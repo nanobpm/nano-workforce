@@ -86,6 +86,7 @@ Deno.test("blackboardUrl: capability token rides the query string", () => {
 Deno.test("normalizeKind: valid passes through, anything else becomes note", () => {
   assertEquals(normalizeKind("file-claim"), "file-claim");
   assertEquals(normalizeKind("constraint-change"), "constraint-change");
+  assertEquals(normalizeKind("learning"), "learning");
   assertEquals(normalizeKind("bogus"), "note");
   assertEquals(normalizeKind(undefined), "note");
 });
@@ -105,6 +106,9 @@ Deno.test("renderCoordinationBrief: leads with a separator and teaches the proto
   assertStringIncludes(brief, "cursor");
   assertStringIncludes(brief, "&since=");
   assertStringIncludes(brief, "conflicts");
+  // Learnings: teaches reading prior gotchas and posting a reusable `learning`.
+  assertStringIncludes(brief, "learning");
+  assertStringIncludes(brief, "Share what you learn");
 });
 
 Deno.test("planKeyForToken: resolves a token to its plan, undefined otherwise", async () => {
