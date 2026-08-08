@@ -3,6 +3,18 @@
   "title": "Epic Coordination",
   "nodes": [
     {
+      "type": "nav",
+      "id": "nav",
+      "props": {
+        "variant": "bar",
+        "title": "Nano Workforce",
+        "items": [
+          { "label": "Convergence", "page": "home" },
+          { "label": "Epic", "page": "epic" }
+        ]
+      }
+    },
+    {
       "type": "text",
       "id": "title",
       "props": { "text": "Epic Coordination", "variant": "heading" }
