@@ -3,6 +3,7 @@
 // is on, or (b) close the PR out as `converged` (review-only mode).
 import type { AppJobHandler } from "@nanobpm/urban";
 import { AUTO_MERGE, startMerge } from "../../app/service.ts";
+import { maybeStartRetro } from "../../app/retro.ts";
 
 // Extends Record so the declared fields are typed while the job may still carry
 // other process variables (e.g. io.nanobpm.agentResult, read by transcriptOf).
@@ -82,6 +83,14 @@ const handler: AppJobHandler<In> = async (job, app) => {
     open_escalation_id: null,
     open_escalation_question: null,
   });
+
+  // Only the review-only terminal path ends the PR here as `converged` — in auto-merge mode the
+  // terminal point is pr.mark-merged (which triggers the retro), and a PR parked in `waiting_deps`
+  // is still in flight. So fire the retro trigger only when this PR actually reached its terminal
+  // state in finalize. Best-effort: must never fail the finalize job.
+  if (status === "converged") {
+    await maybeStartRetro(app.data, app.engine, prKey, app.log);
+  }
 
   return {};
 };
