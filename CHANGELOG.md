@@ -1,3 +1,10 @@
+# [0.29.0](https://github.com/nanobpm/nano-workforce/compare/v0.28.0...v0.29.0) (2026-08-08)
+
+
+### Features
+
+* **app:** page nav bar + urban 0.28.0 multi-page navigation ([#83](https://github.com/nanobpm/nano-workforce/issues/83)) ([4011598](https://github.com/nanobpm/nano-workforce/commit/40115981211d4f50d6243ddf990c668e1a75c60c))
+
 # [0.28.0](https://github.com/nanobpm/nano-workforce/compare/v0.27.0...v0.28.0) (2026-08-08)
 
 
