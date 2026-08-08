@@ -1,3 +1,10 @@
+# [0.27.0](https://github.com/nanobpm/nano-workforce/compare/v0.26.0...v0.27.0) (2026-08-08)
+
+
+### Features
+
+* adopt @nanobpm/urban 0.27.0 for the themed console embed ([#81](https://github.com/nanobpm/nano-workforce/issues/81)) ([11ffecb](https://github.com/nanobpm/nano-workforce/commit/11ffecb3897a1ba5d57a9cda49f6859648c66f85)), closes [122/#123](https://github.com/nanobpm/nano-workforce/issues/123)
+
 # [0.26.0](https://github.com/jwulf/urban-pr-review/compare/v0.25.0...v0.26.0) (2026-08-08)
 
 
