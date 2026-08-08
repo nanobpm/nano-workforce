@@ -22,7 +22,7 @@ CREATE TABLE plan_retros (
   plan_key      TEXT PRIMARY KEY REFERENCES plans(plan_key),
   status        TEXT NOT NULL,               -- filed | skipped | blocked (the agent's result status)
   pr_key        TEXT,                         -- the promotion PR the agent opened on the target repo ("<owner>/<repo>#<n>"), or NULL
-  learnings     INTEGER NOT NULL DEFAULT 0,  -- count of `learning` blackboard entries the retro distilled
+  learnings     INTEGER NOT NULL DEFAULT 0,  -- raw count of `learning` blackboard entries included in the retro digest
   summary       TEXT,                         -- the agent's human-readable retro summary
   report        TEXT,                         -- the full retro report / transcript (nullable)
   created_at    TEXT NOT NULL,

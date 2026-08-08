@@ -10,6 +10,7 @@ import type { AppJobHandler } from "@nanobpm/urban";
 import { recordRetro } from "../../app/retro.ts";
 
 const AGENT_RESULT_KEY = "io.nanobpm.agentResult";
+const VALID_STATUSES = new Set(["filed", "skipped", "blocked"]);
 
 interface In extends Record<string, unknown> {
   planKey: string;
@@ -23,12 +24,19 @@ function asStr(v: unknown): string | null {
   return typeof v === "string" && v.trim() !== "" ? v.trim() : null;
 }
 
+function asStatus(v: unknown, hasPr: boolean): "filed" | "skipped" | "blocked" {
+  const s = asStr(v);
+  if (s && VALID_STATUSES.has(s)) return s as "filed" | "skipped" | "blocked";
+  return hasPr ? "filed" : "skipped";
+}
+
 const handler: AppJobHandler<In> = async (job, app) => {
   const planKey = job.variables.planKey;
 
-  const prKey = asStr(job.variables.pr);
+  const rawPrKey = asStr(job.variables.pr);
   // Default to "filed" only when a PR is present; otherwise the agent decided not to file.
-  const status = asStr(job.variables.status) ?? (prKey ? "filed" : "skipped");
+  const status = asStatus(job.variables.status, rawPrKey !== null);
+  const prKey = status === "filed" ? rawPrKey : null;
   const summary = asStr(job.variables.summary);
 
   const env = job.variables[AGENT_RESULT_KEY] as { output?: unknown } | undefined;

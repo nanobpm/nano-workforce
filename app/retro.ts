@@ -154,6 +154,10 @@ export function renderRetroBrief(d: RetroDigest): string {
   if (d.touchedFiles.length > 0) {
     lines.push("", `### Files touched beyond original slices`, d.touchedFiles.map((f) => `\`${f}\``).join(", "));
   }
+  if (d.notes.length > 0) {
+    lines.push("", `### Other blackboard notes (${d.notes.length})`);
+    for (const n of d.notes) lines.push(`- **[${n.author_task}]** _${n.kind}_: ${n.body}`);
+  }
   return lines.join("\n");
 }
 

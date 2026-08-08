@@ -188,11 +188,12 @@ Deno.test("renderRetroBrief: renders learnings + constraints; states 'none' with
     touchedFiles: ["a.ts"],
     contractChanges: [{ taskId: "t1", change: "shape" }],
     constraints: [{ taskId: "t1", constraint: "must X" }],
-    notes: [],
-    counts: { learnings: 1, deltas: 1, notes: 0 },
+    notes: [{ author_task: "t2", kind: "note", body: "watch the release lane" }],
+    counts: { learnings: 1, deltas: 1, notes: 1 },
   });
   assertStringIncludes(brief, "regen first");
   assertStringIncludes(brief, "must X");
+  assertStringIncludes(brief, "watch the release lane");
   assertStringIncludes(brief, "acme/widgets");
 });
 

@@ -89,3 +89,27 @@ Deno.test("retro-record: honours an explicit blocked status", async () => {
   );
   assertEquals(stores.plan_retros[0].status, "blocked");
 });
+
+Deno.test("retro-record: ignores a PR unless the status is filed", async () => {
+  const { app, stores } = fakeApp();
+  await handler(
+    // deno-lint-ignore no-explicit-any
+    { variables: { planKey: "o/r#8", status: "skipped", pr: "o/r#43", summary: "not durable" } } as any,
+    // deno-lint-ignore no-explicit-any
+    app as any,
+  );
+  assertEquals(stores.plan_retros[0].status, "skipped");
+  assertEquals(stores.plan_retros[0].pr_key, null);
+});
+
+Deno.test("retro-record: defaults invalid status from PR presence", async () => {
+  const { app, stores } = fakeApp();
+  await handler(
+    // deno-lint-ignore no-explicit-any
+    { variables: { planKey: "o/r#9", status: "done", pr: "o/r#44" } } as any,
+    // deno-lint-ignore no-explicit-any
+    app as any,
+  );
+  assertEquals(stores.plan_retros[0].status, "filed");
+  assertEquals(stores.plan_retros[0].pr_key, "o/r#44");
+});
