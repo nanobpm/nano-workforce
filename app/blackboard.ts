@@ -140,7 +140,7 @@ give it a stable \`"dedupe_key"\` (e.g. a short slug of the gotcha) so the same 
 one entry across retries and siblings:
 
     curl -s -X POST "${url}" -H 'content-type: application/json' \\
-      -d '{"author_task":"<your-task-id>","kind":"learning","dedupe_key":"regen-before-build","body":"Run \`make generate\` before \`cargo build --features console\` — a stale generated/ surface fails the build with a confusing error."}'
+      -d '{"author_task":"<your-task-id>","kind":"learning","dedupe_key":"regen-before-build","body":"Run \`make generate\` before \`cargo build --features console\` — a stale generated surface fails the build with a confusing error."}'
 
 A \`learning\` is advisory and never blocks anyone; it is knowledge for the fleet, not a claim on a file.
 
