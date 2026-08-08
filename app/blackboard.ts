@@ -21,7 +21,7 @@ import type { DataLayer } from "@nanobpm/urban";
 
 const now = () => new Date().toISOString();
 
-export const BLACKBOARD_KINDS = ["file-claim", "constraint-change", "scope-change", "note"] as const;
+export const BLACKBOARD_KINDS = ["file-claim", "constraint-change", "scope-change", "learning", "note"] as const;
 export type BlackboardKind = (typeof BLACKBOARD_KINDS)[number];
 
 /** The stored row shape (files is a JSON-encoded string of paths, or NULL). */
@@ -109,13 +109,16 @@ Your blackboard endpoint (already scoped to this epic — no auth header needed)
 
     ${url}
 
-**On start — READ it** to see what siblings have claimed or changed:
+**On start — READ it** to see what siblings have claimed, changed, or **learned**:
 
     curl -s "${url}"
 
 Returns \`{ "planKey": "...", "cursor": <head-entry-id>, "entries": [ { "id", "author_task", "kind", "files", "body", "wave", "created_at" }, ... ] }\` (\`cursor\` is the head entry id, or \`0\` for an empty plan).
 If an entry overlaps your slice (same file, a changed contract/constraint), adapt: coordinate,
 rebase your plan, or if it genuinely blocks you, escalate with a \`question\` per your normal contract.
+**Apply prior \`learning\` entries before you start** — a gotcha a sibling already hit (e.g. "run
+\`make generate\` before \`cargo build\` or the build fails on a stale generated surface") saves you
+from re-discovering it the hard way.
 
 **When your work affects others — POST an entry** (do this as soon as it's true, not only at the end):
 
@@ -124,9 +127,22 @@ rebase your plan, or if it genuinely blocks you, escalate with a \`question\` pe
 
 \`kind\` is one of: \`file-claim\` (you now edit a file outside your original slice),
 \`constraint-change\` (you discovered a constraint that changes another task's direction),
-\`scope-change\` (your contract/scope shifted), or \`note\`. Set \`author_task\` to your task id.
-If a retry might make you re-POST the same fact, include a stable \`"dedupe_key"\` so it collapses to
-one entry.
+\`scope-change\` (your contract/scope shifted), \`learning\` (see below), or \`note\`. Set
+\`author_task\` to your task id. If a retry might make you re-POST the same fact, include a stable
+\`"dedupe_key"\` so it collapses to one entry.
+
+**Share what you learn — POST a \`learning\`.** Whenever you hit a **reusable, non-obvious gotcha**
+that a sibling working this repo would also hit — a required build/codegen step, a test or lint
+incantation, an environment/toolchain footgun, a workaround for a sharp edge — post it immediately
+so nobody re-learns it independently, and so we can later lift the recurring ones into a script, CI,
+or \`AGENTS.md\`. Keep the \`body\` concrete and actionable (the exact command / the exact cause), and
+give it a stable \`"dedupe_key"\` (e.g. a short slug of the gotcha) so the same learning collapses to
+one entry across retries and siblings:
+
+    curl -s -X POST "${url}" -H 'content-type: application/json' \\
+      -d '{"author_task":"<your-task-id>","kind":"learning","dedupe_key":"regen-before-build","body":"Run \`make generate\` before \`cargo build --features console\` — a stale generated surface fails the build with a confusing error."}'
+
+A \`learning\` is advisory and never blocks anyone; it is knowledge for the fleet, not a claim on a file.
 
 **Stay in sync while you work (this matters most while siblings run in parallel).** The GET
 response includes a \`"cursor"\`. Re-read incrementally — before you start each new file, and at
