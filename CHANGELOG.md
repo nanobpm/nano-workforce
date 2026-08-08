@@ -1,3 +1,10 @@
+# [0.28.0](https://github.com/nanobpm/nano-workforce/compare/v0.27.0...v0.28.0) (2026-08-08)
+
+
+### Features
+
+* **blackboard:** first-class 'learning' kind for shared gotchas ([#82](https://github.com/nanobpm/nano-workforce/issues/82)) ([35ff09d](https://github.com/nanobpm/nano-workforce/commit/35ff09dce4a46dab03811fa5657828ca1f027c7c))
+
 # [0.27.0](https://github.com/nanobpm/nano-workforce/compare/v0.26.0...v0.27.0) (2026-08-08)
 
 
