@@ -26,7 +26,10 @@ function asStr(v: unknown): string | null {
 
 function asStatus(v: unknown, hasPr: boolean): "filed" | "skipped" | "blocked" {
   const s = asStr(v);
-  if (s && VALID_STATUSES.has(s)) return s as "filed" | "skipped" | "blocked";
+  if (s && VALID_STATUSES.has(s)) {
+    if (s === "filed" && !hasPr) return "skipped";
+    return s as "filed" | "skipped" | "blocked";
+  }
   return hasPr ? "filed" : "skipped";
 }
 

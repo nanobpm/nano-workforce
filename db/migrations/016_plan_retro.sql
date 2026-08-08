@@ -16,6 +16,14 @@
 -- cannot start a duplicate retro. NULL = no retro has been started for this plan.
 ALTER TABLE plans ADD COLUMN retro_started_at TEXT;
 
+-- Atomic start election for multi-process deployments. `maybeStartRetro` first inserts here; the
+-- PRIMARY KEY lets exactly one worker claim a plan before it stamps `plans.retro_started_at` and
+-- starts the BPMN instance.
+CREATE TABLE plan_retro_starts (
+  plan_key      TEXT PRIMARY KEY REFERENCES plans(plan_key),
+  started_at    TEXT NOT NULL
+);
+
 -- One row per epic retrospective. Written by `pr.retro-record` from the `senior:retro` agent's
 -- result. Advisory knowledge, like the blackboard it distils — it gates no control flow.
 CREATE TABLE plan_retros (

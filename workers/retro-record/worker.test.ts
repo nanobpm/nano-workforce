@@ -113,3 +113,15 @@ Deno.test("retro-record: defaults invalid status from PR presence", async () => 
   assertEquals(stores.plan_retros[0].status, "filed");
   assertEquals(stores.plan_retros[0].pr_key, "o/r#44");
 });
+
+Deno.test("retro-record: coerces filed without a PR to skipped", async () => {
+  const { app, stores } = fakeApp();
+  await handler(
+    // deno-lint-ignore no-explicit-any
+    { variables: { planKey: "o/r#10", status: "filed", summary: "forgot the PR" } } as any,
+    // deno-lint-ignore no-explicit-any
+    app as any,
+  );
+  assertEquals(stores.plan_retros[0].status, "skipped");
+  assertEquals(stores.plan_retros[0].pr_key, null);
+});

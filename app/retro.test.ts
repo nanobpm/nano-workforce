@@ -28,6 +28,9 @@ function memData(): { data: DataLayer; stores: Record<string, any[]> } {
     return {
       // deno-lint-ignore no-explicit-any require-await
       async insert(row: any) {
+        if (pk !== "id" && rows.some((r) => r[pk] === row[pk])) {
+          throw new Error(`UNIQUE constraint failed: ${name}.${pk}`);
+        }
         const id = (seq[name] = (seq[name] ?? 0) + 1);
         rows.push(pk === "id" ? { id, ...row } : { ...row });
         return pk === "id" ? id : row[pk];
@@ -235,12 +238,28 @@ Deno.test("maybeStartRetro: starts the retro exactly once when the last PR lands
   assertEquals(started[0].processDefinitionId, "retro");
   assertEquals(started[0].variables.planKey, PLAN);
   assert(stores["plans"][0].retro_started_at, "retro_started_at must be stamped");
+  assertEquals(stores["plan_retro_starts"].length, 1);
 
   // A sibling terminal PR of the same plan must NOT start a second retro.
   const r2 = await maybeStartRetro(data, engine, "acme/widgets#10");
   assertEquals(r2.started, false);
   assertEquals(r2.reason, "already-started");
   assertEquals(started.length, 1, "fire-once guard");
+});
+
+Deno.test("maybeStartRetro: a pre-claimed retro start does not start a duplicate process", async () => {
+  const { data, stores } = memData();
+  seedPlan(stores);
+  seedTask(stores, { id: "t1", status: "opened", pr_key: "acme/widgets#10" });
+  seedPr(stores, "acme/widgets#10", "merged");
+  stores["plan_retro_starts"] = [{ plan_key: PLAN, started_at: "already" }];
+  await appendEntry(data, PLAN, { author_task: "t1", kind: "learning", body: "regen first" });
+  const { engine, started } = fakeEngine();
+
+  const r = await maybeStartRetro(data, engine, "acme/widgets#10");
+  assertEquals(r, { started: false, planKey: PLAN, reason: "already-started" });
+  assertEquals(started.length, 0);
+  assertEquals(stores["plans"][0].retro_started_at, null);
 });
 
 Deno.test("maybeStartRetro: bails while the plan is incomplete", async () => {

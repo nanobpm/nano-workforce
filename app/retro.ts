@@ -53,6 +53,8 @@ interface PlanRow extends Record<string, unknown> {
 const plansTbl = (data: DataLayer) => data.table<PlanRow>("plans", "plan_key");
 const prsTbl = (data: DataLayer) =>
   data.table<{ pr_key: string; status: string }>("pull_requests", "pr_key");
+const retroStartsTbl = (data: DataLayer) =>
+  data.table<{ plan_key: string; started_at: string }>("plan_retro_starts", "plan_key");
 
 /** Resolve the plan a PR belongs to, or undefined when the PR was submitted standalone (not part
  * of a fan-out). A PR is linked to a plan via the `plan_tasks.pr_key` it produced. */
@@ -178,6 +180,17 @@ export interface RetroInput {
 const retrosTbl = (data: DataLayer) =>
   data.table<{ plan_key: string } & Record<string, unknown>>("plan_retros", "plan_key");
 
+async function claimRetroStart(data: DataLayer, planKey: string): Promise<boolean> {
+  try {
+    await retroStartsTbl(data).insert({ plan_key: planKey, started_at: now() });
+    return true;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/(unique|constraint|duplicate|primary key)/i.test(msg)) return false;
+    throw err;
+  }
+}
+
 /** Upsert a plan's retro row (idempotent on plan_key, so a job retry overwrites in place). */
 export async function recordRetro(
   data: DataLayer,
@@ -205,10 +218,9 @@ export async function recordRetro(
  * of its plan to land AND there is anything to reflect on, start the `retro` process exactly once.
  *
  * Best-effort and non-blocking: any failure here must never fail the terminal job that called it —
- * the retro is advisory. The fire-once guard is `plans.retro_started_at`: we stamp it BEFORE
- * starting the instance, so a sibling PR of the same plan reaching terminal state concurrently
- * finds it non-null and bails. (Job handlers for one app run in a single process, so the
- * check-then-stamp window is not a practical race; the stamp still guards restarts and retries.) */
+ * the retro is advisory. The fire-once guard is `plan_retro_starts`: a PRIMARY KEY insert
+ * atomically elects one starter across app processes before we stamp `plans.retro_started_at`
+ * and start the instance. */
 export async function maybeStartRetro(
   data: DataLayer,
   engine: EngineClient,
@@ -228,6 +240,7 @@ export async function maybeStartRetro(
 
     const digest = await gatherRetro(data, planKey);
     if (isDigestEmpty(digest)) {
+      if (!(await claimRetroStart(data, planKey))) return { started: false, planKey, reason: "already-started" };
       // Nothing to reflect on — stamp anyway so we don't re-check on every future terminal PR of a
       // (now settled) plan, and record a skipped retro for visibility.
       await plansTbl(data).update(planKey, { retro_started_at: now(), updated_at: now() });
@@ -235,7 +248,9 @@ export async function maybeStartRetro(
       return { started: false, planKey, reason: "nothing-to-retro" };
     }
 
-    // Fire-once: stamp before starting so a concurrent sibling terminal PR bails.
+    if (!(await claimRetroStart(data, planKey))) return { started: false, planKey, reason: "already-started" };
+
+    // Stamp before starting so restarts/retries can take the cheap already-started path.
     await plansTbl(data).update(planKey, { retro_started_at: now(), updated_at: now() });
 
     const { processInstanceKey } = await engine.createInstance({
