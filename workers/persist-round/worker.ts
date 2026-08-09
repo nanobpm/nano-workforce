@@ -5,7 +5,7 @@
 // Data access goes through the injected app datasource gateway (`app.data.table<T>`), the RAD
 // `Table<T>` surface — `rounds.insert(...)` / `pull_requests.update(...)`, not hand-written SQL.
 import type { AppJobHandler } from "@nanobpm/urban";
-import { ensurePr } from "../../app/service.ts";
+import { ensurePr, parsePr } from "../../app/service.ts";
 
 // Extends Record so the declared fields are typed while the job may still carry
 // other process variables (e.g. io.nanobpm.agentResult, read by transcriptOf).
@@ -37,9 +37,15 @@ const handler: AppJobHandler<In> = async (job, app) => {
   const now = new Date().toISOString();
 
   // Heal a missing FK parent (engine/app.db desync) before the child `rounds` insert so this
-  // never dies with an opaque `FOREIGN KEY constraint failed` incident.
-  if (repo && typeof prNumber === "number") {
-    await ensurePr(app.data, { prKey, repo, number: prNumber, url: prUrl, round });
+  // never dies with an opaque `FOREIGN KEY constraint failed` incident. Prefer the carried
+  // repo/prNumber; if either is missing (an older in-flight instance, or a process-variable
+  // regression) fall back to parsing them out of the canonical `owner/repo#N` prKey so the heal
+  // still runs.
+  const parsed = parsePr(prKey);
+  const healRepo = repo ?? parsed?.repo;
+  const healNumber = typeof prNumber === "number" ? prNumber : parsed?.number;
+  if (healRepo && typeof healNumber === "number") {
+    await ensurePr(app.data, { prKey, repo: healRepo, number: healNumber, url: prUrl, round });
   }
 
   await app.data.table("rounds", "id").insert({

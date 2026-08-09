@@ -68,7 +68,7 @@ Deno.test("escalation arm without the flag still records the round", async () =>
 // desync), persist-escalation reconstructs the `pull_requests` row before the rounds/escalations
 // inserts so opening an escalation never dies with an opaque FOREIGN KEY constraint failure.
 Deno.test("persist-escalation heals a missing pull_requests parent before recording", async () => {
-  const { app, inserts, rows } = fakeApp();
+  const { app, inserts, updates } = fakeApp();
   const job = {
     variables: {
       prKey: "o/r#8",
@@ -82,11 +82,18 @@ Deno.test("persist-escalation heals a missing pull_requests parent before record
   // deno-lint-ignore no-explicit-any
   await handler(job as any, app as any);
   assertEquals(inserts.pull_requests?.length, 1, "the missing parent is reconstructed");
+  // Assert against the reconstruction insert payload (ensurePr) rather than the stored row: the
+  // fake update() doesn't apply patches, so the row would otherwise still read the insert's
+  // "converging" status and mask the worker's real final state.
   // deno-lint-ignore no-explicit-any
-  const parent = rows.pull_requests!.get("o/r#8") as any;
-  assertEquals(parent.status, "converging");
+  const healed = inserts.pull_requests![0] as any;
+  assertEquals(healed.status, "converging", "the healed parent starts in the converging aggregate");
   assertEquals(inserts.rounds.length, 1, "the round is still recorded");
   assertEquals(inserts.escalations.length, 1, "the escalation is still opened");
+  // And the worker still moves the (now-present) PR to escalated as its final state.
+  assertEquals(updates.pull_requests!.length, 1, "the PR is updated once after the heal");
+  // deno-lint-ignore no-explicit-any
+  assertEquals((updates.pull_requests![0] as any).patch.status, "escalated");
 });
 
 
@@ -149,4 +156,19 @@ Deno.test("unclassified status without a question names the status in the fabric
   const esc = inserts.escalations[0] as any;
   assert(esc.question.includes("in_progress"), "fabricated question references the raw status");
   assertEquals(esc.kind, "blocker", "a non needs_input status is a blocker escalation");
+});
+
+// When repo/prNumber process variables are absent the heal still runs by parsing the canonical
+// `owner/repo#N` prKey, so the escalation's FK parent is never left unguarded.
+Deno.test("persist-escalation heals from the prKey when repo/prNumber are absent", async () => {
+  const { app, inserts } = fakeApp();
+  const job = { variables: { prKey: "o/r#12", round: 2, status: "needs_input", question: "decide" } };
+  // deno-lint-ignore no-explicit-any
+  await handler(job as any, app as any);
+  assertEquals(inserts.pull_requests?.length, 1, "the parent is reconstructed from the prKey");
+  // deno-lint-ignore no-explicit-any
+  const healed = inserts.pull_requests![0] as any;
+  assertEquals(healed.repo, "o/r");
+  assertEquals(healed.number, 12);
+  assertEquals(healed.url, "https://github.com/o/r/pull/12", "URL is derived from the parsed prKey");
 });

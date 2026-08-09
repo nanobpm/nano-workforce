@@ -199,7 +199,7 @@ export async function ensurePr(
       number: pr.number,
       url: pr.url ?? canonicalPrUrl(pr.repo, pr.number),
       status: "converging",
-      current_round: pr.round ?? 0,
+      current_round: pr.round ?? 1,
       abandon_token: mintAbandonToken(),
       created_at: ts,
       updated_at: ts,

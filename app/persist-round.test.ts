@@ -66,7 +66,7 @@ for (const status of ["addressed", "waiting"]) {
 // desync), persist-round reconstructs the `pull_requests` row before recording the round so the
 // insert never dies with an opaque FOREIGN KEY constraint failure.
 Deno.test("persist-round heals a missing pull_requests parent before recording the round", async () => {
-  const { app, inserts, rows } = fakeApp();
+  const { app, inserts, updates } = fakeApp();
   const job = {
     variables: {
       prKey: "o/r#7",
@@ -80,11 +80,18 @@ Deno.test("persist-round heals a missing pull_requests parent before recording t
   await handler(job as any, app as any);
 
   assertEquals(inserts.pull_requests?.length, 1, "the missing parent is reconstructed");
+  // Assert against the reconstruction insert payload (ensurePr) rather than the stored row: the
+  // fake update() doesn't apply patches, so the row would otherwise still read the insert's
+  // "converging" status and mask the worker's real final state.
   // deno-lint-ignore no-explicit-any
-  const parent = rows.pull_requests!.get("o/r#7") as any;
-  assertEquals(parent.status, "converging");
-  assertEquals(parent.url, "https://github.com/o/r/pull/7", "URL is derived canonically");
+  const healed = inserts.pull_requests![0] as any;
+  assertEquals(healed.status, "converging", "the healed parent starts in the converging aggregate");
+  assertEquals(healed.url, "https://github.com/o/r/pull/7", "URL is derived canonically");
   assertEquals(inserts.rounds.length, 1, "the round is still recorded after the heal");
+  // And the worker still parks the (now-present) PR in waiting_review as its final state.
+  assertEquals(updates.pull_requests!.length, 1, "the PR is updated once after the heal");
+  // deno-lint-ignore no-explicit-any
+  assertEquals((updates.pull_requests![0] as any).patch.status, "waiting_review");
 });
 
 // rather than writing a NULL status — the round history stays readable.
@@ -95,4 +102,20 @@ Deno.test("persist-round defaults a missing status to 'addressed'", async () => 
   await handler(job as any, app as any);
   // deno-lint-ignore no-explicit-any
   assertEquals((inserts.rounds[0] as any).status, "addressed");
+});
+
+// When repo/prNumber process variables are absent (an older in-flight instance, or a regression)
+// the heal still runs by parsing the canonical `owner/repo#N` prKey, so the FK-child insert is
+// never left unguarded.
+Deno.test("persist-round heals from the prKey when repo/prNumber are absent", async () => {
+  const { app, inserts } = fakeApp();
+  const job = { variables: { prKey: "o/r#12", round: 2, status: "addressed" } };
+  // deno-lint-ignore no-explicit-any
+  await handler(job as any, app as any);
+  assertEquals(inserts.pull_requests?.length, 1, "the parent is reconstructed from the prKey");
+  // deno-lint-ignore no-explicit-any
+  const healed = inserts.pull_requests![0] as any;
+  assertEquals(healed.repo, "o/r");
+  assertEquals(healed.number, 12);
+  assertEquals(healed.url, "https://github.com/o/r/pull/12", "URL is derived from the parsed prKey");
 });

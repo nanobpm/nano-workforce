@@ -63,6 +63,16 @@ Deno.test("ensurePr reconstructs a minimal converging row when the parent is abs
   assert(typeof row.abandon_token === "string" && (row.abandon_token as string).length > 0);
 });
 
+Deno.test("ensurePr defaults current_round to 1 (rounds are 1-based) when none is passed", async () => {
+  const { data, rows } = memData();
+  await ensurePr(data, { prKey: "o/r#5", repo: "o/r", number: 5 });
+  assertEquals(
+    rows.get("o/r#5")!.current_round,
+    1,
+    "an unknown round heals to 1, not 0, matching submitPr's 1-based invariant",
+  );
+});
+
 Deno.test("ensurePr prefers an explicit url over the canonical one", async () => {
   const { data, rows } = memData();
   const url = "https://github.com/o/r/pull/9";
