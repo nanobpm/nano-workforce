@@ -150,8 +150,9 @@ export function positiveIntEnv(name: string, fallback: number): number {
   return Number.isInteger(n) && n > 0 ? n : fallback;
 }
 
-/** Max adversarial plan-review rounds before the fan-out proceeds regardless (so a reviewer that
- * never approves can't dead-lock the plan). The last round's findings are still recorded. */
+/** Max adversarial plan-review rounds. Reaching the cap WITHOUT approval is a hard failure: the
+ * fan-out raises a `PLAN_REJECTED` incident rather than dispatching an un-approved plan (issue
+ * #86). The last round's findings are still recorded. */
 export const MAX_PLAN_REVIEW_ROUNDS = positiveIntEnv("NANO_PLAN_REVIEW_ROUNDS", 3);
 
 /** A plan is "done" in exactly these states; everything else (planning, dispatched)
@@ -205,7 +206,7 @@ export async function startPlan(data: DataLayer, engine: EngineClient, parsed: P
     }
     // `plan_reviews` is append-only and the review round is derived from
     // `count(plan_reviews)`, so stale rows from the prior run would inflate the
-    // next round index and trip `reviewExhausted` early (bypassing the gate).
+    // next round index and reach the review-round cap early (bypassing the gate).
     // Clear them here — the table is keyed on `plan_key`, so one delete drops the
     // whole set (mirrors how record-plan clears `plan_task_deps`).
     await planReviews(data).delete(parsed.planKey);

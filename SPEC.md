@@ -420,7 +420,10 @@ Start(issue) → plan → record-plan → implement (parallel MI) → record-res
 - **`record-results`** — app worker `pr.record-results`. Zips `results` back onto
   `plan_tasks` by index, and for each opened `pr` calls the same idempotent
   `submitPr` as §4 — **the handoff**: every fleet-produced PR enrols into the
-  review-convergence loop. Sets `plans` status `done`.
+  review-convergence loop. On success it sets `plans` status `done`; if the epic
+  finalizes having opened **zero** PRs (empty plan, or every task blocked/skipped)
+  it raises a non-retryable `NO_WORK_DISPATCHED` incident instead of completing
+  green — a no-op run must not masquerade as success (issue #86).
 
 **Payloads are untyped** (no `nano:shapes`/`io.nanobpm.dataEnvelope`): the vocab is
 scalar-only and cannot express the `tasks`/`results` lists, so the workers self-type
