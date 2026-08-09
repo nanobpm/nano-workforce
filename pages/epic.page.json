@@ -23,7 +23,7 @@
       "type": "text",
       "id": "subtitle",
       "props": {
-        "text": "Read-only observability over each plan's wave state, merge-exclusion graph, coordination notes, and trial-merge gate results.",
+        "text": "Read-only observability over each plan's review trace, wave state, merge-exclusion graph, coordination notes, and trial-merge gate results.",
         "variant": "sub"
       }
     },
@@ -68,6 +68,27 @@
             { "field": "open_task_question", "label": "Open escalation question" }
           ]
         }
+      }
+    },
+    {
+      "type": "dataGrid",
+      "id": "plan-reviews",
+      "props": {
+        "title": "Plan review trace",
+        "refreshMs": 5000,
+        "data": {
+          "kind": "datasource",
+          "source": "app",
+          "table": "plan_reviews",
+          "orderBy": { "field": "round", "dir": "asc" }
+        },
+        "columns": [
+          { "field": "plan_key", "header": "Plan" },
+          { "field": "round", "header": "Round" },
+          { "field": "approved", "header": "Approved? (1/0)" },
+          { "field": "findings", "header": "Reviewer findings" },
+          { "field": "created_at", "header": "Recorded" }
+        ]
       }
     },
     {
