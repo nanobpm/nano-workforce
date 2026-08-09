@@ -27,7 +27,16 @@
       "table": "pull_requests",
       "keyField": "process_key",
       "statusField": "status",
-      "activeStatuses": ["converging", "waiting_review", "escalated"],
+      "activeStatuses": [
+        "converging",
+        "waiting_review",
+        "escalated",
+        "waiting_deps",
+        "waiting_merge",
+        "waiting_lane",
+        "queued",
+        "merging"
+      ],
       "onTerminated": {
         "set": {
           "status": "abandoned",
