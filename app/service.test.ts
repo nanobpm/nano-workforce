@@ -6,13 +6,14 @@
 // loop already guards in `startPlan`). Drives `submitPr` against an in-memory data layer with the
 // GitHub transport forced off so it is hermetic.
 import { assertEquals } from "jsr:@std/assert@1";
-import { submitPr } from "./service.ts";
+import { pollIncidentsImpl, submitPr } from "./service.ts";
 
 // deno-lint-ignore no-explicit-any
 function memTable(rows: any[], key: string) {
   return {
     // deno-lint-ignore no-explicit-any
     get: (k: any) => Promise.resolve(rows.find((r) => r[key] === k) ?? null),
+    all: () => Promise.resolve([...rows]),
     // deno-lint-ignore no-explicit-any
     find: (q: any) =>
       Promise.resolve(rows.filter((r) => Object.entries(q).every(([f, v]) => r[f] === v))),
@@ -98,4 +99,155 @@ Deno.test("re-submit of a cancelled PR clears stale open escalations + the denor
     assertEquals(pr.open_escalation_question, null);
     assertEquals(pr.process_key, "PI-9");
   });
+});
+
+// Red/green regression for technical-incident surfacing (issue #94). A convergence/merge instance
+// can hit an engine incident that parks the token; until `pollIncidents` nothing on the PR row
+// reflected it, so the grid kept showing "converging" while the run was dead in the water. This
+// drives the pass's reconciliation core against a stubbed `/v2/incidents/search`:
+//   1. an ACTIVE incident is mirrored onto `incident_key` + `incident_message` (status untouched),
+//   2. once the engine reports no active incident, the columns are cleared idempotently,
+//   3. a PR with no live instance (no process_key / terminal status) is never queried and any
+//      stale incident on it is cleared.
+function incidentFetch(byInstance: Record<string, unknown[]>) {
+  return (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    const u = typeof url === "string" ? url : url.toString();
+    if (!u.endsWith("/incidents/search")) {
+      throw new Error(`unexpected fetch: ${u}`);
+    }
+    const body = JSON.parse(String(init?.body ?? "{}")) as {
+      filter?: { processInstanceKey?: string };
+    };
+    const items = byInstance[body.filter?.processInstanceKey ?? ""] ?? [];
+    return Promise.resolve(
+      new Response(JSON.stringify({ items }), { status: 200, headers: { "content-type": "application/json" } }),
+    );
+  };
+}
+
+Deno.test("pollIncidents mirrors an ACTIVE incident onto the PR row, then clears it, leaving status untouched", async () => {
+  const row = {
+    pr_key: "owner/repo#7",
+    repo: "owner/repo",
+    number: 7,
+    status: "converging",
+    process_key: "PI-7",
+    incident_key: null as string | null,
+    incident_message: null as string | null,
+    updated_at: "t0",
+  };
+  const stores: Record<string, { rows: unknown[]; key: string }> = {
+    pull_requests: { rows: [row], key: "pr_key" },
+  };
+  const data = {
+    table: (name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key),
+    // deno-lint-ignore no-explicit-any
+  } as any;
+  const headers = { "content-type": "application/json" };
+
+  const prevFetch = globalThis.fetch;
+
+  // Red-ish: with an ACTIVE incident on the instance, the pass must surface it (before this
+  // feature the columns stayed null and the incident was invisible).
+  globalThis.fetch = incidentFetch({
+    "PI-7": [{ incidentKey: "INC-1", errorMessage: "boom: unhandled error", state: "ACTIVE", creationTime: "2024-01-01T00:00:00Z" }],
+  }) as typeof fetch;
+  try {
+    await pollIncidentsImpl(data, "http://engine/v2", headers);
+  } finally {
+    globalThis.fetch = prevFetch;
+  }
+  assertEquals(row.incident_key, "INC-1");
+  assertEquals(row.incident_message, "boom: unhandled error");
+  assertEquals(row.status, "converging"); // orthogonal: status is never touched
+
+  // Green: once the engine reports no active incident, the columns clear idempotently.
+  globalThis.fetch = incidentFetch({ "PI-7": [] }) as typeof fetch;
+  try {
+    await pollIncidentsImpl(data, "http://engine/v2", headers);
+  } finally {
+    globalThis.fetch = prevFetch;
+  }
+  assertEquals(row.incident_key, null);
+  assertEquals(row.incident_message, null);
+  assertEquals(row.status, "converging");
+});
+
+Deno.test("pollIncidents never queries a PR with no live instance and clears any stale incident", async () => {
+  const noKey = {
+    pr_key: "owner/repo#8",
+    status: "converging",
+    process_key: null as string | null,
+    incident_key: "STALE-A",
+    incident_message: "left over",
+    updated_at: "t0",
+  };
+  const terminal = {
+    pr_key: "owner/repo#9",
+    status: "merged",
+    process_key: "PI-9",
+    incident_key: "STALE-B",
+    incident_message: "left over",
+    updated_at: "t0",
+  };
+  const stores: Record<string, { rows: unknown[]; key: string }> = {
+    pull_requests: { rows: [noKey, terminal], key: "pr_key" },
+  };
+  const data = {
+    table: (name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key),
+    // deno-lint-ignore no-explicit-any
+  } as any;
+  const headers = { "content-type": "application/json" };
+
+  const prevFetch = globalThis.fetch;
+  // Any fetch here is a bug — neither PR has a live instance to inspect.
+  globalThis.fetch = (() => {
+    throw new Error("pollIncidents must not query a PR with no live instance");
+  }) as typeof fetch;
+  try {
+    await pollIncidentsImpl(data, "http://engine/v2", headers);
+  } finally {
+    globalThis.fetch = prevFetch;
+  }
+  assertEquals(noKey.incident_key, null);
+  assertEquals(noKey.incident_message, null);
+  assertEquals(terminal.incident_key, null);
+  assertEquals(terminal.incident_message, null);
+});
+
+Deno.test("pollIncidents picks the oldest incident by creationTime, sorting a missing timestamp last", async () => {
+  const row = {
+    pr_key: "owner/repo#11",
+    status: "converging",
+    process_key: "PI-11",
+    incident_key: null as string | null,
+    incident_message: null as string | null,
+    updated_at: "t0",
+  };
+  const stores: Record<string, { rows: unknown[]; key: string }> = {
+    pull_requests: { rows: [row], key: "pr_key" },
+  };
+  const data = {
+    table: (name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key),
+    // deno-lint-ignore no-explicit-any
+  } as any;
+  const headers = { "content-type": "application/json" };
+
+  const prevFetch = globalThis.fetch;
+  // A no-`creationTime` incident must not masquerade as the oldest (empty-string sort bug): the
+  // real earliest ISO timestamp wins even when a timestamp-less incident is returned first.
+  globalThis.fetch = incidentFetch({
+    "PI-11": [
+      { incidentKey: "INC-NOTS", errorMessage: "no timestamp", state: "ACTIVE" },
+      { incidentKey: "INC-OLD", errorMessage: "the first fault", state: "ACTIVE", creationTime: "2024-01-01T00:00:00Z" },
+      { incidentKey: "INC-NEW", errorMessage: "a later fault", state: "ACTIVE", creationTime: "2024-06-01T00:00:00Z" },
+    ],
+  }) as typeof fetch;
+  try {
+    await pollIncidentsImpl(data, "http://engine/v2", headers);
+  } finally {
+    globalThis.fetch = prevFetch;
+  }
+  assertEquals(row.incident_key, "INC-OLD");
+  assertEquals(row.incident_message, "the first fault");
 });
