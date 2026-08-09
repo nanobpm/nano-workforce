@@ -3,7 +3,7 @@
   "specifiers": {
     "jsr:@std/assert@1": "1.0.19",
     "jsr:@std/internal@^1.0.12": "1.0.14",
-    "npm:@nanobpm/urban@0.30": "0.30.0",
+    "npm:@nanobpm/urban@0.31": "0.31.0",
     "npm:@semantic-release/changelog@^6.0.3": "6.0.3_semantic-release@24.2.9__typescript@5.9.3_typescript@5.9.3",
     "npm:@semantic-release/git@^10.0.1": "10.0.1_semantic-release@24.2.9__typescript@5.9.3_typescript@5.9.3",
     "npm:@semantic-release/npm@^13.1.5": "13.1.5_semantic-release@24.2.9__typescript@5.9.3",
@@ -82,8 +82,8 @@
         "ws"
       ]
     },
-    "@nanobpm/urban@0.30.0": {
-      "integrity": "sha512-jaxVFwmWk/dLyA/Owgyons7tc8Yx0iJfotY7mN63hCQS7jenak9d/h3wQmevphF+JDq7E8Ovo+9Wq2K1CGy+yw==",
+    "@nanobpm/urban@0.31.0": {
+      "integrity": "sha512-gDIa8orxyxqS+wLEnIujoenmJDMQO6WKV+QMdLAbR+exQd2srwMFwXYzNmfW8XuZxOTA+I6Etur/1IAX7esuaA==",
       "dependencies": [
         "@nanobpm/nano-app-schema",
         "@nanobpm/nano-sdk",
@@ -1757,11 +1757,11 @@
   },
   "workspace": {
     "dependencies": [
-      "npm:@nanobpm/urban@0.30"
+      "npm:@nanobpm/urban@0.31"
     ],
     "packageJson": {
       "dependencies": [
-        "npm:@nanobpm/urban@0.30",
+        "npm:@nanobpm/urban@0.31",
         "npm:@semantic-release/changelog@^6.0.3",
         "npm:@semantic-release/git@^10.0.1",
         "npm:@semantic-release/npm@^13.1.5",
