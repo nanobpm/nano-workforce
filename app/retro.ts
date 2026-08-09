@@ -17,6 +17,7 @@ import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { planTasks } from "./plan.ts";
 import { readBlackboard } from "./blackboard.ts";
 import { aggregateEpicDeltas } from "./taskDelta.ts";
+import { TERMINAL_STATUSES } from "./service.ts";
 
 export const RETRO_PROCESS_ID = "retro";
 
@@ -32,9 +33,9 @@ export function autoRetroEnabled(): boolean {
 
 const now = () => new Date().toISOString();
 
-/** A PR is in a terminal state (mirrors app/service.ts TERMINAL_STATUSES). A plan is settled only
- * once every PR-producing task has reached one of these. */
-const TERMINAL_PR_STATUSES = new Set(["converged", "merged", "abandoned"]);
+/** A PR is in a terminal state (derived from app/service.ts TERMINAL_STATUSES, the single source of
+ * truth). A plan is settled only once every PR-producing task has reached one of these. */
+const TERMINAL_PR_STATUSES = new Set(TERMINAL_STATUSES);
 
 /** Task statuses that are settled WITHOUT a landed PR: the planner/dispatcher decided not to (or
  * could not) produce one, so they never block epic completion. `escalated`/`waiting-for-lane` are
@@ -191,7 +192,11 @@ async function claimRetroStart(data: DataLayer, planKey: string): Promise<boolea
   }
 }
 
-/** Upsert a plan's retro row (idempotent on plan_key, so a job retry overwrites in place). */
+/** Upsert a plan's retro row (idempotent on plan_key, so a job retry overwrites in place).
+ *
+ * Insert-first, then fall back to update only on a verified unique/PK violation: a get-then-insert
+ * can race (two concurrent retries both see no row, then one insert wins and the other throws), so
+ * we treat "row already exists" as the update path rather than an error. */
 export async function recordRetro(
   data: DataLayer,
   planKey: string,
@@ -206,11 +211,12 @@ export async function recordRetro(
     report: input.report ?? null,
     updated_at: ts,
   };
-  const existing = await retrosTbl(data).get(planKey);
-  if (existing) {
-    await retrosTbl(data).update(planKey, fields);
-  } else {
+  try {
     await retrosTbl(data).insert({ plan_key: planKey, created_at: ts, ...fields });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!/(unique|constraint|duplicate|primary key)/i.test(msg)) throw err;
+    await retrosTbl(data).update(planKey, fields);
   }
 }
 
