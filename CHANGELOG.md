@@ -1,3 +1,10 @@
+## [0.33.1](https://github.com/nanobpm/nano-workforce/compare/v0.33.0...v0.33.1) (2026-08-09)
+
+
+### Bug Fixes
+
+* adopt Urban's built-in reconcile-aware cancel primitive ([#100](https://github.com/nanobpm/nano-workforce/issues/100)) ([e1aed94](https://github.com/nanobpm/nano-workforce/commit/e1aed94c29fc1ebd8ec0f5ca15d73e6ee723d276)), closes [nanobpm/nano-ide#144](https://github.com/nanobpm/nano-ide/issues/144)
+
 # [0.33.0](https://github.com/nanobpm/nano-workforce/compare/v0.32.2...v0.33.0) (2026-08-09)
 
 
