@@ -264,14 +264,29 @@ export async function maybeStartRetro(
     // Stamp before starting so restarts/retries can take the cheap already-started path.
     await plansTbl(data).update(planKey, { retro_started_at: now(), updated_at: now() });
 
-    const { processInstanceKey } = await engine.createInstance({
-      processDefinitionId: RETRO_PROCESS_ID,
-      variables: {
-        planKey,
-        repo: digest.repo,
-        issueUrl: digest.issueUrl,
-      },
-    });
+    let processInstanceKey: string | number | undefined;
+    try {
+      ({ processInstanceKey } = await engine.createInstance({
+        processDefinitionId: RETRO_PROCESS_ID,
+        variables: {
+          planKey,
+          repo: digest.repo,
+          issueUrl: digest.issueUrl,
+        },
+      }));
+    } catch (err) {
+      // The fire-once guard is already consumed (retro_started_at stamped, plan_retro_starts
+      // claimed), so this plan will never re-enter the start path. If we returned here with no
+      // record, the epic surface would show a plan that "started a retro" with nothing to show and
+      // no way to retry. Persist a `blocked` retro instead so the failure stays visible and the
+      // system state is consistent. Recording must not mask the original error in the log.
+      log?.("error", `retro: could not start process for epic ${planKey}`, { err: String(err) });
+      await recordRetro(data, planKey, {
+        status: "blocked",
+        summary: `Retro process could not be started: ${String(err)}`,
+      });
+      return { started: false, planKey, reason: "start-failed" };
+    }
     log?.("info", `retro: started for epic ${planKey}`, { processInstanceKey, learnings: digest.counts.learnings });
     return { started: true, planKey };
   } catch (err) {
