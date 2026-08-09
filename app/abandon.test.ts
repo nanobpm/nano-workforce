@@ -3,6 +3,7 @@ import { assertEquals, assertNotEquals } from "jsr:@std/assert@1";
 import type { DataLayer } from "@nanobpm/urban";
 import {
   abandonStatusForToken,
+  abandonTokenFromUrl,
   abandonUrl,
   isAbandoned,
   mintAbandonToken,
@@ -59,6 +60,21 @@ Deno.test("abandonUrl carries the token on the query string (url-encoded)", () =
     abandonUrl("tok+/=", "https://host"),
     "https://host/hooks/abandon?token=tok%2B%2F%3D",
   );
+});
+
+Deno.test("abandonTokenFromUrl round-trips the token minted into an abandonUrl", () => {
+  const tok = mintAbandonToken();
+  assertEquals(abandonTokenFromUrl(abandonUrl(tok, "https://host")), tok);
+  // url-special tokens survive the encode/decode round-trip too.
+  assertEquals(abandonTokenFromUrl(abandonUrl("tok+/=", "https://host")), "tok+/=");
+});
+
+Deno.test("abandonTokenFromUrl returns undefined for absent/tokenless/garbage input", () => {
+  assertEquals(abandonTokenFromUrl(undefined), undefined);
+  assertEquals(abandonTokenFromUrl(null), undefined);
+  assertEquals(abandonTokenFromUrl(""), undefined);
+  assertEquals(abandonTokenFromUrl("https://host/hooks/abandon"), undefined, "no token param");
+  assertEquals(abandonTokenFromUrl("not a url"), undefined, "unparseable input never throws");
 });
 
 Deno.test("renderAbandonBrief embeds the concrete URL and the stop contract", () => {

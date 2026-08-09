@@ -3,6 +3,8 @@
 // and the MAX_ROUNDS guard (status = blocked, question set by the process). Returns
 // `escalationId` for the UI.
 import type { AppJobHandler } from "@nanobpm/urban";
+import { ensurePr, parsePr } from "../../app/service.ts";
+import { abandonTokenFromUrl } from "../../app/abandon.ts";
 
 // Extends Record so the declared fields are typed while the job may still carry
 // other process variables (e.g. io.nanobpm.agentResult, read by transcriptOf).
@@ -12,6 +14,14 @@ interface In extends Record<string, unknown> {
   status?: string;
   summary?: string;
   question?: string;
+  // Carried by the convergence-loop instance so a missing `pull_requests` parent can be
+  // reconstructed before the FK-child `rounds`/`escalations` inserts.
+  repo?: string;
+  prNumber?: number;
+  prUrl?: string;
+  // The per-PR abandon capability URL the agent was handed; its token is preserved on a heal so
+  // the agent's cooperative-abort check keeps resolving (see ensurePr).
+  abandonUrl?: string;
   // False on the "review stalled" arm: `persist-round` already recorded this `round` as
   // `addressed`, so this escalation must not insert a second `rounds` row for the same
   // `pr_key`/`round_no` (which would record one round as both addressed and blocked). Absent
@@ -52,7 +62,7 @@ function fabricateQuestion(rawStatus: string | undefined, hasTranscript: boolean
 }
 
 const handler: AppJobHandler<In> = async (job, app) => {
-  const { prKey, round, summary } = job.variables;
+  const { prKey, round, summary, repo, prNumber, prUrl, abandonUrl } = job.variables;
   // `status` drives the escalation kind (control flow); a blank/absent status is an
   // unclassified escalation -> a question needing input. `question` is denormalised
   // onto pull_requests below and bound by the UI answer form, so it must be a
@@ -70,6 +80,25 @@ const handler: AppJobHandler<In> = async (job, app) => {
   const question = nonBlank(job.variables.question) ?? fabricateQuestion(rawStatus, transcript != null);
   const kind = status === "needs_input" ? "question" : "blocker";
   const now = new Date().toISOString();
+
+  // Heal a missing FK parent (engine/app.db desync) before the child `rounds`/`escalations`
+  // inserts so this never dies with an opaque `FOREIGN KEY constraint failed` incident. Prefer
+  // the carried repo/prNumber; if either is missing (an older in-flight instance, or a
+  // process-variable regression) fall back to parsing them out of the canonical `owner/repo#N`
+  // prKey so the heal still runs.
+  const parsed = parsePr(prKey);
+  const healRepo = repo ?? parsed?.repo;
+  const healNumber = typeof prNumber === "number" ? prNumber : parsed?.number;
+  if (healRepo && typeof healNumber === "number") {
+    await ensurePr(app.data, {
+      prKey,
+      repo: healRepo,
+      number: healNumber,
+      url: prUrl,
+      round,
+      abandonToken: abandonTokenFromUrl(abandonUrl),
+    });
+  }
 
   // Skip the round insert when the caller already recorded this round (the "review stalled"
   // arm runs after `persist-round`): re-inserting would duplicate the `pr_key`/`round_no` row.

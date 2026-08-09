@@ -44,6 +44,21 @@ export function abandonUrl(token: string, base: string = publicBaseUrl()): strin
   return `${base}/hooks/abandon?token=${encodeURIComponent(token)}`;
 }
 
+/** Recover the capability token from an abandon URL — the inverse of `abandonUrl`. Returns
+ * undefined when the input is absent or carries no `token` query param. A desync-heal uses this to
+ * reconstruct a missing `pull_requests` row with the SAME token the running agent was already
+ * handed (via the `abandonUrl` process variable), so its `curl -f "…/hooks/abandon?token=…"` abort
+ * check keeps resolving instead of 404-ing on a freshly-minted token and aborting a live run. */
+export function abandonTokenFromUrl(url: string | null | undefined): string | undefined {
+  if (!url) return undefined;
+  try {
+    const t = new URL(url).searchParams.get("token");
+    return t || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Resolve an abandon token back to its PR key, or undefined when the token is unknown. */
 export async function prKeyForAbandonToken(
   data: DataLayer,
