@@ -216,7 +216,7 @@
     <bpmn:sequenceFlow id="f_toRecordPlanReview" sourceRef="review-plan" targetRef="record-plan-review" />
     <bpmn:sequenceFlow id="f_toGwPlanReview" sourceRef="record-plan-review" targetRef="gw-plan-review" />
     <bpmn:sequenceFlow id="f_plan_proceed" name="approved" sourceRef="gw-plan-review" targetRef="select-wave">
-      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=planApproved or reviewExhausted</bpmn:conditionExpression>
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=planApproved</bpmn:conditionExpression>
     </bpmn:sequenceFlow>
     <bpmn:sequenceFlow id="f_plan_revise" name="revise" sourceRef="gw-plan-review" targetRef="plan" />
     <bpmn:sequenceFlow id="f_toImplement" sourceRef="select-wave" targetRef="implement" />

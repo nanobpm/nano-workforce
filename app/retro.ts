@@ -14,7 +14,7 @@
 // Data access goes through the record gateway (`data.table`), never hand-written SQL — matching
 // app/plan.ts, app/blackboard.ts, and app/taskDelta.ts.
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
-import { planTasks } from "./plan.ts";
+import { planReviews, planTasks } from "./plan.ts";
 import { isUniqueViolation, readBlackboard } from "./blackboard.ts";
 import { aggregateEpicDeltas } from "./taskDelta.ts";
 import { TERMINAL_STATUSES } from "./service.ts";
@@ -92,12 +92,24 @@ export interface RetroDigest {
   contractChanges: { taskId: string; change: string }[];
   constraints: { taskId: string; constraint: string }[];
   notes: { author_task: string; kind: string; body: string }[];
+  // Plan-review trace (006_plan_review.sql): how many adversarial review rounds the plan needed
+  // before fan-out, and the critique from every rejected round — the "what was wrong with the
+  // first cut of the decomposition" signal, which is prime retro material even when implementers
+  // posted no learnings of their own. `planApproved` reflects the final round's verdict.
+  reviewRounds: number;
+  reviewRejections: { round: number; findings: string }[];
+  planApproved: boolean;
+  // Execution shape: how the plan's tasks actually resolved (opened a PR, were skipped/blocked,
+  // etc.). Lets the retro reason over decomposition accuracy — e.g. a high skipped/blocked ratio
+  // hints the plan over-decomposed.
+  taskOutcomes: { total: number; byStatus: Record<string, number> };
   counts: { learnings: number; deltas: number; notes: number };
 }
 
 /** Gather a plan's reflection material: the `learning` blackboard entries (the headline), plus the
- * task-delta rollup (contract changes, discovered constraints, cross-slice file touches) and any
- * other non-learning blackboard notes for colour. Reads only — no writes. */
+ * task-delta rollup (contract changes, discovered constraints, cross-slice file touches), the
+ * plan-review trace (rounds + rejection findings), the task-outcome shape, and any other
+ * non-learning blackboard notes for colour. Reads only — no writes. */
 export async function gatherRetro(data: DataLayer, planKey: string): Promise<RetroDigest> {
   const plan = await plansTbl(data).get(planKey);
   const entries = await readBlackboard(data, planKey);
@@ -108,6 +120,22 @@ export async function gatherRetro(data: DataLayer, planKey: string): Promise<Ret
     .filter((e) => e.kind !== "learning")
     .map((e) => ({ author_task: e.author_task, kind: e.kind, body: e.body }));
   const deltas = await aggregateEpicDeltas(data, planKey);
+
+  // Plan-review trace, ordered by round. A rejected round is `approved === 0`; only rounds that
+  // carry findings are worth quoting (an empty rejection has nothing to teach).
+  const reviews = (await planReviews(data).find({ plan_key: planKey }))
+    .slice()
+    .sort((a, b) => a.round - b.round);
+  const reviewRejections = reviews
+    .filter((r) => r.approved === 0 && (r.findings ?? "").trim() !== "")
+    .map((r) => ({ round: r.round, findings: r.findings as string }));
+  const planApproved = reviews.length > 0 && reviews[reviews.length - 1].approved === 1;
+
+  // Task-outcome shape (counts by final status).
+  const tasks = await planTasks(data).find({ plan_key: planKey });
+  const byStatus: Record<string, number> = {};
+  for (const t of tasks) byStatus[t.status] = (byStatus[t.status] ?? 0) + 1;
+
   return {
     planKey,
     repo: plan?.repo ?? planKey.split("#")[0] ?? "",
@@ -118,6 +146,10 @@ export async function gatherRetro(data: DataLayer, planKey: string): Promise<Ret
     contractChanges: deltas.contractChanges,
     constraints: deltas.constraints,
     notes,
+    reviewRounds: reviews.length,
+    reviewRejections,
+    planApproved,
+    taskOutcomes: { total: tasks.length, byStatus },
     counts: {
       learnings: learnings.length,
       deltas: deltas.deltas.length,
@@ -139,8 +171,29 @@ export function renderRetroBrief(d: RetroDigest): string {
     `Target repo: **${d.repo}**${d.issueUrl ? ` · issue: ${d.issueUrl}` : ""}`,
     d.title ? `Epic: ${d.title}` : "",
     "",
-    `### Learnings agents posted while implementing (${d.learnings.length})`,
+    `### Plan review — ${d.reviewRounds} round(s), ${d.planApproved ? "approved" : "not approved"}`,
   ];
+  if (d.reviewRejections.length === 0) {
+    lines.push(
+      d.reviewRounds === 0
+        ? "_(no review rounds recorded)_"
+        : "_(approved with no recorded rejections)_",
+    );
+  } else {
+    lines.push(`The plan was revised after ${d.reviewRejections.length} rejected round(s):`);
+    for (const r of d.reviewRejections) lines.push(`- **round ${r.round}**: ${r.findings}`);
+  }
+  if (d.taskOutcomes.total > 0) {
+    const shape = Object.entries(d.taskOutcomes.byStatus)
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([s, n]) => `${s}: ${n}`)
+      .join(", ");
+    lines.push("", `### Task outcomes (${d.taskOutcomes.total} task(s))`, shape);
+  }
+  lines.push(
+    "",
+    `### Learnings agents posted while implementing (${d.learnings.length})`,
+  );
   if (d.learnings.length === 0) {
     lines.push("_(none — agents posted no `learning` entries for this epic)_");
   } else {
@@ -164,9 +217,14 @@ export function renderRetroBrief(d: RetroDigest): string {
   return lines.join("\n");
 }
 
-/** True when a digest carries nothing worth an agent run — no learnings, no deltas, no notes. */
+/** True when a digest carries nothing worth an agent run. A plan is worth retrospecting when
+ * implementers shared material (learnings/deltas/notes) OR the plan itself needed revision — a
+ * rejected review round's findings are reflection material in their own right, even when no
+ * learning was posted. (Task-outcome shape alone is NOT: a cleanly-approved plan whose tasks all
+ * ran has nothing to teach.) */
 export function isDigestEmpty(d: RetroDigest): boolean {
-  return d.counts.learnings === 0 && d.counts.deltas === 0 && d.counts.notes === 0;
+  return d.counts.learnings === 0 && d.counts.deltas === 0 && d.counts.notes === 0 &&
+    d.reviewRejections.length === 0;
 }
 
 /** The persisted retro shape (written by pr.retro-record). */
@@ -264,14 +322,40 @@ export async function maybeStartRetro(
     // Stamp before starting so restarts/retries can take the cheap already-started path.
     await plansTbl(data).update(planKey, { retro_started_at: now(), updated_at: now() });
 
-    const { processInstanceKey } = await engine.createInstance({
-      processDefinitionId: RETRO_PROCESS_ID,
-      variables: {
-        planKey,
-        repo: digest.repo,
-        issueUrl: digest.issueUrl,
-      },
-    });
+    let processInstanceKey: string | number | undefined;
+    try {
+      ({ processInstanceKey } = await engine.createInstance({
+        processDefinitionId: RETRO_PROCESS_ID,
+        variables: {
+          planKey,
+          repo: digest.repo,
+          issueUrl: digest.issueUrl,
+        },
+      }));
+    } catch (err) {
+      // The fire-once guard is already consumed (retro_started_at stamped, plan_retro_starts
+      // claimed), so this plan will never re-enter the start path. If we returned here with no
+      // record, the epic surface would show a plan that "started a retro" with nothing to show and
+      // no way to retry. Persist a `blocked` retro instead so the failure stays visible and the
+      // system state is consistent. Recording must not mask the original error in the log.
+      log?.("error", `retro: could not start process for epic ${planKey}`, { err: String(err) });
+      // Persisting the blocked record is best-effort: recordRetro rethrows non-unique DB errors, and
+      // if that escaped here it would fall through to the outer catch and return `error` instead of
+      // `start-failed` — reintroducing the very silent-gap failure this path guards against (guard
+      // consumed, no durable record). Swallow a secondary persistence failure and log it separately
+      // so the createInstance failure path always reports `start-failed`.
+      try {
+        await recordRetro(data, planKey, {
+          status: "blocked",
+          summary: `Retro process could not be started: ${String(err)}`,
+        });
+      } catch (persistErr) {
+        log?.("error", `retro: could not persist blocked retro for epic ${planKey}`, {
+          err: String(persistErr),
+        });
+      }
+      return { started: false, planKey, reason: "start-failed" };
+    }
     log?.("info", `retro: started for epic ${planKey}`, { processInstanceKey, learnings: digest.counts.learnings });
     return { started: true, planKey };
   } catch (err) {

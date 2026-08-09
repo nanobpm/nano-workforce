@@ -84,6 +84,7 @@
         "columns": [
           { "field": "pr_key", "header": "PR", "linkField": "url" },
           { "field": "status", "header": "Status" },
+          { "field": "incident_message", "header": "Incident" },
           { "field": "current_round", "header": "Round" },
           { "field": "active_worker", "header": "Agent" },
           { "field": "updated_at", "header": "Updated" }
@@ -103,6 +104,8 @@
             { "field": "number", "label": "PR number" },
             { "field": "active_worker", "label": "Agent (leasing worker)" },
             { "field": "lease_until", "label": "Activation lease until" },
+            { "field": "incident_message", "label": "Incident" },
+            { "field": "incident_key", "label": "Incident key" },
             { "field": "merged_at", "label": "Merged at" },
             { "field": "outcome", "label": "Outcome" }
           ],
@@ -226,6 +229,20 @@
                 { "field": "status", "header": "Status" },
                 { "field": "pr_key", "header": "PR" },
                 { "field": "summary", "header": "Summary" }
+              ]
+            },
+            {
+              "title": "Plan reviews",
+              "source": "app",
+              "table": "plan_reviews",
+              "parentField": "plan_key",
+              "childField": "plan_key",
+              "orderBy": { "field": "round", "dir": "asc" },
+              "columns": [
+                { "field": "round", "header": "Round" },
+                { "field": "approved", "header": "Approved? (1/0)" },
+                { "field": "findings", "header": "Reviewer findings" },
+                { "field": "created_at", "header": "Recorded" }
               ]
             },
             {

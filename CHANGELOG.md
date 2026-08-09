@@ -1,3 +1,24 @@
+# [0.32.0](https://github.com/nanobpm/nano-workforce/compare/v0.31.0...v0.32.0) (2026-08-09)
+
+
+### Features
+
+* **poller:** surface technical incidents on the PR row ([#95](https://github.com/nanobpm/nano-workforce/issues/95)) ([596153c](https://github.com/nanobpm/nano-workforce/commit/596153c0f58a0d511f4a7bac66896dab98a6a5c8)), closes [#94](https://github.com/nanobpm/nano-workforce/issues/94)
+
+# [0.31.0](https://github.com/nanobpm/nano-workforce/compare/v0.30.0...v0.31.0) (2026-08-09)
+
+
+### Bug Fixes
+
+* **retro:** record a blocked retro when the retro process fails to start ([#92](https://github.com/nanobpm/nano-workforce/issues/92)) ([22bf171](https://github.com/nanobpm/nano-workforce/commit/22bf17114160bcd269b26fe635afdcc44c249dbe)), closes [#84](https://github.com/nanobpm/nano-workforce/issues/84)
+* surface no-op plan-fanout epics as incidents instead of green ([#86](https://github.com/nanobpm/nano-workforce/issues/86)) ([#88](https://github.com/nanobpm/nano-workforce/issues/88)) ([8178aad](https://github.com/nanobpm/nano-workforce/commit/8178aad61fbf409990d331a4b08c786782d44cd1))
+
+
+### Features
+
+* **retro:** fold plan-review trace and task outcomes into the retro digest ([#91](https://github.com/nanobpm/nano-workforce/issues/91)) ([00d37e5](https://github.com/nanobpm/nano-workforce/commit/00d37e5a8c19238736d14b46401e7a3a41ee2083)), closes [#84](https://github.com/nanobpm/nano-workforce/issues/84) [#87](https://github.com/nanobpm/nano-workforce/issues/87) [#90](https://github.com/nanobpm/nano-workforce/issues/90)
+* surface plan_reviews audit trace on epic and home pages ([#89](https://github.com/nanobpm/nano-workforce/issues/89)) ([2abaa25](https://github.com/nanobpm/nano-workforce/commit/2abaa253ac5bdd4d31a7bee1a0de412e5df56aae)), closes [#87](https://github.com/nanobpm/nano-workforce/issues/87) [#87](https://github.com/nanobpm/nano-workforce/issues/87) [#87](https://github.com/nanobpm/nano-workforce/issues/87) [#87](https://github.com/nanobpm/nano-workforce/issues/87) [#87](https://github.com/nanobpm/nano-workforce/issues/87)
+
 # [0.30.0](https://github.com/nanobpm/nano-workforce/compare/v0.29.0...v0.30.0) (2026-08-09)
 
 

@@ -97,6 +97,10 @@ function seedTask(stores: Record<string, any[]>, task: Record<string, unknown>) 
 function seedPr(stores: Record<string, any[]>, pr_key: string, status: string) {
   (stores["pull_requests"] ??= []).push({ pr_key, status });
 }
+// deno-lint-ignore no-explicit-any
+function seedReview(stores: Record<string, any[]>, round: number, approved: number, findings: string | null) {
+  (stores["plan_reviews"] ??= []).push({ plan_key: PLAN, round, approved, findings, created_at: `t${round}`, job_key: null });
+}
 
 Deno.test("autoRetroEnabled: on by default; disabled by 0/false/off/no", () => {
   const prev = process.env.NANO_AUTO_RETRO;
@@ -177,10 +181,42 @@ Deno.test("gatherRetro: separates learnings from notes and folds in deltas", asy
   assertEquals(d.repo, "acme/widgets");
 });
 
+Deno.test("gatherRetro: folds in the plan-review trace and task-outcome shape", async () => {
+  const { data, stores } = memData();
+  seedPlan(stores);
+  seedTask(stores, { id: "t1", task_id: "t1", status: "opened", pr_key: "acme/widgets#10" });
+  seedTask(stores, { id: "t2", task_id: "t2", status: "skipped", pr_key: null });
+  seedTask(stores, { id: "t3", task_id: "t3", status: "opened", pr_key: "acme/widgets#11" });
+  // Two rejected rounds then an approval — out of order to prove the sort.
+  seedReview(stores, 1, 0, "still missing the migration ordering");
+  seedReview(stores, 0, 0, "task t2 depends on t3 but is sequenced first");
+  seedReview(stores, 2, 1, "");
+
+  const d = await gatherRetro(data, PLAN);
+  assertEquals(d.reviewRounds, 3);
+  assertEquals(d.planApproved, true);
+  assertEquals(d.reviewRejections.map((r) => r.round), [0, 1]);
+  assertEquals(d.reviewRejections[0].findings, "task t2 depends on t3 but is sequenced first");
+  assertEquals(d.taskOutcomes.total, 3);
+  assertEquals(d.taskOutcomes.byStatus, { opened: 2, skipped: 1 });
+});
+
+Deno.test("gatherRetro: no reviews → zero rounds, not approved, empty rejections", async () => {
+  const { data, stores } = memData();
+  seedPlan(stores);
+  const d = await gatherRetro(data, PLAN);
+  assertEquals(d.reviewRounds, 0);
+  assertEquals(d.planApproved, false);
+  assertEquals(d.reviewRejections, []);
+  assertEquals(d.taskOutcomes, { total: 0, byStatus: {} });
+});
+
 Deno.test("renderRetroBrief: renders learnings + constraints; states 'none' with no learnings", () => {
   const empty = renderRetroBrief({
     planKey: PLAN, repo: "acme/widgets", issueUrl: "", title: null,
     learnings: [], touchedFiles: [], contractChanges: [], constraints: [], notes: [],
+    reviewRounds: 0, reviewRejections: [], planApproved: false,
+    taskOutcomes: { total: 0, byStatus: {} },
     counts: { learnings: 0, deltas: 0, notes: 0 },
   });
   assertStringIncludes(empty, "none");
@@ -192,20 +228,31 @@ Deno.test("renderRetroBrief: renders learnings + constraints; states 'none' with
     contractChanges: [{ taskId: "t1", change: "shape" }],
     constraints: [{ taskId: "t1", constraint: "must X" }],
     notes: [{ author_task: "t2", kind: "note", body: "watch the release lane" }],
+    reviewRounds: 2,
+    reviewRejections: [{ round: 0, findings: "wrong dependency order" }],
+    planApproved: true,
+    taskOutcomes: { total: 2, byStatus: { opened: 1, skipped: 1 } },
     counts: { learnings: 1, deltas: 1, notes: 1 },
   });
   assertStringIncludes(brief, "regen first");
   assertStringIncludes(brief, "must X");
   assertStringIncludes(brief, "watch the release lane");
   assertStringIncludes(brief, "acme/widgets");
+  assertStringIncludes(brief, "Plan review");
+  assertStringIncludes(brief, "wrong dependency order");
+  assertStringIncludes(brief, "Task outcomes");
 });
 
-Deno.test("isDigestEmpty: true only when there are no learnings, deltas, or notes", () => {
-  const base = { planKey: PLAN, repo: "", issueUrl: "", title: null, learnings: [], touchedFiles: [], contractChanges: [], constraints: [], notes: [] };
+Deno.test("isDigestEmpty: empty only with no learnings/deltas/notes AND no review rejections", () => {
+  const base = { planKey: PLAN, repo: "", issueUrl: "", title: null, learnings: [], touchedFiles: [], contractChanges: [], constraints: [], notes: [], reviewRounds: 0, reviewRejections: [], planApproved: false, taskOutcomes: { total: 0, byStatus: {} } };
   assert(isDigestEmpty({ ...base, counts: { learnings: 0, deltas: 0, notes: 0 } }));
   assert(!isDigestEmpty({ ...base, counts: { learnings: 1, deltas: 0, notes: 0 } }));
   assert(!isDigestEmpty({ ...base, counts: { learnings: 0, deltas: 2, notes: 0 } }));
   assert(!isDigestEmpty({ ...base, counts: { learnings: 0, deltas: 0, notes: 1 } }));
+  // A rejected review round is reflection material even with no learnings/deltas/notes.
+  assert(!isDigestEmpty({ ...base, reviewRounds: 2, reviewRejections: [{ round: 0, findings: "bad seq" }], counts: { learnings: 0, deltas: 0, notes: 0 } }));
+  // ...but task-outcome shape alone (a cleanly-approved plan) is not.
+  assert(isDigestEmpty({ ...base, reviewRounds: 1, planApproved: true, taskOutcomes: { total: 3, byStatus: { opened: 3 } }, counts: { learnings: 0, deltas: 0, notes: 0 } }));
 });
 
 Deno.test("recordRetro: inserts then updates the same plan_key row in place", async () => {
@@ -278,6 +325,55 @@ Deno.test("maybeStartRetro: starts the retro exactly once when the last PR lands
   assertEquals(started.length, 1, "fire-once guard");
 });
 
+Deno.test("maybeStartRetro: a createInstance failure records a blocked retro (fire-once guard already consumed)", async () => {
+  const { data, stores } = memData();
+  seedPlan(stores);
+  seedTask(stores, { id: "t1", status: "opened", pr_key: "acme/widgets#10" });
+  seedPr(stores, "acme/widgets#10", "merged");
+  await appendEntry(data, PLAN, { author_task: "t1", kind: "learning", body: "regen first" });
+  // deno-lint-ignore no-explicit-any require-await
+  const engine = { async createInstance() { throw new Error("gateway down"); } } as any as EngineClient;
+
+  const r = await maybeStartRetro(data, engine, "acme/widgets#10");
+  assertEquals(r, { started: false, planKey: PLAN, reason: "start-failed" });
+  // The guard is consumed (stamp + claim), so it will never retry...
+  assert(stores["plans"][0].retro_started_at, "retro_started_at is stamped");
+  assertEquals(stores["plan_retro_starts"].length, 1);
+  // ...but the failure is now visible as a blocked retro rather than a silent gap.
+  assertEquals(stores["plan_retros"].length, 1);
+  assertEquals(stores["plan_retros"][0].status, "blocked");
+  assertEquals(stores["plan_retros"][0].pr_key, null);
+  assertStringIncludes(String(stores["plan_retros"][0].summary), "gateway down");
+});
+
+Deno.test("maybeStartRetro: a secondary blocked-retro persistence failure still returns start-failed (not error)", async () => {
+  const { data, stores } = memData();
+  seedPlan(stores);
+  seedTask(stores, { id: "t1", status: "opened", pr_key: "acme/widgets#10" });
+  seedPr(stores, "acme/widgets#10", "merged");
+  await appendEntry(data, PLAN, { author_task: "t1", kind: "learning", body: "regen first" });
+  // deno-lint-ignore no-explicit-any require-await
+  const engine = { async createInstance() { throw new Error("gateway down"); } } as any as EngineClient;
+  // recordRetro rethrows non-unique DB errors; simulate the blocked-retro insert hitting a
+  // FOREIGN KEY failure so the persistence in the createInstance-failure handler throws.
+  // deno-lint-ignore no-explicit-any
+  const failingData = {
+    // deno-lint-ignore no-explicit-any
+    table: (name: string, pk?: string) => {
+      const t = (data as any).table(name, pk);
+      if (name !== "plan_retros") return t;
+      return { ...t, insert: () => Promise.reject(new Error("FOREIGN KEY constraint failed")) };
+    },
+  } as any as DataLayer;
+
+  const r = await maybeStartRetro(failingData, engine, "acme/widgets#10");
+  // The secondary persistence failure must NOT be masked as `error` — the guard is still consumed,
+  // so the caller must see `start-failed`, and no phantom retro row is written.
+  assertEquals(r, { started: false, planKey: PLAN, reason: "start-failed" });
+  assert(stores["plans"][0].retro_started_at, "retro_started_at is stamped");
+  assertEquals(stores["plan_retros"].length, 0);
+});
+
 Deno.test("maybeStartRetro: a pre-claimed retro start does not start a duplicate process", async () => {
   const { data, stores } = memData();
   seedPlan(stores);
@@ -321,6 +417,23 @@ Deno.test("maybeStartRetro: complete but empty → records a skipped retro, does
   assertEquals(started.length, 0);
   assert(stores["plans"][0].retro_started_at, "stamped so we don't re-check forever");
   assertEquals(stores["plan_retros"][0].status, "skipped");
+});
+
+Deno.test("maybeStartRetro: a rejected review round alone is enough to fire the retro", async () => {
+  const { data, stores } = memData();
+  seedPlan(stores);
+  seedTask(stores, { id: "t1", status: "opened", pr_key: "acme/widgets#10" });
+  seedPr(stores, "acme/widgets#10", "merged");
+  // No learnings/deltas/notes — only the plan-review trace carries a rejection.
+  seedReview(stores, 0, 0, "task ordering is wrong");
+  seedReview(stores, 1, 1, "");
+  const { engine, started } = fakeEngine();
+
+  const r = await maybeStartRetro(data, engine, "acme/widgets#10");
+  assertEquals(r.started, true);
+  assertEquals(r.planKey, PLAN);
+  assertEquals(started.length, 1);
+  assert(stores["plans"][0].retro_started_at, "retro_started_at must be stamped");
 });
 
 Deno.test("maybeStartRetro: a PR not part of any plan is a no-op", async () => {

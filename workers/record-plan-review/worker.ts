@@ -6,13 +6,17 @@
 //   • derives the current round from the append-only `plan_reviews` log (no counter variable),
 //     using the engine jobKey as an idempotency guard so a retried job reuses its row,
 //   • records this round's verdict + findings,
-//   • decides the loop: `planApproved` (reviewer said yes) and `reviewExhausted` (the round cap
-//     is reached, so we proceed regardless rather than dead-lock on a reviewer that never
-//     approves), and re-emits the findings as `planFindings` so a revise round feeds the planner.
+//   • decides the loop: emits `planApproved` (reviewer said yes → the BPMN gateway proceeds to
+//     `select-wave`) or, when unapproved, re-emits the findings as `planFindings` so a revise
+//     round feeds the planner and loops back to `plan`.
 //
-// The BPMN gateway proceeds to `select-wave` when `planApproved or reviewExhausted`, else loops
-// back to `plan`. A missing/ambiguous `approved` is treated as NOT approved (revise) — but the
-// round cap still bounds the loop, so the plan can never wedge.
+// When the review-round cap is reached WITHOUT approval, this worker HARD-FAILS: it throws a
+// non-retryable `PLAN_REJECTED` BpmnError (→ incident) rather than proceeding regardless
+// (issue #86). Proceeding used to dispatch an un-vetted plan and — when the plan was empty — let
+// the whole epic complete GREEN having done nothing. The cap still bounds the loop; it now bounds
+// it into an incident, not a silent proceed. A missing/ambiguous `approved` is treated as NOT
+// approved (revise until the cap).
+import { BpmnError } from "@nanobpm/urban";
 import type { AppJobHandler } from "@nanobpm/urban";
 import { MAX_PLAN_REVIEW_ROUNDS, type PlanReview, planReviews } from "../../app/plan.ts";
 
@@ -23,7 +27,6 @@ interface In extends Record<string, unknown> {
 }
 interface Out extends Record<string, unknown> {
   planApproved: boolean;
-  reviewExhausted: boolean;
   planFindings: string;
 }
 
@@ -56,7 +59,7 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
   // Idempotency guard: deriving the round from count(plan_reviews) is not retry-safe on its own.
   // A job retried after the insert (crash/timeout post-write) re-runs with the SAME jobKey — if
   // this job already recorded a row, reuse it rather than appending a duplicate, which would
-  // inflate the count and trip `reviewExhausted` early. Otherwise this is the first attempt:
+  // inflate the count and reach the review-round cap early. Otherwise this is the first attempt:
   // derive the 0-based next round from the append-only log and record it under this jobKey.
   const recorded: PlanReview = (await reviews.findOne({ plan_key: planKey, job_key: jobKey })) ??
     await (async () => {
@@ -77,16 +80,29 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
   const roundApproved = recorded.approved === 1;
   const roundFindings = recorded.findings ?? "";
 
-  // Exhausted once this round is the last permitted one (round is 0-based).
-  const reviewExhausted = round + 1 >= MAX_PLAN_REVIEW_ROUNDS;
-  if (!roundApproved) {
-    app.log(reviewExhausted ? "warn" : "info", `record-plan-review: ${planKey} round ${round}`, {
-      approved: roundApproved,
-      reviewExhausted,
-    });
+  if (roundApproved) {
+    return { planApproved: true, planFindings: roundFindings };
   }
 
-  return { planApproved: roundApproved, reviewExhausted, planFindings: roundFindings };
+  // Not approved this round. Hard-fail once the round cap is reached (issue #86): previously the
+  // fan-out PROCEEDED regardless ("don't dead-lock on a reviewer that never approves"), which
+  // dispatched an un-vetted plan and — when the plan was empty — completed the epic GREEN having
+  // done nothing (instance 21). Instead raise a non-retryable BpmnError: no boundary catches
+  // `PLAN_REJECTED`, so the engine parks the instance on an incident rather than dispatching an
+  // un-approved plan. The round is 0-based, so `round + 1 >= cap` is the last permitted round.
+  if (round + 1 >= MAX_PLAN_REVIEW_ROUNDS) {
+    app.log("error", `record-plan-review: ${planKey} not approved after ${MAX_PLAN_REVIEW_ROUNDS} round(s)`, {
+      round,
+    });
+    throw new BpmnError(
+      "PLAN_REJECTED",
+      `${planKey}: plan not approved after ${MAX_PLAN_REVIEW_ROUNDS} review round(s)`,
+    );
+  }
+
+  // Otherwise loop: the planner revises against this round's findings.
+  app.log("info", `record-plan-review: ${planKey} round ${round} — revise`, { approved: false });
+  return { planApproved: false, planFindings: roundFindings };
 };
 
 export default handler;
