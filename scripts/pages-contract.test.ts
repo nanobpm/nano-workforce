@@ -136,6 +136,9 @@ function collectRefs(page: string, node: Json, out: Ref[]): void {
       ...(node.tabs ?? []).flatMap((t: Json) => filterFields(t.filter)),
       detail.linkField,
       ...(detail.fields ?? []).flatMap((f: Json) => [f.field, f.linkField]),
+      // `detail.children[].parentField` joins each child grid back to a column on THIS (parent)
+      // table, so a rename/typo there 400s at request time — guard it against the parent schema.
+      ...(detail.children ?? []).map((c: Json) => c.parentField),
     ].filter(Boolean);
     out.push({ page, table: data.table, source: data.source ?? "app", fields, columns });
   }
