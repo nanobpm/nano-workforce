@@ -175,11 +175,14 @@ export function canonicalPrUrl(repo: string, number: number): string {
  * DB is rebuilt, restored from a stale copy, or simply lags a live process instance while running
  * from a local checkout — a persist/finalize/merge job would otherwise insert a child row whose
  * FK parent is absent and die with an opaque `FOREIGN KEY constraint failed` incident that a human
- * has to hand-resolve (observed on convergence-loop instance 94). Every such job carries the PR's
- * `repo`/`prNumber` as process variables, so the parent can be reconstructed deterministically:
- * we heal the missing row (a minimal `converging` aggregate) and let the loop continue instead of
- * parking a dead-end incident. When the row already exists this is a no-op, so the healthy path is
- * unchanged.
+ * has to hand-resolve (observed on convergence-loop instance 94). The PR's `repo`/`prNumber` are
+ * normally carried as process variables; where they may be absent (older in-flight instances) the
+ * call sites derive them from the canonical `owner/repo#N` prKey, so the parent can always be
+ * reconstructed deterministically: we heal the missing row (a minimal `converging` aggregate) and
+ * let the loop continue instead of parking a dead-end incident. Callers pass the instance's
+ * `abandonToken` (recovered from its `abandonUrl` var) so the healed row keeps the token the
+ * running agent was handed and its cooperative-abort check keeps resolving. When the row already
+ * exists this is a no-op, so the healthy path is unchanged.
  */
 export async function ensurePr(
   data: DataLayer,
