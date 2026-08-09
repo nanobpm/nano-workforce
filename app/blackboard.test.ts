@@ -5,6 +5,7 @@ import {
   appendEntry,
   blackboardUrl,
   detectFileClaimConflicts,
+  isUniqueViolation,
   mintBlackboardToken,
   normalizeKind,
   planKeyForToken,
@@ -296,4 +297,20 @@ Deno.test("detectFileClaimConflicts: beforeId restricts to strictly prior claims
   assertEquals(conflicts[0].id, Number(prior.id));
   assertEquals(conflicts[0].author_task, "gap-2");
   assert(Number(later.id) > Number(mine.id));
+});
+
+Deno.test("isUniqueViolation: true for UNIQUE/PK, false for FOREIGN KEY and unrelated errors", () => {
+  // Extended SQLite codes.
+  assert(isUniqueViolation(Object.assign(new Error("x"), { code: "SQLITE_CONSTRAINT_UNIQUE" })));
+  assert(isUniqueViolation(Object.assign(new Error("x"), { code: "SQLITE_CONSTRAINT_PRIMARYKEY" })));
+  // Message-only (driver surfaced no code).
+  assert(isUniqueViolation(new Error("UNIQUE constraint failed: plan_retros.plan_key")));
+  assert(isUniqueViolation(new Error("PRIMARY KEY constraint failed")));
+  // The bug this guards: a bare "constraint" match would swallow an FK failure.
+  assert(!isUniqueViolation(new Error("FOREIGN KEY constraint failed")));
+  assert(!isUniqueViolation(Object.assign(new Error("fk"), { code: "SQLITE_CONSTRAINT_FOREIGNKEY" })));
+  // Unrelated / non-errors.
+  assert(!isUniqueViolation(new Error("network down")));
+  assert(!isUniqueViolation(null));
+  assert(!isUniqueViolation("nope"));
 });
