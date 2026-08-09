@@ -4,7 +4,8 @@
 // completed the process GREEN — even when ZERO PRs were opened (empty plan, or every task
 // blocked/skipped). A no-op run was indistinguishable from success (instance 21). It now raises a
 // non-retryable `NO_WORK_DISPATCHED` BpmnError (→ incident) when the epic finalizes with no opened
-// PR, so "accomplished nothing" surfaces instead of masquerading as a completed epic.
+// PR, recording a `failed` terminal status + outcome first, so "accomplished nothing" surfaces
+// instead of masquerading as a completed epic.
 import { assertEquals, assertRejects } from "jsr:@std/assert@1";
 import { BpmnError } from "@nanobpm/urban";
 import handler from "./worker.ts";
@@ -59,6 +60,11 @@ Deno.test("no opened PRs (empty plan) hard-fails with NO_WORK_DISPATCHED", async
   const app = fakeApp([]);
   const err = await assertRejects(() => call(app), BpmnError);
   assertEquals((err as BpmnError).errorCode, "NO_WORK_DISPATCHED");
+  // The failure outcome + terminal `failed` status must be recorded before throwing, so the DB
+  // state matches the parked incident and startPlan can re-plan it.
+  const plan = app._plans.at(-1) as Record<string, unknown>;
+  assertEquals(plan.status, "failed");
+  assertEquals(plan.outcome, "no work dispatched — the planner produced no tasks");
 });
 
 Deno.test("tasks present but none opened (all skipped/blocked) hard-fails", async () => {
@@ -68,6 +74,9 @@ Deno.test("tasks present but none opened (all skipped/blocked) hard-fails", asyn
   ]);
   const err = await assertRejects(() => call(app), BpmnError);
   assertEquals((err as BpmnError).errorCode, "NO_WORK_DISPATCHED");
+  const plan = app._plans.at(-1) as Record<string, unknown>;
+  assertEquals(plan.status, "failed");
+  assertEquals(plan.outcome, "no work dispatched — every task was blocked or skipped");
 });
 
 Deno.test("at least one opened PR finalizes cleanly (no throw)", async () => {
