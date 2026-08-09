@@ -1,3 +1,10 @@
+## [0.32.1](https://github.com/nanobpm/nano-workforce/compare/v0.32.0...v0.32.1) (2026-08-09)
+
+
+### Bug Fixes
+
+* **cancel:** reconcile terminated Epic/plan runs via instanceTracking ([#96](https://github.com/nanobpm/nano-workforce/issues/96)) ([3d0c5ba](https://github.com/nanobpm/nano-workforce/commit/3d0c5ba1b8bb9bd0c28432323b1867a7c86d1835))
+
 # [0.32.0](https://github.com/nanobpm/nano-workforce/compare/v0.31.0...v0.32.0) (2026-08-09)
 
 
