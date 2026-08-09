@@ -214,3 +214,40 @@ Deno.test("pollIncidents never queries a PR with no live instance and clears any
   assertEquals(terminal.incident_key, null);
   assertEquals(terminal.incident_message, null);
 });
+
+Deno.test("pollIncidents picks the oldest incident by creationTime, sorting a missing timestamp last", async () => {
+  const row = {
+    pr_key: "owner/repo#11",
+    status: "converging",
+    process_key: "PI-11",
+    incident_key: null as string | null,
+    incident_message: null as string | null,
+    updated_at: "t0",
+  };
+  const stores: Record<string, { rows: unknown[]; key: string }> = {
+    pull_requests: { rows: [row], key: "pr_key" },
+  };
+  const data = {
+    table: (name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key),
+    // deno-lint-ignore no-explicit-any
+  } as any;
+  const headers = { "content-type": "application/json" };
+
+  const prevFetch = globalThis.fetch;
+  // A no-`creationTime` incident must not masquerade as the oldest (empty-string sort bug): the
+  // real earliest ISO timestamp wins even when a timestamp-less incident is returned first.
+  globalThis.fetch = incidentFetch({
+    "PI-11": [
+      { incidentKey: "INC-NOTS", errorMessage: "no timestamp", state: "ACTIVE" },
+      { incidentKey: "INC-OLD", errorMessage: "the first fault", state: "ACTIVE", creationTime: "2024-01-01T00:00:00Z" },
+      { incidentKey: "INC-NEW", errorMessage: "a later fault", state: "ACTIVE", creationTime: "2024-06-01T00:00:00Z" },
+    ],
+  }) as typeof fetch;
+  try {
+    await pollIncidentsImpl(data, "http://engine/v2", headers);
+  } finally {
+    globalThis.fetch = prevFetch;
+  }
+  assertEquals(row.incident_key, "INC-OLD");
+  assertEquals(row.incident_message, "the first fault");
+});

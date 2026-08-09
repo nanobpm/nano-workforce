@@ -854,11 +854,6 @@ interface IncidentSearchItem {
   creationTime?: string | null;
 }
 
-/** PR statuses that have no live engine instance to inspect for incidents: the run has finished
- * (converged/merged) or was given up (abandoned). Their `process_key` may still be set, but the
- * instance is gone, so `pollIncidents` clears any stale incident rather than querying. */
-const INCIDENT_TERMINAL_STATUSES = new Set(["converged", "merged", "abandoned"]);
-
 /** Incident-surfacing poll pass (issue #94). A convergence or merge process instance can hit a
  * *technical* incident — an unhandled engine error that parks the token — and nothing on the PR
  * row reflected it: the grid kept showing the last workflow status (`converging`, `merging`, …)
@@ -894,9 +889,11 @@ export async function pollIncidentsImpl(
 ) {
   const all = await prs(data).all();
   for (const pr of all) {
-    // No live instance to inspect (never created, mid-transition, or terminal) → make sure no
-    // stale incident lingers on the row, then move on.
-    if (!pr.process_key || INCIDENT_TERMINAL_STATUSES.has(pr.status)) {
+    // No live instance to inspect (never created, mid-transition, or terminal — the run has
+    // finished or was given up, so its instance is gone) → make sure no stale incident lingers on
+    // the row, then move on. Reuses the canonical `TERMINAL_STATUSES` so incident logic can't drift
+    // from the rest of the status machine.
+    if (!pr.process_key || TERMINAL_STATUSES.includes(pr.status)) {
       if (pr.incident_key || pr.incident_message) {
         await prs(data).update(pr.pr_key, {
           incident_key: null,
@@ -922,10 +919,13 @@ export async function pollIncidentsImpl(
       const body = (await res.json()) as { items?: IncidentSearchItem[] };
       // Surface the oldest ACTIVE incident (the first thing that broke — a stable choice if the
       // instance somehow parks more than one). Re-filter on state defensively in case the wire
-      // filter is ignored.
+      // filter is ignored. An incident with no `creationTime` sorts *last*, so a missing timestamp
+      // can never masquerade as the oldest.
       const active = (body.items ?? [])
         .filter((i) => (i.state ?? "ACTIVE") === "ACTIVE")
-        .sort((a, b) => (a.creationTime ?? "").localeCompare(b.creationTime ?? ""))[0];
+        .sort((a, b) =>
+          (a.creationTime ?? "\uffff").localeCompare(b.creationTime ?? "\uffff")
+        )[0];
       if (active) {
         incidentKey = active.incidentKey ?? null;
         incidentMessage = active.errorMessage ?? null;
