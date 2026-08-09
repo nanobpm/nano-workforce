@@ -22,6 +22,34 @@
       }
     }
   },
+  "instanceTracking": [
+    {
+      "table": "pull_requests",
+      "keyField": "process_key",
+      "statusField": "status",
+      "activeStatuses": ["converging", "waiting_review", "escalated"],
+      "onTerminated": {
+        "set": {
+          "status": "abandoned",
+          "open_escalation_id": null,
+          "open_escalation_question": null
+        }
+      },
+      "pollMs": 5000
+    },
+    {
+      "table": "plans",
+      "keyField": "process_key",
+      "statusField": "status",
+      "activeStatuses": ["planning", "dispatched"],
+      "onTerminated": {
+        "set": {
+          "status": "abandoned"
+        }
+      },
+      "pollMs": 5000
+    }
+  ],
   "workers": [
     {
       "taskType": "pr.persist-round",

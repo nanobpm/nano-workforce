@@ -6,7 +6,7 @@
 // loop already guards in `startPlan`). Drives `submitPr` against an in-memory data layer with the
 // GitHub transport forced off so it is hermetic.
 import { assertEquals } from "jsr:@std/assert@1";
-import { submitPr } from "./service.ts";
+import { cancelRun, submitPr } from "./service.ts";
 
 // deno-lint-ignore no-explicit-any
 function memTable(rows: any[], key: string) {
@@ -98,4 +98,77 @@ Deno.test("re-submit of a cancelled PR clears stale open escalations + the denor
     assertEquals(pr.open_escalation_question, null);
     assertEquals(pr.process_key, "PI-9");
   });
+});
+
+// Bug: the Epic cancel button (Nano Workforce UI) POSTs the plan row's `process_key` to
+// /app/actions/cancel → cancelRun. cancelRun only knows the `pull_requests` table, so for a plan
+// instance it terminated the engine instance but returned `not_found` (a 404 the UI surfaces as an
+// error), and never reconciled the `plans` row — so "cancel didn't cancel the epic". The instance
+// IS torn down; the declarative instanceTracking reconciler flips the plans row. cancelRun must
+// therefore report success for a raw instance key it terminated.
+Deno.test("cancelRun terminates a non-PR (Epic/plan) instance and reports success", async () => {
+  const stores: Record<string, { rows: unknown[]; key: string }> = {
+    pull_requests: { rows: [], key: "pr_key" }, // no PR tracks this key — it's a plan instance
+  };
+  const data = {
+    table: (name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key),
+    // deno-lint-ignore no-explicit-any
+  } as any;
+  const cancelled: string[] = [];
+  const engine = {
+    // deno-lint-ignore no-explicit-any
+    cancelInstance: (input: any) => {
+      cancelled.push(String(input.processInstanceKey));
+      return Promise.resolve();
+    },
+    // deno-lint-ignore no-explicit-any
+  } as any;
+
+  const r = await cancelRun(data, engine, { processInstanceKey: "PI-EPIC-1" });
+
+  assertEquals(cancelled, ["PI-EPIC-1"]); // the engine instance was terminated …
+  assertEquals(r.ok, true); // … and cancel is reported successful (no misleading 404).
+});
+
+// The tracked-PR path must still flip the row abandoned SYNCHRONOUSLY: app/abandon.ts derives the
+// agent-abort signal straight off pull_requests.status, so a deferred (reconciler-only) write would
+// widen the check-then-push window a side-effecting agent races against.
+Deno.test("cancelRun flips a tracked PR to abandoned immediately and clears the escalation pointer", async () => {
+  const PR_KEY = "owner/repo#7";
+  const stores: Record<string, { rows: unknown[]; key: string }> = {
+    pull_requests: {
+      rows: [{
+        pr_key: PR_KEY,
+        repo: "owner/repo",
+        number: 7,
+        status: "escalated",
+        process_key: "PI-PR-7",
+        open_escalation_id: 3,
+        open_escalation_question: "why?",
+      }],
+      key: "pr_key",
+    },
+  };
+  const data = {
+    table: (name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key),
+    // deno-lint-ignore no-explicit-any
+  } as any;
+  const cancelled: string[] = [];
+  const engine = {
+    // deno-lint-ignore no-explicit-any
+    cancelInstance: (input: any) => {
+      cancelled.push(String(input.processInstanceKey));
+      return Promise.resolve();
+    },
+    // deno-lint-ignore no-explicit-any
+  } as any;
+
+  const r = await cancelRun(data, engine, { prKey: PR_KEY });
+
+  assertEquals(r.ok, true);
+  assertEquals(cancelled, ["PI-PR-7"]);
+  const pr = stores.pull_requests.rows[0] as Record<string, unknown>;
+  assertEquals(pr.status, "abandoned");
+  assertEquals(pr.open_escalation_id, null);
+  assertEquals(pr.open_escalation_question, null);
 });
