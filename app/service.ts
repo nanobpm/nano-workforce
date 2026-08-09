@@ -130,6 +130,13 @@ interface PullRequest {
   // running agent curls (GET /hooks/abandon?token=…) to learn whether this run was cancelled before
   // it performs a side effect. Minted at submit, reused across the convergence + merge instances.
   abandon_token: string | null;
+  // Technical-incident surfacing (017_pr_incident.sql, issue #94), written by the poller's
+  // `pollIncidents` pass. `incident_key` is the engine incidentKey of the ACTIVE incident parking
+  // this PR's instance and `incident_message` its errorMessage; both NULL when the instance has no
+  // active incident. Orthogonal to `status` — an incident is a cross-cutting liveness fault, not a
+  // workflow stage.
+  incident_key: string | null;
+  incident_message: string | null;
 }
 
 interface PrDependency {
@@ -836,6 +843,111 @@ async function pollJobActivation(
   }
 }
 
+/** The subset of a Camunda-8 `/v2/incidents/search` result item this app reads. `incidentKey` is
+ * the unique incident id; `errorMessage` is the human-readable fault; `state` is the incident
+ * lifecycle (`ACTIVE` while it parks the token, `RESOLVED` once cleared); `creationTime` orders
+ * concurrent incidents. */
+interface IncidentSearchItem {
+  incidentKey?: string;
+  errorMessage?: string | null;
+  state?: string;
+  creationTime?: string | null;
+}
+
+/** PR statuses that have no live engine instance to inspect for incidents: the run has finished
+ * (converged/merged) or was given up (abandoned). Their `process_key` may still be set, but the
+ * instance is gone, so `pollIncidents` clears any stale incident rather than querying. */
+const INCIDENT_TERMINAL_STATUSES = new Set(["converged", "merged", "abandoned"]);
+
+/** Incident-surfacing poll pass (issue #94). A convergence or merge process instance can hit a
+ * *technical* incident — an unhandled engine error that parks the token — and nothing on the PR
+ * row reflected it: the grid kept showing the last workflow status (`converging`, `merging`, …)
+ * while the run was actually dead in the water (a PR sat "converging" all day on an incident).
+ *
+ * This pass reads the engine's Camunda-8 `/v2/incidents/search` for each PR that still has a live
+ * instance (has a `process_key`, non-terminal status) and mirrors an ACTIVE incident onto two
+ * orthogonal columns — `incident_key` + `incident_message` — leaving `status` untouched. An
+ * incident is a cross-cutting liveness fault, not a workflow stage, so it must not overload the
+ * status machine. Clearing is idempotent: when the instance has no active incident (resolved, or
+ * never had one) the columns are nulled, so an incident raised or resolved out-of-band converges
+ * to the truth on the next pass. Best-effort transport: a failed query leaves the last-known
+ * values untouched and the next pass retries. Updates (and bumps `updated_at`) only on an actual
+ * change so a steady state doesn't churn the grid. */
+async function pollIncidents(
+  data: DataLayer,
+  restAddress: string,
+  engineToken: string | undefined,
+) {
+  const base = restAddress.replace(/\/+$/, "");
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  if (engineToken) headers.authorization = `Bearer ${engineToken}`;
+  await pollIncidentsImpl(data, base, headers);
+}
+
+/** Testable core of {@link pollIncidents}: given the normalised `base` URL and prepared auth
+ * `headers`, reconcile every PR row against the engine's active incidents. Split out so tests can
+ * exercise the reconciliation with a stubbed `fetch` without re-deriving transport wiring. */
+export async function pollIncidentsImpl(
+  data: DataLayer,
+  base: string,
+  headers: Record<string, string>,
+) {
+  const all = await prs(data).all();
+  for (const pr of all) {
+    // No live instance to inspect (never created, mid-transition, or terminal) → make sure no
+    // stale incident lingers on the row, then move on.
+    if (!pr.process_key || INCIDENT_TERMINAL_STATUSES.has(pr.status)) {
+      if (pr.incident_key || pr.incident_message) {
+        await prs(data).update(pr.pr_key, {
+          incident_key: null,
+          incident_message: null,
+          updated_at: now(),
+        });
+      }
+      continue;
+    }
+
+    let incidentKey: string | null = null;
+    let incidentMessage: string | null = null;
+    try {
+      const res = await fetch(`${base}/incidents/search`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          filter: { processInstanceKey: pr.process_key, state: "ACTIVE" },
+          page: { limit: 20 },
+        }),
+      });
+      if (!res.ok) continue; // engine unhappy → keep last-known, retry next pass
+      const body = (await res.json()) as { items?: IncidentSearchItem[] };
+      // Surface the oldest ACTIVE incident (the first thing that broke — a stable choice if the
+      // instance somehow parks more than one). Re-filter on state defensively in case the wire
+      // filter is ignored.
+      const active = (body.items ?? [])
+        .filter((i) => (i.state ?? "ACTIVE") === "ACTIVE")
+        .sort((a, b) => (a.creationTime ?? "").localeCompare(b.creationTime ?? ""))[0];
+      if (active) {
+        incidentKey = active.incidentKey ?? null;
+        incidentMessage = active.errorMessage ?? null;
+      }
+    } catch (err) {
+      console.error(`[poller] incidents ${pr.pr_key}: ${err}`);
+      continue;
+    }
+
+    if (
+      incidentKey !== (pr.incident_key ?? null) ||
+      incidentMessage !== (pr.incident_message ?? null)
+    ) {
+      await prs(data).update(pr.pr_key, {
+        incident_key: incidentKey,
+        incident_message: incidentMessage,
+        updated_at: now(),
+      });
+    }
+  }
+}
+
 /** Wave-merge barrier poll pass. After `record-wave` hands off a wave that has a successor, the
  * plan-fanout instance parks at the `wait-wave-merged` catch event and `plans.gate_wave` records
  * that wave's index. Here we check whether every OPENED PR in that wave has MERGED and, if so,
@@ -879,9 +991,9 @@ async function pollWaveGates(data: DataLayer, engine: EngineClient, token: strin
   }
 }
 
-/** One full poll pass: advance the review stage, the merge stage, and (when the engine REST
- * endpoint is supplied) the job-activation visibility pass. Called on the self-scheduling loop
- * in `main.ts`. */
+/** One full poll pass: advance the review stage, the merge stage, the wave-merge barrier, and
+ * (when the engine REST endpoint is supplied) the job-activation visibility pass and the
+ * technical-incident surfacing pass. Called on the self-scheduling loop in `main.ts`. */
 export async function pollOnce(
   data: DataLayer,
   engine: EngineClient,
@@ -891,5 +1003,8 @@ export async function pollOnce(
   await pollReviews(data, engine, token);
   await pollMerges(data, engine, token);
   await pollWaveGates(data, engine, token);
-  if (engineRest) await pollJobActivation(data, engineRest.restAddress, engineRest.token);
+  if (engineRest) {
+    await pollJobActivation(data, engineRest.restAddress, engineRest.token);
+    await pollIncidents(data, engineRest.restAddress, engineRest.token);
+  }
 }
