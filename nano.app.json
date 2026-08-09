@@ -155,6 +155,11 @@
       "method": "GET"
     },
     {
+      "path": "/app/version",
+      "module": "actions/version.ts",
+      "method": "GET"
+    },
+    {
       "path": "/app/actions/message",
       "module": "actions/message.ts"
     },
