@@ -1,3 +1,10 @@
+# [0.30.0](https://github.com/nanobpm/nano-workforce/compare/v0.29.0...v0.30.0) (2026-08-09)
+
+
+### Features
+
+* **retro:** epic retrospective workflow that promotes shared learnings ([#84](https://github.com/nanobpm/nano-workforce/issues/84)) ([306e46f](https://github.com/nanobpm/nano-workforce/commit/306e46ff333bc5baff199713bf3a71f0c294e897)), closes [#82](https://github.com/nanobpm/nano-workforce/issues/82)
+
 # [0.29.0](https://github.com/nanobpm/nano-workforce/compare/v0.28.0...v0.29.0) (2026-08-08)
 
 
