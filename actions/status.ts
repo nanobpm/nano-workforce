@@ -1,6 +1,6 @@
 // GET /app/status — list the PRs currently in flight (every tracked PR not converged/abandoned).
 // A read-only projection over the app datasource so an operator or an external automation
-// harness can see active work — and grab a prKey to cancel — without opening the DB or the UI.
+// harness can see active work — and grab a `processKey` to cancel — without opening the DB or the UI.
 //
 // Optional shared-secret guard, mirroring /hooks/submit: when NANO_PR_WEBHOOK_SECRET is set,
 // callers must present it via the x-hook-secret header. Unset → open (unchanged default). The

@@ -267,12 +267,15 @@ carry app-specific business logic:
 | method | route | purpose |
 |---|---|---|
 | `POST` | `/app/actions/start/convergence-loop` | parse the PR ref → create the aggregate + start the process |
-| `POST` | `/app/actions/cancel` | cancel the engine instance + mark the PR `abandoned` |
 | `POST` | `/app/actions/message` (`escalation-answered`) | answer an open escalation → publish `escalation-answered` |
 | `POST` | `/hooks/submit` | webhook submit (shared-secret auth) → start the process |
 
 Everything else (`GET /`, `GET /app/pages/*`, `GET /app/data/*`, the renderer) is
-served by the runtime. `deno task purge` wipes and re-migrates the app db (used
+served by the runtime — including `POST /app/actions/cancel`, which is Urban's
+built-in reconcile-aware cancel primitive (there is **no** local handler in this
+repo): it terminates the engine instance, verifies the termination, and flips the
+tracked row to `abandoned` via the `instanceTracking` `onTerminated.set` patch.
+`deno task purge` wipes and re-migrates the app db (used
 when the engine data is purged, to keep app state and engine state consistent).
 
 ## 9. Prompt delivery — model-authored template headers

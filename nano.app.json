@@ -50,7 +50,10 @@
       "table": "plans",
       "keyField": "process_key",
       "statusField": "status",
-      "activeStatuses": ["planning", "dispatched"],
+      "activeStatuses": [
+        "planning",
+        "dispatched"
+      ],
       "onTerminated": {
         "set": {
           "status": "abandoned"
@@ -144,10 +147,6 @@
     {
       "path": "/app/actions/start/plan-fanout",
       "module": "actions/plan-start.ts"
-    },
-    {
-      "path": "/app/actions/cancel",
-      "module": "actions/cancel.ts"
     },
     {
       "path": "/app/status",
