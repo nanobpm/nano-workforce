@@ -325,6 +325,55 @@ Deno.test("maybeStartRetro: starts the retro exactly once when the last PR lands
   assertEquals(started.length, 1, "fire-once guard");
 });
 
+Deno.test("maybeStartRetro: a createInstance failure records a blocked retro (fire-once guard already consumed)", async () => {
+  const { data, stores } = memData();
+  seedPlan(stores);
+  seedTask(stores, { id: "t1", status: "opened", pr_key: "acme/widgets#10" });
+  seedPr(stores, "acme/widgets#10", "merged");
+  await appendEntry(data, PLAN, { author_task: "t1", kind: "learning", body: "regen first" });
+  // deno-lint-ignore no-explicit-any require-await
+  const engine = { async createInstance() { throw new Error("gateway down"); } } as any as EngineClient;
+
+  const r = await maybeStartRetro(data, engine, "acme/widgets#10");
+  assertEquals(r, { started: false, planKey: PLAN, reason: "start-failed" });
+  // The guard is consumed (stamp + claim), so it will never retry...
+  assert(stores["plans"][0].retro_started_at, "retro_started_at is stamped");
+  assertEquals(stores["plan_retro_starts"].length, 1);
+  // ...but the failure is now visible as a blocked retro rather than a silent gap.
+  assertEquals(stores["plan_retros"].length, 1);
+  assertEquals(stores["plan_retros"][0].status, "blocked");
+  assertEquals(stores["plan_retros"][0].pr_key, null);
+  assertStringIncludes(String(stores["plan_retros"][0].summary), "gateway down");
+});
+
+Deno.test("maybeStartRetro: a secondary blocked-retro persistence failure still returns start-failed (not error)", async () => {
+  const { data, stores } = memData();
+  seedPlan(stores);
+  seedTask(stores, { id: "t1", status: "opened", pr_key: "acme/widgets#10" });
+  seedPr(stores, "acme/widgets#10", "merged");
+  await appendEntry(data, PLAN, { author_task: "t1", kind: "learning", body: "regen first" });
+  // deno-lint-ignore no-explicit-any require-await
+  const engine = { async createInstance() { throw new Error("gateway down"); } } as any as EngineClient;
+  // recordRetro rethrows non-unique DB errors; simulate the blocked-retro insert hitting a
+  // FOREIGN KEY failure so the persistence in the createInstance-failure handler throws.
+  // deno-lint-ignore no-explicit-any
+  const failingData = {
+    // deno-lint-ignore no-explicit-any
+    table: (name: string, pk?: string) => {
+      const t = (data as any).table(name, pk);
+      if (name !== "plan_retros") return t;
+      return { ...t, insert: () => Promise.reject(new Error("FOREIGN KEY constraint failed")) };
+    },
+  } as any as DataLayer;
+
+  const r = await maybeStartRetro(failingData, engine, "acme/widgets#10");
+  // The secondary persistence failure must NOT be masked as `error` — the guard is still consumed,
+  // so the caller must see `start-failed`, and no phantom retro row is written.
+  assertEquals(r, { started: false, planKey: PLAN, reason: "start-failed" });
+  assert(stores["plans"][0].retro_started_at, "retro_started_at is stamped");
+  assertEquals(stores["plan_retros"].length, 0);
+});
+
 Deno.test("maybeStartRetro: a pre-claimed retro start does not start a duplicate process", async () => {
   const { data, stores } = memData();
   seedPlan(stores);
