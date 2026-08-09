@@ -12,7 +12,10 @@
 // home page's plan detail (child grid). Feature coverage so the trace can't silently regress out.
 import { assert } from "jsr:@std/assert@1";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+// Percent-decode the pathname: `new URL(..).pathname` can contain encoded characters (e.g. a space
+// as `%20`), which `Deno.readDir`/`readTextFile` would fail to resolve. Matches the repo convention
+// (see scripts/check-agent-prompts.test.ts).
+const ROOT = decodeURIComponent(new URL("../", import.meta.url).pathname);
 
 // ---- migrations -> { table -> Set<column> } -----------------------------------------------------
 
@@ -98,7 +101,14 @@ interface Ref {
   page: string;
   table: string;
   source: string;
-  fields: string[]; // columns + order/link/parent-child fields that must exist on `table`
+  fields: string[]; // every column that must exist on `table` (displayed columns + binding fields)
+  columns: string[]; // only the visibly displayed grid columns (`columns[].field`)
+}
+
+// Pull `field` names out of a `filter` array ([{ field, in/eq/... }, ...]).
+function filterFields(filter: Json): string[] {
+  if (!Array.isArray(filter)) return [];
+  return filter.map((f: Json) => f?.field).filter(Boolean);
 }
 
 function collectRefs(page: string, node: Json, out: Ref[]): void {
@@ -108,32 +118,43 @@ function collectRefs(page: string, node: Json, out: Ref[]): void {
   }
   if (!node || typeof node !== "object") return;
 
-  // Top-level datasource grid: { props: { data: { kind:"datasource", table, orderBy }, columns } }
+  // Top-level datasource grid: the datasource lives at `node.data`, while `columns`, `rowKey`,
+  // `filter`/`tabs`, and `detail` are siblings on the same `node` (the grid props).
   const data = node.data;
   if (data && data.kind === "datasource" && typeof data.table === "string") {
-    out.push({
-      page,
-      table: data.table,
-      source: data.source ?? "app",
-      fields: [
-        ...(node.columns ?? []).map((c: Json) => c.field),
-        data.orderBy?.field,
-      ].filter(Boolean),
-    });
+    const columns: string[] = (node.columns ?? []).map((c: Json) => c.field).filter(Boolean);
+    // Every reference that resolves to a column on this table — the runtime 400s on any of them if
+    // it names a column the migrations never created, so all must be guarded, not just displayed
+    // columns. `detail.fields`/`detail.linkField` render columns of the same top-level row.
+    const detail = node.detail ?? {};
+    const fields: string[] = [
+      ...columns,
+      ...(node.columns ?? []).map((c: Json) => c.linkField),
+      node.rowKey,
+      data.orderBy?.field,
+      ...filterFields(data.filter),
+      ...(node.tabs ?? []).flatMap((t: Json) => filterFields(t.filter)),
+      detail.linkField,
+      ...(detail.fields ?? []).flatMap((f: Json) => [f.field, f.linkField]),
+    ].filter(Boolean);
+    out.push({ page, table: data.table, source: data.source ?? "app", fields, columns });
   }
 
   // Child grid inside a detail: { table, childField, parentField, orderBy, columns }
   if (typeof node.table === "string" && typeof node.childField === "string") {
+    const columns: string[] = (node.columns ?? []).map((c: Json) => c.field).filter(Boolean);
     out.push({
       page,
       table: node.table,
       source: node.source ?? "app",
       fields: [
-        ...(node.columns ?? []).map((c: Json) => c.field),
+        ...columns,
+        ...(node.columns ?? []).map((c: Json) => c.linkField),
         node.childField,
         node.orderBy?.field,
         node.lazyField?.field,
       ].filter(Boolean),
+      columns,
     });
   }
 
@@ -189,12 +210,14 @@ Deno.test("issue #87: plan_reviews is surfaced on the epic and home pages", asyn
   assert(onEpic, "epic.page.json must bind a grid to plan_reviews (plan-review trace)");
   assert(onHome, "home.page.json plan detail must include a plan_reviews child grid");
 
-  // The trace is only useful with the verdict + critique columns, so pin them.
+  // The trace is only useful with the verdict + critique columns, so pin them. Assert against the
+  // visibly displayed `columns` (not `fields`, which also holds binding refs like orderBy.field) so
+  // a column silently dropped from the grid UI can't pass by being referenced elsewhere.
   const required = ["round", "approved", "findings"];
   for (const r of refs.filter((x) => x.table === "plan_reviews")) {
     for (const col of required) {
       assert(
-        r.fields.includes(col),
+        r.columns.includes(col),
         `${r.page}: plan_reviews grid must expose the "${col}" column`,
       );
     }
