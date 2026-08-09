@@ -267,7 +267,7 @@ carry app-specific business logic:
 | method | route | purpose |
 |---|---|---|
 | `POST` | `/app/actions/start/convergence-loop` | parse the PR ref → create the aggregate + start the process |
-| `POST` | `/app/actions/cancel` | cancel the engine instance + mark the PR `abandoned` |
+| `POST` | `/app/actions/cancel` | cancel the engine instance + mark the row `abandoned` (Urban's built-in reconcile-aware cancel primitive) |
 | `POST` | `/app/actions/message` (`escalation-answered`) | answer an open escalation → publish `escalation-answered` |
 | `POST` | `/hooks/submit` | webhook submit (shared-secret auth) → start the process |
 

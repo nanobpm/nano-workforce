@@ -7,7 +7,7 @@
 // unknown token is a 404 (never leaks which PRs exist).
 //
 //   GET → { prKey, status, abandoned }  — `abandoned` is derived from `pull_requests.status`,
-//          which `cancelRun` sets to 'abandoned' on cancel. `true` ⇒ the agent must stop.
+//          which Urban's cancel primitive sets to 'abandoned' on cancel. `true` ⇒ the agent must stop.
 import type { ActionHandler } from "@nanobpm/urban";
 import { abandonStatusForToken } from "../app/abandon.ts";
 

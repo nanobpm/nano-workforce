@@ -11,7 +11,8 @@
 //   - CAPABILITY URL. The per-PR token IS the credential; the agent curls the exact URL it was
 //     handed in its prompt. An unknown token is a 404 (never leaks which PRs exist).
 //   - DERIVED, not a separate marker. `abandoned` is read straight off `pull_requests.status`,
-//     which `cancelRun` (app/service.ts) already sets to 'abandoned' on cancel. No new state to
+//     which Urban's cancel primitive sets to 'abandoned' on cancel (via the `instanceTracking`
+//     `onTerminated.set` patch, applied the instant the instance terminates). No new state to
 //     keep in sync.
 //   - ADVISORY. Like the blackboard, this never hard-locks; it narrows an unavoidable
 //     check-then-push (TOCTOU) window to near-zero. Job fencing in the harness (issue #76 layer 2)
