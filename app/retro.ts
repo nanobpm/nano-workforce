@@ -14,7 +14,7 @@
 // Data access goes through the record gateway (`data.table`), never hand-written SQL — matching
 // app/plan.ts, app/blackboard.ts, and app/taskDelta.ts.
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
-import { planTasks } from "./plan.ts";
+import { planReviews, planTasks } from "./plan.ts";
 import { isUniqueViolation, readBlackboard } from "./blackboard.ts";
 import { aggregateEpicDeltas } from "./taskDelta.ts";
 import { TERMINAL_STATUSES } from "./service.ts";
@@ -92,12 +92,24 @@ export interface RetroDigest {
   contractChanges: { taskId: string; change: string }[];
   constraints: { taskId: string; constraint: string }[];
   notes: { author_task: string; kind: string; body: string }[];
+  // Plan-review trace (006_plan_review.sql): how many adversarial review rounds the plan needed
+  // before fan-out, and the critique from every rejected round — the "what was wrong with the
+  // first cut of the decomposition" signal, which is prime retro material even when implementers
+  // posted no learnings of their own. `planApproved` reflects the final round's verdict.
+  reviewRounds: number;
+  reviewRejections: { round: number; findings: string }[];
+  planApproved: boolean;
+  // Execution shape: how the plan's tasks actually resolved (opened a PR, were skipped/blocked,
+  // etc.). Lets the retro reason over decomposition accuracy — e.g. a high skipped/blocked ratio
+  // hints the plan over-decomposed.
+  taskOutcomes: { total: number; byStatus: Record<string, number> };
   counts: { learnings: number; deltas: number; notes: number };
 }
 
 /** Gather a plan's reflection material: the `learning` blackboard entries (the headline), plus the
- * task-delta rollup (contract changes, discovered constraints, cross-slice file touches) and any
- * other non-learning blackboard notes for colour. Reads only — no writes. */
+ * task-delta rollup (contract changes, discovered constraints, cross-slice file touches), the
+ * plan-review trace (rounds + rejection findings), the task-outcome shape, and any other
+ * non-learning blackboard notes for colour. Reads only — no writes. */
 export async function gatherRetro(data: DataLayer, planKey: string): Promise<RetroDigest> {
   const plan = await plansTbl(data).get(planKey);
   const entries = await readBlackboard(data, planKey);
@@ -108,6 +120,22 @@ export async function gatherRetro(data: DataLayer, planKey: string): Promise<Ret
     .filter((e) => e.kind !== "learning")
     .map((e) => ({ author_task: e.author_task, kind: e.kind, body: e.body }));
   const deltas = await aggregateEpicDeltas(data, planKey);
+
+  // Plan-review trace, ordered by round. A rejected round is `approved === 0`; only rounds that
+  // carry findings are worth quoting (an empty rejection has nothing to teach).
+  const reviews = (await planReviews(data).find({ plan_key: planKey }))
+    .slice()
+    .sort((a, b) => a.round - b.round);
+  const reviewRejections = reviews
+    .filter((r) => r.approved === 0 && (r.findings ?? "").trim() !== "")
+    .map((r) => ({ round: r.round, findings: r.findings as string }));
+  const planApproved = reviews.length > 0 && reviews[reviews.length - 1].approved === 1;
+
+  // Task-outcome shape (counts by final status).
+  const tasks = await planTasks(data).find({ plan_key: planKey });
+  const byStatus: Record<string, number> = {};
+  for (const t of tasks) byStatus[t.status] = (byStatus[t.status] ?? 0) + 1;
+
   return {
     planKey,
     repo: plan?.repo ?? planKey.split("#")[0] ?? "",
@@ -118,6 +146,10 @@ export async function gatherRetro(data: DataLayer, planKey: string): Promise<Ret
     contractChanges: deltas.contractChanges,
     constraints: deltas.constraints,
     notes,
+    reviewRounds: reviews.length,
+    reviewRejections,
+    planApproved,
+    taskOutcomes: { total: tasks.length, byStatus },
     counts: {
       learnings: learnings.length,
       deltas: deltas.deltas.length,
@@ -139,8 +171,29 @@ export function renderRetroBrief(d: RetroDigest): string {
     `Target repo: **${d.repo}**${d.issueUrl ? ` · issue: ${d.issueUrl}` : ""}`,
     d.title ? `Epic: ${d.title}` : "",
     "",
-    `### Learnings agents posted while implementing (${d.learnings.length})`,
+    `### Plan review — ${d.reviewRounds} round(s), ${d.planApproved ? "approved" : "not approved"}`,
   ];
+  if (d.reviewRejections.length === 0) {
+    lines.push(
+      d.reviewRounds === 0
+        ? "_(no review rounds recorded)_"
+        : "_(approved with no recorded rejections)_",
+    );
+  } else {
+    lines.push(`The plan was revised after ${d.reviewRejections.length} rejected round(s):`);
+    for (const r of d.reviewRejections) lines.push(`- **round ${r.round}**: ${r.findings}`);
+  }
+  if (d.taskOutcomes.total > 0) {
+    const shape = Object.entries(d.taskOutcomes.byStatus)
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([s, n]) => `${s}: ${n}`)
+      .join(", ");
+    lines.push("", `### Task outcomes (${d.taskOutcomes.total} task(s))`, shape);
+  }
+  lines.push(
+    "",
+    `### Learnings agents posted while implementing (${d.learnings.length})`,
+  );
   if (d.learnings.length === 0) {
     lines.push("_(none — agents posted no `learning` entries for this epic)_");
   } else {
