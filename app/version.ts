@@ -81,9 +81,21 @@ function resolveGitDirs(): { gitDir: string; commonDir: string } | null {
   return { gitDir, commonDir };
 }
 
+/** The app's own `package.json` (read once, reused by name + version). */
+function appPackage(): Record<string, unknown> | null {
+  return readJson(join(REPO_ROOT, "package.json"));
+}
+
+/** The app's name from `package.json`, scope-stripped (e.g. "@foo/bar" → "bar"). */
+function appName(pkg: Record<string, unknown> | null): string {
+  const raw = typeof pkg?.name === "string" ? pkg.name.trim() : "";
+  if (!raw) return "nano-workforce";
+  const unscoped = raw.startsWith("@") ? raw.slice(raw.indexOf("/") + 1) : raw;
+  return unscoped || "nano-workforce";
+}
+
 /** The app's own version from its `package.json`. */
-function appVersion(): string | null {
-  const pkg = readJson(join(REPO_ROOT, "package.json"));
+function appVersion(pkg: Record<string, unknown> | null): string | null {
   return typeof pkg?.version === "string" ? pkg.version : null;
 }
 
@@ -165,18 +177,29 @@ export interface VersionInfo {
   uptimeSeconds: number;
 }
 
-/** Gather the running app's identity. Cheap and side-effect-free — safe to call per request. */
-export function buildVersionInfo(): VersionInfo {
+/**
+ * Everything except `uptimeSeconds` is fixed for the life of the process, so probe the working
+ * tree ONCE at module load rather than re-reading files (`.git`, package.jsons) on every request.
+ */
+const STATIC: Omit<VersionInfo, "uptimeSeconds"> = (() => {
   const proc = globalThis.process;
-  return {
-    name: "nano-workforce",
-    version: appVersion(),
+  const pkg = appPackage();
+  return Object.freeze({
+    name: appName(pkg),
+    version: appVersion(pkg),
     urbanVersion: urbanVersion(),
     gitSha: gitSha(),
     gitBranch: gitBranch(),
     runtime: runtime(),
     pid: typeof proc?.pid === "number" ? proc.pid : null,
     startedAt: STARTED_AT.toISOString(),
+  });
+})();
+
+/** Gather the running app's identity. Cheap and side-effect-free — safe to call per request. */
+export function buildVersionInfo(): VersionInfo {
+  return {
+    ...STATIC,
     uptimeSeconds: Math.round((Date.now() - STARTED_AT.getTime()) / 1000),
   };
 }
