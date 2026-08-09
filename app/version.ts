@@ -3,15 +3,16 @@
 // The app runs its TypeScript sources DIRECTLY from a checkout (`node --experimental-strip-types
 // main.ts`) with no build/bundle step, so "which code is running" can only be answered by
 // inspecting the working tree at runtime. This module gathers that identity — the app's package
-// version, the resolved `@nanobpm/urban` version, the git commit (read from `.git`, with an env
-// override for detached deploys), plus the Node/Deno runtime, pid and start time — so an operator
+// version, the resolved `@nanobpm/urban` version, the git commit (read from `.git`, handling both
+// an ordinary `.git` directory and the `gitdir:` file pointer used by worktrees/submodules, with
+// an env override for detached deploys), plus the Node/Deno runtime, pid and start time — so an operator
 // debugging a stuck instance can confirm the process is on the code they think it is.
 //
 // Every probe is best-effort: a missing file or unavailable `.git` yields `null` for that field
 // rather than throwing, so `/app/version` never fails just because one source is absent.
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve, isAbsolute } from "node:path";
 
 // Captured once, at module load — i.e. when the running process booted this code.
 const STARTED_AT = new Date();
@@ -36,6 +37,50 @@ function readJson(path: string): Record<string, unknown> | null {
   }
 }
 
+/**
+ * Read an env var across runtimes: Node exposes `process.env`; Deno may not populate it, so fall
+ * back to `Deno.env.get` (guarded — reading env can throw without `--allow-env`).
+ */
+function envVar(name: string): string | null {
+  const fromProcess = globalThis.process?.env?.[name];
+  if (typeof fromProcess === "string" && fromProcess.trim()) return fromProcess.trim();
+  const deno = (globalThis as { Deno?: { env?: { get?(k: string): string | undefined } } }).Deno;
+  try {
+    const fromDeno = deno?.env?.get?.(name);
+    if (typeof fromDeno === "string" && fromDeno.trim()) return fromDeno.trim();
+  } catch {
+    // Env access denied — treat as unset.
+  }
+  return null;
+}
+
+/**
+ * Locate the repo's git directories. `.git` is usually a directory, but in a `git worktree` (this
+ * app is often run from one) or a submodule it is a FILE containing `gitdir: <path>`, so a naive
+ * `${REPO_ROOT}/.git/HEAD` read returns null even on a live checkout. Resolve both the (possibly
+ * per-worktree) git dir that holds `HEAD` and the COMMON dir that holds loose refs / `packed-refs`.
+ */
+function resolveGitDirs(): { gitDir: string; commonDir: string } | null {
+  const dotGit = join(REPO_ROOT, ".git");
+  // Ordinary checkout: `.git` is a directory and `HEAD` sits directly inside.
+  if (readText(join(dotGit, "HEAD")) != null) {
+    return { gitDir: dotGit, commonDir: dotGit };
+  }
+  // Linked worktree / submodule: `.git` is a file pointing at the real git dir.
+  const pointer = readText(dotGit);
+  const match = pointer ? /^gitdir:\s*(.+?)\s*$/m.exec(pointer) : null;
+  if (!match) return null;
+  const target = match[1].trim();
+  const gitDir = isAbsolute(target) ? target : resolve(REPO_ROOT, target);
+  // A linked worktree keeps its own HEAD in `gitDir` but shares refs via the common dir, named by
+  // the `commondir` file (e.g. "../..").
+  const common = readText(join(gitDir, "commondir"));
+  const commonDir = common?.trim()
+    ? (isAbsolute(common.trim()) ? common.trim() : resolve(gitDir, common.trim()))
+    : gitDir;
+  return { gitDir, commonDir };
+}
+
 /** The app's own version from its `package.json`. */
 function appVersion(): string | null {
   const pkg = readJson(join(REPO_ROOT, "package.json"));
@@ -51,15 +96,17 @@ function urbanVersion(): string | null {
 /**
  * The git commit the working tree is on, read straight from `.git` so it reflects the ACTUAL
  * checked-out code — not a value baked at some earlier build. Resolves a symbolic `HEAD`
- * (`ref: refs/heads/…`) via the loose ref file, falling back to `packed-refs`. An explicit
- * `NANO_WORKFORCE_GIT_SHA` env var wins (for deploys that ship without a `.git` directory).
+ * (`ref: refs/heads/…`) via the loose ref file (checking both the per-worktree and common dirs),
+ * falling back to `packed-refs`. An explicit `NANO_WORKFORCE_GIT_SHA` env var wins (for deploys
+ * that ship without a `.git` directory).
  */
 function gitSha(): string | null {
-  const env = globalThis.process?.env?.NANO_WORKFORCE_GIT_SHA;
-  if (typeof env === "string" && env.trim()) return env.trim();
+  const env = envVar("NANO_WORKFORCE_GIT_SHA");
+  if (env) return env;
 
-  const gitDir = join(REPO_ROOT, ".git");
-  const head = readText(join(gitDir, "HEAD"));
+  const dirs = resolveGitDirs();
+  if (dirs == null) return null;
+  const head = readText(join(dirs.gitDir, "HEAD"));
   if (head == null) return null;
 
   const ref = head.trim();
@@ -68,11 +115,12 @@ function gitSha(): string | null {
     return ref || null;
   }
   const refPath = ref.slice(4).trim(); // e.g. "refs/heads/main"
-  const loose = readText(join(gitDir, refPath));
+  // A loose ref may live in the per-worktree dir or the common dir; check both.
+  const loose = readText(join(dirs.gitDir, refPath)) ?? readText(join(dirs.commonDir, refPath));
   if (loose != null && loose.trim()) return loose.trim();
 
-  // Packed refs fallback: lines of "<sha> <refname>".
-  const packed = readText(join(gitDir, "packed-refs"));
+  // Packed refs fallback (always in the common dir): lines of "<sha> <refname>".
+  const packed = readText(join(dirs.commonDir, "packed-refs"));
   if (packed != null) {
     for (const line of packed.split("\n")) {
       const trimmed = line.trim();
@@ -84,9 +132,11 @@ function gitSha(): string | null {
   return null;
 }
 
-/** The current branch name from `.git/HEAD`, or `null` when detached / unavailable. */
+/** The current branch name from `HEAD`, or `null` when detached / unavailable. */
 function gitBranch(): string | null {
-  const head = readText(join(REPO_ROOT, ".git", "HEAD"));
+  const dirs = resolveGitDirs();
+  if (dirs == null) return null;
+  const head = readText(join(dirs.gitDir, "HEAD"));
   if (head == null) return null;
   const ref = head.trim();
   if (!ref.startsWith("ref:")) return null;
