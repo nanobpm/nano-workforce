@@ -229,6 +229,20 @@
               ]
             },
             {
+              "title": "Plan reviews",
+              "source": "app",
+              "table": "plan_reviews",
+              "parentField": "plan_key",
+              "childField": "plan_key",
+              "orderBy": { "field": "round", "dir": "asc" },
+              "columns": [
+                { "field": "round", "header": "Round" },
+                { "field": "approved", "header": "Approved? (1/0)" },
+                { "field": "findings", "header": "Reviewer findings" },
+                { "field": "created_at", "header": "Recorded" }
+              ]
+            },
+            {
               "title": "Escalations",
               "source": "app",
               "table": "plan_escalations",
