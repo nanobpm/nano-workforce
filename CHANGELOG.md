@@ -1,3 +1,10 @@
+# [0.32.0](https://github.com/nanobpm/nano-workforce/compare/v0.31.0...v0.32.0) (2026-08-09)
+
+
+### Features
+
+* **poller:** surface technical incidents on the PR row ([#95](https://github.com/nanobpm/nano-workforce/issues/95)) ([596153c](https://github.com/nanobpm/nano-workforce/commit/596153c0f58a0d511f4a7bac66896dab98a6a5c8)), closes [#94](https://github.com/nanobpm/nano-workforce/issues/94)
+
 # [0.31.0](https://github.com/nanobpm/nano-workforce/compare/v0.30.0...v0.31.0) (2026-08-09)
 
 
