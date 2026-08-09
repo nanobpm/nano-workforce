@@ -1,3 +1,10 @@
+## [0.32.2](https://github.com/nanobpm/nano-workforce/compare/v0.32.1...v0.32.2) (2026-08-09)
+
+
+### Bug Fixes
+
+* heal missing pull_requests FK parent before child writes ([#93](https://github.com/nanobpm/nano-workforce/issues/93)) ([896c1f7](https://github.com/nanobpm/nano-workforce/commit/896c1f7a71098463c581816ffc2821af196f779e)), closes [owner/repo#N](https://github.com/owner/repo/issues/N)
+
 ## [0.32.1](https://github.com/nanobpm/nano-workforce/compare/v0.32.0...v0.32.1) (2026-08-09)
 
 
