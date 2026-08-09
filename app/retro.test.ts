@@ -243,12 +243,16 @@ Deno.test("renderRetroBrief: renders learnings + constraints; states 'none' with
   assertStringIncludes(brief, "Task outcomes");
 });
 
-Deno.test("isDigestEmpty: true only when there are no learnings, deltas, or notes", () => {
+Deno.test("isDigestEmpty: empty only with no learnings/deltas/notes AND no review rejections", () => {
   const base = { planKey: PLAN, repo: "", issueUrl: "", title: null, learnings: [], touchedFiles: [], contractChanges: [], constraints: [], notes: [], reviewRounds: 0, reviewRejections: [], planApproved: false, taskOutcomes: { total: 0, byStatus: {} } };
   assert(isDigestEmpty({ ...base, counts: { learnings: 0, deltas: 0, notes: 0 } }));
   assert(!isDigestEmpty({ ...base, counts: { learnings: 1, deltas: 0, notes: 0 } }));
   assert(!isDigestEmpty({ ...base, counts: { learnings: 0, deltas: 2, notes: 0 } }));
   assert(!isDigestEmpty({ ...base, counts: { learnings: 0, deltas: 0, notes: 1 } }));
+  // A rejected review round is reflection material even with no learnings/deltas/notes.
+  assert(!isDigestEmpty({ ...base, reviewRounds: 2, reviewRejections: [{ round: 0, findings: "bad seq" }], counts: { learnings: 0, deltas: 0, notes: 0 } }));
+  // ...but task-outcome shape alone (a cleanly-approved plan) is not.
+  assert(isDigestEmpty({ ...base, reviewRounds: 1, planApproved: true, taskOutcomes: { total: 3, byStatus: { opened: 3 } }, counts: { learnings: 0, deltas: 0, notes: 0 } }));
 });
 
 Deno.test("recordRetro: inserts then updates the same plan_key row in place", async () => {
@@ -364,6 +368,23 @@ Deno.test("maybeStartRetro: complete but empty → records a skipped retro, does
   assertEquals(started.length, 0);
   assert(stores["plans"][0].retro_started_at, "stamped so we don't re-check forever");
   assertEquals(stores["plan_retros"][0].status, "skipped");
+});
+
+Deno.test("maybeStartRetro: a rejected review round alone is enough to fire the retro", async () => {
+  const { data, stores } = memData();
+  seedPlan(stores);
+  seedTask(stores, { id: "t1", status: "opened", pr_key: "acme/widgets#10" });
+  seedPr(stores, "acme/widgets#10", "merged");
+  // No learnings/deltas/notes — only the plan-review trace carries a rejection.
+  seedReview(stores, 0, 0, "task ordering is wrong");
+  seedReview(stores, 1, 1, "");
+  const { engine, started } = fakeEngine();
+
+  const r = await maybeStartRetro(data, engine, "acme/widgets#10");
+  assertEquals(r.started, true);
+  assertEquals(r.planKey, PLAN);
+  assertEquals(started.length, 1);
+  assert(stores["plans"][0].retro_started_at, "retro_started_at must be stamped");
 });
 
 Deno.test("maybeStartRetro: a PR not part of any plan is a no-op", async () => {

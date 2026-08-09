@@ -217,9 +217,14 @@ export function renderRetroBrief(d: RetroDigest): string {
   return lines.join("\n");
 }
 
-/** True when a digest carries nothing worth an agent run — no learnings, no deltas, no notes. */
+/** True when a digest carries nothing worth an agent run. A plan is worth retrospecting when
+ * implementers shared material (learnings/deltas/notes) OR the plan itself needed revision — a
+ * rejected review round's findings are reflection material in their own right, even when no
+ * learning was posted. (Task-outcome shape alone is NOT: a cleanly-approved plan whose tasks all
+ * ran has nothing to teach.) */
 export function isDigestEmpty(d: RetroDigest): boolean {
-  return d.counts.learnings === 0 && d.counts.deltas === 0 && d.counts.notes === 0;
+  return d.counts.learnings === 0 && d.counts.deltas === 0 && d.counts.notes === 0 &&
+    d.reviewRejections.length === 0;
 }
 
 /** The persisted retro shape (written by pr.retro-record). */
