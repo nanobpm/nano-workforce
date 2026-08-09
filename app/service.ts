@@ -388,11 +388,21 @@ export interface CancelSelector {
   prKey?: string;
 }
 
-/** Cancel a PR's running convergence instance and mark it abandoned. Terminating the engine
- * instance emits no completion event (no worker runs), so the app-tier flips the PR's status
- * here — the same place ADR 0040 puts app-owned rest state. Accepts either selector; a PR
- * already in a terminal state is left untouched so a stale cancel can't overwrite a `converged`
- * outcome with `abandoned`. */
+/** Cancel a run and mark its read-model row abandoned. Two paths converge here:
+ *
+ *  - **Tracked PR** (a `pull_requests` row): the engine instance is terminated (which emits no
+ *    completion event — no worker runs) and this function flips the PR row to `abandoned`
+ *    *synchronously*. The immediacy matters: the agent-abort capability (`app/abandon.ts`) derives
+ *    `abandoned` straight off `pull_requests.status`, so a deferred write would widen the
+ *    check-then-push window a side-effecting agent races against.
+ *  - **Any other instance** (e.g. the cancel button on an Epic/plan row, which POSTs the row's
+ *    `process_key`): the instance is terminated here, and the declarative `instanceTracking`
+ *    reconciler (`nano.app.json`) flips the owning row (`plans`) to abandoned on its next poll.
+ *    That same reconciler is also the safety net for terminations that never reach this function
+ *    at all — an operator terminating the instance directly, or a crash.
+ *
+ * Accepts either selector; a PR already in a terminal state is left untouched so a stale cancel
+ * can't overwrite a `converged` outcome with `abandoned`. */
 export async function cancelRun(data: DataLayer, engine: EngineClient, selector: CancelSelector) {
   const { processInstanceKey, prKey } = selector;
   const table = prs(data);
@@ -422,6 +432,14 @@ export async function cancelRun(data: DataLayer, engine: EngineClient, selector:
       open_escalation_question: null,
     });
     return { ok: true, prKey: pr.pr_key };
+  }
+  // No tracked PR for this key. If we were handed a raw instance key (e.g. the cancel button
+  // on an Epic/plan row, which POSTs the row's `process_key`), the instance has still been
+  // terminated above — the declarative `instanceTracking` reconciler (nano.app.json) flips the
+  // owning row (`plans`) to abandoned on its next poll. Report success so the UI does not
+  // surface a misleading 404 for a cancel that actually took effect.
+  if (instanceKey) {
+    return { ok: true, processInstanceKey: instanceKey };
   }
   return { ok: false, kind: "not_found", reason: "no PR for that selector" };
 }
