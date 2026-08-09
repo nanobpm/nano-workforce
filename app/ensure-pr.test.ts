@@ -42,12 +42,14 @@ function memData(opts: { throwOnInsert?: boolean; seedOnThrow?: boolean } = {}):
 }
 
 Deno.test("ensurePr is a no-op when the parent already exists", async () => {
-  const { data, rows } = memData();
+  const mem = memData();
+  const { data, rows } = mem;
   rows.set("o/r#1", { pr_key: "o/r#1", status: "converging" });
   const before = { ...rows.get("o/r#1") };
   await ensurePr(data, { prKey: "o/r#1", repo: "o/r", number: 1 });
   assertEquals(rows.size, 1, "no new row is written");
   assertEquals(rows.get("o/r#1"), before, "the existing row is untouched");
+  assertEquals(mem.insertCalls, 0, "insert is never attempted — the no-write guarantee holds");
 });
 
 Deno.test("ensurePr reconstructs a minimal converging row when the parent is absent", async () => {
@@ -71,6 +73,23 @@ Deno.test("ensurePr defaults current_round to 1 (rounds are 1-based) when none i
     1,
     "an unknown round heals to 1, not 0, matching submitPr's 1-based invariant",
   );
+});
+
+Deno.test("ensurePr reuses a supplied abandon token instead of minting a new one", async () => {
+  const { data, rows } = memData();
+  await ensurePr(data, { prKey: "o/r#7", repo: "o/r", number: 7, abandonToken: "TOK-en_123" });
+  assertEquals(
+    rows.get("o/r#7")!.abandon_token,
+    "TOK-en_123",
+    "the running agent's existing token is preserved so its abort check keeps resolving",
+  );
+});
+
+Deno.test("ensurePr mints a token when none is supplied", async () => {
+  const { data, rows } = memData();
+  await ensurePr(data, { prKey: "o/r#8", repo: "o/r", number: 8 });
+  const tok = rows.get("o/r#8")!.abandon_token;
+  assert(typeof tok === "string" && (tok as string).length > 0, "a fresh token is minted as a fallback");
 });
 
 Deno.test("ensurePr prefers an explicit url over the canonical one", async () => {

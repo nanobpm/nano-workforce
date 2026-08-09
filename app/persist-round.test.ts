@@ -109,7 +109,14 @@ Deno.test("persist-round defaults a missing status to 'addressed'", async () => 
 // never left unguarded.
 Deno.test("persist-round heals from the prKey when repo/prNumber are absent", async () => {
   const { app, inserts } = fakeApp();
-  const job = { variables: { prKey: "o/r#12", round: 2, status: "addressed" } };
+  const job = {
+    variables: {
+      prKey: "o/r#12",
+      round: 2,
+      status: "addressed",
+      abandonUrl: "https://host/hooks/abandon?token=TOK-en_123",
+    },
+  };
   // deno-lint-ignore no-explicit-any
   await handler(job as any, app as any);
   assertEquals(inserts.pull_requests?.length, 1, "the parent is reconstructed from the prKey");
@@ -118,4 +125,9 @@ Deno.test("persist-round heals from the prKey when repo/prNumber are absent", as
   assertEquals(healed.repo, "o/r");
   assertEquals(healed.number, 12);
   assertEquals(healed.url, "https://github.com/o/r/pull/12", "URL is derived from the parsed prKey");
+  assertEquals(
+    healed.abandon_token,
+    "TOK-en_123",
+    "the running agent's abandon token is preserved from abandonUrl, not re-minted",
+  );
 });

@@ -4,6 +4,7 @@
 // `escalationId` for the UI.
 import type { AppJobHandler } from "@nanobpm/urban";
 import { ensurePr, parsePr } from "../../app/service.ts";
+import { abandonTokenFromUrl } from "../../app/abandon.ts";
 
 // Extends Record so the declared fields are typed while the job may still carry
 // other process variables (e.g. io.nanobpm.agentResult, read by transcriptOf).
@@ -18,6 +19,9 @@ interface In extends Record<string, unknown> {
   repo?: string;
   prNumber?: number;
   prUrl?: string;
+  // The per-PR abandon capability URL the agent was handed; its token is preserved on a heal so
+  // the agent's cooperative-abort check keeps resolving (see ensurePr).
+  abandonUrl?: string;
   // False on the "review stalled" arm: `persist-round` already recorded this `round` as
   // `addressed`, so this escalation must not insert a second `rounds` row for the same
   // `pr_key`/`round_no` (which would record one round as both addressed and blocked). Absent
@@ -58,7 +62,7 @@ function fabricateQuestion(rawStatus: string | undefined, hasTranscript: boolean
 }
 
 const handler: AppJobHandler<In> = async (job, app) => {
-  const { prKey, round, summary, repo, prNumber, prUrl } = job.variables;
+  const { prKey, round, summary, repo, prNumber, prUrl, abandonUrl } = job.variables;
   // `status` drives the escalation kind (control flow); a blank/absent status is an
   // unclassified escalation -> a question needing input. `question` is denormalised
   // onto pull_requests below and bound by the UI answer form, so it must be a
@@ -86,7 +90,14 @@ const handler: AppJobHandler<In> = async (job, app) => {
   const healRepo = repo ?? parsed?.repo;
   const healNumber = typeof prNumber === "number" ? prNumber : parsed?.number;
   if (healRepo && typeof healNumber === "number") {
-    await ensurePr(app.data, { prKey, repo: healRepo, number: healNumber, url: prUrl, round });
+    await ensurePr(app.data, {
+      prKey,
+      repo: healRepo,
+      number: healNumber,
+      url: prUrl,
+      round,
+      abandonToken: abandonTokenFromUrl(abandonUrl),
+    });
   }
 
   // Skip the round insert when the caller already recorded this round (the "review stalled"

@@ -162,7 +162,15 @@ Deno.test("unclassified status without a question names the status in the fabric
 // `owner/repo#N` prKey, so the escalation's FK parent is never left unguarded.
 Deno.test("persist-escalation heals from the prKey when repo/prNumber are absent", async () => {
   const { app, inserts } = fakeApp();
-  const job = { variables: { prKey: "o/r#12", round: 2, status: "needs_input", question: "decide" } };
+  const job = {
+    variables: {
+      prKey: "o/r#12",
+      round: 2,
+      status: "needs_input",
+      question: "decide",
+      abandonUrl: "https://host/hooks/abandon?token=TOK-en_123",
+    },
+  };
   // deno-lint-ignore no-explicit-any
   await handler(job as any, app as any);
   assertEquals(inserts.pull_requests?.length, 1, "the parent is reconstructed from the prKey");
@@ -171,4 +179,9 @@ Deno.test("persist-escalation heals from the prKey when repo/prNumber are absent
   assertEquals(healed.repo, "o/r");
   assertEquals(healed.number, 12);
   assertEquals(healed.url, "https://github.com/o/r/pull/12", "URL is derived from the parsed prKey");
+  assertEquals(
+    healed.abandon_token,
+    "TOK-en_123",
+    "the running agent's abandon token is preserved from abandonUrl, not re-minted",
+  );
 });

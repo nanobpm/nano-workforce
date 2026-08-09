@@ -183,7 +183,7 @@ export function canonicalPrUrl(repo: string, number: number): string {
  */
 export async function ensurePr(
   data: DataLayer,
-  pr: { prKey: string; repo: string; number: number; url?: string; round?: number },
+  pr: { prKey: string; repo: string; number: number; url?: string; round?: number; abandonToken?: string },
 ): Promise<void> {
   const table = prs(data);
   if (await table.get(pr.prKey)) return;
@@ -200,7 +200,10 @@ export async function ensurePr(
       url: pr.url ?? canonicalPrUrl(pr.repo, pr.number),
       status: "converging",
       current_round: pr.round ?? 1,
-      abandon_token: mintAbandonToken(),
+      // Reuse the token the running agent was already handed (recovered from the instance's
+      // `abandonUrl` var) so its abort check keeps resolving; only mint a fresh one when the caller
+      // has no token to preserve (e.g. an old instance predating the `abandonUrl` variable).
+      abandon_token: pr.abandonToken ?? mintAbandonToken(),
       created_at: ts,
       updated_at: ts,
     });

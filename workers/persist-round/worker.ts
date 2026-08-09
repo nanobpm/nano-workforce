@@ -6,6 +6,7 @@
 // `Table<T>` surface — `rounds.insert(...)` / `pull_requests.update(...)`, not hand-written SQL.
 import type { AppJobHandler } from "@nanobpm/urban";
 import { ensurePr, parsePr } from "../../app/service.ts";
+import { abandonTokenFromUrl } from "../../app/abandon.ts";
 
 // Extends Record so the declared fields are typed while the job may still carry
 // other process variables (e.g. io.nanobpm.agentResult, read by transcriptOf).
@@ -19,6 +20,9 @@ interface In extends Record<string, unknown> {
   repo?: string;
   prNumber?: number;
   prUrl?: string;
+  // The per-PR abandon capability URL the review agent was handed; its token is preserved on a
+  // heal so the agent's cooperative-abort check keeps resolving (see ensurePr).
+  abandonUrl?: string;
 }
 
 // The harness records the agent's full (byte-capped) stdout on the result envelope; keep it
@@ -33,7 +37,7 @@ const handler: AppJobHandler<In> = async (job, app) => {
   // This worker is the "addressed"/"waiting" path, so `status` resolves to one of those
   // domain values. `summary` is left undefined when absent: the write boundary omits it so the
   // nullable `rounds.summary` column stays NULL rather than being coerced to "".
-  const { prKey, round, status = "addressed", summary, repo, prNumber, prUrl } = job.variables;
+  const { prKey, round, status = "addressed", summary, repo, prNumber, prUrl, abandonUrl } = job.variables;
   const now = new Date().toISOString();
 
   // Heal a missing FK parent (engine/app.db desync) before the child `rounds` insert so this
@@ -45,7 +49,14 @@ const handler: AppJobHandler<In> = async (job, app) => {
   const healRepo = repo ?? parsed?.repo;
   const healNumber = typeof prNumber === "number" ? prNumber : parsed?.number;
   if (healRepo && typeof healNumber === "number") {
-    await ensurePr(app.data, { prKey, repo: healRepo, number: healNumber, url: prUrl, round });
+    await ensurePr(app.data, {
+      prKey,
+      repo: healRepo,
+      number: healNumber,
+      url: prUrl,
+      round,
+      abandonToken: abandonTokenFromUrl(abandonUrl),
+    });
   }
 
   await app.data.table("rounds", "id").insert({

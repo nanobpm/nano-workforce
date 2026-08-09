@@ -11,6 +11,7 @@
 import type { AppJobHandler } from "@nanobpm/urban";
 import { enqueueViaComment, mergePr } from "../../app/github.ts";
 import { MERGE_ADMIN, MERGE_METHOD, ensurePr } from "../../app/service.ts";
+import { abandonTokenFromUrl } from "../../app/abandon.ts";
 import { loadMergeProtocol } from "../../app/mergeProtocol.ts";
 import { checkBaseTarget } from "../../app/baseGuard.ts";
 
@@ -18,6 +19,12 @@ interface In extends Record<string, unknown> {
   prKey: string;
   repo: string;
   prNumber: number;
+  // Carried by the merge-loop instance (startMerge sets it to the converged round); passed to
+  // the heal so a reconstructed row reflects the real round, not a 1-based default.
+  round?: number;
+  // The per-PR abandon capability URL the agent was handed; its token is preserved on a heal so
+  // the agent's cooperative-abort check keeps resolving (see ensurePr).
+  abandonUrl?: string;
 }
 
 interface Out extends Record<string, unknown> {
@@ -27,14 +34,22 @@ interface Out extends Record<string, unknown> {
 }
 
 const handler: AppJobHandler<In, Out> = async (job, app) => {
-  const { prKey, repo, prNumber } = job.variables;
+  const { prKey, repo, prNumber, round, abandonUrl } = job.variables;
   const token = process.env.GITHUB_TOKEN ?? "";
   const now = new Date().toISOString();
 
   // Heal a missing FK parent (engine/app.db desync) before any child `merges` insert below so a
   // land attempt never dies with an opaque `FOREIGN KEY constraint failed` incident. The merge-loop
-  // instance carries repo+prNumber but not prUrl; ensurePr derives the canonical URL from them.
-  await ensurePr(app.data, { prKey, repo, number: prNumber });
+  // instance carries repo+prNumber (and the converged round) but not prUrl; ensurePr derives the
+  // canonical URL from them, keeps the healed round faithful, and preserves the agent's abandon
+  // token so its cooperative-abort check keeps resolving.
+  await ensurePr(app.data, {
+    prKey,
+    repo,
+    number: prNumber,
+    round,
+    abandonToken: abandonTokenFromUrl(abandonUrl),
+  });
 
   // Dead-end-base guard (#60): never land a PR into a base branch that has itself already merged
   // to the default branch — the merge would land into a dead branch and never reach `main`.
