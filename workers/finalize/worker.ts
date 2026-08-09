@@ -2,7 +2,7 @@
 // merge stage (start the `merge-loop` process and park the PR in `waiting_deps`) when auto-merge
 // is on, or (b) close the PR out as `converged` (review-only mode).
 import type { AppJobHandler } from "@nanobpm/urban";
-import { AUTO_MERGE, startMerge } from "../../app/service.ts";
+import { AUTO_MERGE, ensurePr, startMerge } from "../../app/service.ts";
 import { maybeStartRetro } from "../../app/retro.ts";
 
 // Extends Record so the declared fields are typed while the job may still carry
@@ -28,6 +28,9 @@ const handler: AppJobHandler<In> = async (job, app) => {
   // rather than being coerced to "".
   const { prKey, repo, prNumber, prUrl, round, summary } = job.variables;
   const now = new Date().toISOString();
+
+  // Heal a missing FK parent (engine/app.db desync) before the child `rounds` insert.
+  await ensurePr(app.data, { prKey, repo, number: prNumber, url: prUrl, round });
 
   await app.data.table("rounds", "id").insert({
     pr_key: prKey,

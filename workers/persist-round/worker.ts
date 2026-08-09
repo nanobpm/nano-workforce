@@ -5,6 +5,7 @@
 // Data access goes through the injected app datasource gateway (`app.data.table<T>`), the RAD
 // `Table<T>` surface — `rounds.insert(...)` / `pull_requests.update(...)`, not hand-written SQL.
 import type { AppJobHandler } from "@nanobpm/urban";
+import { ensurePr } from "../../app/service.ts";
 
 // Extends Record so the declared fields are typed while the job may still carry
 // other process variables (e.g. io.nanobpm.agentResult, read by transcriptOf).
@@ -13,6 +14,11 @@ interface In extends Record<string, unknown> {
   round: number;
   status?: string;
   summary?: string;
+  // Carried by the convergence-loop instance (set at createInstance) so a missing
+  // `pull_requests` parent can be reconstructed before the FK-child `rounds` insert.
+  repo?: string;
+  prNumber?: number;
+  prUrl?: string;
 }
 
 // The harness records the agent's full (byte-capped) stdout on the result envelope; keep it
@@ -27,8 +33,14 @@ const handler: AppJobHandler<In> = async (job, app) => {
   // This worker is the "addressed"/"waiting" path, so `status` resolves to one of those
   // domain values. `summary` is left undefined when absent: the write boundary omits it so the
   // nullable `rounds.summary` column stays NULL rather than being coerced to "".
-  const { prKey, round, status = "addressed", summary } = job.variables;
+  const { prKey, round, status = "addressed", summary, repo, prNumber, prUrl } = job.variables;
   const now = new Date().toISOString();
+
+  // Heal a missing FK parent (engine/app.db desync) before the child `rounds` insert so this
+  // never dies with an opaque `FOREIGN KEY constraint failed` incident.
+  if (repo && typeof prNumber === "number") {
+    await ensurePr(app.data, { prKey, repo, number: prNumber, url: prUrl, round });
+  }
 
   await app.data.table("rounds", "id").insert({
     pr_key: prKey,

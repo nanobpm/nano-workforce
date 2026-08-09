@@ -10,7 +10,7 @@
 // shapes the escalation payload on a block.
 import type { AppJobHandler } from "@nanobpm/urban";
 import { enqueueViaComment, mergePr } from "../../app/github.ts";
-import { MERGE_ADMIN, MERGE_METHOD } from "../../app/service.ts";
+import { MERGE_ADMIN, MERGE_METHOD, ensurePr } from "../../app/service.ts";
 import { loadMergeProtocol } from "../../app/mergeProtocol.ts";
 import { checkBaseTarget } from "../../app/baseGuard.ts";
 
@@ -30,6 +30,11 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
   const { prKey, repo, prNumber } = job.variables;
   const token = process.env.GITHUB_TOKEN ?? "";
   const now = new Date().toISOString();
+
+  // Heal a missing FK parent (engine/app.db desync) before any child `merges` insert below so a
+  // land attempt never dies with an opaque `FOREIGN KEY constraint failed` incident. The merge-loop
+  // instance carries repo+prNumber but not prUrl; ensurePr derives the canonical URL from them.
+  await ensurePr(app.data, { prKey, repo, number: prNumber });
 
   // Dead-end-base guard (#60): never land a PR into a base branch that has itself already merged
   // to the default branch — the merge would land into a dead branch and never reach `main`.

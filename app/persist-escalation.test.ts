@@ -12,13 +12,22 @@ import handler from "../workers/persist-escalation/worker.ts";
 function fakeApp() {
   const inserts: Record<string, unknown[]> = { rounds: [], escalations: [] };
   const updates: Record<string, unknown[]> = { pull_requests: [] };
+  const rows: Record<string, Map<string, unknown>> = {};
   const app = {
     data: {
       table(name: string, _key: string) {
+        const store = (rows[name] ??= new Map());
         return {
+          // deno-lint-ignore require-await
+          async get(key: string) {
+            return store.get(key);
+          },
           // deno-lint-ignore require-await
           async insert(row: unknown) {
             (inserts[name] ??= []).push(row);
+            const pk = name === "escalations" ? "id" : name === "rounds" ? "id" : "pr_key";
+            // deno-lint-ignore no-explicit-any
+            store.set((row as any)[pk], row);
             return name === "escalations" ? 42 : 1;
           },
           // deno-lint-ignore require-await
@@ -29,7 +38,7 @@ function fakeApp() {
       },
     },
   };
-  return { app, inserts, updates };
+  return { app, inserts, updates, rows };
 }
 
 Deno.test("stalled arm (recordRound=false) does not insert a duplicate rounds row", async () => {
@@ -55,8 +64,32 @@ Deno.test("escalation arm without the flag still records the round", async () =>
   assertEquals((inserts.rounds[0] as any).round_no, 3);
 });
 
-// A blank question would have to be trimmed away, so a padded-but-non-blank question is stored
-// trimmed (matching the sibling `persist-task-escalation`) — no whitespace drift into the UI/DB.
+// When the convergence-loop passes repo/prNumber and the FK parent is missing (engine/app.db
+// desync), persist-escalation reconstructs the `pull_requests` row before the rounds/escalations
+// inserts so opening an escalation never dies with an opaque FOREIGN KEY constraint failure.
+Deno.test("persist-escalation heals a missing pull_requests parent before recording", async () => {
+  const { app, inserts, rows } = fakeApp();
+  const job = {
+    variables: {
+      prKey: "o/r#8",
+      round: 4,
+      status: "blocked",
+      question: "max rounds",
+      repo: "o/r",
+      prNumber: 8,
+    },
+  };
+  // deno-lint-ignore no-explicit-any
+  await handler(job as any, app as any);
+  assertEquals(inserts.pull_requests?.length, 1, "the missing parent is reconstructed");
+  // deno-lint-ignore no-explicit-any
+  const parent = rows.pull_requests!.get("o/r#8") as any;
+  assertEquals(parent.status, "converging");
+  assertEquals(inserts.rounds.length, 1, "the round is still recorded");
+  assertEquals(inserts.escalations.length, 1, "the escalation is still opened");
+});
+
+
 Deno.test("a padded question is persisted trimmed (no whitespace drift)", async () => {
   const { app, inserts, updates } = fakeApp();
   const job = { variables: { prKey: "o/r#1", round: 4, status: "needs_input", question: "  needs a decision  " } };

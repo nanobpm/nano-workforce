@@ -161,6 +161,58 @@ export interface ParsedPr {
   prKey: string;
 }
 
+/** Canonical GitHub PR URL for a repo + number. Matches the `url` `parsePr` derives, so a
+ * reconstructed row is indistinguishable from one registered at submit time. */
+export function canonicalPrUrl(repo: string, number: number): string {
+  return `https://github.com/${repo}/pull/${number}`;
+}
+
+/**
+ * Guarantee the `pull_requests` parent row exists before a FK-child row (`rounds`, `escalations`,
+ * `merges`) is written. Idempotent and race-safe.
+ *
+ * The durable engine and the app's `app.db` are two INDEPENDENT stores. If they ever desync — the
+ * DB is rebuilt, restored from a stale copy, or simply lags a live process instance while running
+ * from a local checkout — a persist/finalize/merge job would otherwise insert a child row whose
+ * FK parent is absent and die with an opaque `FOREIGN KEY constraint failed` incident that a human
+ * has to hand-resolve (observed on convergence-loop instance 94). Every such job carries the PR's
+ * `repo`/`prNumber` as process variables, so the parent can be reconstructed deterministically:
+ * we heal the missing row (a minimal `converging` aggregate) and let the loop continue instead of
+ * parking a dead-end incident. When the row already exists this is a no-op, so the healthy path is
+ * unchanged.
+ */
+export async function ensurePr(
+  data: DataLayer,
+  pr: { prKey: string; repo: string; number: number; url?: string; round?: number },
+): Promise<void> {
+  const table = prs(data);
+  if (await table.get(pr.prKey)) return;
+  const ts = now();
+  console.warn(
+    `[ensurePr] pull_requests row for ${pr.prKey} was missing — reconstructing it so the FK-child ` +
+      `write can proceed (engine/app.db desync heal)`,
+  );
+  try {
+    await table.insert({
+      pr_key: pr.prKey,
+      repo: pr.repo,
+      number: pr.number,
+      url: pr.url ?? canonicalPrUrl(pr.repo, pr.number),
+      status: "converging",
+      current_round: pr.round ?? 0,
+      abandon_token: mintAbandonToken(),
+      created_at: ts,
+      updated_at: ts,
+    });
+  } catch (err) {
+    // Lost a race with a concurrent writer (submitPr or another job created the row first): the
+    // parent now exists, which is exactly the goal, so swallow. Only a still-absent row is a real
+    // failure worth surfacing.
+    if (await table.get(pr.prKey)) return;
+    throw err;
+  }
+}
+
 /** Parse "owner/repo#123" or a canonical PR URL into its parts. */
 export function parsePr(input: string): ParsedPr | null {
   const s = input.trim();
