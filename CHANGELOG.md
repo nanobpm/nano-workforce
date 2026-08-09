@@ -1,3 +1,10 @@
+# [0.34.0](https://github.com/nanobpm/nano-workforce/compare/v0.33.1...v0.34.0) (2026-08-09)
+
+
+### Features
+
+* adopt @nanobpm/urban 0.31.0 (activate processExplorer status links) ([#101](https://github.com/nanobpm/nano-workforce/issues/101)) ([f2313ec](https://github.com/nanobpm/nano-workforce/commit/f2313ecd654b24860ae8f3f21eea791b4de290fb)), closes [#99](https://github.com/nanobpm/nano-workforce/issues/99) [#145](https://github.com/nanobpm/nano-workforce/issues/145) [#100](https://github.com/nanobpm/nano-workforce/issues/100)
+
 ## [0.33.1](https://github.com/nanobpm/nano-workforce/compare/v0.33.0...v0.33.1) (2026-08-09)
 
 
