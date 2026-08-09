@@ -23,8 +23,20 @@
       "type": "text",
       "id": "subtitle",
       "props": {
-        "text": "Read-only observability over each plan's review trace, wave state, merge-exclusion graph, coordination notes, and trial-merge gate results.",
+        "text": "Hand an issue to the fleet to plan and implement it, then track each plan's review trace, wave state, merge-exclusion graph, coordination notes, and trial-merge gate results.",
         "variant": "sub"
+      }
+    },
+    {
+      "type": "actionForm",
+      "id": "plan-submit",
+      "props": {
+        "title": "Hand an issue to the fleet",
+        "submitLabel": "Plan & implement",
+        "action": { "kind": "startProcess", "process": "plan-fanout" },
+        "fields": [
+          { "key": "issue", "label": "owner/repo#123 or a GitHub issue URL", "type": "text" }
+        ]
       }
     },
     {
