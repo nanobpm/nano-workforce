@@ -15,7 +15,7 @@
 // app/plan.ts, app/blackboard.ts, and app/taskDelta.ts.
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { planTasks } from "./plan.ts";
-import { readBlackboard } from "./blackboard.ts";
+import { isUniqueViolation, readBlackboard } from "./blackboard.ts";
 import { aggregateEpicDeltas } from "./taskDelta.ts";
 import { TERMINAL_STATUSES } from "./service.ts";
 
@@ -186,8 +186,10 @@ async function claimRetroStart(data: DataLayer, planKey: string): Promise<boolea
     await retroStartsTbl(data).insert({ plan_key: planKey, started_at: now() });
     return true;
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    if (/(unique|constraint|duplicate|primary key)/i.test(msg)) return false;
+    // Only a UNIQUE/PK collision means "another starter already elected itself" — a benign
+    // duplicate the fire-once guard exists to detect. Any other constraint (e.g. a FOREIGN KEY
+    // failure from a missing plan row) is real corruption and must propagate, not be swallowed.
+    if (isUniqueViolation(err)) return false;
     throw err;
   }
 }
@@ -214,8 +216,11 @@ export async function recordRetro(
   try {
     await retrosTbl(data).insert({ plan_key: planKey, created_at: ts, ...fields });
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    if (!/(unique|constraint|duplicate|primary key)/i.test(msg)) throw err;
+    // Fall back to update only on a verified UNIQUE/PK violation (the get-then-insert race, or a
+    // job retry). Restrict to unique/duplicate/primary-key: a FOREIGN KEY (or other) constraint
+    // failure would otherwise be swallowed here, making the write look successful while doing
+    // nothing — so rethrow anything that isn't a duplicate-row collision.
+    if (!isUniqueViolation(err)) throw err;
     await retrosTbl(data).update(planKey, fields);
   }
 }

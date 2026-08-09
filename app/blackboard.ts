@@ -307,11 +307,15 @@ export async function appendEntry(
   }
 }
 
-/** True when an error is a SQLite UNIQUE-constraint violation (however the driver surfaces it). */
-function isUniqueViolation(err: unknown): boolean {
+/** True only for a UNIQUE / PRIMARY-KEY / duplicate violation — never a foreign-key or other
+ * constraint failure. We match the *specific* violation (extended SQLite codes, or the specific
+ * words) rather than the bare word "constraint", so a `FOREIGN KEY constraint failed` (real data
+ * corruption, not a benign duplicate) is always rethrown rather than silently swallowed. */
+export function isUniqueViolation(err: unknown): boolean {
   if (!err || typeof err !== "object") return false;
   const code = (err as { code?: unknown }).code;
-  if (code === "SQLITE_CONSTRAINT_UNIQUE" || code === "SQLITE_CONSTRAINT") return true;
+  if (code === "SQLITE_CONSTRAINT_UNIQUE" || code === "SQLITE_CONSTRAINT_PRIMARYKEY") return true;
   const message = (err as { message?: unknown }).message;
-  return typeof message === "string" && /UNIQUE constraint failed/i.test(message);
+  return typeof message === "string" &&
+    /(unique|primary key) constraint failed|duplicate/i.test(message);
 }

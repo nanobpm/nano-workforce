@@ -221,6 +221,37 @@ Deno.test("recordRetro: inserts then updates the same plan_key row in place", as
   assertEquals(stores["plan_retros"][0].pr_key, null);
 });
 
+Deno.test("recordRetro: rethrows a non-unique (FOREIGN KEY) constraint error instead of swallowing it", async () => {
+  // A FK failure (e.g. plan_key missing in plans) must NOT be treated as a benign duplicate and
+  // fall through to a silent update — that would make the write look successful while doing nothing.
+  let updated = false;
+  const table = {
+    // deno-lint-ignore require-await
+    async insert() {
+      throw new Error("FOREIGN KEY constraint failed");
+    },
+    // deno-lint-ignore require-await
+    async update() {
+      updated = true;
+    },
+    // deno-lint-ignore require-await
+    async get() {
+      return undefined;
+    },
+  };
+  // deno-lint-ignore no-explicit-any
+  const data = { table: () => table } as any as DataLayer;
+  let threw = false;
+  try {
+    await recordRetro(data, PLAN, { status: "filed", prKey: "acme/widgets#20" });
+  } catch (err) {
+    threw = true;
+    assertStringIncludes(String(err), "FOREIGN KEY");
+  }
+  assert(threw, "the FK error must propagate");
+  assertEquals(updated, false, "must not silently fall back to update on a non-unique error");
+});
+
 Deno.test("maybeStartRetro: starts the retro exactly once when the last PR lands with material", async () => {
   const { data, stores } = memData();
   seedPlan(stores);
