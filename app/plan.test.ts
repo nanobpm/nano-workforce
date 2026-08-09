@@ -53,8 +53,8 @@ Deno.test("valid positive integer → honoured", () => {
 //
 // `plan_reviews` is append-only and the review round is derived from `count(plan_reviews)`.
 // When `startPlan` re-plans a previously finished issue it must clear the prior review rows,
-// otherwise the stale count inflates the next round index and can trip `reviewExhausted` early,
-// bypassing the adversarial gate. This drives `startPlan` against an in-memory data layer and
+// otherwise the stale count inflates the next round index and can reach the review-round cap
+// early, bypassing the adversarial gate. This drives `startPlan` against an in-memory data layer and
 // asserts the `plan_reviews` rows for the plan key are gone after a re-plan.
 import { startPlan } from "./plan.ts";
 
