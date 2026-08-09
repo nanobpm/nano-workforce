@@ -281,10 +281,21 @@ export async function maybeStartRetro(
       // no way to retry. Persist a `blocked` retro instead so the failure stays visible and the
       // system state is consistent. Recording must not mask the original error in the log.
       log?.("error", `retro: could not start process for epic ${planKey}`, { err: String(err) });
-      await recordRetro(data, planKey, {
-        status: "blocked",
-        summary: `Retro process could not be started: ${String(err)}`,
-      });
+      // Persisting the blocked record is best-effort: recordRetro rethrows non-unique DB errors, and
+      // if that escaped here it would fall through to the outer catch and return `error` instead of
+      // `start-failed` — reintroducing the very silent-gap failure this path guards against (guard
+      // consumed, no durable record). Swallow a secondary persistence failure and log it separately
+      // so the createInstance failure path always reports `start-failed`.
+      try {
+        await recordRetro(data, planKey, {
+          status: "blocked",
+          summary: `Retro process could not be started: ${String(err)}`,
+        });
+      } catch (persistErr) {
+        log?.("error", `retro: could not persist blocked retro for epic ${planKey}`, {
+          err: String(persistErr),
+        });
+      }
       return { started: false, planKey, reason: "start-failed" };
     }
     log?.("info", `retro: started for epic ${planKey}`, { processInstanceKey, learnings: digest.counts.learnings });
