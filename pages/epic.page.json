@@ -54,7 +54,7 @@
         ],
         "columns": [
           { "field": "plan_key", "header": "Issue", "linkField": "issue_url" },
-          { "field": "status", "header": "Status" },
+          { "field": "status", "header": "Status", "link": { "kind": "processExplorer", "keyField": "process_key" } },
           { "field": "task_count", "header": "Tasks" },
           { "field": "open_task_id", "header": "Open escalation" },
           { "field": "updated_at", "header": "Updated" }
