@@ -1,3 +1,16 @@
+# [0.33.0](https://github.com/nanobpm/nano-workforce/compare/v0.32.2...v0.33.0) (2026-08-09)
+
+
+### Bug Fixes
+
+* **pages:** move the epic submission form to the Epic tab ([#97](https://github.com/nanobpm/nano-workforce/issues/97)) ([da6db32](https://github.com/nanobpm/nano-workforce/commit/da6db32438d8b9fd9c04fea08ffe1f981728f314))
+
+
+### Features
+
+* **ops:** add GET /app/version endpoint for runtime identity ([#98](https://github.com/nanobpm/nano-workforce/issues/98)) ([538cf61](https://github.com/nanobpm/nano-workforce/commit/538cf615cf0f9b34cdb6417346e045fc6131423e))
+* **pages:** link status column to the process explorer ([#99](https://github.com/nanobpm/nano-workforce/issues/99)) ([7f19a29](https://github.com/nanobpm/nano-workforce/commit/7f19a298b4c8c427c593a9d71181192bcac4a896))
+
 ## [0.32.2](https://github.com/nanobpm/nano-workforce/compare/v0.32.1...v0.32.2) (2026-08-09)
 
 
