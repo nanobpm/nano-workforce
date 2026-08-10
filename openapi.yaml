@@ -38,6 +38,7 @@ components:
     ActivePr:
       type: object
       description: A tracked PR that is not in a terminal (converged/abandoned) state.
+      additionalProperties: false
       required:
         - prKey
         - repo
@@ -107,6 +108,7 @@ components:
     VersionInfo:
       type: object
       description: The running app's identity (which code is actually live).
+      additionalProperties: false
       required:
         - name
         - version
@@ -232,6 +234,7 @@ components:
           description: The operator's answer that resumes the parked implementation agent.
     BlackboardEntry:
       type: object
+      additionalProperties: false
       required:
         - id
         - author_task
@@ -321,6 +324,7 @@ components:
           description: Prior sibling file-claims on the same file(s) (advisory first-writer-wins; never a lock).
           items:
             type: object
+            additionalProperties: false
             required:
               - file
               - author_task

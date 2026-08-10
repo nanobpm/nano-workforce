@@ -39,6 +39,7 @@
     "main.ts",
     "app/**/*.ts",
     "operations/**/*.ts",
+    "nano-generated/**/*.ts",
     "workers/**/*.ts",
     "lib/**/*.ts",
     "src/**/*.ts",

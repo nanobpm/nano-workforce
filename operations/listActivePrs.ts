@@ -6,20 +6,16 @@
 // The runtime validates the (empty) request against openapi.yaml; the optional shared-secret guard
 // stays HERE (the runtime does not enforce OpenAPI `security`): when NANO_PR_WEBHOOK_SECRET is set,
 // callers must present it via the x-hook-secret header. Unset → open (unchanged default).
-import { defineOperation } from "@nanobpm/urban";
-import { type ActivePr, activePrs } from "../app/service.ts";
+
+import { activePrs } from "../app/service.ts";
 import { envVar } from "../app/version.ts";
+import { defineOperation } from "../nano-generated/operations.ts";
 
 // The optional shared-secret guard: when NANO_PR_WEBHOOK_SECRET is set, callers must present it via
 // the x-hook-secret header. Captured once, at module load.
 const SECRET = envVar("NANO_PR_WEBHOOK_SECRET") ?? "";
 
-type Res = { count: number; prs: ActivePr[] } | { error: string };
-
-export default defineOperation<
-  { params: Record<string, string>; query: Record<string, string | string[] | undefined>; body: undefined },
-  Res
->("listActivePrs", async ({ req }, app) => {
+export default defineOperation("listActivePrs", async ({ req }, app) => {
   if (SECRET && req.headers.get("x-hook-secret") !== SECRET) {
     return { status: 401, body: { error: "unauthorized" } };
   }

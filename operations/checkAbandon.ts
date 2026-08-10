@@ -9,13 +9,11 @@
 //
 //   GET → { prKey, status, abandoned }  — `abandoned` is derived from `pull_requests.status`,
 //          which Urban's cancel primitive sets to 'abandoned' on cancel. `true` ⇒ the agent must stop.
-import { defineOperation } from "@nanobpm/urban";
-import { abandonStatusForToken } from "../app/abandon.ts";
 
-export default defineOperation<
-  { params: Record<string, string>; query: { token?: string }; body: unknown },
-  { prKey: string; status: string; abandoned: boolean } | { error: string }
->("checkAbandon", async ({ req }, app) => {
+import { abandonStatusForToken } from "../app/abandon.ts";
+import { defineOperation } from "../nano-generated/operations.ts";
+
+export default defineOperation("checkAbandon", async ({ req }, app) => {
   const token = (req.query.get("token") ?? req.headers.get("x-abandon-token") ?? "").trim();
   if (!token) return { status: 400, body: { error: "missing abandon token" } };
   const state = await abandonStatusForToken(app.data, token);

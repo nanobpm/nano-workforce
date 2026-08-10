@@ -10,25 +10,16 @@
 // Body accepts either the raw correlation key or a plan+task pair:
 //   { "corrKey": "owner/repo#12:task-3", "answer": "…" }
 //   { "plan": "owner/repo#12", "task": "task-3", "answer": "…" }
-import { defineOperation } from "@nanobpm/urban";
+
 import { answerTaskEscalation, featureCorrKey } from "../app/plan.ts";
 import { envVar } from "../app/version.ts";
+import { defineOperation } from "../nano-generated/operations.ts";
 
 const WEBHOOK_SECRET = envVar("NANO_PR_WEBHOOK_SECRET") ?? "";
 
 const str = (v: unknown): string => (typeof v === "string" ? v.trim() : "");
 
-interface Body {
-  corrKey?: unknown;
-  plan?: unknown;
-  task?: unknown;
-  answer?: unknown;
-}
-
-export default defineOperation<
-  { params: Record<string, string>; query: Record<string, string | string[] | undefined>; body: Body },
-  { ok: boolean } & Record<string, unknown>
->("answerFeatureEscalation", async ({ req, body }, app) => {
+export default defineOperation("answerFeatureEscalation", async ({ req, body }, app) => {
   if (WEBHOOK_SECRET && req.headers.get("x-hook-secret") !== WEBHOOK_SECRET) {
     return { status: 401, body: { ok: false, error: "unauthorized" } };
   }
