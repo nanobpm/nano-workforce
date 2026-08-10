@@ -99,8 +99,8 @@ Deno.test("recordExclusions: a duplicate pair within one batch folds into an upd
 });
 Deno.test("clearExclusions: drops one plan's graph, leaving others intact", async () => {
     const { data } = memData();
-    await recordExclusions(data, "p", deriveExclusions(new Map([["a", "x"], ["b", "x"]])));
-    await recordExclusions(data, "q", deriveExclusions(new Map([["c", "y"], ["d", "y"]])));
+    await recordExclusions(data, "p", deriveExclusions(new Map([["a", ["x"]], ["b", ["x"]]])));
+    await recordExclusions(data, "q", deriveExclusions(new Map([["c", ["y"]], ["d", ["y"]]])));
     await clearExclusions(data, "p");
     assertEquals((await readExclusions(data, "p")).length, 0);
     assertEquals((await readExclusions(data, "q")).length, 1, "the other plan survives");
