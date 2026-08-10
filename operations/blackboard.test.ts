@@ -50,7 +50,15 @@ async function call(
   body?: unknown,
 ) {
   // Method routing is the runtime's job; here we dispatch to the delegate the spec mounts per verb.
-  const handler = method === "GET" ? readBlackboard : appendBlackboard;
+  // Be explicit so an unexpected method fails loudly rather than silently running the POST delegate.
+  const handler =
+    method === "GET"
+      ? readBlackboard
+      : method === "POST"
+        ? appendBlackboard
+        : (() => {
+            throw new Error(`blackboard test helper: unsupported method ${method}`);
+          })();
   const res = await handler({ req: req(method, query) as any, params: {}, query: {}, body } as any, app);
   return res as any;
 }
