@@ -119,7 +119,11 @@ export function fakeDataLayer(tables: TableMap = {}): DataLayer {
     tx: () => notImplemented("data.tx"),
     schema: async (): Promise<TableMeta[]> => [],
     table<T extends object = TestRow>(name: string, pk = "id"): Table<T> {
-      const table = tables[name] ?? memTable<TestRow>([], pk);
+      let table = tables[name];
+      if (!table) {
+        table = memTable<TestRow>([], pk);
+        tables[name] = table;
+      }
       // biome-ignore lint/plugin: typed test-double boundary (DataLayer.table<T> supplies caller row type)
       return table as Table<T>;
     },
