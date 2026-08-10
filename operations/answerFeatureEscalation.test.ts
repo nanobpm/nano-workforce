@@ -4,11 +4,14 @@ import type { AppApi } from "@nanobpm/urban";
 
 const hadSecret = Object.prototype.hasOwnProperty.call(process.env, "NANO_PR_WEBHOOK_SECRET");
 const previousSecret = process.env.NANO_PR_WEBHOOK_SECRET;
-process.env.NANO_PR_WEBHOOK_SECRET = " test-secret ";
-const { default: answerFeatureEscalation } = await import("./answerFeatureEscalation.ts");
-
-if (hadSecret && previousSecret !== undefined) process.env.NANO_PR_WEBHOOK_SECRET = previousSecret;
-else delete process.env.NANO_PR_WEBHOOK_SECRET;
+let answerFeatureEscalation: typeof import("./answerFeatureEscalation.ts").default;
+try {
+  process.env.NANO_PR_WEBHOOK_SECRET = " test-secret ";
+  answerFeatureEscalation = (await import("./answerFeatureEscalation.ts")).default;
+} finally {
+  if (hadSecret && previousSecret !== undefined) process.env.NANO_PR_WEBHOOK_SECRET = previousSecret;
+  else delete process.env.NANO_PR_WEBHOOK_SECRET;
+}
 
 function memTable(rows: any[], key: string) {
   return {

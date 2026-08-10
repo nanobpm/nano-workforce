@@ -277,7 +277,7 @@ The full, authoritative contract is `openapi.yaml` (Swagger UI at
 | `POST` | `/app/api/actions/start/plan-fanout` | parse the issue ref → start a plan fan-out run (the ONE plan door) |
 | `POST` | `/app/api/actions/message` (`escalation-answered`) | answer an open escalation → publish `escalation-answered` |
 | `POST` | `/app/api/hooks/feature-answer` | answer an implementation-phase task escalation out of band (optional shared-secret) |
-| `GET` `POST` | `/app/api/hooks/blackboard` | per-plan coordination blackboard (capability-token side-channel) |
+| `GET`/`POST` | `/app/api/hooks/blackboard` | per-plan coordination blackboard (capability-token side-channel) |
 | `GET` | `/app/api/hooks/abandon` | cooperative abandon check (per-PR capability token) |
 
 Everything else (`GET /`, `GET /app/pages/*`, `GET /app/data/*`, the renderer) is
