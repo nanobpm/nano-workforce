@@ -40,7 +40,7 @@
     "test": "deno test -A"
   },
   "dependencies": {
-    "@nanobpm/urban": "^0.31.0"
+    "@nanobpm/urban": "^0.31.1"
   },
   "devDependencies": {
     "@semantic-release/changelog": "^6.0.3",

@@ -44,7 +44,7 @@ jobs:
           deno-version: v2.x
 
       - name: Typecheck (Deno)
-        run: deno check main.ts 'workers/**/*.ts' 'actions/**/*.ts'
+        run: deno check main.ts 'workers/**/*.ts' 'actions/**/*.ts' 'operations/**/*.ts'
 
       # Deploy-safety gate: every model-authored `{{template}}` agent-prompt header must resolve
       # to a declared, non-blank prompt (and no agent prompt may ship blank). A broken/blank token

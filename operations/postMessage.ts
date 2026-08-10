@@ -1,19 +1,28 @@
-// POST /app/actions/message — override the generic publishMessage action. For the
-// `escalation-answered` message we run the review answer flow, and for
-// `feature-escalation-answered` the implementation-phase (per-task) answer flow
-// (issue #25): record the answer, resume the parked token, then re-surface the
-// next open escalation. Any other message falls back to a plain publishMessage
-// (this override shadows the generic route entirely, so the fallback preserves it).
-import type { ActionHandler } from "@nanobpm/urban";
+// POST /app/actions/message → operationId `postMessage` (ADR 0058, base /app).
+// Replaces the hand-rolled action that overrode the generic publishMessage action. For the
+// `escalation-answered` message we run the review answer flow, and for `feature-escalation-answered`
+// (issue #25) the implementation-phase (per-task) answer flow: record the answer, resume the parked
+// token, then re-surface the next open escalation. Any other message falls back to a plain
+// publishMessage.
+//
+// The runtime validates the body against openapi.json (`name` is required, so a missing name is a 400
+// for free); this delegate keeps the message-name dispatch — the discriminator + downstream behavior
+// is app logic, not something the JSON schema can express.
+import { defineOperation } from "@nanobpm/urban";
 import { answerEscalation } from "../app/service.ts";
 import { answerTaskEscalation, FEATURE_ESCALATION_MESSAGE } from "../app/plan.ts";
 
-const handler: ActionHandler = async ({ body }, app) => {
-  const b = (body ?? {}) as {
-    name?: unknown;
-    correlationKey?: unknown;
-    variables?: Record<string, unknown>;
-  };
+interface Body {
+  name?: unknown;
+  correlationKey?: unknown;
+  variables?: Record<string, unknown>;
+}
+
+export default defineOperation<
+  { params: Record<string, string>; query: Record<string, string | string[] | undefined>; body: Body },
+  Record<string, unknown>
+>("postMessage", async ({ body }, app) => {
+  const b = body ?? {};
   const name = String(b.name ?? "");
   if (!name) return { status: 400, body: { error: "name is required" } };
 
@@ -27,9 +36,9 @@ const handler: ActionHandler = async ({ body }, app) => {
   }
 
   if (name === FEATURE_ESCALATION_MESSAGE) {
-    // Implementation-phase task escalation (issue #25): correlationKey is the
-    // task's `<plan_key>:<task_id>`; record the answer, resume the parked child,
-    // and re-surface the next open escalation.
+    // Implementation-phase task escalation (issue #25): correlationKey is the task's
+    // `<plan_key>:<task_id>`; record the answer, resume the parked child, and re-surface the next
+    // open escalation.
     const corrKey = String(b.correlationKey ?? "");
     const answer = String((b.variables?.answer ?? "") as string).trim();
     if (!corrKey) return { status: 400, body: { error: "correlationKey is required" } };
@@ -44,6 +53,4 @@ const handler: ActionHandler = async ({ body }, app) => {
     variables: b.variables,
   });
   return { status: 200, body: { ok: true } };
-};
-
-export default handler;
+});

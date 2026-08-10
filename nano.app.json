@@ -139,29 +139,13 @@
     "label": "Nano Workforce",
     "icon": "assets/icon.svg"
   },
+  "api": {
+    "spec": "openapi.json",
+    "base": "/app",
+    "dir": "operations",
+    "validateResponses": "dev"
+  },
   "actions": [
-    {
-      "path": "/app/actions/start/convergence-loop",
-      "module": "actions/start.ts"
-    },
-    {
-      "path": "/app/actions/start/plan-fanout",
-      "module": "actions/plan-start.ts"
-    },
-    {
-      "path": "/app/status",
-      "module": "actions/status.ts",
-      "method": "GET"
-    },
-    {
-      "path": "/app/version",
-      "module": "actions/version.ts",
-      "method": "GET"
-    },
-    {
-      "path": "/app/actions/message",
-      "module": "actions/message.ts"
-    },
     {
       "path": "/hooks/submit",
       "module": "actions/webhook-submit.ts"
