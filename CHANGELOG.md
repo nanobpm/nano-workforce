@@ -1,3 +1,10 @@
+## [0.39.1](https://github.com/nanobpm/nano-workforce/compare/v0.39.0...v0.39.1) (2026-08-10)
+
+
+### Bug Fixes
+
+* **openapi:** use 3.0 nullable idiom instead of 3.1 type-arrays ([#111](https://github.com/nanobpm/nano-workforce/issues/111)) ([28f40c8](https://github.com/nanobpm/nano-workforce/commit/28f40c891d48043ef7537158466bafdfb79b9792))
+
 # [0.39.0](https://github.com/nanobpm/nano-workforce/compare/v0.38.0...v0.39.0) (2026-08-10)
 
 
