@@ -252,3 +252,42 @@ Deno.test("pollIncidents picks the oldest incident by creationTime, sorting a mi
   assertEquals(row.incident_message, "the first fault");
 });
 
+
+// Red/green regression (nano-workforce#102 review): the engine can hand back a numeric
+// `processInstanceKey`, but the OpenAPI `SubmitResult.processKey` contract is `string | null` and
+// `validateResponses:"dev"` would reject a number — plus a 64-bit key overflows JS number
+// precision. `submitPr` must stringify it both in the returned body and the persisted row.
+Deno.test("submitPr stringifies a numeric processInstanceKey (contract: string | null)", async () => {
+  await withGithubOff(async () => {
+    const PR_KEY = "owner/repo#7";
+    const stores: Record<string, { rows: unknown[]; key: string }> = {
+      pull_requests: { rows: [], key: "pr_key" },
+      escalations: { rows: [], key: "id" },
+      pr_dependencies: { rows: [], key: "pr_key" },
+    };
+    const data = {
+      table: (name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key),
+      // deno-lint-ignore no-explicit-any
+    } as any;
+    const engine = {
+      // A 64-bit-scale key delivered as a JS number — the exact case that breaks dev response
+      // validation and risks precision loss if passed through unstringified.
+      createInstance: () => Promise.resolve({ processInstanceKey: 2251799813685249 }),
+      // deno-lint-ignore no-explicit-any
+    } as any;
+
+    const res = await submitPr(data, engine, {
+      repo: "owner/repo",
+      number: 7,
+      url: "https://github.com/owner/repo/pull/7",
+      prKey: PR_KEY,
+    });
+
+    // deno-lint-ignore no-explicit-any
+    const processKey = (res as any).processKey;
+    assertEquals(typeof processKey, "string");
+    assertEquals(processKey, "2251799813685249");
+    const pr = stores.pull_requests.rows[0] as Record<string, unknown>;
+    assertEquals(pr.process_key, "2251799813685249");
+  });
+});
