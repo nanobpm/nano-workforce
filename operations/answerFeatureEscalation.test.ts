@@ -1,4 +1,4 @@
-import { after, test } from "node:test";
+import { test } from "node:test";
 import { assertEquals } from "#test-assert";
 import type { AppApi } from "@nanobpm/urban";
 
@@ -7,10 +7,8 @@ const previousSecret = process.env.NANO_PR_WEBHOOK_SECRET;
 process.env.NANO_PR_WEBHOOK_SECRET = " test-secret ";
 const { default: answerFeatureEscalation } = await import("./answerFeatureEscalation.ts");
 
-after(() => {
-  if (hadSecret && previousSecret !== undefined) process.env.NANO_PR_WEBHOOK_SECRET = previousSecret;
-  else delete process.env.NANO_PR_WEBHOOK_SECRET;
-});
+if (hadSecret && previousSecret !== undefined) process.env.NANO_PR_WEBHOOK_SECRET = previousSecret;
+else delete process.env.NANO_PR_WEBHOOK_SECRET;
 
 function memTable(rows: any[], key: string) {
   return {
