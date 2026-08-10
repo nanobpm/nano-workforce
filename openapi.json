@@ -76,7 +76,8 @@
         "required": ["prKey"],
         "properties": {
           "prKey": { "type": "string" },
-          "processKey": { "type": ["string", "null"], "description": "The started convergence-loop instance key (null if the engine did not return one)." }
+          "processKey": { "type": ["string", "null"], "description": "The started convergence-loop instance key (null if the engine did not return one)." },
+          "alreadyRunning": { "type": "boolean", "description": "True when a non-terminal convergence loop for this PR already exists; the aggregate was refreshed and no new instance was started." }
         }
       },
       "StartPlanResult": {
