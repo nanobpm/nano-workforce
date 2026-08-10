@@ -7,22 +7,11 @@
 //
 // The request body is FLAT (`{ issue | url }`), not wrapped in a `variables` envelope — this is a
 // purpose-built operation, not a generic engine "start process" call.
-import { defineOperation } from "@nanobpm/urban";
+
 import { parseIssue, startPlan } from "../app/plan.ts";
+import { defineOperation } from "../nano-generated/operations.ts";
 
-interface Body {
-  issue?: string;
-  url?: string;
-}
-
-type Res =
-  | { planKey: string; alreadyRunning?: boolean; processKey?: string | null }
-  | { error: string };
-
-export default defineOperation<
-  { params: Record<string, string>; query: Record<string, string | string[] | undefined>; body: Body },
-  Res
->("startPlanFanout", async ({ body }, app) => {
+export default defineOperation("startPlanFanout", async ({ body }, app) => {
   const b = body ?? {};
   const raw = String(b.issue ?? b.url ?? "").trim();
   const parsed = parseIssue(raw);

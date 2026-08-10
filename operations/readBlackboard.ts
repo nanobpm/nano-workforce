@@ -9,14 +9,11 @@
 //   GET → { planKey, entries: [ { id, author_task, kind, files, body, wave, created_at } ], cursor }
 //          optional ?since=<id> returns only entries with id > since (incremental poll). `cursor` is
 //          the plan's current head id; pass it back as `since` on the next poll (Tier 2).
-import { defineOperation } from "@nanobpm/urban";
-import type { BlackboardPage } from "../app/blackboard.ts";
-import { planKeyForToken, readBlackboardPage } from "../app/blackboard.ts";
 
-export default defineOperation<
-  { params: Record<string, string>; query: { token?: string; since?: string }; body: unknown },
-  (BlackboardPage & { planKey: string }) | { error: string }
->("readBlackboard", async ({ req }, app) => {
+import { planKeyForToken, readBlackboardPage } from "../app/blackboard.ts";
+import { defineOperation } from "../nano-generated/operations.ts";
+
+export default defineOperation("readBlackboard", async ({ req }, app) => {
   const token = (req.query.get("token") ?? req.headers.get("x-blackboard-token") ?? "").trim();
   if (!token) return { status: 400, body: { error: "missing blackboard token" } };
   const planKey = await planKeyForToken(app.data, token);

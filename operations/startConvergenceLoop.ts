@@ -8,20 +8,11 @@
 // not leak the engine's variable-map concept to callers. The runtime validates the body against
 // openapi.yaml; this delegate keeps the PR-parse guard because the reference format (owner/repo#123
 // or a URL) is app logic, not something the JSON schema can express — an unparseable reference is a 400.
-import { defineOperation } from "@nanobpm/urban";
+
 import { clampRounds, MAX_ROUNDS, parsePr, submitPr } from "../app/service.ts";
+import { defineOperation } from "../nano-generated/operations.ts";
 
-interface Body {
-  pr?: string;
-  url?: string;
-  dependsOn?: unknown;
-  maxRounds?: unknown;
-}
-
-export default defineOperation<
-  { params: Record<string, string>; query: Record<string, string | string[] | undefined>; body: Body },
-  { prKey: string; alreadyRunning?: boolean; processKey?: string | null } | { error: string }
->("startConvergenceLoop", async ({ body }, app) => {
+export default defineOperation("startConvergenceLoop", async ({ body }, app) => {
   const b = body ?? {};
   const raw = String(b.pr ?? b.url ?? "").trim();
   const parsed = parsePr(raw);

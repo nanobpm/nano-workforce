@@ -33,6 +33,7 @@
     "upgrade": "node --experimental-strip-types scripts/upgrade-from-pack.ts",
     "check": "urban check",
     "typecheck": "tsc --noEmit",
+    "pretypecheck": "urban gen",
     "check:prompts": "node --experimental-strip-types scripts/check-agent-prompts.ts",
     "gen": "urban gen",
     "gen:check": "urban gen --check",
@@ -44,7 +45,7 @@
     "lint:fix": "biome check --write app operations workers pages components scripts main.ts"
   },
   "dependencies": {
-    "@nanobpm/urban": "^0.35.0"
+    "@nanobpm/urban": "^0.38.0"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.11",

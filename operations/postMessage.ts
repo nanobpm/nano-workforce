@@ -8,20 +8,12 @@
 // The runtime validates the body against openapi.yaml (`name` is required, so a missing name is a 400
 // for free); this delegate keeps the message-name dispatch — the discriminator + downstream behavior
 // is app logic, not something the JSON schema can express.
-import { defineOperation } from "@nanobpm/urban";
+
 import { answerTaskEscalation, FEATURE_ESCALATION_MESSAGE } from "../app/plan.ts";
 import { answerEscalation } from "../app/service.ts";
+import { defineOperation } from "../nano-generated/operations.ts";
 
-interface Body {
-  name?: unknown;
-  correlationKey?: unknown;
-  variables?: Record<string, unknown>;
-}
-
-export default defineOperation<
-  { params: Record<string, string>; query: Record<string, string | string[] | undefined>; body: Body },
-  Record<string, unknown>
->("postMessage", async ({ body }, app) => {
+export default defineOperation("postMessage", async ({ body }, app) => {
   const b = body ?? {};
   const name = String(b.name ?? "");
   if (!name) return { status: 400, body: { error: "name is required" } };

@@ -124,6 +124,16 @@
       "handler": "workers/retro-record/worker.ts"
     }
   ],
+  "externalTaskTypes": [
+    "senior:pr-review",
+    "senior:fix-ci",
+    "senior:rebase",
+    "senior:plan",
+    "senior:plan-review",
+    "senior:feature",
+    "senior:trial-merge",
+    "senior:retro"
+  ],
   "surfaces": {
     "pages": {
       "enabled": true,
