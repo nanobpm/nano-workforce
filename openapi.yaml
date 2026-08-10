@@ -320,10 +320,22 @@ components:
           description: Prior sibling file-claims on the same file(s) (advisory first-writer-wins; never a lock).
           items:
             type: object
+            required:
+              - file
+              - author_task
+              - id
+              - body
+              - created_at
             properties:
+              file:
+                type: string
               author_task:
                 type: string
-              file:
+              id:
+                type: integer
+              body:
+                type: string
+              created_at:
                 type: string
     AbandonStatus:
       type: object

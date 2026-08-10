@@ -8,6 +8,7 @@
 //          on (plan, dedupe_key). Returns { id, inserted, conflicts } — `conflicts` lists prior
 //          sibling `file-claim`s on the same file(s) (advisory first-writer-wins; never a lock).
 import { defineOperation } from "@nanobpm/urban";
+import type { ClaimConflict } from "../app/blackboard.ts";
 import {
   appendEntry,
   detectFileClaimConflicts,
@@ -17,7 +18,7 @@ import {
 
 export default defineOperation<
   { params: Record<string, string>; query: { token?: string }; body: Record<string, unknown> },
-  { id: number; inserted: boolean; conflicts: unknown[] } | { error: string }
+  { id: number; inserted: boolean; conflicts: ClaimConflict[] } | { error: string }
 >("appendBlackboard", async ({ req, body }, app) => {
   const token = (req.query.get("token") ?? req.headers.get("x-blackboard-token") ?? "").trim();
   if (!token) return { status: 400, body: { error: "missing blackboard token" } };

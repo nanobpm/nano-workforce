@@ -10,11 +10,12 @@
 //          optional ?since=<id> returns only entries with id > since (incremental poll). `cursor` is
 //          the plan's current head id; pass it back as `since` on the next poll (Tier 2).
 import { defineOperation } from "@nanobpm/urban";
+import type { BlackboardPage } from "../app/blackboard.ts";
 import { planKeyForToken, readBlackboardPage } from "../app/blackboard.ts";
 
 export default defineOperation<
   { params: Record<string, string>; query: { token?: string; since?: string }; body: unknown },
-  { planKey: string; entries: unknown[]; cursor: number | null } | { error: string }
+  (BlackboardPage & { planKey: string }) | { error: string }
 >("readBlackboard", async ({ req }, app) => {
   const token = (req.query.get("token") ?? req.headers.get("x-blackboard-token") ?? "").trim();
   if (!token) return { status: 400, body: { error: "missing blackboard token" } };
