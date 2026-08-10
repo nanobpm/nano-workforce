@@ -1,3 +1,10 @@
+# [0.37.0](https://github.com/nanobpm/nano-workforce/compare/v0.36.0...v0.37.0) (2026-08-10)
+
+
+### Features
+
+* remove Deno — Node is the only runtime ([#108](https://github.com/nanobpm/nano-workforce/issues/108)) ([d077e9c](https://github.com/nanobpm/nano-workforce/commit/d077e9c94696e2030a2033ad53a05c86a4c18a3e)), closes [#test-assert](https://github.com/nanobpm/nano-workforce/issues/test-assert)
+
 # [0.36.0](https://github.com/nanobpm/nano-workforce/compare/v0.35.2...v0.36.0) (2026-08-10)
 
 
