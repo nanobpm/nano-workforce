@@ -264,11 +264,17 @@ row by migration `003`).
 The app-specific business-logic endpoints are **OpenAPI operations** mounted
 under `api.base` (`/app/api`), each implemented by a delegate module in
 `operations/`, plus a `/hooks/*` webhook. The runtime serves them all; `main.ts`
-only starts the runtime and the review-ready poller:
+only starts the runtime and the review-ready poller. The full, authoritative
+contract is `openapi.json` (Swagger UI at `/app/api-docs`); the OpenAPI rows
+below are the complete set of operations, `/hooks/submit` is one of the `/hooks/*`
+webhooks:
 
 | method | route | purpose |
 |---|---|---|
+| `GET` | `/app/api/status` | list tracked PRs + count |
+| `GET` | `/app/api/version` | app + engine version |
 | `POST` | `/app/api/actions/start/convergence-loop` | parse the PR ref → create the aggregate + start the process |
+| `POST` | `/app/api/actions/start/plan-fanout` | start a plan fan-out run |
 | `POST` | `/app/api/actions/message` (`escalation-answered`) | answer an open escalation → publish `escalation-answered` |
 | `POST` | `/hooks/submit` | webhook submit (shared-secret auth) → start the process |
 
