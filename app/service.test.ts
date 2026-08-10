@@ -254,9 +254,11 @@ Deno.test("pollIncidents picks the oldest incident by creationTime, sorting a mi
 
 
 // Red/green regression (nano-workforce#102 review): the engine can hand back a numeric
-// `processInstanceKey`, but the OpenAPI `SubmitResult.processKey` contract is `string | null` and
-// `validateResponses:"dev"` would reject a number — plus a 64-bit key overflows JS number
-// precision. `submitPr` must stringify it both in the returned body and the persisted row.
+// `processInstanceKey`, but the OpenAPI `SubmitResult.processKey` contract is `string | null`, so
+// under api `validateResponses:"dev"` a raw number fails response validation. Stringifying at the
+// source also keeps the returned key aligned with the DB-persisted `String(...)` value and dodges
+// JS 53-bit precision limits for large 64-bit keys (which is why keys travel as strings in
+// practice). `submitPr` must stringify it both in the returned body and the persisted row.
 Deno.test("submitPr stringifies a numeric processInstanceKey (contract: string | null)", async () => {
   await withGithubOff(async () => {
     const PR_KEY = "owner/repo#7";
@@ -270,8 +272,9 @@ Deno.test("submitPr stringifies a numeric processInstanceKey (contract: string |
       // deno-lint-ignore no-explicit-any
     } as any;
     const engine = {
-      // A 64-bit-scale key delivered as a JS number — the exact case that breaks dev response
-      // validation and risks precision loss if passed through unstringified.
+      // A large key delivered as a JS number — the exact case that breaks dev response validation
+      // (number vs the `string | null` contract). Kept within MAX_SAFE_INTEGER so the fixture
+      // itself is exact; true 64-bit keys travel as strings for the same precision reason.
       createInstance: () => Promise.resolve({ processInstanceKey: 2251799813685249 }),
       // deno-lint-ignore no-explicit-any
     } as any;

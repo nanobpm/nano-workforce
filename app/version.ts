@@ -41,7 +41,7 @@ function readJson(path: string): Record<string, unknown> | null {
  * Read an env var across runtimes: Node exposes `process.env`; Deno may not populate it, so fall
  * back to `Deno.env.get` (guarded — reading env can throw without `--allow-env`).
  */
-function envVar(name: string): string | null {
+export function envVar(name: string): string | null {
   const fromProcess = globalThis.process?.env?.[name];
   if (typeof fromProcess === "string" && fromProcess.trim()) return fromProcess.trim();
   const deno = (globalThis as { Deno?: { env?: { get?(k: string): string | undefined } } }).Deno;

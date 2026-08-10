@@ -8,8 +8,12 @@
 // callers must present it via the x-hook-secret header. Unset → open (unchanged default).
 import { defineOperation } from "@nanobpm/urban";
 import { type ActivePr, activePrs } from "../app/service.ts";
+import { envVar } from "../app/version.ts";
 
-const SECRET = process.env.NANO_PR_WEBHOOK_SECRET ?? "";
+// Cross-runtime env read (Node `process.env` OR Deno `Deno.env`): reading via `process.env` alone
+// would silently disable the guard under Deno/compiled runtimes where `process` is absent, leaving
+// the endpoint open even when NANO_PR_WEBHOOK_SECRET is set. Captured once, at module load.
+const SECRET = envVar("NANO_PR_WEBHOOK_SECRET") ?? "";
 
 type Res = { count: number; prs: ActivePr[] } | { error: string };
 

@@ -7,9 +7,12 @@
 // guard stays HERE (the runtime does not enforce OpenAPI `security`); the OpenAPI document only
 // routes GET to this operation, so a wrong method is a 404 from the router (no explicit 405 needed).
 import { defineOperation } from "@nanobpm/urban";
-import { buildVersionInfo, type VersionInfo } from "../app/version.ts";
+import { buildVersionInfo, envVar, type VersionInfo } from "../app/version.ts";
 
-const SECRET = process.env.NANO_PR_WEBHOOK_SECRET ?? "";
+// Cross-runtime env read (Node `process.env` OR Deno `Deno.env`): reading via `process.env` alone
+// would silently disable the guard under Deno/compiled runtimes where `process` is absent, leaving
+// the endpoint open even when NANO_PR_WEBHOOK_SECRET is set. Captured once, at module load.
+const SECRET = envVar("NANO_PR_WEBHOOK_SECRET") ?? "";
 
 export default defineOperation<
   { params: Record<string, string>; query: Record<string, string | string[] | undefined>; body: undefined },
