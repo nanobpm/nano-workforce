@@ -10,7 +10,6 @@ import type { AppJobHandler } from "@nanobpm/urban";
 import { recordRetro } from "../../app/retro.ts";
 
 const AGENT_RESULT_KEY = "io.nanobpm.agentResult";
-const VALID_STATUSES = new Set(["filed", "skipped", "blocked"]);
 
 interface In extends Record<string, unknown> {
   planKey: string;
@@ -26,10 +25,9 @@ function asStr(v: unknown): string | null {
 
 function asStatus(v: unknown, hasPr: boolean): "filed" | "skipped" | "blocked" {
   const s = asStr(v);
-  if (s && VALID_STATUSES.has(s)) {
+  if (s === "filed" || s === "skipped" || s === "blocked") {
     if (s === "filed" && !hasPr) return "skipped";
-    // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
-    return s as "filed" | "skipped" | "blocked";
+    return s;
   }
   return hasPr ? "filed" : "skipped";
 }

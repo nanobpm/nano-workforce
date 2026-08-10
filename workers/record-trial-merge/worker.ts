@@ -26,7 +26,6 @@ interface Out extends Record<string, unknown> {
   summary?: string;
 }
 
-const RESULTS = new Set<TrialMergeResult>(["clean", "merge-conflict", "suite-failed"]);
 const str = (v: unknown): string | undefined =>
   typeof v === "string" && v.trim().length > 0 ? v.trim() : undefined;
 const waveNo = (v: unknown): number => {
@@ -43,8 +42,8 @@ const safeJson = (v: unknown): string => {
 
 function parseResult(v: unknown): TrialMergeResult {
   const s = typeof v === "string" ? v.trim() : "";
-  // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
-  return RESULTS.has(s as TrialMergeResult) ? (s as TrialMergeResult) : "suite-failed";
+  if (s === "clean" || s === "merge-conflict" || s === "suite-failed") return s;
+  return "suite-failed";
 }
 
 const handler: AppJobHandler<In, Out> = async (job, app) => {
@@ -53,8 +52,7 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
   const result = parseResult(job.variables.result);
   const summary = str(job.variables.summary) ??
     (result === "suite-failed" ? "Trial merge suite failed or returned no machine-readable result" : result);
-  // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
-  const rawJobKey = (job as { key?: unknown }).key;
+  const rawJobKey = Reflect.get(job, "key");
   const jobKey = rawJobKey == null ? null : String(rawJobKey);
 
   try {
