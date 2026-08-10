@@ -14,16 +14,17 @@
 // Data access goes through the record gateway (`data.table`), never hand-written SQL — matching
 // app/plan.ts, app/blackboard.ts, and app/taskDelta.ts.
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
-import { planReviews, planTasks } from "./plan.ts";
 import { isUniqueViolation, readBlackboard } from "./blackboard.ts";
-import { aggregateEpicDeltas } from "./taskDelta.ts";
+import { planReviews, planTasks } from "./plan.ts";
 import { TERMINAL_STATUSES } from "./service.ts";
+import { aggregateEpicDeltas } from "./taskDelta.ts";
 
 export const RETRO_PROCESS_ID = "retro";
 
 /** Opt-out env toggle. Retro runs by default; set NANO_AUTO_RETRO=0/false to disable (e.g. in a
  * review-only deployment that doesn't want the fleet opening promotion PRs). */
 export function autoRetroEnabled(): boolean {
+  // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
   const v = (globalThis as { process?: { env?: Record<string, string | undefined> } })
     .process?.env?.NANO_AUTO_RETRO;
   if (v == null) return true;
@@ -128,6 +129,7 @@ export async function gatherRetro(data: DataLayer, planKey: string): Promise<Ret
     .sort((a, b) => a.round - b.round);
   const reviewRejections = reviews
     .filter((r) => r.approved === 0 && (r.findings ?? "").trim() !== "")
+    // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
     .map((r) => ({ round: r.round, findings: r.findings as string }));
   const planApproved = reviews.length > 0 && reviews[reviews.length - 1].approved === 1;
 

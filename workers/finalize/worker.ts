@@ -2,9 +2,9 @@
 // merge stage (start the `merge-loop` process and park the PR in `waiting_deps`) when auto-merge
 // is on, or (b) close the PR out as `converged` (review-only mode).
 import type { AppJobHandler } from "@nanobpm/urban";
-import { AUTO_MERGE, ensurePr, startMerge } from "../../app/service.ts";
 import { abandonTokenFromUrl } from "../../app/abandon.ts";
 import { maybeStartRetro } from "../../app/retro.ts";
+import { AUTO_MERGE, ensurePr, startMerge } from "../../app/service.ts";
 
 // Extends Record so the declared fields are typed while the job may still carry
 // other process variables (e.g. io.nanobpm.agentResult, read by transcriptOf).
@@ -22,6 +22,7 @@ interface In extends Record<string, unknown> {
 
 const AGENT_RESULT_KEY = "io.nanobpm.agentResult";
 function transcriptOf(vars: Record<string, unknown>): string | null {
+  // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
   const env = vars[AGENT_RESULT_KEY] as { output?: unknown } | undefined;
   return typeof env?.output === "string" ? env.output : null;
 }

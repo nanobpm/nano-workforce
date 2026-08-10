@@ -169,12 +169,17 @@ export async function clearExclusions(data: DataLayer, planKey: string): Promise
 export function mergeLanes(edges: ExclusionEdge[], allTasks: Iterable<string> = []): string[][] {
   const parent = new Map<string, string>();
   const find = (x: string): string => {
+    const parentOf = (node: string): string => {
+      const p = parent.get(node);
+      if (p === undefined) throw new Error(`missing union-find parent for ${node}`);
+      return p;
+    };
     let root = x;
-    while (parent.get(root) !== root) root = parent.get(root)!;
+    while (parentOf(root) !== root) root = parentOf(root);
     // Path-compress so repeated finds stay near-flat.
     let cur = x;
-    while (parent.get(cur) !== root) {
-      const next = parent.get(cur)!;
+    while (parentOf(cur) !== root) {
+      const next = parentOf(cur);
       parent.set(cur, root);
       cur = next;
     }

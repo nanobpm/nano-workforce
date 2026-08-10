@@ -9,11 +9,11 @@
 // calls live in app/github.ts; this worker records the attempt in the `merges` audit table and
 // shapes the escalation payload on a block.
 import type { AppJobHandler } from "@nanobpm/urban";
-import { enqueueViaComment, mergePr } from "../../app/github.ts";
-import { MERGE_ADMIN, MERGE_METHOD, ensurePr } from "../../app/service.ts";
 import { abandonTokenFromUrl } from "../../app/abandon.ts";
-import { loadMergeProtocol } from "../../app/mergeProtocol.ts";
 import { checkBaseTarget } from "../../app/baseGuard.ts";
+import { enqueueViaComment, mergePr } from "../../app/github.ts";
+import { loadMergeProtocol } from "../../app/mergeProtocol.ts";
+import { ensurePr, MERGE_ADMIN, MERGE_METHOD } from "../../app/service.ts";
 
 interface In extends Record<string, unknown> {
   prKey: string;

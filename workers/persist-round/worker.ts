@@ -5,8 +5,8 @@
 // Data access goes through the injected app datasource gateway (`app.data.table<T>`), the RAD
 // `Table<T>` surface — `rounds.insert(...)` / `pull_requests.update(...)`, not hand-written SQL.
 import type { AppJobHandler } from "@nanobpm/urban";
-import { ensurePr, parsePr } from "../../app/service.ts";
 import { abandonTokenFromUrl } from "../../app/abandon.ts";
+import { ensurePr, parsePr } from "../../app/service.ts";
 
 // Extends Record so the declared fields are typed while the job may still carry
 // other process variables (e.g. io.nanobpm.agentResult, read by transcriptOf).
@@ -29,6 +29,7 @@ interface In extends Record<string, unknown> {
 // for audit so a human can see what the agent did this round.
 const AGENT_RESULT_KEY = "io.nanobpm.agentResult";
 function transcriptOf(vars: Record<string, unknown>): string | null {
+  // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
   const env = vars[AGENT_RESULT_KEY] as { output?: unknown } | undefined;
   return typeof env?.output === "string" ? env.output : null;
 }

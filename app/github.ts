@@ -37,6 +37,7 @@ interface DenoCommandCtor {
  * `repo`/`number` from the datastore cannot inject a command). Resolves stdout, rejects on a
  * non-zero exit with stderr as the message. */
 async function runGh(args: string[]): Promise<string> {
+  // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
   const g = globalThis as { Deno?: { Command?: DenoCommandCtor } };
   if (g.Deno?.Command) {
     const { code, stdout, stderr } = await new g.Deno.Command("gh", {
@@ -66,7 +67,10 @@ async function runGh(args: string[]): Promise<string> {
 let ghAvailable: Promise<boolean> | undefined;
 /** Whether the host `gh` CLI is present (memoized — probed at most once per process). */
 function isGhAvailable(): Promise<boolean> {
-  return (ghAvailable ??= runGh(["--version"]).then(() => true, () => false));
+  if (!ghAvailable) {
+    ghAvailable = runGh(["--version"]).then(() => true, () => false);
+  }
+  return ghAvailable;
 }
 
 /** Fetch the reviews for one PR via the configured transport. Throws on transport failure so
@@ -81,6 +85,7 @@ export async function fetchPrReviews(
   const path = `repos/${repo}/pulls/${number}/reviews?per_page=100`;
   if (useGh) {
     const out = await runGh(["api", path, "-H", "Accept: application/vnd.github+json"]);
+    // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
     return JSON.parse(out) as GhReview[];
   }
   if (!token) return null; // token mode with no token → poller idles
@@ -88,6 +93,7 @@ export async function fetchPrReviews(
     headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json" },
   });
   if (!r.ok) throw new Error(`github ${r.status} ${r.statusText}`.trim());
+  // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
   return (await r.json()) as GhReview[];
 }
 
@@ -122,6 +128,7 @@ export async function hasPendingCopilotReviewer(
   let users: { login?: string }[];
   if (await useGh()) {
     const out = await runGh(["api", path, "-H", "Accept: application/vnd.github+json"]);
+    // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
     users = (JSON.parse(out) as { users?: { login?: string }[] }).users ?? [];
   } else {
     if (!token) return null;
@@ -129,6 +136,7 @@ export async function hasPendingCopilotReviewer(
       headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json" },
     });
     if (!r.ok) throw new Error(`github ${r.status} ${r.statusText}`.trim());
+    // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
     users = ((await r.json()) as { users?: { login?: string }[] }).users ?? [];
   }
   return users.some((u) => isCopilot(u.login));
@@ -198,6 +206,7 @@ export async function fetchPrMeta(
 ): Promise<PrMeta | null> {
   if (await useGh()) {
     const out = await runGh(["pr", "view", String(number), "--repo", repo, "--json", "title,body"]);
+    // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
     const j = JSON.parse(out) as { title?: string; body?: string };
     return { title: j.title ?? null, body: j.body ?? "" };
   }
@@ -206,6 +215,7 @@ export async function fetchPrMeta(
     headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json" },
   });
   if (!r.ok) throw new Error(`github ${r.status} ${r.statusText}`.trim());
+  // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
   const j = (await r.json()) as { title?: string; body?: string };
   return { title: j.title ?? null, body: j.body ?? "" };
 }
@@ -273,6 +283,7 @@ export async function fetchPrState(
       "--json",
       "state,mergedAt,mergeStateStatus,statusCheckRollup,isDraft,headRefOid",
     ]);
+    // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
     const j = JSON.parse(out) as {
       state?: string;
       mergedAt?: string | null;
@@ -298,6 +309,7 @@ export async function fetchPrState(
     headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json" },
   });
   if (!r.ok) throw new Error(`github ${r.status} ${r.statusText}`.trim());
+  // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
   const j = (await r.json()) as {
     merged?: boolean;
     merged_at?: string | null;
@@ -328,6 +340,7 @@ export async function fetchPrFiles(
 ): Promise<string[] | null> {
   if (await useGh()) {
     const out = await runGh(["pr", "view", String(number), "--repo", repo, "--json", "files"]);
+    // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
     const j = JSON.parse(out) as { files?: { path?: string }[] };
     return (j.files ?? []).map((f) => f.path ?? "").filter((p) => p !== "");
   }
@@ -341,6 +354,7 @@ export async function fetchPrFiles(
       { headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json" } },
     );
     if (!r.ok) throw new Error(`github ${r.status} ${r.statusText}`.trim());
+    // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
     const batch = (await r.json()) as { filename?: string }[];
     for (const f of batch) if (f.filename) paths.push(f.filename);
     // A short final page means we've read every file — the list is complete.
@@ -367,6 +381,7 @@ export async function fetchPrHead(
 ): Promise<{ headRef: string | null; headSha: string | null } | null> {
   if (await useGh()) {
     const out = await runGh(["pr", "view", String(number), "--repo", repo, "--json", "headRefName,headRefOid"]);
+    // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
     const j = JSON.parse(out) as { headRefName?: string | null; headRefOid?: string | null };
     return { headRef: j.headRefName ?? null, headSha: j.headRefOid ?? null };
   }
@@ -375,6 +390,7 @@ export async function fetchPrHead(
     headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json" },
   });
   if (!r.ok) throw new Error(`github ${r.status} ${r.statusText}`.trim());
+  // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
   const j = (await r.json()) as { head?: { ref?: string | null; sha?: string | null } };
   return { headRef: j.head?.ref ?? null, headSha: j.head?.sha ?? null };
 }
@@ -389,6 +405,7 @@ export async function fetchPrBase(
 ): Promise<string | null> {
   if (await useGh()) {
     const out = await runGh(["pr", "view", String(number), "--repo", repo, "--json", "baseRefName"]);
+    // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
     const j = JSON.parse(out) as { baseRefName?: string };
     return j.baseRefName ?? null;
   }
@@ -397,6 +414,7 @@ export async function fetchPrBase(
     headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json" },
   });
   if (!r.ok) throw new Error(`github ${r.status} ${r.statusText}`.trim());
+  // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
   const j = (await r.json()) as { base?: { ref?: string } };
   return j.base?.ref ?? null;
 }
@@ -413,6 +431,7 @@ export async function fetchDefaultBranch(repo: string, token: string): Promise<s
   let name: string | null = null;
   if (await useGh()) {
     const out = await runGh(["repo", "view", repo, "--json", "defaultBranchRef"]);
+    // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
     const j = JSON.parse(out) as { defaultBranchRef?: { name?: string } };
     name = j.defaultBranchRef?.name ?? null;
   } else if (token) {
@@ -420,6 +439,7 @@ export async function fetchDefaultBranch(repo: string, token: string): Promise<s
       headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json" },
     });
     if (!r.ok) throw new Error(`github ${r.status} ${r.statusText}`.trim());
+    // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
     const j = (await r.json()) as { default_branch?: string };
     name = j.default_branch ?? null;
   } else {
@@ -455,6 +475,7 @@ export async function baseBranchLanded(
       "--limit",
       "20",
     ]);
+    // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
     const arr = JSON.parse(out) as { state?: string }[];
     if (arr.some((p) => (p.state ?? "").toUpperCase() === "MERGED")) return "landed";
     if (arr.some((p) => (p.state ?? "").toUpperCase() === "OPEN")) return "open";
@@ -467,6 +488,7 @@ export async function baseBranchLanded(
     { headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json" } },
   );
   if (!r.ok) throw new Error(`github ${r.status} ${r.statusText}`.trim());
+  // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
   const arr = (await r.json()) as { state?: string; merged_at?: string | null }[];
   if (arr.some((p) => p.merged_at || (p.state ?? "").toUpperCase() === "MERGED")) return "landed";
   if (arr.some((p) => (p.state ?? "").toLowerCase() === "open")) return "open";
@@ -491,7 +513,6 @@ export function classifyMergeability(s: PrState): Mergeability {
       // A required check failed -> a human must act. Pending checks / awaiting review -> wait.
       // When we can't enumerate checks (failingChecks < 0, token mode) stay conservative: wait.
       return s.failingChecks > 0 ? "blocked" : "waiting";
-    case "DRAFT":
     default: // UNKNOWN / "" — GitHub is still computing mergeability
       return "waiting";
   }
@@ -550,6 +571,7 @@ export async function mergePr(
     // in this pass. Trust `merged` when true; otherwise verify the PR's actual state and report
     // `queued` when it hasn't landed yet, so the merge-loop waits for `merge-landed` rather than
     // marking it merged prematurely.
+    // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
     const body = (await r.json().catch(() => ({}))) as { merged?: boolean };
     if (body.merged) return { outcome: "merged", detail: "merged" };
     const st = await fetchPrState(repo, number, token).catch(() => null);

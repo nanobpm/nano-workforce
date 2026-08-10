@@ -10,8 +10,9 @@
 //   • zero PRs opened → record a `failed` outcome for observability, then throw the non-retryable
 //     `NO_WORK_DISPATCHED` BpmnError so the engine parks the instance on an incident instead of
 //     completing green (issue #86). The `failed` status is terminal, so `startPlan` can re-plan it.
-import { BpmnError } from "@nanobpm/urban";
+
 import type { AppJobHandler } from "@nanobpm/urban";
+import { BpmnError } from "@nanobpm/urban";
 import { planTasks } from "../../app/plan.ts";
 
 interface In extends Record<string, unknown> {

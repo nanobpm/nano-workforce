@@ -58,11 +58,9 @@ export interface BlackboardInput {
   dedupe_key?: string;
 }
 
-const KIND_SET = new Set<string>(BLACKBOARD_KINDS);
-
 /** Coerce an arbitrary `kind` to a known value, defaulting to "note" for anything unrecognised. */
 export function normalizeKind(kind: unknown): BlackboardKind {
-  return typeof kind === "string" && KIND_SET.has(kind) ? (kind as BlackboardKind) : "note";
+  return BLACKBOARD_KINDS.find((k) => k === kind) ?? "note";
 }
 
 /** A URL-safe, unguessable capability token (192 bits of randomness, base64url, no padding). */
@@ -79,9 +77,10 @@ export function mintBlackboardToken(): string {
 export function publicBaseUrl(env: string | undefined = process.env.NANO_PR_PUBLIC_BASE_URL): string {
   // Cascade through the fallback chain, skipping any value that is unset OR blank/whitespace, so an
   // explicitly-set-but-empty NANO_PR_PUBLIC_BASE_URL can't yield a malformed capability URL.
-  const base = [env, process.env.NANO_PR_BASE_URL, "http://localhost:3000"]
-    .map((v) => v?.trim())
-    .find((v) => v) as string;
+  const base =
+    [env, process.env.NANO_PR_BASE_URL, "http://localhost:3000"]
+      .map((v) => v?.trim())
+      .find((v): v is string => Boolean(v)) ?? "http://localhost:3000";
   return base.replace(/\/+$/, "");
 }
 
@@ -313,8 +312,10 @@ export async function appendEntry(
  * corruption, not a benign duplicate) is always rethrown rather than silently swallowed. */
 export function isUniqueViolation(err: unknown): boolean {
   if (!err || typeof err !== "object") return false;
+  // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
   const code = (err as { code?: unknown }).code;
   if (code === "SQLITE_CONSTRAINT_UNIQUE" || code === "SQLITE_CONSTRAINT_PRIMARYKEY") return true;
+  // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
   const message = (err as { message?: unknown }).message;
   return typeof message === "string" &&
     /(unique|primary key) constraint failed|duplicate/i.test(message);

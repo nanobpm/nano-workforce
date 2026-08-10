@@ -11,8 +11,8 @@
 // hand-written SQL — matching app/service.ts.
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { blackboardUrl, mintBlackboardToken, renderCoordinationBrief } from "./blackboard.ts";
-import { clearTaskDeltas } from "./taskDelta.ts";
 import { clearExclusions } from "./mergeExclusion.ts";
+import { clearTaskDeltas } from "./taskDelta.ts";
 
 /** The BPMN process this module drives (resources/processes/plan-fanout.bpmn). */
 export const PLAN_PROCESS_ID = "plan-fanout";

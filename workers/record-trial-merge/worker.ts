@@ -4,9 +4,9 @@
 import type { AppJobHandler } from "@nanobpm/urban";
 import {
   recordTrialMergeAudit,
+  type TrialMergeResult,
   trialMergeDecision,
   trialMergeTaskId,
-  type TrialMergeResult,
 } from "../../app/trialMerge.ts";
 
 interface In extends Record<string, unknown> {
@@ -26,7 +26,6 @@ interface Out extends Record<string, unknown> {
   summary?: string;
 }
 
-const RESULTS = new Set<TrialMergeResult>(["clean", "merge-conflict", "suite-failed"]);
 const str = (v: unknown): string | undefined =>
   typeof v === "string" && v.trim().length > 0 ? v.trim() : undefined;
 const waveNo = (v: unknown): number => {
@@ -43,7 +42,8 @@ const safeJson = (v: unknown): string => {
 
 function parseResult(v: unknown): TrialMergeResult {
   const s = typeof v === "string" ? v.trim() : "";
-  return RESULTS.has(s as TrialMergeResult) ? (s as TrialMergeResult) : "suite-failed";
+  if (s === "clean" || s === "merge-conflict" || s === "suite-failed") return s;
+  return "suite-failed";
 }
 
 const handler: AppJobHandler<In, Out> = async (job, app) => {
@@ -52,8 +52,8 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
   const result = parseResult(job.variables.result);
   const summary = str(job.variables.summary) ??
     (result === "suite-failed" ? "Trial merge suite failed or returned no machine-readable result" : result);
-  const rawJobKey = (job as { key?: unknown }).key;
-  const jobKey = rawJobKey == null ? null : String(rawJobKey);
+  const legacyJobKey = Reflect.get(job, "key");
+  const jobKey = job.jobKey ?? (legacyJobKey == null ? null : String(legacyJobKey));
 
   try {
     await recordTrialMergeAudit(app.data, {
@@ -80,7 +80,7 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
     trialMergeRed,
     summary,
     task: { id: trialMergeTaskId(wave), title: `Trial merge gate for wave ${wave}` },
-    question: `${summary}${failing}\n\nD3 needs a human decision: either the PR heads merged cleanly and the combined suite failed, or the trial-merge agent did not return a valid machine-readable result. Decide the design/infrastructure fix, update the PR heads if needed, then answer to rerun the trial merge; answer exactly \"proceed\" only to override and continue without rerunning.`,
+    question: `${summary}${failing}\n\nD3 needs a human decision: either the PR heads merged cleanly and the combined suite failed, or the trial-merge agent did not return a valid machine-readable result. Decide the design/infrastructure fix, update the PR heads if needed, then answer to rerun the trial merge; answer exactly "proceed" only to override and continue without rerunning.`,
   };
 };
 

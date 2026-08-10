@@ -29,6 +29,8 @@
 //                       (skips `npm pack`; --version/--package are ignored)
 //   --force             overlay even if the cwd doesn't look like this app
 //   -h, --help          show this help
+
+import { execFileSync } from "node:child_process";
 import {
   cpSync,
   existsSync,
@@ -39,7 +41,6 @@ import {
   rmSync,
   statSync,
 } from "node:fs";
-import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
@@ -199,10 +200,12 @@ function runTar(tarArgs: string[], tgz: string): string {
   try {
     return execFileSync("tar", tarArgs, { encoding: "utf8" });
   } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "ENOENT") {
+    const code = typeof e === "object" && e !== null ? Reflect.get(e, "code") : undefined;
+    if (code === "ENOENT") {
       throw new Error(`'tar' not found on PATH — install it to extract ${tgz}`, { cause: e });
     }
-    throw new Error(`tar failed on ${tgz}: ${(e as Error).message}`, { cause: e });
+    const message = e instanceof Error ? e.message : String(e);
+    throw new Error(`tar failed on ${tgz}: ${message}`, { cause: e });
   }
 }
 
@@ -329,6 +332,7 @@ function report(label: string, files: string[]): void {
 try {
   main();
 } catch (err) {
-  console.error(`upgrade failed: ${(err as Error).message}`);
+  const message = err instanceof Error ? err.message : String(err);
+  console.error(`upgrade failed: ${message}`);
   process.exit(1);
 }

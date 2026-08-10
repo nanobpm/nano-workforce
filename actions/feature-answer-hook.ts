@@ -20,6 +20,7 @@ const handler: ActionHandler = async ({ req, body }, app) => {
   if (WEBHOOK_SECRET && req.headers.get("x-hook-secret") !== WEBHOOK_SECRET) {
     return { status: 401, body: { error: "unauthorized" } };
   }
+  // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
   const b = (body ?? {}) as {
     corrKey?: unknown;
     plan?: unknown;

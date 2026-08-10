@@ -35,6 +35,7 @@ const handler: ActionHandler = async ({ req, body }, app) => {
   }
 
   if (req.method === "POST") {
+    // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
     const b = (body ?? {}) as Record<string, unknown>;
     const text = typeof b.body === "string" ? b.body.trim() : "";
     if (!text) return { status: 400, body: { error: "'body' (the note text) is required" } };

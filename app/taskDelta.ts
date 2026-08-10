@@ -71,6 +71,7 @@ function decodeArray(raw: string | null): string[] {
  * nothing actionable (so callers persist/broadcast only real deltas, never empty noise). */
 export function parseTaskDelta(raw: unknown): TaskDelta | null {
   if (!raw || typeof raw !== "object") return null;
+  // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
   const o = raw as Record<string, unknown>;
   const delta: TaskDelta = {
     contractChange: trimStr(o.contractChange),

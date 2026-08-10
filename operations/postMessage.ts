@@ -9,8 +9,8 @@
 // for free); this delegate keeps the message-name dispatch — the discriminator + downstream behavior
 // is app logic, not something the JSON schema can express.
 import { defineOperation } from "@nanobpm/urban";
-import { answerEscalation } from "../app/service.ts";
 import { answerTaskEscalation, FEATURE_ESCALATION_MESSAGE } from "../app/plan.ts";
+import { answerEscalation } from "../app/service.ts";
 
 interface Body {
   name?: unknown;
@@ -28,7 +28,7 @@ export default defineOperation<
 
   if (name === "escalation-answered") {
     const prKey = String(b.correlationKey ?? "");
-    const answer = String((b.variables?.answer ?? "") as string).trim();
+    const answer = String(b.variables?.answer ?? "").trim();
     if (!prKey) return { status: 400, body: { error: "correlationKey is required" } };
     if (!answer) return { status: 400, body: { error: "answer is required" } };
     const r = await answerEscalation(app.data, app.engine, prKey, answer);
@@ -40,7 +40,7 @@ export default defineOperation<
     // `<plan_key>:<task_id>`; record the answer, resume the parked child, and re-surface the next
     // open escalation.
     const corrKey = String(b.correlationKey ?? "");
-    const answer = String((b.variables?.answer ?? "") as string).trim();
+    const answer = String(b.variables?.answer ?? "").trim();
     if (!corrKey) return { status: 400, body: { error: "correlationKey is required" } };
     if (!answer) return { status: 400, body: { error: "answer is required" } };
     const r = await answerTaskEscalation(app.data, app.engine, corrKey, answer);

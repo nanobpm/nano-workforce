@@ -72,6 +72,7 @@ function strArray(v: unknown): string[] | undefined {
 }
 function oneOf<T extends string>(v: unknown, allowed: ReadonlySet<string>): T | undefined {
   const s = str(v);
+  // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
   return s !== undefined && allowed.has(s) ? (s as T) : undefined;
 }
 

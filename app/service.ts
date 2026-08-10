@@ -8,6 +8,7 @@
 // Data access goes through the record-oriented gateway (`data.table<T>(name, pk)` — the RAD
 // `Table<T>` surface), not hand-written SQL. Row shapes are declared inline here.
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
+import { abandonUrl, mintAbandonToken, renderAbandonBrief } from "./abandon.ts";
 import {
   classifyMergeability,
   ensureFreshHeadRun,
@@ -18,13 +19,12 @@ import {
   type MergeMethod,
   requestCopilotReview,
 } from "./github.ts";
-import { planTaskDeps, planTasks, plans } from "./plan.ts";
-import { abandonUrl, mintAbandonToken, renderAbandonBrief } from "./abandon.ts";
+import { mergeLanes, readExclusions } from "./mergeExclusion.ts";
 import { freshHeadRunAction, loadMergeProtocol } from "./mergeProtocol.ts";
+import { type PrLaneDecision, planPrLane, taskDependencyDepths } from "./mergeTrain.ts";
+import { plans, planTaskDeps, planTasks } from "./plan.ts";
 import { clampNudgeMinutes, reviewWaitTimeout } from "./reviewWait.ts";
 import { waveMergeTargets } from "./waves.ts";
-import { mergeLanes, readExclusions } from "./mergeExclusion.ts";
-import { planPrLane, type PrLaneDecision, taskDependencyDepths } from "./mergeTrain.ts";
 
 /** The BPMN process that drives review convergence (`resources/processes/convergence-loop.bpmn`). */
 export const PROCESS_ID = "convergence-loop";
@@ -34,10 +34,12 @@ export const MERGE_PROCESS_ID = "merge-loop";
  * in convergence-loop.bpmn). Deliberately NOT hosted here — an external harness services it; the
  * activation poll keys off it to tell "agent working" from "queued". */
 const REVIEW_JOB_TYPE = "senior:pr-review";
+
 /** Default round cap before the loop escalates to a human. A per-submit override (submit form /
  * webhook / start action) takes precedence; this env var sets the fleet-wide default. The cap
  * coercion + ceiling live in the pure `./rounds.ts` module (re-exported for callers). */
 export { clampCiFixBudget, clampRounds, MAX_CI_FIX_CEILING, MAX_ROUNDS_CEILING } from "./rounds.ts";
+
 import { clampCiFixBudget, clampRounds } from "./rounds.ts";
 export const MAX_ROUNDS = clampRounds(process.env.NANO_PR_MAX_ROUNDS, 20);
 
@@ -830,6 +832,7 @@ async function pollJobActivation(
         }),
       });
       if (!res.ok) continue; // engine unhappy → keep last-known, retry next pass
+      // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
       const body = (await res.json()) as { items?: JobSearchItem[] };
       // An open job with a leasing worker means an agent has activated it. Prefer the one with
       // the latest deadline if several are open (there is normally at most one).
@@ -929,6 +932,7 @@ export async function pollIncidentsImpl(
         }),
       });
       if (!res.ok) continue; // engine unhappy → keep last-known, retry next pass
+      // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
       const body = (await res.json()) as { items?: IncidentSearchItem[] };
       // Surface the oldest ACTIVE incident (the first thing that broke — a stable choice if the
       // instance somehow parks more than one). Re-filter on state defensively in case the wire

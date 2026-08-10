@@ -64,9 +64,10 @@ function templateMap(root: string, patterns: string[]): Record<string, string> {
 // signal can't see (an empty value carries no `{{token}}` to be unresolved).
 function hasBlankAgentPromptHeader(bpmn: string): boolean {
   const re = /<zeebe:header\s+key="([^"]*)"\s+value="([^"]*)"\s*\/?>/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(bpmn)) !== null) {
+  let m = re.exec(bpmn);
+  while (m !== null) {
     if (m[1] === AGENT_PROMPT_HEADER && m[2].trim() === "") return true;
+    m = re.exec(bpmn);
   }
   return false;
 }
@@ -86,6 +87,7 @@ export function checkAgentPrompts(root: string): CheckResult {
   if (!existsSync(manifestPath)) {
     return { ok: false, errors: [`nano.app.json not found under ${root}`], resolved: [] };
   }
+  // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
   const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as AppManifest;
   const models = manifest.models ?? {};
   const templates = templateMap(root, models.templates ?? []);

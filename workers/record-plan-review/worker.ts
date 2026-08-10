@@ -16,8 +16,9 @@
 // the whole epic complete GREEN having done nothing. The cap still bounds the loop; it now bounds
 // it into an incident, not a silent proceed. A missing/ambiguous `approved` is treated as NOT
 // approved (revise until the cap).
-import { BpmnError } from "@nanobpm/urban";
+
 import type { AppJobHandler } from "@nanobpm/urban";
+import { BpmnError } from "@nanobpm/urban";
 import { MAX_PLAN_REVIEW_ROUNDS, type PlanReview, planReviews } from "../../app/plan.ts";
 
 interface In extends Record<string, unknown> {

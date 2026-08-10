@@ -11,8 +11,8 @@
 // Every probe is best-effort: a missing file or unavailable `.git` yields `null` for that field
 // rather than throwing, so `/app/api/version` never fails just because one source is absent.
 import { readFileSync } from "node:fs";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { dirname, join, resolve, isAbsolute } from "node:path";
 
 // Captured once, at module load — i.e. when the running process booted this code.
 const STARTED_AT = new Date();
@@ -31,6 +31,7 @@ function readJson(path: string): Record<string, unknown> | null {
   const text = readText(path);
   if (text == null) return null;
   try {
+    // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
     return JSON.parse(text) as Record<string, unknown>;
   } catch {
     return null;
@@ -44,6 +45,7 @@ function readJson(path: string): Record<string, unknown> | null {
 export function envVar(name: string): string | null {
   const fromProcess = globalThis.process?.env?.[name];
   if (typeof fromProcess === "string" && fromProcess.trim()) return fromProcess.trim();
+  // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
   const deno = (globalThis as { Deno?: { env?: { get?(k: string): string | undefined } } }).Deno;
   try {
     const fromDeno = deno?.env?.get?.(name);
@@ -129,7 +131,7 @@ function gitSha(): string | null {
   const refPath = ref.slice(4).trim(); // e.g. "refs/heads/main"
   // A loose ref may live in the per-worktree dir or the common dir; check both.
   const loose = readText(join(dirs.gitDir, refPath)) ?? readText(join(dirs.commonDir, refPath));
-  if (loose != null && loose.trim()) return loose.trim();
+  if (loose?.trim()) return loose.trim();
 
   // Packed refs fallback (always in the common dir): lines of "<sha> <refname>".
   const packed = readText(join(dirs.commonDir, "packed-refs"));
@@ -159,6 +161,7 @@ function gitBranch(): string | null {
 function runtime(): string {
   const proc = globalThis.process;
   // Deno exposes `Deno.version.deno`; Node exposes `process.version` (e.g. "v24.15.0").
+  // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
   const deno = (globalThis as { Deno?: { version?: { deno?: string } } }).Deno;
   if (deno?.version?.deno) return `deno ${deno.version.deno}`;
   if (proc?.version) return `node ${proc.version}`;

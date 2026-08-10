@@ -12,9 +12,11 @@ import { layoutBpmn } from "@nanobpm/urban";
 
 // Host-agnostic file I/O: Deno inside a compiled binary, else node:fs under Node — mirrors
 // app/plan.ts's readAsset seam so this runs the same under `npm run` and `deno task`.
+// biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
 const g = globalThis as {
   Deno?: {
     args: string[];
+    exit(c: number): never;
     readDir(p: string): AsyncIterable<{ name: string; isFile: boolean }>;
     readTextFile(p: string): Promise<string>;
     writeTextFile(p: string, s: string): Promise<void>;
@@ -52,7 +54,7 @@ const countDi = (xml: string) => ({
 });
 
 function exit(code: number): never {
-  if (g.Deno) return (globalThis as { Deno?: { exit(c: number): never } }).Deno!.exit(code);
+  if (g.Deno) return g.Deno.exit(code);
   process.exit(code);
 }
 
