@@ -133,15 +133,15 @@ app emits, then put it to work:
 c8ctl nano hire \
   --name fleet \
   --rank senior \
-  --capabilities pr-review plan plan-review feature fix-ci \
+  --capabilities pr-review plan plan-review feature trial-merge fix-ci rebase retro \
   --command 'copilot -p - --allow-all-tools' \
   --model <your-model>
 
 c8ctl nano work fleet         # polls every senior:* agent task below until Ctrl-C
 ```
 
-`--rank senior` × those five capabilities subscribes the worker to exactly the agent
-task types the three workflows emit (one `senior:<capability>` job type per
+`--rank senior` × those eight capabilities subscribes the worker to exactly the agent
+task types the four workflows emit (one `senior:<capability>` job type per
 capability):
 
 | Capability | Job type | Workflow | Task |
@@ -150,7 +150,10 @@ capability):
 | `plan` | `senior:plan` | `plan-fanout` | Plan an issue into levelized tasks |
 | `plan-review` | `senior:plan-review` | `plan-fanout` | Review the plan before fan-out |
 | `feature` | `senior:feature` | `plan-fanout` | Implement one planned task → open a PR |
+| `trial-merge` | `senior:trial-merge` | `plan-fanout` | Integration gate: trial-merge a wave, catch semantic conflicts CI can't see |
 | `fix-ci` | `senior:fix-ci` | `merge-loop` | Green a `blocked` PR's failing checks |
+| `rebase` | `senior:rebase` | `merge-loop` | Rebase a conflicting PR up to date with its base |
+| `retro` | `senior:retro` | `retro` | Synthesize a finished epic's learnings and promote the recurring ones |
 
 - `--command 'copilot -p - --allow-all-tools'` starts the Copilot CLI reading its
   prompt from **stdin** (`-p -`). The harness pipes the whole job JSON (prompt +
@@ -169,9 +172,12 @@ whichever PRs/tasks are ready — that is the idle time you reclaim. Run more th
 job per worker with `--max-parallel 2`. The app-hosted `pr.*` workers (record-plan,
 select-wave, finalize, merge, …) run **inside** the app, not on an agent worker.
 
-Already have a narrower worker? Extend it in place instead of re-hiring — `c8ctl nano
-assign <name> plan plan-review feature fix-ci` unions the roles onto the profile,
-then restart its worker.
+Already have a narrower worker? Extend it in place instead of re-hiring — this unions
+the roles onto the profile, then restart its worker:
+
+```sh
+c8ctl nano assign <name> pr-review plan plan-review feature trial-merge fix-ci rebase retro
+```
 
 ---
 
