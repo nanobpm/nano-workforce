@@ -1,8 +1,8 @@
-// Tests for the GET /hooks/abandon endpoint (issue #76).
+// Tests for the GET /app/api/hooks/abandon operation `checkAbandon` (ADR 0059; issue #76).
 import { test } from "node:test";
 import { assertEquals } from "#test-assert";
 import type { AppApi } from "@nanobpm/urban";
-import handler from "./abandon.ts";
+import handler from "./checkAbandon.ts";
 
 function memApp(): { app: AppApi } {
   const stores: Record<string, any[]> = {};
@@ -25,7 +25,7 @@ function memApp(): { app: AppApi } {
 function req(method: string, query: Record<string, string>) {
   return {
     method,
-    path: "/hooks/abandon",
+    path: "/app/api/hooks/abandon",
     query: new URLSearchParams(query),
     headers: new Headers(),
     text: async () => "",
@@ -33,7 +33,7 @@ function req(method: string, query: Record<string, string>) {
 }
 
 async function call(app: AppApi, method: string, query: Record<string, string>) {
-  const res = await handler({ req: req(method, query) as any, body: undefined }, app);
+  const res = await handler({ req: req(method, query) as any, params: {}, query: {}, body: undefined }, app);
   return res as any;
 }
 
@@ -73,13 +73,7 @@ test("token via header is accepted", async () => {
   await seedPr(app, "o/r#1", "tok", "abandoned");
   const r = req("GET", {});
   r.headers.set("x-abandon-token", "tok");
-  const res = await handler({ req: r as any, body: undefined }, app) as any;
+  const res = await handler({ req: r as any, params: {}, query: {}, body: undefined }, app) as any;
   assertEquals(res.status, 200);
   assertEquals(res.body.abandoned, true);
-});
-
-test("non-GET → 405", async () => {
-  const { app } = memApp();
-  await seedPr(app, "o/r#1", "tok", "converging");
-  assertEquals((await call(app, "POST", { token: "tok" })).status, 405);
 });

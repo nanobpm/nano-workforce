@@ -3,7 +3,7 @@
   "info": {
     "title": "Nano Workforce control API",
     "version": "1.0.0",
-    "description": "The externally-facing control surface an operator, an automation harness, or an LLM uses to observe and steer PR-convergence and planning runs. Contract-first (ADR 0058): the toolkit derives typed request/response contracts + runtime validators from this document and each `operationId` is implemented by a delegate module in `operations/`. Mounted under base `/app/api`, kept off the framework-reserved `/app` page-runtime namespace (which owns `/app/runtime.js`, `/app/pages/*`, `/app/data/*`). The `/hooks/*` webhook endpoints stay on `actions[]` because they live outside the `/app` namespace."
+    "description": "The externally-facing control surface an operator, an automation harness, or an LLM uses to observe and steer PR-convergence and planning runs. Contract-first (ADR 0058/0059): the toolkit derives typed request/response contracts + runtime validators from this document and each `operationId` is implemented by a delegate module in `operations/`. Mounted under base `/app/api`, kept off the framework-reserved `/app` page-runtime namespace (which owns `/app/runtime.js`, `/app/pages/*`, `/app/data/*`). The webhook endpoints are ordinary operations too (ADR 0059 — the `actions[]` array is retired): the shared-secret ones under `/hooks/*` and the capability-token side-channels (`/hooks/blackboard`, `/hooks/abandon`) all live at `/app/api/hooks/*` and enforce their credential in the delegate."
   },
   "components": {
     "securitySchemes": {
@@ -12,6 +12,18 @@
         "in": "header",
         "name": "x-hook-secret",
         "description": "Optional shared secret. Enforced by the delegate (NOT the runtime) only when NANO_PR_WEBHOOK_SECRET is set; unset means the endpoint is open. Declared here for documentation."
+      },
+      "blackboardToken": {
+        "type": "apiKey",
+        "in": "query",
+        "name": "token",
+        "description": "Per-plan capability token for the blackboard side-channel (issues #51 / #49). The token IS the credential and scopes every read/write to exactly one plan. Enforced by the delegate (a missing token is 400, an unknown token 404); may also be sent as the `x-blackboard-token` header. Declared here for documentation."
+      },
+      "abandonToken": {
+        "type": "apiKey",
+        "in": "query",
+        "name": "token",
+        "description": "Per-PR capability token for the cooperative abandon check (issue #76). The token IS the credential and scopes the read to exactly one PR. Enforced by the delegate (a missing token is 400, an unknown token 404); may also be sent as the `x-abandon-token` header. Declared here for documentation."
       }
     },
     "schemas": {
@@ -91,7 +103,7 @@
       },
       "StartVariables": {
         "type": "object",
-        "description": "Process-start variables. `pr`/`url` (convergence) or `issue`/`url` (planning) name the target; extra keys are forwarded to the engine.",
+        "description": "The start request body. `pr`/`url` (convergence) or `issue`/`url` (planning) name the target; extra keys are forwarded to the engine as process variables.",
         "additionalProperties": true,
         "properties": {
           "pr": { "type": "string", "description": "PR reference: owner/repo#123 or a PR URL." },
@@ -107,6 +119,80 @@
         "additionalProperties": true,
         "required": ["ok"],
         "properties": { "ok": { "type": "boolean" } }
+      },
+      "FeatureAnswerRequest": {
+        "type": "object",
+        "description": "Answer an implementation-phase task escalation (issue #25). Supply either `corrKey`, or both `plan` and `task`; `answer` is always required.",
+        "required": ["answer"],
+        "properties": {
+          "corrKey": { "type": "string", "description": "The task correlation key, `<plan_key>:<task_id>` (e.g. owner/repo#12:task-3)." },
+          "plan": { "type": "string", "description": "Plan reference (owner/repo#N); combined with `task` to derive the corrKey." },
+          "task": { "type": "string", "description": "Task id within the plan; combined with `plan` to derive the corrKey." },
+          "answer": { "type": "string", "description": "The operator's answer that resumes the parked implementation agent." }
+        }
+      },
+      "BlackboardEntry": {
+        "type": "object",
+        "required": ["id", "author_task", "kind", "files", "body", "wave", "created_at"],
+        "properties": {
+          "id": { "type": "integer" },
+          "author_task": { "type": "string" },
+          "kind": { "type": "string" },
+          "files": { "type": "array", "items": { "type": "string" } },
+          "body": { "type": "string" },
+          "wave": { "type": ["integer", "null"] },
+          "created_at": { "type": "string" }
+        }
+      },
+      "BlackboardPage": {
+        "type": "object",
+        "required": ["planKey", "entries", "cursor"],
+        "properties": {
+          "planKey": { "type": "string" },
+          "entries": { "type": "array", "items": { "$ref": "#/components/schemas/BlackboardEntry" } },
+          "cursor": { "type": ["integer", "null"], "description": "The plan's current head id; pass it back as `since` on the next poll (Tier 2)." }
+        }
+      },
+      "BlackboardAppendRequest": {
+        "type": "object",
+        "description": "Append one blackboard entry. Idempotent on (plan, dedupe_key).",
+        "required": ["body"],
+        "properties": {
+          "author_task": { "type": "string", "description": "The authoring task id; defaults to \"system\" when omitted/blank." },
+          "kind": { "type": "string", "description": "Entry kind (e.g. note, file-claim); normalized by the delegate." },
+          "files": { "type": "array", "items": { "type": "string" }, "description": "Files this entry concerns (used by advisory file-claim conflict detection)." },
+          "body": { "type": "string", "description": "The note text (required, non-blank)." },
+          "wave": { "type": "integer", "description": "Optional plan wave the entry belongs to." },
+          "dedupe_key": { "type": "string", "description": "Idempotency key: a retry with the same (plan, dedupe_key) returns the existing entry." }
+        }
+      },
+      "BlackboardAppendResult": {
+        "type": "object",
+        "required": ["id", "inserted", "conflicts"],
+        "properties": {
+          "id": { "type": "integer" },
+          "inserted": { "type": "boolean", "description": "False when a prior entry with the same dedupe_key already existed (idempotent retry)." },
+          "conflicts": {
+            "type": "array",
+            "description": "Prior sibling file-claims on the same file(s) (advisory first-writer-wins; never a lock).",
+            "items": {
+              "type": "object",
+              "properties": {
+                "author_task": { "type": "string" },
+                "file": { "type": "string" }
+              }
+            }
+          }
+        }
+      },
+      "AbandonStatus": {
+        "type": "object",
+        "required": ["prKey", "status", "abandoned"],
+        "properties": {
+          "prKey": { "type": "string" },
+          "status": { "type": "string" },
+          "abandoned": { "type": "boolean", "description": "Derived from pull_requests.status; true ⇒ the run was cancelled and the agent must stop." }
+        }
       }
     }
   },
@@ -153,12 +239,7 @@
           "required": true,
           "content": {
             "application/json": {
-              "schema": {
-                "type": "object",
-                "additionalProperties": true,
-                "required": ["variables"],
-                "properties": { "variables": { "$ref": "#/components/schemas/StartVariables" } }
-              }
+              "schema": { "$ref": "#/components/schemas/StartVariables" }
             }
           }
         },
@@ -182,12 +263,7 @@
           "required": true,
           "content": {
             "application/json": {
-              "schema": {
-                "type": "object",
-                "additionalProperties": true,
-                "required": ["variables"],
-                "properties": { "variables": { "$ref": "#/components/schemas/StartVariables" } }
-              }
+              "schema": { "$ref": "#/components/schemas/StartVariables" }
             }
           }
         },
@@ -240,6 +316,114 @@
           "404": {
             "description": "No matching open escalation / parked token to answer.",
             "content": { "application/json": { "schema": { "$ref": "#/components/schemas/MessageResult" } } }
+          }
+        }
+      }
+    },
+    "/hooks/feature-answer": {
+      "post": {
+        "operationId": "answerFeatureEscalation",
+        "summary": "Answer an implementation-phase task escalation out of band (issue #25). Optional shared-secret guard (x-hook-secret), enforced only when NANO_PR_WEBHOOK_SECRET is set.",
+        "security": [{ "hookSecret": [] }, {}],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/FeatureAnswerRequest" } } }
+        },
+        "responses": {
+          "200": {
+            "description": "The escalation was answered and the parked agent resumed.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/MessageResult" } } }
+          },
+          "400": {
+            "description": "A required field was missing (answer, or a resolvable correlation key).",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/MessageResult" } } }
+          },
+          "401": {
+            "description": "Missing/invalid shared secret (only when NANO_PR_WEBHOOK_SECRET is set).",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/MessageResult" } } }
+          },
+          "404": {
+            "description": "No matching open task escalation for the correlation key.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/MessageResult" } } }
+          }
+        }
+      }
+    },
+    "/hooks/blackboard": {
+      "get": {
+        "operationId": "readBlackboard",
+        "summary": "Read a plan's blackboard, scoped by the capability token (Tier 1). Optional ?since=<id> returns only newer entries.",
+        "security": [{ "blackboardToken": [] }, {}],
+        "parameters": [
+          { "name": "token", "in": "query", "required": false, "schema": { "type": "string" }, "description": "The per-plan capability token (may also be sent as the x-blackboard-token header)." },
+          { "name": "since", "in": "query", "required": false, "schema": { "type": "integer" }, "description": "Return only entries with id > since (incremental poll)." }
+        ],
+        "responses": {
+          "200": {
+            "description": "The blackboard page for this plan.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/BlackboardPage" } } }
+          },
+          "400": {
+            "description": "Missing blackboard token.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorBody" } } }
+          },
+          "404": {
+            "description": "Unknown blackboard token (never reveals which plans exist).",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorBody" } } }
+          }
+        }
+      },
+      "post": {
+        "operationId": "appendBlackboard",
+        "summary": "Append one entry to a plan's blackboard, scoped by the capability token (Tier 1). Idempotent on (plan, dedupe_key).",
+        "security": [{ "blackboardToken": [] }, {}],
+        "parameters": [
+          { "name": "token", "in": "query", "required": false, "schema": { "type": "string" }, "description": "The per-plan capability token (may also be sent as the x-blackboard-token header)." }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/BlackboardAppendRequest" } } }
+        },
+        "responses": {
+          "200": {
+            "description": "An idempotent retry: the entry already existed (inserted=false).",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/BlackboardAppendResult" } } }
+          },
+          "201": {
+            "description": "The entry was appended.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/BlackboardAppendResult" } } }
+          },
+          "400": {
+            "description": "Missing blackboard token or blank body.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorBody" } } }
+          },
+          "404": {
+            "description": "Unknown blackboard token (never reveals which plans exist).",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorBody" } } }
+          }
+        }
+      }
+    },
+    "/hooks/abandon": {
+      "get": {
+        "operationId": "checkAbandon",
+        "summary": "Cooperative abandon check (issue #76): tell a running agent whether its run was cancelled. Scoped by the per-PR capability token.",
+        "security": [{ "abandonToken": [] }, {}],
+        "parameters": [
+          { "name": "token", "in": "query", "required": false, "schema": { "type": "string" }, "description": "The per-PR capability token (may also be sent as the x-abandon-token header)." }
+        ],
+        "responses": {
+          "200": {
+            "description": "The PR's abandon status.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AbandonStatus" } } }
+          },
+          "400": {
+            "description": "Missing abandon token.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorBody" } } }
+          },
+          "404": {
+            "description": "Unknown abandon token (never reveals which PRs exist).",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorBody" } } }
           }
         }
       }

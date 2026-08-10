@@ -9,7 +9,7 @@
 //
 // The process then parks the child at the `feature-escalation-answered` message
 // catch (correlationKey `<plan_key>:<task_id>`). Answering it (page form or
-// `/hooks/feature-answer`) resumes the child, which re-dispatches the SAME task.
+// `/app/api/hooks/feature-answer`) resumes the child, which re-dispatches the SAME task.
 //
 // Retry-safe: if an open escalation already exists for this corr key (a worker
 // re-activation before the wait subscription opened), it is UPDATED, not

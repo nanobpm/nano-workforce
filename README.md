@@ -213,7 +213,7 @@ the UI and the process re-arms and retries.
 ### Fleet mode: hand it an issue (plan → implement → converge)
 
 ```
- issue (UI / POST /hooks/plan) ─► plan-fanout (BPMN)
+ issue (UI / POST /app/api/actions/start/plan-fanout) ─► plan-fanout (BPMN)
     plan (senior:plan) ─► record-plan ─► implement × N (parallel, senior:feature) ─► record-results
                                                                                        │
                                           each opened PR ──► convergence-loop (above)
@@ -222,12 +222,11 @@ the UI and the process re-arms and retries.
 A planning agent decomposes the issue into tasks; a parallel multi-instance activity
 fans them out over implementation agents (one PR per task); `record-results` enrols
 every opened PR into the convergence loop. Submit from the **"Hand an issue to the
-fleet"** form, or:
+fleet"** form, or POST the same operation the form does:
 
 ```bash
-curl -sS -X POST http://localhost:3000/hooks/plan \
+curl -sS -X POST http://localhost:3000/app/api/actions/start/plan-fanout \
   -H 'content-type: application/json' \
-  -H "x-hook-secret: $NANO_PR_WEBHOOK_SECRET" \
   -d '{ "issue": "owner/repo#123" }'
 ```
 
@@ -243,8 +242,8 @@ curl -sS -X POST http://localhost:3000/hooks/plan \
 | `GITHUB_TOKEN` | — | token for the review poller / merge (or use the host `gh` CLI) |
 | `NANO_PR_GITHUB_TRANSPORT` | `auto` | how the poller reads GitHub: `gh` (host CLI), `token` (`GITHUB_TOKEN` over HTTP), or `auto` |
 | `NANO_PR_POLL_MS` | `60000` | review-ready poll interval |
-| `NANO_PR_MAX_ROUNDS` | `20` | default cap: escalate after N rounds (per-submit override via the form / webhook `maxRounds`; clamped 1–100) |
-| `NANO_PR_WEBHOOK_SECRET` | — | shared secret for `POST /hooks/submit` (`X-Hook-Secret`) |
+| `NANO_PR_MAX_ROUNDS` | `20` | default cap: escalate after N rounds (per-submit override via the form / the `maxRounds` field on `start/convergence-loop`; clamped 1–100) |
+| `NANO_PR_WEBHOOK_SECRET` | — | optional shared secret for the `POST /app/api/hooks/feature-answer` webhook operation (`X-Hook-Secret`); unset = open |
 | `NANO_PR_AUTO_MERGE` | `1` | after convergence, run the merge stage; `0` = stop at `converged` (review-only) |
 | `NANO_PR_MERGE_METHOD` | `squash` | merge method: `squash`, `merge`, or `rebase` |
 | `NANO_PR_MERGE_ADMIN` | `0` | pass `--admin` to override failing non-required checks (use with care) |

@@ -1,12 +1,12 @@
 // nano-workforce — Urban App entrypoint (ADR 0055).
 //
 // The whole app is declared in `nano.app.json` (models, sqlite datasource, app-hosted record
-// workers, the schema-driven pages surface, and the action overrides) and materialized by the
+// workers, the schema-driven pages surface, and the OpenAPI control surface) and materialized by the
 // `@nanobpm/urban` runtime via `runFromEnv`:
 //   • deploys the BPMN + hosts the `pr.*` record workers (workers/*/worker.ts),
 //   • serves the schema-driven page runtime (ADR 0042) from `pages/home.page.json`,
-//   • mounts the app-specific action overrides (actions/*.ts) that wrap the generic
-//     start/cancel/message actions, plus the `/hooks/submit` webhook.
+//   • mounts the OpenAPI operations (openapi.json → operations/*.ts) — the start/cancel/message
+//     control endpoints plus the webhook operations under `/app/api/hooks/*` (ADR 0059).
 //
 // The only thing that isn't declarative is the review-ready poller: it does arbitrary GitHub
 // polling and then correlates a `review-ready` message. A cron trigger can only fire an engine

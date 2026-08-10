@@ -103,7 +103,7 @@ test("persist-round heals from the prKey when repo/prNumber are absent", async (
       prKey: "o/r#12",
       round: 2,
       status: "addressed",
-      abandonUrl: "https://host/hooks/abandon?token=TOK-en_123",
+      abandonUrl: "https://host/app/api/hooks/abandon?token=TOK-en_123",
     },
   };
   await handler(job as any, app as any);

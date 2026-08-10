@@ -149,7 +149,7 @@ test("persist-escalation heals from the prKey when repo/prNumber are absent", as
       round: 2,
       status: "needs_input",
       question: "decide",
-      abandonUrl: "https://host/hooks/abandon?token=TOK-en_123",
+      abandonUrl: "https://host/app/api/hooks/abandon?token=TOK-en_123",
     },
   };
   await handler(job as any, app as any);

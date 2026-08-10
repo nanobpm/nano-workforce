@@ -129,7 +129,7 @@ interface PullRequest {
   // frugal-CI fresh-head-run remedy. A rebase changes the head and therefore permits a new nudge.
   fresh_head_run_head: string | null;
   // Cooperative abandon check (015_pr_abandon_token.sql, issue #76): the per-PR capability token a
-  // running agent curls (GET /hooks/abandon?token=…) to learn whether this run was cancelled before
+  // running agent curls (GET /app/api/hooks/abandon?token=…) to learn whether this run was cancelled before
   // it performs a side effect. Minted at submit, reused across the convergence + merge instances.
   abandon_token: string | null;
   // Technical-incident surfacing (017_pr_incident.sql, issue #94), written by the poller's

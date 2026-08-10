@@ -33,7 +33,7 @@
       "props": {
         "title": "Submit a pull request",
         "submitLabel": "Start review",
-        "action": { "path": "/app/api/actions/start/convergence-loop" },
+        "action": { "path": "/app/api/actions/start/convergence-loop", "body": "{{form}}" },
         "fields": [
           { "key": "pr", "label": "owner/repo#123 or a GitHub PR URL", "type": "text" },
           { "key": "maxRounds", "label": "Max review rounds (blank = fleet default)", "type": "number" }
