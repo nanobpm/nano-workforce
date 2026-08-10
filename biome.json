@@ -134,5 +134,8 @@
   },
   "plugins": [
     "./plugins/no-unsafe-type-assertion.grit"
-  ]
+  ],
+  "formatter": {
+    "enabled": false
+  }
 }

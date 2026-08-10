@@ -16,133 +16,124 @@ import { loadMergeProtocol } from "../../app/mergeProtocol.ts";
 import { ensurePr, MERGE_ADMIN, MERGE_METHOD } from "../../app/service.ts";
 
 interface In extends Record<string, unknown> {
-	prKey: string;
-	repo: string;
-	prNumber: number;
-	// Carried by the merge-loop instance (startMerge sets it to the converged round); passed to
-	// the heal so a reconstructed row reflects the real round, not a 1-based default.
-	round?: number;
-	// The per-PR abandon capability URL the agent was handed; its token is preserved on a heal so
-	// the agent's cooperative-abort check keeps resolving (see ensurePr).
-	abandonUrl?: string;
+  prKey: string;
+  repo: string;
+  prNumber: number;
+  // Carried by the merge-loop instance (startMerge sets it to the converged round); passed to
+  // the heal so a reconstructed row reflects the real round, not a 1-based default.
+  round?: number;
+  // The per-PR abandon capability URL the agent was handed; its token is preserved on a heal so
+  // the agent's cooperative-abort check keeps resolving (see ensurePr).
+  abandonUrl?: string;
 }
 
 interface Out extends Record<string, unknown> {
-	mergeStatus: "merged" | "queued" | "blocked";
-	status?: string;
-	question?: string;
+  mergeStatus: "merged" | "queued" | "blocked";
+  status?: string;
+  question?: string;
 }
 
 const handler: AppJobHandler<In, Out> = async (job, app) => {
-	const { prKey, repo, prNumber, round, abandonUrl } = job.variables;
-	const token = process.env.GITHUB_TOKEN ?? "";
-	const now = new Date().toISOString();
+  const { prKey, repo, prNumber, round, abandonUrl } = job.variables;
+  const token = process.env.GITHUB_TOKEN ?? "";
+  const now = new Date().toISOString();
 
-	// Heal a missing FK parent (engine/app.db desync) before any child `merges` insert below so a
-	// land attempt never dies with an opaque `FOREIGN KEY constraint failed` incident. The merge-loop
-	// instance carries repo+prNumber (and the converged round) but not prUrl; ensurePr derives the
-	// canonical URL from them, keeps the healed round faithful, and preserves the agent's abandon
-	// token so its cooperative-abort check keeps resolving.
-	await ensurePr(app.data, {
-		prKey,
-		repo,
-		number: prNumber,
-		round,
-		abandonToken: abandonTokenFromUrl(abandonUrl),
-	});
+  // Heal a missing FK parent (engine/app.db desync) before any child `merges` insert below so a
+  // land attempt never dies with an opaque `FOREIGN KEY constraint failed` incident. The merge-loop
+  // instance carries repo+prNumber (and the converged round) but not prUrl; ensurePr derives the
+  // canonical URL from them, keeps the healed round faithful, and preserves the agent's abandon
+  // token so its cooperative-abort check keeps resolving.
+  await ensurePr(app.data, {
+    prKey,
+    repo,
+    number: prNumber,
+    round,
+    abandonToken: abandonTokenFromUrl(abandonUrl),
+  });
 
-	// Dead-end-base guard (#60): never land a PR into a base branch that has itself already merged
-	// to the default branch — the merge would land into a dead branch and never reach `main`.
-	// GitHub only auto-retargets a PR when its base is *deleted* on merge; a merged-but-undeleted
-	// base (typical in a stacked epic) stays the target and reads CLEAN, so nothing else catches it.
-	// Best-effort: a transport hiccup leaves `deadEnd:false`, so this never blocks a valid merge.
-	const guard = await checkBaseTarget(repo, prNumber, token).catch(() => null);
-	if (guard?.deadEnd) {
-		await app.data.table("merges", "id").insert({
-			pr_key: prKey,
-			outcome: "blocked",
-			method: "base-guard",
-			detail: `base '${guard.base}' has already merged into '${guard.defaultBranch}' (dead-end target)`,
-			at: now,
-		});
-		return {
-			mergeStatus: "blocked",
-			status: "blocked",
-			question:
-				`This PR targets '${guard.base}', which has already merged into '${guard.defaultBranch}'. ` +
-				`Merging now would land into a dead-end branch and never reach '${guard.defaultBranch}'. ` +
-				`Retarget it (gh pr edit ${prNumber} --repo ${repo} --base ${guard.defaultBranch}), then reply to retry.`,
-		};
-	}
+  // Dead-end-base guard (#60): never land a PR into a base branch that has itself already merged
+  // to the default branch — the merge would land into a dead branch and never reach `main`.
+  // GitHub only auto-retargets a PR when its base is *deleted* on merge; a merged-but-undeleted
+  // base (typical in a stacked epic) stays the target and reads CLEAN, so nothing else catches it.
+  // Best-effort: a transport hiccup leaves `deadEnd:false`, so this never blocks a valid merge.
+  const guard = await checkBaseTarget(repo, prNumber, token).catch(() => null);
+  if (guard?.deadEnd) {
+    await app.data.table("merges", "id").insert({
+      pr_key: prKey,
+      outcome: "blocked",
+      method: "base-guard",
+      detail: `base '${guard.base}' has already merged into '${guard.defaultBranch}' (dead-end target)`,
+      at: now,
+    });
+    return {
+      mergeStatus: "blocked",
+      status: "blocked",
+      question:
+        `This PR targets '${guard.base}', which has already merged into '${guard.defaultBranch}'. ` +
+        `Merging now would land into a dead-end branch and never reach '${guard.defaultBranch}'. ` +
+        `Retarget it (gh pr edit ${prNumber} --repo ${repo} --base ${guard.defaultBranch}), then reply to retry.`,
+    };
+  }
 
-	// Load the repo protocol for every worker invocation. A retry after fix-ci/rebase is a fresh
-	// landing attempt, so land-method decisions must not be latched across earlier heads.
-	const protocol = await loadMergeProtocol(repo, token).catch(() => null);
-	const method = protocol?.land.method ?? "gh-merge";
+  // Load the repo protocol for every worker invocation. A retry after fix-ci/rebase is a fresh
+  // landing attempt, so land-method decisions must not be latched across earlier heads.
+  const protocol = await loadMergeProtocol(repo, token).catch(() => null);
+  const method = protocol?.land.method ?? "gh-merge";
 
-	let outcome: "merged" | "queued" | "blocked";
-	let detail: string;
-	let auditMethod: string;
+  let outcome: "merged" | "queued" | "blocked";
+  let detail: string;
+  let auditMethod: string;
 
-	if (method === "mergify-queue") {
-		// Land via the repo's on-demand queue: post the enqueue comment; the poller's queued→landed
-		// watch (service.ts block 3) then advances the process when the queue merges it.
-		const comment = protocol?.land.comment ?? "@mergifyio queue";
-		const ok = await enqueueViaComment(repo, prNumber, token, comment);
-		outcome = ok ? "queued" : "blocked";
-		detail = ok
-			? `enqueued via "${comment}"`
-			: `failed to post enqueue comment "${comment}"`;
-		auditMethod = "queue-comment";
-	} else if (method === "ui") {
-		// The repo requires a human to click Merge; Merlin can't. Escalate rather than pretend.
-		outcome = "blocked";
-		detail = "repo merge protocol requires a manual UI merge (land.method=ui)";
-		auditMethod = "ui";
-	} else {
-		const admin = method === "admin" || MERGE_ADMIN;
-		const res = await mergePr(repo, prNumber, token, {
-			method: MERGE_METHOD,
-			admin,
-		});
-		// No usable transport → treat as a block so a human is asked to configure/merge, rather than
-		// silently completing the process without landing the PR.
-		outcome = res?.outcome ?? "blocked";
-		detail =
-			res?.detail ??
-			"no GitHub transport available (configure gh or GITHUB_TOKEN)";
-		auditMethod = outcome === "queued" ? "queue" : MERGE_METHOD;
-	}
+  if (method === "mergify-queue") {
+    // Land via the repo's on-demand queue: post the enqueue comment; the poller's queued→landed
+    // watch (service.ts block 3) then advances the process when the queue merges it.
+    const comment = protocol?.land.comment ?? "@mergifyio queue";
+    const ok = await enqueueViaComment(repo, prNumber, token, comment);
+    outcome = ok ? "queued" : "blocked";
+    detail = ok ? `enqueued via "${comment}"` : `failed to post enqueue comment "${comment}"`;
+    auditMethod = "queue-comment";
+  } else if (method === "ui") {
+    // The repo requires a human to click Merge; Merlin can't. Escalate rather than pretend.
+    outcome = "blocked";
+    detail = "repo merge protocol requires a manual UI merge (land.method=ui)";
+    auditMethod = "ui";
+  } else {
+    const admin = method === "admin" || MERGE_ADMIN;
+    const res = await mergePr(repo, prNumber, token, { method: MERGE_METHOD, admin });
+    // No usable transport → treat as a block so a human is asked to configure/merge, rather than
+    // silently completing the process without landing the PR.
+    outcome = res?.outcome ?? "blocked";
+    detail = res?.detail ?? "no GitHub transport available (configure gh or GITHUB_TOKEN)";
+    auditMethod = outcome === "queued" ? "queue" : MERGE_METHOD;
+  }
 
-	await app.data.table("merges", "id").insert({
-		pr_key: prKey,
-		outcome,
-		method: auditMethod,
-		detail,
-		at: now,
-	});
+  await app.data.table("merges", "id").insert({
+    pr_key: prKey,
+    outcome,
+    method: auditMethod,
+    detail,
+    at: now,
+  });
 
-	if (outcome === "queued") {
-		await app.data.table("pull_requests", "pr_key").update(prKey, {
-			status: "queued",
-			updated_at: now,
-		});
-		return { mergeStatus: "queued" };
-	}
-	if (outcome === "merged") {
-		return { mergeStatus: "merged" };
-	}
-	// blocked → hand the escalation machinery a concrete question.
-	const docHint = protocol?.doc
-		? ` See the repo's merge protocol (${protocol.doc}).`
-		: "";
-	return {
-		mergeStatus: "blocked",
-		status: "blocked",
-		question:
-			`Automated merge was blocked: ${detail}. ` +
-			`Resolve it on GitHub (rebase / fix a required check / grant merge rights), then reply to retry.${docHint}`,
-	};
+  if (outcome === "queued") {
+    await app.data.table("pull_requests", "pr_key").update(prKey, {
+      status: "queued",
+      updated_at: now,
+    });
+    return { mergeStatus: "queued" };
+  }
+  if (outcome === "merged") {
+    return { mergeStatus: "merged" };
+  }
+  // blocked → hand the escalation machinery a concrete question.
+  const docHint = protocol?.doc ? ` See the repo's merge protocol (${protocol.doc}).` : "";
+  return {
+    mergeStatus: "blocked",
+    status: "blocked",
+    question:
+      `Automated merge was blocked: ${detail}. ` +
+      `Resolve it on GitHub (rebase / fix a required check / grant merge rights), then reply to retry.${docHint}`,
+  };
 };
 
 export default handler;

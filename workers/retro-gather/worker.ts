@@ -7,25 +7,22 @@ import type { AppJobHandler } from "@nanobpm/urban";
 import { gatherRetro, renderRetroBrief } from "../../app/retro.ts";
 
 interface In extends Record<string, unknown> {
-	planKey: string;
+  planKey: string;
 }
 
 interface Out extends Record<string, unknown> {
-	retroDigest: string;
-	retroLearnings: number;
+  retroDigest: string;
+  retroLearnings: number;
 }
 
 const handler: AppJobHandler<In, Out> = async (job, app) => {
-	const planKey = job.variables.planKey;
-	const digest = await gatherRetro(app.data, planKey);
-	app.log(
-		"info",
-		`retro-gather: ${planKey} — ${digest.counts.learnings} learnings, ${digest.counts.deltas} deltas`,
-	);
-	return {
-		retroDigest: renderRetroBrief(digest),
-		retroLearnings: digest.counts.learnings,
-	};
+  const planKey = job.variables.planKey;
+  const digest = await gatherRetro(app.data, planKey);
+  app.log("info", `retro-gather: ${planKey} — ${digest.counts.learnings} learnings, ${digest.counts.deltas} deltas`);
+  return {
+    retroDigest: renderRetroBrief(digest),
+    retroLearnings: digest.counts.learnings,
+  };
 };
 
 export default handler;

@@ -21,96 +21,83 @@ import type { DataLayer } from "@nanobpm/urban";
 
 const now = () => new Date().toISOString();
 
-export const BLACKBOARD_KINDS = [
-	"file-claim",
-	"constraint-change",
-	"scope-change",
-	"learning",
-	"note",
-] as const;
+export const BLACKBOARD_KINDS = ["file-claim", "constraint-change", "scope-change", "learning", "note"] as const;
 export type BlackboardKind = (typeof BLACKBOARD_KINDS)[number];
 
 /** The stored row shape (files is a JSON-encoded string of paths, or NULL). */
 export interface BlackboardRow {
-	id: number;
-	plan_key: string;
-	author_task: string;
-	kind: string;
-	files: string | null;
-	body: string;
-	wave: number | null;
-	dedupe_key: string | null;
-	created_at: string;
+  id: number;
+  plan_key: string;
+  author_task: string;
+  kind: string;
+  files: string | null;
+  body: string;
+  wave: number | null;
+  dedupe_key: string | null;
+  created_at: string;
 }
 
 /** The parsed, agent-facing view of an entry (files decoded to an array). */
 export interface BlackboardEntry {
-	id: number;
-	author_task: string;
-	kind: string;
-	files: string[];
-	body: string;
-	wave: number | null;
-	created_at: string;
+  id: number;
+  author_task: string;
+  kind: string;
+  files: string[];
+  body: string;
+  wave: number | null;
+  created_at: string;
 }
 
 /** What a writer supplies to {@link appendEntry}. `files`/`wave`/`dedupe_key` are optional. */
 export interface BlackboardInput {
-	author_task?: string;
-	kind?: unknown;
-	files?: string[];
-	body: string;
-	wave?: number | null;
-	dedupe_key?: string;
+  author_task?: string;
+  kind?: unknown;
+  files?: string[];
+  body: string;
+  wave?: number | null;
+  dedupe_key?: string;
 }
 
 const KIND_SET = new Set<string>(BLACKBOARD_KINDS);
 
 /** Coerce an arbitrary `kind` to a known value, defaulting to "note" for anything unrecognised. */
 export function normalizeKind(kind: unknown): BlackboardKind {
-	return typeof kind === "string" && KIND_SET.has(kind)
-		? // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
-			(kind as BlackboardKind)
-		: "note";
+  // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+  return typeof kind === "string" && KIND_SET.has(kind) ? (kind as BlackboardKind) : "note";
 }
 
 /** A URL-safe, unguessable capability token (192 bits of randomness, base64url, no padding). */
 export function mintBlackboardToken(): string {
-	const bytes = new Uint8Array(24);
-	crypto.getRandomValues(bytes);
-	let bin = "";
-	for (const b of bytes) bin += String.fromCharCode(b);
-	return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  const bytes = new Uint8Array(24);
+  crypto.getRandomValues(bytes);
+  let bin = "";
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
 /** The externally-reachable base URL agents use to reach this app. Must resolve from WHEREVER the
  * agent runs (co-located or remote/containerised), so it is configured, never hardcoded. */
-export function publicBaseUrl(
-	env: string | undefined = process.env.NANO_PR_PUBLIC_BASE_URL,
-): string {
-	// Cascade through the fallback chain, skipping any value that is unset OR blank/whitespace, so an
-	// explicitly-set-but-empty NANO_PR_PUBLIC_BASE_URL can't yield a malformed capability URL.
-	// biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
-	const base = [env, process.env.NANO_PR_BASE_URL, "http://localhost:3000"]
-		.map((v) => v?.trim())
-		.find((v) => v) as string;
-	return base.replace(/\/+$/, "");
+export function publicBaseUrl(env: string | undefined = process.env.NANO_PR_PUBLIC_BASE_URL): string {
+  // Cascade through the fallback chain, skipping any value that is unset OR blank/whitespace, so an
+  // explicitly-set-but-empty NANO_PR_PUBLIC_BASE_URL can't yield a malformed capability URL.
+  // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+  const base = [env, process.env.NANO_PR_BASE_URL, "http://localhost:3000"]
+    .map((v) => v?.trim())
+    .find((v) => v) as string;
+  return base.replace(/\/+$/, "");
 }
 
 /** The capability URL for a plan's blackboard: the token rides the query string, so the agent can
  * GET/POST the exact string it was handed with no header assembly. */
-export function blackboardUrl(
-	token: string,
-	base: string = publicBaseUrl(),
-): string {
-	return `${base}/hooks/blackboard?token=${encodeURIComponent(token)}`;
+export function blackboardUrl(token: string, base: string = publicBaseUrl()): string {
+  return `${base}/hooks/blackboard?token=${encodeURIComponent(token)}`;
 }
 
 /** The coordination-protocol block appended (verbatim, via `appendPrompt`) to each implementer
  * agent's prompt. `appendPrompt` injects NO separator, so this owns its own leading rule. It
  * carries the concrete, curl-able URL for THIS plan plus the read/write contract. */
 export function renderCoordinationBrief(url: string): string {
-	return `
+  return `
 
 ---
 
@@ -173,51 +160,37 @@ coordinate, or if it genuinely blocks you, escalate a \`question\` per your norm
 here is a hard lock; the merge step is the real safety net.`;
 }
 
-const blackboardTable = (data: DataLayer) =>
-	data.table<BlackboardRow>("plan_blackboard", "id");
+const blackboardTable = (data: DataLayer) => data.table<BlackboardRow>("plan_blackboard", "id");
 
 /** Resolve a capability token back to its plan, or undefined when the token is unknown. */
-export async function planKeyForToken(
-	data: DataLayer,
-	token: string,
-): Promise<string | undefined> {
-	if (!token) return undefined;
-	const row = await data
-		.table<{ plan_key: string; blackboard_token: string | null }>(
-			"plans",
-			"plan_key",
-		)
-		.findOne({ blackboard_token: token });
-	return row?.plan_key;
+export async function planKeyForToken(data: DataLayer, token: string): Promise<string | undefined> {
+  if (!token) return undefined;
+  const row = await data
+    .table<{ plan_key: string; blackboard_token: string | null }>("plans", "plan_key")
+    .findOne({ blackboard_token: token });
+  return row?.plan_key;
 }
 
 function decodeFiles(raw: string | null): string[] {
-	if (!raw) return [];
-	try {
-		const v = JSON.parse(raw);
-		return Array.isArray(v)
-			? v
-					.map(String)
-					.map((s) => s.trim())
-					.filter((s) => s !== "")
-			: [];
-	} catch {
-		return [];
-	}
+  if (!raw) return [];
+  try {
+    const v = JSON.parse(raw);
+    return Array.isArray(v) ? v.map(String).map((s) => s.trim()).filter((s) => s !== "") : [];
+  } catch {
+    return [];
+  }
 }
 
 function toEntry(r: BlackboardRow): BlackboardEntry {
-	return {
-		id: r.id,
-		author_task: r.author_task,
-		kind: r.kind,
-		files: decodeFiles(r.files)
-			.map((x) => x.trim())
-			.filter((x) => x !== ""),
-		body: r.body,
-		wave: r.wave,
-		created_at: r.created_at,
-	};
+  return {
+    id: r.id,
+    author_task: r.author_task,
+    kind: r.kind,
+    files: decodeFiles(r.files).map((x) => x.trim()).filter((x) => x !== ""),
+    body: r.body,
+    wave: r.wave,
+    created_at: r.created_at,
+  };
 }
 
 /** One incremental read: the entries after `since` (write order) plus `cursor` — the plan's current
@@ -225,32 +198,32 @@ function toEntry(r: BlackboardRow): BlackboardEntry {
  * only what siblings added since its last read. `cursor` is the true head even when `since` filters
  * every entry out, so a caller that is fully caught up learns it is caught up (cursor unchanged). */
 export interface BlackboardPage {
-	entries: BlackboardEntry[];
-	cursor: number;
+  entries: BlackboardEntry[];
+  cursor: number;
 }
 
 export async function readBlackboardPage(
-	data: DataLayer,
-	planKey: string,
-	opts: { since?: number } = {},
+  data: DataLayer,
+  planKey: string,
+  opts: { since?: number } = {},
 ): Promise<BlackboardPage> {
-	const rows = await blackboardTable(data).find({ plan_key: planKey });
-	const cursor = rows.reduce((max, r) => (r.id > max ? r.id : max), 0);
-	const since = opts.since ?? 0;
-	const entries = rows
-		.filter((r) => r.id > since)
-		.sort((a, b) => a.id - b.id)
-		.map(toEntry);
-	return { entries, cursor };
+  const rows = await blackboardTable(data).find({ plan_key: planKey });
+  const cursor = rows.reduce((max, r) => (r.id > max ? r.id : max), 0);
+  const since = opts.since ?? 0;
+  const entries = rows
+    .filter((r) => r.id > since)
+    .sort((a, b) => a.id - b.id)
+    .map(toEntry);
+  return { entries, cursor };
 }
 
 /** A plan's entries in write order (id asc). `since` returns only entries with `id > since`. */
 export async function readBlackboard(
-	data: DataLayer,
-	planKey: string,
-	opts: { since?: number } = {},
+  data: DataLayer,
+  planKey: string,
+  opts: { since?: number } = {},
 ): Promise<BlackboardEntry[]> {
-	return (await readBlackboardPage(data, planKey, opts)).entries;
+  return (await readBlackboardPage(data, planKey, opts)).entries;
 }
 
 /** An advisory conflict-of-intent: a sibling has already claimed a file this writer is about to
@@ -258,11 +231,11 @@ export async function readBlackboard(
  * First-writer-wins is advisory only — the blackboard NEVER locks; merge-time gates are the real
  * safety net. */
 export interface ClaimConflict {
-	file: string;
-	author_task: string;
-	id: number;
-	body: string;
-	created_at: string;
+  file: string;
+  author_task: string;
+  id: number;
+  body: string;
+  created_at: string;
 }
 
 /** Prior `file-claim` entries by OTHER authors on this plan that overlap `files`. Used by the
@@ -273,85 +246,67 @@ export interface ClaimConflict {
  * is still surfaced (its row exists by the time we read) without ever matching our own just-written
  * row. */
 export async function detectFileClaimConflicts(
-	data: DataLayer,
-	planKey: string,
-	opts: { author_task?: string; files: string[]; beforeId?: number },
+  data: DataLayer,
+  planKey: string,
+  opts: { author_task?: string; files: string[]; beforeId?: number },
 ): Promise<ClaimConflict[]> {
-	const want = new Set(
-		(opts.files ?? []).map((f) => String(f).trim()).filter((s) => s !== ""),
-	);
-	if (want.size === 0) return [];
-	const me = opts.author_task?.trim() || "";
-	const beforeId = opts.beforeId;
-	const rows = await blackboardTable(data).find({
-		plan_key: planKey,
-		kind: "file-claim",
-	});
-	const out: ClaimConflict[] = [];
-	for (const r of rows.slice().sort((a, b) => a.id - b.id)) {
-		if (beforeId != null && r.id >= beforeId) continue;
-		if ((r.author_task || "") === me) continue;
-		for (const f of new Set(
-			decodeFiles(r.files)
-				.map((x) => x.trim())
-				.filter((x) => x !== ""),
-		)) {
-			if (want.has(f)) {
-				out.push({
-					file: f,
-					author_task: r.author_task,
-					id: r.id,
-					body: r.body,
-					created_at: r.created_at,
-				});
-			}
-		}
-	}
-	return out;
+  const want = new Set((opts.files ?? []).map((f) => String(f).trim()).filter((s) => s !== ""));
+  if (want.size === 0) return [];
+  const me = opts.author_task?.trim() || "";
+  const beforeId = opts.beforeId;
+  const rows = await blackboardTable(data).find({ plan_key: planKey, kind: "file-claim" });
+  const out: ClaimConflict[] = [];
+  for (const r of rows.slice().sort((a, b) => a.id - b.id)) {
+    if (beforeId != null && r.id >= beforeId) continue;
+    if ((r.author_task || "") === me) continue;
+    for (const f of new Set(decodeFiles(r.files).map((x) => x.trim()).filter((x) => x !== ""))) {
+      if (want.has(f)) {
+        out.push({ file: f, author_task: r.author_task, id: r.id, body: r.body, created_at: r.created_at });
+      }
+    }
+  }
+  return out;
 }
 
 /** Append an entry, idempotently. A blank `body` is rejected. When a `dedupe_key` is supplied and
  * an entry already exists for it on this plan, the write is a no-op and the existing id is
  * returned (`inserted: false`) — so an engine job retry re-POSTing the same fact never duplicates. */
 export async function appendEntry(
-	data: DataLayer,
-	planKey: string,
-	input: BlackboardInput,
+  data: DataLayer,
+  planKey: string,
+  input: BlackboardInput,
 ): Promise<{ inserted: boolean; id: number | bigint }> {
-	const body = typeof input.body === "string" ? input.body.trim() : "";
-	if (!body) throw new Error("blackboard entry requires a non-empty body");
-	const table = blackboardTable(data);
-	const dedupe_key = input.dedupe_key?.trim() || undefined;
-	if (dedupe_key) {
-		const existing = await table.findOne({ plan_key: planKey, dedupe_key });
-		if (existing) return { inserted: false, id: existing.id };
-	}
-	const files = (input.files ?? [])
-		.map(String)
-		.map((s) => s.trim())
-		.filter((s) => s !== "");
-	try {
-		const id = await table.insert({
-			plan_key: planKey,
-			author_task: input.author_task?.trim() || "system",
-			kind: normalizeKind(input.kind),
-			files: files.length ? JSON.stringify(files) : null,
-			body,
-			wave: typeof input.wave === "number" ? input.wave : null,
-			dedupe_key: dedupe_key ?? null,
-			created_at: now(),
-		});
-		return { inserted: true, id };
-	} catch (err) {
-		// Idempotent write-back under concurrency: two POSTs sharing a dedupe_key can both miss the
-		// findOne pre-check above, then one loses the race on the UNIQUE (plan_key, dedupe_key) index.
-		// Convert that collision into a no-op by re-reading the winner's row, so a retry never 500s.
-		if (dedupe_key && isUniqueViolation(err)) {
-			const existing = await table.findOne({ plan_key: planKey, dedupe_key });
-			if (existing) return { inserted: false, id: existing.id };
-		}
-		throw err;
-	}
+  const body = typeof input.body === "string" ? input.body.trim() : "";
+  if (!body) throw new Error("blackboard entry requires a non-empty body");
+  const table = blackboardTable(data);
+  const dedupe_key = input.dedupe_key?.trim() || undefined;
+  if (dedupe_key) {
+    const existing = await table.findOne({ plan_key: planKey, dedupe_key });
+    if (existing) return { inserted: false, id: existing.id };
+  }
+  const files = (input.files ?? []).map(String).map((s) => s.trim()).filter((s) => s !== "");
+  try {
+    const id = await table.insert({
+      plan_key: planKey,
+      author_task: input.author_task?.trim() || "system",
+      kind: normalizeKind(input.kind),
+      files: files.length ? JSON.stringify(files) : null,
+      body,
+      wave: typeof input.wave === "number" ? input.wave : null,
+      dedupe_key: dedupe_key ?? null,
+      created_at: now(),
+    });
+    return { inserted: true, id };
+  } catch (err) {
+    // Idempotent write-back under concurrency: two POSTs sharing a dedupe_key can both miss the
+    // findOne pre-check above, then one loses the race on the UNIQUE (plan_key, dedupe_key) index.
+    // Convert that collision into a no-op by re-reading the winner's row, so a retry never 500s.
+    if (dedupe_key && isUniqueViolation(err)) {
+      const existing = await table.findOne({ plan_key: planKey, dedupe_key });
+      if (existing) return { inserted: false, id: existing.id };
+    }
+    throw err;
+  }
 }
 
 /** True only for a UNIQUE / PRIMARY-KEY / duplicate violation — never a foreign-key or other
@@ -359,18 +314,12 @@ export async function appendEntry(
  * words) rather than the bare word "constraint", so a `FOREIGN KEY constraint failed` (real data
  * corruption, not a benign duplicate) is always rethrown rather than silently swallowed. */
 export function isUniqueViolation(err: unknown): boolean {
-	if (!err || typeof err !== "object") return false;
-	// biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
-	const code = (err as { code?: unknown }).code;
-	if (
-		code === "SQLITE_CONSTRAINT_UNIQUE" ||
-		code === "SQLITE_CONSTRAINT_PRIMARYKEY"
-	)
-		return true;
-	// biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
-	const message = (err as { message?: unknown }).message;
-	return (
-		typeof message === "string" &&
-		/(unique|primary key) constraint failed|duplicate/i.test(message)
-	);
+  if (!err || typeof err !== "object") return false;
+  // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+  const code = (err as { code?: unknown }).code;
+  if (code === "SQLITE_CONSTRAINT_UNIQUE" || code === "SQLITE_CONSTRAINT_PRIMARYKEY") return true;
+  // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+  const message = (err as { message?: unknown }).message;
+  return typeof message === "string" &&
+    /(unique|primary key) constraint failed|duplicate/i.test(message);
 }

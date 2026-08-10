@@ -6,6 +6,7 @@
 // biome-ignore-all lint/correctness/noUnusedFunctionParameters: test doubles preserve framework callback shapes.
 // biome-ignore-all lint/correctness/noUnusedVariables: tests keep named captures for readability.
 // biome-ignore-all lint/complexity/useOptionalChain: tests keep explicit assertions for fixture state.
+// biome-ignore-all assist/source/organizeImports: tests keep imports grouped by fixture role.
 // Guard for the `instanceTracking` manifest bindings (nano.app.json). The reconciler flips a row
 // whose engine instance is TERMINATED only when the row is in one of `activeStatuses`. A status
 // that is genuinely in-flight but missing from that list would leave an operator-terminated (or
@@ -13,37 +14,35 @@
 // manifest to the code's single source of truth for "done" (TERMINAL_STATUSES / PLAN_TERMINAL_
 // STATUSES) so the two can't diverge silently.
 import { assert, assertEquals } from "jsr:@std/assert@1";
-import { PLAN_TERMINAL_STATUSES } from "./plan.ts";
 import { TERMINAL_STATUSES } from "./service.ts";
+import { PLAN_TERMINAL_STATUSES } from "./plan.ts";
 
 interface Binding {
-	table: string;
-	statusField?: string;
-	activeStatuses?: string[];
-	onTerminated: { set: Record<string, unknown> };
+  table: string;
+  statusField?: string;
+  activeStatuses?: string[];
+  onTerminated: { set: Record<string, unknown> };
 }
 
 async function bindings(): Promise<Binding[]> {
-	const manifest = JSON.parse(
-		await Deno.readTextFile(new URL("../nano.app.json", import.meta.url)),
-	);
-	return manifest.instanceTracking as Binding[];
+  const manifest = JSON.parse(await Deno.readTextFile(new URL("../nano.app.json", import.meta.url)));
+  return manifest.instanceTracking as Binding[];
 }
 
 function bindingFor(all: Binding[], table: string): Binding {
-	const b = all.find((x) => x.table === table);
-	assert(b, `no instanceTracking binding for ${table}`);
-	return b;
+  const b = all.find((x) => x.table === table);
+  assert(b, `no instanceTracking binding for ${table}`);
+  return b;
 }
 
 Deno.test("instanceTracking: pull_requests activeStatuses excludes every terminal status", async () => {
-	const b = bindingFor(await bindings(), "pull_requests");
-	for (const terminal of TERMINAL_STATUSES) {
-		assert(
-			!b.activeStatuses?.includes(terminal),
-			`terminal status "${terminal}" must not be listed active (it would let the reconciler clobber a settled row)`,
-		);
-	}
+  const b = bindingFor(await bindings(), "pull_requests");
+  for (const terminal of TERMINAL_STATUSES) {
+    assert(
+      !b.activeStatuses?.includes(terminal),
+      `terminal status "${terminal}" must not be listed active (it would let the reconciler clobber a settled row)`,
+    );
+  }
 });
 
 // Every in-flight status the merge train keys off must be reconcilable. These are the states a
@@ -51,39 +50,33 @@ Deno.test("instanceTracking: pull_requests activeStatuses excludes every termina
 // poller: converging/waiting_review/escalated + the merge-stage waiting_deps/waiting_merge/
 // waiting_lane/queued/merging). If a new one is added to the flow, add it here AND to the manifest.
 Deno.test("instanceTracking: pull_requests activeStatuses covers every in-flight status", async () => {
-	const inFlight = [
-		"converging",
-		"waiting_review",
-		"escalated",
-		"waiting_deps",
-		"waiting_merge",
-		"waiting_lane",
-		"queued",
-		"merging",
-	];
-	const b = bindingFor(await bindings(), "pull_requests");
-	for (const s of inFlight) {
-		assert(
-			b.activeStatuses?.includes(s),
-			`in-flight status "${s}" missing from activeStatuses`,
-		);
-	}
-	// No terminal status leaks into the in-flight universe we assert on.
-	for (const s of inFlight) assert(!TERMINAL_STATUSES.includes(s));
+  const inFlight = [
+    "converging",
+    "waiting_review",
+    "escalated",
+    "waiting_deps",
+    "waiting_merge",
+    "waiting_lane",
+    "queued",
+    "merging",
+  ];
+  const b = bindingFor(await bindings(), "pull_requests");
+  for (const s of inFlight) {
+    assert(b.activeStatuses?.includes(s), `in-flight status "${s}" missing from activeStatuses`);
+  }
+  // No terminal status leaks into the in-flight universe we assert on.
+  for (const s of inFlight) assert(!TERMINAL_STATUSES.includes(s));
 });
 
 Deno.test("instanceTracking: plans activeStatuses excludes every terminal status", async () => {
-	const b = bindingFor(await bindings(), "plans");
-	for (const terminal of PLAN_TERMINAL_STATUSES) {
-		assert(
-			!b.activeStatuses?.includes(terminal),
-			`terminal status "${terminal}" must not be active`,
-		);
-	}
+  const b = bindingFor(await bindings(), "plans");
+  for (const terminal of PLAN_TERMINAL_STATUSES) {
+    assert(!b.activeStatuses?.includes(terminal), `terminal status "${terminal}" must not be active`);
+  }
 });
 
 Deno.test("instanceTracking: plans activeStatuses covers every in-flight status", async () => {
-	const inFlight = ["planning", "dispatched"];
-	const b = bindingFor(await bindings(), "plans");
-	assertEquals([...(b.activeStatuses ?? [])].sort(), [...inFlight].sort());
+  const inFlight = ["planning", "dispatched"];
+  const b = bindingFor(await bindings(), "plans");
+  assertEquals([...(b.activeStatuses ?? [])].sort(), [...inFlight].sort());
 });
