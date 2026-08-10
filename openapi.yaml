@@ -15,9 +15,9 @@ info:
     each `operationId` is implemented by a delegate module in `operations/`. Mounted under base
     `/app/api`, kept off the framework-reserved `/app` page-runtime namespace (which owns
     `/app/runtime.js`, `/app/pages/*`, `/app/data/*`). The webhook endpoints are ordinary operations
-    too (ADR 0059 — the `actions[]` array is retired): the shared-secret ones under `/hooks/*` and
-    the capability-token side-channels (`/hooks/blackboard`, `/hooks/abandon`) all live at
-    `/app/api/hooks/*` and enforce their credential in the delegate."
+    too (ADR 0059 — the `actions[]` array is retired): their `/hooks/*` paths in this document are
+    relative to the `/app/api` base, so they are served at `/app/api/hooks/*`. Shared-secret and
+    capability-token side-channels enforce their credential in the delegate."
 components:
   securitySchemes:
     hookSecret:
