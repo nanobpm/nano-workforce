@@ -172,9 +172,12 @@ whichever PRs/tasks are ready — that is the idle time you reclaim. Run more th
 job per worker with `--max-parallel 2`. The app-hosted `pr.*` workers (record-plan,
 select-wave, finalize, merge, …) run **inside** the app, not on an agent worker.
 
-Already have a narrower worker? Extend it in place instead of re-hiring — `c8ctl nano
-assign <name> plan plan-review feature trial-merge fix-ci rebase retro` unions the
-roles onto the profile, then restart its worker.
+Already have a narrower worker? Extend it in place instead of re-hiring — this unions
+the roles onto the profile, then restart its worker:
+
+```sh
+c8ctl nano assign <name> plan plan-review feature trial-merge fix-ci rebase retro
+```
 
 ---
 
