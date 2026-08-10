@@ -1,12 +1,3 @@
-// biome-ignore-all lint/suspicious/noExplicitAny: existing tests use intentionally partial Urban test doubles.
-// biome-ignore-all lint/plugin: existing tests use framework-boundary type assertions.
-// biome-ignore-all lint/suspicious/noAssignInExpressions: tests use compact in-memory store helpers.
-// biome-ignore-all lint/style/noNonNullAssertion: tests assert known fixture state.
-// biome-ignore-all lint/complexity/useLiteralKeys: tests use string keys to mirror persisted field names.
-// biome-ignore-all lint/correctness/noUnusedFunctionParameters: test doubles preserve framework callback shapes.
-// biome-ignore-all lint/correctness/noUnusedVariables: tests keep named captures for readability.
-// biome-ignore-all lint/complexity/useOptionalChain: tests keep explicit assertions for fixture state.
-// biome-ignore-all assist/source/organizeImports: tests keep imports grouped by fixture role.
 // Unit tests for `fetchPrFiles` token-transport paging (issue #58): the D2 conflict-scan must get
 // a COMPLETE file list or a thrown error — never a silently truncated one that under-approximates
 // the merge-exclusion graph. Force the token transport and stub `globalThis.fetch`.
@@ -16,8 +7,7 @@ import { fetchPrFiles } from "./github.ts";
 // A fake `fetch` that serves `pages` of file batches; each page N (1-based) returns `pages[N-1]`
 // files (named `f{index}`), setting a `Link: rel="next"` header whenever a later page exists.
 function stubFetch(pages: number[]) {
-  const total = pages.reduce((a, b) => a + b, 0);
-  return (url: string | URL | Request): Promise<Response> => {
+  return (url: string | URL | Request, _init?: RequestInit): Promise<Response> => {
     const u = new URL(String(url));
     const page = Number(u.searchParams.get("page") ?? "1");
     const count = pages[page - 1] ?? 0;
@@ -37,7 +27,7 @@ async function withTokenTransport<T>(pages: number[], fn: () => Promise<T>): Pro
   const prevMode = Deno.env.get("NANO_PR_GITHUB_TRANSPORT");
   const prevFetch = globalThis.fetch;
   Deno.env.set("NANO_PR_GITHUB_TRANSPORT", "token");
-  globalThis.fetch = stubFetch(pages) as typeof fetch;
+  globalThis.fetch = stubFetch(pages);
   try {
     return await fn();
   } finally {

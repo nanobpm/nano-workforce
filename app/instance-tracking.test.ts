@@ -1,12 +1,3 @@
-// biome-ignore-all lint/suspicious/noExplicitAny: existing tests use intentionally partial Urban test doubles.
-// biome-ignore-all lint/plugin: existing tests use framework-boundary type assertions.
-// biome-ignore-all lint/suspicious/noAssignInExpressions: tests use compact in-memory store helpers.
-// biome-ignore-all lint/style/noNonNullAssertion: tests assert known fixture state.
-// biome-ignore-all lint/complexity/useLiteralKeys: tests use string keys to mirror persisted field names.
-// biome-ignore-all lint/correctness/noUnusedFunctionParameters: test doubles preserve framework callback shapes.
-// biome-ignore-all lint/correctness/noUnusedVariables: tests keep named captures for readability.
-// biome-ignore-all lint/complexity/useOptionalChain: tests keep explicit assertions for fixture state.
-// biome-ignore-all assist/source/organizeImports: tests keep imports grouped by fixture role.
 // Guard for the `instanceTracking` manifest bindings (nano.app.json). The reconciler flips a row
 // whose engine instance is TERMINATED only when the row is in one of `activeStatuses`. A status
 // that is genuinely in-flight but missing from that list would leave an operator-terminated (or
@@ -14,8 +5,9 @@
 // manifest to the code's single source of truth for "done" (TERMINAL_STATUSES / PLAN_TERMINAL_
 // STATUSES) so the two can't diverge silently.
 import { assert, assertEquals } from "jsr:@std/assert@1";
-import { TERMINAL_STATUSES } from "./service.ts";
 import { PLAN_TERMINAL_STATUSES } from "./plan.ts";
+import { TERMINAL_STATUSES } from "./service.ts";
+import { testBoundary } from "./test-support.ts";
 
 interface Binding {
   table: string;
@@ -26,7 +18,7 @@ interface Binding {
 
 async function bindings(): Promise<Binding[]> {
   const manifest = JSON.parse(await Deno.readTextFile(new URL("../nano.app.json", import.meta.url)));
-  return manifest.instanceTracking as Binding[];
+  return testBoundary<{ instanceTracking: Binding[] }>(manifest).instanceTracking;
 }
 
 function bindingFor(all: Binding[], table: string): Binding {

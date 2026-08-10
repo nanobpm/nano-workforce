@@ -1,12 +1,3 @@
-// biome-ignore-all lint/suspicious/noExplicitAny: existing tests use intentionally partial Urban test doubles.
-// biome-ignore-all lint/plugin: existing tests use framework-boundary type assertions.
-// biome-ignore-all lint/suspicious/noAssignInExpressions: tests use compact in-memory store helpers.
-// biome-ignore-all lint/style/noNonNullAssertion: tests assert known fixture state.
-// biome-ignore-all lint/complexity/useLiteralKeys: tests use string keys to mirror persisted field names.
-// biome-ignore-all lint/correctness/noUnusedFunctionParameters: test doubles preserve framework callback shapes.
-// biome-ignore-all lint/correctness/noUnusedVariables: tests keep named captures for readability.
-// biome-ignore-all lint/complexity/useOptionalChain: tests keep explicit assertions for fixture state.
-// biome-ignore-all assist/source/organizeImports: tests keep imports grouped by fixture role.
 // Red/green regression for the plan levelizer (issue #20). Run with `deno test`.
 //
 // One `Deno.test` = one named property of computeWaves. These encode the wave
@@ -14,6 +5,7 @@
 // (all-sequential), a diamond re-converges, and a malformed graph is rejected
 // rather than silently mis-levelized.
 import { assertEquals, assertThrows } from "jsr:@std/assert@1";
+import { testBoundary } from "./test-support.ts";
 import { computeWaves, WaveError, type WaveGateTask, type WaveTask, waveMergeTargets } from "./waves.ts";
 
 Deno.test("no dependencies → every task in wave 0 (fully parallel)", () => {
@@ -31,7 +23,7 @@ Deno.test("linear chain → one task per wave (fully sequential)", () => {
   ];
   const { waves, waveCount, waveOf } = computeWaves(tasks);
   assertEquals(waveCount, 3);
-  assertEquals(waves, [["a"], ["b"], ["c"]]);
+  assertEquals(testBoundary(waves), [["a"], ["b"], ["c"]]);
   assertEquals([waveOf.get("a"), waveOf.get("b"), waveOf.get("c")], [0, 1, 2]);
 });
 
@@ -44,7 +36,7 @@ Deno.test("diamond → longest-path level; join waits for both arms", () => {
   ];
   const { waves, waveCount } = computeWaves(tasks);
   assertEquals(waveCount, 3);
-  assertEquals(waves, [["a"], ["b", "c"], ["d"]]);
+  assertEquals(testBoundary(waves), [["a"], ["b", "c"], ["d"]]);
 });
 
 Deno.test("mixed graph → level is 1 + max(dep level), not 1 + min", () => {
@@ -71,7 +63,7 @@ Deno.test("blank / whitespace dependsOn entries are ignored", () => {
   const tasks: WaveTask[] = [{ id: "a", dependsOn: ["", "  "] }];
   const { waves, waveCount } = computeWaves(tasks);
   assertEquals(waveCount, 1);
-  assertEquals(waves, [["a"]]);
+  assertEquals(testBoundary(waves), [["a"]]);
 });
 
 Deno.test("dependency cycle → WaveError", () => {

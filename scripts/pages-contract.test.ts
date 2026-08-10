@@ -1,12 +1,3 @@
-// biome-ignore-all lint/suspicious/noExplicitAny: existing tests use intentionally partial Urban test doubles.
-// biome-ignore-all lint/plugin: existing tests use framework-boundary type assertions.
-// biome-ignore-all lint/suspicious/noAssignInExpressions: tests use compact in-memory store helpers.
-// biome-ignore-all lint/style/noNonNullAssertion: tests assert known fixture state.
-// biome-ignore-all lint/complexity/useLiteralKeys: tests use string keys to mirror persisted field names.
-// biome-ignore-all lint/correctness/noUnusedFunctionParameters: test doubles preserve framework callback shapes.
-// biome-ignore-all lint/correctness/noUnusedVariables: tests keep named captures for readability.
-// biome-ignore-all lint/complexity/useOptionalChain: tests keep explicit assertions for fixture state.
-// biome-ignore-all assist/source/organizeImports: tests keep imports grouped by fixture role.
 // Static contract guard between the declarative pages (`pages/*.page.json`) and the app schema
 // (`db/migrations/*.sql`).
 //
@@ -20,6 +11,7 @@
 // persisted but was surfaced on no page — must appear on the epic page (flat grid) and inside the
 // home page's plan detail (child grid). Feature coverage so the trace can't silently regress out.
 import { assert } from "jsr:@std/assert@1";
+import { testBoundary } from "../app/test-support.ts";
 
 // Percent-decode the pathname: `new URL(..).pathname` can contain encoded characters (e.g. a space
 // as `%20`), which `Deno.readDir`/`readTextFile` would fail to resolve. Matches the repo convention
@@ -35,7 +27,9 @@ function parseSchema(sql: string, schema: Map<string, Set<string>>): void {
   // CREATE TABLE [IF NOT EXISTS] <name> ( <body> )
   const createRe = /CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?["`]?(\w+)["`]?\s*\(/gi;
   let m: RegExpExecArray | null;
-  while ((m = createRe.exec(sql)) !== null) {
+  while (true) {
+    m = createRe.exec(sql);
+    if (m === null) break;
     const table = m[1];
     const body = balancedBody(sql, createRe.lastIndex - 1); // start at the "("
     if (body === null) continue;
@@ -51,7 +45,9 @@ function parseSchema(sql: string, schema: Map<string, Set<string>>): void {
   }
   // ALTER TABLE <name> ADD [COLUMN] <col>
   const alterRe = /ALTER\s+TABLE\s+["`]?(\w+)["`]?\s+ADD\s+(?:COLUMN\s+)?["`]?(\w+)["`]?/gi;
-  while ((m = alterRe.exec(sql)) !== null) {
+  while (true) {
+    m = alterRe.exec(sql);
+    if (m === null) break;
     const cols = schema.get(m[1]) ?? new Set<string>();
     cols.add(m[2]);
     schema.set(m[1], cols);
@@ -103,8 +99,28 @@ async function loadSchema(): Promise<Map<string, Set<string>>> {
 
 // ---- pages -> datasource references -------------------------------------------------------------
 
-// deno-lint-ignore no-explicit-any
-type Json = any;
+interface Json {
+  [key: string]: unknown;
+  field?: string;
+  linkField?: string;
+  parentField?: string;
+  childField?: string;
+  table?: string;
+  source?: string;
+  kind?: string;
+  data?: Json;
+  columns?: Json[];
+  detail?: Json;
+  fields?: Json[];
+  children?: Json[];
+  tabs?: Json[];
+  filter?: Json[];
+  rowKey?: string;
+  orderBy?: Json;
+  lazyField?: Json;
+}
+
+const isString = (value: unknown): value is string => typeof value === "string";
 
 interface Ref {
   page: string;
@@ -117,7 +133,7 @@ interface Ref {
 // Pull `field` names out of a `filter` array ([{ field, in/eq/... }, ...]).
 function filterFields(filter: Json): string[] {
   if (!Array.isArray(filter)) return [];
-  return filter.map((f: Json) => f?.field).filter(Boolean);
+  return filter.map((f: Json) => f?.field).filter(isString);
 }
 
 function collectRefs(page: string, node: Json, out: Ref[]): void {
@@ -131,7 +147,7 @@ function collectRefs(page: string, node: Json, out: Ref[]): void {
   // `filter`/`tabs`, and `detail` are siblings on the same `node` (the grid props).
   const data = node.data;
   if (data && data.kind === "datasource" && typeof data.table === "string") {
-    const columns: string[] = (node.columns ?? []).map((c: Json) => c.field).filter(Boolean);
+    const columns: string[] = (node.columns ?? []).map((c: Json) => c.field).filter(isString);
     // Every reference that resolves to a column on this table — the runtime 400s on any of them if
     // it names a column the migrations never created, so all must be guarded, not just displayed
     // columns. `detail.fields`/`detail.linkField` render columns of the same top-level row.
@@ -148,13 +164,13 @@ function collectRefs(page: string, node: Json, out: Ref[]): void {
       // `detail.children[].parentField` joins each child grid back to a column on THIS (parent)
       // table, so a rename/typo there 400s at request time — guard it against the parent schema.
       ...(detail.children ?? []).map((c: Json) => c.parentField),
-    ].filter(Boolean);
+    ].filter(isString);
     out.push({ page, table: data.table, source: data.source ?? "app", fields, columns });
   }
 
   // Child grid inside a detail: { table, childField, parentField, orderBy, columns }
   if (typeof node.table === "string" && typeof node.childField === "string") {
-    const columns: string[] = (node.columns ?? []).map((c: Json) => c.field).filter(Boolean);
+    const columns: string[] = (node.columns ?? []).map((c: Json) => c.field).filter(isString);
     out.push({
       page,
       table: node.table,
@@ -165,7 +181,7 @@ function collectRefs(page: string, node: Json, out: Ref[]): void {
         node.childField,
         node.orderBy?.field,
         node.lazyField?.field,
-      ].filter(Boolean),
+      ].filter(isString),
       columns,
     });
   }
@@ -178,7 +194,7 @@ async function loadRefs(): Promise<Ref[]> {
   for await (const e of Deno.readDir(`${ROOT}pages`)) {
     if (!e.isFile || !e.name.endsWith(".page.json")) continue;
     const page = JSON.parse(await Deno.readTextFile(`${ROOT}pages/${e.name}`));
-    collectRefs(e.name, page, refs);
+    collectRefs(e.name, testBoundary<Json>(page), refs);
   }
   return refs;
 }
