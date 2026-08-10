@@ -33,7 +33,7 @@
       "props": {
         "title": "Submit a pull request",
         "submitLabel": "Start review",
-        "action": { "kind": "startProcess", "process": "convergence-loop" },
+        "action": { "path": "/app/api/actions/start/convergence-loop" },
         "fields": [
           { "key": "pr", "label": "owner/repo#123 or a GitHub PR URL", "type": "text" },
           { "key": "maxRounds", "label": "Max review rounds (blank = fleet default)", "type": "number" }
@@ -82,7 +82,7 @@
             "label": "Cancel",
             "confirm": "Cancel this PR's review run?",
             "showWhenField": "process_key",
-            "action": { "kind": "cancelProcess", "keyField": "process_key" }
+            "action": { "path": "/app/actions/cancel", "body": { "processInstanceKey": "{{row.process_key}}" } }
           }
         ],
         "detail": {
@@ -149,9 +149,8 @@
             "inputLabel": "Your answer",
             "submitLabel": "Send answer",
             "action": {
-              "kind": "publishMessage",
-              "message": "escalation-answered",
-              "correlationKeyField": "pr_key"
+              "path": "/app/api/actions/message",
+              "body": { "name": "escalation-answered", "correlationKey": "{{row.pr_key}}", "variables": "{{form}}" }
             }
           }
         }
@@ -192,7 +191,7 @@
             "label": "Cancel",
             "confirm": "Cancel this plan's fan-out run?",
             "showWhenField": "process_key",
-            "action": { "kind": "cancelProcess", "keyField": "process_key" }
+            "action": { "path": "/app/actions/cancel", "body": { "processInstanceKey": "{{row.process_key}}" } }
           }
         ],
         "detail": {
@@ -301,9 +300,8 @@
             "inputLabel": "Your answer",
             "submitLabel": "Send answer",
             "action": {
-              "kind": "publishMessage",
-              "message": "feature-escalation-answered",
-              "correlationKeyField": "open_task_corr_key"
+              "path": "/app/api/actions/message",
+              "body": { "name": "feature-escalation-answered", "correlationKey": "{{row.open_task_corr_key}}", "variables": "{{form}}" }
             }
           }
         }
