@@ -2,7 +2,7 @@
 import { assertEquals } from "jsr:@std/assert@1";
 import { type BaseTarget, isDeadEndBase } from "./baseGuard.ts";
 
-const t = (base: string, defaultBranch: string, landed: BaseTarget.landed): BaseTarget => ({
+const t = (base: string, defaultBranch: string, landed: BaseTarget["landed"]): BaseTarget => ({
   base,
   defaultBranch,
   landed,

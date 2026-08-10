@@ -30,9 +30,9 @@ function fakeApp(rows: Row[], deps: DepRow[]) {
             table(name: string, key: string) {
                 const store = name === "plan_tasks" ? rows : deps;
                 return {
-                    find: (q: Record<string, unknown>) => Promise.resolve(store.filter((r) => Object.entries(q).every(([f, v]) => (testBoundary<Record<string, unknown>>((testBoundary<unknown>(r))))[f] === v))),
+                    find: (q: Record<string, unknown>) => Promise.resolve(store.filter((r) => Object.entries(q).every(([f, v]) => (testBoundary<Record<string, unknown>>(r))[f] === v))),
                     update: (k: unknown, patch: Record<string, unknown>) => {
-                        const row = store.find((r) => (testBoundary<Record<string, unknown>>((testBoundary<unknown>(r))))[key] === k);
+                        const row = store.find((r) => (testBoundary<Record<string, unknown>>(r))[key] === k);
                         if (row)
                             Object.assign(row, patch);
                         return Promise.resolve(row);
