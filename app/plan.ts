@@ -267,10 +267,11 @@ export async function startPlan(data: DataLayer, engine: EngineClient, parsed: P
       blackboardBrief: renderCoordinationBrief(bbUrl),
     },
   });
-  if (processInstanceKey != null) {
-    await table.update(parsed.planKey, { process_key: String(processInstanceKey), updated_at: now() });
+  const processKey = processInstanceKey == null ? null : String(processInstanceKey);
+  if (processKey != null) {
+    await table.update(parsed.planKey, { process_key: processKey, updated_at: now() });
   }
-  return { planKey: parsed.planKey, processKey: processInstanceKey };
+  return { planKey: parsed.planKey, processKey };
 }
 
 /** Re-point a plan's denormalised "open task escalation" fields at its OLDEST

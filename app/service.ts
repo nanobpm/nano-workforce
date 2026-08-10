@@ -369,10 +369,11 @@ export async function submitPr(
       abandonBrief: renderAbandonBrief(abUrl),
     },
   });
-  if (processInstanceKey != null) {
-    await table.update(parsed.prKey, { process_key: String(processInstanceKey) });
+  const processKey = processInstanceKey == null ? null : String(processInstanceKey);
+  if (processKey != null) {
+    await table.update(parsed.prKey, { process_key: processKey });
   }
-  return { prKey: parsed.prKey, processKey: processInstanceKey };
+  return { prKey: parsed.prKey, processKey };
 }
 
 /** Start the merge-loop for a converged PR (called by the `pr.finalize` worker when AUTO_MERGE

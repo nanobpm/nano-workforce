@@ -6,7 +6,7 @@
     ]
   },
   "imports": {
-    "@nanobpm/urban": "npm:@nanobpm/urban@^0.31.0"
+    "@nanobpm/urban": "npm:@nanobpm/urban@^0.31.1"
   },
   "tasks": {
     "start": "deno run --allow-net --allow-read --allow-write --allow-run=gh --allow-env main.ts",

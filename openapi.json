@@ -1,0 +1,248 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Nano Workforce control API",
+    "version": "1.0.0",
+    "description": "The externally-facing control surface an operator, an automation harness, or an LLM uses to observe and steer PR-convergence and planning runs. Contract-first (ADR 0058): the toolkit derives typed request/response contracts + runtime validators from this document and each `operationId` is implemented by a delegate module in `operations/`. Mounted under base `/app` so the existing endpoint paths are preserved. The `/hooks/*` webhook endpoints stay on `actions[]` because they live outside the `/app` namespace."
+  },
+  "components": {
+    "securitySchemes": {
+      "hookSecret": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "x-hook-secret",
+        "description": "Optional shared secret. Enforced by the delegate (NOT the runtime) only when NANO_PR_WEBHOOK_SECRET is set; unset means the endpoint is open. Declared here for documentation."
+      }
+    },
+    "schemas": {
+      "ErrorBody": {
+        "type": "object",
+        "required": ["error"],
+        "properties": { "error": { "type": "string" } }
+      },
+      "ActivePr": {
+        "type": "object",
+        "description": "A tracked PR that is not in a terminal (converged/abandoned) state.",
+        "required": [
+          "prKey", "repo", "number", "url", "title", "status", "round",
+          "processKey", "waitingSince", "openEscalation", "updatedAt",
+          "activeWorker", "leaseUntil"
+        ],
+        "properties": {
+          "prKey": { "type": "string" },
+          "repo": { "type": "string" },
+          "number": { "type": "integer" },
+          "url": { "type": "string" },
+          "title": { "type": ["string", "null"] },
+          "status": { "type": "string" },
+          "round": { "type": "integer" },
+          "processKey": { "type": ["string", "null"], "description": "The engine process instance key; also the keyField the pages processExplorer link uses." },
+          "waitingSince": { "type": ["string", "null"] },
+          "openEscalation": { "type": ["string", "null"] },
+          "updatedAt": { "type": "string" },
+          "activeWorker": { "type": ["string", "null"] },
+          "leaseUntil": { "type": ["string", "null"] }
+        }
+      },
+      "ActivePrList": {
+        "type": "object",
+        "required": ["count", "prs"],
+        "properties": {
+          "count": { "type": "integer" },
+          "prs": { "type": "array", "items": { "$ref": "#/components/schemas/ActivePr" } }
+        }
+      },
+      "VersionInfo": {
+        "type": "object",
+        "description": "The running app's identity (which code is actually live).",
+        "required": [
+          "name", "version", "urbanVersion", "gitSha", "gitBranch",
+          "runtime", "pid", "startedAt", "uptimeSeconds"
+        ],
+        "properties": {
+          "name": { "type": "string" },
+          "version": { "type": ["string", "null"] },
+          "urbanVersion": { "type": ["string", "null"] },
+          "gitSha": { "type": ["string", "null"] },
+          "gitBranch": { "type": ["string", "null"] },
+          "runtime": { "type": "string" },
+          "pid": { "type": ["integer", "null"] },
+          "startedAt": { "type": "string" },
+          "uptimeSeconds": { "type": "integer" }
+        }
+      },
+      "SubmitResult": {
+        "type": "object",
+        "required": ["prKey"],
+        "properties": {
+          "prKey": { "type": "string" },
+          "processKey": { "type": ["string", "null"], "description": "The started convergence-loop instance key (null if the engine did not return one)." },
+          "alreadyRunning": { "type": "boolean", "description": "True when a non-terminal convergence loop for this PR already exists; the aggregate was refreshed and no new instance was started." }
+        }
+      },
+      "StartPlanResult": {
+        "type": "object",
+        "required": ["planKey"],
+        "properties": {
+          "planKey": { "type": "string" },
+          "processKey": { "type": ["string", "null"] },
+          "alreadyRunning": { "type": "boolean", "description": "True when a non-terminal plan for this issue already exists; no new instance was started." }
+        }
+      },
+      "StartVariables": {
+        "type": "object",
+        "description": "Process-start variables. `pr`/`url` (convergence) or `issue`/`url` (planning) name the target; extra keys are forwarded to the engine.",
+        "additionalProperties": true,
+        "properties": {
+          "pr": { "type": "string", "description": "PR reference: owner/repo#123 or a PR URL." },
+          "issue": { "type": "string", "description": "Issue reference: owner/repo#123 or an issue URL." },
+          "url": { "type": "string", "description": "Alias for pr/issue when a bare URL is supplied." },
+          "dependsOn": { "type": "array", "items": { "type": "string" } },
+          "maxRounds": { "type": "integer", "minimum": 1 }
+        }
+      },
+      "MessageResult": {
+        "type": "object",
+        "description": "The result of publishing a message / answering an escalation. Shape varies by message name; `ok` is always present.",
+        "additionalProperties": true,
+        "required": ["ok"],
+        "properties": { "ok": { "type": "boolean" } }
+      }
+    }
+  },
+  "paths": {
+    "/status": {
+      "get": {
+        "operationId": "listActivePrs",
+        "summary": "List every tracked PR currently in flight (not converged/abandoned), newest-updated first.",
+        "security": [{ "hookSecret": [] }, {}],
+        "responses": {
+          "200": {
+            "description": "The active PRs.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ActivePrList" } } }
+          },
+          "401": {
+            "description": "Missing/invalid shared secret (only when NANO_PR_WEBHOOK_SECRET is set).",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorBody" } } }
+          }
+        }
+      }
+    },
+    "/version": {
+      "get": {
+        "operationId": "getVersion",
+        "summary": "The running app's identity (app/urban versions, git sha/branch, runtime, pid, uptime).",
+        "security": [{ "hookSecret": [] }, {}],
+        "responses": {
+          "200": {
+            "description": "The version/identity payload.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/VersionInfo" } } }
+          },
+          "401": {
+            "description": "Missing/invalid shared secret (only when NANO_PR_WEBHOOK_SECRET is set).",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorBody" } } }
+          }
+        }
+      }
+    },
+    "/actions/start/convergence-loop": {
+      "post": {
+        "operationId": "startConvergenceLoop",
+        "summary": "Register/refresh a PR aggregate (idempotent on prKey) and start its convergence loop.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "required": ["variables"],
+                "properties": { "variables": { "$ref": "#/components/schemas/StartVariables" } }
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "The loop was started (or refreshed).",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SubmitResult" } } }
+          },
+          "400": {
+            "description": "The PR reference could not be parsed.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorBody" } } }
+          }
+        }
+      }
+    },
+    "/actions/start/plan-fanout": {
+      "post": {
+        "operationId": "startPlanFanout",
+        "summary": "Register/refresh a plan aggregate (idempotent on planKey) and start the planning fan-out.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "required": ["variables"],
+                "properties": { "variables": { "$ref": "#/components/schemas/StartVariables" } }
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "The plan fan-out was started (or was already running).",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/StartPlanResult" } } }
+          },
+          "400": {
+            "description": "The issue reference could not be parsed.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorBody" } } }
+          }
+        }
+      }
+    },
+    "/actions/message": {
+      "post": {
+        "operationId": "postMessage",
+        "summary": "Publish a message / answer an escalation. For escalation-answered and feature-escalation-answered names, runs the corresponding answer flow; otherwise a plain publishMessage.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "required": ["name"],
+                "properties": {
+                  "name": { "type": "string", "description": "The message name (correlates a waiting event)." },
+                  "correlationKey": { "type": "string" },
+                  "variables": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "properties": { "answer": { "type": "string" } }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The message was published (or the escalation answered).",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/MessageResult" } } }
+          },
+          "400": {
+            "description": "A required field was missing/blank.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorBody" } } }
+          },
+          "404": {
+            "description": "No matching open escalation / parked token to answer.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/MessageResult" } } }
+          }
+        }
+      }
+    }
+  }
+}
