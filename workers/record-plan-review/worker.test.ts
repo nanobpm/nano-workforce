@@ -5,7 +5,8 @@
 // plan was empty (e.g. the planner agent couldn't persist its result) — completed the whole epic
 // GREEN having done nothing (instance 21). We now HARD-FAIL: the terminal, unapproved round raises
 // a non-retryable `PLAN_REJECTED` BpmnError (→ incident), so an un-approved plan never dispatches.
-import { assertEquals, assertRejects } from "jsr:@std/assert@1";
+import { test } from "node:test";
+import { assertEquals, assertRejects } from "#test-assert";
 import { BpmnError } from "@nanobpm/urban";
 import handler from "./worker.ts";
 import { MAX_PLAN_REVIEW_ROUNDS, type PlanReview } from "../../app/plan.ts";
@@ -18,9 +19,7 @@ function fakeApp(existing: PlanReview[] = []) {
     data: {
       table() {
         return {
-          // deno-lint-ignore no-explicit-any
           findOne: (q: any) => Promise.resolve(rows.find((r) => match(r, q)) ?? null),
-          // deno-lint-ignore no-explicit-any
           count: (q: any) => Promise.resolve(rows.filter((r) => match(r, q)).length),
           insert: (row: PlanReview) => {
             rows.push(row);
@@ -31,7 +30,6 @@ function fakeApp(existing: PlanReview[] = []) {
     },
     log: () => {},
     _rows: rows,
-    // deno-lint-ignore no-explicit-any
   } as any;
 }
 
@@ -48,16 +46,15 @@ function priorRounds(planKey: string, n: number): PlanReview[] {
 }
 
 const call = async (app: unknown, vars: Record<string, unknown>, jobKey = "j-new") =>
-  // deno-lint-ignore no-explicit-any
   await handler({ variables: vars, jobKey } as any, app as any);
 
-Deno.test("approved round proceeds (planApproved=true, no throw)", async () => {
+test("approved round proceeds (planApproved=true, no throw)", async () => {
   const app = fakeApp(priorRounds("o/r#1", 0));
   const out = await call(app, { planKey: "o/r#1", approved: true });
   assertEquals((out as { planApproved: boolean }).planApproved, true);
 });
 
-Deno.test("unapproved, non-final round revises (planApproved=false, no throw)", async () => {
+test("unapproved, non-final round revises (planApproved=false, no throw)", async () => {
   // First round of a 3-round cap: not final, so revise.
   const app = fakeApp(priorRounds("o/r#2", 0));
   const out = await call(app, { planKey: "o/r#2", approved: false, findings: "fix X" });
@@ -65,7 +62,7 @@ Deno.test("unapproved, non-final round revises (planApproved=false, no throw)", 
   assertEquals((out as { planFindings: string }).planFindings, "fix X");
 });
 
-Deno.test("unapproved FINAL round hard-fails with PLAN_REJECTED incident", async () => {
+test("unapproved FINAL round hard-fails with PLAN_REJECTED incident", async () => {
   // Seed cap-1 prior rounds so this job is the last permitted round; unapproved ⇒ must throw.
   const app = fakeApp(priorRounds("o/r#3", MAX_PLAN_REVIEW_ROUNDS - 1));
   const err = await assertRejects(
@@ -75,7 +72,7 @@ Deno.test("unapproved FINAL round hard-fails with PLAN_REJECTED incident", async
   assertEquals((err as BpmnError).errorCode, "PLAN_REJECTED");
 });
 
-Deno.test("approved on the FINAL round still proceeds (no throw)", async () => {
+test("approved on the FINAL round still proceeds (no throw)", async () => {
   const app = fakeApp(priorRounds("o/r#4", MAX_PLAN_REVIEW_ROUNDS - 1));
   const out = await call(app, { planKey: "o/r#4", approved: true });
   assertEquals((out as { planApproved: boolean }).planApproved, true);

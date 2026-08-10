@@ -1,7 +1,8 @@
 // Red/green regression for retrying a wave when `select-wave` deliberately left pending work
 // behind a non-fatal wait (D7 / issue #63). Advancing past that wave would make `record-results`
 // finish the plan with a still-pending task.
-import { assertEquals } from "jsr:@std/assert@1";
+import { test } from "node:test";
+import { assertEquals } from "#test-assert";
 import handler from "./worker.ts";
 import type { PlanTaskStatus } from "../../app/plan.ts";
 import { _clearMergeProtocolCache } from "../../app/mergeProtocol.ts";
@@ -32,10 +33,8 @@ function fakeApp(rows: Row[]) {
         table(name: string, key: string) {
           const store = stores[name] ??= [];
           return {
-            // deno-lint-ignore no-explicit-any
             get: (k: any) =>
               Promise.resolve(store.find((r) => ((r as unknown) as Record<string, unknown>)[key] === k)),
-            // deno-lint-ignore no-explicit-any
             find: (q: any) =>
               Promise.resolve(
                 store.filter((r) =>
@@ -44,12 +43,10 @@ function fakeApp(rows: Row[]) {
                   )
                 ),
               ),
-            // deno-lint-ignore no-explicit-any
             insert: (row: any) => {
               store.push(row);
               return Promise.resolve(store.length);
             },
-            // deno-lint-ignore no-explicit-any
             update: (k: any, patch: any) => {
               if (name === "plans") {
                 planUpdates.push({ key: k, patch });
@@ -68,7 +65,6 @@ function fakeApp(rows: Row[]) {
       engine: {
         createInstance: () => Promise.resolve({ processInstanceKey: "pi" }),
       },
-      // deno-lint-ignore no-explicit-any
     } as any,
     planUpdates,
   };
@@ -76,11 +72,11 @@ function fakeApp(rows: Row[]) {
 
 function installGithubStub(method: "gh-merge" | "mergify-queue") {
   _clearMergeProtocolCache();
-  const oldTransport = Deno.env.get("NANO_PR_GITHUB_TRANSPORT");
-  const oldToken = Deno.env.get("GITHUB_TOKEN");
+  const oldTransport = process.env["NANO_PR_GITHUB_TRANSPORT"];
+  const oldToken = process.env["GITHUB_TOKEN"];
   const oldFetch = globalThis.fetch;
-  Deno.env.set("NANO_PR_GITHUB_TRANSPORT", "token");
-  Deno.env.set("GITHUB_TOKEN", "test-token");
+  process.env["NANO_PR_GITHUB_TRANSPORT"] = "token";
+  process.env["GITHUB_TOKEN"] = "test-token";
   globalThis.fetch = ((input: string | URL | Request) => {
     const url = String(input);
     if (url.includes("/contents/AGENTS.md")) {
@@ -104,16 +100,16 @@ function installGithubStub(method: "gh-merge" | "mergify-queue") {
     return Promise.resolve(new Response("not found", { status: 404 }));
   }) as typeof fetch;
   return () => {
-    if (oldTransport == null) Deno.env.delete("NANO_PR_GITHUB_TRANSPORT");
-    else Deno.env.set("NANO_PR_GITHUB_TRANSPORT", oldTransport);
-    if (oldToken == null) Deno.env.delete("GITHUB_TOKEN");
-    else Deno.env.set("GITHUB_TOKEN", oldToken);
+    if (oldTransport == null) delete process.env["NANO_PR_GITHUB_TRANSPORT"];
+    else process.env["NANO_PR_GITHUB_TRANSPORT"] = oldTransport;
+    if (oldToken == null) delete process.env["GITHUB_TOKEN"];
+    else process.env["GITHUB_TOKEN"] = oldToken;
     globalThis.fetch = oldFetch;
     _clearMergeProtocolCache();
   };
 }
 
-Deno.test("record-wave retries the same wave when a task is still pending", async () => {
+test("record-wave retries the same wave when a task is still pending", async () => {
   const rows: Row[] = [{
     id: 2,
     plan_key: "owner/repo#63",
@@ -124,7 +120,6 @@ Deno.test("record-wave retries the same wave when a task is still pending", asyn
   const { app, planUpdates } = fakeApp(rows);
 
   const out = await handler(
-    // deno-lint-ignore no-explicit-any
     {
       variables: {
         planKey: "owner/repo#63",
@@ -148,7 +143,7 @@ Deno.test("record-wave retries the same wave when a task is still pending", asyn
   assertEquals((planUpdates[0].patch as Record<string, unknown>).gate_wave, 1);
 });
 
-Deno.test("record-wave skips trial merge for mergify-queue repos with 2+ heads", async () => {
+test("record-wave skips trial merge for mergify-queue repos with 2+ heads", async () => {
   const restore = installGithubStub("mergify-queue");
   try {
     const rows: Row[] = [
@@ -157,7 +152,6 @@ Deno.test("record-wave skips trial merge for mergify-queue repos with 2+ heads",
     ];
     const { app } = fakeApp(rows);
     const out = await handler(
-      // deno-lint-ignore no-explicit-any
       {
         variables: {
           planKey: "owner/repo#69",
@@ -184,7 +178,7 @@ Deno.test("record-wave skips trial merge for mergify-queue repos with 2+ heads",
   }
 });
 
-Deno.test("record-wave runs trial merge for non-queue repos with populated heads", async () => {
+test("record-wave runs trial merge for non-queue repos with populated heads", async () => {
   const restore = installGithubStub("gh-merge");
   try {
     const rows: Row[] = [
@@ -193,7 +187,6 @@ Deno.test("record-wave runs trial merge for non-queue repos with populated heads
     ];
     const { app } = fakeApp(rows);
     const out = await handler(
-      // deno-lint-ignore no-explicit-any
       {
         variables: {
           planKey: "owner/repo#69",

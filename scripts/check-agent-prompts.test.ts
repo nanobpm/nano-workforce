@@ -4,7 +4,11 @@
 // blank agent-prompt header — ships an effectively prompt-less agent (the root of the empty
 // "(no question provided)" escalations on Magikcraft/nano-bpm #597/#599). These cases assert it
 // fails on each of those shapes and passes on a well-formed app.
-import { assert, assertEquals } from "jsr:@std/assert@1";
+import { test } from "node:test";
+import { assert, assertEquals } from "#test-assert";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { checkAgentPrompts } from "./check-agent-prompts.ts";
 
 const MANIFEST = JSON.stringify({
@@ -16,17 +20,17 @@ function header(value: string): string {
 }
 
 // Build a throwaway app tree and return its root. Each entry maps a repo-relative path to content.
-async function fixture(files: Record<string, string>): Promise<string> {
-  const root = await Deno.makeTempDir({ prefix: "agent-prompts-" });
+function fixture(files: Record<string, string>): string {
+  const root = mkdtempSync(join(tmpdir(), "agent-prompts-"));
   for (const [rel, content] of Object.entries(files)) {
-    const abs = `${root}/${rel}`;
-    await Deno.mkdir(abs.slice(0, abs.lastIndexOf("/")), { recursive: true });
-    await Deno.writeTextFile(abs, content);
+    const abs = join(root, rel);
+    mkdirSync(dirname(abs), { recursive: true });
+    writeFileSync(abs, content);
   }
   return root;
 }
 
-Deno.test("passes when every {{token}} resolves to a non-blank template", async () => {
+test("passes when every {{token}} resolves to a non-blank template", async () => {
   const root = await fixture({
     "nano.app.json": MANIFEST,
     "resources/processes/loop.bpmn": header("{{review-round}}"),
@@ -38,7 +42,7 @@ Deno.test("passes when every {{token}} resolves to a non-blank template", async 
   assertEquals(res.resolved, ["review-round"]);
 });
 
-Deno.test("fails when a header references an undeclared template", async () => {
+test("fails when a header references an undeclared template", async () => {
   const root = await fixture({
     "nano.app.json": MANIFEST,
     "resources/processes/loop.bpmn": header("{{does-not-exist}}"),
@@ -49,7 +53,7 @@ Deno.test("fails when a header references an undeclared template", async () => {
   assert(res.errors.some((e) => e.includes("{{does-not-exist}}") && e.includes("no such template")));
 });
 
-Deno.test("fails when the referenced template file is blank (would substitute to nothing)", async () => {
+test("fails when the referenced template file is blank (would substitute to nothing)", async () => {
   const root = await fixture({
     "nano.app.json": MANIFEST,
     "resources/processes/loop.bpmn": header("{{review-round}}"),
@@ -60,7 +64,7 @@ Deno.test("fails when the referenced template file is blank (would substitute to
   assert(res.errors.some((e) => e.includes("empty") && e.includes("review-round")));
 });
 
-Deno.test("fails when a reserved agent-prompt header is blank", async () => {
+test("fails when a reserved agent-prompt header is blank", async () => {
   const root = await fixture({
     "nano.app.json": MANIFEST,
     "resources/processes/loop.bpmn": header(""),
@@ -71,7 +75,7 @@ Deno.test("fails when a reserved agent-prompt header is blank", async () => {
   assert(res.errors.some((e) => e.includes("is empty")));
 });
 
-Deno.test("checks the real repo: all committed agent prompts resolve", () => {
+test("checks the real repo: all committed agent prompts resolve", () => {
   // The guard must be green against the actual app it protects — this is the case CI relies on.
   const repoRoot = decodeURIComponent(new URL("../", import.meta.url).pathname);
   const res = checkAgentPrompts(repoRoot);

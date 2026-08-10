@@ -3,7 +3,8 @@
 // A predecessor parked behind a merge lane is not a failed slice: dependents must remain pending
 // so a later retry can dispatch them once the lane clears. Real non-open failures still cascade
 // to `skipped` as before.
-import { assertEquals } from "jsr:@std/assert@1";
+import { test } from "node:test";
+import { assertEquals } from "#test-assert";
 import handler from "./worker.ts";
 import type { PlanTaskStatus } from "../../app/plan.ts";
 
@@ -30,7 +31,6 @@ function fakeApp(rows: Row[], deps: DepRow[]) {
       table(name: string, key: string) {
         const store = name === "plan_tasks" ? rows : deps;
         return {
-          // deno-lint-ignore no-explicit-any
           find: (q: any) =>
             Promise.resolve(
               store.filter((r) =>
@@ -39,7 +39,6 @@ function fakeApp(rows: Row[], deps: DepRow[]) {
                 )
               ),
             ),
-          // deno-lint-ignore no-explicit-any
           update: (k: any, patch: any) => {
             const row = store.find((r) =>
               ((r as unknown) as Record<string, unknown>)[key] === k
@@ -50,20 +49,18 @@ function fakeApp(rows: Row[], deps: DepRow[]) {
         };
       },
     },
-    // deno-lint-ignore no-explicit-any
   } as any;
 }
 
 async function selectWave(rows: Row[], deps: DepRow[]) {
   const out = await handler(
-    // deno-lint-ignore no-explicit-any
     { variables: { planKey: "owner/repo#63", currentWave: 1 } } as any,
     fakeApp(rows, deps),
   );
   return out as { waveTasks: unknown[] };
 }
 
-Deno.test("select-wave leaves dependents pending behind a waiting-for-lane dependency", async () => {
+test("select-wave leaves dependents pending behind a waiting-for-lane dependency", async () => {
   const rows: Row[] = [
     {
       id: 1,
@@ -95,9 +92,9 @@ Deno.test("select-wave leaves dependents pending behind a waiting-for-lane depen
   assertEquals(rows[1].summary, undefined);
 });
 
-Deno.test("select-wave still skips dependents behind failed or otherwise non-open dependencies", async (t) => {
+test("select-wave still skips dependents behind failed or otherwise non-open dependencies", async (t) => {
   for (const depStatus of ["blocked", "skipped", "pending"] as const) {
-    await t.step(depStatus, async () => {
+    await t.test(depStatus, async () => {
       const rows: Row[] = [
         {
           id: 1,

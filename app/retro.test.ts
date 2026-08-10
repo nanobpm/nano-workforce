@@ -1,5 +1,6 @@
 // Unit tests for the epic retrospective stage (app/retro.ts, 016_plan_retro.sql).
-import { assert, assertEquals, assertStringIncludes } from "jsr:@std/assert@1";
+import { test } from "node:test";
+import { assert, assertEquals, assertStringIncludes } from "#test-assert";
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { appendEntry } from "./blackboard.ts";
 import { recordTaskDelta } from "./taskDelta.ts";
@@ -15,18 +16,13 @@ import {
 } from "./retro.ts";
 
 // In-memory record gateway matching the Table<T> subset retro.ts uses: insert/find/findOne/get/update.
-// deno-lint-ignore no-explicit-any
 function memData(): { data: DataLayer; stores: Record<string, any[]> } {
-  // deno-lint-ignore no-explicit-any
   const stores: Record<string, any[]> = {};
   const seq: Record<string, number> = {};
   function tbl(name: string, pk = "id") {
-    // deno-lint-ignore no-explicit-any
     const rows = (stores[name] ??= [] as any[]);
-    // deno-lint-ignore no-explicit-any
     const match = (r: any, where: any) => Object.entries(where).every(([k, v]) => r[k] === v);
     return {
-      // deno-lint-ignore no-explicit-any require-await
       async insert(row: any) {
         if (pk !== "id" && rows.some((r) => r[pk] === row[pk])) {
           throw new Error(`UNIQUE constraint failed: ${name}.${pk}`);
@@ -35,26 +31,21 @@ function memData(): { data: DataLayer; stores: Record<string, any[]> } {
         rows.push(pk === "id" ? { id, ...row } : { ...row });
         return pk === "id" ? id : row[pk];
       },
-      // deno-lint-ignore no-explicit-any require-await
       async find(where: any = {}) {
         return rows.filter((r) => match(r, where));
       },
-      // deno-lint-ignore no-explicit-any require-await
       async findOne(where: any = {}) {
         return rows.find((r) => match(r, where));
       },
-      // deno-lint-ignore no-explicit-any require-await
       async get(id: any) {
         return rows.find((row) => row[pk] === id);
       },
-      // deno-lint-ignore no-explicit-any require-await
       async update(id: any, patch: any) {
         const r = rows.find((row) => row[pk] === id);
         if (r) Object.assign(r, patch);
       },
     };
   }
-  // deno-lint-ignore no-explicit-any
   const data = { table: (n: string, pk?: string) => tbl(n, pk) } as any as DataLayer;
   return { data, stores };
 }
@@ -62,21 +53,17 @@ function memData(): { data: DataLayer; stores: Record<string, any[]> } {
 // A fake engine recording createInstance calls.
 function fakeEngine(): { engine: EngineClient; started: { processDefinitionId: string; variables: Record<string, unknown> }[] } {
   const started: { processDefinitionId: string; variables: Record<string, unknown> }[] = [];
-  // deno-lint-ignore no-explicit-any
   const engine = {
-    // deno-lint-ignore no-explicit-any require-await
     async createInstance(req: any) {
       started.push({ processDefinitionId: req.processDefinitionId, variables: req.variables });
       return { processInstanceKey: `PI-${started.length}` };
     },
-    // deno-lint-ignore no-explicit-any require-await
   } as any as EngineClient;
   return { engine, started };
 }
 
 const PLAN = "acme/widgets#7";
 
-// deno-lint-ignore no-explicit-any
 function seedPlan(stores: Record<string, any[]>, over: Record<string, unknown> = {}) {
   stores["plans"] = [{
     plan_key: PLAN,
@@ -89,20 +76,17 @@ function seedPlan(stores: Record<string, any[]>, over: Record<string, unknown> =
   }];
 }
 
-// deno-lint-ignore no-explicit-any
 function seedTask(stores: Record<string, any[]>, task: Record<string, unknown>) {
   (stores["plan_tasks"] ??= []).push({ plan_key: PLAN, ...task });
 }
-// deno-lint-ignore no-explicit-any
 function seedPr(stores: Record<string, any[]>, pr_key: string, status: string) {
   (stores["pull_requests"] ??= []).push({ pr_key, status });
 }
-// deno-lint-ignore no-explicit-any
 function seedReview(stores: Record<string, any[]>, round: number, approved: number, findings: string | null) {
   (stores["plan_reviews"] ??= []).push({ plan_key: PLAN, round, approved, findings, created_at: `t${round}`, job_key: null });
 }
 
-Deno.test("autoRetroEnabled: on by default; disabled by 0/false/off/no", () => {
+test("autoRetroEnabled: on by default; disabled by 0/false/off/no", () => {
   const prev = process.env.NANO_AUTO_RETRO;
   try {
     delete process.env.NANO_AUTO_RETRO;
@@ -119,7 +103,7 @@ Deno.test("autoRetroEnabled: on by default; disabled by 0/false/off/no", () => {
   }
 });
 
-Deno.test("planKeyForPr: resolves the plan a PR's task belongs to; undefined when unlinked", async () => {
+test("planKeyForPr: resolves the plan a PR's task belongs to; undefined when unlinked", async () => {
   const { data, stores } = memData();
   seedTask(stores, { id: "t1", status: "opened", pr_key: "acme/widgets#10" });
   assertEquals(await planKeyForPr(data, "acme/widgets#10"), PLAN);
@@ -127,7 +111,7 @@ Deno.test("planKeyForPr: resolves the plan a PR's task belongs to; undefined whe
   assertEquals(await planKeyForPr(data, ""), undefined);
 });
 
-Deno.test("isPlanComplete: false while any task is still in flight", async () => {
+test("isPlanComplete: false while any task is still in flight", async () => {
   const { data, stores } = memData();
   seedTask(stores, { id: "t1", status: "opened", pr_key: "acme/widgets#10" });
   seedTask(stores, { id: "t2", status: "pending", pr_key: null });
@@ -136,14 +120,14 @@ Deno.test("isPlanComplete: false while any task is still in flight", async () =>
   assertEquals(await isPlanComplete(data, PLAN), false);
 });
 
-Deno.test("isPlanComplete: false when an opened task's PR is not yet terminal", async () => {
+test("isPlanComplete: false when an opened task's PR is not yet terminal", async () => {
   const { data, stores } = memData();
   seedTask(stores, { id: "t1", status: "opened", pr_key: "acme/widgets#10" });
   seedPr(stores, "acme/widgets#10", "waiting_deps"); // in the merge stage, not terminal
   assertEquals(await isPlanComplete(data, PLAN), false);
 });
 
-Deno.test("isPlanComplete: true when every task is settled (terminal PR or skipped/blocked)", async () => {
+test("isPlanComplete: true when every task is settled (terminal PR or skipped/blocked)", async () => {
   const { data, stores } = memData();
   seedTask(stores, { id: "t1", status: "opened", pr_key: "acme/widgets#10" });
   seedTask(stores, { id: "t2", status: "skipped", pr_key: null });
@@ -153,12 +137,12 @@ Deno.test("isPlanComplete: true when every task is settled (terminal PR or skipp
   assertEquals(await isPlanComplete(data, PLAN), true);
 });
 
-Deno.test("isPlanComplete: an empty plan has nothing to retrospect", async () => {
+test("isPlanComplete: an empty plan has nothing to retrospect", async () => {
   const { data } = memData();
   assertEquals(await isPlanComplete(data, PLAN), false);
 });
 
-Deno.test("gatherRetro: separates learnings from notes and folds in deltas", async () => {
+test("gatherRetro: separates learnings from notes and folds in deltas", async () => {
   const { data, stores } = memData();
   seedPlan(stores);
   await appendEntry(data, PLAN, { author_task: "t1", kind: "learning", body: "regen the API surface before building" });
@@ -181,7 +165,7 @@ Deno.test("gatherRetro: separates learnings from notes and folds in deltas", asy
   assertEquals(d.repo, "acme/widgets");
 });
 
-Deno.test("gatherRetro: folds in the plan-review trace and task-outcome shape", async () => {
+test("gatherRetro: folds in the plan-review trace and task-outcome shape", async () => {
   const { data, stores } = memData();
   seedPlan(stores);
   seedTask(stores, { id: "t1", task_id: "t1", status: "opened", pr_key: "acme/widgets#10" });
@@ -201,7 +185,7 @@ Deno.test("gatherRetro: folds in the plan-review trace and task-outcome shape", 
   assertEquals(d.taskOutcomes.byStatus, { opened: 2, skipped: 1 });
 });
 
-Deno.test("gatherRetro: no reviews → zero rounds, not approved, empty rejections", async () => {
+test("gatherRetro: no reviews → zero rounds, not approved, empty rejections", async () => {
   const { data, stores } = memData();
   seedPlan(stores);
   const d = await gatherRetro(data, PLAN);
@@ -211,7 +195,7 @@ Deno.test("gatherRetro: no reviews → zero rounds, not approved, empty rejectio
   assertEquals(d.taskOutcomes, { total: 0, byStatus: {} });
 });
 
-Deno.test("renderRetroBrief: renders learnings + constraints; states 'none' with no learnings", () => {
+test("renderRetroBrief: renders learnings + constraints; states 'none' with no learnings", () => {
   const empty = renderRetroBrief({
     planKey: PLAN, repo: "acme/widgets", issueUrl: "", title: null,
     learnings: [], touchedFiles: [], contractChanges: [], constraints: [], notes: [],
@@ -243,7 +227,7 @@ Deno.test("renderRetroBrief: renders learnings + constraints; states 'none' with
   assertStringIncludes(brief, "Task outcomes");
 });
 
-Deno.test("isDigestEmpty: empty only with no learnings/deltas/notes AND no review rejections", () => {
+test("isDigestEmpty: empty only with no learnings/deltas/notes AND no review rejections", () => {
   const base = { planKey: PLAN, repo: "", issueUrl: "", title: null, learnings: [], touchedFiles: [], contractChanges: [], constraints: [], notes: [], reviewRounds: 0, reviewRejections: [], planApproved: false, taskOutcomes: { total: 0, byStatus: {} } };
   assert(isDigestEmpty({ ...base, counts: { learnings: 0, deltas: 0, notes: 0 } }));
   assert(!isDigestEmpty({ ...base, counts: { learnings: 1, deltas: 0, notes: 0 } }));
@@ -255,7 +239,7 @@ Deno.test("isDigestEmpty: empty only with no learnings/deltas/notes AND no revie
   assert(isDigestEmpty({ ...base, reviewRounds: 1, planApproved: true, taskOutcomes: { total: 3, byStatus: { opened: 3 } }, counts: { learnings: 0, deltas: 0, notes: 0 } }));
 });
 
-Deno.test("recordRetro: inserts then updates the same plan_key row in place", async () => {
+test("recordRetro: inserts then updates the same plan_key row in place", async () => {
   const { data, stores } = memData();
   await recordRetro(data, PLAN, { status: "filed", prKey: "acme/widgets#20", learnings: 3, summary: "promoted 2" });
   assertEquals(stores["plan_retros"].length, 1);
@@ -268,25 +252,21 @@ Deno.test("recordRetro: inserts then updates the same plan_key row in place", as
   assertEquals(stores["plan_retros"][0].pr_key, null);
 });
 
-Deno.test("recordRetro: rethrows a non-unique (FOREIGN KEY) constraint error instead of swallowing it", async () => {
+test("recordRetro: rethrows a non-unique (FOREIGN KEY) constraint error instead of swallowing it", async () => {
   // A FK failure (e.g. plan_key missing in plans) must NOT be treated as a benign duplicate and
   // fall through to a silent update — that would make the write look successful while doing nothing.
   let updated = false;
   const table = {
-    // deno-lint-ignore require-await
     async insert() {
       throw new Error("FOREIGN KEY constraint failed");
     },
-    // deno-lint-ignore require-await
     async update() {
       updated = true;
     },
-    // deno-lint-ignore require-await
     async get() {
       return undefined;
     },
   };
-  // deno-lint-ignore no-explicit-any
   const data = { table: () => table } as any as DataLayer;
   let threw = false;
   try {
@@ -299,7 +279,7 @@ Deno.test("recordRetro: rethrows a non-unique (FOREIGN KEY) constraint error ins
   assertEquals(updated, false, "must not silently fall back to update on a non-unique error");
 });
 
-Deno.test("maybeStartRetro: starts the retro exactly once when the last PR lands with material", async () => {
+test("maybeStartRetro: starts the retro exactly once when the last PR lands with material", async () => {
   const { data, stores } = memData();
   seedPlan(stores);
   seedTask(stores, { id: "t1", status: "opened", pr_key: "acme/widgets#10" });
@@ -325,13 +305,12 @@ Deno.test("maybeStartRetro: starts the retro exactly once when the last PR lands
   assertEquals(started.length, 1, "fire-once guard");
 });
 
-Deno.test("maybeStartRetro: a createInstance failure records a blocked retro (fire-once guard already consumed)", async () => {
+test("maybeStartRetro: a createInstance failure records a blocked retro (fire-once guard already consumed)", async () => {
   const { data, stores } = memData();
   seedPlan(stores);
   seedTask(stores, { id: "t1", status: "opened", pr_key: "acme/widgets#10" });
   seedPr(stores, "acme/widgets#10", "merged");
   await appendEntry(data, PLAN, { author_task: "t1", kind: "learning", body: "regen first" });
-  // deno-lint-ignore no-explicit-any require-await
   const engine = { async createInstance() { throw new Error("gateway down"); } } as any as EngineClient;
 
   const r = await maybeStartRetro(data, engine, "acme/widgets#10");
@@ -346,19 +325,16 @@ Deno.test("maybeStartRetro: a createInstance failure records a blocked retro (fi
   assertStringIncludes(String(stores["plan_retros"][0].summary), "gateway down");
 });
 
-Deno.test("maybeStartRetro: a secondary blocked-retro persistence failure still returns start-failed (not error)", async () => {
+test("maybeStartRetro: a secondary blocked-retro persistence failure still returns start-failed (not error)", async () => {
   const { data, stores } = memData();
   seedPlan(stores);
   seedTask(stores, { id: "t1", status: "opened", pr_key: "acme/widgets#10" });
   seedPr(stores, "acme/widgets#10", "merged");
   await appendEntry(data, PLAN, { author_task: "t1", kind: "learning", body: "regen first" });
-  // deno-lint-ignore no-explicit-any require-await
   const engine = { async createInstance() { throw new Error("gateway down"); } } as any as EngineClient;
   // recordRetro rethrows non-unique DB errors; simulate the blocked-retro insert hitting a
   // FOREIGN KEY failure so the persistence in the createInstance-failure handler throws.
-  // deno-lint-ignore no-explicit-any
   const failingData = {
-    // deno-lint-ignore no-explicit-any
     table: (name: string, pk?: string) => {
       const t = (data as any).table(name, pk);
       if (name !== "plan_retros") return t;
@@ -374,7 +350,7 @@ Deno.test("maybeStartRetro: a secondary blocked-retro persistence failure still 
   assertEquals(stores["plan_retros"].length, 0);
 });
 
-Deno.test("maybeStartRetro: a pre-claimed retro start does not start a duplicate process", async () => {
+test("maybeStartRetro: a pre-claimed retro start does not start a duplicate process", async () => {
   const { data, stores } = memData();
   seedPlan(stores);
   seedTask(stores, { id: "t1", status: "opened", pr_key: "acme/widgets#10" });
@@ -389,7 +365,7 @@ Deno.test("maybeStartRetro: a pre-claimed retro start does not start a duplicate
   assertEquals(stores["plans"][0].retro_started_at, null);
 });
 
-Deno.test("maybeStartRetro: bails while the plan is incomplete", async () => {
+test("maybeStartRetro: bails while the plan is incomplete", async () => {
   const { data, stores } = memData();
   seedPlan(stores);
   seedTask(stores, { id: "t1", status: "opened", pr_key: "acme/widgets#10" });
@@ -404,7 +380,7 @@ Deno.test("maybeStartRetro: bails while the plan is incomplete", async () => {
   assertEquals(stores["plans"][0].retro_started_at, null, "must not stamp an incomplete plan");
 });
 
-Deno.test("maybeStartRetro: complete but empty → records a skipped retro, does not start the process", async () => {
+test("maybeStartRetro: complete but empty → records a skipped retro, does not start the process", async () => {
   const { data, stores } = memData();
   seedPlan(stores);
   seedTask(stores, { id: "t1", status: "opened", pr_key: "acme/widgets#10" });
@@ -419,7 +395,7 @@ Deno.test("maybeStartRetro: complete but empty → records a skipped retro, does
   assertEquals(stores["plan_retros"][0].status, "skipped");
 });
 
-Deno.test("maybeStartRetro: a rejected review round alone is enough to fire the retro", async () => {
+test("maybeStartRetro: a rejected review round alone is enough to fire the retro", async () => {
   const { data, stores } = memData();
   seedPlan(stores);
   seedTask(stores, { id: "t1", status: "opened", pr_key: "acme/widgets#10" });
@@ -436,7 +412,7 @@ Deno.test("maybeStartRetro: a rejected review round alone is enough to fire the 
   assert(stores["plans"][0].retro_started_at, "retro_started_at must be stamped");
 });
 
-Deno.test("maybeStartRetro: a PR not part of any plan is a no-op", async () => {
+test("maybeStartRetro: a PR not part of any plan is a no-op", async () => {
   const { data } = memData();
   const { engine, started } = fakeEngine();
   const r = await maybeStartRetro(data, engine, "acme/widgets#99");
@@ -445,7 +421,7 @@ Deno.test("maybeStartRetro: a PR not part of any plan is a no-op", async () => {
   assertEquals(started.length, 0);
 });
 
-Deno.test("maybeStartRetro: honours NANO_AUTO_RETRO=0", async () => {
+test("maybeStartRetro: honours NANO_AUTO_RETRO=0", async () => {
   const prev = process.env.NANO_AUTO_RETRO;
   process.env.NANO_AUTO_RETRO = "0";
   try {

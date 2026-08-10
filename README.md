@@ -84,8 +84,7 @@ it's the same app and the same behaviour.
 - A running **Nano gateway/engine** (default `http://localhost:8080`) — what the app
   deploys to and what agents pull jobs from.
 - **[Node](https://nodejs.org/) >= 22.6** (the app hosts on Node built-ins;
-  `@nanobpm/urban` declares `engines.node >=22.6`). **[Deno](https://deno.land/)** is
-  optional (only for `npm run compile`).
+  `@nanobpm/urban` declares `engines.node >=22.6`).
 - The **c8ctl CLI with the `nano` plugin** (to hire/run agents).
 - On each agent host: the **GitHub CLI** logged in (`gh auth login`) or a
   `GITHUB_TOKEN`/`GH_TOKEN` in the environment, plus the agent harness itself (e.g.
@@ -274,25 +273,6 @@ agent's base prompt is **not** in the job payload — it is delivered via a mode
 **template header** (`{{review-round}}`, `{{plan}}`, `{{feature}}`, `{{fix-ci}}`, …)
 substituted at deploy time from `prompts/*.md` (`models.templates` in `nano.app.json`);
 per-instance context (e.g. a human's escalation answer) is appended by the harness.
-
----
-
-## Compile to a native binary
-
-The app is authored on Node built-ins, so **Deno** can cross-compile it into a native
-executable that bundles the runtime, deps, and entry code (the target box needs no
-Node/Deno/`node_modules`):
-
-```sh
-npm run compile   # → dist/nano-workforce  (via deno compile)
-```
-
-> **Not yet a single self-contained file.** The binary bundles the runtime + deps +
-> entry code, but the Urban runtime loads the app's declarative files
-> (`nano.app.json`, `pages/`, `db/migrations/`, `prompts/`, `resources/`, and the
-> `actions/`/`workers/` modules) from the **working directory at runtime** — so ship
-> the binary alongside those app files and run it from that directory. Add `--target`
-> in the `deno.json` `compile` task to cross-compile for another OS/arch.
 
 ---
 

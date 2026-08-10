@@ -1,5 +1,6 @@
 // Unit tests for the structured scope/impl-change report (D5, issue #55 / #49).
-import { assert, assertEquals } from "jsr:@std/assert@1";
+import { test } from "node:test";
+import { assert, assertEquals } from "#test-assert";
 import type { DataLayer } from "@nanobpm/urban";
 import {
   aggregateEpicDeltas,
@@ -11,49 +12,39 @@ import {
 
 // A tiny in-memory stand-in for the record gateway (insert/find/findOne/update/delete), mirroring
 // the fake-app style used across the app tests (see app/blackboard.test.ts).
-// deno-lint-ignore no-explicit-any
 function memData(): { data: DataLayer; stores: Record<string, any[]> } {
-  // deno-lint-ignore no-explicit-any
   const stores: Record<string, any[]> = {};
   const seq: Record<string, number> = {};
   function tbl(name: string, pk = "id") {
-    // deno-lint-ignore no-explicit-any
     const rows = (stores[name] ??= [] as any[]);
-    // deno-lint-ignore no-explicit-any
     const match = (r: any, where: any) => Object.entries(where).every(([k, v]) => r[k] === v);
     return {
-      // deno-lint-ignore no-explicit-any require-await
       async insert(row: any) {
         const id = (seq[name] = (seq[name] ?? 0) + 1);
         rows.push(pk === "id" ? { id, ...row } : { ...row });
         return pk === "id" ? id : row[pk];
       },
-      // deno-lint-ignore no-explicit-any require-await
       async find(where: any = {}) {
         return rows.filter((r) => match(r, where));
       },
-      // deno-lint-ignore no-explicit-any require-await
       async findOne(where: any = {}) {
         return rows.find((r) => match(r, where));
       },
-      // deno-lint-ignore no-explicit-any require-await
       async update(id: any, patch: any) {
         const r = rows.find((row) => row[pk] === id);
         if (r) Object.assign(r, patch);
       },
-      // deno-lint-ignore no-explicit-any require-await
       async delete(id: any) {
         const i = rows.findIndex((row) => row[pk] === id);
         if (i >= 0) rows.splice(i, 1);
       },
     };
   }
-  // deno-lint-ignore no-explicit-any
   const data = { table: (n: string, pk?: string) => tbl(n, pk) } as any as DataLayer;
   return { data, stores };
 }
 
-Deno.test("parseTaskDelta: trims, dedupes arrays, and drops empties", () => {
+test("parseTaskDelta: trims, dedupes arrays, and drops empties", () => {
   const d = parseTaskDelta({
     contractChange: "  new signature  ",
     newlyTouches: ["a.rs", " a.rs ", "", "b.rs"],
@@ -67,14 +58,14 @@ Deno.test("parseTaskDelta: trims, dedupes arrays, and drops empties", () => {
   assertEquals(d.constraint, undefined, "a blank constraint is dropped");
 });
 
-Deno.test("parseTaskDelta: a delta with nothing actionable is null", () => {
+test("parseTaskDelta: a delta with nothing actionable is null", () => {
   assertEquals(parseTaskDelta(undefined), null);
   assertEquals(parseTaskDelta({}), null);
   assertEquals(parseTaskDelta({ newlyTouches: [], affectsTasks: [], contractChange: "  " }), null);
   assertEquals(parseTaskDelta("not an object"), null);
 });
 
-Deno.test("recordTaskDelta: upserts per (plan, task) — a resume overwrites, not duplicates", async () => {
+test("recordTaskDelta: upserts per (plan, task) — a resume overwrites, not duplicates", async () => {
   const { data, stores } = memData();
   const first = await recordTaskDelta(data, "o/r#1", "gap-2", {
     newlyTouches: ["a.rs"],
@@ -99,7 +90,7 @@ Deno.test("recordTaskDelta: upserts per (plan, task) — a resume overwrites, no
   assertEquals(entry.wave, 1);
 });
 
-Deno.test("readTaskDeltas: scoped to a plan, in write order, arrays decoded", async () => {
+test("readTaskDeltas: scoped to a plan, in write order, arrays decoded", async () => {
   const { data } = memData();
   await recordTaskDelta(data, "o/r#1", "gap-2", { newlyTouches: ["a.rs"], affectsTasks: [] });
   await recordTaskDelta(data, "o/r#1", "gap-8", { newlyTouches: [], affectsTasks: ["gap-2"], constraint: "x" });
@@ -111,7 +102,7 @@ Deno.test("readTaskDeltas: scoped to a plan, in write order, arrays decoded", as
   assertEquals(entries[1].affectsTasks, ["gap-2"]);
 });
 
-Deno.test("aggregateEpicDeltas: unions touched files + affected tasks, lists changes/constraints", async () => {
+test("aggregateEpicDeltas: unions touched files + affected tasks, lists changes/constraints", async () => {
   const { data } = memData();
   await recordTaskDelta(data, "p", "gap-2", {
     newlyTouches: ["engine/state.rs"],
@@ -132,7 +123,7 @@ Deno.test("aggregateEpicDeltas: unions touched files + affected tasks, lists cha
   assertEquals(report.deltas.length, 2);
 });
 
-Deno.test("clearTaskDeltas: drops a plan's whole set (re-plan cleanup), leaving other plans intact", async () => {
+test("clearTaskDeltas: drops a plan's whole set (re-plan cleanup), leaving other plans intact", async () => {
   const { data, stores } = memData();
   await recordTaskDelta(data, "p", "gap-2", { newlyTouches: ["a.rs"], affectsTasks: [] });
   await recordTaskDelta(data, "p", "gap-8", { newlyTouches: ["b.rs"], affectsTasks: [] });

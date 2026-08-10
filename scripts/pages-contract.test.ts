@@ -10,7 +10,9 @@
 // It also pins the issue #87 surfaces: the plan-review audit log (`plan_reviews`) — which is
 // persisted but was surfaced on no page — must appear on the epic page (flat grid) and inside the
 // home page's plan detail (child grid). Feature coverage so the trace can't silently regress out.
-import { assert } from "jsr:@std/assert@1";
+import { test } from "node:test";
+import { assert } from "#test-assert";
+import { readdirSync, readFileSync } from "node:fs";
 
 // Percent-decode the pathname: `new URL(..).pathname` can contain encoded characters (e.g. a space
 // as `%20`), which `Deno.readDir`/`readTextFile` would fail to resolve. Matches the repo convention
@@ -79,22 +81,21 @@ function splitTopLevel(body: string): string[] {
   return out;
 }
 
-async function loadSchema(): Promise<Map<string, Set<string>>> {
+function loadSchema(): Map<string, Set<string>> {
   const schema = new Map<string, Set<string>>();
   const files: string[] = [];
-  for await (const e of Deno.readDir(`${ROOT}db/migrations`)) {
-    if (e.isFile && e.name.endsWith(".sql")) files.push(e.name);
+  for (const e of readdirSync(`${ROOT}db/migrations`, { withFileTypes: true })) {
+    if (e.isFile() && e.name.endsWith(".sql")) files.push(e.name);
   }
   files.sort(); // migration order doesn't matter for the union, but keep it deterministic
   for (const f of files) {
-    parseSchema(await Deno.readTextFile(`${ROOT}db/migrations/${f}`), schema);
+    parseSchema(readFileSync(`${ROOT}db/migrations/${f}`, "utf8"), schema);
   }
   return schema;
 }
 
 // ---- pages -> datasource references -------------------------------------------------------------
 
-// deno-lint-ignore no-explicit-any
 type Json = any;
 
 interface Ref {
@@ -164,11 +165,11 @@ function collectRefs(page: string, node: Json, out: Ref[]): void {
   for (const v of Object.values(node)) collectRefs(page, v, out);
 }
 
-async function loadRefs(): Promise<Ref[]> {
+function loadRefs(): Ref[] {
   const refs: Ref[] = [];
-  for await (const e of Deno.readDir(`${ROOT}pages`)) {
-    if (!e.isFile || !e.name.endsWith(".page.json")) continue;
-    const page = JSON.parse(await Deno.readTextFile(`${ROOT}pages/${e.name}`));
+  for (const e of readdirSync(`${ROOT}pages`, { withFileTypes: true })) {
+    if (!e.isFile() || !e.name.endsWith(".page.json")) continue;
+    const page = JSON.parse(readFileSync(`${ROOT}pages/${e.name}`, "utf8"));
     collectRefs(e.name, page, refs);
   }
   return refs;
@@ -176,7 +177,7 @@ async function loadRefs(): Promise<Ref[]> {
 
 // ---- guards -------------------------------------------------------------------------------------
 
-Deno.test("every page datasource table exists in the migrations", async () => {
+test("every page datasource table exists in the migrations", async () => {
   const schema = await loadSchema();
   const refs = await loadRefs();
   assert(refs.length > 0, "no datasource references found — collector or pages are broken");
@@ -190,7 +191,7 @@ Deno.test("every page datasource table exists in the migrations", async () => {
   }
 });
 
-Deno.test("every page datasource column exists on its table", async () => {
+test("every page datasource column exists on its table", async () => {
   const schema = await loadSchema();
   const refs = await loadRefs();
   for (const r of refs) {
@@ -206,7 +207,7 @@ Deno.test("every page datasource column exists on its table", async () => {
   }
 });
 
-Deno.test("issue #87: plan_reviews is surfaced on the epic and home pages", async () => {
+test("issue #87: plan_reviews is surfaced on the epic and home pages", async () => {
   const refs = await loadRefs();
   const onEpic = refs.some((r) => r.page === "epic.page.json" && r.table === "plan_reviews");
   const onHome = refs.some((r) => r.page === "home.page.json" && r.table === "plan_reviews");

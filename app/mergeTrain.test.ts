@@ -1,5 +1,6 @@
 // Red/green regression for D6's pure merge-train lane planner.
-import { assertEquals } from "jsr:@std/assert@1";
+import { test } from "node:test";
+import { assertEquals } from "#test-assert";
 import { planLane, planPrLane, taskDependencyDepths } from "./mergeTrain.ts";
 
 const taskToPr = new Map([
@@ -9,7 +10,7 @@ const taskToPr = new Map([
   ["gap-10", "o/r#10"],
 ]);
 
-Deno.test("planLane: dependency depth then task id picks the single lane head", () => {
+test("planLane: dependency depth then task id picks the single lane head", () => {
   const depth = new Map([["gap-8", 2], ["gap-2", 0], ["gap-9", 0]]);
   assertEquals(planLane(["gap-8", "gap-9", "gap-2"], taskToPr, new Set(), depth), {
     headTaskId: "gap-2",
@@ -19,7 +20,7 @@ Deno.test("planLane: dependency depth then task id picks the single lane head", 
   });
 });
 
-Deno.test("taskDependencyDepths: longest dependency path determines landing order depth", () => {
+test("taskDependencyDepths: longest dependency path determines landing order depth", () => {
   const depths = taskDependencyDepths([
     { task_id: "b", depends_on_task_id: "a" },
     { task_id: "c", depends_on_task_id: "b" },
@@ -36,7 +37,7 @@ Deno.test("taskDependencyDepths: longest dependency path determines landing orde
   ]);
 });
 
-Deno.test("planLane: task id is the deterministic tiebreaker", () => {
+test("planLane: task id is the deterministic tiebreaker", () => {
   assertEquals(planLane(["gap-9", "gap-2", "gap-8"], taskToPr, new Set()), {
     headTaskId: "gap-2",
     headPrKey: "o/r#2",
@@ -45,7 +46,7 @@ Deno.test("planLane: task id is the deterministic tiebreaker", () => {
   });
 });
 
-Deno.test("planLane: already-merged head advances to the next unmerged member", () => {
+test("planLane: already-merged head advances to the next unmerged member", () => {
   assertEquals(planLane(["gap-2", "gap-8", "gap-9"], taskToPr, new Set(["o/r#2"])), {
     headTaskId: "gap-8",
     headPrKey: "o/r#8",
@@ -54,7 +55,7 @@ Deno.test("planLane: already-merged head advances to the next unmerged member", 
   });
 });
 
-Deno.test("planLane: single-member lanes never hold their PR", () => {
+test("planLane: single-member lanes never hold their PR", () => {
   assertEquals(planLane(["gap-10"], taskToPr, new Set()), {
     headTaskId: null,
     headPrKey: null,
@@ -63,7 +64,7 @@ Deno.test("planLane: single-member lanes never hold their PR", () => {
   });
 });
 
-Deno.test("planLane: tasks without PR keys do not block PR-backed members", () => {
+test("planLane: tasks without PR keys do not block PR-backed members", () => {
   assertEquals(planLane(["scaffold", "gap-2", "gap-8"], taskToPr, new Set()), {
     headTaskId: "gap-2",
     headPrKey: "o/r#2",
@@ -72,7 +73,7 @@ Deno.test("planLane: tasks without PR keys do not block PR-backed members", () =
   });
 });
 
-Deno.test("planPrLane: held PRs point at the current lane head", () => {
+test("planPrLane: held PRs point at the current lane head", () => {
   assertEquals(
     planPrLane([["gap-2", "gap-8"], ["gap-10"]], taskToPr, new Set(), "o/r#8"),
     {
@@ -84,7 +85,7 @@ Deno.test("planPrLane: held PRs point at the current lane head", () => {
   );
 });
 
-Deno.test("planPrLane: lane head and PRs outside exclusion lanes are not held", () => {
+test("planPrLane: lane head and PRs outside exclusion lanes are not held", () => {
   assertEquals(planPrLane([["gap-2", "gap-8"], ["gap-10"]], taskToPr, new Set(), "o/r#2").isHeld, false);
   assertEquals(planPrLane([["gap-2", "gap-8"], ["gap-10"]], taskToPr, new Set(), "o/r#10").isHeld, false);
   assertEquals(planPrLane([["gap-2", "gap-8"]], taskToPr, new Set(), "o/r#404").isHeld, false);

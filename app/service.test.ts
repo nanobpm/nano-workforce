@@ -5,30 +5,25 @@
 // dead "(no question provided)" question on the re-opened PR (the same stale-row class the plan
 // loop already guards in `startPlan`). Drives `submitPr` against an in-memory data layer with the
 // GitHub transport forced off so it is hermetic.
-import { assertEquals } from "jsr:@std/assert@1";
+import { test } from "node:test";
+import { assertEquals } from "#test-assert";
 import { pollIncidentsImpl, submitPr } from "./service.ts";
 
-// deno-lint-ignore no-explicit-any
 function memTable(rows: any[], key: string) {
   return {
-    // deno-lint-ignore no-explicit-any
     get: (k: any) => Promise.resolve(rows.find((r) => r[key] === k) ?? null),
     all: () => Promise.resolve([...rows]),
-    // deno-lint-ignore no-explicit-any
     find: (q: any) =>
       Promise.resolve(rows.filter((r) => Object.entries(q).every(([f, v]) => r[f] === v))),
-    // deno-lint-ignore no-explicit-any
     insert: (r: any) => {
       rows.push(r);
       return Promise.resolve(r);
     },
-    // deno-lint-ignore no-explicit-any
     update: (k: any, patch: any) => {
       const r = rows.find((x) => x[key] === k);
       if (r) Object.assign(r, patch);
       return Promise.resolve(r);
     },
-    // deno-lint-ignore no-explicit-any
     delete: (k: any) => {
       for (let i = rows.length - 1; i >= 0; i--) if (rows[i][key] === k) rows.splice(i, 1);
       return Promise.resolve();
@@ -37,18 +32,18 @@ function memTable(rows: any[], key: string) {
 }
 
 function withGithubOff(run: () => Promise<void>): Promise<void> {
-  const prevMode = Deno.env.get("NANO_PR_GITHUB_TRANSPORT");
-  const prevTok = Deno.env.get("GITHUB_TOKEN");
-  Deno.env.set("NANO_PR_GITHUB_TRANSPORT", "token"); // no token below -> fetchPrMeta returns null
-  Deno.env.delete("GITHUB_TOKEN");
+  const prevMode = process.env["NANO_PR_GITHUB_TRANSPORT"];
+  const prevTok = process.env["GITHUB_TOKEN"];
+  process.env["NANO_PR_GITHUB_TRANSPORT"] = "token"; // no token below -> fetchPrMeta returns null
+  delete process.env["GITHUB_TOKEN"];
   return run().finally(() => {
-    if (prevMode !== undefined) Deno.env.set("NANO_PR_GITHUB_TRANSPORT", prevMode);
-    else Deno.env.delete("NANO_PR_GITHUB_TRANSPORT");
-    if (prevTok !== undefined) Deno.env.set("GITHUB_TOKEN", prevTok);
+    if (prevMode !== undefined) process.env["NANO_PR_GITHUB_TRANSPORT"] = prevMode;
+    else delete process.env["NANO_PR_GITHUB_TRANSPORT"];
+    if (prevTok !== undefined) process.env["GITHUB_TOKEN"] = prevTok;
   });
 }
 
-Deno.test("re-submit of a cancelled PR clears stale open escalations + the denormalised pointer", async () => {
+test("re-submit of a cancelled PR clears stale open escalations + the denormalised pointer", async () => {
   await withGithubOff(async () => {
     const PR_KEY = "owner/repo#42";
     const stores: Record<string, { rows: unknown[]; key: string }> = {
@@ -74,11 +69,9 @@ Deno.test("re-submit of a cancelled PR clears stale open escalations + the denor
     };
     const data = {
       table: (name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key),
-      // deno-lint-ignore no-explicit-any
     } as any;
     const engine = {
       createInstance: () => Promise.resolve({ processInstanceKey: "PI-9" }),
-      // deno-lint-ignore no-explicit-any
     } as any;
 
     await submitPr(data, engine, {
@@ -125,7 +118,7 @@ function incidentFetch(byInstance: Record<string, unknown[]>) {
   };
 }
 
-Deno.test("pollIncidents mirrors an ACTIVE incident onto the PR row, then clears it, leaving status untouched", async () => {
+test("pollIncidents mirrors an ACTIVE incident onto the PR row, then clears it, leaving status untouched", async () => {
   const row = {
     pr_key: "owner/repo#7",
     repo: "owner/repo",
@@ -141,7 +134,6 @@ Deno.test("pollIncidents mirrors an ACTIVE incident onto the PR row, then clears
   };
   const data = {
     table: (name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key),
-    // deno-lint-ignore no-explicit-any
   } as any;
   const headers = { "content-type": "application/json" };
 
@@ -173,7 +165,7 @@ Deno.test("pollIncidents mirrors an ACTIVE incident onto the PR row, then clears
   assertEquals(row.status, "converging");
 });
 
-Deno.test("pollIncidents never queries a PR with no live instance and clears any stale incident", async () => {
+test("pollIncidents never queries a PR with no live instance and clears any stale incident", async () => {
   const noKey = {
     pr_key: "owner/repo#8",
     status: "converging",
@@ -195,7 +187,6 @@ Deno.test("pollIncidents never queries a PR with no live instance and clears any
   };
   const data = {
     table: (name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key),
-    // deno-lint-ignore no-explicit-any
   } as any;
   const headers = { "content-type": "application/json" };
 
@@ -215,7 +206,7 @@ Deno.test("pollIncidents never queries a PR with no live instance and clears any
   assertEquals(terminal.incident_message, null);
 });
 
-Deno.test("pollIncidents picks the oldest incident by creationTime, sorting a missing timestamp last", async () => {
+test("pollIncidents picks the oldest incident by creationTime, sorting a missing timestamp last", async () => {
   const row = {
     pr_key: "owner/repo#11",
     status: "converging",
@@ -229,7 +220,6 @@ Deno.test("pollIncidents picks the oldest incident by creationTime, sorting a mi
   };
   const data = {
     table: (name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key),
-    // deno-lint-ignore no-explicit-any
   } as any;
   const headers = { "content-type": "application/json" };
 
@@ -259,7 +249,7 @@ Deno.test("pollIncidents picks the oldest incident by creationTime, sorting a mi
 // source also keeps the returned key aligned with the DB-persisted `String(...)` value and dodges
 // JS 53-bit precision limits for large 64-bit keys (which is why keys travel as strings in
 // practice). `submitPr` must stringify it both in the returned body and the persisted row.
-Deno.test("submitPr stringifies a numeric processInstanceKey (contract: string | null)", async () => {
+test("submitPr stringifies a numeric processInstanceKey (contract: string | null)", async () => {
   await withGithubOff(async () => {
     const PR_KEY = "owner/repo#7";
     const stores: Record<string, { rows: unknown[]; key: string }> = {
@@ -269,14 +259,12 @@ Deno.test("submitPr stringifies a numeric processInstanceKey (contract: string |
     };
     const data = {
       table: (name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key),
-      // deno-lint-ignore no-explicit-any
     } as any;
     const engine = {
       // A large key delivered as a JS number — the exact case that breaks dev response validation
       // (number vs the `string | null` contract). Kept within MAX_SAFE_INTEGER so the fixture
       // itself is exact; true 64-bit keys travel as strings for the same precision reason.
       createInstance: () => Promise.resolve({ processInstanceKey: 2251799813685249 }),
-      // deno-lint-ignore no-explicit-any
     } as any;
 
     const res = await submitPr(data, engine, {
@@ -286,7 +274,6 @@ Deno.test("submitPr stringifies a numeric processInstanceKey (contract: string |
       prKey: PR_KEY,
     });
 
-    // deno-lint-ignore no-explicit-any
     const processKey = (res as any).processKey;
     assertEquals(typeof processKey, "string");
     assertEquals(processKey, "2251799813685249");
