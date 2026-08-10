@@ -64,12 +64,12 @@ function templateMap(root: string, patterns: string[]): Record<string, string> {
 // signal can't see (an empty value carries no `{{token}}` to be unresolved).
 function hasBlankAgentPromptHeader(bpmn: string): boolean {
   const re = /<zeebe:header\s+key="([^"]*)"\s+value="([^"]*)"\s*\/?>/g;
-let m = re.exec(bpmn);
-while (m !== null) {
+  let m = re.exec(bpmn);
+  while (m !== null) {
     if (m[1] === AGENT_PROMPT_HEADER && m[2].trim() === "") return true;
-  m = re.exec(bpmn);
-}
-return false;
+    m = re.exec(bpmn);
+  }
+  return false;
 }
 
 export interface CheckResult {

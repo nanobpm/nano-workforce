@@ -61,9 +61,8 @@ const str = (v: unknown): string | undefined =>
 // including a missing status — is treated as `blocked`: we must not assume a PR was opened,
 // and we only hand off / persist a PR when the status is `opened`.
 type WaveResultStatus = Extract<PlanTaskStatus, "opened" | "blocked" | "skipped">;
-const ALLOWED_STATUSES: ReadonlySet<string> = new Set(["opened", "blocked", "skipped"]);
 const isWaveResultStatus = (s: string): s is WaveResultStatus =>
-  ALLOWED_STATUSES.has(s);
+  s === "opened" || s === "blocked" || s === "skipped";
 
 // Coerce a wave index/count to a non-negative integer, falling back to 0. A NaN here would make
 // `nextWave < waveCount` mis-evaluate and end the loop early, leaving tasks `pending`.
