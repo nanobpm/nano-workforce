@@ -4,7 +4,7 @@ import type { AppApi } from "@nanobpm/urban";
 
 const hadSecret = Object.prototype.hasOwnProperty.call(process.env, "NANO_PR_WEBHOOK_SECRET");
 const previousSecret = process.env.NANO_PR_WEBHOOK_SECRET;
-process.env.NANO_PR_WEBHOOK_SECRET = "test-secret";
+process.env.NANO_PR_WEBHOOK_SECRET = " test-secret ";
 const { default: answerFeatureEscalation } = await import("./answerFeatureEscalation.ts");
 
 after(() => {

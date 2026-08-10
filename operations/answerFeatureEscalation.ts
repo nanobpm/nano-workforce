@@ -12,8 +12,9 @@
 //   { "plan": "owner/repo#12", "task": "task-3", "answer": "…" }
 import { defineOperation } from "@nanobpm/urban";
 import { answerTaskEscalation, featureCorrKey } from "../app/plan.ts";
+import { envVar } from "../app/version.ts";
 
-const WEBHOOK_SECRET = process.env.NANO_PR_WEBHOOK_SECRET ?? "";
+const WEBHOOK_SECRET = envVar("NANO_PR_WEBHOOK_SECRET") ?? "";
 
 const str = (v: unknown): string => (typeof v === "string" ? v.trim() : "");
 
