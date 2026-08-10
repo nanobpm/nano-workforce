@@ -1,6 +1,8 @@
 // Tests for the start/message operation delegates (ADR 0058 OpenAPI surface).
 // These cover the app-logic guards the JSON schema can't express (reference parsing, message-name
-// dispatch); the runtime's schema validation (required `pr`/`issue`/`name`) is exercised by urban's
+// dispatch). The delegates reject an unparseable/blank `pr`/`issue` with a 400 (the schema itself
+// marks neither required, since `StartVariables` is shared across convergence and planning); the
+// runtime's schema-level validation (e.g. `postMessage`'s required `name`) is exercised by urban's
 // own api runtime tests.
 import { test } from "node:test";
 import { assertEquals } from "#test-assert";

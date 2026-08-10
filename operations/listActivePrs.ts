@@ -3,7 +3,7 @@
 // external automation harness can see active work — and grab a `processKey` to cancel — without
 // opening the DB or the UI. Read-only projection over the datasource.
 //
-// The runtime validates the (empty) request against openapi.json; the optional shared-secret guard
+// The runtime validates the (empty) request against openapi.yaml; the optional shared-secret guard
 // stays HERE (the runtime does not enforce OpenAPI `security`): when NANO_PR_WEBHOOK_SECRET is set,
 // callers must present it via the x-hook-secret header. Unset → open (unchanged default).
 import { defineOperation } from "@nanobpm/urban";

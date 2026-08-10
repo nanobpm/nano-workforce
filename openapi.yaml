@@ -1,0 +1,633 @@
+# Nano Workforce control API — OpenAPI (authoring source, ADR 0059).
+#
+# This YAML is the single source of truth for the app HTTP surface. The Urban toolkit
+# derives typed request/response contracts + runtime validators from it (urban gen), and
+# each operationId is implemented by a delegate in operations/<operationId>.ts. Mounted
+# under /app/api (off the framework-reserved /app page-runtime namespace). Swagger UI is
+# served at /app/api-docs. Prefer editing this file over the generated artifacts.
+openapi: 3.0.3
+info:
+  title: Nano Workforce control API
+  version: 1.0.0
+  description: "The externally-facing control surface an operator, an automation harness, or an LLM
+    uses to observe and steer PR-convergence and planning runs. Contract-first (ADR 0058/0059): the
+    toolkit derives typed request/response contracts + runtime validators from this document and
+    each `operationId` is implemented by a delegate module in `operations/`. Mounted under base
+    `/app/api`, kept off the framework-reserved `/app` page-runtime namespace (which owns
+    `/app/runtime.js`, `/app/pages/*`, `/app/data/*`). The webhook endpoints are ordinary operations
+    too (ADR 0059 — the `actions[]` array is retired): the shared-secret ones under `/hooks/*` and
+    the capability-token side-channels (`/hooks/blackboard`, `/hooks/abandon`) all live at
+    `/app/api/hooks/*` and enforce their credential in the delegate."
+components:
+  securitySchemes:
+    hookSecret:
+      type: apiKey
+      in: header
+      name: x-hook-secret
+      description: Optional shared secret. Enforced by the delegate (NOT the runtime) only when
+        NANO_PR_WEBHOOK_SECRET is set; unset means the endpoint is open. Declared here for
+        documentation.
+  schemas:
+    ErrorBody:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: string
+    ActivePr:
+      type: object
+      description: A tracked PR that is not in a terminal (converged/abandoned) state.
+      required:
+        - prKey
+        - repo
+        - number
+        - url
+        - title
+        - status
+        - round
+        - processKey
+        - waitingSince
+        - openEscalation
+        - updatedAt
+        - activeWorker
+        - leaseUntil
+      properties:
+        prKey:
+          type: string
+        repo:
+          type: string
+        number:
+          type: integer
+        url:
+          type: string
+        title:
+          type:
+            - string
+            - "null"
+        status:
+          type: string
+        round:
+          type: integer
+        processKey:
+          type:
+            - string
+            - "null"
+          description: The engine process instance key; also the keyField the pages processExplorer link uses.
+        waitingSince:
+          type:
+            - string
+            - "null"
+        openEscalation:
+          type:
+            - string
+            - "null"
+        updatedAt:
+          type: string
+        activeWorker:
+          type:
+            - string
+            - "null"
+        leaseUntil:
+          type:
+            - string
+            - "null"
+    ActivePrList:
+      type: object
+      required:
+        - count
+        - prs
+      properties:
+        count:
+          type: integer
+        prs:
+          type: array
+          items:
+            $ref: "#/components/schemas/ActivePr"
+    VersionInfo:
+      type: object
+      description: The running app's identity (which code is actually live).
+      required:
+        - name
+        - version
+        - urbanVersion
+        - gitSha
+        - gitBranch
+        - runtime
+        - pid
+        - startedAt
+        - uptimeSeconds
+      properties:
+        name:
+          type: string
+        version:
+          type:
+            - string
+            - "null"
+        urbanVersion:
+          type:
+            - string
+            - "null"
+        gitSha:
+          type:
+            - string
+            - "null"
+        gitBranch:
+          type:
+            - string
+            - "null"
+        runtime:
+          type: string
+        pid:
+          type:
+            - integer
+            - "null"
+        startedAt:
+          type: string
+        uptimeSeconds:
+          type: integer
+    SubmitResult:
+      type: object
+      required:
+        - prKey
+      properties:
+        prKey:
+          type: string
+        processKey:
+          type:
+            - string
+            - "null"
+          description: The started convergence-loop instance key (null if the engine did not return one).
+        alreadyRunning:
+          type: boolean
+          description: True when a non-terminal convergence loop for this PR already exists; the aggregate was
+            refreshed and no new instance was started.
+    StartPlanResult:
+      type: object
+      required:
+        - planKey
+      properties:
+        planKey:
+          type: string
+        processKey:
+          type:
+            - string
+            - "null"
+        alreadyRunning:
+          type: boolean
+          description: True when a non-terminal plan for this issue already exists; no new instance was started.
+    StartVariables:
+      type: object
+      description: The start request body. `pr`/`url` (convergence) or `issue`/`url` (planning) name the
+        target. Only the fields below are read by the delegate; any extra keys are accepted but
+        ignored (they are NOT forwarded to the engine as process variables).
+      additionalProperties: true
+      properties:
+        pr:
+          type: string
+          description: "PR reference: owner/repo#123 or a PR URL."
+        issue:
+          type: string
+          description: "Issue reference: owner/repo#123 or an issue URL."
+        url:
+          type: string
+          description: Alias for pr/issue when a bare URL is supplied.
+        dependsOn:
+          type: array
+          items:
+            type: string
+        maxRounds:
+          type: integer
+          minimum: 1
+    MessageResult:
+      type: object
+      description: The result of publishing a message / answering an escalation. Shape varies by message
+        name; `ok` is always present.
+      additionalProperties: true
+      required:
+        - ok
+      properties:
+        ok:
+          type: boolean
+    FeatureAnswerRequest:
+      type: object
+      description: "Answer an implementation-phase task escalation (issue #25). Supply either `corrKey`,
+        or both `plan` and `task`; `answer` is always required."
+      required:
+        - answer
+      properties:
+        corrKey:
+          type: string
+          description: The task correlation key, `<plan_key>:<task_id>` (e.g. owner/repo#12:task-3).
+        plan:
+          type: string
+          description: Plan reference (owner/repo#N); combined with `task` to derive the corrKey.
+        task:
+          type: string
+          description: Task id within the plan; combined with `plan` to derive the corrKey.
+        answer:
+          type: string
+          description: The operator's answer that resumes the parked implementation agent.
+    BlackboardEntry:
+      type: object
+      required:
+        - id
+        - author_task
+        - kind
+        - files
+        - body
+        - wave
+        - created_at
+      properties:
+        id:
+          type: integer
+        author_task:
+          type: string
+        kind:
+          type: string
+        files:
+          type: array
+          items:
+            type: string
+        body:
+          type: string
+        wave:
+          type:
+            - integer
+            - "null"
+        created_at:
+          type: string
+    BlackboardPage:
+      type: object
+      required:
+        - planKey
+        - entries
+        - cursor
+      properties:
+        planKey:
+          type: string
+        entries:
+          type: array
+          items:
+            $ref: "#/components/schemas/BlackboardEntry"
+        cursor:
+          type:
+            - integer
+            - "null"
+          description: The plan's current head id; pass it back as `since` on the next poll (Tier 2).
+    BlackboardAppendRequest:
+      type: object
+      description: Append one blackboard entry. Idempotent on (plan, dedupe_key).
+      required:
+        - body
+      properties:
+        author_task:
+          type: string
+          description: The authoring task id; defaults to "system" when omitted/blank.
+        kind:
+          type: string
+          description: Entry kind (e.g. note, file-claim); normalized by the delegate.
+        files:
+          type: array
+          items:
+            type: string
+          description: Files this entry concerns (used by advisory file-claim conflict detection).
+        body:
+          type: string
+          description: The note text (required, non-blank).
+        wave:
+          type: integer
+          description: Optional plan wave the entry belongs to.
+        dedupe_key:
+          type: string
+          description: "Idempotency key: a retry with the same (plan, dedupe_key) returns the existing entry."
+    BlackboardAppendResult:
+      type: object
+      required:
+        - id
+        - inserted
+        - conflicts
+      properties:
+        id:
+          type: integer
+        inserted:
+          type: boolean
+          description: False when a prior entry with the same dedupe_key already existed (idempotent retry).
+        conflicts:
+          type: array
+          description: Prior sibling file-claims on the same file(s) (advisory first-writer-wins; never a lock).
+          items:
+            type: object
+            properties:
+              author_task:
+                type: string
+              file:
+                type: string
+    AbandonStatus:
+      type: object
+      required:
+        - prKey
+        - status
+        - abandoned
+      properties:
+        prKey:
+          type: string
+        status:
+          type: string
+        abandoned:
+          type: boolean
+          description: Derived from pull_requests.status; true ⇒ the run was cancelled and the agent must stop.
+paths:
+  /status:
+    get:
+      operationId: listActivePrs
+      summary: List every tracked PR currently in flight (not converged/abandoned), newest-updated first.
+      security:
+        - hookSecret: []
+        - {}
+      responses:
+        "200":
+          description: The active PRs.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ActivePrList"
+        "401":
+          description: Missing/invalid shared secret (only when NANO_PR_WEBHOOK_SECRET is set).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+  /version:
+    get:
+      operationId: getVersion
+      summary: The running app's identity (app/urban versions, git sha/branch, runtime, pid, uptime).
+      security:
+        - hookSecret: []
+        - {}
+      responses:
+        "200":
+          description: The version/identity payload.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VersionInfo"
+        "401":
+          description: Missing/invalid shared secret (only when NANO_PR_WEBHOOK_SECRET is set).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+  /actions/start/convergence-loop:
+    post:
+      operationId: startConvergenceLoop
+      summary: Register/refresh a PR aggregate (idempotent on prKey) and start its convergence loop.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StartVariables"
+      responses:
+        "202":
+          description: The loop was started (or refreshed).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubmitResult"
+        "400":
+          description: The PR reference could not be parsed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+  /actions/start/plan-fanout:
+    post:
+      operationId: startPlanFanout
+      summary: Register/refresh a plan aggregate (idempotent on planKey) and start the planning fan-out.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StartVariables"
+      responses:
+        "202":
+          description: The plan fan-out was started (or was already running).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StartPlanResult"
+        "400":
+          description: The issue reference could not be parsed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+  /actions/message:
+    post:
+      operationId: postMessage
+      summary: Publish a message / answer an escalation. For escalation-answered and
+        feature-escalation-answered names, runs the corresponding answer flow; otherwise a plain
+        publishMessage.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+              required:
+                - name
+              properties:
+                name:
+                  type: string
+                  description: The message name (correlates a waiting event).
+                correlationKey:
+                  type: string
+                variables:
+                  type: object
+                  additionalProperties: true
+                  properties:
+                    answer:
+                      type: string
+      responses:
+        "200":
+          description: The message was published (or the escalation answered).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResult"
+        "400":
+          description: A required field was missing/blank.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+        "404":
+          description: No matching open escalation / parked token to answer.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResult"
+  /hooks/feature-answer:
+    post:
+      operationId: answerFeatureEscalation
+      summary: "Answer an implementation-phase task escalation out of band (issue #25). Optional
+        shared-secret guard (x-hook-secret), enforced only when NANO_PR_WEBHOOK_SECRET is set."
+      security:
+        - hookSecret: []
+        - {}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FeatureAnswerRequest"
+      responses:
+        "200":
+          description: The escalation was answered and the parked agent resumed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResult"
+        "400":
+          description: A required field was missing (answer, or a resolvable correlation key).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResult"
+        "401":
+          description: Missing/invalid shared secret (only when NANO_PR_WEBHOOK_SECRET is set).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResult"
+        "404":
+          description: No matching open task escalation for the correlation key.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResult"
+  /hooks/blackboard:
+    get:
+      operationId: readBlackboard
+      summary: Read a plan's blackboard, scoped by the capability token (Tier 1). Optional ?since=<id>
+        returns only newer entries.
+      parameters:
+        - name: token
+          in: query
+          required: false
+          schema:
+            type: string
+          description: "Per-plan capability token (issues #51 / #49) — the token IS the credential and
+            scopes the read to exactly one plan. Required in practice, but declared optional here
+            because it may instead be sent as the `x-blackboard-token` header; the delegate enforces
+            it (400 when absent from both, 404 when unknown). Not an OpenAPI `security` scheme: it is
+            a per-plan DB-issued capability, not a fixed shared secret the runtime could verify."
+        - name: since
+          in: query
+          required: false
+          schema:
+            type: integer
+          description: Return only entries with id > since (incremental poll).
+      responses:
+        "200":
+          description: The blackboard page for this plan.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BlackboardPage"
+        "400":
+          description: Missing blackboard token.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+        "404":
+          description: Unknown blackboard token (never reveals which plans exist).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+    post:
+      operationId: appendBlackboard
+      summary: Append one entry to a plan's blackboard, scoped by the capability token (Tier 1).
+        Idempotent on (plan, dedupe_key).
+      parameters:
+        - name: token
+          in: query
+          required: false
+          schema:
+            type: string
+          description: "Per-plan capability token (issues #51 / #49) — the token IS the credential and
+            scopes the write to exactly one plan. Required in practice, but declared optional here
+            because it may instead be sent as the `x-blackboard-token` header; the delegate enforces
+            it (400 when absent from both, 404 when unknown). Not an OpenAPI `security` scheme: it is
+            a per-plan DB-issued capability, not a fixed shared secret the runtime could verify."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BlackboardAppendRequest"
+      responses:
+        "200":
+          description: "An idempotent retry: the entry already existed (inserted=false)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BlackboardAppendResult"
+        "201":
+          description: The entry was appended.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BlackboardAppendResult"
+        "400":
+          description: Missing blackboard token or blank body.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+        "404":
+          description: Unknown blackboard token (never reveals which plans exist).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+  /hooks/abandon:
+    get:
+      operationId: checkAbandon
+      summary: "Cooperative abandon check (issue #76): tell a running agent whether its run was cancelled.
+        Scoped by the per-PR capability token."
+      parameters:
+        - name: token
+          in: query
+          required: false
+          schema:
+            type: string
+          description: "Per-PR capability token (issue #76) — the token IS the credential and scopes the
+            read to exactly one PR. Required in practice, but declared optional here because it may
+            instead be sent as the `x-abandon-token` header; the delegate enforces it (400 when absent
+            from both, 404 when unknown). Not an OpenAPI `security` scheme: it is a per-PR DB-issued
+            capability, not a fixed shared secret the runtime could verify."
+      responses:
+        "200":
+          description: The PR's abandon status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AbandonStatus"
+        "400":
+          description: Missing abandon token.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+        "404":
+          description: Unknown abandon token (never reveals which PRs exist).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"

@@ -5,7 +5,7 @@
 // `@nanobpm/urban` runtime via `runFromEnv`:
 //   • deploys the BPMN + hosts the `pr.*` record workers (workers/*/worker.ts),
 //   • serves the schema-driven page runtime (ADR 0042) from `pages/home.page.json`,
-//   • mounts the OpenAPI operations (openapi.json → operations/*.ts) — the start/cancel/message
+//   • mounts the OpenAPI operations (openapi.yaml → operations/*.ts) — the start/cancel/message
 //     control endpoints plus the webhook operations under `/app/api/hooks/*` (ADR 0059).
 //
 // The only thing that isn't declarative is the review-ready poller: it does arbitrary GitHub

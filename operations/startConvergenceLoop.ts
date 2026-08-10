@@ -6,7 +6,7 @@
 // The request body is FLAT (`{ pr | url, dependsOn?, maxRounds? }`), not wrapped in a `variables`
 // envelope: this is a purpose-built operation, not a generic engine "start process" call, so it does
 // not leak the engine's variable-map concept to callers. The runtime validates the body against
-// openapi.json; this delegate keeps the PR-parse guard because the reference format (owner/repo#123
+// openapi.yaml; this delegate keeps the PR-parse guard because the reference format (owner/repo#123
 // or a URL) is app logic, not something the JSON schema can express — an unparseable reference is a 400.
 import { defineOperation } from "@nanobpm/urban";
 import { clampRounds, MAX_ROUNDS, parsePr, submitPr } from "../app/service.ts";

@@ -5,7 +5,7 @@
 // token, then re-surface the next open escalation. Any other message falls back to a plain
 // publishMessage.
 //
-// The runtime validates the body against openapi.json (`name` is required, so a missing name is a 400
+// The runtime validates the body against openapi.yaml (`name` is required, so a missing name is a 400
 // for free); this delegate keeps the message-name dispatch — the discriminator + downstream behavior
 // is app logic, not something the JSON schema can express.
 import { defineOperation } from "@nanobpm/urban";

@@ -5,7 +5,7 @@
 // external system (a chat relay, a CI job, a human via curl) resume a parked implementation agent
 // without the page. Same idempotent `answerTaskEscalation` path the page's answer form uses.
 //
-// The runtime validates the body shape against openapi.json; this delegate keeps the semantic
+// The runtime validates the body shape against openapi.yaml; this delegate keeps the semantic
 // checks (an answer is required; a correlation key must be resolvable) and the shared-secret guard.
 // Body accepts either the raw correlation key or a plan+task pair:
 //   { "corrKey": "owner/repo#12:task-3", "answer": "…" }

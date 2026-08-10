@@ -266,7 +266,7 @@ under `api.base` (`/app/api`), each implemented by a delegate module in
 `operations/`. The webhook endpoints are ordinary operations too (ADR 0059 — the
 `actions[]` array is retired), mounted under `/app/api/hooks/*`. The runtime
 serves them all; `main.ts` only starts the runtime and the review-ready poller.
-The full, authoritative contract is `openapi.json` (Swagger UI at
+The full, authoritative contract is `openapi.yaml` (Swagger UI at
 `/app/api-docs`); the OpenAPI rows below are the complete set of operations:
 
 | method | route | purpose |

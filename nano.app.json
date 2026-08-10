@@ -140,7 +140,7 @@
     "icon": "assets/icon.svg"
   },
   "api": {
-    "spec": "openapi.json",
+    "spec": "openapi.yaml",
     "dir": "operations",
     "validateResponses": "dev"
   }
