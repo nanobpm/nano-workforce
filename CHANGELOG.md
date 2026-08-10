@@ -1,3 +1,10 @@
+## [0.35.1](https://github.com/nanobpm/nano-workforce/compare/v0.35.0...v0.35.1) (2026-08-10)
+
+
+### Bug Fixes
+
+* **api:** move OpenAPI base off the reserved /app page-runtime namespace ([#103](https://github.com/nanobpm/nano-workforce/issues/103)) ([6dfb77f](https://github.com/nanobpm/nano-workforce/commit/6dfb77ff82b532965c4a9823d771d46d4ffa920e)), closes [#102](https://github.com/nanobpm/nano-workforce/issues/102)
+
 # [0.35.0](https://github.com/nanobpm/nano-workforce/compare/v0.34.0...v0.35.0) (2026-08-10)
 
 
