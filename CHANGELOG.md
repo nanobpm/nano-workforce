@@ -1,3 +1,10 @@
+# [0.39.0](https://github.com/nanobpm/nano-workforce/compare/v0.38.0...v0.39.0) (2026-08-10)
+
+
+### Features
+
+* adopt urban 0.38.0 typed delegate registry for the OpenAPI surface ([#110](https://github.com/nanobpm/nano-workforce/issues/110)) ([fe62908](https://github.com/nanobpm/nano-workforce/commit/fe62908968c0bd707f8e2da58fa550cca9fbab5b))
+
 # [0.38.0](https://github.com/nanobpm/nano-workforce/compare/v0.37.0...v0.38.0) (2026-08-10)
 
 
