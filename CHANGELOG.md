@@ -1,3 +1,10 @@
+# [0.36.0](https://github.com/nanobpm/nano-workforce/compare/v0.35.2...v0.36.0) (2026-08-10)
+
+
+### Features
+
+* adopt Biome + GritQL ban-`as` lint gate ([#107](https://github.com/nanobpm/nano-workforce/issues/107)) ([38c16fb](https://github.com/nanobpm/nano-workforce/commit/38c16fb319e8c5d6b8c20faf95318de39b948a96)), closes [#105](https://github.com/nanobpm/nano-workforce/issues/105)
+
 ## [0.35.2](https://github.com/nanobpm/nano-workforce/compare/v0.35.1...v0.35.2) (2026-08-10)
 
 
