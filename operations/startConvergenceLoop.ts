@@ -1,28 +1,34 @@
-// POST /app/api/actions/start/convergence-loop → operationId `startConvergenceLoop` (ADR 0058, base /app/api).
-// Replaces the hand-rolled action that overrode the generic "start process" palette action: parse the
-// PR reference and register/refresh the PR aggregate (idempotent on prKey) before starting the loop.
+// POST /app/api/actions/start/convergence-loop → operationId `startConvergenceLoop` (ADR 0058/0059,
+// base /app/api). The ONE door for starting a convergence loop — the page's "Start review" form, an
+// external webhook relay, a CI job, and Swagger all POST here. Parse the PR reference and
+// register/refresh the PR aggregate (idempotent on prKey) before starting the loop.
 //
-// The runtime validates the body against openapi.json (a `variables` object is required); this
-// delegate keeps the PR-parse guard because the reference format (owner/repo#123 or a URL) is app
-// logic, not something the JSON schema can express — an unparseable reference is a 400.
+// The request body is FLAT (`{ pr | url, dependsOn?, maxRounds? }`), not wrapped in a `variables`
+// envelope: this is a purpose-built operation, not a generic engine "start process" call, so it does
+// not leak the engine's variable-map concept to callers. The runtime validates the body against
+// openapi.yaml; this delegate keeps the PR-parse guard because the reference format (owner/repo#123
+// or a URL) is app logic, not something the JSON schema can express — an unparseable reference is a 400.
 import { defineOperation } from "@nanobpm/urban";
 import { clampRounds, MAX_ROUNDS, parsePr, submitPr } from "../app/service.ts";
 
 interface Body {
-  variables?: { pr?: string; url?: string; dependsOn?: unknown; maxRounds?: unknown };
+  pr?: string;
+  url?: string;
+  dependsOn?: unknown;
+  maxRounds?: unknown;
 }
 
 export default defineOperation<
   { params: Record<string, string>; query: Record<string, string | string[] | undefined>; body: Body },
   { prKey: string; alreadyRunning?: boolean; processKey?: string | null } | { error: string }
 >("startConvergenceLoop", async ({ body }, app) => {
-  const vars = body?.variables ?? {};
-  const raw = String(vars.pr ?? vars.url ?? "").trim();
+  const b = body ?? {};
+  const raw = String(b.pr ?? b.url ?? "").trim();
   const parsed = parsePr(raw);
   if (!parsed) {
     return { status: 400, body: { error: "could not parse PR (use owner/repo#123 or a PR URL)" } };
   }
-  const dependsOn = Array.isArray(vars.dependsOn) ? vars.dependsOn.map((d) => String(d)) : [];
-  const maxRounds = clampRounds(vars.maxRounds, MAX_ROUNDS);
+  const dependsOn = Array.isArray(b.dependsOn) ? b.dependsOn.map((d) => String(d)) : [];
+  const maxRounds = clampRounds(b.maxRounds, MAX_ROUNDS);
   return { status: 202, body: await submitPr(app.data, app.engine, parsed, dependsOn, maxRounds) };
 });

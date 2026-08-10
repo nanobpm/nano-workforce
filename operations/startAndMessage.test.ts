@@ -1,6 +1,8 @@
 // Tests for the start/message operation delegates (ADR 0058 OpenAPI surface).
 // These cover the app-logic guards the JSON schema can't express (reference parsing, message-name
-// dispatch); the runtime's schema validation (required `variables`/`name`) is exercised by urban's
+// dispatch). The delegates reject an unparseable/blank `pr`/`issue` with a 400 (the schema itself
+// marks neither required, since `StartVariables` is shared across convergence and planning); the
+// runtime's schema-level validation (e.g. `postMessage`'s required `name`) is exercised by urban's
 // own api runtime tests.
 import { test } from "node:test";
 import { assertEquals } from "#test-assert";
@@ -21,14 +23,14 @@ function input(body: any) {
 }
 
 test("startConvergenceLoop → 400 on an unparseable PR reference", async () => {
-  const res = await startConvergenceLoop(input({ variables: { pr: "not a pr" } }), app);
+  const res = await startConvergenceLoop(input({ pr: "not a pr" }), app);
   const r = res as any;
   assertEquals(r.status, 400);
   assertEquals(typeof r.body.error, "string");
 });
 
 test("startPlanFanout → 400 on an unparseable issue reference", async () => {
-  const res = await startPlanFanout(input({ variables: { issue: "" } }), app);
+  const res = await startPlanFanout(input({ issue: "" }), app);
   const r = res as any;
   assertEquals(r.status, 400);
   assertEquals(typeof r.body.error, "string");

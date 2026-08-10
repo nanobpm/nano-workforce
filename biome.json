@@ -4,7 +4,6 @@
     "includes": [
       "app/**/*.ts",
       "operations/**/*.ts",
-      "actions/**/*.ts",
       "workers/**/*.ts",
       "pages/**/*.ts",
       "components/**/*.ts",
@@ -20,7 +19,6 @@
     "includes": [
       "app/**/*.ts",
       "operations/**/*.ts",
-      "actions/**/*.ts",
       "workers/**/*.ts",
       "pages/**/*.ts",
       "components/**/*.ts",

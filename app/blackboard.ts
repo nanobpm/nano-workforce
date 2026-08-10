@@ -13,7 +13,7 @@
 //     stable `dedupe_key` is a no-op (backed by a unique index; we also short-circuit here).
 //   - CAPABILITY URL. The per-plan token IS the credential; the agent curls the exact URL it was
 //     handed (delivered in `appendPrompt`). Delivery is in-band (rides the prompt the harness
-//     already forwards); use is out-of-band (a direct side-channel to `/hooks/blackboard`).
+//     already forwards); use is out-of-band (a direct side-channel to `/app/api/hooks/blackboard`).
 //
 // Data access goes through the record gateway (`data.table`), never hand-written SQL — matching
 // app/service.ts and app/plan.ts.
@@ -87,7 +87,7 @@ export function publicBaseUrl(env: string | undefined = process.env.NANO_PR_PUBL
 /** The capability URL for a plan's blackboard: the token rides the query string, so the agent can
  * GET/POST the exact string it was handed with no header assembly. */
 export function blackboardUrl(token: string, base: string = publicBaseUrl()): string {
-  return `${base}/hooks/blackboard?token=${encodeURIComponent(token)}`;
+  return `${base}/app/api/hooks/blackboard?token=${encodeURIComponent(token)}`;
 }
 
 /** The coordination-protocol block appended (verbatim, via `appendPrompt`) to each implementer

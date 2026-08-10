@@ -64,7 +64,7 @@ test("publicBaseUrl: a blank/whitespace override falls back instead of yielding 
   try {
     assertEquals(publicBaseUrl(""), "http://localhost:3000");
     assertEquals(publicBaseUrl("   "), "http://localhost:3000");
-    assertEquals(blackboardUrl("t", publicBaseUrl("")), "http://localhost:3000/hooks/blackboard?token=t");
+    assertEquals(blackboardUrl("t", publicBaseUrl("")), "http://localhost:3000/app/api/hooks/blackboard?token=t");
   } finally {
     if (prev === undefined) delete process.env.NANO_PR_BASE_URL;
     else process.env.NANO_PR_BASE_URL = prev;
@@ -74,7 +74,7 @@ test("publicBaseUrl: a blank/whitespace override falls back instead of yielding 
 test("blackboardUrl: capability token rides the query string", () => {
   assertEquals(
     blackboardUrl("tok+en/x", "https://h"),
-    "https://h/hooks/blackboard?token=tok%2Ben%2Fx",
+    "https://h/app/api/hooks/blackboard?token=tok%2Ben%2Fx",
   );
 });
 
@@ -87,7 +87,7 @@ test("normalizeKind: valid passes through, anything else becomes note", () => {
 });
 
 test("renderCoordinationBrief: leads with a separator and teaches the protocol + URL", () => {
-  const url = "https://h/hooks/blackboard?token=abc";
+  const url = "https://h/app/api/hooks/blackboard?token=abc";
   const brief = renderCoordinationBrief(url);
   assert(brief.startsWith("\n\n---"), "must own a leading separator (appendPrompt adds none)");
   assertStringIncludes(brief, url);

@@ -1,8 +1,10 @@
-// Tests for the /hooks/blackboard endpoint (Tier 1, issues #51 / #49 D4).
+// Tests for the /app/api/hooks/blackboard operations `readBlackboard` (GET) + `appendBlackboard`
+// (POST) (ADR 0059; Tier 1, issues #51 / #49 D4).
 import { test } from "node:test";
 import { assertEquals } from "#test-assert";
 import type { AppApi } from "@nanobpm/urban";
-import handler from "./blackboard.ts";
+import readBlackboard from "./readBlackboard.ts";
+import appendBlackboard from "./appendBlackboard.ts";
 
 function memApp(): { app: AppApi; stores: Record<string, any[]> } {
   const stores: Record<string, any[]> = {};
@@ -34,7 +36,7 @@ function memApp(): { app: AppApi; stores: Record<string, any[]> } {
 function req(method: string, query: Record<string, string>) {
   return {
     method,
-    path: "/hooks/blackboard",
+    path: "/app/api/hooks/blackboard",
     query: new URLSearchParams(query),
     headers: new Headers(),
     text: async () => "",
@@ -47,7 +49,17 @@ async function call(
   query: Record<string, string>,
   body?: unknown,
 ) {
-  const res = await handler({ req: req(method, query) as any, body }, app);
+  // Method routing is the runtime's job; here we dispatch to the delegate the spec mounts per verb.
+  // Be explicit so an unexpected method fails loudly rather than silently running the POST delegate.
+  const handler =
+    method === "GET"
+      ? readBlackboard
+      : method === "POST"
+        ? appendBlackboard
+        : (() => {
+            throw new Error(`blackboard test helper: unsupported method ${method}`);
+          })();
+  const res = await handler({ req: req(method, query) as any, params: {}, query: {}, body } as any, app);
   return res as any;
 }
 
@@ -178,10 +190,4 @@ test("POST a non-file-claim carries no conflicts", async () => {
   await seedPlan(app, "o/r#1", "tok");
   const res = await call(app, "POST", { token: "tok" }, { author_task: "t", kind: "note", body: "fyi" });
   assertEquals(res.body.conflicts, []);
-});
-
-test("unsupported method → 405", async () => {
-  const { app } = memApp();
-  await seedPlan(app, "o/r#1", "tok");
-  assertEquals((await call(app, "DELETE", { token: "tok" })).status, 405);
 });

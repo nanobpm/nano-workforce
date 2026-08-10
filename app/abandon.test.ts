@@ -53,7 +53,7 @@ test("mintAbandonToken is url-safe, unpadded, and unique", () => {
 test("abandonUrl carries the token on the query string (url-encoded)", () => {
   assertEquals(
     abandonUrl("tok+/=", "https://host"),
-    "https://host/hooks/abandon?token=tok%2B%2F%3D",
+    "https://host/app/api/hooks/abandon?token=tok%2B%2F%3D",
   );
 });
 
@@ -68,13 +68,13 @@ test("abandonTokenFromUrl returns undefined for absent/tokenless/garbage input",
   assertEquals(abandonTokenFromUrl(undefined), undefined);
   assertEquals(abandonTokenFromUrl(null), undefined);
   assertEquals(abandonTokenFromUrl(""), undefined);
-  assertEquals(abandonTokenFromUrl("https://host/hooks/abandon"), undefined, "no token param");
+  assertEquals(abandonTokenFromUrl("https://host/app/api/hooks/abandon"), undefined, "no token param");
   assertEquals(abandonTokenFromUrl("not a url"), undefined, "unparseable input never throws");
 });
 
 test("renderAbandonBrief embeds the concrete URL and the stop contract", () => {
-  const brief = renderAbandonBrief("https://host/hooks/abandon?token=tok");
-  assertEquals(brief.includes("https://host/hooks/abandon?token=tok"), true);
+  const brief = renderAbandonBrief("https://host/app/api/hooks/abandon?token=tok");
+  assertEquals(brief.includes("https://host/app/api/hooks/abandon?token=tok"), true);
   assertEquals(brief.includes("abandoned"), true);
   assertEquals(brief.includes("Abort"), true);
   // Must use `curl -f` so a 404 (torn-down run) fails the command instead of exiting 0 with an

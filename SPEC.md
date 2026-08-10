@@ -56,7 +56,7 @@ surface are proposed and open for adjustment.
 ```
 nano-workforce/
   nano.app.json               # manifest (ADR 0027): sqlite data, domain types, submit webhook trigger
-  main.ts                     # Deno entrypoint: deploy + start workers + Deno.serve (page runtime + action overrides + poller)
+  main.ts                     # Node entrypoint: deploy + start workers + start the runtime (page runtime + OpenAPI operations + poller)
   deno.json
   pages/
     home.page.json            # the screen, authored declaratively (ADR 0042 Page Composer)
@@ -263,20 +263,22 @@ row by migration `003`).
 
 The app-specific business-logic endpoints are **OpenAPI operations** mounted
 under `api.base` (`/app/api`), each implemented by a delegate module in
-`operations/`, plus a `/hooks/*` webhook. The runtime serves them all; `main.ts`
-only starts the runtime and the review-ready poller. The full, authoritative
-contract is `openapi.json` (Swagger UI at `/app/api-docs`); the OpenAPI rows
-below are the complete set of operations, `/hooks/submit` is one of the `/hooks/*`
-webhooks:
+`operations/`. The webhook endpoints are ordinary operations too (ADR 0059 — the
+`actions[]` array is retired), mounted under `/app/api/hooks/*`. The runtime
+serves them all; `main.ts` only starts the runtime and the review-ready poller.
+The full, authoritative contract is `openapi.yaml` (Swagger UI at
+`/app/api-docs`); the OpenAPI rows below are the complete set of operations:
 
 | method | route | purpose |
 |---|---|---|
 | `GET` | `/app/api/status` | list tracked PRs + count |
 | `GET` | `/app/api/version` | app + engine version |
-| `POST` | `/app/api/actions/start/convergence-loop` | parse the PR ref → create the aggregate + start the process |
-| `POST` | `/app/api/actions/start/plan-fanout` | start a plan fan-out run |
+| `POST` | `/app/api/actions/start/convergence-loop` | parse the PR ref → create the aggregate + start the process (the ONE submit door — page + external callers) |
+| `POST` | `/app/api/actions/start/plan-fanout` | parse the issue ref → start a plan fan-out run (the ONE plan door) |
 | `POST` | `/app/api/actions/message` (`escalation-answered`) | answer an open escalation → publish `escalation-answered` |
-| `POST` | `/hooks/submit` | webhook submit (shared-secret auth) → start the process |
+| `POST` | `/app/api/hooks/feature-answer` | answer an implementation-phase task escalation out of band (optional shared-secret) |
+| `GET`/`POST` | `/app/api/hooks/blackboard` | per-plan coordination blackboard (capability-token side-channel) |
+| `GET` | `/app/api/hooks/abandon` | cooperative abandon check (per-PR capability token) |
 
 Everything else (`GET /`, `GET /app/pages/*`, `GET /app/data/*`, the renderer) is
 served by the runtime — including `POST /app/actions/cancel`, which is Urban's
@@ -393,7 +395,7 @@ queries skip (`merging`), so a slow pass can't double-signal.
 | `GITHUB_TOKEN` | — | GitHub API (poller + agent) |
 | `NANO_PR_POLL_MS` | 60000 | poll interval |
 | `NANO_PR_MAX_ROUNDS` | 20 | default round cap (per-submit `maxRounds` override, clamped 1–100) |
-| `NANO_PR_WEBHOOK_SECRET` | — | HMAC for `/hooks/submit` |
+| `NANO_PR_WEBHOOK_SECRET` | — | optional shared secret for the `/app/api/hooks/feature-answer` webhook operation (`X-Hook-Secret`) |
 | `NANO_PR_AUTO_MERGE` | 1 | run the merge stage after convergence (`0` = review-only) |
 | `NANO_PR_MERGE_METHOD` | squash | `squash` \| `merge` \| `rebase` |
 | `NANO_PR_MERGE_ADMIN` | 0 | pass `--admin` on merge |
@@ -443,9 +445,9 @@ scalar-only and cannot express the `tasks`/`results` lists, so the workers self-
 **Domain model** (`db/migrations/004_planning.sql`): `plans` (one row per issue) +
 `plan_tasks` (one row per slice, tracking its `status`/`pr_key`/`summary`).
 
-**Entry points**: the page's "Hand an issue to the fleet" form
-(`startProcess plan-fanout` → `actions/plan-start.ts`), or `POST /hooks/plan`
-(`{ issue | url }`, optional `X-Hook-Secret`).
+**Entry points**: the epic page's "Hand an issue to the fleet" form or
+`POST /app/api/actions/start/plan-fanout` (`{ issue | url }`) — the same flat
+operation the form posts.
 
 **Visibility**: the home page adds a **Plans** grid (Active: planning/dispatched;
 History: done/failed/abandoned) with a `plan_tasks` child grid showing each task's

@@ -42,13 +42,13 @@ export function mintAbandonToken(): string {
 /** The capability URL for a PR's abandon check: the token rides the query string so the agent can
  * GET the exact string it was handed with no header assembly. */
 export function abandonUrl(token: string, base: string = publicBaseUrl()): string {
-  return `${base}/hooks/abandon?token=${encodeURIComponent(token)}`;
+  return `${base}/app/api/hooks/abandon?token=${encodeURIComponent(token)}`;
 }
 
 /** Recover the capability token from an abandon URL — the inverse of `abandonUrl`. Returns
  * undefined when the input is absent or carries no `token` query param. A desync-heal uses this to
  * reconstruct a missing `pull_requests` row with the SAME token the running agent was already
- * handed (via the `abandonUrl` process variable), so its `curl -f "…/hooks/abandon?token=…"` abort
+ * handed (via the `abandonUrl` process variable), so its `curl -f "…/app/api/hooks/abandon?token=…"` abort
  * check keeps resolving instead of 404-ing on a freshly-minted token and aborting a live run. */
 export function abandonTokenFromUrl(url: string | null | undefined): string | undefined {
   if (!url) return undefined;

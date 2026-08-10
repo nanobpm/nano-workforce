@@ -33,7 +33,7 @@
       "props": {
         "title": "Hand an issue to the fleet",
         "submitLabel": "Plan & implement",
-        "action": { "path": "/app/api/actions/start/plan-fanout" },
+        "action": { "path": "/app/api/actions/start/plan-fanout", "body": "{{form}}" },
         "fields": [
           { "key": "issue", "label": "owner/repo#123 or a GitHub issue URL", "type": "text" }
         ]

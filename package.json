@@ -40,11 +40,11 @@
     "layout:check": "node --experimental-strip-types scripts/layout-bpmn.ts --check",
     "dev": "urban dev",
     "test": "node --experimental-strip-types --test",
-    "lint": "biome check app operations actions workers pages components scripts main.ts",
-    "lint:fix": "biome check --write app operations actions workers pages components scripts main.ts"
+    "lint": "biome check app operations workers pages components scripts main.ts",
+    "lint:fix": "biome check --write app operations workers pages components scripts main.ts"
   },
   "dependencies": {
-    "@nanobpm/urban": "^0.33.0"
+    "@nanobpm/urban": "^0.35.0"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.11",
