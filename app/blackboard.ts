@@ -58,12 +58,9 @@ export interface BlackboardInput {
   dedupe_key?: string;
 }
 
-const KIND_SET = new Set<string>(BLACKBOARD_KINDS);
-
 /** Coerce an arbitrary `kind` to a known value, defaulting to "note" for anything unrecognised. */
 export function normalizeKind(kind: unknown): BlackboardKind {
-  // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
-  return typeof kind === "string" && KIND_SET.has(kind) ? (kind as BlackboardKind) : "note";
+  return BLACKBOARD_KINDS.find((k) => k === kind) ?? "note";
 }
 
 /** A URL-safe, unguessable capability token (192 bits of randomness, base64url, no padding). */

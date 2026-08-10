@@ -51,8 +51,8 @@ for (const suffix of ["", "-wal", "-shm"]) {
     rmSync(path + suffix);
     console.log(`removed ${path}${suffix}`);
   } catch (err) {
-    // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
-    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    const code = typeof err === "object" && err !== null ? Reflect.get(err, "code") : undefined;
+    if (code !== "ENOENT") throw err;
   }
 }
 console.log("app db purged");

@@ -200,12 +200,12 @@ function runTar(tarArgs: string[], tgz: string): string {
   try {
     return execFileSync("tar", tarArgs, { encoding: "utf8" });
   } catch (e) {
-    // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
-    if ((e as NodeJS.ErrnoException).code === "ENOENT") {
+    const code = typeof e === "object" && e !== null ? Reflect.get(e, "code") : undefined;
+    if (code === "ENOENT") {
       throw new Error(`'tar' not found on PATH — install it to extract ${tgz}`, { cause: e });
     }
-    // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
-    throw new Error(`tar failed on ${tgz}: ${(e as Error).message}`, { cause: e });
+    const message = e instanceof Error ? e.message : String(e);
+    throw new Error(`tar failed on ${tgz}: ${message}`, { cause: e });
   }
 }
 
@@ -332,7 +332,7 @@ function report(label: string, files: string[]): void {
 try {
   main();
 } catch (err) {
-  // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
-  console.error(`upgrade failed: ${(err as Error).message}`);
+  const message = err instanceof Error ? err.message : String(err);
+  console.error(`upgrade failed: ${message}`);
   process.exit(1);
 }
