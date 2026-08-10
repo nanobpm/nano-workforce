@@ -176,7 +176,7 @@ Already have a narrower worker? Extend it in place instead of re-hiring — this
 the roles onto the profile, then restart its worker:
 
 ```sh
-c8ctl nano assign <name> plan plan-review feature trial-merge fix-ci rebase retro
+c8ctl nano assign <name> pr-review plan plan-review feature trial-merge fix-ci rebase retro
 ```
 
 ---
