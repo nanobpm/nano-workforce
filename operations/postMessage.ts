@@ -28,8 +28,7 @@ export default defineOperation<
 
   if (name === "escalation-answered") {
     const prKey = String(b.correlationKey ?? "");
-    // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
-    const answer = String((b.variables?.answer ?? "") as string).trim();
+    const answer = String(b.variables?.answer ?? "").trim();
     if (!prKey) return { status: 400, body: { error: "correlationKey is required" } };
     if (!answer) return { status: 400, body: { error: "answer is required" } };
     const r = await answerEscalation(app.data, app.engine, prKey, answer);
@@ -41,8 +40,7 @@ export default defineOperation<
     // `<plan_key>:<task_id>`; record the answer, resume the parked child, and re-surface the next
     // open escalation.
     const corrKey = String(b.correlationKey ?? "");
-    // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
-    const answer = String((b.variables?.answer ?? "") as string).trim();
+    const answer = String(b.variables?.answer ?? "").trim();
     if (!corrKey) return { status: 400, body: { error: "correlationKey is required" } };
     if (!answer) return { status: 400, body: { error: "answer is required" } };
     const r = await answerTaskEscalation(app.data, app.engine, corrKey, answer);

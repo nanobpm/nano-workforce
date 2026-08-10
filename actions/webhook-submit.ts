@@ -12,8 +12,7 @@ const handler: ActionHandler = async ({ req, body }, app) => {
   }
   // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
   const b = (body ?? {}) as { url?: unknown; pr?: unknown; dependsOn?: unknown; maxRounds?: unknown };
-  // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
-  const parsed = parsePr(String((b.url ?? b.pr ?? "") as string));
+  const parsed = parsePr(String(b.url ?? b.pr ?? ""));
   if (!parsed) return { status: 400, body: { error: "could not parse PR url" } };
   const dependsOn = Array.isArray(b.dependsOn) ? b.dependsOn.map((d) => String(d)) : [];
   const maxRounds = clampRounds(b.maxRounds, MAX_ROUNDS);

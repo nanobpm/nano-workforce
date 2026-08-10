@@ -80,10 +80,10 @@ export function mintBlackboardToken(): string {
 export function publicBaseUrl(env: string | undefined = process.env.NANO_PR_PUBLIC_BASE_URL): string {
   // Cascade through the fallback chain, skipping any value that is unset OR blank/whitespace, so an
   // explicitly-set-but-empty NANO_PR_PUBLIC_BASE_URL can't yield a malformed capability URL.
-  // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
-  const base = [env, process.env.NANO_PR_BASE_URL, "http://localhost:3000"]
-    .map((v) => v?.trim())
-    .find((v) => v) as string;
+  const base =
+    [env, process.env.NANO_PR_BASE_URL, "http://localhost:3000"]
+      .map((v) => v?.trim())
+      .find((v): v is string => Boolean(v)) ?? "http://localhost:3000";
   return base.replace(/\/+$/, "");
 }
 
