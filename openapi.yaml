@@ -63,36 +63,30 @@ components:
         url:
           type: string
         title:
-          type:
-            - string
-            - "null"
+          type: string
+          nullable: true
         status:
           type: string
         round:
           type: integer
         processKey:
-          type:
-            - string
-            - "null"
+          type: string
+          nullable: true
           description: The engine process instance key; also the keyField the pages processExplorer link uses.
         waitingSince:
-          type:
-            - string
-            - "null"
+          type: string
+          nullable: true
         openEscalation:
-          type:
-            - string
-            - "null"
+          type: string
+          nullable: true
         updatedAt:
           type: string
         activeWorker:
-          type:
-            - string
-            - "null"
+          type: string
+          nullable: true
         leaseUntil:
-          type:
-            - string
-            - "null"
+          type: string
+          nullable: true
     ActivePrList:
       type: object
       required:
@@ -123,27 +117,22 @@ components:
         name:
           type: string
         version:
-          type:
-            - string
-            - "null"
+          type: string
+          nullable: true
         urbanVersion:
-          type:
-            - string
-            - "null"
+          type: string
+          nullable: true
         gitSha:
-          type:
-            - string
-            - "null"
+          type: string
+          nullable: true
         gitBranch:
-          type:
-            - string
-            - "null"
+          type: string
+          nullable: true
         runtime:
           type: string
         pid:
-          type:
-            - integer
-            - "null"
+          type: integer
+          nullable: true
         startedAt:
           type: string
         uptimeSeconds:
@@ -156,9 +145,8 @@ components:
         prKey:
           type: string
         processKey:
-          type:
-            - string
-            - "null"
+          type: string
+          nullable: true
           description: The started convergence-loop instance key (null if the engine did not return one).
         alreadyRunning:
           type: boolean
@@ -172,9 +160,8 @@ components:
         planKey:
           type: string
         processKey:
-          type:
-            - string
-            - "null"
+          type: string
+          nullable: true
         alreadyRunning:
           type: boolean
           description: True when a non-terminal plan for this issue already exists; no new instance was started.
@@ -257,9 +244,8 @@ components:
         body:
           type: string
         wave:
-          type:
-            - integer
-            - "null"
+          type: integer
+          nullable: true
         created_at:
           type: string
     BlackboardPage:
@@ -276,9 +262,8 @@ components:
           items:
             $ref: "#/components/schemas/BlackboardEntry"
         cursor:
-          type:
-            - integer
-            - "null"
+          type: integer
+          nullable: true
           description: The plan's current head id; pass it back as `since` on the next poll (Tier 2).
     BlackboardAppendRequest:
       type: object
