@@ -9,7 +9,7 @@
 // debugging a stuck instance can confirm the process is on the code they think it is.
 //
 // Every probe is best-effort: a missing file or unavailable `.git` yields `null` for that field
-// rather than throwing, so `/app/version` never fails just because one source is absent.
+// rather than throwing, so `/app/api/version` never fails just because one source is absent.
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve, isAbsolute } from "node:path";

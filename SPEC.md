@@ -266,8 +266,8 @@ carry app-specific business logic:
 
 | method | route | purpose |
 |---|---|---|
-| `POST` | `/app/actions/start/convergence-loop` | parse the PR ref → create the aggregate + start the process |
-| `POST` | `/app/actions/message` (`escalation-answered`) | answer an open escalation → publish `escalation-answered` |
+| `POST` | `/app/api/actions/start/convergence-loop` | parse the PR ref → create the aggregate + start the process |
+| `POST` | `/app/api/actions/message` (`escalation-answered`) | answer an open escalation → publish `escalation-answered` |
 | `POST` | `/hooks/submit` | webhook submit (shared-secret auth) → start the process |
 
 Everything else (`GET /`, `GET /app/pages/*`, `GET /app/data/*`, the renderer) is
