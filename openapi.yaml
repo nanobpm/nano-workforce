@@ -227,6 +227,7 @@ components:
           description: Task id within the plan; combined with `plan` to derive the corrKey.
         answer:
           type: string
+          minLength: 1
           description: The operator's answer that resumes the parked implementation agent.
     BlackboardEntry:
       type: object
@@ -294,6 +295,7 @@ components:
           description: Files this entry concerns (used by advisory file-claim conflict detection).
         body:
           type: string
+          minLength: 1
           description: The note text (required, non-blank).
         wave:
           type: integer
@@ -442,6 +444,7 @@ paths:
               properties:
                 name:
                   type: string
+                  minLength: 1
                   description: The message name (correlates a waiting event).
                 correlationKey:
                   type: string
