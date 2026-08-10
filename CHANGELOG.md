@@ -1,3 +1,10 @@
+## [0.35.2](https://github.com/nanobpm/nano-workforce/compare/v0.35.1...v0.35.2) (2026-08-10)
+
+
+### Bug Fixes
+
+* **pages:** route-driven page actions via @nanobpm/urban@0.33.0 ([#106](https://github.com/nanobpm/nano-workforce/issues/106)) ([0ee4ab2](https://github.com/nanobpm/nano-workforce/commit/0ee4ab29aa8cfca6a04af6eb141a96d7878a6b1a))
+
 ## [0.35.1](https://github.com/nanobpm/nano-workforce/compare/v0.35.0...v0.35.1) (2026-08-10)
 
 
