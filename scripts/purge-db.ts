@@ -1,4 +1,4 @@
-// npm run purge (or `deno task purge`) — wipe the app's sqlite datasource so `npm start`
+// npm run purge — wipe the app's sqlite datasource so `npm start`
 // comes up against a fresh schema (the runtime re-applies db/migrations on boot). Deletes the
 // sqlite file and its WAL/SHM sidecars for the `app` source declared in nano.app.json.
 import { rmSync } from "node:fs";

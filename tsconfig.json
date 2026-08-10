@@ -37,11 +37,14 @@
   },
   "include": [
     "main.ts",
+    "app/**/*.ts",
+    "operations/**/*.ts",
     "workers/**/*.ts",
     "lib/**/*.ts",
     "src/**/*.ts",
     "scripts/**/*.ts",
-    "actions/**/*.ts"
+    "actions/**/*.ts",
+    "test/**/*.ts"
   ],
   "exclude": [
     "node_modules",

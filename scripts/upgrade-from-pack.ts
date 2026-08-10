@@ -1,4 +1,4 @@
-// npm run upgrade (or `deno task upgrade`) — refresh THIS app's source from a newer
+// npm run upgrade — refresh THIS app's source from a newer
 // published pack of @nanobpm/nano-workforce, WITHOUT touching your data.
 //
 // Why this exists: a Console project stamped from the example pack is a one-time

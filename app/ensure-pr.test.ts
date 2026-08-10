@@ -2,7 +2,8 @@
 // `pull_requests` FK parent before a child (`rounds`/`escalations`/`merges`) insert, so an
 // engine/app.db store desync never parks an opaque `FOREIGN KEY constraint failed` incident
 // (observed on convergence-loop instance 94).
-import { assert, assertEquals } from "jsr:@std/assert@1";
+import { test } from "node:test";
+import { assert, assertEquals } from "#test-assert";
 import type { DataLayer } from "@nanobpm/urban";
 import { canonicalPrUrl, ensurePr } from "./service.ts";
 
@@ -18,11 +19,9 @@ function memData(opts: { throwOnInsert?: boolean; seedOnThrow?: boolean } = {}):
   let insertCalls = 0;
   function tbl(name: string, key: string) {
     return {
-      // deno-lint-ignore require-await
       async get(id: string) {
         return rows.get(id);
       },
-      // deno-lint-ignore no-explicit-any require-await
       async insert(row: any) {
         insertCalls++;
         if (opts.throwOnInsert) {
@@ -34,14 +33,13 @@ function memData(opts: { throwOnInsert?: boolean; seedOnThrow?: boolean } = {}):
       },
     };
   }
-  // deno-lint-ignore no-explicit-any
   const data = { table: (n: string, k: string) => tbl(n, k) } as any as DataLayer;
   return { data, rows, get insertCalls() {
     return insertCalls;
   } };
 }
 
-Deno.test("ensurePr is a no-op when the parent already exists", async () => {
+test("ensurePr is a no-op when the parent already exists", async () => {
   const mem = memData();
   const { data, rows } = mem;
   rows.set("o/r#1", { pr_key: "o/r#1", status: "converging" });
@@ -52,7 +50,7 @@ Deno.test("ensurePr is a no-op when the parent already exists", async () => {
   assertEquals(mem.insertCalls, 0, "insert is never attempted — the no-write guarantee holds");
 });
 
-Deno.test("ensurePr reconstructs a minimal converging row when the parent is absent", async () => {
+test("ensurePr reconstructs a minimal converging row when the parent is absent", async () => {
   const { data, rows } = memData();
   await ensurePr(data, { prKey: "o/r#2", repo: "o/r", number: 2, round: 3 });
   const row = rows.get("o/r#2")!;
@@ -65,7 +63,7 @@ Deno.test("ensurePr reconstructs a minimal converging row when the parent is abs
   assert(typeof row.abandon_token === "string" && (row.abandon_token as string).length > 0);
 });
 
-Deno.test("ensurePr defaults current_round to 1 (rounds are 1-based) when none is passed", async () => {
+test("ensurePr defaults current_round to 1 (rounds are 1-based) when none is passed", async () => {
   const { data, rows } = memData();
   await ensurePr(data, { prKey: "o/r#5", repo: "o/r", number: 5 });
   assertEquals(
@@ -75,7 +73,7 @@ Deno.test("ensurePr defaults current_round to 1 (rounds are 1-based) when none i
   );
 });
 
-Deno.test("ensurePr reuses a supplied abandon token instead of minting a new one", async () => {
+test("ensurePr reuses a supplied abandon token instead of minting a new one", async () => {
   const { data, rows } = memData();
   await ensurePr(data, { prKey: "o/r#7", repo: "o/r", number: 7, abandonToken: "TOK-en_123" });
   assertEquals(
@@ -85,27 +83,27 @@ Deno.test("ensurePr reuses a supplied abandon token instead of minting a new one
   );
 });
 
-Deno.test("ensurePr mints a token when none is supplied", async () => {
+test("ensurePr mints a token when none is supplied", async () => {
   const { data, rows } = memData();
   await ensurePr(data, { prKey: "o/r#8", repo: "o/r", number: 8 });
   const tok = rows.get("o/r#8")!.abandon_token;
   assert(typeof tok === "string" && (tok as string).length > 0, "a fresh token is minted as a fallback");
 });
 
-Deno.test("ensurePr prefers an explicit url over the canonical one", async () => {
+test("ensurePr prefers an explicit url over the canonical one", async () => {
   const { data, rows } = memData();
   const url = "https://github.com/o/r/pull/9";
   await ensurePr(data, { prKey: "o/r#9", repo: "o/r", number: 9, url });
   assertEquals(rows.get("o/r#9")!.url, url);
 });
 
-Deno.test("ensurePr swallows an insert race when the row appears anyway", async () => {
+test("ensurePr swallows an insert race when the row appears anyway", async () => {
   // insert throws (unique-violation / concurrent writer) but the row is now present → healed.
   const { data } = memData({ throwOnInsert: true, seedOnThrow: true });
   await ensurePr(data, { prKey: "o/r#3", repo: "o/r", number: 3 });
 });
 
-Deno.test("ensurePr rethrows when the insert fails and the row is still absent", async () => {
+test("ensurePr rethrows when the insert fails and the row is still absent", async () => {
   const { data } = memData({ throwOnInsert: true, seedOnThrow: false });
   let threw = false;
   try {

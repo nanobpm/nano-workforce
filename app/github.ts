@@ -9,7 +9,7 @@
 //   • auto  — prefer `gh` when the binary is present; otherwise fall back to `token`.
 //
 // The poller is app-side host glue (main.ts), so host-specific subprocess I/O is allowed here.
-// Cross-runtime: runs under Node (`node:child_process`) and Deno (`Deno.Command`).
+// Cross-runtime: runs under Node (`node:child_process`).
 
 /** A GitHub pull-request review, narrowed to the fields the poller needs. */
 export interface GhReview {
@@ -26,30 +26,10 @@ export function githubTransport(): GithubTransport {
   return t === "gh" || t === "token" ? t : "auto";
 }
 
-interface DenoCommandCtor {
-  new (
-    command: string,
-    options: { args: string[]; stdout: "piped"; stderr: "piped" },
-  ): { output(): Promise<{ code: number; stdout: Uint8Array; stderr: Uint8Array }> };
-}
-
 /** Run the host `gh` CLI with the given args (no shell — args are passed as a vector, so a
  * `repo`/`number` from the datastore cannot inject a command). Resolves stdout, rejects on a
  * non-zero exit with stderr as the message. */
 async function runGh(args: string[]): Promise<string> {
-  // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
-  const g = globalThis as { Deno?: { Command?: DenoCommandCtor } };
-  if (g.Deno?.Command) {
-    const { code, stdout, stderr } = await new g.Deno.Command("gh", {
-      args,
-      stdout: "piped",
-      stderr: "piped",
-    }).output();
-    if (code !== 0) {
-      throw new Error(new TextDecoder().decode(stderr).trim() || `gh exited ${code}`);
-    }
-    return new TextDecoder().decode(stdout);
-  }
   const { execFile } = await import("node:child_process");
   return await new Promise<string>((resolve, reject) => {
     execFile(

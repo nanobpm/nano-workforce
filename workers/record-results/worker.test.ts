@@ -6,7 +6,8 @@
 // non-retryable `NO_WORK_DISPATCHED` BpmnError (→ incident) when the epic finalizes with no opened
 // PR, recording a `failed` terminal status + outcome first, so "accomplished nothing" surfaces
 // instead of masquerading as a completed epic.
-import { assertEquals, assertRejects } from "jsr:@std/assert@1";
+import { test } from "node:test";
+import { assertEquals, assertRejects } from "#test-assert";
 import { BpmnError } from "@nanobpm/urban";
 import handler from "./worker.ts";
 import type { PlanTaskStatus } from "../../app/plan.ts";
@@ -25,7 +26,6 @@ function fakeApp(rows: Row[]) {
       table(name: string, key: string) {
         if (name === "plans") {
           return {
-            // deno-lint-ignore no-explicit-any
             update: (k: any, patch: any) => {
               plans.push({ [key]: k, ...patch });
               return Promise.resolve(patch);
@@ -34,7 +34,6 @@ function fakeApp(rows: Row[]) {
         }
         // plan_tasks
         return {
-          // deno-lint-ignore no-explicit-any
           find: (q: any) =>
             Promise.resolve(
               rows.filter((r) =>
@@ -48,15 +47,13 @@ function fakeApp(rows: Row[]) {
     },
     log: () => {},
     _plans: plans,
-    // deno-lint-ignore no-explicit-any
   } as any;
 }
 
 const call = async (app: unknown, planKey = "o/r#1") =>
-  // deno-lint-ignore no-explicit-any
   await handler({ variables: { planKey } } as any, app as any);
 
-Deno.test("no opened PRs (empty plan) hard-fails with NO_WORK_DISPATCHED", async () => {
+test("no opened PRs (empty plan) hard-fails with NO_WORK_DISPATCHED", async () => {
   const app = fakeApp([]);
   const err = await assertRejects(() => call(app), BpmnError);
   assertEquals((err as BpmnError).errorCode, "NO_WORK_DISPATCHED");
@@ -67,7 +64,7 @@ Deno.test("no opened PRs (empty plan) hard-fails with NO_WORK_DISPATCHED", async
   assertEquals(plan.outcome, "no work dispatched — the planner produced no tasks");
 });
 
-Deno.test("tasks present but none opened (all skipped/blocked) hard-fails", async () => {
+test("tasks present but none opened (all skipped/blocked) hard-fails", async () => {
   const app = fakeApp([
     { id: 1, plan_key: "o/r#1", task_id: "a", status: "skipped" },
     { id: 2, plan_key: "o/r#1", task_id: "b", status: "blocked" },
@@ -79,7 +76,7 @@ Deno.test("tasks present but none opened (all skipped/blocked) hard-fails", asyn
   assertEquals(plan.outcome, "no work dispatched — every task was blocked or skipped");
 });
 
-Deno.test("at least one opened PR finalizes cleanly (no throw)", async () => {
+test("at least one opened PR finalizes cleanly (no throw)", async () => {
   const app = fakeApp([
     { id: 1, plan_key: "o/r#1", task_id: "a", status: "opened" },
     { id: 2, plan_key: "o/r#1", task_id: "b", status: "skipped" },

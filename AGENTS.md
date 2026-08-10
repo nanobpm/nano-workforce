@@ -51,7 +51,7 @@ path, a second review loop) — extend the canonical one.
 
 ### Zero tolerance for warnings, errors, and test failures
 There are no pre-existing failures or warnings, and you will not allow any to
-enter the codebase. `tsc`, `urban check`, `deno check`, and `deno test` must all
+enter the codebase. `tsc`, `urban check`, `biome check`, and `node --test` must all
 be clean.
 
 ### No task without a tracked issue or PR
@@ -138,20 +138,21 @@ Migrations live in `db/migrations/*.sql` and are **auto-applied on boot** from
 
 ## Runtime & CI gates
 
-Node-hosted (`node --experimental-strip-types`), but the sources are
-**cross-runtime**: workers/actions/`main.ts` also typecheck and run under Deno.
+Node-hosted (`node --experimental-strip-types`); Node is the only runtime. Tests run
+on Node's built-in runner (`node:test`), which strips TypeScript types on the fly.
 Match CI locally before pushing:
 
 ```bash
+npm run lint                                          # biome check (incl. ban-`as` gate)
 npm run typecheck                                     # tsc --noEmit (Node)
 npm run check                                         # urban check (manifest validation)
 npm run layout:check                                  # BPMN diagram freshness (no drift)
-deno check main.ts 'workers/**/*.ts' 'actions/**/*.ts'  # Deno typecheck
-deno test -A                                          # unit tests (run with -A)
+npm run check:prompts                                 # agent-prompt template resolution
+npm test                                              # unit tests (node --test)
 ```
 
-CI (`.github/workflows/ci.yml`) gates typecheck, `urban check`, `layout:check`,
-Deno typecheck, and the Deno test suite. Run `npm run layout <file.bpmn>` after
+CI (`.github/workflows/ci.yml`) gates lint, typecheck, `urban check`, `layout:check`,
+the prompt check, and the Node test suite. Run `npm run layout <file.bpmn>` after
 any BPMN flow change and commit the regenerated diagram — the `layout:check`
 gate fails the build otherwise.
 

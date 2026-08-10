@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   typecheck:
-    name: typecheck (Node + Deno)
+    name: typecheck + test (Node)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -41,23 +41,13 @@ jobs:
       - name: Check BPMN diagram freshness (layout)
         run: npm run layout:check
 
-      - name: Setup Deno
-        uses: denoland/setup-deno@v2
-        with:
-          deno-version: v2.x
-
-      - name: Typecheck (Deno)
-        run: deno check main.ts 'workers/**/*.ts' 'actions/**/*.ts' 'operations/**/*.ts'
-
       # Deploy-safety gate: every model-authored `{{template}}` agent-prompt header must resolve
       # to a declared, non-blank prompt (and no agent prompt may ship blank). A broken/blank token
       # means a prompt-less agent — the root of the empty escalations on nano-bpm #597/#599.
       - name: Check agent prompt templates
-        run: deno run -A scripts/check-agent-prompts.ts
+        run: npm run check:prompts
 
-      # Runs the app/*.test.ts suite (never exercised by the check globs above)
-      # AND guards the committed lockfile: --frozen fails the build if deno.lock
-      # is out of date for the full graph (incl. tests), so lockfile drift — e.g.
-      # a regenerate that drops the jsr:@std/* test deps — can't be merged.
-      - name: Test + frozen lockfile guard (Deno)
-        run: deno test -A --frozen
+      # Runs the full *.test.ts suite under Node's built-in test runner (node:test), which strips
+      # TypeScript types on the fly (Node >= 22.6) — no build step.
+      - name: Test (Node)
+        run: npm test

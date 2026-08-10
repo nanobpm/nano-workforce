@@ -10,9 +10,11 @@
 // way it originally shipped. It is a pure text assertion over the BPMN (no engine), matching the
 // repo's lightweight model-guard style.
 
-import { assert, assertStringIncludes } from "jsr:@std/assert@1";
+import { test } from "node:test";
+import { assert, assertStringIncludes } from "#test-assert";
+import { readFileSync } from "node:fs";
 
-const bpmn = await Deno.readTextFile("resources/processes/merge-loop.bpmn");
+const bpmn = readFileSync("resources/processes/merge-loop.bpmn", "utf8");
 
 // Collapse whitespace so attribute-order / line-wrapping churn doesn't make the assertions brittle.
 const flat = bpmn.replace(/\s+/g, " ");
@@ -27,14 +29,14 @@ function hasFlow(source: string, target: string): boolean {
   return re.test(flat);
 }
 
-Deno.test("conflict routes to the rebase budget gate, not straight to a human", () => {
+test("conflict routes to the rebase budget gate, not straight to a human", () => {
   // The conflict verdict must reach the auto-rebase gate…
   assert(hasFlow("gw-mergeable", "gw-rebase"), "gw-mergeable → gw-rebase (conflict) missing");
   // …guarded by the exact conflict condition (DIRTY → mergeState = "conflict").
   assertStringIncludes(flat, 'mergeState = "conflict"');
 });
 
-Deno.test("rebase arm mirrors the fix-ci arm: budget gate → agent → result gate", () => {
+test("rebase arm mirrors the fix-ci arm: budget gate → agent → result gate", () => {
   // Budget gate: within budget → the agent; exhausted → the (existing) conflict escalation.
   assert(hasFlow("gw-rebase", "rebase"), "gw-rebase → rebase (within budget) missing");
   assert(hasFlow("gw-rebase", "merge-esc-conflict"), "gw-rebase → merge-esc-conflict (budget exhausted) missing");
@@ -49,7 +51,7 @@ Deno.test("rebase arm mirrors the fix-ci arm: budget gate → agent → result g
   assertStringIncludes(flat, "=rebaseRound + 1");
 });
 
-Deno.test("rebase result: success re-arms the poller; unresolved escalates to a human", () => {
+test("rebase result: success re-arms the poller; unresolved escalates to a human", () => {
   // Success loops back to re-attempt the merge — forward progress, no human needed.
   assert(hasFlow("gw-rebase-result", "arm-merge"), "gw-rebase-result → arm-merge (rebased) missing");
   assertStringIncludes(flat, 'status = "rebased"');
@@ -60,7 +62,7 @@ Deno.test("rebase result: success re-arms the poller; unresolved escalates to a 
   );
 });
 
-Deno.test("regression: the conflict verdict passes through the rebase actor, not straight to escalation", () => {
+test("regression: the conflict verdict passes through the rebase actor, not straight to escalation", () => {
   // The original #42 livelock had the conflict verdict escalate to a human with no remediation
   // actor. The primary target of the conflict verdict must now be the rebase gate.
   assert(

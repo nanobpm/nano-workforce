@@ -4,6 +4,9 @@
   "description": "Nano Workforce — an Agent Graph Orchestration application for Agentic SDLC: durable BPMN processes that coordinate a graph of AI agents across the software delivery lifecycle.",
   "type": "module",
   "main": "main.ts",
+  "imports": {
+    "#test-assert": "./test/assert.ts"
+  },
   "engines": {
     "node": ">=22.6"
   },
@@ -30,14 +33,13 @@
     "upgrade": "node --experimental-strip-types scripts/upgrade-from-pack.ts",
     "check": "urban check",
     "typecheck": "tsc --noEmit",
-    "check:prompts": "deno run -A scripts/check-agent-prompts.ts",
+    "check:prompts": "node --experimental-strip-types scripts/check-agent-prompts.ts",
     "gen": "urban gen",
     "gen:check": "urban gen --check",
     "layout": "node --experimental-strip-types scripts/layout-bpmn.ts",
     "layout:check": "node --experimental-strip-types scripts/layout-bpmn.ts --check",
     "dev": "urban dev",
-    "compile": "deno task compile",
-    "test": "deno test -A",
+    "test": "node --test",
     "lint": "biome check app operations actions workers pages components scripts main.ts",
     "lint:fix": "biome check --write app operations actions workers pages components scripts main.ts"
   },

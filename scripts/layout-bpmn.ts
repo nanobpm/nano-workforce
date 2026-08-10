@@ -1,4 +1,4 @@
-// npm run layout <file.bpmn ...> (or `deno task layout <file.bpmn ...>`) — (re)generate the
+// npm run layout <file.bpmn ...> — (re)generate the
 // bpmndi:BPMNDiagram for one or more BPMN models using the urban toolkit's `layoutBpmn`
 // (bpmn-auto-layout). The semantic model stays authoritative: author the process elements
 // (tasks, gateways, flows, zeebe extensions) and run this to derive an auto-laid-out diagram,
@@ -8,39 +8,18 @@
 // `--check` (npm run layout:check) regenerates the DI in memory and fails with a non-zero exit
 // if any committed diagram is stale, WITHOUT rewriting files — the CI freshness gate that stops
 // a BPMN flow change from merging with an un-regenerated diagram.
+import { readdir, readFile, writeFile } from "node:fs/promises";
 import { layoutBpmn } from "@nanobpm/urban";
 
-// Host-agnostic file I/O: Deno inside a compiled binary, else node:fs under Node — mirrors
-// app/plan.ts's readAsset seam so this runs the same under `npm run` and `deno task`.
-// biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
-const g = globalThis as {
-  Deno?: {
-    args: string[];
-    exit(c: number): never;
-    readDir(p: string): AsyncIterable<{ name: string; isFile: boolean }>;
-    readTextFile(p: string): Promise<string>;
-    writeTextFile(p: string, s: string): Promise<void>;
-  };
-};
-
 async function readText(path: string): Promise<string> {
-  return g.Deno?.readTextFile
-    ? await g.Deno.readTextFile(path)
-    : await (await import("node:fs/promises")).readFile(path, "utf8");
+  return await readFile(path, "utf8");
 }
 async function writeText(path: string, text: string): Promise<void> {
-  if (g.Deno?.writeTextFile) return await g.Deno.writeTextFile(path, text);
-  await (await import("node:fs/promises")).writeFile(path, text, "utf8");
+  await writeFile(path, text, "utf8");
 }
 async function defaultProcessFiles(): Promise<string[]> {
   const dir = "resources/processes";
-  if (g.Deno?.readDir) {
-    const files: string[] = [];
-    for await (const e of g.Deno.readDir(dir)) if (e.isFile && e.name.endsWith(".bpmn")) files.push(`${dir}/${e.name}`);
-    return files.sort();
-  }
-  const fs = await import("node:fs/promises");
-  return (await fs.readdir(dir, { withFileTypes: true }))
+  return (await readdir(dir, { withFileTypes: true }))
     .filter((e) => e.isFile() && e.name.endsWith(".bpmn"))
     .map((e) => `${dir}/${e.name}`)
     .sort();
@@ -54,12 +33,11 @@ const countDi = (xml: string) => ({
 });
 
 function exit(code: number): never {
-  if (g.Deno) return g.Deno.exit(code);
   process.exit(code);
 }
 
 async function main() {
-  const argv = g.Deno?.args ?? process.argv.slice(2);
+  const argv = process.argv.slice(2);
   // `--check` mode: regenerate the DI in memory and fail (non-zero) if it differs from what's
   // committed, WITHOUT rewriting any file. This is the CI freshness gate — it catches a BPMN
   // flow change whose author forgot to re-run `npm run layout`, so a stale diagram can't merge.

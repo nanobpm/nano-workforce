@@ -5,7 +5,7 @@
 // inspecting the working tree at runtime. This module gathers that identity — the app's package
 // version, the resolved `@nanobpm/urban` version, the git commit (read from `.git`, handling both
 // an ordinary `.git` directory and the `gitdir:` file pointer used by worktrees/submodules, with
-// an env override for detached deploys), plus the Node/Deno runtime, pid and start time — so an operator
+// an env override for detached deploys), plus the Node runtime, pid and start time — so an operator
 // debugging a stuck instance can confirm the process is on the code they think it is.
 //
 // Every probe is best-effort: a missing file or unavailable `.git` yields `null` for that field
@@ -39,20 +39,11 @@ function readJson(path: string): Record<string, unknown> | null {
 }
 
 /**
- * Read an env var across runtimes: Node exposes `process.env`; Deno may not populate it, so fall
- * back to `Deno.env.get` (guarded — reading env can throw without `--allow-env`).
+ * Read an env var from `process.env`, trimmed; returns null when unset or blank.
  */
 export function envVar(name: string): string | null {
-  const fromProcess = globalThis.process?.env?.[name];
+  const fromProcess = process.env[name];
   if (typeof fromProcess === "string" && fromProcess.trim()) return fromProcess.trim();
-  // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
-  const deno = (globalThis as { Deno?: { env?: { get?(k: string): string | undefined } } }).Deno;
-  try {
-    const fromDeno = deno?.env?.get?.(name);
-    if (typeof fromDeno === "string" && fromDeno.trim()) return fromDeno.trim();
-  } catch {
-    // Env access denied — treat as unset.
-  }
   return null;
 }
 
@@ -159,13 +150,8 @@ function gitBranch(): string | null {
 }
 
 function runtime(): string {
-  const proc = globalThis.process;
-  // Deno exposes `Deno.version.deno`; Node exposes `process.version` (e.g. "v24.15.0").
-  // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
-  const deno = (globalThis as { Deno?: { version?: { deno?: string } } }).Deno;
-  if (deno?.version?.deno) return `deno ${deno.version.deno}`;
-  if (proc?.version) return `node ${proc.version}`;
-  return "unknown";
+  // Node exposes `process.version` (e.g. "v24.15.0").
+  return process.version ? `node ${process.version}` : "unknown";
 }
 
 export interface VersionInfo {
@@ -185,7 +171,6 @@ export interface VersionInfo {
  * tree ONCE at module load rather than re-reading files (`.git`, package.jsons) on every request.
  */
 const STATIC: Omit<VersionInfo, "uptimeSeconds"> = (() => {
-  const proc = globalThis.process;
   const pkg = appPackage();
   return Object.freeze({
     name: appName(pkg),
@@ -194,7 +179,7 @@ const STATIC: Omit<VersionInfo, "uptimeSeconds"> = (() => {
     gitSha: gitSha(),
     gitBranch: gitBranch(),
     runtime: runtime(),
-    pid: typeof proc?.pid === "number" ? proc.pid : null,
+    pid: typeof process.pid === "number" ? process.pid : null,
     startedAt: STARTED_AT.toISOString(),
   });
 })();
