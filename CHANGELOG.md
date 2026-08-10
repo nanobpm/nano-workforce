@@ -1,3 +1,10 @@
+# [0.38.0](https://github.com/nanobpm/nano-workforce/compare/v0.37.0...v0.38.0) (2026-08-10)
+
+
+### Features
+
+* migrate hooks to OpenAPI operations, one HTTP surface (ADR 0059) ([#109](https://github.com/nanobpm/nano-workforce/issues/109)) ([493d78c](https://github.com/nanobpm/nano-workforce/commit/493d78c5b58ba18098c7d458bd9538660eb2d0f3))
+
 # [0.37.0](https://github.com/nanobpm/nano-workforce/compare/v0.36.0...v0.37.0) (2026-08-10)
 
 
