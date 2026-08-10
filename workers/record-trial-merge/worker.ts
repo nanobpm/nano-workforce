@@ -52,8 +52,8 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
   const result = parseResult(job.variables.result);
   const summary = str(job.variables.summary) ??
     (result === "suite-failed" ? "Trial merge suite failed or returned no machine-readable result" : result);
-  const rawJobKey = Reflect.get(job, "key");
-  const jobKey = rawJobKey == null ? null : String(rawJobKey);
+  const legacyJobKey = Reflect.get(job, "key");
+  const jobKey = job.jobKey ?? (legacyJobKey == null ? null : String(legacyJobKey));
 
   try {
     await recordTrialMergeAudit(app.data, {
