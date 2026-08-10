@@ -1,3 +1,10 @@
+# [0.35.0](https://github.com/nanobpm/nano-workforce/compare/v0.34.0...v0.35.0) (2026-08-10)
+
+
+### Features
+
+* migrate externally-facing endpoints to the OpenAPI api surface ([#102](https://github.com/nanobpm/nano-workforce/issues/102)) ([5598e2c](https://github.com/nanobpm/nano-workforce/commit/5598e2ce5a8ec3dc241401714284ce8c94420f7a))
+
 # [0.34.0](https://github.com/nanobpm/nano-workforce/compare/v0.33.1...v0.34.0) (2026-08-09)
 
 
