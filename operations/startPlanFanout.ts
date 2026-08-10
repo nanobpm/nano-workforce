@@ -6,22 +6,31 @@ import { defineOperation } from "@nanobpm/urban";
 import { parseIssue, startPlan } from "../app/plan.ts";
 
 interface Body {
-  variables?: { issue?: string; url?: string };
+	variables?: { issue?: string; url?: string };
 }
 
 type Res =
-  | { planKey: string; alreadyRunning?: boolean; processKey?: string | null }
-  | { error: string };
+	| { planKey: string; alreadyRunning?: boolean; processKey?: string | null }
+	| { error: string };
 
 export default defineOperation<
-  { params: Record<string, string>; query: Record<string, string | string[] | undefined>; body: Body },
-  Res
+	{
+		params: Record<string, string>;
+		query: Record<string, string | string[] | undefined>;
+		body: Body;
+	},
+	Res
 >("startPlanFanout", async ({ body }, app) => {
-  const vars = body?.variables ?? {};
-  const raw = String(vars.issue ?? vars.url ?? "").trim();
-  const parsed = parseIssue(raw);
-  if (!parsed) {
-    return { status: 400, body: { error: "could not parse issue (use owner/repo#123 or an issue URL)" } };
-  }
-  return { status: 202, body: await startPlan(app.data, app.engine, parsed) };
+	const vars = body?.variables ?? {};
+	const raw = String(vars.issue ?? vars.url ?? "").trim();
+	const parsed = parseIssue(raw);
+	if (!parsed) {
+		return {
+			status: 400,
+			body: {
+				error: "could not parse issue (use owner/repo#123 or an issue URL)",
+			},
+		};
+	}
+	return { status: 202, body: await startPlan(app.data, app.engine, parsed) };
 });

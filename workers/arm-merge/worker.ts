@@ -4,15 +4,15 @@
 import type { AppJobHandler } from "@nanobpm/urban";
 
 interface In extends Record<string, unknown> {
-  prKey: string;
+	prKey: string;
 }
 
 const handler: AppJobHandler<In> = async (job, app) => {
-  await app.data.table("pull_requests", "pr_key").update(job.variables.prKey, {
-    status: "waiting_merge",
-    updated_at: new Date().toISOString(),
-  });
-  return {};
+	await app.data.table("pull_requests", "pr_key").update(job.variables.prKey, {
+		status: "waiting_merge",
+		updated_at: new Date().toISOString(),
+	});
+	return {};
 };
 
 export default handler;

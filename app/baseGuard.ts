@@ -13,12 +13,12 @@ import { baseBranchLanded, fetchDefaultBranch, fetchPrBase } from "./github.ts";
 
 /** The landing-target facts the dead-end decision is made from. */
 export interface BaseTarget {
-  /** The PR's current base branch. */
-  base: string;
-  /** The repo's default branch (e.g. `main`). */
-  defaultBranch: string;
-  /** Whether the base branch has already landed — see {@link baseBranchLanded}. */
-  landed: "landed" | "open" | "unknown";
+	/** The PR's current base branch. */
+	base: string;
+	/** The repo's default branch (e.g. `main`). */
+	defaultBranch: string;
+	/** Whether the base branch has already landed — see {@link baseBranchLanded}. */
+	landed: "landed" | "open" | "unknown";
 }
 
 /** A base is a dead-end when it is **not** the default branch AND has already landed (a merged PR
@@ -27,16 +27,16 @@ export interface BaseTarget {
  * still open — or a base with no PR at all — is never wrongly held. A blank base or default is
  * unknown-safe → not a dead-end. */
 export function isDeadEndBase(t: BaseTarget): boolean {
-  if (!t.base || !t.defaultBranch) return false;
-  if (t.base === t.defaultBranch) return false;
-  return t.landed === "landed";
+	if (!t.base || !t.defaultBranch) return false;
+	if (t.base === t.defaultBranch) return false;
+	return t.landed === "landed";
 }
 
 export interface BaseGuardResult {
-  deadEnd: boolean;
-  base: string;
-  defaultBranch: string;
-  landed: "landed" | "open" | "unknown";
+	deadEnd: boolean;
+	base: string;
+	defaultBranch: string;
+	landed: "landed" | "open" | "unknown";
 }
 
 /** Resolve a PR's landing target and decide whether it is a dead-end. Cheap for the common case:
@@ -45,18 +45,23 @@ export interface BaseGuardResult {
  * so the guard never blocks a merge on ambiguity; the caller may `.catch()` a transport throw to
  * the same effect. */
 export async function checkBaseTarget(
-  repo: string,
-  number: number | string,
-  token: string,
+	repo: string,
+	number: number | string,
+	token: string,
 ): Promise<BaseGuardResult> {
-  const [base, defaultBranch] = await Promise.all([
-    fetchPrBase(repo, number, token),
-    fetchDefaultBranch(repo, token),
-  ]);
-  if (!base || !defaultBranch || base === defaultBranch) {
-    return { deadEnd: false, base: base ?? "", defaultBranch: defaultBranch ?? "", landed: "unknown" };
-  }
-  const landed = await baseBranchLanded(repo, base, token);
-  const target: BaseTarget = { base, defaultBranch, landed };
-  return { deadEnd: isDeadEndBase(target), base, defaultBranch, landed };
+	const [base, defaultBranch] = await Promise.all([
+		fetchPrBase(repo, number, token),
+		fetchDefaultBranch(repo, token),
+	]);
+	if (!base || !defaultBranch || base === defaultBranch) {
+		return {
+			deadEnd: false,
+			base: base ?? "",
+			defaultBranch: defaultBranch ?? "",
+			landed: "unknown",
+		};
+	}
+	const landed = await baseBranchLanded(repo, base, token);
+	const target: BaseTarget = { base, defaultBranch, landed };
+	return { deadEnd: isDeadEndBase(target), base, defaultBranch, landed };
 }

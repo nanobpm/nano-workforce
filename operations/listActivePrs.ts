@@ -18,12 +18,16 @@ const SECRET = envVar("NANO_PR_WEBHOOK_SECRET") ?? "";
 type Res = { count: number; prs: ActivePr[] } | { error: string };
 
 export default defineOperation<
-  { params: Record<string, string>; query: Record<string, string | string[] | undefined>; body: undefined },
-  Res
+	{
+		params: Record<string, string>;
+		query: Record<string, string | string[] | undefined>;
+		body: undefined;
+	},
+	Res
 >("listActivePrs", async ({ req }, app) => {
-  if (SECRET && req.headers.get("x-hook-secret") !== SECRET) {
-    return { status: 401, body: { error: "unauthorized" } };
-  }
-  const prs = await activePrs(app.data);
-  return { status: 200, body: { count: prs.length, prs } };
+	if (SECRET && req.headers.get("x-hook-secret") !== SECRET) {
+		return { status: 401, body: { error: "unauthorized" } };
+	}
+	const prs = await activePrs(app.data);
+	return { status: 200, body: { count: prs.length, prs } };
 });

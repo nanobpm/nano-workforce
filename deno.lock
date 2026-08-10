@@ -1760,6 +1760,7 @@
     ],
     "packageJson": {
       "dependencies": [
+        "npm:@biomejs/biome@^2.4.11",
         "npm:@nanobpm/urban@0.33",
         "npm:@semantic-release/changelog@^6.0.3",
         "npm:@semantic-release/git@^10.0.1",

@@ -12,12 +12,17 @@ import type { ActionHandler } from "@nanobpm/urban";
 import { abandonStatusForToken } from "../app/abandon.ts";
 
 const handler: ActionHandler = async ({ req }, app) => {
-  if (req.method !== "GET") return { status: 405, body: { error: "method not allowed (use GET)" } };
-  const token = (req.query.get("token") ?? req.headers.get("x-abandon-token") ?? "").trim();
-  if (!token) return { status: 400, body: { error: "missing abandon token" } };
-  const state = await abandonStatusForToken(app.data, token);
-  if (!state) return { status: 404, body: { error: "unknown abandon token" } };
-  return { status: 200, body: state };
+	if (req.method !== "GET")
+		return { status: 405, body: { error: "method not allowed (use GET)" } };
+	const token = (
+		req.query.get("token") ??
+		req.headers.get("x-abandon-token") ??
+		""
+	).trim();
+	if (!token) return { status: 400, body: { error: "missing abandon token" } };
+	const state = await abandonStatusForToken(app.data, token);
+	if (!state) return { status: 404, body: { error: "unknown abandon token" } };
+	return { status: 200, body: state };
 };
 
 export default handler;

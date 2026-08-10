@@ -24,120 +24,145 @@ import { applyTemplates } from "@nanobpm/urban/runtime";
 const AGENT_PROMPT_HEADER = "io.nanobpm.agentTask.task.prompt";
 
 interface AppManifest {
-  models?: { processes?: string[]; decisions?: string[]; forms?: string[]; templates?: string[] };
+	models?: {
+		processes?: string[];
+		decisions?: string[];
+		forms?: string[];
+		templates?: string[];
+	};
 }
 
 // Mirror urban deploy's `contentTypeFor`: only the escapable model types are substituted.
 function contentTypeFor(path: string): string {
-  if (path.endsWith(".bpmn") || path.endsWith(".dmn")) return "text/xml";
-  if (path.endsWith(".form")) return "application/json";
-  return "application/octet-stream";
+	if (path.endsWith(".bpmn") || path.endsWith(".dmn")) return "text/xml";
+	if (path.endsWith(".form")) return "application/json";
+	return "application/octet-stream";
 }
 
 // Minimal `dir/*.ext` glob — the only shape nano.app.json uses. Unknown patterns throw loudly
 // rather than silently matching nothing.
 function expandGlob(root: string, pattern: string): string[] {
-  const m = /^(.*)\/\*\.([A-Za-z0-9]+)$/.exec(pattern);
-  if (!m) throw new Error(`check-agent-prompts: unsupported glob pattern "${pattern}"`);
-  const [, dir, ext] = m;
-  const abs = join(root, dir);
-  if (!existsSync(abs)) return [];
-  return readdirSync(abs)
-    .filter((f) => f.endsWith(`.${ext}`))
-    .sort()
-    .map((f) => join(dir, f));
+	const m = /^(.*)\/\*\.([A-Za-z0-9]+)$/.exec(pattern);
+	if (!m)
+		throw new Error(
+			`check-agent-prompts: unsupported glob pattern "${pattern}"`,
+		);
+	const [, dir, ext] = m;
+	const abs = join(root, dir);
+	if (!existsSync(abs)) return [];
+	return readdirSync(abs)
+		.filter((f) => f.endsWith(`.${ext}`))
+		.sort()
+		.map((f) => join(dir, f));
 }
 
 // The `name -> content` template map urban substitutes from (array source: name = file stem).
 function templateMap(root: string, patterns: string[]): Record<string, string> {
-  const map: Record<string, string> = {};
-  for (const pattern of patterns) {
-    for (const rel of expandGlob(root, pattern)) {
-      const stem = basename(rel).replace(/\.[^.]+$/, "");
-      map[stem] = readFileSync(join(root, rel), "utf8");
-    }
-  }
-  return map;
+	const map: Record<string, string> = {};
+	for (const pattern of patterns) {
+		for (const rel of expandGlob(root, pattern)) {
+			const stem = basename(rel).replace(/\.[^.]+$/, "");
+			map[stem] = readFileSync(join(root, rel), "utf8");
+		}
+	}
+	return map;
 }
 
 // Blank reserved agent-prompt headers in a BPMN source — the one blank case urban's `unresolved`
 // signal can't see (an empty value carries no `{{token}}` to be unresolved).
 function hasBlankAgentPromptHeader(bpmn: string): boolean {
-  const re = /<zeebe:header\s+key="([^"]*)"\s+value="([^"]*)"\s*\/?>/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(bpmn)) !== null) {
-    if (m[1] === AGENT_PROMPT_HEADER && m[2].trim() === "") return true;
-  }
-  return false;
+	const re = /<zeebe:header\s+key="([^"]*)"\s+value="([^"]*)"\s*\/?>/g;
+	let m = re.exec(bpmn);
+	while (m !== null) {
+		if (m[1] === AGENT_PROMPT_HEADER && m[2].trim() === "") return true;
+		m = re.exec(bpmn);
+	}
+	return false;
 }
 
 export interface CheckResult {
-  ok: boolean;
-  errors: string[];
-  /** template names successfully substituted into a model — surfaced for the CLI summary line. */
-  resolved: string[];
+	ok: boolean;
+	errors: string[];
+	/** template names successfully substituted into a model — surfaced for the CLI summary line. */
+	resolved: string[];
 }
 
 export function checkAgentPrompts(root: string): CheckResult {
-  const errors: string[] = [];
-  const resolved = new Set<string>();
+	const errors: string[] = [];
+	const resolved = new Set<string>();
 
-  const manifestPath = join(root, "nano.app.json");
-  if (!existsSync(manifestPath)) {
-    return { ok: false, errors: [`nano.app.json not found under ${root}`], resolved: [] };
-  }
-  const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as AppManifest;
-  const models = manifest.models ?? {};
-  const templates = templateMap(root, models.templates ?? []);
+	const manifestPath = join(root, "nano.app.json");
+	if (!existsSync(manifestPath)) {
+		return {
+			ok: false,
+			errors: [`nano.app.json not found under ${root}`],
+			resolved: [],
+		};
+	}
+	// biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+	const manifest = JSON.parse(
+		readFileSync(manifestPath, "utf8"),
+	) as AppManifest;
+	const models = manifest.models ?? {};
+	const templates = templateMap(root, models.templates ?? []);
 
-  // A declared-but-blank template substitutes to an empty prompt without being "unresolved" —
-  // catch it up front (urban would silently produce a blank prompt).
-  for (const [name, body] of Object.entries(templates)) {
-    if (body.trim() === "") errors.push(`template {{${name}}} is empty — it would substitute to a blank prompt`);
-  }
+	// A declared-but-blank template substitutes to an empty prompt without being "unresolved" —
+	// catch it up front (urban would silently produce a blank prompt).
+	for (const [name, body] of Object.entries(templates)) {
+		if (body.trim() === "")
+			errors.push(
+				`template {{${name}}} is empty — it would substitute to a blank prompt`,
+			);
+	}
 
-  const modelFiles = [
-    ...(models.processes ?? []),
-    ...(models.decisions ?? []),
-    ...(models.forms ?? []),
-  ].flatMap((p) => expandGlob(root, p));
-  if (modelFiles.length === 0) {
-    errors.push(`no model files matched ${JSON.stringify(models.processes ?? [])}`);
-  }
+	const modelFiles = [
+		...(models.processes ?? []),
+		...(models.decisions ?? []),
+		...(models.forms ?? []),
+	].flatMap((p) => expandGlob(root, p));
+	if (modelFiles.length === 0) {
+		errors.push(
+			`no model files matched ${JSON.stringify(models.processes ?? [])}`,
+		);
+	}
 
-  for (const rel of modelFiles) {
-    const contentType = contentTypeFor(rel);
-    if (contentType === "application/octet-stream") continue; // urban does not substitute these
-    const content = readFileSync(join(root, rel), "utf8");
+	for (const rel of modelFiles) {
+		const contentType = contentTypeFor(rel);
+		if (contentType === "application/octet-stream") continue; // urban does not substitute these
+		const content = readFileSync(join(root, rel), "utf8");
 
-    // Run urban's canonical substitution — the same call deploy makes — and fail on any token it
-    // leaves unresolved (deploy only warns, which we don't tolerate).
-    const applied = applyTemplates(content, contentType, templates);
-    for (const name of applied.unresolved) {
-      errors.push(
-        `${rel}: unresolved template {{${name}}} — no such template is declared in models.templates`,
-      );
-    }
-    for (const name of Object.keys(templates)) {
-      if (content.includes(`{{${name}}}`)) resolved.add(name);
-    }
+		// Run urban's canonical substitution — the same call deploy makes — and fail on any token it
+		// leaves unresolved (deploy only warns, which we don't tolerate).
+		const applied = applyTemplates(content, contentType, templates);
+		for (const name of applied.unresolved) {
+			errors.push(
+				`${rel}: unresolved template {{${name}}} — no such template is declared in models.templates`,
+			);
+		}
+		for (const name of Object.keys(templates)) {
+			if (content.includes(`{{${name}}}`)) resolved.add(name);
+		}
 
-    if (hasBlankAgentPromptHeader(content)) {
-      errors.push(`${rel}: a reserved "${AGENT_PROMPT_HEADER}" header is empty (agent would run prompt-less)`);
-    }
-  }
+		if (hasBlankAgentPromptHeader(content)) {
+			errors.push(
+				`${rel}: a reserved "${AGENT_PROMPT_HEADER}" header is empty (agent would run prompt-less)`,
+			);
+		}
+	}
 
-  return { ok: errors.length === 0, errors, resolved: [...resolved].sort() };
+	return { ok: errors.length === 0, errors, resolved: [...resolved].sort() };
 }
 
 // CLI: check the repo rooted at cwd. Exit non-zero (fail CI) on any problem.
 if (import.meta.main) {
-  const root = process.cwd();
-  const { ok, errors, resolved } = checkAgentPrompts(root);
-  if (!ok) {
-    console.error(`✖ agent prompt check failed (${errors.length} problem(s)):`);
-    for (const e of errors) console.error(`  - ${e}`);
-    process.exit(1);
-  }
-  console.log(`✔ agent prompt templates resolve (${resolved.length}: ${resolved.join(", ")})`);
+	const root = process.cwd();
+	const { ok, errors, resolved } = checkAgentPrompts(root);
+	if (!ok) {
+		console.error(`✖ agent prompt check failed (${errors.length} problem(s)):`);
+		for (const e of errors) console.error(`  - ${e}`);
+		process.exit(1);
+	}
+	console.log(
+		`✔ agent prompt templates resolve (${resolved.length}: ${resolved.join(", ")})`,
+	);
 }

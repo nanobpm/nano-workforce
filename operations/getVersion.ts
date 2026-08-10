@@ -15,11 +15,15 @@ import { buildVersionInfo, envVar, type VersionInfo } from "../app/version.ts";
 const SECRET = envVar("NANO_PR_WEBHOOK_SECRET") ?? "";
 
 export default defineOperation<
-  { params: Record<string, string>; query: Record<string, string | string[] | undefined>; body: undefined },
-  VersionInfo | { error: string }
+	{
+		params: Record<string, string>;
+		query: Record<string, string | string[] | undefined>;
+		body: undefined;
+	},
+	VersionInfo | { error: string }
 >("getVersion", ({ req }) => {
-  if (SECRET && req.headers.get("x-hook-secret") !== SECRET) {
-    return { status: 401, body: { error: "unauthorized" } };
-  }
-  return { status: 200, body: buildVersionInfo() };
+	if (SECRET && req.headers.get("x-hook-secret") !== SECRET) {
+		return { status: 401, body: { error: "unauthorized" } };
+	}
+	return { status: 200, body: buildVersionInfo() };
 });

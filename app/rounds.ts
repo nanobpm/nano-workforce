@@ -12,14 +12,15 @@ export const MAX_ROUNDS_CEILING = 100;
  * unknown`. Values above MAX_ROUNDS_CEILING are clamped down rather than rejected — and the same
  * clamp is applied to `fallback`, so an oversized fallback can never bypass the safety ceiling. */
 export function clampRounds(value: unknown, fallback: number): number {
-  const safeFallback = Number.isFinite(fallback)
-    ? Math.min(Math.max(Math.trunc(fallback), 1), MAX_ROUNDS_CEILING)
-    : 1;
-  const n = typeof value === "number" ? value : Number(String(value ?? "").trim());
-  if (!Number.isFinite(n)) return safeFallback;
-  const i = Math.trunc(n);
-  if (i < 1) return safeFallback;
-  return Math.min(i, MAX_ROUNDS_CEILING);
+	const safeFallback = Number.isFinite(fallback)
+		? Math.min(Math.max(Math.trunc(fallback), 1), MAX_ROUNDS_CEILING)
+		: 1;
+	const n =
+		typeof value === "number" ? value : Number(String(value ?? "").trim());
+	if (!Number.isFinite(n)) return safeFallback;
+	const i = Math.trunc(n);
+	if (i < 1) return safeFallback;
+	return Math.min(i, MAX_ROUNDS_CEILING);
 }
 
 /** Ceiling on CI-fix attempts, mirroring MAX_ROUNDS_CEILING — an unbounded budget could dispatch
@@ -32,17 +33,17 @@ export const MAX_CI_FIX_CEILING = 20;
  * negative / NaN fall back to `fallback`; values above the ceiling are clamped down (and so is an
  * oversized `fallback`, so it can never bypass the ceiling). */
 export function clampCiFixBudget(value: unknown, fallback: number): number {
-  const safeFallback = Number.isFinite(fallback)
-    ? Math.min(Math.max(Math.trunc(fallback), 0), MAX_CI_FIX_CEILING)
-    : 0;
-  // Blank / absent → fallback. This guard is essential BEFORE coercion: Number("") is 0, so a
-  // blank env var must not be mistaken for an explicit 0 (which legitimately disables auto-fix).
-  if (value === null || value === undefined) return safeFallback;
-  const trimmed = typeof value === "number" ? value : String(value).trim();
-  if (trimmed === "") return safeFallback;
-  const n = typeof trimmed === "number" ? trimmed : Number(trimmed);
-  if (!Number.isFinite(n)) return safeFallback;
-  const i = Math.trunc(n);
-  if (i < 0) return safeFallback;
-  return Math.min(i, MAX_CI_FIX_CEILING);
+	const safeFallback = Number.isFinite(fallback)
+		? Math.min(Math.max(Math.trunc(fallback), 0), MAX_CI_FIX_CEILING)
+		: 0;
+	// Blank / absent → fallback. This guard is essential BEFORE coercion: Number("") is 0, so a
+	// blank env var must not be mistaken for an explicit 0 (which legitimately disables auto-fix).
+	if (value === null || value === undefined) return safeFallback;
+	const trimmed = typeof value === "number" ? value : String(value).trim();
+	if (trimmed === "") return safeFallback;
+	const n = typeof trimmed === "number" ? trimmed : Number(trimmed);
+	if (!Number.isFinite(n)) return safeFallback;
+	const i = Math.trunc(n);
+	if (i < 0) return safeFallback;
+	return Math.min(i, MAX_CI_FIX_CEILING);
 }

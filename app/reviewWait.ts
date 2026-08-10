@@ -18,17 +18,18 @@ export const DEFAULT_REVIEW_WAIT_TIMEOUT = "PT20M";
 // `T` before any time components (with at least one time component after it). Good enough to
 // reject an obviously-malformed env value before it is baked into a timer expression the engine
 // would fail to interpret; not a full grammar (we don't need fractional seconds here).
-const ISO_DURATION = /^P(?!$)(\d+Y)?(\d+M)?(\d+W)?(\d+D)?(T(?=\d)(\d+H)?(\d+M)?(\d+S)?)?$/;
+const ISO_DURATION =
+	/^P(?!$)(\d+Y)?(\d+M)?(\d+W)?(\d+D)?(T(?=\d)(\d+H)?(\d+M)?(\d+S)?)?$/;
 
 /** Validate an ISO-8601 duration for the review-wait timer, falling back to `def` when the value
  * is absent, blank, or malformed — a bad env value must never deploy an uninterpretable timer
  * expression into the process. Normalises to upper case (`pt20m` → `PT20M`). */
 export function reviewWaitTimeout(
-  raw: string | undefined,
-  def: string = DEFAULT_REVIEW_WAIT_TIMEOUT,
+	raw: string | undefined,
+	def: string = DEFAULT_REVIEW_WAIT_TIMEOUT,
 ): string {
-  const s = (raw ?? "").trim().toUpperCase();
-  return s !== "" && ISO_DURATION.test(s) ? s : def;
+	const s = (raw ?? "").trim().toUpperCase();
+	return s !== "" && ISO_DURATION.test(s) ? s : def;
 }
 
 /** Default cooldown (minutes) between automatic Copilot re-request nudges for one waiting PR.
@@ -45,15 +46,16 @@ export const MAX_REVIEW_NUDGE_MINUTES = 24 * 60;
  * `fallback`; values above the ceiling are clamped down (and so is an oversized `fallback`, so it
  * can never bypass the ceiling). */
 export function clampNudgeMinutes(
-  value: unknown,
-  fallback: number = DEFAULT_REVIEW_NUDGE_MINUTES,
+	value: unknown,
+	fallback: number = DEFAULT_REVIEW_NUDGE_MINUTES,
 ): number {
-  const safeFallback = Number.isFinite(fallback)
-    ? Math.min(Math.max(Math.trunc(fallback), 1), MAX_REVIEW_NUDGE_MINUTES)
-    : DEFAULT_REVIEW_NUDGE_MINUTES;
-  const n = typeof value === "number" ? value : Number(String(value ?? "").trim());
-  if (!Number.isFinite(n)) return safeFallback;
-  const i = Math.trunc(n);
-  if (i < 1) return safeFallback;
-  return Math.min(i, MAX_REVIEW_NUDGE_MINUTES);
+	const safeFallback = Number.isFinite(fallback)
+		? Math.min(Math.max(Math.trunc(fallback), 1), MAX_REVIEW_NUDGE_MINUTES)
+		: DEFAULT_REVIEW_NUDGE_MINUTES;
+	const n =
+		typeof value === "number" ? value : Number(String(value ?? "").trim());
+	if (!Number.isFinite(n)) return safeFallback;
+	const i = Math.trunc(n);
+	if (i < 1) return safeFallback;
+	return Math.min(i, MAX_REVIEW_NUDGE_MINUTES);
 }

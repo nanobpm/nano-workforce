@@ -26,23 +26,26 @@ export const ABANDONED_STATUS = "abandoned";
 
 /** True when a PR's app-row status means the run was cancelled and the agent must not act. */
 export function isAbandoned(status: string | null | undefined): boolean {
-  return status === ABANDONED_STATUS;
+	return status === ABANDONED_STATUS;
 }
 
 /** A URL-safe, unguessable capability token (192 bits of randomness, base64url, no padding).
  * Same shape as the blackboard token; kept local so the two channels stay independent. */
 export function mintAbandonToken(): string {
-  const bytes = new Uint8Array(24);
-  crypto.getRandomValues(bytes);
-  let bin = "";
-  for (const b of bytes) bin += String.fromCharCode(b);
-  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+	const bytes = new Uint8Array(24);
+	crypto.getRandomValues(bytes);
+	let bin = "";
+	for (const b of bytes) bin += String.fromCharCode(b);
+	return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
 /** The capability URL for a PR's abandon check: the token rides the query string so the agent can
  * GET the exact string it was handed with no header assembly. */
-export function abandonUrl(token: string, base: string = publicBaseUrl()): string {
-  return `${base}/hooks/abandon?token=${encodeURIComponent(token)}`;
+export function abandonUrl(
+	token: string,
+	base: string = publicBaseUrl(),
+): string {
+	return `${base}/hooks/abandon?token=${encodeURIComponent(token)}`;
 }
 
 /** Recover the capability token from an abandon URL — the inverse of `abandonUrl`. Returns
@@ -50,49 +53,58 @@ export function abandonUrl(token: string, base: string = publicBaseUrl()): strin
  * reconstruct a missing `pull_requests` row with the SAME token the running agent was already
  * handed (via the `abandonUrl` process variable), so its `curl -f "…/hooks/abandon?token=…"` abort
  * check keeps resolving instead of 404-ing on a freshly-minted token and aborting a live run. */
-export function abandonTokenFromUrl(url: string | null | undefined): string | undefined {
-  if (!url) return undefined;
-  try {
-    const t = new URL(url).searchParams.get("token");
-    return t || undefined;
-  } catch {
-    return undefined;
-  }
+export function abandonTokenFromUrl(
+	url: string | null | undefined,
+): string | undefined {
+	if (!url) return undefined;
+	try {
+		const t = new URL(url).searchParams.get("token");
+		return t || undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 /** Resolve an abandon token back to its PR key, or undefined when the token is unknown. */
 export async function prKeyForAbandonToken(
-  data: DataLayer,
-  token: string,
+	data: DataLayer,
+	token: string,
 ): Promise<string | undefined> {
-  if (!token) return undefined;
-  const row = await data
-    .table<{ pr_key: string; abandon_token: string | null }>("pull_requests", "pr_key")
-    .findOne({ abandon_token: token });
-  return row?.pr_key;
+	if (!token) return undefined;
+	const row = await data
+		.table<{ pr_key: string; abandon_token: string | null }>(
+			"pull_requests",
+			"pr_key",
+		)
+		.findOne({ abandon_token: token });
+	return row?.pr_key;
 }
 
 /** The abandon status of a PR, or undefined when the token is unknown. */
 export async function abandonStatusForToken(
-  data: DataLayer,
-  token: string,
+	data: DataLayer,
+	token: string,
 ): Promise<{ prKey: string; status: string; abandoned: boolean } | undefined> {
-  if (!token) return undefined;
-  const row = await data
-    .table<{ pr_key: string; abandon_token: string | null; status: string }>(
-      "pull_requests",
-      "pr_key",
-    )
-    .findOne({ abandon_token: token });
-  if (!row) return undefined;
-  return { prKey: row.pr_key, status: row.status, abandoned: isAbandoned(row.status) };
+	if (!token) return undefined;
+	const row = await data
+		.table<{ pr_key: string; abandon_token: string | null; status: string }>(
+			"pull_requests",
+			"pr_key",
+		)
+		.findOne({ abandon_token: token });
+	if (!row) return undefined;
+	return {
+		prKey: row.pr_key,
+		status: row.status,
+		abandoned: isAbandoned(row.status),
+	};
 }
 
 /** The instruction block appended (verbatim, via `appendPrompt`) to each side-effecting agent's
  * prompt. It owns its own leading rule (the FEEL that injects it concatenates with no separator),
  * and carries the concrete, curl-able URL for THIS run plus the abort contract. */
 export function renderAbandonBrief(url: string): string {
-  return `
+	return `
 
 ---
 
