@@ -27,7 +27,9 @@ export function assertStringIncludes(actual: string, expected: string, msg?: str
   );
 }
 
-type ErrorClass = new (...args: never[]) => Error;
+// The constructor rest is `any[]` so error subclasses with required args (e.g. WaveError(message))
+// satisfy the type — param contravariance rejects a narrower `unknown[]`/`never[]` here.
+type ErrorClass = new (...args: any[]) => Error;
 
 function checkError(error: unknown, ErrorClass?: ErrorClass, msgIncludes?: string): Error {
   const err = error instanceof Error ? error : new Error(String(error));

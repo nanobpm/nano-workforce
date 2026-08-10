@@ -1,6 +1,6 @@
-// Red/green regression for the plan levelizer (issue #20). Run with `deno test`.
+// Red/green regression for the plan levelizer (issue #20). Run with `node --test`.
 //
-// One `Deno.test` = one named property of computeWaves. These encode the wave
+// One `test` = one named property of computeWaves. These encode the wave
 // contract: independent tasks share wave 0 (all-parallel), a chain steps 0,1,2…
 // (all-sequential), a diamond re-converges, and a malformed graph is rejected
 // rather than silently mis-levelized.

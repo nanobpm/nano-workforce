@@ -1,7 +1,7 @@
 // Contract for the review-wait liveness policy — the ISO-8601 timeout validation handed to the
 // process's timer catch, and the Copilot re-request nudge cooldown. Both are env-driven, so a
 // blank/malformed operator value must fall back to a sane default rather than deploy an
-// uninterpretable timer or a runaway nudge interval. Run with `deno test -A`.
+// uninterpretable timer or a runaway nudge interval. Run with `node --test`.
 import { test } from "node:test";
 import { assertEquals } from "#test-assert";
 import {

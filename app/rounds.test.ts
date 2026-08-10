@@ -1,6 +1,6 @@
 // Contract for clampRounds — the per-submit round-cap coercion. The submit form renders every
 // field as a text input (the runtime hardcodes type="text"), so the override arrives as a string
-// and a blank field must fall back to the fleet default. Run with `deno test`.
+// and a blank field must fall back to the fleet default. Run with `node --test`.
 import { test } from "node:test";
 import { assertEquals } from "#test-assert";
 import { clampCiFixBudget, clampRounds, MAX_CI_FIX_CEILING, MAX_ROUNDS_CEILING } from "./rounds.ts";

@@ -3,7 +3,7 @@
 // extractor must find the fenced ```merge-protocol JSON, and the fresh-head-run decision must fire
 // exactly once per landing attempt — only in the frugal-CI stuck state (no head run + waiting) —
 // so a converged PR is nudged into a fresh CI run without disturbing a run already in flight.
-// Run with `deno test -A`.
+// Run with `node --test`.
 import { test } from "node:test";
 import { assertEquals } from "#test-assert";
 import {
