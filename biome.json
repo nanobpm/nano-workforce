@@ -10,6 +10,7 @@
       "components/**/*.ts",
       "scripts/**/*.ts",
       "main.ts",
+      "!**/*.test.ts",
       "!nano-generated/**",
       "!node_modules/**"
     ]
@@ -25,6 +26,7 @@
       "components/**/*.ts",
       "scripts/**/*.ts",
       "main.ts",
+      "!**/*.test.ts",
       "!nano-generated/**",
       "!node_modules/**"
     ],

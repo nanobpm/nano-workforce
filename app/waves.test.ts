@@ -5,7 +5,6 @@
 // (all-sequential), a diamond re-converges, and a malformed graph is rejected
 // rather than silently mis-levelized.
 import { assertEquals, assertThrows } from "jsr:@std/assert@1";
-import { testBoundary } from "./test-support.ts";
 import { computeWaves, WaveError, type WaveGateTask, type WaveTask, waveMergeTargets } from "./waves.ts";
 
 Deno.test("no dependencies → every task in wave 0 (fully parallel)", () => {
@@ -23,7 +22,7 @@ Deno.test("linear chain → one task per wave (fully sequential)", () => {
   ];
   const { waves, waveCount, waveOf } = computeWaves(tasks);
   assertEquals(waveCount, 3);
-  assertEquals(testBoundary(waves), [["a"], ["b"], ["c"]]);
+  assertEquals(waves, [["a"], ["b"], ["c"]]);
   assertEquals([waveOf.get("a"), waveOf.get("b"), waveOf.get("c")], [0, 1, 2]);
 });
 
@@ -36,7 +35,7 @@ Deno.test("diamond → longest-path level; join waits for both arms", () => {
   ];
   const { waves, waveCount } = computeWaves(tasks);
   assertEquals(waveCount, 3);
-  assertEquals(testBoundary(waves), [["a"], ["b", "c"], ["d"]]);
+  assertEquals(waves, [["a"], ["b", "c"], ["d"]]);
 });
 
 Deno.test("mixed graph → level is 1 + max(dep level), not 1 + min", () => {
@@ -63,7 +62,7 @@ Deno.test("blank / whitespace dependsOn entries are ignored", () => {
   const tasks: WaveTask[] = [{ id: "a", dependsOn: ["", "  "] }];
   const { waves, waveCount } = computeWaves(tasks);
   assertEquals(waveCount, 1);
-  assertEquals(testBoundary(waves), [["a"]]);
+  assertEquals(waves, [["a"]]);
 });
 
 Deno.test("dependency cycle → WaveError", () => {

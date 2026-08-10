@@ -7,7 +7,8 @@ import { fetchPrFiles } from "./github.ts";
 // A fake `fetch` that serves `pages` of file batches; each page N (1-based) returns `pages[N-1]`
 // files (named `f{index}`), setting a `Link: rel="next"` header whenever a later page exists.
 function stubFetch(pages: number[]) {
-  return (url: string | URL | Request, _init?: RequestInit): Promise<Response> => {
+  const total = pages.reduce((a, b) => a + b, 0);
+  return (url: string | URL | Request): Promise<Response> => {
     const u = new URL(String(url));
     const page = Number(u.searchParams.get("page") ?? "1");
     const count = pages[page - 1] ?? 0;
@@ -27,7 +28,7 @@ async function withTokenTransport<T>(pages: number[], fn: () => Promise<T>): Pro
   const prevMode = Deno.env.get("NANO_PR_GITHUB_TRANSPORT");
   const prevFetch = globalThis.fetch;
   Deno.env.set("NANO_PR_GITHUB_TRANSPORT", "token");
-  globalThis.fetch = stubFetch(pages);
+  globalThis.fetch = stubFetch(pages) as typeof fetch;
   try {
     return await fn();
   } finally {

@@ -5,9 +5,8 @@
 // manifest to the code's single source of truth for "done" (TERMINAL_STATUSES / PLAN_TERMINAL_
 // STATUSES) so the two can't diverge silently.
 import { assert, assertEquals } from "jsr:@std/assert@1";
-import { PLAN_TERMINAL_STATUSES } from "./plan.ts";
 import { TERMINAL_STATUSES } from "./service.ts";
-import { testBoundary } from "./test-support.ts";
+import { PLAN_TERMINAL_STATUSES } from "./plan.ts";
 
 interface Binding {
   table: string;
@@ -18,7 +17,7 @@ interface Binding {
 
 async function bindings(): Promise<Binding[]> {
   const manifest = JSON.parse(await Deno.readTextFile(new URL("../nano.app.json", import.meta.url)));
-  return testBoundary<{ instanceTracking: Binding[] }>(manifest).instanceTracking;
+  return manifest.instanceTracking as Binding[];
 }
 
 function bindingFor(all: Binding[], table: string): Binding {
