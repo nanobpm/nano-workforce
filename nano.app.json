@@ -141,7 +141,7 @@
   },
   "api": {
     "spec": "openapi.json",
-    "base": "/app",
+    "base": "/app/api",
     "dir": "operations",
     "validateResponses": "dev"
   },

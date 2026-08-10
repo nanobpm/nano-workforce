@@ -1,4 +1,4 @@
-// POST /app/actions/start/convergence-loop → operationId `startConvergenceLoop` (ADR 0058, base /app).
+// POST /app/api/actions/start/convergence-loop → operationId `startConvergenceLoop` (ADR 0058, base /app/api).
 // Replaces the hand-rolled action that overrode the generic "start process" palette action: parse the
 // PR reference and register/refresh the PR aggregate (idempotent on prKey) before starting the loop.
 //

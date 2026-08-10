@@ -1,4 +1,4 @@
-// GET /app/version → operationId `getVersion` (ADR 0058 OpenAPI surface, mounted under base /app).
+// GET /app/api/version → operationId `getVersion` (ADR 0058 OpenAPI surface, mounted under base /app/api).
 // The running app's identity (app + resolved @nanobpm/urban versions, git commit/branch, JS runtime,
 // pid, uptime). Because the app runs its `.ts` sources directly from a checkout with no build step,
 // restarts alone don't tell you whether a fix is live; this endpoint does.

@@ -1,4 +1,4 @@
-// POST /app/actions/message → operationId `postMessage` (ADR 0058, base /app).
+// POST /app/api/actions/message → operationId `postMessage` (ADR 0058, base /app/api).
 // Replaces the hand-rolled action that overrode the generic publishMessage action. For the
 // `escalation-answered` message we run the review answer flow, and for `feature-escalation-answered`
 // (issue #25) the implementation-phase (per-task) answer flow: record the answer, resume the parked

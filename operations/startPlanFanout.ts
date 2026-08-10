@@ -1,4 +1,4 @@
-// POST /app/actions/start/plan-fanout → operationId `startPlanFanout` (ADR 0058, base /app).
+// POST /app/api/actions/start/plan-fanout → operationId `startPlanFanout` (ADR 0058, base /app/api).
 // Replaces the hand-rolled action that overrode the generic "start process" palette action: parse the
 // issue reference and register/refresh the plan aggregate (idempotent on planKey) before starting the
 // planning fan-out. An unparseable reference is a 400; an already-running plan short-circuits.

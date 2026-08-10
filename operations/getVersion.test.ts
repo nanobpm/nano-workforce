@@ -1,4 +1,4 @@
-// Tests for GET /app/version → operation `getVersion` (ADR 0058 OpenAPI surface).
+// Tests for GET /app/api/version → operation `getVersion` (ADR 0058 OpenAPI surface).
 // Ported from the previous actions/version.test.ts. Method handling now belongs to the router
 // (only GET is routed here), so there is no 405 case to test at the delegate level.
 import { assert, assertEquals } from "jsr:@std/assert@1";
@@ -12,7 +12,7 @@ function input(headers: Record<string, string> = {}) {
   return {
     req: {
       method: "GET",
-      path: "/app/version",
+      path: "/app/api/version",
       query: new URLSearchParams(),
       headers: new Headers(headers),
       text: async () => "",

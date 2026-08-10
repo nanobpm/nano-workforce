@@ -3,7 +3,7 @@
   "info": {
     "title": "Nano Workforce control API",
     "version": "1.0.0",
-    "description": "The externally-facing control surface an operator, an automation harness, or an LLM uses to observe and steer PR-convergence and planning runs. Contract-first (ADR 0058): the toolkit derives typed request/response contracts + runtime validators from this document and each `operationId` is implemented by a delegate module in `operations/`. Mounted under base `/app` so the existing endpoint paths are preserved. The `/hooks/*` webhook endpoints stay on `actions[]` because they live outside the `/app` namespace."
+    "description": "The externally-facing control surface an operator, an automation harness, or an LLM uses to observe and steer PR-convergence and planning runs. Contract-first (ADR 0058): the toolkit derives typed request/response contracts + runtime validators from this document and each `operationId` is implemented by a delegate module in `operations/`. Mounted under base `/app/api`, kept off the framework-reserved `/app` page-runtime namespace (which owns `/app/runtime.js`, `/app/pages/*`, `/app/data/*`). The `/hooks/*` webhook endpoints stay on `actions[]` because they live outside the `/app` namespace."
   },
   "components": {
     "securitySchemes": {

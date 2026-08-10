@@ -1,4 +1,4 @@
-// Tests for GET /app/status → operation `listActivePrs` (ADR 0058 OpenAPI surface).
+// Tests for GET /app/api/status → operation `listActivePrs` (ADR 0058 OpenAPI surface).
 // Covers the happy path (count/prs projection) and the optional shared-secret guard. A minimal
 // in-memory DataLayer backs `activePrs` (it reads the `pull_requests` table via `.all()`).
 import { assert, assertEquals } from "jsr:@std/assert@1";
@@ -21,7 +21,7 @@ function input(headers: Record<string, string> = {}) {
   return {
     req: {
       method: "GET",
-      path: "/app/status",
+      path: "/app/api/status",
       query: new URLSearchParams(),
       headers: new Headers(headers),
       text: async () => "",

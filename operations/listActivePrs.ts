@@ -1,4 +1,4 @@
-// GET /app/status → operationId `listActivePrs` (ADR 0058 OpenAPI surface, mounted under base /app).
+// GET /app/api/status → operationId `listActivePrs` (ADR 0058 OpenAPI surface, mounted under base /app/api).
 // List the PRs currently in flight (every tracked PR not converged/abandoned) so an operator or an
 // external automation harness can see active work — and grab a `processKey` to cancel — without
 // opening the DB or the UI. Read-only projection over the datasource.
