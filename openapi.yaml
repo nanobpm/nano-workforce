@@ -199,6 +199,7 @@ components:
         maxRounds:
           type: integer
           minimum: 1
+          description: Values above 100 are accepted and clamped to 100 by the delegate.
     MessageResult:
       type: object
       description: The result of publishing a message / answering an escalation. Shape varies by message
