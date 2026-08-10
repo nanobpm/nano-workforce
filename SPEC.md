@@ -261,8 +261,10 @@ child grids, a lazily-loaded transcript, and a conditional **answer** form shown
 when the PR has an open escalation (`open_escalation_id`, denormalised onto the
 row by migration `003`).
 
-`main.ts` delegates to the runtime and intercepts only the three actions that
-carry app-specific business logic:
+The app-specific business-logic endpoints are **OpenAPI operations** mounted
+under `api.base` (`/app/api`), each implemented by a delegate module in
+`operations/`, plus a `/hooks/*` webhook. The runtime serves them all; `main.ts`
+only starts the runtime and the review-ready poller:
 
 | method | route | purpose |
 |---|---|---|
