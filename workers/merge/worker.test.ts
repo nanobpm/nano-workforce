@@ -1,7 +1,7 @@
 // Regression for the out-of-band merge wedge (Magikcraft/nano-bpm#723): when a PR is merged
 // independently of the process (a maintainer clicks Merge, a mergify queue lands it), the poller
-// routes the merge-loop instance back through `attempt-merge`. This worker must detect the already
-// -merged state and complete the loop directly — NOT re-run the land protocol, which would post a
+// routes the merge-loop instance back through `attempt-merge`. This worker must detect the
+// already-merged state and complete the loop directly — NOT re-run the land protocol, which would post a
 // spurious `@mergifyio queue` comment (mergify-queue repos) or a redundant merge call. Forces the
 // token transport and stubs `globalThis.fetch` so the single-PR GET reports `merged: true`.
 import { test } from "node:test";
