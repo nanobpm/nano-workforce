@@ -15,6 +15,9 @@ interface In extends Record<string, unknown> {
   prUrl: string;
   round: number;
   summary?: string;
+  // Per-request review-only override: when true, stop at `converged` and never hand off to the
+  // merge-loop even if auto-merge is on globally. Set at submit time, carried on the instance.
+  convergeOnly?: boolean;
   // The per-PR abandon capability URL the agent was handed; its token is preserved on a heal so
   // the agent's cooperative-abort check keeps resolving (see ensurePr).
   abandonUrl?: string;
@@ -31,7 +34,7 @@ const handler: AppJobHandler<In> = async (job, app) => {
   // `summary` is left undefined when absent so the write boundary omits it: the
   // nullable `rounds.summary` stays NULL and `pull_requests.outcome` is untouched
   // rather than being coerced to "".
-  const { prKey, repo, prNumber, prUrl, round, summary, abandonUrl } = job.variables;
+  const { prKey, repo, prNumber, prUrl, round, summary, abandonUrl, convergeOnly } = job.variables;
   const now = new Date().toISOString();
 
   // Heal a missing FK parent (engine/app.db desync) before the child `rounds` insert.
@@ -60,8 +63,11 @@ const handler: AppJobHandler<In> = async (job, app) => {
   // once merge-loop is actually running — otherwise the PR would be parked in a merge-stage status
   // with no process behind it, and `submitPr` refuses to restart it (only `cancel` recovers). On
   // failure we leave the PR terminal as `converged` so a human/operator can (re)start merge.
+  //
+  // A per-request `convergeOnly` override forces the review-only path for this PR regardless of the
+  // global auto-merge default — the PR rests at `converged` and is never handed to the merge-loop.
   let status = "converged";
-  if (AUTO_MERGE) {
+  if (AUTO_MERGE && !convergeOnly) {
     try {
       const { mergeProcessKey } = await startMerge(app.data, app.engine, {
         repo,
