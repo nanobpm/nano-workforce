@@ -28,6 +28,16 @@ export type FreshHeadRun = "none" | "ready" | "reopen" | "ready-or-reopen";
  * `ui` = a human clicks Merge (Merlin can't do it → escalate). */
 export type LandMethod = "gh-merge" | "admin" | "mergify-queue" | "ui";
 
+/** One required status check a repo declares in its merge protocol. `name` is the check-run /
+ * status-context name exactly as GitHub reports it in the head `statusCheckRollup`.
+ * `acceptedConclusions` are the conclusions that count as satisfied (default `["success"]`); a
+ * change-gated check that is skipped for irrelevant PRs also lists `"skipped"` so a skip counts
+ * as satisfied (required-when-run, skip-tolerant). */
+export interface RequiredCheck {
+  name: string;
+  acceptedConclusions: string[];
+}
+
 export interface MergeProtocol {
   /** Does the repo auto-merge a PR once its checks go green? (Informational; Merlin never relies
    * on auto-merge — it lands deliberately.) */
@@ -38,8 +48,10 @@ export interface MergeProtocol {
   waitForChecks: boolean;
   /** How to land the PR. */
   land: { method: LandMethod; comment?: string };
-  /** Names of the required checks (informational; the poller reads live state). */
-  requiredChecks: string[];
+  /** The checks that gate the merge. A repo publishing these lets the fresh-head-run remedy judge
+   * "is the required CI run present on the head?" by *these* checks — not by total rollup length,
+   * which an unrelated always-on check (e.g. Mergify's "Merge Queue") would otherwise satisfy. */
+  requiredChecks: RequiredCheck[];
   /** Pointer to the human doc, for escalation messages. */
   doc?: string;
 }
@@ -70,6 +82,28 @@ function strArray(v: unknown): string[] | undefined {
   if (!Array.isArray(v)) return undefined;
   return v.filter((x): x is string => typeof x === "string");
 }
+/** Parse `requiredChecks`, tolerating both the rich object shape (`{ name, acceptedConclusions }`)
+ * and a bare list of check names (each → `{ name, acceptedConclusions: ["success"] }`). Entries
+ * without a usable `name` are dropped. Total — never throws. */
+function requiredCheckArray(v: unknown): RequiredCheck[] {
+  if (!Array.isArray(v)) return [];
+  const out: RequiredCheck[] = [];
+  for (const entry of v) {
+    if (typeof entry === "string") {
+      out.push({ name: entry, acceptedConclusions: ["success"] });
+      continue;
+    }
+    if (!isRecord(entry)) continue;
+    const name = str(entry.name);
+    if (name === undefined || name === "") continue;
+    const accepted = strArray(entry.acceptedConclusions);
+    out.push({
+      name,
+      acceptedConclusions: accepted && accepted.length > 0 ? accepted : ["success"],
+    });
+  }
+  return out;
+}
 function oneOf<T extends string>(v: unknown, allowed: ReadonlySet<string>): T | undefined {
   const s = str(v);
   // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
@@ -88,7 +122,7 @@ export function parseMergeProtocol(raw: unknown): MergeProtocol {
     freshHeadRun: oneOf<FreshHeadRun>(raw.freshHeadRun, FRESH_HEAD_RUNS) ?? DEFAULT_MERGE_PROTOCOL.freshHeadRun,
     waitForChecks: bool(raw.waitForChecks) ?? DEFAULT_MERGE_PROTOCOL.waitForChecks,
     land: comment !== undefined ? { method, comment } : { method },
-    requiredChecks: strArray(raw.requiredChecks) ?? [],
+    requiredChecks: requiredCheckArray(raw.requiredChecks),
     doc: str(raw.doc),
   };
 }
@@ -159,27 +193,53 @@ export interface FreshHeadRunAttempt {
   lastActionHeadRefOid?: string | null;
 }
 
+/** Count of the protocol's required checks currently present on the head (in any state). This is
+ * the signal the fresh-head-run remedy actually wants — "has the required CI run happened?" — as
+ * opposed to the raw rollup length, which an unrelated always-on check (e.g. Mergify's "Merge
+ * Queue") inflates. A required check matches by exact name against the head `statusCheckRollup`. */
+export function presentRequiredCheckCount(protocol: MergeProtocol, presentCheckNames: string[]): number {
+  const present = new Set(presentCheckNames);
+  return protocol.requiredChecks.filter((c) => present.has(c.name)).length;
+}
+
+/** The "does a head run already exist?" count to feed {@link freshHeadRunAction}. When the repo
+ * declares `requiredChecks`, judge presence by *those* checks — so an incidental always-on check
+ * (Mergify) never masks a genuinely-missing required run and wedges the merge. When it declares
+ * none, fall back to the total rollup length (legacy behaviour, default repos unchanged). Token
+ * mode (`totalChecks < 0`, checks unenumerable) stays `-1` so the remedy remains conservative and
+ * never reopens blind. */
+export function headRunPresenceCount(
+  protocol: MergeProtocol,
+  state: { totalChecks: number; presentCheckNames: string[] },
+): number {
+  if (state.totalChecks < 0) return -1; // token mode → unknown → conservative
+  if (protocol.requiredChecks.length === 0) return state.totalChecks;
+  return presentRequiredCheckCount(protocol, state.presentCheckNames);
+}
+
 /** Whether the merge poller should produce a synthetic fresh head run *now*, and how.
  *
- * Fires only when the protocol asks for a fresh run AND the PR currently has **no head check run
- * at all** (`totalChecks === 0`) while GitHub still reports it un-landable-but-not-conflicting
+ * Fires only when the protocol asks for a fresh run AND the PR currently has **no required head
+ * run** (`headRunCount === 0`) while GitHub still reports it un-landable-but-not-conflicting
  * (`waiting`). That is exactly the frugal-CI stuck state: review converged, the last push produced
- * no run, so branch protection's required checks read as *expected* forever. Once a run exists for
- * the current head (`totalChecks > 0`, pending or done), or this same head already got its nudge,
- * this returns `null`, so the poller never re-triggers inside one landing attempt. A rebase changes
- * `headRefOid`, so the decision is re-derived and can fire again for the fresh post-rebase head.
- * A genuinely-failing check (`blocked`) is left to the fix-ci arm, a conflict (`conflict`) to the
- * rebase arm (#42). */
+ * no run, so branch protection's required checks read as *expected* forever. `headRunCount` is the
+ * required-check-aware presence count from {@link headRunPresenceCount} — NOT the raw rollup
+ * length — so an incidental always-on check (e.g. Mergify's "Merge Queue") does not read as "a run
+ * already exists". Once the required run is present (`headRunCount > 0`, pending or done), or this
+ * same head already got its nudge, this returns `null`, so the poller never re-triggers inside one
+ * landing attempt. A rebase changes `headRefOid`, so the decision is re-derived and can fire again
+ * for the fresh post-rebase head. A genuinely-failing check (`blocked`) is left to the fix-ci arm,
+ * a conflict (`conflict`) to the rebase arm (#42). */
 export function freshHeadRunAction(
   protocol: MergeProtocol,
   verdict: "ready" | "waiting" | "conflict" | "blocked",
-  totalChecks: number,
+  headRunCount: number,
   isDraft: boolean,
   attempt: FreshHeadRunAttempt = {},
 ): "ready" | "reopen" | null {
   if (protocol.freshHeadRun === "none") return null;
   if (verdict !== "waiting") return null; // ready = go land; blocked/conflict = other arms
-  if (totalChecks !== 0) return null; // a run already exists (or unknown in token mode) → wait
+  if (headRunCount !== 0) return null; // required run already present (or unknown in token mode) → wait
   if (attempt.headRefOid && attempt.headRefOid === attempt.lastActionHeadRefOid) return null;
   switch (protocol.freshHeadRun) {
     case "ready":

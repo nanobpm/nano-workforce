@@ -10,8 +10,10 @@ import {
   DEFAULT_MERGE_PROTOCOL,
   extractProtocolBlock,
   freshHeadRunAction,
+  headRunPresenceCount,
   type MergeProtocol,
   parseMergeProtocol,
+  presentRequiredCheckCount,
 } from "./mergeProtocol.ts";
 
 test("parseMergeProtocol: non-object / junk → defaults (total, never throws)", () => {
@@ -27,7 +29,10 @@ test("parseMergeProtocol: full nano-bpm-style descriptor", () => {
     freshHeadRun: "ready-or-reopen",
     waitForChecks: true,
     land: { method: "mergify-queue", comment: "@mergifyio queue" },
-    requiredChecks: ["rustfmt (pinned nightly)", "server (clippy + test)"],
+    requiredChecks: [
+      { name: "rustfmt (pinned nightly)", acceptedConclusions: ["success"] },
+      { name: "processos (clippy + test)", acceptedConclusions: ["success", "skipped"] },
+    ],
     doc: "AGENTS.md#merging-prs",
   });
   assertEquals(got.autoMerge, false);
@@ -35,7 +40,25 @@ test("parseMergeProtocol: full nano-bpm-style descriptor", () => {
   assertEquals(got.waitForChecks, true);
   assertEquals(got.land, { method: "mergify-queue", comment: "@mergifyio queue" });
   assertEquals(got.requiredChecks.length, 2);
+  assertEquals(got.requiredChecks[0], { name: "rustfmt (pinned nightly)", acceptedConclusions: ["success"] });
+  assertEquals(got.requiredChecks[1].acceptedConclusions, ["success", "skipped"]);
   assertEquals(got.doc, "AGENTS.md#merging-prs");
+});
+
+test("parseMergeProtocol: requiredChecks tolerates bare-string entries + drops nameless/junk", () => {
+  const got = parseMergeProtocol({
+    requiredChecks: [
+      "server (clippy + test)", // bare name → default acceptedConclusions ["success"]
+      { name: "engine-core (clippy + test)" }, // object, no acceptedConclusions → default
+      { name: "", acceptedConclusions: ["success"] }, // empty name → dropped
+      { acceptedConclusions: ["success"] }, // no name → dropped
+      42, // junk → dropped
+    ],
+  });
+  assertEquals(got.requiredChecks, [
+    { name: "server (clippy + test)", acceptedConclusions: ["success"] },
+    { name: "engine-core (clippy + test)", acceptedConclusions: ["success"] },
+  ]);
 });
 
 test("parseMergeProtocol: invalid enums / wrong types fall back per-field", () => {
@@ -43,12 +66,12 @@ test("parseMergeProtocol: invalid enums / wrong types fall back per-field", () =
     autoMerge: "yes", // not a boolean → default
     freshHeadRun: "sometimes", // not in the enum → default (none)
     land: { method: "teleport" }, // not in the enum → default (gh-merge)
-    requiredChecks: ["ok", 7, null], // keep only strings
+    requiredChecks: ["ok", 7, null], // keep only usable names
   });
   assertEquals(got.autoMerge, DEFAULT_MERGE_PROTOCOL.autoMerge);
   assertEquals(got.freshHeadRun, "none");
   assertEquals(got.land.method, "gh-merge");
-  assertEquals(got.requiredChecks, ["ok"]);
+  assertEquals(got.requiredChecks, [{ name: "ok", acceptedConclusions: ["success"] }]);
 });
 
 test("parseMergeProtocol: comment dropped when absent", () => {
@@ -122,4 +145,53 @@ test("freshHeadRunAction: mode=ready only acts on drafts", () => {
   const readyOnly = parseMergeProtocol({ freshHeadRun: "ready", land: { method: "gh-merge" } });
   assertEquals(freshHeadRunAction(readyOnly, "waiting", 0, true), "ready");
   assertEquals(freshHeadRunAction(readyOnly, "waiting", 0, false), null); // not a draft → nothing to ready
+});
+
+// The nano-bpm merge protocol: 7 required checks, one skip-tolerant.
+const NANO_REQ: MergeProtocol = parseMergeProtocol({
+  freshHeadRun: "ready-or-reopen",
+  land: { method: "mergify-queue" },
+  requiredChecks: [
+    { name: "rustfmt (pinned nightly)", acceptedConclusions: ["success"] },
+    { name: "server (clippy + test)", acceptedConclusions: ["success"] },
+    { name: "processos (clippy + test)", acceptedConclusions: ["success", "skipped"] },
+  ],
+});
+
+test("presentRequiredCheckCount: counts only declared required checks present on the head", () => {
+  // Only an unrelated always-on check (Mergify) is present → zero required checks present.
+  assertEquals(presentRequiredCheckCount(NANO_REQ, ["Mergify Merge Queue"]), 0);
+  // Two of the three required checks present (plus the incidental Mergify one).
+  assertEquals(
+    presentRequiredCheckCount(NANO_REQ, ["Mergify Merge Queue", "server (clippy + test)", "rustfmt (pinned nightly)"]),
+    2,
+  );
+  // A repo that declares no required checks → nothing to count.
+  assertEquals(presentRequiredCheckCount(DEFAULT_MERGE_PROTOCOL, ["anything"]), 0);
+});
+
+test("headRunPresenceCount: required-aware — Mergify's incidental check doesn't mask a missing run", () => {
+  // The #727 stuck state: BLOCKED head carries only Mergify's neutral check, none of the 7
+  // required checks ran. Raw rollup length is 1, but the required-check presence is 0 → the
+  // remedy must see 0 and fire the reopen.
+  const st = { totalChecks: 1, presentCheckNames: ["Mergify Merge Queue"] };
+  assertEquals(headRunPresenceCount(NANO_REQ, st), 0);
+  assertEquals(freshHeadRunAction(NANO_REQ, "waiting", headRunPresenceCount(NANO_REQ, st), false), "reopen");
+});
+
+test("headRunPresenceCount: a present required check reads as run-exists (no reopen)", () => {
+  const st = { totalChecks: 2, presentCheckNames: ["Mergify Merge Queue", "server (clippy + test)"] };
+  assertEquals(headRunPresenceCount(NANO_REQ, st), 1);
+  assertEquals(freshHeadRunAction(NANO_REQ, "waiting", headRunPresenceCount(NANO_REQ, st), false), null);
+});
+
+test("headRunPresenceCount: no declared required checks → falls back to total rollup length", () => {
+  const proto = parseMergeProtocol({ freshHeadRun: "ready-or-reopen", land: { method: "gh-merge" } });
+  assertEquals(headRunPresenceCount(proto, { totalChecks: 0, presentCheckNames: [] }), 0);
+  assertEquals(headRunPresenceCount(proto, { totalChecks: 3, presentCheckNames: ["a", "b", "c"] }), 3);
+});
+
+test("headRunPresenceCount: token mode (totalChecks < 0) stays conservative (-1)", () => {
+  assertEquals(headRunPresenceCount(NANO_REQ, { totalChecks: -1, presentCheckNames: [] }), -1);
+  assertEquals(freshHeadRunAction(NANO_REQ, "waiting", -1, false), null);
 });
