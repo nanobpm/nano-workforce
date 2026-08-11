@@ -11,7 +11,7 @@
 import type { AppJobHandler } from "@nanobpm/urban";
 import { abandonTokenFromUrl } from "../../app/abandon.ts";
 import { checkBaseTarget } from "../../app/baseGuard.ts";
-import { enqueueViaComment, mergePr } from "../../app/github.ts";
+import { enqueueViaComment, fetchPrState, mergePr } from "../../app/github.ts";
 import { loadMergeProtocol } from "../../app/mergeProtocol.ts";
 import { ensurePr, MERGE_ADMIN, MERGE_METHOD } from "../../app/service.ts";
 
@@ -50,6 +50,25 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
     round,
     abandonToken: abandonTokenFromUrl(abandonUrl),
   });
+
+  // Idempotent already-merged short-circuit. When the poller routes an out-of-band-merged PR back
+  // through `attempt-merge` (service.ts publishes `merge-ready` on the `waiting_merge` out-of-band
+  // branch), the PR is already landed on GitHub. Re-running the land protocol would post a spurious
+  // `@mergifyio queue` comment (mergify-queue repos) or a redundant merge call, so detect the merged
+  // state first and complete the loop directly. Runs AFTER ensurePr so the `merges` audit row has its
+  // FK parent, and BEFORE the base-guard/protocol logic. Best-effort: a transport hiccup falls through
+  // to the normal path rather than blocking a genuine merge.
+  const pre = await fetchPrState(repo, prNumber, token).catch(() => null);
+  if (pre?.merged) {
+    await app.data.table("merges", "id").insert({
+      pr_key: prKey,
+      outcome: "merged",
+      method: "already-merged",
+      detail: "PR was already merged on GitHub (landed out-of-band)",
+      at: now,
+    });
+    return { mergeStatus: "merged" };
+  }
 
   // Dead-end-base guard (#60): never land a PR into a base branch that has itself already merged
   // to the default branch — the merge would land into a dead branch and never reach `main`.

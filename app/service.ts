@@ -668,11 +668,17 @@ async function pollMerges(data: DataLayer, engine: EngineClient, token: string) 
       const st = await fetchPrState(repo, number, token);
       if (st === null) continue; // no transport → skip this PR (others may still advance)
       if (st.merged) {
-        // Landed out-of-band (someone merged it) — skip straight to done.
+        // Landed out-of-band (a maintainer clicked Merge, a mergify queue merged it, etc.). The
+        // instance is parked at `wait-mergeable`, which subscribes to `merge-ready` — NOT
+        // `merge-landed` (that catch, `wait-landed`, only exists later, after we enqueue). Publishing
+        // `merge-landed` here has no subscription to correlate to, so the engine drops it and the PR
+        // wedges forever in the transient `merging` status (which no poller branch re-scans).
+        // Publish `merge-ready` with a `ready` verdict instead: it routes through `gw-mergeable` to
+        // `attempt-merge`, whose idempotent already-merged check completes the loop (`mark-merged`).
         await flipToMergingThenPublish(data, engine, prKey, "waiting_merge", {
-          name: "merge-landed",
+          name: "merge-ready",
           correlationKey: prKey,
-          variables: {},
+          variables: { mergeState: "ready", failingChecks: 0, failingChecksList: "" },
         });
         console.log(`[poller] already merged -> ${prKey}`);
         continue;
