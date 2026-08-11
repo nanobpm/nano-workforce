@@ -1,3 +1,10 @@
+## [0.44.1](https://github.com/nanobpm/nano-workforce/compare/v0.44.0...v0.44.1) (2026-08-11)
+
+
+### Bug Fixes
+
+* provision isolated agent workspaces via the c8ctl repository envelope ([#124](https://github.com/nanobpm/nano-workforce/issues/124)) ([79c999b](https://github.com/nanobpm/nano-workforce/commit/79c999bc34dd7984ceffd7746a4538705565f2a5))
+
 # [0.44.0](https://github.com/nanobpm/nano-workforce/compare/v0.43.0...v0.44.0) (2026-08-11)
 
 
