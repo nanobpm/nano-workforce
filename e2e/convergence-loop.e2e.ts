@@ -14,7 +14,7 @@
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { after, before, describe, test } from "node:test";
 import { bootTestApp, type TestApp } from "@nanobpm/urban-testkit";
@@ -26,6 +26,23 @@ const APP_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // Provision the app's SQLite in a throwaway temp dir so the pilot never touches (or leaks into) the
 // repo's real ./app.db, and every run starts from a freshly-migrated, empty schema.
 const DB_DIR = mkdtempSync(join(tmpdir(), "nwf-e2e-"));
+
+// Derive the reconciler's poll interval from the app manifest (its single source of truth) rather
+// than hard-coding it, so this test tracks nano.app.json instead of duplicating the value: a change
+// to `pollMs` there stays correct here. Read the `pull_requests` instanceTracking entry's pollMs.
+interface InstanceTrackingEntry {
+  table: string;
+  pollMs: number;
+}
+interface AppManifest {
+  instanceTracking?: InstanceTrackingEntry[];
+}
+const APP_MANIFEST: AppManifest = JSON.parse(
+  readFileSync(join(APP_ROOT, "nano.app.json"), "utf8"),
+);
+const PR_TRACKING = APP_MANIFEST.instanceTracking?.find((e) => e.table === "pull_requests");
+assert.ok(PR_TRACKING, "nano.app.json declares a pull_requests instanceTracking entry");
+const PR_POLL_MS = PR_TRACKING.pollMs;
 
 // Force the app fully offline. github.ts reads `process.env` directly (not the harness env overlay),
 // so seal the GitHub transport on process.env: `token` mode with no GITHUB_TOKEN means every
@@ -148,9 +165,10 @@ describe("nano-workforce e2e (urban-testkit pilot)", () => {
     const stillActive = await prs.findOne({ pr_key: prKey });
     assert.equal(stillActive?.status, "converging", "row not yet reconciled before any poll fires");
 
-    // Advance past the instanceTracking pollMs (5s): the reconciler observes TERMINATED and applies
-    // the manifest `onTerminated.set` → status `abandoned`, escalation pointers cleared.
-    await app.advanceTime(6000);
+    // Advance past the instanceTracking pollMs (derived from nano.app.json above, plus a margin):
+    // the reconciler observes TERMINATED and applies the manifest `onTerminated.set` → status
+    // `abandoned`, escalation pointers cleared.
+    await app.advanceTime(PR_POLL_MS + 1000);
     const reconciled = await prs.findOne({ pr_key: prKey });
     assert.equal(reconciled?.status, "abandoned", "reconciler abandoned the terminated PR's row");
   });
