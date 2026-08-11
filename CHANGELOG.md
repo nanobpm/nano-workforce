@@ -1,3 +1,10 @@
+## [0.40.2](https://github.com/nanobpm/nano-workforce/compare/v0.40.1...v0.40.2) (2026-08-11)
+
+
+### Bug Fixes
+
+* **merge-loop:** escape wait-landed when a queued PR is evicted on conflict ([#117](https://github.com/nanobpm/nano-workforce/issues/117)) ([df7f850](https://github.com/nanobpm/nano-workforce/commit/df7f85050624f11490d715c90e054a5c7fb6d0fa)), closes [Magikcraft/nano-bpm#727](https://github.com/Magikcraft/nano-bpm/issues/727)
+
 ## [0.40.1](https://github.com/nanobpm/nano-workforce/compare/v0.40.0...v0.40.1) (2026-08-11)
 
 
