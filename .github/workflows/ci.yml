@@ -51,3 +51,10 @@ jobs:
       # TypeScript types on the fly (Node >= 22.6) — no build step.
       - name: Test (Node)
         run: npm test
+
+      # End-to-end pilot (nano-ide issue #157, S3): boots the whole app in-process against the WASM
+      # engine + a virtual clock via @nanobpm/urban-testkit and drives the real /app/api operations.
+      # Hermetic (no socket, no GitHub network), so it runs on every push like the unit suite.
+      - name: E2E (urban-testkit)
+        run: npm run e2e
+
