@@ -17,6 +17,7 @@ import {
   fetchPrState,
   hasPendingCopilotReviewer,
   type MergeMethod,
+  type PrState,
   requestCopilotReview,
 } from "./github.ts";
 import { mergeLanes, readExclusions } from "./mergeExclusion.ts";
@@ -637,7 +638,7 @@ async function mirrorTaskStatusForPr(data: DataLayer, prKey: string, status: "op
  *   • waiting_deps  → every declared dependency has merged        → `deps-cleared`
  *   • waiting_merge → GitHub settled the PR as mergeable/blocked  → `merge-ready` {mergeState}
  *   • waiting_lane  → predecessor in same exclusion lane merged    → re-arm `waiting_merge`
- *   • queued        → the queued PR has landed on GitHub          → `merge-landed`
+ *   • queued        → the queued PR landed → `merge-landed`; or it conflicts (DIRTY) → `merge-evicted`
  * On publish we flip status to the transient `merging` (which no branch scans) so a slow pass
  * can't double-signal, exactly as `pollReviews` flips to `converging`; `flipToMergingThenPublish`
  * reverts the flip if the publish fails so a failed handoff can't wedge the PR. */
@@ -756,23 +757,58 @@ async function pollMerges(data: DataLayer, engine: EngineClient, token: string) 
     }
   }
 
-  // 4) Queued PR landed?
+  // 4) Queued PR landed — or fell out of the merge queue?
+  //
+  // A PR enqueued by `attempt-merge` (mergeStatus="queued") parks the process at `wait-landed`.
+  // Two things can end that wait: the queue lands the PR (→ `merge-landed`), or the PR is EVICTED
+  // from the queue because its base moved under it and it now conflicts (`DIRTY`). Without the
+  // eviction path a conflicted-after-enqueue PR waits forever (nothing ever publishes
+  // `merge-landed`), which is exactly how #727/instance 729 wedged. We must NOT treat a merely
+  // "not yet landed" PR as evicted: while it is legitimately queuing GitHub often reports it as
+  // BLOCKED (a pending queue check) or UNSTABLE, which `classifyMergeability` calls not-ready. Only
+  // a genuine merge CONFLICT (`DIRTY`) means it has dropped out — evict on that alone and re-arm the
+  // merge poller (`merge-evicted` → `arm-merge`), which re-runs the mergeable gate so the existing
+  // auto-rebase / escalate machinery resolves the conflict.
   for (const pr of await prs(data).find({ status: "queued" })) {
     const { repo, number, pr_key: prKey } = pr;
     try {
       const st = await fetchPrState(repo, number, token);
       if (st === null) continue; // no transport → skip this PR (others may still advance)
-      if (!st.merged) continue; // still in the queue
-      await flipToMergingThenPublish(data, engine, prKey, "queued", {
-        name: "merge-landed",
-        correlationKey: prKey,
-        variables: {},
-      });
-      console.log(`[poller] queued PR landed -> ${prKey}`);
+      const verdict = queuedVerdict(st);
+      if (verdict === "landed") {
+        await flipToMergingThenPublish(data, engine, prKey, "queued", {
+          name: "merge-landed",
+          correlationKey: prKey,
+          variables: {},
+        });
+        console.log(`[poller] queued PR landed -> ${prKey}`);
+      } else if (verdict === "evicted") {
+        await flipToMergingThenPublish(data, engine, prKey, "queued", {
+          name: "merge-evicted",
+          correlationKey: prKey,
+          variables: {},
+        });
+        console.log(`[poller] queued PR evicted (conflict) -> ${prKey}`);
+      }
+      // otherwise: still legitimately in the queue — keep waiting.
     } catch (err) {
       console.error(`[poller] queued ${prKey}: ${err}`);
     }
   }
+}
+
+/** Decide what to do with a PR the process enqueued (parked at `wait-landed`), from its current
+ *  GitHub merge state:
+ *   • `landed`  — the queue merged it → publish `merge-landed` (advance to mark-merged).
+ *   • `evicted` — it fell out of the queue with a real merge CONFLICT (`DIRTY`) → publish
+ *     `merge-evicted` so the process re-arms the merge poller and the mergeable gate re-runs
+ *     (auto-rebase / escalate). Without this a conflicted-after-enqueue PR waits forever.
+ *   • `waiting` — still legitimately in the queue. Crucially, a queuing PR is frequently reported
+ *     BLOCKED/UNSTABLE (a pending queue check), which is NOT eviction — only `DIRTY` is. */
+export function queuedVerdict(st: PrState): "landed" | "evicted" | "waiting" {
+  if (st.merged) return "landed";
+  if (st.mergeStateStatus === "DIRTY") return "evicted";
+  return "waiting";
 }
 
 /** The subset of a Camunda-8 `/v2/jobs/search` result item this app reads. `worker` is the
