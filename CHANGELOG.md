@@ -1,3 +1,10 @@
+# [0.43.0](https://github.com/nanobpm/nano-workforce/compare/v0.42.0...v0.43.0) (2026-08-11)
+
+
+### Features
+
+* **api:** oneOf request bodies + structured logging (urban 0.42.0) ([#120](https://github.com/nanobpm/nano-workforce/issues/120)) ([ea7549b](https://github.com/nanobpm/nano-workforce/commit/ea7549bd4acb7cdd874fde0a8ccccbf1563b8e53)), closes [#119](https://github.com/nanobpm/nano-workforce/issues/119)
+
 # [0.42.0](https://github.com/nanobpm/nano-workforce/compare/v0.41.0...v0.42.0) (2026-08-11)
 
 
