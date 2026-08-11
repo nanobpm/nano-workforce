@@ -59,6 +59,12 @@ test("examples are keyed to the request's control-API base and leave no placehol
   assert(!md.includes("__ENGINE__"), "no unsubstituted __ENGINE__ placeholder");
 });
 
+test("x-forwarded-proto is restricted to http/https", async () => {
+  const spoofed = input({ host: "wf.example.com", "x-forwarded-proto": "javascript" });
+  const body = (await handler(spoofed, app)) as any;
+  assertEquals(body.body.baseUrl, "http://wf.example.com/app/api", "unsafe scheme falls back to http");
+});
+
 test("engine base follows CAMUNDA_REST_ADDRESS / NANOBPMN_BASE_URL", async () => {
   const prevCamunda = process.env["CAMUNDA_REST_ADDRESS"];
   const prevBase = process.env["NANOBPMN_BASE_URL"];

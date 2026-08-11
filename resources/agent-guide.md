@@ -15,9 +15,11 @@ and unstick or report problems).
 - **Engine (Nano/Camunda-8 v2 REST) base:** `__ENGINE__`
 - **Source repository:** `nanobpm/nano-workforce`
 
-Everything below assumes the app control API is reachable at `__BASE__`. All app
-endpoints are mounted under that base (ADR 0059). Interactive docs (Swagger UI) are
-at `__BASE__/../api-docs`.
+Everything below assumes the app control API is reachable at `__BASE__`. Most app
+endpoints are mounted under that base (ADR 0059), but a few siblings sit outside it —
+notably the interactive docs (Swagger UI) at `__BASE__/../api-docs` and the action
+endpoints (e.g. the cancel action at `/app/actions/cancel`). Paths below are written
+in full so you can tell which are under the control-API base and which are not.
 
 ---
 

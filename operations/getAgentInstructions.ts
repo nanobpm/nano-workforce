@@ -24,7 +24,9 @@ const SECRET = envVar("NANO_PR_WEBHOOK_SECRET") ?? "";
  * back to a localhost default when the Host header is absent (e.g. a raw unit-test request).
  */
 function resolveApiBase(req: { path: string; headers: Headers }): string {
-  const proto = (req.headers.get("x-forwarded-proto") ?? "http").split(",")[0].trim() || "http";
+  const rawProto = (req.headers.get("x-forwarded-proto") ?? "http").split(",")[0].trim().toLowerCase();
+  // x-forwarded-proto is user-controlled behind some proxies; only trust http/https.
+  const proto = rawProto === "http" || rawProto === "https" ? rawProto : "http";
   const host = (req.headers.get("x-forwarded-host") ?? req.headers.get("host") ?? "").split(",")[0].trim();
   // The op is mounted at "<base>/agent"; strip the trailing segment to recover the base path.
   const basePath = req.path.replace(/\/agent\/?$/, "") || "/app/api";

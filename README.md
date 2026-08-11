@@ -292,7 +292,10 @@ examples are keyed to the instance you fetched it from, so a coding agent can dr
 curl -sS http://localhost:3000/app/api/agent | jq -r .instructions
 ```
 
-The source lives in `resources/agent-guide.md`.
+Like `/version` and `/status`, this endpoint honours the optional
+`NANO_PR_WEBHOOK_SECRET` guard (`X-Hook-Secret` header): when that secret is set it
+returns `401` without the matching header; unset = open. The source lives in
+`resources/agent-guide.md`.
 
 ---
 
