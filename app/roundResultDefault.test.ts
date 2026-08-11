@@ -37,6 +37,17 @@ function flowElement(id: string): string | null {
   return m ? m[0] : null;
 }
 
+// Every `<bpmn:sequenceFlow>` element (whole element, self-closing or with children),
+// using the same tempered-lookahead boundary as flowElement() so a captured element can
+// never bleed into the next one.
+function allFlows(): string[] {
+  const re = new RegExp(
+    "<bpmn:sequenceFlow\\b[^>]*?(?:/>|>(?:(?!<bpmn:sequenceFlow\\b).)*?</bpmn:sequenceFlow>)",
+    "g",
+  );
+  return flat.match(re) ?? [];
+}
+
 test("gw-status defaults to the addressed arm, not escalation", () => {
   const gw = flat.match(/<bpmn:exclusiveGateway\b[^>]*\bid="gw-status"[^>]*>/);
   assert(gw, "gw-status gateway missing");
@@ -68,12 +79,15 @@ test("the default (addressed) arm carries no condition and re-enters the guard",
 });
 
 test("regression: an empty/unknown status no longer routes to persist-escalation", () => {
-  // Escalation is reachable ONLY via the explicit needs_input/blocked condition or the
-  // max-rounds guard — never as a catch-all default. Enumerate every flow into
-  // persist-escalation and assert none of them is an unconditional (default) arm off gw-status.
-  const esc = flowElement("f_escalate");
-  assert(esc, "f_escalate flow missing");
-  assertStringIncludes(esc, "conditionExpression");
+  // Escalation is reachable ONLY via an explicit condition (the needs_input/blocked arm),
+  // never as a catch-all default. Enumerate EVERY sequenceFlow into `persist-escalation`
+  // and assert each one carries a conditionExpression — so no future edit can slip an
+  // unconditional (default) arm into escalation.
+  const intoEscalation = allFlows().filter((f) => /targetRef="persist-escalation"/.test(f));
+  assert(intoEscalation.length > 0, "no flow targets persist-escalation");
+  for (const f of intoEscalation) {
+    assertStringIncludes(f, "conditionExpression");
+  }
   // The addressed default must land on the guard (which re-solicits the review), not escalation.
   const addressed = flowElement("f_addressed");
   assert(addressed && /targetRef="gw-guard"/.test(addressed), "default arm must re-enter gw-guard");
