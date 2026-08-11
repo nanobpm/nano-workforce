@@ -25,8 +25,14 @@ const flat = bpmn.replace(/\s+/g, " ");
 
 // The `<sequenceFlow id="...">` element (whole element, up to its close), whether
 // self-closing or with children. Returns the matched text or null.
+//
+// The body branch uses a tempered negative lookahead — `(?:(?!<bpmn:sequenceFlow\b).)*?`
+// — so it can never over-match across a following `<bpmn:sequenceFlow>` element; it
+// captures only up to *this* element's own close.
 function flowElement(id: string): string | null {
-  const re = new RegExp(`<bpmn:sequenceFlow\\b[^>]*?\\bid="${id}"[^>]*?(/>|>.*?</bpmn:sequenceFlow>)`);
+  const re = new RegExp(
+    `<bpmn:sequenceFlow\\b[^>]*?\\bid="${id}"[^>]*?(?:/>|>(?:(?!<bpmn:sequenceFlow\\b).)*?</bpmn:sequenceFlow>)`,
+  );
   const m = flat.match(re);
   return m ? m[0] : null;
 }
