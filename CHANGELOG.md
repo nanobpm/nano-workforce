@@ -1,3 +1,10 @@
+# [0.44.0](https://github.com/nanobpm/nano-workforce/compare/v0.43.0...v0.44.0) (2026-08-11)
+
+
+### Features
+
+* **merge-loop:** wait on a blocking PR instead of escalating to a human ([#122](https://github.com/nanobpm/nano-workforce/issues/122)) ([aec738f](https://github.com/nanobpm/nano-workforce/commit/aec738f165df5a216b9094b4eb9b5b6d4a7ac419))
+
 # [0.43.0](https://github.com/nanobpm/nano-workforce/compare/v0.42.0...v0.43.0) (2026-08-11)
 
 
