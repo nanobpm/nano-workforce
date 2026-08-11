@@ -1,3 +1,10 @@
+## [0.40.1](https://github.com/nanobpm/nano-workforce/compare/v0.40.0...v0.40.1) (2026-08-11)
+
+
+### Bug Fixes
+
+* **convergence:** safe default for resultless review rounds ([#116](https://github.com/nanobpm/nano-workforce/issues/116)) ([de85188](https://github.com/nanobpm/nano-workforce/commit/de85188f57b69496596f4c41cf555c9f6f2090da))
+
 # [0.40.0](https://github.com/nanobpm/nano-workforce/compare/v0.39.3...v0.40.0) (2026-08-11)
 
 
