@@ -137,6 +137,42 @@ components:
           type: string
         uptimeSeconds:
           type: integer
+    AgentInstructions:
+      type: object
+      description: The agent operator guide — how to drive (submit PRs/epics, answer escalations)
+        and debug (find engine instances, relate them to PRs, inspect models/prompts, unstick stuck
+        processes, raise issues/PRs) this Nano Workforce instance. The `instructions` markdown has
+        its example commands keyed to this instance's `baseUrl`/`engineBase`.
+      additionalProperties: false
+      required:
+        - format
+        - appVersion
+        - generatedAt
+        - baseUrl
+        - engineBase
+        - instructions
+      properties:
+        format:
+          type: string
+          description: The `instructions` media format. Always "markdown".
+          enum:
+            - markdown
+        appVersion:
+          type: string
+          nullable: true
+          description: The running app version this guide matches (null when unreadable).
+        generatedAt:
+          type: string
+          description: When this response was rendered (ISO-8601).
+        baseUrl:
+          type: string
+          description: The app control-API base the examples target (e.g. https://host/app/api).
+        engineBase:
+          type: string
+          description: The engine's Camunda-8 v2 REST base this app talks to, for debugging queries.
+        instructions:
+          type: string
+          description: The full operator guide as markdown.
     SubmitResult:
       type: object
       required:
@@ -381,6 +417,27 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/VersionInfo"
+        "401":
+          description: Missing/invalid shared secret (only when NANO_PR_WEBHOOK_SECRET is set).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+  /agent:
+    get:
+      operationId: getAgentInstructions
+      summary: The agent operator guide (markdown) — how to submit PRs/epics, answer escalations, and
+        debug this instance. Point a coding agent at this URL to drive and debug the workforce.
+      security:
+        - hookSecret: []
+        - {}
+      responses:
+        "200":
+          description: The operator guide, with examples keyed to this instance.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentInstructions"
         "401":
           description: Missing/invalid shared secret (only when NANO_PR_WEBHOOK_SECRET is set).
           content:
