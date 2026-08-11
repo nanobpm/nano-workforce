@@ -67,7 +67,7 @@ const handler: AppJobHandler<In> = async (job, app) => {
   // A per-request `convergeOnly` override forces the review-only path for this PR regardless of the
   // global auto-merge default — the PR rests at `converged` and is never handed to the merge-loop.
   let status = "converged";
-  if (AUTO_MERGE && !convergeOnly) {
+  if (AUTO_MERGE && convergeOnly !== true) {
     try {
       const { mergeProcessKey } = await startMerge(app.data, app.engine, {
         repo,

@@ -64,22 +64,20 @@ const BASE_VARS = {
 
 // Auto-retro reads plan tables this fixture doesn't populate; disable it so the terminal
 // `converged` path doesn't spuriously probe for a retro. The hand-off decision under test is
-// independent of retro.
-function withAutoMergeOnRetroOff(run: () => Promise<void>): Promise<void> {
-  const prevMerge = process.env["NANO_PR_AUTO_MERGE"];
+// independent of retro. Auto-merge is left at its default (on): `AUTO_MERGE` is computed once at
+// `app/service.ts` import time and captured by the imported handler, so toggling
+// `NANO_PR_AUTO_MERGE` here would be a no-op — only `NANO_AUTO_RETRO` is read dynamically.
+function withRetroOff(run: () => Promise<void>): Promise<void> {
   const prevRetro = process.env["NANO_AUTO_RETRO"];
-  process.env["NANO_PR_AUTO_MERGE"] = "1";
   process.env["NANO_AUTO_RETRO"] = "0";
   return run().finally(() => {
-    if (prevMerge == null) delete process.env["NANO_PR_AUTO_MERGE"];
-    else process.env["NANO_PR_AUTO_MERGE"] = prevMerge;
     if (prevRetro == null) delete process.env["NANO_AUTO_RETRO"];
     else process.env["NANO_AUTO_RETRO"] = prevRetro;
   });
 }
 
 test("finalize with convergeOnly=true rests the PR at converged and never starts the merge-loop", async () => {
-  await withAutoMergeOnRetroOff(async () => {
+  await withRetroOff(async () => {
     const { app, stores, createdProcesses } = fakeApp();
     // biome-ignore lint/plugin: constructing the framework's job envelope for the handler under test
     await handler({ variables: { ...BASE_VARS, convergeOnly: true } } as never, app as never);
@@ -93,7 +91,7 @@ test("finalize with convergeOnly=true rests the PR at converged and never starts
 });
 
 test("finalize with convergeOnly absent hands off to the merge-loop when auto-merge is on", async () => {
-  await withAutoMergeOnRetroOff(async () => {
+  await withRetroOff(async () => {
     const { app, stores, createdProcesses } = fakeApp();
     // biome-ignore lint/plugin: constructing the framework's job envelope for the handler under test
     await handler({ variables: { ...BASE_VARS } } as never, app as never);
