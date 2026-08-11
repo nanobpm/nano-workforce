@@ -18,7 +18,7 @@ interface Out extends Record<string, unknown> {
 const handler: AppJobHandler<In, Out> = async (job, app) => {
   const planKey = job.variables.planKey;
   const digest = await gatherRetro(app.data, planKey);
-  app.log("info", `retro-gather: ${planKey} — ${digest.counts.learnings} learnings, ${digest.counts.deltas} deltas`);
+  app.log.info(`retro-gather: ${planKey} — ${digest.counts.learnings} learnings, ${digest.counts.deltas} deltas`);
   return {
     retroDigest: renderRetroBrief(digest),
     retroLearnings: digest.counts.learnings,

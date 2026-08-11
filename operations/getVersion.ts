@@ -14,8 +14,9 @@ import { defineOperation } from "../nano-generated/operations.ts";
 // the x-hook-secret header. Captured once, at module load.
 const SECRET = envVar("NANO_PR_WEBHOOK_SECRET") ?? "";
 
-export default defineOperation("getVersion", ({ req }) => {
+export default defineOperation("getVersion", ({ req }, app) => {
   if (SECRET && req.headers.get("x-hook-secret") !== SECRET) {
+    app.log.warn("getVersion rejected: missing/invalid shared secret");
     return { status: 401, body: { error: "unauthorized" } };
   }
   return { status: 200, body: buildVersionInfo() };

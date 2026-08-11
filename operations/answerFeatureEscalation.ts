@@ -5,9 +5,11 @@
 // external system (a chat relay, a CI job, a human via curl) resume a parked implementation agent
 // without the page. Same idempotent `answerTaskEscalation` path the page's answer form uses.
 //
-// The runtime validates the body shape against openapi.yaml; this delegate keeps the semantic
-// checks (an answer is required; a correlation key must be resolvable) and the shared-secret guard.
-// Body accepts either the raw correlation key or a plan+task pair:
+// The runtime validates the body shape against openapi.yaml — a `oneOf` of EXACTLY ONE addressing
+// form (`{ corrKey, answer }` OR `{ plan, task, answer }`), so a body that supplies neither form (or
+// mixes them) is rejected at the edge with a 400 that names the allowed shapes. This delegate narrows
+// the validated variant and keeps the semantic normalization the schema can't express (an answer /
+// correlation key that is present but blank-after-trim) plus the shared-secret guard.
 //   { "corrKey": "owner/repo#12:task-3", "answer": "…" }
 //   { "plan": "owner/repo#12", "task": "task-3", "answer": "…" }
 
@@ -21,14 +23,28 @@ const str = (v: unknown): string => (typeof v === "string" ? v.trim() : "");
 
 export default defineOperation("answerFeatureEscalation", async ({ req, body }, app) => {
   if (WEBHOOK_SECRET && req.headers.get("x-hook-secret") !== WEBHOOK_SECRET) {
+    app.log.warn("feature-answer rejected: missing/invalid shared secret");
     return { status: 401, body: { ok: false, error: "unauthorized" } };
   }
-  const b = body ?? {};
-  const answer = str(b.answer);
-  if (!answer) return { status: 400, body: { ok: false, error: "answer is required" } };
+  // The runtime validates a well-formed body against openapi.yaml, but a directly-invoked delegate
+  // (or a missing body) leaves `body` undefined — guard so that becomes a 400, not a 500.
+  if (!body || typeof body !== "object") {
+    app.log.warn("feature-answer rejected: missing request body");
+    return { status: 400, body: { ok: false, error: "answer is required" } };
+  }
+  const answer = str(body.answer);
+  if (!answer) {
+    app.log.warn("feature-answer rejected: blank answer");
+    return { status: 400, body: { ok: false, error: "answer is required" } };
+  }
 
-  const corrKey = str(b.corrKey) || (str(b.plan) && str(b.task) ? featureCorrKey(str(b.plan), str(b.task)) : "");
+  const corrKey = "corrKey" in body
+    ? str(body.corrKey)
+    : str(body.plan) && str(body.task)
+      ? featureCorrKey(str(body.plan), str(body.task))
+      : "";
   if (!corrKey) {
+    app.log.warn("feature-answer rejected: unresolvable correlation key");
     return {
       status: 400,
       body: { ok: false, error: "provide corrKey, or both plan (owner/repo#N) and task" },
@@ -36,5 +52,7 @@ export default defineOperation("answerFeatureEscalation", async ({ req, body }, 
   }
 
   const r = await answerTaskEscalation(app.data, app.engine, corrKey, answer);
+  if (r.ok) app.log.info("feature escalation answered", { corrKey });
+  else app.log.warn("feature-answer: no open escalation to answer", { corrKey });
   return { status: r.ok ? 200 : 404, body: r };
 });

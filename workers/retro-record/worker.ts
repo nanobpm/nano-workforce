@@ -53,7 +53,7 @@ const handler: AppJobHandler<In> = async (job, app) => {
     report,
   });
 
-  app.log("info", `retro-record: ${planKey} — status=${status}${prKey ? ` pr=${prKey}` : ""}`);
+  app.log.info(`retro-record: ${planKey} — status=${status}${prKey ? ` pr=${prKey}` : ""}`);
   return {};
 };
 

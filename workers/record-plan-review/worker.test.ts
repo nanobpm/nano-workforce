@@ -8,6 +8,7 @@
 import { test } from "node:test";
 import { assertEquals, assertRejects } from "#test-assert";
 import { BpmnError } from "@nanobpm/urban";
+import { noopLog } from "../../test/log.ts";
 import handler from "./worker.ts";
 import { MAX_PLAN_REVIEW_ROUNDS, type PlanReview } from "../../app/plan.ts";
 
@@ -28,7 +29,7 @@ function fakeApp(existing: PlanReview[] = []) {
         };
       },
     },
-    log: () => {},
+    log: noopLog(),
     _rows: rows,
   } as any;
 }

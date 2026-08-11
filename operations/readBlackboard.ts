@@ -17,7 +17,10 @@ export default defineOperation("readBlackboard", async ({ req }, app) => {
   const token = (req.query.get("token") ?? req.headers.get("x-blackboard-token") ?? "").trim();
   if (!token) return { status: 400, body: { error: "missing blackboard token" } };
   const planKey = await planKeyForToken(app.data, token);
-  if (!planKey) return { status: 404, body: { error: "unknown blackboard token" } };
+  if (!planKey) {
+    app.log.warn("readBlackboard: unknown blackboard token");
+    return { status: 404, body: { error: "unknown blackboard token" } };
+  }
 
   const rawSince = req.query.get("since");
   const since = rawSince != null && /^\d+$/.test(rawSince) ? Number(rawSince) : undefined;

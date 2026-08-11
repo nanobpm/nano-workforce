@@ -33,8 +33,9 @@ function resolveApiBase(req: { path: string; headers: Headers }): string {
   return host ? `${proto}://${host}${basePath}` : `http://localhost:3000${basePath}`;
 }
 
-export default defineOperation("getAgentInstructions", ({ req }) => {
+export default defineOperation("getAgentInstructions", ({ req }, app) => {
   if (SECRET && req.headers.get("x-hook-secret") !== SECRET) {
+    app.log.warn("getAgentInstructions rejected: missing/invalid shared secret");
     return { status: 401, body: { error: "unauthorized" } };
   }
   const baseUrl = resolveApiBase(req);

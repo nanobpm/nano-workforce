@@ -43,7 +43,7 @@ const handler: AppJobHandler<In> = async (job, app) => {
       outcome,
       updated_at: ts,
     });
-    app.log("error", `record-results: ${planKey} finalized with 0 opened PRs`, {
+    app.log.error(`record-results: ${planKey} finalized with 0 opened PRs`, {
       taskCount: rows.length,
     });
     throw new BpmnError("NO_WORK_DISPATCHED", `${planKey}: ${outcome}`);

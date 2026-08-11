@@ -1,17 +1,19 @@
 // Tests for the start/message operation delegates (ADR 0058 OpenAPI surface).
-// These cover the app-logic guards the JSON schema can't express (reference parsing, message-name
-// dispatch). The delegates reject an unparseable/blank `pr`/`issue` with a 400 (the schema itself
-// marks neither required, since `StartVariables` is shared across convergence and planning); the
-// runtime's schema-level validation (e.g. `postMessage`'s required `name`) is exercised by urban's
-// own api runtime tests.
+// These cover the app-logic guards the JSON schema can't express (reference FORMAT parsing,
+// message-name dispatch) and the derived-union narrowing. The start bodies are now `oneOf` shapes
+// (`ConvergenceStart` = pr | url, `PlanStart` = issue | url) — exactly-one-of enforcement and
+// extra-key rejection are the runtime's job (exercised by urban's own api runtime tests); here we
+// drive the delegate directly with each validated variant and assert it narrows correctly, still
+// rejecting an unparseable reference with a 400.
 import { test } from "node:test";
 import { assertEquals } from "#test-assert";
 import type { AppApi } from "@nanobpm/urban";
+import { noopLog } from "../test/log.ts";
 import startConvergenceLoop from "./startConvergenceLoop.ts";
 import startPlanFanout from "./startPlanFanout.ts";
 import postMessage from "./postMessage.ts";
 
-const app = {} as any as AppApi;
+const app = { log: noopLog() } as any as AppApi;
 
 function input(body: any) {
   return {
@@ -62,7 +64,7 @@ function captureApp() {
       return Promise.resolve({ processInstanceKey: "PI-1" });
     },
   };
-  return { app: { data, engine } as any as AppApi, get: () => captured };
+  return { app: { data, engine, log: noopLog() } as any as AppApi, get: () => captured };
 }
 
 function withGithubOff(run: () => Promise<void>): Promise<void> {
@@ -76,6 +78,13 @@ function withGithubOff(run: () => Promise<void>): Promise<void> {
     if (prevTok !== undefined) process.env["GITHUB_TOKEN"] = prevTok;
   });
 }
+
+test("startConvergenceLoop → 400 (not 500) on a missing request body", async () => {
+  const res = await startConvergenceLoop(input(undefined), app);
+  const r = res as any;
+  assertEquals(r.status, 400);
+  assertEquals(typeof r.body.error, "string");
+});
 
 test("startConvergenceLoop forwards convergeOnly:true to the loop", async () => {
   await withGithubOff(async () => {
@@ -103,6 +112,29 @@ test("startPlanFanout → 400 on an unparseable issue reference", async () => {
   const r = res as any;
   assertEquals(r.status, 400);
   assertEquals(typeof r.body.error, "string");
+});
+
+test("startPlanFanout → 400 (not 500) on a missing request body", async () => {
+  const res = await startPlanFanout(input(undefined), app);
+  const r = res as any;
+  assertEquals(r.status, 400);
+  assertEquals(typeof r.body.error, "string");
+});
+
+test("startConvergenceLoop narrows the `url` variant (no `pr` key)", async () => {
+  await withGithubOff(async () => {
+    const { app: capApp } = captureApp();
+    const res = await startConvergenceLoop(input({ url: "https://github.com/owner/repo/pull/11" }), capApp);
+    assertEquals((res as any).status, 202);
+  });
+});
+
+test("startPlanFanout narrows the `url` variant (no `issue` key)", async () => {
+  await withGithubOff(async () => {
+    const { app: capApp } = captureApp();
+    const res = await startPlanFanout(input({ url: "https://github.com/owner/repo/issues/12" }), capApp);
+    assertEquals((res as any).status, 202);
+  });
 });
 
 test("postMessage → 400 when name is blank", async () => {

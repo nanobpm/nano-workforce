@@ -6,17 +6,30 @@
 // short-circuits.
 //
 // The request body is FLAT (`{ issue | url }`), not wrapped in a `variables` envelope — this is a
-// purpose-built operation, not a generic engine "start process" call.
+// purpose-built operation, not a generic engine "start process" call. The body is a `oneOf` — EXACTLY
+// ONE of `issue` or `url` — so an empty or ambiguous target is a 400 at the edge; this delegate just
+// narrows the validated variant and keeps the issue-FORMAT parse guard (schema can't express it).
 
 import { parseIssue, startPlan } from "../app/plan.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
 
 export default defineOperation("startPlanFanout", async ({ body }, app) => {
-  const b = body ?? {};
-  const raw = String(b.issue ?? b.url ?? "").trim();
+  // The runtime validates a well-formed body against openapi.yaml, but a directly-invoked delegate
+  // (or a missing body) leaves `body` undefined — guard so that becomes a 400, not a 500 from `in`.
+  if (!body || typeof body !== "object") {
+    app.log.warn("start-plan rejected: missing request body");
+    return { status: 400, body: { error: "request body is required (owner/repo#123 or an issue URL)" } };
+  }
+  const raw = ("issue" in body ? body.issue : body.url).trim();
   const parsed = parseIssue(raw);
   if (!parsed) {
+    app.log.warn("start-plan rejected: unparseable issue reference", { raw });
     return { status: 400, body: { error: "could not parse issue (use owner/repo#123 or an issue URL)" } };
   }
-  return { status: 202, body: await startPlan(app.data, app.engine, parsed) };
+  const result = await startPlan(app.data, app.engine, parsed);
+  app.log.info("plan fan-out started", {
+    planKey: parsed.planKey,
+    alreadyRunning: "alreadyRunning" in result && result.alreadyRunning === true,
+  });
+  return { status: 202, body: result };
 });

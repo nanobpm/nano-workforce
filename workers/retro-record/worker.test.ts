@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import { assertEquals } from "#test-assert";
+import { noopLog } from "../../test/log.ts";
 import handler from "./worker.ts";
 
 function fakeApp() {
@@ -29,7 +30,7 @@ function fakeApp() {
       },
     };
   }
-  const app = { data: { table: (n: string, pk?: string) => tbl(n, pk) }, log: () => undefined };
+  const app = { data: { table: (n: string, pk?: string) => tbl(n, pk) }, log: noopLog() };
   return { app, stores };
 }
 

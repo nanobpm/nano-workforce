@@ -92,7 +92,7 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
   // `PLAN_REJECTED`, so the engine parks the instance on an incident rather than dispatching an
   // un-approved plan. The round is 0-based, so `round + 1 >= cap` is the last permitted round.
   if (round + 1 >= MAX_PLAN_REVIEW_ROUNDS) {
-    app.log("error", `record-plan-review: ${planKey} not approved after ${MAX_PLAN_REVIEW_ROUNDS} round(s)`, {
+    app.log.error(`record-plan-review: ${planKey} not approved after ${MAX_PLAN_REVIEW_ROUNDS} round(s)`, {
       round,
     });
     throw new BpmnError(
@@ -102,7 +102,7 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
   }
 
   // Otherwise loop: the planner revises against this round's findings.
-  app.log("info", `record-plan-review: ${planKey} round ${round} — revise`, { approved: false });
+  app.log.info(`record-plan-review: ${planKey} round ${round} — revise`, { approved: false });
   return { planApproved: false, planFindings: roundFindings };
 };
 

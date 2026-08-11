@@ -2,6 +2,7 @@
 import { test } from "node:test";
 import { assertEquals } from "#test-assert";
 import type { AppApi } from "@nanobpm/urban";
+import { noopLog } from "../test/log.ts";
 import handler from "./checkAbandon.ts";
 
 function memApp(): { app: AppApi } {
@@ -18,7 +19,7 @@ function memApp(): { app: AppApi } {
       },
     };
   }
-  const app = { data: { table: (n: string) => tbl(n) } } as any as AppApi;
+  const app = { data: { table: (n: string) => tbl(n) }, log: noopLog() } as any as AppApi;
   return { app };
 }
 

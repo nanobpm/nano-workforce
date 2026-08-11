@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import { assertEquals } from "#test-assert";
 import type { AppApi } from "@nanobpm/urban";
+import { noopLog } from "../test/log.ts";
 
 const hadSecret = Object.prototype.hasOwnProperty.call(process.env, "NANO_PR_WEBHOOK_SECRET");
 const previousSecret = process.env.NANO_PR_WEBHOOK_SECRET;
@@ -42,6 +43,7 @@ function memApp(escalations: any[] = []) {
         return Promise.resolve();
       },
     },
+    log: noopLog(),
   } as any as AppApi;
   return { app, published };
 }
@@ -96,5 +98,15 @@ test("maps an unmatched corrKey to 404", async () => {
     app,
   ) as any;
   assertEquals(result.status, 404);
+  assertEquals(result.body.ok, false);
+});
+
+test("rejects a missing request body with 400 (not 500)", async () => {
+  const { app } = memApp();
+  const result = await answerFeatureEscalation(
+    { ...input({}, "test-secret"), body: undefined },
+    app,
+  ) as any;
+  assertEquals(result.status, 400);
   assertEquals(result.body.ok, false);
 });
