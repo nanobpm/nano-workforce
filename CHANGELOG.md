@@ -1,3 +1,10 @@
+## [0.39.3](https://github.com/nanobpm/nano-workforce/compare/v0.39.2...v0.39.3) (2026-08-11)
+
+
+### Bug Fixes
+
+* **merge-loop:** judge fresh-head-run by required checks, not rollup length ([#113](https://github.com/nanobpm/nano-workforce/issues/113)) ([a10c4c5](https://github.com/nanobpm/nano-workforce/commit/a10c4c5b3ee5c452591eeb6c6206c4815674959a))
+
 ## [0.39.2](https://github.com/nanobpm/nano-workforce/compare/v0.39.1...v0.39.2) (2026-08-11)
 
 
