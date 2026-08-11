@@ -5,7 +5,8 @@
 // the queue (reported BLOCKED/UNSTABLE by GitHub) must keep waiting, never be falsely evicted.
 import { test } from "node:test";
 import { assertEquals } from "#test-assert";
-import { type PrState, queuedVerdict } from "./service.ts";
+import type { PrState } from "./github.ts";
+import { queuedVerdict } from "./service.ts";
 
 function st(over: Partial<PrState>): PrState {
   return {
@@ -13,6 +14,7 @@ function st(over: Partial<PrState>): PrState {
     mergeStateStatus: "CLEAN",
     failingChecks: 0,
     failingCheckNames: [],
+    presentCheckNames: [],
     totalChecks: 0,
     isDraft: false,
     headRefOid: null,
