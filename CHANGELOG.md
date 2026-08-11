@@ -1,3 +1,10 @@
+# [0.41.0](https://github.com/nanobpm/nano-workforce/compare/v0.40.2...v0.41.0) (2026-08-11)
+
+
+### Features
+
+* **api:** serve an agent operator guide at GET /app/api/agent ([#118](https://github.com/nanobpm/nano-workforce/issues/118)) ([6768407](https://github.com/nanobpm/nano-workforce/commit/67684075cfe4706db7dfc63f8c536990254a7480))
+
 ## [0.40.2](https://github.com/nanobpm/nano-workforce/compare/v0.40.1...v0.40.2) (2026-08-11)
 
 
