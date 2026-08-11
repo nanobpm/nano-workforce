@@ -259,7 +259,12 @@ function failingCheckNames(rollup: RollupEntry[]): string[] {
  * repo's *required* checks are present on the head — so an unrelated always-on check (e.g.
  * Mergify's "Merge Queue") doesn't masquerade as the required CI run having already happened. */
 function allCheckNames(rollup: RollupEntry[]): string[] {
-  return rollup.map((c) => c.name || c.context || c.workflowName || "check");
+  const names: string[] = [];
+  for (const c of rollup) {
+    const name = c.name || c.context || c.workflowName;
+    if (name) names.push(name);
+  }
+  return names;
 }
 
 export async function fetchPrState(

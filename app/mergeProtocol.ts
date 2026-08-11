@@ -90,11 +90,13 @@ function requiredCheckArray(v: unknown): RequiredCheck[] {
   const out: RequiredCheck[] = [];
   for (const entry of v) {
     if (typeof entry === "string") {
-      out.push({ name: entry, acceptedConclusions: ["success"] });
+      const name = entry.trim();
+      if (name === "") continue;
+      out.push({ name, acceptedConclusions: ["success"] });
       continue;
     }
     if (!isRecord(entry)) continue;
-    const name = str(entry.name);
+    const name = str(entry.name)?.trim();
     if (name === undefined || name === "") continue;
     const accepted = strArray(entry.acceptedConclusions);
     out.push({

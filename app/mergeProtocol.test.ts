@@ -147,7 +147,7 @@ test("freshHeadRunAction: mode=ready only acts on drafts", () => {
   assertEquals(freshHeadRunAction(readyOnly, "waiting", 0, false), null); // not a draft → nothing to ready
 });
 
-// The nano-bpm merge protocol: 7 required checks, one skip-tolerant.
+// The nano-bpm merge protocol: 3 required checks, one skip-tolerant.
 const NANO_REQ: MergeProtocol = parseMergeProtocol({
   freshHeadRun: "ready-or-reopen",
   land: { method: "mergify-queue" },
@@ -171,7 +171,7 @@ test("presentRequiredCheckCount: counts only declared required checks present on
 });
 
 test("headRunPresenceCount: required-aware — Mergify's incidental check doesn't mask a missing run", () => {
-  // The #727 stuck state: BLOCKED head carries only Mergify's neutral check, none of the 7
+  // The #727 stuck state: BLOCKED head carries only Mergify's neutral check, none of the 3
   // required checks ran. Raw rollup length is 1, but the required-check presence is 0 → the
   // remedy must see 0 and fire the reopen.
   const st = { totalChecks: 1, presentCheckNames: ["Mergify Merge Queue"] };
