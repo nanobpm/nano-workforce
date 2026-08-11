@@ -41,14 +41,16 @@
     "layout:check": "node --experimental-strip-types scripts/layout-bpmn.ts --check",
     "dev": "urban dev",
     "test": "node --experimental-strip-types --test",
-    "lint": "biome check app operations workers pages components scripts main.ts",
-    "lint:fix": "biome check --write app operations workers pages components scripts main.ts"
+    "e2e": "node --experimental-strip-types --test 'e2e/**/*.e2e.ts'",
+    "lint": "biome check app operations workers pages components scripts e2e main.ts",
+    "lint:fix": "biome check --write app operations workers pages components scripts e2e main.ts"
   },
   "dependencies": {
     "@nanobpm/urban": "^0.42.0"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.11",
+    "@nanobpm/urban-testkit": "^0.3.0",
     "@semantic-release/changelog": "^6.0.3",
     "@semantic-release/git": "^10.0.1",
     "@semantic-release/npm": "^13.1.5",

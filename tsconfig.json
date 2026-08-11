@@ -45,7 +45,8 @@
     "src/**/*.ts",
     "scripts/**/*.ts",
     "actions/**/*.ts",
-    "test/**/*.ts"
+    "test/**/*.ts",
+    "e2e/**/*.ts"
   ],
   "exclude": [
     "node_modules",
