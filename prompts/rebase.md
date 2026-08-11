@@ -27,6 +27,13 @@ When it does, **work only inside `cwd`**, do **not** re-clone, `cd` elsewhere, o
 `AGENT_WORKSPACE` is **unset** (no provisioning), check out the PR head branch yourself.
 
 ## Job input (`job.variables`)
+
+| var           | meaning                                                          |
+|---------------|------------------------------------------------------------------|
+| `prUrl`       | canonical PR URL                                                 |
+| `repo`        | `owner/name`                                                     |
+| `prNumber`    | PR number                                                        |
+| `rebaseRound` | 0-based count of attempts already made (0 on the first try)      |
 | `prompt`      | this document                                                    |
 
 ## What to do
