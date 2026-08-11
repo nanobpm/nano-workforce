@@ -12,6 +12,7 @@ import { abandonUrl, mintAbandonToken, renderAbandonBrief } from "./abandon.ts";
 import {
   classifyMergeability,
   ensureFreshHeadRun,
+  fetchPrHead,
   fetchPrMeta,
   fetchPrReviews,
   fetchPrState,
@@ -277,6 +278,27 @@ async function registerDependencies(data: DataLayer, prKey: string, depKeys: str
   }
 }
 
+/** The reserved namespace key the c8ctl nano worker harness reads the agent-task envelope from
+ * (headers ∪ variables, deep-merged). See c8ctl `normalizeTaskEnvelope`. */
+const AGENT_TASK_NS = "io.nanobpm.agentTask";
+
+/** Build the repository slice of the agent-task envelope for a PR-based agent job (review-round,
+ * fix-ci, rebase). Delivered as a *process variable* under the reserved `io.nanobpm.agentTask`
+ * key so the harness provisions an isolated clone checked out on the PR's head branch — instead of
+ * the agent inheriting whatever directory the worker was launched from (which only happened to be
+ * a usable checkout for repos already present locally). `ref` MUST be the PR head branch; when it
+ * is unresolved we emit nothing (no `repository.url`) so the harness falls back to the legacy
+ * launch-dir behavior rather than silently cloning the repo's default branch. The static
+ * `task.prompt` header on the service task deep-merges with this over the same namespace. */
+export function repoEnvelopeVars(repo: string, ref: string | null): Record<string, unknown> {
+  if (!ref) return {};
+  return {
+    [AGENT_TASK_NS]: {
+      repository: { provider: "github", url: `https://github.com/${repo}.git`, ref },
+    },
+  };
+}
+
 /** Register a PR row (if new) and start the convergence process. Idempotent on prKey. Optional
  * `dependsOn` (explicit refs) is unioned with any `Depends-on:` line parsed from the PR body and
  * recorded as the PR's merge-stage dependency set. */
@@ -298,15 +320,22 @@ export async function submitPr(
   // A transport failure (no gh/token) must not block submission — we just skip enrichment.
   const token = process.env.GITHUB_TOKEN ?? "";
   let title: string | null = null;
+  let headRef: string | null = null;
   const depKeys = new Set(dependsOn.map((d) => parsePr(d)?.prKey).filter((k): k is string => !!k));
   try {
     const meta = await fetchPrMeta(parsed.repo, parsed.number, token);
     if (meta) {
       title = meta.title;
+      headRef = meta.headRef;
       for (const k of parseDependsOn(meta.body)) depKeys.add(k);
     }
   } catch (err) {
     console.warn(`[submit] ${parsed.prKey} meta fetch: ${err}`);
+  }
+  if (!headRef) {
+    // Without the head branch the harness can't check out the PR; the review agent then falls
+    // back to the worker's launch dir (the legacy behavior) and escalates if it isn't a checkout.
+    console.warn(`[submit] ${parsed.prKey} head branch unresolved — agent workspace won't be provisioned`);
   }
   await registerDependencies(data, parsed.prKey, [...depKeys]);
 
@@ -375,6 +404,10 @@ export async function submitPr(
       // review-round agent's prompt, so it can stop before pushing if the run is cancelled.
       abandonUrl: abUrl,
       abandonBrief: renderAbandonBrief(abUrl),
+      // Host-git provisioning (c8ctl): deliver the repository envelope so the `senior:pr-review`
+      // harness clones an isolated workspace checked out on the PR head branch. Spread last so an
+      // unresolved head (`{}`) leaves the other vars untouched.
+      ...repoEnvelopeVars(parsed.repo, headRef),
     },
   });
   const processKey = processInstanceKey == null ? null : String(processInstanceKey);
@@ -400,6 +433,19 @@ export async function startMerge(
     await prs(data).update(pr.prKey, { abandon_token: abandonToken, updated_at: now() });
   }
   const abUrl = abandonUrl(abandonToken);
+  // Resolve the PR head branch so the merge agents (fix-ci, rebase) get an isolated clone checked
+  // out on it (same host-git provisioning path as review-round). Best-effort: an unresolved head
+  // means the envelope is omitted and the agent falls back to the worker's launch dir.
+  const token = process.env.GITHUB_TOKEN ?? "";
+  let headRef: string | null = null;
+  try {
+    headRef = (await fetchPrHead(pr.repo, pr.number, token))?.headRef ?? null;
+  } catch (err) {
+    console.warn(`[startMerge] ${pr.prKey} head branch fetch: ${err}`);
+  }
+  if (!headRef) {
+    console.warn(`[startMerge] ${pr.prKey} head branch unresolved — merge-agent workspace won't be provisioned`);
+  }
   const { processInstanceKey } = await engine.createInstance({
     processDefinitionId: MERGE_PROCESS_ID,
     variables: {
@@ -414,6 +460,9 @@ export async function startMerge(
       rebaseMax: MAX_REBASE_ROUNDS,
       abandonUrl: abUrl,
       abandonBrief: renderAbandonBrief(abUrl),
+      // Host-git provisioning (c8ctl): same repository envelope as the convergence loop, so the
+      // fix-ci/rebase agents operate on an isolated checkout of the PR head branch.
+      ...repoEnvelopeVars(pr.repo, headRef),
     },
   });
   if (processInstanceKey != null) {

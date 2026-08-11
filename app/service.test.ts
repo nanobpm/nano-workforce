@@ -7,7 +7,7 @@
 // GitHub transport forced off so it is hermetic.
 import { test } from "node:test";
 import { assertEquals } from "#test-assert";
-import { pollIncidentsImpl, submitPr } from "./service.ts";
+import { pollIncidentsImpl, repoEnvelopeVars, submitPr } from "./service.ts";
 
 function memTable(rows: any[], key: string) {
   return {
@@ -330,4 +330,20 @@ test("submitPr defaults convergeOnly to false so the global auto-merge default g
     });
     assertEquals(get(), false);
   });
+});
+
+// The repository envelope drives the c8ctl harness's isolated workspace provisioning: it is
+// emitted under the reserved `io.nanobpm.agentTask` namespace with the PR head branch as the
+// checkout ref, and omitted entirely when the head branch couldn't be resolved (so the harness
+// falls back to the legacy launch-dir behavior instead of cloning the wrong default branch).
+test("repoEnvelopeVars emits the repository envelope keyed on the PR head branch", () => {
+  const vars = repoEnvelopeVars("owner/repo", "feat/issue-12");
+  const env = (vars as any)["io.nanobpm.agentTask"];
+  assertEquals(env.repository.url, "https://github.com/owner/repo.git");
+  assertEquals(env.repository.ref, "feat/issue-12");
+  assertEquals(env.repository.provider, "github");
+});
+
+test("repoEnvelopeVars emits nothing when the head branch is unresolved", () => {
+  assertEquals(Object.keys(repoEnvelopeVars("owner/repo", null)).length, 0);
 });

@@ -173,7 +173,7 @@ triaging, editing/replying/pushing, and (when `addressed`) re-requesting review.
 Workspace isolation is the **worker harness's** responsibility, not this app's and
 not the prompt's. The `c8ctl nano work` host-git provisioning (frozen v1 envelope)
 gives **each job its own `mkdtemp` run-dir + fresh clone**, runs the agent with
-`cwd` set to it (`AGENT_WORKSPACE`/`REPO_URL`/`REPO_BRANCH`/`REPO_REF` env), and
+`cwd` set to it (`AGENT_WORKSPACE`/`AGENT_REPO_URL`/`AGENT_REPO_BRANCH`/`AGENT_REPO_REF` env), and
 **reaps that run-dir when the job ends**. So multiple agents on one host do **not**
 collide even in host mode — the isolation lives below the agent.
 
@@ -183,8 +183,13 @@ Consequences the prompt (`prompts/review-round.md`) encodes:
 - The agent **cleans up anything it creates outside the commit** before returning
   (worktrees, scratch branches/clones, temp files), so host mode does not leak.
 - The harness checks out the PR's **existing head branch** and pushes back to it
-  (no new branch/PR). The `c8ctl` integration provisions the repo and resolves the
-  head branch from `prNumber`/`prUrl` — the app does not pass a `headBranch` var.
+  (no new branch/PR). Provisioning only fires when the job carries a
+  `io.nanobpm.agentTask.repository.url`; the **app** supplies it — plus the head
+  branch as `…repository.ref` — as a process variable at `createInstance`
+  (`repoEnvelopeVars` in `app/service.ts`, resolving the head via `fetchPrMeta`/
+  `fetchPrHead`). The harness is PR-agnostic: it does **not** derive the head branch
+  from `prNumber`/`prUrl`. When the head can't be resolved the envelope is omitted and
+  the agent falls back to the worker's launch directory (the legacy behavior).
 
 ## 6. Signals
 
@@ -510,9 +515,10 @@ the loop runs one parallel `implement` MI fan-out per wave:
 
 - **Provisioning the existing PR branch** — resolved: the `c8ctl` host-git
   integration provisions the repo and checks out the PR's head branch (it must
-  already give the worker repo access to work at all), resolving the branch from
-  `prNumber`/`prUrl`. The app does **not** pass a `headBranch` job variable; the
-  job stays engine-shaped and the worker stays a pure provisioner.
+  already give the worker repo access to work at all). The **app** resolves the head
+  branch and passes it in the `io.nanobpm.agentTask.repository.{url,ref}` envelope
+  (a `createInstance` process variable — see `repoEnvelopeVars`); the harness is
+  PR-agnostic and provisions from that envelope. The worker stays a pure provisioner.
 - **review-ready via GitHub webhook** — same message, swappable faster trigger,
   when the app is publicly reachable. Deferred (poller-only for v1).
 - **Supervised vs external worker** — the agent runs as an external

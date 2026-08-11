@@ -17,6 +17,15 @@ with a status URL is appended below: **before you push the rebased branch, curl 
 `-fsS`) and stop immediately if the check **fails** or reports `"abandoned": true`. Re-check right
 before the push.
 
+## Workspace (host mode) — read this first
+
+When the worker harness (e.g. `c8ctl nano work`) provisions a workspace, your **current
+working directory is a fresh, isolated clone of the repo checked out on the PR's head
+branch** — exposed via `AGENT_WORKSPACE`, `AGENT_REPO_URL`, `AGENT_REPO_BRANCH`, `AGENT_REPO_REF`.
+When it does, **work only inside `cwd`**, do **not** re-clone, `cd` elsewhere, or add a
+`git worktree`, and do not touch global/host state — other jobs get their own clones. If
+`AGENT_WORKSPACE` is **unset** (no provisioning), check out the PR head branch yourself.
+
 ## Job input (`job.variables`)
 
 | var           | meaning                                                          |
@@ -29,7 +38,8 @@ before the push.
 
 ## What to do
 
-1. Check out the PR's head branch (it already exists on the remote) and identify
+1. Check out the PR's head branch (already provisioned as your `cwd` in host mode; else it
+   already exists on the remote) and identify
    the base branch (`gh pr view <prNumber> --repo <repo> --json baseRefName`).
 2. Update the branch onto the current base. Prefer a **rebase**
    (`git fetch origin && git rebase origin/<base>`); if the repo's history policy

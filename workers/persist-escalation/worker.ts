@@ -44,6 +44,13 @@ function transcriptOf(vars: Record<string, unknown>): string | null {
   return typeof env?.output === "string" ? env.output : null;
 }
 
+// The c8ctl harness completes each agent job with an `agent` variable (its profile name), which
+// propagates here. Record it on the round/escalation so a human can identify the servicing worker
+// from the durable history. Reuses the `nonBlank` domain rule (blank/absent -> NULL column).
+function workerOf(vars: Record<string, unknown>): string | undefined {
+  return nonBlank(vars.agent);
+}
+
 // Synthesize a concrete, answerable question when the agent left one blank. A blank question is
 // almost always a *no-result* round: a prompt-less agent that never wrote its result file, so
 // `status` is empty and `gw-status` falls through its default `f_escalate` arm (the empty
@@ -72,6 +79,7 @@ const handler: AppJobHandler<In> = async (job, app) => {
   const rawStatus = nonBlank(job.variables.status);
   const status = rawStatus ?? "needs_input";
   const transcript = transcriptOf(job.variables);
+  const worker = workerOf(job.variables);
   // A blank question must never open an unanswerable escalation. Every legitimate arm sets a
   // concrete question — the agent contract requires one for needs_input/blocked, and the
   // max-rounds + review-timeout arms set a literal via the model. When one is still missing
@@ -110,6 +118,7 @@ const handler: AppJobHandler<In> = async (job, app) => {
       status,
       summary,
       transcript,
+      worker,
       started_at: now,
       ended_at: now,
     });
@@ -120,6 +129,7 @@ const handler: AppJobHandler<In> = async (job, app) => {
     kind,
     question,
     transcript,
+    worker,
     status: "open",
     asked_at: now,
   });

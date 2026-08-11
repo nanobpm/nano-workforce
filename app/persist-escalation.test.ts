@@ -57,6 +57,18 @@ test("escalation arm without the flag still records the round", async () => {
   assertEquals((inserts.rounds[0] as any).round_no, 3);
 });
 
+// The servicing worker name (harness `agent` var) is stamped on both the round it recorded and
+// the escalation it opened, so the durable history identifies who did the work.
+test("persist-escalation records the servicing worker on the round and escalation", async () => {
+  const { app, inserts } = fakeApp();
+  const job = {
+    variables: { prKey: "o/r#1", round: 3, status: "blocked", question: "max rounds", agent: "senior" },
+  };
+  await handler(job as any, app as any);
+  assertEquals((inserts.rounds[0] as any).worker, "senior", "the round carries the worker name");
+  assertEquals((inserts.escalations[0] as any).worker, "senior", "the escalation carries the worker name");
+});
+
 // When the convergence-loop passes repo/prNumber and the FK parent is missing (engine/app.db
 // desync), persist-escalation reconstructs the `pull_requests` row before the rounds/escalations
 // inserts so opening an escalation never dies with an opaque FOREIGN KEY constraint failure.
