@@ -3,11 +3,12 @@
 // external webhook relay, a CI job, and Swagger all POST here. Parse the PR reference and
 // register/refresh the PR aggregate (idempotent on prKey) before starting the loop.
 //
-// The request body is FLAT (`{ pr | url, dependsOn?, maxRounds? }`), not wrapped in a `variables`
-// envelope: this is a purpose-built operation, not a generic engine "start process" call, so it does
-// not leak the engine's variable-map concept to callers. The runtime validates the body against
-// openapi.yaml; this delegate keeps the PR-parse guard because the reference format (owner/repo#123
-// or a URL) is app logic, not something the JSON schema can express — an unparseable reference is a 400.
+// The request body is FLAT (`{ pr | url, dependsOn?, maxRounds?, convergeOnly? }`), not wrapped in a
+// `variables` envelope: this is a purpose-built operation, not a generic engine "start process" call,
+// so it does not leak the engine's variable-map concept to callers. The runtime validates the body
+// against openapi.yaml; this delegate keeps the PR-parse guard because the reference format
+// (owner/repo#123 or a URL) is app logic, not something the JSON schema can express — an unparseable
+// reference is a 400.
 
 import { clampRounds, MAX_ROUNDS, parsePr, submitPr } from "../app/service.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
@@ -21,5 +22,11 @@ export default defineOperation("startConvergenceLoop", async ({ body }, app) => 
   }
   const dependsOn = Array.isArray(b.dependsOn) ? b.dependsOn.map((d) => String(d)) : [];
   const maxRounds = clampRounds(b.maxRounds, MAX_ROUNDS);
-  return { status: 202, body: await submitPr(app.data, app.engine, parsed, dependsOn, maxRounds) };
+  // Per-request review-only override: when true the PR stops at `converged` and is never
+  // handed to the merge-loop, regardless of the global NANO_PR_AUTO_MERGE default.
+  const convergeOnly = b.convergeOnly === true;
+  return {
+    status: 202,
+    body: await submitPr(app.data, app.engine, parsed, dependsOn, maxRounds, convergeOnly),
+  };
 });

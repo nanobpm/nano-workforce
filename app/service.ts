@@ -285,6 +285,7 @@ export async function submitPr(
   parsed: ParsedPr,
   dependsOn: string[] = [],
   maxRounds: number = MAX_ROUNDS,
+  convergeOnly = false,
 ) {
   const table = prs(data);
   const existing = await table.get(parsed.prKey);
@@ -365,6 +366,10 @@ export async function submitPr(
       round: 1,
       maxRounds: clampRounds(maxRounds, MAX_ROUNDS),
       reviewWaitTimeout: REVIEW_WAIT_TIMEOUT,
+      // Per-request review-only override: carried on the instance so `pr.finalize` can stop at
+      // `converged` for this PR without handing off to the merge-loop, independent of the global
+      // NANO_PR_AUTO_MERGE default. Only ever narrows (never forces merge on when auto-merge is off).
+      convergeOnly,
       // Cooperative abandon check (#76): the capability URL + the abort brief appended to the
       // review-round agent's prompt, so it can stop before pushing if the run is cancelled.
       abandonUrl: abUrl,

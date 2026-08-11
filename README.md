@@ -210,6 +210,10 @@ branch before escalating (`NANO_PR_MAX_CI_FIX_ROUNDS`, default 3). Conflicts, an
 exhausted budget, or an agent that can't fix the build escalate to a human; answer in
 the UI and the process re-arms and retries.
 
+A single submission can pin **review-only** regardless of the global default by
+passing `convergeOnly: true` on the `start/convergence-loop` request — the PR stops at
+`converged` and is never handed to `merge-loop`, even with `NANO_PR_AUTO_MERGE` on.
+
 ### Fleet mode: hand it an issue (plan → implement → converge)
 
 ```
@@ -244,7 +248,7 @@ curl -sS -X POST http://localhost:3000/app/api/actions/start/plan-fanout \
 | `NANO_PR_POLL_MS` | `60000` | review-ready poll interval |
 | `NANO_PR_MAX_ROUNDS` | `20` | default cap: escalate after N rounds (per-submit override via the form / the `maxRounds` field on `start/convergence-loop`; clamped 1–100) |
 | `NANO_PR_WEBHOOK_SECRET` | — | optional shared secret for the `POST /app/api/hooks/feature-answer` webhook operation (`X-Hook-Secret`); unset = open |
-| `NANO_PR_AUTO_MERGE` | `1` | after convergence, run the merge stage; `0` = stop at `converged` (review-only) |
+| `NANO_PR_AUTO_MERGE` | `1` | after convergence, run the merge stage; `0` = stop at `converged` (review-only). Per-submit override via the `convergeOnly` field on `start/convergence-loop` (`true` forces review-only for that PR) |
 | `NANO_PR_MERGE_METHOD` | `squash` | merge method: `squash`, `merge`, or `rebase` |
 | `NANO_PR_MERGE_ADMIN` | `0` | pass `--admin` to override failing non-required checks (use with care) |
 | `NANO_PR_MAX_CI_FIX_ROUNDS` | `3` | max `senior:fix-ci` attempts to green a `blocked` PR before escalating; `0` disables (escalate immediately), clamped 0–20 |

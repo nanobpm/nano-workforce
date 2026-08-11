@@ -281,3 +281,53 @@ test("submitPr stringifies a numeric processInstanceKey (contract: string | null
     assertEquals(pr.process_key, "2251799813685249");
   });
 });
+
+// Per-request review-only override: `submitPr` carries `convergeOnly` onto the convergence
+// instance so `pr.finalize` can stop at `converged` without handing off to the merge-loop. Default
+// false (so the global auto-merge default governs); true when the caller pins review-only.
+function captureConvergeOnly() {
+  const stores: Record<string, { rows: unknown[]; key: string }> = {
+    pull_requests: { rows: [], key: "pr_key" },
+    escalations: { rows: [], key: "id" },
+    pr_dependencies: { rows: [], key: "pr_key" },
+  };
+  const data = {
+    table: (name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key),
+  } as any;
+  let captured: unknown;
+  const engine = {
+    createInstance: (req: { variables?: Record<string, unknown> }) => {
+      captured = req.variables?.convergeOnly;
+      return Promise.resolve({ processInstanceKey: "PI-1" });
+    },
+  } as any;
+  return { data, engine, get: () => captured };
+}
+
+test("submitPr threads convergeOnly=true onto the instance as a process variable", async () => {
+  await withGithubOff(async () => {
+    const { data, engine, get } = captureConvergeOnly();
+    await submitPr(
+      data,
+      engine,
+      { repo: "owner/repo", number: 8, url: "https://github.com/owner/repo/pull/8", prKey: "owner/repo#8" },
+      [],
+      20,
+      true,
+    );
+    assertEquals(get(), true);
+  });
+});
+
+test("submitPr defaults convergeOnly to false so the global auto-merge default governs", async () => {
+  await withGithubOff(async () => {
+    const { data, engine, get } = captureConvergeOnly();
+    await submitPr(data, engine, {
+      repo: "owner/repo",
+      number: 9,
+      url: "https://github.com/owner/repo/pull/9",
+      prKey: "owner/repo#9",
+    });
+    assertEquals(get(), false);
+  });
+});
