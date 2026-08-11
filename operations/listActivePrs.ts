@@ -17,6 +17,7 @@ const SECRET = envVar("NANO_PR_WEBHOOK_SECRET") ?? "";
 
 export default defineOperation("listActivePrs", async ({ req }, app) => {
   if (SECRET && req.headers.get("x-hook-secret") !== SECRET) {
+    app.log.warn("listActivePrs rejected: missing/invalid shared secret");
     return { status: 401, body: { error: "unauthorized" } };
   }
   const prs = await activePrs(app.data);

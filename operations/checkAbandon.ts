@@ -17,6 +17,9 @@ export default defineOperation("checkAbandon", async ({ req }, app) => {
   const token = (req.query.get("token") ?? req.headers.get("x-abandon-token") ?? "").trim();
   if (!token) return { status: 400, body: { error: "missing abandon token" } };
   const state = await abandonStatusForToken(app.data, token);
-  if (!state) return { status: 404, body: { error: "unknown abandon token" } };
+  if (!state) {
+    app.log.warn("checkAbandon: unknown abandon token");
+    return { status: 404, body: { error: "unknown abandon token" } };
+  }
   return { status: 200, body: state };
 });

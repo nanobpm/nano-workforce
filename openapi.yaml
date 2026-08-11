@@ -201,22 +201,24 @@ components:
         alreadyRunning:
           type: boolean
           description: True when a non-terminal plan for this issue already exists; no new instance was started.
-    StartVariables:
+    ConvergenceStart:
+      description: The start-convergence request body. Names the target PR by EXACTLY ONE of `pr`
+        (an `owner/repo#123` reference) or `url` (a bare PR URL) — never both, never neither — with
+        the optional convergence knobs. Modeled as `oneOf` named variants (ADR — Camunda REST v2
+        pattern) so the runtime rejects an ambiguous or empty target at the edge with a 400 that
+        names the allowed shapes, rather than the delegate silently coalescing `pr ?? url`.
+      oneOf:
+        - $ref: "#/components/schemas/ConvergenceStartByPr"
+        - $ref: "#/components/schemas/ConvergenceStartByUrl"
+    ConvergenceStartByPr:
       type: object
-      description: The start request body. `pr`/`url` (convergence) or `issue`/`url` (planning) name the
-        target. Only the fields below are read by the delegate; any extra keys are accepted but
-        ignored (they are NOT forwarded to the engine as process variables).
-      additionalProperties: true
+      additionalProperties: false
+      required:
+        - pr
       properties:
         pr:
           type: string
-          description: "PR reference: owner/repo#123 or a PR URL."
-        issue:
-          type: string
-          description: "Issue reference: owner/repo#123 or an issue URL."
-        url:
-          type: string
-          description: Alias for pr/issue when a bare URL is supplied.
+          description: "PR reference: owner/repo#123."
         dependsOn:
           type: array
           items:
@@ -230,6 +232,54 @@ components:
           description: When true, run convergence only and stop at `converged` — the PR is never
             handed to the merge-loop even if auto-merge is on globally (`NANO_PR_AUTO_MERGE`). A
             per-request review-only override; defaults to false (the global auto-merge default applies).
+    ConvergenceStartByUrl:
+      type: object
+      additionalProperties: false
+      required:
+        - url
+      properties:
+        url:
+          type: string
+          description: A bare PR URL, when no `owner/repo#123` reference is supplied.
+        dependsOn:
+          type: array
+          items:
+            type: string
+        maxRounds:
+          type: integer
+          minimum: 1
+          description: Values above 100 are accepted and clamped to 100 by the delegate.
+        convergeOnly:
+          type: boolean
+          description: When true, run convergence only and stop at `converged` — the PR is never
+            handed to the merge-loop even if auto-merge is on globally (`NANO_PR_AUTO_MERGE`). A
+            per-request review-only override; defaults to false (the global auto-merge default applies).
+    PlanStart:
+      description: The start-plan-fanout request body. Names the target issue by EXACTLY ONE of
+        `issue` (an `owner/repo#123` reference) or `url` (a bare issue URL). Modeled as `oneOf`
+        named variants (Camunda REST v2 pattern) so an ambiguous or empty target is a 400 at the
+        edge, not a silent `issue ?? url` coalesce in the delegate.
+      oneOf:
+        - $ref: "#/components/schemas/PlanStartByIssue"
+        - $ref: "#/components/schemas/PlanStartByUrl"
+    PlanStartByIssue:
+      type: object
+      additionalProperties: false
+      required:
+        - issue
+      properties:
+        issue:
+          type: string
+          description: "Issue reference: owner/repo#123."
+    PlanStartByUrl:
+      type: object
+      additionalProperties: false
+      required:
+        - url
+      properties:
+        url:
+          type: string
+          description: A bare issue URL, when no `owner/repo#123` reference is supplied.
     MessageResult:
       type: object
       description: The result of publishing a message / answering an escalation. Shape varies by message
@@ -241,15 +291,36 @@ components:
         ok:
           type: boolean
     FeatureAnswerRequest:
+      description: "Answer an implementation-phase task escalation (issue #25). Supply the target by
+        EXACTLY ONE of `corrKey`, or the `plan`+`task` pair the delegate derives it from; `answer`
+        is always required. Modeled as `oneOf` named variants (Camunda REST v2 pattern) so a body
+        that supplies neither addressing form — or mixes them — is a 400 at the edge that names the
+        allowed shapes, instead of the delegate re-deriving the precedence by hand."
+      oneOf:
+        - $ref: "#/components/schemas/FeatureAnswerByCorrKey"
+        - $ref: "#/components/schemas/FeatureAnswerByPlanTask"
+    FeatureAnswerByCorrKey:
       type: object
-      description: "Answer an implementation-phase task escalation (issue #25). Supply either `corrKey`,
-        or both `plan` and `task`; `answer` is always required."
+      additionalProperties: false
       required:
+        - corrKey
         - answer
       properties:
         corrKey:
           type: string
           description: The task correlation key, `<plan_key>:<task_id>` (e.g. owner/repo#12:task-3).
+        answer:
+          type: string
+          minLength: 1
+          description: The operator's answer that resumes the parked implementation agent.
+    FeatureAnswerByPlanTask:
+      type: object
+      additionalProperties: false
+      required:
+        - plan
+        - task
+        - answer
+      properties:
         plan:
           type: string
           description: Plan reference (owner/repo#N); combined with `task` to derive the corrKey.
@@ -453,7 +524,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/StartVariables"
+              $ref: "#/components/schemas/ConvergenceStart"
       responses:
         "202":
           description: The loop was started (or refreshed).
@@ -476,7 +547,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/StartVariables"
+              $ref: "#/components/schemas/PlanStart"
       responses:
         "202":
           description: The plan fan-out was started (or was already running).

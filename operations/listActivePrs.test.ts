@@ -4,6 +4,7 @@
 import { test } from "node:test";
 import { assert, assertEquals } from "#test-assert";
 import type { AppApi } from "@nanobpm/urban";
+import { noopLog } from "../test/log.ts";
 import handler from "./listActivePrs.ts";
 
 function memApp(rows: any[]): AppApi {
@@ -12,7 +13,7 @@ function memApp(rows: any[]): AppApi {
       return rows;
     },
   };
-  return { data: { table: () => tbl } } as any as AppApi;
+  return { data: { table: () => tbl }, log: noopLog() } as any as AppApi;
 }
 
 function input(headers: Record<string, string> = {}) {

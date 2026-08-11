@@ -67,7 +67,7 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
       jobKey,
     });
   } catch (err) {
-    app.log("error", `record-trial-merge: audit persist failed for ${planKey} wave ${wave}`, { err: String(err) });
+    app.log.error(`record-trial-merge: audit persist failed for ${planKey} wave ${wave}`, { err: String(err) });
   }
 
   const trialMergeRed = trialMergeDecision(result) === "escalate";

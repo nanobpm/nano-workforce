@@ -9,6 +9,7 @@
 import { test } from "node:test";
 import { assertEquals, assertRejects } from "#test-assert";
 import { BpmnError } from "@nanobpm/urban";
+import { noopLog } from "../../test/log.ts";
 import handler from "./worker.ts";
 import type { PlanTaskStatus } from "../../app/plan.ts";
 
@@ -45,7 +46,7 @@ function fakeApp(rows: Row[]) {
         };
       },
     },
-    log: () => {},
+    log: noopLog(),
     _plans: plans,
   } as any;
 }

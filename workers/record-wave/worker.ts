@@ -164,7 +164,7 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
           });
         }
       } catch (err) {
-        app.log("error", `record-wave: recording delta for ${taskId} failed`, {
+        app.log.error(`record-wave: recording delta for ${taskId} failed`, {
           err: String(err),
         });
       }
@@ -194,7 +194,7 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
       try {
         await submitPr(app.data, app.engine, parsed, depPrKeys);
       } catch (err) {
-        app.log("error", `record-wave: handoff failed for ${parsed.prKey}`, {
+        app.log.error(`record-wave: handoff failed for ${parsed.prKey}`, {
           err: String(err),
         });
       }
@@ -220,7 +220,7 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
         if (meta?.headRef) head.headRef = meta.headRef;
         if (meta?.headSha) head.headSha = meta.headSha;
       } catch (err) {
-        app.log("error", `record-wave: pr head fetch failed for ${head.repo}#${head.prNumber}`, { err: String(err) });
+        app.log.error(`record-wave: pr head fetch failed for ${head.repo}#${head.prNumber}`, { err: String(err) });
       }
       return head;
     }));
@@ -253,7 +253,7 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
           for (const f of files) set.add(f);
           touchesByTask.set(o.taskId, set);
         } catch (err) {
-          app.log("error", `record-wave: pr files fetch failed for ${o.repo}#${o.number}`, {
+          app.log.error(`record-wave: pr files fetch failed for ${o.repo}#${o.number}`, {
             err: String(err),
           });
         }
@@ -261,7 +261,7 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
       const edges = deriveExclusions(touchesByTask);
       if (edges.length > 0) {
         const { inserted, updated } = await recordExclusions(app.data, planKey, edges);
-        app.log("info", `record-wave: merge-exclusion scan wave ${currentWave}`, {
+        app.log.info(`record-wave: merge-exclusion scan wave ${currentWave}`, {
           planKey,
           edges: edges.length,
           inserted,
@@ -269,7 +269,7 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
         });
       }
     } catch (err) {
-      app.log("error", `record-wave: merge-exclusion scan failed for ${planKey}`, {
+      app.log.error(`record-wave: merge-exclusion scan failed for ${planKey}`, {
         err: String(err),
       });
     }
@@ -291,7 +291,7 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
       updated_at: ts,
     });
   } catch (err) {
-    app.log("error", `record-wave: arming wave gate failed for ${planKey}`, { err: String(err) });
+    app.log.error(`record-wave: arming wave gate failed for ${planKey}`, { err: String(err) });
   }
 
   return {

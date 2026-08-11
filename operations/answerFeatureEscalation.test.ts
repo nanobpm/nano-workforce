@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import { assertEquals } from "#test-assert";
 import type { AppApi } from "@nanobpm/urban";
+import { noopLog } from "../test/log.ts";
 
 const hadSecret = Object.prototype.hasOwnProperty.call(process.env, "NANO_PR_WEBHOOK_SECRET");
 const previousSecret = process.env.NANO_PR_WEBHOOK_SECRET;
@@ -42,6 +43,7 @@ function memApp(escalations: any[] = []) {
         return Promise.resolve();
       },
     },
+    log: noopLog(),
   } as any as AppApi;
   return { app, published };
 }

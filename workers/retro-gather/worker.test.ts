@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import { assert, assertEquals, assertStringIncludes } from "#test-assert";
 import type { DataLayer } from "@nanobpm/urban";
+import { noopLog } from "../../test/log.ts";
 import { appendEntry } from "../../app/blackboard.ts";
 import handler from "./worker.ts";
 
@@ -38,7 +39,7 @@ test("retro-gather: emits a digest brief + learning count for the plan", async (
   await appendEntry(data, "o/r#3", { author_task: "t1", kind: "learning", body: "regen before build" });
   await appendEntry(data, "o/r#3", { author_task: "t2", kind: "learning", body: "use nextest" });
 
-  const app = { data, log: () => undefined };
+  const app = { data, log: noopLog() };
   const out = await handler(
     { variables: { planKey: "o/r#3" } } as any,
     app as any,
@@ -53,7 +54,7 @@ test("retro-gather: emits a digest brief + learning count for the plan", async (
 test("retro-gather: an epic with no learnings still renders a valid brief", async () => {
   const { data, stores } = memData();
   stores["plans"] = [{ plan_key: "o/r#4", repo: "o/r", issue_url: "", title: null }];
-  const app = { data, log: () => undefined };
+  const app = { data, log: noopLog() };
   const out = await handler(
     { variables: { planKey: "o/r#4" } } as any,
     app as any,

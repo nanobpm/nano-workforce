@@ -6,6 +6,7 @@
 // token transport and stubs `globalThis.fetch` so the single-PR GET reports `merged: true`.
 import { test } from "node:test";
 import { assertEquals } from "#test-assert";
+import { noopLog } from "../../test/log.ts";
 import handler from "./worker.ts";
 
 function fakeApp() {
@@ -36,7 +37,7 @@ function fakeApp() {
           };
         },
       },
-      log: () => undefined,
+      log: noopLog(),
       engine: {},
     } as any,
     stores,

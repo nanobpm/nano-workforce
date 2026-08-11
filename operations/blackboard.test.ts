@@ -3,6 +3,7 @@
 import { test } from "node:test";
 import { assertEquals } from "#test-assert";
 import type { AppApi } from "@nanobpm/urban";
+import { noopLog } from "../test/log.ts";
 import readBlackboard from "./readBlackboard.ts";
 import appendBlackboard from "./appendBlackboard.ts";
 
@@ -29,7 +30,7 @@ function memApp(): { app: AppApi; stores: Record<string, any[]> } {
       },
     };
   }
-  const app = { data: { table: (n: string, pk?: string) => tbl(n, pk) } } as any as AppApi;
+  const app = { data: { table: (n: string, pk?: string) => tbl(n, pk) }, log: noopLog() } as any as AppApi;
   return { app, stores };
 }
 

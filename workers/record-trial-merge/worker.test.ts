@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import { assertEquals, assertStringIncludes } from "#test-assert";
+import { noopLog } from "../../test/log.ts";
 import handler, { parseResult } from "./worker.ts";
 
 function fakeApp() {
@@ -19,7 +20,7 @@ function fakeApp() {
         };
       },
     },
-    log: () => undefined,
+    log: noopLog(),
   };
   return { app, inserts };
 }

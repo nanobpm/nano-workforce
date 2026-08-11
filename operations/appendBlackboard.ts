@@ -20,7 +20,10 @@ export default defineOperation("appendBlackboard", async ({ req, body }, app) =>
   const token = (req.query.get("token") ?? req.headers.get("x-blackboard-token") ?? "").trim();
   if (!token) return { status: 400, body: { error: "missing blackboard token" } };
   const planKey = await planKeyForToken(app.data, token);
-  if (!planKey) return { status: 404, body: { error: "unknown blackboard token" } };
+  if (!planKey) {
+    app.log.warn("appendBlackboard: unknown blackboard token");
+    return { status: 404, body: { error: "unknown blackboard token" } };
+  }
 
   const b = body ?? {};
   const text = typeof b.body === "string" ? b.body.trim() : "";
@@ -51,6 +54,12 @@ export default defineOperation("appendBlackboard", async ({ req, body }, app) =>
       beforeId: Number(res.id),
     })
     : [];
+  app.log.info("blackboard entry appended", {
+    planKey,
+    kind,
+    inserted: res.inserted,
+    conflicts: conflicts.length,
+  });
   return {
     status: res.inserted ? 201 : 200,
     body: { id: Number(res.id), inserted: res.inserted, conflicts },

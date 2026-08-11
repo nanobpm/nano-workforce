@@ -5,9 +5,10 @@
 import { test } from "node:test";
 import { assert, assertEquals } from "#test-assert";
 import type { AppApi } from "@nanobpm/urban";
+import { noopLog } from "../test/log.ts";
 import handler from "./getAgentInstructions.ts";
 
-const app = {} as any as AppApi;
+const app = { log: noopLog() } as any as AppApi;
 
 function input(headers: Record<string, string> = {}, path = "/app/api/agent") {
   return {

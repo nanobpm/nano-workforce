@@ -83,7 +83,7 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
     });
     waveOf = new Map();
     for (const t of tasks) waveOf.set(t.id, 0);
-    app.log("warn", `record-plan: ${planKey} plan not levelizable, running flat`, {
+    app.log.warn(`record-plan: ${planKey} plan not levelizable, running flat`, {
       err: err.message,
     });
   }

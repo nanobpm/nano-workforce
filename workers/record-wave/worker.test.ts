@@ -3,6 +3,7 @@
 // finish the plan with a still-pending task.
 import { test } from "node:test";
 import { assertEquals } from "#test-assert";
+import { noopLog } from "../../test/log.ts";
 import handler from "./worker.ts";
 import type { PlanTaskStatus } from "../../app/plan.ts";
 import { _clearMergeProtocolCache } from "../../app/mergeProtocol.ts";
@@ -61,7 +62,7 @@ function fakeApp(rows: Row[]) {
           };
         },
       },
-      log: () => undefined,
+      log: noopLog(),
       engine: {
         createInstance: () => Promise.resolve({ processInstanceKey: "pi" }),
       },

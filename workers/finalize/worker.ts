@@ -83,10 +83,10 @@ const handler: AppJobHandler<In> = async (job, app) => {
       if (mergeProcessKey != null) {
         status = "waiting_deps";
       } else {
-        app.log("error", `finalize: merge-loop start returned no process key for ${prKey}; leaving PR converged`);
+        app.log.error(`finalize: merge-loop start returned no process key for ${prKey}; leaving PR converged`);
       }
     } catch (err) {
-      app.log("error", `finalize: could not start merge-loop for ${prKey}; leaving PR converged`, {
+      app.log.error(`finalize: could not start merge-loop for ${prKey}; leaving PR converged`, {
         err: String(err),
       });
     }

@@ -6,6 +6,7 @@
 // AND the request did not force convergence-only.
 import { test } from "node:test";
 import { assertEquals } from "#test-assert";
+import { noopLog } from "../../test/log.ts";
 import handler from "./worker.ts";
 import { MERGE_PROCESS_ID } from "../../app/service.ts";
 
@@ -48,7 +49,7 @@ function fakeApp() {
           return Promise.resolve({ processInstanceKey: "MERGE-1" });
         },
       },
-      log: () => undefined,
+      log: noopLog(),
     },
   };
 }

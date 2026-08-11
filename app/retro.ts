@@ -13,7 +13,7 @@
 //
 // Data access goes through the record gateway (`data.table`), never hand-written SQL — matching
 // app/plan.ts, app/blackboard.ts, and app/taskDelta.ts.
-import type { DataLayer, EngineClient } from "@nanobpm/urban";
+import type { DataLayer, EngineClient, Logger } from "@nanobpm/urban";
 import { isUniqueViolation, readBlackboard } from "./blackboard.ts";
 import { planReviews, planTasks } from "./plan.ts";
 import { TERMINAL_STATUSES } from "./service.ts";
@@ -296,7 +296,7 @@ export async function maybeStartRetro(
   data: DataLayer,
   engine: EngineClient,
   prKey: string,
-  log?: (level: "info" | "warn" | "error", msg: string, meta?: Record<string, unknown>) => void,
+  log?: Logger,
 ): Promise<{ started: boolean; planKey?: string; reason?: string }> {
   if (!autoRetroEnabled()) return { started: false, reason: "disabled" };
   try {
@@ -340,7 +340,7 @@ export async function maybeStartRetro(
       // record, the epic surface would show a plan that "started a retro" with nothing to show and
       // no way to retry. Persist a `blocked` retro instead so the failure stays visible and the
       // system state is consistent. Recording must not mask the original error in the log.
-      log?.("error", `retro: could not start process for epic ${planKey}`, { err: String(err) });
+      log?.error(`retro: could not start process for epic ${planKey}`, { err: String(err) });
       // Persisting the blocked record is best-effort: recordRetro rethrows non-unique DB errors, and
       // if that escaped here it would fall through to the outer catch and return `error` instead of
       // `start-failed` — reintroducing the very silent-gap failure this path guards against (guard
@@ -352,16 +352,16 @@ export async function maybeStartRetro(
           summary: `Retro process could not be started: ${String(err)}`,
         });
       } catch (persistErr) {
-        log?.("error", `retro: could not persist blocked retro for epic ${planKey}`, {
+        log?.error(`retro: could not persist blocked retro for epic ${planKey}`, {
           err: String(persistErr),
         });
       }
       return { started: false, planKey, reason: "start-failed" };
     }
-    log?.("info", `retro: started for epic ${planKey}`, { processInstanceKey, learnings: digest.counts.learnings });
+    log?.info(`retro: started for epic ${planKey}`, { processInstanceKey, learnings: digest.counts.learnings });
     return { started: true, planKey };
   } catch (err) {
-    log?.("error", `retro: could not start for PR ${prKey}`, { err: String(err) });
+    log?.error(`retro: could not start for PR ${prKey}`, { err: String(err) });
     return { started: false, reason: "error" };
   }
 }
