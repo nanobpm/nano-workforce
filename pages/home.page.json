@@ -36,7 +36,8 @@
         "action": { "path": "/app/api/actions/start/convergence-loop", "body": "{{form}}" },
         "fields": [
           { "key": "pr", "label": "owner/repo#123 or a GitHub PR URL", "type": "text" },
-          { "key": "maxRounds", "label": "Max review rounds (blank = fleet default)", "type": "number" }
+          { "key": "maxRounds", "label": "Max review rounds (blank = fleet default)", "type": "number" },
+          { "key": "convergeOnly", "label": "Converge only — stop at review consensus, do not merge", "type": "checkbox" }
         ]
       }
     },
