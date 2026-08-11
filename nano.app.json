@@ -88,6 +88,10 @@
       "handler": "workers/mark-merged/worker.ts"
     },
     {
+      "taskType": "pr.record-dependency",
+      "handler": "workers/record-dependency/worker.ts"
+    },
+    {
       "taskType": "pr.record-plan",
       "handler": "workers/record-plan/worker.ts"
     },

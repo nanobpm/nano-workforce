@@ -56,9 +56,20 @@ the PR's checks yourself (`gh pr checks`, `gh run view`).
 Return a structured result:
 
 - `status: "fixed"` — you pushed a fix you believe makes the failing checks pass.
-- `status: "blocked"` — you could **not** fix it (e.g. the failure needs a human
-  decision, a secret, or an upstream change). Set `question` to a concise,
-  specific description of what is blocking and what a human must decide.
+- `status: "waiting-on-pr"` — the PR cannot merge yet because **another PR must land
+  first**, and this is an ordering constraint, not a defect: e.g. the failing check
+  is a required linked-issue / "closes #N" gate that a sibling PR will satisfy, the
+  PR is stacked on a base PR that has not merged, or the PR body / an issue it
+  references says it depends on another PR. This is a **wait, not an escalation** — do
+  **not** ask a human to babysit it. Set `dependsOn` to the PR(s) that must merge
+  first, as `owner/repo#N` refs (or PR URLs), separated by commas or spaces. The
+  process records the dependency and automatically re-attempts the merge once every
+  named PR has landed.
+- `status: "blocked"` — you could **not** fix it and it genuinely needs a human
+  **decision** (a secret, an upstream change, or a judgement call). Set `question` to a
+  concise, specific description of what is blocking and what a human must decide.
+  Reserve this for a real decision — if the PR is merely waiting on another PR, use
+  `waiting-on-pr` instead so no human is pulled in.
 
 Never report `fixed` unless you actually pushed a change. If nothing was wrong on
 the branch (the failure was transient infrastructure), say so in `summary` and
