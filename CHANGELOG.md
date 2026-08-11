@@ -1,3 +1,10 @@
+## [0.39.2](https://github.com/nanobpm/nano-workforce/compare/v0.39.1...v0.39.2) (2026-08-11)
+
+
+### Bug Fixes
+
+* **merge:** recover PRs merged out-of-band instead of wedging in "merging" ([#112](https://github.com/nanobpm/nano-workforce/issues/112)) ([037d8aa](https://github.com/nanobpm/nano-workforce/commit/037d8aa2538b85f9c1b43927378f3578530a924e)), closes [Magikcraft/nano-bpm#723](https://github.com/Magikcraft/nano-bpm/issues/723)
+
 ## [0.39.1](https://github.com/nanobpm/nano-workforce/compare/v0.39.0...v0.39.1) (2026-08-10)
 
 
