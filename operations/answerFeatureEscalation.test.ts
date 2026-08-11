@@ -100,3 +100,13 @@ test("maps an unmatched corrKey to 404", async () => {
   assertEquals(result.status, 404);
   assertEquals(result.body.ok, false);
 });
+
+test("rejects a missing request body with 400 (not 500)", async () => {
+  const { app } = memApp();
+  const result = await answerFeatureEscalation(
+    { ...input({}, "test-secret"), body: undefined },
+    app,
+  ) as any;
+  assertEquals(result.status, 400);
+  assertEquals(result.body.ok, false);
+});

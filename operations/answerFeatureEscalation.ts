@@ -26,6 +26,12 @@ export default defineOperation("answerFeatureEscalation", async ({ req, body }, 
     app.log.warn("feature-answer rejected: missing/invalid shared secret");
     return { status: 401, body: { ok: false, error: "unauthorized" } };
   }
+  // The runtime validates a well-formed body against openapi.yaml, but a directly-invoked delegate
+  // (or a missing body) leaves `body` undefined — guard so that becomes a 400, not a 500.
+  if (!body || typeof body !== "object") {
+    app.log.warn("feature-answer rejected: missing request body");
+    return { status: 400, body: { ok: false, error: "answer is required" } };
+  }
   const answer = str(body.answer);
   if (!answer) {
     app.log.warn("feature-answer rejected: blank answer");

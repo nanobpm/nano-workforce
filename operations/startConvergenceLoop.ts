@@ -15,6 +15,12 @@ import { clampRounds, MAX_ROUNDS, parsePr, submitPr } from "../app/service.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
 
 export default defineOperation("startConvergenceLoop", async ({ body }, app) => {
+  // The runtime validates a well-formed body against openapi.yaml, but a directly-invoked delegate
+  // (or a missing body) leaves `body` undefined — guard so that becomes a 400, not a 500 from `in`.
+  if (!body || typeof body !== "object") {
+    app.log.warn("start-convergence rejected: missing request body");
+    return { status: 400, body: { error: "request body is required (owner/repo#123 or a PR URL)" } };
+  }
   const raw = ("pr" in body ? body.pr : body.url).trim();
   const parsed = parsePr(raw);
   if (!parsed) {

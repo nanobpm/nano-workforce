@@ -14,6 +14,12 @@ import { parseIssue, startPlan } from "../app/plan.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
 
 export default defineOperation("startPlanFanout", async ({ body }, app) => {
+  // The runtime validates a well-formed body against openapi.yaml, but a directly-invoked delegate
+  // (or a missing body) leaves `body` undefined — guard so that becomes a 400, not a 500 from `in`.
+  if (!body || typeof body !== "object") {
+    app.log.warn("start-plan rejected: missing request body");
+    return { status: 400, body: { error: "request body is required (owner/repo#123 or an issue URL)" } };
+  }
   const raw = ("issue" in body ? body.issue : body.url).trim();
   const parsed = parseIssue(raw);
   if (!parsed) {

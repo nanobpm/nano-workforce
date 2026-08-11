@@ -79,6 +79,13 @@ function withGithubOff(run: () => Promise<void>): Promise<void> {
   });
 }
 
+test("startConvergenceLoop → 400 (not 500) on a missing request body", async () => {
+  const res = await startConvergenceLoop(input(undefined), app);
+  const r = res as any;
+  assertEquals(r.status, 400);
+  assertEquals(typeof r.body.error, "string");
+});
+
 test("startConvergenceLoop forwards convergeOnly:true to the loop", async () => {
   await withGithubOff(async () => {
     const { app: capApp, get } = captureApp();
@@ -102,6 +109,13 @@ test("startConvergenceLoop defaults convergeOnly to false and does not truthy-co
 
 test("startPlanFanout → 400 on an unparseable issue reference", async () => {
   const res = await startPlanFanout(input({ issue: "" }), app);
+  const r = res as any;
+  assertEquals(r.status, 400);
+  assertEquals(typeof r.body.error, "string");
+});
+
+test("startPlanFanout → 400 (not 500) on a missing request body", async () => {
+  const res = await startPlanFanout(input(undefined), app);
   const r = res as any;
   assertEquals(r.status, 400);
   assertEquals(typeof r.body.error, "string");
