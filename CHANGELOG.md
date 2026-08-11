@@ -1,3 +1,10 @@
+# [0.42.0](https://github.com/nanobpm/nano-workforce/compare/v0.41.0...v0.42.0) (2026-08-11)
+
+
+### Features
+
+* **ui:** checkbox to run convergence without auto-merge ([#121](https://github.com/nanobpm/nano-workforce/issues/121)) ([8883026](https://github.com/nanobpm/nano-workforce/commit/8883026d552855c8a25c526d22ef2aa83ac9f298)), closes [#115](https://github.com/nanobpm/nano-workforce/issues/115)
+
 # [0.41.0](https://github.com/nanobpm/nano-workforce/compare/v0.40.2...v0.41.0) (2026-08-11)
 
 
