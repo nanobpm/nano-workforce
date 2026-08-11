@@ -95,11 +95,17 @@ test("a padded question is persisted trimmed (no whitespace drift)", async () =>
   assertEquals((updates.pull_requests![0] as any).patch.open_escalation_question, "needs a decision", "denormalised question is trimmed too");
 });
 
-// A round that fell through the `gw-status` default (no `converged`/`addressed` status and no
-// question — the prompt-less-agent failure behind the empty "(no question provided)" escalations
-// on Magikcraft/nano-bpm #597/#599) must NOT throw (which parked an un-remediable JobNoRetries
-// incident). It now opens an *answerable* escalation with a fabricated, concrete question and the
-// agent's transcript attached, so a human can unblock the loop entirely from the UI.
+// Defence-in-depth for the persist-escalation worker: if the gateway ever DOES route a
+// blank-status / blank-question job here (an agent-raised `needs_input`/`blocked` with no
+// question, or the max-rounds / review-stalled arms), the worker must NOT throw — throwing
+// parked an un-remediable JobNoRetries incident (the empty "(no question provided)" escalations
+// on Magikcraft/nano-bpm #597/#599). It opens an *answerable* escalation with a fabricated,
+// concrete question and the agent's transcript attached, so a human can unblock the loop from
+// the UI.
+//
+// NOTE: the `gw-status` gateway no longer routes an empty/unknown status here — that now
+// defaults to `f_addressed` and re-enters the review wait (see roundResultDefault.test.ts).
+// This fabrication path stays as a worker-level backstop for the explicit escalation arms.
 test("blank question fabricates an answerable escalation (no throw, no incident)", async () => {
   for (const question of [undefined, "", "   "]) {
     const { app, inserts, updates } = fakeApp();

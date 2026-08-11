@@ -58,7 +58,11 @@ Because several agents may run on the same host at once:
 3. **Act.** Make the code changes for all fixes + nitpicks in your workspace (`cwd`)
    in one coherent, signed-off commit (`git commit -s`). Run the repo's
    build/test/lint locally before pushing. Push to the PR's head branch (the branch
-   you are already on) — do not open a new branch or PR.
+   you are already on) — do not open a new branch or PR. If the branch has drifted
+   behind its base and you need to **rebase / resolve a merge conflict** to keep it
+   mergeable, that is allowed: do it in place on this branch and **force-push**
+   (`--force-with-lease`). Any push this round — including a rebase/force-push with
+   no reviewer comments to act on — is an **`addressed`** round (see the return table).
 4. **Reply in-thread** to each comment you addressed or pushed back on, one reply
    per comment, so the trail lives on the PR.
 5. **Resolve the thread** for every comment you handled — every *fix*, *nitpick*,
@@ -128,7 +132,7 @@ Return **one** of:
 | `status`      | when                                                          | also set        |
 |---------------|---------------------------------------------------------------|-----------------|
 | `converged`   | nothing actionable left (see above)                           | `summary`       |
-| `addressed`   | you made changes + pushed this round                          | `summary`       |
+| `addressed`   | you pushed anything this round — code fixes, nitpicks, **or** a rebase/force-push to resolve a conflict | `summary`       |
 | `waiting`     | nothing to triage yet — you are awaiting a pending review (typically round 1) | `summary` |
 | `needs_input` | you hit a decision only a human can make                      | `summary`, `question` |
 | `blocked`     | you are stuck on something external (auth, failing push, missing secret) | `summary`, `question` |
@@ -143,7 +147,8 @@ Never guess on a `needs_input` decision — raise it and let a human answer.
 
 Your result variables only reach the process if you emit them through the harness's
 result channel. Prose in your normal output is **not** parsed — if you only "say"
-your status in the transcript, the round escalates with an empty question. So:
+your status in the transcript, the process can't read it, falls back to a safe
+default, and you waste a round. So emit a machine-readable result one of two ways:
 
 1. **Write a JSON object to the file at `$AGENT_RESULT_FILE`** (an env var the
    harness sets for you). The object's keys become process variables. Example for a
@@ -169,3 +174,12 @@ your status in the transcript, the round escalates with an empty question. So:
 Do not put the result file inside the repo checkout or `git add` it — it lives
 outside your workspace. Exit `0` for every status (including `blocked`/`needs_input`);
 a non-zero exit means a genuine crash and the job is retried.
+
+**Emitting a machine-readable result is your mandatory final step — never exit
+silently.** Emitting a result (the `$AGENT_RESULT_FILE` write, or the stdout fallback
+above if you truly cannot write the file) is the last thing you do on every path out of
+this round (including after a rebase/force-push, or when nothing needed doing). If you
+are ever unsure which status applies and you are not blocked on a human decision,
+return **`addressed`** (or **`waiting`** if you are still awaiting the first review) —
+never leave without a result. A missing result is treated as a safe `addressed` and
+re-enters the review wait, but relying on that instead of emitting one wastes a round.
