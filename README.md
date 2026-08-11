@@ -279,6 +279,26 @@ per-instance context (e.g. a human's escalation answer) is appended by the harne
 
 ---
 
+## Point an agent at it (self-serve guide)
+
+The running app serves a live **agent operator guide** at
+`GET /app/api/agent` — how to submit PRs (review-only vs. merge), hand over an epic,
+answer escalations, and **debug** the system (find engine instances, relate them to
+PRs, inspect the models/prompts, unstick stuck processes, and raise issues/PRs). Its
+examples are keyed to the instance you fetched it from, so a coding agent can drive
+**and** debug the workforce with no extra context:
+
+```bash
+curl -sS http://localhost:3000/app/api/agent | jq -r .instructions
+```
+
+Like `/version` and `/status`, this endpoint honours the optional
+`NANO_PR_WEBHOOK_SECRET` guard (`X-Hook-Secret` header): when that secret is set it
+returns `401` without the matching header; unset = open. The source lives in
+`resources/agent-guide.md`.
+
+---
+
 ## Architecture & contributing
 
 - **[SPEC.md](SPEC.md)** — the behavioural source of truth for the processes.
