@@ -368,11 +368,21 @@ start ─► wait: deps merged ─► arm merge ─► wait: mergeable ─┬─
   exhausted, the agent reports `blocked`, or the branch is in `conflict` does it fall
   through to the human escalation path.
 
+- **Discovered dependency** — a `senior:fix-ci` or `senior:rebase` agent may find that
+  the PR cannot land because **another PR must merge first** (a required linked-issue
+  gate a sibling PR will close, a stacked base PR, or a `Depends-on:` the agent read
+  from the PR/issue text). That is an ordering **wait, not a human decision**: the
+  agent returns `status: "waiting-on-pr"` with a `dependsOn` list of `owner/repo#N`
+  refs. `pr.record-dependency` appends those edges to `pr_dependencies` and parks the
+  PR back at *wait: deps merged*, so the same poller pass lands it automatically once
+  the named PRs merge — no escalation is opened.
+
 - **Dependencies** — `pr_dependencies(pr_key, depends_on_key)` (migration 004).
-  Declared two ways: a `Depends-on: owner/repo#N` line in the PR body (parsed on
-  submit) and/or a `dependsOn` array on the submit request. `merge-loop` parks at
-  *wait: deps merged*; the poller checks each dependency (own tracked row first,
-  else GitHub `merged` state) and publishes `deps-cleared` once all have landed.
+  Declared three ways: a `Depends-on: owner/repo#N` line in the PR body (parsed on
+  submit), a `dependsOn` array on the submit request, and/or **discovered at merge
+  time** by a `fix-ci`/`rebase` agent (`status: "waiting-on-pr"`, above). `merge-loop`
+  parks at *wait: deps merged*; the poller checks each dependency (own tracked row
+  first, else GitHub `merged` state) and publishes `deps-cleared` once all have landed.
 - **Mergeability** — the poller classifies GitHub's `mergeStateStatus`:
   `CLEAN`/`HAS_HOOKS`/`UNSTABLE`/`BEHIND` → `ready`; `DIRTY` → `conflict`;
   `BLOCKED` → `blocked` if a required check is failing, else keep waiting;

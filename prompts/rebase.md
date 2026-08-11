@@ -67,10 +67,20 @@ Return a structured result:
 - `status: "rebased"` — the branch tip now contains the latest base: you resolved
   any conflicts mechanically and pushed, **or** it was already up to date. The
   process will re-attempt the merge.
+- `status: "waiting-on-pr"` — the PR cannot merge yet because **another PR must land
+  first**, and this is an ordering constraint, not a conflict you can resolve: e.g.
+  the branch is stacked on a base PR that has not merged, or the PR body / an issue
+  it references says it depends on another PR that must close a blocking issue first.
+  This is a **wait, not an escalation** — do **not** ask a human to babysit it. Set
+  `dependsOn` to the PR(s) that must merge first, as `owner/repo#N` refs (or PR URLs),
+  separated by commas or spaces. The process records the dependency and automatically
+  re-attempts the merge once every named PR has landed.
 - `status: "blocked"` — you could **not** resolve it mechanically (a genuine
   semantic conflict where two changes contradict and a human must decide which
   behaviour wins, or the branch is un-rebaseable). Set `question` to a concise,
   specific description of the conflicting intent and the decision a human must make.
+  Reserve this for a real decision — if the PR is merely waiting on another PR to land
+  first, use `waiting-on-pr` instead so no human is pulled in.
 
 Report `rebased` when the branch tip now contains the latest base — either
 because you pushed a resolved update, or because it was **already up to date**
