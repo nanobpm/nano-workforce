@@ -90,7 +90,7 @@
       <bpmn:incoming>f_answerLoop</bpmn:incoming>
       <bpmn:outgoing>f_toStatus</bpmn:outgoing>
     </bpmn:serviceTask>
-    <bpmn:exclusiveGateway id="gw-status" name="status?" default="f_escalate">
+    <bpmn:exclusiveGateway id="gw-status" name="status?" default="f_addressed">
       <bpmn:incoming>f_toStatus</bpmn:incoming>
       <bpmn:outgoing>f_converged</bpmn:outgoing>
       <bpmn:outgoing>f_addressed</bpmn:outgoing>
@@ -202,13 +202,13 @@
     <bpmn:sequenceFlow id="f_converged" name="converged" sourceRef="gw-status" targetRef="persist-converged">
       <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=status = "converged"</bpmn:conditionExpression>
     </bpmn:sequenceFlow>
-    <bpmn:sequenceFlow id="f_addressed" name="addressed" sourceRef="gw-status" targetRef="gw-guard">
-      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=status = "addressed"</bpmn:conditionExpression>
-    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="f_addressed" name="addressed / default" sourceRef="gw-status" targetRef="gw-guard" />
     <bpmn:sequenceFlow id="f_waiting" name="waiting" sourceRef="gw-status" targetRef="gw-guard">
       <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=status = "waiting"</bpmn:conditionExpression>
     </bpmn:sequenceFlow>
-    <bpmn:sequenceFlow id="f_escalate" name="needs_input / blocked" sourceRef="gw-status" targetRef="persist-escalation" />
+    <bpmn:sequenceFlow id="f_escalate" name="needs_input / blocked" sourceRef="gw-status" targetRef="persist-escalation">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=status = "needs_input" or status = "blocked"</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
     <bpmn:sequenceFlow id="f_guardMax" name="max rounds" sourceRef="gw-guard" targetRef="persist-escalation-maxrounds">
       <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=round &gt;= maxRounds</bpmn:conditionExpression>
     </bpmn:sequenceFlow>
@@ -337,7 +337,7 @@
         <di:waypoint x="441" y="280" />
         <di:waypoint x="591" y="280" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="446" y="206" width="67" height="14" />
+          <dc:Bounds x="446" y="199" width="78" height="28" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_waiting" bpmnElement="f_waiting">
