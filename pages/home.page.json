@@ -109,6 +109,7 @@
               "columns": [
                 { "field": "round_no", "header": "#" },
                 { "field": "status", "header": "Result" },
+                { "field": "worker", "header": "Worker" },
                 { "field": "summary", "header": "Summary" }
               ],
               "lazyField": { "field": "transcript", "label": "Transcript", "lazy": true }
@@ -123,6 +124,7 @@
               "columns": [
                 { "field": "round_no", "header": "#" },
                 { "field": "kind", "header": "Kind" },
+                { "field": "worker", "header": "Worker" },
                 { "field": "question", "header": "Question" },
                 { "field": "status", "header": "Status" },
                 { "field": "answer", "header": "Answer" }

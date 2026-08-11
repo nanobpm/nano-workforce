@@ -56,6 +56,23 @@ for (const status of ["addressed", "waiting"]) {
   });
 }
 
+// The harness completes each agent job with `agent` (its profile name); persist-round records it
+// on the round so a human can identify the servicing worker from the durable history.
+test("persist-round records the servicing worker name from the agent variable", async () => {
+  const { app, inserts } = fakeApp();
+  const job = { variables: { prKey: "o/r#1", round: 1, status: "addressed", agent: "senior" } };
+  await handler(job as any, app as any);
+  assertEquals((inserts.rounds[0] as any).worker, "senior", "the round carries the worker name");
+});
+
+// A blank/absent agent name leaves the nullable column NULL (the write boundary omits undefined).
+test("persist-round leaves worker undefined when the agent name is blank", async () => {
+  const { app, inserts } = fakeApp();
+  const job = { variables: { prKey: "o/r#1", round: 1, status: "addressed", agent: "  " } };
+  await handler(job as any, app as any);
+  assertEquals((inserts.rounds[0] as any).worker, undefined, "blank worker -> NULL column");
+});
+
 // When the convergence-loop passes repo/prNumber and the FK parent is missing (engine/app.db
 // desync), persist-round reconstructs the `pull_requests` row before recording the round so the
 // insert never dies with an opaque FOREIGN KEY constraint failure.

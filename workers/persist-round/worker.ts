@@ -34,6 +34,14 @@ function transcriptOf(vars: Record<string, unknown>): string | null {
   return typeof env?.output === "string" ? env.output : null;
 }
 
+// The c8ctl harness completes each agent job with an `agent` variable (its profile name), which
+// propagates here. Record it on the round so a human can identify the servicing worker from the
+// durable history. Undefined (blank/absent) leaves the nullable `worker` column NULL.
+function workerOf(vars: Record<string, unknown>): string | undefined {
+  const v = vars.agent;
+  return typeof v === "string" && v.trim() !== "" ? v.trim() : undefined;
+}
+
 const handler: AppJobHandler<In> = async (job, app) => {
   // This worker is the "addressed"/"waiting" path, so `status` resolves to one of those
   // domain values. `summary` is left undefined when absent: the write boundary omits it so the
@@ -66,6 +74,7 @@ const handler: AppJobHandler<In> = async (job, app) => {
     status,
     summary,
     transcript: transcriptOf(job.variables),
+    worker: workerOf(job.variables),
     started_at: now,
     ended_at: now,
   });

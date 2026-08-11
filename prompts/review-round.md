@@ -31,7 +31,7 @@ cancel can land anytime.
 The worker harness (e.g. `c8ctl nano work`) has **already provisioned an isolated,
 per-job workspace for you**: your **current working directory is a fresh clone of
 the repo, checked out on the PR's head branch**. The harness exposes it via the
-`AGENT_WORKSPACE`, `REPO_URL`, `REPO_BRANCH` and `REPO_REF` environment variables,
+`AGENT_WORKSPACE`, `AGENT_REPO_URL`, `AGENT_REPO_BRANCH` and `AGENT_REPO_REF` environment variables,
 and it **reaps that workspace after the job ends**.
 
 Because several agents may run on the same host at once:

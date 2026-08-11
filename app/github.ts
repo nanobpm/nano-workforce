@@ -177,6 +177,10 @@ async function useGh(): Promise<boolean> {
 export interface PrMeta {
   title: string | null;
   body: string;
+  /** The PR's head branch name (e.g. `feat/issue-12`). Drives the c8ctl harness's isolated
+   * workspace checkout (`io.nanobpm.agentTask.repository.ref`) so the review agent lands on the
+   * PR branch instead of the worker's launch directory. `null` when GitHub doesn't return it. */
+  headRef: string | null;
 }
 
 export async function fetchPrMeta(
@@ -185,10 +189,10 @@ export async function fetchPrMeta(
   token: string,
 ): Promise<PrMeta | null> {
   if (await useGh()) {
-    const out = await runGh(["pr", "view", String(number), "--repo", repo, "--json", "title,body"]);
+    const out = await runGh(["pr", "view", String(number), "--repo", repo, "--json", "title,body,headRefName"]);
     // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
-    const j = JSON.parse(out) as { title?: string; body?: string };
-    return { title: j.title ?? null, body: j.body ?? "" };
+    const j = JSON.parse(out) as { title?: string; body?: string; headRefName?: string | null };
+    return { title: j.title ?? null, body: j.body ?? "", headRef: j.headRefName ?? null };
   }
   if (!token) return null;
   const r = await fetch(`https://api.github.com/repos/${repo}/pulls/${number}`, {
@@ -196,8 +200,8 @@ export async function fetchPrMeta(
   });
   if (!r.ok) throw new Error(`github ${r.status} ${r.statusText}`.trim());
   // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
-  const j = (await r.json()) as { title?: string; body?: string };
-  return { title: j.title ?? null, body: j.body ?? "" };
+  const j = (await r.json()) as { title?: string; body?: string; head?: { ref?: string | null } };
+  return { title: j.title ?? null, body: j.body ?? "", headRef: j.head?.ref ?? null };
 }
 
 /** A PR's merge state, narrowed to what the merge poller needs to classify landability.
