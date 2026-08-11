@@ -1,3 +1,10 @@
+# [0.40.0](https://github.com/nanobpm/nano-workforce/compare/v0.39.3...v0.40.0) (2026-08-11)
+
+
+### Features
+
+* **convergence:** per-request convergeOnly override to skip the merge-loop ([#115](https://github.com/nanobpm/nano-workforce/issues/115)) ([8840b23](https://github.com/nanobpm/nano-workforce/commit/8840b23e97ed56aaf43df20d3f9a97b00b7e865d))
+
 ## [0.39.3](https://github.com/nanobpm/nano-workforce/compare/v0.39.2...v0.39.3) (2026-08-11)
 
 
