@@ -20,7 +20,7 @@ import {
   requestCopilotReview,
 } from "./github.ts";
 import { mergeLanes, readExclusions } from "./mergeExclusion.ts";
-import { freshHeadRunAction, loadMergeProtocol } from "./mergeProtocol.ts";
+import { freshHeadRunAction, headRunPresenceCount, loadMergeProtocol } from "./mergeProtocol.ts";
 import { type PrLaneDecision, planPrLane, taskDependencyDepths } from "./mergeTrain.ts";
 import { plans, planTaskDeps, planTasks } from "./plan.ts";
 import { clampNudgeMinutes, reviewWaitTimeout } from "./reviewWait.ts";
@@ -686,14 +686,17 @@ async function pollMerges(data: DataLayer, engine: EngineClient, token: string) 
       const verdict = classifyMergeability(st);
       if (verdict === "waiting") {
         // Frugal-CI remedy (#43): when the repo publishes a merge protocol that wants a fresh
-        // head run and the PR has NO head run at all, review has converged but the last push
+        // head run and the PR has NO required head run yet, review has converged but the last push
         // produced no CI run — so branch protection's required checks read as "expected" forever
-        // and this PR would wait indefinitely. Produce a fresh `pull_request` run once per head
-        // (mark ready / close+reopen); rebases change `headRefOid`, so downstream merge-train PRs
-        // get a new nudge after every post-rebase landing attempt.
+        // and this PR would wait indefinitely. Judge "no run yet" by the protocol's *required*
+        // checks (headRunPresenceCount), not the raw rollup length, so an incidental always-on
+        // check (e.g. Mergify's "Merge Queue") doesn't mask a missing run. Produce a fresh
+        // `pull_request` run once per head (mark ready / close+reopen); rebases change
+        // `headRefOid`, so downstream merge-train PRs get a new nudge after every post-rebase
+        // landing attempt.
         const protocol = await loadMergeProtocol(repo, token).catch(() => null);
         if (protocol) {
-          const action = freshHeadRunAction(protocol, verdict, st.totalChecks, st.isDraft, {
+          const action = freshHeadRunAction(protocol, verdict, headRunPresenceCount(protocol, st), st.isDraft, {
             headRefOid: st.headRefOid,
             lastActionHeadRefOid: pr.fresh_head_run_head,
           });

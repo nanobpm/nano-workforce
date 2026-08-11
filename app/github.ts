@@ -214,6 +214,12 @@ export interface PrState {
    * frugal-CI stuck state the fresh-head-run remedy targets); `-1` when the transport can't
    * enumerate checks (token mode). */
   totalChecks: number;
+  /** Names of every head check present in any state (pending/failed/passed). Empty in token mode
+   * (the REST fallback can't enumerate checks). Lets the fresh-head-run remedy judge whether the
+   * repo's *required* checks (per its merge protocol) are actually present on the head — an
+   * unrelated always-on check (e.g. Mergify's "Merge Queue") must not read as "the required run
+   * already happened". */
+  presentCheckNames: string[];
   /** Whether the PR is a draft (a fresh head run is produced by marking it ready, not reopen). */
   isDraft: boolean;
   /** Current head commit. Used to scope one-shot merge-protocol nudges to a landing attempt. */
@@ -244,6 +250,19 @@ function failingCheckNames(rollup: RollupEntry[]): string[] {
   for (const c of rollup) {
     const v = (c.conclusion || c.state || "").toUpperCase();
     if (bad.has(v)) names.push(c.name || c.context || c.workflowName || "check");
+  }
+  return names;
+}
+
+/** Names of every head check present, regardless of state. Covers both the CheckRun shape
+ * (`name`/`workflowName`) and the legacy StatusContext shape (`context`). Used to test whether a
+ * repo's *required* checks are present on the head — so an unrelated always-on check (e.g.
+ * Mergify's "Merge Queue") doesn't masquerade as the required CI run having already happened. */
+function allCheckNames(rollup: RollupEntry[]): string[] {
+  const names: string[] = [];
+  for (const c of rollup) {
+    const name = c.name || c.context || c.workflowName;
+    if (name) names.push(name);
   }
   return names;
 }
@@ -280,6 +299,7 @@ export async function fetchPrState(
       failingChecks: names.length,
       failingCheckNames: names,
       totalChecks: rollup.length,
+      presentCheckNames: allCheckNames(rollup),
       isDraft: !!j.isDraft,
       headRefOid: j.headRefOid ?? null,
     };
@@ -305,6 +325,7 @@ export async function fetchPrState(
     failingChecks: -1, // REST here doesn't enumerate checks → classifier treats BLOCKED as "wait"
     failingCheckNames: [], // …and the CI-fix agent gets no per-check list in token mode
     totalChecks: -1, // …and the fresh-head-run remedy stays conservative (never reopens blind)
+    presentCheckNames: [], // …can't enumerate checks in token mode → no required-check presence signal
     isDraft: !!j.draft,
     headRefOid: j.head?.sha ?? null,
   };
