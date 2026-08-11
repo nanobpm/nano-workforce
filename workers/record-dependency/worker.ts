@@ -12,7 +12,7 @@
 // duplicates, and insert missing edges idempotently — a worker retry never double-inserts, and an
 // already-recorded edge is a no-op.
 import type { AppJobHandler } from "@nanobpm/urban";
-import { parsePr } from "../../app/service.ts";
+import { ensurePr, parsePr } from "../../app/service.ts";
 
 interface In extends Record<string, unknown> {
   prKey: string;
@@ -66,14 +66,29 @@ const handler: AppJobHandler<In> = async (job, app) => {
   }
 
   if (depKeys.length === 0) {
-    // The agent signalled "waiting-on-pr" but named no parseable PR. Rather than strand the PR in
-    // `waiting_deps` with nothing to wait for (the poller would clear it immediately anyway, since
-    // an empty dep set trivially "all merged"), log loudly so the miswiring is visible.
+    // The agent signalled "waiting-on-pr" but named no parseable PR. Whether this actually strands
+    // the PR depends on the existing DAG: with no other edges the poller clears it immediately (an
+    // empty dep set trivially "all merged"); if prior edges already exist it will keep waiting on
+    // those. Either way the miswiring — a "waiting-on-pr" signal with no parseable ref — is a
+    // defect worth logging loudly.
+    const clause =
+      have.size === 0
+        ? "it will clear immediately (no other dependencies recorded)"
+        : `it still has ${have.size} previously-recorded dependency edge(s) to wait on`;
     app.log(
       "error",
       `record-dependency: ${prKey} reported waiting-on-pr but no parseable dependsOn ref; ` +
-        `it will clear immediately. Raw: ${JSON.stringify(job.variables.dependsOn)}`,
+        `${clause}. Raw: ${JSON.stringify(job.variables.dependsOn)}`,
     );
+  }
+
+  // Heal a missing FK parent (engine/app.db desync) before updating `pull_requests`; otherwise the
+  // update silently no-ops and the instance re-enters `wait-deps` with no row for the merge poller
+  // to watch — wedging the merge loop. Mirrors persist-round's heal; repo/number are derived from
+  // the canonical `owner/repo#N` prKey since the RecordDepIn envelope carries only prKey/dependsOn.
+  const parsed = parsePr(prKey);
+  if (parsed) {
+    await ensurePr(app.data, { prKey, repo: parsed.repo, number: parsed.number, url: parsed.url });
   }
 
   // Park the PR back in the merge-stage dependency wait so `pollMerges` block 1 watches it.

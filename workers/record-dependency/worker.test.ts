@@ -98,3 +98,19 @@ test("no parseable ref still parks in waiting_deps and logs the miswiring loudly
   assertEquals(stores.pull_requests[0].status, "waiting_deps");
   assertEquals(logs.some((l) => l.level === "error"), true);
 });
+
+test("heals a missing pull_requests parent row before parking so the merge poller can watch it", async () => {
+  const { app, stores } = fakeApp();
+  stores.pull_requests.length = 0; // engine/app.db desync: no parent row for o/r#1
+
+  await handler(job({ prKey: "o/r#1", dependsOn: "o/r#2" }), app);
+
+  // ensurePr reconstructed the row, and the subsequent update landed on it (not a silent no-op).
+  assertEquals(stores.pull_requests.length, 1);
+  const healed = stores.pull_requests[0];
+  assertEquals(healed.pr_key, "o/r#1");
+  assertEquals(healed.repo, "o/r");
+  assertEquals(healed.number, 1);
+  assertEquals(healed.status, "waiting_deps");
+  assertEquals(stores.pr_dependencies.length, 1);
+});
