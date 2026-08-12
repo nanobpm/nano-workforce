@@ -283,6 +283,11 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
   // the same value when it dispatches); on the final wave, pin it to the last index so a finished
   // epic reads N/N (nextWave would be waveCount, one past the last band). Display-only.
   const projectedCurrentWave = hasMoreWaves ? nextWave : Math.max(0, waveCount - 1);
+  // Keep the three progress fields consistent: a taskless plan (waveCount 0 — the MI `implement`
+  // step completed immediately with no waves) has no wave to be on, so current_wave and wave_label
+  // both stay NULL rather than writing current_wave=0 against a NULL label (and clobbering the NULL
+  // projection record-plan/select-wave already recorded).
+  const currentWaveProjection = waveCount > 0 ? projectedCurrentWave : null;
   const waveLabel = waveCount > 0 ? `${projectedCurrentWave + 1}/${waveCount}` : null;
 
   // Wave-merge barrier: when another wave follows, park the plan-fanout instance at the
@@ -295,7 +300,7 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
   try {
     await plans(app.data).update(planKey, {
       gate_wave: hasMoreWaves ? currentWave : null,
-      current_wave: projectedCurrentWave,
+      current_wave: currentWaveProjection,
       wave_label: waveLabel,
       updated_at: ts,
     });

@@ -176,6 +176,30 @@ test("record-wave pins current_wave to the last index and clears gate_wave on th
   assertEquals((planUpdates[0].patch as Record<string, unknown>).wave_label, "3/3");
 });
 
+test("record-wave keeps all wave-progress fields NULL for a taskless plan (waveCount 0)", async () => {
+  // A taskless plan runs record-wave with waveCount 0 (the MI `implement` step completed
+  // immediately). All three progress fields must stay NULL together — never current_wave=0 against
+  // a NULL wave_label, which would clobber record-plan/select-wave's NULL projection.
+  const { app, planUpdates } = fakeApp([]);
+
+  await handler(
+    {
+      variables: {
+        planKey: "owner/repo#70",
+        currentWave: 0,
+        waveCount: 0,
+        waveTasks: [],
+        waveResults: [],
+      },
+    } as any,
+    app,
+  );
+
+  const patch = planUpdates[0].patch as Record<string, unknown>;
+  assertEquals(patch.current_wave, null);
+  assertEquals(patch.wave_label, null);
+});
+
 test("record-wave skips trial merge for mergify-queue repos with 2+ heads", async () => {
   const restore = installGithubStub("mergify-queue");
   try {
