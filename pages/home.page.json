@@ -9,15 +9,25 @@
         "variant": "bar",
         "title": "Nano Workforce",
         "items": [
-          { "label": "Convergence", "page": "home" },
-          { "label": "Epic", "page": "epic" }
-        ]
+          {
+            "label": "Convergence",
+            "page": "home"
+          },
+          {
+            "label": "Epics",
+            "page": "epic"
+          }
+        ],
+        "sticky": true
       }
     },
     {
       "type": "text",
       "id": "title",
-      "props": { "text": "PR Review Convergence", "variant": "heading" }
+      "props": {
+        "text": "PR Review Convergence",
+        "variant": "heading"
+      }
     },
     {
       "type": "text",
@@ -31,13 +41,13 @@
       "type": "button",
       "id": "agent-instructions",
       "props": {
-        "label": "🤖 Agent Instructions",
+        "label": "\ud83e\udd16 Agent Instructions",
         "variant": "ghost",
         "modal": {
           "title": "Point your agent at Nano Workforce",
           "description": "Copy this prompt and paste it into your coding agent (Copilot, Claude, etc.). It tells the agent to read this workforce's live operator guide, then help you drive and debug it.",
           "copyLabel": "Copy prompt",
-          "copyText": "You are helping me operate a running Nano Workforce instance — a durable orchestration app that drives pull requests to review convergence against an automated reviewer, merges them, and can take a whole issue and plan \u2192 implement \u2192 converge it across a fleet of coding agents.\n\nFirst, fetch and read its live operator guide. It tells you how to submit PRs and epics for convergence (including whether to go all the way to merge or stop at review consensus), how to find engine instances and relate them to PRs via the Nano/Camunda-8 REST API, how to inspect the models and prompts, and how to help me untangle escalations:\n\n    curl -sS {{appBase}}app/api/agent\n\nIf this instance is secured with a shared secret (NANO_PR_WEBHOOK_SECRET), add its value as an x-hook-secret header, otherwise the request returns 401:\n\n    curl -sS -H \"x-hook-secret: <secret>\" {{appBase}}app/api/agent\n\nThen follow that guide to help me drive and debug this workforce. If you find a bug or a stuck process, the guide explains how to raise an issue or a PR against nanobpm/nano-workforce."
+          "copyText": "You are helping me operate a running Nano Workforce instance \u2014 a durable orchestration app that drives pull requests to review convergence against an automated reviewer, merges them, and can take a whole issue and plan \u2192 implement \u2192 converge it across a fleet of coding agents.\n\nFirst, fetch and read its live operator guide. It tells you how to submit PRs and epics for convergence (including whether to go all the way to merge or stop at review consensus), how to find engine instances and relate them to PRs via the Nano/Camunda-8 REST API, how to inspect the models and prompts, and how to help me untangle escalations:\n\n    curl -sS {{appBase}}app/api/agent\n\nIf this instance is secured with a shared secret (NANO_PR_WEBHOOK_SECRET), add its value as an x-hook-secret header, otherwise the request returns 401:\n\n    curl -sS -H \"x-hook-secret: <secret>\" {{appBase}}app/api/agent\n\nThen follow that guide to help me drive and debug this workforce. If you find a bug or a stuck process, the guide explains how to raise an issue or a PR against nanobpm/nano-workforce."
         }
       }
     },
@@ -47,11 +57,26 @@
       "props": {
         "title": "Submit a pull request",
         "submitLabel": "Start review",
-        "action": { "path": "/app/api/actions/start/convergence-loop", "body": "{{form}}" },
+        "action": {
+          "path": "/app/api/actions/start/convergence-loop",
+          "body": "{{form}}"
+        },
         "fields": [
-          { "key": "pr", "label": "owner/repo#123 or a GitHub PR URL", "type": "text" },
-          { "key": "maxRounds", "label": "Max review rounds (blank = fleet default)", "type": "number" },
-          { "key": "convergeOnly", "label": "Converge only — stop at review consensus, do not merge", "type": "checkbox" }
+          {
+            "key": "pr",
+            "label": "owner/repo#123 or a GitHub PR URL",
+            "type": "text"
+          },
+          {
+            "key": "maxRounds",
+            "label": "Max review rounds (blank = fleet default)",
+            "type": "number"
+          },
+          {
+            "key": "convergeOnly",
+            "label": "Converge only \u2014 stop at review consensus, do not merge",
+            "type": "checkbox"
+          }
         ]
       }
     },
@@ -67,50 +92,140 @@
           "kind": "datasource",
           "source": "app",
           "table": "pull_requests",
-          "orderBy": { "field": "updated_at", "dir": "desc" },
+          "orderBy": {
+            "field": "updated_at",
+            "dir": "desc"
+          },
           "filter": [
-            { "field": "status", "in": ["converging", "waiting_review", "escalated", "waiting_deps", "waiting_merge", "queued", "merging"] }
+            {
+              "field": "status",
+              "in": [
+                "converging",
+                "waiting_review",
+                "escalated",
+                "waiting_deps",
+                "waiting_merge",
+                "queued",
+                "merging"
+              ]
+            }
           ]
         },
         "tabs": [
           {
             "label": "Active",
             "filter": [
-              { "field": "status", "in": ["converging", "waiting_review", "escalated", "waiting_deps", "waiting_merge", "queued", "merging"] }
+              {
+                "field": "status",
+                "in": [
+                  "converging",
+                  "waiting_review",
+                  "escalated",
+                  "waiting_deps",
+                  "waiting_merge",
+                  "queued",
+                  "merging"
+                ]
+              }
             ]
           },
           {
             "label": "History",
-            "filter": [{ "field": "status", "in": ["converged", "merged", "abandoned"] }]
+            "filter": [
+              {
+                "field": "status",
+                "in": [
+                  "converged",
+                  "merged",
+                  "abandoned"
+                ]
+              }
+            ]
           }
         ],
         "columns": [
-          { "field": "pr_key", "header": "PR", "linkField": "url" },
-          { "field": "status", "header": "Status", "link": { "kind": "processExplorer", "keyField": "process_key" } },
-          { "field": "incident_message", "header": "Incident", "badge": { "tone": "danger", "label": "1" } },
-          { "field": "current_round", "header": "Round" },
-          { "field": "active_worker", "header": "Agent" },
-          { "field": "updated_at", "header": "Updated" }
+          {
+            "field": "pr_key",
+            "header": "PR",
+            "linkField": "url"
+          },
+          {
+            "field": "status",
+            "header": "Status",
+            "link": {
+              "kind": "processExplorer",
+              "keyField": "process_key"
+            }
+          },
+          {
+            "field": "incident_message",
+            "header": "Incident",
+            "badge": {
+              "tone": "danger",
+              "label": "1"
+            }
+          },
+          {
+            "field": "current_round",
+            "header": "Round"
+          },
+          {
+            "field": "active_worker",
+            "header": "Agent"
+          },
+          {
+            "field": "updated_at",
+            "header": "Updated"
+          }
         ],
         "rowActions": [
           {
             "label": "Cancel",
             "confirm": "Cancel this PR's review run?",
             "showWhenField": "process_key",
-            "action": { "path": "/app/actions/cancel", "body": { "processInstanceKey": "{{row.process_key}}" } }
+            "action": {
+              "path": "/app/actions/cancel",
+              "body": {
+                "processInstanceKey": "{{row.process_key}}"
+              }
+            }
           }
         ],
         "detail": {
           "linkField": "url",
           "fields": [
-            { "field": "repo", "label": "Repository" },
-            { "field": "number", "label": "PR number" },
-            { "field": "active_worker", "label": "Agent (leasing worker)" },
-            { "field": "lease_until", "label": "Activation lease until" },
-            { "field": "incident_message", "label": "Incident" },
-            { "field": "incident_key", "label": "Incident key" },
-            { "field": "merged_at", "label": "Merged at" },
-            { "field": "outcome", "label": "Outcome" }
+            {
+              "field": "repo",
+              "label": "Repository"
+            },
+            {
+              "field": "number",
+              "label": "PR number"
+            },
+            {
+              "field": "active_worker",
+              "label": "Agent (leasing worker)"
+            },
+            {
+              "field": "lease_until",
+              "label": "Activation lease until"
+            },
+            {
+              "field": "incident_message",
+              "label": "Incident"
+            },
+            {
+              "field": "incident_key",
+              "label": "Incident key"
+            },
+            {
+              "field": "merged_at",
+              "label": "Merged at"
+            },
+            {
+              "field": "outcome",
+              "label": "Outcome"
+            }
           ],
           "children": [
             {
@@ -119,14 +234,33 @@
               "table": "rounds",
               "parentField": "pr_key",
               "childField": "pr_key",
-              "orderBy": { "field": "round_no", "dir": "asc" },
+              "orderBy": {
+                "field": "round_no",
+                "dir": "asc"
+              },
               "columns": [
-                { "field": "round_no", "header": "#" },
-                { "field": "status", "header": "Result" },
-                { "field": "worker", "header": "Worker" },
-                { "field": "summary", "header": "Summary" }
+                {
+                  "field": "round_no",
+                  "header": "#"
+                },
+                {
+                  "field": "status",
+                  "header": "Result"
+                },
+                {
+                  "field": "worker",
+                  "header": "Worker"
+                },
+                {
+                  "field": "summary",
+                  "header": "Summary"
+                }
               ],
-              "lazyField": { "field": "transcript", "label": "Transcript", "lazy": true }
+              "lazyField": {
+                "field": "transcript",
+                "label": "Transcript",
+                "lazy": true
+              }
             },
             {
               "title": "Escalations",
@@ -134,16 +268,41 @@
               "table": "escalations",
               "parentField": "pr_key",
               "childField": "pr_key",
-              "orderBy": { "field": "id", "dir": "asc" },
+              "orderBy": {
+                "field": "id",
+                "dir": "asc"
+              },
               "columns": [
-                { "field": "round_no", "header": "#" },
-                { "field": "kind", "header": "Kind" },
-                { "field": "worker", "header": "Worker" },
-                { "field": "question", "header": "Question" },
-                { "field": "status", "header": "Status" },
-                { "field": "answer", "header": "Answer" }
+                {
+                  "field": "round_no",
+                  "header": "#"
+                },
+                {
+                  "field": "kind",
+                  "header": "Kind"
+                },
+                {
+                  "field": "worker",
+                  "header": "Worker"
+                },
+                {
+                  "field": "question",
+                  "header": "Question"
+                },
+                {
+                  "field": "status",
+                  "header": "Status"
+                },
+                {
+                  "field": "answer",
+                  "header": "Answer"
+                }
               ],
-              "lazyField": { "field": "transcript", "label": "Agent response", "lazy": true }
+              "lazyField": {
+                "field": "transcript",
+                "label": "Agent response",
+                "lazy": true
+              }
             },
             {
               "title": "Depends on",
@@ -151,10 +310,19 @@
               "table": "pr_dependencies",
               "parentField": "pr_key",
               "childField": "pr_key",
-              "orderBy": { "field": "created_at", "dir": "asc" },
+              "orderBy": {
+                "field": "created_at",
+                "dir": "asc"
+              },
               "columns": [
-                { "field": "depends_on_key", "header": "PR that must merge first" },
-                { "field": "created_at", "header": "Declared" }
+                {
+                  "field": "depends_on_key",
+                  "header": "PR that must merge first"
+                },
+                {
+                  "field": "created_at",
+                  "header": "Declared"
+                }
               ]
             }
           ],
@@ -167,7 +335,11 @@
             "submitLabel": "Send answer",
             "action": {
               "path": "/app/api/actions/message",
-              "body": { "name": "escalation-answered", "correlationKey": "{{row.pr_key}}", "variables": "{{form}}" }
+              "body": {
+                "name": "escalation-answered",
+                "correlationKey": "{{row.pr_key}}",
+                "variables": "{{form}}"
+              }
             }
           }
         }

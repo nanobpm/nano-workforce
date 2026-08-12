@@ -55,6 +55,18 @@ export interface Plan {
   // Wave-merge barrier (007_wave_gate.sql): the wave index whose PRs the plan is currently
   // waiting to see MERGED before dispatching the next wave, or null when not parked at the barrier.
   gate_wave: number | null;
+  // Operator-visibility wave progress (022_plan_wave_progress.sql, #137): denormalised so the
+  // epics-index can show wave X/N at a glance. `wave_count` is the total waves (N); `current_wave`
+  // is the 0-based index of the wave the fleet is actively implementing (advanced by select-wave,
+  // pinned to wave_count-1 on completion). Display-only — never gates control flow. NULL until the
+  // plan is dispatched with tasks.
+  wave_count: number | null;
+  current_wave: number | null;
+  // Pre-formatted 1-based "X/N" progress string for the epics-index at-a-glance column
+  // (022_plan_wave_progress.sql, #137). The dataGrid has no per-cell templating (nano-ide#214),
+  // so this is projected alongside the numeric columns by the same worker writes. NULL until
+  // dispatched with tasks.
+  wave_label: string | null;
   // Per-plan capability token for the coordination blackboard (009_plan_blackboard.sql, #51).
   // Minted at plan start; baked into the blackboard URL handed to implementer agents. NULL for
   // plans created before the blackboard shipped.

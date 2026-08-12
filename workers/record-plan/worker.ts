@@ -123,6 +123,14 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
   const patch: Record<string, unknown> = {
     status: tasks.length > 0 ? "dispatched" : "done",
     task_count: tasks.length,
+    // Operator-visibility progress projection (issue #137): total waves (N), and the wave the
+    // fleet is actively implementing (0 at dispatch). `select-wave` advances current_wave per
+    // wave; a taskless plan gets no wave (NULL) since there is nothing to implement. Display-only.
+    // All three fields stay NULL until dispatched with tasks — a taskless plan must not leak a
+    // misleading wave_count: 0 while current_wave/wave_label are NULL (inconsistent projection).
+    wave_count: tasks.length > 0 ? waveCount : null,
+    current_wave: tasks.length > 0 ? 0 : null,
+    wave_label: tasks.length > 0 ? `1/${waveCount}` : null,
     updated_at: ts,
   };
   if (tasks.length === 0) patch.outcome = note ? str(note) : "planner emitted no tasks";

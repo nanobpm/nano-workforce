@@ -25,11 +25,12 @@ interface DepRow {
   depends_on_task_id: string;
 }
 
-function fakeApp(rows: Row[], deps: DepRow[]) {
+function fakeApp(rows: Row[], deps: DepRow[], plans: Record<string, unknown>[] = []) {
   return {
+    log: { error() {}, info() {}, warn() {} },
     data: {
       table(name: string, key: string) {
-        const store = name === "plan_tasks" ? rows : deps;
+        const store = name === "plan_tasks" ? rows : name === "plans" ? plans : deps;
         return {
           find: (q: any) =>
             Promise.resolve(
@@ -59,6 +60,36 @@ async function selectWave(rows: Row[], deps: DepRow[]) {
   );
   return out as { waveTasks: unknown[] };
 }
+
+test("select-wave projects the active wave onto plans.current_wave", async () => {
+  const rows: Row[] = [
+    { id: 1, plan_key: "owner/repo#63", task_id: "a", title: "A", prompt: "do A", status: "pending", wave: 1 },
+  ];
+  const plans: Record<string, unknown>[] = [{ plan_key: "owner/repo#63", current_wave: 0 }];
+  const out = await handler(
+    { variables: { planKey: "owner/repo#63", currentWave: 1 } } as any,
+    fakeApp(rows, [], plans),
+  );
+  assertEquals((out as { waveTasks: unknown[] }).waveTasks.length, 1);
+  assertEquals(plans[0].current_wave, 1);
+  // wave_count is derived from the levelized rows (max wave + 1) and the 1-based "X/N" label
+  // is pre-formatted for the epics-index at-a-glance column.
+  assertEquals(plans[0].wave_count, 2);
+  assertEquals(plans[0].wave_label, "2/2");
+});
+
+test("select-wave nulls all three progress fields when there are no levelized rows", async () => {
+  // No plan_tasks rows => waveCount 0. current_wave must be NULL too (not a stray index against a
+  // NULL wave_count/wave_label), matching the documented "NULL until dispatched with tasks".
+  const plans: Record<string, unknown>[] = [{ plan_key: "owner/repo#63", current_wave: 5 }];
+  await handler(
+    { variables: { planKey: "owner/repo#63", currentWave: 0 } } as any,
+    fakeApp([], [], plans),
+  );
+  assertEquals(plans[0].current_wave, null);
+  assertEquals(plans[0].wave_count, null);
+  assertEquals(plans[0].wave_label, null);
+});
 
 test("select-wave leaves dependents pending behind a waiting-for-lane dependency", async () => {
   const rows: Row[] = [

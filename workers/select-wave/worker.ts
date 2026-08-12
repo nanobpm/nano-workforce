@@ -15,7 +15,7 @@
 // Emitting an empty `waveTasks` is fine: the MI activity over an empty collection completes
 // immediately (the same 0-task path the flat fan-out already relied on).
 import type { AppJobHandler } from "@nanobpm/urban";
-import { planTaskDeps, planTasks } from "../../app/plan.ts";
+import { plans, planTaskDeps, planTasks } from "../../app/plan.ts";
 
 interface In extends Record<string, unknown> {
   planKey: string;
@@ -46,6 +46,28 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
   const rows = await taskTable.find({ plan_key: planKey });
   const statusById = new Map<string, string>();
   for (const r of rows) statusById.set(r.task_id, r.status);
+
+  // Operator-visibility projection (issue #137): mark this as the wave the fleet is now
+  // implementing, so the epics-index can show wave X/N at a glance. wave_count is derivable from
+  // the levelized rows (max wave + 1), so the "X/N" label stays correct even if a re-levelize
+  // changed the total. Best-effort + idempotent (a retry re-writes the same value) and
+  // display-only — it must never gate control flow, which stays driven by the process
+  // `currentWave`/`waveCount`/`gate_wave` state.
+  const waveCount = rows.reduce((m, r) => Math.max(m, r.wave ?? 0), -1) + 1;
+  try {
+    await plans(app.data).update(planKey, {
+      // Keep the three progress fields consistent: with no levelized rows (waveCount 0) there is
+      // no wave to implement, so current_wave is NULL too — never a stray index against NULL N.
+      current_wave: waveCount > 0 ? currentWave : null,
+      wave_count: waveCount > 0 ? waveCount : null,
+      wave_label: waveCount > 0 ? `${currentWave + 1}/${waveCount}` : null,
+      updated_at: ts,
+    });
+  } catch (err) {
+    app.log.error(`select-wave: projecting current_wave failed for ${planKey}`, {
+      err: String(err),
+    });
+  }
 
   const deps = await planTaskDeps(app.data).find({ plan_key: planKey });
   const depsByTask = new Map<string, string[]>();
