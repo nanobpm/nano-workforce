@@ -5,7 +5,7 @@
 // planner could revise forever. `positiveIntEnv` must fall back to the default on any value that
 // is not a positive integer, so the loop is always bounded.
 import { test } from "node:test";
-import { assertEquals, assertThrows } from "#test-assert";
+import { assertEquals, assertRejects, assertThrows } from "#test-assert";
 import { positiveIntEnv } from "./plan.ts";
 
 const KEY = "NANO_PLAN_REVIEW_ROUNDS_TEST";
@@ -301,6 +301,64 @@ test("answerTaskEscalation is a no-op when no open escalation matches the correl
   } as any;
   const r = await answerTaskEscalation(data, engine, "owner/repo#9:missing", "x");
   assertEquals(r.ok, false);
+});
+
+// Red/green regression (PR #131 suppressed advisory, app/plan.ts:455).
+//
+// Clearing a trial-merge wave's "Needs attention" row (`resolveTrialMergeAttention`)
+// is a best-effort cosmetic cleanup, but it must be RETRIABLE: if it ran only AFTER
+// the escalation was committed as `answered` and the resume message was published,
+// a transient DB error there would 500 the whole answer flow while the escalation is
+// already answered/resumed — a retry then 404s (no open escalation) and the red row
+// is pinned forever (the very failure the insert-first ordering elsewhere avoids).
+// The fix runs the idempotent resolution BEFORE the commit/publish, so a failure
+// leaves the escalation OPEN and nothing is orphaned — the caller can safely retry.
+test("answerTaskEscalation stays retriable (escalation open, no orphaned resume) when clearing 'Needs attention' fails", async () => {
+  const stores = escalationStores([
+    {
+      id: 1,
+      plan_key: "owner/repo#9",
+      task_id: "trial-merge-wave-0",
+      corr_key: "owner/repo#9:trial-merge-wave-0",
+      question: "Q",
+      status: "open",
+      answer: null,
+    },
+  ]);
+  stores.plan_trial_merges = {
+    rows: [{ id: 100, plan_key: "owner/repo#9", wave: 0, resolved: 0 }],
+    key: "id",
+  };
+  const base = memData(stores);
+  // Inject a transient failure in the trial-merge audit table's `update` only.
+  const data = {
+    table: (name: string, key: string) => {
+      const t = base.table(name, key);
+      if (name === "plan_trial_merges") {
+        return { ...t, update: () => Promise.reject(new Error("transient DB error")) };
+      }
+      return t;
+    },
+  } as any;
+
+  const published: any[] = [];
+  const engine = {
+    publishMessage: (m: any) => {
+      published.push(m);
+      return Promise.resolve();
+    },
+  } as any;
+
+  await assertRejects(() =>
+    answerTaskEscalation(data, engine, "owner/repo#9:trial-merge-wave-0", "proceed")
+  );
+
+  // Escalation must remain OPEN so a retry can recover (never committed as answered).
+  const esc = stores.plan_escalations.rows.find((x: any) => x.id === 1) as any;
+  assertEquals(esc.status, "open");
+  assertEquals(esc.answer, null);
+  // No orphaned resume message was published.
+  assertEquals(published.length, 0);
 });
 
 test("currentPlanReviewEpoch counts answered plan-review escalations only", async () => {
