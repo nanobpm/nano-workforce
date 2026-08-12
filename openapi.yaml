@@ -357,10 +357,9 @@ components:
           description: Plan reference (owner/repo#N), also the message correlation key.
         directive:
           type: string
-          enum:
-            - proceed
-            - revise
           description: >-
+            One of `proceed` or `revise` (case-insensitive; normalized to lowercase and trimmed
+            server-side, see `parsePlanEscalationDirective`).
             `proceed` dispatches the current unapproved plan as an explicit human override;
             `revise` loops back to the planner with the note folded into planFindings and a fresh
             review budget.
@@ -627,9 +626,9 @@ paths:
                       type: string
                     directive:
                       type: string
-                      enum:
-                        - proceed
-                        - revise
+                      description: >-
+                        One of `proceed` or `revise` (case-insensitive; normalized to lowercase and
+                        trimmed server-side, see `parsePlanEscalationDirective`).
                     note:
                       type: string
       responses:

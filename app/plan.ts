@@ -147,12 +147,12 @@ export const planTaskDeps = (data: DataLayer) =>
  * (crash/timeout after the insert) reuses its row instead of appending a duplicate round. */
 export interface PlanReview {
   plan_key: string;
- epoch: number;
- round: number;
- approved: number;
- findings: string | null;
- created_at: string;
- job_key: string | null;
+  epoch: number;
+  round: number;
+  approved: number;
+  findings: string | null;
+  created_at: string;
+  job_key: string | null;
 }
 export const planReviews = (data: DataLayer) => data.table<PlanReview>("plan_reviews", "plan_key");
 
@@ -167,19 +167,19 @@ export function parsePlanEscalationDirective(input: unknown): PlanEscalationDire
  * `plan_escalations`: the latter is task-scoped (`task_id`/`corr_key` are NOT NULL and mirrored
  * onto `plan_tasks`), while this row is plan-scoped and drives the review epoch reset. */
 export interface PlanReviewEscalation {
- id: number;
- plan_key: string;
- epoch: number;
- round: number;
- findings: string | null;
- status: string;
- directive: PlanEscalationDirective | null;
- note: string | null;
- asked_at: string;
- answered_at: string | null;
+  id: number;
+  plan_key: string;
+  epoch: number;
+  round: number;
+  findings: string | null;
+  status: string;
+  directive: PlanEscalationDirective | null;
+  note: string | null;
+  asked_at: string;
+  answered_at: string | null;
 }
 export const planReviewEscalations = (data: DataLayer) =>
- data.table<PlanReviewEscalation>("plan_review_escalations", "id");
+  data.table<PlanReviewEscalation>("plan_review_escalations", "id");
 
 /** Read a positive-integer env override, falling back when unset/blank/invalid. A bad value
  * (e.g. "", "abc", "0", "2.5") must NOT silently become `NaN`/`0` — that would make the round
