@@ -1,3 +1,10 @@
+# [0.45.0](https://github.com/nanobpm/nano-workforce/compare/v0.44.1...v0.45.0) (2026-08-12)
+
+
+### Features
+
+* **plan:** pin an epic's base branch so the fleet lands on an integration branch ([#125](https://github.com/nanobpm/nano-workforce/issues/125)) ([1c3bfa1](https://github.com/nanobpm/nano-workforce/commit/1c3bfa1a1dbc212e31e510931766f46904dae1a3)), closes [#124](https://github.com/nanobpm/nano-workforce/issues/124) [nanobpm/nano-workforce#124](https://github.com/nanobpm/nano-workforce/issues/124)
+
 ## [0.44.1](https://github.com/nanobpm/nano-workforce/compare/v0.44.0...v0.44.1) (2026-08-11)
 
 
