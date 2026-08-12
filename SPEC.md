@@ -511,6 +511,44 @@ the loop runs one parallel `implement` MI fan-out per wave:
   directive in a sub-issue body, mapping each prerequisite `#M` to `issue-M` in the
   adopted task's `dependsOn` — so a human-declared blocking order survives adoption.
 
+### 13.2 Trial-merge integration gate (D3) — issue #69
+
+Before a wave's still-open heads land, the fan-out runs a **D3 trial merge** to catch
+**emergent** conflicts: heads that merge cleanly but whose *combination* breaks the
+target repo's suite. `app/trialMerge.ts` classifies the result `clean | merge-conflict
+| suite-failed`; only `suite-failed` escalates (`trialMergeDecision`). Textual
+merge-conflicts are pass-through — D2/D6 own merge-exclusion and merge-train ordering.
+It runs only for `headCount >= 2` on non-mergify repos (`shouldRunTrialMerge`).
+
+Flow (`resources/processes/plan-fanout.bpmn`): `gw-trial-needed` → `trial-merge`
+(`senior:trial-merge`) → `record-trial-merge` (audit row in `plan_trial_merges`) →
+`gw-trial` (`trial red?`). On red it persists a plan-level escalation
+(`pr.persist-task-escalation`, task id `trial-merge-wave-<N>`, corrKey
+`<plan_key>:trial-merge-wave-<N>`) and parks at `wait-trial-answer`
+(`feature-escalation-answered`). The operator answers exactly `proceed` to override and
+continue, or anything else to **rerun** the trial after pushing a fix.
+
+**Known gap — inherited vs emergent failures (issue #129, PLANNED).** As shipped, D3
+escalates on *any* red combined suite, including a failure that was **already red on
+each head individually** (e.g. a per-PR build defect, or a repo-wide workspace
+build-ordering bug). That parks a human on something that is not an integration
+decision. The target behaviour is an **autonomy ladder**:
+
+1. **Shift-left** — a head whose *required* checks are red never enters the trial merge;
+  the convergence loop's `senior:fix-ci` path owns per-PR failures. D3 only sees
+  individually-green heads.
+2. **Baseline-diff** — the `senior:trial-merge` agent reports, per failing check,
+  whether it was green on each head alone; D3 escalates **only** on checks that
+  *regress under combination* (green-per-head → red-combined) and attributes inherited
+  failures back to the owning head's loop.
+3. **Auto-remediation** — for deterministic, agent-diagnosable classes (build ordering,
+  lockfile drift, renamed scripts) a `senior:integration-fix` agent pushes the fix and
+  reruns the trial before any human is parked (reusing the escalate→wait→rerun/proceed
+  branch from the plan-review escalation, §13.x / PR #128).
+
+A human escalation is then reserved for its one true case: **two slices that each pass
+but encode incompatible decisions about a shared contract** — a genuine design call.
+
 ## 14. Open questions / future
 
 - **Provisioning the existing PR branch** — resolved: the `c8ctl` host-git
@@ -524,6 +562,8 @@ the loop runs one parallel `implement` MI fan-out per wave:
 - **Supervised vs external worker** — the agent runs as an external
   `c8ctl nano work` daemon by default; a supervised in-server mode is possible
   later (ADR 0041 decision).
+- **Autonomous D3** — shift-left + baseline-diff + auto-remediation so the trial-merge
+  gate only escalates genuine cross-slice design conflicts (§13.2, issue #129).
 - **Prompt versioning/hash** per PR for auditability.
 - **Auth on the web UI** — the manifest `security` block (ADR 0028) if this is
   exposed beyond localhost.
