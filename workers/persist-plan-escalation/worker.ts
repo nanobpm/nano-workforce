@@ -22,7 +22,12 @@ const int = (v: unknown): number => {
 };
 
 const handler: AppJobHandler<In, Out> = async (job, app) => {
-  const planKey = job.variables.planKey;
+  const planKey = str(job.variables.planKey);
+  if (!planKey) {
+    // No plan binding means we cannot correlate a resume — fail loudly rather
+    // than silently parking a token that can never be answered.
+    throw new Error("persist-plan-escalation: missing planKey in process scope");
+  }
   const epoch = int(job.variables.planReviewEpoch);
   const round = int(job.variables.planReviewRound);
   const findings = str(job.variables.planFindings) || null;

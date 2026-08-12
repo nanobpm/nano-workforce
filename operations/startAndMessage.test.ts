@@ -162,3 +162,61 @@ test("postMessage → 400 when escalation-answered lacks a correlationKey", asyn
   assertEquals(r.status, 400);
   assertEquals(r.body.error, "correlationKey is required");
 });
+
+function planEscalationMessageApp() {
+  const plans = [{ plan_key: "owner/repo#12", open_plan_escalation_id: 1 }];
+  const escalations = [{
+    id: 1,
+    plan_key: "owner/repo#12",
+    epoch: 0,
+    round: 2,
+    findings: "needs guidance",
+    status: "open",
+    directive: null,
+    note: null,
+  }];
+  const published: any[] = [];
+  const match = (r: Record<string, unknown>, q: Record<string, unknown>) =>
+    Object.entries(q).every(([f, v]) => r[f] === v);
+  const table = (rows: any[], key: string) => ({
+    find: (q: any) => Promise.resolve(rows.filter((r) => match(r, q))),
+    update: (id: any, patch: any) => {
+      const row = rows.find((r) => r[key] === id);
+      if (row) Object.assign(row, patch);
+      return Promise.resolve(row);
+    },
+  });
+  return {
+    app: {
+      data: {
+        table(name: string) {
+          return name === "plans" ? table(plans, "plan_key") : table(escalations, "id");
+        },
+      },
+      engine: {
+        publishMessage: (m: any) => {
+          published.push(m);
+          return Promise.resolve();
+        },
+      },
+      log: noopLog(),
+    } as any as AppApi,
+    escalations,
+    published,
+  };
+}
+
+test("postMessage accepts mixed-case plan escalation directive like the dedicated hook", async () => {
+  const { app: msgApp, escalations, published } = planEscalationMessageApp();
+  const res = await postMessage(input({
+    name: "plan-escalation-answered",
+    correlationKey: "owner/repo#12",
+    variables: { directive: "PrOcEeD", note: "ship it" },
+  }), msgApp);
+  const r = res as any;
+  assertEquals(r.status, 200);
+  assertEquals(r.body.ok, true);
+  assertEquals(r.body.directive, "proceed");
+  assertEquals(escalations[0].directive, "proceed");
+  assertEquals(published[0].variables.planEscalationDirective, "proceed");
+});

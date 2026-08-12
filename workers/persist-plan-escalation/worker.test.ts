@@ -1,5 +1,5 @@
 import { test } from "node:test";
-import { assertEquals } from "#test-assert";
+import { assertEquals, assertRejects } from "#test-assert";
 import { noopLog } from "../../test/log.ts";
 import handler from "./worker.ts";
 
@@ -52,4 +52,16 @@ test("records an open plan-review escalation and surfaces it on the plan", async
   assertEquals(app._plans[0].open_plan_escalation_id, 1);
   assertEquals(app._plans[0].open_plan_findings, "needs a seam");
   assertEquals(app._plans[0].status, "planning");
+});
+
+test("missing planKey fails loudly instead of parking an unanswerable escalation", async () => {
+  const app = fakeApp();
+  await assertRejects(
+    () => handler({
+      variables: { planKey: "   ", planFindings: "needs a seam" },
+      jobKey: "j-missing",
+    } as any, app as any),
+    Error,
+    "persist-plan-escalation: missing planKey in process scope",
+  );
 });

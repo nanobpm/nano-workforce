@@ -1,7 +1,10 @@
 // POST /app/api/hooks/plan-answer → operationId `answerPlanEscalation`. Answers a plan-review
 // cap escalation out of band. The process is parked on `plan-escalation-answered`, correlated by
 // planKey; the answer records the human directive and resumes the plan.
-import { answerPlanEscalation as answerPlanEscalationState } from "../app/plan.ts";
+import {
+  answerPlanEscalation as answerPlanEscalationState,
+  parsePlanEscalationDirective,
+} from "../app/plan.ts";
 import { envVar } from "../app/version.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
 
@@ -20,14 +23,14 @@ export default defineOperation("answerPlanEscalation", async ({ req, body }, app
   }
 
   const planKey = str(body.plan);
-  const directive = str(body.directive).toLowerCase();
+  const directive = parsePlanEscalationDirective(body.directive);
   const note = str(body.note);
   if (!planKey) {
     app.log.warn("plan-answer rejected: missing plan");
     return { status: 400, body: { ok: false, error: "plan is required" } };
   }
-  if (directive !== "proceed" && directive !== "revise") {
-    app.log.warn("plan-answer rejected: invalid directive", { directive });
+  if (!directive) {
+    app.log.warn("plan-answer rejected: invalid directive", { directive: str(body.directive) });
     return { status: 400, body: { ok: false, error: "directive must be proceed or revise" } };
   }
 

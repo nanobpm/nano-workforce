@@ -158,6 +158,11 @@ export const planReviews = (data: DataLayer) => data.table<PlanReview>("plan_rev
 
 export type PlanEscalationDirective = "proceed" | "revise";
 
+export function parsePlanEscalationDirective(input: unknown): PlanEscalationDirective | null {
+  const s = typeof input === "string" ? input.trim().toLowerCase() : "";
+  return s === "proceed" || s === "revise" ? s : null;
+}
+
 /** One plan-review cap escalation. Kept in a dedicated table rather than overloading
  * `plan_escalations`: the latter is task-scoped (`task_id`/`corr_key` are NOT NULL and mirrored
  * onto `plan_tasks`), while this row is plan-scoped and drives the review epoch reset. */
@@ -445,7 +450,7 @@ export async function answerTaskEscalation(
 }
 
 export function normalizePlanEscalationDirective(input: unknown): PlanEscalationDirective {
-  return typeof input === "string" && input.trim().toLowerCase() === "proceed" ? "proceed" : "revise";
+  return parsePlanEscalationDirective(input) ?? "revise";
 }
 
 function renderPlanEscalationFindings(open: PlanReviewEscalation, note: string): string {
