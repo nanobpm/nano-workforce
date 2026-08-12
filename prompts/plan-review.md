@@ -40,6 +40,19 @@ decomposition **from the issues**, then test the plan against it.
   `dependsOn` it. Reject a `dependsOn` edge added purely to **serialise the landing** of otherwise
   parallel work — that is not a fix, it just needlessly serialises implementation; name the pair,
   the shared surface, and which of (a)/(b) the planner should apply.
+- **Package fragmentation (Conway artifact).** The plan gives a cohesive body of work its own
+  published unit **per task** — N tasks ⇒ N npm packages / crates / services — where one library
+  with the slices as **subpath exports / subdirectories** would serve the same consumers. This is
+  the task decomposition leaking into the artifact's module boundaries: separate packages are the
+  frictionless maximum of independence, so they get chosen by default, then have to be
+  un-fragmented by hand (and each extra published unit is a publish/credentials bootstrap +
+  changelog + version cadence forever). Try to disprove that each **new** published-package
+  boundary is **consumer-driven**: is there a distinct external consumer of *it* alone, an
+  intentional independent release cadence, or a different runtime tier? If not for a given
+  package, flag it and demand the remedy: **coarsen the siblings into one package** exposing
+  subpaths, landing a **wave-0 skeleton-scaffold task** (manifest with the full exports map
+  pre-declared + one empty subdirectory per slice) first if the shared manifest would otherwise be
+  a merge collision. Name the packages that lack a consumer-facing justification.
 - **Non-self-contained prompt.** A task's `prompt` can't be executed without reasoning the planner
   kept to itself.
 - **Sequencing intent violated.** If the issues state an ordering (e.g. "audit the foundation
