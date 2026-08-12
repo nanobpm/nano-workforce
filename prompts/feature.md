@@ -26,14 +26,26 @@ process with no memory of your last run, the branch name MUST be derivable from
 (`git ls-remote --heads origin feat/<task.id>` or
 `gh pr list --head feat/<task.id> --state all`):
 
-- **It does not exist** → this is a first run. Branch off the default branch.
+- **It does not exist** → this is a first run. Branch off the base branch (see
+  the note below — usually the repository default branch, but an epic may pin an
+  integration branch in your appended task context).
 - **It exists** → this is a **resume**. `git fetch` and check it out, read its diff
   and any open (draft) PR, and **continue from there** — do not restart from
   scratch. Fold in `variables.answer` as the guidance you were waiting on.
 
+## Your base branch (default branch, unless the epic pins one)
+
+Branch off — and open your PR against — the repository's **default branch**,
+UNLESS your appended task context carries a **"Base branch (authoritative)"**
+note pinning an epic integration branch. When it does, that branch wins
+everywhere below: branch off `origin/<that branch>`, read the epic's latest
+landed state there, and pass `gh pr create --base <that branch>`. A PR opened
+against the wrong base will not be merged into the epic.
+
 ## What to do
 
-1. Clone / check out the repository's default branch (first run) or your existing
+1. Clone / check out your base branch (first run — the default branch, or the
+   pinned epic branch if your context names one) or your existing
    `feat/<task.id>` branch (resume — see above).
 2. Implement `task.prompt`. Keep the change scoped to this slice only.
 3. Commit (sign off — this repo family enforces DCO: `git commit -s`), push the

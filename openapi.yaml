@@ -271,6 +271,15 @@ components:
         issue:
           type: string
           description: "Issue reference: owner/repo#123."
+        baseBranch:
+          type: string
+          description: >-
+            Optional target branch the fleet branches off and opens every PR against, instead of the
+            repository's default branch. Use this to land an entire epic on a long-lived integration
+            branch (e.g. `epic/agent-protocol`) so nothing reaches the default branch — and any
+            merge-to-default side effect, such as auto-publishing a package — until you deliberately
+            merge the integration branch. Blank/omitted keeps the current behaviour (the repo
+            default branch).
     PlanStartByUrl:
       type: object
       additionalProperties: false
@@ -280,6 +289,11 @@ components:
         url:
           type: string
           description: A bare issue URL, when no `owner/repo#123` reference is supplied.
+        baseBranch:
+          type: string
+          description: >-
+            Optional target branch the fleet branches off and opens every PR against, instead of the
+            repository's default branch. See `PlanStartByIssue.baseBranch`.
     MessageResult:
       type: object
       description: The result of publishing a message / answering an escalation. Shape varies by message

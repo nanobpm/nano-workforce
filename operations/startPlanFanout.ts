@@ -26,9 +26,14 @@ export default defineOperation("startPlanFanout", async ({ body }, app) => {
     app.log.warn("start-plan rejected: unparseable issue reference", { raw });
     return { status: 400, body: { error: "could not parse issue (use owner/repo#123 or an issue URL)" } };
   }
-  const result = await startPlan(app.data, app.engine, parsed);
+  // Optional epic base branch: the branch the fleet branches off and opens every PR against instead
+  // of the repo default. Present on both oneOf variants; blank/absent keeps the default-branch
+  // behaviour. `startPlan` normalises blank → null.
+  const baseBranch = "baseBranch" in body && typeof body.baseBranch === "string" ? body.baseBranch : null;
+  const result = await startPlan(app.data, app.engine, parsed, baseBranch);
   app.log.info("plan fan-out started", {
     planKey: parsed.planKey,
+    baseBranch: baseBranch?.trim() || "(default branch)",
     alreadyRunning: "alreadyRunning" in result && result.alreadyRunning === true,
   });
   return { status: 202, body: result };
