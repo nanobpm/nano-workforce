@@ -199,7 +199,7 @@ export const MAX_PLAN_REVIEW_ROUNDS = positiveIntEnv("NANO_PLAN_REVIEW_ROUNDS", 
 /** The current review epoch is derived from the append-only escalation log: every answered
  * plan-review escalation represents a human decision to leave the prior budget behind. */
 export async function currentPlanReviewEpoch(data: DataLayer, planKey: string): Promise<number> {
- return await planReviewEscalations(data).count({ plan_key: planKey, status: "answered" });
+  return await planReviewEscalations(data).count({ plan_key: planKey, status: "answered" });
 }
 
 /** A plan is "done" in exactly these states; everything else (planning, dispatched)
