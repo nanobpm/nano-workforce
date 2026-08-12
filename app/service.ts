@@ -296,7 +296,10 @@ export function repoEnvelopeVars(repo: string, ref: string | null): Record<strin
   // `owner/repo`), but this is an exported helper the fan-out epic gives many new callers. A repo
   // that is not exactly `owner/repo` would build a bogus clone URL, so emit nothing (the harness
   // then falls back to the launch-dir behaviour) rather than handing the harness a malformed URL.
-  if (!/^[^/\s]+\/[^/\s]+$/.test(repo)) return {};
+  // The owner is a GitHub login (alphanumeric + hyphen); the repo-name segment additionally allows
+  // `.` and `_`. A trailing `.git` is rejected outright so we never emit a double-suffixed
+  // `…/owner/repo.git.git`, and the anchored allowlist bars query/fragment/host-injection chars.
+  if (!/^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/.test(repo) || /\.git$/i.test(repo)) return {};
   return {
     [AGENT_TASK_NS]: {
       repository: { provider: "github", url: `https://github.com/${repo}.git`, ref },
