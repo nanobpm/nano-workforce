@@ -30,7 +30,7 @@ function fixture(files: Record<string, string>): string {
   return root;
 }
 
-test("passes when every {{token}} resolves to a non-blank template", async () => {
+test("passes when every {{token}} resolves to a non-blank template that emits a result", async () => {
   const root = await fixture({
     "nano.app.json": MANIFEST,
     "resources/processes/loop.bpmn": header("{{review-round}}"),
@@ -107,7 +107,7 @@ test("checks the real repo: all committed agent prompts resolve", () => {
   assertEquals(res.errors, []);
   assert(res.ok);
   // Every senior:* agent prompt header in the three processes must have resolved.
-  for (const t of ["review-round", "fix-ci", "plan", "plan-review", "feature", "trial-merge"]) {
+  for (const t of ["review-round", "fix-ci", "plan", "plan-review", "feature", "trial-merge", "rebase", "retro"]) {
     assert(res.resolved.includes(t), `expected template ${t} to resolve`);
   }
 });
