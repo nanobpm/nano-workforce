@@ -36,6 +36,7 @@ interface In extends Record<string, unknown> {
 }
 interface Out extends Record<string, unknown> {
   escalationId: number;
+  escalationCorrKey: string;
 }
 
 // A non-blank trimmed string, else undefined. A blank question/PR must not reach
@@ -106,7 +107,14 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
   }
 
   await refreshOpenTaskEscalation(app.data, planKey);
-  return { escalationId };
+  // Emit the correlation key as a single scalar so the downstream
+  // `feature-escalation-answered` catch subscribes on `=escalationCorrKey`
+  // (freshly set, in scope) rather than re-deriving `=planKey + ":" + task.id`.
+  // The concatenation form errored to an empty, unmatchable key whenever `task`
+  // was not a Map at subscription-open, parking the token forever (see the
+  // engine incident fix). The value is identical to `featureCorrKey(planKey,
+  // taskId)`, so the app's answer-publish path still matches.
+  return { escalationId, escalationCorrKey: corrKey };
 };
 
 export default handler;

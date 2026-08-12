@@ -13,6 +13,7 @@ import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { blackboardUrl, mintBlackboardToken, renderCoordinationBrief } from "./blackboard.ts";
 import { clearExclusions } from "./mergeExclusion.ts";
 import { clearTaskDeltas } from "./taskDelta.ts";
+import { resolveTrialMergeAttention, trialMergeWaveFromTaskId } from "./trialMerge.ts";
 
 /** The BPMN process this module drives (resources/processes/plan-fanout.bpmn). */
 export const PLAN_PROCESS_ID = "plan-fanout";
@@ -433,6 +434,20 @@ export async function answerTaskEscalation(
     .sort((a, b) => b.id - a.id)[0];
   if (!open) return { ok: false, reason: "no open escalation" };
   const ts = now();
+  // A trial-merge escalation (task_id `trial-merge-wave-<wave>`) leaves an
+  // append-only red audit row in `plan_trial_merges`. Answering it clears that
+  // row from the page's "Needs attention" tab — including a "proceed" override
+  // that records no re-run row (a re-run would supersede it, but a proceed would
+  // not, pinning the red row forever).
+  //
+  // Resolve it FIRST, before the escalation is committed as answered and the
+  // resume message is published. `resolveTrialMergeAttention` is idempotent, so
+  // if this throws (e.g. a transient DB error) the escalation is still open and
+  // the whole operation retries cleanly. Running it AFTER the commit/publish
+  // would make a failure here unrecoverable: the escalation is already answered,
+  // a retry 404s (no open escalation), and the red row is pinned forever.
+  const trialWave = trialMergeWaveFromTaskId(open.task_id);
+  if (trialWave != null) await resolveTrialMergeAttention(data, open.plan_key, trialWave);
   await planEscalations(data).update(open.id, { answer, status: "answered", answered_at: ts });
   // Mirror onto the task row so a re-dispatched agent (and the UI) sees the answer.
   for (const t of await planTasks(data).find({ plan_key: open.plan_key, task_id: open.task_id })) {
