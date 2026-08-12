@@ -28,6 +28,20 @@
       }
     },
     {
+      "type": "button",
+      "id": "agent-instructions",
+      "props": {
+        "label": "🤖 Agent Instructions",
+        "variant": "ghost",
+        "modal": {
+          "title": "Point your agent at Nano Workforce",
+          "description": "Copy this prompt and paste it into your coding agent (Copilot, Claude, etc.). It tells the agent to read this workforce's live operator guide, then help you drive and debug it.",
+          "copyLabel": "Copy prompt",
+          "copyText": "You are helping me operate a running Nano Workforce instance — a durable orchestration app that drives pull requests to review convergence against an automated reviewer, merges them, and can take a whole issue and plan \u2192 implement \u2192 converge it across a fleet of coding agents.\n\nFirst, fetch and read its live operator guide. It tells you how to submit PRs and epics for convergence (including whether to go all the way to merge or stop at review consensus), how to find engine instances and relate them to PRs via the Nano/Camunda-8 REST API, how to inspect the models and prompts, and how to help me untangle escalations:\n\n    curl -sS {{appBase}}app/api/agent\n\nIf this instance is secured with a shared secret (NANO_PR_WEBHOOK_SECRET), add its value as an x-hook-secret header, otherwise the request returns 401:\n\n    curl -sS -H \"x-hook-secret: <secret>\" {{appBase}}app/api/agent\n\nThen follow that guide to help me drive and debug this workforce. If you find a bug or a stuck process, the guide explains how to raise an issue or a PR against nanobpm/nano-workforce."
+        }
+      }
+    },
+    {
       "type": "actionForm",
       "id": "submit",
       "props": {
