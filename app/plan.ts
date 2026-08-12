@@ -44,6 +44,13 @@ export interface Plan {
   open_task_question: string | null;
   open_task_corr_key: string | null;
   open_task_id: string | null;
+  // Denormalised "open plan-review escalation" pointer (# plan-review escalation): when the
+  // adversarial plan-review cap is reached without approval, the process parks for a human
+  // proceed/revise directive. These fields surface the newest open plan-level escalation on the
+  // plans page without overloading the implementation-phase `plan_escalations` table.
+  open_plan_escalation_id: number | null;
+  open_plan_findings: string | null;
+  open_plan_round: number | null;
   // Wave-merge barrier (007_wave_gate.sql): the wave index whose PRs the plan is currently
   // waiting to see MERGED before dispatching the next wave, or null when not parked at the barrier.
   gate_wave: number | null;
@@ -115,6 +122,10 @@ export const planEscalations = (data: DataLayer) =>
  * subscription correlates on `<plan_key>:<task_id>` (see plan-fanout.bpmn). */
 export const FEATURE_ESCALATION_MESSAGE = "feature-escalation-answered";
 
+/** The message the plan-fanout process catches to resume a plan-review escalation; its
+ * subscription correlates on `<plan_key>` (see plan-fanout.bpmn). */
+export const PLAN_ESCALATION_MESSAGE = "plan-escalation-answered";
+
 /** Build the per-task message correlation key the process parks on. */
 export const featureCorrKey = (planKey: string, taskId: string) => `${planKey}:${taskId}`;
 
@@ -136,6 +147,7 @@ export const planTaskDeps = (data: DataLayer) =>
  * (crash/timeout after the insert) reuses its row instead of appending a duplicate round. */
 export interface PlanReview {
   plan_key: string;
+  epoch: number;
   round: number;
   approved: number;
   findings: string | null;
@@ -143,6 +155,31 @@ export interface PlanReview {
   job_key: string | null;
 }
 export const planReviews = (data: DataLayer) => data.table<PlanReview>("plan_reviews", "plan_key");
+
+export type PlanEscalationDirective = "proceed" | "revise";
+
+export function parsePlanEscalationDirective(input: unknown): PlanEscalationDirective | null {
+  const s = typeof input === "string" ? input.trim().toLowerCase() : "";
+  return s === "proceed" || s === "revise" ? s : null;
+}
+
+/** One plan-review cap escalation. Kept in a dedicated table rather than overloading
+ * `plan_escalations`: the latter is task-scoped (`task_id`/`corr_key` are NOT NULL and mirrored
+ * onto `plan_tasks`), while this row is plan-scoped and drives the review epoch reset. */
+export interface PlanReviewEscalation {
+  id: number;
+  plan_key: string;
+  epoch: number;
+  round: number;
+  findings: string | null;
+  status: string;
+  directive: PlanEscalationDirective | null;
+  note: string | null;
+  asked_at: string;
+  answered_at: string | null;
+}
+export const planReviewEscalations = (data: DataLayer) =>
+  data.table<PlanReviewEscalation>("plan_review_escalations", "id");
 
 /** Read a positive-integer env override, falling back when unset/blank/invalid. A bad value
  * (e.g. "", "abc", "0", "2.5") must NOT silently become `NaN`/`0` — that would make the round
@@ -154,10 +191,16 @@ export function positiveIntEnv(name: string, fallback: number): number {
   return Number.isInteger(n) && n > 0 ? n : fallback;
 }
 
-/** Max adversarial plan-review rounds. Reaching the cap WITHOUT approval is a hard failure: the
- * fan-out raises a `PLAN_REJECTED` incident rather than dispatching an un-approved plan (issue
- * #86). The last round's findings are still recorded. */
+/** Max adversarial plan-review rounds per epoch. Reaching the cap WITHOUT approval parks the
+ * fan-out on a human plan-review escalation rather than dispatching an un-approved plan (issue
+ * #86). A human `revise` answer starts a fresh epoch, so the next plan gets a full new budget. */
 export const MAX_PLAN_REVIEW_ROUNDS = positiveIntEnv("NANO_PLAN_REVIEW_ROUNDS", 3);
+
+/** The current review epoch is derived from the append-only escalation log: every answered
+ * plan-review escalation represents a human decision to leave the prior budget behind. */
+export async function currentPlanReviewEpoch(data: DataLayer, planKey: string): Promise<number> {
+  return await planReviewEscalations(data).count({ plan_key: planKey, status: "answered" });
+}
 
 /** A plan is "done" in exactly these states; everything else (planning, dispatched)
  * is in flight. The cancel guard and the active view key off this. */
@@ -279,13 +322,17 @@ export async function startPlan(
     // Clear them here — the table is keyed on `plan_key`, so one delete drops the
     // whole set (mirrors how record-plan clears `plan_task_deps`).
     await planReviews(data).delete(parsed.planKey);
-    // Same class of stale-row bug for the implementation-phase escalation state
-    // (issue #25): `plan_escalations` is keyed on `id` (not `plan_key`), so drop
-    // the prior run's rows one-by-one. Otherwise a still-"open" escalation from
-    // the previous run survives the re-plan and `refreshOpenTaskEscalation`
-    // re-surfaces a question for a `task_id` we just deleted from `plan_tasks`.
+    // Same class of stale-row bug for escalation state: task escalations are keyed on `id` (not
+    // `plan_key`), so drop the prior run's rows one-by-one. Otherwise a still-"open" escalation
+    // from the previous run survives the re-plan and `refreshOpenTaskEscalation` re-surfaces a
+    // question for a `task_id` we just deleted from `plan_tasks`.
     for (const e of await planEscalations(data).find({ plan_key: parsed.planKey })) {
       await planEscalations(data).delete(e.id);
+    }
+    // Plan-review escalations are also keyed on `id` because they are an audit trail; clear them
+    // on a fresh submission so the epoch derived from answered escalations resets to 0.
+    for (const e of await planReviewEscalations(data).find({ plan_key: parsed.planKey })) {
+      await planReviewEscalations(data).delete(e.id);
     }
     // Same for the structured impl-change deltas (D5, #55): keyed on `id`, so drop the prior run's
     // rows one-by-one, otherwise a stale delta lingers in the epic report for a task we just deleted.
@@ -303,6 +350,9 @@ export async function startPlan(
       open_task_question: null,
       open_task_corr_key: null,
       open_task_id: null,
+      open_plan_escalation_id: null,
+      open_plan_findings: null,
+      open_plan_round: null,
       blackboard_token: token,
       base_branch: base,
       updated_at: ts,
@@ -397,4 +447,64 @@ export async function answerTaskEscalation(
   });
   await refreshOpenTaskEscalation(data, open.plan_key);
   return { ok: true, escalationId: open.id, planKey: open.plan_key, taskId: open.task_id };
+}
+
+export function normalizePlanEscalationDirective(input: unknown): PlanEscalationDirective {
+  return parsePlanEscalationDirective(input) ?? "revise";
+}
+
+function renderPlanEscalationFindings(open: PlanReviewEscalation, note: string): string {
+  const parts = [
+    `Plan review reached its round budget at epoch ${open.epoch}, round ${open.round}.`,
+    "",
+    "Reviewer findings:",
+    (open.findings ?? "").trim() || "(no reviewer findings were provided.)",
+  ];
+  if (note) {
+    parts.push("", "Human guidance:", note);
+  } else {
+    parts.push("", "Human directive: revise the plan within the allowed task boundaries.");
+  }
+  return parts.join("\n");
+}
+
+/** Answer the newest open plan-review escalation. `proceed` is an explicit human override that lets
+  * the current (unapproved) plan continue to wave dispatch; `revise` (the default) folds the human
+  * note into `planFindings` and starts a fresh review epoch on the next planner pass. */
+export async function answerPlanEscalation(
+  data: DataLayer,
+  engine: EngineClient,
+  planKey: string,
+  directiveInput: unknown,
+  noteInput: unknown,
+) {
+  const open = (await planReviewEscalations(data).find({ plan_key: planKey, status: "open" }))
+    .sort((a, b) => b.id - a.id)[0];
+  if (!open) return { ok: false, reason: "no open plan escalation" };
+
+  const directive = normalizePlanEscalationDirective(directiveInput);
+  const note = typeof noteInput === "string" ? noteInput.trim() : "";
+  const ts = now();
+  await planReviewEscalations(data).update(open.id, {
+    directive,
+    note: note || null,
+    status: "answered",
+    answered_at: ts,
+  });
+  await plans(data).update(planKey, {
+    open_plan_escalation_id: null,
+    open_plan_findings: null,
+    open_plan_round: null,
+    updated_at: ts,
+  });
+
+  await engine.publishMessage({
+    name: PLAN_ESCALATION_MESSAGE,
+    correlationKey: planKey,
+    variables: {
+      planEscalationDirective: directive,
+      planFindings: directive === "revise" ? renderPlanEscalationFindings(open, note) : "",
+    },
+  });
+  return { ok: true, escalationId: open.id, planKey, directive };
 }

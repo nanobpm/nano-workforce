@@ -151,9 +151,19 @@ curl -sS -X POST __BASE__/hooks/feature-answer \
 
 If `NANO_PR_WEBHOOK_SECRET` is set on the deployment, add `-H "x-hook-secret: <secret>"`.
 
-Guidance for the human you assist: read the escalation `question` first (it is the
-exact blocker text the agent surfaced), decide the smallest unblocking answer, and
-answer it precisely — the answer becomes the agent's next-round context.
+**Answer a plan-review escalation** raised when the adversarial plan review cannot
+converge within its round budget. Use `revise` to send guidance back to the planner
+with a fresh review budget, or `proceed` to explicitly approve the current plan as-is:
+
+```bash
+curl -sS -X POST __BASE__/hooks/plan-answer \
+  -H 'content-type: application/json' \
+  -d '{ "plan": "owner/repo#123", "directive": "revise", "note": "Keep the sub-issues 1:1; make issue-7 the seam and point siblings at it." }'
+```
+
+Guidance for the human you assist: read the escalation `question` or plan-review
+`findings` first, decide the smallest unblocking answer, and answer it precisely —
+the answer becomes the agent's next-round context.
 
 ---
 
