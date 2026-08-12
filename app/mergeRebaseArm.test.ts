@@ -29,6 +29,16 @@ function hasFlow(source: string, target: string): boolean {
   return re.test(flat);
 }
 
+// Assert a specific `<sequenceFlow>` (matched by id) has the given source/target, regardless of
+// attribute order. Unlike `hasFlow`, this pins the *named* flow so a test can't be satisfied by a
+// sibling flow that happens to share the same source/target (e.g. a success arm masking a default).
+function flowHasId(id: string, source: string, target: string): boolean {
+  const m = flat.match(new RegExp(`<bpmn:sequenceFlow\\b[^>]*\\bid="${id}"[^>]*/?>`));
+  if (!m) return false;
+  const tag = m[0];
+  return tag.includes(`sourceRef="${source}"`) && tag.includes(`targetRef="${target}"`);
+}
+
 test("conflict routes to the rebase budget gate, not straight to a human", () => {
   // The conflict verdict must reach the auto-rebase gate…
   assert(hasFlow("gw-mergeable", "gw-rebase"), "gw-mergeable → gw-rebase (conflict) missing");
@@ -69,7 +79,12 @@ test("rebase result: a missing/ambiguous status reconciles from ground truth, no
   // now re-arms the merge poller, which re-checks `gw-mergeable` from GitHub state — bounded by
   // the existing rebaseMax budget — instead of pulling in a human.
   assertStringIncludes(flat, 'id="gw-rebase-result" name="rebased?" default="f_reb_reconcile"');
-  assert(hasFlow("gw-rebase-result", "arm-merge"), "gw-rebase-result → arm-merge (reconcile) missing");
+  // Pin the *default* reconcile flow itself, not just any gw-rebase-result → arm-merge edge (the
+  // success arm `f_reb_rebased` shares that target), so a mis-wired default can't pass silently.
+  assert(
+    flowHasId("f_reb_reconcile", "gw-rebase-result", "arm-merge"),
+    "f_reb_reconcile must default gw-rebase-result → arm-merge (reconcile)",
+  );
   // Escalation is now reserved for the agent's explicit "I cannot proceed" verdict.
   assertStringIncludes(flat, 'id="f_reb_blocked"');
   const rebBlocked = flat.match(/<bpmn:sequenceFlow[^>]*id="f_reb_blocked"[\s\S]*?<\/bpmn:sequenceFlow>/);
@@ -81,7 +96,12 @@ test("ci-fix result: a missing/ambiguous status reconciles from ground truth, no
   // Symmetric to the rebase arm: the CI-fix agent's no-verdict default re-arms the merge poller
   // (ground-truth re-check, bounded by ciFixMax) rather than escalating a possibly-green PR.
   assertStringIncludes(flat, 'id="gw-ci-result" name="fixed?" default="f_ci_reconcile"');
-  assert(hasFlow("gw-ci-result", "arm-merge"), "gw-ci-result → arm-merge (reconcile) missing");
+  // Pin the *default* reconcile flow itself, not just any gw-ci-result → arm-merge edge (the
+  // success arm `f_ci_fixed` shares that target), so a mis-wired default can't pass silently.
+  assert(
+    flowHasId("f_ci_reconcile", "gw-ci-result", "arm-merge"),
+    "f_ci_reconcile must default gw-ci-result → arm-merge (reconcile)",
+  );
   // Escalation reserved for the agent's explicit `blocked` verdict.
   const ciBlocked = flat.match(/<bpmn:sequenceFlow[^>]*id="f_ci_blocked"[\s\S]*?<\/bpmn:sequenceFlow>/);
   assert(ciBlocked, "f_ci_blocked flow missing");
