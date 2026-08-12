@@ -50,7 +50,7 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.11",
-    "@nanobpm/urban-testkit": "^0.3.0",
+    "@nanobpm/urban-testkit": "^0.4.0",
     "@semantic-release/changelog": "^6.0.3",
     "@semantic-release/git": "^10.0.1",
     "@semantic-release/npm": "^13.1.5",
