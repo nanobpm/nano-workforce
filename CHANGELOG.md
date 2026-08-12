@@ -1,3 +1,10 @@
+## [0.46.1](https://github.com/nanobpm/nano-workforce/compare/v0.46.0...v0.46.1) (2026-08-12)
+
+
+### Bug Fixes
+
+* **trial-merge:** durable "needs attention" resolution + robust escalation key ([#131](https://github.com/nanobpm/nano-workforce/issues/131)) ([71200e8](https://github.com/nanobpm/nano-workforce/commit/71200e814a8c035a79f1eec37303781c70b6e6c0))
+
 # [0.46.0](https://github.com/nanobpm/nano-workforce/compare/v0.45.0...v0.46.0) (2026-08-12)
 
 
