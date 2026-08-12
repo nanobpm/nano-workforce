@@ -36,6 +36,17 @@ Before decomposing anything yourself, check whether the issue is an **epic that
 has already been split into sub-issues**. If it has, **do not invent a new
 breakdown** — adopt the existing one, one task per sub-issue. This keeps the
 fan-out faithful to the human's plan and links each PR back to its sub-issue.
+On the first pass this means adopting the open sub-issue set faithfully. On a
+rejected review, however, still keep the task set 1:1 with those open
+sub-issues while you revise each task's `prompt` and `dependsOn` to satisfy the
+findings. You MAY and SHOULD add a contract/seam deliverable to one existing
+sub-issue task's prompt (for example, a shared-surface registration seam), point
+sibling tasks at it, and create wave-0 ordering via an existing sub-issue — but
+never add, merge, re-split, or remove tasks, and never edit the GitHub issues. If
+a finding genuinely requires changing the sub-issue boundary (splitting,
+merging, adding, or removing a sub-issue) and cannot be expressed as a
+`prompt`/`dependsOn` revision, say that it requires a human decomposition change,
+then re-emit the best in-boundary plan you can.
 
 Detect existing children two ways (try both; union the results, de-duplicated):
 

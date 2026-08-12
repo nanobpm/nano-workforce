@@ -120,6 +120,10 @@
       "handler": "workers/persist-task-escalation/worker.ts"
     },
     {
+      "taskType": "pr.persist-plan-escalation",
+      "handler": "workers/persist-plan-escalation/worker.ts"
+    },
+    {
       "taskType": "pr.retro-gather",
       "handler": "workers/retro-gather/worker.ts"
     },

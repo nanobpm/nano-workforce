@@ -1,15 +1,20 @@
 // POST /app/api/actions/message → operationId `postMessage` (ADR 0058, base /app/api).
 // Replaces the hand-rolled action that overrode the generic publishMessage action. For the
-// `escalation-answered` message we run the review answer flow, and for `feature-escalation-answered`
-// (issue #25) the implementation-phase (per-task) answer flow: record the answer, resume the parked
-// token, then re-surface the next open escalation. Any other message falls back to a plain
-// publishMessage.
+// `escalation-answered` message we run the review answer flow, for `feature-escalation-answered`
+// (issue #25) the implementation-phase (per-task) answer flow, and for
+// `plan-escalation-answered` the plan-review cap answer flow. Any other message falls back to a
+// plain publishMessage.
 //
 // The runtime validates the body against openapi.yaml (`name` is required, so a missing name is a 400
 // for free); this delegate keeps the message-name dispatch — the discriminator + downstream behavior
 // is app logic, not something the JSON schema can express.
 
-import { answerTaskEscalation, FEATURE_ESCALATION_MESSAGE } from "../app/plan.ts";
+import {
+  answerPlanEscalation,
+  answerTaskEscalation,
+  FEATURE_ESCALATION_MESSAGE,
+  PLAN_ESCALATION_MESSAGE,
+} from "../app/plan.ts";
 import { answerEscalation } from "../app/service.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
 
@@ -43,6 +48,20 @@ export default defineOperation("postMessage", async ({ body }, app) => {
     const r = await answerTaskEscalation(app.data, app.engine, corrKey, answer);
     if (r.ok) app.log.info("feature escalation answered", { name, corrKey });
     else app.log.warn("postMessage: no open feature escalation to answer", { name, corrKey });
+    return { status: r.ok ? 200 : 404, body: r };
+  }
+
+  if (name === PLAN_ESCALATION_MESSAGE) {
+    const planKey = String(b.correlationKey ?? "");
+    const directive = String(b.variables?.directive ?? "revise").trim();
+    const note = String(b.variables?.note ?? b.variables?.answer ?? "").trim();
+    if (!planKey) return { status: 400, body: { error: "correlationKey is required" } };
+    if (directive !== "proceed" && directive !== "revise") {
+      return { status: 400, body: { error: "directive must be proceed or revise" } };
+    }
+    const r = await answerPlanEscalation(app.data, app.engine, planKey, directive, note);
+    if (r.ok) app.log.info("plan escalation answered", { name, planKey, directive });
+    else app.log.warn("postMessage: no open plan escalation to answer", { name, planKey });
     return { status: r.ok ? 200 : 404, body: r };
   }
 

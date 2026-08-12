@@ -70,7 +70,23 @@
           { "field": "status", "header": "Status", "link": { "kind": "processExplorer", "keyField": "process_key" } },
           { "field": "task_count", "header": "Tasks" },
           { "field": "open_task_id", "header": "Open escalation" },
+          { "field": "open_plan_round", "header": "Plan escalation round" },
           { "field": "updated_at", "header": "Updated" }
+        ],
+        "rowActions": [
+          {
+            "label": "Proceed with plan",
+            "confirm": "Dispatch the current unapproved plan as a human override?",
+            "showWhenField": "open_plan_escalation_id",
+            "action": {
+              "path": "/app/api/actions/message",
+              "body": {
+                "name": "plan-escalation-answered",
+                "correlationKey": "{{row.plan_key}}",
+                "variables": { "directive": "proceed", "note": "Proceed override from the plans page." }
+              }
+            }
+          }
         ],
         "detail": {
           "linkField": "issue_url",
@@ -79,8 +95,25 @@
             { "field": "issue_number", "label": "Issue number" },
             { "field": "base_branch", "label": "Base branch (blank = repo default)" },
             { "field": "outcome", "label": "Outcome" },
+            { "field": "open_plan_findings", "label": "Open plan-review findings" },
             { "field": "open_task_question", "label": "Open escalation question" }
-          ]
+          ],
+          "form": {
+            "showWhenField": "open_plan_escalation_id",
+            "title": "Answer the open plan-review escalation",
+            "promptField": "open_plan_findings",
+            "inputKey": "note",
+            "inputLabel": "Revision directive note for the planner",
+            "submitLabel": "Revise plan",
+            "action": {
+              "path": "/app/api/actions/message",
+              "body": {
+                "name": "plan-escalation-answered",
+                "correlationKey": "{{row.plan_key}}",
+                "variables": { "directive": "revise", "note": "{{form.note}}" }
+              }
+            }
+          }
         }
       }
     },
@@ -99,9 +132,36 @@
         "columns": [
           { "field": "plan_key", "header": "Plan" },
           { "field": "round", "header": "Round" },
+          { "field": "epoch", "header": "Epoch" },
           { "field": "approved", "header": "Approved? (1/0)" },
           { "field": "findings", "header": "Reviewer findings" },
           { "field": "created_at", "header": "Recorded" }
+        ]
+      }
+    },
+    {
+      "type": "dataGrid",
+      "id": "plan-review-escalations",
+      "props": {
+        "title": "Plan-review escalations",
+        "rowKey": "id",
+        "refreshMs": 5000,
+        "data": {
+          "kind": "datasource",
+          "source": "app",
+          "table": "plan_review_escalations",
+          "orderBy": { "field": "id", "dir": "desc" }
+        },
+        "columns": [
+          { "field": "plan_key", "header": "Plan" },
+          { "field": "epoch", "header": "Epoch" },
+          { "field": "round", "header": "Round" },
+          { "field": "findings", "header": "Findings" },
+          { "field": "status", "header": "Status" },
+          { "field": "directive", "header": "Directive" },
+          { "field": "note", "header": "Human note" },
+          { "field": "asked_at", "header": "Asked" },
+          { "field": "answered_at", "header": "Answered" }
         ]
       }
     },

@@ -70,6 +70,10 @@ function memTable(rows: any[], key: string) {
       rows.push(r);
       return Promise.resolve(r);
     },
+    count: (q: any) =>
+      Promise.resolve(
+        rows.filter((r) => Object.entries(q).every(([f, v]) => r[f] === v)).length,
+      ),
     update: (k: any, patch: any) => {
       const r = rows.find((x) => x[key] === k);
       if (r) Object.assign(r, patch);
@@ -97,8 +101,8 @@ test("re-plan of a finished issue clears stale plan_reviews rows", async () => {
     },
     plan_reviews: {
       rows: [
-        { plan_key: PLAN_KEY, round: 0 },
-        { plan_key: PLAN_KEY, round: 1 },
+        { plan_key: PLAN_KEY, epoch: 0, round: 0 },
+        { plan_key: PLAN_KEY, epoch: 0, round: 1 },
       ],
       key: "plan_key",
     },
@@ -195,7 +199,13 @@ test("re-plan of a finished issue clears stale open escalations and the denormal
 // task row, and publishing the correlated resume message — that had no unit coverage. These
 // drive both against the in-memory data layer above and assert the oldest-first surfacing,
 // the answer mirroring, and the published message.
-import { answerTaskEscalation, refreshOpenTaskEscalation } from "./plan.ts";
+import {
+  answerPlanEscalation,
+  answerTaskEscalation,
+  currentPlanReviewEpoch,
+  PLAN_ESCALATION_MESSAGE,
+  refreshOpenTaskEscalation,
+} from "./plan.ts";
 
 function escalationStores(rows: unknown[]): Record<string, { rows: unknown[]; key: string }> {
   return {
@@ -291,6 +301,73 @@ test("answerTaskEscalation is a no-op when no open escalation matches the correl
   } as any;
   const r = await answerTaskEscalation(data, engine, "owner/repo#9:missing", "x");
   assertEquals(r.ok, false);
+});
+
+test("currentPlanReviewEpoch counts answered plan-review escalations only", async () => {
+  const stores = {
+    plan_review_escalations: {
+      rows: [
+        { id: 1, plan_key: "owner/repo#10", status: "answered" },
+        { id: 2, plan_key: "owner/repo#10", status: "open" },
+        { id: 3, plan_key: "owner/repo#other", status: "answered" },
+      ],
+      key: "id",
+    },
+  };
+  assertEquals(await currentPlanReviewEpoch(memData(stores), "owner/repo#10"), 1);
+});
+
+test("answerPlanEscalation records directive, clears the plan pointer, and publishes the resume message", async () => {
+  const stores = {
+    plans: {
+      rows: [{
+        plan_key: "owner/repo#11",
+        open_plan_escalation_id: 7,
+        open_plan_findings: "reviewer findings",
+        open_plan_round: 2,
+      }],
+      key: "plan_key",
+    },
+    plan_review_escalations: {
+      rows: [{
+        id: 7,
+        plan_key: "owner/repo#11",
+        epoch: 0,
+        round: 2,
+        findings: "reviewer findings",
+        status: "open",
+        directive: null,
+        note: null,
+      }],
+      key: "id",
+    },
+  };
+  const published: any[] = [];
+  const engine = {
+    publishMessage: (m: any) => {
+      published.push(m);
+      return Promise.resolve();
+    },
+  } as any;
+
+  const r = await answerPlanEscalation(memData(stores), engine, "owner/repo#11", "revise", "Use issue-1 as seam.");
+  assertEquals(r.ok, true);
+  assertEquals(r.directive, "revise");
+  const esc = stores.plan_review_escalations.rows[0] as any;
+  assertEquals(esc.status, "answered");
+  assertEquals(esc.directive, "revise");
+  assertEquals(esc.note, "Use issue-1 as seam.");
+  const plan = stores.plans.rows[0] as any;
+  assertEquals(plan.open_plan_escalation_id, null);
+  assertEquals(plan.open_plan_findings, null);
+  assertEquals(plan.open_plan_round, null);
+  assertEquals(published[0].name, PLAN_ESCALATION_MESSAGE);
+  assertEquals(published[0].correlationKey, "owner/repo#11");
+  assertEquals(published[0].variables.planEscalationDirective, "revise");
+  assertEquals(
+    String(published[0].variables.planFindings).includes("Use issue-1 as seam."),
+    true,
+  );
 });
 
 // Coverage for the epic base-branch control (issue nano-ide #124 / 019_plan_base_branch.sql).

@@ -345,6 +345,28 @@ components:
           type: string
           minLength: 1
           description: The operator's answer that resumes the parked implementation agent.
+    PlanAnswerRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - plan
+        - directive
+      properties:
+        plan:
+          type: string
+          description: Plan reference (owner/repo#N), also the message correlation key.
+        directive:
+          type: string
+          enum:
+            - proceed
+            - revise
+          description: >-
+            `proceed` dispatches the current unapproved plan as an explicit human override;
+            `revise` loops back to the planner with the note folded into planFindings and a fresh
+            review budget.
+        note:
+          type: string
+          description: Human guidance for the planner (used for `revise`; optional for `proceed`).
     BlackboardEntry:
       type: object
       additionalProperties: false
@@ -578,9 +600,9 @@ paths:
   /actions/message:
     post:
       operationId: postMessage
-      summary: Publish a message / answer an escalation. For escalation-answered and
-        feature-escalation-answered names, runs the corresponding answer flow; otherwise a plain
-        publishMessage.
+      summary: Publish a message / answer an escalation. For escalation-answered,
+        feature-escalation-answered, and plan-escalation-answered names, runs the corresponding
+        answer flow; otherwise a plain publishMessage.
       requestBody:
         required: true
         content:
@@ -602,6 +624,13 @@ paths:
                   additionalProperties: true
                   properties:
                     answer:
+                      type: string
+                    directive:
+                      type: string
+                      enum:
+                        - proceed
+                        - revise
+                    note:
                       type: string
       responses:
         "200":
@@ -657,6 +686,45 @@ paths:
                 $ref: "#/components/schemas/MessageResult"
         "404":
           description: No matching open task escalation for the correlation key.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResult"
+  /hooks/plan-answer:
+    post:
+      operationId: answerPlanEscalation
+      summary: "Answer a plan-review cap escalation out of band. Optional shared-secret guard
+        (x-hook-secret), enforced only when NANO_PR_WEBHOOK_SECRET is set."
+      security:
+        - hookSecret: []
+        - {}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PlanAnswerRequest"
+      responses:
+        "200":
+          description: The escalation was answered and the parked plan resumed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResult"
+        "400":
+          description: A required field was missing (plan or directive).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResult"
+        "401":
+          description: Missing/invalid shared secret (only when NANO_PR_WEBHOOK_SECRET is set).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResult"
+        "404":
+          description: No matching open plan escalation for the plan key.
           content:
             application/json:
               schema:
