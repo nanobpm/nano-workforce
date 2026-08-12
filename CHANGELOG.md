@@ -1,3 +1,10 @@
+# [0.47.0](https://github.com/nanobpm/nano-workforce/compare/v0.46.2...v0.47.0) (2026-08-12)
+
+
+### Features
+
+* **ui:** Agent Instructions button (copy-paste agent prompt) ([#126](https://github.com/nanobpm/nano-workforce/issues/126)) ([4c022ab](https://github.com/nanobpm/nano-workforce/commit/4c022abcbaa90501cacc27ac0b9c8d77b3f81df1)), closes [nanobpm/nano-ide#196](https://github.com/nanobpm/nano-ide/issues/196)
+
 ## [0.46.2](https://github.com/nanobpm/nano-workforce/compare/v0.46.1...v0.46.2) (2026-08-12)
 
 
