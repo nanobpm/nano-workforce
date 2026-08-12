@@ -1,3 +1,10 @@
+# [0.48.0](https://github.com/nanobpm/nano-workforce/compare/v0.47.0...v0.48.0) (2026-08-12)
+
+
+### Features
+
+* **pages:** render PR incident as a red badge on the home grid ([#132](https://github.com/nanobpm/nano-workforce/issues/132)) ([7a58015](https://github.com/nanobpm/nano-workforce/commit/7a58015676b8d0ca6ec7b28c7943504b5f3dfb0e)), closes [#94](https://github.com/nanobpm/nano-workforce/issues/94)
+
 # [0.47.0](https://github.com/nanobpm/nano-workforce/compare/v0.46.2...v0.47.0) (2026-08-12)
 
 
