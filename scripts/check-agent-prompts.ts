@@ -72,6 +72,33 @@ function hasBlankAgentPromptHeader(bpmn: string): boolean {
   return false;
 }
 
+// The template tokens a model wires as an agent's base prompt, e.g. the `fix-ci` in
+// `value="{{fix-ci}}"` on an `io.nanobpm.agentTask.task.prompt` header. These templates *drive an
+// agent*, so each must teach it to emit a machine-readable result (see agentPromptEmitsResult).
+function agentPromptTokens(bpmn: string): string[] {
+  const tokens: string[] = [];
+  const re = /<zeebe:header\s+key="([^"]*)"\s+value="([^"]*)"\s*\/?>/g;
+  let m = re.exec(bpmn);
+  while (m !== null) {
+    if (m[1] === AGENT_PROMPT_HEADER) {
+      const tok = /^\{\{\s*([^}]+?)\s*\}\}$/.exec(m[2].trim());
+      if (tok) tokens.push(tok[1]);
+    }
+    m = re.exec(bpmn);
+  }
+  return tokens;
+}
+
+// A prompt that drives an agent must tell it how to return a machine-readable result — the
+// `$AGENT_RESULT_FILE` write (or the `::nano:result::` stdout fallback). Without it the agent can
+// finish with prose only, its `status` variable comes back empty, the status gateway falls through
+// to its default escalation arm, and the run parks a human escalation / stalls the merge (the
+// fix-ci/rebase gap behind Magikcraft/nano-bpm#746's stuck merge). Prose is never parsed, so this
+// instruction is load-bearing, not documentation.
+function agentPromptEmitsResult(body: string): boolean {
+  return body.includes("AGENT_RESULT_FILE") || body.includes("::nano:result::");
+}
+
 export interface CheckResult {
   ok: boolean;
   errors: string[];
@@ -82,6 +109,7 @@ export interface CheckResult {
 export function checkAgentPrompts(root: string): CheckResult {
   const errors: string[] = [];
   const resolved = new Set<string>();
+  const agentTokens = new Set<string>();
 
   const manifestPath = join(root, "nano.app.json");
   if (!existsSync(manifestPath)) {
@@ -126,6 +154,20 @@ export function checkAgentPrompts(root: string): CheckResult {
 
     if (hasBlankAgentPromptHeader(content)) {
       errors.push(`${rel}: a reserved "${AGENT_PROMPT_HEADER}" header is empty (agent would run prompt-less)`);
+    }
+    for (const tok of agentPromptTokens(content)) agentTokens.add(tok);
+  }
+
+  // Every template wired as an agent's base prompt must teach the agent to emit a machine-readable
+  // result; a prose-only agent leaves `status` blank and the process escalates/stalls.
+  for (const tok of [...agentTokens].sort()) {
+    const body = templates[tok];
+    if (body != null && body.trim() !== "" && !agentPromptEmitsResult(body)) {
+      errors.push(
+        `template {{${tok}}} drives an agent but never tells it to write $AGENT_RESULT_FILE ` +
+          `(or the ::nano:result:: fallback) — the agent can finish with prose only, leaving its ` +
+          `status blank so the process escalates/stalls`,
+      );
     }
   }
 

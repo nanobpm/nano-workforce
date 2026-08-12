@@ -84,3 +84,48 @@ Return a structured result:
 Never report `fixed` unless you actually pushed a change. If nothing was wrong on
 the branch (the failure was transient infrastructure), say so in `summary` and
 return `blocked` so a human can decide whether to just retry the merge.
+
+### How to return it (the wire mechanism)
+
+Your result variables only reach the process if you emit them through the harness's
+result channel. Prose in your normal output is **not** parsed — if you only "say"
+your status in the transcript, the process can't read it, falls back to its safe
+default (a merge escalation a human must clear), and the merge stalls. So emit a
+machine-readable result one of two ways:
+
+1. **Write a JSON object to the file at `$AGENT_RESULT_FILE`** (an env var the
+   harness sets for you). The object's keys become process variables. Examples:
+
+   ```sh
+   # pushed a fix you believe turns the failing checks green:
+   printf '%s' '{"status":"fixed","summary":"Fixed the flaky timeout in auth.test.ts and pushed"}' > "$AGENT_RESULT_FILE"
+   # ordering constraint — must wait for another PR to land first:
+   printf '%s' '{"status":"waiting-on-pr","summary":"Blocked by the linked-issue gate","dependsOn":"owner/repo#123"}' > "$AGENT_RESULT_FILE"
+   # genuinely stuck — a human must decide:
+   printf '%s' '{"status":"blocked","summary":"CI needs an NPM_TOKEN secret I cannot set","question":"Add the NPM_TOKEN repo secret, then answer to rerun."}' > "$AGENT_RESULT_FILE"
+   ```
+
+   Write this file **once**, at the very end, with your final result. Keep it a flat
+   JSON object of exactly the variables named in the return contract above.
+
+2. **Fallback** (only if you truly cannot write the file): print a single line to
+   stdout of the form `::nano:result:: {json}` — e.g.
+
+   ```
+   ::nano:result:: {"status":"fixed","summary":"Corrected the type error in handler.ts and pushed"}
+   ```
+
+   The harness reads the **last** such line. A trailing fenced JSON code block is also
+   accepted as a last resort.
+
+Do not put the result file inside the repo checkout or `git add` it — it lives
+outside your workspace. Exit `0` for every status (including `blocked`/`waiting-on-pr`);
+a non-zero exit means a genuine crash and the job is retried.
+
+**Emitting a machine-readable result is your mandatory final step — never exit
+silently.** It is the last thing you do on every path out of this job (including after
+a push, or when you conclude nothing can be fixed). If you are ever unsure which status
+applies, return **`blocked`** with a `summary` and a concrete `question` rather than
+leaving without a result — a missing result is treated as an unclassified merge
+escalation that pulls in a human and stalls the merge, so relying on that default
+wastes the attempt.
