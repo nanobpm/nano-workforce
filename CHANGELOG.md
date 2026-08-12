@@ -1,3 +1,10 @@
+## [0.48.1](https://github.com/nanobpm/nano-workforce/compare/v0.48.0...v0.48.1) (2026-08-12)
+
+
+### Bug Fixes
+
+* **ui:** remove duplicate "Plans (agent fleet)" section from the Convergence page ([#136](https://github.com/nanobpm/nano-workforce/issues/136)) ([7eb836a](https://github.com/nanobpm/nano-workforce/commit/7eb836a47888d5c29a716d15596bd8a2b29e448c))
+
 # [0.48.0](https://github.com/nanobpm/nano-workforce/compare/v0.47.0...v0.48.0) (2026-08-12)
 
 
