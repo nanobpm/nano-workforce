@@ -1,3 +1,10 @@
+## [0.46.2](https://github.com/nanobpm/nano-workforce/compare/v0.46.1...v0.46.2) (2026-08-12)
+
+
+### Bug Fixes
+
+* **prompts:** make merge-phase agents emit a machine-readable result ([#133](https://github.com/nanobpm/nano-workforce/issues/133)) ([6584092](https://github.com/nanobpm/nano-workforce/commit/6584092b3ef8f15159c024c080b312ead7484076)), closes [Magikcraft/nano-bpm#746](https://github.com/Magikcraft/nano-bpm/issues/746)
+
 ## [0.46.1](https://github.com/nanobpm/nano-workforce/compare/v0.46.0...v0.46.1) (2026-08-12)
 
 
