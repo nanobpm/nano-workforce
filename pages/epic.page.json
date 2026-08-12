@@ -7,10 +7,11 @@
       "id": "nav",
       "props": {
         "variant": "bar",
+        "sticky": true,
         "title": "Nano Workforce",
         "items": [
           { "label": "Convergence", "page": "home" },
-          { "label": "Epic", "page": "epic" }
+          { "label": "Epics", "page": "epic" }
         ]
       }
     },
@@ -23,7 +24,7 @@
       "type": "text",
       "id": "subtitle",
       "props": {
-        "text": "Hand an issue to the fleet to plan and implement it, then track each plan's review trace, wave state, merge-exclusion graph, coordination notes, and trial-merge gate results.",
+        "text": "Hand an issue to the fleet to plan and implement it, then open an epic to track its review trace, wave state, merge-exclusion graph, coordination notes, and trial-merge gate results.",
         "variant": "sub"
       }
     },
@@ -44,7 +45,7 @@
       "type": "dataGrid",
       "id": "epic-plans",
       "props": {
-        "title": "Plans",
+        "title": "Epics",
         "rowKey": "plan_key",
         "refreshMs": 5000,
         "data": {
@@ -66,241 +67,13 @@
           { "label": "All", "filter": [] }
         ],
         "columns": [
-          { "field": "plan_key", "header": "Issue", "linkField": "issue_url" },
+          { "field": "plan_key", "header": "Epic", "link": { "kind": "page", "page": "epic-detail", "keyField": "plan_key" } },
           { "field": "status", "header": "Status", "link": { "kind": "processExplorer", "keyField": "process_key" } },
+          { "field": "wave_label", "header": "Wave" },
           { "field": "task_count", "header": "Tasks" },
-          { "field": "open_task_id", "header": "Open escalation" },
-          { "field": "open_plan_round", "header": "Plan escalation round" },
+          { "field": "open_plan_findings", "header": "Attention", "badge": { "tone": "danger", "label": "!" } },
+          { "field": "issue_number", "header": "Issue", "linkField": "issue_url" },
           { "field": "updated_at", "header": "Updated" }
-        ],
-        "rowActions": [
-          {
-            "label": "Proceed with plan",
-            "confirm": "Dispatch the current unapproved plan as a human override?",
-            "showWhenField": "open_plan_escalation_id",
-            "action": {
-              "path": "/app/api/actions/message",
-              "body": {
-                "name": "plan-escalation-answered",
-                "correlationKey": "{{row.plan_key}}",
-                "variables": { "directive": "proceed", "note": "Proceed override from the plans page." }
-              }
-            }
-          }
-        ],
-        "detail": {
-          "linkField": "issue_url",
-          "fields": [
-            { "field": "repo", "label": "Repository" },
-            { "field": "issue_number", "label": "Issue number" },
-            { "field": "base_branch", "label": "Base branch (blank = repo default)" },
-            { "field": "outcome", "label": "Outcome" },
-            { "field": "open_plan_findings", "label": "Open plan-review findings" },
-            { "field": "open_task_question", "label": "Open escalation question" }
-          ],
-          "form": {
-            "showWhenField": "open_plan_escalation_id",
-            "title": "Answer the open plan-review escalation",
-            "promptField": "open_plan_findings",
-            "inputKey": "note",
-            "inputLabel": "Revision directive note for the planner",
-            "submitLabel": "Revise plan",
-            "action": {
-              "path": "/app/api/actions/message",
-              "body": {
-                "name": "plan-escalation-answered",
-                "correlationKey": "{{row.plan_key}}",
-                "variables": { "directive": "revise", "note": "{{form.note}}" }
-              }
-            }
-          }
-        }
-      }
-    },
-    {
-      "type": "dataGrid",
-      "id": "plan-reviews",
-      "props": {
-        "title": "Plan review trace",
-        "refreshMs": 5000,
-        "data": {
-          "kind": "datasource",
-          "source": "app",
-          "table": "plan_reviews",
-          "orderBy": { "field": "round", "dir": "asc" }
-        },
-        "columns": [
-          { "field": "plan_key", "header": "Plan" },
-          { "field": "round", "header": "Round" },
-          { "field": "epoch", "header": "Epoch" },
-          { "field": "approved", "header": "Approved? (1/0)" },
-          { "field": "findings", "header": "Reviewer findings" },
-          { "field": "created_at", "header": "Recorded" }
-        ]
-      }
-    },
-    {
-      "type": "dataGrid",
-      "id": "plan-review-escalations",
-      "props": {
-        "title": "Plan-review escalations",
-        "rowKey": "id",
-        "refreshMs": 5000,
-        "data": {
-          "kind": "datasource",
-          "source": "app",
-          "table": "plan_review_escalations",
-          "orderBy": { "field": "id", "dir": "desc" }
-        },
-        "columns": [
-          { "field": "plan_key", "header": "Plan" },
-          { "field": "epoch", "header": "Epoch" },
-          { "field": "round", "header": "Round" },
-          { "field": "findings", "header": "Findings" },
-          { "field": "status", "header": "Status" },
-          { "field": "directive", "header": "Directive" },
-          { "field": "note", "header": "Human note" },
-          { "field": "asked_at", "header": "Asked" },
-          { "field": "answered_at", "header": "Answered" }
-        ]
-      }
-    },
-    {
-      "type": "dataGrid",
-      "id": "wave-state",
-      "props": {
-        "title": "Wave state",
-        "rowKey": "id",
-        "refreshMs": 5000,
-        "data": {
-          "kind": "datasource",
-          "source": "app",
-          "table": "plan_tasks",
-          "orderBy": { "field": "wave", "dir": "asc" },
-          "filter": [
-            { "field": "status", "in": ["pending", "opened", "escalated", "waiting-for-lane", "blocked"] }
-          ]
-        },
-        "tabs": [
-          {
-            "label": "Active",
-            "filter": [
-              { "field": "status", "in": ["pending", "opened", "escalated", "waiting-for-lane", "blocked"] }
-            ]
-          },
-          {
-            "label": "Skipped",
-            "filter": [{ "field": "status", "in": ["skipped"] }]
-          },
-          { "label": "All", "filter": [] }
-        ],
-        "columns": [
-          { "field": "plan_key", "header": "Plan" },
-          { "field": "wave", "header": "Wave" },
-          { "field": "task_id", "header": "Task" },
-          { "field": "title", "header": "Title" },
-          { "field": "status", "header": "Status" },
-          { "field": "pr_key", "header": "PR" },
-          { "field": "summary", "header": "Summary" },
-          { "field": "updated_at", "header": "Updated" }
-        ],
-        "detail": {
-          "fields": [
-            { "field": "open_question", "label": "Open question" },
-            { "field": "answer", "label": "Answer" },
-            { "field": "draft_pr_key", "label": "Draft PR" },
-            { "field": "prompt", "label": "Prompt" }
-          ]
-        }
-      }
-    },
-    {
-      "type": "dataGrid",
-      "id": "merge-exclusions",
-      "props": {
-        "title": "Conflict graph / who blocks whom",
-        "rowKey": "id",
-        "refreshMs": 5000,
-        "data": {
-          "kind": "datasource",
-          "source": "app",
-          "table": "plan_merge_exclusions",
-          "orderBy": { "field": "id", "dir": "asc" }
-        },
-        "columns": [
-          { "field": "plan_key", "header": "Plan" },
-          { "field": "task_a", "header": "Task A" },
-          { "field": "task_b", "header": "Task B" },
-          { "field": "files", "header": "Shared files" },
-          { "field": "source", "header": "Source" },
-          { "field": "updated_at", "header": "Updated" }
-        ]
-      }
-    },
-    {
-      "type": "dataGrid",
-      "id": "coordination-notes",
-      "props": {
-        "title": "Coordination notes",
-        "rowKey": "id",
-        "refreshMs": 5000,
-        "data": {
-          "kind": "datasource",
-          "source": "app",
-          "table": "plan_blackboard",
-          "orderBy": { "field": "id", "dir": "asc" }
-        },
-        "columns": [
-          { "field": "plan_key", "header": "Plan" },
-          { "field": "wave", "header": "Wave" },
-          { "field": "author_task", "header": "Agent" },
-          { "field": "kind", "header": "Kind" },
-          { "field": "files", "header": "Files" },
-          { "field": "body", "header": "Note" },
-          { "field": "created_at", "header": "Posted" }
-        ]
-      }
-    },
-    {
-      "type": "dataGrid",
-      "id": "trial-merge-results",
-      "props": {
-        "title": "Trial-merge results",
-        "rowKey": "id",
-        "refreshMs": 5000,
-        "data": {
-          "kind": "datasource",
-          "source": "app",
-          "table": "plan_trial_merges",
-          "orderBy": { "field": "created_at", "dir": "desc" },
-          "filter": [
-            { "field": "result", "in": ["merge-conflict", "suite-failed"] },
-            { "field": "resolved", "in": [0] }
-          ]
-        },
-        "tabs": [
-          {
-            "label": "Needs attention",
-            "filter": [
-              { "field": "result", "in": ["merge-conflict", "suite-failed"] },
-              { "field": "resolved", "in": [0] }
-            ]
-          },
-          {
-            "label": "Clean",
-            "filter": [{ "field": "result", "in": ["clean"] }]
-          },
-          { "label": "All", "filter": [] }
-        ],
-        "columns": [
-          { "field": "plan_key", "header": "Plan" },
-          { "field": "wave", "header": "Wave" },
-          { "field": "result", "header": "Result" },
-          { "field": "heads", "header": "Heads" },
-          { "field": "conflicts", "header": "Conflicts" },
-          { "field": "failing", "header": "Failing" },
-          { "field": "summary", "header": "Summary" },
-          { "field": "created_at", "header": "Recorded" }
         ]
       }
     }

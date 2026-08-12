@@ -207,12 +207,15 @@ test("every page datasource column exists on its table", async () => {
   }
 });
 
-test("issue #87: plan_reviews is surfaced on the epic and home pages", async () => {
+test("issue #87: plan_reviews is surfaced on the per-epic detail page", async () => {
   const refs = await loadRefs();
-  const onEpic = refs.some((r) => r.page === "epic.page.json" && r.table === "plan_reviews");
-  const onHome = refs.some((r) => r.page === "home.page.json" && r.table === "plan_reviews");
-  assert(onEpic, "epic.page.json must bind a grid to plan_reviews (plan-review trace)");
-  assert(onHome, "home.page.json plan detail must include a plan_reviews child grid");
+  // The operator-visibility redesign (issue #137) moved per-plan detail grids off the flat
+  // epic index onto the param-scoped per-epic page (#/epic-detail/<plan_key>), where the
+  // plan-review trace is filtered to a single epic. Assert the trace lives there.
+  const onEpicDetail = refs.some(
+    (r) => r.page === "epic-detail.page.json" && r.table === "plan_reviews",
+  );
+  assert(onEpicDetail, "epic-detail.page.json must bind a grid to plan_reviews (plan-review trace)");
 
   // The trace is only useful with the verdict + critique columns, so pin them. Assert against the
   // visibly displayed `columns` (not `fields`, which also holds binding refs like orderBy.field) so

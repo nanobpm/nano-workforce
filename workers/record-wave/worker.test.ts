@@ -142,6 +142,38 @@ test("record-wave retries the same wave when a task is still pending", async () 
     trialMergeSkipReason: "wave-still-pending",
   });
   assertEquals((planUpdates[0].patch as Record<string, unknown>).gate_wave, 1);
+  // Retry keeps the projection on the same (still-pending) wave.
+  assertEquals((planUpdates[0].patch as Record<string, unknown>).current_wave, 1);
+});
+
+test("record-wave pins current_wave to the last index and clears gate_wave on the final wave", async () => {
+  const rows: Row[] = [{
+    id: 9,
+    plan_key: "owner/repo#63",
+    task_id: "z",
+    status: "opened",
+    wave: 2,
+  }];
+  const { app, planUpdates } = fakeApp(rows);
+
+  await handler(
+    {
+      variables: {
+        planKey: "owner/repo#63",
+        currentWave: 2,
+        waveCount: 3,
+        waveTasks: [],
+        waveResults: [],
+      },
+    } as any,
+    app,
+  );
+
+  // Final wave (2 of 3): no successor wave — gate cleared, projection pinned to N-1 so the
+  // epics-index reads 3/3 rather than the one-past-the-end nextWave (3).
+  assertEquals((planUpdates[0].patch as Record<string, unknown>).gate_wave, null);
+  assertEquals((planUpdates[0].patch as Record<string, unknown>).current_wave, 2);
+  assertEquals((planUpdates[0].patch as Record<string, unknown>).wave_label, "3/3");
 });
 
 test("record-wave skips trial merge for mergify-queue repos with 2+ heads", async () => {
