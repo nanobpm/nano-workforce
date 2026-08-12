@@ -52,7 +52,9 @@ export function trialMergeTaskId(wave: number): string {
  * (e.g. an ordinary feature escalation). */
 export function trialMergeWaveFromTaskId(taskId: string): number | null {
   if (!taskId.startsWith(TRIAL_MERGE_TASK_PREFIX)) return null;
-  const wave = Number(taskId.slice(TRIAL_MERGE_TASK_PREFIX.length));
+  const suffix = taskId.slice(TRIAL_MERGE_TASK_PREFIX.length);
+  if (!/^\d+$/.test(suffix)) return null;
+  const wave = Number(suffix);
   return Number.isInteger(wave) && wave >= 0 ? wave : null;
 }
 

@@ -84,4 +84,10 @@ test("trialMergeWaveFromTaskId parses only trial-merge task ids", () => {
   assertEquals(trialMergeWaveFromTaskId("trial-merge-wave-0"), 0);
   assertEquals(trialMergeWaveFromTaskId("some-feature-task"), null);
   assertEquals(trialMergeWaveFromTaskId("trial-merge-wave-x"), null);
+  // Empty suffix must not silently map to wave 0 (Number("") === 0).
+  assertEquals(trialMergeWaveFromTaskId("trial-merge-wave-"), null);
+  // Non-integer / signed / whitespace suffixes are rejected.
+  assertEquals(trialMergeWaveFromTaskId("trial-merge-wave-1.5"), null);
+  assertEquals(trialMergeWaveFromTaskId("trial-merge-wave-+2"), null);
+  assertEquals(trialMergeWaveFromTaskId("trial-merge-wave-12"), 12);
 });
