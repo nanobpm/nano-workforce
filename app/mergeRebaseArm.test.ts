@@ -62,6 +62,33 @@ test("rebase result: success re-arms the poller; unresolved escalates to a human
   );
 });
 
+test("rebase result: a missing/ambiguous status reconciles from ground truth, not escalation (#134)", () => {
+  // #134 / Magikcraft/nano-bpm#751: the rebase agent resolved everything and the PR became
+  // MERGEABLE, but it emitted no machine-readable `status`, so the old default arm escalated a
+  // PR that was already landable. Ground truth is authoritative: the default (no-verdict) arm
+  // now re-arms the merge poller, which re-checks `gw-mergeable` from GitHub state — bounded by
+  // the existing rebaseMax budget — instead of pulling in a human.
+  assertStringIncludes(flat, 'id="gw-rebase-result" name="rebased?" default="f_reb_reconcile"');
+  assert(hasFlow("gw-rebase-result", "arm-merge"), "gw-rebase-result → arm-merge (reconcile) missing");
+  // Escalation is now reserved for the agent's explicit "I cannot proceed" verdict.
+  assertStringIncludes(flat, 'id="f_reb_blocked"');
+  const rebBlocked = flat.match(/<bpmn:sequenceFlow[^>]*id="f_reb_blocked"[\s\S]*?<\/bpmn:sequenceFlow>/);
+  assert(rebBlocked, "f_reb_blocked flow missing");
+  assertStringIncludes(rebBlocked![0], 'status = "blocked"');
+});
+
+test("ci-fix result: a missing/ambiguous status reconciles from ground truth, not escalation (#134)", () => {
+  // Symmetric to the rebase arm: the CI-fix agent's no-verdict default re-arms the merge poller
+  // (ground-truth re-check, bounded by ciFixMax) rather than escalating a possibly-green PR.
+  assertStringIncludes(flat, 'id="gw-ci-result" name="fixed?" default="f_ci_reconcile"');
+  assert(hasFlow("gw-ci-result", "arm-merge"), "gw-ci-result → arm-merge (reconcile) missing");
+  // Escalation reserved for the agent's explicit `blocked` verdict.
+  const ciBlocked = flat.match(/<bpmn:sequenceFlow[^>]*id="f_ci_blocked"[\s\S]*?<\/bpmn:sequenceFlow>/);
+  assert(ciBlocked, "f_ci_blocked flow missing");
+  assertStringIncludes(ciBlocked![0], 'status = "blocked"');
+  assert(hasFlow("gw-ci-result", "merge-esc-attempt"), "gw-ci-result → merge-esc-attempt (blocked) missing");
+});
+
 test("regression: the conflict verdict passes through the rebase actor, not straight to escalation", () => {
   // The original #42 livelock had the conflict verdict escalate to a human with no remediation
   // actor. The primary target of the conflict verdict must now be the rebase gate.
