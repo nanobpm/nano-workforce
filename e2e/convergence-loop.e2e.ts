@@ -1,9 +1,13 @@
-// End-to-end pilot for @nanobpm/urban-testkit (nano-ide issue #157, slice S3).
+// End-to-end pilot for @nanobpm/urban-testkit (nano-ide issue #157, slices S3 + S4).
 //
 // Boots this whole Urban app in-process against the WASM engine and a virtual clock via
 // `bootTestApp`, then drives its real ADR-0059 OpenAPI operations by `operationId` — the same
 // spec-driven `/app/api/*` surface a browser, a CI relay, or Swagger hit in production. No socket
 // is opened, no wall-clock is waited on, and no GitHub network is touched.
+//
+// It also adopts the S4 coverage-exhaustive gate: booted with `{ coverage: true }`, it gates a
+// curated `pilot:operations` surface (the operations this pilot claims to own) and prints an
+// informational whole-app coverage snapshot for the operations/workers it does not yet drive.
 //
 // Network isolation: the app's GitHub transport (app/github.ts) is forced to `token` mode with no
 // token, so every best-effort GitHub read short-circuits to `null`/idle instead of reaching out.
@@ -60,6 +64,14 @@ const HARNESS_ENV = {
   NANO_APP_DB_URL: `file:${join(DB_DIR, "app.db")}`,
 } as const;
 
+// The operations this pilot claims to own — the slice of the app's OpenAPI surface it drives end
+// to end. The coverage gate below is scoped to exactly these: if you add one here without a test
+// that drives it, `assertFullCoverage` goes red. (The app declares 10 operations + 16 workers in
+// total; this pilot is deliberately a representative slice, not a whole-app sweep, so it does NOT
+// gate the auto-declared "operations"/"workers" surfaces — it reports them instead, see below.)
+const PILOT_OPERATIONS = ["appendBlackboard", "readBlackboard", "startConvergenceLoop"] as const;
+const PILOT_SURFACE = "pilot:operations";
+
 describe("nano-workforce e2e (urban-testkit pilot)", () => {
   let app: TestApp;
 
@@ -68,9 +80,13 @@ describe("nano-workforce e2e (urban-testkit pilot)", () => {
       savedEnv.set(k, process.env[k]);
       process.env[k] = v;
     }
-    app = await bootTestApp(APP_ROOT, { env: HARNESS_ENV });
+    // Enable the S4 coverage gate: `app.coverage` is pre-declared with this app's "operations"
+    // (from openapi.yaml) and "workers" (from nano.app.json) surfaces, and records each hit
+    // automatically as the pilot drives operations / the engine runs jobs.
+    app = await bootTestApp(APP_ROOT, { env: HARNESS_ENV, coverage: true });
     // This app declares an `api` binding, so the spec-driven driver must be present.
     assert.ok(app.api, "app.api driver should be defined (nano.app.json declares an `api` binding)");
+    assert.ok(app.coverage, "app.coverage should be defined (booted with { coverage: true })");
   });
 
   after(async () => {
@@ -171,5 +187,36 @@ describe("nano-workforce e2e (urban-testkit pilot)", () => {
     await app.advanceTime(PR_POLL_MS + 1000);
     const reconciled = await prs.findOne({ pr_key: prKey });
     assert.equal(reconciled?.status, "abandoned", "reconciler abandoned the terminated PR's row");
+  });
+
+  test("coverage gate: every operation the pilot claims to own was exercised", () => {
+    const coverage = app.coverage;
+    assert.ok(coverage);
+
+    // The auto-declared "operations" surface has recorded (across the tests above) exactly the
+    // operations this pilot drove. Mirror the pilot-owned ones into a curated surface and gate
+    // THAT — so the pilot fails the moment a `PILOT_OPERATIONS` entry lacks a driving test, without
+    // demanding whole-app coverage (this is a representative slice, not a full sweep).
+    const report = coverage.report();
+    const opsExercised = new Set(
+      report.surfaces.find((s) => s.surface === "operations")?.exercised ?? [],
+    );
+    coverage.declareSurface(PILOT_SURFACE, PILOT_OPERATIONS);
+    for (const id of PILOT_OPERATIONS) {
+      if (opsExercised.has(id)) coverage.record(PILOT_SURFACE, id);
+    }
+    // Fails, naming any un-driven pilot operation, if PILOT_OPERATIONS grows without a test.
+    coverage.assertFullCoverage({ surfaces: [PILOT_SURFACE] });
+
+    // Informational (non-failing) whole-app snapshot: how much of the app's total surface this
+    // pilot exercises. Surfaces the remaining operations/workers as a roadmap for widening the
+    // pilot, without turning the deliberate slice into a red build.
+    for (const surface of report.surfaces) {
+      const { exercised, declared, missing } = surface;
+      console.log(
+        `[coverage] ${surface.surface}: ${exercised.length}/${declared.length} exercised` +
+          (missing.length ? ` — not yet driven: ${missing.join(", ")}` : ""),
+      );
+    }
   });
 });
