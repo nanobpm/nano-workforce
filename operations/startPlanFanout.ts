@@ -10,7 +10,7 @@
 // ONE of `issue` or `url` — so an empty or ambiguous target is a 400 at the edge; this delegate just
 // narrows the validated variant and keeps the issue-FORMAT parse guard (schema can't express it).
 
-import { parseIssue, startPlan } from "../app/plan.ts";
+import { InvalidBaseBranchError, normalizeBaseBranch, parseIssue, startPlan } from "../app/plan.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
 
 export default defineOperation("startPlanFanout", async ({ body }, app) => {
@@ -26,9 +26,29 @@ export default defineOperation("startPlanFanout", async ({ body }, app) => {
     app.log.warn("start-plan rejected: unparseable issue reference", { raw });
     return { status: 400, body: { error: "could not parse issue (use owner/repo#123 or an issue URL)" } };
   }
-  const result = await startPlan(app.data, app.engine, parsed);
+  // Optional epic base branch: the branch the fleet branches off and opens every PR against instead
+  // of the repo default. Present on both oneOf variants; blank/absent keeps the default-branch
+  // behaviour. It is later interpolated into the authoritative implementer prompt (with `git`/`gh`
+  // shell snippets), so validate/normalise it HERE — a non-blank value that isn't a plausible git
+  // branch name is a 400 at the edge, never persisted or rendered. `normalizeBaseBranch` blank → null.
+  const baseBranch = "baseBranch" in body && typeof body.baseBranch === "string" ? body.baseBranch : null;
+  let normalizedBase: string | null;
+  try {
+    normalizedBase = normalizeBaseBranch(baseBranch);
+  } catch (err) {
+    if (err instanceof InvalidBaseBranchError) {
+      app.log.warn("start-plan rejected: invalid base branch", { baseBranch: err.value });
+      return {
+        status: 400,
+        body: { error: "invalid baseBranch (must be a plausible git branch name, e.g. epic/agent-protocol)" },
+      };
+    }
+    throw err;
+  }
+  const result = await startPlan(app.data, app.engine, parsed, normalizedBase);
   app.log.info("plan fan-out started", {
     planKey: parsed.planKey,
+    baseBranch: normalizedBase ?? "(default branch)",
     alreadyRunning: "alreadyRunning" in result && result.alreadyRunning === true,
   });
   return { status: 202, body: result };

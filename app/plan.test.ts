@@ -5,7 +5,7 @@
 // planner could revise forever. `positiveIntEnv` must fall back to the default on any value that
 // is not a positive integer, so the loop is always bounded.
 import { test } from "node:test";
-import { assertEquals } from "#test-assert";
+import { assertEquals, assertThrows } from "#test-assert";
 import { positiveIntEnv } from "./plan.ts";
 
 const KEY = "NANO_PLAN_REVIEW_ROUNDS_TEST";
@@ -291,4 +291,122 @@ test("answerTaskEscalation is a no-op when no open escalation matches the correl
   } as any;
   const r = await answerTaskEscalation(data, engine, "owner/repo#9:missing", "x");
   assertEquals(r.ok, false);
+});
+
+// Coverage for the epic base-branch control (issue nano-ide #124 / 019_plan_base_branch.sql).
+//
+// A plan may pin a base branch so the fleet branches off — and opens every PR against — a long-lived
+// integration branch instead of the repo default, keeping an epic off the default branch (and off any
+// merge-to-default side effect such as auto-publishing) until the integration branch is deliberately
+// merged. `normalizeBaseBranch` decides "unset" (fall back to default), `renderBaseBranchBrief` is the
+// authoritative prompt override, and `startPlan` must persist the branch and seed BOTH the `baseBranch`
+// variable and the `baseBranchBrief` (which rides `appendPrompt`) — or leave them null when unpinned.
+import { InvalidBaseBranchError, normalizeBaseBranch, renderBaseBranchBrief } from "./plan.ts";
+
+test("normalizeBaseBranch: blank/whitespace/undefined → null; a real branch is trimmed", () => {
+  assertEquals(normalizeBaseBranch(undefined), null);
+  assertEquals(normalizeBaseBranch(null), null);
+  assertEquals(normalizeBaseBranch(""), null);
+  assertEquals(normalizeBaseBranch("   "), null);
+  assertEquals(normalizeBaseBranch("  epic/agent-protocol  "), "epic/agent-protocol");
+});
+
+test("normalizeBaseBranch: accepts conservative git-branch shapes", () => {
+  assertEquals(normalizeBaseBranch("main"), "main");
+  assertEquals(normalizeBaseBranch("release-1.2"), "release-1.2");
+  assertEquals(normalizeBaseBranch("feature/x_y.z"), "feature/x_y.z");
+});
+
+test("normalizeBaseBranch: rejects injection-prone / implausible branch names", () => {
+  // `baseBranch` is interpolated into an authoritative agent prompt that carries shell
+  // commands, so anything that isn't a plausible git ref must be rejected at the edge —
+  // not silently rendered into `git`/`gh` snippets or the prompt Markdown.
+  const bad = [
+    "foo bar", // whitespace
+    "-rf", // leading dash → looks like a CLI flag
+    "foo; rm -rf /", // shell metacharacters
+    "foo`whoami`", // command substitution
+    "foo$(id)", // command substitution
+    "foo\nbar", // newline → breaks rendered instructions
+    "foo..bar", // git-illegal double dot
+    "/foo", // leading slash
+    "foo/", // trailing slash
+    "foo.", // trailing dot
+    "foo//bar", // empty path component
+    "foo.lock", // git-reserved .lock suffix
+    "épée", // outside the conservative allowlist
+  ];
+  for (const value of bad) {
+    assertThrows(() => normalizeBaseBranch(value), InvalidBaseBranchError);
+  }
+});
+
+test("renderBaseBranchBrief names the branch in every instruction (branch-off, read, PR base)", () => {
+  const brief = renderBaseBranchBrief("epic/agent-protocol");
+  // Authoritative marker so it overrides the static "default branch" wording.
+  assertEquals(brief.includes("authoritative"), true);
+  assertEquals(brief.includes("git checkout -b feat/<task.id> origin/epic/agent-protocol"), true);
+  assertEquals(brief.includes("gh pr create --base epic/agent-protocol"), true);
+});
+
+test("startPlan pins the base branch: persisted on the row + seeded as baseBranch/baseBranchBrief variables", async () => {
+  const PLAN_KEY = "owner/repo#124";
+  const stores: Record<string, { rows: any[]; key: string }> = {
+    plans: { rows: [], key: "plan_key" },
+    plan_tasks: { rows: [], key: "id" },
+    plan_reviews: { rows: [], key: "plan_key" },
+    plan_escalations: { rows: [], key: "id" },
+    plan_task_deps: { rows: [], key: "plan_key" },
+  };
+  const data = memData(stores);
+  let seen: any = null;
+  const engine = {
+    createInstance: (req: any) => {
+      seen = req.variables;
+      return Promise.resolve({ processInstanceKey: "PI-1" });
+    },
+  } as any;
+
+  await startPlan(
+    data,
+    engine,
+    { repo: "owner/repo", number: 124, url: "https://github.com/owner/repo/issues/124", planKey: PLAN_KEY },
+    "  epic/agent-protocol  ",
+  );
+
+  // Persisted (trimmed) on the plan row for the epic UI + resume.
+  assertEquals((stores.plans.rows[0] as any).base_branch, "epic/agent-protocol");
+  // Process variables the implement-task consumes.
+  assertEquals(seen.baseBranch, "epic/agent-protocol");
+  assertEquals(seen.baseBranchBrief.includes("gh pr create --base epic/agent-protocol"), true);
+});
+
+test("startPlan without a base branch keeps default-branch behaviour (null row + null variables)", async () => {
+  const PLAN_KEY = "owner/repo#200";
+  const stores: Record<string, { rows: any[]; key: string }> = {
+    plans: { rows: [], key: "plan_key" },
+    plan_tasks: { rows: [], key: "id" },
+    plan_reviews: { rows: [], key: "plan_key" },
+    plan_escalations: { rows: [], key: "id" },
+    plan_task_deps: { rows: [], key: "plan_key" },
+  };
+  const data = memData(stores);
+  let seen: any = null;
+  const engine = {
+    createInstance: (req: any) => {
+      seen = req.variables;
+      return Promise.resolve({ processInstanceKey: "PI-2" });
+    },
+  } as any;
+
+  await startPlan(data, engine, {
+    repo: "owner/repo",
+    number: 200,
+    url: "https://github.com/owner/repo/issues/200",
+    planKey: PLAN_KEY,
+  });
+
+  assertEquals((stores.plans.rows[0] as any).base_branch, null);
+  assertEquals(seen.baseBranch, null);
+  assertEquals(seen.baseBranchBrief, null);
 });

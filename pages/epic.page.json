@@ -35,7 +35,8 @@
         "submitLabel": "Plan & implement",
         "action": { "path": "/app/api/actions/start/plan-fanout", "body": "{{form}}" },
         "fields": [
-          { "key": "issue", "label": "owner/repo#123 or a GitHub issue URL", "type": "text" }
+          { "key": "issue", "label": "owner/repo#123 or a GitHub issue URL", "type": "text" },
+          { "key": "baseBranch", "label": "Base branch (blank = repo default; e.g. epic/agent-protocol to land the whole epic on an integration branch)", "type": "text" }
         ]
       }
     },
@@ -76,6 +77,7 @@
           "fields": [
             { "field": "repo", "label": "Repository" },
             { "field": "issue_number", "label": "Issue number" },
+            { "field": "base_branch", "label": "Base branch (blank = repo default)" },
             { "field": "outcome", "label": "Outcome" },
             { "field": "open_task_question", "label": "Open escalation question" }
           ]

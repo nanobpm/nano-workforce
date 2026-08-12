@@ -51,6 +51,10 @@ export interface Plan {
   // Minted at plan start; baked into the blackboard URL handed to implementer agents. NULL for
   // plans created before the blackboard shipped.
   blackboard_token: string | null;
+  // Optional target base branch (019_plan_base_branch.sql): when set, the fleet branches off this
+  // branch and opens every task PR against it instead of the repository's default branch, landing
+  // the whole epic on a long-lived integration branch. NULL keeps the default-branch behaviour.
+  base_branch: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -185,14 +189,79 @@ export function parseIssue(input: string): ParsedIssue | null {
   return null;
 }
 
+/** Raised when a caller supplies a `baseBranch` that isn't a plausible git branch name. The
+ * value is interpolated into the authoritative implementer prompt (which carries `git`/`gh`
+ * shell snippets and inline-code Markdown), so a non-ref value could break the rendered
+ * instructions or smuggle in a command/prompt fragment — reject it at the edge instead. */
+export class InvalidBaseBranchError extends Error {
+  readonly value: string;
+  constructor(value: string) {
+    super(`invalid base branch name: ${JSON.stringify(value)}`);
+    this.name = "InvalidBaseBranchError";
+    this.value = value;
+  }
+}
+
+/** Conservative allowlist gate for a base-branch name. Stricter than `git check-ref-format` on
+ * purpose: only `[A-Za-z0-9._/-]`, no leading `/`/`.`/`-` (a leading dash reads as a CLI flag),
+ * no trailing `/`/`.`, no `..`/`//`, no empty or `.lock`-suffixed path component, bounded length.
+ * This rejects whitespace, shell metacharacters, command substitution, and newlines outright. */
+function isPlausibleBranchName(s: string): boolean {
+  if (s.length === 0 || s.length > 255) return false;
+  if (!/^[A-Za-z0-9._/-]+$/.test(s)) return false;
+  if (/^[/.-]/.test(s) || /[/.]$/.test(s)) return false;
+  if (s.includes("..") || s.includes("//")) return false;
+  return s.split("/").every((seg) => seg.length > 0 && !seg.startsWith(".") && !seg.endsWith(".lock"));
+}
+
+/** Normalise a caller-supplied base branch: trim, and treat blank as "unset" (null) so the fleet
+ * falls back to the repository's default branch — the legacy behaviour. A non-blank value that is
+ * not a plausible git branch name is rejected (`InvalidBaseBranchError`) rather than persisted or
+ * rendered into the agent prompt; the operation edge maps that to a 400. */
+export function normalizeBaseBranch(input: string | null | undefined): string | null {
+  const s = (input ?? "").trim();
+  if (s.length === 0) return null;
+  if (!isPlausibleBranchName(s)) throw new InvalidBaseBranchError(s);
+  return s;
+}
+
+/** The per-instance brief appended to an implementer agent's prompt when the plan pins a base
+ * branch. It is authoritative over the static "branch off the default branch" wording in
+ * prompts/feature.md, so the agent branches off — and opens its PR against — the integration
+ * branch, and reads the epic's latest landed state there rather than the repo default branch. */
+export function renderBaseBranchBrief(baseBranch: string): string {
+  return [
+    "",
+    "",
+    "---",
+    "",
+    `**Base branch (authoritative — overrides any "default branch" instruction above): \`${baseBranch}\`.**`,
+    "",
+    `This epic lands on \`${baseBranch}\`, NOT the repository default branch. Everywhere the`,
+    "instructions say \"default branch\", use this branch instead:",
+    "",
+    `- Branch off it: \`git fetch origin ${baseBranch} && git checkout -b feat/<task.id> origin/${baseBranch}\`.`,
+    `- Read the epic's latest landed state from \`${baseBranch}\` (your prerequisites merged there, not into the default branch).`,
+    `- Open your PR against it: \`gh pr create --base ${baseBranch} ...\`.`,
+    "",
+    "Do not target the repository default branch — a PR opened against it will not be merged into the epic.",
+  ].join("\n");
+}
+
 /** Register a plan row (if new) and start the plan-fanout process. Idempotent on
  * planKey: a plan already in flight is not restarted. */
-export async function startPlan(data: DataLayer, engine: EngineClient, parsed: ParsedIssue) {
+export async function startPlan(
+  data: DataLayer,
+  engine: EngineClient,
+  parsed: ParsedIssue,
+  baseBranch: string | null = null,
+) {
   const table = plans(data);
   const existing = await table.get(parsed.planKey);
   if (existing && !PLAN_TERMINAL_STATUSES.includes(existing.status)) {
     return { planKey: parsed.planKey, alreadyRunning: true };
   }
+  const base = normalizeBaseBranch(baseBranch);
   const ts = now();
   // Mint (or reuse, on a re-plan) this plan's blackboard capability token, and render the
   // coordination brief that carries its concrete URL. The token is the credential; agents reach
@@ -235,6 +304,7 @@ export async function startPlan(data: DataLayer, engine: EngineClient, parsed: P
       open_task_corr_key: null,
       open_task_id: null,
       blackboard_token: token,
+      base_branch: base,
       updated_at: ts,
     });
   } else {
@@ -246,6 +316,7 @@ export async function startPlan(data: DataLayer, engine: EngineClient, parsed: P
       status: "planning",
       task_count: 0,
       blackboard_token: token,
+      base_branch: base,
       created_at: ts,
       updated_at: ts,
     });
@@ -265,6 +336,12 @@ export async function startPlan(data: DataLayer, engine: EngineClient, parsed: P
       // out-of-band.
       blackboardUrl: bbUrl,
       blackboardBrief: renderCoordinationBrief(bbUrl),
+      // Optional epic base branch (019_plan_base_branch.sql): the branch the fleet branches off and
+      // opens every PR against instead of the repo default. `baseBranchBrief` rides `appendPrompt`
+      // in the implement-task (like `blackboardBrief`); both are null when no base branch is pinned,
+      // so the agent keeps the default-branch behaviour from prompts/feature.md.
+      baseBranch: base,
+      baseBranchBrief: base == null ? null : renderBaseBranchBrief(base),
     },
   });
   const processKey = processInstanceKey == null ? null : String(processInstanceKey);

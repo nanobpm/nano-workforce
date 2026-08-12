@@ -50,11 +50,21 @@ Because several agents may run on the same host at once:
 
 1. **Read the latest review.** Fetch the newest Copilot review + its inline
    comments on the PR (`gh pr view`, `gh api .../pulls/{n}/reviews`, `.../comments`).
+   Also read Copilot's **suppressed / low-confidence** advisories — the collapsed
+   "low confidence" list Copilot folds into the **review body** (`.../reviews`
+   `body`). These are NOT in the default inline-comment API set, so a plain
+   `.../comments` read misses them; scan the review body for them explicitly.
    If `answer` is present, treat it as the human's decision on the escalation you
    raised last round and act on it first.
 2. **Triage each comment** into: *fix* (correct, worth doing), *nitpick* (apply
    silently), *needs human input* (design/product/tradeoff you can't decide), or
    *push back* (wrong / false positive — reply with evidence, make no change).
+   Triage the suppressed / low-confidence advisories the **same** way — but do not
+   treat "suppressed" as either automatically actionable or automatically ignorable:
+   if one is a **cheap, correct** robustness/correctness win, just do it (a
+   *nitpick*); otherwise **decline it explicitly with a one-line rationale in your
+   `summary`** (e.g. "declined suppressed advisory X — input already validated
+   upstream at Y"). Never silently drop one.
 3. **Act.** Make the code changes for all fixes + nitpicks in your workspace (`cwd`)
    in one coherent, signed-off commit (`git commit -s`). Run the repo's
    build/test/lint locally before pushing. Push to the PR's head branch (the branch
@@ -107,6 +117,9 @@ Consider the PR **converged** when the latest review has no actionable comment:
   comments") and there are no new inline comments, **or**
 - every new comment is a nitpick you already handled or intentionally declined,
   **or**
+- the only remaining items are suppressed / low-confidence advisories you have
+  triaged and either applied or declined-with-rationale (a suppressed advisory
+  you have recorded a decision on does **not** block convergence), **or**
 - Copilot is looping — reiterating a point you already addressed or pushed back
   on (two rounds of the same substantive point = converged).
 

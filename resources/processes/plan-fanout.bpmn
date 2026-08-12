@@ -93,7 +93,7 @@
             <zeebe:header key="io.nanobpm.agentTask.task.prompt" value="{{feature}}" />
           </zeebe:taskHeaders>
           <zeebe:ioMapping>
-            <zeebe:input source="=&#34;&#10;&#10;---&#10;&#10;&#34; + task.prompt + (if (blackboardBrief = null) then &#34;&#34; else blackboardBrief)" target="appendPrompt" />
+            <zeebe:input source="=&#34;&#10;&#10;---&#10;&#10;&#34; + task.prompt + (if (blackboardBrief = null) then &#34;&#34; else blackboardBrief) + (if (baseBranchBrief = null) then &#34;&#34; else baseBranchBrief)" target="appendPrompt" />
           </zeebe:ioMapping>
         </bpmn:extensionElements>
         <bpmn:incoming>w_toImpl</bpmn:incoming>

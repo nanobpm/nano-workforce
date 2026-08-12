@@ -347,3 +347,39 @@ test("repoEnvelopeVars emits the repository envelope keyed on the PR head branch
 test("repoEnvelopeVars emits nothing when the head branch is unresolved", () => {
   assertEquals(Object.keys(repoEnvelopeVars("owner/repo", null)).length, 0);
 });
+
+test("repoEnvelopeVars emits nothing for a malformed repo (not owner/repo)", () => {
+  // Defence in depth: a repo that isn't exactly `owner/repo` would build a bogus clone URL, so the
+  // helper emits no envelope (harness falls back to the launch dir) rather than a malformed URL.
+  for (const bad of [
+    "",
+    "noslash",
+    "a/b/c",
+    "owner /repo",
+    "owner/re po",
+    "/repo",
+    "owner/",
+    // A trailing `.git` would build a double-suffixed clone URL (…/owner/repo.git.git).
+    "owner/repo.git",
+    "owner/repo.GIT",
+    // Query/fragment/host-injection characters must never reach the clone URL.
+    "owner/repo?x",
+    "owner/repo#frag",
+    "owner/repo:x",
+    "owner/re~po",
+    // Owner is a GitHub login: no dots or underscores allowed there.
+    "own.er/repo",
+    "own_er/repo",
+  ]) {
+    assertEquals(Object.keys(repoEnvelopeVars(bad, "feat/x")).length, 0, `expected no envelope for "${bad}"`);
+  }
+  // Well-formed repos still emit (guard is not over-eager): hyphens, dots and underscores
+  // are legal in the repo-name segment, mixed case is preserved.
+  for (const good of ["owner/repo", "my-org/my.repo", "Owner123/Repo_2", "a-b/c-d"]) {
+    assertEquals(
+      ((repoEnvelopeVars(good, "feat/x") as any)["io.nanobpm.agentTask"].repository.url),
+      `https://github.com/${good}.git`,
+      `expected envelope for "${good}"`,
+    );
+  }
+});

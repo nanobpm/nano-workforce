@@ -121,6 +121,18 @@ test("startPlanFanout → 400 (not 500) on a missing request body", async () => 
   assertEquals(typeof r.body.error, "string");
 });
 
+test("startPlanFanout → 400 on an invalid baseBranch (not persisted/rendered)", async () => {
+  // A non-blank baseBranch that isn't a plausible git branch name (shell metacharacters here)
+  // must be rejected at the edge as a 400 — never persisted or interpolated into the agent prompt.
+  const res = await startPlanFanout(
+    input({ issue: "owner/repo#123", baseBranch: "epic/agent; rm -rf /" }),
+    app,
+  );
+  const r = res as any;
+  assertEquals(r.status, 400);
+  assertEquals(typeof r.body.error, "string");
+});
+
 test("startConvergenceLoop narrows the `url` variant (no `pr` key)", async () => {
   await withGithubOff(async () => {
     const { app: capApp } = captureApp();
