@@ -189,11 +189,40 @@ export function parseIssue(input: string): ParsedIssue | null {
   return null;
 }
 
+/** Raised when a caller supplies a `baseBranch` that isn't a plausible git branch name. The
+ * value is interpolated into the authoritative implementer prompt (which carries `git`/`gh`
+ * shell snippets and inline-code Markdown), so a non-ref value could break the rendered
+ * instructions or smuggle in a command/prompt fragment — reject it at the edge instead. */
+export class InvalidBaseBranchError extends Error {
+  readonly value: string;
+  constructor(value: string) {
+    super(`invalid base branch name: ${JSON.stringify(value)}`);
+    this.name = "InvalidBaseBranchError";
+    this.value = value;
+  }
+}
+
+/** Conservative allowlist gate for a base-branch name. Stricter than `git check-ref-format` on
+ * purpose: only `[A-Za-z0-9._/-]`, no leading `/`/`.`/`-` (a leading dash reads as a CLI flag),
+ * no trailing `/`/`.`, no `..`/`//`, no empty or `.lock`-suffixed path component, bounded length.
+ * This rejects whitespace, shell metacharacters, command substitution, and newlines outright. */
+function isPlausibleBranchName(s: string): boolean {
+  if (s.length === 0 || s.length > 255) return false;
+  if (!/^[A-Za-z0-9._/-]+$/.test(s)) return false;
+  if (/^[/.-]/.test(s) || /[/.]$/.test(s)) return false;
+  if (s.includes("..") || s.includes("//")) return false;
+  return s.split("/").every((seg) => seg.length > 0 && !seg.startsWith(".") && !seg.endsWith(".lock"));
+}
+
 /** Normalise a caller-supplied base branch: trim, and treat blank as "unset" (null) so the fleet
- * falls back to the repository's default branch — the legacy behaviour. */
+ * falls back to the repository's default branch — the legacy behaviour. A non-blank value that is
+ * not a plausible git branch name is rejected (`InvalidBaseBranchError`) rather than persisted or
+ * rendered into the agent prompt; the operation edge maps that to a 400. */
 export function normalizeBaseBranch(input: string | null | undefined): string | null {
   const s = (input ?? "").trim();
-  return s.length > 0 ? s : null;
+  if (s.length === 0) return null;
+  if (!isPlausibleBranchName(s)) throw new InvalidBaseBranchError(s);
+  return s;
 }
 
 /** The per-instance brief appended to an implementer agent's prompt when the plan pins a base

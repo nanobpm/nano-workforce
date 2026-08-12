@@ -5,7 +5,7 @@
 // planner could revise forever. `positiveIntEnv` must fall back to the default on any value that
 // is not a positive integer, so the loop is always bounded.
 import { test } from "node:test";
-import { assertEquals } from "#test-assert";
+import { assertEquals, assertThrows } from "#test-assert";
 import { positiveIntEnv } from "./plan.ts";
 
 const KEY = "NANO_PLAN_REVIEW_ROUNDS_TEST";
@@ -301,7 +301,7 @@ test("answerTaskEscalation is a no-op when no open escalation matches the correl
 // merged. `normalizeBaseBranch` decides "unset" (fall back to default), `renderBaseBranchBrief` is the
 // authoritative prompt override, and `startPlan` must persist the branch and seed BOTH the `baseBranch`
 // variable and the `baseBranchBrief` (which rides `appendPrompt`) — or leave them null when unpinned.
-import { normalizeBaseBranch, renderBaseBranchBrief } from "./plan.ts";
+import { InvalidBaseBranchError, normalizeBaseBranch, renderBaseBranchBrief } from "./plan.ts";
 
 test("normalizeBaseBranch: blank/whitespace/undefined → null; a real branch is trimmed", () => {
   assertEquals(normalizeBaseBranch(undefined), null);
@@ -309,6 +309,36 @@ test("normalizeBaseBranch: blank/whitespace/undefined → null; a real branch is
   assertEquals(normalizeBaseBranch(""), null);
   assertEquals(normalizeBaseBranch("   "), null);
   assertEquals(normalizeBaseBranch("  epic/agent-protocol  "), "epic/agent-protocol");
+});
+
+test("normalizeBaseBranch: accepts conservative git-branch shapes", () => {
+  assertEquals(normalizeBaseBranch("main"), "main");
+  assertEquals(normalizeBaseBranch("release-1.2"), "release-1.2");
+  assertEquals(normalizeBaseBranch("feature/x_y.z"), "feature/x_y.z");
+});
+
+test("normalizeBaseBranch: rejects injection-prone / implausible branch names", () => {
+  // `baseBranch` is interpolated into an authoritative agent prompt that carries shell
+  // commands, so anything that isn't a plausible git ref must be rejected at the edge —
+  // not silently rendered into `git`/`gh` snippets or the prompt Markdown.
+  const bad = [
+    "foo bar", // whitespace
+    "-rf", // leading dash → looks like a CLI flag
+    "foo; rm -rf /", // shell metacharacters
+    "foo`whoami`", // command substitution
+    "foo$(id)", // command substitution
+    "foo\nbar", // newline → breaks rendered instructions
+    "foo..bar", // git-illegal double dot
+    "/foo", // leading slash
+    "foo/", // trailing slash
+    "foo.", // trailing dot
+    "foo//bar", // empty path component
+    "foo.lock", // git-reserved .lock suffix
+    "épée", // outside the conservative allowlist
+  ];
+  for (const value of bad) {
+    assertThrows(() => normalizeBaseBranch(value), InvalidBaseBranchError);
+  }
 });
 
 test("renderBaseBranchBrief names the branch in every instruction (branch-off, read, PR base)", () => {
