@@ -78,6 +78,19 @@ test("select-wave projects the active wave onto plans.current_wave", async () =>
   assertEquals(plans[0].wave_label, "2/2");
 });
 
+test("select-wave nulls all three progress fields when there are no levelized rows", async () => {
+  // No plan_tasks rows => waveCount 0. current_wave must be NULL too (not a stray index against a
+  // NULL wave_count/wave_label), matching the documented "NULL until dispatched with tasks".
+  const plans: Record<string, unknown>[] = [{ plan_key: "owner/repo#63", current_wave: 5 }];
+  await handler(
+    { variables: { planKey: "owner/repo#63", currentWave: 0 } } as any,
+    fakeApp([], [], plans),
+  );
+  assertEquals(plans[0].current_wave, null);
+  assertEquals(plans[0].wave_count, null);
+  assertEquals(plans[0].wave_label, null);
+});
+
 test("select-wave leaves dependents pending behind a waiting-for-lane dependency", async () => {
   const rows: Row[] = [
     {

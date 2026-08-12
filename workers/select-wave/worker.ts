@@ -56,7 +56,9 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
   const waveCount = rows.reduce((m, r) => Math.max(m, r.wave ?? 0), -1) + 1;
   try {
     await plans(app.data).update(planKey, {
-      current_wave: currentWave,
+      // Keep the three progress fields consistent: with no levelized rows (waveCount 0) there is
+      // no wave to implement, so current_wave is NULL too — never a stray index against NULL N.
+      current_wave: waveCount > 0 ? currentWave : null,
       wave_count: waveCount > 0 ? waveCount : null,
       wave_label: waveCount > 0 ? `${currentWave + 1}/${waveCount}` : null,
       updated_at: ts,
