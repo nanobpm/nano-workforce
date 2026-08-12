@@ -107,22 +107,31 @@ export async function recordTrialMergeAudit(
   // tab forever, even after the wave was re-run clean (issue: the tab never
   // cleared). The newly-inserted row defaults `resolved = 0`, so a still-red
   // latest attempt keeps showing until it too is superseded or answered.
+  //
+  // Insert the new (unresolved) row FIRST, then resolve the older rows — never
+  // the reverse. Resolving priors before the insert would leave the wave with
+  // zero unresolved rows if the insert (or the process) failed in between,
+  // silently clearing the "Needs attention" tab. Insert-first guarantees the
+  // wave always has at least one unresolved row through the transition.
+  const id = Number(
+    await table.insert({
+      plan_key: row.planKey,
+      wave: row.wave,
+      result: row.result,
+      heads: jsonOrNull(row.heads),
+      conflicts: jsonOrNull(row.conflicts),
+      failing: jsonOrNull(row.failing),
+      summary: row.summary ?? null,
+      job_key: jobKey,
+      resolved: 0,
+      created_at: ts,
+      updated_at: ts,
+    }),
+  );
   for (const prior of await table.find({ plan_key: row.planKey, wave: row.wave })) {
-    if (prior.resolved !== 1) await table.update(prior.id, { resolved: 1, updated_at: ts });
+    if (prior.id !== id && prior.resolved !== 1) await table.update(prior.id, { resolved: 1, updated_at: ts });
   }
-  return Number(await table.insert({
-    plan_key: row.planKey,
-    wave: row.wave,
-    result: row.result,
-    heads: jsonOrNull(row.heads),
-    conflicts: jsonOrNull(row.conflicts),
-    failing: jsonOrNull(row.failing),
-    summary: row.summary ?? null,
-    job_key: jobKey,
-    resolved: 0,
-    created_at: ts,
-    updated_at: ts,
-  }));
+  return id;
 }
 
 /** Mark every trial-merge audit row for `(planKey, wave)` resolved, so the epic

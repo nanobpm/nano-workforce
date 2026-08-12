@@ -1,5 +1,5 @@
 import { test } from "node:test";
-import { assertEquals } from "#test-assert";
+import { assertEquals, assertRejects } from "#test-assert";
 import {
   recordTrialMergeAudit,
   resolveTrialMergeAttention,
@@ -40,7 +40,7 @@ function memData() {
     },
   };
   const data = { table: () => table } as any;
-  return { data, rows };
+  return { data, rows, table };
 }
 
 test("recordTrialMergeAudit supersedes prior rows for the same wave", async () => {
@@ -65,6 +65,21 @@ test("recordTrialMergeAudit updates a re-reporting job in place without supersed
   assertEquals(rows.length, 1, "no duplicate/supersede row is created");
   assertEquals(rows[0].result, "clean");
   assertEquals(rows[0].resolved, 0);
+});
+
+test("recordTrialMergeAudit keeps the wave flagged if the superseding insert fails", async () => {
+  const { data, rows, table } = memData();
+  await recordTrialMergeAudit(data, { planKey: "o/r#1", wave: 1, result: "suite-failed" });
+  // Simulate a crash/failure on the superseding insert. The new row must be
+  // inserted BEFORE prior rows are resolved, so a failure here must not leave
+  // the wave with zero unresolved rows (which would silently clear "Needs
+  // attention").
+  table.insert = async () => {
+    throw new Error("insert failed");
+  };
+  await assertRejects(() => recordTrialMergeAudit(data, { planKey: "o/r#1", wave: 1, result: "clean" }));
+  const unresolved = rows.filter((r) => r.wave === 1 && r.resolved !== 1);
+  assertEquals(unresolved.length, 1, "the wave still has an unresolved row after the failed insert");
 });
 
 test("resolveTrialMergeAttention clears every unresolved row for the wave", async () => {
