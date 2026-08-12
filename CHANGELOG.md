@@ -1,3 +1,10 @@
+# [0.46.0](https://github.com/nanobpm/nano-workforce/compare/v0.45.0...v0.46.0) (2026-08-12)
+
+
+### Features
+
+* add plan review escalation ([#128](https://github.com/nanobpm/nano-workforce/issues/128)) ([b67cc9e](https://github.com/nanobpm/nano-workforce/commit/b67cc9ebd84ef251e38e1e0fc332f712f82438c2)), closes [owner/repo#N](https://github.com/owner/repo/issues/N)
+
 # [0.45.0](https://github.com/nanobpm/nano-workforce/compare/v0.44.1...v0.45.0) (2026-08-12)
 
 
