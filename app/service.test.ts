@@ -347,3 +347,16 @@ test("repoEnvelopeVars emits the repository envelope keyed on the PR head branch
 test("repoEnvelopeVars emits nothing when the head branch is unresolved", () => {
   assertEquals(Object.keys(repoEnvelopeVars("owner/repo", null)).length, 0);
 });
+
+test("repoEnvelopeVars emits nothing for a malformed repo (not owner/repo)", () => {
+  // Defence in depth: a repo that isn't exactly `owner/repo` would build a bogus clone URL, so the
+  // helper emits no envelope (harness falls back to the launch dir) rather than a malformed URL.
+  for (const bad of ["", "noslash", "a/b/c", "owner /repo", "owner/re po", "/repo", "owner/"]) {
+    assertEquals(Object.keys(repoEnvelopeVars(bad, "feat/x")).length, 0, `expected no envelope for "${bad}"`);
+  }
+  // A well-formed repo still emits (guard is not over-eager).
+  assertEquals(
+    ((repoEnvelopeVars("owner/repo", "feat/x") as any)["io.nanobpm.agentTask"].repository.url),
+    "https://github.com/owner/repo.git",
+  );
+});

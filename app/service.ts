@@ -292,6 +292,11 @@ const AGENT_TASK_NS = "io.nanobpm.agentTask";
  * `task.prompt` header on the service task deep-merges with this over the same namespace. */
 export function repoEnvelopeVars(repo: string, ref: string | null): Record<string, unknown> {
   if (!ref) return {};
+  // Defence in depth: every current caller derives `repo` from parsePr/parseIssue (regex-bounded to
+  // `owner/repo`), but this is an exported helper the fan-out epic gives many new callers. A repo
+  // that is not exactly `owner/repo` would build a bogus clone URL, so emit nothing (the harness
+  // then falls back to the launch-dir behaviour) rather than handing the harness a malformed URL.
+  if (!/^[^/\s]+\/[^/\s]+$/.test(repo)) return {};
   return {
     [AGENT_TASK_NS]: {
       repository: { provider: "github", url: `https://github.com/${repo}.git`, ref },
