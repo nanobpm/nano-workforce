@@ -39,6 +39,16 @@ function flowHasId(id: string, source: string, target: string): boolean {
   return tag.includes(`sourceRef="${source}"`) && tag.includes(`targetRef="${target}"`);
 }
 
+// Assert an `<exclusiveGateway>` (matched by id) declares the given `default` flow, regardless of
+// attribute order. Matching the start tag by id and reading `default` from it keeps the guard
+// robust to harmless XML reformatting (attribute reordering / wrapping) that a fixed-order literal
+// substring would spuriously trip on.
+function gatewayDefault(id: string, def: string): boolean {
+  const m = flat.match(new RegExp(`<bpmn:exclusiveGateway\\b[^>]*\\bid="${id}"[^>]*>`));
+  if (!m) return false;
+  return m[0].includes(`default="${def}"`);
+}
+
 test("conflict routes to the rebase budget gate, not straight to a human", () => {
   // The conflict verdict must reach the auto-rebase gate…
   assert(hasFlow("gw-mergeable", "gw-rebase"), "gw-mergeable → gw-rebase (conflict) missing");
@@ -78,7 +88,10 @@ test("rebase result: a missing/ambiguous status reconciles from ground truth, no
   // PR that was already landable. Ground truth is authoritative: the default (no-verdict) arm
   // now re-arms the merge poller, which re-checks `gw-mergeable` from GitHub state — bounded by
   // the existing rebaseMax budget — instead of pulling in a human.
-  assertStringIncludes(flat, 'id="gw-rebase-result" name="rebased?" default="f_reb_reconcile"');
+  assert(
+    gatewayDefault("gw-rebase-result", "f_reb_reconcile"),
+    'gw-rebase-result must default to f_reb_reconcile (reconcile)',
+  );
   // Pin the *default* reconcile flow itself, not just any gw-rebase-result → arm-merge edge (the
   // success arm `f_reb_rebased` shares that target), so a mis-wired default can't pass silently.
   assert(
@@ -95,7 +108,10 @@ test("rebase result: a missing/ambiguous status reconciles from ground truth, no
 test("ci-fix result: a missing/ambiguous status reconciles from ground truth, not escalation (#134)", () => {
   // Symmetric to the rebase arm: the CI-fix agent's no-verdict default re-arms the merge poller
   // (ground-truth re-check, bounded by ciFixMax) rather than escalating a possibly-green PR.
-  assertStringIncludes(flat, 'id="gw-ci-result" name="fixed?" default="f_ci_reconcile"');
+  assert(
+    gatewayDefault("gw-ci-result", "f_ci_reconcile"),
+    'gw-ci-result must default to f_ci_reconcile (reconcile)',
+  );
   // Pin the *default* reconcile flow itself, not just any gw-ci-result → arm-merge edge (the
   // success arm `f_ci_fixed` shares that target), so a mis-wired default can't pass silently.
   assert(
