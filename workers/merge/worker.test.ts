@@ -6,6 +6,7 @@
 // token transport and stubs `globalThis.fetch` so the single-PR GET reports `merged: true`.
 import { test } from "node:test";
 import { assertEquals } from "#test-assert";
+import { _clearMergeProtocolCache } from "../../app/mergeProtocol.ts";
 import { noopLog } from "../../test/log.ts";
 import handler from "./worker.ts";
 
@@ -94,4 +95,104 @@ test("pr.merge short-circuits an already-merged PR without re-running the land p
     // Never posts an enqueue comment or issues a merge call (only the read GET happened).
     assertEquals(calls.some((u) => /comments|merge$/.test(u)), false);
   });
+});
+
+// The land protocol has three terminal outcomes, dispatched by the worker's exhaustive `matchTags`
+// (worker.ts §"Exhaustive dispatch"). The already-merged short-circuit above never reaches that
+// dispatch, so the two land branches below — `queued` (repo lands via an on-demand merge queue) and
+// `blocked` (GitHub refuses the merge) — pin the behaviour of that critical terminal switch so a
+// regression in any arm is caught. Both drive the token transport and route GitHub calls through a
+// stubbed `globalThis.fetch`.
+function withGithub(
+  routes: (url: string, init: RequestInit | undefined) => Response | null,
+  run: (calls: string[]) => Promise<void>,
+): Promise<void> {
+  const oldTransport = process.env["NANO_PR_GITHUB_TRANSPORT"];
+  const oldToken = process.env["GITHUB_TOKEN"];
+  const oldFetch = globalThis.fetch;
+  const calls: string[] = [];
+  process.env["NANO_PR_GITHUB_TRANSPORT"] = "token";
+  process.env["GITHUB_TOKEN"] = "test-token";
+  _clearMergeProtocolCache();
+  globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    calls.push(url);
+    const res = routes(url, init);
+    return Promise.resolve(res ?? new Response("not found", { status: 404 }));
+  }) as typeof fetch;
+  return run(calls).finally(() => {
+    if (oldTransport == null) delete process.env["NANO_PR_GITHUB_TRANSPORT"];
+    else process.env["NANO_PR_GITHUB_TRANSPORT"] = oldTransport;
+    if (oldToken == null) delete process.env["GITHUB_TOKEN"];
+    else process.env["GITHUB_TOKEN"] = oldToken;
+    globalThis.fetch = oldFetch;
+    _clearMergeProtocolCache();
+  });
+}
+
+test("pr.merge routes a mergify-queue repo through the queued branch (enqueue comment, status=queued)", async () => {
+  // AGENTS.md publishes a mergify-queue land protocol, so the worker enqueues via a comment rather
+  // than issuing a direct merge; the queued arm of `matchTags` marks the PR `queued` and returns.
+  const protocol =
+    "# repo\n\n```merge-protocol\n{ \"land\": { \"method\": \"mergify-queue\", \"comment\": \"@mergifyio queue\" } }\n```\n";
+  await withGithub(
+    (url) => {
+      if (/\/contents\/AGENTS\.md$/.test(url)) return new Response(protocol);
+      if (/\/pulls\/\d+$/.test(url)) return new Response(JSON.stringify({ merged: false, mergeable_state: "clean" }));
+      if (/\/issues\/\d+\/comments$/.test(url)) return new Response(JSON.stringify({ id: 1 }), { status: 201 });
+      return null;
+    },
+    async (calls) => {
+      const { app, stores } = fakeApp();
+      const out = (await handler(
+        { variables: { prKey: "acme/widgets#7", repo: "acme/widgets", prNumber: 7 } } as any,
+        app,
+      )) as Record<string, unknown>;
+
+      // Queued arm: waits for `merge-landed`, so it reports `queued` (not `merged`/`blocked`).
+      assertEquals(out, { mergeStatus: "queued" });
+
+      // Enqueued via the protocol's comment, never a direct merge PUT.
+      assertEquals(calls.some((u) => /\/issues\/\d+\/comments$/.test(u)), true);
+      assertEquals(calls.some((u) => /\/merge$/.test(u)), false);
+
+      // Audit row records the queue-comment land, and the PR row is flipped to `queued`.
+      assertEquals(stores.merges.length, 1);
+      assertEquals(stores.merges[0].outcome, "queued");
+      assertEquals(stores.merges[0].method, "queue-comment");
+      assertEquals(stores.pull_requests.find((r) => r.pr_key === "acme/widgets#7")?.status, "queued");
+    },
+  );
+});
+
+test("pr.merge routes a refused merge through the blocked branch (escalation payload)", async () => {
+  // Default (gh-merge) protocol; GitHub refuses the merge PUT, so `mergePr` reports `blocked` and the
+  // blocked arm of `matchTags` shapes the human-facing escalation question from the failure detail.
+  await withGithub(
+    (url) => {
+      if (/\/pulls\/\d+\/merge$/.test(url))
+        return new Response("Pull Request is not mergeable", { status: 405, statusText: "Method Not Allowed" });
+      if (/\/pulls\/\d+$/.test(url)) return new Response(JSON.stringify({ merged: false, mergeable_state: "dirty" }));
+      return null; // no AGENTS.md / merge-protocol.json → DEFAULT gh-merge protocol
+    },
+    async (calls) => {
+      const { app, stores } = fakeApp();
+      const out = (await handler(
+        { variables: { prKey: "acme/widgets#9", repo: "acme/widgets", prNumber: 9 } } as any,
+        app,
+      )) as Record<string, unknown>;
+
+      // Blocked arm: surfaces both the loop-terminal `mergeStatus` and the escalation `status`.
+      assertEquals(out.mergeStatus, "blocked");
+      assertEquals(out.status, "blocked");
+      assertEquals(typeof out.question, "string");
+      assertEquals((out.question as string).startsWith("Automated merge was blocked:"), true);
+
+      // Attempted a real merge PUT (not an enqueue comment), and recorded a blocked audit row.
+      assertEquals(calls.some((u) => /\/pulls\/\d+\/merge$/.test(u)), true);
+      assertEquals(calls.some((u) => /\/comments$/.test(u)), false);
+      assertEquals(stores.merges.length, 1);
+      assertEquals(stores.merges[0].outcome, "blocked");
+    },
+  );
 });
