@@ -115,7 +115,7 @@ machine-readable result one of two ways:
    ::nano:result:: {"status":"fixed","summary":"Corrected the type error in handler.ts and pushed"}
    ```
 
-   The harness reads the **last** such line. A trailing ```json fenced block is also
+   The harness reads the **last** such line. A trailing fenced JSON code block is also
    accepted as a last resort.
 
 Do not put the result file inside the repo checkout or `git add` it — it lives
