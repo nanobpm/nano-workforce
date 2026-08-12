@@ -103,20 +103,25 @@ test("pr.merge short-circuits an already-merged PR without re-running the land p
 // `blocked` (GitHub refuses the merge) — pin the behaviour of that critical terminal switch so a
 // regression in any arm is caught. Both drive the token transport and route GitHub calls through a
 // stubbed `globalThis.fetch`.
+// Each recorded call keeps the HTTP method alongside the URL so tests can assert not just *which*
+// endpoint the worker hit but *how* (e.g. enqueue via POST, merge via PUT) — a URL-only matcher
+// would stay green if the verb regressed.
+type GithubCall = { url: string; method: string };
+
 function withGithub(
   routes: (url: string, init: RequestInit | undefined) => Response | null,
-  run: (calls: string[]) => Promise<void>,
+  run: (calls: GithubCall[]) => Promise<void>,
 ): Promise<void> {
   const oldTransport = process.env["NANO_PR_GITHUB_TRANSPORT"];
   const oldToken = process.env["GITHUB_TOKEN"];
   const oldFetch = globalThis.fetch;
-  const calls: string[] = [];
+  const calls: GithubCall[] = [];
   process.env["NANO_PR_GITHUB_TRANSPORT"] = "token";
   process.env["GITHUB_TOKEN"] = "test-token";
   _clearMergeProtocolCache();
   globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
     const url = String(input);
-    calls.push(url);
+    calls.push({ url, method: (init?.method ?? "GET").toUpperCase() });
     const res = routes(url, init);
     return Promise.resolve(res ?? new Response("not found", { status: 404 }));
   }) as typeof fetch;
@@ -152,9 +157,12 @@ test("pr.merge routes a mergify-queue repo through the queued branch (enqueue co
       // Queued arm: waits for `merge-landed`, so it reports `queued` (not `merged`/`blocked`).
       assertEquals(out, { mergeStatus: "queued" });
 
-      // Enqueued via the protocol's comment, never a direct merge PUT.
-      assertEquals(calls.some((u) => /\/issues\/\d+\/comments$/.test(u)), true);
-      assertEquals(calls.some((u) => /\/merge$/.test(u)), false);
+      // Enqueued via the protocol's comment (POST), never a direct merge PUT.
+      assertEquals(
+        calls.some((c) => /\/issues\/\d+\/comments$/.test(c.url) && c.method === "POST"),
+        true,
+      );
+      assertEquals(calls.some((c) => /\/merge$/.test(c.url)), false);
 
       // Audit row records the queue-comment land, and the PR row is flipped to `queued`.
       assertEquals(stores.merges.length, 1);
@@ -189,8 +197,11 @@ test("pr.merge routes a refused merge through the blocked branch (escalation pay
       assertEquals((out.question as string).startsWith("Automated merge was blocked:"), true);
 
       // Attempted a real merge PUT (not an enqueue comment), and recorded a blocked audit row.
-      assertEquals(calls.some((u) => /\/pulls\/\d+\/merge$/.test(u)), true);
-      assertEquals(calls.some((u) => /\/comments$/.test(u)), false);
+      assertEquals(
+        calls.some((c) => /\/pulls\/\d+\/merge$/.test(c.url) && c.method === "PUT"),
+        true,
+      );
+      assertEquals(calls.some((c) => /\/comments$/.test(c.url)), false);
       assertEquals(stores.merges.length, 1);
       assertEquals(stores.merges[0].outcome, "blocked");
     },
