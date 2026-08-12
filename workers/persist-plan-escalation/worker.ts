@@ -15,7 +15,10 @@ interface Out extends Record<string, unknown> {
   planEscalationId: number;
 }
 
-const str = (v: unknown): string => (typeof v === "string" ? v.trim() : v == null ? "" : String(v).trim());
+// Accept only genuine strings (trimmed); anything else is treated as missing so
+// the explicit planKey guard fires instead of silently coercing (e.g. 123 -> "123")
+// an escalation that BPMN correlation ("owner/repo#N") could never resume.
+const str = (v: unknown): string => (typeof v === "string" ? v.trim() : "");
 const int = (v: unknown): number => {
   const n = Math.trunc(Number(v));
   return Number.isFinite(n) && n >= 0 ? n : 0;

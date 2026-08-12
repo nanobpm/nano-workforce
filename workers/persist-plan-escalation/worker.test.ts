@@ -65,3 +65,16 @@ test("missing planKey fails loudly instead of parking an unanswerable escalation
     "persist-plan-escalation: missing planKey in process scope",
   );
 });
+
+test("non-string planKey is treated as missing rather than coerced to a bogus key", async () => {
+  const app = fakeApp();
+  await assertRejects(
+    () => handler({
+      variables: { planKey: 123, planFindings: "needs a seam" },
+      jobKey: "j-nonstring",
+    } as any, app as any),
+    Error,
+    "persist-plan-escalation: missing planKey in process scope",
+  );
+  assertEquals(app._escalations.length, 0);
+});
