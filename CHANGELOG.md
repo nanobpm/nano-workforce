@@ -1,3 +1,10 @@
+# [0.50.0](https://github.com/nanobpm/nano-workforce/compare/v0.49.0...v0.50.0) (2026-08-12)
+
+
+### Features
+
+* **merge:** adopt @nanobpm/urban/effect matchTags for exhaustive land dispatch ([#139](https://github.com/nanobpm/nano-workforce/issues/139)) ([c251763](https://github.com/nanobpm/nano-workforce/commit/c251763a050858ea610ce45e59a34f859163c29c)), closes [nano-ide#215](https://github.com/nano-ide/issues/215)
+
 # [0.49.0](https://github.com/nanobpm/nano-workforce/compare/v0.48.2...v0.49.0) (2026-08-12)
 
 
