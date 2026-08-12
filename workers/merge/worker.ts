@@ -9,6 +9,7 @@
 // calls live in app/github.ts; this worker records the attempt in the `merges` audit table and
 // shapes the escalation payload on a block.
 import type { AppJobHandler } from "@nanobpm/urban";
+import { matchTags, tag } from "@nanobpm/urban/effect";
 import { abandonTokenFromUrl } from "../../app/abandon.ts";
 import { checkBaseTarget } from "../../app/baseGuard.ts";
 import { enqueueViaComment, fetchPrState, mergePr } from "../../app/github.ts";
@@ -134,25 +135,29 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
     at: now,
   });
 
-  if (outcome === "queued") {
-    await app.data.table("pull_requests", "pr_key").update(prKey, {
-      status: "queued",
-      updated_at: now,
-    });
-    return { mergeStatus: "queued" };
-  }
-  if (outcome === "merged") {
-    return { mergeStatus: "merged" };
-  }
-  // blocked → hand the escalation machinery a concrete question.
+  // Exhaustive dispatch on the land outcome. Modelled as a tagged value so
+  // `matchTags` forces a handler for every case — adding a new outcome to the
+  // `"merged" | "queued" | "blocked"` union becomes a compile error here rather
+  // than silently falling through to the "blocked" branch.
   const docHint = protocol?.doc ? ` See the repo's merge protocol (${protocol.doc}).` : "";
-  return {
-    mergeStatus: "blocked",
-    status: "blocked",
-    question:
-      `Automated merge was blocked: ${detail}. ` +
-      `Resolve it on GitHub (rebase / fix a required check / grant merge rights), then reply to retry.${docHint}`,
-  };
+  return await matchTags(tag(outcome, { detail }), {
+    queued: async () => {
+      await app.data.table("pull_requests", "pr_key").update(prKey, {
+        status: "queued",
+        updated_at: now,
+      });
+      return { mergeStatus: "queued" };
+    },
+    merged: async () => ({ mergeStatus: "merged" }),
+    // blocked → hand the escalation machinery a concrete question.
+    blocked: async (o) => ({
+      mergeStatus: "blocked",
+      status: "blocked",
+      question:
+        `Automated merge was blocked: ${o.detail}. ` +
+        `Resolve it on GitHub (rebase / fix a required check / grant merge rights), then reply to retry.${docHint}`,
+    }),
+  });
 };
 
 export default handler;
