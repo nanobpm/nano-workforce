@@ -1,3 +1,10 @@
+# [0.49.0](https://github.com/nanobpm/nano-workforce/compare/v0.48.2...v0.49.0) (2026-08-12)
+
+
+### Features
+
+* **ui:** per-epic operator workspace with live wave progress ([#138](https://github.com/nanobpm/nano-workforce/issues/138)) ([127888d](https://github.com/nanobpm/nano-workforce/commit/127888d5d2b66e1e9d1c85d015cbd65f3696216f)), closes [#137](https://github.com/nanobpm/nano-workforce/issues/137) [nanobpm/nano-workforce#137](https://github.com/nanobpm/nano-workforce/issues/137) [nanobpm/nano-ide#213](https://github.com/nanobpm/nano-ide/issues/213) [nanobpm/nano-ide#214](https://github.com/nanobpm/nano-ide/issues/214)
+
 ## [0.48.2](https://github.com/nanobpm/nano-workforce/compare/v0.48.1...v0.48.2) (2026-08-12)
 
 
