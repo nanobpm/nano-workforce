@@ -1,3 +1,10 @@
+## [0.48.2](https://github.com/nanobpm/nano-workforce/compare/v0.48.1...v0.48.2) (2026-08-12)
+
+
+### Bug Fixes
+
+* **merge-loop:** reconcile from ground truth instead of escalating on a missing agent status ([#135](https://github.com/nanobpm/nano-workforce/issues/135)) ([6861cbe](https://github.com/nanobpm/nano-workforce/commit/6861cbe160d0aebb903924f5aaf67f9c90adac6d)), closes [#134](https://github.com/nanobpm/nano-workforce/issues/134)
+
 ## [0.48.1](https://github.com/nanobpm/nano-workforce/compare/v0.48.0...v0.48.1) (2026-08-12)
 
 
