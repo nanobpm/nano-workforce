@@ -13,6 +13,7 @@ import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { blackboardUrl, mintBlackboardToken, renderCoordinationBrief } from "./blackboard.ts";
 import { clearExclusions } from "./mergeExclusion.ts";
 import { clearTaskDeltas } from "./taskDelta.ts";
+import { resolveTrialMergeAttention, trialMergeWaveFromTaskId } from "./trialMerge.ts";
 
 /** The BPMN process this module drives (resources/processes/plan-fanout.bpmn). */
 export const PLAN_PROCESS_ID = "plan-fanout";
@@ -445,6 +446,13 @@ export async function answerTaskEscalation(
     correlationKey: corrKey,
     variables: { answer },
   });
+  // A trial-merge escalation (task_id `trial-merge-wave-<wave>`) leaves an
+  // append-only red audit row in `plan_trial_merges`. Answering it clears that
+  // row from the page's "Needs attention" tab — including a "proceed" override
+  // that records no re-run row (a re-run would supersede it, but a proceed would
+  // not, pinning the red row forever).
+  const trialWave = trialMergeWaveFromTaskId(open.task_id);
+  if (trialWave != null) await resolveTrialMergeAttention(data, open.plan_key, trialWave);
   await refreshOpenTaskEscalation(data, open.plan_key);
   return { ok: true, escalationId: open.id, planKey: open.plan_key, taskId: open.task_id };
 }

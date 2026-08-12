@@ -273,12 +273,18 @@
           "source": "app",
           "table": "plan_trial_merges",
           "orderBy": { "field": "created_at", "dir": "desc" },
-          "filter": [{ "field": "result", "in": ["merge-conflict", "suite-failed"] }]
+          "filter": [
+            { "field": "result", "in": ["merge-conflict", "suite-failed"] },
+            { "field": "resolved", "in": [0] }
+          ]
         },
         "tabs": [
           {
             "label": "Needs attention",
-            "filter": [{ "field": "result", "in": ["merge-conflict", "suite-failed"] }]
+            "filter": [
+              { "field": "result", "in": ["merge-conflict", "suite-failed"] },
+              { "field": "resolved", "in": [0] }
+            ]
           },
           {
             "label": "Clean",
