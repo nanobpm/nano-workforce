@@ -544,7 +544,7 @@ decision. The target behaviour is an **autonomy ladder**:
 3. **Auto-remediation** — for deterministic, agent-diagnosable classes (build ordering,
   lockfile drift, renamed scripts) a `senior:integration-fix` agent pushes the fix and
   reruns the trial before any human is parked (reusing the escalate→wait→rerun/proceed
-  branch from the plan-review escalation, §13.x / PR #128).
+  branch from the plan-review escalation, PR #128).
 
 A human escalation is then reserved for its one true case: **two slices that each pass
 but encode incompatible decisions about a shared contract** — a genuine design call.
