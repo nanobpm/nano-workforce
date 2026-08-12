@@ -100,3 +100,48 @@ was needed, so the process simply re-attempts the merge; the rebase budget
 bounds how many times a still-stuck PR can loop here before it escalates. Reserve
 `blocked` for a genuine semantic conflict you cannot resolve mechanically (or a
 branch that is un-rebaseable), so a human can decide.
+
+### How to return it (the wire mechanism)
+
+Your result variables only reach the process if you emit them through the harness's
+result channel. Prose in your normal output is **not** parsed — if you only "say"
+your status in the transcript, the process can't read it, falls back to its safe
+default (a merge escalation a human must clear), and the merge stalls. So emit a
+machine-readable result one of two ways:
+
+1. **Write a JSON object to the file at `$AGENT_RESULT_FILE`** (an env var the
+   harness sets for you). The object's keys become process variables. Examples:
+
+   ```sh
+   # branch tip now contains the latest base (you pushed a resolved rebase, or it was already up to date):
+   printf '%s' '{"status":"rebased","summary":"Rebased onto main, resolved 2 conflicts in router.ts, pushed"}' > "$AGENT_RESULT_FILE"
+   # ordering constraint — must wait for another PR to land first:
+   printf '%s' '{"status":"waiting-on-pr","summary":"Stacked on the base PR that has not merged","dependsOn":"owner/repo#123"}' > "$AGENT_RESULT_FILE"
+   # genuine semantic conflict — a human must decide which behaviour wins:
+   printf '%s' '{"status":"blocked","summary":"main and this branch both rewrote retry() incompatibly","question":"Should retries stay capped at 3 (main) or become unbounded (this PR)?"}' > "$AGENT_RESULT_FILE"
+   ```
+
+   Write this file **once**, at the very end, with your final result. Keep it a flat
+   JSON object of exactly the variables named in the return contract above.
+
+2. **Fallback** (only if you truly cannot write the file): print a single line to
+   stdout of the form `::nano:result:: {json}` — e.g.
+
+   ```
+   ::nano:result:: {"status":"rebased","summary":"Already up to date; no push needed"}
+   ```
+
+   The harness reads the **last** such line. A trailing ```json fenced block is also
+   accepted as a last resort.
+
+Do not put the result file inside the repo checkout or `git add` it — it lives
+outside your workspace. Exit `0` for every status (including `blocked`/`waiting-on-pr`);
+a non-zero exit means a genuine crash and the job is retried.
+
+**Emitting a machine-readable result is your mandatory final step — never exit
+silently.** It is the last thing you do on every path out of this job (including after
+a force-push, or when the branch was already up to date). If you are ever unsure which
+status applies and the branch tip contains the latest base, return **`rebased`** with a
+`summary`; otherwise return **`blocked`** with a concrete `question` — never leave
+without a result. A missing result is treated as an unclassified merge escalation that
+pulls in a human and stalls the merge, so relying on that default wastes the attempt.

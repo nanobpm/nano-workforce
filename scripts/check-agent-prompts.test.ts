@@ -34,7 +34,7 @@ test("passes when every {{token}} resolves to a non-blank template", async () =>
   const root = await fixture({
     "nano.app.json": MANIFEST,
     "resources/processes/loop.bpmn": header("{{review-round}}"),
-    "prompts/review-round.md": "# Round\nDo the thing.",
+    "prompts/review-round.md": "# Round\nDo the thing, then write your result to `$AGENT_RESULT_FILE`.",
   });
   const res = checkAgentPrompts(root);
   assertEquals(res.errors, []);
@@ -73,6 +73,31 @@ test("fails when a reserved agent-prompt header is blank", async () => {
   const res = checkAgentPrompts(root);
   assert(!res.ok);
   assert(res.errors.some((e) => e.includes("is empty")));
+});
+
+test("fails when an agent-prompt template omits the machine-readable result mechanism", async () => {
+  // A prompt wired as an agent's base prompt must tell it to write $AGENT_RESULT_FILE (or use the
+  // ::nano:result:: fallback). Without it the agent finishes with prose only, `status` comes back
+  // blank, and the status gateway escalates/stalls — the fix-ci/rebase gap behind #746's stuck merge.
+  const root = await fixture({
+    "nano.app.json": MANIFEST,
+    "resources/processes/loop.bpmn": header("{{review-round}}"),
+    "prompts/review-round.md": "# Round\nReturn status: converged. (but never says how to emit it)",
+  });
+  const res = checkAgentPrompts(root);
+  assert(!res.ok);
+  assert(res.errors.some((e) => e.includes("{{review-round}}") && e.includes("AGENT_RESULT_FILE")));
+});
+
+test("passes when an agent-prompt template emits via the ::nano:result:: fallback", async () => {
+  const root = await fixture({
+    "nano.app.json": MANIFEST,
+    "resources/processes/loop.bpmn": header("{{review-round}}"),
+    "prompts/review-round.md": "# Round\nEmit `::nano:result:: {\"status\":\"converged\"}` at the end.",
+  });
+  const res = checkAgentPrompts(root);
+  assertEquals(res.errors, []);
+  assert(res.ok);
 });
 
 test("checks the real repo: all committed agent prompts resolve", () => {
