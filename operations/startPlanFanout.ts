@@ -10,11 +10,14 @@
 // ONE of `issue` or `url` — so an empty or ambiguous target is a 400 at the edge; this delegate just
 // narrows the validated variant and keeps the issue-FORMAT parse guard (schema can't express it).
 
+import { BaseBranchMustExistError } from "../app/github.ts";
 import {
+  admitPlan,
+  DefaultBaseNotConfirmedError,
   InvalidBaseBranchError,
   MissingBaseBranchError,
-  normalizeBaseBranch,
   parseIssue,
+  SharedBaseError,
   startPlan,
 } from "../app/plan.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
@@ -32,15 +35,20 @@ export default defineOperation("startPlanFanout", async ({ body }, app) => {
     app.log.warn("start-plan rejected: unparseable issue reference", { raw });
     return { status: 400, body: { error: "could not parse issue (use owner/repo#123 or an issue URL)" } };
   }
-  // Epic base branch (ADR 0003): the branch the fleet branches off and opens every PR against. It is
-  // now REQUIRED and later interpolated into the authoritative implementer prompt (with `git`/`gh`
-  // shell snippets), so validate/normalise it HERE — a blank/absent base is a 400
-  // (`MissingBaseBranchError`) and a non-blank value that isn't a plausible git branch name is a 400
-  // (`InvalidBaseBranchError`), never persisted or rendered. (B4 layers the admitPlan gate on top.)
-  const baseBranch = "baseBranch" in body && typeof body.baseBranch === "string" ? body.baseBranch : null;
+  // Epic base branch (ADR 0003): admit the launch through the fail-fast `admitPlan` gate BEFORE any
+  // fan-out. It composes the four ordered admission rules — required+explicit, create-if-missing
+  // (epic/* guard, run synchronously so a typo is a clean edge 400), confirm-default, and
+  // shared-base — and returns the normalized base. Errors map to specific HTTP statuses at the edge.
+  const rawBase = "baseBranch" in body && typeof body.baseBranch === "string" ? body.baseBranch : null;
+  const allowSharedBase = "allowSharedBase" in body && body.allowSharedBase === true;
+  const confirmDefaultBase = "confirmDefaultBase" in body && body.confirmDefaultBase === true;
+  const token = process.env.GITHUB_TOKEN ?? "";
   let normalizedBase: string;
   try {
-    normalizedBase = normalizeBaseBranch(baseBranch);
+    normalizedBase = await admitPlan(app.data, parsed.repo, rawBase, token, {
+      allowSharedBase,
+      confirmDefaultBase,
+    });
   } catch (err) {
     if (err instanceof MissingBaseBranchError) {
       app.log.warn("start-plan rejected: missing base branch");
@@ -54,6 +62,39 @@ export default defineOperation("startPlanFanout", async ({ body }, app) => {
       return {
         status: 400,
         body: { error: "invalid baseBranch (must be a plausible git branch name, e.g. epic/agent-protocol)" },
+      };
+    }
+    if (err instanceof BaseBranchMustExistError) {
+      app.log.warn("start-plan rejected: base branch does not exist", { baseBranch: err.branch });
+      return {
+        status: 400,
+        body: {
+          error:
+            `baseBranch "${err.branch}" does not exist and is not an epic/* branch, so it is not ` +
+            `auto-created — create it first, or use the epic/* convention`,
+        },
+      };
+    }
+    if (err instanceof DefaultBaseNotConfirmedError) {
+      app.log.warn("start-plan rejected: default base not confirmed", { baseBranch: err.branch });
+      return {
+        status: 400,
+        body: {
+          error:
+            `baseBranch "${err.branch}" is the repository default branch — every task would land ` +
+            `directly on it with no integration branch. Re-submit with confirmDefaultBase: true to proceed`,
+        },
+      };
+    }
+    if (err instanceof SharedBaseError) {
+      app.log.warn("start-plan rejected: shared base branch", { baseBranch: err.branch });
+      return {
+        status: 409,
+        body: {
+          error:
+            `baseBranch "${err.branch}" is already in use by another active epic. Re-submit with ` +
+            `allowSharedBase: true to stack on it, or name a distinct epic/* branch`,
+        },
       };
     }
     throw err;

@@ -11,6 +11,7 @@
 // hand-written SQL — matching app/service.ts.
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { blackboardUrl, mintBlackboardToken, renderCoordinationBrief } from "./blackboard.ts";
+import { ensureBaseBranch, fetchDefaultBranch } from "./github.ts";
 import { clearExclusions } from "./mergeExclusion.ts";
 import { clearTaskDeltas } from "./taskDelta.ts";
 import { resolveTrialMergeAttention, trialMergeWaveFromTaskId } from "./trialMerge.ts";
@@ -315,6 +316,114 @@ export function renderBaseBranchBrief(baseBranch: string): string {
     "",
     "Do not target the repository default branch — a PR opened against it will not be merged into the epic.",
   ].join("\n");
+}
+
+/** Raised when the explicit base branch IS the repository default branch but the caller did not
+ * acknowledge the consequence with `confirmDefaultBase: true` (ADR 0003 rule 3). Naming the default
+ * is the one dangerous explicit value: every task lands directly on it with no integration buffer,
+ * and any merge-to-default side effect fires per task. The operation edge maps this to a 400. */
+export class DefaultBaseNotConfirmedError extends Error {
+  readonly branch: string;
+  constructor(branch: string) {
+    super(
+      `base branch "${branch}" is the repository default branch: every task would land directly ` +
+        `on "${branch}" with NO integration branch, and any merge-to-default side effect (e.g. ` +
+        `auto-publish) would fire per task. Re-submit with confirmDefaultBase: true to acknowledge ` +
+        `and proceed, or name an epic/* integration branch instead.`,
+    );
+    this.name = "DefaultBaseNotConfirmedError";
+    this.branch = branch;
+  }
+}
+
+/** Raised when another ACTIVE plan (status ∉ PLAN_TERMINAL_STATUSES) already targets the same repo
+ * + same custom base branch, and the caller did not pass `allowSharedBase: true` (ADR 0003 rule 4).
+ * Two in-flight epics sharing one integration branch interleave commits and poison each other's
+ * base. The default branch is EXEMPT (many epics target it concurrently without colliding — each
+ * task PR is independent). The operation edge maps this to a 409. */
+export class SharedBaseError extends Error {
+  readonly repo: string;
+  readonly branch: string;
+  constructor(repo: string, branch: string) {
+    super(
+      `base branch "${branch}" on ${repo} is already in use by another active epic. Sharing one ` +
+        `integration branch across epics interleaves their commits and poisons the base. Re-submit ` +
+        `with allowSharedBase: true only if you intend to stack on it, or name a distinct epic/* ` +
+        `branch.`,
+    );
+    this.name = "SharedBaseError";
+    this.repo = repo;
+    this.branch = branch;
+  }
+}
+
+/** Find plans on `repo` targeting `base` whose status is NOT terminal (i.e. still active). Used by
+ * the shared-base admission guard to detect a second epic reaching for the same integration branch.
+ * Grandfathered `base_branch = null` rows never match a non-null `base`, so they are ignored. */
+export async function findActivePlansByBase(
+  data: DataLayer,
+  repo: string,
+  base: string,
+): Promise<Plan[]> {
+  const rows = await plans(data).find({ repo, base_branch: base });
+  return rows.filter((p) => !PLAN_TERMINAL_STATUSES.includes(p.status));
+}
+
+/** Options gating the confirm-default (rule 3) and shared-base (rule 4) admission rules. Both
+ * default to `false` — a "warn you can't skip": the operator must consciously opt in. */
+export interface AdmitPlanOptions {
+  allowSharedBase?: boolean;
+  confirmDefaultBase?: boolean;
+}
+
+/** Fail-fast admission gate for an epic launch (ADR 0003 §Decision). Composes the four ordered
+ * admission rules BEFORE any task fans out and returns the normalized base branch on success. The
+ * ORDER is load-bearing — the cheapest / most fundamental reject (missing or typo'd base) fires
+ * first, so it is NOT reordered:
+ *
+ *   1. Required + explicit — `normalizeBaseBranch` (blank/absent → `MissingBaseBranchError`;
+ *      implausible → `InvalidBaseBranchError`).
+ *   2. Create-if-missing (epic/* guard), synchronously — `ensureBaseBranch`: a missing non-`epic/*`
+ *      base throws `BaseBranchMustExistError` HERE (so a typo is a clean edge 400, not a late
+ *      per-task failure); a missing `epic/*` base is created off default HEAD before fan-out; an
+ *      existing base is a no-op. It is idempotent, so the durable `ensure-base-branch` head task
+ *      re-runs it as belt-and-suspenders.
+ *   3. Confirm-default — if the base equals the repo default branch and `confirmDefaultBase` is not
+ *      `true`, throw `DefaultBaseNotConfirmedError`. The default branch is then EXEMPT from rule 4.
+ *   4. Shared-base — if an active plan already targets this same custom base and `allowSharedBase`
+ *      is not `true`, throw `SharedBaseError`.
+ */
+export async function admitPlan(
+  data: DataLayer,
+  repo: string,
+  baseBranch: string | null | undefined,
+  token: string,
+  options: AdmitPlanOptions = {},
+): Promise<string> {
+  // Rule 1 — required + explicit.
+  const base = normalizeBaseBranch(baseBranch);
+
+  // Rule 2 — create-if-missing (epic/* guard), synchronously at admission. A missing non-epic/*
+  // base throws BaseBranchMustExistError → clean edge 400; a missing epic/* base is created off
+  // default HEAD; an existing base is a no-op. Idempotent, so the head task safely re-runs it.
+  await ensureBaseBranch(repo, base, token);
+
+  // Rule 3 — confirm-default. Naming the repo default branch is deliberate and requires an explicit
+  // acknowledgement. When the base IS the default, it is exempt from the shared-base guard (rule 4),
+  // so return here on a confirmed default.
+  const defaultBranch = await fetchDefaultBranch(repo, token);
+  if (defaultBranch !== null && base === defaultBranch) {
+    if (options.confirmDefaultBase !== true) throw new DefaultBaseNotConfirmedError(base);
+    return base;
+  }
+
+  // Rule 4 — shared-base guard on a custom integration branch.
+  if (options.allowSharedBase !== true) {
+    const active = await findActivePlansByBase(data, repo, base);
+    if (active.length > 0) throw new SharedBaseError(repo, base);
+  }
+
+  return base;
 }
 
 /** Register a plan row (if new) and start the plan-fanout process. Idempotent on
