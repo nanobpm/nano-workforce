@@ -115,6 +115,10 @@
       "handler": "workers/record-trial-merge/worker.ts"
     },
     {
+      "taskType": "pr.resolve-trial-attention",
+      "handler": "workers/resolve-trial-attention/worker.ts"
+    },
+    {
       "taskType": "pr.record-results",
       "handler": "workers/record-results/worker.ts"
     },
