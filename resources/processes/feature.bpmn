@@ -77,8 +77,19 @@
         <zeebe:assignmentDefinition candidateGroups="operators" />
       </bpmn:extensionElements>
       <bpmn:incoming>f_blocked</bpmn:incoming>
-      <bpmn:outgoing>f_blockedEnd</bpmn:outgoing>
+      <bpmn:outgoing>f_toBlockedAck</bpmn:outgoing>
     </bpmn:userTask>
+    <bpmn:serviceTask id="record-blocked-ack" name="Record acknowledgement">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="pr.record-blocked-ack" />
+        <zeebe:ioMapping>
+          <zeebe:input source="=featureKey" target="featureKey" />
+          <zeebe:input source="=if (is defined(note)) then note else null" target="note" />
+        </zeebe:ioMapping>
+      </bpmn:extensionElements>
+      <bpmn:incoming>f_toBlockedAck</bpmn:incoming>
+      <bpmn:outgoing>f_blockedEnd</bpmn:outgoing>
+    </bpmn:serviceTask>
     <bpmn:exclusiveGateway id="gw-converge" name="converge?" default="f_noConverge">
       <bpmn:incoming>f_notBlocked</bpmn:incoming>
       <bpmn:outgoing>f_converge</bpmn:outgoing>
@@ -114,7 +125,8 @@
       <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=featureStatus = "blocked"</bpmn:conditionExpression>
     </bpmn:sequenceFlow>
     <bpmn:sequenceFlow id="f_notBlocked" name="not blocked" sourceRef="gw-blocked" targetRef="gw-converge" />
-    <bpmn:sequenceFlow id="f_blockedEnd" sourceRef="feature-blocked" targetRef="End" />
+    <bpmn:sequenceFlow id="f_toBlockedAck" sourceRef="feature-blocked" targetRef="record-blocked-ack" />
+    <bpmn:sequenceFlow id="f_blockedEnd" sourceRef="record-blocked-ack" targetRef="End" />
     <bpmn:sequenceFlow id="f_converge" name="converge" sourceRef="gw-converge" targetRef="converge">
       <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=converge = true and featureStatus = "opened" and prKey != null</bpmn:conditionExpression>
     </bpmn:sequenceFlow>
@@ -161,6 +173,9 @@
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_feature-blocked" bpmnElement="feature-blocked">
         <dc:Bounds x="1466" y="400" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_record-blocked-ack" bpmnElement="record-blocked-ack">
+        <dc:Bounds x="1666" y="400" width="100" height="80" />
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_gw-converge" bpmnElement="gw-converge" isMarkerVisible="true">
         <dc:Bounds x="1491" y="95" width="50" height="50" />
@@ -256,8 +271,12 @@
         <di:waypoint x="866" y="280" />
         <di:waypoint x="966" y="280" />
       </bpmndi:BPMNEdge>
-      <bpmndi:BPMNEdge id="BPMNEdge_f_blockedEnd" bpmnElement="f_blockedEnd">
+      <bpmndi:BPMNEdge id="BPMNEdge_f_toBlockedAck" bpmnElement="f_toBlockedAck">
         <di:waypoint x="1566" y="440" />
+        <di:waypoint x="1666" y="440" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_f_blockedEnd" bpmnElement="f_blockedEnd">
+        <di:waypoint x="1766" y="440" />
         <di:waypoint x="1884" y="440" />
         <di:waypoint x="1884" y="138" />
       </bpmndi:BPMNEdge>

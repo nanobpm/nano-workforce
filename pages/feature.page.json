@@ -62,7 +62,7 @@
           "filter": [{ "field": "status", "in": ["running"] }]
         },
         "tabs": [
-          { "label": "Active", "filter": [{ "field": "status", "in": ["running"] }] },
+          { "label": "Active", "filter": [{ "field": "status", "in": ["running", "awaiting_operator"] }] },
           { "label": "History", "filter": [{ "field": "status", "in": ["opened", "converging", "merged", "converged", "blocked", "skipped", "failed", "abandoned"] }] },
           { "label": "All", "filter": [] }
         ],

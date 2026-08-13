@@ -55,6 +55,7 @@ interface FeatureRow {
   process_key: string | null;
   status: string;
   pr_key: string | null;
+  delivery_label: string | null;
 }
 interface PrRow {
   pr_key: string;
@@ -160,7 +161,7 @@ describe("single-issue feature run (#172 — feature.bpmn)", () => {
     );
   });
 
-  test("blocked: a non-opened result parks the run at the operators' user task, never enrolls a PR", async () => {
+  test("blocked: parks at the operators' user task (non-terminal), never enrolls a PR, settles on ack", async () => {
     await withApp(
       { "senior:feature": () => ({ status: "blocked", summary: "could not proceed" }) },
       { baseBranch: "epic/e2e", converge: true },
@@ -173,24 +174,27 @@ describe("single-issue feature run (#172 — feature.bpmn)", () => {
         assert.ok(!flows.includes("gw-blocked->gw-converge"), "a blocked run never reaches the converge gateway");
 
         // The instance stays alive parked at a completable native user task (operators inbox) — a
-        // blocked run is never a silent dead-end.
+        // blocked run is never a silent dead-end — and the row is NON-terminal `awaiting_operator`
+        // so a re-dispatch of the same issue short-circuits (no orphaned parallel run).
         const tasks = await app.engine.searchUserTasks({ processInstanceKey: processKey });
         const task = tasks.find((t) => t.elementId === "feature-blocked") as InboxTask | undefined;
         assert.ok(task?.userTaskKey, "the blocked outcome parked a completable native user task");
 
-        const run = await featureRow(app, featureKey);
-        assert.equal(run.status, "blocked");
-        assert.equal(run.pr_key, null);
+        const parked = await featureRow(app, featureKey);
+        assert.equal(parked.status, "awaiting_operator", "while parked the run is non-terminal awaiting_operator");
+        assert.equal(parked.pr_key, null);
         const prs = await app.db.table<PrRow>("pull_requests", "pr_key").find({});
         assert.equal(prs.length, 0, "a blocked run never enrolled a PR into the convergence loop");
 
-        // Acknowledging the blocked run completes the instance.
-        await app.engine.completeUserTask(task!.userTaskKey, { note: "acknowledged" });
+        // Acknowledging the blocked run records the note, settles it terminal `blocked`, and ends.
+        await app.engine.completeUserTask(task!.userTaskKey, { note: "reassigned to a human" });
         await app.settle();
-        assert.ok(
-          takenFlows(app).includes("feature-blocked->End"),
-          "acknowledging the blocked user task ends the run",
-        );
+        const flows2 = takenFlows(app);
+        assert.ok(flows2.includes("feature-blocked->record-blocked-ack"), "ack routes through record-blocked-ack");
+        assert.ok(flows2.includes("record-blocked-ack->End"), "the acknowledged run ends");
+        const settled = await featureRow(app, featureKey);
+        assert.equal(settled.status, "blocked", "the acknowledged run settles at terminal blocked");
+        assert.equal(settled.delivery_label, "operator: reassigned to a human", "the operator note is recorded");
       },
     );
   });

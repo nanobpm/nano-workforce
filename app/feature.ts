@@ -51,6 +51,7 @@ export const FEATURE_RUN_STATUSES = [
   "running", // the agent is implementing (including while parked at an escalation user task)
   "opened", // a PR was raised and the run ends here (converge was not requested)
   "converging", // the opened PR was handed to the convergence loop (live state via pr_key → pull_requests)
+  "awaiting_operator", // NON-terminal: the run is blocked and parked at the feature-blocked operator user task
   "merged", // reconciled: the handed-off PR MERGED (pollFeatureDelivery, from pull_requests.status)
   "converged", // reconciled: the handed-off PR converged but did not merge (auto-merge off)
   "blocked", // the agent could not open a PR (gave up / escalation abandoned)
@@ -63,7 +64,10 @@ export type FeatureRunStatus = typeof FEATURE_RUN_STATUSES[number];
 /** A feature run is finished once it leaves `running`. Mirrors PLAN_TERMINAL_STATUSES: a
  * re-dispatch of the same issue restarts only when the prior run has settled. `converging` stays
  * terminal-for-redispatch even though `pollFeatureDelivery` may later advance it to
- * `merged`/`converged`/`abandoned` — those are equally terminal, so redispatch gating is unaffected. */
+ * `merged`/`converged`/`abandoned` — those are equally terminal, so redispatch gating is unaffected.
+ * `awaiting_operator` is deliberately EXCLUDED (non-terminal): while a blocked run is parked at the
+ * feature-blocked operator user task its instance is still alive, so a re-dispatch of the same issue
+ * must short-circuit (no orphaned parallel instance) until the operator acknowledges it. */
 export const FEATURE_TERMINAL_STATUSES: readonly FeatureRunStatus[] = [
   "opened",
   "converging",
