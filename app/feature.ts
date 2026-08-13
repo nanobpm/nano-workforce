@@ -39,6 +39,10 @@ export interface FeatureRun {
   converge: number;
   auto_merge: number;
   outcome: string | null;
+  /** Human rollup detail projected by `pollFeatureDelivery` (fix: Feature history stuck at
+   * `converging`). NULL until there is a signal. The reconciled TERMINAL outcome is written to
+   * `status` itself; this carries the sub-state / note (e.g. "merged", "waiting_review"). */
+  delivery_label: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -47,6 +51,8 @@ export const FEATURE_RUN_STATUSES = [
   "running", // the agent is implementing (including while parked at an escalation user task)
   "opened", // a PR was raised and the run ends here (converge was not requested)
   "converging", // the opened PR was handed to the convergence loop (live state via pr_key → pull_requests)
+  "merged", // reconciled: the handed-off PR MERGED (pollFeatureDelivery, from pull_requests.status)
+  "converged", // reconciled: the handed-off PR converged but did not merge (auto-merge off)
   "blocked", // the agent could not open a PR (gave up / escalation abandoned)
   "skipped", // nothing to do
   "failed", // an unexpected failure
@@ -55,15 +61,54 @@ export const FEATURE_RUN_STATUSES = [
 export type FeatureRunStatus = typeof FEATURE_RUN_STATUSES[number];
 
 /** A feature run is finished once it leaves `running`. Mirrors PLAN_TERMINAL_STATUSES: a
- * re-dispatch of the same issue restarts only when the prior run has settled. */
+ * re-dispatch of the same issue restarts only when the prior run has settled. `converging` stays
+ * terminal-for-redispatch even though `pollFeatureDelivery` may later advance it to
+ * `merged`/`converged`/`abandoned` — those are equally terminal, so redispatch gating is unaffected. */
 export const FEATURE_TERMINAL_STATUSES: readonly FeatureRunStatus[] = [
   "opened",
   "converging",
+  "merged",
+  "converged",
   "blocked",
   "skipped",
   "failed",
   "abandoned",
 ];
+
+/** Reconciled delivery outcome for a single feature run, derived from its handed-off PR's
+ * `pull_requests.status`. Pure and read-only — the source of truth for the denormalised
+ * `feature_runs.status` transition + `feature_runs.delivery_label` that `pollFeatureDelivery`
+ * projects. Only meaningful for a run currently `converging` with a `pr_key`. */
+export interface FeatureDeliveryRollup {
+  /** The reconciled `feature_runs.status`. Stays `converging` while the PR is still in flight
+   * (or its row is missing); advances to the matching terminal outcome once the PR settles. */
+  status: FeatureRunStatus;
+  /** Human rollup detail for the row (`delivery_label`). */
+  label: string;
+}
+
+/** Map a handed-off PR's `pull_requests.status` to the feature run's reconciled outcome.
+ *
+ * - `merged` → `merged` (the win). `converged` → `converged` (review done, not merged — auto-merge
+ *   was off). `abandoned` → `abandoned`.
+ * - in-flight PR statuses (`converging`/`waiting_review`/`escalated`) keep the run `converging`,
+ *   surfacing the live sub-state as the label so the grid stops looking frozen.
+ * - `null` (the `pull_requests` row is missing — DB desync) keeps the run `converging` and labels
+ *   it so the desync is visible, never a false-positive terminal. */
+export function deriveFeatureDelivery(prStatus: string | null): FeatureDeliveryRollup {
+  switch (prStatus) {
+    case "merged":
+      return { status: "merged", label: "merged" };
+    case "converged":
+      return { status: "converged", label: "converged (not merged)" };
+    case "abandoned":
+      return { status: "abandoned", label: "PR abandoned" };
+    case null:
+      return { status: "converging", label: "PR record missing" };
+    default:
+      return { status: "converging", label: prStatus };
+  }
+}
 
 export const featureRuns = (data: DataLayer) => data.table<FeatureRun>("feature_runs", "feature_key");
 
@@ -104,6 +149,7 @@ export async function startFeature(
       converge: converge ? 1 : 0,
       auto_merge: autoMerge ? 1 : 0,
       outcome: null,
+      delivery_label: null,
       updated_at: ts,
     });
   } else {
@@ -119,6 +165,7 @@ export async function startFeature(
       converge: converge ? 1 : 0,
       auto_merge: autoMerge ? 1 : 0,
       outcome: null,
+      delivery_label: null,
       created_at: ts,
       updated_at: ts,
     });

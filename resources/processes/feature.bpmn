@@ -63,10 +63,24 @@
       <bpmn:incoming>w_done</bpmn:incoming>
       <bpmn:incoming>w_abandon</bpmn:incoming>
       <bpmn:incoming>w_sla</bpmn:incoming>
-      <bpmn:outgoing>f_toConvergeGw</bpmn:outgoing>
+      <bpmn:outgoing>f_toBlockedGw</bpmn:outgoing>
     </bpmn:serviceTask>
+    <bpmn:exclusiveGateway id="gw-blocked" name="blocked?" default="f_notBlocked">
+      <bpmn:incoming>f_toBlockedGw</bpmn:incoming>
+      <bpmn:outgoing>f_blocked</bpmn:outgoing>
+      <bpmn:outgoing>f_notBlocked</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:userTask id="feature-blocked" name="Blocked run (human)">
+      <bpmn:extensionElements>
+        <zeebe:formDefinition formId="feature-blocked" />
+        <zeebe:userTask />
+        <zeebe:assignmentDefinition candidateGroups="operators" />
+      </bpmn:extensionElements>
+      <bpmn:incoming>f_blocked</bpmn:incoming>
+      <bpmn:outgoing>f_blockedEnd</bpmn:outgoing>
+    </bpmn:userTask>
     <bpmn:exclusiveGateway id="gw-converge" name="converge?" default="f_noConverge">
-      <bpmn:incoming>f_toConvergeGw</bpmn:incoming>
+      <bpmn:incoming>f_notBlocked</bpmn:incoming>
       <bpmn:outgoing>f_converge</bpmn:outgoing>
       <bpmn:outgoing>f_noConverge</bpmn:outgoing>
     </bpmn:exclusiveGateway>
@@ -80,6 +94,7 @@
     <bpmn:endEvent id="End" name="Done">
       <bpmn:incoming>f_noConverge</bpmn:incoming>
       <bpmn:incoming>f_toEndConverged</bpmn:incoming>
+      <bpmn:incoming>f_blockedEnd</bpmn:incoming>
     </bpmn:endEvent>
     <bpmn:sequenceFlow id="f_toEnsureBase" sourceRef="Start" targetRef="ensure-base-branch" />
     <bpmn:sequenceFlow id="f_toImplement" sourceRef="ensure-base-branch" targetRef="implement-task" />
@@ -94,7 +109,12 @@
     </bpmn:sequenceFlow>
     <bpmn:sequenceFlow id="w_abandon" name="abandon" sourceRef="w_gw_answer" targetRef="record-feature" />
     <bpmn:sequenceFlow id="w_sla" name="SLA auto-abandon" sourceRef="be_feature_sla" targetRef="record-feature" />
-    <bpmn:sequenceFlow id="f_toConvergeGw" sourceRef="record-feature" targetRef="gw-converge" />
+    <bpmn:sequenceFlow id="f_toBlockedGw" sourceRef="record-feature" targetRef="gw-blocked" />
+    <bpmn:sequenceFlow id="f_blocked" name="blocked" sourceRef="gw-blocked" targetRef="feature-blocked">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=featureStatus = "blocked"</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="f_notBlocked" name="not blocked" sourceRef="gw-blocked" targetRef="gw-converge" />
+    <bpmn:sequenceFlow id="f_blockedEnd" sourceRef="feature-blocked" targetRef="End" />
     <bpmn:sequenceFlow id="f_converge" name="converge" sourceRef="gw-converge" targetRef="converge">
       <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=converge = true and featureStatus = "opened" and prKey != null</bpmn:conditionExpression>
     </bpmn:sequenceFlow>
@@ -133,19 +153,28 @@
       <bpmndi:BPMNShape id="BPMNShape_record-feature" bpmnElement="record-feature">
         <dc:Bounds x="1116" y="80" width="100" height="80" />
       </bpmndi:BPMNShape>
-      <bpmndi:BPMNShape id="BPMNShape_gw-converge" bpmnElement="gw-converge" isMarkerVisible="true">
+      <bpmndi:BPMNShape id="BPMNShape_gw-blocked" bpmnElement="gw-blocked" isMarkerVisible="true">
         <dc:Bounds x="1316" y="95" width="50" height="50" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="1308" y="76" width="67" height="14" />
+          <dc:Bounds x="1311" y="76" width="60" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_feature-blocked" bpmnElement="feature-blocked">
+        <dc:Bounds x="1466" y="400" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_gw-converge" bpmnElement="gw-converge" isMarkerVisible="true">
+        <dc:Bounds x="1491" y="95" width="50" height="50" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1483" y="76" width="67" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_converge" bpmnElement="converge">
-        <dc:Bounds x="1466" y="240" width="100" height="80" />
+        <dc:Bounds x="1666" y="240" width="100" height="80" />
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_End" bpmnElement="End">
-        <dc:Bounds x="1666" y="102" width="36" height="36" />
+        <dc:Bounds x="1866" y="102" width="36" height="36" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="1667" y="83" width="34" height="14" />
+          <dc:Bounds x="1867" y="83" width="34" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_be_feature_sla" bpmnElement="be_feature_sla">
@@ -173,15 +202,22 @@
           <dc:Bounds x="875" y="98" width="32" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
-      <bpmndi:BPMNEdge id="BPMNEdge_f_toConvergeGw" bpmnElement="f_toConvergeGw">
+      <bpmndi:BPMNEdge id="BPMNEdge_f_toBlockedGw" bpmnElement="f_toBlockedGw">
         <di:waypoint x="1216" y="120" />
         <di:waypoint x="1316" y="120" />
       </bpmndi:BPMNEdge>
-      <bpmndi:BPMNEdge id="BPMNEdge_f_noConverge" bpmnElement="f_noConverge">
+      <bpmndi:BPMNEdge id="BPMNEdge_f_notBlocked" bpmnElement="f_notBlocked">
         <di:waypoint x="1366" y="120" />
-        <di:waypoint x="1666" y="120" />
+        <di:waypoint x="1491" y="120" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="1481" y="98" width="71" height="14" />
+          <dc:Bounds x="1390" y="98" width="78" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_f_noConverge" bpmnElement="f_noConverge">
+        <di:waypoint x="1541" y="120" />
+        <di:waypoint x="1866" y="120" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1668" y="98" width="71" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_w_abandon" bpmnElement="w_abandon">
@@ -200,22 +236,35 @@
           <dc:Bounds x="646" y="206" width="67" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
-      <bpmndi:BPMNEdge id="BPMNEdge_f_converge" bpmnElement="f_converge">
+      <bpmndi:BPMNEdge id="BPMNEdge_f_blocked" bpmnElement="f_blocked">
         <di:waypoint x="1341" y="145" />
-        <di:waypoint x="1341" y="280" />
-        <di:waypoint x="1466" y="280" />
+        <di:waypoint x="1341" y="440" />
+        <di:waypoint x="1466" y="440" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="1346" y="206" width="60" height="14" />
+          <dc:Bounds x="1346" y="286" width="53" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_f_converge" bpmnElement="f_converge">
+        <di:waypoint x="1516" y="145" />
+        <di:waypoint x="1516" y="280" />
+        <di:waypoint x="1666" y="280" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1521" y="206" width="60" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_w_toAnswerGw" bpmnElement="w_toAnswerGw">
         <di:waypoint x="866" y="280" />
         <di:waypoint x="966" y="280" />
       </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_f_blockedEnd" bpmnElement="f_blockedEnd">
+        <di:waypoint x="1566" y="440" />
+        <di:waypoint x="1884" y="440" />
+        <di:waypoint x="1884" y="138" />
+      </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_toEndConverged" bpmnElement="f_toEndConverged">
-        <di:waypoint x="1566" y="280" />
-        <di:waypoint x="1684" y="280" />
-        <di:waypoint x="1684" y="138" />
+        <di:waypoint x="1766" y="280" />
+        <di:waypoint x="1884" y="280" />
+        <di:waypoint x="1884" y="138" />
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_w_sla" bpmnElement="w_sla">
         <di:waypoint x="816" y="338" />

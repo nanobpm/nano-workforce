@@ -160,16 +160,37 @@ describe("single-issue feature run (#172 — feature.bpmn)", () => {
     );
   });
 
-  test("blocked: a non-opened result never enrolls a PR and settles blocked", async () => {
+  test("blocked: a non-opened result parks the run at the operators' user task, never enrolls a PR", async () => {
     await withApp(
       { "senior:feature": () => ({ status: "blocked", summary: "could not proceed" }) },
       { baseBranch: "epic/e2e", converge: true },
-      async ({ app, featureKey }) => {
+      async ({ app, featureKey, processKey }) => {
         const flows = takenFlows(app);
-        assert.ok(flows.includes("gw-converge->End"), "a blocked run takes the raise-only branch even with converge=true");
+        assert.ok(
+          flows.includes("gw-blocked->feature-blocked"),
+          `a blocked run routes to the operators' user task, not the converge gateway (flows: ${flows.join(", ")})`,
+        );
+        assert.ok(!flows.includes("gw-blocked->gw-converge"), "a blocked run never reaches the converge gateway");
+
+        // The instance stays alive parked at a completable native user task (operators inbox) — a
+        // blocked run is never a silent dead-end.
+        const tasks = await app.engine.searchUserTasks({ processInstanceKey: processKey });
+        const task = tasks.find((t) => t.elementId === "feature-blocked") as InboxTask | undefined;
+        assert.ok(task?.userTaskKey, "the blocked outcome parked a completable native user task");
+
         const run = await featureRow(app, featureKey);
         assert.equal(run.status, "blocked");
         assert.equal(run.pr_key, null);
+        const prs = await app.db.table<PrRow>("pull_requests", "pr_key").find({});
+        assert.equal(prs.length, 0, "a blocked run never enrolled a PR into the convergence loop");
+
+        // Acknowledging the blocked run completes the instance.
+        await app.engine.completeUserTask(task!.userTaskKey, { note: "acknowledged" });
+        await app.settle();
+        assert.ok(
+          takenFlows(app).includes("feature-blocked->End"),
+          "acknowledging the blocked user task ends the run",
+        );
       },
     );
   });
