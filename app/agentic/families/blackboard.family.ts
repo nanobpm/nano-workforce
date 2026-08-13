@@ -37,14 +37,17 @@ let handle: { stop(): void } | undefined;
 export const family: AgenticFamily = {
   name: "blackboard",
   mount(ctx: AgenticContext): void {
+    // Stop any previously-attached family before (re)mounting, so a repeat mount() (tests or a
+    // future remount path) can't leave stale handlers attached and double-handle frames / leak
+    // resources. Done unconditionally — before the data check — so even a no-data remount detaches
+    // the prior handle instead of silently leaving it live.
+    handle?.stop();
+    handle = undefined;
     const data = ctx.data;
     if (!data) {
       ctx.log.warn("agentic blackboard family: no data layer; not mounting");
       return;
     }
-    // Stop any previously-attached family before remounting, so a repeat mount() (tests or a future
-    // remount path) can't leave stale handlers attached and double-handle frames / leak resources.
-    handle?.stop();
     const db = data.source().db;
     const store = new BlackboardStore(db);
     store.ensureSchema();
