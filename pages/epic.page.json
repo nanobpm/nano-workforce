@@ -70,6 +70,7 @@
         "columns": [
           { "field": "plan_key", "header": "Epic", "link": { "kind": "page", "page": "epic-detail", "keyField": "plan_key" } },
           { "field": "status", "header": "Status", "link": { "kind": "processExplorer", "keyField": "process_key" } },
+          { "field": "base_branch", "header": "Base branch" },
           { "field": "wave_label", "header": "Wave" },
           { "field": "task_count", "header": "Tasks" },
           { "field": "open_plan_findings", "header": "Attention", "badge": { "tone": "danger", "label": "!" } },
