@@ -142,3 +142,33 @@ test("pollDelivery: all slice PR rows present and merged -> landed", async () =>
   assertEquals(stores.plans[0].delivery, "landed");
   assertEquals(stores.plans[0].delivery_label, "2/2 slices merged");
 });
+
+test("pollDelivery: a non-done plan is skipped and any stale projection is cleared", async () => {
+  const { data, stores } = memData();
+  stores.plans = [
+    // Regressed out of `done` while carrying a stale `converging` projection.
+    { plan_key: "epic-3", status: "in_progress", delivery: "converging", delivery_label: "1/2 slices merged, 1 converging" },
+  ];
+  // A task join here would be wasted work for a non-done plan; assert it is never consulted.
+  let taskLookups = 0;
+  stores.plan_tasks = [{ id: 1, plan_key: "epic-3", pr_key: "o/r#20" }];
+  stores.pull_requests = [{ pr_key: "o/r#20", status: "merged" }];
+  const origTable = (data as any).table.bind(data);
+  (data as any).table = (n: string, pk?: string) => {
+    const t = origTable(n, pk);
+    if (n === "plan_tasks") {
+      const origFind = t.find.bind(t);
+      t.find = async (where: any) => {
+        taskLookups++;
+        return origFind(where);
+      };
+    }
+    return t;
+  };
+
+  await pollDelivery(data);
+
+  assertEquals(stores.plans[0].delivery, null);
+  assertEquals(stores.plans[0].delivery_label, null);
+  assertEquals(taskLookups, 0);
+});

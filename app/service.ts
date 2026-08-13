@@ -1213,6 +1213,19 @@ export async function pollDelivery(data: DataLayer) {
   for (const pr of await prs(data).all()) statusByPrKey.set(pr.pr_key, pr.status);
   for (const plan of await plans(data).all()) {
     try {
+      // `deriveDelivery` always yields `{null, null}` for a non-`done` plan, so skip the per-plan
+      // task join for those — but still clear any stale projection defensively (e.g. a plan that
+      // regressed out of `done`) so the read model never keeps a phantom `converging`/`landed`.
+      if (plan.status !== "done") {
+        if (plan.delivery !== null || plan.delivery_label !== null) {
+          await plans(data).update(plan.plan_key, {
+            delivery: null,
+            delivery_label: null,
+            updated_at: now(),
+          });
+        }
+        continue;
+      }
       const tasks = await planTasks(data).find({ plan_key: plan.plan_key });
       const prStatuses: string[] = [];
       for (const t of tasks) {
