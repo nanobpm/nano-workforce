@@ -19,6 +19,11 @@ function memTable(rows: any[], key: string) {
     get: (value: unknown) => Promise.resolve(rows.find((candidate) => candidate[key] === value) ?? null),
     find: (where: Record<string, unknown>) =>
       Promise.resolve(rows.filter((row) => Object.entries(where).every(([field, value]) => row[field] === value))),
+    insert: (row: Record<string, unknown>) => {
+      const id = rows.length + 1;
+      rows.push({ id, ...row });
+      return Promise.resolve(id);
+    },
     update: (value: unknown, patch: Record<string, unknown>) => {
       const row = rows.find((candidate) => candidate[key] === value);
       if (row) Object.assign(row, patch);

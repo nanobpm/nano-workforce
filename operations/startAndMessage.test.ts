@@ -172,6 +172,11 @@ function planEscalationMessageApp() {
   const table = (rows: any[], key: string) => ({
     get: (k: unknown) => Promise.resolve(rows.find((r) => r[key] === k) ?? null),
     find: (q: any) => Promise.resolve(rows.filter((r) => match(r, q))),
+    insert: (row: Record<string, unknown>) => {
+      const id = rows.length + 1;
+      rows.push({ id, ...row });
+      return Promise.resolve(id);
+    },
     update: (id: any, patch: any) => {
       const row = rows.find((r) => r[key] === id);
       if (row) Object.assign(row, patch);

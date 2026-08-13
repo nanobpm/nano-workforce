@@ -373,6 +373,54 @@ components:
             `plan-review-decision` user task form (whose field is named `notes`). When both are
             present, `note` takes precedence only if it is non-blank; a blank/whitespace `note`
             is treated as missing and falls back to `notes`.
+    AgentCompleteRequest:
+      type: object
+      additionalProperties: false
+      description: >-
+        Complete an escalation user task AS AN AGENT (epic #156 / ADR 0046). The agent submits the
+        SAME typed form variables a human would through the task inbox; the host routes them through
+        the one canonical attributed completer, records the agent's identity for the audit trail, and
+        resumes the process. Only the migrated escalation user tasks may be completed this way.
+      required:
+        - userTaskKey
+        - agentId
+        - variables
+      properties:
+        userTaskKey:
+          type: string
+          minLength: 1
+          description: The engine user-task key of the parked escalation task (from GET /tasks/api/tasks).
+        agentId:
+          type: string
+          minLength: 1
+          description: The completing agent's identity (ADR 0046), recorded for attribution.
+        variables:
+          type: object
+          additionalProperties: true
+          description: >-
+            The typed form completion variables — the SAME shape a human submits (e.g.
+            `{ resolution, answer }`, `{ directive, notes }`, `{ action, notes }`, or `{ answer }`).
+    RevertCompletionRequest:
+      type: object
+      additionalProperties: false
+      description: >-
+        Revert/override an agent escalation completion (the reversibility guarantee of ADR 0046). A
+        human marks a reversible agent completion reverted so the agent's answer is no longer treated
+        as authoritative; the reverter's identity + timestamp are recorded.
+      required:
+        - completionId
+        - reverterId
+      properties:
+        completionId:
+          type: integer
+          description: The `task_completions` id returned when the agent completion was recorded.
+        reverterId:
+          type: string
+          minLength: 1
+          description: The human identity overriding the agent completion, recorded for the audit trail.
+        note:
+          type: string
+          description: Optional corrective guidance from the human that overrides the agent's answer.
     BlackboardEntry:
       type: object
       additionalProperties: false
@@ -737,6 +785,88 @@ paths:
                 $ref: "#/components/schemas/MessageResult"
         "404":
           description: No matching open plan escalation for the plan key.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResult"
+  /hooks/agent-complete:
+    post:
+      operationId: agentCompleteEscalation
+      summary: "Complete an escalation user task as an agent assignee (ADR 0046). Reuses the same
+        `.form` contract + engine resume path a human uses; records the agent identity for
+        attribution. Optional shared-secret guard (x-hook-secret), enforced only when
+        NANO_PR_WEBHOOK_SECRET is set."
+      security:
+        - hookSecret: []
+        - {}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentCompleteRequest"
+      responses:
+        "200":
+          description: The agent completed the escalation task and the process resumed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResult"
+        "400":
+          description: A required field was missing (userTaskKey, agentId, variables), or the target is not an escalation task.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResult"
+        "401":
+          description: Missing/invalid shared secret (only when NANO_PR_WEBHOOK_SECRET is set).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResult"
+        "404":
+          description: No open escalation user task matches the userTaskKey.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResult"
+  /hooks/revert-completion:
+    post:
+      operationId: revertEscalationCompletion
+      summary: "Revert/override an agent escalation completion (ADR 0046 reversibility). A human marks
+        a reversible agent completion reverted so the agent's answer is no longer authoritative.
+        Optional shared-secret guard (x-hook-secret), enforced only when NANO_PR_WEBHOOK_SECRET is
+        set."
+      security:
+        - hookSecret: []
+        - {}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RevertCompletionRequest"
+      responses:
+        "200":
+          description: The agent completion was reverted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResult"
+        "400":
+          description: A required field was missing, or the completion is not reversible / already reverted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResult"
+        "401":
+          description: Missing/invalid shared secret (only when NANO_PR_WEBHOOK_SECRET is set).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResult"
+        "404":
+          description: No completion matches the completionId.
           content:
             application/json:
               schema:
