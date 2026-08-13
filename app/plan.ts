@@ -10,6 +10,7 @@
 // the process. Data access goes through the record gateway (`data.table`), never
 // hand-written SQL — matching app/service.ts.
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
+import { completeUserTaskAttributed } from "./agentCompletion.ts";
 import { blackboardUrl, mintBlackboardToken, renderCoordinationBrief } from "./blackboard.ts";
 import { DEFAULT_ESCALATION_SLA_TIMEOUT, escalationSlaTimeout } from "./escalationSla.ts";
 import { clearExclusions } from "./mergeExclusion.ts";
@@ -478,7 +479,17 @@ export async function answerTaskEscalation(
   for (const t of await planTasks(data).find({ plan_key: planKey, task_id: taskId })) {
     await planTasks(data).update(t.id, { answer, updated_at: ts });
   }
-  await engine.completeUserTask(match.userTaskKey, { resolution: "answer", answer });
+  await completeUserTaskAttributed(
+    data,
+    engine,
+    {
+      userTaskKey: match.userTaskKey,
+      processInstanceKey: plan.process_key,
+      elementId: match.elementId,
+      variables: { resolution: "answer", answer },
+    },
+    { kind: "human", id: "operator" },
+  );
   return { ok: true, userTaskKey: match.userTaskKey, planKey, taskId };
 }
 
@@ -502,6 +513,16 @@ export async function answerPlanEscalation(
 
   const directive = normalizePlanEscalationDirective(directiveInput);
   const notes = typeof noteInput === "string" ? noteInput.trim() : "";
-  await engine.completeUserTask(match.userTaskKey, { directive, notes });
+  await completeUserTaskAttributed(
+    data,
+    engine,
+    {
+      userTaskKey: match.userTaskKey,
+      processInstanceKey: plan.process_key,
+      elementId: match.elementId,
+      variables: { directive, notes },
+    },
+    { kind: "human", id: "operator" },
+  );
   return { ok: true, userTaskKey: match.userTaskKey, planKey, directive };
 }
