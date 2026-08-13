@@ -1201,15 +1201,25 @@ async function pollWaveGates(data: DataLayer, engine: EngineClient, token: strin
  * row so the epics overview / detail views can read it as a flat column (Urban's datasource can't
  * read a SQL VIEW). Never touches `plan.status` — additive/derived only. Writes only when the
  * projection actually changes, so a steady-state pass is a no-op. */
-async function pollDelivery(data: DataLayer) {
+/** Sentinel status fed to `deriveDelivery` for a `plan_tasks.pr_key` whose `pull_requests` row is
+ * missing (DB desync). It is deliberately non-terminal and not `merged`, so a dangling PR counts as
+ * in-flight — never a false-positive `landed` from a silently-dropped slice. */
+const MISSING_PR_STATUS = "missing";
+
+export async function pollDelivery(data: DataLayer) {
+  // Preload every PR status once per pass into a pr_key→status map (avoids the prior N+1
+  // `prs(data).get` per task; mirrors how `activePrs` reads `prs(data).all()` once).
+  const statusByPrKey = new Map<string, string>();
+  for (const pr of await prs(data).all()) statusByPrKey.set(pr.pr_key, pr.status);
   for (const plan of await plans(data).all()) {
     try {
       const tasks = await planTasks(data).find({ plan_key: plan.plan_key });
       const prStatuses: string[] = [];
       for (const t of tasks) {
         if (!t.pr_key) continue;
-        const pr = await prs(data).get(t.pr_key);
-        if (pr) prStatuses.push(pr.status);
+        // A dangling pr_key (row missing) is treated as in-flight, not dropped, so a DB desync
+        // can never wrongly promote an epic to `landed`.
+        prStatuses.push(statusByPrKey.get(t.pr_key) ?? MISSING_PR_STATUS);
       }
       const { delivery, label } = deriveDelivery(plan.status, prStatuses);
       if (plan.delivery !== delivery || plan.delivery_label !== label) {

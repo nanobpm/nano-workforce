@@ -5,7 +5,39 @@
 // resolved-not-landed (never `landed`).
 import { test } from "node:test";
 import { assert, assertEquals } from "#test-assert";
-import { deriveDelivery, TERMINAL_STATUSES } from "./service.ts";
+import type { DataLayer } from "@nanobpm/urban";
+import { deriveDelivery, pollDelivery, TERMINAL_STATUSES } from "./service.ts";
+
+// A tiny in-memory record gateway (all/find/update/insert), mirroring the fake-app style used
+// across the app tests (see app/taskDelta.test.ts), enough to exercise the `pollDelivery` projection.
+function memData(): { data: DataLayer; stores: Record<string, any[]> } {
+  const stores: Record<string, any[]> = {};
+  function tbl(name: string, pk = "id") {
+    const rows = (stores[name] ??= [] as any[]);
+    const match = (r: any, where: any) => Object.entries(where).every(([k, v]) => r[k] === v);
+    return {
+      async all() {
+        return rows.slice();
+      },
+      async get(id: any) {
+        return rows.find((r) => r[pk] === id);
+      },
+      async find(where: any = {}) {
+        return rows.filter((r) => match(r, where));
+      },
+      async insert(row: any) {
+        rows.push({ ...row });
+        return row[pk];
+      },
+      async update(id: any, patch: any) {
+        const r = rows.find((row) => row[pk] === id);
+        if (r) Object.assign(r, patch);
+      },
+    };
+  }
+  const data = { table: (n: string, pk?: string) => tbl(n, pk) } as any as DataLayer;
+  return { data, stores };
+}
 
 test("all slice PRs merged -> landed", () => {
   const r = deriveDelivery("done", ["merged", "merged", "merged"]);
@@ -71,4 +103,42 @@ test("every non-terminal status counts as in flight", () => {
     assertEquals(r.delivery, "converging", `status ${s}`);
     assertEquals(r.prsInFlight, 1, `status ${s}`);
   }
+});
+
+test("pollDelivery: a dangling pr_key (missing PR row) counts as in-flight, never false-landed", async () => {
+  const { data, stores } = memData();
+  stores.plans = [
+    { plan_key: "epic-1", status: "done", delivery: null, delivery_label: null },
+  ];
+  stores.plan_tasks = [
+    { id: 1, plan_key: "epic-1", pr_key: "o/r#1" },
+    { id: 2, plan_key: "epic-1", pr_key: "o/r#2" }, // no matching pull_requests row (DB desync)
+  ];
+  stores.pull_requests = [{ pr_key: "o/r#1", status: "merged" }];
+
+  await pollDelivery(data);
+
+  // Without the dangling PR being treated as in-flight, this would wrongly become `landed` (1/1).
+  assertEquals(stores.plans[0].delivery, "converging");
+  assertEquals(stores.plans[0].delivery_label, "1/2 slices merged, 1 converging");
+});
+
+test("pollDelivery: all slice PR rows present and merged -> landed", async () => {
+  const { data, stores } = memData();
+  stores.plans = [
+    { plan_key: "epic-2", status: "done", delivery: null, delivery_label: null },
+  ];
+  stores.plan_tasks = [
+    { id: 1, plan_key: "epic-2", pr_key: "o/r#10" },
+    { id: 2, plan_key: "epic-2", pr_key: "o/r#11" },
+  ];
+  stores.pull_requests = [
+    { pr_key: "o/r#10", status: "merged" },
+    { pr_key: "o/r#11", status: "merged" },
+  ];
+
+  await pollDelivery(data);
+
+  assertEquals(stores.plans[0].delivery, "landed");
+  assertEquals(stores.plans[0].delivery_label, "2/2 slices merged");
 });
