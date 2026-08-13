@@ -1,3 +1,10 @@
+# [0.52.0](https://github.com/nanobpm/nano-workforce/compare/v0.51.0...v0.52.0) (2026-08-13)
+
+
+### Features
+
+* presence + registry family over app.data (H1) ([#161](https://github.com/nanobpm/nano-workforce/issues/161)) ([6666ff1](https://github.com/nanobpm/nano-workforce/commit/6666ff148d02bc0f7ae9740511fdc62bbe9c2e70)), closes [#142](https://github.com/nanobpm/nano-workforce/issues/142) [#152](https://github.com/nanobpm/nano-workforce/issues/152) [#152](https://github.com/nanobpm/nano-workforce/issues/152) [#144](https://github.com/nanobpm/nano-workforce/issues/144)
+
 # [0.51.0](https://github.com/nanobpm/nano-workforce/compare/v0.50.0...v0.51.0) (2026-08-13)
 
 
