@@ -19,7 +19,7 @@
     <script type="importmap">
       {
         "imports": {
-          "@nanobpm/agentic/cockpit": "https://cdn.jsdelivr.net/npm/@nanobpm/agentic/dist/cockpit/index.js",
+          "@nanobpm/agentic/cockpit": "https://cdn.jsdelivr.net/npm/@nanobpm/agentic@0.1.0/dist/cockpit/index.js",
           "@xterm/xterm": "https://cdn.jsdelivr.net/npm/@xterm/xterm@5/+esm"
         }
       }
@@ -31,11 +31,15 @@
       import { mountCockpit } from "./mount.js";
 
       // Standalone: mount into the page body. Endpoints default to the current origin; override via
-      // ?report= and ?relay= for a remote app.
+      // ?report= and ?relay= for a remote app. For a secured deployment, pass the report guard secret
+      // via ?secret= (sent as x-hook-secret) and the relay credentials via ?token= and ?capability=.
       const params = new URLSearchParams(location.search);
       mountCockpit(document.getElementById("cockpit-root"), {
         reportUrl: params.get("report") ?? undefined,
         relayUrl: params.get("relay") ?? undefined,
+        hookSecret: params.get("secret") ?? undefined,
+        relayToken: params.get("token") ?? undefined,
+        relayCapability: params.get("capability") ?? undefined,
       });
     </script>
   </body>

@@ -12,7 +12,7 @@
     <script type="importmap">
       {
         "imports": {
-          "@nanobpm/agentic/cockpit": "https://cdn.jsdelivr.net/npm/@nanobpm/agentic/dist/cockpit/index.js",
+          "@nanobpm/agentic/cockpit": "https://cdn.jsdelivr.net/npm/@nanobpm/agentic@0.1.0/dist/cockpit/index.js",
           "@xterm/xterm": "https://cdn.jsdelivr.net/npm/@xterm/xterm@5/+esm"
         }
       }
@@ -33,6 +33,9 @@
       mountCockpit(cfg.host ?? document.getElementById("cockpit-root"), {
         reportUrl: cfg.reportUrl,
         relayUrl: cfg.relayUrl,
+        hookSecret: cfg.hookSecret,
+        relayToken: cfg.relayToken,
+        relayCapability: cfg.relayCapability,
       });
     </script>
   </body>

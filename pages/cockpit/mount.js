@@ -177,6 +177,10 @@ function relaySocketFactory(url) {
  * @param {object} [opts]
  * @param {string} [opts.reportUrl] — the supply JSON endpoint the app serves.
  * @param {string} [opts.relayUrl]  — the agentic channel WebSocket URL (with auth token + capability query).
+ * @param {string} [opts.hookSecret] — shared secret sent as `x-hook-secret` on the report fetch when the
+ *   app's supply endpoint is guarded by NANO_PR_WEBHOOK_SECRET (omit for open deployments).
+ * @param {string} [opts.relayToken] — identity token appended to the default relay URL as `?token=…`.
+ * @param {string} [opts.relayCapability] — capability credential appended to the default relay URL as `&capability=…`.
  * @param {number} [opts.refreshMs] — poll interval (default 2000).
  * @returns a handle with `.dispose()`.
  */
@@ -188,7 +192,8 @@ export function mountCockpit(host, opts = {}) {
   }
   const doc = document;
   const reportUrl = opts.reportUrl ?? "/app/api/agentic/supply";
-  const relayUrl = opts.relayUrl ?? defaultRelayUrl();
+  const hookSecret = opts.hookSecret;
+  const relayUrl = opts.relayUrl ?? defaultRelayUrl(opts.relayToken, opts.relayCapability);
   const refreshMs = opts.refreshMs ?? DEFAULT_REFRESH_MS;
   const staleAfterMs = opts.staleAfterMs ?? DEFAULT_STALE_AFTER_MS;
   const connectRelay = relaySocketFactory(relayUrl);
@@ -244,7 +249,9 @@ export function mountCockpit(host, opts = {}) {
     if (disposed) return;
     let report;
     try {
-      const res = await fetch(reportUrl, { headers: { accept: "application/json" } });
+      const headers = { accept: "application/json" };
+      if (hookSecret) headers["x-hook-secret"] = hookSecret;
+      const res = await fetch(reportUrl, { headers });
       if (!res.ok) throw new Error(`supply fetch failed: ${res.status}`);
       report = await res.json();
     } catch (err) {
@@ -293,8 +300,20 @@ export function mountCockpit(host, opts = {}) {
   return { start, stop, dispose, refresh, drill: drillInto };
 }
 
-/** Derive the channel WebSocket URL from the current origin (path `/agentic`). */
-function defaultRelayUrl() {
+/**
+ * Derive the channel WebSocket URL from the current origin (path `/agentic`).
+ *
+ * The agentic hub authenticates upgrades with `sharedSecretAuthenticator({ requireCredential: true })`,
+ * so a bare `ws(s)://host/agentic` is rejected (4401/4403). When a `token` (and optional `capability`)
+ * are supplied, they are appended as the `?token=…&capability=…` query the hub requires; without them
+ * the default URL cannot authenticate and drill-in will be refused — pass credentials (or an explicit
+ * `relayUrl`) for secured deployments.
+ */
+function defaultRelayUrl(token, capability) {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
-  return `${proto}//${location.host}/agentic`;
+  const base = `${proto}//${location.host}/agentic`;
+  if (!token) return base;
+  const query = new URLSearchParams({ token });
+  if (capability) query.set("capability", capability);
+  return `${base}?${query}`;
 }
