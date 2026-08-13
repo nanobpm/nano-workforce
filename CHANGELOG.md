@@ -1,3 +1,10 @@
+# [0.57.0](https://github.com/nanobpm/nano-workforce/compare/v0.56.0...v0.57.0) (2026-08-13)
+
+
+### Features
+
+* **app-view:** show epic base branch in epics overview grid ([#159](https://github.com/nanobpm/nano-workforce/issues/159)) ([#164](https://github.com/nanobpm/nano-workforce/issues/164)) ([216cb0f](https://github.com/nanobpm/nano-workforce/commit/216cb0f515561fbaa646725593707ae6a2418246))
+
 # [0.56.0](https://github.com/nanobpm/nano-workforce/compare/v0.55.0...v0.56.0) (2026-08-13)
 
 
