@@ -101,8 +101,6 @@ const handler: AppJobHandler<In> = async (job, app) => {
     outcome: summary,
     converged_at: now,
     updated_at: now,
-    open_escalation_id: null,
-    open_escalation_question: null,
   });
 
   // Only the review-only terminal path ends the PR here as `converged` — in auto-merge mode the

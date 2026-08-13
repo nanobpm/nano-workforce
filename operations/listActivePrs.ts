@@ -20,6 +20,6 @@ export default defineOperation("listActivePrs", async ({ req }, app) => {
     app.log.warn("listActivePrs rejected: missing/invalid shared secret");
     return { status: 401, body: { error: "unauthorized" } };
   }
-  const prs = await activePrs(app.data);
+  const prs = await activePrs(app.data, app.engine);
   return { status: 200, body: { count: prs.length, prs } };
 });

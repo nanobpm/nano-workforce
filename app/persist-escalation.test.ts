@@ -99,12 +99,17 @@ test("persist-escalation heals a missing pull_requests parent before recording",
 });
 
 
-test("a padded question is persisted trimmed (no whitespace drift)", async () => {
+test("a padded question is persisted trimmed and returned trimmed (no whitespace drift)", async () => {
   const { app, inserts, updates } = fakeApp();
   const job = { variables: { prKey: "o/r#1", round: 4, status: "needs_input", question: "  needs a decision  " } };
-  await handler(job as any, app as any);
+  const out = await handler(job as any, app as any);
   assertEquals((inserts.escalations[0] as any).question, "needs a decision", "escalation stores the trimmed question");
-  assertEquals((updates.pull_requests![0] as any).patch.open_escalation_question, "needs a decision", "denormalised question is trimmed too");
+  // The trimmed question is returned as a process variable so the downstream `wait-answer`
+  // userTask + `pr-escalation.form` can display it (there is no denormalised PR-row pointer).
+  assertEquals((out as any).question, "needs a decision", "the returned question is trimmed too");
+  const patch = (updates.pull_requests![0] as any).patch;
+  assertEquals(patch.open_escalation_question, undefined, "no denormalised question pointer is written");
+  assertEquals(patch.open_escalation_id, undefined, "no denormalised id pointer is written");
 });
 
 // REGRESSION (nano-workforce ADR 0002 §1 — retire the blank-question fabrication failure mode).

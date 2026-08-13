@@ -42,9 +42,7 @@
       ],
       "onTerminated": {
         "set": {
-          "status": "abandoned",
-          "open_escalation_id": null,
-          "open_escalation_question": null
+          "status": "abandoned"
         }
       },
       "pollMs": 5000

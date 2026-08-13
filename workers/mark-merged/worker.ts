@@ -13,8 +13,6 @@ const handler: AppJobHandler<In> = async (job, app) => {
     status: "merged",
     merged_at: now,
     updated_at: now,
-    open_escalation_id: null,
-    open_escalation_question: null,
   });
 
   // If this PR was the last of its epic to land, kick off the retrospective. Best-effort: a

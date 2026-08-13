@@ -13,7 +13,12 @@ function memApp(rows: any[]): AppApi {
       return rows;
     },
   };
-  return { data: { table: () => tbl }, log: noopLog() } as any as AppApi;
+  const engine = {
+    async searchUserTasks() {
+      return [];
+    },
+  };
+  return { data: { table: () => tbl }, engine, log: noopLog() } as any as AppApi;
 }
 
 function input(headers: Record<string, string> = {}) {

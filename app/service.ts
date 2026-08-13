@@ -115,8 +115,6 @@ interface PullRequest {
   updated_at: string;
   converged_at: string | null;
   merged_at: string | null;
-  open_escalation_id: number | null;
-  open_escalation_question: string | null;
   // Job-activation visibility (005_job_activation.sql), written by the poller's
   // `pollJobActivation` pass. `active_worker` is the leasing worker's name while an
   // agent is actively working the `senior:pr-review` round; NULL means the job is
@@ -353,10 +351,11 @@ export async function submitPr(
   const abandonToken = existing?.abandon_token ?? mintAbandonToken();
   if (existing) {
     // A prior run (cancelled, converged, or otherwise superseded) may have left an OPEN
-    // escalation row plus the denormalised pointer on the PR. A fresh convergence run must not
-    // inherit that stale answer form — the "(no question provided)" bleed-through on resubmit
-    // (Magikcraft/nano-bpm #597/#599). Mark any still-open escalations `stale` and clear the
-    // pointer below, mirroring the plan re-plan cleanup (issue #25 in plan.ts).
+    // escalation row. A fresh convergence run must not inherit that stale answer — the
+    // "(no question provided)" bleed-through on resubmit (Magikcraft/nano-bpm #597/#599).
+    // Mark any still-open escalations `stale`, mirroring the plan re-plan cleanup (issue #25
+    // in plan.ts). The review-loop escalation is now a native userTask whose open state is
+    // derived from `searchUserTasks`, so there is no denormalised PR-row pointer to clear.
     for (const e of await escs(data).find({ pr_key: parsed.prKey, status: "open" })) {
       await escs(data).update(e.id, { status: "stale" });
     }
@@ -372,10 +371,6 @@ export async function submitPr(
       outcome: null,
       converged_at: null,
       merged_at: null,
-      // Drop any denormalised open-escalation pointer from the prior run so the answer form
-      // does not resurface a dead/stale question on the re-opened PR.
-      open_escalation_id: null,
-      open_escalation_question: null,
       abandon_token: abandonToken,
       updated_at: ts,
     });
@@ -493,8 +488,6 @@ export async function answerEscalation(
   await prs(data).update(prKey, {
     status: "converging",
     updated_at: ts,
-    open_escalation_id: null,
-    open_escalation_question: null,
   });
   await engine.publishMessage({
     name: "escalation-answered",
@@ -526,27 +519,48 @@ export interface ActivePr {
 
 /** Every tracked PR not in a terminal state (converged/abandoned), newest-updated first. Backs
  * the GET status endpoint so an operator or an external harness can see what is in flight
- * without reading the datasource directly. */
-export async function activePrs(data: DataLayer): Promise<ActivePr[]> {
+ * without reading the datasource directly. The open-escalation question is derived from live
+ * user-task state — the native `wait-answer` userTask parked on the PR's convergence instance
+ * (confirmed via `searchUserTasks`), with the question text read from the durable `escalations`
+ * audit row — rather than a denormalised PR-row pointer. */
+export async function activePrs(data: DataLayer, engine: EngineClient): Promise<ActivePr[]> {
   const all = await prs(data).all();
-  return all
+  const active = all
     .filter((p) => !TERMINAL_STATUSES.includes(p.status))
-    .sort((a, b) => (a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0))
-    .map((p) => ({
-      prKey: p.pr_key,
-      repo: p.repo,
-      number: p.number,
-      url: p.url,
-      title: p.title ?? null,
-      status: p.status,
-      round: p.current_round,
-      processKey: p.process_key ?? null,
-      waitingSince: p.waiting_since ?? null,
-      openEscalation: p.open_escalation_question ?? null,
-      updatedAt: p.updated_at,
-      activeWorker: p.active_worker ?? null,
-      leaseUntil: p.lease_until ?? null,
-    }));
+    .sort((a, b) => (a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0));
+  // Only an `escalated` PR can be parked on the review-loop `wait-answer` userTask. For each,
+  // confirm the task is still open via `searchUserTasks` (keyed on the PR's process instance —
+  // the WASM/SDK engine does not surface a task's variables, so the instance filter is how a task
+  // maps back to its PR) and surface the question from its latest open `escalations` row. Once the
+  // task is completed (answered), it drops out and `openEscalation` derives back to null.
+  const openEscByPr = new Map<string, string>();
+  for (const p of active) {
+    if (p.status !== "escalated" || !p.process_key) continue;
+    try {
+      const tasks = await engine.searchUserTasks({ processInstanceKey: p.process_key });
+      if (!tasks.some((t) => t.elementId === "wait-answer")) continue;
+    } catch (err) {
+      console.warn(`[activePrs] searchUserTasks failed for ${p.pr_key}: ${err}`);
+      continue;
+    }
+    const open = (await escs(data).find({ pr_key: p.pr_key, status: "open" })).sort((a, b) => b.id - a.id)[0];
+    if (open?.question) openEscByPr.set(p.pr_key, open.question);
+  }
+  return active.map((p) => ({
+    prKey: p.pr_key,
+    repo: p.repo,
+    number: p.number,
+    url: p.url,
+    title: p.title ?? null,
+    status: p.status,
+    round: p.current_round,
+    processKey: p.process_key ?? null,
+    waitingSince: p.waiting_since ?? null,
+    openEscalation: openEscByPr.get(p.pr_key) ?? null,
+    updatedAt: p.updated_at,
+    activeWorker: p.active_worker ?? null,
+    leaseUntil: p.lease_until ?? null,
+  }));
 }
 
 /** One review-ready poll pass (SPEC §10): for every PR waiting on a review, fetch its GitHub

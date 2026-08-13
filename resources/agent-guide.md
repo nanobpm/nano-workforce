@@ -124,8 +124,25 @@ curl -sS __BASE__/status | jq '.prs[] | select(.openEscalation != null)
   | { prKey, status, round, openEscalation }'
 ```
 
-**Answer a PR/merge escalation** (convergence-loop or merge-loop). Use the message
-name `escalation-answered`; correlate by the PR key:
+**Answer a PR review-loop escalation** (convergence-loop). This is now a native
+`userTask` bearing the `pr-escalation` form — answer it through the **task inbox**
+surface (list the open tasks, then complete the one for your PR with `{ answer }`):
+
+```bash
+# List open user tasks (the escalation carries `prKey` + `question` in its variables):
+curl -sS __BASE__/tasks/api/tasks | jq '.[] | { userTaskKey, elementId, variables }'
+
+# Complete the escalation task — the typed `answer` resumes the review loop:
+curl -sS -X POST __BASE__/tasks/api/complete \
+  -H 'content-type: application/json' \
+  -d '{
+        "userTaskKey": "<userTaskKey>",
+        "variables": { "answer": "Yes — cap the retries at 5 and proceed." }
+      }'
+```
+
+**Answer a merge-loop escalation** (merge-loop still uses the durable message
+catch). Use the message name `escalation-answered`; correlate by the PR key:
 
 ```bash
 curl -sS -X POST __BASE__/actions/message \
@@ -173,7 +190,7 @@ the answer becomes the agent's next-round context.
  submit ──► convergence-loop
    round (senior:pr-review) ──► addressed ──► wait review-ready ─┐
                              ├─ converged  ──► finalize ──► merge-loop (unless convergeOnly)
-                             └─ needs_input/blocked ──► escalate ──► wait escalation-answered
+                             └─ needs_input/blocked ──► escalate ──► wait-answer userTask (task inbox)
  merge-loop: wait deps ─► arm merge ─► (queue-aware) merge / land
              blocked (CI red) ─► senior:fix-ci ─► retry     conflict ─► senior:rebase ─► retry
 ```

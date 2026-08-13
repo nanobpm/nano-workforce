@@ -8,14 +8,6 @@
       </zeebe:properties>
     </bpmn:extensionElements>
   </bpmn:message>
-  <bpmn:message id="Message_escalationAnswered" name="escalation-answered">
-    <bpmn:extensionElements>
-      <zeebe:subscription correlationKey="=prKey" />
-      <zeebe:properties>
-        <zeebe:property name="io.nanobpm.dataEnvelope.in" value="EscalationAnswered" />
-      </zeebe:properties>
-    </bpmn:extensionElements>
-  </bpmn:message>
   <bpmn:process id="convergence-loop" name="PR Review Convergence" isExecutable="true">
     <bpmn:extensionElements>
       <nano:shapes>
@@ -48,6 +40,7 @@
         <nano:shape id="PrPersistEscalationOut" name="Record escalation — result">
           <nano:extend name="escalationId" type="integer" optional="true" />
           <nano:extend name="escalated" type="boolean" optional="true" />
+          <nano:extend name="question" type="string" optional="true" />
         </nano:shape>
         <nano:shape id="PrFinalizeIn" name="Mark converged — input">
           <nano:extend name="prKey" type="string" />
@@ -61,10 +54,6 @@
           <nano:extend name="reviewId" type="integer" />
           <nano:extend name="reviewState" type="string" />
           <nano:extend name="submittedAt" type="datetime" optional="true" />
-        </nano:shape>
-        <nano:shape id="EscalationAnswered" name="escalation-answered message payload">
-          <nano:extend name="answer" type="string" />
-          <nano:extend name="escalationId" type="integer" />
         </nano:shape>
       </nano:shapes>
     </bpmn:extensionElements>
@@ -184,13 +173,20 @@
       <bpmn:incoming>f_guardMax</bpmn:incoming>
       <bpmn:outgoing>f_maxWait</bpmn:outgoing>
     </bpmn:serviceTask>
-    <bpmn:intermediateCatchEvent id="wait-answer" name="Wait: escalation answered">
+    <bpmn:userTask id="wait-answer" name="Answer escalation">
+      <bpmn:extensionElements>
+        <zeebe:formDefinition formId="pr-escalation" />
+        <zeebe:userTask />
+        <zeebe:ioMapping>
+          <zeebe:input source="=question" target="question" />
+          <zeebe:input source="=prKey" target="prKey" />
+        </zeebe:ioMapping>
+      </bpmn:extensionElements>
       <bpmn:incoming>f_escWait</bpmn:incoming>
       <bpmn:incoming>f_maxWait</bpmn:incoming>
       <bpmn:incoming>f_stalledWait</bpmn:incoming>
       <bpmn:outgoing>f_answerLoop</bpmn:outgoing>
-      <bpmn:messageEventDefinition id="med_escalationAnswered" messageRef="Message_escalationAnswered" />
-    </bpmn:intermediateCatchEvent>
+    </bpmn:userTask>
     <bpmn:serviceTask id="persist-converged" name="Mark converged">
       <bpmn:extensionElements>
         <zeebe:taskDefinition type="pr.finalize" />
@@ -295,10 +291,7 @@
         <dc:Bounds x="1066" y="560" width="100" height="80" />
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_wait-answer" bpmnElement="wait-answer">
-        <dc:Bounds x="1752" y="422" width="36" height="36" />
-        <bpmndi:BPMNLabel>
-          <dc:Bounds x="1733" y="375" width="74" height="42" />
-        </bpmndi:BPMNLabel>
+        <dc:Bounds x="1752" y="400" width="100" height="80" />
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_persist-converged" bpmnElement="persist-converged">
         <dc:Bounds x="566" y="80" width="100" height="80" />
@@ -398,10 +391,9 @@
       <bpmndi:BPMNEdge id="BPMNEdge_f_escWait" bpmnElement="f_escWait">
         <di:waypoint x="791" y="625" />
         <di:waypoint x="791" y="645" />
-        <di:waypoint x="1752" y="645" />
-        <di:waypoint x="1752" y="478" />
-        <di:waypoint x="1770" y="478" />
-        <di:waypoint x="1770" y="458" />
+        <di:waypoint x="1732" y="645" />
+        <di:waypoint x="1732" y="460" />
+        <di:waypoint x="1752" y="460" />
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_reviewStalled" bpmnElement="f_reviewStalled">
         <di:waypoint x="1452" y="440" />
@@ -419,12 +411,12 @@
         <di:waypoint x="1166" y="620" />
         <di:waypoint x="1186" y="620" />
         <di:waypoint x="1186" y="645" />
-        <di:waypoint x="1770" y="645" />
-        <di:waypoint x="1770" y="458" />
+        <di:waypoint x="1802" y="645" />
+        <di:waypoint x="1802" y="480" />
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_answerLoop" bpmnElement="f_answerLoop">
-        <di:waypoint x="1770" y="458" />
-        <di:waypoint x="1770" y="500" />
+        <di:waypoint x="1802" y="480" />
+        <di:waypoint x="1802" y="500" />
         <di:waypoint x="266" y="500" />
         <di:waypoint x="266" y="160" />
       </bpmndi:BPMNEdge>

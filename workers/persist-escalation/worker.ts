@@ -66,10 +66,10 @@ function workerOf(vars: Record<string, unknown>): string | undefined {
 const handler: AppJobHandler<In> = async (job, app) => {
   const { prKey, round, summary, repo, prNumber, prUrl, abandonUrl } = job.variables;
   // `status` drives the escalation kind (control flow); a blank/absent status is an
-  // unclassified escalation -> a question needing input. `question` is denormalised
-  // onto pull_requests below and bound by the UI answer form, so it must be a
-  // concrete, non-blank value. `summary` is left undefined so the write boundary
-  // omits it and the nullable column stays NULL.
+  // unclassified escalation -> a question needing input. `question` is returned as a
+  // process variable below so the downstream `wait-answer` userTask + `pr-escalation.form`
+  // can display it, so it must be a concrete, non-blank value. `summary` is left undefined
+  // so the write boundary omits it and the nullable column stays NULL.
   const rawStatus = nonBlank(job.variables.status);
   const status = rawStatus ?? "needs_input";
   const transcript = transcriptOf(job.variables);
@@ -135,11 +135,9 @@ const handler: AppJobHandler<In> = async (job, app) => {
     status: "escalated",
     current_round: round,
     updated_at: now,
-    open_escalation_id: Number(escalationId),
-    open_escalation_question: question,
   });
 
-  return { escalationId: Number(escalationId), escalated: true };
+  return { escalationId: Number(escalationId), escalated: true, question };
 };
 
 export default handler;
