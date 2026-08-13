@@ -170,11 +170,13 @@ export class CorrelationRegistry {
 
 /** Drop `undefined`-valued keys so an optional context field never overwrites a known value with a hole. */
 function stripUndefined(context: JobContext): JobContext {
-  const out: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(context)) {
-    if (value !== undefined) out[key] = value;
-  }
-  return out;
+  const { processInstanceKey, bpmnProcessId, elementId, planKey } = context;
+  return {
+    ...(processInstanceKey !== undefined ? { processInstanceKey } : {}),
+    ...(bpmnProcessId !== undefined ? { bpmnProcessId } : {}),
+    ...(elementId !== undefined ? { elementId } : {}),
+    ...(planKey !== undefined ? { planKey } : {}),
+  };
 }
 
 /** The live correlation registry from the most recent mount, so the supply report (H5) can read it. */
