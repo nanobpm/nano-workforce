@@ -45,9 +45,10 @@ export interface FeatureRun {
    * outcome is written to `status` itself; this carries the sub-state / note (e.g. "merged",
    * "waiting_review", or "operator: <note>"). */
   delivery_label: string | null;
-  /** The parked `feature-escalation` user task's `question`, denormalised by `pollFeatureEscalations`
-   * so the pages can show what the agent asked. NULL whenever the run is not parked at an escalation
-   * (cleared when it un-parks / resumes). */
+  /** The parked `feature-escalation` user task's `question`, persisted at escalation entry by the
+   * `record-feature-escalation` worker (NOT by `pollFeatureEscalations`, which deliberately never
+   * writes it) so the pages can show what the agent asked. NULL whenever the run is not parked at an
+   * escalation (cleared on the exit paths — `record-feature` / the answer operation). */
   escalation_question: string | null;
   /** The completable native `feature-escalation` user-task key the answer affordance posts to
    * (`completeUserTaskAttributed`) and the pages gate the answer controls on (`showWhenField`). Set by

@@ -1290,8 +1290,10 @@ export async function pollFeatureDelivery(data: DataLayer) {
  * `feature_runs` twin of `pollFeatureDelivery`: for each run that can be parked at (or resuming from)
  * the escalation, read its open user tasks and project the parked task onto the row via the pure
  * `deriveFeatureEscalationPatch` — flipping `status` to `escalated` and denormalising the escalation's
- * `question` + completable `userTaskKey` so the pages can surface the question and drive an answer,
- * and flipping back to `running` (clearing the pointer) once it un-parks.
+ * completable `userTaskKey` so the pages can drive an answer, and flipping back to `running` (clearing
+ * the pointer) once it un-parks. It never writes `escalation_question` — that is persisted by the
+ * `record-feature-escalation` worker at escalation entry and cleared on the exit paths, so the poller
+ * can never clobber the source of truth for the question.
  *
  * Candidates are only the runs that could be parked here — `running` (may have just escalated) and
  * `escalated` (may have just resumed) — queried via the `feature_runs(status)` index, so the pass
