@@ -178,7 +178,7 @@
     "pages": {
       "enabled": true,
       "pagesDir": "pages",
-      "homePage": "home",
+      "homePage": "overview",
       "sourceName": "app"
     }
   },
