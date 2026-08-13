@@ -35,6 +35,18 @@ test("review-round: a human-blocking status WITH an answerable question is decis
   }
 });
 
+test("review-round: status is matched exactly (untrimmed), mirroring the gw-status conditions", () => {
+  // The gw-status gateway does not trim `status`, so a whitespace-padded token is NOT the enum
+  // value and stays transient. Pins the no-drift contract between this taxonomy and the model.
+  for (const status of ["needs_input ", " needs_input", "blocked ", "converged "]) {
+    assertEquals(
+      classifyEscalation({ kind: "review-round", status, question: "please decide" }),
+      "transient",
+      `whitespace-padded status ${JSON.stringify(status)} is not the enum → transient`,
+    );
+  }
+});
+
 test("review-round: a human-blocking status with a BLANK question is a non-escalation", () => {
   for (const status of ["needs_input", "blocked"]) {
     for (const question of [undefined, "", "   "]) {

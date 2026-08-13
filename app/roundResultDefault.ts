@@ -29,7 +29,7 @@ export function routeRoundResult(
   status: string | null | undefined,
   question?: string | null,
 ): RoundRouting {
-  if ((status ?? "").trim() === "converged") return "converged";
+  if ((status ?? "") === "converged") return "converged";
   const disposition = classifyEscalation({ kind: "review-round", status, question });
   return disposition === "decision-required" ? "escalate" : "reenter";
 }

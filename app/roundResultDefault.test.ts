@@ -131,3 +131,73 @@ test("routeRoundResult: an addressed/unknown/empty status re-enters the loop", (
     assertEquals(routeRoundResult(status, "q"), "reenter", `status ${JSON.stringify(status)} re-enters`);
   }
 });
+
+test("routeRoundResult: status is matched exactly, mirroring the untrimmed gw-status conditions", () => {
+  // The gw-status gateway conditions do NOT trim `status` (unlike `question`, which trims for
+  // blank-detection). `status` is a machine enum, so a whitespace-padded token is NOT the enum
+  // value: it must route exactly as the deployed model does — never converge/escalate in code
+  // while the model re-enters. This pins the no-drift contract.
+  assertEquals(routeRoundResult("converged ", null), "reenter", "'converged ' is not the enum → re-enter");
+  assertEquals(routeRoundResult(" converged", null), "reenter", "' converged' is not the enum → re-enter");
+  assertEquals(routeRoundResult("needs_input ", "q"), "reenter", "'needs_input ' is not the enum → re-enter");
+  assertEquals(routeRoundResult("blocked ", "q"), "reenter", "'blocked ' is not the enum → re-enter");
+});
+
+// --- Liveness guard: a non-escalation early return must not wedge on the durable answer-wait. ---
+// `persist-escalation` may complete WITHOUT opening an escalation (worker returns
+// `escalated:false` for a blank-question / non-decision-required job — defence-in-depth). The
+// model must branch on that output so such a token re-enters the loop instead of flowing into
+// `wait-answer`, which would block forever with no escalation for a human to answer.
+
+test("persist-escalation routes through the gw-escalated liveness gateway, not straight to wait-answer", () => {
+  // The only flow out of persist-escalation goes to the gateway.
+  const escOut = allFlows().filter((f) => /sourceRef="persist-escalation"/.test(f));
+  assertEquals(escOut.length, 1, "persist-escalation must have exactly one outgoing flow");
+  assertStringIncludes(escOut[0], 'targetRef="gw-escalated"');
+  // No flow leaves persist-escalation directly for wait-answer.
+  assert(
+    !escOut.some((f) => /targetRef="wait-answer"/.test(f)),
+    "persist-escalation must not flow directly into wait-answer",
+  );
+});
+
+test("gw-escalated waits only when an escalation was opened, else re-enters the guard", () => {
+  const gw = flat.match(/<bpmn:exclusiveGateway\b[^>]*\bid="gw-escalated"[^>]*>/);
+  assert(gw, "gw-escalated gateway missing");
+  // Its default arm must be the re-enter (no-escalation) arm, never the answer-wait.
+  assertStringIncludes(gw[0], 'default="f_escReenter"');
+
+  // The wait arm is guarded on the worker's `escalated` output — a token only reaches the
+  // durable answer-wait when an escalation actually exists.
+  const wait = flowElement("f_escWait");
+  assert(wait, "f_escWait flow missing");
+  assertStringIncludes(wait, 'sourceRef="gw-escalated"');
+  assertStringIncludes(wait, 'targetRef="wait-answer"');
+  assertStringIncludes(wait, "escalated = true");
+
+  // The default (no-escalation) arm carries no condition and re-enters gw-guard (forward
+  // progress), so a non-escalation early return can never wedge on wait-answer.
+  const reenter = flowElement("f_escReenter");
+  assert(reenter, "f_escReenter flow missing");
+  assertStringIncludes(reenter, 'sourceRef="gw-escalated"');
+  assertStringIncludes(reenter, 'targetRef="gw-guard"');
+  assert(
+    !/conditionExpression/.test(reenter),
+    "f_escReenter is the default arm and must not carry a conditionExpression",
+  );
+});
+
+test("regression: every flow into wait-answer is either escalated-gated or a fixed-question escalation", () => {
+  // wait-answer must never be reachable by an unconditional edge from the agent-raised
+  // persist-escalation (whose escalation is conditional). The agent path reaches it only via
+  // gw-escalated's `escalated = true` arm; the max-rounds / review-stalled paths set a fixed
+  // non-blank question and so always escalate.
+  const intoWait = allFlows().filter((f) => /targetRef="wait-answer"/.test(f));
+  assert(intoWait.length > 0, "no flow targets wait-answer");
+  for (const f of intoWait) {
+    assert(
+      !/sourceRef="persist-escalation"/.test(f),
+      "wait-answer must not be entered directly from persist-escalation",
+    );
+  }
+});

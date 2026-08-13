@@ -78,7 +78,11 @@ const DECISION_STATUSES: ReadonlySet<string> = new Set(["needs_input", "blocked"
 export function classifyEscalation(signal: EscalationSignal): EscalationDisposition {
   switch (signal.kind) {
     case "review-round": {
-      const status = (signal.status ?? "").trim();
+      // Exact-token match, mirroring the convergence-loop `gw-status` gateway (whose
+      // status conditions do NOT trim) so this canonical router can never drift from the
+      // deployed model. `status` is a machine-produced enum, not free-form prose, so it is
+      // compared exactly — unlike `question`, whose blank-detection trims (hasAnswerableQuestion).
+      const status = signal.status ?? "";
       // Only an explicit human-blocking status is even a candidate; everything else is
       // transient (re-enter the review wait — this is the empty-status backstop).
       if (!DECISION_STATUSES.has(status)) return "transient";
