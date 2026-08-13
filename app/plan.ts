@@ -31,11 +31,12 @@ export const ESCALATION_SLA_TIMEOUT = escalationSlaTimeout(
 const now = () => new Date().toISOString();
 
 // Agent prompts are no longer read by the host. The `senior:plan`, `senior:plan-review`, and
-// `senior:feature` prompts are authored in the model as `{{plan}}` / `{{plan-review}}` /
-// `{{feature}}` deploy-time templates (see `models.templates` in nano.app.json) substituted into
-// each task's `io.nanobpm.agentTask.task.prompt` header. Per-instance dynamic context (a plan's
-// rejection findings, a task's brief) rides `appendPrompt`, which the harness concatenates onto
-// the header base. The host only carries runtime identity + `planFindings`.
+// `senior:feature` prompts are generic resources (`prompts/plan.md` / `plan-review.md` /
+// `feature.md`, deployed via a `models` glob in nano.app.json) linked into each task as
+// `<zeebe:linkedResource … bindingType="latest" linkName="prompt"/>` and resolved by the engine at
+// job activation. Per-instance dynamic context (a plan's rejection findings, a task's brief) rides
+// `appendPrompt`, which the harness concatenates onto the linked base. The host only carries
+// runtime identity + `planFindings`.
 
 export interface Plan {
   plan_key: string;

@@ -18,9 +18,9 @@
     <bpmn:serviceTask id="implement-task" name="Implement (agent)">
       <bpmn:extensionElements>
         <zeebe:taskDefinition type="senior:feature" />
-        <zeebe:taskHeaders>
-          <zeebe:header key="io.nanobpm.agentTask.task.prompt" value="{{feature}}" />
-        </zeebe:taskHeaders>
+        <zeebe:linkedResources>
+          <zeebe:linkedResource resourceId="feature.md" bindingType="latest" linkName="prompt" />
+        </zeebe:linkedResources>
         <zeebe:ioMapping>
           <zeebe:input source="=&#34;&#10;&#10;---&#10;&#10;&#34; + task.prompt + (if (baseBranchBrief = null) then &#34;&#34; else baseBranchBrief)" target="appendPrompt" />
           <zeebe:output source="=status" target="status" />

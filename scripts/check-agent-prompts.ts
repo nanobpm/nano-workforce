@@ -1,33 +1,48 @@
-// check-agent-prompts — deploy-safety gate for the model-authored `{{template}}` agent prompts.
+// check-agent-prompts — deploy-safety gate for the agent prompts, now authored as *linked
+// resources* (issue #169) rather than baked `{{token}}` templates.
 //
-// Since #31 (v0.11.0) each agent's prompt is authored in the BPMN as a deploy-time template
-// header, e.g. `<zeebe:header key="io.nanobpm.agentTask.task.prompt" value="{{review-round}}" />`.
-// `@nanobpm/urban` substitutes `{{token}}` with `prompts/<token>.md` (nano.app.json
-// `models.templates`) at deploy time; the harness (`c8ctl nano work`) does NO substitution and
-// relays whatever header ships. So a token that resolves to a missing/blank template — or a blank
-// agent-prompt header — runs the agent effectively prompt-less. For `senior:pr-review` that makes
-// it improvise as a "reviewer" and escalate with no question (Magikcraft/nano-bpm #597/#599).
+// Since #169 each agent's base prompt is a generic resource: `prompts/<token>.md` is deployed as
+// an `application/octet-stream` resource (via a `models` deploy glob — see nano.app.json) and each
+// agent service task links it at job-activation time:
 //
-// urban's deploy only *warns* on an unresolved placeholder and ships the resource with the raw
-// token in place — and this project does not tolerate warnings. This guard runs urban's OWN
-// substitution (`applyTemplates`, the single source of truth for token scanning/escaping) exactly
-// as deploy does and turns any surviving placeholder into a hard failure, plus flags a blank
-// template or a blank agent-prompt header (which substitute to an empty prompt without being
-// "unresolved"). Importing from `@nanobpm/urban/runtime` also asserts the installed urban is new
-// enough to substitute at all (the capability was added in the 0.22 / nano-ide #106 release).
+//   <zeebe:linkedResources>
+//     <zeebe:linkedResource resourceId="review-round.md" bindingType="latest" linkName="prompt" />
+//   </zeebe:linkedResources>
+//
+// The engine resolves the LATEST deployed key for that `resourceId` when the job activates and hands
+// the content to the harness in the `linkedResources` activation header. Crucially, the engine
+// *silently omits* an unresolvable link (a typo'd or undeployed `resourceId`) from the header — no
+// incident — so a mistake yields a blank base prompt at runtime, exactly the prompt-less-agent
+// failure that produced the empty "(no question provided)" escalations (Magikcraft/nano-bpm
+// #597/#599). This guard turns that silent runtime failure into a hard build failure:
+//
+//   1. Every `linkName="prompt"` link's `resourceId` MUST match a prompt file that the app actually
+//      deploys (a file matched by a `models` deploy glob). This catches both a typo'd `resourceId`
+//      and a prompt that exists on disk but is not wired into a deploy glob (so never reaches the
+//      engine — the link would resolve to nothing).
+//   2. Each linked prompt file must be non-blank and must teach the agent to emit a machine-readable
+//      result (`$AGENT_RESULT_FILE`, or the `::nano:result::` stdout fallback) — a prose-only agent
+//      leaves `status` blank and the status gateway escalates/stalls (the fix-ci/rebase gap behind
+//      Magikcraft/nano-bpm#746's stuck merge).
+//   3. No service task may still carry the retired baked `io.nanobpm.agentTask.task.prompt` header:
+//      the deploy no longer substitutes `{{token}}` templates, so such a header would ship a literal
+//      `{{token}}` (or stale frozen text) as the prompt.
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
-import { applyTemplates } from "@nanobpm/urban/runtime";
 
-// The reserved header carrying an agent's base prompt. A blank value here means the agent gets no
-// instructions — the exact failure mode we guard against.
-const AGENT_PROMPT_HEADER = "io.nanobpm.agentTask.task.prompt";
+// The retired header that used to carry an agent's baked base prompt. Its continued presence is a
+// migration regression (the deploy no longer substitutes templates), so we flag it.
+const RETIRED_PROMPT_HEADER = "io.nanobpm.agentTask.task.prompt";
+
+// The `linkName` that designates a linked resource as an agent's base prompt. Other link names (if
+// any are ever added) are not agent prompts and are ignored by this guard.
+const PROMPT_LINK_NAME = "prompt";
 
 interface AppManifest {
   models?: { processes?: string[]; decisions?: string[]; forms?: string[]; templates?: string[] };
 }
 
-// Mirror urban deploy's `contentTypeFor`: only the escapable model types are substituted.
+// Only the escapable model types are XML we scan for `<zeebe:linkedResource>` links.
 function contentTypeFor(path: string): string {
   if (path.endsWith(".bpmn") || path.endsWith(".dmn")) return "text/xml";
   if (path.endsWith(".form")) return "application/json";
@@ -48,53 +63,39 @@ function expandGlob(root: string, pattern: string): string[] {
     .map((f) => join(dir, f));
 }
 
-// The `name -> content` template map urban substitutes from (array source: name = file stem).
-function templateMap(root: string, patterns: string[]): Record<string, string> {
-  const map: Record<string, string> = {};
-  for (const pattern of patterns) {
-    for (const rel of expandGlob(root, pattern)) {
-      const stem = basename(rel).replace(/\.[^.]+$/, "");
-      map[stem] = readFileSync(join(root, rel), "utf8");
-    }
-  }
-  return map;
+interface PromptLink {
+  resourceId: string;
+  bindingType: string | null;
 }
 
-// Blank reserved agent-prompt headers in a BPMN source — the one blank case urban's `unresolved`
-// signal can't see (an empty value carries no `{{token}}` to be unresolved).
-function hasBlankAgentPromptHeader(bpmn: string): boolean {
-  const re = /<zeebe:header\s+key="([^"]*)"\s+value="([^"]*)"\s*\/?>/g;
+// Extract the `<zeebe:linkedResource linkName="prompt" …>` links from a BPMN source. Each agent
+// service task carries exactly one; a process may host several tasks.
+function promptLinks(bpmn: string): PromptLink[] {
+  const links: PromptLink[] = [];
+  const re = /<zeebe:linkedResource\b([^>]*?)\/?>/g;
   let m = re.exec(bpmn);
   while (m !== null) {
-    if (m[1] === AGENT_PROMPT_HEADER && m[2].trim() === "") return true;
-    m = re.exec(bpmn);
-  }
-  return false;
-}
-
-// The template tokens a model wires as an agent's base prompt, e.g. the `fix-ci` in
-// `value="{{fix-ci}}"` on an `io.nanobpm.agentTask.task.prompt` header. These templates *drive an
-// agent*, so each must teach it to emit a machine-readable result (see agentPromptEmitsResult).
-function agentPromptTokens(bpmn: string): string[] {
-  const tokens: string[] = [];
-  const re = /<zeebe:header\s+key="([^"]*)"\s+value="([^"]*)"\s*\/?>/g;
-  let m = re.exec(bpmn);
-  while (m !== null) {
-    if (m[1] === AGENT_PROMPT_HEADER) {
-      const tok = /^\{\{\s*([^}]+?)\s*\}\}$/.exec(m[2].trim());
-      if (tok) tokens.push(tok[1]);
+    const attrs = m[1];
+    const linkName = /\blinkName="([^"]*)"/.exec(attrs)?.[1];
+    if (linkName === PROMPT_LINK_NAME) {
+      const resourceId = /\bresourceId="([^"]*)"/.exec(attrs)?.[1] ?? "";
+      const bindingType = /\bbindingType="([^"]*)"/.exec(attrs)?.[1] ?? null;
+      links.push({ resourceId, bindingType });
     }
     m = re.exec(bpmn);
   }
-  return tokens;
+  return links;
+}
+
+// Any surviving retired baked-prompt header — a migration regression.
+function hasRetiredPromptHeader(bpmn: string): boolean {
+  return new RegExp(`<zeebe:header\\s+key="${RETIRED_PROMPT_HEADER}"`).test(bpmn);
 }
 
 // A prompt that drives an agent must tell it how to return a machine-readable result — the
 // `$AGENT_RESULT_FILE` write (or the `::nano:result::` stdout fallback). Without it the agent can
 // finish with prose only, its `status` variable comes back empty, the status gateway falls through
-// to its default escalation arm, and the run parks a human escalation / stalls the merge (the
-// fix-ci/rebase gap behind Magikcraft/nano-bpm#746's stuck merge). Prose is never parsed, so this
-// instruction is load-bearing, not documentation.
+// to its default escalation arm, and the run parks a human escalation / stalls the merge.
 function agentPromptEmitsResult(body: string): boolean {
   return body.includes("AGENT_RESULT_FILE") || body.includes("::nano:result::");
 }
@@ -102,14 +103,13 @@ function agentPromptEmitsResult(body: string): boolean {
 export interface CheckResult {
   ok: boolean;
   errors: string[];
-  /** template names successfully substituted into a model — surfaced for the CLI summary line. */
+  /** prompt resource ids (file stems) successfully linked — surfaced for the CLI summary line. */
   resolved: string[];
 }
 
 export function checkAgentPrompts(root: string): CheckResult {
   const errors: string[] = [];
   const resolved = new Set<string>();
-  const agentTokens = new Set<string>();
 
   const manifestPath = join(root, "nano.app.json");
   if (!existsSync(manifestPath)) {
@@ -118,57 +118,73 @@ export function checkAgentPrompts(root: string): CheckResult {
   // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
   const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as AppManifest;
   const models = manifest.models ?? {};
-  const templates = templateMap(root, models.templates ?? []);
 
-  // A declared-but-blank template substitutes to an empty prompt without being "unresolved" —
-  // catch it up front (urban would silently produce a blank prompt).
-  for (const [name, body] of Object.entries(templates)) {
-    if (body.trim() === "") errors.push(`template {{${name}}} is empty — it would substitute to a blank prompt`);
-  }
-
-  const modelFiles = [
+  // The resources the app actually DEPLOYS: every file matched by a deploy glob (processes,
+  // decisions, forms). Its deployed resource name is the file's basename — the same string a
+  // `linkedResource resourceId` must reference. Building this from the deploy globs (not from the
+  // prompts/ directory) is what catches a prompt that exists on disk but is wired only into a
+  // non-deploying key (e.g. the retired `models.templates`), so it never reaches the engine.
+  const deployGlobs = [
     ...(models.processes ?? []),
     ...(models.decisions ?? []),
     ...(models.forms ?? []),
-  ].flatMap((p) => expandGlob(root, p));
-  if (modelFiles.length === 0) {
-    errors.push(`no model files matched ${JSON.stringify(models.processes ?? [])}`);
+  ];
+  const deployedFiles = new Map<string, string>();
+  for (const rel of deployGlobs.flatMap((p) => expandGlob(root, p))) {
+    deployedFiles.set(basename(rel), rel);
   }
 
-  for (const rel of modelFiles) {
-    const contentType = contentTypeFor(rel);
-    if (contentType === "application/octet-stream") continue; // urban does not substitute these
+  // The model files whose XML we scan for `<zeebe:linkedResource>` links.
+  const xmlModelFiles = deployGlobs
+    .flatMap((p) => expandGlob(root, p))
+    .filter((rel) => contentTypeFor(rel) === "text/xml");
+  if (xmlModelFiles.length === 0) {
+    errors.push(`no BPMN/DMN model files matched ${JSON.stringify(models.processes ?? [])}`);
+  }
+
+  let linkCount = 0;
+  for (const rel of xmlModelFiles) {
     const content = readFileSync(join(root, rel), "utf8");
 
-    // Run urban's canonical substitution — the same call deploy makes — and fail on any token it
-    // leaves unresolved (deploy only warns, which we don't tolerate).
-    const applied = applyTemplates(content, contentType, templates);
-    for (const name of applied.unresolved) {
+    if (hasRetiredPromptHeader(content)) {
       errors.push(
-        `${rel}: unresolved template {{${name}}} — no such template is declared in models.templates`,
+        `${rel}: a retired "${RETIRED_PROMPT_HEADER}" header is still present — migrate it to a ` +
+          `<zeebe:linkedResource … linkName="prompt"/> (the deploy no longer substitutes {{token}} templates)`,
       );
     }
-    for (const name of Object.keys(templates)) {
-      if (content.includes(`{{${name}}}`)) resolved.add(name);
-    }
 
-    if (hasBlankAgentPromptHeader(content)) {
-      errors.push(`${rel}: a reserved "${AGENT_PROMPT_HEADER}" header is empty (agent would run prompt-less)`);
+    for (const link of promptLinks(content)) {
+      linkCount++;
+      if (link.resourceId.trim() === "") {
+        errors.push(`${rel}: a linkName="prompt" linkedResource has an empty resourceId`);
+        continue;
+      }
+      const deployedRel = deployedFiles.get(link.resourceId);
+      if (deployedRel == null) {
+        errors.push(
+          `${rel}: linkName="prompt" resourceId="${link.resourceId}" has no deployed resource — ` +
+            `no file matched by a models deploy glob has that name, so the engine would omit the ` +
+            `link and the agent would run prompt-less`,
+        );
+        continue;
+      }
+      const body = readFileSync(join(root, deployedRel), "utf8");
+      const stem = basename(deployedRel).replace(/\.[^.]+$/, "");
+      if (body.trim() === "") {
+        errors.push(`prompt resource "${link.resourceId}" is empty — the agent would run prompt-less`);
+      } else if (!agentPromptEmitsResult(body)) {
+        errors.push(
+          `prompt resource "${link.resourceId}" drives an agent but never tells it to write ` +
+            `$AGENT_RESULT_FILE (or the ::nano:result:: fallback) — the agent can finish with prose ` +
+            `only, leaving its status blank so the process escalates/stalls`,
+        );
+      }
+      resolved.add(stem);
     }
-    for (const tok of agentPromptTokens(content)) agentTokens.add(tok);
   }
 
-  // Every template wired as an agent's base prompt must teach the agent to emit a machine-readable
-  // result; a prose-only agent leaves `status` blank and the process escalates/stalls.
-  for (const tok of [...agentTokens].sort()) {
-    const body = templates[tok];
-    if (body != null && body.trim() !== "" && !agentPromptEmitsResult(body)) {
-      errors.push(
-        `template {{${tok}}} drives an agent but never tells it to write $AGENT_RESULT_FILE ` +
-          `(or the ::nano:result:: fallback) — the agent can finish with prose only, leaving its ` +
-          `status blank so the process escalates/stalls`,
-      );
-    }
+  if (linkCount === 0 && errors.length === 0) {
+    errors.push("no linkName=\"prompt\" linkedResource found in any model — agent prompts are unwired");
   }
 
   return { ok: errors.length === 0, errors, resolved: [...resolved].sort() };
@@ -183,5 +199,5 @@ if (import.meta.main) {
     for (const e of errors) console.error(`  - ${e}`);
     process.exit(1);
   }
-  console.log(`✔ agent prompt templates resolve (${resolved.length}: ${resolved.join(", ")})`);
+  console.log(`✔ agent prompts link to deployed resources (${resolved.length}: ${resolved.join(", ")})`);
 }

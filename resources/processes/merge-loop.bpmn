@@ -226,9 +226,9 @@
     <bpmn:serviceTask id="fix-ci" name="Fix CI (agent)">
       <bpmn:extensionElements>
         <zeebe:taskDefinition type="senior:fix-ci" />
-        <zeebe:taskHeaders>
-          <zeebe:header key="io.nanobpm.agentTask.task.prompt" value="{{fix-ci}}" />
-        </zeebe:taskHeaders>
+        <zeebe:linkedResources>
+          <zeebe:linkedResource resourceId="fix-ci.md" bindingType="latest" linkName="prompt" />
+        </zeebe:linkedResources>
         <zeebe:properties>
           <zeebe:property name="io.nanobpm.dataEnvelope.in" value="FixCiIn" />
           <zeebe:property name="io.nanobpm.dataEnvelope.out" value="FixCiOut" />
@@ -256,9 +256,9 @@
     <bpmn:serviceTask id="rebase" name="Rebase (agent)">
       <bpmn:extensionElements>
         <zeebe:taskDefinition type="senior:rebase" />
-        <zeebe:taskHeaders>
-          <zeebe:header key="io.nanobpm.agentTask.task.prompt" value="{{rebase}}" />
-        </zeebe:taskHeaders>
+        <zeebe:linkedResources>
+          <zeebe:linkedResource resourceId="rebase.md" bindingType="latest" linkName="prompt" />
+        </zeebe:linkedResources>
         <zeebe:properties>
           <zeebe:property name="io.nanobpm.dataEnvelope.in" value="RebaseIn" />
           <zeebe:property name="io.nanobpm.dataEnvelope.out" value="RebaseOut" />

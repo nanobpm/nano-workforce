@@ -156,7 +156,8 @@ capability):
 
 - `--command 'copilot -p - --allow-all-tools'` starts the Copilot CLI reading its
   prompt from **stdin** (`-p -`). The harness pipes the whole job JSON (prompt +
-  `job.variables`) to stdin; the relevant `prompts/*.md` template tells the agent how
+  `job.variables`) to stdin; the relevant `prompts/*.md` resource (linked into the task
+  and fetched by the harness at activation) tells the agent how
   to read it and where to write its result.
 - **`--allow-all-tools` is essential** for an unattended worker — without it Copilot
   pauses for permission before each tool call and the job stalls.
@@ -280,10 +281,14 @@ The `senior:*` tasks are serviced by **external** workers — they are **not** i
 manifest `workers[]`. Point a `c8ctl nano work` daemon (or any Zeebe-style worker) at
 the task types; each job carries its variables (e.g. `senior:pr-review` gets `{prUrl,
 repo, prNumber, round, answer?}` and returns `{status, summary, question?}`). An
-agent's base prompt is **not** in the job payload — it is delivered via a model
-**template header** (`{{review-round}}`, `{{plan}}`, `{{feature}}`, `{{fix-ci}}`, …)
-substituted at deploy time from `prompts/*.md` (`models.templates` in `nano.app.json`);
-per-instance context (e.g. a human's escalation answer) is appended by the harness.
+agent's base prompt is **not** in the job payload — it is delivered as a
+**linked resource** (`<zeebe:linkedResource resourceId="review-round.md"
+bindingType="latest" linkName="prompt"/>`, likewise `plan.md`, `feature.md`,
+`fix-ci.md`, …) that the engine resolves to the latest deployed `prompts/*.md` at job
+activation (the prompts deploy as generic resources via a `models` glob in
+`nano.app.json`); per-instance context (e.g. a human's escalation answer) is appended
+by the harness. Because the binding is `latest`, redeploying one `prompts/*.md` updates
+the prompt for the next activation in a **running** epic — see SPEC §9.
 
 ---
 

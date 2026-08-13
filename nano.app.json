@@ -6,13 +6,11 @@
   "codename": "nano-workforce",
   "models": {
     "processes": [
-      "resources/processes/*.bpmn"
+      "resources/processes/*.bpmn",
+      "prompts/*.md"
     ],
     "forms": [
       "resources/forms/*.form"
-    ],
-    "templates": [
-      "prompts/*.md"
     ]
   },
   "data": {
