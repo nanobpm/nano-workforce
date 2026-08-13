@@ -98,9 +98,11 @@ function escapeRegExp(literal: string): string {
   return literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-// Any surviving retired baked-prompt header — a migration regression.
+// Any surviving retired baked-prompt header — a migration regression. XML attribute order is not
+// significant, so match the `key` attribute anywhere within the opening `<zeebe:header …>` tag (not
+// only immediately after the element name) — otherwise a reordered header would bypass the guard.
 function hasRetiredPromptHeader(bpmn: string): boolean {
-  return new RegExp(`<zeebe:header\\s+key="${escapeRegExp(RETIRED_PROMPT_HEADER)}"`).test(bpmn);
+  return new RegExp(`<zeebe:header\\s[^>]*\\bkey="${escapeRegExp(RETIRED_PROMPT_HEADER)}"`).test(bpmn);
 }
 
 // A prompt that drives an agent must tell it how to return a machine-readable result — the

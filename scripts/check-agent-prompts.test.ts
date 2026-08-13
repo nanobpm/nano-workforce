@@ -114,6 +114,22 @@ test("fails when the retired baked prompt header is still present", () => {
   assert(res.errors.some((e) => e.includes("retired") && e.includes("linkedResource")));
 });
 
+test("fails when the retired baked prompt header survives with reordered attributes", () => {
+  // XML attribute order is not significant: a retired header with `value` before `key` must still be
+  // caught. The guard used to anchor `key` immediately after `<zeebe:header`, so a reordered header
+  // would slip through and ship a literal placeholder as the prompt.
+  const root = fixture({
+    "nano.app.json": MANIFEST,
+    "resources/processes/loop.bpmn": serviceTask(
+      '<zeebe:taskHeaders><zeebe:header value="{{review-round}}" key="io.nanobpm.agentTask.task.prompt" /></zeebe:taskHeaders>',
+    ),
+    "prompts/review-round.md": "# Round\nWrite `$AGENT_RESULT_FILE`.",
+  });
+  const res = checkAgentPrompts(root);
+  assert(!res.ok);
+  assert(res.errors.some((e) => e.includes("retired") && e.includes("linkedResource")));
+});
+
 test("fails when a linked prompt resource omits the machine-readable result mechanism", () => {
   // A prompt wired as an agent's base prompt must tell it to write $AGENT_RESULT_FILE (or use the
   // ::nano:result:: fallback). Without it the agent finishes with prose only, `status` comes back
