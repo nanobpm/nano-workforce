@@ -158,7 +158,7 @@ export function checkAgentPrompts(root: string): CheckResult {
     .flatMap((p) => expandGlob(root, p))
     .filter((rel) => contentTypeFor(rel) === "text/xml");
   if (xmlModelFiles.length === 0) {
-    errors.push(`no BPMN/DMN model files matched ${JSON.stringify(models.processes ?? [])}`);
+    errors.push(`no BPMN/DMN model files matched ${JSON.stringify(deployGlobs)}`);
   }
 
   let linkCount = 0;
