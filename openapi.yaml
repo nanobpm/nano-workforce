@@ -359,7 +359,7 @@ components:
           type: string
           description: >-
             One of `proceed` or `revise` (case-insensitive; normalized to lowercase and trimmed
-            server-side, see `parsePlanEscalationDirective`).
+            server-side, see `normalizePlanEscalationDirective`).
             `proceed` dispatches the current unapproved plan as an explicit human override;
             `revise` loops back to the planner with the note folded into planFindings and a fresh
             review budget.
@@ -634,7 +634,7 @@ paths:
                       type: string
                       description: >-
                         One of `proceed` or `revise` (case-insensitive; normalized to lowercase and
-                        trimmed server-side, see `parsePlanEscalationDirective`).
+                        trimmed server-side, see `normalizePlanEscalationDirective`).
                     note:
                       type: string
       responses:

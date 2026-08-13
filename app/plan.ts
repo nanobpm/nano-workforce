@@ -447,12 +447,15 @@ export async function answerTaskEscalation(
     (candidates.length === 1 ? candidates[0] : undefined);
   if (!match) return { ok: false, reason: "no open escalation" };
 
-  await engine.completeUserTask(match.userTaskKey, { resolution: "answer", answer });
-  // Mirror onto the task row so a re-dispatched agent (and the UI) sees the answer.
+  // Mirror onto the task row first so a re-dispatched agent (and the UI) sees the answer.
+  // Completing the user task resumes the process, so if the DB write threw afterwards the open
+  // task would be gone and a retry could no longer find it — leaving the row permanently
+  // un-mirrored. Mirror first, then complete, so any failure stays retriable.
   const ts = now();
   for (const t of await planTasks(data).find({ plan_key: planKey, task_id: taskId })) {
     await planTasks(data).update(t.id, { answer, updated_at: ts });
   }
+  await engine.completeUserTask(match.userTaskKey, { resolution: "answer", answer });
   return { ok: true, userTaskKey: match.userTaskKey, planKey, taskId };
 }
 
