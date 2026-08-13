@@ -9,13 +9,13 @@
 // `*.test.ts` file is ignored (test files never carry a family), and a module that exports no valid
 // family is skipped with a warning rather than crashing boot.
 import { readdir } from "node:fs/promises";
-import { join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { dirname, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import type { Logger } from "@nanobpm/urban";
 import type { AgenticFamily } from "./registry.ts";
 
 /** The conventional directory holding sibling family modules, resolved next to this loader. */
-export const FAMILIES_DIR = join(import.meta.dirname, "families");
+export const FAMILIES_DIR = join(dirname(fileURLToPath(import.meta.url)), "families");
 
 /** The filename suffix a family module must carry to be discovered. */
 const FAMILY_SUFFIX = ".family.ts";

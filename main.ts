@@ -63,6 +63,8 @@ if (httpServer instanceof Server) {
   } else {
     app.log.warn("agentic channel not mounted: set NANO_AGENTIC_SECRET (or NANO_PR_WEBHOOK_SECRET)");
   }
+} else if (agenticSecret) {
+  app.log.warn("agentic channel not mounted: app.httpServer is not a node:http Server on this host");
 }
 
 // Review-ready poller. Self-scheduling (not setInterval) so a slow GitHub call can never
