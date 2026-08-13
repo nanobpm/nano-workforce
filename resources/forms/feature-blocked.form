@@ -1,0 +1,17 @@
+{
+  "id": "feature-blocked",
+  "schemaVersion": 18,
+  "type": "default",
+  "components": [
+    {
+      "type": "text",
+      "text": "This single-issue feature run is **blocked** — the implementation agent could not open a PR (it gave up, or the escalation was abandoned / timed out). It landed in your inbox so a blocked run is never a silent dead-end. Review the outcome, then acknowledge to close the run.",
+      "label": "Blocked feature run"
+    },
+    {
+      "type": "textarea",
+      "key": "note",
+      "label": "Disposition note (what you did / why — recorded on the run)"
+    }
+  ]
+}

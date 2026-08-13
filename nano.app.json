@@ -133,6 +133,10 @@
       "handler": "workers/record-feature/worker.ts"
     },
     {
+      "taskType": "pr.record-blocked-ack",
+      "handler": "workers/record-blocked-ack/worker.ts"
+    },
+    {
       "taskType": "pr.converge-feature",
       "handler": "workers/converge-feature/worker.ts"
     },

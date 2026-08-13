@@ -7,7 +7,7 @@
 // process variables (the single `task` slice + the base-branch brief).
 import { test } from "node:test";
 import { assertEquals } from "#test-assert";
-import { FEATURE_PROCESS_ID, featureTaskId, startFeature } from "./feature.ts";
+import { FEATURE_PROCESS_ID, FEATURE_TERMINAL_STATUSES, featureTaskId, startFeature } from "./feature.ts";
 
 function memTable(rows: any[], key: string) {
   return {
@@ -130,6 +130,30 @@ test("startFeature: an already-running run short-circuits (no new instance)", as
   assertEquals(created, 0);
   assertEquals("alreadyRunning" in result && (result as any).alreadyRunning, true);
   assertEquals(result.processKey, "PI-OLD");
+});
+
+test("startFeature: a run parked at the operator task (awaiting_operator) short-circuits a re-dispatch", async () => {
+  // A blocked run parked at the feature-blocked user task is NON-terminal, so re-dispatching the
+  // same issue must not spawn an orphaned parallel instance — it short-circuits until the operator
+  // acknowledges it (which settles it to terminal `blocked`).
+  assertEquals(FEATURE_TERMINAL_STATUSES.includes("awaiting_operator" as any), false);
+  const stores = {
+    feature_runs: {
+      rows: [{ feature_key: "owner/repo#42", status: "awaiting_operator", process_key: "PI-PARK" }],
+      key: "feature_key",
+    },
+  };
+  let created = 0;
+  const engine = {
+    createInstance: () => {
+      created += 1;
+      return Promise.resolve({ processInstanceKey: "PI-NEW" });
+    },
+  } as any;
+  const result = await startFeature(memData(stores), engine, PARSED, "main", false, false);
+  assertEquals(created, 0);
+  assertEquals("alreadyRunning" in result && (result as any).alreadyRunning, true);
+  assertEquals(result.processKey, "PI-PARK");
 });
 
 test("startFeature: a settled run is restarted in place (status reset, pr/outcome cleared)", async () => {

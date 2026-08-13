@@ -9,6 +9,7 @@
 // `Table<T>` surface), not hand-written SQL. Row shapes are declared inline here.
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { abandonUrl, mintAbandonToken, renderAbandonBrief } from "./abandon.ts";
+import { deriveFeatureDelivery, featureRuns } from "./feature.ts";
 import {
   classifyMergeability,
   ensureFreshHeadRun,
@@ -1249,6 +1250,39 @@ export async function pollDelivery(data: DataLayer) {
   }
 }
 
+/** Reconcile each in-flight FEATURE run against its handed-off PR (fix: Feature history stuck at
+ * `converging`). A feature run ends its own process with `status = converging` and its PR's live
+ * outcome (merged / converged / abandoned) thereafter lives only on the `pull_requests` row keyed
+ * by `pr_key` — so the Feature history grid, which reads `feature_runs`, showed `converging` forever.
+ * This is the `feature_runs` twin of `pollDelivery` (which does the same for epic `plans`): for each
+ * run currently `converging` with a `pr_key`, project the PR's status onto `feature_runs.status`
+ * (advancing it to the matching terminal outcome once the PR settles) + a human `delivery_label`.
+ * Never touches a run that isn't `converging` — additive/derived only, idempotent, best-effort. */
+export async function pollFeatureDelivery(data: DataLayer) {
+  // Preload every PR status once per pass (mirrors pollDelivery — avoids an N+1 `prs(data).get`).
+  const statusByPrKey = new Map<string, string>();
+  for (const pr of await prs(data).all()) statusByPrKey.set(pr.pr_key, pr.status);
+  // Only `converging` runs are ever reconciled — query them via the `feature_runs(status)` index
+  // (db/migrations/028) instead of scanning all history, so this pass stays O(in-flight), not
+  // O(total runs), as the table grows.
+  for (const run of await featureRuns(data).find({ status: "converging" })) {
+    if (!run.pr_key) continue;
+    try {
+      const prStatus = statusByPrKey.get(run.pr_key) ?? null;
+      const { status, label } = deriveFeatureDelivery(prStatus);
+      if (run.status !== status || run.delivery_label !== label) {
+        await featureRuns(data).update(run.feature_key, {
+          status,
+          delivery_label: label,
+          updated_at: now(),
+        });
+      }
+    } catch (err) {
+      console.error(`[poller] feature delivery ${run.feature_key}: ${err}`);
+    }
+  }
+}
+
 /** One full poll pass: advance the review stage, the merge stage, the wave-merge barrier, and
  * (when the engine REST endpoint is supplied) the job-activation visibility pass and the
  * technical-incident surfacing pass. Called on the self-scheduling loop in `main.ts`. */
@@ -1262,6 +1296,7 @@ export async function pollOnce(
   await pollMerges(data, engine, token);
   await pollWaveGates(data, engine, token);
   await pollDelivery(data);
+  await pollFeatureDelivery(data);
   if (engineRest) {
     await pollJobActivation(data, engineRest.restAddress, engineRest.token);
     await pollIncidents(data, engineRest.restAddress, engineRest.token);

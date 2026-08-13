@@ -59,11 +59,11 @@
           "source": "app",
           "table": "feature_runs",
           "orderBy": { "field": "updated_at", "dir": "desc" },
-          "filter": [{ "field": "status", "in": ["running"] }]
+          "filter": [{ "field": "status", "in": ["running", "awaiting_operator"] }]
         },
         "tabs": [
-          { "label": "Active", "filter": [{ "field": "status", "in": ["running"] }] },
-          { "label": "History", "filter": [{ "field": "status", "in": ["opened", "converging", "blocked", "skipped", "failed", "abandoned"] }] },
+          { "label": "Active", "filter": [{ "field": "status", "in": ["running", "awaiting_operator"] }] },
+          { "label": "History", "filter": [{ "field": "status", "in": ["opened", "converging", "merged", "converged", "blocked", "skipped", "failed", "abandoned"] }] },
           { "label": "All", "filter": [] }
         ],
         "columns": [
@@ -71,6 +71,7 @@
           { "field": "status", "header": "Status", "link": { "kind": "processExplorer", "keyField": "process_key" } },
           { "field": "base_branch", "header": "Base branch" },
           { "field": "pr_key", "header": "PR", "link": { "kind": "page", "page": "home", "keyField": "pr_key" } },
+          { "field": "delivery_label", "header": "Delivery" },
           { "field": "converge", "header": "Converge" },
           { "field": "auto_merge", "header": "Auto-merge" },
           { "field": "outcome", "header": "Outcome" },

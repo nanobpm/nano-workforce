@@ -45,15 +45,21 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
   // (the run is complete), just with no `pr_key` to converge.
   const prKey = parsed?.prKey ?? null;
   const featureStatus: FeatureRunStatus = status;
+  // A `blocked` outcome is routed (via the `blocked?` gateway) to the `feature-blocked` operator user
+  // task, which keeps the instance ALIVE until a human acknowledges it. Persist the row as the
+  // NON-terminal `awaiting_operator` for that parked window so a re-dispatch of the same issue
+  // short-circuits (no orphaned parallel run); `record-blocked-ack` writes the terminal `blocked`
+  // once the operator completes the task. `opened`/`skipped` are already terminal — persist as-is.
+  const rowStatus: FeatureRunStatus = status === "blocked" ? "awaiting_operator" : status;
   const ts = new Date().toISOString();
 
   await featureRuns(app.data).update(featureKey, {
-    status: featureStatus,
+    status: rowStatus,
     pr_key: prKey,
     outcome: summary ?? null,
     updated_at: ts,
   });
-  app.log.info("record-feature", { featureKey, featureStatus, prKey });
+  app.log.info("record-feature", { featureKey, featureStatus, rowStatus, prKey });
 
   return { featureStatus, prKey };
 };
