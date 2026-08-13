@@ -582,3 +582,214 @@ test("startPlan grandfathers a pre-existing null base_branch row: re-plan reads 
   assertEquals((stores.plans.rows[0] as any).base_branch, "epic/gate-branch");
   assertEquals(seen.baseBranch, "epic/gate-branch");
 });
+
+// ── admitPlan decision matrix (ADR 0003 §Decision, rules 1-4) ────────────────
+// The fail-fast admission gate composes four ORDERED rules before any fan-out. These drive it
+// through a faked github transport (token mode + stubbed `globalThis.fetch`) and an in-memory
+// `plans` table, asserting each rule's accept/reject and that the ORDER is load-bearing.
+import { BaseBranchMustExistError } from "./github.ts";
+import { admitPlan, DefaultBaseNotConfirmedError, findActivePlansByBase, SharedBaseError } from "./plan.ts";
+
+interface AdmitRepo {
+  repo: string;
+  defaultBranch: string;
+  branches: Set<string>;
+  creates: string[]; // refs created via POST
+  metaCalls: number; // GETs to /repos/:repo (default-branch resolution)
+}
+
+function admitFetch(state: AdmitRepo) {
+  return (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    const u = new URL(String(url));
+    const method = (init?.method ?? "GET").toUpperCase();
+    const path = u.pathname;
+    if (method === "GET" && path === `/repos/${state.repo}`) {
+      state.metaCalls += 1;
+      return Promise.resolve(
+        new Response(JSON.stringify({ default_branch: state.defaultBranch }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      );
+    }
+    const refPrefix = `/repos/${state.repo}/git/ref/heads/`;
+    if (method === "GET" && path.startsWith(refPrefix)) {
+      const branch = decodeURIComponent(path.slice(refPrefix.length));
+      if (!state.branches.has(branch)) return Promise.resolve(new Response("Not Found", { status: 404 }));
+      return Promise.resolve(
+        new Response(JSON.stringify({ ref: `refs/heads/${branch}`, object: { sha: `${branch}-sha` } }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      );
+    }
+    if (method === "POST" && path === `/repos/${state.repo}/git/refs`) {
+      // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+      const body = JSON.parse(String(init?.body ?? "{}")) as { ref?: string };
+      const ref = String(body.ref ?? "");
+      const branch = ref.replace(/^refs\/heads\//, "");
+      if (state.branches.has(branch)) {
+        return Promise.resolve(new Response(JSON.stringify({ message: "Reference already exists" }), { status: 422 }));
+      }
+      state.creates.push(ref);
+      state.branches.add(branch);
+      return Promise.resolve(new Response(JSON.stringify({ ref }), { status: 201 }));
+    }
+    return Promise.resolve(new Response(`unexpected ${method} ${path}`, { status: 500 }));
+  };
+}
+
+async function withAdmit<T>(state: AdmitRepo, fn: () => Promise<T>): Promise<T> {
+  const prevMode = process.env["NANO_PR_GITHUB_TRANSPORT"];
+  const prevFetch = globalThis.fetch;
+  process.env["NANO_PR_GITHUB_TRANSPORT"] = "token";
+  globalThis.fetch = admitFetch(state) as typeof fetch;
+  try {
+    return await fn();
+  } finally {
+    globalThis.fetch = prevFetch;
+    if (prevMode === undefined) delete process.env["NANO_PR_GITHUB_TRANSPORT"];
+    else process.env["NANO_PR_GITHUB_TRANSPORT"] = prevMode;
+  }
+}
+
+function admitData(planRows: any[] = []) {
+  return memData({ plans: { rows: planRows, key: "plan_key" } });
+}
+
+test("admitPlan rule 1: blank/absent base → MissingBaseBranchError (before any github call)", async () => {
+  const state: AdmitRepo = { repo: "o/r1", defaultBranch: "main", branches: new Set(["main"]), creates: [], metaCalls: 0 };
+  await withAdmit(state, async () => {
+    await assertRejects(() => admitPlan(admitData(), state.repo, "", "tok"), MissingBaseBranchError);
+    await assertRejects(() => admitPlan(admitData(), state.repo, null, "tok"), MissingBaseBranchError);
+  });
+  // Rule 1 fires before rule 2/3 — the default-branch endpoint is never hit.
+  assertEquals(state.metaCalls, 0);
+  assertEquals(state.creates.length, 0);
+});
+
+test("admitPlan rule 1: implausible base → InvalidBaseBranchError", async () => {
+  const state: AdmitRepo = { repo: "o/r1b", defaultBranch: "main", branches: new Set(["main"]), creates: [], metaCalls: 0 };
+  await withAdmit(state, async () => {
+    await assertRejects(() => admitPlan(admitData(), state.repo, "bad branch;rm -rf", "tok"), InvalidBaseBranchError);
+  });
+  assertEquals(state.metaCalls, 0);
+});
+
+test("admitPlan rule 2: missing non-epic/* base → BaseBranchMustExistError (synchronous edge-400 path)", async () => {
+  const state: AdmitRepo = { repo: "o/r2", defaultBranch: "main", branches: new Set(["main"]), creates: [], metaCalls: 0 };
+  await withAdmit(state, async () => {
+    await assertRejects(() => admitPlan(admitData(), state.repo, "release-9", "tok"), BaseBranchMustExistError);
+  });
+  assertEquals(state.creates.length, 0);
+});
+
+test("admitPlan rule 2: missing epic/* base → created off default HEAD, then admitted", async () => {
+  const state: AdmitRepo = { repo: "o/r3", defaultBranch: "main", branches: new Set(["main"]), creates: [], metaCalls: 0 };
+  const base = await withAdmit(state, () => admitPlan(admitData(), state.repo, "epic/new-thing", "tok"));
+  assertEquals(base, "epic/new-thing");
+  assertEquals(state.creates, ["refs/heads/epic/new-thing"]);
+});
+
+test("admitPlan rule 3: default-branch target WITHOUT confirmDefaultBase → DefaultBaseNotConfirmedError", async () => {
+  const state: AdmitRepo = { repo: "o/r4", defaultBranch: "main", branches: new Set(["main"]), creates: [], metaCalls: 0 };
+  await withAdmit(state, async () => {
+    await assertRejects(() => admitPlan(admitData(), state.repo, "main", "tok"), DefaultBaseNotConfirmedError);
+  });
+});
+
+test("admitPlan rule 3: default-branch target WITH confirmDefaultBase → admitted", async () => {
+  const state: AdmitRepo = { repo: "o/r5", defaultBranch: "main", branches: new Set(["main"]), creates: [], metaCalls: 0 };
+  const base = await withAdmit(state, () =>
+    admitPlan(admitData(), state.repo, "main", "tok", { confirmDefaultBase: true }),
+  );
+  assertEquals(base, "main");
+});
+
+test("admitPlan rule 4: active shared CUSTOM base WITHOUT allowSharedBase → SharedBaseError", async () => {
+  const state: AdmitRepo = { repo: "o/r6", defaultBranch: "main", branches: new Set(["main", "epic/shared"]), creates: [], metaCalls: 0 };
+  const planRows = [{ plan_key: "o/r6#1", repo: "o/r6", base_branch: "epic/shared", status: "planning" }];
+  await withAdmit(state, async () => {
+    await assertRejects(() => admitPlan(admitData(planRows), state.repo, "epic/shared", "tok"), SharedBaseError);
+  });
+});
+
+test("admitPlan rule 4: same-issue re-submit is admitted — selfPlanKey excludes the launch's OWN active row", async () => {
+  // Idempotency regression: startPlan short-circuits an in-flight plan to `alreadyRunning`, but that
+  // reachable only if admitPlan does NOT 409 the retry against the plan's own active row. With
+  // selfPlanKey set, the shared-base guard excludes that row, so the same-issue re-submit is admitted.
+  const state: AdmitRepo = { repo: "o/r6b", defaultBranch: "main", branches: new Set(["main", "epic/shared"]), creates: [], metaCalls: 0 };
+  const planRows = [{ plan_key: "o/r6b#1", repo: "o/r6b", base_branch: "epic/shared", status: "planning" }];
+  const base = await withAdmit(state, () =>
+    admitPlan(admitData(planRows), state.repo, "epic/shared", "tok", { selfPlanKey: "o/r6b#1" }),
+  );
+  assertEquals(base, "epic/shared");
+});
+
+test("admitPlan rule 4: a DIFFERENT active plan on the same base still trips the guard even with selfPlanKey set", async () => {
+  // selfPlanKey excludes only the launch's own row — a genuine collision with another epic still 409s.
+  const state: AdmitRepo = { repo: "o/r6c", defaultBranch: "main", branches: new Set(["main", "epic/shared"]), creates: [], metaCalls: 0 };
+  const planRows = [{ plan_key: "o/r6c#2", repo: "o/r6c", base_branch: "epic/shared", status: "planning" }];
+  await withAdmit(state, async () => {
+    await assertRejects(
+      () => admitPlan(admitData(planRows), state.repo, "epic/shared", "tok", { selfPlanKey: "o/r6c#1" }),
+      SharedBaseError,
+    );
+  });
+});
+
+test("admitPlan rule 4: same custom base WITH allowSharedBase → admitted", async () => {
+  const state: AdmitRepo = { repo: "o/r7", defaultBranch: "main", branches: new Set(["main", "epic/shared"]), creates: [], metaCalls: 0 };
+  const planRows = [{ plan_key: "o/r7#1", repo: "o/r7", base_branch: "epic/shared", status: "planning" }];
+  const base = await withAdmit(state, () =>
+    admitPlan(admitData(planRows), state.repo, "epic/shared", "tok", { allowSharedBase: true }),
+  );
+  assertEquals(base, "epic/shared");
+});
+
+test("admitPlan rule 4: two plans sharing the DEFAULT branch → always admitted (exempt)", async () => {
+  const state: AdmitRepo = { repo: "o/r8", defaultBranch: "main", branches: new Set(["main"]), creates: [], metaCalls: 0 };
+  // Another active plan already targets the default branch — the shared-base guard exempts it.
+  const planRows = [{ plan_key: "o/r8#1", repo: "o/r8", base_branch: "main", status: "planning" }];
+  const base = await withAdmit(state, () =>
+    admitPlan(admitData(planRows), state.repo, "main", "tok", { confirmDefaultBase: true }),
+  );
+  assertEquals(base, "main");
+});
+
+test("admitPlan rule 4: a TERMINAL-status plan on the same base does NOT trip the guard", async () => {
+  const state: AdmitRepo = { repo: "o/r9", defaultBranch: "main", branches: new Set(["main", "epic/done-base"]), creates: [], metaCalls: 0 };
+  const planRows = [{ plan_key: "o/r9#1", repo: "o/r9", base_branch: "epic/done-base", status: "done" }];
+  const base = await withAdmit(state, () => admitPlan(admitData(planRows), state.repo, "epic/done-base", "tok"));
+  assertEquals(base, "epic/done-base");
+});
+
+test("admitPlan ORDER: a blank base is rejected before confirm-default / shared-base run", async () => {
+  // Even with an active shared plan present AND the base being the default, rule 1 must fire first.
+  const state: AdmitRepo = { repo: "o/r10", defaultBranch: "main", branches: new Set(["main"]), creates: [], metaCalls: 0 };
+  const planRows = [{ plan_key: "o/r10#1", repo: "o/r10", base_branch: "main", status: "planning" }];
+  await withAdmit(state, async () => {
+    await assertRejects(() => admitPlan(admitData(planRows), state.repo, "  ", "tok"), MissingBaseBranchError);
+  });
+  assertEquals(state.metaCalls, 0); // never reached rule 3
+});
+
+test("admitPlan ORDER: a typo'd non-epic base is rejected (rule 2) before confirm-default (rule 3)", async () => {
+  const state: AdmitRepo = { repo: "o/r11", defaultBranch: "main", branches: new Set(["main"]), creates: [], metaCalls: 0 };
+  await withAdmit(state, async () => {
+    await assertRejects(() => admitPlan(admitData(), state.repo, "mian", "tok"), BaseBranchMustExistError);
+  });
+  // ensureBaseBranch (rule 2) throws for the missing non-epic/* branch before fetchDefaultBranch (rule 3).
+  assertEquals(state.metaCalls, 0);
+});
+
+test("findActivePlansByBase returns only non-terminal plans on the matching repo + base", async () => {
+  const rows = [
+    { plan_key: "o/x#1", repo: "o/x", base_branch: "epic/b", status: "planning" },
+    { plan_key: "o/x#2", repo: "o/x", base_branch: "epic/b", status: "done" },
+    { plan_key: "o/x#3", repo: "o/x", base_branch: "epic/other", status: "planning" },
+  ];
+  const active = await findActivePlansByBase(admitData(rows), "o/x", "epic/b");
+  assertEquals(active.length, 1);
+  assertEquals(active[0].plan_key, "o/x#1");
+});

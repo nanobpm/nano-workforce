@@ -12,6 +12,7 @@ import { noopLog } from "../test/log.ts";
 import startConvergenceLoop from "./startConvergenceLoop.ts";
 import startPlanFanout from "./startPlanFanout.ts";
 import postMessage from "./postMessage.ts";
+import { resetDefaultBranchCache } from "../app/github.ts";
 
 const app = { log: noopLog() } as any as AppApi;
 
@@ -72,10 +73,57 @@ function withGithubOff(run: () => Promise<void>): Promise<void> {
   const prevTok = process.env["GITHUB_TOKEN"];
   process.env["NANO_PR_GITHUB_TRANSPORT"] = "token"; // no token → meta fetch is skipped
   delete process.env["GITHUB_TOKEN"];
+  resetDefaultBranchCache(); // start cold so a prior warmed cache can't mask the no-transport path
   return run().finally(() => {
+    resetDefaultBranchCache();
     if (prev !== undefined) process.env["NANO_PR_GITHUB_TRANSPORT"] = prev;
     else delete process.env["NANO_PR_GITHUB_TRANSPORT"];
     if (prevTok !== undefined) process.env["GITHUB_TOKEN"] = prevTok;
+  });
+}
+
+// Force the token transport with a stubbed `globalThis.fetch` that serves a minimal in-memory
+// github model, so `admitPlan` (which now calls `ensureBaseBranch` + `fetchDefaultBranch`) can run
+// without touching the network. The default branch is `main`; an epic/* base is auto-created off it.
+function withGithubStub(run: () => Promise<void>): Promise<void> {
+  const prevMode = process.env["NANO_PR_GITHUB_TRANSPORT"];
+  const prevTok = process.env["GITHUB_TOKEN"];
+  const prevFetch = globalThis.fetch;
+  process.env["NANO_PR_GITHUB_TRANSPORT"] = "token";
+  process.env["GITHUB_TOKEN"] = "tok";
+  resetDefaultBranchCache(); // isolate: don't inherit or leak the owner/repo default-branch entry
+  const branches = new Map<string, string>([["main", "mainsha"]]);
+  globalThis.fetch = ((url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    const u = new URL(String(url));
+    const method = (init?.method ?? "GET").toUpperCase();
+    const path = u.pathname;
+    const json = (obj: unknown, status = 200) =>
+      new Response(JSON.stringify(obj), { status, headers: { "content-type": "application/json" } });
+    if (method === "GET" && path === "/repos/owner/repo") return Promise.resolve(json({ default_branch: "main" }));
+    const refPrefix = "/repos/owner/repo/git/ref/heads/";
+    if (method === "GET" && path.startsWith(refPrefix)) {
+      const branch = decodeURIComponent(path.slice(refPrefix.length));
+      const sha = branches.get(branch);
+      if (sha === undefined) return Promise.resolve(new Response("Not Found", { status: 404 }));
+      return Promise.resolve(json({ ref: `refs/heads/${branch}`, object: { sha } }));
+    }
+    if (method === "POST" && path === "/repos/owner/repo/git/refs") {
+      // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+      const body = JSON.parse(String(init?.body ?? "{}")) as { ref?: string; sha?: string };
+      const branch = String(body.ref ?? "").replace(/^refs\/heads\//, "");
+      if (branches.has(branch)) return Promise.resolve(json({ message: "Reference already exists" }, 422));
+      branches.set(branch, String(body.sha ?? ""));
+      return Promise.resolve(json({ ref: body.ref }, 201));
+    }
+    return Promise.resolve(new Response(`unexpected ${method} ${path}`, { status: 500 }));
+  }) as typeof fetch;
+  return run().finally(() => {
+    resetDefaultBranchCache();
+    globalThis.fetch = prevFetch;
+    if (prevMode !== undefined) process.env["NANO_PR_GITHUB_TRANSPORT"] = prevMode;
+    else delete process.env["NANO_PR_GITHUB_TRANSPORT"];
+    if (prevTok !== undefined) process.env["GITHUB_TOKEN"] = prevTok;
+    else delete process.env["GITHUB_TOKEN"];
   });
 }
 
@@ -151,7 +199,7 @@ test("startConvergenceLoop narrows the `url` variant (no `pr` key)", async () =>
 });
 
 test("startPlanFanout narrows the `url` variant (no `issue` key)", async () => {
-  await withGithubOff(async () => {
+  await withGithubStub(async () => {
     const { app: capApp } = captureApp();
     const res = await startPlanFanout(
       input({ url: "https://github.com/owner/repo/issues/12", baseBranch: "epic/agent-protocol" }),
