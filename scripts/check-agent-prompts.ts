@@ -92,9 +92,15 @@ function promptLinks(bpmn: string): PromptLink[] {
   return links;
 }
 
+// Escape a literal string for safe embedding in a RegExp — the header key contains dots that would
+// otherwise act as wildcards and match unintended header keys.
+function escapeRegExp(literal: string): string {
+  return literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 // Any surviving retired baked-prompt header — a migration regression.
 function hasRetiredPromptHeader(bpmn: string): boolean {
-  return new RegExp(`<zeebe:header\\s+key="${RETIRED_PROMPT_HEADER}"`).test(bpmn);
+  return new RegExp(`<zeebe:header\\s+key="${escapeRegExp(RETIRED_PROMPT_HEADER)}"`).test(bpmn);
 }
 
 // A prompt that drives an agent must tell it how to return a machine-readable result — the
