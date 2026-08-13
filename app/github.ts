@@ -598,7 +598,10 @@ export async function mergePr(
  *   • `opened`  — a PR was created; `url` (html_url) and `number` identify it.
  *   • `exists`  — GitHub refused because a PR already exists for this head→base (422). Idempotent
  *                 callers treat this as success and recover the existing PR.
- *   • `invalid` — GitHub refused the base/head as invalid or nonexistent (422/404).
+ *   • `invalid` — GitHub refused the base/head as invalid or nonexistent — a 422 whose body signals
+ *                 an invalid base/head, or a 404 whose body signals the same. A bare 404 (repo not
+ *                 found, auth/permission, wrong `repo`) is NOT `invalid`; it throws so genuine
+ *                 misconfiguration propagates rather than being mislabelled an invalid-branch rejection.
  * A genuine transport failure (auth, network, 5xx) still propagates as a throw. `null` is returned
  * only when no transport is usable (mirrors the sibling write helpers). */
 export type OpenPrResult =
@@ -613,19 +616,20 @@ function isPrAlreadyExists(msg: string): boolean {
   return /pull request already exists|already exists for/i.test(msg);
 }
 
-/** True when a 422 body/message indicates the *base or head* itself is invalid or nonexistent (an
- * invalid-branch rejection), as opposed to some unrelated validation failure (e.g. a title/body
- * constraint) that must surface as a real error rather than be mislabelled `invalid`. GitHub
- * phrases invalid-branch 422s with an `errors[].field` of `base`/`head`, a "No commits between …"
- * message, or a "does not exist" note. */
+/** True when a 422/404 body/message indicates the *base or head* itself is invalid or nonexistent
+ * (an invalid-branch rejection), as opposed to some unrelated validation failure (e.g. a title/body
+ * constraint) or a bare transport 404 (repo not found / no access) that must surface as a real error
+ * rather than be mislabelled `invalid`. GitHub phrases invalid-branch rejections with an
+ * `errors[].field` of `base`/`head`, a "No commits between …" message, or a "does not exist" note. */
 function isInvalidBaseHead(msg: string): boolean {
   return /no commits between|does not exist|\b(base|head)\b/i.test(msg);
 }
 
 /** Open a pull request `head` → `base` in `repo` (`owner/repo`) with `title`/`body`. Does NOT
  * merge. Returns a discriminated {@link OpenPrResult} so the caller can branch on GitHub's
- * "already exists" (422) and "invalid base/head" (422/404) cases; `null` when no transport is
- * usable. Only a genuine transport failure throws. See {@link OpenPrResult} for the contract. */
+ * "already exists" (422) and "invalid base/head" (422, or a 404 whose body signals base/head);
+ * `null` when no transport is usable. A genuine transport failure — including a bare 404 (repo not
+ * found / no access) — throws. See {@link OpenPrResult} for the contract. */
 export async function openPullRequest(
   repo: string,
   base: string,
@@ -662,7 +666,7 @@ export async function openPullRequest(
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (isPrAlreadyExists(msg)) return { outcome: "exists", detail: msg };
-      if (/\b404\b/.test(msg) || ((/\b422\b|unprocessable/i.test(msg)) && isInvalidBaseHead(msg))) {
+      if ((/\b404\b/.test(msg) || /\b422\b|unprocessable/i.test(msg)) && isInvalidBaseHead(msg)) {
         return { outcome: "invalid", detail: msg };
       }
       throw err;
@@ -689,7 +693,7 @@ export async function openPullRequest(
   const text = (await r.text()).slice(0, 300);
   const detail = `github ${r.status} ${r.statusText}: ${text}`.trim();
   if (r.status === 422 && isPrAlreadyExists(text)) return { outcome: "exists", detail };
-  if (r.status === 404 || (r.status === 422 && isInvalidBaseHead(text))) return { outcome: "invalid", detail };
+  if ((r.status === 404 || r.status === 422) && isInvalidBaseHead(text)) return { outcome: "invalid", detail };
   throw new Error(detail);
 }
 

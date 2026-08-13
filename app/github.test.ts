@@ -130,12 +130,30 @@ test("openPullRequest: an invalid base/head (422) is surfaced as outcome 'invali
   assertEquals(res?.outcome, "invalid");
 });
 
-test("openPullRequest: an invalid base/head (404, plain-text body) is surfaced as outcome 'invalid'", async () => {
+test("openPullRequest: an invalid base/head (404 whose body signals the branch) is surfaced as outcome 'invalid'", async () => {
   const res = await withStubbedFetch(
-    () => Promise.resolve(new Response("Not Found", { status: 404, statusText: "Not Found" })),
+    () =>
+      Promise.resolve(
+        new Response(JSON.stringify({ message: "Not Found: base branch does not exist" }), {
+          status: 404,
+          statusText: "Not Found",
+        }),
+      ),
     () => openPullRequest("o/r", "nope", "feat/x", "T", "B", "tok"),
   );
   assertEquals(res?.outcome, "invalid");
+});
+
+test("openPullRequest: a bare 404 (repo not found / auth) is thrown, not misclassified as 'invalid'", async () => {
+  await assertRejects(
+    () =>
+      withStubbedFetch(
+        () => Promise.resolve(new Response("Not Found", { status: 404, statusText: "Not Found" })),
+        () => openPullRequest("o/r", "epic/y", "feat/x", "T", "B", "tok"),
+      ),
+    Error,
+    "404",
+  );
 });
 
 test("openPullRequest: a non-base/head 422 (e.g. a title validation failure) is thrown, not misclassified as 'invalid'", async () => {
