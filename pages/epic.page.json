@@ -39,7 +39,7 @@
         "action": { "path": "/app/api/actions/start/plan-fanout", "body": "{{form}}" },
         "fields": [
           { "key": "issue", "label": "owner/repo#123 or a GitHub issue URL", "type": "text", "required": true, "requiredMessage": "An issue reference is required (owner/repo#123 or an issue URL)" },
-          { "key": "baseBranch", "label": "Base branch (REQUIRED; e.g. epic/agent-protocol to land the whole epic on an integration branch). A missing epic/* branch is auto-created off default HEAD; a non-epic/* branch must already exist.", "type": "text", "required": true, "requiredMessage": "Name the branch the PR targets (e.g. main or epic/agent-protocol)" },
+          { "key": "baseBranch", "label": "Base branch: e.g. epic/agent-protocol to land the whole epic on an integration branch. A missing epic/* branch is auto-created off default HEAD; a non-epic/* branch must already exist.", "type": "text", "required": true, "requiredMessage": "Name the branch the PR targets (e.g. main or epic/agent-protocol)" },
           { "key": "confirmDefaultBase", "label": "Confirm landing on the default branch \u2014 required only when the base above IS the repository default (every task lands directly on it, with any merge-to-default side effect firing per task)", "type": "checkbox" },
           { "key": "allowSharedBase", "label": "Allow sharing a custom integration branch with another active epic \u2014 required only when another in-flight epic already targets this same custom base", "type": "checkbox" }
         ]
