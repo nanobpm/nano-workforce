@@ -40,7 +40,7 @@ function memSqlite(): SqliteDb {
     exec: (sql) => db.exec(sql),
     run: (sql, params = []) => {
       const r = db.prepare(sql).run(...(params as never[]));
-      return { changes: Number(r.changes), lastInsertRowid: r.lastInsertRowid };
+      return { changes: Number(r.changes), lastInsertRowid: Number(r.lastInsertRowid) };
     },
     all: <T = Record<string, unknown>>(sql: string, params: unknown[] = []) =>
       db.prepare(sql).all(...(params as never[])) as T[],

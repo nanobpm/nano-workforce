@@ -253,6 +253,11 @@ export const family: AgenticFamily = {
         ctx.log.warn("agentic presence reconcile failed", { err: String(err) });
       }
     };
+    // Run one maintenance pass eagerly at mount so the registry is correct immediately: the
+    // presence table is durable across restarts, so without this first sweep/reconcile
+    // `registeredWorkers()` / `snapshot()` could briefly surface stale rows from a previous run
+    // (all connections start closed) until the first interval tick fires.
+    tick();
     const timer = interval > 0 ? setInterval(tick, interval) : undefined;
     // Never keep the process alive for the presence sweep alone.
     timer?.unref?.();
