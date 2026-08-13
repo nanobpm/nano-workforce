@@ -1,8 +1,9 @@
 -- Derived epic delivery signal: separate "fan-out dispatched to convergence" from "all slice
 -- PRs actually merged" (issue #171).
 --
--- `plans.status = done` means "every slice produced a PR and was handed off to convergence"
--- (record-results marks it as soon as ≥1 PR opened), NOT "every PR merged". Convergence + merge
+-- `plans.status = done` means "the fan-out finished and ≥1 slice opened a PR and was handed off to
+-- convergence" (record-results marks it as soon as one PR opened — other slices may be
+-- blocked/skipped), NOT "every PR merged". Convergence + merge
 -- then run as separate async per-PR processes, so a `done` epic can still have slice PRs in
 -- flight. That conflation is misleading on the epics overview.
 --

@@ -100,9 +100,9 @@ const now = () => new Date().toISOString();
 export const TERMINAL_STATUSES: readonly string[] = ["converged", "merged", "abandoned"];
 
 /** The derived epic delivery signal (issue #171). Distinct from `plan.status`: `status = done`
- * means "every slice produced a PR and was dispatched to convergence" (record-results sets it as
- * soon as ≥1 PR opened), which conflates hand-off with landing. `delivery` reports whether those
- * slice PRs have actually MERGED. */
+ * means "the fan-out finished and ≥1 slice opened a PR, dispatched to convergence" (record-results
+ * sets it as soon as one PR opened — other slices may be blocked/skipped), which conflates hand-off
+ * with landing. `delivery` reports whether those slice PRs have actually MERGED. */
 export type Delivery = "converging" | "landed";
 
 /** Rollup of a plan's slice-PR landing state, derived by joining `plan_tasks.pr_key` →
