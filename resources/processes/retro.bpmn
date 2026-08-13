@@ -1,12 +1,29 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI" xmlns:dc="http://www.omg.org/spec/DD/20100524/DC" xmlns:di="http://www.omg.org/spec/DD/20100524/DI" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:zeebe="http://camunda.org/schema/zeebe/1.0" xmlns:nano="https://nanobpm.io/schema/shapes/1.0" id="Definitions_nano_workforce_retro" targetNamespace="http://nanobpm.io/nano-workforce">
   <bpmn:process id="retro" name="Epic Retrospective" isExecutable="true">
+    <bpmn:extensionElements>
+      <nano:shapes>
+        <nano:shape id="RetroGatherIn" name="Gather learnings — input">
+          <nano:extend name="planKey" type="string" />
+        </nano:shape>
+        <nano:shape id="RetroRecordIn" name="Record retro — input">
+          <nano:extend name="planKey" type="string" />
+          <nano:extend name="retroLearnings" type="integer" optional="true" />
+          <nano:extend name="status" type="string" optional="true" />
+          <nano:extend name="pr" type="string" optional="true" />
+          <nano:extend name="summary" type="string" optional="true" />
+        </nano:shape>
+      </nano:shapes>
+    </bpmn:extensionElements>
     <bpmn:startEvent id="Start" name="Epic complete">
       <bpmn:outgoing>f_start</bpmn:outgoing>
     </bpmn:startEvent>
     <bpmn:serviceTask id="gather" name="Gather learnings">
       <bpmn:extensionElements>
         <zeebe:taskDefinition type="pr.retro-gather" />
+        <zeebe:properties>
+          <zeebe:property name="io.nanobpm.dataEnvelope.in" value="RetroGatherIn" />
+        </zeebe:properties>
       </bpmn:extensionElements>
       <bpmn:incoming>f_start</bpmn:incoming>
       <bpmn:outgoing>f_toSynthesize</bpmn:outgoing>
@@ -27,6 +44,9 @@
     <bpmn:serviceTask id="record" name="Record retro">
       <bpmn:extensionElements>
         <zeebe:taskDefinition type="pr.retro-record" />
+        <zeebe:properties>
+          <zeebe:property name="io.nanobpm.dataEnvelope.in" value="RetroRecordIn" />
+        </zeebe:properties>
       </bpmn:extensionElements>
       <bpmn:incoming>f_toRecord</bpmn:incoming>
       <bpmn:outgoing>f_toEnd</bpmn:outgoing>

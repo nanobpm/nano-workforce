@@ -17,6 +17,7 @@
 // durable rows; it returns no variables, leaving the submitted `answer` untouched so it flows on to
 // the next review round.
 import type { AppJobHandler } from "@nanobpm/urban";
+import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 
 interface Escalation extends Record<string, unknown> {
   id: number;
@@ -34,11 +35,8 @@ interface PullRequest extends Record<string, unknown> {
   updated_at: string;
 }
 
-interface In extends Record<string, unknown> {
-  prKey: string;
-  answer?: string;
-}
-
+// Input typed off the model data envelope (`PrAnswerEscalationIn` in convergence-loop.bpmn) — ADR 0040.
+type In = WorkerInputs["pr.answer-escalation"];
 // A string variable, or undefined when it is absent/blank. The form marks `answer` required, so a
 // blank here would be an out-of-band completion; record it as NULL rather than an empty string.
 function nonBlank(v: unknown): string | undefined {

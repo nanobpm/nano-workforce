@@ -14,10 +14,10 @@
 import type { AppJobHandler } from "@nanobpm/urban";
 import { BpmnError } from "@nanobpm/urban";
 import { planTasks } from "../../app/plan.ts";
+import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 
-interface In extends Record<string, unknown> {
-  planKey: string;
-}
+// Input typed off the model data envelope (`RecordResultsIn` in plan-fanout.bpmn) — ADR 0040.
+type In = WorkerInputs["pr.record-results"];
 
 const handler: AppJobHandler<In> = async (job, app) => {
   const { planKey } = job.variables;

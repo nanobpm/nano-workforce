@@ -17,29 +17,12 @@ import type { AppJobHandler } from "@nanobpm/urban";
 import { abandonTokenFromUrl } from "../../app/abandon.ts";
 import { classifyEscalation } from "../../app/escalationTaxonomy.ts";
 import { ensurePr, parsePr } from "../../app/service.ts";
+import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 
-// Extends Record so the declared fields are typed while the job may still carry
-// other process variables (e.g. io.nanobpm.agentResult, read by transcriptOf).
-interface In extends Record<string, unknown> {
-  prKey: string;
-  round: number;
-  status?: string;
-  summary?: string;
-  question?: string;
-  // Carried by the convergence-loop instance so a missing `pull_requests` parent can be
-  // reconstructed before the FK-child `rounds`/`escalations` inserts.
-  repo?: string;
-  prNumber?: number;
-  prUrl?: string;
-  // The per-PR abandon capability URL the agent was handed; its token is preserved on a heal so
-  // the agent's cooperative-abort check keeps resolving (see ensurePr).
-  abandonUrl?: string;
-  // False on the "review stalled" arm: `persist-round` already recorded this `round` as
-  // `addressed`, so this escalation must not insert a second `rounds` row for the same
-  // `pr_key`/`round_no` (which would record one round as both addressed and blocked). Absent
-  // on the agent-raised / max-rounds arms, where no prior round row exists — so it defaults on.
-  recordRound?: boolean;
-}
+// Input typed off the model data envelope (`EscalationIn` in convergence-loop.bpmn) — ADR 0040.
+// Framework-injected variables (`io.nanobpm.agentResult`, `agent`) are read through the
+// `Record`-typed helpers below rather than the envelope.
+type In = WorkerInputs["pr.persist-escalation"];
 
 // A string variable, or undefined when it is absent, empty, or whitespace-only.
 // The write boundary owns *type* defaults (undefined -> column DEFAULT/NULL); this

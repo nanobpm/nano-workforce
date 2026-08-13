@@ -5,10 +5,10 @@
 // agent reflects on real material rather than re-deriving it.
 import type { AppJobHandler } from "@nanobpm/urban";
 import { gatherRetro, renderRetroBrief } from "../../app/retro.ts";
+import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 
-interface In extends Record<string, unknown> {
-  planKey: string;
-}
+// Input typed off the model data envelope (`RetroGatherIn` in retro.bpmn) — ADR 0040.
+type In = WorkerInputs["pr.retro-gather"];
 
 interface Out extends Record<string, unknown> {
   retroDigest: string;

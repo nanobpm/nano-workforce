@@ -9,6 +9,10 @@ import {
   trialMergeTaskId,
 } from "../../app/trialMerge.ts";
 
+// NOTE (issue #201): this worker reads ARRAY inputs (`waveOpenHeads`, `conflicts`, `failing`), which
+// the scalar-only `nano:dataEnvelope` cannot express, so it keeps a hand-written `interface In`
+// pending a decision on extending the envelope schema to arrays. See the PR body's "array inputs"
+// escalation.
 interface In extends Record<string, unknown> {
   planKey: string;
   currentWave?: unknown;

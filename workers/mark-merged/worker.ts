@@ -2,10 +2,10 @@
 // `merged` state; the merge audit trail is written by pr.merge, so this only closes the row out.
 import type { AppJobHandler } from "@nanobpm/urban";
 import { maybeStartRetro } from "../../app/retro.ts";
+import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 
-interface In extends Record<string, unknown> {
-  prKey: string;
-}
+// Input typed off the model data envelope (`MarkMergedIn` in merge-loop.bpmn) — ADR 0040.
+type In = WorkerInputs["pr.mark-merged"];
 
 const handler: AppJobHandler<In> = async (job, app) => {
   const now = new Date().toISOString();

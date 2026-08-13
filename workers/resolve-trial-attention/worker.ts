@@ -14,12 +14,10 @@
 // and logged rather than thrown.
 import type { AppJobHandler } from "@nanobpm/urban";
 import { resolveTrialMergeAttention } from "../../app/trialMerge.ts";
+import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 
-interface In extends Record<string, unknown> {
-  planKey: string;
-  currentWave?: unknown;
-  trialMergeWave?: unknown;
-}
+// Input typed off the model data envelope (`ResolveTrialAttentionIn` in plan-fanout.bpmn) — ADR 0040.
+type In = WorkerInputs["pr.resolve-trial-attention"];
 
 const waveNo = (v: unknown): number => {
   const n = Math.trunc(Number(v));
