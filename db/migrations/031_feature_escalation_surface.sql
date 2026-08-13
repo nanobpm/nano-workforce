@@ -1,0 +1,28 @@
+-- Surface native feature-run escalations in the nwf UI (issue #210).
+--
+-- When a feature run (`feature.bpmn`) escalates to a human it parks on the native
+-- `feature-escalation` user task (`candidateGroups=operators`). That wait was
+-- invisible in the nwf UI: the schema-driven pages read `feature_runs`, but the
+-- open user task (the actual wait) is engine state, not a row here, so a run could
+-- sit blocked on a human decision indefinitely with no visible signal, and
+-- `feature_runs.status` stayed `running`.
+--
+-- The `record-feature-escalation` service task (feature.bpmn) runs on the
+-- `escalated` arm, before the user task is created, and persists the escalation
+-- onto the row: it flips `status` to `escalated` and denormalises the agent's
+-- `question` here (it reads the process variable while it is still in scope — the
+-- poller can't, as the WASM engine does not surface task-local user-task variables
+-- via `searchUserTasks`). The poller (`pollFeatureEscalations` in app/service.ts)
+-- then fills the parked `userTaskKey` in once the user task is observable, resets
+-- `status` back to `running` when the run un-parks, and `record-feature` / the
+-- answer operation clear both columns again on exit. Both columns are NULL
+-- whenever the run is not parked at `feature-escalation`.
+--
+-- `escalation_user_task_key` is the completable native user-task key the answer
+-- affordance posts to (`completeUserTaskAttributed`); it also gates the answer
+-- controls in the pages (`showWhenField`, which is JS-truthy, so NULL correctly
+-- hides them). Forward-only, additive (expand): both columns are nullable with no
+-- default. Numbered after the current highest prefix (030); the runner wraps each
+-- file in its own transaction, so this file must NOT contain BEGIN/COMMIT.
+ALTER TABLE feature_runs ADD COLUMN escalation_question TEXT;
+ALTER TABLE feature_runs ADD COLUMN escalation_user_task_key TEXT;

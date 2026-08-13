@@ -925,6 +925,58 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/MessageResult"
+  /actions/answer-escalation:
+    post:
+      operationId: answerFeatureEscalation
+      summary: "Answer a native feature-run escalation (issue #210). Completes the parked
+        `feature-escalation` user task with the operator's typed form variables (resolution=answer/abandon
+        + guidance), driving the canonical attributed completer (completeUserTaskAttributed) — the same
+        resume path the task inbox uses, recording who answered. The poller then reconciles the run off
+        `escalated`. This is the nwf UI's answer affordance for a feature run parked on a human decision."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+                - userTaskKey
+                - resolution
+              properties:
+                userTaskKey:
+                  type: string
+                  minLength: 1
+                  description: The parked `feature-escalation` user-task key (feature_runs.escalation_user_task_key).
+                resolution:
+                  type: string
+                  enum: [answer, abandon]
+                  description: answer ⇒ re-dispatch the implement task with the guidance; abandon ⇒ give up on the task.
+                answer:
+                  type: string
+                  description: Guidance for the implementation agent. Required (non-blank) when resolution is answer.
+                operator:
+                  type: string
+                  description: Optional operator handle recorded in the attribution ledger; defaults to "operator".
+      responses:
+        "200":
+          description: The escalation user task was completed and the process resumed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResult"
+        "400":
+          description: A required field was missing/invalid, or the target is not an escalation task.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResult"
+        "404":
+          description: No open escalation user task matches the userTaskKey.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResult"
   /hooks/agent-complete:
     post:
       operationId: agentCompleteEscalation

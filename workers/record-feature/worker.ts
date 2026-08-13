@@ -54,6 +54,12 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
     status: rowStatus,
     pr_key: prKey,
     outcome: summary ?? null,
+    // The run has left the `feature-escalation` wait (answered → abandon, SLA auto-abandon, or the
+    // agent finished without escalating), so clear the denormalised escalation pointer the pages gate
+    // on. pollFeatureEscalations only sweeps `running`/`escalated` runs, so a terminal-ward transition
+    // through here must clear it itself or the stale question would linger on the row.
+    escalation_question: null,
+    escalation_user_task_key: null,
     updated_at: ts,
   });
   app.log.info("record-feature", { featureKey, featureStatus, rowStatus, prKey });

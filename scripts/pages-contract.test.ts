@@ -267,7 +267,7 @@ test("issue #205: overview is the landing page and first nav item", async () => 
       "merging",
     ],
     plans: ["planning", "dispatched"],
-    feature_runs: ["running", "awaiting_operator"],
+    feature_runs: ["running", "escalated", "awaiting_operator"],
   };
   const grids = (overview.nodes ?? []).filter((n: Json) => n.type === "dataGrid");
   for (const [table, statuses] of Object.entries(expected)) {

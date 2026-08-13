@@ -148,6 +148,23 @@ export interface AgentCompleteResult {
   elementId?: string;
 }
 
+/** Resolve a parked escalation user task by key: return its `elementId` if it is one of the migrated
+ *  escalation tasks, or a failure reason otherwise. Shared by the agent and human completers so both
+ *  refuse a non-escalation / missing target the exact same way (a key with no matching open
+ *  escalation task is a 404-style no-op). */
+async function resolveEscalationTask(
+  engine: EngineClient,
+  userTaskKey: string,
+): Promise<{ ok: true; elementId: string } | { ok: false; reason: string }> {
+  const open = await engine.searchUserTasks();
+  const match = open.find((t) => t.userTaskKey === userTaskKey);
+  if (!match) return { ok: false, reason: "no open escalation task" };
+  if (!match.elementId || !ESCALATION_TASK_ELEMENTS.has(match.elementId)) {
+    return { ok: false, reason: "not an escalation task" };
+  }
+  return { ok: true, elementId: match.elementId };
+}
+
 /** Complete an escalation user task AS AN AGENT (ADR 0046). Resolves the parked task by its key,
  *  refuses anything that is not one of the migrated escalation tasks, and routes the typed form
  *  variables through the shared attributed completer with the agent's identity. Reuses the exact
@@ -163,24 +180,45 @@ export async function completeEscalationAsAgent(
   const agentId = input.agentId.trim();
   if (!agentId) return { ok: false, reason: "agentId is required" };
 
-  const open = await engine.searchUserTasks();
-  const match = open.find((t) => t.userTaskKey === userTaskKey);
-  if (!match) return { ok: false, reason: "no open escalation task" };
-  if (!match.elementId || !ESCALATION_TASK_ELEMENTS.has(match.elementId)) {
-    return { ok: false, reason: "not an escalation task" };
-  }
+  const resolved = await resolveEscalationTask(engine, userTaskKey);
+  if (!resolved.ok) return resolved;
 
   const { completionId } = await completeUserTaskAttributed(
     data,
     engine,
-    {
-      userTaskKey,
-      elementId: match.elementId,
-      variables: input.variables,
-    },
+    { userTaskKey, elementId: resolved.elementId, variables: input.variables },
     { kind: "agent", id: agentId },
   );
-  return { ok: true, completionId, userTaskKey, elementId: match.elementId };
+  return { ok: true, completionId, userTaskKey, elementId: resolved.elementId };
+}
+
+/** Complete an escalation user task AS A HUMAN operator (issue #210). The exact twin of
+ *  `completeEscalationAsAgent`, but attributed to a human: it drives the SAME canonical
+ *  `completeUserTaskAttributed` with the operator's typed form variables, so the nwf UI's answer
+ *  affordance resumes the process through the one implementation a human uses from the task inbox —
+ *  no parallel completion path — while recording WHO answered in the `task_completions` ledger. A
+ *  human completion is the authority (not reversible). A key with no matching open escalation task is
+ *  a 404-style no-op. */
+export async function completeEscalationAsHuman(
+  data: DataLayer,
+  engine: EngineClient,
+  input: { userTaskKey: string; variables: Record<string, unknown>; operatorId: string },
+): Promise<AgentCompleteResult> {
+  const userTaskKey = input.userTaskKey.trim();
+  if (!userTaskKey) return { ok: false, reason: "userTaskKey is required" };
+  const operatorId = input.operatorId.trim();
+  if (!operatorId) return { ok: false, reason: "operatorId is required" };
+
+  const resolved = await resolveEscalationTask(engine, userTaskKey);
+  if (!resolved.ok) return resolved;
+
+  const { completionId } = await completeUserTaskAttributed(
+    data,
+    engine,
+    { userTaskKey, elementId: resolved.elementId, variables: input.variables },
+    { kind: "human", id: operatorId },
+  );
+  return { ok: true, completionId, userTaskKey, elementId: resolved.elementId };
 }
 
 export interface RevertResult {
