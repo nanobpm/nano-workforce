@@ -631,6 +631,8 @@ export async function openPullRequest(
       const out = await runGh([
         "api",
         path,
+        "-H",
+        "Accept: application/vnd.github+json",
         "-X",
         "POST",
         "-f",
@@ -644,7 +646,10 @@ export async function openPullRequest(
       ]);
       // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
       const j = JSON.parse(out) as { html_url?: string; number?: number };
-      return { outcome: "opened", url: j.html_url ?? "", number: j.number ?? 0 };
+      if (!j.html_url || typeof j.number !== "number") {
+        throw new Error(`unexpected PR-creation response (missing html_url/number): ${out.slice(0, 300)}`);
+      }
+      return { outcome: "opened", url: j.html_url, number: j.number };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (isPrAlreadyExists(msg)) return { outcome: "exists", detail: msg };
@@ -667,7 +672,10 @@ export async function openPullRequest(
   if (r.ok) {
     // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
     const j = (await r.json()) as { html_url?: string; number?: number };
-    return { outcome: "opened", url: j.html_url ?? "", number: j.number ?? 0 };
+    if (!j.html_url || typeof j.number !== "number") {
+      throw new Error("unexpected PR-creation response (missing html_url/number)");
+    }
+    return { outcome: "opened", url: j.html_url, number: j.number };
   }
   const text = (await r.text()).slice(0, 300);
   const detail = `github ${r.status} ${r.statusText}: ${text}`.trim();

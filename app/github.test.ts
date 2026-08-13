@@ -64,7 +64,7 @@ test("fetchPrFiles: throws when the cap genuinely truncates (full last page + ne
 // cares about (a PR already exists for head/base; an invalid base/head) must be surfaced as
 // distinct outcomes, not thrown. Force the token transport and stub `globalThis.fetch`.
 
-function withStubbedFetch<T>(
+async function withStubbedFetch<T>(
   stub: (url: string, init?: RequestInit) => Promise<Response>,
   fn: () => Promise<T>,
 ): Promise<T> {
@@ -73,15 +73,13 @@ function withStubbedFetch<T>(
   process.env["NANO_PR_GITHUB_TRANSPORT"] = "token";
   globalThis.fetch = ((url: string | URL | Request, init?: RequestInit) =>
     stub(String(url), init)) as typeof fetch;
-  return (async () => {
-    try {
-      return await fn();
-    } finally {
-      globalThis.fetch = prevFetch;
-      if (prevMode === undefined) delete process.env["NANO_PR_GITHUB_TRANSPORT"];
-      else process.env["NANO_PR_GITHUB_TRANSPORT"] = prevMode;
-    }
-  })();
+  try {
+    return await fn();
+  } finally {
+    globalThis.fetch = prevFetch;
+    if (prevMode === undefined) delete process.env["NANO_PR_GITHUB_TRANSPORT"];
+    else process.env["NANO_PR_GITHUB_TRANSPORT"] = prevMode;
+  }
 }
 
 test("openPullRequest: happy path returns the created PR url and number", async () => {
@@ -127,6 +125,14 @@ test("openPullRequest: an invalid base/head (422) is surfaced as outcome 'invali
           status: 422,
         }),
       ),
+    () => openPullRequest("o/r", "nope", "feat/x", "T", "B", "tok"),
+  );
+  assertEquals(res?.outcome, "invalid");
+});
+
+test("openPullRequest: an invalid base/head (404, plain-text body) is surfaced as outcome 'invalid'", async () => {
+  const res = await withStubbedFetch(
+    () => Promise.resolve(new Response("Not Found", { status: 404, statusText: "Not Found" })),
     () => openPullRequest("o/r", "nope", "feat/x", "T", "B", "tok"),
   );
   assertEquals(res?.outcome, "invalid");
