@@ -142,3 +142,12 @@ inside its slice. Use:
 - `constraint` — a constraint you discovered that changes another task's direction.
 
 This is advisory context, not an escalation — it never blocks you or anyone else.
+
+If the repo has an **append-ordered namespace** — files chosen by "the next"
+monotonic value (DB migration prefixes, ADR numbers, changelog fragments,
+ordered fixtures) — `file-claim` your intended slot on the coordination
+blackboard *before* authoring, and read existing claims first. Parallel siblings
+otherwise pick the same value and collide silently (names don't textually
+conflict, so git merges both). This is advisory best-effort; the repo's own CI
+gate, if any, remains the guarantee. Check the repo's AGENTS.md for which
+namespaces are ordered.
