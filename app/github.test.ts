@@ -3,7 +3,7 @@
 // the merge-exclusion graph. Force the token transport and stub `globalThis.fetch`.
 import { test } from "node:test";
 import { assertEquals, assertRejects } from "#test-assert";
-import { fetchPrFiles, openPullRequest } from "./github.ts";
+import { fetchOpenPrByHead, fetchPrFiles, openPullRequest } from "./github.ts";
 
 // A fake `fetch` that serves `pages` of file batches; each page N (1-based) returns `pages[N-1]`
 // files (named `f{index}`), setting a `Link: rel="next"` header whenever a later page exists.
@@ -198,6 +198,61 @@ test("openPullRequest: token transport with no token returns null without a netw
       throw new Error("fetch must not be called when no token is available");
     },
     () => openPullRequest("o/r", "epic/y", "feat/x", "T", "B", ""),
+  );
+  assertEquals(res, null);
+});
+
+// ── fetchOpenPrByHead (epic-promotion idempotency recovery — issue #160) ─────
+// GitHub's 422 "a pull request already exists" carries no URL, so the promote operation recovers
+// the open PR here. The token transport lists open PRs by owner-qualified head/base and returns
+// the first `{ url, number }`, `null` when none match, and throws on a non-2xx. Force the token
+// transport and stub `globalThis.fetch`.
+
+test("fetchOpenPrByHead: token transport happy path returns the open PR url and number", async () => {
+  const res = await withStubbedFetch(
+    (url) => {
+      const u = new URL(url);
+      assertEquals(u.pathname, "/repos/o/r/pulls");
+      assertEquals(u.searchParams.get("state"), "open");
+      assertEquals(u.searchParams.get("head"), "o:feat/x");
+      assertEquals(u.searchParams.get("base"), "epic/y");
+      return Promise.resolve(
+        new Response(JSON.stringify([{ html_url: "https://github.com/o/r/pull/789", number: 789 }]), {
+          status: 200,
+        }),
+      );
+    },
+    () => fetchOpenPrByHead("o/r", "feat/x", "epic/y", "tok"),
+  );
+  assertEquals(res, { url: "https://github.com/o/r/pull/789", number: 789 });
+});
+
+test("fetchOpenPrByHead: token transport empty result returns null (no open PR to recover)", async () => {
+  const res = await withStubbedFetch(
+    () => Promise.resolve(new Response(JSON.stringify([]), { status: 200 })),
+    () => fetchOpenPrByHead("o/r", "feat/x", "epic/y", "tok"),
+  );
+  assertEquals(res, null);
+});
+
+test("fetchOpenPrByHead: token transport non-2xx throws (never silently returns null)", async () => {
+  await assertRejects(
+    () =>
+      withStubbedFetch(
+        () => Promise.resolve(new Response("boom", { status: 500, statusText: "Server Error" })),
+        () => fetchOpenPrByHead("o/r", "feat/x", "epic/y", "tok"),
+      ),
+    Error,
+    "500",
+  );
+});
+
+test("fetchOpenPrByHead: token transport with no token returns null without a network call", async () => {
+  const res = await withStubbedFetch(
+    () => {
+      throw new Error("fetch must not be called when no token is available");
+    },
+    () => fetchOpenPrByHead("o/r", "feat/x", "epic/y", ""),
   );
   assertEquals(res, null);
 });

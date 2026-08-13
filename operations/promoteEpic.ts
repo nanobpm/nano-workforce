@@ -165,7 +165,14 @@ export default defineOperation("promoteEpic", async ({ body }, app) => {
     app.log.warn("promoteEpic rejected: missing/invalid planKey");
     return { status: 400, body: { error: "planKey is required (owner/repo#N)" } };
   }
-  return runPromoteEpic(app, body.planKey.trim(), {
+  const planKey = body.planKey.trim();
+  // A malformed key (not `owner/repo#N`) would otherwise fall through to a 404 "unknown plan",
+  // which misrepresents a client error as a missing resource. Reject it as a 400 up front.
+  if (!/^[^/\s]+\/[^#\s]+#\d+$/.test(planKey)) {
+    app.log.warn("promoteEpic rejected: malformed planKey", { planKey });
+    return { status: 400, body: { error: `malformed planKey (expected owner/repo#N): ${planKey}` } };
+  }
+  return runPromoteEpic(app, planKey, {
     fetchDefaultBranch: realFetchDefaultBranch,
     openPullRequest: realOpenPullRequest,
     fetchOpenPrByHead: realFetchOpenPrByHead,

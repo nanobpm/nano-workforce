@@ -241,4 +241,11 @@ test("default export: missing/invalid body → 400", async () => {
   assertEquals((await promoteEpic(input(undefined) as any, app)).status, 400);
   // biome-ignore lint/suspicious/noExplicitAny: driving the delegate with an intentionally-invalid body
   assertEquals((await promoteEpic(input({ planKey: "   " }) as any, app)).status, 400);
+  // A well-formed non-empty string that isn't `owner/repo#N` is a client error (400), not a 404.
+  // biome-ignore lint/suspicious/noExplicitAny: driving the delegate with an intentionally-malformed key
+  assertEquals((await promoteEpic(input({ planKey: "not-a-plan-key" }) as any, app)).status, 400);
+  // biome-ignore lint/suspicious/noExplicitAny: driving the delegate with an intentionally-malformed key
+  assertEquals((await promoteEpic(input({ planKey: "o/r#" }) as any, app)).status, 400);
+  // biome-ignore lint/suspicious/noExplicitAny: driving the delegate with an intentionally-malformed key
+  assertEquals((await promoteEpic(input({ planKey: "o/r160" }) as any, app)).status, 400);
 });
