@@ -20,15 +20,23 @@ export const DEFAULT_REVIEW_WAIT_TIMEOUT = "PT20M";
 // would fail to interpret; not a full grammar (we don't need fractional seconds here).
 const ISO_DURATION = /^P(?!$)(\d+Y)?(\d+M)?(\d+W)?(\d+D)?(T(?=\d)(\d+H)?(\d+M)?(\d+S)?)?$/;
 
+/** Validate an ISO-8601 duration string for a BPMN timer's `<bpmn:timeDuration>`, falling back to
+ * `def` when the value is absent, blank, or malformed — a bad env value must never deploy an
+ * uninterpretable timer expression into a process. Normalises to upper case (`pt20m` → `PT20M`).
+ * This is the single canonical duration validator; per-timer policies (review-wait, escalation
+ * SLA) derive their env-driven value from it rather than re-implementing the grammar. */
+export function isoDuration(raw: string | undefined, def: string): string {
+  const s = (raw ?? "").trim().toUpperCase();
+  return s !== "" && ISO_DURATION.test(s) ? s : def;
+}
+
 /** Validate an ISO-8601 duration for the review-wait timer, falling back to `def` when the value
- * is absent, blank, or malformed — a bad env value must never deploy an uninterpretable timer
- * expression into the process. Normalises to upper case (`pt20m` → `PT20M`). */
+ * is absent, blank, or malformed. Thin wrapper over {@link isoDuration}. */
 export function reviewWaitTimeout(
   raw: string | undefined,
   def: string = DEFAULT_REVIEW_WAIT_TIMEOUT,
 ): string {
-  const s = (raw ?? "").trim().toUpperCase();
-  return s !== "" && ISO_DURATION.test(s) ? s : def;
+  return isoDuration(raw, def);
 }
 
 /** Default cooldown (minutes) between automatic Copilot re-request nudges for one waiting PR.

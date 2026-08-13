@@ -11,11 +11,21 @@
 // hand-written SQL — matching app/service.ts.
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { blackboardUrl, mintBlackboardToken, renderCoordinationBrief } from "./blackboard.ts";
+import { DEFAULT_ESCALATION_SLA_TIMEOUT, escalationSlaTimeout } from "./escalationSla.ts";
 import { clearExclusions } from "./mergeExclusion.ts";
 import { clearTaskDeltas } from "./taskDelta.ts";
 
 /** The BPMN process this module drives (resources/processes/plan-fanout.bpmn). */
 export const PLAN_PROCESS_ID = "plan-fanout";
+
+/** The fleet-wide escalation SLA (ISO-8601 duration) seeded onto every plan-fanout instance as the
+ * `escalationSlaTimeout` process variable and evaluated by each escalation user task's interrupting
+ * timer boundary. An operator sets `NANO_ESCALATION_SLA_TIMEOUT`; a malformed value falls back to
+ * {@link DEFAULT_ESCALATION_SLA_TIMEOUT} so a bad env can never deploy an uninterpretable timer. */
+export const ESCALATION_SLA_TIMEOUT = escalationSlaTimeout(
+  process.env.NANO_ESCALATION_SLA_TIMEOUT,
+  DEFAULT_ESCALATION_SLA_TIMEOUT,
+);
 
 const now = () => new Date().toISOString();
 
@@ -391,6 +401,15 @@ export async function startPlan(
       // user task each time a human answers a plan-review escalation. `record-plan-review` reads it
       // to reset the per-epoch round budget; it starts at 0 for the first review round.
       planReviewEpoch: 0,
+      // Escalation-of-the-escalation SLA (U5, #156): the validated ISO-8601 duration seeded onto the
+      // instance and read by each escalation user task's interrupting timer boundary
+      // (`<bpmn:timeDuration>=escalationSlaTimeout`). If a human never answers, the boundary fires and
+      // the process auto-proceeds down the gateway's safe-default arm — durable in-process liveness,
+      // not a poller-side watchdog. `escalationAssignee` is the optional named assignee the escalation
+      // user tasks' `zeebe:assignmentDefinition` resolves (null = unassigned, routed via the
+      // `operators` candidate group); an operator/agent can claim/reassign via the task inbox.
+      escalationSlaTimeout: ESCALATION_SLA_TIMEOUT,
+      escalationAssignee: null,
       // Coordination blackboard (#51): the capability URL + the protocol brief that each
       // implementer agent gets appended to its prompt (composed into `appendPrompt` in
       // plan-fanout.bpmn's implement-task). Advisory shared state, delivered in-band, used
