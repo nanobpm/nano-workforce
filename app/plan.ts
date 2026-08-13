@@ -180,7 +180,8 @@ export type PlanEscalationDirective = "proceed" | "revise";
 /** Narrow an arbitrary directive input to the typed set, defaulting to `revise` (the safe,
  * re-planning outcome) for anything unexpected. */
 export function normalizePlanEscalationDirective(input: unknown): PlanEscalationDirective {
-  return input === "proceed" ? "proceed" : "revise";
+  const norm = typeof input === "string" ? input.trim().toLowerCase() : input;
+  return norm === "proceed" ? "proceed" : "revise";
 }
 
 /** One plan-review cap escalation. Kept in a dedicated table rather than overloading

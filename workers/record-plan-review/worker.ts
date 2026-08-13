@@ -44,9 +44,10 @@ interface Out extends Record<string, unknown> {
 const isApproved = (v: unknown): boolean =>
   v === true || (typeof v === "string" && v.trim().toLowerCase() === "true");
 
-// The plan-review epoch is a durable process variable. It is null/absent on the first review round
-// (before any human answer) and a non-negative integer once the `plan-review-decision` user task
-// has bumped it. Coerce anything unexpected to 0 so a round is always recorded under a valid epoch.
+// The plan-review epoch is a durable process variable. `startPlan` seeds it to 0 when creating the
+// instance, and the `plan-review-decision` user task bumps it on each human answer. The 0-fallback
+// here is backwards compatibility for older instances created before the variable was seeded (where
+// it is null/absent): coerce anything unexpected to 0 so a round is always recorded under a valid epoch.
 const coerceEpoch = (v: unknown): number => {
   const n = typeof v === "number" ? v : typeof v === "string" ? Number(v) : Number.NaN;
   return Number.isInteger(n) && n >= 0 ? n : 0;
