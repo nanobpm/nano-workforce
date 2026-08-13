@@ -13,7 +13,7 @@
 
 import type { AppJobHandler } from "@nanobpm/urban";
 import { BpmnError } from "@nanobpm/urban";
-import { planTasks } from "../../app/plan.ts";
+import { plans, planTasks } from "../../app/plan.ts";
 
 interface In extends Record<string, unknown> {
   planKey: string;
@@ -49,9 +49,18 @@ const handler: AppJobHandler<In> = async (job, app) => {
     throw new BpmnError("NO_WORK_DISPATCHED", `${planKey}: ${outcome}`);
   }
 
+  // Derive the epic "ready to promote" signal in its ONE canonical place (026_plan_promotion_pr_url,
+  // #160): TRUE exactly when this plan is `done`, targets a pinned integration branch (`base_branch`
+  // set), and has not been promoted yet (`promotion_pr_url` still NULL). We gate on the three stored
+  // fields only — the repo-default-branch check is deferred to the promoteEpic operation, per #160.
+  const plan = await plans(app.data).get(planKey);
+  const promoteReady =
+    plan != null && plan.base_branch != null && plan.promotion_pr_url == null ? 1 : 0;
+
   await app.data.table("plans", "plan_key").update(planKey, {
     status: "done",
     outcome: `${opened} PR(s) dispatched to convergence`,
+    promote_ready: promoteReady,
     updated_at: ts,
   });
 
