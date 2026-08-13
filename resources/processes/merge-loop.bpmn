@@ -47,16 +47,6 @@
           <nano:extend name="status" type="string" optional="true" />
           <nano:extend name="question" type="string" optional="true" />
         </nano:shape>
-        <nano:shape id="MergeEscalationIn" name="Record merge escalation — input">
-          <nano:extend name="prKey" type="string" />
-          <nano:extend name="round" type="integer" />
-          <nano:extend name="status" type="string" optional="true" />
-          <nano:extend name="summary" type="string" optional="true" />
-          <nano:extend name="question" type="string" optional="true" />
-        </nano:shape>
-        <nano:shape id="MergeEscalationOut" name="Record merge escalation — result">
-          <nano:extend name="escalationId" type="integer" />
-        </nano:shape>
         <nano:shape id="MarkMergedIn" name="Mark merged — input">
           <nano:extend name="prKey" type="string" />
         </nano:shape>
@@ -186,8 +176,8 @@
       <bpmn:extensionElements>
         <zeebe:taskDefinition type="pr.persist-escalation" />
         <zeebe:properties>
-          <zeebe:property name="io.nanobpm.dataEnvelope.in" value="MergeEscalationIn" />
-          <zeebe:property name="io.nanobpm.dataEnvelope.out" value="MergeEscalationOut" />
+          <zeebe:property name="io.nanobpm.dataEnvelope.in" value="EscalationIn" />
+          <zeebe:property name="io.nanobpm.dataEnvelope.out" value="EscalationOut" />
         </zeebe:properties>
         <zeebe:ioMapping>
           <zeebe:input source="=&#34;blocked&#34;" target="status" />
@@ -203,8 +193,8 @@
       <bpmn:extensionElements>
         <zeebe:taskDefinition type="pr.persist-escalation" />
         <zeebe:properties>
-          <zeebe:property name="io.nanobpm.dataEnvelope.in" value="MergeEscalationIn" />
-          <zeebe:property name="io.nanobpm.dataEnvelope.out" value="MergeEscalationOut" />
+          <zeebe:property name="io.nanobpm.dataEnvelope.in" value="EscalationIn" />
+          <zeebe:property name="io.nanobpm.dataEnvelope.out" value="EscalationOut" />
         </zeebe:properties>
       </bpmn:extensionElements>
       <bpmn:incoming>f_m_gBlocked</bpmn:incoming>
