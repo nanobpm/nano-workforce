@@ -354,8 +354,8 @@ export async function submitPr(
     // escalation row. A fresh convergence run must not inherit that stale answer — the
     // "(no question provided)" bleed-through on resubmit (Magikcraft/nano-bpm #597/#599).
     // Mark any still-open escalations `stale`, mirroring the plan re-plan cleanup (issue #25
-    // in plan.ts). The review-loop escalation is now a native userTask whose open state is
-    // derived from `searchUserTasks`, so there is no denormalised PR-row pointer to clear.
+    // in plan.ts). The review-loop escalation is now a native userTask; its open state is derived
+    // from the canonical `escalations` row status, so there is no denormalised PR-row pointer to clear.
     for (const e of await escs(data).find({ pr_key: parsed.prKey, status: "open" })) {
       await escs(data).update(e.id, { status: "stale" });
     }
@@ -519,30 +519,26 @@ export interface ActivePr {
 
 /** Every tracked PR not in a terminal state (converged/abandoned), newest-updated first. Backs
  * the GET status endpoint so an operator or an external harness can see what is in flight
- * without reading the datasource directly. The open-escalation question is derived from live
- * user-task state — the native `wait-answer` userTask parked on the PR's convergence instance
- * (confirmed via `searchUserTasks`), with the question text read from the durable `escalations`
- * audit row — rather than a denormalised PR-row pointer. */
-export async function activePrs(data: DataLayer, engine: EngineClient): Promise<ActivePr[]> {
+ * without reading the datasource directly. The open-escalation question is derived from the
+ * canonical `escalations` audit row — the single source of truth (no denormalised PR-row
+ * pointer). A PR reads `status="escalated"` only while a token is parked awaiting a human answer,
+ * and the row it raised carries `status="open"` until that answer is recorded — by the review
+ * loop's `pr.answer-escalation` step on `wait-answer` completion, or the merge loop's
+ * `answerEscalation` message path. Deriving from the row (not a per-loop wait mechanism) surfaces
+ * BOTH loops' escalations: the merge loop parks on a message catch with no user task, so a
+ * user-task probe would silently hide it. Once answered the row leaves `open`, so `openEscalation`
+ * derives back to null. */
+export async function activePrs(data: DataLayer): Promise<ActivePr[]> {
   const all = await prs(data).all();
   const active = all
     .filter((p) => !TERMINAL_STATUSES.includes(p.status))
     .sort((a, b) => (a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0));
-  // Only an `escalated` PR can be parked on the review-loop `wait-answer` userTask. For each,
-  // confirm the task is still open via `searchUserTasks` (keyed on the PR's process instance —
-  // the WASM/SDK engine does not surface a task's variables, so the instance filter is how a task
-  // maps back to its PR) and surface the question from its latest open `escalations` row. Once the
-  // task is completed (answered), it drops out and `openEscalation` derives back to null.
+  // Only an `escalated` PR is parked awaiting a human answer (either loop). Surface the question
+  // from its latest still-open `escalations` row; a resubmit retires stale rows and finalize/merge
+  // move the PR off `escalated`, so an open row on an escalated PR is a genuinely live escalation.
   const openEscByPr = new Map<string, string>();
   for (const p of active) {
-    if (p.status !== "escalated" || !p.process_key) continue;
-    try {
-      const tasks = await engine.searchUserTasks({ processInstanceKey: p.process_key });
-      if (!tasks.some((t) => t.elementId === "wait-answer")) continue;
-    } catch (err) {
-      console.warn(`[activePrs] searchUserTasks failed for ${p.pr_key}: ${err}`);
-      continue;
-    }
+    if (p.status !== "escalated") continue;
     const open = (await escs(data).find({ pr_key: p.pr_key, status: "open" })).sort((a, b) => b.id - a.id)[0];
     if (open?.question) openEscByPr.set(p.pr_key, open.question);
   }

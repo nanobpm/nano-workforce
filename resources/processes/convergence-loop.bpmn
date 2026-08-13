@@ -42,6 +42,10 @@
           <nano:extend name="escalated" type="boolean" optional="true" />
           <nano:extend name="question" type="string" optional="true" />
         </nano:shape>
+        <nano:shape id="PrAnswerEscalationIn" name="Answer escalation — input">
+          <nano:extend name="prKey" type="string" />
+          <nano:extend name="answer" type="string" optional="true" />
+        </nano:shape>
         <nano:shape id="PrFinalizeIn" name="Mark converged — input">
           <nano:extend name="prKey" type="string" />
           <nano:extend name="repo" type="string" />
@@ -185,8 +189,22 @@
       <bpmn:incoming>f_escWait</bpmn:incoming>
       <bpmn:incoming>f_maxWait</bpmn:incoming>
       <bpmn:incoming>f_stalledWait</bpmn:incoming>
-      <bpmn:outgoing>f_answerLoop</bpmn:outgoing>
+      <bpmn:outgoing>f_answerRecord</bpmn:outgoing>
     </bpmn:userTask>
+    <bpmn:serviceTask id="record-answer" name="Record answer">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="pr.answer-escalation" />
+        <zeebe:properties>
+          <zeebe:property name="io.nanobpm.dataEnvelope.in" value="PrAnswerEscalationIn" />
+        </zeebe:properties>
+        <zeebe:ioMapping>
+          <zeebe:input source="=prKey" target="prKey" />
+          <zeebe:input source="=answer" target="answer" />
+        </zeebe:ioMapping>
+      </bpmn:extensionElements>
+      <bpmn:incoming>f_answerRecord</bpmn:incoming>
+      <bpmn:outgoing>f_answerLoop</bpmn:outgoing>
+    </bpmn:serviceTask>
     <bpmn:serviceTask id="persist-converged" name="Mark converged">
       <bpmn:extensionElements>
         <zeebe:taskDefinition type="pr.finalize" />
@@ -228,7 +246,8 @@
     </bpmn:sequenceFlow>
     <bpmn:sequenceFlow id="f_escReenter" name="no escalation opened" sourceRef="gw-escalated" targetRef="gw-guard" />
     <bpmn:sequenceFlow id="f_maxWait" sourceRef="persist-escalation-maxrounds" targetRef="wait-answer" />
-    <bpmn:sequenceFlow id="f_answerLoop" sourceRef="wait-answer" targetRef="review-round" />
+    <bpmn:sequenceFlow id="f_answerRecord" sourceRef="wait-answer" targetRef="record-answer" />
+    <bpmn:sequenceFlow id="f_answerLoop" sourceRef="record-answer" targetRef="review-round" />
     <bpmn:sequenceFlow id="f_finalize" sourceRef="persist-converged" targetRef="End" />
   </bpmn:process>
   <bpmndi:BPMNDiagram id="BPMNDiagram_convergence-loop">
@@ -272,7 +291,7 @@
       <bpmndi:BPMNShape id="BPMNShape_wait-review-timeout" bpmnElement="wait-review-timeout">
         <dc:Bounds x="1416" y="422" width="36" height="36" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="1406" y="375" width="56" height="42" />
+          <dc:Bounds x="1406" y="463" width="56" height="42" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_persist-review-stalled" bpmnElement="persist-review-stalled">
@@ -292,6 +311,9 @@
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_wait-answer" bpmnElement="wait-answer">
         <dc:Bounds x="1752" y="400" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_record-answer" bpmnElement="record-answer">
+        <dc:Bounds x="1952" y="400" width="100" height="80" />
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_persist-converged" bpmnElement="persist-converged">
         <dc:Bounds x="566" y="80" width="100" height="80" />
@@ -414,10 +436,14 @@
         <di:waypoint x="1802" y="645" />
         <di:waypoint x="1802" y="480" />
       </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_f_answerRecord" bpmnElement="f_answerRecord">
+        <di:waypoint x="1852" y="440" />
+        <di:waypoint x="1952" y="440" />
+      </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_answerLoop" bpmnElement="f_answerLoop">
-        <di:waypoint x="1802" y="480" />
-        <di:waypoint x="1802" y="500" />
-        <di:waypoint x="266" y="500" />
+        <di:waypoint x="2002" y="480" />
+        <di:waypoint x="2002" y="660" />
+        <di:waypoint x="266" y="660" />
         <di:waypoint x="266" y="160" />
       </bpmndi:BPMNEdge>
     </bpmndi:BPMNPlane>

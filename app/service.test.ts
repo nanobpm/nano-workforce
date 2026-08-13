@@ -81,7 +81,7 @@ test("re-submit of a cancelled PR marks stale open escalations", async () => {
 
     // The prior run's open escalation is retired (not left "open" to resurface a dead form on the
     // re-opened PR). The review-loop escalation is now a native userTask (open state derived from
-    // `searchUserTasks`), so there is no denormalised PR-row pointer to clear.
+    // the canonical `escalations` row status), so there is no denormalised PR-row pointer to clear.
     const esc = stores.escalations.rows[0] as Record<string, unknown>;
     assertEquals(esc.status, "stale");
     const pr = stores.pull_requests.rows[0] as Record<string, unknown>;

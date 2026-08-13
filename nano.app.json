@@ -73,6 +73,10 @@
       "handler": "workers/persist-escalation/worker.ts"
     },
     {
+      "taskType": "pr.answer-escalation",
+      "handler": "workers/answer-escalation/worker.ts"
+    },
+    {
       "taskType": "pr.finalize",
       "handler": "workers/finalize/worker.ts"
     },

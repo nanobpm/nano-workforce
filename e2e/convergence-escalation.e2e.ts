@@ -1,13 +1,14 @@
 // End-to-end proof for the PR review-loop escalation → native userTask + form (epic #156, slice
-// U3, issues #597/#599). Boots this whole Urban app in-process against the WASM engine via
+// U4, issues #597/#599). Boots this whole Urban app in-process against the WASM engine via
 // `bootTestApp` and proves the migrated escalation round-trip:
 //
 //   start convergence-loop → the review agent returns `needs_input` with a question → the loop
 //   parks on the native `wait-answer` userTask (linked to `pr-escalation.form`), NOT the retired
-//   `escalation-answered` message catch → the open escalation is derived from `searchUserTasks`
-//   (surfaced on GET /app/api/status as `openEscalation`, with NO denormalised PR-row pointer) →
-//   an operator completes the task through the taskInbox surface with the typed `{ answer }` →
-//   the loop resumes and the answer reaches the next review round.
+//   `escalation-answered` message catch → the open escalation is derived from the durable
+//   `escalations` audit row (surfaced on GET /app/api/status as `openEscalation`, with NO
+//   denormalised PR-row pointer) → an operator completes the task through the taskInbox surface
+//   with the typed `{ answer }` → the `record-answer` step retires the escalations row to
+//   `answered` and the loop resumes and the answer reaches the next review round.
 //
 // The falsifiable core (mirroring the U0 spine e2e): the WASM engine folds a completed instance's
 // variables away, so "resumes WITH the typed answer" is proven by capturing `job.variables.answer`
@@ -29,7 +30,7 @@ import { fileURLToPath } from "node:url";
 import { bootTestApp, type TestApp } from "@nanobpm/urban-testkit";
 
 const APP_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const DB_DIR = mkdtempSync(join(tmpdir(), "nwf-u3-"));
+const DB_DIR = mkdtempSync(join(tmpdir(), "nwf-u4-"));
 
 const GITHUB_ENV_OVERRIDES: Record<string, string> = {
   NANO_PR_GITHUB_TRANSPORT: "token",
@@ -64,7 +65,7 @@ function takenFlows(app: TestApp): string[] {
     .map((f) => `${f.from}->${f.to}`);
 }
 
-describe("nano-workforce PR review-loop escalation (U3 userTask)", () => {
+describe("nano-workforce PR review-loop escalation (U4 userTask)", () => {
   let app: TestApp;
   // The review agent stub's captured state across activations.
   let reviewCalls = 0;
@@ -132,8 +133,8 @@ describe("nano-workforce PR review-loop escalation (U3 userTask)", () => {
     assert.equal(task.elementId, "wait-answer", "the open task is the review-loop escalation userTask");
     assert.ok(task.userTaskKey, "the task carries a completable userTaskKey");
 
-    // The open escalation is DERIVED from searchUserTasks on the status endpoint — no denormalised
-    // `open_escalation_*` pointer is written or read.
+    // The open escalation is DERIVED from the durable `escalations` audit row on the status
+    // endpoint — no denormalised `open_escalation_*` pointer is written or read.
     const status = await app.callRoute<StatusBody>({ method: "GET", path: "/app/api/status" });
     assert.equal(status.status, 200, "the status endpoint responds");
     const statusRow = status.body.prs.find((p) => p.prKey === prKey);
@@ -142,7 +143,7 @@ describe("nano-workforce PR review-loop escalation (U3 userTask)", () => {
     assert.equal(
       statusRow?.openEscalation,
       "Which retry cap?",
-      "the open escalation question is derived from the live userTask",
+      "the open escalation question is derived from the open escalations row",
     );
 
     // Complete the escalation through the taskInbox completion route with the typed `answer`.
@@ -155,18 +156,21 @@ describe("nano-workforce PR review-loop escalation (U3 userTask)", () => {
     assert.equal(completed.status, 200, "the completion route accepts the typed submission");
     assert.equal(completed.body.ok, true, "the userTask was completed");
 
-    // The typed answer resumed the loop back into the review round: the token took f_answerLoop
-    // (wait-answer → review-round) and the review agent saw exactly the submitted answer. An empty
-    // or wrong completion would surface a different `capturedAnswer` — this is the falsifiable core.
+    // The typed answer resumed the loop back into the review round: the token took
+    // wait-answer → record-answer (which retires the escalations row) → review-round, and the
+    // review agent saw exactly the submitted answer. An empty or wrong completion would surface a
+    // different `capturedAnswer` — this is the falsifiable core.
     await app.settle();
+    const flows = takenFlows(app);
     assert.ok(
-      takenFlows(app).includes("wait-answer->review-round"),
-      `the answer resumed the loop back to the review round (flows: ${takenFlows(app).join(", ")})`,
+      flows.includes("wait-answer->record-answer") && flows.includes("record-answer->review-round"),
+      `the answer resumed the loop through record-answer back to the review round (flows: ${flows.join(", ")})`,
     );
     assert.equal(reviewCalls, 2, "the review agent ran a second round after the answer");
     assert.equal(capturedAnswer, answer, "the typed answer reached the resumed review round");
 
-    // No open escalation lingers on the status endpoint once answered + resumed.
+    // The escalations row was retired to `answered` (the single source of truth the status endpoint
+    // derives from), so no open escalation lingers on the status endpoint once answered + resumed.
     const afterStatus = await app.callRoute<StatusBody>({ method: "GET", path: "/app/api/status" });
     const afterRow = afterStatus.body.prs.find((p) => p.prKey === prKey);
     if (afterRow) {
