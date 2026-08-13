@@ -321,13 +321,17 @@ components:
         allowSharedBase:
           type: boolean
           description: >-
-            Opt-in to share a custom integration base branch with another already-active plan. See
-            `PlanStartByIssue.allowSharedBase`.
+            Reserved for a later ADR 0003 admission slice — NOT yet enforced in this slice (B0).
+            Accepted by the schema today but currently has no runtime effect. When implemented it
+            will opt in to sharing a custom integration base branch with another already-active plan.
+            See `PlanStartByIssue.allowSharedBase`.
         confirmDefaultBase:
           type: boolean
           description: >-
-            Required acknowledgement when `baseBranch` names the repository default branch. See
-            `PlanStartByIssue.confirmDefaultBase`.
+            Reserved for a later ADR 0003 admission slice — NOT yet enforced in this slice (B0).
+            Accepted by the schema today but currently has no runtime effect. When implemented it
+            will be the required acknowledgement when `baseBranch` names the repository default
+            branch. See `PlanStartByIssue.confirmDefaultBase`.
     MessageResult:
       type: object
       description: The result of publishing a message / answering an escalation. Shape varies by message
