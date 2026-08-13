@@ -1,3 +1,10 @@
+# [0.54.0](https://github.com/nanobpm/nano-workforce/compare/v0.53.0...v0.54.0) (2026-08-13)
+
+
+### Features
+
+* generalize the advisory blackboard onto the agentic channel (H4) ([#166](https://github.com/nanobpm/nano-workforce/issues/166)) ([450a4fa](https://github.com/nanobpm/nano-workforce/commit/450a4fa4a75ad1cdc2a78eef6f95aa2f45bebb9f)), closes [#147](https://github.com/nanobpm/nano-workforce/issues/147) [#147](https://github.com/nanobpm/nano-workforce/issues/147) [#143](https://github.com/nanobpm/nano-workforce/issues/143)
+
 # [0.53.0](https://github.com/nanobpm/nano-workforce/compare/v0.52.0...v0.53.0) (2026-08-13)
 
 
