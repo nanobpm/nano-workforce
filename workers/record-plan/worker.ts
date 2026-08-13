@@ -25,7 +25,7 @@ interface RawTask {
   prompt?: unknown;
   dependsOn?: unknown;
 }
-// NOTE (issue #201): this worker reads an ARRAY input (`tasks: RawTask[]`), which the scalar-only
+// NOTE (issue #211): this worker reads an ARRAY input (`tasks: RawTask[]`), which the scalar-only
 // `nano:dataEnvelope` cannot express, so it keeps a hand-written `interface In` pending a decision
 // on extending the envelope schema to arrays. See the PR body's "array inputs" escalation.
 interface In extends Record<string, unknown> {
