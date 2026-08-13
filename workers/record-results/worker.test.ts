@@ -20,13 +20,14 @@ interface Row {
   status: PlanTaskStatus;
 }
 
-function fakeApp(rows: Row[]) {
+function fakeApp(rows: Row[], plan: Record<string, unknown> = {}) {
   const plans: Record<string, unknown>[] = [];
   return {
     data: {
       table(name: string, key: string) {
         if (name === "plans") {
           return {
+            get: (_k: any) => Promise.resolve(plan),
             update: (k: any, patch: any) => {
               plans.push({ [key]: k, ...patch });
               return Promise.resolve(patch);
@@ -65,6 +66,16 @@ test("no opened PRs (empty plan) hard-fails with NO_WORK_DISPATCHED", async () =
   assertEquals(plan.outcome, "no work dispatched — the planner produced no tasks");
 });
 
+test("failed finalization clears promote_ready (no stale readiness on non-done)", async () => {
+  // A non-`done` status must never carry a stale readiness signal: even if a prior writer set
+  // promote_ready = 1, the no-work failure path must clear it to 0 (#160).
+  const app = fakeApp([], { base_branch: "epic/x", promotion_pr_url: null, promote_ready: 1 });
+  await assertRejects(() => call(app), BpmnError);
+  const plan = app._plans.at(-1) as Record<string, unknown>;
+  assertEquals(plan.status, "failed");
+  assertEquals(plan.promote_ready, 0);
+});
+
 test("tasks present but none opened (all skipped/blocked) hard-fails", async () => {
   const app = fakeApp([
     { id: 1, plan_key: "o/r#1", task_id: "a", status: "skipped" },
@@ -86,4 +97,33 @@ test("at least one opened PR finalizes cleanly (no throw)", async () => {
   const plan = app._plans.at(-1) as Record<string, unknown>;
   assertEquals(plan.status, "done");
   assertEquals(plan.outcome, "1 PR(s) dispatched to convergence");
+});
+
+// promote_ready read-model derivation (026_plan_promotion_pr_url.sql, #160): the finalizer is the
+// ONE canonical writer of the signal. It is 1 exactly when the plan reaches `done` with a pinned
+// integration `base_branch` and no promotion PR yet — gated on the three stored fields only.
+const opened = (): Row[] => [{ id: 1, plan_key: "o/r#1", task_id: "a", status: "opened" }];
+
+test("done + base_branch set + no promotion_pr_url → promote_ready = 1", async () => {
+  const app = fakeApp(opened(), { base_branch: "epic/x", promotion_pr_url: null });
+  await call(app);
+  const plan = app._plans.at(-1) as Record<string, unknown>;
+  assertEquals(plan.status, "done");
+  assertEquals(plan.promote_ready, 1);
+});
+
+test("done but base_branch null → promote_ready = 0", async () => {
+  const app = fakeApp(opened(), { base_branch: null, promotion_pr_url: null });
+  await call(app);
+  const plan = app._plans.at(-1) as Record<string, unknown>;
+  assertEquals(plan.status, "done");
+  assertEquals(plan.promote_ready, 0);
+});
+
+test("done but promotion_pr_url already set → promote_ready = 0", async () => {
+  const app = fakeApp(opened(), { base_branch: "epic/x", promotion_pr_url: "o/r#99" });
+  await call(app);
+  const plan = app._plans.at(-1) as Record<string, unknown>;
+  assertEquals(plan.status, "done");
+  assertEquals(plan.promote_ready, 0);
 });

@@ -75,6 +75,15 @@ export interface Plan {
   // branch and opens every task PR against it instead of the repository's default branch, landing
   // the whole epic on a long-lived integration branch. NULL keeps the default-branch behaviour.
   base_branch: string | null;
+  // Epic "ready to promote" foundations (026_plan_promotion_pr_url.sql, #160). `promotion_pr_url` is
+  // the integration→default-branch promotion PR once opened by the promoteEpic operation (NULL until
+  // promoted; set makes the promotion idempotent). `promote_ready` is a denormalised read-model flag
+  // the epic pages badge/gate on — 1 exactly when `status = 'done' AND base_branch IS NOT NULL AND
+  // promotion_pr_url IS NULL`, else 0. Stored (not a SQL view) because the pages read `plans`
+  // directly, mirroring `wave_label`/`open_plan_findings`. Derived in exactly one place
+  // (record-results); the default-branch check is deferred to the promoteEpic operation.
+  promotion_pr_url: string | null;
+  promote_ready: number;
   created_at: string;
   updated_at: string;
 }
@@ -366,6 +375,9 @@ export async function startPlan(
       open_plan_escalation_id: null,
       open_plan_findings: null,
       open_plan_round: null,
+      // A re-plan drops a previously-`done` plan back to `planning`; clear the promote-ready signal
+      // so a stale "ready to promote" badge/button never lingers on a non-done plan (026, #160).
+      promote_ready: 0,
       blackboard_token: token,
       base_branch: base,
       updated_at: ts,
