@@ -22,6 +22,7 @@ import { fileURLToPath } from "node:url";
 import type { EngineJob } from "@nanobpm/urban/runtime";
 import { bootTestApp, type TestApp } from "@nanobpm/urban-testkit";
 import { admitGithubState, installAdmitGithub } from "./support/github-admit.ts";
+import { pollFeatureEscalations } from "../app/service.ts";
 
 const APP_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -56,6 +57,8 @@ interface FeatureRow {
   status: string;
   pr_key: string | null;
   delivery_label: string | null;
+  escalation_question: string | null;
+  escalation_user_task_key: string | null;
 }
 interface PrRow {
   pr_key: string;
@@ -250,6 +253,61 @@ describe("single-issue feature run (#172 — feature.bpmn)", () => {
           `abandon routed to record-feature (flows: ${flows.join(", ")})`,
         );
         assert.ok(!flows.includes("w_gw_answer->implement-task"), "the answer loop was NOT taken");
+      },
+    );
+  });
+
+  test("escalate → the poller surfaces it on the read model, and the operator answer resolves it (issue #210)", async () => {
+    let calls = 0;
+    await withApp(
+      {
+        "senior:feature": () => {
+          calls += 1;
+          return calls === 1
+            ? { status: "escalated", question: "Which API should I use?", summary: "parked for a human" }
+            : { status: "opened", pr: "owner/repo#210", summary: "resumed and opened" };
+        },
+      },
+      { baseBranch: "epic/e2e" },
+      async ({ app, featureKey }) => {
+        // The `record-feature-escalation` service task runs on the escalated arm (before the user task),
+        // so the row already carries the flipped status + the agent's question when the run parks — the
+        // read model the pages read is no longer blind to the native user-task wait (the #210 bug).
+        const parked = await featureRow(app, featureKey);
+        assert.equal(parked.status, "escalated", "the escalated status is surfaced on the read model");
+        assert.equal(parked.escalation_question, "Which API should I use?", "the agent's question is surfaced");
+
+        // The poller fills in the completable user-task key (which the service task can't know — the
+        // task doesn't exist yet when it runs) so the UI can drive an attributed answer.
+        await pollFeatureEscalations(app.db, app.engine);
+        const escalated = await featureRow(app, featureKey);
+        assert.ok(escalated.escalation_user_task_key, "the poller denormalised the completable user-task key");
+        assert.equal(escalated.status, "escalated", "the run stays escalated while parked");
+
+        // Answer through the app's OWN operation (the nwf UI's answer affordance) — the attributed
+        // completer resumes the SAME implement task a human would from the task inbox.
+        const answered = await app.api?.call("answerFeatureEscalation", {
+          body: { userTaskKey: escalated.escalation_user_task_key, resolution: "answer", answer: "use v2" },
+        });
+        assert.equal(answered?.status, 200, "the operator answer completed the escalation task");
+        await app.settle();
+
+        const flows = takenFlows(app);
+        assert.ok(
+          flows.includes("w_gw_answer->implement-task"),
+          `the answer re-dispatched the same implement task (flows: ${flows.join(", ")})`,
+        );
+        assert.equal(calls, 2, "the implementation agent was re-dispatched exactly once after the answer");
+
+        // The run opened its PR; the escalation pointer + question were cleared once resolved.
+        const settled = await featureRow(app, featureKey);
+        assert.equal(settled.status, "opened", "the resumed run opened its PR");
+        assert.equal(settled.escalation_user_task_key, null, "the escalation pointer was cleared once resolved");
+        assert.equal(settled.escalation_question, null, "the surfaced question was cleared once resolved");
+
+        // A further poll pass is an idempotent no-op — a terminal run is not a candidate.
+        await pollFeatureEscalations(app.db, app.engine);
+        assert.equal((await featureRow(app, featureKey)).status, "opened");
       },
     );
   });

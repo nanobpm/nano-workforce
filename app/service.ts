@@ -9,7 +9,7 @@
 // `Table<T>` surface), not hand-written SQL. Row shapes are declared inline here.
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { abandonUrl, mintAbandonToken, renderAbandonBrief } from "./abandon.ts";
-import { deriveFeatureDelivery, featureRuns } from "./feature.ts";
+import { deriveFeatureDelivery, deriveFeatureEscalationPatch, FEATURE_ESCALATION_ELEMENT, type FeatureRun, featureRuns } from "./feature.ts";
 import {
   classifyMergeability,
   ensureFreshHeadRun,
@@ -1283,6 +1283,47 @@ export async function pollFeatureDelivery(data: DataLayer) {
   }
 }
 
+/** Reconcile each in-flight FEATURE run against its native `feature-escalation` user task (issue
+ * #210 — feature-run escalations were invisible in the nwf UI). When a feature run escalates it parks
+ * on the `feature-escalation` operator user task (an engine wait); no worker runs, so `feature_runs`
+ * — which the schema-driven pages read — stayed `running` with nothing to show. This is the
+ * `feature_runs` twin of `pollFeatureDelivery`: for each run that can be parked at (or resuming from)
+ * the escalation, read its open user tasks and project the parked task onto the row via the pure
+ * `deriveFeatureEscalationPatch` — flipping `status` to `escalated` and denormalising the escalation's
+ * `question` + completable `userTaskKey` so the pages can surface the question and drive an answer,
+ * and flipping back to `running` (clearing the pointer) once it un-parks.
+ *
+ * Candidates are only the runs that could be parked here — `running` (may have just escalated) and
+ * `escalated` (may have just resumed) — queried via the `feature_runs(status)` index, so the pass
+ * stays O(in-flight), not O(total runs). Terminal-ward transitions THROUGH `record-feature` (answer
+ * → abandon, SLA auto-abandon, done) clear the pointer in that worker, so a run that has already left
+ * `escalated` never needs sweeping here. Best-effort + idempotent — per-run failures are isolated. */
+export async function pollFeatureEscalations(data: DataLayer, engine: EngineClient) {
+  const seen = new Set<string>();
+  const candidates: FeatureRun[] = [];
+  for (const status of ["running", "escalated"] as const) {
+    for (const run of await featureRuns(data).find({ status })) {
+      if (seen.has(run.feature_key)) continue;
+      seen.add(run.feature_key);
+      candidates.push(run);
+    }
+  }
+  for (const run of candidates) {
+    if (!run.process_key) continue;
+    try {
+      const tasks = await engine.searchUserTasks({ processInstanceKey: run.process_key });
+      const task = tasks.find((t) => t.elementId === FEATURE_ESCALATION_ELEMENT);
+      const parked = task ? { userTaskKey: task.userTaskKey } : null;
+      const patch = deriveFeatureEscalationPatch(run, parked);
+      if (patch) {
+        await featureRuns(data).update(run.feature_key, { ...patch, updated_at: now() });
+      }
+    } catch (err) {
+      console.error(`[poller] feature escalation ${run.feature_key}: ${err}`);
+    }
+  }
+}
+
 /** One full poll pass: advance the review stage, the merge stage, the wave-merge barrier, and
  * (when the engine REST endpoint is supplied) the job-activation visibility pass and the
  * technical-incident surfacing pass. Called on the self-scheduling loop in `main.ts`. */
@@ -1297,6 +1338,7 @@ export async function pollOnce(
   await pollWaveGates(data, engine, token);
   await pollDelivery(data);
   await pollFeatureDelivery(data);
+  await pollFeatureEscalations(data, engine);
   if (engineRest) {
     await pollJobActivation(data, engineRest.restAddress, engineRest.token);
     await pollIncidents(data, engineRest.restAddress, engineRest.token);

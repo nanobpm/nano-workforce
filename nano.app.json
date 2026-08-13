@@ -65,7 +65,8 @@
       "keyField": "process_key",
       "statusField": "status",
       "activeStatuses": [
-        "running"
+        "running",
+        "escalated"
       ],
       "onTerminated": {
         "set": {
@@ -131,6 +132,10 @@
     {
       "taskType": "pr.record-feature",
       "handler": "workers/record-feature/worker.ts"
+    },
+    {
+      "taskType": "pr.record-feature-escalation",
+      "handler": "workers/record-feature-escalation/worker.ts"
     },
     {
       "taskType": "pr.record-blocked-ack",

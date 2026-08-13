@@ -60,16 +60,17 @@
           "source": "app",
           "table": "feature_runs",
           "orderBy": { "field": "updated_at", "dir": "desc" },
-          "filter": [{ "field": "status", "in": ["running", "awaiting_operator"] }]
+          "filter": [{ "field": "status", "in": ["running", "escalated", "awaiting_operator"] }]
         },
         "tabs": [
-          { "label": "Active", "filter": [{ "field": "status", "in": ["running", "awaiting_operator"] }] },
+          { "label": "Active", "filter": [{ "field": "status", "in": ["running", "escalated", "awaiting_operator"] }] },
           { "label": "History", "filter": [{ "field": "status", "in": ["opened", "converging", "merged", "converged", "blocked", "skipped", "failed", "abandoned"] }] },
           { "label": "All", "filter": [] }
         ],
         "columns": [
           { "field": "feature_key", "header": "Feature", "linkField": "issue_url" },
           { "field": "status", "header": "Status", "link": { "kind": "processExplorer", "keyField": "process_key" } },
+          { "field": "escalation_question", "header": "Escalation" },
           { "field": "base_branch", "header": "Base branch" },
           { "field": "pr_key", "header": "PR", "link": { "kind": "page", "page": "home", "keyField": "pr_key" } },
           { "field": "delivery_label", "header": "Delivery" },
@@ -77,7 +78,42 @@
           { "field": "auto_merge", "header": "Auto-merge" },
           { "field": "outcome", "header": "Outcome" },
           { "field": "updated_at", "header": "Updated" }
-        ]
+        ],
+        "rowActions": [
+          {
+            "label": "Abandon",
+            "confirm": "Abandon this escalated task? The run gives up on it (no PR).",
+            "showWhenField": "escalation_user_task_key",
+            "action": {
+              "path": "/app/api/actions/answer-escalation",
+              "body": { "userTaskKey": "{{row.escalation_user_task_key}}", "resolution": "abandon" }
+            }
+          }
+        ],
+        "detail": {
+          "fields": [
+            { "field": "escalation_question", "label": "Escalation question" },
+            { "field": "outcome", "label": "Outcome" },
+            { "field": "delivery_label", "label": "Delivery" }
+          ],
+          "form": {
+            "showWhenField": "escalation_user_task_key",
+            "title": "Answer escalation",
+            "promptField": "escalation_question",
+            "inputKey": "answer",
+            "inputLabel": "Guidance for the implementation agent",
+            "submitLabel": "Answer & re-dispatch",
+            "action": {
+              "path": "/app/api/actions/answer-escalation",
+              "successLabel": "Answered — the agent will resume",
+              "body": {
+                "userTaskKey": "{{row.escalation_user_task_key}}",
+                "resolution": "answer",
+                "answer": "{{form.answer}}"
+              }
+            }
+          }
+        }
       }
     }
   ]

@@ -45,12 +45,22 @@ export interface FeatureRun {
    * outcome is written to `status` itself; this carries the sub-state / note (e.g. "merged",
    * "waiting_review", or "operator: <note>"). */
   delivery_label: string | null;
+  /** The parked `feature-escalation` user task's `question`, denormalised by `pollFeatureEscalations`
+   * so the pages can show what the agent asked. NULL whenever the run is not parked at an escalation
+   * (cleared when it un-parks / resumes). */
+  escalation_question: string | null;
+  /** The completable native `feature-escalation` user-task key the answer affordance posts to
+   * (`completeUserTaskAttributed`) and the pages gate the answer controls on (`showWhenField`). Set by
+   * `pollFeatureEscalations` while parked; NULL otherwise. */
+  escalation_user_task_key: string | null;
   created_at: string;
   updated_at: string;
 }
 
 export const FEATURE_RUN_STATUSES = [
-  "running", // the agent is implementing (including while parked at an escalation user task)
+  "running", // the agent is implementing
+  "escalated", // NON-terminal: the run is parked at the `feature-escalation` operator user task,
+  // waiting on a human answer (denormalised from the parked user task by pollFeatureEscalations)
   "opened", // a PR was raised and the run ends here (converge was not requested)
   "converging", // the opened PR was handed to the convergence loop (live state via pr_key → pull_requests)
   "awaiting_operator", // NON-terminal: the run is blocked and parked at the feature-blocked operator user task
@@ -70,7 +80,9 @@ export type FeatureRunStatus = typeof FEATURE_RUN_STATUSES[number];
  * `merged`/`converged`/`abandoned` — those are equally terminal, so redispatch gating is unaffected.
  * `awaiting_operator` is deliberately EXCLUDED (non-terminal): while a blocked run is parked at the
  * feature-blocked operator user task its instance is still alive, so a re-dispatch of the same issue
- * must short-circuit (no orphaned parallel instance) until the operator acknowledges it. */
+ * must short-circuit (no orphaned parallel instance) until the operator acknowledges it. `escalated`
+ * is EXCLUDED for the same reason: a run parked at the `feature-escalation` user task is still alive,
+ * so a re-dispatch must short-circuit until the human answers (or the SLA fires). */
 export const FEATURE_TERMINAL_STATUSES: readonly FeatureRunStatus[] = [
   "opened",
   "converging",
@@ -117,6 +129,51 @@ export function deriveFeatureDelivery(prStatus: string | null): FeatureDeliveryR
   }
 }
 
+/** The `feature-escalation` user-task element id (feature.bpmn) — the native operator wait a run
+ * parks on when the agent escalates. `pollFeatureEscalations` reconciles it onto the read model. */
+export const FEATURE_ESCALATION_ELEMENT = "feature-escalation";
+
+/** The parked `feature-escalation` user task, as `pollFeatureEscalations` observes it via
+ * `searchUserTasks`: the completable user-task key the pages drive an attributed answer against.
+ *
+ * The agent's `question` is NOT read from here — the WASM testkit engine does not surface a user
+ * task's `zeebe:ioMapping`-mapped local variables through `searchUserTasks`, so relying on it would
+ * make the question untestable. Instead the `record-feature-escalation` service task (feature.bpmn)
+ * persists `question` onto the row at escalation entry — see `workers/record-feature-escalation`. */
+export interface FeatureEscalationParked {
+  userTaskKey: string;
+}
+
+/** Pure source of truth for the escalation read-model reconcile (`pollFeatureEscalations`): given a
+ * run and whether it is currently parked at `feature-escalation`, return the minimal `feature_runs`
+ * patch reconciling the run's LIVENESS (status + completable-task pointer) with the observed park
+ * state (or null when nothing changed, so the poller skips the write). Idempotent, and — crucially —
+ * self-healing across the brief window between the `record-feature-escalation` service task and the
+ * user task actually appearing: a premature "not parked" reset to `running` is re-flipped to
+ * `escalated` on the next pass once the task is observed.
+ *
+ * - parked → flip `status` to `escalated` and denormalise the completable `userTaskKey` so the pages
+ *   can drive an attributed answer. It never writes `escalation_question` — that is the service
+ *   task's to own (set) and the exit paths' to clear (record-feature / the answer operation), so the
+ *   poller can never clobber the persisted question during that self-healing window.
+ * - un-parked → clear the completable-task pointer; a run still marked `escalated` has resumed
+ *   (answered / looped back to implement-task), so it returns to `running`. A run already advanced
+ *   past `escalated` by a downstream worker keeps that status — only the pointer is cleared. */
+export function deriveFeatureEscalationPatch(
+  run: Pick<FeatureRun, "status" | "escalation_user_task_key">,
+  parked: FeatureEscalationParked | null,
+): Partial<FeatureRun> | null {
+  const patch: Partial<FeatureRun> = {};
+  if (parked) {
+    if (run.status !== "escalated") patch.status = "escalated";
+    if (run.escalation_user_task_key !== parked.userTaskKey) patch.escalation_user_task_key = parked.userTaskKey;
+  } else {
+    if (run.status === "escalated") patch.status = "running";
+    if (run.escalation_user_task_key !== null) patch.escalation_user_task_key = null;
+  }
+  return Object.keys(patch).length > 0 ? patch : null;
+}
+
 export const featureRuns = (data: DataLayer) => data.table<FeatureRun>("feature_runs", "feature_key");
 
 /** The deterministic task id for a single-issue run — the implementation agent branches
@@ -157,6 +214,8 @@ export async function startFeature(
       auto_merge: autoMerge ? 1 : 0,
       outcome: null,
       delivery_label: null,
+      escalation_question: null,
+      escalation_user_task_key: null,
       updated_at: ts,
     });
   } else {
@@ -173,6 +232,8 @@ export async function startFeature(
       auto_merge: autoMerge ? 1 : 0,
       outcome: null,
       delivery_label: null,
+      escalation_question: null,
+      escalation_user_task_key: null,
       created_at: ts,
       updated_at: ts,
     });

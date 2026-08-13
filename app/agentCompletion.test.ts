@@ -16,6 +16,7 @@ import { test } from "node:test";
 import { assert, assertEquals, assertRejects } from "#test-assert";
 import {
   completeEscalationAsAgent,
+  completeEscalationAsHuman,
   completeUserTaskAttributed,
   latestCompletion,
   revertAgentCompletion,
@@ -137,6 +138,56 @@ test("agent completer is a no-op for an unknown userTaskKey", async () => {
   assertEquals(r.ok, false);
   assertEquals(r.reason, "no open escalation task");
   assertEquals(completed.length, 0);
+});
+
+test("a HUMAN operator completes a feature escalation via the SAME attributed resume path (issue #210)", async () => {
+  const stores = { task_completions: { rows: [] as any[], key: "id" } };
+  const data = memData(stores);
+  const { engine, completed } = fakeEngine([{ userTaskKey: "ut-1", elementId: "feature-escalation" }]);
+
+  const r = await completeEscalationAsHuman(data, engine, {
+    userTaskKey: "ut-1",
+    operatorId: "alice",
+    variables: { resolution: "answer", answer: "use v2" },
+  });
+
+  assertEquals(r.ok, true);
+  assertEquals(r.elementId, "feature-escalation");
+
+  // Identical resume path to the agent/task-inbox: completeUserTask with the exact typed variables.
+  assertEquals(completed.length, 1);
+  assertEquals(completed[0].variables, { resolution: "answer", answer: "use v2" });
+
+  // Attribution recorded as a HUMAN completion — the authority, so NOT reversible.
+  const row = stores.task_completions.rows[0] as TaskCompletion;
+  assertEquals(row.actor_kind, "human");
+  assertEquals(row.actor_id, "alice");
+  assertEquals(row.reversible, 0, "a human completion is the authority (not reversible)");
+});
+
+test("human completer refuses a non-escalation user task and is a no-op for an unknown key", async () => {
+  const stores = { task_completions: { rows: [] as any[], key: "id" } };
+  const data = memData(stores);
+  const { engine, completed } = fakeEngine([{ userTaskKey: "ut-x", elementId: "decide" }]);
+
+  const notEsc = await completeEscalationAsHuman(data, engine, {
+    userTaskKey: "ut-x",
+    operatorId: "alice",
+    variables: { resolution: "abandon" },
+  });
+  assertEquals(notEsc.ok, false);
+  assertEquals(notEsc.reason, "not an escalation task");
+
+  const missing = await completeEscalationAsHuman(data, engine, {
+    userTaskKey: "ut-missing",
+    operatorId: "alice",
+    variables: { resolution: "abandon" },
+  });
+  assertEquals(missing.ok, false);
+  assertEquals(missing.reason, "no open escalation task");
+
+  assertEquals(completed.length, 0, "neither refusal completes a task");
+  assertEquals(stores.task_completions.rows.length, 0, "and no attribution row is written");
 });
 
 test("a human can revert/override an agent completion (recording who + when + corrective note)", async () => {
