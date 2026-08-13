@@ -1,3 +1,10 @@
+# [0.58.0](https://github.com/nanobpm/nano-workforce/compare/v0.57.0...v0.58.0) (2026-08-13)
+
+
+### Features
+
+* single-issue feature run — one issue → one PR (+ optional converge/merge) ([#194](https://github.com/nanobpm/nano-workforce/issues/194)) ([7557439](https://github.com/nanobpm/nano-workforce/commit/7557439e7f88383a5da62fda45994a37f6262007)), closes [post-#192](https://github.com/post-/issues/192) [#172](https://github.com/nanobpm/nano-workforce/issues/172) [#172](https://github.com/nanobpm/nano-workforce/issues/172) [owner/repo#N](https://github.com/owner/repo/issues/N)
+
 # [0.57.0](https://github.com/nanobpm/nano-workforce/compare/v0.56.0...v0.57.0) (2026-08-13)
 
 
