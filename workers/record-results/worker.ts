@@ -41,6 +41,9 @@ const handler: AppJobHandler<In> = async (job, app) => {
     await app.data.table("plans", "plan_key").update(planKey, {
       status: "failed",
       outcome,
+      // A non-`done` status must never carry a stale readiness signal: clear it here too so a
+      // re-run (or any prior writer) can't leave `promote_ready = 1` on a failed plan (#160).
+      promote_ready: 0,
       updated_at: ts,
     });
     app.log.error(`record-results: ${planKey} finalized with 0 opened PRs`, {

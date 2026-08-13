@@ -66,6 +66,16 @@ test("no opened PRs (empty plan) hard-fails with NO_WORK_DISPATCHED", async () =
   assertEquals(plan.outcome, "no work dispatched — the planner produced no tasks");
 });
 
+test("failed finalization clears promote_ready (no stale readiness on non-done)", async () => {
+  // A non-`done` status must never carry a stale readiness signal: even if a prior writer set
+  // promote_ready = 1, the no-work failure path must clear it to 0 (#160).
+  const app = fakeApp([], { base_branch: "epic/x", promotion_pr_url: null, promote_ready: 1 });
+  await assertRejects(() => call(app), BpmnError);
+  const plan = app._plans.at(-1) as Record<string, unknown>;
+  assertEquals(plan.status, "failed");
+  assertEquals(plan.promote_ready, 0);
+});
+
 test("tasks present but none opened (all skipped/blocked) hard-fails", async () => {
   const app = fakeApp([
     { id: 1, plan_key: "o/r#1", task_id: "a", status: "skipped" },
