@@ -1,3 +1,10 @@
+# [0.56.0](https://github.com/nanobpm/nano-workforce/compare/v0.55.0...v0.56.0) (2026-08-13)
+
+
+### Features
+
+* correlate jobKeys to process/plan across supply report + cockpit (H6) ([#182](https://github.com/nanobpm/nano-workforce/issues/182)) ([f6e2b0d](https://github.com/nanobpm/nano-workforce/commit/f6e2b0d5f804c4c30863e5f5c66bbdc835025046)), closes [#142](https://github.com/nanobpm/nano-workforce/issues/142) [#152](https://github.com/nanobpm/nano-workforce/issues/152) [#149](https://github.com/nanobpm/nano-workforce/issues/149)
+
 # [0.55.0](https://github.com/nanobpm/nano-workforce/compare/v0.54.0...v0.55.0) (2026-08-13)
 
 
