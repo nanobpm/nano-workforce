@@ -49,6 +49,7 @@
           { "field": "task_count", "header": "Tasks" },
           { "field": "open_task_id", "header": "Open escalation" },
           { "field": "open_plan_round", "header": "Plan escalation round" },
+          { "field": "promotion_pr_url", "header": "Promotion PR", "linkField": "promotion_pr_url" },
           { "field": "updated_at", "header": "Updated" }
         ],
         "rowActions": [
@@ -63,6 +64,15 @@
                 "correlationKey": "{{row.plan_key}}",
                 "variables": { "directive": "proceed", "note": "Proceed override from the epic page." }
               }
+            }
+          },
+          {
+            "label": "Promote to default branch",
+            "confirm": "Open a PR from {{row.base_branch}} into the default branch? This is the deliberate merge-to-default gate — nothing merges automatically.",
+            "showWhenField": "promote_ready",
+            "action": {
+              "path": "/app/api/actions/promote/epic",
+              "body": { "planKey": "{{row.plan_key}}" }
             }
           }
         ],
