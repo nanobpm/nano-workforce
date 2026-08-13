@@ -33,7 +33,7 @@ export default defineOperation("agentCompleteEscalation", async ({ req, body }, 
   const variables = body.variables;
   if (!userTaskKey) return { status: 400, body: { ok: false, error: "userTaskKey is required" } };
   if (!agentId) return { status: 400, body: { ok: false, error: "agentId is required" } };
-  if (!variables || typeof variables !== "object") {
+  if (!variables || typeof variables !== "object" || Array.isArray(variables)) {
     return { status: 400, body: { ok: false, error: "variables must be an object" } };
   }
 

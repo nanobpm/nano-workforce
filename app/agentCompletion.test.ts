@@ -317,3 +317,21 @@ test("a rollback failure never masks the original engine error", async () => {
     "the engine failure propagates, not the rollback failure",
   );
 });
+
+test("latestCompletion returns the newest row by id regardless of insertion order", async () => {
+  const stores = {
+    task_completions: {
+      rows: [
+        { id: 3, user_task_key: "ut-x", actor_kind: "agent", actor_id: "bot", variables_json: "{}", reversible: 1, reverted: 0, created_at: "t3" },
+        { id: 1, user_task_key: "ut-x", actor_kind: "human", actor_id: "alice", variables_json: "{}", reversible: 0, reverted: 0, created_at: "t1" },
+        { id: 2, user_task_key: "ut-other", actor_kind: "agent", actor_id: "bot", variables_json: "{}", reversible: 1, reverted: 0, created_at: "t2" },
+      ] as any[],
+      key: "id",
+    },
+  };
+  const data = memData(stores);
+
+  const newest = (await latestCompletion(data, "ut-x"))!;
+  assertEquals(newest.id, 3, "the highest-id row for the key wins, not the first found");
+  assertEquals(stores.task_completions.rows[0].id, 3, "the backing array is not reordered");
+});

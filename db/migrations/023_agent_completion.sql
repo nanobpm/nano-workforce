@@ -20,7 +20,7 @@ CREATE TABLE task_completions (
   user_task_key         TEXT NOT NULL,             -- the engine user-task key that was completed
   process_instance_key  TEXT,                      -- owning process instance, when known
   element_id            TEXT,                      -- the escalation task's BPMN elementId
-  actor_kind            TEXT NOT NULL,             -- agent | human
+  actor_kind            TEXT NOT NULL CHECK (actor_kind IN ('agent', 'human')), -- agent | human
   actor_id              TEXT NOT NULL,             -- the completing identity (agent id / operator)
   variables_json        TEXT NOT NULL,             -- the typed form variables submitted (JSON)
   reversible            INTEGER NOT NULL DEFAULT 0, -- 1 = a human may override (agent completions)

@@ -133,7 +133,11 @@ export async function latestCompletion(
   userTaskKey: string,
 ): Promise<TaskCompletion | undefined> {
   const rows = await taskCompletions(data).find({ user_task_key: userTaskKey });
-  return rows.sort((a, b) => b.id - a.id)[0];
+  let newest: TaskCompletion | undefined;
+  for (const row of rows) {
+    if (!newest || row.id > newest.id) newest = row;
+  }
+  return newest;
 }
 
 export interface AgentCompleteResult {
