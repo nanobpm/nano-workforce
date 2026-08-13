@@ -75,14 +75,30 @@ test("deriveFeatureEscalationPatch: an already-escalated run with the key record
   assertEquals(patch, null);
 });
 
-test("deriveFeatureEscalationPatch: an escalated run that un-parked resumes to running, pointer cleared", () => {
+test("deriveFeatureEscalationPatch: an escalated run that un-parked resumes to running, pointer + question cleared", () => {
   const patch = deriveFeatureEscalationPatch({ status: "escalated", escalation_user_task_key: "ut-9" }, null);
-  assertEquals(patch, { status: "running", escalation_user_task_key: null });
+  assertEquals(patch, { status: "running", escalation_user_task_key: null, escalation_question: null });
 });
 
-test("deriveFeatureEscalationPatch: a run past escalated with a stale pointer clears only the pointer", () => {
+test("deriveFeatureEscalationPatch: a run past escalated with a stale pointer clears the pointer + question", () => {
   const patch = deriveFeatureEscalationPatch({ status: "awaiting_operator", escalation_user_task_key: "ut-9" }, null);
-  assertEquals(patch, { escalation_user_task_key: null });
+  assertEquals(patch, { escalation_user_task_key: null, escalation_question: null });
+});
+
+// Self-heal: a task completed out-of-band (external UI, bypassing the answer operation) leaves the
+// run un-parked but with the pointer still recording the observed task. The poller clears BOTH the
+// pointer and the now-stale question so the UI stops surfacing an Escalation on a resumed run.
+test("deriveFeatureEscalationPatch: un-park after an out-of-band completion clears the stale question", () => {
+  const patch = deriveFeatureEscalationPatch({ status: "escalated", escalation_user_task_key: "ut-9" }, null);
+  assertEquals(patch?.escalation_question, null);
+});
+
+// The pre-observation self-healing window (record-feature-escalation has persisted the question but
+// the task is not yet visible, so the pointer is still NULL): a premature "not parked" pass must NOT
+// clobber the freshly-persisted question — only reset the transient status, re-flipped next pass.
+test("deriveFeatureEscalationPatch: the pre-observation self-healing window never clears the question", () => {
+  const patch = deriveFeatureEscalationPatch({ status: "escalated", escalation_user_task_key: null }, null);
+  assertEquals(patch, { status: "running" });
 });
 
 test("deriveFeatureEscalationPatch: a clean running run not parked yields no patch", () => {
@@ -105,7 +121,7 @@ test("pollFeatureEscalations: a parked run is flipped to escalated with the comp
   assertEquals(stores.feature_runs[0].escalation_question, null);
 });
 
-test("pollFeatureEscalations: an escalated run whose task is gone resumes to running and clears the pointer", async () => {
+test("pollFeatureEscalations: an escalated run whose task is gone resumes to running, clears the pointer + stale question", async () => {
   const { data, stores } = memData();
   stores.feature_runs = [
     { feature_key: "o/r#2", status: "escalated", process_key: "200", escalation_question: "Q", escalation_user_task_key: "ut-2" },
@@ -116,6 +132,8 @@ test("pollFeatureEscalations: an escalated run whose task is gone resumes to run
 
   assertEquals(stores.feature_runs[0].status, "running");
   assertEquals(stores.feature_runs[0].escalation_user_task_key, null);
+  // The observed task is gone → self-heal the now-stale question so the UI stops surfacing it.
+  assertEquals(stores.feature_runs[0].escalation_question, null);
 });
 
 test("pollFeatureEscalations: a re-observed parked run keeps its persisted question, only filling the key", async () => {

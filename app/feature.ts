@@ -46,9 +46,11 @@ export interface FeatureRun {
    * "waiting_review", or "operator: <note>"). */
   delivery_label: string | null;
   /** The parked `feature-escalation` user task's `question`, persisted at escalation entry by the
-   * `record-feature-escalation` worker (NOT by `pollFeatureEscalations`, which deliberately never
-   * writes it) so the pages can show what the agent asked. NULL whenever the run is not parked at an
-   * escalation (cleared on the exit paths — `record-feature` / the answer operation). */
+   * `record-feature-escalation` worker (NOT by `pollFeatureEscalations` while parked, which
+   * deliberately never writes it) so the pages can show what the agent asked. NULL whenever the run
+   * is not parked at an escalation — cleared on the exit paths (`record-feature` / the answer
+   * operation), and, as a self-heal, by `pollFeatureEscalations` when a previously-observed task is
+   * completed out-of-band (see `deriveFeatureEscalationPatch`). */
   escalation_question: string | null;
   /** The completable native `feature-escalation` user-task key the answer affordance posts to
    * (`completeUserTaskAttributed`) and the pages gate the answer controls on (`showWhenField`). Set by
@@ -154,12 +156,16 @@ export interface FeatureEscalationParked {
  * `escalated` on the next pass once the task is observed.
  *
  * - parked → flip `status` to `escalated` and denormalise the completable `userTaskKey` so the pages
- *   can drive an attributed answer. It never writes `escalation_question` — that is the service
- *   task's to own (set) and the exit paths' to clear (record-feature / the answer operation), so the
- *   poller can never clobber the persisted question during that self-healing window.
+ *   can drive an attributed answer. It never writes `escalation_question` while parked — that is the
+ *   service task's to own (set) and the exit paths' to clear (record-feature / the answer operation),
+ *   so the poller can never clobber the persisted question during that self-healing window.
  * - un-parked → clear the completable-task pointer; a run still marked `escalated` has resumed
  *   (answered / looped back to implement-task), so it returns to `running`. A run already advanced
- *   past `escalated` by a downstream worker keeps that status — only the pointer is cleared. */
+ *   past `escalated` by a downstream worker keeps that status — only the pointer is cleared. Once the
+ *   pointer was actually OBSERVED (non-NULL) and the task is now gone, `escalation_question` is also
+ *   cleared here, self-healing a question left populated when the task was completed out-of-band
+ *   (bypassing the answer operation). This is gated on the observed pointer precisely so it cannot
+ *   fire in the pre-observation self-healing window, where the pointer is still NULL. */
 export function deriveFeatureEscalationPatch(
   run: Pick<FeatureRun, "status" | "escalation_user_task_key">,
   parked: FeatureEscalationParked | null,
@@ -170,7 +176,17 @@ export function deriveFeatureEscalationPatch(
     if (run.escalation_user_task_key !== parked.userTaskKey) patch.escalation_user_task_key = parked.userTaskKey;
   } else {
     if (run.status === "escalated") patch.status = "running";
-    if (run.escalation_user_task_key !== null) patch.escalation_user_task_key = null;
+    // Un-park cleanup — fires ONLY once the poller has actually OBSERVED the task (pointer non-NULL)
+    // and it is now gone. This self-heals a `question` left populated when the task was completed
+    // out-of-band (e.g. an external task UI, bypassing the answer operation that normally clears it),
+    // which would otherwise keep the UI showing an Escalation on a run that has resumed. Gating on
+    // the pointer being non-NULL is what makes it safe: during the brief self-healing window between
+    // `record-feature-escalation` (which persists the question but leaves the pointer NULL) and the
+    // task appearing, the pointer is NULL, so this never clobbers the freshly-persisted question.
+    if (run.escalation_user_task_key !== null) {
+      patch.escalation_user_task_key = null;
+      patch.escalation_question = null;
+    }
   }
   return Object.keys(patch).length > 0 ? patch : null;
 }
