@@ -3,35 +3,18 @@
 import { test } from "node:test";
 import { assertEquals } from "#test-assert";
 import type { AppApi } from "@nanobpm/urban";
+import { memBlackboardData } from "../test/blackboardDb.ts";
 import { noopLog } from "../test/log.ts";
 import readBlackboard from "./readBlackboard.ts";
 import appendBlackboard from "./appendBlackboard.ts";
 
-function memApp(): { app: AppApi; stores: Record<string, any[]> } {
-  const stores: Record<string, any[]> = {};
-  const seq: Record<string, number> = {};
-  function tbl(name: string, pk = "id") {
-    const rows = (stores[name] ??= [] as any[]);
-    return {
-      async insert(row: any) {
-        if (pk === "id") {
-          const id = (seq[name] = (seq[name] ?? 0) + 1);
-          rows.push({ id, ...row });
-          return id;
-        }
-        rows.push({ ...row });
-        return row[pk];
-      },
-      async find(where: any = {}) {
-        return rows.filter((r) => Object.entries(where).every(([k, v]) => r[k] === v));
-      },
-      async findOne(where: any = {}) {
-        return rows.find((r) => Object.entries(where).every(([k, v]) => r[k] === v));
-      },
-    };
-  }
-  const app = { data: { table: (n: string, pk?: string) => tbl(n, pk) }, log: noopLog() } as any as AppApi;
-  return { app, stores };
+// The operations bind to `app.data`; back it with a real in-memory SQLite DataLayer (the same
+// harness `app/blackboard.test.ts` uses) so the hook path exercises the shared `BlackboardStore` /
+// `agentic_blackboard` table end-to-end. `db` is exposed for row-count assertions.
+function memApp(): { app: AppApi; db: { all<T>(sql: string, params?: unknown[]): T[] } } {
+  const { data, db } = memBlackboardData();
+  const app = { data, log: noopLog() } as unknown as AppApi;
+  return { app, db };
 }
 
 function req(method: string, query: Record<string, string>) {
@@ -106,14 +89,15 @@ test("POST with a blank body → 400", async () => {
 });
 
 test("POST is idempotent on dedupe_key (retry → 200, not a duplicate)", async () => {
-  const { app, stores } = memApp();
+  const { app, db } = memApp();
   await seedPlan(app, "o/r#1", "tok");
   const body = { author_task: "t", body: "claim", dedupe_key: "t:claim:1" };
   assertEquals((await call(app, "POST", { token: "tok" }, body)).status, 201);
   const retry = await call(app, "POST", { token: "tok" }, body);
   assertEquals(retry.status, 200);
   assertEquals(retry.body.inserted, false);
-  assertEquals(stores["plan_blackboard"].length, 1);
+  const [{ n }] = db.all<{ n: number }>("SELECT COUNT(*) AS n FROM agentic_blackboard WHERE scope = ?", ["o/r#1"]);
+  assertEquals(n, 1);
 });
 
 test("GET ?since returns only newer entries", async () => {
