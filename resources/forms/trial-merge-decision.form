@@ -1,0 +1,25 @@
+{
+  "id": "trial-merge-decision",
+  "schemaVersion": 18,
+  "type": "default",
+  "components": [
+    {
+      "type": "select",
+      "key": "action",
+      "label": "Action",
+      "values": [
+        { "label": "Proceed — accept the red trial merge and continue", "value": "proceed" },
+        { "label": "Rebase — re-run the trial merge", "value": "rebase" },
+        { "label": "Abandon — stop and finalize the plan", "value": "abandon" }
+      ],
+      "validate": {
+        "required": true
+      }
+    },
+    {
+      "type": "textarea",
+      "key": "notes",
+      "label": "Notes"
+    }
+  ]
+}

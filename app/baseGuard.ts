@@ -9,6 +9,7 @@
 //
 // This module detects that case so the merge worker can escalate (retarget) instead of landing.
 
+import { classifyEscalation, type EscalationDisposition } from "./escalationTaxonomy.ts";
 import { baseBranchLanded, fetchDefaultBranch, fetchPrBase } from "./github.ts";
 
 /** The landing-target facts the dead-end decision is made from. */
@@ -59,4 +60,14 @@ export async function checkBaseTarget(
   const landed = await baseBranchLanded(repo, base, token);
   const target: BaseTarget = { base, defaultBranch, landed };
   return { deadEnd: isDeadEndBase(target), base, defaultBranch, landed };
+}
+
+/** Classify a base-guard result against the canonical escalation taxonomy. A confirmed
+ * dead-end base is a `decision-required` escalation (a human must retarget the PR); anything
+ * else — a legitimately-stacked open base, an ambiguous signal, or a transport hiccup — is not
+ * an escalation (`none`), so the guard never blocks a valid merge. Delegates to
+ * {@link classifyEscalation} so the merge worker shares one source of truth with every other
+ * raise site. */
+export function classifyBaseGuard(result: Pick<BaseGuardResult, "deadEnd">): EscalationDisposition {
+  return classifyEscalation({ kind: "dead-end-base", deadEnd: result.deadEnd });
 }

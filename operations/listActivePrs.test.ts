@@ -7,13 +7,24 @@ import type { AppApi } from "@nanobpm/urban";
 import { noopLog } from "../test/log.ts";
 import handler from "./listActivePrs.ts";
 
-function memApp(rows: any[]): AppApi {
-  const tbl = {
-    async all() {
-      return rows;
-    },
+function memApp(rows: any[], escalations: any[] = []): AppApi {
+  const table = (name: string) => {
+    if (name === "escalations") {
+      return {
+        async find(where: Record<string, unknown>) {
+          return escalations.filter((e) =>
+            Object.entries(where).every(([k, v]) => e[k] === v)
+          );
+        },
+      };
+    }
+    return {
+      async all() {
+        return rows;
+      },
+    };
   };
-  return { data: { table: () => tbl }, log: noopLog() } as any as AppApi;
+  return { data: { table }, log: noopLog() } as any as AppApi;
 }
 
 function input(headers: Record<string, string> = {}) {
@@ -44,6 +55,28 @@ test("returns 200 with a count + projected active PRs", async () => {
   assertEquals(r.body.prs.length, 1);
   assertEquals(r.body.prs[0].prKey, "o/r#1");
   assertEquals(r.body.prs[0].processKey, "9");
+});
+
+test("surfaces openEscalation for an escalated PR from its open escalations row (both loops)", async () => {
+  // Regression: a merge-loop escalation parks on a message catch (no user task), so deriving
+  // openEscalation from a user-task probe hid it. Deriving from the canonical `escalations` row
+  // surfaces it. Two escalated PRs — one with an open row (visible), one already answered (null).
+  const app = memApp(
+    [
+      { pr_key: "o/r#10", repo: "o/r", number: 10, url: "u10", title: "merge blocked", status: "escalated", current_round: 3, process_key: "m1", updated_at: "2026-02-02" },
+      { pr_key: "o/r#11", repo: "o/r", number: 11, url: "u11", title: "answered", status: "escalated", current_round: 4, process_key: "m2", updated_at: "2026-02-01" },
+    ],
+    [
+      { id: 1, pr_key: "o/r#10", status: "open", question: "Resolve the conflict on the branch, then retry?" },
+      { id: 2, pr_key: "o/r#11", status: "answered", question: "old question" },
+    ],
+  );
+  const res = (await handler(input(), app)) as any;
+  assertEquals(res.status, 200);
+  const p10 = res.body.prs.find((p: any) => p.prKey === "o/r#10");
+  const p11 = res.body.prs.find((p: any) => p.prKey === "o/r#11");
+  assertEquals(p10.openEscalation, "Resolve the conflict on the branch, then retry?");
+  assertEquals(p11.openEscalation, null);
 });
 
 test("shared-secret guard rejects a missing secret when configured", async () => {

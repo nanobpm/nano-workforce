@@ -1,0 +1,23 @@
+{
+  "id": "pr-escalation",
+  "schemaVersion": 18,
+  "type": "default",
+  "components": [
+    {
+      "type": "textarea",
+      "key": "question",
+      "label": "Escalation question",
+      "description": "A human decision is needed to resume the PR review-convergence loop.",
+      "readonly": true
+    },
+    {
+      "type": "textarea",
+      "key": "answer",
+      "label": "Your answer",
+      "description": "Your reply resumes the review loop and is handed to the next review round.",
+      "validate": {
+        "required": true
+      }
+    }
+  ]
+}

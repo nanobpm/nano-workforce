@@ -7,7 +7,7 @@
 // escalation. The agent-raised / max-rounds arms omit the flag (no prior round row) and must
 // still record the round.
 import { test } from "node:test";
-import { assert, assertEquals } from "#test-assert";
+import { assertEquals } from "#test-assert";
 import handler from "../workers/persist-escalation/worker.ts";
 
 function fakeApp() {
@@ -99,62 +99,60 @@ test("persist-escalation heals a missing pull_requests parent before recording",
 });
 
 
-test("a padded question is persisted trimmed (no whitespace drift)", async () => {
+test("a padded question is persisted trimmed and returned trimmed (no whitespace drift)", async () => {
   const { app, inserts, updates } = fakeApp();
   const job = { variables: { prKey: "o/r#1", round: 4, status: "needs_input", question: "  needs a decision  " } };
-  await handler(job as any, app as any);
+  const out = await handler(job as any, app as any);
   assertEquals((inserts.escalations[0] as any).question, "needs a decision", "escalation stores the trimmed question");
-  assertEquals((updates.pull_requests![0] as any).patch.open_escalation_question, "needs a decision", "denormalised question is trimmed too");
+  // The trimmed question is returned as a process variable so the downstream `wait-answer`
+  // userTask + `pr-escalation.form` can display it (there is no denormalised PR-row pointer).
+  assertEquals((out as any).question, "needs a decision", "the returned question is trimmed too");
+  const patch = (updates.pull_requests![0] as any).patch;
+  assertEquals(patch.open_escalation_question, undefined, "no denormalised question pointer is written");
+  assertEquals(patch.open_escalation_id, undefined, "no denormalised id pointer is written");
 });
 
-// Defence-in-depth for the persist-escalation worker: if the gateway ever DOES route a
-// blank-status / blank-question job here (an agent-raised `needs_input`/`blocked` with no
-// question, or the max-rounds / review-stalled arms), the worker must NOT throw — throwing
-// parked an un-remediable JobNoRetries incident (the empty "(no question provided)" escalations
-// on Magikcraft/nano-bpm #597/#599). It opens an *answerable* escalation with a fabricated,
-// concrete question and the agent's transcript attached, so a human can unblock the loop from
-// the UI.
+// REGRESSION (nano-workforce ADR 0002 §1 — retire the blank-question fabrication failure mode).
 //
-// NOTE: the `gw-status` gateway no longer routes an empty/unknown status here — that now
-// defaults to `f_addressed` and re-enters the review wait (see roundResultDefault.test.ts).
-// This fabrication path stays as a worker-level backstop for the explicit escalation arms.
-test("blank question fabricates an answerable escalation (no throw, no incident)", async () => {
+// A blank/absent question must be treated as a NON-escalation: no escalation row, no PR status
+// flip to `escalated`, no wait. The worker previously FABRICATED a concrete question from the
+// transcript and opened an answerable escalation — that is exactly the failure mode this slice
+// retires. This test reproduces that defect (it fails against the old fabricating worker, which
+// opened an escalation with `escalationId:42`) and pins the new non-escalation behaviour.
+//
+// The `gw-status` gateway is the primary guard (its `f_escalate` arm now requires a non-blank
+// question — see roundResultDefault.test.ts), so a blank-question round never reaches this worker
+// in practice; this asserts the worker's defence-in-depth via the canonical taxonomy.
+test("blank question is a non-escalation (no row fabricated, no status flip)", async () => {
   for (const question of [undefined, "", "   "]) {
     const { app, inserts, updates } = fakeApp();
     const job = {
       variables: {
         prKey: "o/r#1",
         round: 2,
+        status: "needs_input",
         ...(question === undefined ? {} : { question }),
         "io.nanobpm.agentResult": { output: "the agent's prose review, no result file" },
       },
     };
     const out = await handler(job as any, app as any);
-    assertEquals((out as any).escalationId, 42, "an escalation is opened, not refused");
-    assertEquals(inserts.escalations.length, 1, "escalation row written");
-    const esc = inserts.escalations[0] as any;
-    assert(esc.question.trim().length > 0, "fabricated question is concrete/non-blank");
-    assert(
-      esc.question.includes("machine-readable result"),
-      "no-result rounds explain the missing status",
-    );
-    assertEquals(esc.transcript, "the agent's prose review, no result file", "transcript attached");
-    // Default status for an unclassified escalation is a question needing input.
-    assertEquals(esc.kind, "question");
-    const pr = updates.pull_requests![0] as any;
-    assertEquals(pr.patch.open_escalation_question, esc.question, "denormalised question set");
+    assertEquals((out as any).escalated, false, "the job reports no escalation");
+    assertEquals((out as any).escalationId, null, "no escalation id is minted");
+    assertEquals(inserts.escalations.length, 0, "no escalation row is fabricated");
+    assertEquals(inserts.rounds.length, 0, "no round row is written for a non-escalation");
+    assertEquals(updates.pull_requests?.length ?? 0, 0, "the PR is never flipped to escalated");
   }
 });
 
-// When a non-empty-but-unclassified status arrives with no question, the fabricated question
-// names the status so the human sees what the agent reported.
-test("unclassified status without a question names the status in the fabricated question", async () => {
-  const { app, inserts } = fakeApp();
+// A non-human-blocking status (never routed here by `gw-status`, but defensively handled) is a
+// transient signal, not a decision-required escalation: it opens nothing.
+test("a non-decision status is a non-escalation even with no question", async () => {
+  const { app, inserts, updates } = fakeApp();
   const job = { variables: { prKey: "o/r#1", round: 3, status: "in_progress" } };
-  await handler(job as any, app as any);
-  const esc = inserts.escalations[0] as any;
-  assert(esc.question.includes("in_progress"), "fabricated question references the raw status");
-  assertEquals(esc.kind, "blocker", "a non needs_input status is a blocker escalation");
+  const out = await handler(job as any, app as any);
+  assertEquals((out as any).escalated, false);
+  assertEquals(inserts.escalations.length, 0, "no escalation is opened for a transient status");
+  assertEquals(updates.pull_requests?.length ?? 0, 0, "the PR is not flipped to escalated");
 });
 
 // When repo/prNumber process variables are absent the heal still runs by parsing the canonical

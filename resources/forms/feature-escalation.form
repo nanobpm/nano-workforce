@@ -1,0 +1,27 @@
+{
+  "id": "feature-escalation",
+  "schemaVersion": 18,
+  "type": "default",
+  "components": [
+    {
+      "type": "select",
+      "key": "resolution",
+      "label": "Resolution",
+      "values": [
+        { "label": "Answer — re-dispatch the task with this guidance", "value": "answer" },
+        { "label": "Abandon — give up on this task", "value": "abandon" }
+      ],
+      "validate": {
+        "required": true
+      }
+    },
+    {
+      "type": "textarea",
+      "key": "answer",
+      "label": "Answer / guidance for the implementation agent",
+      "conditional": {
+        "hide": "=resolution != \"answer\""
+      }
+    }
+  ]
+}

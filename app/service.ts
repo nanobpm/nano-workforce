@@ -115,8 +115,6 @@ interface PullRequest {
   updated_at: string;
   converged_at: string | null;
   merged_at: string | null;
-  open_escalation_id: number | null;
-  open_escalation_question: string | null;
   // Job-activation visibility (005_job_activation.sql), written by the poller's
   // `pollJobActivation` pass. `active_worker` is the leasing worker's name while an
   // agent is actively working the `senior:pr-review` round; NULL means the job is
@@ -353,10 +351,11 @@ export async function submitPr(
   const abandonToken = existing?.abandon_token ?? mintAbandonToken();
   if (existing) {
     // A prior run (cancelled, converged, or otherwise superseded) may have left an OPEN
-    // escalation row plus the denormalised pointer on the PR. A fresh convergence run must not
-    // inherit that stale answer form — the "(no question provided)" bleed-through on resubmit
-    // (Magikcraft/nano-bpm #597/#599). Mark any still-open escalations `stale` and clear the
-    // pointer below, mirroring the plan re-plan cleanup (issue #25 in plan.ts).
+    // escalation row. A fresh convergence run must not inherit that stale answer — the
+    // "(no question provided)" bleed-through on resubmit (Magikcraft/nano-bpm #597/#599).
+    // Mark any still-open escalations `stale`, mirroring the plan re-plan cleanup (issue #25
+    // in plan.ts). The review-loop escalation is now a native userTask; its open state is derived
+    // from the canonical `escalations` row status, so there is no denormalised PR-row pointer to clear.
     for (const e of await escs(data).find({ pr_key: parsed.prKey, status: "open" })) {
       await escs(data).update(e.id, { status: "stale" });
     }
@@ -372,10 +371,6 @@ export async function submitPr(
       outcome: null,
       converged_at: null,
       merged_at: null,
-      // Drop any denormalised open-escalation pointer from the prior run so the answer form
-      // does not resurface a dead/stale question on the re-opened PR.
-      open_escalation_id: null,
-      open_escalation_question: null,
       abandon_token: abandonToken,
       updated_at: ts,
     });
@@ -486,22 +481,26 @@ export async function answerEscalation(
   prKey: string,
   answer: string,
 ) {
-  const open = (await escs(data).find({ pr_key: prKey, status: "open" })).sort((a, b) => b.id - a.id)[0];
-  if (!open) return { ok: false, reason: "no open escalation" };
+  const open = (await escs(data).find({ pr_key: prKey, status: "open" })).sort((a, b) => b.id - a.id);
+  if (open.length === 0) return { ok: false, reason: "no open escalation" };
   const ts = now();
-  await escs(data).update(open.id, { answer, status: "answered", answered_at: ts });
+  await escs(data).update(open[0].id, { answer, status: "answered", answered_at: ts });
+  // `pr.persist-escalation` always INSERTs a new open row, so a retry can leave duplicate open rows
+  // for this PR. Retire any older ones to `stale` so none is left `open` to phantom-surface on
+  // /status (mirrors `submitPr`'s resubmit cleanup and the review loop's `pr.answer-escalation`).
+  for (const dup of open.slice(1)) {
+    await escs(data).update(dup.id, { status: "stale" });
+  }
   await prs(data).update(prKey, {
     status: "converging",
     updated_at: ts,
-    open_escalation_id: null,
-    open_escalation_question: null,
   });
   await engine.publishMessage({
     name: "escalation-answered",
     correlationKey: prKey,
-    variables: { answer, escalationId: open.id },
+    variables: { answer, escalationId: open[0].id },
   });
-  return { ok: true, escalationId: open.id };
+  return { ok: true, escalationId: open[0].id };
 }
 
 /** A PR currently in flight, as reported by the status endpoint. */
@@ -526,27 +525,45 @@ export interface ActivePr {
 
 /** Every tracked PR not in a terminal state (converged/abandoned), newest-updated first. Backs
  * the GET status endpoint so an operator or an external harness can see what is in flight
- * without reading the datasource directly. */
+ * without reading the datasource directly. The open-escalation question is derived from the
+ * canonical `escalations` audit row — the single source of truth (no denormalised PR-row
+ * pointer). A PR reads `status="escalated"` only while a token is parked awaiting a human answer,
+ * and the row it raised carries `status="open"` until that answer is recorded — by the review
+ * loop's `pr.answer-escalation` step on `wait-answer` completion, or the merge loop's
+ * `answerEscalation` message path. Deriving from the row (not a per-loop wait mechanism) surfaces
+ * BOTH loops' escalations: the merge loop parks on a message catch with no user task, so a
+ * user-task probe would silently hide it. Once answered the row leaves `open`, so `openEscalation`
+ * derives back to null. */
 export async function activePrs(data: DataLayer): Promise<ActivePr[]> {
   const all = await prs(data).all();
-  return all
+  const active = all
     .filter((p) => !TERMINAL_STATUSES.includes(p.status))
-    .sort((a, b) => (a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0))
-    .map((p) => ({
-      prKey: p.pr_key,
-      repo: p.repo,
-      number: p.number,
-      url: p.url,
-      title: p.title ?? null,
-      status: p.status,
-      round: p.current_round,
-      processKey: p.process_key ?? null,
-      waitingSince: p.waiting_since ?? null,
-      openEscalation: p.open_escalation_question ?? null,
-      updatedAt: p.updated_at,
-      activeWorker: p.active_worker ?? null,
-      leaseUntil: p.lease_until ?? null,
-    }));
+    .sort((a, b) => (a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0));
+  // Only an `escalated` PR is parked awaiting a human answer (either loop). Surface the question
+  // from its latest still-open `escalations` row; a resubmit retires stale rows and finalize/merge
+  // move the PR off `escalated`, so an open row on an escalated PR is a genuinely live escalation.
+  // Fetch every open row in one query (avoids an N+1 over escalated PRs), then keep the newest per PR.
+  const openEscByPr = new Map<string, string>();
+  const escalatedPrs = new Set(active.filter((p) => p.status === "escalated").map((p) => p.pr_key));
+  for (const e of (await escs(data).find({ status: "open" })).sort((a, b) => b.id - a.id)) {
+    if (!escalatedPrs.has(e.pr_key) || openEscByPr.has(e.pr_key)) continue;
+    if (e.question) openEscByPr.set(e.pr_key, e.question);
+  }
+  return active.map((p) => ({
+    prKey: p.pr_key,
+    repo: p.repo,
+    number: p.number,
+    url: p.url,
+    title: p.title ?? null,
+    status: p.status,
+    round: p.current_round,
+    processKey: p.process_key ?? null,
+    waitingSince: p.waiting_since ?? null,
+    openEscalation: openEscByPr.get(p.pr_key) ?? null,
+    updatedAt: p.updated_at,
+    activeWorker: p.active_worker ?? null,
+    leaseUntil: p.lease_until ?? null,
+  }));
 }
 
 /** One review-ready poll pass (SPEC §10): for every PR waiting on a review, fetch its GitHub

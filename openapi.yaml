@@ -454,68 +454,54 @@ components:
       properties:
         ok:
           type: boolean
-    FeatureAnswerRequest:
-      description: "Answer an implementation-phase task escalation (issue #25). Supply the target by
-        EXACTLY ONE of `corrKey`, or the `plan`+`task` pair the delegate derives it from; `answer`
-        is always required. Modeled as `oneOf` named variants (Camunda REST v2 pattern) so a body
-        that supplies neither addressing form — or mixes them — is a 400 at the edge that names the
-        allowed shapes, instead of the delegate re-deriving the precedence by hand."
-      oneOf:
-        - $ref: "#/components/schemas/FeatureAnswerByCorrKey"
-        - $ref: "#/components/schemas/FeatureAnswerByPlanTask"
-    FeatureAnswerByCorrKey:
+    AgentCompleteRequest:
       type: object
       additionalProperties: false
+      description: >-
+        Complete an escalation user task AS AN AGENT (epic #156 / ADR 0046). The agent submits the
+        SAME typed form variables a human would through the task inbox; the host routes them through
+        the one canonical attributed completer, records the agent's identity for the audit trail, and
+        resumes the process. Only the migrated escalation user tasks may be completed this way.
       required:
-        - corrKey
-        - answer
+        - userTaskKey
+        - agentId
+        - variables
       properties:
-        corrKey:
-          type: string
-          description: The task correlation key, `<plan_key>:<task_id>` (e.g. owner/repo#12:task-3).
-        answer:
+        userTaskKey:
           type: string
           minLength: 1
-          description: The operator's answer that resumes the parked implementation agent.
-    FeatureAnswerByPlanTask:
-      type: object
-      additionalProperties: false
-      required:
-        - plan
-        - task
-        - answer
-      properties:
-        plan:
-          type: string
-          description: Plan reference (owner/repo#N); combined with `task` to derive the corrKey.
-        task:
-          type: string
-          description: Task id within the plan; combined with `plan` to derive the corrKey.
-        answer:
+          description: The engine user-task key of the parked escalation task (from GET /tasks/api/tasks).
+        agentId:
           type: string
           minLength: 1
-          description: The operator's answer that resumes the parked implementation agent.
-    PlanAnswerRequest:
-      type: object
-      additionalProperties: false
-      required:
-        - plan
-        - directive
-      properties:
-        plan:
-          type: string
-          description: Plan reference (owner/repo#N), also the message correlation key.
-        directive:
-          type: string
+          description: The completing agent's identity (ADR 0046), recorded for attribution.
+        variables:
+          type: object
+          additionalProperties: true
           description: >-
-            One of `proceed` or `revise` (case-insensitive; normalized to lowercase and trimmed
-            server-side, see `parsePlanEscalationDirective`).
-            `proceed` dispatches the current unapproved plan as an explicit human override;
-            `revise` loops back to the planner with the note folded into planFindings and a fresh
-            review budget.
+            The typed form completion variables — the SAME shape a human submits (e.g.
+            `{ resolution, answer }`, `{ directive, notes }`, `{ action, notes }`, or `{ answer }`).
+    RevertCompletionRequest:
+      type: object
+      additionalProperties: false
+      description: >-
+        Revert/override an agent escalation completion (the reversibility guarantee of ADR 0046). A
+        human marks a reversible agent completion reverted so the agent's answer is no longer treated
+        as authoritative; the reverter's identity + timestamp are recorded.
+      required:
+        - completionId
+        - reverterId
+      properties:
+        completionId:
+          type: integer
+          description: The `task_completions` id returned when the agent completion was recorded.
+        reverterId:
+          type: string
+          minLength: 1
+          description: The human identity overriding the agent completion, recorded for the audit trail.
         note:
           type: string
-          description: Human guidance for the planner (used for `revise`; optional for `proceed`).
+          description: Optional corrective guidance from the human that overrides the agent's answer.
     BlackboardEntry:
       type: object
       additionalProperties: false
@@ -770,9 +756,11 @@ paths:
   /actions/message:
     post:
       operationId: postMessage
-      summary: Publish a message / answer an escalation. For escalation-answered,
-        feature-escalation-answered, and plan-escalation-answered names, runs the corresponding
-        answer flow; otherwise a plain publishMessage.
+      summary: "Publish a message / answer an escalation. For the merge-loop `escalation-answered`
+        name, runs the merge-loop escalation answer flow; otherwise a plain publishMessage. The
+        epic #156 escalation
+        kinds (task, plan-review, trial-merge, PR review-loop) are native user tasks answered via
+        the task inbox (POST /tasks/api/complete), not this route."
       requestBody:
         required: true
         content:
@@ -795,13 +783,7 @@ paths:
                   properties:
                     answer:
                       type: string
-                    directive:
-                      type: string
-                      description: >-
-                        One of `proceed` or `revise` (case-insensitive; normalized to lowercase and
-                        trimmed server-side, see `parsePlanEscalationDirective`).
-                    note:
-                      type: string
+                      description: The operator's answer that resumes a parked merge-loop escalation.
       responses:
         "200":
           description: The message was published (or the escalation answered).
@@ -821,11 +803,13 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/MessageResult"
-  /hooks/feature-answer:
+  /hooks/agent-complete:
     post:
-      operationId: answerFeatureEscalation
-      summary: "Answer an implementation-phase task escalation out of band (issue #25). Optional
-        shared-secret guard (x-hook-secret), enforced only when NANO_PR_WEBHOOK_SECRET is set."
+      operationId: agentCompleteEscalation
+      summary: "Complete an escalation user task as an agent assignee (ADR 0046). Reuses the same
+        `.form` contract + engine resume path a human uses; records the agent identity for
+        attribution. Optional shared-secret guard (x-hook-secret), enforced only when
+        NANO_PR_WEBHOOK_SECRET is set."
       security:
         - hookSecret: []
         - {}
@@ -834,16 +818,16 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/FeatureAnswerRequest"
+              $ref: "#/components/schemas/AgentCompleteRequest"
       responses:
         "200":
-          description: The escalation was answered and the parked agent resumed.
+          description: The agent completed the escalation task and the process resumed.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/MessageResult"
         "400":
-          description: A required field was missing (answer, or a resolvable correlation key).
+          description: A required field was missing (userTaskKey, agentId, variables), or the target is not an escalation task.
           content:
             application/json:
               schema:
@@ -855,16 +839,18 @@ paths:
               schema:
                 $ref: "#/components/schemas/MessageResult"
         "404":
-          description: No matching open task escalation for the correlation key.
+          description: No open escalation user task matches the userTaskKey.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/MessageResult"
-  /hooks/plan-answer:
+  /hooks/revert-completion:
     post:
-      operationId: answerPlanEscalation
-      summary: "Answer a plan-review cap escalation out of band. Optional shared-secret guard
-        (x-hook-secret), enforced only when NANO_PR_WEBHOOK_SECRET is set."
+      operationId: revertEscalationCompletion
+      summary: "Revert/override an agent escalation completion (ADR 0046 reversibility). A human marks
+        a reversible agent completion reverted so the agent's answer is no longer authoritative.
+        Optional shared-secret guard (x-hook-secret), enforced only when NANO_PR_WEBHOOK_SECRET is
+        set."
       security:
         - hookSecret: []
         - {}
@@ -873,16 +859,16 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/PlanAnswerRequest"
+              $ref: "#/components/schemas/RevertCompletionRequest"
       responses:
         "200":
-          description: The escalation was answered and the parked plan resumed.
+          description: The agent completion was reverted.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/MessageResult"
         "400":
-          description: A required field was missing (plan or directive).
+          description: A required field was missing, or the completion is not reversible / already reverted.
           content:
             application/json:
               schema:
@@ -894,7 +880,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/MessageResult"
         "404":
-          description: No matching open plan escalation for the plan key.
+          description: No completion matches the completionId.
           content:
             application/json:
               schema:

@@ -11,9 +11,9 @@
 import type { AppJobHandler } from "@nanobpm/urban";
 import { matchTags, tag } from "@nanobpm/urban/effect";
 import { abandonTokenFromUrl } from "../../app/abandon.ts";
-import { checkBaseTarget } from "../../app/baseGuard.ts";
+import { checkBaseTarget, classifyBaseGuard } from "../../app/baseGuard.ts";
 import { enqueueViaComment, fetchPrState, mergePr } from "../../app/github.ts";
-import { loadMergeProtocol } from "../../app/mergeProtocol.ts";
+import { classifyMergeLanding, DEFAULT_MERGE_PROTOCOL, loadMergeProtocol } from "../../app/mergeProtocol.ts";
 import { ensurePr, MERGE_ADMIN, MERGE_METHOD } from "../../app/service.ts";
 
 interface In extends Record<string, unknown> {
@@ -77,7 +77,7 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
   // base (typical in a stacked epic) stays the target and reads CLEAN, so nothing else catches it.
   // Best-effort: a transport hiccup leaves `deadEnd:false`, so this never blocks a valid merge.
   const guard = await checkBaseTarget(repo, prNumber, token).catch(() => null);
-  if (guard?.deadEnd) {
+  if (guard && classifyBaseGuard(guard) === "decision-required") {
     await app.data.table("merges", "id").insert({
       pr_key: prKey,
       outcome: "blocked",
@@ -112,8 +112,9 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
     outcome = ok ? "queued" : "blocked";
     detail = ok ? `enqueued via "${comment}"` : `failed to post enqueue comment "${comment}"`;
     auditMethod = "queue-comment";
-  } else if (method === "ui") {
-    // The repo requires a human to click Merge; Merlin can't. Escalate rather than pretend.
+  } else if (classifyMergeLanding(protocol ?? DEFAULT_MERGE_PROTOCOL) === "decision-required") {
+    // The repo requires a human to click Merge (`land.method=ui`); Merlin can't. This is the
+    // only decision-required land method — escalate rather than pretend.
     outcome = "blocked";
     detail = "repo merge protocol requires a manual UI merge (land.method=ui)";
     auditMethod = "ui";

@@ -37,7 +37,7 @@
       "type": "text",
       "id": "subtitle",
       "props": {
-        "text": "Submit a pull request to run the autonomous review-convergence loop. Answer escalations inline; cancel a run at any time.",
+        "text": "Submit a pull request to run the autonomous review-convergence loop. Answer escalations from the Task inbox at /tasks; cancel a run at any time.",
         "variant": "sub"
       }
     },
@@ -329,23 +329,7 @@
                 }
               ]
             }
-          ],
-          "form": {
-            "showWhenField": "open_escalation_id",
-            "title": "Answer the open escalation",
-            "promptField": "open_escalation_question",
-            "inputKey": "answer",
-            "inputLabel": "Your answer",
-            "submitLabel": "Send answer",
-            "action": {
-              "path": "/app/api/actions/message",
-              "body": {
-                "name": "escalation-answered",
-                "correlationKey": "{{row.pr_key}}",
-                "variables": "{{form}}"
-              }
-            }
-          }
+          ]
         }
       }
     }

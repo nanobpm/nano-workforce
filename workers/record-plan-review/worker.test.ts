@@ -9,9 +9,8 @@ import { noopLog } from "../../test/log.ts";
 import { MAX_PLAN_REVIEW_ROUNDS, type PlanReview } from "../../app/plan.ts";
 import handler from "./worker.ts";
 
-function fakeApp(existing: PlanReview[] = [], reviewEscalations: any[] = []) {
+function fakeApp(existing: PlanReview[] = []) {
   const reviewRows: PlanReview[] = [...existing];
-  const escalationRows = [...reviewEscalations];
   const match = (r: Record<string, unknown>, q: Record<string, unknown>) =>
     Object.entries(q).every(([f, v]) => r[f] === v);
   const table = (rows: any[]) => ({
@@ -25,14 +24,12 @@ function fakeApp(existing: PlanReview[] = [], reviewEscalations: any[] = []) {
   });
   return {
     data: {
-      table(name: string) {
-        if (name === "plan_review_escalations") return table(escalationRows);
+      table() {
         return table(reviewRows);
       },
     },
     log: noopLog(),
     _rows: reviewRows,
-    _escalations: escalationRows,
   } as any;
 }
 
@@ -85,12 +82,14 @@ test("approved on the FINAL round still proceeds (no escalation)", async () => {
   assertEquals((out as any).planEscalated, false);
 });
 
-test("answered plan-review escalation starts a fresh epoch and round budget", async () => {
-  const app = fakeApp(
-    priorRounds("o/r#5", MAX_PLAN_REVIEW_ROUNDS, 0),
-    [{ id: 1, plan_key: "o/r#5", status: "answered" }],
+test("a bumped plan-review epoch starts a fresh round budget", async () => {
+  // The `plan-review-decision` user task bumped `planReviewEpoch` to 1 after a prior epoch's
+  // rounds; the next planner pass records round 0 of the new epoch, resetting the budget.
+  const app = fakeApp(priorRounds("o/r#5", MAX_PLAN_REVIEW_ROUNDS, 0));
+  const out = await call(
+    app,
+    { planKey: "o/r#5", approved: false, findings: "new epoch finding", planReviewEpoch: 1 },
   );
-  const out = await call(app, { planKey: "o/r#5", approved: false, findings: "new epoch finding" });
   assertEquals((out as any).planApproved, false);
   assertEquals((out as any).planEscalated, false);
   assertEquals((out as any).planReviewEpoch, 1);

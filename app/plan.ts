@@ -11,13 +11,22 @@
 // hand-written SQL — matching app/service.ts.
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { blackboardUrl, mintBlackboardToken, renderCoordinationBrief } from "./blackboard.ts";
+import { DEFAULT_ESCALATION_SLA_TIMEOUT, escalationSlaTimeout } from "./escalationSla.ts";
 import { ensureBaseBranch, fetchDefaultBranch } from "./github.ts";
 import { clearExclusions } from "./mergeExclusion.ts";
 import { clearTaskDeltas } from "./taskDelta.ts";
-import { resolveTrialMergeAttention, trialMergeWaveFromTaskId } from "./trialMerge.ts";
 
 /** The BPMN process this module drives (resources/processes/plan-fanout.bpmn). */
 export const PLAN_PROCESS_ID = "plan-fanout";
+
+/** The fleet-wide escalation SLA (ISO-8601 duration) seeded onto every plan-fanout instance as the
+ * `escalationSlaTimeout` process variable and evaluated by each escalation user task's interrupting
+ * timer boundary. An operator sets `NANO_ESCALATION_SLA_TIMEOUT`; a malformed value falls back to
+ * {@link DEFAULT_ESCALATION_SLA_TIMEOUT} so a bad env can never deploy an uninterpretable timer. */
+export const ESCALATION_SLA_TIMEOUT = escalationSlaTimeout(
+  process.env.NANO_ESCALATION_SLA_TIMEOUT,
+  DEFAULT_ESCALATION_SLA_TIMEOUT,
+);
 
 const now = () => new Date().toISOString();
 
@@ -38,21 +47,6 @@ export interface Plan {
   task_count: number;
   process_key: string | null;
   outcome: string | null;
-  // Denormalised "oldest open task escalation" pointer (issue #25): the plans page
-  // detail has a single answer form per row, so the oldest still-open per-task
-  // escalation is surfaced here; answering re-points these at the next one (or
-  // clears them). See refreshOpenTaskEscalation.
-  open_task_escalation_id: number | null;
-  open_task_question: string | null;
-  open_task_corr_key: string | null;
-  open_task_id: string | null;
-  // Denormalised "open plan-review escalation" pointer (# plan-review escalation): when the
-  // adversarial plan-review cap is reached without approval, the process parks for a human
-  // proceed/revise directive. These fields surface the newest open plan-level escalation on the
-  // plans page without overloading the implementation-phase `plan_escalations` table.
-  open_plan_escalation_id: number | null;
-  open_plan_findings: string | null;
-  open_plan_round: number | null;
   // Wave-merge barrier (007_wave_gate.sql): the wave index whose PRs the plan is currently
   // waiting to see MERGED before dispatching the next wave, or null when not parked at the barrier.
   gate_wave: number | null;
@@ -114,36 +108,8 @@ export const PLAN_TASK_STATUSES = [
 ] as const;
 export type PlanTaskStatus = typeof PLAN_TASK_STATUSES[number];
 
-/** One implementation-phase escalation (issue #25) — the per-task analogue of the
- * review loop's `escalations` row. `status` is open | answered. */
-export interface PlanEscalation {
-  id: number;
-  plan_key: string;
-  task_id: string;
-  corr_key: string;
-  question: string;
-  answer: string | null;
-  draft_pr_key: string | null;
-  status: string;
-  asked_at: string;
-  answered_at: string | null;
-}
-
 export const plans = (data: DataLayer) => data.table<Plan>("plans", "plan_key");
 export const planTasks = (data: DataLayer) => data.table<PlanTask>("plan_tasks", "id");
-export const planEscalations = (data: DataLayer) =>
-  data.table<PlanEscalation>("plan_escalations", "id");
-
-/** The message the plan-fanout process catches to resume an escalated task; its
- * subscription correlates on `<plan_key>:<task_id>` (see plan-fanout.bpmn). */
-export const FEATURE_ESCALATION_MESSAGE = "feature-escalation-answered";
-
-/** The message the plan-fanout process catches to resume a plan-review escalation; its
- * subscription correlates on `<plan_key>` (see plan-fanout.bpmn). */
-export const PLAN_ESCALATION_MESSAGE = "plan-escalation-answered";
-
-/** Build the per-task message correlation key the process parks on. */
-export const featureCorrKey = (planKey: string, taskId: string) => `${planKey}:${taskId}`;
 
 /** One dependency edge in the plan DAG (issue #20): `task_id` waits for `depends_on_task_id`.
  * Keyed on `plan_key` so a single delete clears a plan's whole edge set (as pr_dependencies). */
@@ -172,31 +138,6 @@ export interface PlanReview {
 }
 export const planReviews = (data: DataLayer) => data.table<PlanReview>("plan_reviews", "plan_key");
 
-export type PlanEscalationDirective = "proceed" | "revise";
-
-export function parsePlanEscalationDirective(input: unknown): PlanEscalationDirective | null {
-  const s = typeof input === "string" ? input.trim().toLowerCase() : "";
-  return s === "proceed" || s === "revise" ? s : null;
-}
-
-/** One plan-review cap escalation. Kept in a dedicated table rather than overloading
- * `plan_escalations`: the latter is task-scoped (`task_id`/`corr_key` are NOT NULL and mirrored
- * onto `plan_tasks`), while this row is plan-scoped and drives the review epoch reset. */
-export interface PlanReviewEscalation {
-  id: number;
-  plan_key: string;
-  epoch: number;
-  round: number;
-  findings: string | null;
-  status: string;
-  directive: PlanEscalationDirective | null;
-  note: string | null;
-  asked_at: string;
-  answered_at: string | null;
-}
-export const planReviewEscalations = (data: DataLayer) =>
-  data.table<PlanReviewEscalation>("plan_review_escalations", "id");
-
 /** Read a positive-integer env override, falling back when unset/blank/invalid. A bad value
  * (e.g. "", "abc", "0", "2.5") must NOT silently become `NaN`/`0` — that would make the round
  * cap `round + 1 >= cap` always false and allow an unbounded revise loop. */
@@ -212,11 +153,9 @@ export function positiveIntEnv(name: string, fallback: number): number {
  * #86). A human `revise` answer starts a fresh epoch, so the next plan gets a full new budget. */
 export const MAX_PLAN_REVIEW_ROUNDS = positiveIntEnv("NANO_PLAN_REVIEW_ROUNDS", 3);
 
-/** The current review epoch is derived from the append-only escalation log: every answered
- * plan-review escalation represents a human decision to leave the prior budget behind. */
-export async function currentPlanReviewEpoch(data: DataLayer, planKey: string): Promise<number> {
-  return await planReviewEscalations(data).count({ plan_key: planKey, status: "answered" });
-}
+/** The current review epoch is a durable process variable (`planReviewEpoch`) bumped by the
+ * `plan-review-decision` user task each time a human answers a plan-review escalation. It is read
+ * back by `record-plan-review` to reset the round budget — there is no derived counter here. */
 
 /** A plan is "done" in exactly these states; everything else (planning, dispatched)
  * is in flight. The cancel guard and the active view key off this. */
@@ -467,18 +406,6 @@ export async function startPlan(
     // Clear them here — the table is keyed on `plan_key`, so one delete drops the
     // whole set (mirrors how record-plan clears `plan_task_deps`).
     await planReviews(data).delete(parsed.planKey);
-    // Same class of stale-row bug for escalation state: task escalations are keyed on `id` (not
-    // `plan_key`), so drop the prior run's rows one-by-one. Otherwise a still-"open" escalation
-    // from the previous run survives the re-plan and `refreshOpenTaskEscalation` re-surfaces a
-    // question for a `task_id` we just deleted from `plan_tasks`.
-    for (const e of await planEscalations(data).find({ plan_key: parsed.planKey })) {
-      await planEscalations(data).delete(e.id);
-    }
-    // Plan-review escalations are also keyed on `id` because they are an audit trail; clear them
-    // on a fresh submission so the epoch derived from answered escalations resets to 0.
-    for (const e of await planReviewEscalations(data).find({ plan_key: parsed.planKey })) {
-      await planReviewEscalations(data).delete(e.id);
-    }
     // Same for the structured impl-change deltas (D5, #55): keyed on `id`, so drop the prior run's
     // rows one-by-one, otherwise a stale delta lingers in the epic report for a task we just deleted.
     await clearTaskDeltas(data, parsed.planKey);
@@ -489,15 +416,6 @@ export async function startPlan(
       task_count: 0,
       issue_url: parsed.url,
       outcome: null,
-      // Reset the denormalised "surfaced escalation" pointer so nothing from the
-      // prior run lingers on the plan row (would otherwise show a dead answer form).
-      open_task_escalation_id: null,
-      open_task_question: null,
-      open_task_corr_key: null,
-      open_task_id: null,
-      open_plan_escalation_id: null,
-      open_plan_findings: null,
-      open_plan_round: null,
       blackboard_token: token,
       base_branch: base,
       updated_at: ts,
@@ -525,6 +443,19 @@ export async function startPlan(
       issueNumber: parsed.number,
       issueUrl: parsed.url,
       planFindings: null,
+      // The plan-review epoch is a durable process variable, bumped by the `plan-review-decision`
+      // user task each time a human answers a plan-review escalation. `record-plan-review` reads it
+      // to reset the per-epoch round budget; it starts at 0 for the first review round.
+      planReviewEpoch: 0,
+      // Escalation-of-the-escalation SLA (U5, #156): the validated ISO-8601 duration seeded onto the
+      // instance and read by each escalation user task's interrupting timer boundary
+      // (`<bpmn:timeDuration>=escalationSlaTimeout`). If a human never answers, the boundary fires and
+      // the process auto-proceeds down the gateway's safe-default arm — durable in-process liveness,
+      // not a poller-side watchdog. `escalationAssignee` is the optional named assignee the escalation
+      // user tasks' `zeebe:assignmentDefinition` resolves (null = unassigned, routed via the
+      // `operators` candidate group); an operator/agent can claim/reassign via the task inbox.
+      escalationSlaTimeout: ESCALATION_SLA_TIMEOUT,
+      escalationAssignee: null,
       // Coordination blackboard (#51): the capability URL + the protocol brief that each
       // implementer agent gets appended to its prompt (composed into `appendPrompt` in
       // plan-fanout.bpmn's implement-task). Advisory shared state, delivered in-band, used
@@ -546,124 +477,3 @@ export async function startPlan(
   return { planKey: parsed.planKey, processKey };
 }
 
-/** Re-point a plan's denormalised "open task escalation" fields at its OLDEST
- * still-open `plan_escalations` row (or clear them when none remain). The page
- * runtime binds a single answer form per plan row, so parallel escalations are
- * surfaced one at a time, oldest-first; this is called after opening an
- * escalation and after answering one. */
-export async function refreshOpenTaskEscalation(data: DataLayer, planKey: string) {
-  const open = (await planEscalations(data).find({ plan_key: planKey, status: "open" }))
-    .sort((a, b) => a.id - b.id)[0];
-  await plans(data).update(planKey, {
-    open_task_escalation_id: open ? open.id : null,
-    open_task_question: open ? open.question : null,
-    open_task_corr_key: open ? open.corr_key : null,
-    open_task_id: open ? open.task_id : null,
-    updated_at: now(),
-  });
-}
-
-/** Answer an open implementation-phase escalation → record it, resume the parked
- * task via the correlated `feature-escalation-answered` message, and re-surface
- * the next-oldest open escalation (if any). Keyed by the correlation key
- * (`<plan_key>:<task_id>`) so an external webhook and the page share one path.
- * Idempotent-ish: a corr_key with no open escalation is a 404-style no-op. */
-export async function answerTaskEscalation(
-  data: DataLayer,
-  engine: EngineClient,
-  corrKey: string,
-  answer: string,
-) {
-  const open = (await planEscalations(data).find({ corr_key: corrKey, status: "open" }))
-    .sort((a, b) => b.id - a.id)[0];
-  if (!open) return { ok: false, reason: "no open escalation" };
-  const ts = now();
-  // A trial-merge escalation (task_id `trial-merge-wave-<wave>`) leaves an
-  // append-only red audit row in `plan_trial_merges`. Answering it clears that
-  // row from the page's "Needs attention" tab — including a "proceed" override
-  // that records no re-run row (a re-run would supersede it, but a proceed would
-  // not, pinning the red row forever).
-  //
-  // Resolve it FIRST, before the escalation is committed as answered and the
-  // resume message is published. `resolveTrialMergeAttention` is idempotent, so
-  // if this throws (e.g. a transient DB error) the escalation is still open and
-  // the whole operation retries cleanly. Running it AFTER the commit/publish
-  // would make a failure here unrecoverable: the escalation is already answered,
-  // a retry 404s (no open escalation), and the red row is pinned forever.
-  const trialWave = trialMergeWaveFromTaskId(open.task_id);
-  if (trialWave != null) await resolveTrialMergeAttention(data, open.plan_key, trialWave);
-  await planEscalations(data).update(open.id, { answer, status: "answered", answered_at: ts });
-  // Mirror onto the task row so a re-dispatched agent (and the UI) sees the answer.
-  for (const t of await planTasks(data).find({ plan_key: open.plan_key, task_id: open.task_id })) {
-    await planTasks(data).update(t.id, { answer, updated_at: ts });
-  }
-  // Resume the parked child: the process merges `answer` into the child scope and
-  // loops back to re-dispatch the SAME task on its existing branch.
-  await engine.publishMessage({
-    name: FEATURE_ESCALATION_MESSAGE,
-    correlationKey: corrKey,
-    variables: { answer },
-  });
-  await refreshOpenTaskEscalation(data, open.plan_key);
-  return { ok: true, escalationId: open.id, planKey: open.plan_key, taskId: open.task_id };
-}
-
-export function normalizePlanEscalationDirective(input: unknown): PlanEscalationDirective {
-  return parsePlanEscalationDirective(input) ?? "revise";
-}
-
-function renderPlanEscalationFindings(open: PlanReviewEscalation, note: string): string {
-  const parts = [
-    `Plan review reached its round budget at epoch ${open.epoch}, round ${open.round}.`,
-    "",
-    "Reviewer findings:",
-    (open.findings ?? "").trim() || "(no reviewer findings were provided.)",
-  ];
-  if (note) {
-    parts.push("", "Human guidance:", note);
-  } else {
-    parts.push("", "Human directive: revise the plan within the allowed task boundaries.");
-  }
-  return parts.join("\n");
-}
-
-/** Answer the newest open plan-review escalation. `proceed` is an explicit human override that lets
-  * the current (unapproved) plan continue to wave dispatch; `revise` (the default) folds the human
-  * note into `planFindings` and starts a fresh review epoch on the next planner pass. */
-export async function answerPlanEscalation(
-  data: DataLayer,
-  engine: EngineClient,
-  planKey: string,
-  directiveInput: unknown,
-  noteInput: unknown,
-) {
-  const open = (await planReviewEscalations(data).find({ plan_key: planKey, status: "open" }))
-    .sort((a, b) => b.id - a.id)[0];
-  if (!open) return { ok: false, reason: "no open plan escalation" };
-
-  const directive = normalizePlanEscalationDirective(directiveInput);
-  const note = typeof noteInput === "string" ? noteInput.trim() : "";
-  const ts = now();
-  await planReviewEscalations(data).update(open.id, {
-    directive,
-    note: note || null,
-    status: "answered",
-    answered_at: ts,
-  });
-  await plans(data).update(planKey, {
-    open_plan_escalation_id: null,
-    open_plan_findings: null,
-    open_plan_round: null,
-    updated_at: ts,
-  });
-
-  await engine.publishMessage({
-    name: PLAN_ESCALATION_MESSAGE,
-    correlationKey: planKey,
-    variables: {
-      planEscalationDirective: directive,
-      planFindings: directive === "revise" ? renderPlanEscalationFindings(open, note) : "",
-    },
-  });
-  return { ok: true, escalationId: open.id, planKey, directive };
-}

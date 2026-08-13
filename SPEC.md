@@ -31,10 +31,10 @@ surface are proposed and open for adjustment.
                      ▼
             ┌───────────────────┐        review-ready (msg)      ┌──────────┐
             │  convergence-loop │◀───────────────────────────────│  poller  │
-            │      (BPMN)       │        escalation-answered (msg)└────┬─────┘
+            │      (BPMN)       │                                 └────┬─────┘
             └─────────┬─────────┘◀───────────────┐                    │ polls
-                      │ senior:pr-review job      │ answer POST        │ GitHub
-                      ▼                           │                    ▼
+                      │ senior:pr-review job      │ userTask complete  │ GitHub
+                      ▼                           │ (inbox)            ▼
             ┌───────────────────┐          ┌──────┴───────┐     ┌────────────┐
             │  decoupled agent  │          │   web UI +   │     │   SQLite   │
             │ (c8ctl nano work) │          │  API routes  │────▶│ (app.db)   │
@@ -197,16 +197,16 @@ Consequences the prompt (`prompts/review-round.md`) encodes:
 |---|---|---|---|
 | `pr-submitted` | — (start) | submit route/webhook | `{repo, prNumber, prUrl, prKey}` |
 | `review-ready` | `prKey` | **poller** | `{reviewId, reviewState, submittedAt}` |
-| `escalation-answered` | `prKey` | UI answer route | `{answer, escalationId}` |
+| `escalation-answered` | `prKey` | merge-loop answer (`answerEscalation`) | `{answer, escalationId}` |
 | `deps-cleared` | `prKey` | **poller** (merge) | — (all `Depends-on` PRs merged) |
 | `merge-ready` | `prKey` | **poller** (merge) | `{mergeState}` (`ready` \| `conflict` \| `blocked`); when `blocked`, also `{failingChecks, failingChecksList}` for the `senior:fix-ci` branch |
 | `merge-landed` | `prKey` | **poller** (merge) | — (queued PR merged, or merged out-of-band) |
 
-Note `escalation-answered` is reused by both processes (`convergence-loop` and
-`merge-loop`); only one is ever active for a given `prKey`, so correlation is
-unambiguous. Each `.bpmn` gives it a distinct message **id** (and distinct
-envelope shape ids) to avoid duplicate-id collisions when the manifest deploys
-both files.
+Note `escalation-answered` is now used only by the `merge-loop` process (the
+`convergence-loop` review escalation is a native `userTask` answered through the
+task inbox, not this message). The merge-loop `.bpmn` gives it a distinct message
+**id** (and distinct envelope shape ids) to avoid duplicate-id collisions when the
+manifest deploys both files.
 
 ## 7. Domain model (SQLite — `db/migrations/001_init.sql`) — PROPOSED
 
@@ -262,9 +262,9 @@ The UI is authored declaratively as `pages/home.page.json` and served by the
 generic Urban **page runtime** (`@nanobpm/app`, ADR 0042) — no hand-written SPA.
 The page defines status-filtered tabs (active vs. history), a submit form, a
 per-row **Cancel** action, and an expandable detail with the round/escalation
-child grids, a lazily-loaded transcript, and a conditional **answer** form shown
-when the PR has an open escalation (`open_escalation_id`, denormalised onto the
-row by migration `003`).
+child grids and a lazily-loaded transcript. The round/escalation grids are
+read-only audit; escalations are answered through the **task inbox** surface at
+`/tasks` (native `userTask`s), not an inline form on this page.
 
 The app-specific business-logic endpoints are **OpenAPI operations** mounted
 under `api.base` (`/app/api`), each implemented by a delegate module in
@@ -280,8 +280,7 @@ The full, authoritative contract is `openapi.yaml` (Swagger UI at
 | `GET` | `/app/api/version` | app + engine version |
 | `POST` | `/app/api/actions/start/convergence-loop` | parse the PR ref → create the aggregate + start the process (the ONE submit door — page + external callers) |
 | `POST` | `/app/api/actions/start/plan-fanout` | parse the issue ref → start a plan fan-out run (the ONE plan door) |
-| `POST` | `/app/api/actions/message` (`escalation-answered`) | answer an open escalation → publish `escalation-answered` |
-| `POST` | `/app/api/hooks/feature-answer` | answer an implementation-phase task escalation out of band (optional shared-secret) |
+| `POST` | `/app/api/actions/message` (`escalation-answered`) | answer an open merge-loop escalation → publish `escalation-answered` (the four #156 escalation kinds are native user tasks answered via the task inbox) |
 | `GET`/`POST` | `/app/api/hooks/blackboard` | per-plan coordination blackboard (capability-token side-channel) |
 | `GET` | `/app/api/hooks/abandon` | cooperative abandon check (per-PR capability token) |
 
@@ -397,8 +396,8 @@ start ─► wait: deps merged ─► arm merge ─► wait: mergeable ─┬─
   waits for `merge-landed` (poller detects the landed PR). Every attempt is
   recorded in the `merges` audit table.
 - **Escalation** — a conflict or a failing gate raises the same
-  `pr.persist-escalation` worker / UI answer form as the review stage (status
-  `escalated`); answering re-arms and retries.
+  `pr.persist-escalation` worker as the review stage (status `escalated`), answered
+  via the merge-loop `escalation-answered` message; answering re-arms and retries.
 - **Terminal** — `merged` (with `merged_at`), or `converged` when
   `NANO_PR_AUTO_MERGE=0` (review-only), or `abandoned` on cancel.
 
@@ -415,7 +414,7 @@ queries skip (`merging`), so a slow pass can't double-signal.
 | `GITHUB_TOKEN` | — | GitHub API (poller + agent) |
 | `NANO_PR_POLL_MS` | 60000 | poll interval |
 | `NANO_PR_MAX_ROUNDS` | 20 | default round cap (per-submit `maxRounds` override, clamped 1–100) |
-| `NANO_PR_WEBHOOK_SECRET` | — | optional shared secret for the `/app/api/hooks/feature-answer` webhook operation (`X-Hook-Secret`) |
+| `NANO_PR_WEBHOOK_SECRET` | — | optional shared secret (`X-Hook-Secret`) for guarded operations (e.g. `/app/api/agent`, `/app/api/version`, `/app/api/status`) |
 | `NANO_PR_AUTO_MERGE` | 1 | run the merge stage after convergence (`0` = review-only; per-submit `convergeOnly: true` override) |
 | `NANO_PR_MERGE_METHOD` | squash | `squash` \| `merge` \| `rebase` |
 | `NANO_PR_MERGE_ADMIN` | 0 | pass `--admin` on merge |
@@ -526,11 +525,11 @@ It runs only for `headCount >= 2` on non-mergify repos (`shouldRunTrialMerge`).
 
 Flow (`resources/processes/plan-fanout.bpmn`): `gw-trial-needed` → `trial-merge`
 (`senior:trial-merge`) → `record-trial-merge` (audit row in `plan_trial_merges`) →
-`gw-trial` (`trial red?`). On red it persists a plan-level escalation
-(`pr.persist-task-escalation`, task id `trial-merge-wave-<N>`, corrKey
-`<plan_key>:trial-merge-wave-<N>`) and parks at `wait-trial-answer`
-(`feature-escalation-answered`). The operator answers exactly `proceed` to override and
-continue, or anything else to **rerun** the trial after pushing a fix.
+`gw-trial` (`trial red?`). On red it opens a plan-level **user task**
+(`trial-merge-decision`, task id `trial-merge-wave-<N>`) and parks at
+`wait-trial-answer` until it is completed through the task inbox. The operator
+answers with `action: "proceed"` to override and continue, or `"rebase"`/`"abandon"`
+to **rerun** the trial after pushing a fix (or give up).
 
 **Known gap — inherited vs emergent failures (issue #129, PLANNED).** As shipped, D3
 escalates on *any* red combined suite, including a failure that was **already red on

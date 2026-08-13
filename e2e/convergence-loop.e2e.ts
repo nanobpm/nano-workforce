@@ -183,7 +183,7 @@ describe("nano-workforce e2e (urban-testkit pilot)", () => {
 
     // Advance past the instanceTracking pollMs (derived from nano.app.json above, plus a margin):
     // the reconciler observes TERMINATED and applies the manifest `onTerminated.set` → status
-    // `abandoned`, escalation pointers cleared.
+    // `abandoned`.
     await app.advanceTime(PR_POLL_MS + 1000);
     const reconciled = await prs.findOne({ pr_key: prKey });
     assert.equal(reconciled?.status, "abandoned", "reconciler abandoned the terminated PR's row");
