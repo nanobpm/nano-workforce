@@ -46,7 +46,8 @@
           <nano:extend name="recordRound" type="boolean" optional="true" />
         </nano:shape>
         <nano:shape id="PrPersistEscalationOut" name="Record escalation — result">
-          <nano:extend name="escalationId" type="integer" />
+          <nano:extend name="escalationId" type="integer" optional="true" />
+          <nano:extend name="escalated" type="boolean" optional="true" />
         </nano:shape>
         <nano:shape id="PrFinalizeIn" name="Mark converged — input">
           <nano:extend name="prKey" type="string" />
@@ -207,7 +208,7 @@
       <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=status = "waiting"</bpmn:conditionExpression>
     </bpmn:sequenceFlow>
     <bpmn:sequenceFlow id="f_escalate" name="needs_input / blocked" sourceRef="gw-status" targetRef="persist-escalation">
-      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=(status = "needs_input" or status = "blocked") and question != null and question != ""</bpmn:conditionExpression>
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=(status = "needs_input" or status = "blocked") and question != null and trim(question) != ""</bpmn:conditionExpression>
     </bpmn:sequenceFlow>
     <bpmn:sequenceFlow id="f_guardMax" name="max rounds" sourceRef="gw-guard" targetRef="persist-escalation-maxrounds">
       <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=round &gt;= maxRounds</bpmn:conditionExpression>

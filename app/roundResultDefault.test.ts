@@ -66,11 +66,12 @@ test("escalation is an explicit needs_input/blocked arm gated on a non-blank que
   assertStringIncludes(esc, 'targetRef="persist-escalation"');
   // Escalation now only fires on an explicit human-blocking status.
   assertStringIncludes(esc, 'status = "needs_input" or status = "blocked"');
-  // ...AND only when the round carries an answerable question. A blank/absent question can no
-  // longer route to escalation (retires the blank-question fabrication failure mode); it falls
-  // through to the addressed default and re-enters the review wait.
+  // ...AND only when the round carries an answerable question. A blank/absent/whitespace-only
+  // question can no longer route to escalation (retires the blank-question fabrication failure
+  // mode); it falls through to the addressed default and re-enters the review wait. The guard
+  // trims so a whitespace-only question ("   ") is treated as blank too.
   assertStringIncludes(esc, 'question != null');
-  assertStringIncludes(esc, 'question != ""');
+  assertStringIncludes(esc, 'trim(question) != ""');
 });
 
 test("the default (addressed) arm carries no condition and re-enters the guard", () => {
