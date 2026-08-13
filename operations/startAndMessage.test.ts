@@ -212,3 +212,16 @@ test("postMessage accepts mixed-case plan escalation directive like the dedicate
   assertEquals(completed[0].userTaskKey, "ut-plan-12");
   assertEquals(completed[0].variables, { directive: "proceed", notes: "ship it" });
 });
+
+test("postMessage falls back to notes when note is blank/whitespace (does not drop human guidance)", async () => {
+  const { app: msgApp, completed } = planEscalationMessageApp();
+  const res = await postMessage(input({
+    name: "plan-escalation-answered",
+    correlationKey: "owner/repo#12",
+    variables: { directive: "revise", note: "   ", notes: "please add tests" },
+  }), msgApp);
+  const r = res as any;
+  assertEquals(r.status, 200);
+  assertEquals(r.body.ok, true);
+  assertEquals(completed[0].variables, { directive: "revise", notes: "please add tests" });
+});
