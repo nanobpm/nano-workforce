@@ -28,10 +28,33 @@ process with no memory of your last run, the branch name MUST be derivable from
 
 - **It does not exist** → this is a first run. Branch off the base branch (see
   the note below — usually the repository default branch, but an epic may pin an
-  integration branch in your appended task context).
+  integration branch in your appended task context). **Claim the issue now** — see
+  below.
 - **It exists** → this is a **resume**. `git fetch` and check it out, read its diff
   and any open (draft) PR, and **continue from there** — do not restart from
-  scratch. Fold in `variables.answer` as the guidance you were waiting on.
+  scratch. Fold in `variables.answer` as the guidance you were waiting on. Do
+  **not** re-claim — you already announced this run on your first pass.
+
+## Claim your issue on a first run (only when `variables.claimIssue` is true)
+
+So humans and other agents can see the work has been picked up, announce yourself
+on the issue **before implementing** — but ONLY on a first run (your
+`feat/<task.id>` branch did not yet exist, per the check above) AND only when
+**`variables.claimIssue` is true**:
+
+```
+gh issue comment <variables.issue> --body "🤖 Starting work on this issue — branch `feat/<task.id>`."
+```
+
+- `variables.claimIssue` is set **only for single-issue feature runs**, where
+  `variables.issue` IS the issue you implement and close, so claiming it is
+  correct. **Epic slices leave it unset** — their `variables.issue` is the shared
+  *parent epic*, which must never be claimed per-slice; when `claimIssue` is not
+  true, **skip this step entirely**.
+- The branch-existence check above is what makes this idempotent: a resumed run
+  (branch already exists) never re-claims, so the issue gets exactly one claim.
+- It is a courtesy claim, **not a gate** — if the comment fails (e.g. a transient
+  `gh` error), carry on and implement anyway.
 
 ## Your base branch (default branch, unless the epic pins one)
 
@@ -44,14 +67,16 @@ against the wrong base will not be merged into the epic.
 
 ## What to do
 
-1. Clone / check out your base branch (first run — the default branch, or the
+1. Claim your issue if `variables.claimIssue` is true and this is a first run (see
+   above).
+2. Clone / check out your base branch (first run — the default branch, or the
    pinned epic branch if your context names one) or your existing
    `feat/<task.id>` branch (resume — see above).
-2. Implement `task.prompt`. Keep the change scoped to this slice only.
-3. Commit (sign off — this repo family enforces DCO: `git commit -s`), push the
+3. Implement `task.prompt`. Keep the change scoped to this slice only.
+4. Commit (sign off — this repo family enforces DCO: `git commit -s`), push the
    branch, and open a pull request with `gh pr create` describing the slice and
    linking the parent issue (`Depends-on:`/`Closes` as appropriate).
-4. Clean up any scratch clone/worktree you created outside the commit.
+5. Clean up any scratch clone/worktree you created outside the commit.
 
 > **Do not request the Copilot review yourself.** When you open a *ready* PR the
 > app enrolls it into the review-convergence loop and requests the initial

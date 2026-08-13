@@ -148,6 +148,11 @@ export async function startFeature(
       // merge-loop. `converge=false` ⇒ merge is moot.
       converge,
       autoMerge,
+      // A single-issue feature run OWNS its issue (the whole issue is the slice), so the agent may
+      // claim it with a "starting work" comment on a first run (prompts/feature.md). Epic slices
+      // (plan-fanout) deliberately DO NOT set this — their `issue` is the shared parent epic, which
+      // must never be claimed per-slice.
+      claimIssue: true,
       // Seed the agent-result variables so the escalation loop + record worker can reference them
       // before the first `senior:feature` job completes (the harness merges the real values in).
       answer: null,
