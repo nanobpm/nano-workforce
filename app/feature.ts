@@ -39,9 +39,11 @@ export interface FeatureRun {
   converge: number;
   auto_merge: number;
   outcome: string | null;
-  /** Human rollup detail projected by `pollFeatureDelivery` (fix: Feature history stuck at
-   * `converging`). NULL until there is a signal. The reconciled TERMINAL outcome is written to
-   * `status` itself; this carries the sub-state / note (e.g. "merged", "waiting_review"). */
+  /** Human rollup detail. Projected by `pollFeatureDelivery` (fix: Feature history stuck at
+   * `converging`) and also written by `pr.record-blocked-ack` with the operator's disposition
+   * note when a blocked run is acknowledged. NULL until there is a signal. The reconciled TERMINAL
+   * outcome is written to `status` itself; this carries the sub-state / note (e.g. "merged",
+   * "waiting_review", or "operator: <note>"). */
   delivery_label: string | null;
   created_at: string;
   updated_at: string;

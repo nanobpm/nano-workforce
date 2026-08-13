@@ -11,8 +11,11 @@
 --
 -- `delivery_label` is the human rollup detail projected onto the row by
 -- `pollFeatureDelivery` (e.g. "merged", "converged (not merged)", "PR abandoned",
--- or an in-flight sub-state like "waiting_review"). NULL until there is a signal
--- (no `pr_key`, or the run never reached `converging`). The reconciled terminal
+-- or an in-flight sub-state like "waiting_review"). It is also written by
+-- `pr.record-blocked-ack` with the operator's disposition note (e.g. "operator:
+-- <note>" / "acknowledged") when a blocked run is acknowledged. NULL until there
+-- is a signal (no `pr_key`, or the run never reached `converging` and was not
+-- acknowledged). The reconciled terminal
 -- outcome is written to `status` itself (converging → merged | converged |
 -- abandoned) so the existing Status column becomes accurate.
 ALTER TABLE feature_runs ADD COLUMN delivery_label TEXT;

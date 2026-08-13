@@ -59,7 +59,7 @@
           "source": "app",
           "table": "feature_runs",
           "orderBy": { "field": "updated_at", "dir": "desc" },
-          "filter": [{ "field": "status", "in": ["running"] }]
+          "filter": [{ "field": "status", "in": ["running", "awaiting_operator"] }]
         },
         "tabs": [
           { "label": "Active", "filter": [{ "field": "status", "in": ["running", "awaiting_operator"] }] },
