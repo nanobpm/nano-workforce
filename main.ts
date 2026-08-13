@@ -16,8 +16,11 @@
 // The reviewer agent (job type `senior:pr-review`) is deliberately NOT hosted here — it is an
 // EXTERNAL worker. Point a coding-agent harness at that job type (the same one that services
 // the code-first twin) so the automated review stays decoupled from the orchestration.
+import { Server } from "node:http";
 import { createNanoSdkEngineClient, runFromEnv, selectHost } from "@nanobpm/urban";
+import { type AgenticChannelHandle, mountAgenticChannel } from "./app/agentic/channel.ts";
 import { MAX_ROUNDS, pollOnce } from "./app/service.ts";
+import { envVar } from "./app/version.ts";
 
 const PORT = Number(process.env.PR_REVIEW_PORT ?? 3000);
 const POLL_MS = Number(process.env.NANO_PR_POLL_MS ?? 60_000);
@@ -40,6 +43,28 @@ const engine = await createNanoSdkEngineClient({
 // signal handler would only stop the HTTP server, leaving the poller keeping us alive).
 const app = await runFromEnv({ engine, host, port: PORT, handleSignals: false });
 
+// Agentic visibility channel (ADR 0056, epic #142). Ride the app's OWN HTTP server so the channel
+// shares the app port (no sidecar). This is the ONLY main.ts wiring for the whole epic — sibling
+// slices (H1/H3/H4) extend it by dropping a family module under `app/agentic/families/`, never here.
+// Mount only when a shared identity secret is configured, so the app never exposes an
+// unauthenticated upgrade; `app.httpServer` is a `node:http` Server once started (undefined on hosts
+// that don't surface one, e.g. Deno).
+let agentic: AgenticChannelHandle | undefined;
+const agenticSecret = envVar("NANO_AGENTIC_SECRET") ?? envVar("NANO_PR_WEBHOOK_SECRET");
+const httpServer = app.httpServer;
+if (httpServer instanceof Server) {
+  if (agenticSecret) {
+    agentic = await mountAgenticChannel({
+      server: httpServer,
+      secret: agenticSecret,
+      data: app.data,
+      log: app.log,
+    });
+  } else {
+    app.log.warn("agentic channel not mounted: set NANO_AGENTIC_SECRET (or NANO_PR_WEBHOOK_SECRET)");
+  }
+}
+
 // Review-ready poller. Self-scheduling (not setInterval) so a slow GitHub call can never
 // overlap two passes (which could double-signal `review-ready`); the next pass is scheduled
 // only after the previous one settles.
@@ -59,6 +84,13 @@ async function drainAndExit(): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
   if (pollTimer) clearTimeout(pollTimer);
+  // Tear the agentic families + hub down (releases the WS clients) before the app stops its HTTP
+  // server, which the channel shares.
+  if (agentic) {
+    try {
+      await agentic.teardown();
+    } catch { /* best-effort channel shutdown */ }
+  }
   try {
     await app.stop();
   } catch { /* already stopped */ }

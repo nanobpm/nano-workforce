@@ -46,7 +46,8 @@
     "lint:fix": "biome check --write app operations workers pages components scripts e2e main.ts"
   },
   "dependencies": {
-    "@nanobpm/urban": "^0.45.0"
+    "@nanobpm/agentic": "^0.1.0",
+    "@nanobpm/urban": "^0.46.0"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.11",
