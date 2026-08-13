@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI" xmlns:dc="http://www.omg.org/spec/DD/20100524/DC" xmlns:di="http://www.omg.org/spec/DD/20100524/DI" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:zeebe="http://camunda.org/schema/zeebe/1.0" xmlns:nano="https://nanobpm.io/schema/shapes/1.0" id="Definitions_nano_workforce_spine_demo" targetNamespace="http://nanobpm.io/nano-workforce">
+  <bpmn:process id="spine-demo" name="User-task Spine Demo" isExecutable="true">
+    <bpmn:startEvent id="start">
+      <bpmn:outgoing>flow-to-decide</bpmn:outgoing>
+    </bpmn:startEvent>
+    <bpmn:userTask id="decide" name="Decide">
+      <bpmn:extensionElements>
+        <zeebe:formDefinition formId="spine-demo" />
+        <zeebe:userTask />
+      </bpmn:extensionElements>
+      <bpmn:incoming>flow-to-decide</bpmn:incoming>
+      <bpmn:outgoing>flow-to-gateway</bpmn:outgoing>
+    </bpmn:userTask>
+    <bpmn:exclusiveGateway id="gw-decision" name="decision?" default="flow-rejected">
+      <bpmn:incoming>flow-to-gateway</bpmn:incoming>
+      <bpmn:outgoing>flow-approved</bpmn:outgoing>
+      <bpmn:outgoing>flow-rejected</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:endEvent id="end-approved">
+      <bpmn:incoming>flow-approved</bpmn:incoming>
+    </bpmn:endEvent>
+    <bpmn:endEvent id="end-rejected">
+      <bpmn:incoming>flow-rejected</bpmn:incoming>
+    </bpmn:endEvent>
+    <bpmn:sequenceFlow id="flow-to-decide" sourceRef="start" targetRef="decide" />
+    <bpmn:sequenceFlow id="flow-to-gateway" sourceRef="decide" targetRef="gw-decision" />
+    <bpmn:sequenceFlow id="flow-approved" sourceRef="gw-decision" targetRef="end-approved">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=decision = "approve"</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="flow-rejected" sourceRef="gw-decision" targetRef="end-rejected" />
+  </bpmn:process>
+  <bpmndi:BPMNDiagram id="BPMNDiagram_spine-demo">
+    <bpmndi:BPMNPlane id="BPMNPlane_spine-demo" bpmnElement="spine-demo">
+      <bpmndi:BPMNShape id="BPMNShape_start" bpmnElement="start">
+        <dc:Bounds x="80" y="102" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_decide" bpmnElement="decide">
+        <dc:Bounds x="216" y="80" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_gw-decision" bpmnElement="gw-decision" isMarkerVisible="true">
+        <dc:Bounds x="416" y="95" width="50" height="50" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="408" y="76" width="67" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_end-approved" bpmnElement="end-approved">
+        <dc:Bounds x="566" y="262" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_end-rejected" bpmnElement="end-rejected">
+        <dc:Bounds x="566" y="102" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNEdge id="BPMNEdge_flow-to-decide" bpmnElement="flow-to-decide">
+        <di:waypoint x="116" y="120" />
+        <di:waypoint x="216" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_flow-to-gateway" bpmnElement="flow-to-gateway">
+        <di:waypoint x="316" y="120" />
+        <di:waypoint x="416" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_flow-rejected" bpmnElement="flow-rejected">
+        <di:waypoint x="466" y="120" />
+        <di:waypoint x="566" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_flow-approved" bpmnElement="flow-approved">
+        <di:waypoint x="441" y="145" />
+        <di:waypoint x="441" y="280" />
+        <di:waypoint x="566" y="280" />
+      </bpmndi:BPMNEdge>
+    </bpmndi:BPMNPlane>
+  </bpmndi:BPMNDiagram>
+</bpmn:definitions>
