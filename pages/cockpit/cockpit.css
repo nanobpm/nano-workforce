@@ -1,0 +1,145 @@
+/* The SUPPLY cockpit stylesheet (H5 / #148) — a compact, phone-friendly dark cockpit shared by the
+   standalone shell and the console App-View embed, so the two render identically. The three-state
+   liveness dot keys off `data-liveness` (live | stale | down). It styles the SUPPLY worker list only
+   — no demand×supply matrix / diversity-SLO light (deferred to enrolment epic #152). */
+
+:root {
+  --cockpit-bg: #0b0f14;
+  --cockpit-panel: #131a22;
+  --cockpit-edge: #223041;
+  --cockpit-text: #e6edf3;
+  --cockpit-muted: #8b98a5;
+  --cockpit-green: #2ea043;
+  --cockpit-amber: #d29922;
+  --cockpit-red: #f85149;
+}
+
+.cockpit-shell {
+  color: var(--cockpit-text);
+  background: var(--cockpit-bg);
+  font: 14px/1.4 ui-sans-serif, system-ui, sans-serif;
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+  min-height: 100%;
+}
+
+.cockpit-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+
+.cockpit-title {
+  font-size: 16px;
+  margin: 0;
+}
+
+.cockpit-supply-summary {
+  color: var(--cockpit-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.cockpit-supply-region,
+.cockpit-terminal {
+  background: var(--cockpit-panel);
+  border: 1px solid var(--cockpit-edge);
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.cockpit-panel-title {
+  font-size: 13px;
+  margin: 0 0 8px;
+  color: var(--cockpit-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.cockpit-leaf {
+  margin-bottom: 12px;
+}
+
+.cockpit-leaf-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 6px;
+}
+
+.cockpit-leaf-name {
+  font-weight: 600;
+}
+
+.cockpit-leaf-count {
+  color: var(--cockpit-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.cockpit-supply-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+}
+
+.cockpit-th {
+  text-align: left;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--cockpit-muted);
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--cockpit-edge);
+}
+
+.cockpit-td {
+  padding: 6px 8px;
+  border-bottom: 1px solid rgba(34, 48, 65, 0.5);
+}
+
+.cockpit-supply-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cockpit-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+  flex: 0 0 auto;
+  background: var(--cockpit-muted);
+}
+
+.cockpit-dot[data-liveness="live"] { background: var(--cockpit-green); }
+.cockpit-dot[data-liveness="stale"] { background: var(--cockpit-amber); }
+.cockpit-dot[data-liveness="down"] { background: var(--cockpit-red); }
+
+.cockpit-worker {
+  background: none;
+  border: none;
+  color: var(--cockpit-text);
+  cursor: pointer;
+  font: inherit;
+  padding: 0;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.cockpit-worker:hover { color: #58a6ff; }
+
+.cockpit-supply-liveness { color: var(--cockpit-muted); }
+
+.cockpit-supply-empty {
+  color: var(--cockpit-muted);
+  padding: 8px 0;
+}
+
+.cockpit-terminal-host {
+  min-height: 220px;
+  background: #05080b;
+  border-radius: 6px;
+}
