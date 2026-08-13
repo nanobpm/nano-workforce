@@ -104,6 +104,8 @@ test("startFeature: seeds the single task slice + base-branch brief onto the ins
   assertEquals(v.task.prompt.includes("owner/repo#42"), true);
   assertEquals(v.converge, true);
   assertEquals(v.autoMerge, false);
+  // A single-issue run owns its issue, so the agent is told it may claim it (epic slices never set this).
+  assertEquals(v.claimIssue, true);
   assertEquals(v.baseBranch, "epic/x");
   // The brief is the authoritative base-branch override the agent gets via appendPrompt.
   assertEquals(v.baseBranchBrief.includes("epic/x"), true);
