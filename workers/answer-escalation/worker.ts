@@ -8,11 +8,12 @@
 // single source of truth, ADR "derivation over duplication") would keep surfacing a phantom open
 // escalation on `/status` after it was answered.
 //
-// This mirrors the merge-loop's message-catch answer path (`answerEscalation` in app/service.ts),
-// which already retires its row: both loops converge on the same rule — an answered escalation is
-// recorded on the canonical `escalations` row, never left dangling. The token resume itself is owned
-// by the engine (userTask completion), so this worker only reconciles the audit row; it returns no
-// variables, leaving the submitted `answer` untouched so it flows on to the next review round.
+// This mirrors the merge-loop's message-catch answer path (`answerEscalation` in app/service.ts):
+// both retire the canonical `escalations` row AND move the `pull_requests` row off `status="escalated"`
+// back to `"converging"`, so an answered escalation is never left dangling and `/status` never shows an
+// escalated PR with a null question. The token resume itself is owned by the engine (userTask
+// completion), so this worker only reconciles the durable rows; it returns no variables, leaving the
+// submitted `answer` untouched so it flows on to the next review round.
 import type { AppJobHandler } from "@nanobpm/urban";
 
 interface Escalation extends Record<string, unknown> {
@@ -21,6 +22,14 @@ interface Escalation extends Record<string, unknown> {
   status: string;
   answer: string | null;
   answered_at: string | null;
+}
+
+// The PR-row fields this worker reconciles when an escalation is answered. Only `status`/`updated_at`
+// are written (mirroring `answerEscalation`); the rest of the row is untouched.
+interface PullRequest extends Record<string, unknown> {
+  pr_key: string;
+  status: string;
+  updated_at: string;
 }
 
 interface In extends Record<string, unknown> {
@@ -43,11 +52,18 @@ const handler: AppJobHandler<In> = async (job, app) => {
   // from masking the one the operator just answered.
   const open = (await escs.find({ pr_key: prKey, status: "open" })).sort((a, b) => b.id - a.id)[0];
   if (open) {
+    const ts = new Date().toISOString();
     await escs.update(open.id, {
       answer: answer ?? null,
       status: "answered",
-      answered_at: new Date().toISOString(),
+      answered_at: ts,
     });
+    // Mirror the merge loop's `answerEscalation`: move the PR off `status="escalated"` back to
+    // `"converging"` now that the question is answered. Without this the row stays `escalated` (with
+    // a now-null derived `openEscalation`) until the re-entered round's `persist-round` runs — a
+    // `/status` inconsistency and a divergence from the merge path both loops are meant to share.
+    const prs = app.data.table<PullRequest>("pull_requests", "pr_key");
+    await prs.update(prKey, { status: "converging", updated_at: ts });
   }
   return {};
 };
