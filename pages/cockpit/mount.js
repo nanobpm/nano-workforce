@@ -22,6 +22,10 @@ import { Terminal } from "@xterm/xterm";
 const DEFAULT_REFRESH_MS = 2000;
 const DEFAULT_STALE_AFTER_MS = 15_000;
 
+function isPosInt(value) {
+  return Number.isSafeInteger(value) && value > 0;
+}
+
 // ── supply projection (mirrors app/agentic/cockpit/supply-view.ts) ─────────────────────────────
 
 function liveness(worker, staleAfterMs) {
@@ -197,6 +201,12 @@ export function mountCockpit(host, opts = {}) {
   const hookSecret = opts.hookSecret;
   const relayUrl = opts.relayUrl ?? defaultRelayUrl(opts.relayToken, opts.relayCapability);
   const refreshMs = opts.refreshMs ?? DEFAULT_REFRESH_MS;
+  // refreshMs feeds setTimeout as a poll delay. A negative/NaN/fractional/unsafe value silently
+  // collapses to a ~0ms delay, turning the poll into a hot loop that hammers the supply endpoint.
+  // Require a positive safe integer up-front (mirroring the TS boot layer) so a bad opt fails loudly.
+  if (!isPosInt(refreshMs)) {
+    throw new RangeError(`mountCockpit(opts.refreshMs): must be a positive safe integer, got ${refreshMs}.`);
+  }
   const staleAfterMs = opts.staleAfterMs ?? DEFAULT_STALE_AFTER_MS;
   const connectRelay = relaySocketFactory(relayUrl);
   const onError = (err) => console.error("[cockpit]", err);

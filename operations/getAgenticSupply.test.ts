@@ -111,7 +111,7 @@ test("returns an empty supply report when no presence family is mounted", async 
 });
 
 test("maps the presence snapshot into the supply report (stream, family, host, liveness)", async () => {
-  await mountPresence(memSqlite());
+  const hub = await mountPresence(memSqlite());
   try {
     const res = (await handler(input(), app)) as {
       status: number;
@@ -131,6 +131,7 @@ test("maps the presence snapshot into the supply report (stream, family, host, l
     assertEquals(res.body.leaves[0]?.workers.length, 1);
   } finally {
     family.teardown?.();
+    await hub.close();
   }
 });
 
