@@ -165,6 +165,7 @@ test("postMessage → 400 when escalation-answered lacks a correlationKey", asyn
 
 function planEscalationMessageApp() {
   const plans = [{ plan_key: "owner/repo#12", process_key: "pk-12" }];
+  const taskCompletions: any[] = [];
   const openTasks = [{ userTaskKey: "ut-plan-12", elementId: "plan-review-decision", variables: {} }];
   const completed: Array<{ userTaskKey: string; variables?: Record<string, unknown> }> = [];
   const match = (r: Record<string, unknown>, q: Record<string, unknown>) =>
@@ -182,12 +183,25 @@ function planEscalationMessageApp() {
       if (row) Object.assign(row, patch);
       return Promise.resolve(row);
     },
+    delete: (id: any) => {
+      const i = rows.findIndex((r) => r[key] === id);
+      if (i >= 0) rows.splice(i, 1);
+      return Promise.resolve();
+    },
   });
+  // Route by table name like the real DataLayer, so the ledger insert done by
+  // completeUserTaskAttributed lands in task_completions and never mutates plans.
+  const tables: Record<string, ReturnType<typeof table>> = {
+    plans: table(plans, "plan_key"),
+    task_completions: table(taskCompletions, "id"),
+  };
   return {
     app: {
       data: {
         table(name: string) {
-          return table(plans, "plan_key");
+          const t = tables[name];
+          if (!t) throw new Error(`unexpected table ${name}`);
+          return t;
         },
       },
       engine: {
