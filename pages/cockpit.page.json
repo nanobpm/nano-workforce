@@ -1,0 +1,46 @@
+{
+  "schemaVersion": "1.0",
+  "title": "Cockpit",
+  "nodes": [
+    {
+      "type": "nav",
+      "id": "nav",
+      "props": {
+        "variant": "bar",
+        "title": "Nano Workforce",
+        "items": [
+          { "label": "Convergence", "page": "home" },
+          { "label": "Epics", "page": "epic" },
+          { "label": "Cockpit", "page": "cockpit" }
+        ],
+        "sticky": true
+      }
+    },
+    {
+      "type": "text",
+      "id": "title",
+      "props": {
+        "text": "Agent cockpit — live supply",
+        "variant": "heading"
+      }
+    },
+    {
+      "type": "text",
+      "id": "intro",
+      "props": {
+        "text": "The live worker/supply view: every connected worker grouped by leaf token, with family, host, current jobs, and liveness — sourced from the agentic presence registry. Drill into a worker to stream its terminal live over the relay; the terminal stays mounted across a list refresh and re-attaches (resume-from-offset) on reconnect. The same view renders embedded here (App View) and standalone on a phone. (The demand×supply matrix, missing-agent-type lights, and the diversity SLO are the enrolment epic's board — not shown here.)",
+        "variant": "sub"
+      }
+    },
+    {
+      "type": "appView",
+      "id": "cockpit",
+      "props": {
+        "title": "Live supply",
+        "embed": "./cockpit/embed.html",
+        "standalone": "./cockpit/standalone.html",
+        "fill": true
+      }
+    }
+  ]
+}

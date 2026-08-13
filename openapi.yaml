@@ -99,6 +99,79 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/ActivePr"
+    AgenticSupplyWorker:
+      type: object
+      description: One connected worker in the supply mirror (H5 cockpit; sourced from the H1 presence registry).
+      required:
+        - instance
+        - identity
+        - stream
+        - jobKeys
+        - live
+        - staleMs
+      properties:
+        instance:
+          type: string
+          description: The worker instance id.
+        identity:
+          type: string
+          description: The ADR 0028 leaf token the worker registered under.
+        stream:
+          type: string
+          description: The relay stream id to subscribe when drilling into this worker's terminal.
+        family:
+          type: string
+          description: Declared family (enrolment attribute), if any.
+        host:
+          type: string
+          description: Declared host (where the worker runs), if any.
+        jobKeys:
+          type: array
+          description: The jobKeys this worker is currently processing (empty until the H6 correlation seam lands).
+          items:
+            type: string
+        live:
+          type: boolean
+          description: Whether the worker's channel connection is still open.
+        staleMs:
+          type: integer
+          description: Milliseconds since the last liveness refresh (0 when fresh).
+    AgenticSupplyLeaf:
+      type: object
+      description: The supply for one leaf token — the workers registered under it.
+      required:
+        - token
+        - workers
+      properties:
+        token:
+          type: string
+        workers:
+          type: array
+          items:
+            $ref: "#/components/schemas/AgenticSupplyWorker"
+    AgenticSupplyReport:
+      type: object
+      description: The SUPPLY-ONLY visibility report — the live worker list grouped by leaf. No demand-side
+        fields (the demand×supply matrix / diversity SLO are deferred to enrolment epic #152).
+      required:
+        - count
+        - workers
+        - leaves
+      properties:
+        count:
+          type: integer
+          description: The number of connected workers.
+        generatedAt:
+          type: string
+          description: When this snapshot was taken, ISO-8601.
+        workers:
+          type: array
+          items:
+            $ref: "#/components/schemas/AgenticSupplyWorker"
+        leaves:
+          type: array
+          items:
+            $ref: "#/components/schemas/AgenticSupplyLeaf"
     VersionInfo:
       type: object
       description: The running app's identity (which code is actually live).
@@ -503,6 +576,27 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ActivePrList"
+        "401":
+          description: Missing/invalid shared secret (only when NANO_PR_WEBHOOK_SECRET is set).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+  /agentic/supply:
+    get:
+      operationId: getAgenticSupply
+      summary: The SUPPLY-ONLY agentic visibility report — the live worker list (family, host, current jobs,
+        liveness) grouped by leaf, sourced from the H1 presence registry. Feeds the H5 cockpit page.
+      security:
+        - hookSecret: []
+        - {}
+      responses:
+        "200":
+          description: The supply report.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgenticSupplyReport"
         "401":
           description: Missing/invalid shared secret (only when NANO_PR_WEBHOOK_SECRET is set).
           content:
