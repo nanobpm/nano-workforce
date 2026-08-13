@@ -280,22 +280,29 @@ components:
             400, not silently coalesced to the repository default branch. Use it to land an entire
             epic on a long-lived integration branch (e.g. `epic/agent-protocol`) so nothing reaches
             the default branch — and any merge-to-default side effect, such as auto-publishing a
-            package — until you deliberately merge the integration branch. A missing `epic/*` base is
-            auto-created off the default branch HEAD; a missing non-`epic/*` base is a 400.
+            package — until you deliberately merge the integration branch. NOTE: this slice (B0)
+            only enforces that `baseBranch` is present and a plausible branch name; branch-existence
+            admission (auto-creating a missing `epic/*` base off the default branch HEAD, and
+            rejecting a missing non-`epic/*` base with a 400) is specified by ADR 0003 but NOT yet
+            enforced here — it lands in a later admission slice.
         allowSharedBase:
           type: boolean
           description: >-
-            Opt-in to share a custom integration base branch with another already-active plan. By
-            default admission rejects (409) when another active plan already targets the same repo +
-            same custom base branch, to stop two epics interleaving commits on one integration branch;
-            set true to override. The repository default branch is exempt from this guard.
+            Reserved for a later ADR 0003 admission slice — NOT yet enforced in this slice (B0). When
+            implemented it will opt in to sharing a custom integration base branch with another
+            already-active plan: admission will otherwise reject (409) when another active plan already
+            targets the same repo + same custom base branch, to stop two epics interleaving commits on
+            one integration branch (the repository default branch is exempt from that guard). Accepted
+            by the schema today but currently has no runtime effect.
         confirmDefaultBase:
           type: boolean
           description: >-
-            Required acknowledgement when `baseBranch` names the repository default branch. Targeting
-            the default lands every task directly on it with no integration buffer — and fires any
-            merge-to-default side effect per task — so admission rejects (400) unless you confirm with
-            true. It has no effect for a non-default base.
+            Reserved for a later ADR 0003 admission slice — NOT yet enforced in this slice (B0). When
+            implemented it will be the required acknowledgement when `baseBranch` names the repository
+            default branch: targeting the default lands every task directly on it with no integration
+            buffer — and fires any merge-to-default side effect per task — so admission will reject
+            (400) unless confirmed with true (no effect for a non-default base). Accepted by the schema
+            today but currently has no runtime effect.
     PlanStartByUrl:
       type: object
       additionalProperties: false
