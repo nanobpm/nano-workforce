@@ -12,6 +12,7 @@ import { noopLog } from "../test/log.ts";
 import startConvergenceLoop from "./startConvergenceLoop.ts";
 import startPlanFanout from "./startPlanFanout.ts";
 import postMessage from "./postMessage.ts";
+import { resetDefaultBranchCache } from "../app/github.ts";
 
 const app = { log: noopLog() } as any as AppApi;
 
@@ -72,7 +73,9 @@ function withGithubOff(run: () => Promise<void>): Promise<void> {
   const prevTok = process.env["GITHUB_TOKEN"];
   process.env["NANO_PR_GITHUB_TRANSPORT"] = "token"; // no token → meta fetch is skipped
   delete process.env["GITHUB_TOKEN"];
+  resetDefaultBranchCache(); // start cold so a prior warmed cache can't mask the no-transport path
   return run().finally(() => {
+    resetDefaultBranchCache();
     if (prev !== undefined) process.env["NANO_PR_GITHUB_TRANSPORT"] = prev;
     else delete process.env["NANO_PR_GITHUB_TRANSPORT"];
     if (prevTok !== undefined) process.env["GITHUB_TOKEN"] = prevTok;
@@ -88,6 +91,7 @@ function withGithubStub(run: () => Promise<void>): Promise<void> {
   const prevFetch = globalThis.fetch;
   process.env["NANO_PR_GITHUB_TRANSPORT"] = "token";
   process.env["GITHUB_TOKEN"] = "tok";
+  resetDefaultBranchCache(); // isolate: don't inherit or leak the owner/repo default-branch entry
   const branches = new Map<string, string>([["main", "mainsha"]]);
   globalThis.fetch = ((url: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const u = new URL(String(url));
@@ -114,6 +118,7 @@ function withGithubStub(run: () => Promise<void>): Promise<void> {
     return Promise.resolve(new Response(`unexpected ${method} ${path}`, { status: 500 }));
   }) as typeof fetch;
   return run().finally(() => {
+    resetDefaultBranchCache();
     globalThis.fetch = prevFetch;
     if (prevMode !== undefined) process.env["NANO_PR_GITHUB_TRANSPORT"] = prevMode;
     else delete process.env["NANO_PR_GITHUB_TRANSPORT"];

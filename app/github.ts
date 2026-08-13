@@ -454,6 +454,12 @@ export async function fetchDefaultBranch(repo: string, token: string): Promise<s
   return name;
 }
 
+/** Test-only: drop the memoized default-branch entries so a suite can't leak a warmed cache
+ * (which ignores transport/token state on a hit) into a test that expects a cold lookup. */
+export function resetDefaultBranchCache(): void {
+  defaultBranchCache.clear();
+}
+
 /** Whether a branch has already *landed* — i.e. it is the head of a `MERGED` PR. Returns:
  *   • `landed`  — a merged PR exists from this branch → the branch is a dead-end target
  *   • `open`    — an open PR exists from it (still alive)
