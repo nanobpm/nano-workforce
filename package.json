@@ -28,6 +28,7 @@
     "access": "public"
   },
   "scripts": {
+    "prestart": "urban gen",
     "start": "node --experimental-strip-types main.ts",
     "purge": "node --experimental-strip-types scripts/purge-db.ts",
     "upgrade": "node --experimental-strip-types scripts/upgrade-from-pack.ts",
