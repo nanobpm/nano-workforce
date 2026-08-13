@@ -1,3 +1,10 @@
+# [0.65.0](https://github.com/nanobpm/nano-workforce/compare/v0.64.0...v0.65.0) (2026-08-13)
+
+
+### Features
+
+* surface native feature-run escalations in the nwf UI ([#213](https://github.com/nanobpm/nano-workforce/issues/213)) ([cf14724](https://github.com/nanobpm/nano-workforce/commit/cf1472419e2c68be4902a1fce2dabfcf39f2ae54)), closes [#210](https://github.com/nanobpm/nano-workforce/issues/210) [#210](https://github.com/nanobpm/nano-workforce/issues/210)
+
 # [0.64.0](https://github.com/nanobpm/nano-workforce/compare/v0.63.0...v0.64.0) (2026-08-13)
 
 
