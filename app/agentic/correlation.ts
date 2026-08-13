@@ -168,7 +168,7 @@ export class CorrelationRegistry {
   }
 }
 
-/** Drop `undefined`-valued keys so an optional context field never overwrites a known value with a hole. */
+/** Drop `undefined`-valued keys so the stored context never materializes an explicit `{ key: undefined }` hole. */
 function stripUndefined(context: JobContext): JobContext {
   const { processInstanceKey, bpmnProcessId, elementId, planKey } = context;
   return {

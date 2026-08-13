@@ -65,19 +65,26 @@ function memTransport(): { transport: ChannelTransport; connect(conn: ChannelCon
   return { transport, connect: (conn) => onConnection?.(conn) };
 }
 
-/** A live in-memory connection: `feed` delivers a frame TO the hub; `sent` collects frames FROM it. */
+/**
+ * A live in-memory connection: `feed` delivers a frame TO the hub; `sent` collects frames FROM it.
+ * `close()` fires the hub's registered close listener, so teardown/presence-cleanup paths run as in
+ * production (rather than silently swallowing the disconnect).
+ */
 function conn(id: string, identity: string): { conn: ChannelConnection; feed(frame: Frame): void; sent: Frame[] } {
   let onMessage: ((bytes: Uint8Array) => void) | undefined;
+  let onClose: ((code?: number, reason?: string) => void) | undefined;
   const sent: Frame[] = [];
   const channelConn: ChannelConnection = {
     id,
     handshake: { query: { identity }, token: "t", credential: "c" },
     send: (bytes) => sent.push(decodeFrame(bytes)),
-    close: () => {},
+    close: (code, reason) => onClose?.(code, reason),
     onMessage: (l) => {
       onMessage = l;
     },
-    onClose: () => {},
+    onClose: (l) => {
+      onClose = l;
+    },
   };
   return { conn: channelConn, feed: (frame) => onMessage?.(encodeFrame(frame)), sent };
 }
