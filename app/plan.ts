@@ -11,6 +11,7 @@
 // hand-written SQL — matching app/service.ts.
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { blackboardUrl, mintBlackboardToken, renderCoordinationBrief } from "./blackboard.ts";
+import { ensureBaseBranch, fetchDefaultBranch } from "./github.ts";
 import { clearExclusions } from "./mergeExclusion.ts";
 import { clearTaskDeltas } from "./taskDelta.ts";
 import { resolveTrialMergeAttention, trialMergeWaveFromTaskId } from "./trialMerge.ts";
@@ -71,9 +72,11 @@ export interface Plan {
   // Minted at plan start; baked into the blackboard URL handed to implementer agents. NULL for
   // plans created before the blackboard shipped.
   blackboard_token: string | null;
-  // Optional target base branch (019_plan_base_branch.sql): when set, the fleet branches off this
-  // branch and opens every task PR against it instead of the repository's default branch, landing
-  // the whole epic on a long-lived integration branch. NULL keeps the default-branch behaviour.
+  // Target base branch (019_plan_base_branch.sql; ADR 0003): the fleet branches off this branch and
+  // opens every task PR against it instead of the repository's default branch, landing the whole
+  // epic on a long-lived integration branch. New launches always set it (base is required at
+  // admission); the column stays NULLABLE ONLY to grandfather pre-ADR-0003 / in-flight rows that
+  // carry NULL — those must remain readable, so do NOT add a NOT NULL migration.
   base_branch: string | null;
   created_at: string;
   updated_at: string;
@@ -258,6 +261,16 @@ export class InvalidBaseBranchError extends Error {
   }
 }
 
+/** Raised when a caller supplies a blank/absent `baseBranch`. Every epic launch must name its base
+ * branch explicitly (ADR 0003): "land on the default branch" is a conscious, named, confirmed choice
+ * (the confirm-default gate), never a silent fallback. The operation edge maps this to a 400. */
+export class MissingBaseBranchError extends Error {
+  constructor() {
+    super("base branch is required (blank/absent base branches are rejected)");
+    this.name = "MissingBaseBranchError";
+  }
+}
+
 /** Conservative allowlist gate for a base-branch name. Stricter than `git check-ref-format` on
  * purpose: only `[A-Za-z0-9._/-]`, no leading `/`/`.`/`-` (a leading dash reads as a CLI flag),
  * no trailing `/`/`.`, no `..`/`//`, no empty or `.lock`-suffixed path component, bounded length.
@@ -270,13 +283,14 @@ function isPlausibleBranchName(s: string): boolean {
   return s.split("/").every((seg) => seg.length > 0 && !seg.startsWith(".") && !seg.endsWith(".lock"));
 }
 
-/** Normalise a caller-supplied base branch: trim, and treat blank as "unset" (null) so the fleet
- * falls back to the repository's default branch — the legacy behaviour. A non-blank value that is
- * not a plausible git branch name is rejected (`InvalidBaseBranchError`) rather than persisted or
- * rendered into the agent prompt; the operation edge maps that to a 400. */
-export function normalizeBaseBranch(input: string | null | undefined): string | null {
+/** Normalise a caller-supplied base branch: trim, then require it. A blank/absent value is rejected
+ * (`MissingBaseBranchError`) — ADR 0003 removed the implicit default-branch fallback, so every epic
+ * launch must name its base explicitly. A non-blank value that is not a plausible git branch name is
+ * rejected (`InvalidBaseBranchError`) rather than persisted or rendered into the agent prompt. The
+ * operation edge maps both to a 400. Always returns a non-null branch on success. */
+export function normalizeBaseBranch(input: string | null | undefined): string {
   const s = (input ?? "").trim();
-  if (s.length === 0) return null;
+  if (s.length === 0) throw new MissingBaseBranchError();
   if (!isPlausibleBranchName(s)) throw new InvalidBaseBranchError(s);
   return s;
 }
@@ -304,13 +318,131 @@ export function renderBaseBranchBrief(baseBranch: string): string {
   ].join("\n");
 }
 
+/** Raised when the explicit base branch IS the repository default branch but the caller did not
+ * acknowledge the consequence with `confirmDefaultBase: true` (ADR 0003 rule 3). Naming the default
+ * is the one dangerous explicit value: every task lands directly on it with no integration buffer,
+ * and any merge-to-default side effect fires per task. The operation edge maps this to a 400. */
+export class DefaultBaseNotConfirmedError extends Error {
+  readonly branch: string;
+  constructor(branch: string) {
+    super(
+      `base branch "${branch}" is the repository default branch: every task would land directly ` +
+        `on "${branch}" with NO integration branch, and any merge-to-default side effect (e.g. ` +
+        `auto-publish) would fire per task. Re-submit with confirmDefaultBase: true to acknowledge ` +
+        `and proceed, or name an epic/* integration branch instead.`,
+    );
+    this.name = "DefaultBaseNotConfirmedError";
+    this.branch = branch;
+  }
+}
+
+/** Raised when another ACTIVE plan (status ∉ PLAN_TERMINAL_STATUSES) already targets the same repo
+ * + same custom base branch, and the caller did not pass `allowSharedBase: true` (ADR 0003 rule 4).
+ * Two in-flight epics sharing one integration branch interleave commits and poison each other's
+ * base. The default branch is EXEMPT (many epics target it concurrently without colliding — each
+ * task PR is independent). The operation edge maps this to a 409. */
+export class SharedBaseError extends Error {
+  readonly repo: string;
+  readonly branch: string;
+  constructor(repo: string, branch: string) {
+    super(
+      `base branch "${branch}" on ${repo} is already in use by another active epic. Sharing one ` +
+        `integration branch across epics interleaves their commits and poisons the base. Re-submit ` +
+        `with allowSharedBase: true only if you intend to stack on it, or name a distinct epic/* ` +
+        `branch.`,
+    );
+    this.name = "SharedBaseError";
+    this.repo = repo;
+    this.branch = branch;
+  }
+}
+
+/** Find plans on `repo` targeting `base` whose status is NOT terminal (i.e. still active). Used by
+ * the shared-base admission guard to detect a second epic reaching for the same integration branch.
+ * Grandfathered `base_branch = null` rows never match a non-null `base`, so they are ignored. */
+export async function findActivePlansByBase(
+  data: DataLayer,
+  repo: string,
+  base: string,
+): Promise<Plan[]> {
+  const rows = await plans(data).find({ repo, base_branch: base });
+  return rows.filter((p) => !PLAN_TERMINAL_STATUSES.includes(p.status));
+}
+
+/** Options gating the confirm-default (rule 3) and shared-base (rule 4) admission rules. Both
+ * default to `false` — a "warn you can't skip": the operator must consciously opt in. */
+export interface AdmitPlanOptions {
+  allowSharedBase?: boolean;
+  confirmDefaultBase?: boolean;
+  /** The `plan_key` of the launch being admitted. When set, the shared-base guard (rule 4)
+   * EXCLUDES this plan's own active row, so an idempotent re-submit of the same issue does not
+   * trip `SharedBaseError` against itself — `startPlan` is idempotent on `plan_key` and returns
+   * `alreadyRunning` for an active plan, so the retry must reach it, not 409 on rule 4. */
+  selfPlanKey?: string;
+}
+
+/** Fail-fast admission gate for an epic launch (ADR 0003 §Decision). Composes the four ordered
+ * admission rules BEFORE any task fans out and returns the normalized base branch on success. The
+ * ORDER is load-bearing — the cheapest / most fundamental reject (missing or typo'd base) fires
+ * first, so it is NOT reordered:
+ *
+ *   1. Required + explicit — `normalizeBaseBranch` (blank/absent → `MissingBaseBranchError`;
+ *      implausible → `InvalidBaseBranchError`).
+ *   2. Create-if-missing (epic/* guard), synchronously — `ensureBaseBranch`: a missing non-`epic/*`
+ *      base throws `BaseBranchMustExistError` HERE (so a typo is a clean edge 400, not a late
+ *      per-task failure); a missing `epic/*` base is created off default HEAD before fan-out; an
+ *      existing base is a no-op. It is idempotent, so the durable `ensure-base-branch` head task
+ *      re-runs it as belt-and-suspenders.
+ *   3. Confirm-default — if the base equals the repo default branch and `confirmDefaultBase` is not
+ *      `true`, throw `DefaultBaseNotConfirmedError`. The default branch is then EXEMPT from rule 4.
+ *   4. Shared-base — if a DIFFERENT active plan already targets this same custom base and
+ *      `allowSharedBase` is not `true`, throw `SharedBaseError`. The launch's own active row is
+ *      excluded (via `options.selfPlanKey`) so an idempotent same-issue re-submit is not a 409.
+ */
+export async function admitPlan(
+  data: DataLayer,
+  repo: string,
+  baseBranch: string | null | undefined,
+  token: string,
+  options: AdmitPlanOptions = {},
+): Promise<string> {
+  // Rule 1 — required + explicit.
+  const base = normalizeBaseBranch(baseBranch);
+
+  // Rule 2 — create-if-missing (epic/* guard), synchronously at admission. A missing non-epic/*
+  // base throws BaseBranchMustExistError → clean edge 400; a missing epic/* base is created off
+  // default HEAD; an existing base is a no-op. Idempotent, so the head task safely re-runs it.
+  await ensureBaseBranch(repo, base, token);
+
+  // Rule 3 — confirm-default. Naming the repo default branch is deliberate and requires an explicit
+  // acknowledgement. When the base IS the default, it is exempt from the shared-base guard (rule 4),
+  // so return here on a confirmed default.
+  const defaultBranch = await fetchDefaultBranch(repo, token);
+  if (defaultBranch !== null && base === defaultBranch) {
+    if (options.confirmDefaultBase !== true) throw new DefaultBaseNotConfirmedError(base);
+    return base;
+  }
+
+  // Rule 4 — shared-base guard on a custom integration branch. Exclude this launch's OWN active row
+  // (when `selfPlanKey` is given) so an idempotent same-issue re-submit reaches `startPlan`'s
+  // `alreadyRunning` short-circuit instead of tripping a 409 against itself.
+  if (options.allowSharedBase !== true) {
+    const active = (await findActivePlansByBase(data, repo, base)).filter(
+      (p) => p.plan_key !== options.selfPlanKey,
+    );
+    if (active.length > 0) throw new SharedBaseError(repo, base);
+  }
+
+  return base;
+}
+
 /** Register a plan row (if new) and start the plan-fanout process. Idempotent on
  * planKey: a plan already in flight is not restarted. */
 export async function startPlan(
   data: DataLayer,
   engine: EngineClient,
   parsed: ParsedIssue,
-  baseBranch: string | null = null,
+  baseBranch: string,
 ) {
   const table = plans(data);
   const existing = await table.get(parsed.planKey);
@@ -399,12 +531,12 @@ export async function startPlan(
       // out-of-band.
       blackboardUrl: bbUrl,
       blackboardBrief: renderCoordinationBrief(bbUrl),
-      // Optional epic base branch (019_plan_base_branch.sql): the branch the fleet branches off and
-      // opens every PR against instead of the repo default. `baseBranchBrief` rides `appendPrompt`
-      // in the implement-task (like `blackboardBrief`); both are null when no base branch is pinned,
-      // so the agent keeps the default-branch behaviour from prompts/feature.md.
+      // Epic base branch (019_plan_base_branch.sql; ADR 0003): the branch the fleet branches off
+      // and opens every PR against instead of the repo default. `baseBranchBrief` rides
+      // `appendPrompt` in the implement-task (like `blackboardBrief`). Base is now always explicit
+      // (normalizeBaseBranch rejects blank), so the brief is always rendered.
       baseBranch: base,
-      baseBranchBrief: base == null ? null : renderBaseBranchBrief(base),
+      baseBranchBrief: renderBaseBranchBrief(base),
     },
   });
   const processKey = processInstanceKey == null ? null : String(processInstanceKey);

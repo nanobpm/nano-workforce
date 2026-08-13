@@ -231,8 +231,16 @@ fleet"** form, or POST the same operation the form does:
 ```bash
 curl -sS -X POST http://localhost:3000/app/api/actions/start/plan-fanout \
   -H 'content-type: application/json' \
-  -d '{ "issue": "owner/repo#123" }'
+  -d '{ "issue": "owner/repo#123", "baseBranch": "epic/agent-protocol" }'
 ```
+
+`baseBranch` is **required** (ADR 0003) — it's the integration branch the whole fleet
+branches off and opens every PR against. A missing `epic/*` base is auto-created off the
+default branch's HEAD; a missing non-`epic/*` base is a `400` (must already exist). Two
+optional flags gate the dangerous cases: `confirmDefaultBase: true` is required to name the
+repository default branch as the base, and `allowSharedBase: true` is required when another
+active epic already targets the same custom base. See
+[ADR 0003](docs/adr/0003-epic-base-branch-admission.md) for the full admission model.
 
 ---
 

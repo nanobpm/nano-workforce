@@ -454,6 +454,12 @@ export async function fetchDefaultBranch(repo: string, token: string): Promise<s
   return name;
 }
 
+/** Test-only: drop the memoized default-branch entries so a suite can't leak a warmed cache
+ * (which ignores transport/token state on a hit) into a test that expects a cold lookup. */
+export function resetDefaultBranchCache(): void {
+  defaultBranchCache.clear();
+}
+
 /** Whether a branch has already *landed* — i.e. it is the head of a `MERGED` PR. Returns:
  *   • `landed`  — a merged PR exists from this branch → the branch is a dead-end target
  *   • `open`    — an open PR exists from it (still alive)
@@ -671,4 +677,130 @@ export async function enqueueViaComment(
     body: JSON.stringify({ body: comment }),
   });
   return r.ok;
+}
+
+// ── Epic base-branch admission (ADR 0003, rule 2) ───────────────────────────
+// `ensureBaseBranch` is the create-if-missing primitive that guarantees an epic's integration
+// branch exists BEFORE any task fans out, with an `epic/*` guard so a typo can't silently spawn a
+// wrong-rooted branch. It is idempotent — an existing branch is a NO-OP (the ref is never reset,
+// which would nuke in-flight task PRs stacked on it) — so it is safe to call repeatedly: at
+// admission (fail fast), from the durable `ensure-base-branch` head task, and again on a re-plan.
+
+/** Thrown when a base branch that does NOT match the `epic/*` convention is missing. A
+ * non-`epic/*` base must already exist — a mistyped name is an operator error, not something to
+ * auto-create off the default branch (that would silently produce a wrong-rooted branch). */
+export class BaseBranchMustExistError extends Error {
+  readonly branch: string;
+  constructor(branch: string) {
+    super(
+      `base branch "${branch}" does not exist and is not an epic/* branch, so it will not be ` +
+        `auto-created — create it first, or use the epic/* convention for an auto-created ` +
+        `integration branch`,
+    );
+    this.name = "BaseBranchMustExistError";
+    this.branch = branch;
+  }
+}
+
+/** Whether `branch` matches the auto-creatable `epic/*` convention (migration 019). */
+function isEpicBranch(branch: string): boolean {
+  return branch.startsWith("epic/");
+}
+
+/** Resolve the head commit SHA of `branch` on `repo`, or `null` when the branch does not exist
+ * (a 404 from the git-ref endpoint). Throws only on a genuine transport failure. */
+async function branchHeadSha(repo: string, branch: string, token: string): Promise<string | null> {
+  const apiPath = `repos/${repo}/git/ref/heads/${branch}`;
+  if (await useGh()) {
+    try {
+      const out = await runGh(["api", apiPath]);
+      // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+      const j = JSON.parse(out) as { object?: { sha?: string } };
+      return j.object?.sha ?? null;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/\b404\b|not found|no such/i.test(msg)) return null;
+      throw err;
+    }
+  }
+  if (!token) throw new Error(`no GitHub transport available to read ${apiPath}`);
+  const r = await fetch(`https://api.github.com/${apiPath}`, {
+    headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json" },
+  });
+  if (r.status === 404) return null;
+  if (!r.ok) throw new Error(`github ${r.status} ${r.statusText}`.trim());
+  // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+  const j = (await r.json()) as { object?: { sha?: string } };
+  return j.object?.sha ?? null;
+}
+
+/** Create `refs/heads/<branch>` pointing at `sha`. Idempotent: a concurrent create / re-plan
+ * that already made the ref (GitHub `422 Reference already exists`) is treated as a no-op.
+ * Returns `true` when this call actually created the ref, `false` when it lost the race and the
+ * ref already existed (the 422 case) — so the caller can report an honest exists/created outcome. */
+async function createBranchRef(
+  repo: string,
+  branch: string,
+  sha: string,
+  token: string,
+): Promise<boolean> {
+  const ref = `refs/heads/${branch}`;
+  if (await useGh()) {
+    try {
+      await runGh(["api", `repos/${repo}/git/refs`, "-X", "POST", "-f", `ref=${ref}`, "-f", `sha=${sha}`]);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/\b422\b|already exists/i.test(msg)) return false; // idempotent — someone else created it
+      throw err;
+    }
+    return true;
+  }
+  if (!token) throw new Error(`no GitHub transport available to create ${ref}`);
+  const r = await fetch(`https://api.github.com/repos/${repo}/git/refs`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${token}`,
+      accept: "application/vnd.github+json",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ ref, sha }),
+  });
+  if (r.ok) return true;
+  if (r.status === 422) return false; // reference already exists — idempotent
+  throw new Error(`github ${r.status} ${r.statusText}: ${(await r.text()).slice(0, 300)}`.trim());
+}
+
+/** The outcome of `ensureBaseBranch`: the branch was already present (`exists`, a no-op) or was
+ * just created off the default branch HEAD (`created`). */
+export type EnsureBaseBranchResult = "exists" | "created";
+
+/** Guarantee the epic base `branch` exists on `repo` (ADR 0003 rule 2), idempotently:
+ *   • already exists → `"exists"` — NO-OP; the ref is never moved/reset.
+ *   • missing and matches `epic/*` → create `refs/heads/<branch>` off the default branch HEAD,
+ *     return `"created"`.
+ *   • missing and not `epic/*` → throw `BaseBranchMustExistError` (a non-`epic/*` base must
+ *     pre-exist; a typo must fail fast, not silently spawn a wrong-rooted branch).
+ * Safe to call repeatedly (at admission AND as the durable head task, and on a re-plan). */
+export async function ensureBaseBranch(
+  repo: string,
+  branch: string,
+  token: string,
+): Promise<EnsureBaseBranchResult> {
+  const existing = await branchHeadSha(repo, branch, token);
+  if (existing !== null) return "exists"; // never reset an existing ref
+
+  if (!isEpicBranch(branch)) throw new BaseBranchMustExistError(branch);
+
+  const defaultBranch = await fetchDefaultBranch(repo, token);
+  if (!defaultBranch) {
+    throw new Error(`cannot resolve the default branch of ${repo} to create ${branch}`);
+  }
+  const defaultSha = await branchHeadSha(repo, defaultBranch, token);
+  if (!defaultSha) {
+    throw new Error(`cannot resolve HEAD of default branch ${defaultBranch} on ${repo} to create ${branch}`);
+  }
+  // A concurrent create / re-plan may have raced us to the ref (GitHub 422); in that case it
+  // already exists and we did not create it, so report "exists" rather than misleading "created".
+  const created = await createBranchRef(repo, branch, defaultSha, token);
+  return created ? "created" : "exists";
 }
