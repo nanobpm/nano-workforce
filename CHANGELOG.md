@@ -1,3 +1,10 @@
+## [0.61.1](https://github.com/nanobpm/nano-workforce/compare/v0.61.0...v0.61.1) (2026-08-13)
+
+
+### Bug Fixes
+
+* **feature:** reconcile Feature-history status + escalate blocked runs ([#204](https://github.com/nanobpm/nano-workforce/issues/204)) ([5ef9461](https://github.com/nanobpm/nano-workforce/commit/5ef94613f09b557806eb9254545df1984025077c)), closes [#171](https://github.com/nanobpm/nano-workforce/issues/171)
+
 # [0.61.0](https://github.com/nanobpm/nano-workforce/compare/v0.60.0...v0.61.0) (2026-08-13)
 
 
