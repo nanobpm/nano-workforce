@@ -29,6 +29,13 @@ async function startHttp(): Promise<{ server: Server; port: number }> {
   return { server, port };
 }
 
+/** Close an HTTP server and resolve only once it has stopped listening (server.close() is async). */
+function closeServer(server: Server): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    server.close((err) => (err ? reject(err) : resolve()));
+  });
+}
+
 /** Open a ws client and resolve on open. Rejects (with the close code) if it closes before opening. */
 function connect(port: number, query: string): Promise<WebSocket> {
   const ws = new WebSocket(`ws://127.0.0.1:${port}/agentic${query}`);
@@ -92,7 +99,7 @@ test("a valid identity token + capability credential upgrades on /agentic", asyn
   const channel = await mount(port, server);
   t.after(async () => {
     await channel.teardown();
-    server.close();
+    await closeServer(server);
   });
 
   const ws = await connect(port, `?token=${SECRET}&capability=cap-1`);
@@ -107,7 +114,7 @@ test("an invalid identity token is rejected (4401)", async (t) => {
   const channel = await mount(port, server);
   t.after(async () => {
     await channel.teardown();
-    server.close();
+    await closeServer(server);
   });
 
   const closedCode = await rejectionCode(port, "?token=wrong&capability=cap-1");
@@ -120,7 +127,7 @@ test("a missing capability credential is rejected (4403)", async (t) => {
   const channel = await mount(port, server);
   t.after(async () => {
     await channel.teardown();
-    server.close();
+    await closeServer(server);
   });
 
   const closedCode = await rejectionCode(port, `?token=${SECRET}`);
@@ -132,7 +139,7 @@ test("normal HTTP routes keep working alongside the channel", async (t) => {
   const channel = await mount(port, server);
   t.after(async () => {
     await channel.teardown();
-    server.close();
+    await closeServer(server);
   });
 
   const res = await fetch(`http://127.0.0.1:${port}/health`);
@@ -159,7 +166,7 @@ test("the hub is visible via inspect() and mounts registered families", async (t
     return reg;
   };
   const channel = await mount(port, server, families);
-  t.after(() => server.close());
+  t.after(() => closeServer(server));
 
   const snap = channel.inspect();
   assertEquals(snap.path, "/agentic");
@@ -174,7 +181,7 @@ test("the hub is visible via inspect() and mounts registered families", async (t
 test("teardown closes live connections and is idempotent", async (t) => {
   const { server, port } = await startHttp();
   const channel = await mount(port, server);
-  t.after(() => server.close());
+  t.after(() => closeServer(server));
 
   const ws = await connect(port, `?token=${SECRET}&capability=cap-1`);
   const closed = new Promise<void>((resolve) => ws.on("close", () => resolve()));
@@ -188,7 +195,7 @@ test("teardown closes live connections and is idempotent", async (t) => {
 
 test("a family mount failure tears down already-mounted families and closes the hub", async (t) => {
   const { server, port } = await startHttp();
-  t.after(() => server.close());
+  t.after(() => closeServer(server));
   const trace: string[] = [];
   const families = () => {
     const reg = new AgenticFamilyRegistry();
@@ -225,7 +232,7 @@ test("a family mount failure tears down already-mounted families and closes the 
 
 test("a missing secret is refused (never mount an open channel)", async (t) => {
   const { server, port } = await startHttp();
-  t.after(() => server.close());
+  t.after(() => closeServer(server));
   let threw = false;
   try {
     await mountAgenticChannel({ server, secret: "", data: undefined, log: noopLog() });
