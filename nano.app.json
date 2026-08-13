@@ -61,6 +61,20 @@
         }
       },
       "pollMs": 5000
+    },
+    {
+      "table": "feature_runs",
+      "keyField": "process_key",
+      "statusField": "status",
+      "activeStatuses": [
+        "running"
+      ],
+      "onTerminated": {
+        "set": {
+          "status": "abandoned"
+        }
+      },
+      "pollMs": 5000
     }
   ],
   "workers": [
@@ -115,6 +129,14 @@
     {
       "taskType": "pr.record-wave",
       "handler": "workers/record-wave/worker.ts"
+    },
+    {
+      "taskType": "pr.record-feature",
+      "handler": "workers/record-feature/worker.ts"
+    },
+    {
+      "taskType": "pr.converge-feature",
+      "handler": "workers/converge-feature/worker.ts"
     },
     {
       "taskType": "pr.record-trial-merge",
