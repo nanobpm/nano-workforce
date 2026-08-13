@@ -43,7 +43,8 @@ const handler: AppJobHandler<In> = async (job, app) => {
       outcome,
       // A non-`done` status must never carry a stale readiness signal: clear it here too so a
       // re-run (or any prior writer) can't leave `promote_ready = 1` on a failed plan (#160).
-      promote_ready: 0,
+      // NULL, not 0 — the overview badge column gates on string-emptiness (#174).
+      promote_ready: null,
       updated_at: ts,
     });
     app.log.error(`record-results: ${planKey} finalized with 0 opened PRs`, {
@@ -53,12 +54,13 @@ const handler: AppJobHandler<In> = async (job, app) => {
   }
 
   // Derive the epic "ready to promote" signal in its ONE canonical place (026_plan_promotion_pr_url,
-  // #160): TRUE exactly when this plan is `done`, targets a pinned integration branch (`base_branch`
-  // set), and has not been promoted yet (`promotion_pr_url` still NULL). We gate on the three stored
+  // #160): 1 exactly when this plan is `done`, targets a pinned integration branch (`base_branch`
+  // set), and has not been promoted yet (`promotion_pr_url` still NULL); otherwise NULL — not 0 —
+  // because the overview badge column gates on string-emptiness (#174). We gate on the three stored
   // fields only — the repo-default-branch check is deferred to the promoteEpic operation, per #160.
   const plan = await plans(app.data).get(planKey);
   const promoteReady =
-    plan != null && plan.base_branch != null && plan.promotion_pr_url == null ? 1 : 0;
+    plan != null && plan.base_branch != null && plan.promotion_pr_url == null ? 1 : null;
 
   await app.data.table("plans", "plan_key").update(planKey, {
     status: "done",

@@ -68,12 +68,12 @@ test("no opened PRs (empty plan) hard-fails with NO_WORK_DISPATCHED", async () =
 
 test("failed finalization clears promote_ready (no stale readiness on non-done)", async () => {
   // A non-`done` status must never carry a stale readiness signal: even if a prior writer set
-  // promote_ready = 1, the no-work failure path must clear it to 0 (#160).
+  // promote_ready = 1, the no-work failure path must clear it to NULL (#160, #174).
   const app = fakeApp([], { base_branch: "epic/x", promotion_pr_url: null, promote_ready: 1 });
   await assertRejects(() => call(app), BpmnError);
   const plan = app._plans.at(-1) as Record<string, unknown>;
   assertEquals(plan.status, "failed");
-  assertEquals(plan.promote_ready, 0);
+  assertEquals(plan.promote_ready, null);
 });
 
 test("tasks present but none opened (all skipped/blocked) hard-fails", async () => {
@@ -101,7 +101,8 @@ test("at least one opened PR finalizes cleanly (no throw)", async () => {
 
 // promote_ready read-model derivation (026_plan_promotion_pr_url.sql, #160): the finalizer is the
 // ONE canonical writer of the signal. It is 1 exactly when the plan reaches `done` with a pinned
-// integration `base_branch` and no promotion PR yet — gated on the three stored fields only.
+// integration `base_branch` and no promotion PR yet — gated on the three stored fields only;
+// otherwise NULL (nullable, not 0 — the overview badge column gates on string-emptiness, #174).
 const opened = (): Row[] => [{ id: 1, plan_key: "o/r#1", task_id: "a", status: "opened" }];
 
 test("done + base_branch set + no promotion_pr_url → promote_ready = 1", async () => {
@@ -112,18 +113,18 @@ test("done + base_branch set + no promotion_pr_url → promote_ready = 1", async
   assertEquals(plan.promote_ready, 1);
 });
 
-test("done but base_branch null → promote_ready = 0", async () => {
+test("done but base_branch null → promote_ready = null", async () => {
   const app = fakeApp(opened(), { base_branch: null, promotion_pr_url: null });
   await call(app);
   const plan = app._plans.at(-1) as Record<string, unknown>;
   assertEquals(plan.status, "done");
-  assertEquals(plan.promote_ready, 0);
+  assertEquals(plan.promote_ready, null);
 });
 
-test("done but promotion_pr_url already set → promote_ready = 0", async () => {
+test("done but promotion_pr_url already set → promote_ready = null", async () => {
   const app = fakeApp(opened(), { base_branch: "epic/x", promotion_pr_url: "o/r#99" });
   await call(app);
   const plan = app._plans.at(-1) as Record<string, unknown>;
   assertEquals(plan.status, "done");
-  assertEquals(plan.promote_ready, 0);
+  assertEquals(plan.promote_ready, null);
 });

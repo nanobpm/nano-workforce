@@ -132,7 +132,7 @@ test("(d) already-promoted (promotion_pr_url set) → returns existing PR, opens
   assertEquals(calls.defaultBranch, 0);
 });
 
-test("(e) happy path → opens exactly one PR, persists promotion_pr_url, sets promote_ready = 0", async () => {
+test("(e) happy path → opens exactly one PR, persists promotion_pr_url, sets promote_ready = null", async () => {
   const { app, plansRows } = makeApp([donePlan()], [
     { id: 1, plan_key: "o/r#160", pr_key: "o/r#161", summary: "slice one" },
     { id: 2, plan_key: "o/r#160", pr_key: "o/r#162", summary: "slice two" },
@@ -146,7 +146,7 @@ test("(e) happy path → opens exactly one PR, persists promotion_pr_url, sets p
   assertEquals(res.body.promoted, true);
   assertEquals(calls.open, 1);
   assertEquals(plansRows[0].promotion_pr_url, "https://github.com/o/r/pull/9");
-  assertEquals(plansRows[0].promote_ready, 0);
+  assertEquals(plansRows[0].promote_ready, null);
 });
 
 test("(e') happy path passes default branch as base and integration branch as head", async () => {
@@ -179,7 +179,7 @@ test("(f) idempotent re-invoke after a successful promote → returns existing P
   assertEquals(r2.body.promoted, false);
   assertEquals(second.calls.open, 0);
   assertEquals(second.calls.defaultBranch, 0);
-  assertEquals(plansRows[0].promote_ready, 0);
+  assertEquals(plansRows[0].promote_ready, null);
 });
 
 test("(g) GitHub-side 'PR already exists' → treated as success, existing URL recovered and persisted", async () => {
@@ -198,7 +198,7 @@ test("(g) GitHub-side 'PR already exists' → treated as success, existing URL r
   assertEquals(res.body.promoted, false);
   assertEquals(calls.byHead, 1);
   assertEquals(plansRows[0].promotion_pr_url, "https://github.com/o/r/pull/7");
-  assertEquals(plansRows[0].promote_ready, 0);
+  assertEquals(plansRows[0].promote_ready, null);
 });
 
 test("(g') GitHub 'exists' but the open PR can't be recovered → 502, nothing persisted", async () => {

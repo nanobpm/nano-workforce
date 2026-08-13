@@ -72,6 +72,7 @@
           { "field": "wave_label", "header": "Wave" },
           { "field": "task_count", "header": "Tasks" },
           { "field": "open_plan_findings", "header": "Attention", "badge": { "tone": "danger", "label": "!" } },
+          { "field": "promote_ready", "header": "Promote", "badge": { "tone": "ok", "label": "\u2191" } },
           { "field": "issue_number", "header": "Issue", "linkField": "issue_url" },
           { "field": "updated_at", "header": "Updated" }
         ]
