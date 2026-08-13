@@ -586,7 +586,8 @@ paths:
     post:
       operationId: postMessage
       summary: Publish a message / answer an escalation. For the merge-loop `escalation-answered`
-        name, runs the review answer flow; otherwise a plain publishMessage. The epic-156 escalation
+        name, runs the merge-loop escalation answer flow; otherwise a plain publishMessage. The
+        epic-156 escalation
         kinds (task, plan-review, trial-merge, PR review-loop) are native user tasks answered via
         the task inbox (POST /tasks/api/complete), not this route.
       requestBody:

@@ -31,10 +31,10 @@ surface are proposed and open for adjustment.
                      ▼
             ┌───────────────────┐        review-ready (msg)      ┌──────────┐
             │  convergence-loop │◀───────────────────────────────│  poller  │
-            │      (BPMN)       │        userTask complete (inbox)└────┬─────┘
+            │      (BPMN)       │                                 └────┬─────┘
             └─────────┬─────────┘◀───────────────┐                    │ polls
-                      │ senior:pr-review job      │ answer POST        │ GitHub
-                      ▼                           │                    ▼
+                      │ senior:pr-review job      │ userTask complete  │ GitHub
+                      ▼                           │ (inbox)            ▼
             ┌───────────────────┐          ┌──────┴───────┐     ┌────────────┐
             │  decoupled agent  │          │   web UI +   │     │   SQLite   │
             │ (c8ctl nano work) │          │  API routes  │────▶│ (app.db)   │
@@ -414,7 +414,7 @@ queries skip (`merging`), so a slow pass can't double-signal.
 | `GITHUB_TOKEN` | — | GitHub API (poller + agent) |
 | `NANO_PR_POLL_MS` | 60000 | poll interval |
 | `NANO_PR_MAX_ROUNDS` | 20 | default round cap (per-submit `maxRounds` override, clamped 1–100) |
-| `NANO_PR_WEBHOOK_SECRET` | — | optional shared secret (`X-Hook-Secret`) for guarded hook operations (e.g. `/app/api/hooks/agent`, `/app/api/hooks/version`) |
+| `NANO_PR_WEBHOOK_SECRET` | — | optional shared secret (`X-Hook-Secret`) for guarded operations (e.g. `/app/api/agent`, `/app/api/version`, `/app/api/status`) |
 | `NANO_PR_AUTO_MERGE` | 1 | run the merge stage after convergence (`0` = review-only; per-submit `convergeOnly: true` override) |
 | `NANO_PR_MERGE_METHOD` | squash | `squash` \| `merge` \| `rebase` |
 | `NANO_PR_MERGE_ADMIN` | 0 | pass `--admin` on merge |

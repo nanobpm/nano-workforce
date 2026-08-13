@@ -1,7 +1,7 @@
 // POST /app/api/actions/message → operationId `postMessage` (ADR 0058, base /app/api).
 // Replaces the hand-rolled action that overrode the generic publishMessage action. For the
-// merge-loop `escalation-answered` message we run the review answer flow; any other message falls
-// back to a plain publishMessage.
+// merge-loop `escalation-answered` message we run the merge-loop escalation answer flow; any other
+// message falls back to a plain publishMessage.
 //
 // The four #156 escalation kinds (task, plan-review, trial-merge, PR review-loop) are now native
 // `userTask`s answered directly through the task inbox (`POST /tasks/api/complete`), so this
@@ -30,8 +30,8 @@ export default defineOperation("postMessage", async ({ body }, app) => {
     if (!prKey) return { status: 400, body: { error: "correlationKey is required" } };
     if (!answer) return { status: 400, body: { error: "answer is required" } };
     const r = await answerEscalation(app.data, app.engine, prKey, answer);
-    if (r.ok) app.log.info("review escalation answered", { name, prKey });
-    else app.log.warn("postMessage: no open review escalation to answer", { name, prKey });
+    if (r.ok) app.log.info("merge-loop escalation answered", { name, prKey });
+    else app.log.warn("postMessage: no open merge-loop escalation to answer", { name, prKey });
     return { status: r.ok ? 200 : 404, body: r };
   }
 

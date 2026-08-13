@@ -134,14 +134,14 @@ inbox** surface. There is no bespoke per-kind webhook or answer page any more.
 
 ```bash
 # Every parked escalation, across all kinds:
-curl -sS __BASE__/tasks/api/tasks | jq '.[] | { userTaskKey, elementId, variables }'
+curl -sS __BASE__/../tasks/api/tasks | jq '.[] | { userTaskKey, elementId, variables }'
 
 # Filter to one kind (e.g. plan-review decisions) by elementId:
-curl -sS __BASE__/tasks/api/tasks \
+curl -sS __BASE__/../tasks/api/tasks \
   | jq '[.[] | select(.elementId == "plan-review-decision")]'
 ```
 
-The inbox UI is also served at `__BASE__/tasks` for a human to browse, filter, and
+The inbox UI is also served at `__BASE__/../tasks` for a human to browse, filter, and
 answer (assignee/candidate-group and age surface on each task once assignment lands).
 
 **Answer a task** by completing it with the typed variables its form expects — the
@@ -149,22 +149,22 @@ completion resumes the parked process:
 
 ```bash
 # PR review-loop (elementId `wait-answer`, pr-escalation form):
-curl -sS -X POST __BASE__/tasks/api/complete -H 'content-type: application/json' \
+curl -sS -X POST __BASE__/../tasks/api/complete -H 'content-type: application/json' \
   -d '{ "userTaskKey": "<key>", "variables": { "answer": "Cap retries at 5 and proceed." } }'
 
 # Implementation (feature) task (elementId `feature-escalation`):
 #   { "resolution": "answer", "answer": "…" }  to resume, or  { "resolution": "abandon" }
-curl -sS -X POST __BASE__/tasks/api/complete -H 'content-type: application/json' \
+curl -sS -X POST __BASE__/../tasks/api/complete -H 'content-type: application/json' \
   -d '{ "userTaskKey": "<key>", "variables": { "resolution": "answer", "answer": "Use v2." } }'
 
 # Plan-review (elementId `plan-review-decision`):
 #   { "directive": "revise", "notes": "…" }  (fresh review budget)  or  { "directive": "proceed" }
-curl -sS -X POST __BASE__/tasks/api/complete -H 'content-type: application/json' \
+curl -sS -X POST __BASE__/../tasks/api/complete -H 'content-type: application/json' \
   -d '{ "userTaskKey": "<key>", "variables": { "directive": "revise", "notes": "Make issue-7 the seam." } }'
 
 # Trial-merge (elementId `trial-merge-decision`):
 #   { "action": "proceed" | "rebase" | "abandon", "notes"?: "…" }
-curl -sS -X POST __BASE__/tasks/api/complete -H 'content-type: application/json' \
+curl -sS -X POST __BASE__/../tasks/api/complete -H 'content-type: application/json' \
   -d '{ "userTaskKey": "<key>", "variables": { "action": "rebase", "notes": "Re-run after the fix." } }'
 ```
 
