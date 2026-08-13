@@ -174,6 +174,22 @@ test("fails when no prompt link is wired at all", () => {
   assert(res.errors.some((e) => e.includes("unwired")));
 });
 
+test("fails when two deploy globs match files sharing a basename (ambiguous resource name)", () => {
+  // Two deployed files with the same basename would silently overwrite in the resourceId lookup, so
+  // a linkName="prompt" resourceId could resolve to the wrong file. The guard must fail fast.
+  const root = fixture({
+    "nano.app.json": JSON.stringify({
+      models: { processes: ["resources/processes/*.bpmn", "prompts/*.md", "extra/*.md"] },
+    }),
+    "resources/processes/loop.bpmn": serviceTask(link("review-round.md")),
+    "prompts/review-round.md": "# Round\nWrite `$AGENT_RESULT_FILE`.",
+    "extra/review-round.md": "# Duplicate\nWrite `$AGENT_RESULT_FILE`.",
+  });
+  const res = checkAgentPrompts(root);
+  assert(!res.ok);
+  assert(res.errors.some((e) => e.includes("duplicate deployed resource name") && e.includes("review-round.md")));
+});
+
 test("checks the real repo: all committed agent prompts link to deployed resources", () => {
   // The guard must be green against the actual app it protects — this is the case CI relies on.
   const repoRoot = decodeURIComponent(new URL("../", import.meta.url).pathname);

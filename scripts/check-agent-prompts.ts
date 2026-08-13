@@ -134,9 +134,23 @@ export function checkAgentPrompts(root: string): CheckResult {
     ...(models.decisions ?? []),
     ...(models.forms ?? []),
   ];
+  // Keyed by basename (the deployed resource name a `resourceId` references). Two deploy globs
+  // matching files with the same basename would silently overwrite here, so a `resourceId` lookup
+  // could resolve to the wrong file (or mask a misconfiguration). Fail fast on the collision so the
+  // lookup stays unambiguous.
   const deployedFiles = new Map<string, string>();
   for (const rel of deployGlobs.flatMap((p) => expandGlob(root, p))) {
-    deployedFiles.set(basename(rel), rel);
+    const name = basename(rel);
+    const prior = deployedFiles.get(name);
+    if (prior != null && prior !== rel) {
+      errors.push(
+        `duplicate deployed resource name "${name}": both "${prior}" and "${rel}" deploy under the ` +
+          `same basename, so a linkName="prompt" resourceId="${name}" would resolve ambiguously — ` +
+          `rename one so deployed resource names stay unique`,
+      );
+      continue;
+    }
+    deployedFiles.set(name, rel);
   }
 
   // The model files whose XML we scan for `<zeebe:linkedResource>` links.
