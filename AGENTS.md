@@ -135,6 +135,10 @@ Migrations live in `db/migrations/*.sql` and are **auto-applied on boot** from
 - **Destructive drops are a separate, later contract phase**, shipped only after
   a release stopped reading the old shape.
 - Number a new migration after the current highest prefix (they apply in order).
+  Check `origin/main`, not your branch point — a fan-out epic branch forks at one
+  prefix while `main` keeps advancing, so the branch-local "next" number collides
+  on merge. Two files must never share a prefix; `npm run check:migrations`
+  (a CI gate) enforces this and fails the build on any new duplicate.
 
 ## Runtime & CI gates
 
@@ -148,11 +152,12 @@ npm run typecheck                                     # tsc --noEmit (Node)
 npm run check                                         # urban check (manifest validation)
 npm run layout:check                                  # BPMN diagram freshness (no drift)
 npm run check:prompts                                 # agent-prompt template resolution
+npm run check:migrations                              # migration prefixes (no collisions)
 npm test                                              # unit tests (node --test)
 ```
 
 CI (`.github/workflows/ci.yml`) gates lint, typecheck, `urban check`, `layout:check`,
-the prompt check, and the Node test suite. Run `npm run layout <file.bpmn>` after
+the prompt check, the migration-prefix check, and the Node test suite. Run `npm run layout <file.bpmn>` after
 any BPMN flow change and commit the regenerated diagram — the `layout:check`
 gate fails the build otherwise.
 

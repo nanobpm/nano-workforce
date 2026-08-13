@@ -35,6 +35,7 @@
     "typecheck": "tsc --noEmit",
     "pretypecheck": "urban gen",
     "check:prompts": "node --experimental-strip-types scripts/check-agent-prompts.ts",
+    "check:migrations": "node --experimental-strip-types scripts/check-migrations.ts",
     "gen": "urban gen",
     "gen:check": "urban gen --check",
     "layout": "node --experimental-strip-types scripts/layout-bpmn.ts",
