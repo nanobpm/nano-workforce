@@ -188,3 +188,16 @@ test("openPullRequest: a genuine transport failure (5xx) propagates as a throw",
     "500",
   );
 });
+
+test("openPullRequest: token transport with no token returns null without a network call (poller idles)", async () => {
+  // The "no transport usable → null" contract: under token transport with an empty token,
+  // `openPullRequest` must idle (return null) rather than throw or hit the network. Stub `fetch`
+  // to throw so any accidental network call fails the test loudly.
+  const res = await withStubbedFetch(
+    () => {
+      throw new Error("fetch must not be called when no token is available");
+    },
+    () => openPullRequest("o/r", "epic/y", "feat/x", "T", "B", ""),
+  );
+  assertEquals(res, null);
+});
