@@ -47,6 +47,13 @@ jobs:
       - name: Check agent prompt templates
         run: npm run check:prompts
 
+      # Merge-safety gate: migrations are applied in numeric-prefix order, but each fan-out branch
+      # picks "the next" prefix independently, so parallel siblings silently collide on one slot
+      # (the historical 004/005/006/007 pairs; recurred on epic #142). This fails the build on any
+      # new duplicate prefix so the collision can't merge unnoticed.
+      - name: Check migration prefixes (no collisions)
+        run: npm run check:migrations
+
       # Runs the full *.test.ts suite under Node's built-in test runner (node:test), which strips
       # TypeScript types on the fly (Node >= 22.6) — no build step.
       - name: Test (Node)
