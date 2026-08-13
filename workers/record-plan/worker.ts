@@ -18,21 +18,12 @@
 import type { AppJobHandler } from "@nanobpm/urban";
 import { planTaskDeps, planTasks } from "../../app/plan.ts";
 import { computeWaves, WaveError, type WaveTask } from "../../app/waves.ts";
+import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 
-interface RawTask {
-  id?: unknown;
-  title?: unknown;
-  prompt?: unknown;
-  dependsOn?: unknown;
-}
-// NOTE (issue #211): this worker reads an ARRAY input (`tasks: RawTask[]`), which the scalar-only
-// `nano:dataEnvelope` cannot express, so it keeps a hand-written `interface In` pending a decision
-// on extending the envelope schema to arrays. See the PR body's "array inputs" escalation.
-interface In extends Record<string, unknown> {
-  planKey: string;
-  tasks?: RawTask[];
-  note?: string;
-}
+// Input typed off the model data envelope (`RecordPlanIn` in plan-fanout.bpmn) — ADR 0040. The
+// `tasks[]` array field is a `nano:reference` to the `RecordPlanTask` shape (`list="true"`), so it
+// resolves to `RecordPlanTask[]` with no hand-written interface.
+type In = WorkerInputs["pr.record-plan"];
 interface NormalTask {
   id: string;
   title: string;
