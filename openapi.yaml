@@ -201,6 +201,30 @@ components:
         alreadyRunning:
           type: boolean
           description: True when a non-terminal plan for this issue already exists; no new instance was started.
+    PromoteEpicResult:
+      type: object
+      description: The result of a promoteEpic call — the epic's promotion PR (opened now or recovered
+        idempotently). `promoted` is true when this call opened a NEW PR, false when an existing one
+        was returned.
+      additionalProperties: false
+      required:
+        - planKey
+        - url
+        - number
+        - promoted
+      properties:
+        planKey:
+          type: string
+        url:
+          type: string
+          description: The promotion PR's html_url (integration branch → default branch).
+        number:
+          type: integer
+          nullable: true
+          description: The promotion PR number, or null when only a persisted URL was available to recover.
+        promoted:
+          type: boolean
+          description: True when this call opened a new PR; false when an existing promotion PR was returned idempotently.
     ConvergenceStart:
       description: The start-convergence request body. Names the target PR by EXACTLY ONE of `pr`
         (an `owner/repo#123` reference) or `url` (a bare PR URL) — never both, never neither — with
@@ -846,6 +870,72 @@ paths:
                 $ref: "#/components/schemas/ErrorBody"
         "404":
           description: Unknown abandon token (never reveals which PRs exist).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+  /actions/promote/epic:
+    post:
+      operationId: promoteEpic
+      summary: Open the human-gated promotion PR from an epic's integration branch into the repo
+        default branch (issue #160). Idempotent — never merges, only opens (or recovers) the PR.
+      description: >-
+        The one-click, human-gated integration→default-branch door for a completed epic. Opens a
+        pull request from the plan's `base_branch` (the epic integration branch) into the
+        repository's default branch, summarising the epic's landed task PRs. It NEVER merges — it
+        only opens the PR — and it is idempotent: once a promotion PR exists (persisted, or already
+        open on GitHub for the same head→base) it is recovered and returned rather than duplicated.
+        Rejected unless the plan is `done` with a `base_branch` set, and when that base already IS
+        the default branch (nothing to promote).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+                - planKey
+              properties:
+                planKey:
+                  type: string
+                  minLength: 1
+                  description: The plan (epic) key, `owner/repo#N` — the same value the plans table is keyed on.
+      responses:
+        "202":
+          description: A new promotion PR was opened; its URL/number is returned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PromoteEpicResult"
+        "200":
+          description: A promotion PR already existed (persisted or open on GitHub); it is recovered and returned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PromoteEpicResult"
+        "400":
+          description: The request body was missing/invalid (e.g. absent planKey).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+        "404":
+          description: No plan exists for the given planKey.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+        "409":
+          description: >-
+            The plan is not promotable — it is not `done`, has no `base_branch`, its base already IS
+            the repo default branch (nothing to promote), or GitHub rejected the base/head as invalid.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+        "502":
+          description: No usable GitHub transport, or GitHub reported the PR exists but it could not be recovered.
           content:
             application/json:
               schema:
