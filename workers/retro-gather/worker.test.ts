@@ -2,6 +2,7 @@ import { test } from "node:test";
 import { assert, assertEquals, assertStringIncludes } from "#test-assert";
 import type { DataLayer } from "@nanobpm/urban";
 import { noopLog } from "../../test/log.ts";
+import { memBlackboardSource } from "../../test/blackboardDb.ts";
 import { appendEntry } from "../../app/blackboard.ts";
 import handler from "./worker.ts";
 
@@ -29,7 +30,7 @@ function memData(): { data: DataLayer; stores: Record<string, any[]> } {
       async update() {},
     };
   }
-  const data = { table: (n: string, pk?: string) => tbl(n, pk) } as any as DataLayer;
+  const data = { table: (n: string, pk?: string) => tbl(n, pk), source: memBlackboardSource().source } as any as DataLayer;
   return { data, stores };
 }
 

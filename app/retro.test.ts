@@ -2,6 +2,7 @@
 import { test } from "node:test";
 import { assert, assertEquals, assertStringIncludes } from "#test-assert";
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
+import { memBlackboardSource } from "../test/blackboardDb.ts";
 import { appendEntry } from "./blackboard.ts";
 import { recordTaskDelta } from "./taskDelta.ts";
 import {
@@ -46,7 +47,7 @@ function memData(): { data: DataLayer; stores: Record<string, any[]> } {
       },
     };
   }
-  const data = { table: (n: string, pk?: string) => tbl(n, pk) } as any as DataLayer;
+  const data = { table: (n: string, pk?: string) => tbl(n, pk), source: memBlackboardSource().source } as any as DataLayer;
   return { data, stores };
 }
 
@@ -335,6 +336,7 @@ test("maybeStartRetro: a secondary blocked-retro persistence failure still retur
   // recordRetro rethrows non-unique DB errors; simulate the blocked-retro insert hitting a
   // FOREIGN KEY failure so the persistence in the createInstance-failure handler throws.
   const failingData = {
+    ...data,
     table: (name: string, pk?: string) => {
       const t = (data as any).table(name, pk);
       if (name !== "plan_retros") return t;

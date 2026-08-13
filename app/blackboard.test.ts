@@ -1,7 +1,12 @@
 // Unit tests for the epic coordination blackboard (Tier 1, issues #51 / #49 D4).
+//
+// H4 (#147) migrated the storage onto `@nanobpm/agentic/blackboard`'s shared `BlackboardStore`
+// (table `agentic_blackboard`), reached over the app DataLayer's raw SQLite handle. These tests run
+// the adapter against a REAL in-memory SQLite engine (see `test/blackboardDb.ts`), so the
+// idempotency, conflict, and incremental-read behaviour is verified end-to-end, not against a mock.
 import { test } from "node:test";
 import { assert, assertEquals, assertStringIncludes } from "#test-assert";
-import type { DataLayer } from "@nanobpm/urban";
+import { memBlackboardData } from "../test/blackboardDb.ts";
 import {
   appendEntry,
   blackboardUrl,
@@ -10,40 +15,12 @@ import {
   mintBlackboardToken,
   normalizeKind,
   planKeyForToken,
+  planKeyForTokenSync,
   publicBaseUrl,
   readBlackboard,
   readBlackboardPage,
   renderCoordinationBrief,
 } from "./blackboard.ts";
-
-// A tiny in-memory stand-in for the record gateway, matching the subset of the Table<T> API the
-// blackboard uses (insert/find/findOne). Mirrors the fake-app style used across the app tests.
-function memData(): { data: DataLayer; stores: Record<string, any[]> } {
-  const stores: Record<string, any[]> = {};
-  const seq: Record<string, number> = {};
-  function tbl(name: string, pk = "id") {
-    const rows = (stores[name] ??= [] as any[]);
-    return {
-      async insert(row: any) {
-        if (pk === "id") {
-          const id = (seq[name] = (seq[name] ?? 0) + 1);
-          rows.push({ id, ...row });
-          return id;
-        }
-        rows.push({ ...row });
-        return row[pk];
-      },
-      async find(where: any = {}) {
-        return rows.filter((r) => Object.entries(where).every(([k, v]) => r[k] === v));
-      },
-      async findOne(where: any = {}) {
-        return rows.find((r) => Object.entries(where).every(([k, v]) => r[k] === v));
-      },
-    };
-  }
-  const data = { table: (n: string, pk?: string) => tbl(n, pk) } as any as DataLayer;
-  return { data, stores };
-}
 
 test("mintBlackboardToken: URL-safe, unguessable, unique", () => {
   const a = mintBlackboardToken();
@@ -106,16 +83,21 @@ test("renderCoordinationBrief: leads with a separator and teaches the protocol +
   assertStringIncludes(brief, "Share what you learn");
 });
 
-test("planKeyForToken: resolves a token to its plan, undefined otherwise", async () => {
-  const { data } = memData();
+test("planKeyForToken: resolves a token to its plan, undefined otherwise (async + sync agree)", async () => {
+  const { data, db } = memBlackboardData();
   await data.table("plans", "plan_key").insert({ plan_key: "o/r#7", blackboard_token: "tok7" });
   assertEquals(await planKeyForToken(data, "tok7"), "o/r#7");
   assertEquals(await planKeyForToken(data, "nope"), undefined);
   assertEquals(await planKeyForToken(data, ""), undefined);
+  // The sync resolver (used by the agentic channel's scopeOf) resolves the identical mapping, so the
+  // HTTP hook and the channel scope a plan's board to the same plan_key.
+  assertEquals(planKeyForTokenSync(db, "tok7"), "o/r#7");
+  assertEquals(planKeyForTokenSync(db, "nope"), undefined);
+  assertEquals(planKeyForTokenSync(db, ""), undefined);
 });
 
 test("appendEntry + readBlackboard: append, encode files, read back in write order", async () => {
-  const { data } = memData();
+  const { data } = memBlackboardData();
   await appendEntry(data, "o/r#1", { author_task: "gap-2", kind: "file-claim", files: ["a.rs"], body: "touches a.rs" });
   await appendEntry(data, "o/r#1", { author_task: "gap-8", kind: "note", body: "heads up" });
   await appendEntry(data, "o/r#2", { body: "other plan" }); // must not leak across plans
@@ -128,14 +110,14 @@ test("appendEntry + readBlackboard: append, encode files, read back in write ord
 });
 
 test("appendEntry: trims whitespace-padded file paths so stored/read values are clean", async () => {
-  const { data } = memData();
+  const { data } = memBlackboardData();
   await appendEntry(data, "p", { kind: "file-claim", files: ["  engine/state.rs  ", "\tengine/mine.rs\n"], body: "claims" });
   const [e] = await readBlackboard(data, "p");
   assertEquals(e.files, ["engine/state.rs", "engine/mine.rs"], "paths stored trimmed, not whitespace-padded");
 });
 
 test("appendEntry: a missing author defaults to 'system' and kind is normalised", async () => {
-  const { data } = memData();
+  const { data } = memBlackboardData();
   await appendEntry(data, "p", { body: "x", kind: "weird" as unknown });
   const [e] = await readBlackboard(data, "p");
   assertEquals(e.author_task, "system");
@@ -143,44 +125,30 @@ test("appendEntry: a missing author defaults to 'system' and kind is normalised"
 });
 
 test("appendEntry: idempotent on dedupe_key (a job retry re-POST is a no-op)", async () => {
-  const { data, stores } = memData();
+  const { data, db } = memBlackboardData();
   const first = await appendEntry(data, "p", { author_task: "t", body: "claim", dedupe_key: "t:claim:1" });
   const again = await appendEntry(data, "p", { author_task: "t", body: "claim", dedupe_key: "t:claim:1" });
   assertEquals(first.inserted, true);
   assertEquals(again.inserted, false, "second write with same dedupe_key is a no-op");
   assertEquals(again.id, first.id, "returns the existing id");
-  assertEquals(stores["plan_blackboard"].length, 1, "exactly one row persisted");
+  const [{ n }] = db.all<{ n: number }>("SELECT COUNT(*) AS n FROM agentic_blackboard WHERE scope = ?", ["p"]);
+  assertEquals(n, 1, "exactly one row persisted");
 });
 
-test("appendEntry: a lost UNIQUE race collapses to a no-op instead of a 500", async () => {
-  // Simulate the concurrency window: two POSTs share a dedupe_key, both miss the findOne
-  // pre-check, then insert loses the race on the UNIQUE (plan_key, dedupe_key) index. The
-  // catch branch must re-read the winner's row and return it rather than propagate the throw.
-  const winner = { id: 42, plan_key: "p", dedupe_key: "t:claim:1", author_task: "t", body: "claim" };
-  let preCheckDone = false;
-  const table: any = {
-    async findOne() {
-      // Pre-check misses (row not yet visible); the recovery read after the collision hits.
-      if (!preCheckDone) {
-        preCheckDone = true;
-        return undefined;
-      }
-      return winner;
-    },
-    async insert() {
-      throw Object.assign(new Error("UNIQUE constraint failed: plan_blackboard.dedupe_key"), {
-        code: "SQLITE_CONSTRAINT_UNIQUE",
-      });
-    },
-  };
-  const data = { table: () => table } as any as DataLayer;
-  const res = await appendEntry(data, "p", { author_task: "t", body: "claim", dedupe_key: "t:claim:1" });
-  assertEquals(res.inserted, false, "a lost race is not a fresh insert");
-  assertEquals(res.id, 42, "returns the winning row's id");
+test("appendEntry: a repeat dedupe_key collapses to the existing row instead of a fresh insert", async () => {
+  // The store's idempotent short-circuit (and its lost-UNIQUE-race recovery) means re-appending a
+  // fact under a stable dedupe_key returns the winning row as inserted:false rather than throwing —
+  // an engine job retry never duplicates or 500s.
+  const { data } = memBlackboardData();
+  const winner = await appendEntry(data, "p", { author_task: "t", body: "claim", dedupe_key: "t:claim:1" });
+  assertEquals(winner.inserted, true);
+  const retry = await appendEntry(data, "p", { author_task: "t", body: "claim", dedupe_key: "t:claim:1" });
+  assertEquals(retry.inserted, false, "a repeat is not a fresh insert");
+  assertEquals(retry.id, winner.id, "returns the winning row's id");
 });
 
 test("appendEntry: a blank body is rejected", async () => {
-  const { data } = memData();
+  const { data } = memBlackboardData();
   let threw = false;
   try {
     await appendEntry(data, "p", { body: "   " });
@@ -191,7 +159,7 @@ test("appendEntry: a blank body is rejected", async () => {
 });
 
 test("readBlackboard: since returns only newer entries (incremental poll)", async () => {
-  const { data } = memData();
+  const { data } = memBlackboardData();
   await appendEntry(data, "p", { body: "one" });
   await appendEntry(data, "p", { body: "two" });
   await appendEntry(data, "p", { body: "three" });
@@ -201,7 +169,7 @@ test("readBlackboard: since returns only newer entries (incremental poll)", asyn
 });
 
 test("readBlackboardPage: cursor is the plan head and lets an agent poll to caught-up (Tier 2)", async () => {
-  const { data } = memData();
+  const { data } = memBlackboardData();
   await appendEntry(data, "p", { body: "one" });
   await appendEntry(data, "p", { body: "two" });
 
@@ -222,14 +190,14 @@ test("readBlackboardPage: cursor is the plan head and lets an agent poll to caug
 });
 
 test("readBlackboardPage: an empty plan yields no entries and a zero cursor", async () => {
-  const { data } = memData();
+  const { data } = memBlackboardData();
   const page = await readBlackboardPage(data, "empty");
   assertEquals(page.entries, []);
   assertEquals(page.cursor, 0);
 });
 
 test("detectFileClaimConflicts: a sibling's prior claim on the same file is surfaced", async () => {
-  const { data } = memData();
+  const { data } = memBlackboardData();
   await appendEntry(data, "p", { author_task: "gap-2", kind: "file-claim", files: ["engine/state.rs"], body: "owns state.rs" });
 
   const conflicts = await detectFileClaimConflicts(data, "p", {
@@ -242,7 +210,7 @@ test("detectFileClaimConflicts: a sibling's prior claim on the same file is surf
 });
 
 test("detectFileClaimConflicts: your own prior claim and non-file-claim entries are not conflicts", async () => {
-  const { data } = memData();
+  const { data } = memBlackboardData();
   await appendEntry(data, "p", { author_task: "gap-2", kind: "file-claim", files: ["a.rs"], body: "my earlier claim" });
   await appendEntry(data, "p", { author_task: "gap-8", kind: "note", files: ["a.rs"], body: "just a note about a.rs" });
 
@@ -256,7 +224,7 @@ test("detectFileClaimConflicts: your own prior claim and non-file-claim entries 
 });
 
 test("detectFileClaimConflicts: beforeId restricts to strictly prior claims (insertion order wins)", async () => {
-  const { data } = memData();
+  const { data } = memBlackboardData();
   const prior = await appendEntry(data, "p", {
     author_task: "gap-2",
     kind: "file-claim",

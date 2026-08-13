@@ -2,42 +2,43 @@
 //
 // A per-plan advisory shared store. Implementer agents (`senior:feature`) READ it on dispatch and
 // WRITE to it during/after their work — "I now also touch state.rs", "constraint X changed
-// direction Y" — so parallel siblings in a wave can coordinate without a human relay. It is the
-// machine-actionable substrate the #614 retro's "structured coordination channel" asked for.
+// direction Y" — so parallel siblings in a wave can coordinate without a human relay.
 //
-// Design invariants:
+// H4 (#147, ADR 0056) GENERALISED the storage onto `@nanobpm/agentic/blackboard`'s first-class,
+// capability-scoped `BlackboardStore` (table `agentic_blackboard`) — the SAME store the new
+// agentic-channel `blackboard` family serves, over the SAME app SQLite DataLayer. This module is now
+// the app-side ADAPTER: it keeps the exact HTTP-hook surface (snake_case entries, `plan_key` scope,
+// token→plan resolution) callers already depend on — `operations/{appendBlackboard,readBlackboard}`,
+// `app/retro.ts`, `app/plan.ts`, `workers/record-wave` — while the append/read/dedupe/conflict
+// SEMANTICS live once in the shared store (no drift surface). The idempotency, `file-claim`
+// conflict reporting, and `since`/cursor incremental-read behaviour are identical to before because
+// the store is a faithful port of the original `plan_blackboard` logic.
+//
+// Design invariants (unchanged):
 //   - ADVISORY ONLY. Never gate a sequence flow on a blackboard read; the BPMN stays the
 //     control-flow source of truth. This store is shared *knowledge*, read fresh, and is not part
 //     of deterministic replay.
 //   - IDEMPOTENT write-back. The engine may re-activate a job on retry, so a re-POST carrying a
-//     stable `dedupe_key` is a no-op (backed by a unique index; we also short-circuit here).
+//     stable `dedupe_key` is a no-op (backed by a unique index; the store also short-circuits).
 //   - CAPABILITY URL. The per-plan token IS the credential; the agent curls the exact URL it was
 //     handed (delivered in `appendPrompt`). Delivery is in-band (rides the prompt the harness
 //     already forwards); use is out-of-band (a direct side-channel to `/app/api/hooks/blackboard`).
 //
-// Data access goes through the record gateway (`data.table`), never hand-written SQL — matching
-// app/service.ts and app/plan.ts.
+// Storage goes through the shared `BlackboardStore` over the app DataLayer's raw synchronous SQLite
+// handle (`data.source().db`) — the same physical database the record gateway (`data.table`) uses,
+// so the HTTP hook and the agentic channel share one connection and one table.
+
+import { BlackboardStore, type SqliteDb } from "@nanobpm/agentic/blackboard";
 import type { DataLayer } from "@nanobpm/urban";
 
-const now = () => new Date().toISOString();
+// Re-export the storage vocabulary from the shared package so there is ONE canonical definition of
+// the kinds, the kind-normaliser, and the unique-violation predicate — the app never keeps a
+// parallel copy that could drift from the store's own semantics.
+export type { BlackboardKind } from "@nanobpm/agentic/blackboard";
+export { BLACKBOARD_KINDS, isUniqueViolation, normalizeKind } from "@nanobpm/agentic/blackboard";
 
-export const BLACKBOARD_KINDS = ["file-claim", "constraint-change", "scope-change", "learning", "note"] as const;
-export type BlackboardKind = (typeof BLACKBOARD_KINDS)[number];
-
-/** The stored row shape (files is a JSON-encoded string of paths, or NULL). */
-export interface BlackboardRow {
-  id: number;
-  plan_key: string;
-  author_task: string;
-  kind: string;
-  files: string | null;
-  body: string;
-  wave: number | null;
-  dedupe_key: string | null;
-  created_at: string;
-}
-
-/** The parsed, agent-facing view of an entry (files decoded to an array). */
+/** The parsed, agent-facing view of an entry (files decoded to an array). Snake_case is the
+ * app/HTTP-hook boundary contract every existing caller and agent already consumes. */
 export interface BlackboardEntry {
   id: number;
   author_task: string;
@@ -56,11 +57,6 @@ export interface BlackboardInput {
   body: string;
   wave?: number | null;
   dedupe_key?: string;
-}
-
-/** Coerce an arbitrary `kind` to a known value, defaulting to "note" for anything unrecognised. */
-export function normalizeKind(kind: unknown): BlackboardKind {
-  return BLACKBOARD_KINDS.find((k) => k === kind) ?? "note";
 }
 
 /** A URL-safe, unguessable capability token (192 bits of randomness, base64url, no padding). */
@@ -157,9 +153,45 @@ coordinate, or if it genuinely blocks you, escalate a \`question\` per your norm
 here is a hard lock; the merge step is the real safety net.`;
 }
 
-const blackboardTable = (data: DataLayer) => data.table<BlackboardRow>("plan_blackboard", "id");
+// The store is a thin wrapper over the DataLayer's raw synchronous SQLite handle; construct it per
+// call (cheap — it just holds the handle). The schema is applied by boot migration
+// `025_agentic_blackboard.sql`; we also `ensureSchema()` once per handle (idempotent
+// `CREATE TABLE IF NOT EXISTS`) so the adapter works against a bare source too (e.g. unit tests over
+// an in-memory DataLayer that hasn't run migrations).
+const schemaReady = new WeakSet<object>();
+function storeFor(data: DataLayer): BlackboardStore {
+  const db = data.source().db;
+  const store = new BlackboardStore(db);
+  if (!schemaReady.has(db)) {
+    store.ensureSchema();
+    schemaReady.add(db);
+  }
+  return store;
+}
 
-/** Resolve a capability token back to its plan, or undefined when the token is unknown. */
+/** Map the store's camelCase entry to the app/HTTP snake_case boundary shape. */
+function toEntry(e: {
+  id: number;
+  authorTask: string;
+  kind: string;
+  files: string[];
+  body: string;
+  wave: number | null;
+  createdAt: string;
+}): BlackboardEntry {
+  return {
+    id: e.id,
+    author_task: e.authorTask,
+    kind: e.kind,
+    files: e.files,
+    body: e.body,
+    wave: e.wave,
+    created_at: e.createdAt,
+  };
+}
+
+/** Resolve a capability token back to its plan, or undefined when the token is unknown. Async
+ * variant over the record gateway, used by the HTTP-hook operations. */
 export async function planKeyForToken(data: DataLayer, token: string): Promise<string | undefined> {
   if (!token) return undefined;
   const row = await data
@@ -168,32 +200,24 @@ export async function planKeyForToken(data: DataLayer, token: string): Promise<s
   return row?.plan_key;
 }
 
-function decodeFiles(raw: string | null): string[] {
-  if (!raw) return [];
-  try {
-    const v = JSON.parse(raw);
-    return Array.isArray(v) ? v.map(String).map((s) => s.trim()).filter((s) => s !== "") : [];
-  } catch {
-    return [];
-  }
-}
-
-function toEntry(r: BlackboardRow): BlackboardEntry {
-  return {
-    id: r.id,
-    author_task: r.author_task,
-    kind: r.kind,
-    files: decodeFiles(r.files).map((x) => x.trim()).filter((x) => x !== ""),
-    body: r.body,
-    wave: r.wave,
-    created_at: r.created_at,
-  };
+/** Resolve a capability token back to its plan over a raw synchronous SQLite handle. The agentic
+ * channel's `blackboard` family derives its board `scope` synchronously from the connection's
+ * capability credential, so it needs this sync path (the async {@link planKeyForToken} can't be
+ * awaited in a synchronous `scopeOf`). Both resolve the SAME `plans.blackboard_token` mapping, so
+ * the channel and the HTTP hook scope every plan's board to the identical `plan_key`. */
+export function planKeyForTokenSync(db: SqliteDb, token: string): string | undefined {
+  if (!token) return undefined;
+  const rows = db.all<{ plan_key: string }>(
+    "SELECT plan_key FROM plans WHERE blackboard_token = ? LIMIT 1",
+    [token],
+  );
+  return rows[0]?.plan_key;
 }
 
 /** One incremental read: the entries after `since` (write order) plus `cursor` — the plan's current
- * head id. An agent polling midflight (Tier 2) passes `cursor` back as the next `since`, so it pulls
- * only what siblings added since its last read. `cursor` is the true head even when `since` filters
- * every entry out, so a caller that is fully caught up learns it is caught up (cursor unchanged). */
+ * head id. An agent polling midflight passes `cursor` back as the next `since`, so it pulls only
+ * what siblings added since its last read. `cursor` is the true head even when `since` filters every
+ * entry out, so a caller that is fully caught up learns it is caught up (cursor unchanged). */
 export interface BlackboardPage {
   entries: BlackboardEntry[];
   cursor: number;
@@ -204,14 +228,8 @@ export async function readBlackboardPage(
   planKey: string,
   opts: { since?: number } = {},
 ): Promise<BlackboardPage> {
-  const rows = await blackboardTable(data).find({ plan_key: planKey });
-  const cursor = rows.reduce((max, r) => (r.id > max ? r.id : max), 0);
-  const since = opts.since ?? 0;
-  const entries = rows
-    .filter((r) => r.id > since)
-    .sort((a, b) => a.id - b.id)
-    .map(toEntry);
-  return { entries, cursor };
+  const page = storeFor(data).readPage(planKey, { since: opts.since });
+  return { entries: page.entries.map(toEntry), cursor: page.cursor };
 }
 
 /** A plan's entries in write order (id asc). `since` returns only entries with `id > since`. */
@@ -247,22 +265,19 @@ export async function detectFileClaimConflicts(
   planKey: string,
   opts: { author_task?: string; files: string[]; beforeId?: number },
 ): Promise<ClaimConflict[]> {
-  const want = new Set((opts.files ?? []).map((f) => String(f).trim()).filter((s) => s !== ""));
-  if (want.size === 0) return [];
-  const me = opts.author_task?.trim() || "";
-  const beforeId = opts.beforeId;
-  const rows = await blackboardTable(data).find({ plan_key: planKey, kind: "file-claim" });
-  const out: ClaimConflict[] = [];
-  for (const r of rows.slice().sort((a, b) => a.id - b.id)) {
-    if (beforeId != null && r.id >= beforeId) continue;
-    if ((r.author_task || "") === me) continue;
-    for (const f of new Set(decodeFiles(r.files).map((x) => x.trim()).filter((x) => x !== ""))) {
-      if (want.has(f)) {
-        out.push({ file: f, author_task: r.author_task, id: r.id, body: r.body, created_at: r.created_at });
-      }
-    }
-  }
-  return out;
+  return storeFor(data)
+    .detectFileClaimConflicts(planKey, {
+      authorTask: opts.author_task,
+      files: opts.files,
+      beforeId: opts.beforeId,
+    })
+    .map((c) => ({
+      file: c.file,
+      author_task: c.authorTask,
+      id: c.id,
+      body: c.body,
+      created_at: c.createdAt,
+    }));
 }
 
 /** Append an entry, idempotently. A blank `body` is rejected. When a `dedupe_key` is supplied and
@@ -273,50 +288,12 @@ export async function appendEntry(
   planKey: string,
   input: BlackboardInput,
 ): Promise<{ inserted: boolean; id: number | bigint }> {
-  const body = typeof input.body === "string" ? input.body.trim() : "";
-  if (!body) throw new Error("blackboard entry requires a non-empty body");
-  const table = blackboardTable(data);
-  const dedupe_key = input.dedupe_key?.trim() || undefined;
-  if (dedupe_key) {
-    const existing = await table.findOne({ plan_key: planKey, dedupe_key });
-    if (existing) return { inserted: false, id: existing.id };
-  }
-  const files = (input.files ?? []).map(String).map((s) => s.trim()).filter((s) => s !== "");
-  try {
-    const id = await table.insert({
-      plan_key: planKey,
-      author_task: input.author_task?.trim() || "system",
-      kind: normalizeKind(input.kind),
-      files: files.length ? JSON.stringify(files) : null,
-      body,
-      wave: typeof input.wave === "number" ? input.wave : null,
-      dedupe_key: dedupe_key ?? null,
-      created_at: now(),
-    });
-    return { inserted: true, id };
-  } catch (err) {
-    // Idempotent write-back under concurrency: two POSTs sharing a dedupe_key can both miss the
-    // findOne pre-check above, then one loses the race on the UNIQUE (plan_key, dedupe_key) index.
-    // Convert that collision into a no-op by re-reading the winner's row, so a retry never 500s.
-    if (dedupe_key && isUniqueViolation(err)) {
-      const existing = await table.findOne({ plan_key: planKey, dedupe_key });
-      if (existing) return { inserted: false, id: existing.id };
-    }
-    throw err;
-  }
-}
-
-/** True only for a UNIQUE / PRIMARY-KEY / duplicate violation — never a foreign-key or other
- * constraint failure. We match the *specific* violation (extended SQLite codes, or the specific
- * words) rather than the bare word "constraint", so a `FOREIGN KEY constraint failed` (real data
- * corruption, not a benign duplicate) is always rethrown rather than silently swallowed. */
-export function isUniqueViolation(err: unknown): boolean {
-  if (!err || typeof err !== "object") return false;
-  // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
-  const code = (err as { code?: unknown }).code;
-  if (code === "SQLITE_CONSTRAINT_UNIQUE" || code === "SQLITE_CONSTRAINT_PRIMARYKEY") return true;
-  // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
-  const message = (err as { message?: unknown }).message;
-  return typeof message === "string" &&
-    /(unique|primary key) constraint failed|duplicate/i.test(message);
+  return storeFor(data).append(planKey, {
+    authorTask: input.author_task,
+    kind: input.kind,
+    files: input.files,
+    body: input.body,
+    wave: input.wave,
+    dedupeKey: input.dedupe_key,
+  });
 }
