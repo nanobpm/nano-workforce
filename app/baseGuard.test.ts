@@ -1,7 +1,7 @@
 // Unit tests for the dead-end-base guard decision (#60).
 import { test } from "node:test";
 import { assertEquals } from "#test-assert";
-import { type BaseTarget, isDeadEndBase } from "./baseGuard.ts";
+import { type BaseTarget, classifyBaseGuard, isDeadEndBase } from "./baseGuard.ts";
 
 const t = (base: string, defaultBranch: string, landed: BaseTarget["landed"]): BaseTarget => ({
   base,
@@ -33,4 +33,12 @@ test("NOT a dead-end on ambiguity: base has no PR / transport couldn't tell (unk
 test("unknown-safe: blank base or blank default is never a dead-end", () => {
   assertEquals(isDeadEndBase(t("", "main", "landed")), false);
   assertEquals(isDeadEndBase(t("feat/x", "", "landed")), false);
+});
+
+// The dead-end base is classified against the canonical escalation taxonomy: a confirmed dead end
+// is a decision-required escalation (a human must retarget); anything else is not an escalation, so
+// the merge worker never blocks a valid merge on ambiguity.
+test("classifyBaseGuard: a confirmed dead end is decision-required, else none", () => {
+  assertEquals(classifyBaseGuard({ deadEnd: true }), "decision-required");
+  assertEquals(classifyBaseGuard({ deadEnd: false }), "none");
 });

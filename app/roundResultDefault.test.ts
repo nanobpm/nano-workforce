@@ -15,8 +15,9 @@
 // repo's lightweight model-guard style (see mergeRebaseArm.test.ts).
 
 import { test } from "node:test";
-import { assert, assertStringIncludes } from "#test-assert";
+import { assert, assertEquals, assertStringIncludes } from "#test-assert";
 import { readFileSync } from "node:fs";
+import { routeRoundResult } from "./roundResultDefault.ts";
 
 const bpmn = readFileSync("resources/processes/convergence-loop.bpmn", "utf8");
 
@@ -59,12 +60,17 @@ test("gw-status defaults to the addressed arm, not escalation", () => {
   );
 });
 
-test("escalation is an explicit needs_input/blocked arm", () => {
+test("escalation is an explicit needs_input/blocked arm gated on a non-blank question", () => {
   const esc = flowElement("f_escalate");
   assert(esc, "f_escalate flow missing");
   assertStringIncludes(esc, 'targetRef="persist-escalation"');
   // Escalation now only fires on an explicit human-blocking status.
   assertStringIncludes(esc, 'status = "needs_input" or status = "blocked"');
+  // ...AND only when the round carries an answerable question. A blank/absent question can no
+  // longer route to escalation (retires the blank-question fabrication failure mode); it falls
+  // through to the addressed default and re-enters the review wait.
+  assertStringIncludes(esc, 'question != null');
+  assertStringIncludes(esc, 'question != ""');
 });
 
 test("the default (addressed) arm carries no condition and re-enters the guard", () => {
@@ -91,4 +97,36 @@ test("regression: an empty/unknown status no longer routes to persist-escalation
   // The addressed default must land on the guard (which re-solicits the review), not escalation.
   const addressed = flowElement("f_addressed");
   assert(addressed && /targetRef="gw-guard"/.test(addressed), "default arm must re-enter gw-guard");
+});
+
+// The canonical router (app/roundResultDefault.ts) mirrors the gw-status routing above, with the
+// escalation decision delegated to the single taxonomy. These unit tests pin its behaviour — the
+// same rules the structural BPMN assertions above enforce on the committed model.
+
+test("routeRoundResult: a converged round converges", () => {
+  assertEquals(routeRoundResult("converged", null), "converged");
+  assertEquals(routeRoundResult("converged", "ignored"), "converged");
+});
+
+test("routeRoundResult: a human-blocking status with a question escalates", () => {
+  assertEquals(routeRoundResult("needs_input", "please decide"), "escalate");
+  assertEquals(routeRoundResult("blocked", "please decide"), "escalate");
+});
+
+test("routeRoundResult: a blank-question human-blocking status re-enters the loop (no fabrication)", () => {
+  for (const status of ["needs_input", "blocked"]) {
+    for (const question of [undefined, null, "", "   "]) {
+      assertEquals(
+        routeRoundResult(status, question),
+        "reenter",
+        `blank-question ${status} must re-enter the review wait, not escalate`,
+      );
+    }
+  }
+});
+
+test("routeRoundResult: an addressed/unknown/empty status re-enters the loop", () => {
+  for (const status of [undefined, "", "addressed", "waiting", "in_progress"]) {
+    assertEquals(routeRoundResult(status, "q"), "reenter", `status ${JSON.stringify(status)} re-enters`);
+  }
 });

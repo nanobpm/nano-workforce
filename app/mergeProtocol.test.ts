@@ -7,6 +7,7 @@
 import { test } from "node:test";
 import { assertEquals } from "#test-assert";
 import {
+  classifyMergeLanding,
   DEFAULT_MERGE_PROTOCOL,
   extractProtocolBlock,
   freshHeadRunAction,
@@ -194,4 +195,18 @@ test("headRunPresenceCount: no declared required checks → falls back to total 
 test("headRunPresenceCount: token mode (totalChecks < 0) stays conservative (-1)", () => {
   assertEquals(headRunPresenceCount(NANO_REQ, { totalChecks: -1, presentCheckNames: [] }), -1);
   assertEquals(freshHeadRunAction(NANO_REQ, "waiting", -1, false), null);
+});
+
+// The land method is classified against the canonical escalation taxonomy: only a `ui` method is a
+// decision-required escalation (a human must click Merge); every machine-landable method is
+// transient (the merge stage lands it in-process).
+test("classifyMergeLanding: only `ui` is decision-required", () => {
+  const withMethod = (method: MergeProtocol["land"]["method"]): MergeProtocol => ({
+    ...DEFAULT_MERGE_PROTOCOL,
+    land: { method },
+  });
+  assertEquals(classifyMergeLanding(withMethod("ui")), "decision-required");
+  assertEquals(classifyMergeLanding(withMethod("gh-merge")), "transient");
+  assertEquals(classifyMergeLanding(withMethod("admin")), "transient");
+  assertEquals(classifyMergeLanding(withMethod("mergify-queue")), "transient");
 });

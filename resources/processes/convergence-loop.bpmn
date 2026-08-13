@@ -207,7 +207,7 @@
       <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=status = "waiting"</bpmn:conditionExpression>
     </bpmn:sequenceFlow>
     <bpmn:sequenceFlow id="f_escalate" name="needs_input / blocked" sourceRef="gw-status" targetRef="persist-escalation">
-      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=status = "needs_input" or status = "blocked"</bpmn:conditionExpression>
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=(status = "needs_input" or status = "blocked") and question != null and question != ""</bpmn:conditionExpression>
     </bpmn:sequenceFlow>
     <bpmn:sequenceFlow id="f_guardMax" name="max rounds" sourceRef="gw-guard" targetRef="persist-escalation-maxrounds">
       <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=round &gt;= maxRounds</bpmn:conditionExpression>

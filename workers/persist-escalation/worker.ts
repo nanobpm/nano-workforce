@@ -2,8 +2,17 @@
 // row for a human to answer. Handles both the agent-raised path (status = needs_input | blocked)
 // and the MAX_ROUNDS guard (status = blocked, question set by the process). Returns
 // `escalationId` for the UI.
+//
+// A BLANK question is a NON-escalation (nano-workforce ADR 0002 §1): it must never open an
+// answerable escalation. The convergence-loop `gw-status` gateway enforces this upstream — its
+// `f_escalate` arm now requires a non-blank question, so a blank-question round re-enters the
+// durable review wait instead of routing here (see app/roundResultDefault.ts). This worker keeps
+// the same rule as defence-in-depth via the canonical taxonomy: if a blank-question job ever
+// reaches it, it opens NO escalation and reports `escalated:false` rather than FABRICATING a
+// question (the retired failure mode) or throwing an un-remediable incident.
 import type { AppJobHandler } from "@nanobpm/urban";
 import { abandonTokenFromUrl } from "../../app/abandon.ts";
+import { classifyEscalation } from "../../app/escalationTaxonomy.ts";
 import { ensurePr, parsePr } from "../../app/service.ts";
 
 // Extends Record so the declared fields are typed while the job may still carry
@@ -51,24 +60,6 @@ function workerOf(vars: Record<string, unknown>): string | undefined {
   return nonBlank(vars.agent);
 }
 
-// Synthesize a concrete, answerable question when the agent left one blank. A blank question is
-// almost always a *no-result* round: a prompt-less agent that never wrote its result file, so
-// `status` is empty and `gw-status` falls through its default `f_escalate` arm (the empty
-// "(no question provided)" escalations on Magikcraft/nano-bpm #597/#599). Throwing here parked a
-// `JobNoRetries` incident that could NOT be diagnosed or remediated from the UI. Instead we open
-// an escalation a human can actually answer, with the agent's transcript attached below it.
-function fabricateQuestion(rawStatus: string | undefined, hasTranscript: boolean): string {
-  const tail = hasTranscript
-    ? " Review the agent's response shown below, then reply with how it should proceed — or cancel and resubmit."
-    : " No agent response was captured. Reply with how it should proceed, or cancel and resubmit.";
-  if (!rawStatus) {
-    return "The review agent finished without a machine-readable result (no status was reported), " +
-      "so this round could not be classified as converged, addressed, or a specific request." + tail;
-  }
-  return `The review agent reported status "${rawStatus}" without a question, so this round ` +
-    "could not be resolved automatically." + tail;
-}
-
 const handler: AppJobHandler<In> = async (job, app) => {
   const { prKey, round, summary, repo, prNumber, prUrl, abandonUrl } = job.variables;
   // `status` drives the escalation kind (control flow); a blank/absent status is an
@@ -80,13 +71,17 @@ const handler: AppJobHandler<In> = async (job, app) => {
   const status = rawStatus ?? "needs_input";
   const transcript = transcriptOf(job.variables);
   const worker = workerOf(job.variables);
-  // A blank question must never open an unanswerable escalation. Every legitimate arm sets a
-  // concrete question — the agent contract requires one for needs_input/blocked, and the
-  // max-rounds + review-timeout arms set a literal via the model. When one is still missing
-  // (a no-result round through the `gw-status` default), fabricate an actionable question that
-  // references the attached transcript rather than throwing (which parked an un-remediable
-  // incident). This keeps the loop recoverable entirely from the UI.
-  const question = nonBlank(job.variables.question) ?? fabricateQuestion(rawStatus, transcript != null);
+  // Classify this job through the single canonical taxonomy (ADR 0002 §1). Only a
+  // decision-required escalation opens an answerable escalation row. A blank question (or any
+  // non-human-blocking status that reached here defensively) is a NON-escalation: open nothing
+  // and report `escalated:false` — never FABRICATE a question and never throw. The `gw-status`
+  // gateway already routes blank-question rounds back into the durable review wait, so this is
+  // defence-in-depth, not the primary guard.
+  const question = nonBlank(job.variables.question);
+  const disposition = classifyEscalation({ kind: "review-round", status: rawStatus, question });
+  if (disposition !== "decision-required" || question === undefined) {
+    return { escalationId: null, escalated: false };
+  }
   const kind = status === "needs_input" ? "question" : "blocker";
   const now = new Date().toISOString();
 
@@ -141,7 +136,7 @@ const handler: AppJobHandler<In> = async (job, app) => {
     open_escalation_question: question,
   });
 
-  return { escalationId: Number(escalationId) };
+  return { escalationId: Number(escalationId), escalated: true };
 };
 
 export default handler;
