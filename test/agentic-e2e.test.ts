@@ -29,7 +29,7 @@ import type { AppApi, DataLayer } from "@nanobpm/urban";
 import { assert, assertEquals } from "#test-assert";
 import { currentCorrelation } from "../app/agentic/correlation.ts";
 import { loadAgenticFamilies } from "../app/agentic/loader.ts";
-import type { AgenticContext, AgenticFamily } from "../app/agentic/registry.ts";
+import { type AgenticContext, AgenticFamilyRegistry } from "../app/agentic/registry.ts";
 import handler from "../operations/getAgenticSupply.ts";
 import { noopLog } from "./log.ts";
 
@@ -107,15 +107,18 @@ const produce = (stream: string, incarnation: number, chunk: string): Frame => (
 interface MountedHub {
   hub: AgenticHub;
   transport: { transport: ChannelTransport; connect(c: ChannelConnection): void };
-  families: AgenticFamily[];
+  names: string[];
   teardown(): Promise<void>;
 }
 
 async function mountFleet(db: SqliteDb): Promise<MountedHub> {
   const transport = memTransport();
   const hub = new AgenticHub({ transport: transport.transport, authenticator, sweepIntervalMs: 0 });
-  // H0: discover + mount the WHOLE fleet exactly as production boot does.
-  const families = await loadAgenticFamilies(undefined, noopLog());
+  // H0: discover + mount the WHOLE fleet through the SAME registry seam production boot uses
+  // (`mountAgenticChannel`) — so idempotent mountAll, partial-mount cleanup, and reverse/isolated
+  // teardown are all exercised here exactly as in production rather than reimplemented by hand.
+  const registry = new AgenticFamilyRegistry();
+  registry.registerAll(await loadAgenticFamilies(undefined, noopLog()));
   const ctx: AgenticContext = {
     hub,
     registry: hub.registry,
@@ -123,13 +126,13 @@ async function mountFleet(db: SqliteDb): Promise<MountedHub> {
     data: memData(db),
     log: noopLog(),
   };
-  for (const family of families) await family.mount(ctx);
+  await registry.mountAll(ctx);
   return {
     hub,
     transport,
-    families,
+    names: registry.names(),
     teardown: async () => {
-      for (const family of [...families].reverse()) await family.teardown?.();
+      await registry.teardownAll(noopLog());
       await hub.close();
     },
   };
@@ -147,7 +150,7 @@ test("E2E: the whole visibility plane wires up — presence, correlation, supply
 
   // Sanity: the fleet the seam discovers really includes presence, relay, and correlation.
   const fleet = await mountFleet(db);
-  const names = fleet.families.map((f) => f.name);
+  const names = fleet.names;
   assert(names.includes("presence"), "H1 presence family is discovered by the H0 seam");
   assert(names.includes("relay"), "H3 relay family is discovered by the H0 seam");
   assert(names.includes("correlation"), "H6 correlation family is discovered by the H0 seam");
