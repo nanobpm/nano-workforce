@@ -10,7 +10,13 @@
 // ONE of `issue` or `url` — so an empty or ambiguous target is a 400 at the edge; this delegate just
 // narrows the validated variant and keeps the issue-FORMAT parse guard (schema can't express it).
 
-import { InvalidBaseBranchError, normalizeBaseBranch, parseIssue, startPlan } from "../app/plan.ts";
+import {
+  InvalidBaseBranchError,
+  MissingBaseBranchError,
+  normalizeBaseBranch,
+  parseIssue,
+  startPlan,
+} from "../app/plan.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
 
 export default defineOperation("startPlanFanout", async ({ body }, app) => {
@@ -26,16 +32,23 @@ export default defineOperation("startPlanFanout", async ({ body }, app) => {
     app.log.warn("start-plan rejected: unparseable issue reference", { raw });
     return { status: 400, body: { error: "could not parse issue (use owner/repo#123 or an issue URL)" } };
   }
-  // Optional epic base branch: the branch the fleet branches off and opens every PR against instead
-  // of the repo default. Present on both oneOf variants; blank/absent keeps the default-branch
-  // behaviour. It is later interpolated into the authoritative implementer prompt (with `git`/`gh`
-  // shell snippets), so validate/normalise it HERE — a non-blank value that isn't a plausible git
-  // branch name is a 400 at the edge, never persisted or rendered. `normalizeBaseBranch` blank → null.
+  // Epic base branch (ADR 0003): the branch the fleet branches off and opens every PR against. It is
+  // now REQUIRED and later interpolated into the authoritative implementer prompt (with `git`/`gh`
+  // shell snippets), so validate/normalise it HERE — a blank/absent base is a 400
+  // (`MissingBaseBranchError`) and a non-blank value that isn't a plausible git branch name is a 400
+  // (`InvalidBaseBranchError`), never persisted or rendered. (B4 layers the admitPlan gate on top.)
   const baseBranch = "baseBranch" in body && typeof body.baseBranch === "string" ? body.baseBranch : null;
-  let normalizedBase: string | null;
+  let normalizedBase: string;
   try {
     normalizedBase = normalizeBaseBranch(baseBranch);
   } catch (err) {
+    if (err instanceof MissingBaseBranchError) {
+      app.log.warn("start-plan rejected: missing base branch");
+      return {
+        status: 400,
+        body: { error: "baseBranch is required (name the integration branch, e.g. epic/agent-protocol)" },
+      };
+    }
     if (err instanceof InvalidBaseBranchError) {
       app.log.warn("start-plan rejected: invalid base branch", { baseBranch: err.value });
       return {
@@ -48,7 +61,7 @@ export default defineOperation("startPlanFanout", async ({ body }, app) => {
   const result = await startPlan(app.data, app.engine, parsed, normalizedBase);
   app.log.info("plan fan-out started", {
     planKey: parsed.planKey,
-    baseBranch: normalizedBase ?? "(default branch)",
+    baseBranch: normalizedBase,
     alreadyRunning: "alreadyRunning" in result && result.alreadyRunning === true,
   });
   return { status: 202, body: result };

@@ -71,9 +71,11 @@ export interface Plan {
   // Minted at plan start; baked into the blackboard URL handed to implementer agents. NULL for
   // plans created before the blackboard shipped.
   blackboard_token: string | null;
-  // Optional target base branch (019_plan_base_branch.sql): when set, the fleet branches off this
-  // branch and opens every task PR against it instead of the repository's default branch, landing
-  // the whole epic on a long-lived integration branch. NULL keeps the default-branch behaviour.
+  // Target base branch (019_plan_base_branch.sql; ADR 0003): the fleet branches off this branch and
+  // opens every task PR against it instead of the repository's default branch, landing the whole
+  // epic on a long-lived integration branch. New launches always set it (base is required at
+  // admission); the column stays NULLABLE ONLY to grandfather pre-ADR-0003 / in-flight rows that
+  // carry NULL — those must remain readable, so do NOT add a NOT NULL migration.
   base_branch: string | null;
   created_at: string;
   updated_at: string;
@@ -258,6 +260,16 @@ export class InvalidBaseBranchError extends Error {
   }
 }
 
+/** Raised when a caller supplies a blank/absent `baseBranch`. Every epic launch must name its base
+ * branch explicitly (ADR 0003): "land on the default branch" is a conscious, named, confirmed choice
+ * (the confirm-default gate), never a silent fallback. The operation edge maps this to a 400. */
+export class MissingBaseBranchError extends Error {
+  constructor() {
+    super("base branch is required (blank/absent base branches are rejected)");
+    this.name = "MissingBaseBranchError";
+  }
+}
+
 /** Conservative allowlist gate for a base-branch name. Stricter than `git check-ref-format` on
  * purpose: only `[A-Za-z0-9._/-]`, no leading `/`/`.`/`-` (a leading dash reads as a CLI flag),
  * no trailing `/`/`.`, no `..`/`//`, no empty or `.lock`-suffixed path component, bounded length.
@@ -270,13 +282,14 @@ function isPlausibleBranchName(s: string): boolean {
   return s.split("/").every((seg) => seg.length > 0 && !seg.startsWith(".") && !seg.endsWith(".lock"));
 }
 
-/** Normalise a caller-supplied base branch: trim, and treat blank as "unset" (null) so the fleet
- * falls back to the repository's default branch — the legacy behaviour. A non-blank value that is
- * not a plausible git branch name is rejected (`InvalidBaseBranchError`) rather than persisted or
- * rendered into the agent prompt; the operation edge maps that to a 400. */
-export function normalizeBaseBranch(input: string | null | undefined): string | null {
+/** Normalise a caller-supplied base branch: trim, then require it. A blank/absent value is rejected
+ * (`MissingBaseBranchError`) — ADR 0003 removed the implicit default-branch fallback, so every epic
+ * launch must name its base explicitly. A non-blank value that is not a plausible git branch name is
+ * rejected (`InvalidBaseBranchError`) rather than persisted or rendered into the agent prompt. The
+ * operation edge maps both to a 400. Always returns a non-null branch on success. */
+export function normalizeBaseBranch(input: string | null | undefined): string {
   const s = (input ?? "").trim();
-  if (s.length === 0) return null;
+  if (s.length === 0) throw new MissingBaseBranchError();
   if (!isPlausibleBranchName(s)) throw new InvalidBaseBranchError(s);
   return s;
 }
@@ -310,7 +323,7 @@ export async function startPlan(
   data: DataLayer,
   engine: EngineClient,
   parsed: ParsedIssue,
-  baseBranch: string | null = null,
+  baseBranch: string,
 ) {
   const table = plans(data);
   const existing = await table.get(parsed.planKey);
@@ -399,12 +412,12 @@ export async function startPlan(
       // out-of-band.
       blackboardUrl: bbUrl,
       blackboardBrief: renderCoordinationBrief(bbUrl),
-      // Optional epic base branch (019_plan_base_branch.sql): the branch the fleet branches off and
-      // opens every PR against instead of the repo default. `baseBranchBrief` rides `appendPrompt`
-      // in the implement-task (like `blackboardBrief`); both are null when no base branch is pinned,
-      // so the agent keeps the default-branch behaviour from prompts/feature.md.
+      // Epic base branch (019_plan_base_branch.sql; ADR 0003): the branch the fleet branches off
+      // and opens every PR against instead of the repo default. `baseBranchBrief` rides
+      // `appendPrompt` in the implement-task (like `blackboardBrief`). Base is now always explicit
+      // (normalizeBaseBranch rejects blank), so the brief is always rendered.
       baseBranch: base,
-      baseBranchBrief: base == null ? null : renderBaseBranchBrief(base),
+      baseBranchBrief: renderBaseBranchBrief(base),
     },
   });
   const processKey = processInstanceKey == null ? null : String(processInstanceKey);

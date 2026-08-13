@@ -121,7 +121,7 @@ test("re-plan of a finished issue clears stale plan_reviews rows", async () => {
     number: 7,
     url: "https://github.com/owner/repo/issues/7",
     planKey: PLAN_KEY,
-  });
+  }, "epic/agent-protocol");
 
   assertEquals(stores.plan_reviews.rows.length, 0);
   assertEquals(stores.plan_tasks.rows.length, 0);
@@ -179,7 +179,7 @@ test("re-plan of a finished issue clears stale open escalations and the denormal
     number: 8,
     url: "https://github.com/owner/repo/issues/8",
     planKey: PLAN_KEY,
-  });
+  }, "epic/agent-protocol");
 
   // Stale escalation rows from the prior run must not survive a re-plan …
   assertEquals(stores.plan_escalations.rows.length, 0);
@@ -428,21 +428,22 @@ test("answerPlanEscalation records directive, clears the plan pointer, and publi
   );
 });
 
-// Coverage for the epic base-branch control (issue nano-ide #124 / 019_plan_base_branch.sql).
+// Coverage for the epic base-branch control (issue nano-ide #124 / 019_plan_base_branch.sql; ADR 0003).
 //
-// A plan may pin a base branch so the fleet branches off — and opens every PR against — a long-lived
-// integration branch instead of the repo default, keeping an epic off the default branch (and off any
-// merge-to-default side effect such as auto-publishing) until the integration branch is deliberately
-// merged. `normalizeBaseBranch` decides "unset" (fall back to default), `renderBaseBranchBrief` is the
-// authoritative prompt override, and `startPlan` must persist the branch and seed BOTH the `baseBranch`
-// variable and the `baseBranchBrief` (which rides `appendPrompt`) — or leave them null when unpinned.
-import { InvalidBaseBranchError, normalizeBaseBranch, renderBaseBranchBrief } from "./plan.ts";
+// Every plan must pin a base branch so the fleet branches off — and opens every PR against — a
+// long-lived integration branch instead of the repo default, keeping an epic off the default branch
+// (and off any merge-to-default side effect such as auto-publishing) until the integration branch is
+// deliberately merged. Since ADR 0003, base is REQUIRED: `normalizeBaseBranch` rejects a blank/absent
+// value (`MissingBaseBranchError`) instead of falling back to the default. `renderBaseBranchBrief` is
+// the authoritative prompt override, and `startPlan` persists the branch and seeds BOTH the
+// `baseBranch` variable and the `baseBranchBrief` (which rides `appendPrompt`) unconditionally.
+import { InvalidBaseBranchError, MissingBaseBranchError, normalizeBaseBranch, renderBaseBranchBrief } from "./plan.ts";
 
-test("normalizeBaseBranch: blank/whitespace/undefined → null; a real branch is trimmed", () => {
-  assertEquals(normalizeBaseBranch(undefined), null);
-  assertEquals(normalizeBaseBranch(null), null);
-  assertEquals(normalizeBaseBranch(""), null);
-  assertEquals(normalizeBaseBranch("   "), null);
+test("normalizeBaseBranch: blank/whitespace/undefined → MissingBaseBranchError; a real branch is trimmed", () => {
+  assertThrows(() => normalizeBaseBranch(undefined), MissingBaseBranchError);
+  assertThrows(() => normalizeBaseBranch(null), MissingBaseBranchError);
+  assertThrows(() => normalizeBaseBranch(""), MissingBaseBranchError);
+  assertThrows(() => normalizeBaseBranch("   "), MissingBaseBranchError);
   assertEquals(normalizeBaseBranch("  epic/agent-protocol  "), "epic/agent-protocol");
 });
 
@@ -450,6 +451,8 @@ test("normalizeBaseBranch: accepts conservative git-branch shapes", () => {
   assertEquals(normalizeBaseBranch("main"), "main");
   assertEquals(normalizeBaseBranch("release-1.2"), "release-1.2");
   assertEquals(normalizeBaseBranch("feature/x_y.z"), "feature/x_y.z");
+  // A plausible `epic/*` integration branch (the 019 convention) is returned unchanged.
+  assertEquals(normalizeBaseBranch("epic/agent-protocol"), "epic/agent-protocol");
 });
 
 test("normalizeBaseBranch: rejects injection-prone / implausible branch names", () => {
@@ -516,7 +519,7 @@ test("startPlan pins the base branch: persisted on the row + seeded as baseBranc
   assertEquals(seen.baseBranchBrief.includes("gh pr create --base epic/agent-protocol"), true);
 });
 
-test("startPlan without a base branch keeps default-branch behaviour (null row + null variables)", async () => {
+test("startPlan renders baseBranchBrief unconditionally now that base is required", async () => {
   const PLAN_KEY = "owner/repo#200";
   const stores: Record<string, { rows: any[]; key: string }> = {
     plans: { rows: [], key: "plan_key" },
@@ -539,9 +542,43 @@ test("startPlan without a base branch keeps default-branch behaviour (null row +
     number: 200,
     url: "https://github.com/owner/repo/issues/200",
     planKey: PLAN_KEY,
-  });
+  }, "epic/gate-branch");
 
-  assertEquals((stores.plans.rows[0] as any).base_branch, null);
-  assertEquals(seen.baseBranch, null);
-  assertEquals(seen.baseBranchBrief, null);
+  assertEquals((stores.plans.rows[0] as any).base_branch, "epic/gate-branch");
+  assertEquals(seen.baseBranch, "epic/gate-branch");
+  // The brief is always rendered — there is no null fork any more.
+  assertEquals(seen.baseBranchBrief.includes("gh pr create --base epic/gate-branch"), true);
+});
+
+test("startPlan grandfathers a pre-existing null base_branch row: re-plan reads it without error", async () => {
+  // Pre-ADR-0003 / in-flight rows carry base_branch = null (the column stays nullable). Re-planning
+  // such a finished issue must read the old null row without error and re-pin it to the new explicit
+  // base — the required-ness is enforced at admission of the new launch, not by a DB NOT NULL.
+  const PLAN_KEY = "owner/repo#201";
+  const stores: Record<string, { rows: any[]; key: string }> = {
+    plans: { rows: [{ plan_key: PLAN_KEY, status: "done", task_count: 0, base_branch: null }], key: "plan_key" },
+    plan_tasks: { rows: [], key: "id" },
+    plan_reviews: { rows: [], key: "plan_key" },
+    plan_escalations: { rows: [], key: "id" },
+    plan_task_deps: { rows: [], key: "plan_key" },
+  };
+  const data = memData(stores);
+  let seen: any = null;
+  const engine = {
+    createInstance: (req: any) => {
+      seen = req.variables;
+      return Promise.resolve({ processInstanceKey: "PI-3" });
+    },
+  } as any;
+
+  await startPlan(data, engine, {
+    repo: "owner/repo",
+    number: 201,
+    url: "https://github.com/owner/repo/issues/201",
+    planKey: PLAN_KEY,
+  }, "epic/gate-branch");
+
+  // The grandfathered null row is re-pinned to the new explicit base without throwing.
+  assertEquals((stores.plans.rows[0] as any).base_branch, "epic/gate-branch");
+  assertEquals(seen.baseBranch, "epic/gate-branch");
 });

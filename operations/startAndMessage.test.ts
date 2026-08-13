@@ -144,7 +144,10 @@ test("startConvergenceLoop narrows the `url` variant (no `pr` key)", async () =>
 test("startPlanFanout narrows the `url` variant (no `issue` key)", async () => {
   await withGithubOff(async () => {
     const { app: capApp } = captureApp();
-    const res = await startPlanFanout(input({ url: "https://github.com/owner/repo/issues/12" }), capApp);
+    const res = await startPlanFanout(
+      input({ url: "https://github.com/owner/repo/issues/12", baseBranch: "epic/agent-protocol" }),
+      capApp,
+    );
     assertEquals((res as any).status, 202);
   });
 });

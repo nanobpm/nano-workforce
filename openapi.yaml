@@ -267,6 +267,7 @@ components:
       additionalProperties: false
       required:
         - issue
+        - baseBranch
       properties:
         issue:
           type: string
@@ -274,17 +275,33 @@ components:
         baseBranch:
           type: string
           description: >-
-            Optional target branch the fleet branches off and opens every PR against, instead of the
-            repository's default branch. Use this to land an entire epic on a long-lived integration
-            branch (e.g. `epic/agent-protocol`) so nothing reaches the default branch — and any
-            merge-to-default side effect, such as auto-publishing a package — until you deliberately
-            merge the integration branch. Blank/omitted keeps the current behaviour (the repo
-            default branch).
+            REQUIRED target branch the fleet branches off and opens every PR against. Every epic
+            launch must name its base explicitly (ADR 0003): a blank/absent value is rejected with a
+            400, not silently coalesced to the repository default branch. Use it to land an entire
+            epic on a long-lived integration branch (e.g. `epic/agent-protocol`) so nothing reaches
+            the default branch — and any merge-to-default side effect, such as auto-publishing a
+            package — until you deliberately merge the integration branch. A missing `epic/*` base is
+            auto-created off the default branch HEAD; a missing non-`epic/*` base is a 400.
+        allowSharedBase:
+          type: boolean
+          description: >-
+            Opt-in to share a custom integration base branch with another already-active plan. By
+            default admission rejects (409) when another active plan already targets the same repo +
+            same custom base branch, to stop two epics interleaving commits on one integration branch;
+            set true to override. The repository default branch is exempt from this guard.
+        confirmDefaultBase:
+          type: boolean
+          description: >-
+            Required acknowledgement when `baseBranch` names the repository default branch. Targeting
+            the default lands every task directly on it with no integration buffer — and fires any
+            merge-to-default side effect per task — so admission rejects (400) unless you confirm with
+            true. It has no effect for a non-default base.
     PlanStartByUrl:
       type: object
       additionalProperties: false
       required:
         - url
+        - baseBranch
       properties:
         url:
           type: string
@@ -292,8 +309,18 @@ components:
         baseBranch:
           type: string
           description: >-
-            Optional target branch the fleet branches off and opens every PR against, instead of the
-            repository's default branch. See `PlanStartByIssue.baseBranch`.
+            REQUIRED target branch the fleet branches off and opens every PR against. See
+            `PlanStartByIssue.baseBranch`.
+        allowSharedBase:
+          type: boolean
+          description: >-
+            Opt-in to share a custom integration base branch with another already-active plan. See
+            `PlanStartByIssue.allowSharedBase`.
+        confirmDefaultBase:
+          type: boolean
+          description: >-
+            Required acknowledgement when `baseBranch` names the repository default branch. See
+            `PlanStartByIssue.confirmDefaultBase`.
     MessageResult:
       type: object
       description: The result of publishing a message / answering an escalation. Shape varies by message
