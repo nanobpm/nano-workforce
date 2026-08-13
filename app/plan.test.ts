@@ -239,6 +239,22 @@ test("answerTaskEscalation is a no-op when no open escalation matches the correl
   assertEquals(completed.length, 0);
 });
 
+test("answerTaskEscalation rejects an empty taskId instead of completing an arbitrary escalation", async () => {
+  const stores = {
+    plans: { rows: [{ plan_key: "owner/repo#9", process_key: "pk-9" }], key: "plan_key" },
+    plan_tasks: { rows: [{ id: 10, plan_key: "owner/repo#9", task_id: "a", answer: null }], key: "id" },
+  };
+  const { engine, completed } = fakeEngine([
+    { userTaskKey: "ut-a", elementId: "feature-escalation", variables: { task: { id: "a" } } },
+  ]);
+
+  // Empty taskId suffix must NOT fall through to the single-candidate fallback and complete ut-a.
+  const r = await answerTaskEscalation(memData(stores), engine, "owner/repo#9:", "do it");
+  assertEquals(r.ok, false);
+  assertEquals(completed.length, 0);
+  assertEquals((stores.plan_tasks.rows[0] as any).answer, null);
+});
+
 test("answerPlanEscalation completes the parked plan-review-decision task with the typed directive + notes", async () => {
   const stores = {
     plans: { rows: [{ plan_key: "owner/repo#11", process_key: "pk-11" }], key: "plan_key" },

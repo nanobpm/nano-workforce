@@ -438,6 +438,10 @@ export async function answerTaskEscalation(
   if (idx <= 0) return { ok: false, reason: "no open escalation" };
   const planKey = corrKey.slice(0, idx);
   const taskId = corrKey.slice(idx + 1);
+  // Require a non-empty taskId: an empty suffix (e.g. "owner/repo#9:") would otherwise fall
+  // through to the single-candidate fallback below and complete an arbitrary open feature
+  // escalation for the plan.
+  if (!taskId) return { ok: false, reason: "no open escalation" };
   const plan = await plans(data).get(planKey);
   if (!plan?.process_key) return { ok: false, reason: "no open escalation" };
 

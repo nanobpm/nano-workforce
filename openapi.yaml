@@ -370,8 +370,9 @@ components:
           type: string
           description: >-
             Alias for `note`, accepting the form-shaped payload emitted by the
-            `plan-review-decision` user task form (whose field is named `notes`). `note` takes
-            precedence when both are present.
+            `plan-review-decision` user task form (whose field is named `notes`). When both are
+            present, `note` takes precedence only if it is non-blank; a blank/whitespace `note`
+            is treated as missing and falls back to `notes`.
     BlackboardEntry:
       type: object
       additionalProperties: false
@@ -637,6 +638,12 @@ paths:
                         trimmed server-side, see `normalizePlanEscalationDirective`).
                     note:
                       type: string
+                    notes:
+                      type: string
+                      description: >-
+                        Alias for `note`, accepting the form-shaped payload emitted by the
+                        `plan-review-decision` user task form (whose field is named `notes`).
+                        Used when `note` is absent or blank.
       responses:
         "200":
           description: The message was published (or the escalation answered).
