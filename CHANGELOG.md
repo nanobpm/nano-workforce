@@ -1,3 +1,10 @@
+# [0.61.0](https://github.com/nanobpm/nano-workforce/compare/v0.60.0...v0.61.0) (2026-08-13)
+
+
+### Features
+
+* prompts as linked resources (bindingType: latest) — live mid-epic updates ([#198](https://github.com/nanobpm/nano-workforce/issues/198)) ([#203](https://github.com/nanobpm/nano-workforce/issues/203)) ([24a83e0](https://github.com/nanobpm/nano-workforce/commit/24a83e01f7e7b4f6e5296ce90c63fa44105aa058)), closes [#169](https://github.com/nanobpm/nano-workforce/issues/169) [#169](https://github.com/nanobpm/nano-workforce/issues/169)
+
 # [0.60.0](https://github.com/nanobpm/nano-workforce/compare/v0.59.0...v0.60.0) (2026-08-13)
 
 
