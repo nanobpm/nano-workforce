@@ -156,7 +156,7 @@ history / completion events), so the dedicated audit table is retired without lo
 
 - **Form-rendering fidelity.** The current `taskInbox` page is minimal (lists key/element). How rich a
   `.form` render is needed before the answer page can be deleted — and is that the form editor's job or a
-  `taskInbox` upgrade (an nano-ide concern)?
+  `taskInbox` upgrade (a nano-ide concern)?
 - **Agent-answer policy (§5).** When may an agent auto-complete vs must-route-to-human — a per-kind policy,
   a confidence gate, or an operator toggle? How is an agent completion attributed and reversible?
 - **Assignment model.** Candidate group vs named assignee for each kind; where the operator's routing
