@@ -14,7 +14,6 @@ import {
   answerTaskEscalation,
   FEATURE_ESCALATION_MESSAGE,
   PLAN_ESCALATION_MESSAGE,
-  parsePlanEscalationDirective,
 } from "../app/plan.ts";
 import { answerEscalation } from "../app/service.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
@@ -54,8 +53,12 @@ export default defineOperation("postMessage", async ({ body }, app) => {
 
   if (name === PLAN_ESCALATION_MESSAGE) {
     const planKey = String(b.correlationKey ?? "");
-    const directive = parsePlanEscalationDirective(b.variables?.directive ?? "revise");
-    const note = String(b.variables?.note ?? b.variables?.answer ?? "").trim();
+    const rawDirective = String(b.variables?.directive ?? "revise").trim().toLowerCase();
+    const directive = rawDirective === "proceed" || rawDirective === "revise" ? rawDirective : null;
+    const note =
+      String(b.variables?.note ?? "").trim() ||
+      String(b.variables?.notes ?? "").trim() ||
+      String(b.variables?.answer ?? "").trim();
     if (!planKey) return { status: 400, body: { error: "correlationKey is required" } };
     if (!directive) {
       return { status: 400, body: { error: "directive must be proceed or revise" } };

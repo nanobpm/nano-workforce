@@ -359,13 +359,20 @@ components:
           type: string
           description: >-
             One of `proceed` or `revise` (case-insensitive; normalized to lowercase and trimmed
-            server-side, see `parsePlanEscalationDirective`).
+            server-side, see `normalizePlanEscalationDirective`).
             `proceed` dispatches the current unapproved plan as an explicit human override;
             `revise` loops back to the planner with the note folded into planFindings and a fresh
             review budget.
         note:
           type: string
           description: Human guidance for the planner (used for `revise`; optional for `proceed`).
+        notes:
+          type: string
+          description: >-
+            Alias for `note`, accepting the form-shaped payload emitted by the
+            `plan-review-decision` user task form (whose field is named `notes`). When both are
+            present, `note` takes precedence only if it is non-blank; a blank/whitespace `note`
+            is treated as missing and falls back to `notes`.
     BlackboardEntry:
       type: object
       additionalProperties: false
@@ -628,9 +635,15 @@ paths:
                       type: string
                       description: >-
                         One of `proceed` or `revise` (case-insensitive; normalized to lowercase and
-                        trimmed server-side, see `parsePlanEscalationDirective`).
+                        trimmed server-side, see `normalizePlanEscalationDirective`).
                     note:
                       type: string
+                    notes:
+                      type: string
+                      description: >-
+                        Alias for `note`, accepting the form-shaped payload emitted by the
+                        `plan-review-decision` user task form (whose field is named `notes`).
+                        Used when `note` is absent or blank.
       responses:
         "200":
           description: The message was published (or the escalation answered).

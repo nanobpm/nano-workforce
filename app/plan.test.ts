@@ -5,7 +5,7 @@
 // planner could revise forever. `positiveIntEnv` must fall back to the default on any value that
 // is not a positive integer, so the loop is always bounded.
 import { test } from "node:test";
-import { assertEquals, assertRejects, assertThrows } from "#test-assert";
+import { assertEquals, assertThrows } from "#test-assert";
 import { positiveIntEnv } from "./plan.ts";
 
 const KEY = "NANO_PLAN_REVIEW_ROUNDS_TEST";
@@ -127,16 +127,14 @@ test("re-plan of a finished issue clears stale plan_reviews rows", async () => {
   assertEquals(stores.plan_tasks.rows.length, 0);
 });
 
-// Red/green regression for re-plan clearing stale open escalations (issue #25).
+// Red/green regression for re-plan resetting the denormalised open_task_* pointer (issue #25).
 //
-// `plan_escalations` is written by the implementation-phase escalation loop and denormalised onto
-// the plan row (`open_task_*`). When `startPlan` re-plans a finished issue it deletes the prior
-// `plan_tasks`, so any still-"open" escalation from that run points at a task that no longer
-// exists. If those rows (and the plan's denormalised pointer) survive the re-plan,
-// `refreshOpenTaskEscalation` re-surfaces a dead question in the answer form — the same
-// stale-row class as `plan_reviews` above. This drives `startPlan` against the in-memory data
-// layer and asserts both the escalation rows and the denormalised pointer are cleared.
-test("re-plan of a finished issue clears stale open escalations and the denormalised open_task_* pointer", async () => {
+// When `startPlan` re-plans a finished issue it deletes the prior `plan_tasks`, so any stale
+// "surfaced escalation" pointer denormalised onto the plan row (`open_task_*`) would otherwise
+// point at a task that no longer exists — surfacing a dead question. The re-plan resets those
+// pointers to null. (The escalation itself is now a native user task on the process instance, and a
+// re-plan starts a fresh instance, so there is no separate escalation table to clear.)
+test("re-plan of a finished issue resets the denormalised open_task_* pointer", async () => {
   const PLAN_KEY = "owner/repo#8";
   const stores: Record<string, { rows: unknown[]; key: string }> = {
     plans: {
@@ -153,17 +151,6 @@ test("re-plan of a finished issue clears stale open escalations and the denormal
     },
     plan_tasks: { rows: [{ id: 1, plan_key: PLAN_KEY, task_id: "task-1" }], key: "id" },
     plan_reviews: { rows: [], key: "plan_key" },
-    plan_escalations: {
-      rows: [{
-        id: 5,
-        plan_key: PLAN_KEY,
-        task_id: "task-1",
-        corr_key: `${PLAN_KEY}:task-1`,
-        question: "stale question from prior run?",
-        status: "open",
-      }],
-      key: "id",
-    },
     plan_task_deps: { rows: [], key: "plan_key" },
   };
   const data = {
@@ -181,10 +168,7 @@ test("re-plan of a finished issue clears stale open escalations and the denormal
     planKey: PLAN_KEY,
   });
 
-  // Stale escalation rows from the prior run must not survive a re-plan …
-  assertEquals(stores.plan_escalations.rows.length, 0);
-  // … and the plan's denormalised "surfaced escalation" pointer must be reset,
-  // so `refreshOpenTaskEscalation` can't re-surface a question for a deleted task.
+  // The plan's denormalised "surfaced escalation" pointer must be reset on a re-plan.
   const plan = stores.plans.rows[0] as Record<string, unknown>;
   assertEquals(plan.open_task_escalation_id, null);
   assertEquals(plan.open_task_question, null);
@@ -192,28 +176,11 @@ test("re-plan of a finished issue clears stale open escalations and the denormal
   assertEquals(plan.open_task_id, null);
 });
 
-// Red/green coverage for the implementation-phase escalation lifecycle (issue #25).
-//
-// `refreshOpenTaskEscalation` and `answerTaskEscalation` (issue #25) drive new stateful
-// behaviour — denormalising the plan's "surfaced" escalation, mirroring the answer onto the
-// task row, and publishing the correlated resume message — that had no unit coverage. These
-// drive both against the in-memory data layer above and assert the oldest-first surfacing,
-// the answer mirroring, and the published message.
-import {
-  answerPlanEscalation,
-  answerTaskEscalation,
-  currentPlanReviewEpoch,
-  PLAN_ESCALATION_MESSAGE,
-  refreshOpenTaskEscalation,
-} from "./plan.ts";
-
-function escalationStores(rows: unknown[]): Record<string, { rows: unknown[]; key: string }> {
-  return {
-    plans: { rows: [{ plan_key: "owner/repo#9" }], key: "plan_key" },
-    plan_escalations: { rows, key: "id" },
-    plan_tasks: { rows: [], key: "id" },
-  };
-}
+// Red/green coverage for the implementation-phase + plan-review escalation answer paths (issue #25,
+// epic #156). Both escalations are now native user tasks on the plan-fanout instance: answering an
+// escalation locates the parked task via `searchUserTasks` (keyed by the plan's process instance)
+// and completes it with the typed form variables that drive the downstream gateway.
+import { answerPlanEscalation, answerTaskEscalation } from "./plan.ts";
 
 function memData(stores: Record<string, { rows: any[]; key: string }>) {
   return {
@@ -222,210 +189,102 @@ function memData(stores: Record<string, { rows: any[]; key: string }>) {
   } as any;
 }
 
-test("refreshOpenTaskEscalation surfaces the OLDEST open escalation, then clears when none remain", async () => {
-  const stores = escalationStores([
-    { id: 2, plan_key: "owner/repo#9", task_id: "b", corr_key: "owner/repo#9:b", question: "Q-b", status: "open" },
-    { id: 1, plan_key: "owner/repo#9", task_id: "a", corr_key: "owner/repo#9:a", question: "Q-a", status: "open" },
-  ]);
-  const data = memData(stores);
-
-  await refreshOpenTaskEscalation(data, "owner/repo#9");
-  let plan = stores.plans.rows[0] as any;
-  assertEquals(plan.open_task_escalation_id, 1);
-  assertEquals(plan.open_task_question, "Q-a");
-  assertEquals(plan.open_task_corr_key, "owner/repo#9:a");
-  assertEquals(plan.open_task_id, "a");
-
-  // Once the oldest is answered, the next-oldest is surfaced.
-  (stores.plan_escalations.rows.find((r: any) => r.id === 1) as any).status = "answered";
-  await refreshOpenTaskEscalation(data, "owner/repo#9");
-  plan = stores.plans.rows[0] as any;
-  assertEquals(plan.open_task_escalation_id, 2);
-  assertEquals(plan.open_task_id, "b");
-
-  // With nothing open the denormalised fields clear.
-  (stores.plan_escalations.rows.find((r: any) => r.id === 2) as any).status = "answered";
-  await refreshOpenTaskEscalation(data, "owner/repo#9");
-  plan = stores.plans.rows[0] as any;
-  assertEquals(plan.open_task_escalation_id, null);
-  assertEquals(plan.open_task_question, null);
-  assertEquals(plan.open_task_corr_key, null);
-  assertEquals(plan.open_task_id, null);
-});
-
-test("answerTaskEscalation records the answer, mirrors it onto the task, publishes the resume message, and re-surfaces the next escalation", async () => {
-  const stores = escalationStores([
-    { id: 1, plan_key: "owner/repo#9", task_id: "a", corr_key: "owner/repo#9:a", question: "Q-a", status: "open", answer: null },
-    { id: 2, plan_key: "owner/repo#9", task_id: "b", corr_key: "owner/repo#9:b", question: "Q-b", status: "open", answer: null },
-  ]);
-  stores.plan_tasks.rows.push({ id: 10, plan_key: "owner/repo#9", task_id: "a", answer: null });
-  const data = memData(stores);
-
-  const published: any[] = [];
+/** A fake engine whose `searchUserTasks` returns the seeded open tasks and whose `completeUserTask`
+ *  records each completion for assertions. */
+function fakeEngine(openTasks: any[]) {
+  const completed: Array<{ userTaskKey: string; variables?: Record<string, unknown> }> = [];
   const engine = {
-    publishMessage: (m: any) => {
-      published.push(m);
+    searchUserTasks: (_filter?: Record<string, unknown>) => Promise.resolve(openTasks),
+    completeUserTask: (userTaskKey: string, variables?: Record<string, unknown>) => {
+      completed.push({ userTaskKey, variables });
       return Promise.resolve();
     },
   } as any;
+  return { engine, completed };
+}
+
+test("answerTaskEscalation completes the parked feature-escalation task and mirrors the answer onto the task row", async () => {
+  const stores = {
+    plans: { rows: [{ plan_key: "owner/repo#9", process_key: "pk-9" }], key: "plan_key" },
+    plan_tasks: { rows: [{ id: 10, plan_key: "owner/repo#9", task_id: "a", answer: null }], key: "id" },
+  };
+  const data = memData(stores);
+  const { engine, completed } = fakeEngine([
+    { userTaskKey: "ut-a", elementId: "feature-escalation", variables: { task: { id: "a" } } },
+    { userTaskKey: "ut-b", elementId: "feature-escalation", variables: { task: { id: "b" } } },
+  ]);
 
   const r = await answerTaskEscalation(data, engine, "owner/repo#9:a", "do it");
   assertEquals(r.ok, true);
-  assertEquals(r.escalationId, 1);
   assertEquals(r.planKey, "owner/repo#9");
   assertEquals(r.taskId, "a");
 
-  // Escalation row marked answered with the recorded answer.
-  const esc = stores.plan_escalations.rows.find((x: any) => x.id === 1) as any;
-  assertEquals(esc.status, "answered");
-  assertEquals(esc.answer, "do it");
+  // The exact parked child (by task.id) is completed with the typed answer resolution.
+  assertEquals(completed.length, 1);
+  assertEquals(completed[0].userTaskKey, "ut-a");
+  assertEquals(completed[0].variables, { resolution: "answer", answer: "do it" });
 
-  // Answer mirrored onto the task row.
+  // Answer mirrored onto the task row for the re-dispatched agent + UI.
   assertEquals((stores.plan_tasks.rows[0] as any).answer, "do it");
-
-  // Correlated resume message published on the shared constant channel.
-  assertEquals(published.length, 1);
-  assertEquals(published[0].name, "feature-escalation-answered");
-  assertEquals(published[0].correlationKey, "owner/repo#9:a");
-  assertEquals(published[0].variables.answer, "do it");
-
-  // Next-oldest open escalation re-surfaced on the plan row.
-  assertEquals((stores.plans.rows[0] as any).open_task_escalation_id, 2);
 });
 
 test("answerTaskEscalation is a no-op when no open escalation matches the correlation key", async () => {
-  const stores = escalationStores([]);
-  const data = memData(stores);
-  const engine = {
-    publishMessage: () => Promise.reject(new Error("should not publish")),
-  } as any;
-  const r = await answerTaskEscalation(data, engine, "owner/repo#9:missing", "x");
+  const stores = {
+    plans: { rows: [{ plan_key: "owner/repo#9", process_key: "pk-9" }], key: "plan_key" },
+    plan_tasks: { rows: [], key: "id" },
+  };
+  const { engine, completed } = fakeEngine([]);
+  const r = await answerTaskEscalation(memData(stores), engine, "owner/repo#9:missing", "x");
   assertEquals(r.ok, false);
+  assertEquals(completed.length, 0);
 });
 
-// Red/green regression (PR #131 suppressed advisory, app/plan.ts:455).
-//
-// Clearing a trial-merge wave's "Needs attention" row (`resolveTrialMergeAttention`)
-// is a best-effort cosmetic cleanup, but it must be RETRIABLE: if it ran only AFTER
-// the escalation was committed as `answered` and the resume message was published,
-// a transient DB error there would 500 the whole answer flow while the escalation is
-// already answered/resumed — a retry then 404s (no open escalation) and the red row
-// is pinned forever (the very failure the insert-first ordering elsewhere avoids).
-// The fix runs the idempotent resolution BEFORE the commit/publish, so a failure
-// leaves the escalation OPEN and nothing is orphaned — the caller can safely retry.
-test("answerTaskEscalation stays retriable (escalation open, no orphaned resume) when clearing 'Needs attention' fails", async () => {
-  const stores = escalationStores([
-    {
-      id: 1,
-      plan_key: "owner/repo#9",
-      task_id: "trial-merge-wave-0",
-      corr_key: "owner/repo#9:trial-merge-wave-0",
-      question: "Q",
-      status: "open",
-      answer: null,
-    },
+test("answerTaskEscalation rejects an empty taskId instead of completing an arbitrary escalation", async () => {
+  const stores = {
+    plans: { rows: [{ plan_key: "owner/repo#9", process_key: "pk-9" }], key: "plan_key" },
+    plan_tasks: { rows: [{ id: 10, plan_key: "owner/repo#9", task_id: "a", answer: null }], key: "id" },
+  };
+  const { engine, completed } = fakeEngine([
+    { userTaskKey: "ut-a", elementId: "feature-escalation", variables: { task: { id: "a" } } },
   ]);
-  stores.plan_trial_merges = {
-    rows: [{ id: 100, plan_key: "owner/repo#9", wave: 0, resolved: 0 }],
-    key: "id",
+
+  // Empty taskId suffix must NOT fall through to the single-candidate fallback and complete ut-a.
+  const r = await answerTaskEscalation(memData(stores), engine, "owner/repo#9:", "do it");
+  assertEquals(r.ok, false);
+  assertEquals(completed.length, 0);
+  assertEquals((stores.plan_tasks.rows[0] as any).answer, null);
+});
+
+test("answerPlanEscalation completes the parked plan-review-decision task with the typed directive + notes", async () => {
+  const stores = {
+    plans: { rows: [{ plan_key: "owner/repo#11", process_key: "pk-11" }], key: "plan_key" },
   };
-  const base = memData(stores);
-  // Inject a transient failure in the trial-merge audit table's `update` only.
-  const data = {
-    table: (name: string, key: string) => {
-      const t = base.table(name, key);
-      if (name === "plan_trial_merges") {
-        return { ...t, update: () => Promise.reject(new Error("transient DB error")) };
-      }
-      return t;
-    },
-  } as any;
+  const { engine, completed } = fakeEngine([
+    { userTaskKey: "ut-plan", elementId: "plan-review-decision", variables: {} },
+  ]);
 
-  const published: any[] = [];
-  const engine = {
-    publishMessage: (m: any) => {
-      published.push(m);
-      return Promise.resolve();
-    },
-  } as any;
-
-  await assertRejects(() =>
-    answerTaskEscalation(data, engine, "owner/repo#9:trial-merge-wave-0", "proceed")
+  const r = await answerPlanEscalation(
+    memData(stores),
+    engine,
+    "owner/repo#11",
+    "revise",
+    "Use issue-1 as seam.",
   );
-
-  // Escalation must remain OPEN so a retry can recover (never committed as answered).
-  const esc = stores.plan_escalations.rows.find((x: any) => x.id === 1) as any;
-  assertEquals(esc.status, "open");
-  assertEquals(esc.answer, null);
-  // No orphaned resume message was published.
-  assertEquals(published.length, 0);
-});
-
-test("currentPlanReviewEpoch counts answered plan-review escalations only", async () => {
-  const stores = {
-    plan_review_escalations: {
-      rows: [
-        { id: 1, plan_key: "owner/repo#10", status: "answered" },
-        { id: 2, plan_key: "owner/repo#10", status: "open" },
-        { id: 3, plan_key: "owner/repo#other", status: "answered" },
-      ],
-      key: "id",
-    },
-  };
-  assertEquals(await currentPlanReviewEpoch(memData(stores), "owner/repo#10"), 1);
-});
-
-test("answerPlanEscalation records directive, clears the plan pointer, and publishes the resume message", async () => {
-  const stores = {
-    plans: {
-      rows: [{
-        plan_key: "owner/repo#11",
-        open_plan_escalation_id: 7,
-        open_plan_findings: "reviewer findings",
-        open_plan_round: 2,
-      }],
-      key: "plan_key",
-    },
-    plan_review_escalations: {
-      rows: [{
-        id: 7,
-        plan_key: "owner/repo#11",
-        epoch: 0,
-        round: 2,
-        findings: "reviewer findings",
-        status: "open",
-        directive: null,
-        note: null,
-      }],
-      key: "id",
-    },
-  };
-  const published: any[] = [];
-  const engine = {
-    publishMessage: (m: any) => {
-      published.push(m);
-      return Promise.resolve();
-    },
-  } as any;
-
-  const r = await answerPlanEscalation(memData(stores), engine, "owner/repo#11", "revise", "Use issue-1 as seam.");
   assertEquals(r.ok, true);
   assertEquals(r.directive, "revise");
-  const esc = stores.plan_review_escalations.rows[0] as any;
-  assertEquals(esc.status, "answered");
-  assertEquals(esc.directive, "revise");
-  assertEquals(esc.note, "Use issue-1 as seam.");
-  const plan = stores.plans.rows[0] as any;
-  assertEquals(plan.open_plan_escalation_id, null);
-  assertEquals(plan.open_plan_findings, null);
-  assertEquals(plan.open_plan_round, null);
-  assertEquals(published[0].name, PLAN_ESCALATION_MESSAGE);
-  assertEquals(published[0].correlationKey, "owner/repo#11");
-  assertEquals(published[0].variables.planEscalationDirective, "revise");
-  assertEquals(
-    String(published[0].variables.planFindings).includes("Use issue-1 as seam."),
-    true,
-  );
+  assertEquals(completed.length, 1);
+  assertEquals(completed[0].userTaskKey, "ut-plan");
+  assertEquals(completed[0].variables, { directive: "revise", notes: "Use issue-1 as seam." });
+});
+
+test("answerPlanEscalation is a no-op when the plan has no parked decision task", async () => {
+  const stores = {
+    plans: { rows: [{ plan_key: "owner/repo#11", process_key: "pk-11" }], key: "plan_key" },
+  };
+  const { engine, completed } = fakeEngine([]);
+  const r = await answerPlanEscalation(memData(stores), engine, "owner/repo#11", "proceed", "");
+  assertEquals(r.ok, false);
+  assertEquals(completed.length, 0);
 });
 
 // Coverage for the epic base-branch control (issue nano-ide #124 / 019_plan_base_branch.sql).

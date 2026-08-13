@@ -164,21 +164,13 @@ test("postMessage → 400 when escalation-answered lacks a correlationKey", asyn
 });
 
 function planEscalationMessageApp() {
-  const plans = [{ plan_key: "owner/repo#12", open_plan_escalation_id: 1 }];
-  const escalations = [{
-    id: 1,
-    plan_key: "owner/repo#12",
-    epoch: 0,
-    round: 2,
-    findings: "needs guidance",
-    status: "open",
-    directive: null,
-    note: null,
-  }];
-  const published: any[] = [];
+  const plans = [{ plan_key: "owner/repo#12", process_key: "pk-12" }];
+  const openTasks = [{ userTaskKey: "ut-plan-12", elementId: "plan-review-decision", variables: {} }];
+  const completed: Array<{ userTaskKey: string; variables?: Record<string, unknown> }> = [];
   const match = (r: Record<string, unknown>, q: Record<string, unknown>) =>
     Object.entries(q).every(([f, v]) => r[f] === v);
   const table = (rows: any[], key: string) => ({
+    get: (k: unknown) => Promise.resolve(rows.find((r) => r[key] === k) ?? null),
     find: (q: any) => Promise.resolve(rows.filter((r) => match(r, q))),
     update: (id: any, patch: any) => {
       const row = rows.find((r) => r[key] === id);
@@ -190,24 +182,24 @@ function planEscalationMessageApp() {
     app: {
       data: {
         table(name: string) {
-          return name === "plans" ? table(plans, "plan_key") : table(escalations, "id");
+          return table(plans, "plan_key");
         },
       },
       engine: {
-        publishMessage: (m: any) => {
-          published.push(m);
+        searchUserTasks: (_filter?: Record<string, unknown>) => Promise.resolve(openTasks),
+        completeUserTask: (userTaskKey: string, variables?: Record<string, unknown>) => {
+          completed.push({ userTaskKey, variables });
           return Promise.resolve();
         },
       },
       log: noopLog(),
     } as any as AppApi,
-    escalations,
-    published,
+    completed,
   };
 }
 
 test("postMessage accepts mixed-case plan escalation directive like the dedicated hook", async () => {
-  const { app: msgApp, escalations, published } = planEscalationMessageApp();
+  const { app: msgApp, completed } = planEscalationMessageApp();
   const res = await postMessage(input({
     name: "plan-escalation-answered",
     correlationKey: "owner/repo#12",
@@ -217,6 +209,19 @@ test("postMessage accepts mixed-case plan escalation directive like the dedicate
   assertEquals(r.status, 200);
   assertEquals(r.body.ok, true);
   assertEquals(r.body.directive, "proceed");
-  assertEquals(escalations[0].directive, "proceed");
-  assertEquals(published[0].variables.planEscalationDirective, "proceed");
+  assertEquals(completed[0].userTaskKey, "ut-plan-12");
+  assertEquals(completed[0].variables, { directive: "proceed", notes: "ship it" });
+});
+
+test("postMessage falls back to notes when note is blank/whitespace (does not drop human guidance)", async () => {
+  const { app: msgApp, completed } = planEscalationMessageApp();
+  const res = await postMessage(input({
+    name: "plan-escalation-answered",
+    correlationKey: "owner/repo#12",
+    variables: { directive: "revise", note: "   ", notes: "please add tests" },
+  }), msgApp);
+  const r = res as any;
+  assertEquals(r.status, 200);
+  assertEquals(r.body.ok, true);
+  assertEquals(completed[0].variables, { directive: "revise", notes: "please add tests" });
 });
