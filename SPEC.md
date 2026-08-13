@@ -466,8 +466,10 @@ scalar-only and cannot express the `tasks`/`results` lists, so the workers self-
 `plan_tasks` (one row per slice, tracking its `status`/`pr_key`/`summary`).
 
 **Entry points**: the epic page's "Hand an issue to the fleet" form or
-`POST /app/api/actions/start/plan-fanout` (`{ issue | url, baseBranch }`, plus optional
-`confirmDefaultBase`/`allowSharedBase`) — the same flat operation the form posts. `baseBranch`
+`POST /app/api/actions/start/plan-fanout` (either `{ issue, baseBranch }` or
+`{ url, baseBranch }` — a `oneOf` naming the target by **exactly one** of `issue`
+(`owner/repo#123`) or `url`, plus optional `confirmDefaultBase`/`allowSharedBase`) —
+the same flat operation the form posts. `baseBranch`
 is required and admitted through the ADR 0003 gate (auto-create `epic/*`, confirm-default,
 shared-base guard).
 
