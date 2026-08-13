@@ -14,6 +14,7 @@
 //   2. `.github/merge-protocol.json`.
 // A repo that publishes neither keeps today's behaviour (DEFAULT_MERGE_PROTOCOL).
 
+import { classifyEscalation, type EscalationDisposition } from "./escalationTaxonomy.ts";
 import { fetchRepoFile } from "./github.ts";
 
 /** How to give branch protection a fresh head `pull_request` run before landing. `none` = the
@@ -65,6 +66,15 @@ export const DEFAULT_MERGE_PROTOCOL: MergeProtocol = {
   land: { method: "gh-merge" },
   requiredChecks: [],
 };
+
+/** Classify a repo's landing method against the canonical escalation taxonomy. A `ui` land
+ * method is a `decision-required` escalation (only a human can click Merge); every
+ * machine-landable method (gh-merge / admin / mergify-queue) is `transient` — the merge stage
+ * lands it in-process without paging a human. Delegates to {@link classifyEscalation} so the
+ * merge worker shares one source of truth with every other raise site. */
+export function classifyMergeLanding(protocol: MergeProtocol): EscalationDisposition {
+  return classifyEscalation({ kind: "merge-protocol", landMethod: protocol.land.method });
+}
 
 const FRESH_HEAD_RUNS: ReadonlySet<string> = new Set(["none", "ready", "reopen", "ready-or-reopen"]);
 const LAND_METHODS: ReadonlySet<string> = new Set(["gh-merge", "admin", "mergify-queue", "ui"]);

@@ -148,7 +148,7 @@
       <bpmn:sequenceFlow id="w_toImpl" sourceRef="w_start" targetRef="implement-task" />
       <bpmn:sequenceFlow id="w_toGw" sourceRef="implement-task" targetRef="w_gw" />
       <bpmn:sequenceFlow id="w_escalate" name="escalated" sourceRef="w_gw" targetRef="persist-task-escalation">
-        <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=status = "escalated"</bpmn:conditionExpression>
+        <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=status = "escalated" and question != null and trim(question) != ""</bpmn:conditionExpression>
       </bpmn:sequenceFlow>
       <bpmn:sequenceFlow id="w_done" name="done" sourceRef="w_gw" targetRef="w_end" />
       <bpmn:sequenceFlow id="w_toWait" sourceRef="persist-task-escalation" targetRef="wait-feature-answer" />
