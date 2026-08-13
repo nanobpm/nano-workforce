@@ -3,7 +3,7 @@
 // the merge-exclusion graph. Force the token transport and stub `globalThis.fetch`.
 import { test } from "node:test";
 import { assertEquals, assertRejects } from "#test-assert";
-import { fetchPrFiles } from "./github.ts";
+import { BaseBranchMustExistError, ensureBaseBranch, fetchPrFiles } from "./github.ts";
 
 // A fake `fetch` that serves `pages` of file batches; each page N (1-based) returns `pages[N-1]`
 // files (named `f{index}`), setting a `Link: rel="next"` header whenever a later page exists.
@@ -57,4 +57,139 @@ test("fetchPrFiles: throws when the cap genuinely truncates (full last page + ne
     Error,
     "truncated",
   );
+});
+
+// ── ensureBaseBranch (ADR 0003 rule 2) ──────────────────────────────────────
+// Force the token transport and stub `globalThis.fetch` so the create-if-missing primitive is
+// exercised end-to-end without touching the network: git-ref lookups, default-branch resolution,
+// and ref creation are all served from an in-memory repo model that records every create call.
+interface FakeRepo {
+  repo: string;
+  defaultBranch: string;
+  branches: Map<string, string>; // branch name → head sha (includes the default branch)
+  creates: { ref: string; sha: string }[];
+}
+
+function jsonResponse(obj: unknown, status = 200): Response {
+  return new Response(JSON.stringify(obj), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+function githubFetch(state: FakeRepo) {
+  return (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    const u = new URL(String(url));
+    const method = (init?.method ?? "GET").toUpperCase();
+    const path = u.pathname;
+    // Repo metadata → default branch (fetchDefaultBranch token mode).
+    if (method === "GET" && path === `/repos/${state.repo}`) {
+      return Promise.resolve(jsonResponse({ default_branch: state.defaultBranch }));
+    }
+    // Git ref lookup → head sha or 404.
+    const refPrefix = `/repos/${state.repo}/git/ref/heads/`;
+    if (method === "GET" && path.startsWith(refPrefix)) {
+      const branch = decodeURIComponent(path.slice(refPrefix.length));
+      const sha = state.branches.get(branch);
+      if (sha === undefined) return Promise.resolve(new Response("Not Found", { status: 404 }));
+      return Promise.resolve(jsonResponse({ ref: `refs/heads/${branch}`, object: { sha } }));
+    }
+    // Create ref.
+    if (method === "POST" && path === `/repos/${state.repo}/git/refs`) {
+      // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+      const body = JSON.parse(String(init?.body ?? "{}")) as { ref?: string; sha?: string };
+      const ref = String(body.ref ?? "");
+      const sha = String(body.sha ?? "");
+      const branch = ref.replace(/^refs\/heads\//, "");
+      if (state.branches.has(branch)) {
+        return Promise.resolve(jsonResponse({ message: "Reference already exists" }, 422));
+      }
+      state.creates.push({ ref, sha });
+      state.branches.set(branch, sha);
+      return Promise.resolve(jsonResponse({ ref }, 201));
+    }
+    return Promise.resolve(new Response(`unexpected ${method} ${path}`, { status: 500 }));
+  };
+}
+
+async function withGithub<T>(state: FakeRepo, fn: () => Promise<T>): Promise<T> {
+  const prevMode = process.env["NANO_PR_GITHUB_TRANSPORT"];
+  const prevFetch = globalThis.fetch;
+  process.env["NANO_PR_GITHUB_TRANSPORT"] = "token";
+  globalThis.fetch = githubFetch(state) as typeof fetch;
+  try {
+    return await fn();
+  } finally {
+    globalThis.fetch = prevFetch;
+    if (prevMode === undefined) delete process.env["NANO_PR_GITHUB_TRANSPORT"];
+    else process.env["NANO_PR_GITHUB_TRANSPORT"] = prevMode;
+  }
+}
+
+test("ensureBaseBranch: existing branch is a no-op (never creates/resets the ref)", async () => {
+  const state: FakeRepo = {
+    repo: "o/exists",
+    defaultBranch: "main",
+    branches: new Map([
+      ["main", "mainsha"],
+      ["epic/already-there", "existingsha"],
+    ]),
+    creates: [],
+  };
+  const result = await withGithub(state, () =>
+    ensureBaseBranch(state.repo, "epic/already-there", "tok"),
+  );
+  assertEquals(result, "exists");
+  assertEquals(state.creates.length, 0);
+  // The ref must be left untouched.
+  assertEquals(state.branches.get("epic/already-there"), "existingsha");
+});
+
+test("ensureBaseBranch: missing epic/* branch is created off the default branch HEAD", async () => {
+  const state: FakeRepo = {
+    repo: "o/create-epic",
+    defaultBranch: "main",
+    branches: new Map([["main", "defaulthead"]]),
+    creates: [],
+  };
+  const result = await withGithub(state, () =>
+    ensureBaseBranch(state.repo, "epic/new-feature", "tok"),
+  );
+  assertEquals(result, "created");
+  assertEquals(state.creates, [{ ref: "refs/heads/epic/new-feature", sha: "defaulthead" }]);
+});
+
+test("ensureBaseBranch: idempotent — a second call once the branch exists is a no-op", async () => {
+  const state: FakeRepo = {
+    repo: "o/idempotent",
+    defaultBranch: "main",
+    branches: new Map([["main", "defaulthead"]]),
+    creates: [],
+  };
+  const first = await withGithub(state, () => ensureBaseBranch(state.repo, "epic/twice", "tok"));
+  assertEquals(first, "created");
+  assertEquals(state.creates.length, 1);
+  // Re-plan / durable head-task re-run: the branch now exists → clean no-op, no second create.
+  const second = await withGithub(state, () => ensureBaseBranch(state.repo, "epic/twice", "tok"));
+  assertEquals(second, "exists");
+  assertEquals(state.creates.length, 1);
+});
+
+test("ensureBaseBranch: missing non-epic/* branch throws BaseBranchMustExistError", async () => {
+  const state: FakeRepo = {
+    repo: "o/typo",
+    defaultBranch: "main",
+    branches: new Map([["main", "defaulthead"]]),
+    creates: [],
+  };
+  const err = await withGithub(state, () =>
+    assertRejects(
+      () => ensureBaseBranch(state.repo, "feature/typo", "tok"),
+      BaseBranchMustExistError,
+      "feature/typo",
+    ),
+  );
+  assertEquals(err instanceof BaseBranchMustExistError, true);
+  // A rejected non-epic/* base must never spawn a wrong-rooted branch.
+  assertEquals(state.creates.length, 0);
 });
