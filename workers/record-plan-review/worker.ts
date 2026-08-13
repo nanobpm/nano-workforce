@@ -3,9 +3,10 @@
 //
 // The `senior:plan-review` agent critiqued the levelized plan and emitted `{ approved, findings }`.
 // This worker:
-//   • derives the current epoch from answered plan-review escalations and the current round from
-//     the append-only `plan_reviews` log for that epoch (no counter variable), using the engine
-//     jobKey as an idempotency guard so a retried job reuses its row,
+//   • reads the current epoch from the durable `planReviewEpoch` process variable (bumped by the
+//     `plan-review-decision` user task each time a human answers a plan-review escalation) and
+//     derives the current round from the append-only `plan_reviews` log for that epoch (no counter
+//     variable), using the engine jobKey as an idempotency guard so a retried job reuses its row,
 //   • records this round's verdict + findings,
 //   • decides the loop: emits `planApproved` (reviewer said yes → the BPMN gateway proceeds to
 //     `select-wave`) or, when unapproved, re-emits the findings as `planFindings` so a revise
@@ -19,7 +20,6 @@
 
 import type { AppJobHandler } from "@nanobpm/urban";
 import {
-  currentPlanReviewEpoch,
   MAX_PLAN_REVIEW_ROUNDS,
   type PlanReview,
   planReviews,
@@ -29,6 +29,7 @@ interface In extends Record<string, unknown> {
   planKey: string;
   approved?: unknown;
   findings?: unknown;
+  planReviewEpoch?: unknown;
 }
 interface Out extends Record<string, unknown> {
   planApproved: boolean;
@@ -42,6 +43,14 @@ interface Out extends Record<string, unknown> {
 // missing verdict — means revise. Bounded by the round cap, so this can't loop forever.
 const isApproved = (v: unknown): boolean =>
   v === true || (typeof v === "string" && v.trim().toLowerCase() === "true");
+
+// The plan-review epoch is a durable process variable. It is null/absent on the first review round
+// (before any human answer) and a non-negative integer once the `plan-review-decision` user task
+// has bumped it. Coerce anything unexpected to 0 so a round is always recorded under a valid epoch.
+const coerceEpoch = (v: unknown): number => {
+  const n = typeof v === "number" ? v : typeof v === "string" ? Number(v) : Number.NaN;
+  return Number.isInteger(n) && n >= 0 ? n : 0;
+};
 
 export const str = (v: unknown): string => {
   if (typeof v === "string") return v;
@@ -63,7 +72,7 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
   const jobKey = job.jobKey;
 
   const reviews = planReviews(app.data);
-  const epoch = await currentPlanReviewEpoch(app.data, planKey);
+  const epoch = coerceEpoch(job.variables.planReviewEpoch);
 
   // Idempotency guard: deriving the epoch/round from count(plan_reviews) is not retry-safe on its
   // own. A job retried after the insert (crash/timeout post-write) re-runs with the SAME jobKey —

@@ -3,7 +3,6 @@
 // planKey; the answer records the human directive and resumes the plan.
 import {
   answerPlanEscalation as answerPlanEscalationState,
-  parsePlanEscalationDirective,
 } from "../app/plan.ts";
 import { envVar } from "../app/version.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
@@ -23,7 +22,8 @@ export default defineOperation("answerPlanEscalation", async ({ req, body }, app
   }
 
   const planKey = str(body.plan);
-  const directive = parsePlanEscalationDirective(body.directive);
+  const rawDirective = str(body.directive).toLowerCase();
+  const directive = rawDirective === "proceed" || rawDirective === "revise" ? rawDirective : null;
   const note = str(body.note);
   if (!planKey) {
     app.log.warn("plan-answer rejected: missing plan");

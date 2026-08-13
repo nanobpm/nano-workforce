@@ -1,0 +1,27 @@
+{
+  "id": "plan-review-decision",
+  "schemaVersion": 18,
+  "type": "default",
+  "components": [
+    {
+      "type": "select",
+      "key": "directive",
+      "label": "Directive",
+      "values": [
+        { "label": "Proceed — dispatch the current plan as-is", "value": "proceed" },
+        { "label": "Revise — send the plan back to the planner", "value": "revise" }
+      ],
+      "validate": {
+        "required": true
+      }
+    },
+    {
+      "type": "textarea",
+      "key": "notes",
+      "label": "Revision guidance for the planner",
+      "conditional": {
+        "hide": "=directive != \"revise\""
+      }
+    }
+  ]
+}

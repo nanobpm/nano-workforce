@@ -16,6 +16,7 @@ try {
 
 function memTable(rows: any[], key: string) {
   return {
+    get: (value: unknown) => Promise.resolve(rows.find((candidate) => candidate[key] === value) ?? null),
     find: (where: Record<string, unknown>) =>
       Promise.resolve(rows.filter((row) => Object.entries(where).every(([field, value]) => row[field] === value))),
     update: (value: unknown, patch: Record<string, unknown>) => {
@@ -26,26 +27,26 @@ function memTable(rows: any[], key: string) {
   };
 }
 
-function memApp(escalations: any[] = []) {
+function memApp(openTasks: any[] = []) {
   const stores: Record<string, { rows: any[]; key: string }> = {
-    plans: { rows: [{ plan_key: "owner/repo#9" }], key: "plan_key" },
-    plan_escalations: { rows: escalations, key: "id" },
+    plans: { rows: [{ plan_key: "owner/repo#9", process_key: "pk-9" }], key: "plan_key" },
     plan_tasks: { rows: [{ id: 1, plan_key: "owner/repo#9", task_id: "task-1" }], key: "id" },
   };
-  const published: Record<string, unknown>[] = [];
+  const completed: Array<{ userTaskKey: string; variables?: Record<string, unknown> }> = [];
   const app = {
     data: {
       table: (name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key),
     },
     engine: {
-      publishMessage: (message: Record<string, unknown>) => {
-        published.push(message);
+      searchUserTasks: (_filter?: Record<string, unknown>) => Promise.resolve(openTasks),
+      completeUserTask: (userTaskKey: string, variables?: Record<string, unknown>) => {
+        completed.push({ userTaskKey, variables });
         return Promise.resolve();
       },
     },
     log: noopLog(),
   } as any as AppApi;
-  return { app, published };
+  return { app, completed };
 }
 
 function input(body: Record<string, unknown>, secret?: string) {
@@ -72,14 +73,11 @@ test("rejects a request without the configured hook secret", async () => {
   assertEquals(result.body, { ok: false, error: "unauthorized" });
 });
 
-test("derives corrKey from plan + task and maps an answered escalation to 200", async () => {
-  const { app, published } = memApp([{
-    id: 1,
-    plan_key: "owner/repo#9",
-    task_id: "task-1",
-    corr_key: "owner/repo#9:task-1",
-    question: "Proceed?",
-    status: "open",
+test("derives corrKey from plan + task and completes the parked user task", async () => {
+  const { app, completed } = memApp([{
+    userTaskKey: "ut-1",
+    elementId: "feature-escalation",
+    variables: { task: { id: "task-1" } },
   }]);
   const result = await answerFeatureEscalation(
     input({ plan: "owner/repo#9", task: "task-1", answer: " yes " }, "test-secret"),
@@ -87,8 +85,8 @@ test("derives corrKey from plan + task and maps an answered escalation to 200", 
   ) as any;
   assertEquals(result.status, 200);
   assertEquals(result.body.ok, true);
-  assertEquals(published[0]?.correlationKey, "owner/repo#9:task-1");
-  assertEquals((published[0]?.variables as Record<string, unknown>).answer, "yes");
+  assertEquals(completed[0]?.userTaskKey, "ut-1");
+  assertEquals(completed[0]?.variables, { resolution: "answer", answer: "yes" });
 });
 
 test("maps an unmatched corrKey to 404", async () => {
