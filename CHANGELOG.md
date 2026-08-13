@@ -1,3 +1,52 @@
+# [0.57.0](https://github.com/nanobpm/nano-workforce/compare/v0.56.0...v0.57.0) (2026-08-13)
+
+
+### Features
+
+* **app-view:** show epic base branch in epics overview grid ([#159](https://github.com/nanobpm/nano-workforce/issues/159)) ([#164](https://github.com/nanobpm/nano-workforce/issues/164)) ([216cb0f](https://github.com/nanobpm/nano-workforce/commit/216cb0f515561fbaa646725593707ae6a2418246))
+
+# [0.56.0](https://github.com/nanobpm/nano-workforce/compare/v0.55.0...v0.56.0) (2026-08-13)
+
+
+### Features
+
+* correlate jobKeys to process/plan across supply report + cockpit (H6) ([#182](https://github.com/nanobpm/nano-workforce/issues/182)) ([f6e2b0d](https://github.com/nanobpm/nano-workforce/commit/f6e2b0d5f804c4c30863e5f5c66bbdc835025046)), closes [#142](https://github.com/nanobpm/nano-workforce/issues/142) [#152](https://github.com/nanobpm/nano-workforce/issues/152) [#149](https://github.com/nanobpm/nano-workforce/issues/149)
+
+# [0.55.0](https://github.com/nanobpm/nano-workforce/compare/v0.54.0...v0.55.0) (2026-08-13)
+
+
+### Features
+
+* supply-only agentic cockpit page + report endpoint (H5) ([#173](https://github.com/nanobpm/nano-workforce/issues/173)) ([428f7f3](https://github.com/nanobpm/nano-workforce/commit/428f7f3a8ca35ea05c8b9c0dbc478d24d125486a)), closes [#144](https://github.com/nanobpm/nano-workforce/issues/144) [#146](https://github.com/nanobpm/nano-workforce/issues/146) [#152](https://github.com/nanobpm/nano-workforce/issues/152) [#148](https://github.com/nanobpm/nano-workforce/issues/148) [#144](https://github.com/nanobpm/nano-workforce/issues/144) [#146](https://github.com/nanobpm/nano-workforce/issues/146)
+
+# [0.54.0](https://github.com/nanobpm/nano-workforce/compare/v0.53.0...v0.54.0) (2026-08-13)
+
+
+### Features
+
+* generalize the advisory blackboard onto the agentic channel (H4) ([#166](https://github.com/nanobpm/nano-workforce/issues/166)) ([450a4fa](https://github.com/nanobpm/nano-workforce/commit/450a4fa4a75ad1cdc2a78eef6f95aa2f45bebb9f)), closes [#147](https://github.com/nanobpm/nano-workforce/issues/147) [#147](https://github.com/nanobpm/nano-workforce/issues/147) [#143](https://github.com/nanobpm/nano-workforce/issues/143)
+
+# [0.53.0](https://github.com/nanobpm/nano-workforce/compare/v0.52.0...v0.53.0) (2026-08-13)
+
+
+### Features
+
+* relay ring + transcript store agentic family (H3) ([#162](https://github.com/nanobpm/nano-workforce/issues/162)) ([f629526](https://github.com/nanobpm/nano-workforce/commit/f62952698fa3cfb3321e60fdce61fdb1f13ca9d6)), closes [#142](https://github.com/nanobpm/nano-workforce/issues/142) [#143](https://github.com/nanobpm/nano-workforce/issues/143) [#146](https://github.com/nanobpm/nano-workforce/issues/146) [#streams](https://github.com/nanobpm/nano-workforce/issues/streams)
+
+# [0.52.0](https://github.com/nanobpm/nano-workforce/compare/v0.51.0...v0.52.0) (2026-08-13)
+
+
+### Features
+
+* presence + registry family over app.data (H1) ([#161](https://github.com/nanobpm/nano-workforce/issues/161)) ([6666ff1](https://github.com/nanobpm/nano-workforce/commit/6666ff148d02bc0f7ae9740511fdc62bbe9c2e70)), closes [#142](https://github.com/nanobpm/nano-workforce/issues/142) [#152](https://github.com/nanobpm/nano-workforce/issues/152) [#152](https://github.com/nanobpm/nano-workforce/issues/152) [#144](https://github.com/nanobpm/nano-workforce/issues/144)
+
+# [0.51.0](https://github.com/nanobpm/nano-workforce/compare/v0.50.0...v0.51.0) (2026-08-13)
+
+
+### Features
+
+* mount agentic channel hub + family-registration seam (H0) ([#154](https://github.com/nanobpm/nano-workforce/issues/154)) ([96a679e](https://github.com/nanobpm/nano-workforce/commit/96a679e0843c76bf93940f09eef1c6c642a4ebed)), closes [#142](https://github.com/nanobpm/nano-workforce/issues/142) [#143](https://github.com/nanobpm/nano-workforce/issues/143) [#isMounted](https://github.com/nanobpm/nano-workforce/issues/isMounted)
+
 # [0.50.0](https://github.com/nanobpm/nano-workforce/compare/v0.49.0...v0.50.0) (2026-08-12)
 
 

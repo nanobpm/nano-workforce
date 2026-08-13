@@ -16,6 +16,10 @@
           {
             "label": "Epics",
             "page": "epic"
+          },
+          {
+            "label": "Cockpit",
+            "page": "cockpit"
           }
         ],
         "sticky": true

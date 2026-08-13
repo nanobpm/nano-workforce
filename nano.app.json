@@ -65,6 +65,10 @@
   ],
   "workers": [
     {
+      "taskType": "pr.ensure-base-branch",
+      "handler": "workers/ensure-base-branch/worker.ts"
+    },
+    {
       "taskType": "pr.persist-round",
       "handler": "workers/persist-round/worker.ts"
     },

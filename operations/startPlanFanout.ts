@@ -10,7 +10,16 @@
 // ONE of `issue` or `url` — so an empty or ambiguous target is a 400 at the edge; this delegate just
 // narrows the validated variant and keeps the issue-FORMAT parse guard (schema can't express it).
 
-import { InvalidBaseBranchError, normalizeBaseBranch, parseIssue, startPlan } from "../app/plan.ts";
+import { BaseBranchMustExistError } from "../app/github.ts";
+import {
+  admitPlan,
+  DefaultBaseNotConfirmedError,
+  InvalidBaseBranchError,
+  MissingBaseBranchError,
+  parseIssue,
+  SharedBaseError,
+  startPlan,
+} from "../app/plan.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
 
 export default defineOperation("startPlanFanout", async ({ body }, app) => {
@@ -26,16 +35,29 @@ export default defineOperation("startPlanFanout", async ({ body }, app) => {
     app.log.warn("start-plan rejected: unparseable issue reference", { raw });
     return { status: 400, body: { error: "could not parse issue (use owner/repo#123 or an issue URL)" } };
   }
-  // Optional epic base branch: the branch the fleet branches off and opens every PR against instead
-  // of the repo default. Present on both oneOf variants; blank/absent keeps the default-branch
-  // behaviour. It is later interpolated into the authoritative implementer prompt (with `git`/`gh`
-  // shell snippets), so validate/normalise it HERE — a non-blank value that isn't a plausible git
-  // branch name is a 400 at the edge, never persisted or rendered. `normalizeBaseBranch` blank → null.
-  const baseBranch = "baseBranch" in body && typeof body.baseBranch === "string" ? body.baseBranch : null;
-  let normalizedBase: string | null;
+  // Epic base branch (ADR 0003): admit the launch through the fail-fast `admitPlan` gate BEFORE any
+  // fan-out. It composes the four ordered admission rules — required+explicit, create-if-missing
+  // (epic/* guard, run synchronously so a typo is a clean edge 400), confirm-default, and
+  // shared-base — and returns the normalized base. Errors map to specific HTTP statuses at the edge.
+  const rawBase = "baseBranch" in body && typeof body.baseBranch === "string" ? body.baseBranch : null;
+  const allowSharedBase = "allowSharedBase" in body && body.allowSharedBase === true;
+  const confirmDefaultBase = "confirmDefaultBase" in body && body.confirmDefaultBase === true;
+  const token = process.env.GITHUB_TOKEN ?? "";
+  let normalizedBase: string;
   try {
-    normalizedBase = normalizeBaseBranch(baseBranch);
+    normalizedBase = await admitPlan(app.data, parsed.repo, rawBase, token, {
+      allowSharedBase,
+      confirmDefaultBase,
+      selfPlanKey: parsed.planKey,
+    });
   } catch (err) {
+    if (err instanceof MissingBaseBranchError) {
+      app.log.warn("start-plan rejected: missing base branch");
+      return {
+        status: 400,
+        body: { error: "baseBranch is required (name the integration branch, e.g. epic/agent-protocol)" },
+      };
+    }
     if (err instanceof InvalidBaseBranchError) {
       app.log.warn("start-plan rejected: invalid base branch", { baseBranch: err.value });
       return {
@@ -43,13 +65,50 @@ export default defineOperation("startPlanFanout", async ({ body }, app) => {
         body: { error: "invalid baseBranch (must be a plausible git branch name, e.g. epic/agent-protocol)" },
       };
     }
+    if (err instanceof BaseBranchMustExistError) {
+      app.log.warn("start-plan rejected: base branch does not exist", { baseBranch: err.branch });
+      return {
+        status: 400,
+        body: {
+          error:
+            `baseBranch "${err.branch}" does not exist and is not an epic/* branch, so it is not ` +
+            `auto-created — create it first, or use the epic/* convention`,
+        },
+      };
+    }
+    if (err instanceof DefaultBaseNotConfirmedError) {
+      app.log.warn("start-plan rejected: default base not confirmed", { baseBranch: err.branch });
+      return {
+        status: 400,
+        body: {
+          error:
+            `baseBranch "${err.branch}" is the repository default branch — every task would land ` +
+            `directly on it with no integration branch. Re-submit with confirmDefaultBase: true to proceed`,
+        },
+      };
+    }
+    if (err instanceof SharedBaseError) {
+      app.log.warn("start-plan rejected: shared base branch", { baseBranch: err.branch });
+      return {
+        status: 409,
+        body: {
+          error:
+            `baseBranch "${err.branch}" is already in use by another active epic. Re-submit with ` +
+            `allowSharedBase: true to stack on it, or name a distinct epic/* branch`,
+        },
+      };
+    }
     throw err;
   }
   const result = await startPlan(app.data, app.engine, parsed, normalizedBase);
+  const alreadyRunning = "alreadyRunning" in result && result.alreadyRunning === true;
   app.log.info("plan fan-out started", {
     planKey: parsed.planKey,
-    baseBranch: normalizedBase ?? "(default branch)",
-    alreadyRunning: "alreadyRunning" in result && result.alreadyRunning === true,
+    // The base the caller requested. When `alreadyRunning`, `startPlan` short-circuits before this
+    // base takes effect (it may not match the in-flight plan's persisted base), so name it as the
+    // request — not the effective base — to keep the log honest.
+    requestedBaseBranch: normalizedBase,
+    alreadyRunning,
   });
   return { status: 202, body: result };
 });

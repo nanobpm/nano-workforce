@@ -24,6 +24,7 @@ import { after, before, describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import type { EngineJob } from "@nanobpm/urban/runtime";
 import { bootTestApp, type TestApp } from "@nanobpm/urban-testkit";
+import { admitGithubState, installAdmitGithub } from "./support/github-admit.ts";
 import {
   completeEscalationAsAgent,
   latestCompletion,
@@ -61,15 +62,20 @@ type Stub = (job: EngineJob) => Record<string, unknown> | void;
 
 describe("agent-answerable escalations (U6 — same form, agent completer, attribution + reversibility)", () => {
   const savedEnv = new Map<string, string | undefined>();
+  let restoreGithub: (() => void) | undefined;
 
   before(() => {
     for (const [k, v] of Object.entries(GITHUB_ENV_OVERRIDES)) {
       savedEnv.set(k, process.env[k]);
       process.env[k] = v;
     }
+    // ADR 0003: `startPlanFanout` + the `pr.ensure-base-branch` head task now pass through base
+    // admission, which reads/creates the base ref. Pin the hermetic `token` transport + fetch stub.
+    restoreGithub = installAdmitGithub(admitGithubState("owner/repo", "main"));
   });
 
   after(() => {
+    restoreGithub?.();
     for (const [k, v] of savedEnv) {
       if (v === undefined) delete process.env[k];
       else process.env[k] = v;
@@ -89,7 +95,7 @@ describe("agent-answerable escalations (U6 — same form, agent completer, attri
         await app.engine.registerWorker(jobType, async (job) => stub(job) ?? undefined);
       }
       const planKey = "owner/repo#1";
-      const started = await app.api?.call("startPlanFanout", { body: { issue: planKey } });
+      const started = await app.api?.call("startPlanFanout", { body: { issue: planKey, baseBranch: "epic/e2e" } });
       assert.equal(started?.status, 202, "startPlanFanout accepted the issue");
       await app.settle();
       const plan = await app.db

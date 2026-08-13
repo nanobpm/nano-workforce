@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Agent cockpit — supply (App View embed)</title>
+    <link rel="stylesheet" href="./cockpit.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5/css/xterm.min.css" />
+    <style>
+      html, body { margin: 0; height: 100%; background: #0b0f14; }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "@nanobpm/agentic/cockpit": "https://cdn.jsdelivr.net/npm/@nanobpm/agentic@0.1.0/dist/cockpit/index.js",
+          "@xterm/xterm": "https://cdn.jsdelivr.net/npm/@xterm/xterm@5/+esm"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <!--
+      Console App-View embed (ADR 0057). The console loads this document into its App-View surface and
+      hands it a host element; we mount the SAME supply cockpit via the SAME ./mount.js as the
+      standalone shell — only the host and the injected endpoints differ, so the page renders
+      identically. When the console injects endpoint config via `window.__NANO_APP_VIEW__`, it wins.
+    -->
+    <main id="cockpit-root"></main>
+    <script type="module">
+      import { mountCockpit } from "./mount.js";
+
+      const cfg = window.__NANO_APP_VIEW__ ?? {};
+      mountCockpit(cfg.host ?? document.getElementById("cockpit-root"), {
+        reportUrl: cfg.reportUrl,
+        relayUrl: cfg.relayUrl,
+        hookSecret: cfg.hookSecret,
+        relayToken: cfg.relayToken,
+        relayCapability: cfg.relayCapability,
+      });
+    </script>
+  </body>
+</html>
