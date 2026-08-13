@@ -8,6 +8,9 @@
     "processes": [
       "resources/processes/*.bpmn"
     ],
+    "forms": [
+      "resources/forms/*.form"
+    ],
     "templates": [
       "prompts/*.md"
     ]
@@ -143,6 +146,9 @@
     "senior:retro"
   ],
   "surfaces": {
+    "taskInbox": {
+      "enabled": true
+    },
     "pages": {
       "enabled": true,
       "pagesDir": "pages",

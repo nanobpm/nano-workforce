@@ -1,0 +1,15 @@
+{
+  "id": "spine-demo",
+  "schemaVersion": 18,
+  "type": "default",
+  "components": [
+    {
+      "type": "textfield",
+      "key": "decision",
+      "label": "Decision",
+      "validate": {
+        "required": true
+      }
+    }
+  ]
+}
