@@ -15,8 +15,9 @@
 //       resumes-from-offset: it re-attaches and receives only the un-applied tail, with no loss and
 //       no duplication.
 //
-// It is timer-free and deterministic: connections are in-memory, `flush` drains the microtask queue,
-// and every assertion is on settled state. There are no retries and no sleeps.
+// It is timer-free and deterministic: connections are in-memory, `flush` yields to the next
+// event-loop turn via `setImmediate` (so all pending microtasks settle before it resolves), and
+// every assertion is on settled state. There are no retries and no sleeps.
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { AgenticHub } from "@nanobpm/agentic/channel";
