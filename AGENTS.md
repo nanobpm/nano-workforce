@@ -79,6 +79,20 @@ GENERATED, never hand-edited.**
   stale. It runs in `.github/workflows/ci.yml`, so a flow change that forgets the
   relayout **cannot merge**. Run `npm run layout` and commit the result whenever
   the check flags a model.
+- **`cancelActivity="true"` is the BPMN default and `bpmn-auto-layout`
+  canonicalises it away.** Don't hand-add it back to an interrupting boundary
+  event — the serializer strips it, so a hand-written `cancelActivity="true"`
+  makes `layout:check` drift on the next relayout. Interrupting is the default;
+  only `cancelActivity="false"` (non-interrupting) is emitted.
+- **One task owns each `.bpmn` file — never fan two parallel tasks onto the same
+  process diagram.** `layoutBpmn` regenerates the *entire* `<bpmndi:BPMNDiagram>`
+  block, so two independently relaid-out copies of one process diverge across
+  every shape and edge. Each PR is green alone, but the second to land collides
+  in the DI and — even after a text-merge — leaves the committed diagram stale
+  vs. the merged semantic model, so `layout:check` fails on a combined state that
+  no single PR's CI ever exercised. When decomposing a fleet, coarsen the tasks
+  that touch a shared process file into one; do **not** paper the collision over
+  with a `dependsOn` edge added purely to serialise otherwise-parallel work.
 
 ## Engine capabilities (Zeebe parity — use them, don't work around them)
 
@@ -104,6 +118,29 @@ reconciles external (GitHub) state.
 cannot yet express event-based gateways or boundary events (its `FlowNode` union
 has no such node). This app authors BPMN as XML, so author those constructs in
 the XML directly; `layoutBpmn` lays them out correctly.
+
+## Testing flows against the testkit (WASM) engine
+
+Unit tests boot the app against an in-process WASM build of the engine. Two
+non-obvious behaviours bite user-task / escalation tests — budget for them
+instead of rediscovering them:
+
+- **A COMPLETED instance's variables are folded away.** `snapshot()` reports
+  `instance.variables = {}` once an instance completes, and a completed
+  `userTask` carries no vars — so you cannot assert a typed completion variable
+  from a finished instance. Either read variables while the instance is still
+  ACTIVE (parked on the next wait), or route the resume through a FEEL gateway
+  condition and assert `app.snapshot().takenSequenceFlows`. `takenSequenceFlows`
+  is engine-**global** and cumulative, so assert it with a single instance per
+  booted app.
+- **A `zeebe:input source="=null"` seed shadows a job-completion value at an
+  immediately-following gateway inside a multi-instance subProcess.** The gate
+  reads the stale `null` and takes its default. Don't seed a var that an
+  in-subprocess gateway reads; instead hoist it into the MI-child scope with a
+  `zeebe:output source="=var" target="var"` mapping on the service task (a no-op
+  on the production nano engine, which updates the nearest scope, but it keeps
+  per-child isolation in the testkit). Only vars read by an in-subprocess gateway
+  need this — output-only vars (e.g. `summary`, `pr`) are fine.
 
 ## Data envelopes are scalar-only
 
@@ -135,6 +172,10 @@ Migrations live in `db/migrations/*.sql` and are **auto-applied on boot** from
 - **Destructive drops are a separate, later contract phase**, shipped only after
   a release stopped reading the old shape.
 - Number a new migration after the current highest prefix (they apply in order).
+  Check `origin/main`, not your branch point — a fan-out epic branch forks at one
+  prefix while `main` keeps advancing, so the branch-local "next" number collides
+  on merge. Two files must never share a prefix; `npm run check:migrations`
+  (a CI gate) enforces this and fails the build on any new duplicate.
 
 ## Runtime & CI gates
 
@@ -148,13 +189,30 @@ npm run typecheck                                     # tsc --noEmit (Node)
 npm run check                                         # urban check (manifest validation)
 npm run layout:check                                  # BPMN diagram freshness (no drift)
 npm run check:prompts                                 # agent-prompt template resolution
+npm run check:migrations                              # migration prefixes (no collisions)
 npm test                                              # unit tests (node --test)
 ```
 
 CI (`.github/workflows/ci.yml`) gates lint, typecheck, `urban check`, `layout:check`,
-the prompt check, and the Node test suite. Run `npm run layout <file.bpmn>` after
+the prompt check, the migration-prefix check, and the Node test suite. Run `npm run layout <file.bpmn>` after
 any BPMN flow change and commit the regenerated diagram — the `layout:check`
 gate fails the build otherwise.
+
+### Generated facades are gitignored — regenerate before running a single test file
+
+`nano-generated/*` (the materialised Nano SDK facades — `operations.ts`, etc.) is
+**gitignored** and produced by `urban gen`. Two consequences that have bitten
+agents:
+
+- **Never `git add nano-generated/`** — there is nothing to commit; `gen:check`
+  and `typecheck` validate its freshness on disk. `npm run gen` (or the
+  `pretypecheck`/`pretest` hook) refreshes it.
+- **Run `npm run gen` before running a single delegate test file directly**, e.g.
+  `node --test operations/foo.test.ts`. A raw single-file run does **not** fire an
+  `urban gen` hook, so the delegate import fails with a cryptic
+  `ERR_MODULE_NOT_FOUND` for `nano-generated/operations.ts`. `npm test`/`npm run
+  e2e`/`typecheck` regenerate it first via a pre-hook, so full-suite runs are
+  fine.
 
 ## Repo conventions
 
