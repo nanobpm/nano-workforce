@@ -1,3 +1,10 @@
+# [0.63.0](https://github.com/nanobpm/nano-workforce/compare/v0.62.0...v0.63.0) (2026-08-13)
+
+
+### Features
+
+* Overview landing page with collapsible active-work sections ([#206](https://github.com/nanobpm/nano-workforce/issues/206)) ([64c91df](https://github.com/nanobpm/nano-workforce/commit/64c91dfacd6b9b660a7bbbb1a3c9a8a78603b247)), closes [nanobpm/nano-ide#227](https://github.com/nanobpm/nano-ide/issues/227) [#205](https://github.com/nanobpm/nano-workforce/issues/205)
+
 # [0.62.0](https://github.com/nanobpm/nano-workforce/compare/v0.61.1...v0.62.0) (2026-08-13)
 
 
