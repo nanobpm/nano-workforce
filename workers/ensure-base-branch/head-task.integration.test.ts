@@ -6,6 +6,7 @@
 // through the real worker handler against a faked github transport — no network, deterministic.
 import { test } from "node:test";
 import { assertEquals } from "#test-assert";
+import { resetDefaultBranchCache } from "../../app/github.ts";
 import handler from "./worker.ts";
 
 interface GithubState {
@@ -60,10 +61,12 @@ async function withGithub<T>(state: GithubState, fn: () => Promise<T>): Promise<
   const prevFetch = globalThis.fetch;
   process.env["NANO_PR_GITHUB_TRANSPORT"] = "token";
   process.env["GITHUB_TOKEN"] = "tok";
+  resetDefaultBranchCache(); // isolate: don't inherit or leak another test's default-branch entry
   globalThis.fetch = githubFetch(state) as typeof fetch;
   try {
     return await fn();
   } finally {
+    resetDefaultBranchCache();
     globalThis.fetch = prevFetch;
     if (prevMode === undefined) delete process.env["NANO_PR_GITHUB_TRANSPORT"];
     else process.env["NANO_PR_GITHUB_TRANSPORT"] = prevMode;
