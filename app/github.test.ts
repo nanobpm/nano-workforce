@@ -138,6 +138,27 @@ test("openPullRequest: an invalid base/head (404, plain-text body) is surfaced a
   assertEquals(res?.outcome, "invalid");
 });
 
+test("openPullRequest: a non-base/head 422 (e.g. a title validation failure) is thrown, not misclassified as 'invalid'", async () => {
+  await assertRejects(
+    () =>
+      withStubbedFetch(
+        () =>
+          Promise.resolve(
+            new Response(
+              JSON.stringify({
+                message: "Validation Failed",
+                errors: [{ resource: "PullRequest", field: "title", code: "invalid" }],
+              }),
+              { status: 422, statusText: "Unprocessable Entity" },
+            ),
+          ),
+        () => openPullRequest("o/r", "epic/y", "feat/x", "T", "B", "tok"),
+      ),
+    Error,
+    "422",
+  );
+});
+
 test("openPullRequest: a genuine transport failure (5xx) propagates as a throw", async () => {
   await assertRejects(
     () =>

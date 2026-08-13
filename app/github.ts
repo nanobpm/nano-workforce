@@ -613,6 +613,15 @@ function isPrAlreadyExists(msg: string): boolean {
   return /pull request already exists|already exists for/i.test(msg);
 }
 
+/** True when a 422 body/message indicates the *base or head* itself is invalid or nonexistent (an
+ * invalid-branch rejection), as opposed to some unrelated validation failure (e.g. a title/body
+ * constraint) that must surface as a real error rather than be mislabelled `invalid`. GitHub
+ * phrases invalid-branch 422s with an `errors[].field` of `base`/`head`, a "No commits between …"
+ * message, or a "does not exist" note. */
+function isInvalidBaseHead(msg: string): boolean {
+  return /no commits between|does not exist|\b(base|head)\b/i.test(msg);
+}
+
 /** Open a pull request `head` → `base` in `repo` (`owner/repo`) with `title`/`body`. Does NOT
  * merge. Returns a discriminated {@link OpenPrResult} so the caller can branch on GitHub's
  * "already exists" (422) and "invalid base/head" (422/404) cases; `null` when no transport is
@@ -653,7 +662,7 @@ export async function openPullRequest(
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (isPrAlreadyExists(msg)) return { outcome: "exists", detail: msg };
-      if (/\b(422|404)\b|unprocessable|invalid|not exist|no commits between/i.test(msg)) {
+      if (/\b404\b/.test(msg) || ((/\b422\b|unprocessable/i.test(msg)) && isInvalidBaseHead(msg))) {
         return { outcome: "invalid", detail: msg };
       }
       throw err;
@@ -680,7 +689,7 @@ export async function openPullRequest(
   const text = (await r.text()).slice(0, 300);
   const detail = `github ${r.status} ${r.statusText}: ${text}`.trim();
   if (r.status === 422 && isPrAlreadyExists(text)) return { outcome: "exists", detail };
-  if (r.status === 422 || r.status === 404) return { outcome: "invalid", detail };
+  if (r.status === 404 || (r.status === 422 && isInvalidBaseHead(text))) return { outcome: "invalid", detail };
   throw new Error(detail);
 }
 
