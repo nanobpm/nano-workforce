@@ -31,5 +31,9 @@ test("escalationSlaTimeout: an explicit fallback is honoured for a bad value", (
 });
 
 test("the default is itself a well-formed ISO-8601 duration (never an uninterpretable timer)", () => {
-  assert.equal(escalationSlaTimeout(DEFAULT_ESCALATION_SLA_TIMEOUT), DEFAULT_ESCALATION_SLA_TIMEOUT);
+  // Validate the default against the grammar with a *distinct* fallback: if the default were
+  // malformed it would fall through to the sentinel, so equality to itself proves it parses.
+  const sentinel = "PT1S";
+  assert.notEqual(DEFAULT_ESCALATION_SLA_TIMEOUT, sentinel);
+  assert.equal(escalationSlaTimeout(DEFAULT_ESCALATION_SLA_TIMEOUT, sentinel), DEFAULT_ESCALATION_SLA_TIMEOUT);
 });
