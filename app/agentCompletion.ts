@@ -88,13 +88,20 @@ export async function completeUserTaskAttributed(
   },
   actor: Actor,
 ): Promise<{ completionId: number }> {
+  // Normalize + validate the attribution keys upfront so the ledger can never record a row with
+  // blank attribution or whitespace-mismatched keys.
+  const userTaskKey = target.userTaskKey.trim();
+  if (!userTaskKey) throw new Error("userTaskKey is required");
+  const actorId = actor.id.trim();
+  if (!actorId) throw new Error("actor id is required");
+
   const reversible = actor.kind === "agent";
   const id = await taskCompletions(data).insert({
-    user_task_key: target.userTaskKey,
+    user_task_key: userTaskKey,
     process_instance_key: target.processInstanceKey ?? null,
     element_id: target.elementId ?? null,
     actor_kind: actor.kind,
-    actor_id: actor.id,
+    actor_id: actorId,
     variables_json: JSON.stringify(target.variables ?? {}),
     reversible: reversible ? 1 : 0,
     reverted: 0,
@@ -105,11 +112,16 @@ export async function completeUserTaskAttributed(
   });
   const completionId = Number(id);
   try {
-    await engine.completeUserTask(target.userTaskKey, target.variables);
+    await engine.completeUserTask(userTaskKey, target.variables);
   } catch (err) {
     // The completion did not take — roll the attribution row back so the ledger reflects only
-    // completions that actually happened, and let the caller retry.
-    await taskCompletions(data).delete(completionId);
+    // completions that actually happened, and let the caller retry. The rollback is best-effort:
+    // if the delete itself throws, the engine failure remains the primary signal we re-raise.
+    try {
+      await taskCompletions(data).delete(completionId);
+    } catch {
+      // swallow — never let a rollback failure mask the original engine error
+    }
     throw err;
   }
   return { completionId };
@@ -186,6 +198,7 @@ export async function revertAgentCompletion(
 ): Promise<RevertResult> {
   const row = await taskCompletions(data).get(completionId);
   if (!row) return { ok: false, reason: "no such completion" };
+  if (reverter.kind !== "human") return { ok: false, reason: "only a human may revert a completion" };
   if (!row.reversible) return { ok: false, reason: "completion is not reversible" };
   if (row.reverted) return { ok: false, reason: "completion already reverted" };
   const reverterId = reverter.id.trim();

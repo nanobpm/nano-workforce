@@ -13,7 +13,7 @@
 // real process); this suite pins the host-side attribution + reversibility contract in isolation.
 
 import { test } from "node:test";
-import { assert, assertEquals } from "#test-assert";
+import { assert, assertEquals, assertRejects } from "#test-assert";
 import {
   completeEscalationAsAgent,
   completeUserTaskAttributed,
@@ -227,4 +227,93 @@ test("reverting an unknown completion id is a no-op", async () => {
   const r = await revertAgentCompletion(data, 999, { kind: "human", id: "alice" });
   assertEquals(r.ok, false);
   assertEquals(r.reason, "no such completion");
+});
+
+test("only a human may revert a completion (an agent identity cannot weaken the audit trail)", async () => {
+  const stores = { task_completions: { rows: [] as any[], key: "id" } };
+  const data = memData(stores);
+  const { engine } = fakeEngine([{ userTaskKey: "ut-4", elementId: "feature-escalation" }]);
+
+  const { completionId } = await completeUserTaskAttributed(
+    data,
+    engine,
+    { userTaskKey: "ut-4", elementId: "feature-escalation", variables: { resolution: "answer", answer: "x" } },
+    { kind: "agent", id: "bot" },
+  );
+
+  const r = await revertAgentCompletion(data, completionId, { kind: "agent", id: "other-bot" });
+  assertEquals(r.ok, false);
+  assertEquals(r.reason, "only a human may revert a completion");
+
+  const row = (await latestCompletion(data, "ut-4"))!;
+  assertEquals(row.reverted, 0, "the completion is left un-reverted when a non-human attempts it");
+});
+
+test("the attributed completer normalizes keys and rejects blank attribution", async () => {
+  const stores = { task_completions: { rows: [] as any[], key: "id" } };
+  const data = memData(stores);
+  const { engine, completed } = fakeEngine([{ userTaskKey: "ut-5", elementId: "feature-escalation" }]);
+
+  // Whitespace around the key + actor id is trimmed before it reaches the ledger and the engine.
+  const { completionId } = await completeUserTaskAttributed(
+    data,
+    engine,
+    { userTaskKey: "  ut-5  ", elementId: "feature-escalation", variables: { resolution: "answer", answer: "x" } },
+    { kind: "agent", id: "  bot  " },
+  );
+  assert(completionId > 0);
+  assertEquals(completed[0].userTaskKey, "ut-5", "the engine is completed with the trimmed key");
+  const row = stores.task_completions.rows[0] as TaskCompletion;
+  assertEquals(row.user_task_key, "ut-5");
+  assertEquals(row.actor_id, "bot");
+
+  // A blank key / actor id is rejected upfront — the ledger never records blank attribution.
+  await assertRejects(() =>
+    completeUserTaskAttributed(
+      data,
+      engine,
+      { userTaskKey: "   ", variables: {} },
+      { kind: "human", id: "operator" },
+    ),
+  );
+  await assertRejects(() =>
+    completeUserTaskAttributed(
+      data,
+      engine,
+      { userTaskKey: "ut-5", variables: {} },
+      { kind: "human", id: "  " },
+    ),
+  );
+  assertEquals(stores.task_completions.rows.length, 1, "no ledger row is written for a rejected completion");
+});
+
+test("a rollback failure never masks the original engine error", async () => {
+  const engine = {
+    searchUserTasks: () => Promise.resolve([{ userTaskKey: "ut-6", elementId: "feature-escalation" }]),
+    completeUserTask: () => Promise.reject(new Error("engine rejected the completion")),
+  } as any;
+
+  // A data layer whose ledger delete (the rollback) also throws — the engine error must still win.
+  const data = {
+    table: () => ({
+      insert: () => Promise.resolve(1),
+      delete: () => Promise.reject(new Error("ledger delete failed")),
+    }),
+  } as any;
+
+  let threw: unknown;
+  try {
+    await completeUserTaskAttributed(
+      data,
+      engine,
+      { userTaskKey: "ut-6", elementId: "feature-escalation", variables: { resolution: "answer", answer: "x" } },
+      { kind: "agent", id: "bot" },
+    );
+  } catch (err) {
+    threw = err;
+  }
+  assert(
+    threw instanceof Error && /engine rejected/.test(threw.message),
+    "the engine failure propagates, not the rollback failure",
+  );
 });
