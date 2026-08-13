@@ -697,6 +697,54 @@ export async function openPullRequest(
   throw new Error(detail);
 }
 
+/** Recover an already-open PR by its head→base branch pair (issue #160). Used by the promote
+ * operation to make `openPullRequest`'s `exists` outcome idempotent: GitHub's 422 "a pull request
+ * already exists" carries no URL, so we look the open PR up here and return its `{ url, number }`
+ * (or `null` when none is found / no transport is usable). Mirrors `baseBranchLanded`'s two-transport
+ * list pattern, but narrowed to the single open head→base PR and its identifying fields. */
+export async function fetchOpenPrByHead(
+  repo: string,
+  head: string,
+  base: string,
+  token: string,
+): Promise<{ url: string; number: number } | null> {
+  if (await useGh()) {
+    const out = await runGh([
+      "pr",
+      "list",
+      "--repo",
+      repo,
+      "--head",
+      head,
+      "--base",
+      base,
+      "--state",
+      "open",
+      "--json",
+      "url,number",
+      "--limit",
+      "1",
+    ]);
+    // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+    const arr = JSON.parse(out) as { url?: string; number?: number }[];
+    const p = arr[0];
+    if (p?.url && typeof p.number === "number") return { url: p.url, number: p.number };
+    return null;
+  }
+  if (!token) return null;
+  const owner = repo.split("/")[0];
+  const r = await fetch(
+    `https://api.github.com/repos/${repo}/pulls?state=open&head=${encodeURIComponent(`${owner}:${head}`)}&base=${encodeURIComponent(base)}&per_page=1`,
+    { headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json" } },
+  );
+  if (!r.ok) throw new Error(`github ${r.status} ${r.statusText}`.trim());
+  // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+  const arr = (await r.json()) as { html_url?: string; number?: number }[];
+  const p = arr[0];
+  if (p?.html_url && typeof p.number === "number") return { url: p.html_url, number: p.number };
+  return null;
+}
+
 // ── Merge-protocol execution helpers (issue #43) ────────────────────────────
 // Two capabilities the frugal-CI + on-demand-queue landing protocol needs, on top of the plain
 // `gh pr merge` above: (a) read an arbitrary file from the target repo to discover its published
