@@ -1,0 +1,28 @@
+-- Derived epic delivery signal: separate "fan-out dispatched to convergence" from "all slice
+-- PRs actually merged" (issue #171).
+--
+-- `plans.status = done` means "every slice produced a PR and was handed off to convergence"
+-- (record-results marks it as soon as ≥1 PR opened), NOT "every PR merged". Convergence + merge
+-- then run as separate async per-PR processes, so a `done` epic can still have slice PRs in
+-- flight. That conflation is misleading on the epics overview.
+--
+-- We leave `plans.status` untouched (automation depends on `done` == dispatched) and add a
+-- DERIVED delivery signal, computed by joining each `plan_tasks.pr_key` → `pull_requests.status`.
+-- Urban's datasource cannot read a SQL VIEW (gateway.ts schema() whitelists only type='table'),
+-- so — following the codebase convention for read-model projections onto `plans` (wave_label,
+-- gate_wave, …) — the poller denormalises two flat columns, recomputed idempotently each pass:
+--
+--   • delivery       — the derived signal, one of:
+--                        'converging' — plan `done` but ≥1 slice PR still non-terminal.
+--                        'landed'     — every slice PR merged (prs_in_flight == 0 &&
+--                                       prs_merged == prs_opened && prs_opened > 0).
+--                      NULL when there is no positive signal yet: the plan is not `done`, it
+--                      opened no PRs, or every PR is terminal but not all merged (some
+--                      abandoned/converged — resolved-not-landed). `landed` is the honest
+--                      "epic delivered" state and the precondition for ready-to-promote (#160).
+--   • delivery_label — the human rollup for the epic detail view, e.g.
+--                      "4/5 slices merged, 1 converging". NULL when delivery is NULL.
+--
+-- Additive/derived only: no new writes to the plan lifecycle (`status`).
+ALTER TABLE plans ADD COLUMN delivery TEXT;
+ALTER TABLE plans ADD COLUMN delivery_label TEXT;

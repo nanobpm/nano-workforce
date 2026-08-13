@@ -99,6 +99,70 @@ const now = () => new Date().toISOString();
  * guard both key off this set. */
 export const TERMINAL_STATUSES: readonly string[] = ["converged", "merged", "abandoned"];
 
+/** The derived epic delivery signal (issue #171). Distinct from `plan.status`: `status = done`
+ * means "every slice produced a PR and was dispatched to convergence" (record-results sets it as
+ * soon as ≥1 PR opened), which conflates hand-off with landing. `delivery` reports whether those
+ * slice PRs have actually MERGED. */
+export type Delivery = "converging" | "landed";
+
+/** Rollup of a plan's slice-PR landing state, derived by joining `plan_tasks.pr_key` →
+ * `pull_requests.status`. Pure and read-only — the single source of truth for the denormalised
+ * `plans.delivery` / `plans.delivery_label` columns the poller projects. */
+export interface DeliveryRollup {
+  delivery: Delivery | null;
+  label: string | null;
+  prsOpened: number;
+  prsMerged: number;
+  prsInFlight: number;
+}
+
+/** Derive the delivery signal for one plan from its status and the statuses of its slice PRs.
+ *
+ * - `converging` — the plan is `done` but ≥1 slice PR is still non-terminal (in flight).
+ * - `landed` — every slice PR merged: `prsInFlight == 0 && prsMerged == prsOpened && prsOpened > 0`.
+ * - `null` — no positive signal yet: the plan isn't `done`, it opened no PRs, or every PR is
+ *   terminal but not all merged (some `abandoned`/`converged` — resolved-not-landed, per the issue).
+ *
+ * A slice's PR status is "in flight" iff it is NOT in `TERMINAL_STATUSES`; `abandoned`/`converged`
+ * count as resolved-not-landed (terminal but not merged), so they never make an epic `landed`. */
+export function deriveDelivery(
+  planStatus: string,
+  prStatuses: readonly string[],
+): DeliveryRollup {
+  const prsOpened = prStatuses.length;
+  let prsMerged = 0;
+  let prsInFlight = 0;
+  for (const s of prStatuses) {
+    if (s === "merged") prsMerged++;
+    else if (!TERMINAL_STATUSES.includes(s)) prsInFlight++;
+  }
+  // `delivery` is only meaningful once the fan-out has been dispatched (`status = done`) and at
+  // least one slice PR exists; otherwise there is nothing to have landed yet.
+  if (planStatus !== "done" || prsOpened === 0) {
+    return { delivery: null, label: null, prsOpened, prsMerged, prsInFlight };
+  }
+  if (prsInFlight > 0) {
+    return {
+      delivery: "converging",
+      label: `${prsMerged}/${prsOpened} slices merged, ${prsInFlight} converging`,
+      prsOpened,
+      prsMerged,
+      prsInFlight,
+    };
+  }
+  if (prsMerged === prsOpened) {
+    return {
+      delivery: "landed",
+      label: `${prsOpened}/${prsOpened} slices merged`,
+      prsOpened,
+      prsMerged,
+      prsInFlight,
+    };
+  }
+  // Every slice PR is terminal but not all merged (some abandoned/converged): resolved, not landed.
+  return { delivery: null, label: null, prsOpened, prsMerged, prsInFlight };
+}
+
 interface PullRequest {
   pr_key: string;
   repo: string;
@@ -1132,6 +1196,35 @@ async function pollWaveGates(data: DataLayer, engine: EngineClient, token: strin
   }
 }
 
+/** Idempotent read-model pass: recompute each plan's derived `delivery` signal (issue #171) by
+ * joining its slice tasks' `pr_key` → `pull_requests.status`, and denormalise it onto the `plans`
+ * row so the epics overview / detail views can read it as a flat column (Urban's datasource can't
+ * read a SQL VIEW). Never touches `plan.status` — additive/derived only. Writes only when the
+ * projection actually changes, so a steady-state pass is a no-op. */
+async function pollDelivery(data: DataLayer) {
+  for (const plan of await plans(data).all()) {
+    try {
+      const tasks = await planTasks(data).find({ plan_key: plan.plan_key });
+      const prStatuses: string[] = [];
+      for (const t of tasks) {
+        if (!t.pr_key) continue;
+        const pr = await prs(data).get(t.pr_key);
+        if (pr) prStatuses.push(pr.status);
+      }
+      const { delivery, label } = deriveDelivery(plan.status, prStatuses);
+      if (plan.delivery !== delivery || plan.delivery_label !== label) {
+        await plans(data).update(plan.plan_key, {
+          delivery,
+          delivery_label: label,
+          updated_at: now(),
+        });
+      }
+    } catch (err) {
+      console.error(`[poller] delivery ${plan.plan_key}: ${err}`);
+    }
+  }
+}
+
 /** One full poll pass: advance the review stage, the merge stage, the wave-merge barrier, and
  * (when the engine REST endpoint is supplied) the job-activation visibility pass and the
  * technical-incident surfacing pass. Called on the self-scheduling loop in `main.ts`. */
@@ -1144,6 +1237,7 @@ export async function pollOnce(
   await pollReviews(data, engine, token);
   await pollMerges(data, engine, token);
   await pollWaveGates(data, engine, token);
+  await pollDelivery(data);
   if (engineRest) {
     await pollJobActivation(data, engineRest.restAddress, engineRest.token);
     await pollIncidents(data, engineRest.restAddress, engineRest.token);

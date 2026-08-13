@@ -72,6 +72,13 @@ export interface Plan {
   // admission); the column stays NULLABLE ONLY to grandfather pre-ADR-0003 / in-flight rows that
   // carry NULL — those must remain readable, so do NOT add a NOT NULL migration.
   base_branch: string | null;
+  // Derived epic delivery signal (029_plan_delivery.sql, #171): separates "fan-out dispatched to
+  // convergence" (status=done) from "all slice PRs actually merged". Recomputed idempotently by the
+  // poller's `pollDelivery` pass by joining each plan_tasks.pr_key → pull_requests.status — never
+  // written by the plan lifecycle. `delivery` is 'converging' | 'landed' | NULL (see deriveDelivery
+  // in app/service.ts); `delivery_label` is the human rollup for the epic detail view. Display-only.
+  delivery: string | null;
+  delivery_label: string | null;
   created_at: string;
   updated_at: string;
 }
