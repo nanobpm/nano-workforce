@@ -61,7 +61,7 @@ export async function loadAgenticFamilies(
     throw err;
   }
   const files = entries
-    .filter((name) => name.endsWith(FAMILY_SUFFIX) && !name.endsWith(".test.ts"))
+    .filter((name) => name.endsWith(FAMILY_SUFFIX))
     .sort();
   const families: AgenticFamily[] = [];
   for (const name of files) {

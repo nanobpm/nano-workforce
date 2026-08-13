@@ -100,7 +100,7 @@ export async function mountAgenticChannel(
     families: registry.names(),
   });
 
-  let torndown = false;
+  let tornDown = false;
   return {
     hub,
     transport,
@@ -114,8 +114,8 @@ export async function mountAgenticChannel(
       };
     },
     async teardown() {
-      if (torndown) return;
-      torndown = true;
+      if (tornDown) return;
+      tornDown = true;
       await registry.teardownAll(log);
       await hub.close();
       log.info("agentic channel torn down");

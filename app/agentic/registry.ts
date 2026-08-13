@@ -30,7 +30,7 @@ import type { AgenticHub, ConnectionRegistry, WebSocketChannelTransport } from "
 import type { DataLayer, Logger } from "@nanobpm/urban";
 
 /**
- * The reusable handles the seam threads to every family module at mount time. A sibling family uses
+ * The reusable handle the seam threads to every family module at mount time. A sibling family uses
  * these — and only these — so it never re-mounts the transport, re-authenticates, or reaches into
  * the boot script.
  */
