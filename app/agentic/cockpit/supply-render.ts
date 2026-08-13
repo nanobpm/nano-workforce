@@ -69,6 +69,27 @@ function workerRow(doc: DocumentLike, worker: SupplyWorkerView, options: RenderS
   jobsCell.setAttribute("data-jobs", String(worker.jobs));
   row.appendChild(jobsCell);
 
+  // The process instance / plan each current job belongs to (H6). Each correlation is a drill button
+  // onto its jobKey-scoped relay stream, so the operator opens the LIVE job's terminal — not just the
+  // worker's default stream. Empty → "—" so the cell always renders something stable.
+  const processCell = el(doc, "td", "cockpit-td cockpit-supply-process");
+  processCell.setAttribute("data-correlations", String(worker.correlations.length));
+  if (worker.correlations.length === 0) {
+    processCell.textContent = "—";
+  } else {
+    for (const correlation of worker.correlations) {
+      const link = el(doc, "button", "cockpit-correlation", correlation.label);
+      link.setAttribute("type", "button");
+      link.setAttribute("data-job-key", correlation.jobKey);
+      link.setAttribute("data-stream", correlation.stream);
+      if (onDrill !== undefined) {
+        link.addEventListener("click", () => onDrill(correlation.stream));
+      }
+      processCell.appendChild(link);
+    }
+  }
+  row.appendChild(processCell);
+
   const livenessCell = el(doc, "td", "cockpit-td cockpit-supply-liveness", worker.liveness);
   livenessCell.setAttribute("data-liveness", worker.liveness);
   row.appendChild(livenessCell);
@@ -88,7 +109,7 @@ function leafSection(doc: DocumentLike, leaf: SupplyLeafView, options: RenderSup
   const table = el(doc, "table", "cockpit-supply-table");
   const thead = el(doc, "thead", "cockpit-supply-thead");
   const head = el(doc, "tr", "cockpit-supply-head");
-  for (const label of ["worker", "family", "host", "jobs", "liveness"]) {
+  for (const label of ["worker", "family", "host", "jobs", "process / plan", "liveness"]) {
     head.appendChild(el(doc, "th", "cockpit-th", label));
   }
   thead.appendChild(head);

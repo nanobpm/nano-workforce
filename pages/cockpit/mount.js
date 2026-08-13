@@ -33,8 +33,21 @@ function liveness(worker, staleAfterMs) {
   return worker.staleMs >= staleAfterMs ? "stale" : "live";
 }
 
-function workerView(worker, staleAfterMs) {
+function correlationLabel(c) {
+  const parts = [];
+  if (c.bpmnProcessId != null) parts.push(c.bpmnProcessId);
+  if (c.elementId != null) parts.push(c.elementId);
+  if (c.processInstanceKey != null) parts.push(`inst ${c.processInstanceKey}`);
+  if (c.planKey != null) parts.push(c.planKey);
+  return parts.length > 0 ? parts.join(" \u00b7 ") : `job ${c.jobKey}`;
+}
+
+function workerView(worker, staleAfterMs, byJobKey) {
   const jobKeys = [...(worker.jobKeys ?? [])].sort((a, b) => a.localeCompare(b));
+  const correlations = jobKeys
+    .map((jobKey) => byJobKey.get(jobKey))
+    .filter((c) => c != null)
+    .map((c) => ({ jobKey: c.jobKey, stream: c.stream, label: correlationLabel(c) }));
   return {
     instance: worker.instance,
     identity: worker.identity,
@@ -43,6 +56,7 @@ function workerView(worker, staleAfterMs) {
     host: worker.host ?? "\u2014",
     jobKeys,
     jobs: jobKeys.length,
+    correlations,
     liveness: liveness(worker, staleAfterMs),
     staleMs: worker.staleMs,
   };
@@ -50,9 +64,11 @@ function workerView(worker, staleAfterMs) {
 
 function supplyView(report, staleAfterMs) {
   const byInstance = (a, b) => a.instance.localeCompare(b.instance);
+  const byJobKey = new Map();
+  for (const c of report.correlations ?? []) byJobKey.set(c.jobKey, c);
   const leaves = (report.leaves ?? [])
     .map((leaf) => {
-      const workers = leaf.workers.map((w) => workerView(w, staleAfterMs)).sort(byInstance);
+      const workers = leaf.workers.map((w) => workerView(w, staleAfterMs, byJobKey)).sort(byInstance);
       return {
         token: leaf.token,
         workers,
@@ -61,7 +77,7 @@ function supplyView(report, staleAfterMs) {
       };
     })
     .sort((a, b) => a.token.localeCompare(b.token));
-  const workers = (report.workers ?? []).map((w) => workerView(w, staleAfterMs)).sort(byInstance);
+  const workers = (report.workers ?? []).map((w) => workerView(w, staleAfterMs, byJobKey)).sort(byInstance);
   return { leaves, workers, count: workers.length, live: workers.filter((w) => w.liveness === "live").length };
 }
 
@@ -100,6 +116,21 @@ function workerRow(doc, worker, onDrill) {
   const jobsCell = el(doc, "td", "cockpit-td cockpit-supply-jobs", worker.jobs === 0 ? "\u2014" : worker.jobKeys.join(", "));
   jobsCell.setAttribute("data-jobs", String(worker.jobs));
   row.appendChild(jobsCell);
+  const processCell = el(doc, "td", "cockpit-td cockpit-supply-process");
+  processCell.setAttribute("data-correlations", String(worker.correlations.length));
+  if (worker.correlations.length === 0) {
+    processCell.textContent = "\u2014";
+  } else {
+    for (const correlation of worker.correlations) {
+      const link = el(doc, "button", "cockpit-correlation", correlation.label);
+      link.setAttribute("type", "button");
+      link.setAttribute("data-job-key", correlation.jobKey);
+      link.setAttribute("data-stream", correlation.stream);
+      if (onDrill) link.addEventListener("click", () => onDrill(correlation.stream));
+      processCell.appendChild(link);
+    }
+  }
+  row.appendChild(processCell);
   const livenessCell = el(doc, "td", "cockpit-td cockpit-supply-liveness", worker.liveness);
   livenessCell.setAttribute("data-liveness", worker.liveness);
   row.appendChild(livenessCell);
@@ -116,7 +147,7 @@ function leafSection(doc, leaf, onDrill) {
   const table = el(doc, "table", "cockpit-supply-table");
   const thead = el(doc, "thead", "cockpit-supply-thead");
   const head = el(doc, "tr", "cockpit-supply-head");
-  for (const label of ["worker", "family", "host", "jobs", "liveness"]) head.appendChild(el(doc, "th", "cockpit-th", label));
+  for (const label of ["worker", "family", "host", "jobs", "process / plan", "liveness"]) head.appendChild(el(doc, "th", "cockpit-th", label));
   thead.appendChild(head);
   table.appendChild(thead);
   const tbody = el(doc, "tbody", "cockpit-supply-tbody");

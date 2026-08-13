@@ -11,6 +11,7 @@ function report(over: Partial<SupplyReport> = {}): SupplyReport {
     leaves: over.leaves ?? [],
     count: over.count ?? workers.length,
     generatedAt: over.generatedAt,
+    correlations: over.correlations,
   };
 }
 
@@ -73,4 +74,43 @@ test("sorts leaves by token and workers by instance, with per-leaf live counts",
   );
   assert.equal(view.leaves[1]?.liveCount, 1);
   assert.equal(view.leaves[1]?.total, 2);
+});
+
+test("H6: resolves each worker's jobKeys into correlation views with a human label", () => {
+  const view = supplyView(
+    report({
+      workers: [{ instance: "wk-a", identity: "leaf-a", stream: "job:6494", jobKeys: ["6494"], live: true, staleMs: 0 }],
+      correlations: [
+        { jobKey: "6494", stream: "job:6494", processInstanceKey: "4612", bpmnProcessId: "plan-fanout", elementId: "implement-task", planKey: "o/r#142" },
+      ],
+    }),
+  );
+  const w = view.workers[0];
+  assert.equal(w?.correlations.length, 1);
+  const c = w?.correlations[0];
+  assert.equal(c?.jobKey, "6494");
+  assert.equal(c?.stream, "job:6494");
+  assert.equal(c?.processInstanceKey, "4612");
+  assert.equal(c?.planKey, "o/r#142");
+  assert.equal(c?.label, "plan-fanout · implement-task · inst 4612 · o/r#142");
+});
+
+test("H6: a worker with no matching correlation renders an empty correlation list", () => {
+  const view = supplyView(
+    report({
+      workers: [{ instance: "wk-a", identity: "leaf-a", stream: "wk-a", jobKeys: ["nope"], live: true, staleMs: 0 }],
+      correlations: [{ jobKey: "other", stream: "job:other" }],
+    }),
+  );
+  assert.deepEqual(view.workers[0]?.correlations, []);
+});
+
+test("H6: a correlation with no engine context falls back to a job-key label", () => {
+  const view = supplyView(
+    report({
+      workers: [{ instance: "wk-a", identity: "leaf-a", stream: "job:6494", jobKeys: ["6494"], live: true, staleMs: 0 }],
+      correlations: [{ jobKey: "6494", stream: "job:6494" }],
+    }),
+  );
+  assert.equal(view.workers[0]?.correlations[0]?.label, "job 6494");
 });

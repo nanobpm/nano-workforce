@@ -127,7 +127,7 @@ components:
           description: Declared host (where the worker runs), if any.
         jobKeys:
           type: array
-          description: The jobKeys this worker is currently processing (empty until the H6 correlation seam lands).
+          description: The jobKeys this worker is currently processing (populated by the H6 correlation registry).
           items:
             type: string
         live:
@@ -149,6 +149,32 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/AgenticSupplyWorker"
+    AgenticJobCorrelation:
+      type: object
+      description: One current job's engine context (H6) — lines a worker's terminal up with its process
+        instance / plan. The relay stream a job's terminal is on is the jobKey-scoped stream `job:<jobKey>`.
+      required:
+        - jobKey
+        - stream
+      properties:
+        jobKey:
+          type: string
+          description: The Camunda-8 job key the worker activated.
+        stream:
+          type: string
+          description: The relay stream id the job's terminal is relayed on (`job:<jobKey>`).
+        processInstanceKey:
+          type: string
+          description: The owning process instance key, if known.
+        bpmnProcessId:
+          type: string
+          description: The BPMN process id the job belongs to, if known.
+        elementId:
+          type: string
+          description: The BPMN element id (activity/task) the job is for, if known.
+        planKey:
+          type: string
+          description: The plan / epic key this job is part of (e.g. owner/repo#142), if known.
     AgenticSupplyReport:
       type: object
       description: The SUPPLY-ONLY visibility report — the live worker list grouped by leaf. No demand-side
@@ -172,6 +198,12 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/AgenticSupplyLeaf"
+        correlations:
+          type: array
+          description: The engine context (process instance / plan) for every jobKey currently being
+            processed, so the cockpit can line each worker's terminal up with its process instance / plan (H6).
+          items:
+            $ref: "#/components/schemas/AgenticJobCorrelation"
     VersionInfo:
       type: object
       description: The running app's identity (which code is actually live).
