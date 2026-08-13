@@ -13,14 +13,16 @@ import startPlanFanout from "./startPlanFanout.ts";
 
 // ── in-memory github model ───────────────────────────────────────────────────
 // A minimal fake of the GitHub REST surface `admitPlan` touches: the repo-meta GET (default branch),
-// the ref GET (branch existence + head sha) and the ref-create POST. `default_branch` is `main`; an
-// `epic/*` base is auto-created off its head. `creates` records ref-create POSTs so a test can assert
-// a branch was (or was NOT) created.
+// the ref GET (branch existence, returning a synthetic per-branch head sha) and the ref-create POST.
+// `default_branch` is `main`; a missing `epic/*` base is auto-created off the default branch's head
+// sha (which `admitPlan` reads via the ref GET, so here that is `main-sha`). `creates` records the
+// full ref-create POST body (`ref` + `sha`) so a test can assert a branch was (or was NOT) created
+// AND that the create payload points the new ref at the resolved base sha, not a stale/blank value.
 interface GithubState {
   repo: string;
   defaultBranch: string;
   branches: Set<string>;
-  creates: string[];
+  creates: { ref: string; sha: string }[];
 }
 
 function githubFetch(state: GithubState) {
@@ -41,11 +43,12 @@ function githubFetch(state: GithubState) {
     }
     if (method === "POST" && path === `/repos/${state.repo}/git/refs`) {
       // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
-      const body = JSON.parse(String(init?.body ?? "{}")) as { ref?: string };
+      const body = JSON.parse(String(init?.body ?? "{}")) as { ref?: string; sha?: string };
       const ref = String(body.ref ?? "");
+      const sha = String(body.sha ?? "");
       const branch = ref.replace(/^refs\/heads\//, "");
       if (state.branches.has(branch)) return Promise.resolve(json({ message: "Reference already exists" }, 422));
-      state.creates.push(ref);
+      state.creates.push({ ref, sha });
       state.branches.add(branch);
       return Promise.resolve(json({ ref }, 201));
     }
@@ -169,7 +172,9 @@ test("edge: missing epic/* base → created off default HEAD, then 202", async (
     const { app, started } = makeApp();
     const res = (await startPlanFanout(input({ issue: "owner/repo#3", baseBranch: "epic/new" }), app)) as any;
     assertEquals(res.status, 202);
-    assertEquals(gh.creates, ["refs/heads/epic/new"]);
+    // Created off the resolved base sha: the ref-create payload names epic/new AND points it at the
+    // default branch's head sha (`main-sha` here), proving the create body carries the base sha.
+    assertEquals(gh.creates, [{ ref: "refs/heads/epic/new", sha: "main-sha" }]);
     assertEquals(started.length, 1);
   });
 });
