@@ -587,6 +587,116 @@ export async function mergePr(
   return { outcome: "blocked", detail };
 }
 
+// ── PR creation (epic promotion — issue #160) ───────────────────────────────
+// The epic-promotion door opens a PR from the epic's integration branch into the repo default
+// branch (a later `promoteEpic` operation calls this). Same two-transport model (gh | token).
+
+/** The outcome of an `openPullRequest` attempt. The two well-known GitHub 4xx cases the caller
+ * (the promote operation) branches on are surfaced as distinct outcomes rather than thrown, so a
+ * "PR already exists for this head/base" (422) can be recovered idempotently and an invalid
+ * base/head (422/404) reported as a rejection — never as an opaque 500:
+ *   • `opened`  — a PR was created; `url` (html_url) and `number` identify it.
+ *   • `exists`  — GitHub refused because a PR already exists for this head→base (422). Idempotent
+ *                 callers treat this as success and recover the existing PR.
+ *   • `invalid` — GitHub refused the base/head as invalid or nonexistent — a 422 whose body signals
+ *                 an invalid base/head, or a 404 whose body signals the same. A bare 404 (repo not
+ *                 found, auth/permission, wrong `repo`) is NOT `invalid`; it throws so genuine
+ *                 misconfiguration propagates rather than being mislabelled an invalid-branch rejection.
+ * A genuine transport failure (auth, network, 5xx) still propagates as a throw. `null` is returned
+ * only when no transport is usable (mirrors the sibling write helpers). */
+export type OpenPrResult =
+  | { outcome: "opened"; url: string; number: number }
+  | { outcome: "exists"; detail: string }
+  | { outcome: "invalid"; detail: string };
+
+/** True when a 422 body/message indicates a PR already exists for the same head→base (as opposed
+ * to an invalid base/head, which is also a 422). GitHub phrases the former "A pull request already
+ * exists for …". */
+function isPrAlreadyExists(msg: string): boolean {
+  return /pull request already exists|already exists for/i.test(msg);
+}
+
+/** True when a 422/404 body/message indicates the *base or head* itself is invalid or nonexistent
+ * (an invalid-branch rejection), as opposed to some unrelated validation failure (e.g. a title/body
+ * constraint) or a bare transport 404 (repo not found / no access) that must surface as a real error
+ * rather than be mislabelled `invalid`. GitHub phrases invalid-branch rejections with an
+ * `errors[].field` of `base`/`head`, a "No commits between …" message, or a "does not exist" note. */
+function isInvalidBaseHead(msg: string): boolean {
+  return /no commits between|does not exist|\b(base|head)\b/i.test(msg);
+}
+
+/** Open a pull request `head` → `base` in `repo` (`owner/repo`) with `title`/`body`. Does NOT
+ * merge. Returns a discriminated {@link OpenPrResult} so the caller can branch on GitHub's
+ * "already exists" (422) and "invalid base/head" (422, or a 404 whose body signals base/head);
+ * `null` when no transport is usable. A genuine transport failure — including a bare 404 (repo not
+ * found / no access) — throws. See {@link OpenPrResult} for the contract. */
+export async function openPullRequest(
+  repo: string,
+  base: string,
+  head: string,
+  title: string,
+  body: string,
+  token: string,
+): Promise<OpenPrResult | null> {
+  const path = `repos/${repo}/pulls`;
+  if (await useGh()) {
+    try {
+      const out = await runGh([
+        "api",
+        path,
+        "-H",
+        "Accept: application/vnd.github+json",
+        "-X",
+        "POST",
+        "-f",
+        `title=${title}`,
+        "-f",
+        `head=${head}`,
+        "-f",
+        `base=${base}`,
+        "-f",
+        `body=${body}`,
+      ]);
+      // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+      const j = JSON.parse(out) as { html_url?: string; number?: number };
+      if (!j.html_url || typeof j.number !== "number") {
+        throw new Error(`unexpected PR-creation response (missing html_url/number): ${out.slice(0, 300)}`);
+      }
+      return { outcome: "opened", url: j.html_url, number: j.number };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (isPrAlreadyExists(msg)) return { outcome: "exists", detail: msg };
+      if ((/\b404\b/.test(msg) || /\b422\b|unprocessable/i.test(msg)) && isInvalidBaseHead(msg)) {
+        return { outcome: "invalid", detail: msg };
+      }
+      throw err;
+    }
+  }
+  if (!token) return null;
+  const r = await fetch(`https://api.github.com/${path}`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${token}`,
+      accept: "application/vnd.github+json",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ title, head, base, body }),
+  });
+  if (r.ok) {
+    // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+    const j = (await r.json()) as { html_url?: string; number?: number };
+    if (!j.html_url || typeof j.number !== "number") {
+      throw new Error("unexpected PR-creation response (missing html_url/number)");
+    }
+    return { outcome: "opened", url: j.html_url, number: j.number };
+  }
+  const text = (await r.text()).slice(0, 300);
+  const detail = `github ${r.status} ${r.statusText}: ${text}`.trim();
+  if (r.status === 422 && isPrAlreadyExists(text)) return { outcome: "exists", detail };
+  if ((r.status === 404 || r.status === 422) && isInvalidBaseHead(text)) return { outcome: "invalid", detail };
+  throw new Error(detail);
+}
+
 // ── Merge-protocol execution helpers (issue #43) ────────────────────────────
 // Two capabilities the frugal-CI + on-demand-queue landing protocol needs, on top of the plain
 // `gh pr merge` above: (a) read an arbitrary file from the target repo to discover its published
