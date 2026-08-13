@@ -34,9 +34,15 @@ export function jobStream(jobKey: string): string {
   return `${JOB_STREAM_PREFIX}${jobKey}`;
 }
 
-/** The jobKey encoded in a jobKey-scoped relay stream id, or undefined for any other stream. */
+/**
+ * The jobKey encoded in a jobKey-scoped relay stream id, or undefined for any other stream.
+ * A bare `job:` prefix with no suffix carries no jobKey, so it maps to undefined too — keeping
+ * the "empty jobKey is invalid" invariant (`link()` ignores empty jobKeys) consistent for callers.
+ */
 export function jobKeyOfStream(stream: string): string | undefined {
-  return stream.startsWith(JOB_STREAM_PREFIX) ? stream.slice(JOB_STREAM_PREFIX.length) : undefined;
+  if (!stream.startsWith(JOB_STREAM_PREFIX)) return undefined;
+  const jobKey = stream.slice(JOB_STREAM_PREFIX.length);
+  return jobKey === "" ? undefined : jobKey;
 }
 
 /** One job's engine context — the correlation a terminal is lined up against. */

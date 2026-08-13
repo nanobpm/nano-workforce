@@ -21,7 +21,9 @@ test("jobStream / jobKeyOfStream are inverse over the job: convention", () => {
   assert.equal(jobStream("6494"), `${JOB_STREAM_PREFIX}6494`);
   assert.equal(jobKeyOfStream(jobStream("6494")), "6494");
   assert.equal(jobKeyOfStream("wk-a"), undefined);
-  assert.equal(jobKeyOfStream("job:"), "");
+  // A bare `job:` prefix carries no jobKey, so it maps to undefined (not "") — an empty jobKey is
+  // invalid (link() ignores it), so callers never mistake it for a valid key.
+  assert.equal(jobKeyOfStream("job:"), undefined);
 });
 
 test("link records context and both projections; resolve carries the job: stream", () => {
