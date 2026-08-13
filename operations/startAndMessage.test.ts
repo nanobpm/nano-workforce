@@ -133,6 +133,15 @@ test("startPlanFanout → 400 on an invalid baseBranch (not persisted/rendered)"
   assertEquals(typeof r.body.error, "string");
 });
 
+test("startPlanFanout → 400 on a missing baseBranch (not persisted/rendered)", async () => {
+  // A blank/absent baseBranch must be rejected at the edge as a 400 (MissingBaseBranchError),
+  // never silently coalesced to the repository default branch (ADR 0003, B0).
+  const res = await startPlanFanout(input({ issue: "owner/repo#123" }), app);
+  const r = res as any;
+  assertEquals(r.status, 400);
+  assertEquals(typeof r.body.error, "string");
+});
+
 test("startConvergenceLoop narrows the `url` variant (no `pr` key)", async () => {
   await withGithubOff(async () => {
     const { app: capApp } = captureApp();
@@ -144,7 +153,10 @@ test("startConvergenceLoop narrows the `url` variant (no `pr` key)", async () =>
 test("startPlanFanout narrows the `url` variant (no `issue` key)", async () => {
   await withGithubOff(async () => {
     const { app: capApp } = captureApp();
-    const res = await startPlanFanout(input({ url: "https://github.com/owner/repo/issues/12" }), capApp);
+    const res = await startPlanFanout(
+      input({ url: "https://github.com/owner/repo/issues/12", baseBranch: "epic/agent-protocol" }),
+      capApp,
+    );
     assertEquals((res as any).status, 202);
   });
 });

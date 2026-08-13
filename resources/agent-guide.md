@@ -97,10 +97,12 @@ PR is then enrolled into its own convergence loop (§1).
 ```bash
 curl -sS -X POST __BASE__/actions/start/plan-fanout \
   -H 'content-type: application/json' \
-  -d '{ "issue": "owner/repo#123" }'
+  -d '{ "issue": "owner/repo#123", "baseBranch": "epic/agent-protocol" }'
 ```
 
-The body is flat: `issue` (or `url`) — `owner/repo#123` or an issue URL. Starting a
+The body is flat: `issue` (or `url`) — `owner/repo#123` or an issue URL — plus a REQUIRED
+`baseBranch` (ADR 0003), the branch the fleet branches off and opens every PR against; a
+blank/absent base is rejected with a 400. Starting a
 plan is idempotent on the plan key; an already-running plan short-circuits. The
 response (202) echoes the `planKey` and engine `processKey`.
 
