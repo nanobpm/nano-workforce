@@ -139,16 +139,26 @@ function freshGithub(repo: string, extraBranches: string[] = []): GithubState {
 
 // ── Rule 1 — required + explicit ──────────────────────────────────────────────
 
-test("edge: missing/blank baseBranch → 400", async () => {
-  const gh = freshGithub("owner/repo");
-  await withGithub(gh, async () => {
-    const { app, started } = makeApp();
-    const res = (await startPlanFanout(input({ issue: "owner/repo#1" }), app)) as any;
-    assertEquals(res.status, 400);
-    assertEquals(typeof res.body.error, "string");
-    assertEquals(started.length, 0); // rejected before any fan-out
+// Rule 1 rejects both a MISSING baseBranch field and an explicit blank/whitespace
+// one — the latter is a distinct edge input that must not slip past as a "present"
+// value. Table-drive both so the required-and-explicit rule is covered end to end.
+for (const [label, body] of [
+  ["missing field", { issue: "owner/repo#1" }],
+  ["empty string", { issue: "owner/repo#1", baseBranch: "" }],
+  ["whitespace only", { issue: "owner/repo#1", baseBranch: "   " }],
+] as const) {
+  test(`edge: ${label} baseBranch → 400`, async () => {
+    const gh = freshGithub("owner/repo");
+    await withGithub(gh, async () => {
+      const { app, started } = makeApp();
+      const res = (await startPlanFanout(input(body), app)) as any;
+      assertEquals(res.status, 400);
+      assertEquals(typeof res.body.error, "string");
+      assertEquals(started.length, 0); // rejected before any fan-out
+      assertEquals(gh.creates, []); // no ref created on a rejected input
+    });
   });
-});
+}
 
 // ── Rule 2 — create-if-missing (epic/* guard), synchronously at the edge ──────
 

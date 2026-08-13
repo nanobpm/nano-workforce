@@ -6,7 +6,7 @@
 // through the real worker handler against a faked github transport — no network, deterministic.
 import { test } from "node:test";
 import { assertEquals } from "#test-assert";
-import handler from "../../workers/ensure-base-branch/worker.ts";
+import handler from "./worker.ts";
 
 interface GithubState {
   repo: string;
