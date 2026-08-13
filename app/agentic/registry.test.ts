@@ -119,3 +119,42 @@ test("a mount failure only tears down what actually mounted", async () => {
   // "fails" never completed mount, so its teardown must not run; "a" did mount, so it tears down.
   assertEquals(trace, ["mount:a", "teardown:a"]);
 });
+
+test("mountAll self-heals after a mid-mount failure — a retry re-mounts, never a stuck no-op", async () => {
+  const trace: string[] = [];
+  const reg = new AgenticFamilyRegistry();
+  reg.register(tracer("a", trace));
+  let shouldFail = true;
+  reg.register({
+    name: "flaky",
+    mount() {
+      if (shouldFail) {
+        shouldFail = false;
+        throw new Error("mount fails once");
+      }
+      trace.push("mount:flaky");
+    },
+    teardown() {
+      trace.push("teardown:flaky");
+    },
+  });
+
+  // First attempt fails mid-mount; mountAll must reverse the partial mount and reset its own state
+  // (without the caller having to call teardownAll)...
+  await assertRejects(() => reg.mountAll(fakeCtx()), Error, "mount fails once");
+  assertEquals(trace, ["mount:a", "teardown:a"]);
+
+  // ...so a retry actually re-mounts instead of being a silent no-op (the wedged-state regression).
+  await reg.mountAll(fakeCtx());
+  assertEquals(trace, ["mount:a", "teardown:a", "mount:a", "mount:flaky"]);
+
+  await reg.teardownAll();
+  assertEquals(trace, [
+    "mount:a",
+    "teardown:a",
+    "mount:a",
+    "mount:flaky",
+    "teardown:flaky",
+    "teardown:a",
+  ]);
+});

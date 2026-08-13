@@ -52,14 +52,24 @@ function connect(port: number, query: string): Promise<WebSocket> {
  * WebSocket upgrade completes, so a rejected peer momentarily opens and is then closed with the app
  * code (4401/4403) — this waits for that close and returns the code.
  */
+/** How long rejectionCode waits for the close frame before failing (generous for slow CI). */
+const REJECTION_TIMEOUT_MS = 2000;
+
 function rejectionCode(port: number, query: string): Promise<number> {
   const ws = new WebSocket(`ws://127.0.0.1:${port}/agentic${query}`);
   return new Promise<number>((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error("connection neither closed nor timed out")),
+      REJECTION_TIMEOUT_MS,
+    );
+    timer.unref?.();
     ws.on("error", () => {
       /* swallow the paired error event; the close frame carries the code */
     });
-    ws.on("close", (code) => resolve(code));
-    setTimeout(() => reject(new Error("connection neither closed nor timed out")), 2000).unref?.();
+    ws.on("close", (code) => {
+      clearTimeout(timer);
+      resolve(code);
+    });
   });
 }
 

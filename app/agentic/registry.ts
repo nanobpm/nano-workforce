@@ -95,10 +95,18 @@ export class AgenticFamilyRegistry {
   async mountAll(ctx: AgenticContext): Promise<void> {
     if (this.#isMounted) return;
     this.#isMounted = true;
-    for (const family of this.#families) {
-      await family.mount(ctx);
-      // Track post-mount so a failure mid-mount only tears down what actually mounted.
-      this.#mounted.push(family);
+    try {
+      for (const family of this.#families) {
+        await family.mount(ctx);
+        // Track post-mount so a failure mid-mount only tears down what actually mounted.
+        this.#mounted.push(family);
+      }
+    } catch (err) {
+      // A mid-mount failure must not wedge the registry at #isMounted=true (which would make every
+      // later mountAll a silent no-op). Reuse the canonical teardown to reverse the partial mount and
+      // reset the flag, leaving the registry clean and re-mountable, then rethrow to the caller.
+      await this.teardownAll(ctx.log);
+      throw err;
     }
   }
 
