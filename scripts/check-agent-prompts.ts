@@ -38,6 +38,11 @@ const RETIRED_PROMPT_HEADER = "io.nanobpm.agentTask.task.prompt";
 // any are ever added) are not agent prompts and are ignored by this guard.
 const PROMPT_LINK_NAME = "prompt";
 
+// A prompt link MUST bind `latest` — this whole migration (#169) is about live mid-epic prompt
+// updates, which only work when the engine resolves the latest deployed key at activation. A
+// missing or different `bindingType` would silently pin/omit the prompt, so the guard fails it.
+const PROMPT_BINDING_TYPE = "latest";
+
 interface AppManifest {
   models?: { processes?: string[]; decisions?: string[]; forms?: string[]; templates?: string[] };
 }
@@ -158,6 +163,15 @@ export function checkAgentPrompts(root: string): CheckResult {
       if (link.resourceId.trim() === "") {
         errors.push(`${rel}: a linkName="prompt" linkedResource has an empty resourceId`);
         continue;
+      }
+      if (link.bindingType !== PROMPT_BINDING_TYPE) {
+        errors.push(
+          `${rel}: linkName="prompt" resourceId="${link.resourceId}" has ` +
+            `bindingType=${link.bindingType == null ? "(absent)" : `"${link.bindingType}"`} — it must be ` +
+            `bindingType="${PROMPT_BINDING_TYPE}" so the engine resolves the latest deployed prompt at ` +
+            `activation (mid-epic prompt updates rely on it); any other value silently alters runtime ` +
+            `prompt resolution`,
+        );
       }
       const deployedRel = deployedFiles.get(link.resourceId);
       if (deployedRel == null) {

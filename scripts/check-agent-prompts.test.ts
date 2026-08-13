@@ -139,6 +139,30 @@ test("passes when a linked prompt resource emits via the ::nano:result:: fallbac
   assert(res.ok);
 });
 
+test("fails when a prompt link uses a bindingType other than latest", () => {
+  const root = fixture({
+    "nano.app.json": MANIFEST,
+    "resources/processes/loop.bpmn": serviceTask(link("review-round.md", "deployment")),
+    "prompts/review-round.md": "# Round\nWrite `$AGENT_RESULT_FILE`.",
+  });
+  const res = checkAgentPrompts(root);
+  assert(!res.ok);
+  assert(res.errors.some((e) => e.includes("review-round.md") && e.includes('bindingType="deployment"')));
+});
+
+test("fails when a prompt link omits bindingType entirely", () => {
+  const root = fixture({
+    "nano.app.json": MANIFEST,
+    "resources/processes/loop.bpmn": serviceTask(
+      '<zeebe:linkedResource resourceId="review-round.md" linkName="prompt" />',
+    ),
+    "prompts/review-round.md": "# Round\nWrite `$AGENT_RESULT_FILE`.",
+  });
+  const res = checkAgentPrompts(root);
+  assert(!res.ok);
+  assert(res.errors.some((e) => e.includes("review-round.md") && e.includes("(absent)")));
+});
+
 test("fails when no prompt link is wired at all", () => {
   const root = fixture({
     "nano.app.json": MANIFEST,

@@ -31,8 +31,8 @@ export const ESCALATION_SLA_TIMEOUT = escalationSlaTimeout(
 const now = () => new Date().toISOString();
 
 // Agent prompts are no longer read by the host. The `senior:plan`, `senior:plan-review`, and
-// `senior:feature` prompts are generic resources (`prompts/plan.md` / `plan-review.md` /
-// `feature.md`, deployed via a `models` glob in nano.app.json) linked into each task as
+// `senior:feature` prompts are generic resources (`prompts/plan.md` / `prompts/plan-review.md` /
+// `prompts/feature.md`, deployed via a `models` glob in nano.app.json) linked into each task as
 // `<zeebe:linkedResource … bindingType="latest" linkName="prompt"/>` and resolved by the engine at
 // job activation. Per-instance dynamic context (a plan's rejection findings, a task's brief) rides
 // `appendPrompt`, which the harness concatenates onto the linked base. The host only carries
