@@ -73,7 +73,9 @@
           {
             "key": "pr",
             "label": "owner/repo#123 or a GitHub PR URL",
-            "type": "text"
+            "type": "text",
+            "required": true,
+            "requiredMessage": "A PR reference is required (owner/repo#123 or a PR URL)"
           },
           {
             "key": "maxRounds",
