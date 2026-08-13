@@ -181,9 +181,9 @@ service is warranted only when at least one is true:
   a worker client) that consumers install separately.
 
 Absent one of those, the default is **one library, with the slices as subpath
-exports / subdirectories inside it** (mirror an existing multi-surface package in
-this codebase — e.g. a library that already exposes `./runtime`, `./toolkit`,
-`./worker` from one package). The slices stay independent to *write*: use the
+exports / subdirectories inside it** (the shape of a package that exposes several
+surfaces — e.g. `./runtime`, `./toolkit`, `./worker` — from a single manifest). The
+slices stay independent to *write*: use the
 **wave-0 scaffold task** (option 2 above) to land the library skeleton first — its
 manifest with the **full exports map pre-declared** and an empty subdirectory per
 slice — so every sibling only **adds files inside its own subdirectory** and never
