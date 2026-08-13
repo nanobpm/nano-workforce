@@ -1,3 +1,10 @@
+# [0.51.0](https://github.com/nanobpm/nano-workforce/compare/v0.50.0...v0.51.0) (2026-08-13)
+
+
+### Features
+
+* mount agentic channel hub + family-registration seam (H0) ([#154](https://github.com/nanobpm/nano-workforce/issues/154)) ([96a679e](https://github.com/nanobpm/nano-workforce/commit/96a679e0843c76bf93940f09eef1c6c642a4ebed)), closes [#142](https://github.com/nanobpm/nano-workforce/issues/142) [#143](https://github.com/nanobpm/nano-workforce/issues/143) [#isMounted](https://github.com/nanobpm/nano-workforce/issues/isMounted)
+
 # [0.50.0](https://github.com/nanobpm/nano-workforce/compare/v0.49.0...v0.50.0) (2026-08-12)
 
 
