@@ -230,3 +230,57 @@ test("issue #87: plan_reviews is surfaced on the per-epic detail page", async ()
     }
   }
 });
+
+test("issue #205: overview is the landing page and first nav item", async () => {
+  const overview = JSON.parse(readFileSync(`${ROOT}pages/overview.page.json`, "utf8"));
+
+  // The overview must be the pages-surface home so it's the default destination.
+  const app = JSON.parse(readFileSync(`${ROOT}nano.app.json`, "utf8"));
+  assert(
+    app?.surfaces?.pages?.homePage === "overview",
+    "nano.app.json surfaces.pages.homePage must be \"overview\" (the landing page)",
+  );
+
+  // Every page's nav must lead with Overview so it's the first tab everywhere.
+  for (const e of readdirSync(`${ROOT}pages`, { withFileTypes: true })) {
+    if (!e.isFile() || !e.name.endsWith(".page.json")) continue;
+    const page = JSON.parse(readFileSync(`${ROOT}pages/${e.name}`, "utf8"));
+    const nav = (page.nodes ?? []).find((n: Json) => n.type === "nav");
+    if (!nav) continue;
+    const first = nav.props?.items?.[0];
+    assert(
+      first?.page === "overview" && first?.label === "Overview",
+      `${e.name}: nav must lead with the Overview tab (first item page "overview")`,
+    );
+  }
+
+  // Three collapsible active-work sections, one per dispatch surface, each with a
+  // live count in its header (showCount) and a persisted collapse toggle (collapsible).
+  const expected: Record<string, string[]> = {
+    pull_requests: [
+      "converging",
+      "waiting_review",
+      "escalated",
+      "waiting_deps",
+      "waiting_merge",
+      "queued",
+      "merging",
+    ],
+    plans: ["planning", "dispatched"],
+    feature_runs: ["running", "awaiting_operator"],
+  };
+  const grids = (overview.nodes ?? []).filter((n: Json) => n.type === "dataGrid");
+  for (const [table, statuses] of Object.entries(expected)) {
+    const grid = grids.find((g: Json) => g.props?.data?.table === table);
+    assert(grid, `overview.page.json must have a section bound to "${table}"`);
+    assert(grid.props.collapsible === true, `overview "${table}" section must be collapsible`);
+    assert(grid.props.showCount === true, `overview "${table}" section must show a live count`);
+    const filter = grid.props?.data?.filter?.find((f: Json) => f.field === "status");
+    assert(filter, `overview "${table}" section must filter on status`);
+    assert(
+      JSON.stringify([...filter.in].sort()) === JSON.stringify([...statuses].sort()),
+      `overview "${table}" section must filter to the active statuses ${JSON.stringify(statuses)}`,
+    );
+  }
+});
+

@@ -9,6 +9,7 @@
         "variant": "bar",
         "title": "Nano Workforce",
         "items": [
+          { "label": "Overview", "page": "overview" },
           { "label": "Convergence", "page": "home" },
           { "label": "Epics", "page": "epic" },
           { "label": "Feature", "page": "feature" },
