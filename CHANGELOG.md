@@ -1,3 +1,10 @@
+# [0.60.0](https://github.com/nanobpm/nano-workforce/compare/v0.59.0...v0.60.0) (2026-08-13)
+
+
+### Features
+
+* **pages:** mark required form fields for inline validation hints ([#199](https://github.com/nanobpm/nano-workforce/issues/199)) ([15f0038](https://github.com/nanobpm/nano-workforce/commit/15f003809d0ec3294415161a79d73ef53c2703f2)), closes [nano-ide#223](https://github.com/nano-ide/issues/223) [nano-ide#223](https://github.com/nano-ide/issues/223)
+
 # [0.59.0](https://github.com/nanobpm/nano-workforce/compare/v0.58.1...v0.59.0) (2026-08-13)
 
 
