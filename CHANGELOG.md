@@ -1,3 +1,10 @@
+## [0.58.1](https://github.com/nanobpm/nano-workforce/compare/v0.58.0...v0.58.1) (2026-08-13)
+
+
+### Bug Fixes
+
+* regenerate nano-generated/ before start (prestart: urban gen) ([#195](https://github.com/nanobpm/nano-workforce/issues/195)) ([d45fe22](https://github.com/nanobpm/nano-workforce/commit/d45fe22de58766730721f51cbcb7e97d6f4f06c8)), closes [#192](https://github.com/nanobpm/nano-workforce/issues/192)
+
 # [0.58.0](https://github.com/nanobpm/nano-workforce/compare/v0.57.0...v0.58.0) (2026-08-13)
 
 
