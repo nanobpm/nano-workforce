@@ -42,9 +42,7 @@
       ],
       "onTerminated": {
         "set": {
-          "status": "abandoned",
-          "open_escalation_id": null,
-          "open_escalation_question": null
+          "status": "abandoned"
         }
       },
       "pollMs": 5000
@@ -73,6 +71,10 @@
     {
       "taskType": "pr.persist-escalation",
       "handler": "workers/persist-escalation/worker.ts"
+    },
+    {
+      "taskType": "pr.answer-escalation",
+      "handler": "workers/answer-escalation/worker.ts"
     },
     {
       "taskType": "pr.finalize",

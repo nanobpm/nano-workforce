@@ -43,7 +43,7 @@ function withGithubOff(run: () => Promise<void>): Promise<void> {
   });
 }
 
-test("re-submit of a cancelled PR clears stale open escalations + the denormalised pointer", async () => {
+test("re-submit of a cancelled PR marks stale open escalations", async () => {
   await withGithubOff(async () => {
     const PR_KEY = "owner/repo#42";
     const stores: Record<string, { rows: unknown[]; key: string }> = {
@@ -56,8 +56,6 @@ test("re-submit of a cancelled PR clears stale open escalations + the denormalis
           title: "old title",
           status: "abandoned", // terminal -> re-open path
           current_round: 3,
-          open_escalation_id: 5,
-          open_escalation_question: "(no question provided)",
         }],
         key: "pr_key",
       },
@@ -81,15 +79,16 @@ test("re-submit of a cancelled PR clears stale open escalations + the denormalis
       prKey: PR_KEY,
     });
 
-    // The prior run's open escalation is retired (not left "open" to resurface a dead form) …
+    // The prior run's open escalation is retired (not left "open" to resurface a dead form on the
+    // re-opened PR). The review-loop escalation is now a native userTask (open state derived from
+    // the canonical `escalations` row status), so there is no denormalised PR-row pointer to clear.
     const esc = stores.escalations.rows[0] as Record<string, unknown>;
     assertEquals(esc.status, "stale");
-    // … and the PR row is re-opened with the denormalised escalation pointer cleared.
     const pr = stores.pull_requests.rows[0] as Record<string, unknown>;
     assertEquals(pr.status, "converging");
     assertEquals(pr.current_round, 1);
-    assertEquals(pr.open_escalation_id, null);
-    assertEquals(pr.open_escalation_question, null);
+    assertEquals(pr.open_escalation_id, undefined);
+    assertEquals(pr.open_escalation_question, undefined);
     assertEquals(pr.process_key, "PI-9");
   });
 });
