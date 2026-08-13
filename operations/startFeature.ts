@@ -31,7 +31,14 @@ export default defineOperation("startFeature", async ({ body }, app) => {
     app.log.warn("start-feature rejected: missing request body");
     return { status: 400, body: { error: "request body is required (owner/repo#123 or an issue URL)" } };
   }
-  const raw = ("issue" in body ? body.issue : body.url).trim();
+  // The `oneOf` variant is normally narrowed by OpenAPI validation, but a directly-invoked delegate
+  // can pass a missing/mistyped `issue`/`url` — guard so that stays a 400, not a 500 from `.trim()`.
+  const target = "issue" in body ? body.issue : "url" in body ? body.url : undefined;
+  if (typeof target !== "string") {
+    app.log.warn("start-feature rejected: issue/url must be a string");
+    return { status: 400, body: { error: "issue or url must be a string (owner/repo#123 or an issue URL)" } };
+  }
+  const raw = target.trim();
   const parsed = parseIssue(raw);
   if (!parsed) {
     app.log.warn("start-feature rejected: unparseable issue reference", { raw });
@@ -46,10 +53,13 @@ export default defineOperation("startFeature", async ({ body }, app) => {
   const token = process.env.GITHUB_TOKEN ?? "";
   let normalizedBase: string;
   try {
+    // No `selfPlanKey`: a feature run creates a `feature_runs` row, NOT a `plans` row, so there is no
+    // own plan to exclude from the shared-base guard (rule 4). Passing `parsed.planKey` here would
+    // exclude an ACTIVE EPIC sharing the same `owner/repo#N` key, silently bypassing shared-base
+    // protection. Feature-run idempotency is enforced separately by `startFeature` on `feature_runs`.
     normalizedBase = await admitPlan(app.data, parsed.repo, rawBase, token, {
       allowSharedBase,
       confirmDefaultBase,
-      selfPlanKey: parsed.planKey,
     });
   } catch (err) {
     if (err instanceof MissingBaseBranchError) {
