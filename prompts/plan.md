@@ -161,8 +161,8 @@ infrastructure several distinct tasks sit on top of. Reserve plain parallel task
 
 The shared-surface rule above pushes toward independence, and independence has a
 seductive failure mode: giving each task its **own published unit** (npm package,
-crate, service, module) is the *frictionless maximum* of independence — a separate
-manifest, separate exports, separate directory means zero shared surface and zero
+crate, service) is the *frictionless maximum* of independence — a separate
+manifest, separate exports, separate directory mean zero shared surface and zero
 merge collision. So a plan that slices a single cohesive library into N tasks will,
 left alone, tend to emit **N packages** — one per task. That is not a design; it is
 your task decomposition leaking into the artifact's module boundaries (Conway's
