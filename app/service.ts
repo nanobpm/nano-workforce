@@ -536,11 +536,12 @@ export async function activePrs(data: DataLayer): Promise<ActivePr[]> {
   // Only an `escalated` PR is parked awaiting a human answer (either loop). Surface the question
   // from its latest still-open `escalations` row; a resubmit retires stale rows and finalize/merge
   // move the PR off `escalated`, so an open row on an escalated PR is a genuinely live escalation.
+  // Fetch every open row in one query (avoids an N+1 over escalated PRs), then keep the newest per PR.
   const openEscByPr = new Map<string, string>();
-  for (const p of active) {
-    if (p.status !== "escalated") continue;
-    const open = (await escs(data).find({ pr_key: p.pr_key, status: "open" })).sort((a, b) => b.id - a.id)[0];
-    if (open?.question) openEscByPr.set(p.pr_key, open.question);
+  const escalatedPrs = new Set(active.filter((p) => p.status === "escalated").map((p) => p.pr_key));
+  for (const e of (await escs(data).find({ status: "open" })).sort((a, b) => b.id - a.id)) {
+    if (!escalatedPrs.has(e.pr_key) || openEscByPr.has(e.pr_key)) continue;
+    if (e.question) openEscByPr.set(e.pr_key, e.question);
   }
   return active.map((p) => ({
     prKey: p.pr_key,
