@@ -27,7 +27,6 @@ import { decodeFrame, encodeFrame, type Frame } from "@nanobpm/agentic/protocol"
 import type { AppApi, DataLayer } from "@nanobpm/urban";
 import { assert, assertEquals } from "#test-assert";
 import { currentCorrelation } from "../app/agentic/correlation.ts";
-import { currentPresenceRegistry } from "../app/agentic/families/presence.family.ts";
 import { loadAgenticFamilies } from "../app/agentic/loader.ts";
 import type { AgenticContext, AgenticFamily } from "../app/agentic/registry.ts";
 import handler from "../operations/getAgenticSupply.ts";
@@ -94,11 +93,6 @@ const produce = (stream: string, incarnation: number, chunk: string): Frame => (
   seq: 0,
   payload: { op: "produce", stream, incarnation, chunk },
 });
-
-/** Read the relay `stream`/`offset`/`chunk` off a delivered data frame's payload, without a cast. */
-function field(payload: unknown, key: string): unknown {
-  return payload && typeof payload === "object" && Object.hasOwn(payload, key) ? Object.getOwnPropertyDescriptor(payload, key)?.value : undefined;
-}
 
 // ── the harness: a real hub with the whole family fleet mounted through the H0 seam ───────────────
 
