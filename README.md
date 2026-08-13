@@ -231,7 +231,7 @@ fleet"** form, or POST the same operation the form does:
 ```bash
 curl -sS -X POST http://localhost:3000/app/api/actions/start/plan-fanout \
   -H 'content-type: application/json' \
-  -d '{ "issue": "owner/repo#123" }'
+  -d '{ "issue": "owner/repo#123", "baseBranch": "epic/agent-protocol" }'
 ```
 
 ---

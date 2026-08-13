@@ -31,7 +31,7 @@ const RAW_GUIDE: string = (() => {
       "- `GET /status` — every PR in flight, with its engine `processKey` and any open escalation.",
       "- `GET /version` — which code is live.",
       "- `POST /actions/start/convergence-loop` — submit a PR (`{ pr, convergeOnly?, maxRounds?, dependsOn? }`).",
-      "- `POST /actions/start/plan-fanout` — submit an epic (`{ issue }`).",
+      "- `POST /actions/start/plan-fanout` — submit an epic (`{ issue, baseBranch }`).",
       "- `POST /actions/message` — answer an escalation (`escalation-answered`, correlate by PR key).",
       "",
       "Engine (Camunda-8 v2 REST) base for debugging: `__ENGINE__`.",

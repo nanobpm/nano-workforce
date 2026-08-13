@@ -256,9 +256,10 @@ components:
             per-request review-only override; defaults to false (the global auto-merge default applies).
     PlanStart:
       description: The start-plan-fanout request body. Names the target issue by EXACTLY ONE of
-        `issue` (an `owner/repo#123` reference) or `url` (a bare issue URL). Modeled as `oneOf`
-        named variants (Camunda REST v2 pattern) so an ambiguous or empty target is a 400 at the
-        edge, not a silent `issue ?? url` coalesce in the delegate.
+        `issue` (an `owner/repo#123` reference) or `url` (a bare issue URL), plus a REQUIRED
+        `baseBranch` (ADR 0003) the fleet branches off — a blank/absent base is a 400. Modeled as
+        `oneOf` named variants (Camunda REST v2 pattern) so an ambiguous or empty target is a 400 at
+        the edge, not a silent `issue ?? url` coalesce in the delegate.
       oneOf:
         - $ref: "#/components/schemas/PlanStartByIssue"
         - $ref: "#/components/schemas/PlanStartByUrl"
