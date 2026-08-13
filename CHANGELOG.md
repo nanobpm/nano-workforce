@@ -1,3 +1,10 @@
+# [0.55.0](https://github.com/nanobpm/nano-workforce/compare/v0.54.0...v0.55.0) (2026-08-13)
+
+
+### Features
+
+* supply-only agentic cockpit page + report endpoint (H5) ([#173](https://github.com/nanobpm/nano-workforce/issues/173)) ([428f7f3](https://github.com/nanobpm/nano-workforce/commit/428f7f3a8ca35ea05c8b9c0dbc478d24d125486a)), closes [#144](https://github.com/nanobpm/nano-workforce/issues/144) [#146](https://github.com/nanobpm/nano-workforce/issues/146) [#152](https://github.com/nanobpm/nano-workforce/issues/152) [#148](https://github.com/nanobpm/nano-workforce/issues/148) [#144](https://github.com/nanobpm/nano-workforce/issues/144) [#146](https://github.com/nanobpm/nano-workforce/issues/146)
+
 # [0.54.0](https://github.com/nanobpm/nano-workforce/compare/v0.53.0...v0.54.0) (2026-08-13)
 
 
