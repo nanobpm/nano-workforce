@@ -55,7 +55,7 @@ export default defineOperation("postMessage", async ({ body }, app) => {
     const planKey = String(b.correlationKey ?? "");
     const rawDirective = String(b.variables?.directive ?? "revise").trim().toLowerCase();
     const directive = rawDirective === "proceed" || rawDirective === "revise" ? rawDirective : null;
-    const note = String(b.variables?.note ?? b.variables?.answer ?? "").trim();
+    const note = String(b.variables?.note ?? b.variables?.notes ?? b.variables?.answer ?? "").trim();
     if (!planKey) return { status: 400, body: { error: "correlationKey is required" } };
     if (!directive) {
       return { status: 400, body: { error: "directive must be proceed or revise" } };

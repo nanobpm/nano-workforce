@@ -366,6 +366,12 @@ components:
         note:
           type: string
           description: Human guidance for the planner (used for `revise`; optional for `proceed`).
+        notes:
+          type: string
+          description: >-
+            Alias for `note`, accepting the form-shaped payload emitted by the
+            `plan-review-decision` user task form (whose field is named `notes`). `note` takes
+            precedence when both are present.
     BlackboardEntry:
       type: object
       additionalProperties: false

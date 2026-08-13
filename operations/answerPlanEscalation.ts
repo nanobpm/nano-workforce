@@ -1,6 +1,7 @@
 // POST /app/api/hooks/plan-answer → operationId `answerPlanEscalation`. Answers a plan-review
-// cap escalation out of band. The process is parked on `plan-escalation-answered`, correlated by
-// planKey; the answer records the human directive and resumes the plan.
+// cap escalation out of band. The process is parked on the native `plan-review-decision` user
+// task, correlated by planKey; the answer records the human directive and resumes the plan by
+// completing that parked user task.
 import {
   answerPlanEscalation as answerPlanEscalationState,
 } from "../app/plan.ts";
@@ -24,7 +25,7 @@ export default defineOperation("answerPlanEscalation", async ({ req, body }, app
   const planKey = str(body.plan);
   const rawDirective = str(body.directive).toLowerCase();
   const directive = rawDirective === "proceed" || rawDirective === "revise" ? rawDirective : null;
-  const note = str(body.note);
+  const note = str(body.note) || str(body.notes);
   if (!planKey) {
     app.log.warn("plan-answer rejected: missing plan");
     return { status: 400, body: { ok: false, error: "plan is required" } };
