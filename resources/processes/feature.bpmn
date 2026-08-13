@@ -1,0 +1,240 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI" xmlns:dc="http://www.omg.org/spec/DD/20100524/DC" xmlns:di="http://www.omg.org/spec/DD/20100524/DI" xmlns:zeebe="http://camunda.org/schema/zeebe/1.0" id="Definitions_nano_workforce_feature" targetNamespace="http://nanobpm.io/nano-workforce">
+  <bpmn:process id="feature" name="Single-issue feature run" isExecutable="true">
+    <bpmn:startEvent id="Start" name="Issue submitted">
+      <bpmn:outgoing>f_toEnsureBase</bpmn:outgoing>
+    </bpmn:startEvent>
+    <bpmn:serviceTask id="ensure-base-branch" name="Ensure base branch">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="pr.ensure-base-branch" />
+        <zeebe:ioMapping>
+          <zeebe:input source="=repo" target="repo" />
+          <zeebe:input source="=baseBranch" target="baseBranch" />
+        </zeebe:ioMapping>
+      </bpmn:extensionElements>
+      <bpmn:incoming>f_toEnsureBase</bpmn:incoming>
+      <bpmn:outgoing>f_toImplement</bpmn:outgoing>
+    </bpmn:serviceTask>
+    <bpmn:serviceTask id="implement-task" name="Implement (agent)">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="senior:feature" />
+        <zeebe:taskHeaders>
+          <zeebe:header key="io.nanobpm.agentTask.task.prompt" value="{{feature}}" />
+        </zeebe:taskHeaders>
+        <zeebe:ioMapping>
+          <zeebe:input source="=&#34;&#10;&#10;---&#10;&#10;&#34; + task.prompt + (if (baseBranchBrief = null) then &#34;&#34; else baseBranchBrief)" target="appendPrompt" />
+          <zeebe:output source="=status" target="status" />
+          <zeebe:output source="=question" target="question" />
+        </zeebe:ioMapping>
+      </bpmn:extensionElements>
+      <bpmn:incoming>f_toImplement</bpmn:incoming>
+      <bpmn:incoming>w_answerLoop</bpmn:incoming>
+      <bpmn:outgoing>w_toGw</bpmn:outgoing>
+    </bpmn:serviceTask>
+    <bpmn:exclusiveGateway id="w_gw" name="escalated?" default="w_done">
+      <bpmn:incoming>w_toGw</bpmn:incoming>
+      <bpmn:outgoing>w_escalate</bpmn:outgoing>
+      <bpmn:outgoing>w_done</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:userTask id="feature-escalation" name="Task escalation (human)">
+      <bpmn:extensionElements>
+        <zeebe:formDefinition formId="feature-escalation" />
+        <zeebe:userTask />
+        <zeebe:assignmentDefinition candidateGroups="operators" assignee="=escalationAssignee" />
+      </bpmn:extensionElements>
+      <bpmn:incoming>w_escalate</bpmn:incoming>
+      <bpmn:outgoing>w_toAnswerGw</bpmn:outgoing>
+    </bpmn:userTask>
+    <bpmn:boundaryEvent id="be_feature_sla" name="SLA elapsed" attachedToRef="feature-escalation">
+      <bpmn:outgoing>w_sla</bpmn:outgoing>
+      <bpmn:timerEventDefinition id="ted_feature_sla">
+        <bpmn:timeDuration xsi:type="bpmn:tFormalExpression">=escalationSlaTimeout</bpmn:timeDuration>
+      </bpmn:timerEventDefinition>
+    </bpmn:boundaryEvent>
+    <bpmn:exclusiveGateway id="w_gw_answer" name="answer?" default="w_abandon">
+      <bpmn:incoming>w_toAnswerGw</bpmn:incoming>
+      <bpmn:outgoing>w_answerLoop</bpmn:outgoing>
+      <bpmn:outgoing>w_abandon</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:serviceTask id="record-feature" name="Record result">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="pr.record-feature" />
+      </bpmn:extensionElements>
+      <bpmn:incoming>w_done</bpmn:incoming>
+      <bpmn:incoming>w_abandon</bpmn:incoming>
+      <bpmn:incoming>w_sla</bpmn:incoming>
+      <bpmn:outgoing>f_toConvergeGw</bpmn:outgoing>
+    </bpmn:serviceTask>
+    <bpmn:exclusiveGateway id="gw-converge" name="converge?" default="f_noConverge">
+      <bpmn:incoming>f_toConvergeGw</bpmn:incoming>
+      <bpmn:outgoing>f_converge</bpmn:outgoing>
+      <bpmn:outgoing>f_noConverge</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:serviceTask id="converge" name="Hand off to convergence loop">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="pr.converge-feature" />
+      </bpmn:extensionElements>
+      <bpmn:incoming>f_converge</bpmn:incoming>
+      <bpmn:outgoing>f_toEndConverged</bpmn:outgoing>
+    </bpmn:serviceTask>
+    <bpmn:endEvent id="End" name="Done">
+      <bpmn:incoming>f_noConverge</bpmn:incoming>
+      <bpmn:incoming>f_toEndConverged</bpmn:incoming>
+    </bpmn:endEvent>
+    <bpmn:sequenceFlow id="f_toEnsureBase" sourceRef="Start" targetRef="ensure-base-branch" />
+    <bpmn:sequenceFlow id="f_toImplement" sourceRef="ensure-base-branch" targetRef="implement-task" />
+    <bpmn:sequenceFlow id="w_toGw" sourceRef="implement-task" targetRef="w_gw" />
+    <bpmn:sequenceFlow id="w_escalate" name="escalated" sourceRef="w_gw" targetRef="feature-escalation">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=status = "escalated" and question != null and trim(question) != ""</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="w_done" name="done" sourceRef="w_gw" targetRef="record-feature" />
+    <bpmn:sequenceFlow id="w_toAnswerGw" sourceRef="feature-escalation" targetRef="w_gw_answer" />
+    <bpmn:sequenceFlow id="w_answerLoop" name="answer" sourceRef="w_gw_answer" targetRef="implement-task">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=resolution = "answer"</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="w_abandon" name="abandon" sourceRef="w_gw_answer" targetRef="record-feature" />
+    <bpmn:sequenceFlow id="w_sla" name="SLA auto-abandon" sourceRef="be_feature_sla" targetRef="record-feature" />
+    <bpmn:sequenceFlow id="f_toConvergeGw" sourceRef="record-feature" targetRef="gw-converge" />
+    <bpmn:sequenceFlow id="f_converge" name="converge" sourceRef="gw-converge" targetRef="converge">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=converge = true and featureStatus = "opened" and prKey != null</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="f_noConverge" name="raise only" sourceRef="gw-converge" targetRef="End" />
+    <bpmn:sequenceFlow id="f_toEndConverged" sourceRef="converge" targetRef="End" />
+  </bpmn:process>
+  <bpmndi:BPMNDiagram id="BPMNDiagram_feature">
+    <bpmndi:BPMNPlane id="BPMNPlane_feature" bpmnElement="feature">
+      <bpmndi:BPMNShape id="BPMNShape_Start" bpmnElement="Start">
+        <dc:Bounds x="80" y="102" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="63" y="143" width="70" height="28" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_ensure-base-branch" bpmnElement="ensure-base-branch">
+        <dc:Bounds x="216" y="80" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_implement-task" bpmnElement="implement-task">
+        <dc:Bounds x="416" y="80" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_w_gw" bpmnElement="w_gw" isMarkerVisible="true">
+        <dc:Bounds x="616" y="95" width="50" height="50" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="604" y="76" width="74" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_feature-escalation" bpmnElement="feature-escalation">
+        <dc:Bounds x="766" y="240" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_w_gw_answer" bpmnElement="w_gw_answer" isMarkerVisible="true">
+        <dc:Bounds x="966" y="255" width="50" height="50" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="963" y="236" width="56" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_record-feature" bpmnElement="record-feature">
+        <dc:Bounds x="1116" y="80" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_gw-converge" bpmnElement="gw-converge" isMarkerVisible="true">
+        <dc:Bounds x="1316" y="95" width="50" height="50" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1308" y="76" width="67" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_converge" bpmnElement="converge">
+        <dc:Bounds x="1466" y="240" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_End" bpmnElement="End">
+        <dc:Bounds x="1666" y="102" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1667" y="83" width="34" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_be_feature_sla" bpmnElement="be_feature_sla">
+        <dc:Bounds x="798" y="302" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="774" y="383" width="84" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNEdge id="BPMNEdge_f_toEnsureBase" bpmnElement="f_toEnsureBase">
+        <di:waypoint x="116" y="120" />
+        <di:waypoint x="216" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_f_toImplement" bpmnElement="f_toImplement">
+        <di:waypoint x="316" y="120" />
+        <di:waypoint x="416" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_w_toGw" bpmnElement="w_toGw">
+        <di:waypoint x="516" y="120" />
+        <di:waypoint x="616" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_w_done" bpmnElement="w_done">
+        <di:waypoint x="666" y="120" />
+        <di:waypoint x="1116" y="120" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="875" y="98" width="32" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_f_toConvergeGw" bpmnElement="f_toConvergeGw">
+        <di:waypoint x="1216" y="120" />
+        <di:waypoint x="1316" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_f_noConverge" bpmnElement="f_noConverge">
+        <di:waypoint x="1366" y="120" />
+        <di:waypoint x="1666" y="120" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1481" y="98" width="71" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_w_abandon" bpmnElement="w_abandon">
+        <di:waypoint x="1016" y="280" />
+        <di:waypoint x="1166" y="280" />
+        <di:waypoint x="1166" y="160" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1065" y="258" width="53" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_w_escalate" bpmnElement="w_escalate">
+        <di:waypoint x="641" y="145" />
+        <di:waypoint x="641" y="280" />
+        <di:waypoint x="766" y="280" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="646" y="206" width="67" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_f_converge" bpmnElement="f_converge">
+        <di:waypoint x="1341" y="145" />
+        <di:waypoint x="1341" y="280" />
+        <di:waypoint x="1466" y="280" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1346" y="206" width="60" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_w_toAnswerGw" bpmnElement="w_toAnswerGw">
+        <di:waypoint x="866" y="280" />
+        <di:waypoint x="966" y="280" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_f_toEndConverged" bpmnElement="f_toEndConverged">
+        <di:waypoint x="1566" y="280" />
+        <di:waypoint x="1684" y="280" />
+        <di:waypoint x="1684" y="138" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_w_sla" bpmnElement="w_sla">
+        <di:waypoint x="816" y="338" />
+        <di:waypoint x="816" y="358" />
+        <di:waypoint x="1166" y="358" />
+        <di:waypoint x="1166" y="160" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1007" y="325" width="88" height="28" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_w_answerLoop" bpmnElement="w_answerLoop">
+        <di:waypoint x="991" y="305" />
+        <di:waypoint x="991" y="360" />
+        <di:waypoint x="466" y="360" />
+        <di:waypoint x="466" y="160" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="704" y="338" width="49" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+    </bpmndi:BPMNPlane>
+  </bpmndi:BPMNDiagram>
+</bpmn:definitions>

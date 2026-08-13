@@ -12,6 +12,7 @@
         "items": [
           { "label": "Convergence", "page": "home" },
           { "label": "Epics", "page": "epic" },
+          { "label": "Feature", "page": "feature" },
           { "label": "Cockpit", "page": "cockpit" }
         ]
       }

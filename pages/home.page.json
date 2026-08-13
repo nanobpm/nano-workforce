@@ -18,6 +18,10 @@
             "page": "epic"
           },
           {
+            "label": "Feature",
+            "page": "feature"
+          },
+          {
             "label": "Cockpit",
             "page": "cockpit"
           }

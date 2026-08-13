@@ -306,6 +306,19 @@ components:
         alreadyRunning:
           type: boolean
           description: True when a non-terminal plan for this issue already exists; no new instance was started.
+    StartFeatureResult:
+      type: object
+      required:
+        - featureKey
+      properties:
+        featureKey:
+          type: string
+        processKey:
+          type: string
+          nullable: true
+        alreadyRunning:
+          type: boolean
+          description: True when a non-terminal feature run for this issue already exists; no new instance was started.
     ConvergenceStart:
       description: The start-convergence request body. Names the target PR by EXACTLY ONE of `pr`
         (an `owner/repo#123` reference) or `url` (a bare PR URL) — never both, never neither — with
@@ -444,6 +457,86 @@ components:
             Accepted by the schema today but currently has no runtime effect. When implemented it
             will be the required acknowledgement when `baseBranch` names the repository default
             branch. See `PlanStartByIssue.confirmDefaultBase`.
+    FeatureStart:
+      description: The start-feature request body — a SINGLE-issue feature run. Names the target issue
+        by EXACTLY ONE of `issue` (an `owner/repo#123` reference) or `url` (a bare issue URL), plus a
+        REQUIRED `baseBranch` (ADR 0003, same admission as the epic path), and the two optional
+        follow-on knobs `converge` / `autoMerge`. Modeled as `oneOf` named variants (Camunda REST v2
+        pattern) so an ambiguous or empty target is a 400 at the edge.
+      oneOf:
+        - $ref: "#/components/schemas/FeatureStartByIssue"
+        - $ref: "#/components/schemas/FeatureStartByUrl"
+    FeatureStartByIssue:
+      type: object
+      additionalProperties: false
+      required:
+        - issue
+        - baseBranch
+      properties:
+        issue:
+          type: string
+          description: "Issue reference: owner/repo#123."
+        baseBranch:
+          type: string
+          minLength: 1
+          maxLength: 255
+          pattern: '\S'
+          description: >-
+            REQUIRED target branch the agent branches off and opens its PR against. Admitted through
+            the same ADR 0003 policy as the epic path (`admitPlan`): a missing `epic/*` base is
+            auto-created off default HEAD; a non-`epic/*` base must already exist; naming the default
+            branch requires `confirmDefaultBase`.
+        converge:
+          type: boolean
+          description: >-
+            When true, hand the opened PR to the convergence loop (review rounds) as a follow-on step.
+            When false (default) the run ends at "PR raised, not reviewed".
+        autoMerge:
+          type: boolean
+          description: >-
+            When true (and `converge` is true), drive the merge-loop after convergence — mirrors
+            `convergeOnly`/`NANO_PR_AUTO_MERGE` inverted. When false the run stops at `converged`.
+            Moot when `converge` is false.
+        confirmDefaultBase:
+          type: boolean
+          description: >-
+            Acknowledge that `baseBranch` is the repository default branch (the PR would target it
+            directly). See `PlanStartByIssue.confirmDefaultBase`.
+        allowSharedBase:
+          type: boolean
+          description: >-
+            Opt in to sharing a custom integration base branch with another already-active epic. See
+            `PlanStartByIssue.allowSharedBase`.
+    FeatureStartByUrl:
+      type: object
+      additionalProperties: false
+      required:
+        - url
+        - baseBranch
+      properties:
+        url:
+          type: string
+          description: A bare issue URL, when no `owner/repo#123` reference is supplied.
+        baseBranch:
+          type: string
+          minLength: 1
+          maxLength: 255
+          pattern: '\S'
+          description: >-
+            REQUIRED target branch the agent branches off and opens its PR against. See
+            `FeatureStartByIssue.baseBranch`.
+        converge:
+          type: boolean
+          description: When true, hand the opened PR to the convergence loop. See `FeatureStartByIssue.converge`.
+        autoMerge:
+          type: boolean
+          description: When true (with `converge`), drive the merge-loop. See `FeatureStartByIssue.autoMerge`.
+        confirmDefaultBase:
+          type: boolean
+          description: Acknowledge landing on the default branch. See `PlanStartByIssue.confirmDefaultBase`.
+        allowSharedBase:
+          type: boolean
+          description: Share a custom integration base with another active epic. See `PlanStartByIssue.allowSharedBase`.
     MessageResult:
       type: object
       description: The result of publishing a message / answering an escalation. Shape varies by message
@@ -749,6 +842,35 @@ paths:
                 $ref: "#/components/schemas/StartPlanResult"
         "400":
           description: The issue reference could not be parsed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+  /actions/start/feature:
+    post:
+      operationId: startFeature
+      summary: Register/refresh a feature-run aggregate (idempotent on featureKey) and start the single-issue run.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FeatureStart"
+      responses:
+        "202":
+          description: The feature run was started (or was already running).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StartFeatureResult"
+        "400":
+          description: The issue reference could not be parsed, or the base branch was rejected.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+        "409":
+          description: The base branch is already in use by another active epic.
           content:
             application/json:
               schema:
