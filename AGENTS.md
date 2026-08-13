@@ -150,6 +150,30 @@ must carry a list (e.g. failing check names), join it to a scalar (e.g.
 `\n`-separated) in the publisher before it crosses the envelope, and split it on
 the far side if needed.
 
+## Urban page runtime: rendering primitives are not JS-truthy
+
+The `@nanobpm/urban` page runtime (`pages.ts`, ~0.46) renders `pages/*.page.json`
+with primitive-specific gating and linking rules that do **not** match ordinary JS
+truthiness. Getting these wrong renders stray badges on every row or drops a link
+silently — cheap to avoid, annoying to debug after the fact.
+
+- **`badge` columns gate on non-empty string, not truthiness.** A column badge
+  renders whenever `String(value).trim() !== ""`. So an `INTEGER NOT NULL DEFAULT
+  0` flag renders the badge on *every* non-set row (value `0` → `"0"` → non-empty).
+  For a "show a badge only when set" flag, store **`NULL`** (not `0`) when
+  not-set, in the **canonical derivation** *and* everywhere else that clears it —
+  a single `0`-writer re-lights the badge.
+- **`detail.fields` render as plain text — no per-field links.** The detail panel
+  emits `label + String(value)` per field; there is no per-field `linkField`/
+  `link`. Clickable links exist only on **grid columns** (`col.linkField`,
+  http(s)-gated — see `issue_url`/`issue_number` in `pages/epic.page.json`) and on
+  the single block-level `detail.linkField`. To make a value clickable, add it as
+  a grid column with `linkField`, not a `detail.fields` entry.
+- **`showWhenField` *does* use JS truthiness.** Unlike `badge`, a control gated by
+  `showWhenField` is hidden for `0`/`null`/`""` alike — so a `0`-or-`NULL` flag
+  correctly hides it either way. (This is why the same flag can need `NULL` for a
+  badge yet work as `0` for a `showWhenField` button.)
+
 ## The poller owns liveness/reconciliation
 
 `main.ts` runs a **self-scheduling** poll loop (`pollOnce` in `app/service.ts`),
