@@ -46,6 +46,25 @@ export interface SupplyLeafReport {
   readonly workers: readonly SupplyWorkerReport[];
 }
 
+/**
+ * One current job's engine context (H6 #149) — the process instance / plan a worker's terminal is
+ * lined up against. Mirrors the supply endpoint's `AgenticJobCorrelation`.
+ */
+export interface SupplyCorrelationReport {
+  /** The Camunda-8 job key. */
+  readonly jobKey: string;
+  /** The relay stream the job's terminal is on (`job:<jobKey>`). */
+  readonly stream: string;
+  /** The owning process instance key, if known. */
+  readonly processInstanceKey?: string;
+  /** The BPMN process id, if known. */
+  readonly bpmnProcessId?: string;
+  /** The BPMN element id, if known. */
+  readonly elementId?: string;
+  /** The plan / epic key, if known. */
+  readonly planKey?: string;
+}
+
 /** The supply-only report the cockpit polls (no demand fields — those are enrolment epic #152). */
 export interface SupplyReport {
   /** Supply grouped by leaf token. */
@@ -56,6 +75,26 @@ export interface SupplyReport {
   readonly count: number;
   /** When the snapshot was taken, ISO-8601 (optional). */
   readonly generatedAt?: string;
+  /** The engine context for every currently-processing job (H6), keyed by jobKey. */
+  readonly correlations?: readonly SupplyCorrelationReport[];
+}
+
+/** One current job's context as the cockpit renders it in a worker row (H6). */
+export interface JobCorrelationView {
+  /** The Camunda-8 job key. */
+  readonly jobKey: string;
+  /** The relay stream the job's terminal is on. */
+  readonly stream: string;
+  /** A single human label for the process instance / plan, e.g. `plan-fanout · inst 4612 · owner/repo#142`. */
+  readonly label: string;
+  /** The owning process instance key, if known. */
+  readonly processInstanceKey?: string;
+  /** The BPMN process id, if known. */
+  readonly bpmnProcessId?: string;
+  /** The BPMN element id, if known. */
+  readonly elementId?: string;
+  /** The plan / epic key, if known. */
+  readonly planKey?: string;
 }
 
 /** One worker row in the renderable supply view. */
@@ -72,6 +111,11 @@ export interface SupplyWorkerView {
   readonly jobKeys: readonly string[];
   /** The number of current jobs. */
   readonly jobs: number;
+  /**
+   * The engine context for each of this worker's current jobs (H6), sorted by jobKey — so the operator
+   * sees which process instance / plan the terminal belongs to. Empty when nothing correlates.
+   */
+  readonly correlations: readonly JobCorrelationView[];
   /** The coarse liveness grade for the status dot. */
   readonly liveness: Liveness;
   /** How long since the last liveness refresh, in ms. */
@@ -116,8 +160,38 @@ function liveness(worker: SupplyWorkerReport, staleAfterMs: number): Liveness {
   return worker.staleMs >= staleAfterMs ? "stale" : "live";
 }
 
-function workerView(worker: SupplyWorkerReport, staleAfterMs: number): SupplyWorkerView {
+/** A single stable human label for a job's process instance / plan (empty parts are dropped). */
+function correlationLabel(c: SupplyCorrelationReport): string {
+  const parts: string[] = [];
+  if (c.bpmnProcessId !== undefined) parts.push(c.bpmnProcessId);
+  if (c.elementId !== undefined) parts.push(c.elementId);
+  if (c.processInstanceKey !== undefined) parts.push(`inst ${c.processInstanceKey}`);
+  if (c.planKey !== undefined) parts.push(c.planKey);
+  return parts.length > 0 ? parts.join(" · ") : `job ${c.jobKey}`;
+}
+
+function correlationView(c: SupplyCorrelationReport): JobCorrelationView {
+  return {
+    jobKey: c.jobKey,
+    stream: c.stream,
+    label: correlationLabel(c),
+    ...(c.processInstanceKey !== undefined ? { processInstanceKey: c.processInstanceKey } : {}),
+    ...(c.bpmnProcessId !== undefined ? { bpmnProcessId: c.bpmnProcessId } : {}),
+    ...(c.elementId !== undefined ? { elementId: c.elementId } : {}),
+    ...(c.planKey !== undefined ? { planKey: c.planKey } : {}),
+  };
+}
+
+function workerView(
+  worker: SupplyWorkerReport,
+  staleAfterMs: number,
+  byJobKey: ReadonlyMap<string, SupplyCorrelationReport>,
+): SupplyWorkerView {
   const jobKeys = [...worker.jobKeys].sort((a, b) => a.localeCompare(b));
+  const correlations = jobKeys
+    .map((jobKey) => byJobKey.get(jobKey))
+    .filter((c): c is SupplyCorrelationReport => c !== undefined)
+    .map(correlationView);
   return {
     instance: worker.instance,
     identity: worker.identity,
@@ -126,6 +200,7 @@ function workerView(worker: SupplyWorkerReport, staleAfterMs: number): SupplyWor
     host: worker.host ?? "—",
     jobKeys,
     jobs: jobKeys.length,
+    correlations,
     liveness: liveness(worker, staleAfterMs),
     staleMs: worker.staleMs,
   };
@@ -142,9 +217,12 @@ const byInstance = (a: SupplyWorkerView, b: SupplyWorkerView) => a.instance.loca
 export function supplyView(report: SupplyReport, options: SupplyViewOptions = {}): SupplyView {
   const staleAfterMs = options.staleAfterMs ?? DEFAULT_STALE_AFTER_MS;
 
+  const byJobKey = new Map<string, SupplyCorrelationReport>();
+  for (const c of report.correlations ?? []) byJobKey.set(c.jobKey, c);
+
   const leaves: SupplyLeafView[] = report.leaves
     .map((leaf) => {
-      const workers = leaf.workers.map((w) => workerView(w, staleAfterMs)).sort(byInstance);
+      const workers = leaf.workers.map((w) => workerView(w, staleAfterMs, byJobKey)).sort(byInstance);
       return {
         token: leaf.token,
         workers,
@@ -154,7 +232,7 @@ export function supplyView(report: SupplyReport, options: SupplyViewOptions = {}
     })
     .sort((a, b) => a.token.localeCompare(b.token));
 
-  const workers = report.workers.map((w) => workerView(w, staleAfterMs)).sort(byInstance);
+  const workers = report.workers.map((w) => workerView(w, staleAfterMs, byJobKey)).sort(byInstance);
 
   return {
     leaves,

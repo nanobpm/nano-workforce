@@ -131,6 +131,23 @@
 
 .cockpit-worker:hover { color: #58a6ff; }
 
+.cockpit-supply-process { color: var(--cockpit-muted); }
+
+.cockpit-correlation {
+  background: none;
+  border: none;
+  color: var(--cockpit-text);
+  cursor: pointer;
+  display: block;
+  font: inherit;
+  padding: 0;
+  text-align: left;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.cockpit-correlation:hover { color: #58a6ff; }
+
 .cockpit-supply-liveness { color: var(--cockpit-muted); }
 
 .cockpit-supply-empty {

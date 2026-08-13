@@ -74,3 +74,39 @@ test("renders an empty state when no workers are connected", () => {
   assert.equal(host.byData("empty", "true").length, 1);
   assert.equal(host.byClass("cockpit-supply-worker").length, 0);
 });
+
+test("H6: renders a process/plan cell that drills into the job's stream", () => {
+  const host = new FakeElement("body");
+  const drilled: string[] = [];
+  const correlated: SupplyReport = {
+    count: 1,
+    workers: [{ instance: "wk-a", identity: "leaf-1", stream: "job:6494", family: "senior", host: "h1", jobKeys: ["6494"], live: true, staleMs: 0 }],
+    leaves: [
+      {
+        token: "leaf-1",
+        workers: [{ instance: "wk-a", identity: "leaf-1", stream: "job:6494", family: "senior", host: "h1", jobKeys: ["6494"], live: true, staleMs: 0 }],
+      },
+    ],
+    correlations: [{ jobKey: "6494", stream: "job:6494", bpmnProcessId: "plan-fanout", processInstanceKey: "4612", planKey: "o/r#142" }],
+  };
+  renderSupply(host, doc, supplyView(correlated), { onDrill: (stream) => drilled.push(stream) });
+
+  const cell = host.byData("worker", "wk-a")[0]?.byClass("cockpit-supply-process")[0];
+  assert.ok(cell);
+  assert.equal(cell?.getAttribute("data-correlations"), "1");
+  const link = host.byClass("cockpit-correlation")[0];
+  assert.ok(link, "the correlation drill button was rendered");
+  assert.equal(link?.getAttribute("data-job-key"), "6494");
+  assert.equal(link?.getAttribute("data-stream"), "job:6494");
+  assert.equal(link?.text(), "plan-fanout · inst 4612 · o/r#142");
+  link?.dispatch("click");
+  assert.deepEqual(drilled, ["job:6494"], "drilling the process/plan cell opens the live job's stream");
+});
+
+test("H6: a worker with no correlation renders an em-dash process cell", () => {
+  const host = new FakeElement("body");
+  renderSupply(host, doc, supplyView(sample));
+  const cell = host.byData("worker", "wk-b")[0]?.byClass("cockpit-supply-process")[0];
+  assert.equal(cell?.text(), "—");
+  assert.equal(cell?.getAttribute("data-correlations"), "0");
+});

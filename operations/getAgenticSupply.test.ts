@@ -12,6 +12,8 @@ import { encodeFrame, type Frame } from "@nanobpm/agentic/protocol";
 import type { SqliteDb } from "@nanobpm/agentic/presence";
 import type { AppApi, DataLayer } from "@nanobpm/urban";
 import { assert, assertEquals } from "#test-assert";
+import { currentCorrelation } from "../app/agentic/correlation.ts";
+import { family as correlationFamily } from "../app/agentic/families/correlation.family.ts";
 import { family } from "../app/agentic/families/presence.family.ts";
 import type { AgenticContext } from "../app/agentic/registry.ts";
 import { noopLog } from "../test/log.ts";
@@ -149,5 +151,43 @@ test("shared-secret guard rejects a missing secret when configured", async () =>
   } finally {
     if (prev === undefined) delete process.env["NANO_PR_WEBHOOK_SECRET"];
     else process.env["NANO_PR_WEBHOOK_SECRET"] = prev;
+  }
+});
+
+test("H6: with the correlation family mounted, jobKeys populate, stream repoints, and correlations are reported", async () => {
+  const hub = await mountPresence(memSqlite());
+  correlationFamily.mount({
+    hub,
+    registry: hub.registry,
+    transport: undefined as never,
+    data: undefined,
+    log: noopLog(),
+  });
+  const correlation = currentCorrelation();
+  assert(correlation !== undefined, "the correlation family installs the singleton");
+  correlation.link("wk-a", "6494", { processInstanceKey: "4612", bpmnProcessId: "plan-fanout", elementId: "implement-task", planKey: "o/r#142" });
+  try {
+    const res = (await handler(input(), app)) as {
+      status: number;
+      body: {
+        workers: Array<Record<string, unknown>>;
+        correlations: Array<Record<string, unknown>>;
+      };
+    };
+    assertEquals(res.status, 200);
+    const w = res.body.workers[0];
+    assertEquals(w.jobKeys, ["6494"], "the correlation registry feeds the jobKeys seam");
+    assertEquals(w.stream, "job:6494", "the drill stream repoints at the live job's stream");
+    assertEquals(res.body.correlations.length, 1);
+    const c = res.body.correlations[0];
+    assertEquals(c.jobKey, "6494");
+    assertEquals(c.stream, "job:6494");
+    assertEquals(c.processInstanceKey, "4612");
+    assertEquals(c.bpmnProcessId, "plan-fanout");
+    assertEquals(c.planKey, "o/r#142");
+  } finally {
+    correlationFamily.teardown?.();
+    family.teardown?.();
+    await hub.close();
   }
 });
