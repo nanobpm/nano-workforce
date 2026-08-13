@@ -1,3 +1,10 @@
+# [0.64.0](https://github.com/nanobpm/nano-workforce/compare/v0.63.0...v0.64.0) (2026-08-13)
+
+
+### Features
+
+* type workers off the generated data envelope ([#201](https://github.com/nanobpm/nano-workforce/issues/201)) ([#208](https://github.com/nanobpm/nano-workforce/issues/208)) ([792083f](https://github.com/nanobpm/nano-workforce/commit/792083f153050862a11224288b0e27e769ab06ba)), closes [nano-ide#225](https://github.com/nano-ide/issues/225) [#225](https://github.com/nanobpm/nano-workforce/issues/225) [#228](https://github.com/nanobpm/nano-workforce/issues/228) [#211](https://github.com/nanobpm/nano-workforce/issues/211) [#211](https://github.com/nanobpm/nano-workforce/issues/211)
+
 # [0.63.0](https://github.com/nanobpm/nano-workforce/compare/v0.62.0...v0.63.0) (2026-08-13)
 
 
