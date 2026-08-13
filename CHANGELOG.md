@@ -1,3 +1,10 @@
+# [0.59.0](https://github.com/nanobpm/nano-workforce/compare/v0.58.1...v0.59.0) (2026-08-13)
+
+
+### Features
+
+* derive epic delivery signal (converging vs landed) ([#197](https://github.com/nanobpm/nano-workforce/issues/197)) ([39ab5f1](https://github.com/nanobpm/nano-workforce/commit/39ab5f1b2628aadd350e9043ab0114103a24a1e2)), closes [#171](https://github.com/nanobpm/nano-workforce/issues/171) [#171](https://github.com/nanobpm/nano-workforce/issues/171)
+
 ## [0.58.1](https://github.com/nanobpm/nano-workforce/compare/v0.58.0...v0.58.1) (2026-08-13)
 
 
