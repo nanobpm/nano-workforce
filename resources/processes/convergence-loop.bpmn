@@ -67,9 +67,9 @@
     <bpmn:serviceTask id="review-round" name="Review round (agent)">
       <bpmn:extensionElements>
         <zeebe:taskDefinition type="senior:pr-review" />
-        <zeebe:taskHeaders>
-          <zeebe:header key="io.nanobpm.agentTask.task.prompt" value="{{review-round}}" />
-        </zeebe:taskHeaders>
+        <zeebe:linkedResources>
+          <zeebe:linkedResource resourceId="review-round.md" bindingType="latest" linkName="prompt" />
+        </zeebe:linkedResources>
         <zeebe:properties>
           <zeebe:property name="io.nanobpm.dataEnvelope.in" value="PrReviewRoundIn" />
           <zeebe:property name="io.nanobpm.dataEnvelope.out" value="PrReviewRoundOut" />

@@ -23,9 +23,9 @@
     <bpmn:serviceTask id="plan" name="Plan (agent)">
       <bpmn:extensionElements>
         <zeebe:taskDefinition type="senior:plan" />
-        <zeebe:taskHeaders>
-          <zeebe:header key="io.nanobpm.agentTask.task.prompt" value="{{plan}}" />
-        </zeebe:taskHeaders>
+        <zeebe:linkedResources>
+          <zeebe:linkedResource resourceId="plan.md" bindingType="latest" linkName="prompt" />
+        </zeebe:linkedResources>
         <zeebe:ioMapping>
           <zeebe:input source="=(if (planFindings = null or planFindings = &#34;&#34;) then &#34;&#34; else &#34;&#10;&#10;---&#10;&#10;A prior review REJECTED your last plan. Address every point, then re-emit the full plan:&#10;&#10;&#34; + planFindings)" target="appendPrompt" />
         </zeebe:ioMapping>
@@ -46,9 +46,9 @@
     <bpmn:serviceTask id="review-plan" name="Review plan (agent)">
       <bpmn:extensionElements>
         <zeebe:taskDefinition type="senior:plan-review" />
-        <zeebe:taskHeaders>
-          <zeebe:header key="io.nanobpm.agentTask.task.prompt" value="{{plan-review}}" />
-        </zeebe:taskHeaders>
+        <zeebe:linkedResources>
+          <zeebe:linkedResource resourceId="plan-review.md" bindingType="latest" linkName="prompt" />
+        </zeebe:linkedResources>
       </bpmn:extensionElements>
       <bpmn:incoming>f_toReviewPlan</bpmn:incoming>
       <bpmn:outgoing>f_toRecordPlanReview</bpmn:outgoing>
@@ -121,9 +121,9 @@
       <bpmn:serviceTask id="implement-task" name="Implement (agent)">
         <bpmn:extensionElements>
           <zeebe:taskDefinition type="senior:feature" />
-          <zeebe:taskHeaders>
-            <zeebe:header key="io.nanobpm.agentTask.task.prompt" value="{{feature}}" />
-          </zeebe:taskHeaders>
+          <zeebe:linkedResources>
+            <zeebe:linkedResource resourceId="feature.md" bindingType="latest" linkName="prompt" />
+          </zeebe:linkedResources>
           <zeebe:ioMapping>
             <zeebe:input source="=&#34;&#10;&#10;---&#10;&#10;&#34; + task.prompt + (if (blackboardBrief = null) then &#34;&#34; else blackboardBrief) + (if (baseBranchBrief = null) then &#34;&#34; else baseBranchBrief)" target="appendPrompt" />
             <zeebe:output source="=status" target="status" />
@@ -192,9 +192,9 @@
     <bpmn:serviceTask id="trial-merge" name="Trial merge (agent)">
       <bpmn:extensionElements>
         <zeebe:taskDefinition type="senior:trial-merge" />
-        <zeebe:taskHeaders>
-          <zeebe:header key="io.nanobpm.agentTask.task.prompt" value="{{trial-merge}}" />
-        </zeebe:taskHeaders>
+        <zeebe:linkedResources>
+          <zeebe:linkedResource resourceId="trial-merge.md" bindingType="latest" linkName="prompt" />
+        </zeebe:linkedResources>
         <zeebe:ioMapping>
           <zeebe:input source="=null" target="result" />
           <zeebe:input source="=null" target="conflicts" />

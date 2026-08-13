@@ -62,9 +62,9 @@ test("rebase arm mirrors the fix-ci arm: budget gate → agent → result gate",
   assert(hasFlow("gw-rebase", "merge-esc-conflict"), "gw-rebase → merge-esc-conflict (budget exhausted) missing");
   assertStringIncludes(flat, "rebaseRound &lt; rebaseMax");
 
-  // The agent is the senior:rebase fleet task, carrying its base prompt via the {{rebase}} header.
+  // The agent is the senior:rebase fleet task, carrying its base prompt via the rebase.md linked resource.
   assertStringIncludes(flat, 'type="senior:rebase"');
-  assertStringIncludes(flat, 'value="{{rebase}}"');
+  assertStringIncludes(flat, 'resourceId="rebase.md"');
 
   // Agent → result gate; the round counter advances so the budget can actually be exhausted.
   assert(hasFlow("rebase", "gw-rebase-result"), "rebase → gw-rebase-result missing");

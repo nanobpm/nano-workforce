@@ -85,10 +85,11 @@ export const MERGE_ADMIN = ["1", "true", "on", "yes"].includes(
   (process.env.NANO_PR_MERGE_ADMIN ?? "0").trim().toLowerCase(),
 );
 
-// The `senior:pr-review` agent prompt is no longer read by the host: it is authored in the
-// model as a `{{review-round}}` deploy-time template (see `models.templates` in nano.app.json)
-// substituted into the task's `io.nanobpm.agentTask.task.prompt` header. The host only carries
-// runtime PR identity + the round counter now.
+// The `senior:pr-review` agent prompt is no longer read by the host: it is a generic resource
+// (`prompts/review-round.md`, deployed via a `models` glob in nano.app.json) linked into the task
+// as `<zeebe:linkedResource resourceId="review-round.md" bindingType="latest" linkName="prompt"/>`
+// and resolved by the engine at job activation. The host only carries runtime PR identity + the
+// round counter now.
 
 const now = () => new Date().toISOString();
 

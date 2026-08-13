@@ -14,9 +14,9 @@
     <bpmn:serviceTask id="synthesize" name="Synthesize &#38; promote (agent)">
       <bpmn:extensionElements>
         <zeebe:taskDefinition type="senior:retro" />
-        <zeebe:taskHeaders>
-          <zeebe:header key="io.nanobpm.agentTask.task.prompt" value="{{retro}}" />
-        </zeebe:taskHeaders>
+        <zeebe:linkedResources>
+          <zeebe:linkedResource resourceId="retro.md" bindingType="latest" linkName="prompt" />
+        </zeebe:linkedResources>
         <zeebe:ioMapping>
           <zeebe:input source="=retroDigest" target="appendPrompt" />
         </zeebe:ioMapping>
