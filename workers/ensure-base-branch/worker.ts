@@ -10,11 +10,10 @@
 // wrong-rooted branch).
 import type { AppJobHandler } from "@nanobpm/urban";
 import { type EnsureBaseBranchResult, ensureBaseBranch } from "../../app/github.ts";
+import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 
-interface In extends Record<string, unknown> {
-  repo: string;
-  baseBranch: string;
-}
+// Input typed off the model data envelope (`EnsureBaseBranchIn` in plan-fanout.bpmn) — ADR 0040.
+type In = WorkerInputs["pr.ensure-base-branch"];
 interface Out extends Record<string, unknown> {
   baseBranchResult: EnsureBaseBranchResult;
 }

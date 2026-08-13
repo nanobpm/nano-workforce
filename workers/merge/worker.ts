@@ -15,18 +15,10 @@ import { checkBaseTarget, classifyBaseGuard } from "../../app/baseGuard.ts";
 import { enqueueViaComment, fetchPrState, mergePr } from "../../app/github.ts";
 import { classifyMergeLanding, DEFAULT_MERGE_PROTOCOL, loadMergeProtocol } from "../../app/mergeProtocol.ts";
 import { ensurePr, MERGE_ADMIN, MERGE_METHOD } from "../../app/service.ts";
+import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 
-interface In extends Record<string, unknown> {
-  prKey: string;
-  repo: string;
-  prNumber: number;
-  // Carried by the merge-loop instance (startMerge sets it to the converged round); passed to
-  // the heal so a reconstructed row reflects the real round, not a 1-based default.
-  round?: number;
-  // The per-PR abandon capability URL the agent was handed; its token is preserved on a heal so
-  // the agent's cooperative-abort check keeps resolving (see ensurePr).
-  abandonUrl?: string;
-}
+// Input typed off the model data envelope (`MergeAttemptIn` in merge-loop.bpmn) — ADR 0040.
+type In = WorkerInputs["pr.merge"];
 
 interface Out extends Record<string, unknown> {
   mergeStatus: "merged" | "queued" | "blocked";

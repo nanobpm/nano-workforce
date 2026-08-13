@@ -8,16 +8,12 @@
 // exposes the raw transcript under the `io.nanobpm.agentResult` envelope's `.output`.
 import type { AppJobHandler } from "@nanobpm/urban";
 import { recordRetro } from "../../app/retro.ts";
+import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 
 const AGENT_RESULT_KEY = "io.nanobpm.agentResult";
 
-interface In extends Record<string, unknown> {
-  planKey: string;
-  retroLearnings?: number;
-  status?: unknown; // filed | skipped | blocked
-  pr?: unknown; // "<owner>/<repo>#<n>" of the promotion PR, when filed
-  summary?: unknown;
-}
+// Input typed off the model data envelope (`RetroRecordIn` in retro.bpmn) — ADR 0040.
+type In = WorkerInputs["pr.retro-record"];
 
 function asStr(v: unknown): string | null {
   return typeof v === "string" && v.trim() !== "" ? v.trim() : null;
@@ -42,7 +38,7 @@ const handler: AppJobHandler<In> = async (job, app) => {
   const summary = asStr(job.variables.summary);
 
   // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
-  const env = job.variables[AGENT_RESULT_KEY] as { output?: unknown } | undefined;
+  const env = (job.variables as Record<string, unknown>)[AGENT_RESULT_KEY] as { output?: unknown } | undefined;
   const report = typeof env?.output === "string" ? env.output : null;
 
   await recordRetro(app.data, planKey, {

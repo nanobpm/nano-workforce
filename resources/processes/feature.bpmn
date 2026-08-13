@@ -1,12 +1,30 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI" xmlns:dc="http://www.omg.org/spec/DD/20100524/DC" xmlns:di="http://www.omg.org/spec/DD/20100524/DI" xmlns:zeebe="http://camunda.org/schema/zeebe/1.0" id="Definitions_nano_workforce_feature" targetNamespace="http://nanobpm.io/nano-workforce">
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI" xmlns:dc="http://www.omg.org/spec/DD/20100524/DC" xmlns:di="http://www.omg.org/spec/DD/20100524/DI" xmlns:zeebe="http://camunda.org/schema/zeebe/1.0" xmlns:nano="https://nanobpm.io/schema/shapes/1.0" id="Definitions_nano_workforce_feature" targetNamespace="http://nanobpm.io/nano-workforce">
   <bpmn:process id="feature" name="Single-issue feature run" isExecutable="true">
+    <bpmn:extensionElements>
+      <nano:shapes>
+        <nano:shape id="RecordFeatureIn" name="Record feature result — input">
+          <nano:extend name="featureKey" type="string" />
+          <nano:extend name="status" type="string" optional="true" />
+          <nano:extend name="pr" type="string" optional="true" />
+          <nano:extend name="summary" type="string" optional="true" />
+        </nano:shape>
+        <nano:shape id="ConvergeFeatureIn" name="Converge feature PR — input">
+          <nano:extend name="featureKey" type="string" />
+          <nano:extend name="prKey" type="string" optional="true" />
+          <nano:extend name="autoMerge" type="boolean" optional="true" />
+        </nano:shape>
+      </nano:shapes>
+    </bpmn:extensionElements>
     <bpmn:startEvent id="Start" name="Issue submitted">
       <bpmn:outgoing>f_toEnsureBase</bpmn:outgoing>
     </bpmn:startEvent>
     <bpmn:serviceTask id="ensure-base-branch" name="Ensure base branch">
       <bpmn:extensionElements>
         <zeebe:taskDefinition type="pr.ensure-base-branch" />
+        <zeebe:properties>
+          <zeebe:property name="io.nanobpm.dataEnvelope.in" value="EnsureBaseBranchIn" />
+        </zeebe:properties>
         <zeebe:ioMapping>
           <zeebe:input source="=repo" target="repo" />
           <zeebe:input source="=baseBranch" target="baseBranch" />
@@ -59,6 +77,9 @@
     <bpmn:serviceTask id="record-feature" name="Record result">
       <bpmn:extensionElements>
         <zeebe:taskDefinition type="pr.record-feature" />
+        <zeebe:properties>
+          <zeebe:property name="io.nanobpm.dataEnvelope.in" value="RecordFeatureIn" />
+        </zeebe:properties>
       </bpmn:extensionElements>
       <bpmn:incoming>w_done</bpmn:incoming>
       <bpmn:incoming>w_abandon</bpmn:incoming>
@@ -98,6 +119,9 @@
     <bpmn:serviceTask id="converge" name="Hand off to convergence loop">
       <bpmn:extensionElements>
         <zeebe:taskDefinition type="pr.converge-feature" />
+        <zeebe:properties>
+          <zeebe:property name="io.nanobpm.dataEnvelope.in" value="ConvergeFeatureIn" />
+        </zeebe:properties>
       </bpmn:extensionElements>
       <bpmn:incoming>f_converge</bpmn:incoming>
       <bpmn:outgoing>f_toEndConverged</bpmn:outgoing>

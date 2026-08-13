@@ -7,23 +7,13 @@
 import type { AppJobHandler } from "@nanobpm/urban";
 import { abandonTokenFromUrl } from "../../app/abandon.ts";
 import { ensurePr, parsePr } from "../../app/service.ts";
+import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 
-// Extends Record so the declared fields are typed while the job may still carry
-// other process variables (e.g. io.nanobpm.agentResult, read by transcriptOf).
-interface In extends Record<string, unknown> {
-  prKey: string;
-  round: number;
-  status?: string;
-  summary?: string;
-  // Carried by the convergence-loop instance (set at createInstance) so a missing
-  // `pull_requests` parent can be reconstructed before the FK-child `rounds` insert.
-  repo?: string;
-  prNumber?: number;
-  prUrl?: string;
-  // The per-PR abandon capability URL the review agent was handed; its token is preserved on a
-  // heal so the agent's cooperative-abort check keeps resolving (see ensurePr).
-  abandonUrl?: string;
-}
+// Input is typed off the model data envelope (`PrPersistRoundIn` in convergence-loop.bpmn),
+// the single source of truth for this worker's wire contract (ADR 0040). Framework-injected
+// variables the handler still reads (`io.nanobpm.agentResult`, `agent`) are accessed through the
+// `Record<string, unknown>`-typed helpers below rather than the envelope.
+type In = WorkerInputs["pr.persist-round"];
 
 // The harness records the agent's full (byte-capped) stdout on the result envelope; keep it
 // for audit so a human can see what the agent did this round.

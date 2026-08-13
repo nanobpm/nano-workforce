@@ -16,11 +16,10 @@
 // immediately (the same 0-task path the flat fan-out already relied on).
 import type { AppJobHandler } from "@nanobpm/urban";
 import { plans, planTaskDeps, planTasks } from "../../app/plan.ts";
+import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 
-interface In extends Record<string, unknown> {
-  planKey: string;
-  currentWave: number;
-}
+// Input typed off the model data envelope (`SelectWaveIn` in plan-fanout.bpmn) — ADR 0040.
+type In = WorkerInputs["pr.select-wave"];
 interface WaveTaskOut {
   id: string;
   title: string;

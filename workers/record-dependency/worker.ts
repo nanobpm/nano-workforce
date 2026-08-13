@@ -13,11 +13,12 @@
 // already-recorded edge is a no-op.
 import type { AppJobHandler } from "@nanobpm/urban";
 import { ensurePr, parsePr } from "../../app/service.ts";
+import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 
-interface In extends Record<string, unknown> {
-  prKey: string;
-  dependsOn?: unknown;
-}
+// Input typed off the model data envelope (`RecordDepIn` in merge-loop.bpmn) — ADR 0040. The
+// scalar `dependsOn` carries the agent's `owner/repo#N` refs as one string; `parseDependsOn` below
+// still tolerates the legacy array shape defensively.
+type In = WorkerInputs["pr.record-dependency"];
 
 interface DependencyRow {
   pr_key: string;

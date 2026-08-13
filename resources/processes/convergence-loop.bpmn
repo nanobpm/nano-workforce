@@ -28,6 +28,10 @@
           <nano:extend name="round" type="integer" />
           <nano:extend name="status" type="string" optional="true" />
           <nano:extend name="summary" type="string" optional="true" />
+          <nano:extend name="repo" type="string" optional="true" />
+          <nano:extend name="prNumber" type="integer" optional="true" />
+          <nano:extend name="prUrl" type="string" optional="true" />
+          <nano:extend name="abandonUrl" type="string" optional="true" />
         </nano:shape>
         <nano:shape id="EscalationIn" name="Record escalation — input">
           <nano:extend name="prKey" type="string" />
@@ -36,6 +40,10 @@
           <nano:extend name="summary" type="string" optional="true" />
           <nano:extend name="question" type="string" optional="true" />
           <nano:extend name="recordRound" type="boolean" optional="true" />
+          <nano:extend name="repo" type="string" optional="true" />
+          <nano:extend name="prNumber" type="integer" optional="true" />
+          <nano:extend name="prUrl" type="string" optional="true" />
+          <nano:extend name="abandonUrl" type="string" optional="true" />
         </nano:shape>
         <nano:shape id="EscalationOut" name="Record escalation — result">
           <nano:extend name="escalationId" type="integer" optional="true" />
@@ -53,6 +61,8 @@
           <nano:extend name="prUrl" type="string" />
           <nano:extend name="round" type="integer" />
           <nano:extend name="summary" type="string" optional="true" />
+          <nano:extend name="convergeOnly" type="boolean" optional="true" />
+          <nano:extend name="abandonUrl" type="string" optional="true" />
         </nano:shape>
         <nano:shape id="ReviewReady" name="review-ready message payload">
           <nano:extend name="reviewId" type="integer" />

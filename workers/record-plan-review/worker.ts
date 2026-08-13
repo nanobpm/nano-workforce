@@ -24,13 +24,10 @@ import {
   type PlanReview,
   planReviews,
 } from "../../app/plan.ts";
+import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 
-interface In extends Record<string, unknown> {
-  planKey: string;
-  approved?: unknown;
-  findings?: unknown;
-  planReviewEpoch?: unknown;
-}
+// Input typed off the model data envelope (`RecordPlanReviewIn` in plan-fanout.bpmn) — ADR 0040.
+type In = WorkerInputs["pr.record-plan-review"];
 interface Out extends Record<string, unknown> {
   planApproved: boolean;
   planEscalated: boolean;

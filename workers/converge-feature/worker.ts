@@ -13,12 +13,10 @@
 import type { AppJobHandler } from "@nanobpm/urban";
 import { featureRuns } from "../../app/feature.ts";
 import { MAX_ROUNDS, parsePr, submitPr } from "../../app/service.ts";
+import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 
-interface In extends Record<string, unknown> {
-  featureKey: string;
-  prKey?: unknown;
-  autoMerge?: unknown;
-}
+// Input typed off the model data envelope (`ConvergeFeatureIn` in feature.bpmn) — ADR 0040.
+type In = WorkerInputs["pr.converge-feature"];
 
 const handler: AppJobHandler<In, Record<string, never>> = async (job, app) => {
   const featureKey = job.variables.featureKey;

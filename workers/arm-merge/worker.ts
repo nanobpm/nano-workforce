@@ -2,10 +2,10 @@
 // evaluates its mergeability and correlates `merge-ready`. Reached both on entry to the merge
 // stage (after dependencies clear) and after a human answers a merge escalation (re-check).
 import type { AppJobHandler } from "@nanobpm/urban";
+import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 
-interface In extends Record<string, unknown> {
-  prKey: string;
-}
+// Input typed off the model data envelope (`MergeArmIn` in merge-loop.bpmn) — ADR 0040.
+type In = WorkerInputs["pr.arm-merge"];
 
 const handler: AppJobHandler<In> = async (job, app) => {
   await app.data.table("pull_requests", "pr_key").update(job.variables.prKey, {

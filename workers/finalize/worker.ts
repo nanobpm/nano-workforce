@@ -5,23 +5,11 @@ import type { AppJobHandler } from "@nanobpm/urban";
 import { abandonTokenFromUrl } from "../../app/abandon.ts";
 import { maybeStartRetro } from "../../app/retro.ts";
 import { AUTO_MERGE, ensurePr, startMerge } from "../../app/service.ts";
+import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 
-// Extends Record so the declared fields are typed while the job may still carry
-// other process variables (e.g. io.nanobpm.agentResult, read by transcriptOf).
-interface In extends Record<string, unknown> {
-  prKey: string;
-  repo: string;
-  prNumber: number;
-  prUrl: string;
-  round: number;
-  summary?: string;
-  // Per-request review-only override: when true, stop at `converged` and never hand off to the
-  // merge-loop even if auto-merge is on globally. Set at submit time, carried on the instance.
-  convergeOnly?: boolean;
-  // The per-PR abandon capability URL the agent was handed; its token is preserved on a heal so
-  // the agent's cooperative-abort check keeps resolving (see ensurePr).
-  abandonUrl?: string;
-}
+// Input typed off the model data envelope (`PrFinalizeIn` in convergence-loop.bpmn) — ADR 0040.
+// Framework-injected `io.nanobpm.agentResult` is read through the `Record`-typed `transcriptOf`.
+type In = WorkerInputs["pr.finalize"];
 
 const AGENT_RESULT_KEY = "io.nanobpm.agentResult";
 function transcriptOf(vars: Record<string, unknown>): string | null {

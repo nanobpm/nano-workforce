@@ -14,13 +14,10 @@
 import type { AppJobHandler } from "@nanobpm/urban";
 import { type FeatureRunStatus, featureRuns } from "../../app/feature.ts";
 import { parsePr } from "../../app/service.ts";
+import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 
-interface In extends Record<string, unknown> {
-  featureKey: string;
-  status?: unknown;
-  pr?: unknown;
-  summary?: unknown;
-}
+// Input typed off the model data envelope (`RecordFeatureIn` in feature.bpmn) — ADR 0040.
+type In = WorkerInputs["pr.record-feature"];
 interface Out extends Record<string, unknown> {
   featureStatus: FeatureRunStatus;
   prKey: string | null;

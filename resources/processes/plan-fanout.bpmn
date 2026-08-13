@@ -1,17 +1,46 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI" xmlns:dc="http://www.omg.org/spec/DD/20100524/DC" xmlns:di="http://www.omg.org/spec/DD/20100524/DI" xmlns:zeebe="http://camunda.org/schema/zeebe/1.0" id="Definitions_nano_workforce_plan" targetNamespace="http://nanobpm.io/nano-workforce">
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI" xmlns:dc="http://www.omg.org/spec/DD/20100524/DC" xmlns:di="http://www.omg.org/spec/DD/20100524/DI" xmlns:zeebe="http://camunda.org/schema/zeebe/1.0" xmlns:nano="https://nanobpm.io/schema/shapes/1.0" id="Definitions_nano_workforce_plan" targetNamespace="http://nanobpm.io/nano-workforce">
   <bpmn:message id="Message_waveMerged" name="wave-merged">
     <bpmn:extensionElements>
       <zeebe:subscription correlationKey="=planKey" />
     </bpmn:extensionElements>
   </bpmn:message>
   <bpmn:process id="plan-fanout" name="Agent Fleet — plan &#38; implement" isExecutable="true">
+    <bpmn:extensionElements>
+      <nano:shapes>
+        <nano:shape id="EnsureBaseBranchIn" name="Ensure base branch — input">
+          <nano:extend name="repo" type="string" />
+          <nano:extend name="baseBranch" type="string" />
+        </nano:shape>
+        <nano:shape id="RecordPlanReviewIn" name="Record plan review — input">
+          <nano:extend name="planKey" type="string" />
+          <nano:extend name="approved" type="boolean" optional="true" />
+          <nano:extend name="findings" type="string" optional="true" />
+          <nano:extend name="planReviewEpoch" type="integer" optional="true" />
+        </nano:shape>
+        <nano:shape id="SelectWaveIn" name="Select wave — input">
+          <nano:extend name="planKey" type="string" />
+          <nano:extend name="currentWave" type="integer" />
+        </nano:shape>
+        <nano:shape id="ResolveTrialAttentionIn" name="Clear trial attention — input">
+          <nano:extend name="planKey" type="string" />
+          <nano:extend name="currentWave" type="integer" optional="true" />
+          <nano:extend name="trialMergeWave" type="integer" optional="true" />
+        </nano:shape>
+        <nano:shape id="RecordResultsIn" name="Finalize plan — input">
+          <nano:extend name="planKey" type="string" />
+        </nano:shape>
+      </nano:shapes>
+    </bpmn:extensionElements>
     <bpmn:startEvent id="Start" name="Issue submitted">
       <bpmn:outgoing>f_toEnsureBase</bpmn:outgoing>
     </bpmn:startEvent>
     <bpmn:serviceTask id="ensure-base-branch" name="Ensure base branch">
       <bpmn:extensionElements>
         <zeebe:taskDefinition type="pr.ensure-base-branch" />
+        <zeebe:properties>
+          <zeebe:property name="io.nanobpm.dataEnvelope.in" value="EnsureBaseBranchIn" />
+        </zeebe:properties>
         <zeebe:ioMapping>
           <zeebe:input source="=repo" target="repo" />
           <zeebe:input source="=baseBranch" target="baseBranch" />
@@ -56,6 +85,9 @@
     <bpmn:serviceTask id="record-plan-review" name="Record review &#38; decide">
       <bpmn:extensionElements>
         <zeebe:taskDefinition type="pr.record-plan-review" />
+        <zeebe:properties>
+          <zeebe:property name="io.nanobpm.dataEnvelope.in" value="RecordPlanReviewIn" />
+        </zeebe:properties>
       </bpmn:extensionElements>
       <bpmn:incoming>f_toRecordPlanReview</bpmn:incoming>
       <bpmn:outgoing>f_toGwPlanReview</bpmn:outgoing>
@@ -93,6 +125,9 @@
     <bpmn:serviceTask id="select-wave" name="Select wave">
       <bpmn:extensionElements>
         <zeebe:taskDefinition type="pr.select-wave" />
+        <zeebe:properties>
+          <zeebe:property name="io.nanobpm.dataEnvelope.in" value="SelectWaveIn" />
+        </zeebe:properties>
       </bpmn:extensionElements>
       <bpmn:incoming>f_plan_proceed</bpmn:incoming>
       <bpmn:incoming>f_plan_answer_proceed</bpmn:incoming>
@@ -238,6 +273,9 @@
     <bpmn:serviceTask id="resolve-trial-attention" name="Clear trial attention">
       <bpmn:extensionElements>
         <zeebe:taskDefinition type="pr.resolve-trial-attention" />
+        <zeebe:properties>
+          <zeebe:property name="io.nanobpm.dataEnvelope.in" value="ResolveTrialAttentionIn" />
+        </zeebe:properties>
       </bpmn:extensionElements>
       <bpmn:incoming>f_toGwTrialAnswer</bpmn:incoming>
       <bpmn:outgoing>f_resolveToTrialAnswer</bpmn:outgoing>
@@ -263,6 +301,9 @@
     <bpmn:serviceTask id="record-results" name="Finalize plan">
       <bpmn:extensionElements>
         <zeebe:taskDefinition type="pr.record-results" />
+        <zeebe:properties>
+          <zeebe:property name="io.nanobpm.dataEnvelope.in" value="RecordResultsIn" />
+        </zeebe:properties>
       </bpmn:extensionElements>
       <bpmn:incoming>f_done</bpmn:incoming>
       <bpmn:incoming>f_trialAnswerAbandon</bpmn:incoming>
