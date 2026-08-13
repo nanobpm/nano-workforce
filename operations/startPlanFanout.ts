@@ -59,10 +59,14 @@ export default defineOperation("startPlanFanout", async ({ body }, app) => {
     throw err;
   }
   const result = await startPlan(app.data, app.engine, parsed, normalizedBase);
+  const alreadyRunning = "alreadyRunning" in result && result.alreadyRunning === true;
   app.log.info("plan fan-out started", {
     planKey: parsed.planKey,
-    baseBranch: normalizedBase,
-    alreadyRunning: "alreadyRunning" in result && result.alreadyRunning === true,
+    // The base the caller requested. When `alreadyRunning`, `startPlan` short-circuits before this
+    // base takes effect (it may not match the in-flight plan's persisted base), so name it as the
+    // request — not the effective base — to keep the log honest.
+    requestedBaseBranch: normalizedBase,
+    alreadyRunning,
   });
   return { status: 202, body: result };
 });

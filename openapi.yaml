@@ -275,6 +275,7 @@ components:
         baseBranch:
           type: string
           minLength: 1
+          pattern: '\S'
           description: >-
             REQUIRED target branch the fleet branches off and opens every PR against. Every epic
             launch must name its base explicitly (ADR 0003): a blank/absent value is rejected with a
@@ -317,6 +318,7 @@ components:
         baseBranch:
           type: string
           minLength: 1
+          pattern: '\S'
           description: >-
             REQUIRED target branch the fleet branches off and opens every PR against. See
             `PlanStartByIssue.baseBranch`.
