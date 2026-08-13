@@ -282,9 +282,13 @@ manifest `workers[]`. Point a `c8ctl nano work` daemon (or any Zeebe-style worke
 the task types; each job carries its variables (e.g. `senior:pr-review` gets `{prUrl,
 repo, prNumber, round, answer?}` and returns `{status, summary, question?}`). An
 agent's base prompt is **not** in the job payload — it is delivered as a
-**linked resource** (`<zeebe:linkedResource resourceId="review-round.md"
-bindingType="latest" linkName="prompt"/>`, likewise `plan.md`, `feature.md`,
-`fix-ci.md`, …) that the engine resolves to the latest deployed `prompts/*.md` at job
+**linked resource** (likewise `plan.md`, `feature.md`, `fix-ci.md`, …):
+
+```xml
+<zeebe:linkedResource resourceId="review-round.md" bindingType="latest" linkName="prompt"/>
+```
+
+that the engine resolves to the latest deployed `prompts/*.md` at job
 activation (the prompts deploy as generic resources via a `models` glob in
 `nano.app.json`); per-instance context (e.g. a human's escalation answer) is appended
 by the harness. Because the binding is `latest`, redeploying one `prompts/*.md` updates

@@ -310,8 +310,13 @@ both live in the source repo, not in the job payload.
 - **Prompts (agent base instructions):** `prompts/*.md` — `review-round.md`,
   `plan.md`, `feature.md`, `fix-ci.md`, `rebase.md`, `trial-merge.md`, etc. An
   agent's base prompt is **not** a job variable: it is delivered as a
-  **linked resource** (`<zeebe:linkedResource resourceId="review-round.md"
-  bindingType="latest" linkName="prompt"/>`, likewise `plan.md`, …) that the engine
+  **linked resource** (likewise `plan.md`, …):
+
+  ```xml
+  <zeebe:linkedResource resourceId="review-round.md" bindingType="latest" linkName="prompt"/>
+  ```
+
+  that the engine
   resolves to the latest deployed prompt at job activation. Because the binding is
   `latest`, redeploying one of these files updates the prompt mid-epic without a process
   redeploy. If an agent misbehaves systematically, the prompt is the first thing
