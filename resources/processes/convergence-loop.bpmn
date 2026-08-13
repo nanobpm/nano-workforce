@@ -29,7 +29,7 @@
           <nano:extend name="status" type="string" optional="true" />
           <nano:extend name="summary" type="string" optional="true" />
         </nano:shape>
-        <nano:shape id="PrPersistEscalationIn" name="Record escalation — input">
+        <nano:shape id="EscalationIn" name="Record escalation — input">
           <nano:extend name="prKey" type="string" />
           <nano:extend name="round" type="integer" />
           <nano:extend name="status" type="string" optional="true" />
@@ -37,7 +37,7 @@
           <nano:extend name="question" type="string" optional="true" />
           <nano:extend name="recordRound" type="boolean" optional="true" />
         </nano:shape>
-        <nano:shape id="PrPersistEscalationOut" name="Record escalation — result">
+        <nano:shape id="EscalationOut" name="Record escalation — result">
           <nano:extend name="escalationId" type="integer" optional="true" />
           <nano:extend name="escalated" type="boolean" optional="true" />
           <nano:extend name="question" type="string" optional="true" />
@@ -134,8 +134,8 @@
       <bpmn:extensionElements>
         <zeebe:taskDefinition type="pr.persist-escalation" />
         <zeebe:properties>
-          <zeebe:property name="io.nanobpm.dataEnvelope.in" value="PrPersistEscalationIn" />
-          <zeebe:property name="io.nanobpm.dataEnvelope.out" value="PrPersistEscalationOut" />
+          <zeebe:property name="io.nanobpm.dataEnvelope.in" value="EscalationIn" />
+          <zeebe:property name="io.nanobpm.dataEnvelope.out" value="EscalationOut" />
         </zeebe:properties>
         <zeebe:ioMapping>
           <zeebe:input source="=&#34;blocked&#34;" target="status" />
@@ -150,8 +150,8 @@
       <bpmn:extensionElements>
         <zeebe:taskDefinition type="pr.persist-escalation" />
         <zeebe:properties>
-          <zeebe:property name="io.nanobpm.dataEnvelope.in" value="PrPersistEscalationIn" />
-          <zeebe:property name="io.nanobpm.dataEnvelope.out" value="PrPersistEscalationOut" />
+          <zeebe:property name="io.nanobpm.dataEnvelope.in" value="EscalationIn" />
+          <zeebe:property name="io.nanobpm.dataEnvelope.out" value="EscalationOut" />
         </zeebe:properties>
       </bpmn:extensionElements>
       <bpmn:incoming>f_escalate</bpmn:incoming>
@@ -166,8 +166,8 @@
       <bpmn:extensionElements>
         <zeebe:taskDefinition type="pr.persist-escalation" />
         <zeebe:properties>
-          <zeebe:property name="io.nanobpm.dataEnvelope.in" value="PrPersistEscalationIn" />
-          <zeebe:property name="io.nanobpm.dataEnvelope.out" value="PrPersistEscalationOut" />
+          <zeebe:property name="io.nanobpm.dataEnvelope.in" value="EscalationIn" />
+          <zeebe:property name="io.nanobpm.dataEnvelope.out" value="EscalationOut" />
         </zeebe:properties>
         <zeebe:ioMapping>
           <zeebe:input source="=&#34;blocked&#34;" target="status" />
