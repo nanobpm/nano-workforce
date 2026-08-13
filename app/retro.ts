@@ -161,7 +161,7 @@ export async function gatherRetro(data: DataLayer, planKey: string): Promise<Ret
 }
 
 /** Render the digest as the compact markdown brief handed to the retro agent (rides `appendPrompt`,
- * concatenated after the base `{{retro}}` prompt — so it owns its own leading separator). */
+ * concatenated after the base `retro.md` linked-resource prompt — so it owns its own leading separator). */
 export function renderRetroBrief(d: RetroDigest): string {
   const lines: string[] = [
     "",

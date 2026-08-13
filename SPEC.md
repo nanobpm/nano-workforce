@@ -86,11 +86,11 @@ known at submit time, carried as a process variable and stored on the DB row.
       │
       ▼
 [Register PR]  (script/handler)   → insert DB row; round = 1
-      │                              (base prompt delivered via the {{review-round}} model
-      │                               template header, not a process variable)
+      │                              (base prompt delivered via the review-round.md
+      │                               linked resource, not a process variable)
       ▼
 ┌──▶ [Review round]  (service task, taskType: senior:pr-review)
-│         in : prUrl, repo, prNumber, round, answer?   (prompt via task header)
+│         in : prUrl, repo, prNumber, round, answer?   (prompt via linked resource)
 │         out: status, summary, question?
 │         │
 │         ▼
@@ -153,10 +153,11 @@ Notes:
 | `round` | int | 1-based round counter |
 | `answer` | string? | present only when resuming from an escalation |
 
-The base instructions are **not** a job variable: they are delivered as a model
-**template header** on the `senior:pr-review` task — header key
-`io.nanobpm.agentTask.task.prompt` with value `{{review-round}}`, substituted with
-`prompts/review-round.md` at deploy time.
+The base instructions are **not** a job variable: they are delivered as a
+**linked resource** on the `senior:pr-review` task —
+`<zeebe:linkedResource resourceId="review-round.md" bindingType="latest" linkName="prompt"/>`,
+which the engine resolves to the latest deployed `prompts/review-round.md` at job
+activation.
 
 **Output** (job result variables):
 | var | type | notes |
@@ -292,24 +293,54 @@ tracked row to `abandoned` via the `instanceTracking` `onTerminated.set` patch.
 `deno task purge` wipes and re-migrates the app db (used
 when the engine data is purged, to keep app state and engine state consistent).
 
-## 9. Prompt delivery — model-authored template headers
+## 9. Prompt delivery — linked resources (`bindingType: latest`)
 
-Each agent task's base prompt lives **only** in its `prompts/*.md` side-car and is
-authored **into the model** as a deploy-time `{{stem}}` template. `nano.app.json`
-declares `models.templates: ["prompts/*.md"]`, and each agent service task carries a
-`io.nanobpm.agentTask.task.prompt = {{stem}}` task header (`{{review-round}}`,
-`{{plan}}`, `{{plan-review}}`, `{{feature}}`, `{{fix-ci}}`). At deploy the template
-substitutes the file content into the header, so the host no longer reads prompt
-assets or carries them as process variables.
+Each agent task's base prompt lives **only** in its `prompts/*.md` side-car, deployed
+as a **generic resource** and **linked** — not baked — into the model (issue #169).
+`nano.app.json` lists `prompts/*.md` in a `models` deploy glob, so `@nanobpm/urban`
+deploys each file as an `application/octet-stream` resource whose deployed **name is
+the file's basename** (`prompts/review-round.md` → resource `review-round.md`). Each
+agent service task links it:
 
-Per-instance dynamic context rides **`appendPrompt`**: an ioMapping sets a job-local
-`appendPrompt` string (a plan's rejection findings, a feature task's brief, the
-failing-check list) which the agent harness concatenates **verbatim** onto the header
-base — the model owns any separator, and a null/empty append leaves the base
+```xml
+<zeebe:linkedResources>
+  <zeebe:linkedResource resourceId="review-round.md" bindingType="latest" linkName="prompt" />
+</zeebe:linkedResources>
+```
+
+At **job activation** the engine resolves the *latest deployed* key for that
+`resourceId` and hands the content to the harness in the `linkedResources` activation
+header; the harness fetches by key and uses it as the base prompt. Because the binding
+is `latest`, **redeploying a single `prompts/*.md` changes the prompt for the next task
+activation in a running epic** — no process redeploy, no in-flight epic restart. This
+is the live-prompt debugging loop: edit one Markdown file, `urban deploy` (or restart
+the app, which deploys on boot), and the next agent job of that type picks it up.
+
+> **Latest-for-now, audited.** The engine currently keeps only the latest version per
+> `resourceId` (`deployment`/`versionTag` bindings degrade to latest — no pinning yet).
+> We accept `latest` (ideal for active debugging) and rely on the harness recording the
+> resolved `resourceKey` per job for "which prompt did this run use?". True
+> `deployment`-binding pinning for reproducible production epics is an engine follow-up,
+> not part of #169.
+
+> **The engine silently omits an unresolvable link.** A typo'd or undeployed
+> `resourceId` is dropped from the activation header (no incident) — the agent would
+> then run prompt-less. `scripts/check-agent-prompts.ts` (CI gate `check:prompts`)
+> guards against this: every `linkName="prompt"` link's `resourceId` must match a
+> prompt file the app actually deploys (a file in a `models` deploy glob), each linked
+> prompt must be non-blank and teach the agent to emit a machine-readable result
+> (`$AGENT_RESULT_FILE` / `::nano:result::`), and no task may still carry the retired
+> baked `io.nanobpm.agentTask.task.prompt` header.
+
+Per-instance dynamic context still rides **`appendPrompt`** (unchanged): an ioMapping
+sets a job-local `appendPrompt` string (a plan's rejection findings, a feature task's
+brief, the failing-check list) which the agent harness concatenates **verbatim** onto
+the linked base — the model owns any separator, and a null/empty append leaves the base
 untouched. Base prompts can't be composed in FEEL (they are quote-heavy, and XML
 attribute escaping would corrupt a FEEL string literal), so composition happens via
-this append seam rather than inline in FEEL. Requires `@nanobpm/urban` with
-deploy-time template substitution.
+this append seam rather than inline in FEEL. Requires an `@nanobpm/urban` deploy that
+emits generic-resource deployments for `prompts/*.md` and a harness that consumes
+`linkedResources` and fetches the resource by key.
 
 ## 10. Poller
 
@@ -365,7 +396,7 @@ start ─► wait: deps merged ─► arm merge ─► wait: mergeable ─┬─
 
 - **CI auto-fix** — a `blocked` verdict means a **required check failed**
   (`classifyMergeability`). Rather than escalate immediately, the stage dispatches a
-  `senior:fix-ci` agent (base prompt via the `{{fix-ci}}` template header; the failing
+  `senior:fix-ci` agent (base prompt via the `fix-ci.md` linked resource; the failing
   check names ride `appendPrompt`) to green the checks on the branch, then re-arms the
   poller. It repeats while `ciFixRound < ciFixMax`
   (`NANO_PR_MAX_CI_FIX_ROUNDS`, default 3; `0` disables). Only when the budget is
@@ -432,7 +463,7 @@ Start(issue) → plan → record-plan → implement (parallel MI) → record-res
 ```
 
 - **`plan`** — service task, job type `senior:plan`. Its base prompt is delivered
-  via the `{{plan}}` model template header (`prompts/plan.md`); when a prior review
+  via the `plan.md` linked resource (`bindingType: latest`); when a prior review
   rejected the plan, the rejection findings ride `appendPrompt` (an ioMapping over
   `planFindings`) rather than being concatenated in FEEL. The agent reads the issue
   via `gh` and emits `tasks: [{ id, title, prompt }]`.
@@ -442,8 +473,8 @@ Start(issue) → plan → record-plan → implement (parallel MI) → record-res
   iterates the canonical list.
 - **`implement`** — service task, job type `senior:feature`, **parallel
   multi-instance** over `=tasks` (`inputElement="task"`,
-  `outputCollection="results"`). Its base prompt is delivered via the `{{feature}}`
-  model template header (`prompts/feature.md`); each child's per-task brief
+  `outputCollection="results"`). Its base prompt is delivered via the `feature.md`
+  linked resource (`bindingType: latest`); each child's per-task brief
   (`"\n\n---\n\n" + task.prompt`) rides `appendPrompt` — an input mapping evaluated
   **per child** (Zeebe parity: the inner activity keeps its own `zeebe:ioMapping`,
   applied on each inner-instance activation with `task`/`loopCounter` bound). Each
