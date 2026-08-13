@@ -6,7 +6,7 @@
 -- user tasks (`searchUserTasks`) instead. Nothing reads these tables/columns any more,
 -- so drop them.
 --
--- Forward-only and numbered after the current highest prefix (022); migrations apply
+-- Forward-only and numbered after the current highest prefix (026); migrations apply
 -- in order and are auto-applied on boot. The migration runner wraps each file in its
 -- own transaction — this file must NOT contain BEGIN/COMMIT.
 --

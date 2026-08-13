@@ -1,6 +1,6 @@
 // Migration-path regression proof for retiring the bespoke escalation subsystem (epic #156, slice
 // U7 — the destructive CONTRACT phase). Boots the whole app against the WASM engine so migration
-// `023_retire_escalation_subsystem.sql` is applied on top of the full ledger, then proves three
+// `027_retire_escalation_subsystem.sql` is applied on top of the full ledger, then proves three
 // things about the retired surface:
 //
 //   1. Schema contract — the superseded tables (`plan_escalations`, `plan_review_escalations`) and
@@ -103,7 +103,7 @@ describe("retire escalation subsystem (U7 — destructive contract phase)", () =
     // The retirement migration is recorded in the ledger (it actually ran on top of the full stack).
     const applied = app.db.source().migrationsApplied;
     assert.ok(
-      applied.some((m) => m.includes("023_retire_escalation_subsystem")),
+      applied.some((m) => m.includes("027_retire_escalation_subsystem")),
       `migration 023 is in the applied ledger (applied: ${applied.join(", ")})`,
     );
 
