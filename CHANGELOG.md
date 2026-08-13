@@ -1,3 +1,10 @@
+# [0.53.0](https://github.com/nanobpm/nano-workforce/compare/v0.52.0...v0.53.0) (2026-08-13)
+
+
+### Features
+
+* relay ring + transcript store agentic family (H3) ([#162](https://github.com/nanobpm/nano-workforce/issues/162)) ([f629526](https://github.com/nanobpm/nano-workforce/commit/f62952698fa3cfb3321e60fdce61fdb1f13ca9d6)), closes [#142](https://github.com/nanobpm/nano-workforce/issues/142) [#143](https://github.com/nanobpm/nano-workforce/issues/143) [#146](https://github.com/nanobpm/nano-workforce/issues/146) [#streams](https://github.com/nanobpm/nano-workforce/issues/streams)
+
 # [0.52.0](https://github.com/nanobpm/nano-workforce/compare/v0.51.0...v0.52.0) (2026-08-13)
 
 
