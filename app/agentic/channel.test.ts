@@ -64,7 +64,7 @@ function rejectionCode(port: number, query: string): Promise<number> {
 }
 
 async function mount(
-  port: number,
+  _port: number,
   server: Server,
   families?: () => AgenticFamilyRegistry,
 ): Promise<AgenticChannelHandle> {
@@ -174,6 +174,43 @@ test("teardown closes live connections and is idempotent", async () => {
   await channel.teardown(); // second call is a no-op, must not throw
   await closed;
   assertEquals(ws.readyState, WebSocket.CLOSED);
+});
+
+test("a family mount failure tears down already-mounted families and closes the hub", async () => {
+  const { server, port } = await startHttp();
+  after(() => server.close());
+  const trace: string[] = [];
+  const families = () => {
+    const reg = new AgenticFamilyRegistry();
+    reg.register({
+      name: "ok",
+      mount() {
+        trace.push("mount-ok");
+      },
+      teardown() {
+        trace.push("teardown-ok");
+      },
+    });
+    reg.register({
+      name: "boom",
+      mount() {
+        trace.push("mount-boom");
+        throw new Error("family boom failed to mount");
+      },
+    });
+    return reg;
+  };
+
+  let threw = false;
+  try {
+    await mount(port, server, families);
+  } catch {
+    threw = true;
+  }
+  assert(threw, "mountAgenticChannel must reject when a family mount throws");
+  // The already-mounted family was torn down (reverse order) — no family left half-mounted, and the
+  // hub was closed on the same path (see mountAgenticChannel's failure handler).
+  assertEquals(trace, ["mount-ok", "mount-boom", "teardown-ok"]);
 });
 
 test("a missing secret is refused (never mount an open channel)", async () => {

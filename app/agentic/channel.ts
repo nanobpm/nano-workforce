@@ -82,8 +82,18 @@ export async function mountAgenticChannel(
   // Share the app's port: the transport rode the existing server, so it is already listening.
   await transport.ready();
 
-  const registry = await (opts.families ? opts.families() : discoverRegistry(log));
-  await registry.mountAll({ hub, registry: hub.registry, transport, data, log });
+  // If discovery or any family mount throws, the transport + hub are already live: tear down whatever
+  // mounted (in reverse) and close the hub before rethrowing, so a failed boot never strands upgrade
+  // handlers or half-open connections.
+  let registry: AgenticFamilyRegistry | undefined;
+  try {
+    registry = await (opts.families ? opts.families() : discoverRegistry(log));
+    await registry.mountAll({ hub, registry: hub.registry, transport, data, log });
+  } catch (err) {
+    await registry?.teardownAll(log);
+    await hub.close();
+    throw err;
+  }
 
   log.info("agentic channel mounted", {
     path: AGENTIC_PATH,
