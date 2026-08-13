@@ -106,6 +106,40 @@ blank/absent base is rejected with a 400. Starting a
 plan is idempotent on the plan key; an already-running plan short-circuits. The
 response (202) echoes the `planKey` and engine `processKey`.
 
+### Base-branch admission (ADR 0003)
+
+`startPlanFanout` admits the base through one fail-fast gate before any task fans out.
+Four ordered rules govern which base is accepted:
+
+1. **Required + explicit.** `baseBranch` is mandatory — a blank/absent value is a `400`
+   (`MissingBaseBranchError`), and an implausible name is a `400` (`InvalidBaseBranchError`).
+   There is no silent "land on the default branch" fallback.
+2. **Create-if-missing, `epic/*` only.** A missing `epic/*` base is **auto-created** off the
+   repository default branch's HEAD (idempotently — an existing branch is never reset). A
+   missing base that is **not** `epic/*` is a clean `400` (`BaseBranchMustExistError`): a typo
+   can't silently spawn a wrong-rooted branch, so any non-`epic/*` base must already exist.
+3. **Confirm-default.** Naming the repository **default branch** as the base requires
+   `confirmDefaultBase: true`, else `400` (`DefaultBaseNotConfirmedError`). This is a
+   deliberate acknowledgement that every task lands directly on the default branch with no
+   integration buffer, and any merge-to-default side effect fires per task.
+4. **Shared-base guard.** If another **active** epic (status not `done`/`failed`/`abandoned`)
+   already targets the **same repo + same custom base**, admission is a `409` (`SharedBaseError`)
+   unless you pass `allowSharedBase: true`. The default branch is exempt — many epics target it
+   concurrently without colliding.
+
+So the body may also carry two optional booleans — `confirmDefaultBase` and `allowSharedBase` —
+each a "warn you can't skip" for its rule:
+
+```bash
+curl -sS -X POST __BASE__/actions/start/plan-fanout \
+  -H 'content-type: application/json' \
+  -d '{ "issue": "owner/repo#123", "baseBranch": "main", "confirmDefaultBase": true }'
+```
+
+Grandfathered: in-flight plans launched before this admission gate (with a `null` base branch)
+keep running unchanged — the requirement is enforced at admission of **new** launches, not by a
+database constraint.
+
 Track a plan the same way you track PRs — its `process_key` is an engine instance you
 can inspect in §5, and the PRs it opens show up in `/status` as ordinary convergence
 loops.
