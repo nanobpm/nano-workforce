@@ -57,7 +57,8 @@ export const FEATURE_RUN_STATUSES = [
   "blocked", // the agent could not open a PR (gave up / escalation abandoned)
   "skipped", // nothing to do
   "failed", // an unexpected failure
-  "abandoned", // the process instance was cancelled (set by instanceTracking.onTerminated)
+  "abandoned", // reconciled: the handed-off PR was abandoned (pollFeatureDelivery), or the process
+  // instance itself was cancelled (set by instanceTracking.onTerminated)
 ] as const;
 export type FeatureRunStatus = typeof FEATURE_RUN_STATUSES[number];
 

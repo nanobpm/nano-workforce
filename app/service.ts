@@ -1261,8 +1261,11 @@ export async function pollFeatureDelivery(data: DataLayer) {
   // Preload every PR status once per pass (mirrors pollDelivery — avoids an N+1 `prs(data).get`).
   const statusByPrKey = new Map<string, string>();
   for (const pr of await prs(data).all()) statusByPrKey.set(pr.pr_key, pr.status);
-  for (const run of await featureRuns(data).all()) {
-    if (run.status !== "converging" || !run.pr_key) continue;
+  // Only `converging` runs are ever reconciled — query them via the `feature_runs(status)` index
+  // (db/migrations/028) instead of scanning all history, so this pass stays O(in-flight), not
+  // O(total runs), as the table grows.
+  for (const run of await featureRuns(data).find({ status: "converging" })) {
+    if (!run.pr_key) continue;
     try {
       const prStatus = statusByPrKey.get(run.pr_key) ?? null;
       const { status, label } = deriveFeatureDelivery(prStatus);
