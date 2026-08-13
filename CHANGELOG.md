@@ -1,3 +1,10 @@
+# [0.62.0](https://github.com/nanobpm/nano-workforce/compare/v0.61.1...v0.62.0) (2026-08-13)
+
+
+### Features
+
+* **feature-prompt:** claim the issue with a comment before starting work ([#207](https://github.com/nanobpm/nano-workforce/issues/207)) ([b1b23c9](https://github.com/nanobpm/nano-workforce/commit/b1b23c9928704616aa2173cfa056668a11d32e1c))
+
 ## [0.61.1](https://github.com/nanobpm/nano-workforce/compare/v0.61.0...v0.61.1) (2026-08-13)
 
 
