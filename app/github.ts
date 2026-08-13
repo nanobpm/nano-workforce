@@ -696,7 +696,7 @@ export class BaseBranchMustExistError extends Error {
   }
 }
 
-/** Whether `branch` matches the auto-createable `epic/*` convention (migration 019). */
+/** Whether `branch` matches the auto-creatable `epic/*` convention (migration 019). */
 function isEpicBranch(branch: string): boolean {
   return branch.startsWith("epic/");
 }
@@ -729,23 +729,25 @@ async function branchHeadSha(repo: string, branch: string, token: string): Promi
 }
 
 /** Create `refs/heads/<branch>` pointing at `sha`. Idempotent: a concurrent create / re-plan
- * that already made the ref (GitHub `422 Reference already exists`) is treated as a no-op. */
+ * that already made the ref (GitHub `422 Reference already exists`) is treated as a no-op.
+ * Returns `true` when this call actually created the ref, `false` when it lost the race and the
+ * ref already existed (the 422 case) — so the caller can report an honest exists/created outcome. */
 async function createBranchRef(
   repo: string,
   branch: string,
   sha: string,
   token: string,
-): Promise<void> {
+): Promise<boolean> {
   const ref = `refs/heads/${branch}`;
   if (await useGh()) {
     try {
       await runGh(["api", `repos/${repo}/git/refs`, "-X", "POST", "-f", `ref=${ref}`, "-f", `sha=${sha}`]);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      if (/\b422\b|already exists/i.test(msg)) return; // idempotent — someone else created it
+      if (/\b422\b|already exists/i.test(msg)) return false; // idempotent — someone else created it
       throw err;
     }
-    return;
+    return true;
   }
   if (!token) throw new Error(`no GitHub transport available to create ${ref}`);
   const r = await fetch(`https://api.github.com/repos/${repo}/git/refs`, {
@@ -757,8 +759,8 @@ async function createBranchRef(
     },
     body: JSON.stringify({ ref, sha }),
   });
-  if (r.ok) return;
-  if (r.status === 422) return; // reference already exists — idempotent
+  if (r.ok) return true;
+  if (r.status === 422) return false; // reference already exists — idempotent
   throw new Error(`github ${r.status} ${r.statusText}: ${(await r.text()).slice(0, 300)}`.trim());
 }
 
@@ -791,6 +793,8 @@ export async function ensureBaseBranch(
   if (!defaultSha) {
     throw new Error(`cannot resolve HEAD of default branch ${defaultBranch} on ${repo} to create ${branch}`);
   }
-  await createBranchRef(repo, branch, defaultSha, token);
-  return "created";
+  // A concurrent create / re-plan may have raced us to the ref (GitHub 422); in that case it
+  // already exists and we did not create it, so report "exists" rather than misleading "created".
+  const created = await createBranchRef(repo, branch, defaultSha, token);
+  return created ? "created" : "exists";
 }

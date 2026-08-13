@@ -175,6 +175,49 @@ test("ensureBaseBranch: idempotent — a second call once the branch exists is a
   assertEquals(state.creates.length, 1);
 });
 
+test(
+  'ensureBaseBranch: concurrent create race (GET 404 then POST 422) reports "exists", not "created"',
+  async () => {
+    // Simulate losing the create race: the ref lookup 404s (so we attempt a create), but by the
+    // time our POST lands another actor has already created the ref → GitHub answers 422. The
+    // 422 is idempotent, and the outcome must be the honest "exists" (we did not create it), not
+    // a misleading "created". This locks in the retriable semantics for a concurrent create.
+    const state: FakeRepo = {
+      repo: "o/race",
+      defaultBranch: "main",
+      branches: new Map([["main", "defaulthead"]]),
+      creates: [],
+    };
+    // The git-ref lookup for the epic branch always 404s (as if it does not exist yet), while a
+    // concurrent actor has "already created" it so our POST sees a 422.
+    const base = githubFetch(state);
+    const racingFetch = (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const u = new URL(String(url));
+      const method = (init?.method ?? "GET").toUpperCase();
+      const path = u.pathname;
+      if (method === "GET" && path === `/repos/${state.repo}/git/ref/heads/epic/raced`) {
+        return Promise.resolve(new Response("Not Found", { status: 404 }));
+      }
+      if (method === "POST" && path === `/repos/${state.repo}/git/refs`) {
+        return Promise.resolve(jsonResponse({ message: "Reference already exists" }, 422));
+      }
+      return base(url, init);
+    };
+    const prevMode = process.env["NANO_PR_GITHUB_TRANSPORT"];
+    const prevFetch = globalThis.fetch;
+    process.env["NANO_PR_GITHUB_TRANSPORT"] = "token";
+    globalThis.fetch = racingFetch as typeof fetch;
+    try {
+      const result = await ensureBaseBranch(state.repo, "epic/raced", "tok");
+      assertEquals(result, "exists");
+    } finally {
+      globalThis.fetch = prevFetch;
+      if (prevMode === undefined) delete process.env["NANO_PR_GITHUB_TRANSPORT"];
+      else process.env["NANO_PR_GITHUB_TRANSPORT"] = prevMode;
+    }
+  },
+);
+
 test("ensureBaseBranch: missing non-epic/* branch throws BaseBranchMustExistError", async () => {
   const state: FakeRepo = {
     repo: "o/typo",
