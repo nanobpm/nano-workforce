@@ -157,6 +157,41 @@ Choose (1) when the surface *is* the task; choose (2) when the surface is shared
 infrastructure several distinct tasks sit on top of. Reserve plain parallel tasks
 (no shared surface) for genuinely disjoint work.
 
+### Packaging cohesion → one library, subpaths, not a package per task
+
+The shared-surface rule above pushes toward independence, and independence has a
+seductive failure mode: giving each task its **own published unit** (npm package,
+crate, service) is the *frictionless maximum* of independence — a separate
+manifest, separate exports, separate directory mean zero shared surface and zero
+merge collision. So a plan that slices a single cohesive library into N tasks will,
+left alone, tend to emit **N packages** — one per task. That is not a design; it is
+your task decomposition leaking into the artifact's module boundaries (Conway's
+Law). It has to be unfragmented by hand later, and each extra published unit is a
+one-time publish/credentials bootstrap plus a changelog and version cadence forever.
+
+So, before you slice: **a new published unit requires a consumer-facing
+justification, not merely "this is an independent task."** A new package/crate/
+service is warranted only when at least one is true:
+
+- a **distinct external consumer** imports it on its own (something outside the
+  family depends on *it*, not on its siblings);
+- it needs an **independent release cadence** (versioned and shipped separately on
+  purpose); or
+- it is a **different runtime tier** (e.g. a browser bundle vs. a server library vs.
+  a worker client) that consumers install separately.
+
+Absent one of those, the default is **one library, with the slices as subpath
+exports / subdirectories inside it** (the shape of a package that exposes several
+surfaces — e.g. `./runtime`, `./toolkit`, `./worker` — from a single manifest). The
+slices stay independent to *write*: use the
+**wave-0 scaffold task** (option 2 above) to land the library skeleton first — its
+manifest with the **full exports map pre-declared** and an empty subdirectory per
+slice — so every sibling only **adds files inside its own subdirectory** and never
+touches the shared manifest or barrel. That buys parallel-merge independence **and**
+a cohesive published artifact at the same time. Reserve genuinely separate packages
+for the consumer-facing cases above, and say in the task prompt which consumer
+justifies the split.
+
 ## Output contract
 
 Write a JSON object of **result variables** to the file named by the
