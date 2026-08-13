@@ -161,6 +161,22 @@ the prompt check, the migration-prefix check, and the Node test suite. Run `npm 
 any BPMN flow change and commit the regenerated diagram — the `layout:check`
 gate fails the build otherwise.
 
+### Generated facades are gitignored — regenerate before running a single test file
+
+`nano-generated/*` (the materialised Nano SDK facades — `operations.ts`, etc.) is
+**gitignored** and produced by `urban gen`. Two consequences that have bitten
+agents:
+
+- **Never `git add nano-generated/`** — there is nothing to commit; `gen:check`
+  and `typecheck` validate its freshness on disk. `npm run gen` (or the
+  `pretypecheck`/`pretest` hook) refreshes it.
+- **Run `npm run gen` before running a single delegate test file directly**, e.g.
+  `node --test operations/foo.test.ts`. A raw single-file run does **not** fire an
+  `urban gen` hook, so the delegate import fails with a cryptic
+  `ERR_MODULE_NOT_FOUND` for `nano-generated/operations.ts`. `npm test`/`npm run
+  e2e`/`typecheck` regenerate it first via a pre-hook, so full-suite runs are
+  fine.
+
 ## Repo conventions
 
 - **DCO sign-off is enforced.** Every commit needs a `Signed-off-by` trailer —
