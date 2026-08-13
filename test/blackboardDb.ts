@@ -6,6 +6,7 @@
 //     token→plan resolution), backed by the SAME db so the sync (`planKeyForTokenSync`) and async
 //     (`planKeyForToken`) paths see identical rows.
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
+import { afterEach } from "node:test";
 import type { DataLayer } from "@nanobpm/urban";
 
 /** The tiny synchronous SQLite handle shape the runtime + the agentic store share. */
@@ -32,6 +33,25 @@ function wrap(db: DatabaseSync): SqliteDb {
     all: <T>(sql: string, params: unknown[] = []) => db.prepare(sql).all(...params.map(coerce)) as T[],
     close: () => db.close(),
   };
+}
+
+// Every raw handle these helpers open is tracked here and released after each test, so call sites
+// that drop the returned `close()` (most of them) don't leak native SQLite handles across the run.
+const openDbs = new Set<DatabaseSync>();
+
+afterEach(() => {
+  for (const raw of openDbs) closeTracked(raw);
+});
+
+/** Open a tracked in-memory db and return it with an idempotent `close()` safe to call twice. */
+function openTracked(): { raw: DatabaseSync; close(): void } {
+  const raw = new DatabaseSync(":memory:");
+  openDbs.add(raw);
+  return { raw, close: () => closeTracked(raw) };
+}
+
+function closeTracked(raw: DatabaseSync): void {
+  if (openDbs.delete(raw)) raw.close();
 }
 
 /** A minimal async record gateway over the real db — just the insert/find/findOne subset the
@@ -65,14 +85,14 @@ function gateway(db: SqliteDb, name: string, pk: string) {
 
 /** A DataLayer stub over a fresh in-memory SQLite db, plus a `plans` table for token resolution. */
 export function memBlackboardData(): { data: DataLayer; db: SqliteDb; close(): void } {
-  const raw = new DatabaseSync(":memory:");
+  const { raw, close } = openTracked();
   const db = wrap(raw);
   db.exec("CREATE TABLE IF NOT EXISTS plans (plan_key TEXT PRIMARY KEY, blackboard_token TEXT);");
   const data = {
     source: () => ({ db }),
     table: (name: string, pk = "id") => gateway(db, name, pk),
   } as unknown as DataLayer;
-  return { data, db, close: () => raw.close() };
+  return { data, db, close };
 }
 
 /**
@@ -82,7 +102,7 @@ export function memBlackboardData(): { data: DataLayer; db: SqliteDb; close(): v
  * the fake `data`: `{ ...fake, source: bb.source }`.
  */
 export function memBlackboardSource(): { source: () => { db: SqliteDb }; db: SqliteDb; close(): void } {
-  const raw = new DatabaseSync(":memory:");
+  const { raw, close } = openTracked();
   const db = wrap(raw);
-  return { source: () => ({ db }), db, close: () => raw.close() };
+  return { source: () => ({ db }), db, close };
 }

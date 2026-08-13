@@ -42,6 +42,9 @@ export const family: AgenticFamily = {
       ctx.log.warn("agentic blackboard family: no data layer; not mounting");
       return;
     }
+    // Stop any previously-attached family before remounting, so a repeat mount() (tests or a future
+    // remount path) can't leave stale handlers attached and double-handle frames / leak resources.
+    handle?.stop();
     const db = data.source().db;
     const store = new BlackboardStore(db);
     store.ensureSchema();
