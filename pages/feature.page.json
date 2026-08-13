@@ -38,8 +38,8 @@
         "submitLabel": "Implement & raise PR",
         "action": { "path": "/app/api/actions/start/feature", "body": "{{form}}" },
         "fields": [
-          { "key": "issue", "label": "owner/repo#123 or a GitHub issue URL", "type": "text" },
-          { "key": "baseBranch", "label": "Base branch (REQUIRED; the branch the PR targets, e.g. main). A missing epic/* branch is auto-created off default HEAD; a non-epic/* branch must already exist.", "type": "text" },
+          { "key": "issue", "label": "owner/repo#123 or a GitHub issue URL", "type": "text", "required": true, "requiredMessage": "An issue reference is required (owner/repo#123 or an issue URL)" },
+          { "key": "baseBranch", "label": "Base branch (REQUIRED; the branch the PR targets, e.g. main). A missing epic/* branch is auto-created off default HEAD; a non-epic/* branch must already exist.", "type": "text", "required": true, "requiredMessage": "Name the branch the PR targets (e.g. main or epic/agent-protocol)" },
           { "key": "converge", "label": "Converge \u2014 hand the raised PR to the review-convergence loop", "type": "checkbox" },
           { "key": "autoMerge", "label": "Auto-merge \u2014 after convergence, drive the merge-loop (only applies when Converge is on)", "type": "checkbox" },
           { "key": "confirmDefaultBase", "label": "Confirm landing on the default branch \u2014 required only when the base above IS the repository default", "type": "checkbox" },
