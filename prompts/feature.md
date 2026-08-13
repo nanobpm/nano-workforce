@@ -22,9 +22,12 @@ You have `gh` / git authenticated for the target repository.
 
 Always use the branch **`feat/<task.id>`**. Because a resumed run gets a fresh
 process with no memory of your last run, the branch name MUST be derivable from
-`task.id` alone. On start, check whether it already exists on the remote
-(`git ls-remote --heads origin feat/<task.id>` or
-`gh pr list --head feat/<task.id> --state all`):
+`task.id` alone. On start, check whether it already exists on the remote with
+`git ls-remote --heads origin feat/<task.id>` — a non-empty result means the
+branch exists. Use this ref check as the authoritative first-run/resume signal:
+a remote branch can exist without any PR, so `gh pr list --head feat/<task.id> --state all`
+is reliable only as a *supplementary* PR lookup once `git ls-remote` has
+established the branch exists, never as the existence check itself:
 
 - **It does not exist** → this is a first run. Branch off the base branch (see
   the note below — usually the repository default branch, but an epic may pin an
@@ -42,8 +45,10 @@ on the issue **before implementing** — but ONLY on a first run (your
 `feat/<task.id>` branch did not yet exist, per the check above) AND only when
 **`variables.claimIssue` is true**:
 
-```
-gh issue comment <variables.issue> --body "🤖 Starting work on this issue — branch `feat/<task.id>`."
+```sh
+gh issue comment <variables.issue> --body-file - <<'BODY'
+🤖 Starting work on this issue — branch `feat/<task.id>`.
+BODY
 ```
 
 - `variables.claimIssue` is set **only for single-issue feature runs**, where
