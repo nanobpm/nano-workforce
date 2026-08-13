@@ -374,6 +374,11 @@ export async function findActivePlansByBase(
 export interface AdmitPlanOptions {
   allowSharedBase?: boolean;
   confirmDefaultBase?: boolean;
+  /** The `plan_key` of the launch being admitted. When set, the shared-base guard (rule 4)
+   * EXCLUDES this plan's own active row, so an idempotent re-submit of the same issue does not
+   * trip `SharedBaseError` against itself — `startPlan` is idempotent on `plan_key` and returns
+   * `alreadyRunning` for an active plan, so the retry must reach it, not 409 on rule 4. */
+  selfPlanKey?: string;
 }
 
 /** Fail-fast admission gate for an epic launch (ADR 0003 §Decision). Composes the four ordered
@@ -390,8 +395,9 @@ export interface AdmitPlanOptions {
  *      re-runs it as belt-and-suspenders.
  *   3. Confirm-default — if the base equals the repo default branch and `confirmDefaultBase` is not
  *      `true`, throw `DefaultBaseNotConfirmedError`. The default branch is then EXEMPT from rule 4.
- *   4. Shared-base — if an active plan already targets this same custom base and `allowSharedBase`
- *      is not `true`, throw `SharedBaseError`.
+ *   4. Shared-base — if a DIFFERENT active plan already targets this same custom base and
+ *      `allowSharedBase` is not `true`, throw `SharedBaseError`. The launch's own active row is
+ *      excluded (via `options.selfPlanKey`) so an idempotent same-issue re-submit is not a 409.
  */
 export async function admitPlan(
   data: DataLayer,
@@ -417,9 +423,13 @@ export async function admitPlan(
     return base;
   }
 
-  // Rule 4 — shared-base guard on a custom integration branch.
+  // Rule 4 — shared-base guard on a custom integration branch. Exclude this launch's OWN active row
+  // (when `selfPlanKey` is given) so an idempotent same-issue re-submit reaches `startPlan`'s
+  // `alreadyRunning` short-circuit instead of tripping a 409 against itself.
   if (options.allowSharedBase !== true) {
-    const active = await findActivePlansByBase(data, repo, base);
+    const active = (await findActivePlansByBase(data, repo, base)).filter(
+      (p) => p.plan_key !== options.selfPlanKey,
+    );
     if (active.length > 0) throw new SharedBaseError(repo, base);
   }
 

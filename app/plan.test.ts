@@ -714,6 +714,30 @@ test("admitPlan rule 4: active shared CUSTOM base WITHOUT allowSharedBase → Sh
   });
 });
 
+test("admitPlan rule 4: same-issue re-submit is admitted — selfPlanKey excludes the launch's OWN active row", async () => {
+  // Idempotency regression: startPlan short-circuits an in-flight plan to `alreadyRunning`, but that
+  // reachable only if admitPlan does NOT 409 the retry against the plan's own active row. With
+  // selfPlanKey set, the shared-base guard excludes that row, so the same-issue re-submit is admitted.
+  const state: AdmitRepo = { repo: "o/r6b", defaultBranch: "main", branches: new Set(["main", "epic/shared"]), creates: [], metaCalls: 0 };
+  const planRows = [{ plan_key: "o/r6b#1", repo: "o/r6b", base_branch: "epic/shared", status: "planning" }];
+  const base = await withAdmit(state, () =>
+    admitPlan(admitData(planRows), state.repo, "epic/shared", "tok", { selfPlanKey: "o/r6b#1" }),
+  );
+  assertEquals(base, "epic/shared");
+});
+
+test("admitPlan rule 4: a DIFFERENT active plan on the same base still trips the guard even with selfPlanKey set", async () => {
+  // selfPlanKey excludes only the launch's own row — a genuine collision with another epic still 409s.
+  const state: AdmitRepo = { repo: "o/r6c", defaultBranch: "main", branches: new Set(["main", "epic/shared"]), creates: [], metaCalls: 0 };
+  const planRows = [{ plan_key: "o/r6c#2", repo: "o/r6c", base_branch: "epic/shared", status: "planning" }];
+  await withAdmit(state, async () => {
+    await assertRejects(
+      () => admitPlan(admitData(planRows), state.repo, "epic/shared", "tok", { selfPlanKey: "o/r6c#1" }),
+      SharedBaseError,
+    );
+  });
+});
+
 test("admitPlan rule 4: same custom base WITH allowSharedBase → admitted", async () => {
   const state: AdmitRepo = { repo: "o/r7", defaultBranch: "main", branches: new Set(["main", "epic/shared"]), creates: [], metaCalls: 0 };
   const planRows = [{ plan_key: "o/r7#1", repo: "o/r7", base_branch: "epic/shared", status: "planning" }];

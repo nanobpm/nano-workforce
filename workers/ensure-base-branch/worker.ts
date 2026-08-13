@@ -9,14 +9,14 @@
 // throws `BaseBranchMustExistError` (which fails the durable task rather than fanning out onto a
 // wrong-rooted branch).
 import type { AppJobHandler } from "@nanobpm/urban";
-import { ensureBaseBranch } from "../../app/github.ts";
+import { type EnsureBaseBranchResult, ensureBaseBranch } from "../../app/github.ts";
 
 interface In extends Record<string, unknown> {
   repo: string;
   baseBranch: string;
 }
 interface Out extends Record<string, unknown> {
-  baseBranchResult: string;
+  baseBranchResult: EnsureBaseBranchResult;
 }
 
 const handler: AppJobHandler<In, Out> = async (job, app) => {

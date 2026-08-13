@@ -48,6 +48,7 @@ export default defineOperation("startPlanFanout", async ({ body }, app) => {
     normalizedBase = await admitPlan(app.data, parsed.repo, rawBase, token, {
       allowSharedBase,
       confirmDefaultBase,
+      selfPlanKey: parsed.planKey,
     });
   } catch (err) {
     if (err instanceof MissingBaseBranchError) {
