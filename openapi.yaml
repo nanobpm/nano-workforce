@@ -274,6 +274,7 @@ components:
           description: "Issue reference: owner/repo#123."
         baseBranch:
           type: string
+          minLength: 1
           description: >-
             REQUIRED target branch the fleet branches off and opens every PR against. Every epic
             launch must name its base explicitly (ADR 0003): a blank/absent value is rejected with a
@@ -315,6 +316,7 @@ components:
           description: A bare issue URL, when no `owner/repo#123` reference is supplied.
         baseBranch:
           type: string
+          minLength: 1
           description: >-
             REQUIRED target branch the fleet branches off and opens every PR against. See
             `PlanStartByIssue.baseBranch`.
