@@ -2,8 +2,8 @@
 // `feature-escalation` user task (issue #210). Runs on the `escalated` arm, before the user task
 // exists, and must flip the row to the non-terminal `escalated` status and persist the agent's
 // `question` so the nwf UI can surface it (the poller can't read task-local vars, so this is the
-// question's source of truth). It must NOT touch the completable-task pointer (unknown here — the
-// poller fills it once the task is observable).
+// question's source of truth). It clears the completable-task pointer to NULL (the task does not
+// exist yet, so any non-null value is stale); the poller fills the real key once it is observable.
 import { test } from "node:test";
 import { assertEquals } from "#test-assert";
 import { noopLog } from "../../test/log.ts";
@@ -49,7 +49,19 @@ test("record-feature-escalation: flips the run to escalated and persists the que
   assertEquals(out, {});
   assertEquals(rows[0].status, "escalated");
   assertEquals(rows[0].escalation_question, "Which API should I use?");
-  // The user task does not exist yet — the pointer is the poller's to fill, not this worker's.
+  // The user task does not exist yet — the pointer is cleared to NULL here (poller fills the real key).
+  assertEquals(rows[0].escalation_user_task_key, null);
+});
+
+test("record-feature-escalation: clears a stale completable-task pointer at escalation entry", async () => {
+  // The task does not exist yet here, so a non-null key can only be stale (a prior escalation's key
+  // left behind, a manual DB repair, etc). Leaving it would bind the pages' answer/abandon affordance
+  // to the wrong task until the poller overwrites it; clear it so the row reads "key unknown here".
+  const rows = [{ feature_key: "owner/repo#9", status: "running", escalation_question: null, escalation_user_task_key: "stale-ut" }];
+  const app = fakeApp(rows);
+  await handler({ variables: { featureKey: "owner/repo#9", question: "Q?" } } as never, app);
+  assertEquals(rows[0].status, "escalated");
+  assertEquals(rows[0].escalation_question, "Q?");
   assertEquals(rows[0].escalation_user_task_key, null);
 });
 
