@@ -5,13 +5,13 @@ Date: 2026-08-13.
 
 > **Scope note.** A **nano-workforce-local** ADR — it governs how *this app* admits an epic for
 > execution. Platform-wide ADRs live in `Magikcraft/nano-bpm/docs/adr` (referenced by number + repo).
-> Continues nano-workforce's series after ADR 0002.
+> Continues nano-workforce's series after ADR 0001 (ADR 0002 is planned but not yet written; see below).
 
 Relates to:
 nano-workforce **ADR 0001** (cross-repo epics + integration branches — this ADR hardens *how* an epic's
 integration branch is chosen, created, and protected),
-nano-workforce **ADR 0002** (escalations are user tasks — the confirm / shared-base gates are human
-decisions that *could* later surface as user tasks; see Open questions),
+nano-workforce **ADR 0002** *(planned — not yet written in this repo; escalations as user tasks)*: the
+confirm / shared-base gates are human decisions that *could* later surface as user tasks; see Open questions,
 nano-bpm **ADR 0058** (the OpenAPI endpoint surface — `startPlanFanout` is a spec operation whose request
 schema this ADR changes),
 migration `019_plan_base_branch.sql` (the `plans.base_branch` column, whose example is `epic/agent-protocol`),
@@ -106,11 +106,11 @@ independent). The guard fires only for a **shared custom integration branch**, t
   stays nullable; the required-ness is enforced at *admission* of new launches, not by a DB `NOT NULL`).
 - **New write permission exercised:** ref creation (already held by the token that pushes task branches).
 - **Ties into ADR 0001/0002:** this is the admission half of the integration-branch story (0001), and its
-  human gates could later be modeled as user tasks (0002) rather than flags — see Open questions.
+  human gates could later be modeled as user tasks (planned ADR 0002) rather than flags — see Open questions.
 
 ## Open questions
 
-- **Gates as user tasks (ADR 0002)?** Should `confirmDefaultBase` / shared-base become an inbox **user
+- **Gates as user tasks (planned ADR 0002)?** Should `confirmDefaultBase` / shared-base become an inbox **user
   task** ("Epic X wants to target `main` / share `epic/y` — approve?") instead of a submit-time flag? For
   *pre-fan-out* admission a synchronous flag is simpler and fail-fast; a user task fits only if we want a
   human in the launch loop. Deferred.
