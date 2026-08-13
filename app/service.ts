@@ -481,10 +481,16 @@ export async function answerEscalation(
   prKey: string,
   answer: string,
 ) {
-  const open = (await escs(data).find({ pr_key: prKey, status: "open" })).sort((a, b) => b.id - a.id)[0];
-  if (!open) return { ok: false, reason: "no open escalation" };
+  const open = (await escs(data).find({ pr_key: prKey, status: "open" })).sort((a, b) => b.id - a.id);
+  if (open.length === 0) return { ok: false, reason: "no open escalation" };
   const ts = now();
-  await escs(data).update(open.id, { answer, status: "answered", answered_at: ts });
+  await escs(data).update(open[0].id, { answer, status: "answered", answered_at: ts });
+  // `pr.persist-escalation` always INSERTs a new open row, so a retry can leave duplicate open rows
+  // for this PR. Retire any older ones to `stale` so none is left `open` to phantom-surface on
+  // /status (mirrors `submitPr`'s resubmit cleanup and the review loop's `pr.answer-escalation`).
+  for (const dup of open.slice(1)) {
+    await escs(data).update(dup.id, { status: "stale" });
+  }
   await prs(data).update(prKey, {
     status: "converging",
     updated_at: ts,
@@ -492,9 +498,9 @@ export async function answerEscalation(
   await engine.publishMessage({
     name: "escalation-answered",
     correlationKey: prKey,
-    variables: { answer, escalationId: open.id },
+    variables: { answer, escalationId: open[0].id },
   });
-  return { ok: true, escalationId: open.id };
+  return { ok: true, escalationId: open[0].id };
 }
 
 /** A PR currently in flight, as reported by the status endpoint. */

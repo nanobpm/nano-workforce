@@ -9,11 +9,13 @@
 // escalation on `/status` after it was answered.
 //
 // This mirrors the merge-loop's message-catch answer path (`answerEscalation` in app/service.ts):
-// both retire the canonical `escalations` row AND move the `pull_requests` row off `status="escalated"`
-// back to `"converging"`, so an answered escalation is never left dangling and `/status` never shows an
-// escalated PR with a null question. The token resume itself is owned by the engine (userTask
-// completion), so this worker only reconciles the durable rows; it returns no variables, leaving the
-// submitted `answer` untouched so it flows on to the next review round.
+// both answer the newest still-open `escalations` row, mark any duplicate open rows `stale` (a
+// retry of `pr.persist-escalation` can leave more than one open), AND move the `pull_requests` row
+// off `status="escalated"` back to `"converging"`, so an answered escalation is never left dangling
+// and `/status` never shows an escalated PR with a null question or a phantom open row. The token
+// resume itself is owned by the engine (userTask completion), so this worker only reconciles the
+// durable rows; it returns no variables, leaving the submitted `answer` untouched so it flows on to
+// the next review round.
 import type { AppJobHandler } from "@nanobpm/urban";
 
 interface Escalation extends Record<string, unknown> {
@@ -47,17 +49,22 @@ const handler: AppJobHandler<In> = async (job, app) => {
   const { prKey } = job.variables;
   const answer = nonBlank(job.variables.answer);
   const escs = app.data.table<Escalation>("escalations", "id");
-  // Retire the latest still-open escalation for this PR (mirrors `answerEscalation`'s latest-open
-  // selection). Only one should be open per park; picking the newest keeps a defensive extra row
-  // from masking the one the operator just answered.
-  const open = (await escs.find({ pr_key: prKey, status: "open" })).sort((a, b) => b.id - a.id)[0];
-  if (open) {
+  // Retire EVERY still-open escalation for this PR. `pr.persist-escalation` always INSERTs a new
+  // open row, so a retry/duplicate activation can leave more than one open — answering only the
+  // newest would leave an older duplicate `open`, a phantom `activePrs` keeps deriving while the PR
+  // is still `escalated`. Answer the newest (it carries the operator's reply) and mark any remaining
+  // open rows `stale`, mirroring `answerEscalation` and `submitPr`'s resubmit cleanup.
+  const open = (await escs.find({ pr_key: prKey, status: "open" })).sort((a, b) => b.id - a.id);
+  if (open.length > 0) {
     const ts = new Date().toISOString();
-    await escs.update(open.id, {
+    await escs.update(open[0].id, {
       answer: answer ?? null,
       status: "answered",
       answered_at: ts,
     });
+    for (const dup of open.slice(1)) {
+      await escs.update(dup.id, { status: "stale" });
+    }
     // Mirror the merge loop's `answerEscalation`: move the PR off `status="escalated"` back to
     // `"converging"` now that the question is answered. Without this the row stays `escalated` (with
     // a now-null derived `openEscalation`) until the re-entered round's `persist-round` runs — a

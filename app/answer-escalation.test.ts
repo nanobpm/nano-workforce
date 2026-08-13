@@ -64,6 +64,29 @@ test("retires the latest open escalation to answered with the submitted answer",
   assertEquals(typeof prUpdates[0].patch.updated_at, "string", "updated_at is stamped");
 });
 
+test("retires ALL open rows: newest answered, any duplicate open rows marked stale", async () => {
+  // `pr.persist-escalation` always INSERTs a new open row, so a retry/duplicate activation can
+  // leave more than one `status="open"` row for the same PR. Answering only the newest would leave
+  // an older open row behind — a phantom that keeps `activePrs` deriving an open escalation while
+  // the PR is still `escalated`. Every open row for the PR must leave `open` in this completion.
+  const rows = [
+    { id: 3, pr_key: "o/r#1", status: "open", question: "stale dup A" },
+    { id: 7, pr_key: "o/r#1", status: "open", question: "Which retry cap?" },
+    { id: 9, pr_key: "o/r#2", status: "open", question: "other PR — untouched" },
+  ];
+  const { app, updates, prUpdates } = fakeApp(rows);
+  const job = { variables: { prKey: "o/r#1", answer: "Cap at 5." } };
+  await handler(job as any, app as any);
+  assertEquals(updates.length, 2, "both open rows for this PR are retired; the other PR is untouched");
+  const answered = updates.find((u) => u.key === 7);
+  const stale = updates.find((u) => u.key === 3);
+  assertEquals(answered?.patch.status, "answered", "the newest open row is answered");
+  assertEquals(answered?.patch.answer, "Cap at 5.", "the answer is recorded on the newest row");
+  assertEquals(stale?.patch.status, "stale", "the older duplicate open row is marked stale");
+  assertEquals(prUpdates.length, 1, "the PR row is moved off `escalated` exactly once");
+  assertEquals(prUpdates[0].patch.status, "converging");
+});
+
 test("no open row is a no-op (idempotent re-completion)", async () => {
   const rows = [{ id: 7, pr_key: "o/r#1", status: "answered", question: "Which retry cap?" }];
   const { app, updates, prUpdates } = fakeApp(rows);
