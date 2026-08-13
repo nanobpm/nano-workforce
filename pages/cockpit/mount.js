@@ -182,6 +182,8 @@ function relaySocketFactory(url) {
  * @param {string} [opts.relayToken] — identity token appended to the default relay URL as `?token=…`.
  * @param {string} [opts.relayCapability] — capability credential appended to the default relay URL as `&capability=…`.
  * @param {number} [opts.refreshMs] — poll interval (default 2000).
+ * @param {number} [opts.staleAfterMs] — a worker is rendered "stale" once its last heartbeat is at
+ *   least this many ms old (default 15000).
  * @returns a handle with `.dispose()`.
  */
 export function mountCockpit(host, opts = {}) {
