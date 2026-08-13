@@ -29,6 +29,14 @@
       }
     },
     {
+      "type": "text",
+      "id": "escalations-pointer",
+      "props": {
+        "text": "Escalations (task, plan-review, trial-merge) are native user tasks — answer them from the Task inbox at /tasks: list the open tasks, pick the one for this epic, and submit the typed decision. There is no separate answer form on this page.",
+        "variant": "sub"
+      }
+    },
+    {
       "type": "dataGrid",
       "id": "epic-plan",
       "props": {
@@ -47,24 +55,7 @@
           { "field": "status", "header": "Status", "link": { "kind": "processExplorer", "keyField": "process_key" } },
           { "field": "wave_label", "header": "Wave" },
           { "field": "task_count", "header": "Tasks" },
-          { "field": "open_task_id", "header": "Open escalation" },
-          { "field": "open_plan_round", "header": "Plan escalation round" },
           { "field": "updated_at", "header": "Updated" }
-        ],
-        "rowActions": [
-          {
-            "label": "Proceed with plan",
-            "confirm": "Dispatch the current unapproved plan as a human override?",
-            "showWhenField": "open_plan_escalation_id",
-            "action": {
-              "path": "/app/api/actions/message",
-              "body": {
-                "name": "plan-escalation-answered",
-                "correlationKey": "{{row.plan_key}}",
-                "variables": { "directive": "proceed", "note": "Proceed override from the epic page." }
-              }
-            }
-          }
         ],
         "detail": {
           "linkField": "issue_url",
@@ -72,26 +63,8 @@
             { "field": "repo", "label": "Repository" },
             { "field": "issue_number", "label": "Issue number" },
             { "field": "base_branch", "label": "Base branch (blank = repo default)" },
-            { "field": "outcome", "label": "Outcome" },
-            { "field": "open_plan_findings", "label": "Open plan-review findings" },
-            { "field": "open_task_question", "label": "Open escalation question" }
-          ],
-          "form": {
-            "showWhenField": "open_plan_escalation_id",
-            "title": "Answer the open plan-review escalation",
-            "promptField": "open_plan_findings",
-            "inputKey": "note",
-            "inputLabel": "Revision directive note for the planner",
-            "submitLabel": "Revise plan",
-            "action": {
-              "path": "/app/api/actions/message",
-              "body": {
-                "name": "plan-escalation-answered",
-                "correlationKey": "{{row.plan_key}}",
-                "variables": { "directive": "revise", "note": "{{form.note}}" }
-              }
-            }
-          }
+            { "field": "outcome", "label": "Outcome" }
+          ]
         }
       }
     },

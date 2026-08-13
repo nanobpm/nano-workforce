@@ -124,25 +124,53 @@ curl -sS __BASE__/status | jq '.prs[] | select(.openEscalation != null)
   | { prKey, status, round, openEscalation }'
 ```
 
-**Answer a PR review-loop escalation** (convergence-loop). This is now a native
-`userTask` bearing the `pr-escalation` form — answer it through the **task inbox**
-surface (list the open tasks, then complete the one for your PR with `{ answer }`):
+The four decision-required escalation kinds — **PR review-loop**, **implementation
+(feature) task**, **plan-review**, and **trial-merge** — are now native BPMN
+`userTask`s bearing a linked `.form`, all answered the same way through the **task
+inbox** surface. There is no bespoke per-kind webhook or answer page any more.
+
+**List the open escalation tasks.** Each task carries its context (e.g. `prKey` /
+`question` / `findings` / `task`) in its `variables`, and its kind in `elementId`:
 
 ```bash
-# List open user tasks (the escalation carries `prKey` + `question` in its variables):
-curl -sS __BASE__/tasks/api/tasks | jq '.[] | { userTaskKey, elementId, variables }'
+# Every parked escalation, across all kinds:
+curl -sS __BASE__/../../tasks/api/tasks | jq '.[] | { userTaskKey, elementId, variables }'
 
-# Complete the escalation task — the typed `answer` resumes the review loop:
-curl -sS -X POST __BASE__/tasks/api/complete \
-  -H 'content-type: application/json' \
-  -d '{
-        "userTaskKey": "<userTaskKey>",
-        "variables": { "answer": "Yes — cap the retries at 5 and proceed." }
-      }'
+# Filter to one kind (e.g. plan-review decisions) by elementId:
+curl -sS __BASE__/../../tasks/api/tasks \
+  | jq '[.[] | select(.elementId == "plan-review-decision")]'
 ```
 
-**Answer a merge-loop escalation** (merge-loop still uses the durable message
-catch). Use the message name `escalation-answered`; correlate by the PR key:
+The inbox UI is also served at `__BASE__/../../tasks` for a human to browse, filter, and
+answer (assignee/candidate-group and age surface on each task once assignment lands).
+
+**Answer a task** by completing it with the typed variables its form expects — the
+completion resumes the parked process:
+
+```bash
+# PR review-loop (elementId `wait-answer`, pr-escalation form):
+curl -sS -X POST __BASE__/../../tasks/api/complete -H 'content-type: application/json' \
+  -d '{ "userTaskKey": "<key>", "variables": { "answer": "Cap retries at 5 and proceed." } }'
+
+# Implementation (feature) task (elementId `feature-escalation`):
+#   { "resolution": "answer", "answer": "…" }  to resume, or  { "resolution": "abandon" }
+curl -sS -X POST __BASE__/../../tasks/api/complete -H 'content-type: application/json' \
+  -d '{ "userTaskKey": "<key>", "variables": { "resolution": "answer", "answer": "Use v2." } }'
+
+# Plan-review (elementId `plan-review-decision`):
+#   { "directive": "revise", "notes": "…" }  (fresh review budget)  or  { "directive": "proceed" }
+curl -sS -X POST __BASE__/../../tasks/api/complete -H 'content-type: application/json' \
+  -d '{ "userTaskKey": "<key>", "variables": { "directive": "revise", "notes": "Make issue-7 the seam." } }'
+
+# Trial-merge (elementId `trial-merge-decision`):
+#   { "action": "proceed" | "rebase" | "abandon", "notes"?: "…" }
+curl -sS -X POST __BASE__/../../tasks/api/complete -H 'content-type: application/json' \
+  -d '{ "userTaskKey": "<key>", "variables": { "action": "rebase", "notes": "Re-run after the fix." } }'
+```
+
+**Answer a merge-loop escalation** (the one out-of-scope kind that still uses the
+durable message catch, not a user task). Use the message name `escalation-answered`,
+correlated by the PR key:
 
 ```bash
 curl -sS -X POST __BASE__/actions/message \
@@ -154,29 +182,12 @@ curl -sS -X POST __BASE__/actions/message \
       }'
 ```
 
-The answer is delivered to the agent as the `answer` variable on its next round, and
-the loop resumes.
-
-**Answer an implementation-phase (feature) task escalation** raised during a
-plan fan-out — a dedicated webhook operation:
-
-```bash
-curl -sS -X POST __BASE__/hooks/feature-answer \
-  -H 'content-type: application/json' \
-  -d '{ "correlationKey": "<task-or-pr-key>", "answer": "…" }'
-```
-
 If `NANO_PR_WEBHOOK_SECRET` is set on the deployment, add `-H "x-hook-secret: <secret>"`.
 
-**Answer a plan-review escalation** raised when the adversarial plan review cannot
-converge within its round budget. Use `revise` to send guidance back to the planner
-with a fresh review budget, or `proceed` to explicitly approve the current plan as-is:
-
-```bash
-curl -sS -X POST __BASE__/hooks/plan-answer \
-  -H 'content-type: application/json' \
-  -d '{ "plan": "owner/repo#123", "directive": "revise", "note": "Keep the sub-issues 1:1; make issue-7 the seam and point siblings at it." }'
-```
+The answer is delivered to the agent as its next-round context (e.g. the `answer`,
+`directive`, or `action` variable), and the loop resumes. **Audit** is durable: the
+completed user tasks form the escalation history, and the review/merge loops' rows
+live in the `escalations` table (surfaced read-only per PR on the Convergence page).
 
 Guidance for the human you assist: read the escalation `question` or plan-review
 `findings` first, decide the smallest unblocking answer, and answer it precisely —

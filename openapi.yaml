@@ -304,75 +304,6 @@ components:
       properties:
         ok:
           type: boolean
-    FeatureAnswerRequest:
-      description: "Answer an implementation-phase task escalation (issue #25). Supply the target by
-        EXACTLY ONE of `corrKey`, or the `plan`+`task` pair the delegate derives it from; `answer`
-        is always required. Modeled as `oneOf` named variants (Camunda REST v2 pattern) so a body
-        that supplies neither addressing form — or mixes them — is a 400 at the edge that names the
-        allowed shapes, instead of the delegate re-deriving the precedence by hand."
-      oneOf:
-        - $ref: "#/components/schemas/FeatureAnswerByCorrKey"
-        - $ref: "#/components/schemas/FeatureAnswerByPlanTask"
-    FeatureAnswerByCorrKey:
-      type: object
-      additionalProperties: false
-      required:
-        - corrKey
-        - answer
-      properties:
-        corrKey:
-          type: string
-          description: The task correlation key, `<plan_key>:<task_id>` (e.g. owner/repo#12:task-3).
-        answer:
-          type: string
-          minLength: 1
-          description: The operator's answer that resumes the parked implementation agent.
-    FeatureAnswerByPlanTask:
-      type: object
-      additionalProperties: false
-      required:
-        - plan
-        - task
-        - answer
-      properties:
-        plan:
-          type: string
-          description: Plan reference (owner/repo#N); combined with `task` to derive the corrKey.
-        task:
-          type: string
-          description: Task id within the plan; combined with `plan` to derive the corrKey.
-        answer:
-          type: string
-          minLength: 1
-          description: The operator's answer that resumes the parked implementation agent.
-    PlanAnswerRequest:
-      type: object
-      additionalProperties: false
-      required:
-        - plan
-        - directive
-      properties:
-        plan:
-          type: string
-          description: Plan reference (owner/repo#N), also the message correlation key.
-        directive:
-          type: string
-          description: >-
-            One of `proceed` or `revise` (case-insensitive; normalized to lowercase and trimmed
-            server-side, see `normalizePlanEscalationDirective`).
-            `proceed` dispatches the current unapproved plan as an explicit human override;
-            `revise` loops back to the planner with the note folded into planFindings and a fresh
-            review budget.
-        note:
-          type: string
-          description: Human guidance for the planner (used for `revise`; optional for `proceed`).
-        notes:
-          type: string
-          description: >-
-            Alias for `note`, accepting the form-shaped payload emitted by the
-            `plan-review-decision` user task form (whose field is named `notes`). When both are
-            present, `note` takes precedence only if it is non-blank; a blank/whitespace `note`
-            is treated as missing and falls back to `notes`.
     AgentCompleteRequest:
       type: object
       additionalProperties: false
@@ -654,9 +585,11 @@ paths:
   /actions/message:
     post:
       operationId: postMessage
-      summary: Publish a message / answer an escalation. For escalation-answered,
-        feature-escalation-answered, and plan-escalation-answered names, runs the corresponding
-        answer flow; otherwise a plain publishMessage.
+      summary: "Publish a message / answer an escalation. For the merge-loop `escalation-answered`
+        name, runs the merge-loop escalation answer flow; otherwise a plain publishMessage. The
+        epic #156 escalation
+        kinds (task, plan-review, trial-merge, PR review-loop) are native user tasks answered via
+        the task inbox (POST /tasks/api/complete), not this route."
       requestBody:
         required: true
         content:
@@ -679,19 +612,7 @@ paths:
                   properties:
                     answer:
                       type: string
-                    directive:
-                      type: string
-                      description: >-
-                        One of `proceed` or `revise` (case-insensitive; normalized to lowercase and
-                        trimmed server-side, see `normalizePlanEscalationDirective`).
-                    note:
-                      type: string
-                    notes:
-                      type: string
-                      description: >-
-                        Alias for `note`, accepting the form-shaped payload emitted by the
-                        `plan-review-decision` user task form (whose field is named `notes`).
-                        Used when `note` is absent or blank.
+                      description: The operator's answer that resumes a parked merge-loop escalation.
       responses:
         "200":
           description: The message was published (or the escalation answered).
@@ -707,84 +628,6 @@ paths:
                 $ref: "#/components/schemas/ErrorBody"
         "404":
           description: No matching open escalation / parked token to answer.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/MessageResult"
-  /hooks/feature-answer:
-    post:
-      operationId: answerFeatureEscalation
-      summary: "Answer an implementation-phase task escalation out of band (issue #25). Optional
-        shared-secret guard (x-hook-secret), enforced only when NANO_PR_WEBHOOK_SECRET is set."
-      security:
-        - hookSecret: []
-        - {}
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/FeatureAnswerRequest"
-      responses:
-        "200":
-          description: The escalation was answered and the parked agent resumed.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/MessageResult"
-        "400":
-          description: A required field was missing (answer, or a resolvable correlation key).
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/MessageResult"
-        "401":
-          description: Missing/invalid shared secret (only when NANO_PR_WEBHOOK_SECRET is set).
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/MessageResult"
-        "404":
-          description: No matching open task escalation for the correlation key.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/MessageResult"
-  /hooks/plan-answer:
-    post:
-      operationId: answerPlanEscalation
-      summary: "Answer a plan-review cap escalation out of band. Optional shared-secret guard
-        (x-hook-secret), enforced only when NANO_PR_WEBHOOK_SECRET is set."
-      security:
-        - hookSecret: []
-        - {}
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/PlanAnswerRequest"
-      responses:
-        "200":
-          description: The escalation was answered and the parked plan resumed.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/MessageResult"
-        "400":
-          description: A required field was missing (plan or directive).
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/MessageResult"
-        "401":
-          description: Missing/invalid shared secret (only when NANO_PR_WEBHOOK_SECRET is set).
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/MessageResult"
-        "404":
-          description: No matching open plan escalation for the plan key.
           content:
             application/json:
               schema:

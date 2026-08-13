@@ -33,7 +33,7 @@
       "type": "text",
       "id": "subtitle",
       "props": {
-        "text": "Submit a pull request to run the autonomous review-convergence loop. Answer escalations inline; cancel a run at any time.",
+        "text": "Submit a pull request to run the autonomous review-convergence loop. Answer escalations from the Task inbox at /tasks; cancel a run at any time.",
         "variant": "sub"
       }
     },
