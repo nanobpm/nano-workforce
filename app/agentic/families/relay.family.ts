@@ -110,8 +110,22 @@ export class RelayTranscriptService {
   constructor(options: RelayTranscriptServiceOptions) {
     this.#registry = options.registry;
     this.#log = options.log;
-    this.store = options.db ? new TranscriptStore(options.db, options.transcript) : undefined;
-    if (this.store && options.ensureSchema !== false) this.store.ensureSchema();
+    // Persistence is advisory: a store that can't be constructed or whose schema can't be applied
+    // (locked/permission-denied/unavailable SQLite) must NOT fail the family mount — fall back to
+    // running the relay unpersisted rather than tearing down the whole agentic channel.
+    let store: TranscriptStore | undefined;
+    if (options.db) {
+      try {
+        store = new TranscriptStore(options.db, options.transcript);
+        if (options.ensureSchema !== false) store.ensureSchema();
+      } catch (err) {
+        this.#log.warn("agentic transcript store unavailable — relay runs unpersisted", {
+          err: String(err),
+        });
+        store = undefined;
+      }
+    }
+    this.store = store;
 
     this.relay = new RelayHub({
       ...options.relay,
@@ -137,10 +151,10 @@ export class RelayTranscriptService {
   }
 
   /**
-   * Declare a stream's retention lifecycle before (or independently of) its first `produce`. First
-   * call wins in the store; here it also decides whether a producer disconnect auto-completes the
-   * stream (`ephemeral`) or leaves it open for reattach (`long-lived`). No-op once the stream has
-   * already been completed.
+   * Declare a stream's retention lifecycle before (or independently of) its first `produce`. The
+   * durable store records lifecycle write-once (first call wins there); in memory the latest call
+   * wins until the stream completes, which is how {@link checkpointStream} upgrades an as-yet
+   * ephemeral stream to `long-lived`. No-op once the stream has already been completed.
    */
   declareLifecycle(stream: string, lifecycle: TranscriptLifecycle): void {
     const state = this.#stateFor(stream);
@@ -158,7 +172,19 @@ export class RelayTranscriptService {
     if (!this.store) return 0;
     const state = this.#stateFor(stream);
     const source = this.relay.ring(stream) ?? EMPTY_SOURCE;
-    const flushed = this.store.flush(stream, source, state.lifecycle);
+    let flushed: number;
+    try {
+      flushed = this.store.flush(stream, source, state.lifecycle);
+    } catch (err) {
+      // Persistence is advisory: a flush failure must not bubble into the hub's frame handler and
+      // take down unrelated streams. Log and leave the stream uncompleted so a later pass retries.
+      this.#log.warn("agentic relay stream flush failed — leaving stream uncompleted", {
+        stream,
+        lifecycle: state.lifecycle,
+        err: String(err),
+      });
+      return 0;
+    }
     if (state.lifecycle === "ephemeral") state.completed = true;
     // Drop producer ownership so a later reconcile does not re-flush a completed stream.
     state.producer = undefined;
@@ -180,7 +206,13 @@ export class RelayTranscriptService {
     if (!this.store) return 0;
     this.declareLifecycle(stream, "long-lived");
     const source = this.relay.ring(stream) ?? EMPTY_SOURCE;
-    return this.store.flush(stream, source, "long-lived");
+    try {
+      return this.store.flush(stream, source, "long-lived");
+    } catch (err) {
+      // Advisory: a checkpoint failure keeps the relay usable — return 0, the stream stays open.
+      this.#log.warn("agentic relay checkpoint flush failed", { stream, err: String(err) });
+      return 0;
+    }
   }
 
   /**
@@ -194,7 +226,11 @@ export class RelayTranscriptService {
 
   /** Retention sweep: retire completed-ephemeral transcripts past the retention window. */
   sweep(now?: number): string[] {
-    return this.store?.sweep(now) ?? [];
+    const retired = this.store?.sweep(now) ?? [];
+    // Forget the in-memory state of every retired stream so `#streams` stays bounded (and
+    // `#reconcile`'s scan stays cheap) even after many ephemeral streams complete and age out.
+    for (const stream of retired) this.#streams.delete(stream);
+    return retired;
   }
 
   /** A stream's persisted transcript metadata, if any (lifecycle/status/offset window). */

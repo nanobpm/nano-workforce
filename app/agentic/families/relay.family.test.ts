@@ -39,6 +39,27 @@ function memoryDb(): SqliteDb {
   };
 }
 
+/** An in-memory {@link SqliteDb} whose exec/run/all can be flipped to throw, to exercise advisory resilience. */
+function flakyDb(): { db: SqliteDb; fail: (on: boolean) => void } {
+  const raw = new DatabaseSync(":memory:");
+  let failing = false;
+  const guard = <T>(fn: () => T): T => {
+    if (failing) throw new Error("sqlite unavailable");
+    return fn();
+  };
+  return {
+    db: {
+      exec: (sql) => guard(() => raw.exec(sql)),
+      run: (sql, params = []) => guard(() => raw.prepare(sql).run(...params)),
+      all: <T = Record<string, unknown>>(sql: string, params: unknown[] = []): T[] =>
+        guard(() => raw.prepare(sql).all(...params) as T[]),
+    },
+    fail: (on: boolean) => {
+      failing = on;
+    },
+  };
+}
+
 /** A hub double that just captures the family handler so the test can drive frames directly. */
 interface CapturingHub {
   handler?: (frame: Frame, conn: RelayConn) => void;
@@ -215,6 +236,7 @@ test("retention: an ephemeral stream's transcript is persisted on completion, th
   clock.t += 1000;
   assertEquals(service.sweep(), ["job-1"]);
   assertEquals(service.transcriptOf("job-1"), undefined);
+  assert(!service.streams().includes("job-1"), "sweep forgets retired stream state — map stays bounded");
   service.teardown();
 });
 
@@ -304,6 +326,60 @@ test("incarnation fencing: a stale producer cannot overwrite a newer incarnation
   hub.handler?.(subscribe("s", 0, 100), c.conn);
   const chunks = c.sent.filter((f) => payloadOp(f) === undefined).map((f) => payloadField(f, "chunk"));
   assertEquals(chunks, ["new-a", "new-b"], "the stale incarnation's chunk never entered the ring");
+  service.teardown();
+});
+
+test("advisory mode: a store that fails to initialize falls back to unpersisted — mount never throws", () => {
+  const registry = new ConnectionRegistry();
+  const { db, fail } = flakyDb();
+  fail(true); // schema application throws during construction
+  const hub = capturingHub();
+  const service = new RelayTranscriptService({ hub, registry, db, log: noopLog() });
+  assertEquals(service.store, undefined, "store setup failure falls back to unpersisted, not a thrown mount");
+
+  // The relay still replays — advisory-correct even with no store.
+  const p = connect("prod", registry);
+  for (let i = 0; i < 3; i++) hub.handler?.(produce("s", 1, `n${i}`), p.conn);
+  const c = connect("cons", registry);
+  hub.handler?.(subscribe("s", 0, 100), c.conn);
+  assertEquals(c.sent.filter((f) => payloadOp(f) === undefined).length, 3);
+  assertEquals(service.completeStream("s"), 0);
+  service.teardown();
+});
+
+test("advisory resilience: a flush failure leaves the ephemeral stream uncompleted and never bubbles", () => {
+  const registry = new ConnectionRegistry();
+  const { db, fail } = flakyDb();
+  const hub = capturingHub();
+  const service = new RelayTranscriptService({ hub, registry, db, log: noopLog() });
+  const p = connect("prod", registry);
+  for (let i = 0; i < 2; i++) hub.handler?.(produce("job", 1, `c${i}`), p.conn);
+
+  fail(true);
+  assertEquals(service.completeStream("job"), 0, "flush failure is swallowed and returns 0");
+
+  // Left uncompleted: once the store recovers, a later completion flushes the whole window.
+  fail(false);
+  assertEquals(service.completeStream("job"), 2);
+  assertEquals(service.transcriptOf("job")?.status, "completed");
+  service.teardown();
+});
+
+test("advisory resilience: a checkpoint flush failure keeps the long-lived stream open and returns 0", () => {
+  const registry = new ConnectionRegistry();
+  const { db, fail } = flakyDb();
+  const hub = capturingHub();
+  const service = new RelayTranscriptService({ hub, registry, db, log: noopLog() });
+  service.declareLifecycle("ctrl", "long-lived");
+  const p = connect("prod", registry);
+  for (let i = 0; i < 3; i++) hub.handler?.(produce("ctrl", 1, `k${i}`), p.conn);
+
+  fail(true);
+  assertEquals(service.checkpointStream("ctrl"), 0, "checkpoint failure is swallowed and returns 0");
+
+  fail(false);
+  assertEquals(service.checkpointStream("ctrl"), 3);
+  assertEquals(service.transcriptOf("ctrl")?.status, "open");
   service.teardown();
 });
 
