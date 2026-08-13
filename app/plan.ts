@@ -79,11 +79,12 @@ export interface Plan {
   // the integration→default-branch promotion PR once opened by the promoteEpic operation (NULL until
   // promoted; set makes the promotion idempotent). `promote_ready` is a denormalised read-model flag
   // the epic pages badge/gate on — 1 exactly when `status = 'done' AND base_branch IS NOT NULL AND
-  // promotion_pr_url IS NULL`, else 0. Stored (not a SQL view) because the pages read `plans`
+  // promotion_pr_url IS NULL`, else NULL (nullable, not 0 — the overview badge column would paint on
+  // a "0" string; NULL is gated out, #174). Stored (not a SQL view) because the pages read `plans`
   // directly, mirroring `wave_label`/`open_plan_findings`. Derived in exactly one place
   // (record-results); the default-branch check is deferred to the promoteEpic operation.
   promotion_pr_url: string | null;
-  promote_ready: number;
+  promote_ready: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -377,7 +378,8 @@ export async function startPlan(
       open_plan_round: null,
       // A re-plan drops a previously-`done` plan back to `planning`; clear the promote-ready signal
       // so a stale "ready to promote" badge/button never lingers on a non-done plan (026, #160).
-      promote_ready: 0,
+      // NULL, not 0 — the overview badge column gates on string-emptiness (#174).
+      promote_ready: null,
       blackboard_token: token,
       base_branch: base,
       updated_at: ts,

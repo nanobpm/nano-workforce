@@ -13,8 +13,9 @@
 //     default-branch check the read-model `promote_ready` derivation deliberately skips)
 //
 // On a promotable plan it opens the PR (default branch ← base_branch), persists `promotion_pr_url`
-// and clears `promote_ready` to 0 (the single read-model derivation lives in record-results; here we
-// only turn the flag off because a promotion PR now exists — no second derivation site). GitHub's
+// and clears `promote_ready` to NULL (the single read-model derivation lives in record-results; here
+// we only turn the flag off because a promotion PR now exists — no second derivation site). NULL, not
+// 0, so the overview badge column gates it out on string-emptiness (#174). GitHub's
 // "a pull request already exists" (422) is treated as success: the open PR is recovered via
 // `fetchOpenPrByHead`, persisted, and returned.
 
@@ -153,7 +154,7 @@ export async function runPromoteEpic(
     promoted = false;
   }
 
-  await table.update(planKey, { promotion_pr_url: url, promote_ready: 0, updated_at: new Date().toISOString() });
+  await table.update(planKey, { promotion_pr_url: url, promote_ready: null, updated_at: new Date().toISOString() });
   app.log.info("promoteEpic opened/recovered promotion PR", { planKey, url, number, promoted });
   return { status: promoted ? 202 : 200, body: { planKey, url, number, promoted } };
 }
