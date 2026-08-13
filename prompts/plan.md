@@ -166,7 +166,7 @@ manifest, separate exports, separate directory mean zero shared surface and zero
 merge collision. So a plan that slices a single cohesive library into N tasks will,
 left alone, tend to emit **N packages** — one per task. That is not a design; it is
 your task decomposition leaking into the artifact's module boundaries (Conway's
-Law). It has to be un-fragmented by hand later, and each extra published unit is a
+Law). It has to be unfragmented by hand later, and each extra published unit is a
 one-time publish/credentials bootstrap plus a changelog and version cadence forever.
 
 So, before you slice: **a new published unit requires a consumer-facing
