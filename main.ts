@@ -39,9 +39,20 @@ const engine = await createNanoSdkEngineClient({
   log: host.log,
 });
 
+// Agentic mode is decided up front because it also governs the HTTP bind host (below).
+const agenticSecret = envVar("NANO_AGENTIC_SECRET") ?? envVar("NANO_PR_WEBHOOK_SECRET");
+const agenticDisabled = /^(0|off|false|no)$/i.test(envVar("NANO_AGENTIC") ?? "");
+
+// Local-first bind (ADR 0056): in LOCAL mode the channel serves a well-known localhost token, so the
+// server MUST NOT be reachable from other hosts. Default to loopback unless a secret is configured
+// (SECURE mode / GitHub webhooks intentionally expose the service) or NANO_HOST/HOST is set. This is
+// what silences urban's "LOCAL mode but not bound to loopback" warning for normal local use.
+const explicitHost = (process.env.NANO_HOST ?? process.env.HOST ?? "").trim();
+const bindHost = explicitHost !== "" ? explicitHost : agenticSecret ? undefined : "127.0.0.1";
+
 // Manage our own shutdown so the poller is stopped and the process exits (the runtime
 // signal handler would only stop the HTTP server, leaving the poller keeping us alive).
-const app = await runFromEnv({ engine, host, port: PORT, handleSignals: false });
+const app = await runFromEnv({ engine, host, port: PORT, handleSignals: false, hostname: bindHost });
 
 // Agentic visibility channel (ADR 0056, epic #142). Ride the app's OWN HTTP server so the channel
 // shares the app port (no sidecar). This is the ONLY main.ts wiring for the whole epic — sibling
@@ -56,8 +67,6 @@ const app = await runFromEnv({ engine, host, port: PORT, handleSignals: false })
 // `app.httpServer` is a `node:http` Server once started (undefined on hosts that don't surface one,
 // e.g. Deno).
 let agentic: AgenticChannelHandle | undefined;
-const agenticSecret = envVar("NANO_AGENTIC_SECRET") ?? envVar("NANO_PR_WEBHOOK_SECRET");
-const agenticDisabled = /^(0|off|false|no)$/i.test(envVar("NANO_AGENTIC") ?? "");
 const httpServer = app.httpServer;
 if (httpServer instanceof Server) {
   if (agenticDisabled) {
