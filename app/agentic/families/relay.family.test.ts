@@ -21,6 +21,7 @@ import { assert, assertEquals } from "#test-assert";
 import { noopLog } from "../../../test/log.ts";
 import {
   createRelayFamily,
+  currentRelayTranscriptService,
   family as relayFamily,
   RELAY_FAMILY_NAME,
   RelayTranscriptService,
@@ -381,6 +382,50 @@ test("advisory resilience: a checkpoint flush failure keeps the long-lived strea
   assertEquals(service.checkpointStream("ctrl"), 3);
   assertEquals(service.transcriptOf("ctrl")?.status, "open");
   service.teardown();
+});
+
+test("mount installs the service singleton for the read path and teardown clears it (#222)", () => {
+  const registry = new ConnectionRegistry();
+  const ctx = {
+    hub: capturingHub() as never,
+    registry: registry as never,
+    transport: undefined as never,
+    data: { source: () => ({ db: memoryDb() }) } as never,
+    log: noopLog(),
+  };
+  const family = createRelayFamily();
+  assertEquals(currentRelayTranscriptService(), undefined, "no singleton before mount");
+  family.mount(ctx);
+  const service = currentRelayTranscriptService();
+  assert(service !== undefined, "mount installs the singleton the read endpoints source");
+  assert(service.store !== undefined, "the mounted service is persisted");
+  family.teardown?.();
+  assertEquals(currentRelayTranscriptService(), undefined, "teardown clears the singleton");
+});
+
+test("mount drives a retention sweep so completed-ephemeral transcripts are retired (#222)", () => {
+  const registry = new ConnectionRegistry();
+  // A tiny retention window + a clock we control: complete an ephemeral stream, advance past retention,
+  // then confirm the family's own sweep surface retires it (the periodic tick calls the same path).
+  let nowMs = 1_000_000;
+  const ctx = {
+    hub: capturingHub() as never,
+    registry: registry as never,
+    transport: undefined as never,
+    data: { source: () => ({ db: memoryDb() }) } as never,
+    log: noopLog(),
+  };
+  const family = createRelayFamily({ transcript: { ephemeralRetentionMs: 10, clock: { now: () => nowMs } } });
+  family.mount(ctx);
+  const service = currentRelayTranscriptService();
+  assert(service !== undefined);
+  service.store?.flush("job:9", { since: () => ({ entries: [{ offset: 0, chunk: "x" }] }), nextOffset: 1 }, "ephemeral");
+  assertEquals(service.transcriptOf("job:9")?.status, "completed");
+  nowMs += 1000; // advance well past the 10ms retention window
+  const retired = service.sweep();
+  assertEquals(retired, ["job:9"], "the completed-ephemeral transcript is retired past retention");
+  assertEquals(service.transcriptOf("job:9"), undefined);
+  family.teardown?.();
 });
 
 test("drift guard: migration 024 mirrors the canonical transcript DDL byte-for-byte", async () => {

@@ -30,7 +30,7 @@
       "type": "text",
       "id": "intro",
       "props": {
-        "text": "The live worker/supply view: every connected worker grouped by leaf token, with family, host, current jobs, and liveness — sourced from the agentic presence registry. Drill into a worker to stream its terminal live over the relay; the terminal stays mounted across a list refresh and re-attaches (resume-from-offset) on reconnect. The same view renders embedded here (App View) and standalone on a phone. (The demand×supply matrix, missing-agent-type lights, and the diversity SLO are the enrolment epic's board — not shown here.)",
+        "text": "The live worker/supply view: every connected worker grouped by leaf token, with family, host, current jobs, and liveness — sourced from the agentic presence registry. Drill into a worker to stream its terminal live over the relay; the terminal stays mounted across a list refresh and re-attaches (resume-from-offset) on reconnect. Beside it, a \"past sessions\" history lists the durable transcripts agents flushed on completion — select one to replay its captured terminal statically into the same panel (the title distinguishes live vs replayed). The same view renders embedded here (App View) and standalone on a phone. (The demand×supply matrix, missing-agent-type lights, and the diversity SLO are the enrolment epic's board — not shown here.)",
         "variant": "sub"
       }
     },

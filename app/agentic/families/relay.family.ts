@@ -38,6 +38,10 @@ import type { AgenticContext, AgenticFamily } from "../registry.ts";
 /** The stable family name this slice registers under the seam (distinct from the wire family key). */
 export const RELAY_FAMILY_NAME = "relay";
 
+/** The default retention-sweep cadence divisor: the periodic sweep runs at a fraction of the retention
+ * window (like the presence family runs its maintenance tick at a fraction of the presence TTL). */
+const SWEEP_DIVISOR = 4;
+
 /** Read a property off an unknown value without an unsafe `as` cast (mirrors the loader's helper). */
 function readProp(value: unknown, key: string): unknown {
   if (!value || typeof value !== "object") return undefined;
@@ -293,6 +297,12 @@ export class RelayTranscriptService {
  * in `mount` (threading the seam's hub/registry/DataLayer/log) and tears it down in `teardown`. The
  * created service is exposed to `onMounted` so a driver (H6 correlation, tests) can reach the
  * completion/reattach surface without re-mounting anything.
+ *
+ * It also (H3 read path, #222): installs the mounted service as the module singleton
+ * {@link currentRelayTranscriptService} — so the advisory transcript READ endpoints (`GET
+ * /agentic/transcripts*`) can source the {@link TranscriptStore} without re-mounting — and starts ONE
+ * periodic retention sweep so completed-ephemeral transcripts are actually retired past the retention
+ * window (the store defines the policy; this drives it, so the transcript table stays bounded).
  */
 export function createRelayFamily(options: {
   readonly relay?: RelayHubOptions;
@@ -302,6 +312,7 @@ export function createRelayFamily(options: {
   readonly onMounted?: (service: RelayTranscriptService) => void;
 } = {}): AgenticFamily {
   let service: RelayTranscriptService | undefined;
+  let sweepTimer: ReturnType<typeof setInterval> | undefined;
   return {
     name: RELAY_FAMILY_NAME,
     mount(ctx: AgenticContext): void {
@@ -316,13 +327,52 @@ export function createRelayFamily(options: {
         transcript: options.transcript,
         ensureSchema: options.ensureSchema,
       });
+      setCurrentRelayTranscriptService(service);
+
+      // Drive the store's retention-by-lifecycle policy: retire completed-ephemeral transcripts past
+      // the retention window on a periodic tick so the durable table does not grow unbounded. Advisory
+      // (a sweep fault is logged, never thrown) and never keeps the process alive on its own.
+      const store = service.store;
+      if (store) {
+        const interval = Math.max(1, Math.floor(store.ephemeralRetentionMs / SWEEP_DIVISOR));
+        const tick = () => {
+          try {
+            const retired = service?.sweep() ?? [];
+            if (retired.length > 0) ctx.log.info("agentic transcript retention sweep", { retired: retired.length });
+          } catch (err) {
+            ctx.log.warn("agentic transcript retention sweep failed", { err: String(err) });
+          }
+        };
+        sweepTimer = setInterval(tick, interval);
+        sweepTimer.unref?.();
+      }
+
       options.onMounted?.(service);
     },
     teardown(): void {
+      if (sweepTimer !== undefined) {
+        clearInterval(sweepTimer);
+        sweepTimer = undefined;
+      }
       service?.teardown();
+      if (currentService === service) setCurrentRelayTranscriptService(undefined);
       service = undefined;
     },
   };
+}
+
+/** The live relay service from the most recent mount, so the transcript READ endpoints (#222) can
+ * source the durable {@link TranscriptStore} without re-mounting the family. */
+let currentService: RelayTranscriptService | undefined;
+
+/** The mounted relay/transcript service, or undefined before mount / after teardown. */
+export function currentRelayTranscriptService(): RelayTranscriptService | undefined {
+  return currentService;
+}
+
+/** Install the live service (called by the relay family's `mount`; cleared on `teardown`). */
+export function setCurrentRelayTranscriptService(svc: RelayTranscriptService | undefined): void {
+  currentService = svc;
 }
 
 /** The discovered family instance (the loader picks up this `family` export). */

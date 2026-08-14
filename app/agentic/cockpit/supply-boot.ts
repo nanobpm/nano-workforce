@@ -31,9 +31,15 @@ import {
 import { renderSupply } from "./supply-render.ts";
 import type { SupplyReport } from "./supply-view.ts";
 import { supplyView } from "./supply-view.ts";
+import { renderTranscripts, replayTranscript, type TranscriptDataReport } from "./transcript-render.ts";
+import type { TranscriptListReport } from "./transcript-view.ts";
+import { transcriptsView } from "./transcript-view.ts";
 
 /** Mounts a terminal into `host` and returns the sink relay output is written to. */
 export type CreateTerminal = (host: ElementLike) => TerminalSink;
+
+/** The terminal region's playback mode: a LIVE relay stream vs a REPLAYED (static) stored transcript. */
+export type TerminalMode = "live" | "replay";
 
 /** An opaque poll-timer handle (a Node `Timeout` or a browser timer id). */
 export type TimerHandle = unknown;
@@ -45,6 +51,16 @@ export interface SupplyCockpitEnv {
   readonly doc: DocumentLike;
   /** Fetches the latest SUPPLY report (e.g. over HTTP from the app's `/agentic/supply` endpoint). */
   readonly fetchSupply: () => Promise<SupplyReport>;
+  /**
+   * Fetches the captured-session list (`GET /agentic/transcripts`) for the "past sessions" history.
+   * Optional: when omitted the past-sessions panel is not rendered (live-only cockpit).
+   */
+  readonly fetchTranscripts?: () => Promise<TranscriptListReport>;
+  /**
+   * Fetches a stored transcript's bytes (`GET /agentic/transcripts/{stream}`) for static replay.
+   * Required for the "past sessions" replay to work; must be provided together with {@link fetchTranscripts}.
+   */
+  readonly fetchTranscript?: (stream: string, from?: number) => Promise<TranscriptDataReport>;
   /** Opens a socket to the app relay channel (one per drill-in connection). */
   readonly connectRelay: SocketFactory;
   /** Mounts the terminal widget (xterm.js in the browser) and returns its write sink. */
@@ -73,10 +89,14 @@ export interface SupplyCockpitHandle {
   start(): void;
   /** Stop the poll loop (leaves the last render in place). */
   stop(): void;
-  /** Drill into a worker's relay stream, opening a resumable live terminal. */
+  /** Drill into a worker's relay stream, opening a resumable LIVE terminal. */
   drill(stream: string): void;
-  /** The stream currently drilled into, if any. */
+  /** Replay a captured past session's stored transcript statically into the terminal (no live worker). */
+  replay(stream: string): Promise<void>;
+  /** The stream currently drilled into or replayed, if any. */
   readonly currentStream: string | undefined;
+  /** Whether the terminal is showing a LIVE stream or a REPLAYED transcript (undefined when idle). */
+  readonly currentMode: TerminalMode | undefined;
   /** Stop everything and release the terminal connection. */
   dispose(): void;
 }
@@ -95,7 +115,10 @@ interface Drill {
 class SupplyCockpit implements SupplyCockpitHandle {
   readonly #env: SupplyCockpitEnv;
   readonly #listRegion: ElementLike;
+  readonly #pastRegion: ElementLike | undefined;
   readonly #terminalHost: ElementLike;
+  readonly #terminalTitle: ElementLike;
+  readonly #terminalPanel: ElementLike;
   readonly #refreshMs: number;
   readonly #setTimer: (run: () => void, ms: number) => TimerHandle;
   readonly #clearTimer: (handle: TimerHandle) => void;
@@ -108,6 +131,11 @@ class SupplyCockpit implements SupplyCockpitHandle {
   // The currently mounted terminal, tracked so switching streams (and dispose) tears down the prior
   // xterm instance instead of leaking it + its listeners.
   #terminal: TerminalSink | undefined;
+  // The terminal region's current playback: a LIVE relay stream or a REPLAYED stored transcript, and
+  // the stream it is showing — so the past-sessions list can highlight the active replay and the
+  // panel title can distinguish live from replayed.
+  #mode: TerminalMode | undefined;
+  #shownStream: string | undefined;
   // Bumped by every start()/stop() so an in-flight #tick() from a previous start cycle can't
   // reschedule after a stop→start race and leave two overlapping poll chains running.
   #generation = 0;
@@ -151,30 +179,52 @@ class SupplyCockpit implements SupplyCockpitHandle {
         }
       });
 
-    // Build the stable skeleton once: a volatile list region the poll re-renders, and a PERSISTENT
-    // terminal region a refresh never touches.
+    // Build the stable skeleton once: a volatile list region the poll re-renders, an optional volatile
+    // "past sessions" region (rendered only when the transcript read endpoints are wired), and a
+    // PERSISTENT terminal region a refresh never touches (so a drilled-in/replayed terminal survives).
     env.host.replaceChildren();
     const shell = env.doc.createElement("div");
     shell.className = "cockpit-shell";
     this.#listRegion = env.doc.createElement("div");
     this.#listRegion.className = "cockpit-supply-region";
-    const terminalPanel = env.doc.createElement("section");
-    terminalPanel.className = "cockpit-terminal";
-    const title = env.doc.createElement("h2");
-    title.className = "cockpit-panel-title";
-    title.textContent = "Worker terminal";
-    terminalPanel.appendChild(title);
+    // The past-sessions history list only exists when a transcript list source is injected.
+    if (env.fetchTranscripts !== undefined) {
+      this.#pastRegion = env.doc.createElement("div");
+      this.#pastRegion.className = "cockpit-past-region";
+    }
+    this.#terminalPanel = env.doc.createElement("section");
+    this.#terminalPanel.className = "cockpit-terminal";
+    this.#terminalPanel.setAttribute("data-terminal-mode", "idle");
+    this.#terminalTitle = env.doc.createElement("h2");
+    this.#terminalTitle.className = "cockpit-panel-title";
+    this.#terminalTitle.textContent = "Worker terminal";
+    this.#terminalPanel.appendChild(this.#terminalTitle);
     this.#terminalHost = env.doc.createElement("div");
     this.#terminalHost.className = "cockpit-terminal-host";
     this.#terminalHost.setAttribute("data-terminal", "host");
-    terminalPanel.appendChild(this.#terminalHost);
+    this.#terminalPanel.appendChild(this.#terminalHost);
     shell.appendChild(this.#listRegion);
-    shell.appendChild(terminalPanel);
+    if (this.#pastRegion !== undefined) shell.appendChild(this.#pastRegion);
+    shell.appendChild(this.#terminalPanel);
     env.host.appendChild(shell);
   }
 
   get currentStream(): string | undefined {
-    return this.#drill?.stream;
+    return this.#shownStream;
+  }
+
+  get currentMode(): TerminalMode | undefined {
+    return this.#mode;
+  }
+
+  /** Reflect the terminal region's playback mode on the panel (title + `data-terminal-mode`). */
+  #setMode(mode: TerminalMode | undefined, stream: string | undefined): void {
+    this.#mode = mode;
+    this.#shownStream = stream;
+    this.#terminalPanel.setAttribute("data-terminal-mode", mode ?? "idle");
+    if (mode === "live") this.#terminalTitle.textContent = "Worker terminal — live";
+    else if (mode === "replay") this.#terminalTitle.textContent = "Worker terminal — replay (past session)";
+    else this.#terminalTitle.textContent = "Worker terminal";
   }
 
   async refresh(): Promise<void> {
@@ -190,6 +240,30 @@ class SupplyCockpit implements SupplyCockpitHandle {
     try {
       renderSupply(this.#listRegion, this.#env.doc, supplyView(report, { staleAfterMs: this.#env.staleAfterMs }), {
         onDrill: (stream) => this.drill(stream),
+      });
+    } catch (err) {
+      this.#env.onError?.(err);
+    }
+    await this.#refreshPast();
+  }
+
+  /** Fetch + render the "past sessions" history list, when a transcript source is wired. Independent
+   * of the supply fetch: a transcript-endpoint fault never blocks the live worker list. */
+  async #refreshPast(): Promise<void> {
+    const fetchTranscripts = this.#env.fetchTranscripts;
+    if (fetchTranscripts === undefined || this.#pastRegion === undefined) return;
+    let report: TranscriptListReport;
+    try {
+      report = await fetchTranscripts();
+    } catch (err) {
+      this.#env.onError?.(err);
+      return;
+    }
+    if (this.#disposed || this.#pastRegion === undefined) return;
+    try {
+      renderTranscripts(this.#pastRegion, this.#env.doc, transcriptsView(report), {
+        onReplay: (stream) => void this.replay(stream),
+        ...(this.#mode === "replay" && this.#shownStream !== undefined ? { activeStream: this.#shownStream } : {}),
       });
     } catch (err) {
       this.#env.onError?.(err);
@@ -225,7 +299,7 @@ class SupplyCockpit implements SupplyCockpitHandle {
 
   drill(stream: string): void {
     if (this.#disposed) return;
-    if (this.#drill?.stream === stream) return;
+    if (this.#mode === "live" && this.#drill?.stream === stream) return;
     // Close and drop the prior drill up-front so a synchronous failure while building the new one
     // (createTerminal, an invalid TerminalSession credit, or connect throwing) can't leave #drill
     // pointing at an already-closed client. #drill is re-set only once the new client is fully wired.
@@ -260,6 +334,48 @@ class SupplyCockpit implements SupplyCockpitHandle {
       });
       client.open();
       this.#drill = { stream, client };
+      this.#setMode("live", stream);
+    } catch (err) {
+      this.#env.onError?.(err);
+    }
+  }
+
+  /**
+   * Replay a captured PAST session's stored transcript into the terminal region — static playback of a
+   * closed stream with NO live worker and NO relay connection. Tears down any live drill first, fetches
+   * the transcript's bytes, and feeds them through the SAME resume-from-offset {@link TerminalSession}
+   * renderer a live stream uses, so the exited agent's terminal renders faithfully. The panel is marked
+   * `replay` so the operator plainly sees it is a past session, not a live one.
+   */
+  async replay(stream: string): Promise<void> {
+    if (this.#disposed) return;
+    const fetchTranscript = this.#env.fetchTranscript;
+    if (fetchTranscript === undefined) return;
+    // Drop any live drill and the prior terminal before fetching so a replay never runs alongside a
+    // live stream in the same region.
+    this.#drill?.client.close();
+    this.#drill = undefined;
+    this.#terminal?.dispose?.();
+    this.#terminal = undefined;
+    this.#setMode(undefined, undefined);
+
+    let data: TranscriptDataReport;
+    try {
+      data = await fetchTranscript(stream);
+    } catch (err) {
+      this.#env.onError?.(err);
+      return;
+    }
+    if (this.#disposed) return;
+    try {
+      this.#terminalHost.replaceChildren();
+      const sink = this.#env.createTerminal(this.#terminalHost);
+      this.#terminal = sink;
+      const session = new TerminalSession({ stream, sink, send: () => {}, from: data.from });
+      replayTranscript(session, data);
+      this.#setMode("replay", stream);
+      // Re-render the past list so the just-selected session shows as active (best-effort).
+      void this.#refreshPast();
     } catch (err) {
       this.#env.onError?.(err);
     }
@@ -273,6 +389,7 @@ class SupplyCockpit implements SupplyCockpitHandle {
     this.#drill = undefined;
     this.#terminal?.dispose?.();
     this.#terminal = undefined;
+    this.#setMode(undefined, undefined);
   }
 }
 
