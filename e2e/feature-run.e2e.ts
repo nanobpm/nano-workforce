@@ -22,7 +22,7 @@ import { fileURLToPath } from "node:url";
 import type { EngineJob } from "@nanobpm/urban/runtime";
 import { bootTestApp, type TestApp } from "@nanobpm/urban-testkit";
 import { admitGithubState, installAdmitGithub } from "./support/github-admit.ts";
-import { pollFeatureEscalations } from "../app/service.ts";
+import { pollFeatureBlocked, pollFeatureEscalations } from "../app/service.ts";
 
 const APP_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -59,6 +59,7 @@ interface FeatureRow {
   delivery_label: string | null;
   escalation_question: string | null;
   escalation_user_task_key: string | null;
+  blocked_user_task_key: string | null;
 }
 interface PrRow {
   pr_key: string;
@@ -189,8 +190,20 @@ describe("single-issue feature run (#172 — feature.bpmn)", () => {
         const prs = await app.db.table<PrRow>("pull_requests", "pr_key").find({});
         assert.equal(prs.length, 0, "a blocked run never enrolled a PR into the convergence loop");
 
-        // Acknowledging the blocked run records the note, settles it terminal `blocked`, and ends.
-        await app.engine.completeUserTask(task!.userTaskKey, { note: "reassigned to a human" });
+        // The poller fills in the completable user-task key (which no service task can know — the task
+        // doesn't exist yet when record-feature runs) so the pages can drive an attributed acknowledge.
+        await pollFeatureBlocked(app.db, app.engine);
+        const denorm = await featureRow(app, featureKey);
+        assert.ok(denorm.blocked_user_task_key, "the poller denormalised the completable blocked user-task key");
+        assert.equal(denorm.status, "awaiting_operator", "the run stays awaiting_operator while parked");
+
+        // Acknowledge through the app's OWN operation (the nwf UI's affordance) — the attributed
+        // completer resumes the SAME record-blocked-ack path a human would from the task inbox, with NO
+        // out-of-band /v2/user-tasks/{key}/completion call.
+        const acked = await app.api?.call("acknowledgeBlocked", {
+          body: { userTaskKey: denorm.blocked_user_task_key, note: "reassigned to a human" },
+        });
+        assert.equal(acked?.status, 200, "the operator acknowledgement completed the blocked task");
         await app.settle();
         const flows2 = takenFlows(app);
         assert.ok(flows2.includes("feature-blocked->record-blocked-ack"), "ack routes through record-blocked-ack");
@@ -198,6 +211,11 @@ describe("single-issue feature run (#172 — feature.bpmn)", () => {
         const settled = await featureRow(app, featureKey);
         assert.equal(settled.status, "blocked", "the acknowledged run settles at terminal blocked");
         assert.equal(settled.delivery_label, "operator: reassigned to a human", "the operator note is recorded");
+        assert.equal(settled.blocked_user_task_key, null, "the completable-task pointer was cleared on ack");
+
+        // A further poll pass is an idempotent no-op — a terminal run is not a candidate.
+        await pollFeatureBlocked(app.db, app.engine);
+        assert.equal((await featureRow(app, featureKey)).status, "blocked");
       },
     );
   });

@@ -32,12 +32,15 @@ function fakeApp(rows: Record<string, unknown>[]) {
 }
 
 test("record-blocked-ack: settles the parked run at terminal blocked and records the operator note", async () => {
-  const rows = [{ feature_key: "owner/repo#7", status: "awaiting_operator", delivery_label: null }];
+  const rows = [{ feature_key: "owner/repo#7", status: "awaiting_operator", delivery_label: null, blocked_user_task_key: "ut-7" }];
   const app = fakeApp(rows);
   const out = await handler({ variables: { featureKey: "owner/repo#7", note: "reassigned to a human" } } as any, app);
   assertEquals(out, {});
   assertEquals(rows[0].status, "blocked");
   assertEquals(rows[0].delivery_label, "operator: reassigned to a human");
+  // The completable-task pointer is cleared on the terminal-ward transition so the pages stop offering
+  // the acknowledge affordance for a now-completed task (pollFeatureBlocked no longer sweeps this row).
+  assertEquals(rows[0].blocked_user_task_key, null);
 });
 
 test("record-blocked-ack: a blank note falls back to an 'acknowledged' label", async () => {

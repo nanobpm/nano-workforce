@@ -1,0 +1,26 @@
+-- Surface a blocked feature-run's completion affordance in the nwf UI (issue #220).
+--
+-- The escalation path (`feature-escalation`) got the full UI treatment in issue
+-- #210; the BLOCKED path (`feature-blocked`) did not. When a single-issue feature
+-- run reaches a `blocked` outcome it parks on the native `feature-blocked` operator
+-- user task (`candidateGroups=operators`) and `record-feature` holds the row at the
+-- NON-terminal `awaiting_operator` status. That wait was actionable only out-of-band
+-- (a direct `/v2/user-tasks/{key}/completion` call): the schema-driven pages read
+-- `feature_runs`, but nothing denormalised the completable `feature-blocked`
+-- userTaskKey onto the row, so the pages had no pointer to drive a completion action
+-- and the run sat parked forever with no affordance.
+--
+-- This column is the blocked twin of `escalation_user_task_key` (migration 031):
+-- the completable native `feature-blocked` user-task key the "Acknowledge blocked"
+-- affordance posts to (`completeUserTaskAttributed`) and the pages gate the control
+-- on (`showWhenField`, JS-truthy, so NULL correctly hides it). It is kept DISTINCT
+-- from `escalation_user_task_key` so the two human tasks are never conflated. The
+-- poller (`pollFeatureBlocked` in app/service.ts) fills it in once the user task is
+-- observable and clears it when the run un-parks; `record-blocked-ack` / the
+-- acknowledge operation clear it on the terminal-ward exit. It is NULL whenever the
+-- run is not parked at `feature-blocked`.
+--
+-- Forward-only, additive (expand): the column is nullable with no default. Numbered
+-- after the current highest prefix (031); the runner wraps each file in its own
+-- transaction, so this file must NOT contain BEGIN/COMMIT.
+ALTER TABLE feature_runs ADD COLUMN blocked_user_task_key TEXT;

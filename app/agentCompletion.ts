@@ -221,6 +221,44 @@ export async function completeEscalationAsHuman(
   return { ok: true, completionId, userTaskKey, elementId: resolved.elementId };
 }
 
+/** The `feature-blocked` operator user-task element id (feature.bpmn). Unlike an escalation this is not
+ *  an agent-answerable task — it is a blocked-run acknowledgement only a human operator retires — so it
+ *  lives outside `ESCALATION_TASK_ELEMENTS` (the agent completer must never touch it) and has its own
+ *  human-only completer below. */
+export const FEATURE_BLOCKED_TASK_ELEMENT = "feature-blocked";
+
+/** Complete the `feature-blocked` operator user task AS A HUMAN (issue #220). The blocked twin of
+ *  `completeEscalationAsHuman`: it resolves the parked task by key, refuses anything that is not the
+ *  `feature-blocked` task, and routes the operator's typed form variables (an optional `note`) through
+ *  the SAME canonical `completeUserTaskAttributed` — so the nwf "Acknowledge blocked" affordance resumes
+ *  the process (→ `pr.record-blocked-ack`, which settles the row to terminal `blocked`) through the one
+ *  completion a human drives from the task inbox, recording WHO acknowledged in the `task_completions`
+ *  ledger. A human completion is the authority (not reversible). A key with no matching open
+ *  `feature-blocked` task is a 404-style no-op. */
+export async function completeBlockedAsHuman(
+  data: DataLayer,
+  engine: EngineClient,
+  input: { userTaskKey: string; variables: Record<string, unknown>; operatorId: string },
+): Promise<AgentCompleteResult> {
+  const userTaskKey = input.userTaskKey.trim();
+  if (!userTaskKey) return { ok: false, reason: "userTaskKey is required" };
+  const operatorId = input.operatorId.trim();
+  if (!operatorId) return { ok: false, reason: "operatorId is required" };
+
+  const open = await engine.searchUserTasks();
+  const match = open.find((t) => t.userTaskKey === userTaskKey);
+  if (!match) return { ok: false, reason: "no open blocked task" };
+  if (match.elementId !== FEATURE_BLOCKED_TASK_ELEMENT) return { ok: false, reason: "not a blocked task" };
+
+  const { completionId } = await completeUserTaskAttributed(
+    data,
+    engine,
+    { userTaskKey, elementId: match.elementId, variables: input.variables },
+    { kind: "human", id: operatorId },
+  );
+  return { ok: true, completionId, userTaskKey, elementId: match.elementId };
+}
+
 export interface RevertResult {
   ok: boolean;
   reason?: string;

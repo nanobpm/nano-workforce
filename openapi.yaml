@@ -977,6 +977,55 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/MessageResult"
+  /actions/acknowledge-blocked:
+    post:
+      operationId: acknowledgeBlocked
+      summary: "Acknowledge a blocked native feature run (issue #220). Completes the parked
+        `feature-blocked` operator user task with the operator's optional disposition note, driving the
+        canonical attributed completer (completeUserTaskAttributed) — the same resume path the task inbox
+        uses, recording who acknowledged. Completing it fires pr.record-blocked-ack, settling the run to
+        the terminal `blocked` status with the note, and the poller reconciles the completable-task
+        pointer off the row. This is the nwf UI's completion affordance for a feature run parked as
+        blocked (the blocked twin of answer-escalation)."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+                - userTaskKey
+              properties:
+                userTaskKey:
+                  type: string
+                  minLength: 1
+                  description: The parked `feature-blocked` user-task key (feature_runs.blocked_user_task_key).
+                note:
+                  type: string
+                  description: Optional operator disposition note, recorded on the run (delivery_label). Blank ⇒ "acknowledged".
+                operator:
+                  type: string
+                  description: Optional operator handle recorded in the attribution ledger; defaults to "operator".
+      responses:
+        "200":
+          description: The blocked user task was completed and the process resumed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResult"
+        "400":
+          description: A required field was missing/invalid, or the target is not a blocked task.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResult"
+        "404":
+          description: No open blocked user task matches the userTaskKey.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResult"
   /hooks/agent-complete:
     post:
       operationId: agentCompleteEscalation
