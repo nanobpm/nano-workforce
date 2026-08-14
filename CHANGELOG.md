@@ -1,3 +1,10 @@
+# [0.68.0](https://github.com/nanobpm/nano-workforce/compare/v0.67.0...v0.68.0) (2026-08-14)
+
+
+### Features
+
+* **feature:** UI completion affordance for blocked feature runs ([#220](https://github.com/nanobpm/nano-workforce/issues/220)) ([#221](https://github.com/nanobpm/nano-workforce/issues/221)) ([5b68ad4](https://github.com/nanobpm/nano-workforce/commit/5b68ad4871e21d59224d69cde0b95f02247884ae)), closes [#210](https://github.com/nanobpm/nano-workforce/issues/210)
+
 # [0.67.0](https://github.com/nanobpm/nano-workforce/compare/v0.66.0...v0.67.0) (2026-08-14)
 
 
