@@ -9,7 +9,7 @@
 // `Table<T>` surface), not hand-written SQL. Row shapes are declared inline here.
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { abandonUrl, mintAbandonToken, renderAbandonBrief } from "./abandon.ts";
-import { deriveFeatureDelivery, deriveFeatureEscalationPatch, FEATURE_ESCALATION_ELEMENT, type FeatureRun, featureRuns } from "./feature.ts";
+import { deriveFeatureBlockedPatch, deriveFeatureDelivery, deriveFeatureEscalationPatch, FEATURE_BLOCKED_ELEMENT, FEATURE_ESCALATION_ELEMENT, type FeatureRun, featureRuns } from "./feature.ts";
 import {
   classifyMergeability,
   ensureFreshHeadRun,
@@ -1326,6 +1326,40 @@ export async function pollFeatureEscalations(data: DataLayer, engine: EngineClie
   }
 }
 
+/** Reconcile each BLOCKED FEATURE run against its native `feature-blocked` user task (issue #220 —
+ * a blocked run parked at `feature-blocked` had no completion affordance in nwf). When a feature run
+ * reaches a `blocked` outcome `record-feature` holds the row at the NON-terminal `awaiting_operator`
+ * status and it parks on the `feature-blocked` operator user task (an engine wait); no worker runs, so
+ * the schema-driven pages — which read `feature_runs` — had a status to show but NO pointer to drive a
+ * completion action, so the run sat parked forever unless completed out-of-band. This is the blocked
+ * twin of `pollFeatureEscalations`: for each run parked at (or resuming from) the blocked wait, read its
+ * open user tasks and project the parked task's completable `userTaskKey` onto the row via the pure
+ * `deriveFeatureBlockedPatch`, so the pages can drive an "Acknowledge blocked" action, and clear the
+ * pointer once it un-parks. It never touches `status` — `record-feature` owns the `awaiting_operator`
+ * flip and `record-blocked-ack` owns the terminal `blocked`, so the poller can never clobber either.
+ *
+ * Candidates are only the runs that could be parked here — `awaiting_operator` (parked at, or just
+ * un-parked from, the blocked wait) — queried via the `feature_runs(status)` index, so the pass stays
+ * O(in-flight), not O(total runs). The terminal-ward transition THROUGH `record-blocked-ack` (and the
+ * acknowledge operation) clears the pointer, so a run that has already settled to `blocked` never needs
+ * sweeping here. Best-effort + idempotent — per-run failures are isolated. */
+export async function pollFeatureBlocked(data: DataLayer, engine: EngineClient) {
+  for (const run of await featureRuns(data).find({ status: "awaiting_operator" })) {
+    if (!run.process_key) continue;
+    try {
+      const tasks = await engine.searchUserTasks({ processInstanceKey: run.process_key });
+      const task = tasks.find((t) => t.elementId === FEATURE_BLOCKED_ELEMENT);
+      const parked = task ? { userTaskKey: task.userTaskKey } : null;
+      const patch = deriveFeatureBlockedPatch(run, parked);
+      if (patch) {
+        await featureRuns(data).update(run.feature_key, { ...patch, updated_at: now() });
+      }
+    } catch (err) {
+      console.error(`[poller] feature blocked ${run.feature_key}: ${err}`);
+    }
+  }
+}
+
 /** One full poll pass: advance the review stage, the merge stage, the wave-merge barrier, and
  * (when the engine REST endpoint is supplied) the job-activation visibility pass and the
  * technical-incident surfacing pass. Called on the self-scheduling loop in `main.ts`. */
@@ -1341,6 +1375,7 @@ export async function pollOnce(
   await pollDelivery(data);
   await pollFeatureDelivery(data);
   await pollFeatureEscalations(data, engine);
+  await pollFeatureBlocked(data, engine);
   if (engineRest) {
     await pollJobActivation(data, engineRest.restAddress, engineRest.token);
     await pollIncidents(data, engineRest.restAddress, engineRest.token);

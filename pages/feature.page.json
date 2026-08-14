@@ -88,6 +88,15 @@
               "path": "/app/api/actions/answer-escalation",
               "body": { "userTaskKey": "{{row.escalation_user_task_key}}", "resolution": "abandon" }
             }
+          },
+          {
+            "label": "Acknowledge blocked",
+            "confirm": "Acknowledge this blocked run? It settles to terminal blocked (the agent could not open a PR).",
+            "showWhenField": "blocked_user_task_key",
+            "action": {
+              "path": "/app/api/actions/acknowledge-blocked",
+              "body": { "userTaskKey": "{{row.blocked_user_task_key}}" }
+            }
           }
         ],
         "detail": {

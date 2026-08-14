@@ -56,6 +56,14 @@ export interface FeatureRun {
    * (`completeUserTaskAttributed`) and the pages gate the answer controls on (`showWhenField`). Set by
    * `pollFeatureEscalations` while parked; NULL otherwise. */
   escalation_user_task_key: string | null;
+  /** The completable native `feature-blocked` user-task key the "Acknowledge blocked" affordance posts
+   * to (`completeUserTaskAttributed`) and the pages gate the acknowledge control on (`showWhenField`).
+   * Kept DISTINCT from `escalation_user_task_key` so the two human tasks (an escalation answer vs a
+   * blocked-run acknowledgement) are never conflated. Set by `pollFeatureBlocked` while a run is parked
+   * at `feature-blocked` (status `awaiting_operator`); NULL otherwise — cleared on the exit paths
+   * (`record-blocked-ack` / the acknowledge operation) and, as a self-heal, by `pollFeatureBlocked`
+   * when a previously-observed task is completed out-of-band (see `deriveFeatureBlockedPatch`). */
+  blocked_user_task_key: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -191,6 +199,52 @@ export function deriveFeatureEscalationPatch(
   return Object.keys(patch).length > 0 ? patch : null;
 }
 
+/** The `feature-blocked` user-task element id (feature.bpmn) — the native operator wait a run parks on
+ * when the agent reports a `blocked` outcome (it gave up / the escalation was abandoned or timed out).
+ * `pollFeatureBlocked` reconciles it onto the read model. */
+export const FEATURE_BLOCKED_ELEMENT = "feature-blocked";
+
+/** The parked `feature-blocked` user task, as `pollFeatureBlocked` observes it via `searchUserTasks`:
+ * the completable user-task key the pages drive an attributed acknowledgement against. */
+export interface FeatureBlockedParked {
+  userTaskKey: string;
+}
+
+/** Pure source of truth for the blocked read-model reconcile (`pollFeatureBlocked`), the blocked twin
+ * of `deriveFeatureEscalationPatch`: given a run and whether it is currently parked at `feature-blocked`,
+ * return the minimal `feature_runs` patch reconciling the completable-task pointer with the observed park
+ * state (or null when nothing changed, so the poller skips the write). Idempotent and self-healing.
+ *
+ * Unlike the escalation reconcile, the STATUS flip is NOT owned here: `record-feature` already persists
+ * the row as `awaiting_operator` in the same token path before the `feature-blocked` user task is
+ * created, and `record-blocked-ack` settles it to the terminal `blocked` on completion. So this only
+ * reconciles the completable-task POINTER — never the status — so it can never overwrite the terminal
+ * `blocked` the acknowledgement worker has already written.
+ *
+ * - parked → denormalise the completable `userTaskKey` so the pages can drive an attributed acknowledge.
+ * - un-parked → clear the pointer ONLY once it was actually OBSERVED (non-NULL) and the task is now gone.
+ *   Gating on the observed pointer is what makes it safe across the brief self-healing window between
+ *   `record-feature` (which persists `awaiting_operator` but leaves the pointer NULL) and the user task
+ *   appearing: in that window the pointer is NULL, so this never fires, and the next pass fills it in once
+ *   the task is observable. Once observed and then gone (e.g. an out-of-band completion), the stale
+ *   pointer is cleared so the pages stop offering an acknowledge control for a task that no longer exists. */
+export function deriveFeatureBlockedPatch(
+  run: Pick<FeatureRun, "blocked_user_task_key">,
+  parked: FeatureBlockedParked | null,
+): Partial<FeatureRun> | null {
+  const patch: Partial<FeatureRun> = {};
+  if (parked) {
+    if (run.blocked_user_task_key !== parked.userTaskKey) patch.blocked_user_task_key = parked.userTaskKey;
+  } else {
+    // Un-park cleanup — fires ONLY once the poller has actually OBSERVED the task (pointer non-NULL) and
+    // it is now gone. Gating on the pointer being non-NULL is what makes it safe: during the brief
+    // self-healing window between `record-feature` (which persists `awaiting_operator` but leaves the
+    // pointer NULL) and the task appearing, the pointer is NULL, so this never clears prematurely.
+    if (run.blocked_user_task_key !== null) patch.blocked_user_task_key = null;
+  }
+  return Object.keys(patch).length > 0 ? patch : null;
+}
+
 export const featureRuns = (data: DataLayer) => data.table<FeatureRun>("feature_runs", "feature_key");
 
 /** The deterministic task id for a single-issue run — the implementation agent branches
@@ -233,6 +287,7 @@ export async function startFeature(
       delivery_label: null,
       escalation_question: null,
       escalation_user_task_key: null,
+      blocked_user_task_key: null,
       updated_at: ts,
     });
   } else {
@@ -251,6 +306,7 @@ export async function startFeature(
       delivery_label: null,
       escalation_question: null,
       escalation_user_task_key: null,
+      blocked_user_task_key: null,
       created_at: ts,
       updated_at: ts,
     });
