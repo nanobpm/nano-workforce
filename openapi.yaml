@@ -1009,7 +1009,7 @@ paths:
                   description: Optional operator handle recorded in the attribution ledger; defaults to "operator".
       responses:
         "200":
-          description: The blocked user task was completed and the run settled to blocked.
+          description: The blocked user task was completed and the process resumed.
           content:
             application/json:
               schema:
