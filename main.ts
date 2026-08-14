@@ -73,8 +73,9 @@ if (httpServer instanceof Server) {
     });
     if (!secure) {
       app.log.info(
-        "agentic channel mounted in LOCAL mode (on by default, no auth). " +
-          "Set NANO_AGENTIC_SECRET for secure mode, or NANO_AGENTIC=off to disable.",
+        "agentic channel mounted in LOCAL mode (on by default, token-only — a well-known localhost " +
+          "token, no capability credential). Set NANO_AGENTIC_SECRET for secure mode, or " +
+          "NANO_AGENTIC=off to disable.",
       );
     }
   }

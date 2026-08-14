@@ -5,6 +5,7 @@
 // hub is visible via `inspect()`, families mount/tear-down through the seam, and shutdown is clean.
 import { type AddressInfo, createServer, type Server } from "node:http";
 import { test } from "node:test";
+import { createLogger } from "@nanobpm/urban/runtime";
 import { WebSocket } from "ws";
 import { assert, assertEquals } from "#test-assert";
 import { noopLog } from "../../test/log.ts";
@@ -283,4 +284,52 @@ test("LOCAL mode still rejects a wrong token (4401)", async (t) => {
   const closedCode = await rejectionCode(port, "?token=not-the-local-token");
   assertEquals(closedCode, 4401);
   assertEquals(channel.hub.connectionCount, 0);
+});
+
+/** A capturing `Logger`: records every `(level, msg)` pair the sink receives. */
+function capturingLog(): { log: ReturnType<typeof noopLog>; records: Array<{ level: string; msg: string }> } {
+  const records: Array<{ level: string; msg: string }> = [];
+  const log = createLogger((level: string, msg: string) => {
+    records.push({ level, msg });
+  });
+  return { log, records };
+}
+
+test("LOCAL mode warns when the server is bound to a non-loopback interface", async (t) => {
+  const server = createServer((_req, res) => res.end());
+  await new Promise<void>((resolve) => server.listen(0, "0.0.0.0", resolve));
+  const { log, records } = capturingLog();
+  const channel = await mountAgenticChannel({
+    server,
+    secret: "",
+    secure: false,
+    data: undefined,
+    log,
+  });
+  t.after(async () => {
+    await channel.teardown();
+    await closeServer(server);
+  });
+
+  const warned = records.some((r) => r.level === "warn" && r.msg.includes("not bound to loopback"));
+  assert(warned, "LOCAL mode on a non-loopback bind must warn that the well-known token is exposed");
+});
+
+test("LOCAL mode does NOT warn when the server is bound to loopback", async (t) => {
+  const { server } = await startHttp();
+  const { log, records } = capturingLog();
+  const channel = await mountAgenticChannel({
+    server,
+    secret: "",
+    secure: false,
+    data: undefined,
+    log,
+  });
+  t.after(async () => {
+    await channel.teardown();
+    await closeServer(server);
+  });
+
+  const warned = records.some((r) => r.level === "warn" && r.msg.includes("not bound to loopback"));
+  assert(!warned, "a loopback-bound LOCAL channel is the expected safe case and must not warn");
 });

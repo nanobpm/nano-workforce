@@ -14,6 +14,7 @@
 // Invariants (ADR 0056): app-tier only, never the engine; the Camunda-8 job protocol (worker⇄engine)
 // is untouched; advisory semantics preserved (a family never gates a BPMN sequence flow).
 import type { Server } from "node:http";
+import type { AddressInfo } from "node:net";
 import {
   AgenticHub,
   sharedSecretAuthenticator,
@@ -35,6 +36,19 @@ export const AGENTIC_PATH = "/agentic";
  * lock-step with the worker constant in jwulf/c8ctl-plugin-nano (`c8ctl-plugin.js` LOCAL_AGENTIC_TOKEN).
  */
 export const LOCAL_AGENTIC_TOKEN = "nano-local";
+
+/**
+ * True if `addr` (from {@link Server.address}) is a loopback / same-machine bind — the safety
+ * assumption LOCAL mode relies on. A string address is a UNIX domain socket / named pipe (same-host
+ * only) and `null` is an unbound server, so both are treated as safe; a TCP bind is loopback only
+ * for `127.0.0.0/8` or `::1`. A wildcard bind (`0.0.0.0` / `::`) or any specific public interface is
+ * NOT loopback, so the well-known {@link LOCAL_AGENTIC_TOKEN} would be reachable off-box.
+ */
+function isLoopbackBind(addr: string | AddressInfo | null): boolean {
+  if (addr === null || typeof addr === "string") return true;
+  const host = addr.address;
+  return host === "::1" || host === "::ffff:127.0.0.1" || host.startsWith("127.");
+}
 
 export interface MountAgenticChannelOptions {
   /** The app's own `node:http` server (share its port; `app.httpServer` narrowed to `Server`). */
@@ -110,6 +124,22 @@ export async function mountAgenticChannel(
   });
   // Share the app's port: the transport rode the existing server, so it is already listening.
   await transport.ready();
+
+  // LOCAL mode gates only on the well-known localhost token, so it is safe ONLY while the server is
+  // bound to loopback. The channel rides the app's server and does not own its bind address, so it
+  // cannot enforce this — but if the server is exposed on a wildcard/public interface, the token is
+  // reachable off-box; warn loudly so an operator either binds to loopback or switches to secure mode.
+  if (!secure) {
+    const addr = server.address();
+    if (!isLoopbackBind(addr)) {
+      log.warn(
+        "agentic channel is in LOCAL mode but the server is not bound to loopback — the well-known " +
+          "LOCAL_AGENTIC_TOKEN is reachable from other hosts. Set NANO_AGENTIC_SECRET for secure " +
+          "mode, or bind the server to 127.0.0.1.",
+        { mode: "local", bind: typeof addr === "object" && addr ? addr.address : String(addr) },
+      );
+    }
+  }
 
   // If discovery or any family mount throws, the transport + hub are already live: tear down whatever
   // mounted (in reverse) and close the hub before rethrowing, so a failed boot never strands upgrade
