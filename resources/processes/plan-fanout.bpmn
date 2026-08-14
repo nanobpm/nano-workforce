@@ -26,11 +26,17 @@
         <nano:shape id="RecordWaveTaskRef" name="Record wave — task ref">
           <nano:extend name="id" type="string" optional="true" />
         </nano:shape>
+        <nano:shape id="RecordWaveDelta" name="Record wave — task delta">
+          <nano:extend name="contractChange" type="string" optional="true" />
+          <nano:extend name="newlyTouches" type="string" list="true" optional="true" />
+          <nano:extend name="affectsTasks" type="string" list="true" optional="true" />
+          <nano:extend name="constraint" type="string" optional="true" />
+        </nano:shape>
         <nano:shape id="RecordWaveResult" name="Record wave — agent result">
           <nano:extend name="status" type="string" optional="true" />
           <nano:extend name="summary" type="string" optional="true" />
           <nano:extend name="pr" type="string" optional="true" />
-          <nano:extend name="delta" type="json" optional="true" />
+          <nano:extend name="delta" type="RecordWaveDelta" optional="true" />
         </nano:shape>
         <nano:shape id="RecordWaveIn" name="Record wave — input">
           <nano:extend name="planKey" type="string" />
