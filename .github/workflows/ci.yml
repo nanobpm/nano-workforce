@@ -54,6 +54,13 @@ jobs:
       - name: Check migration prefixes (no collisions)
         run: npm run check:migrations
 
+      # Contract-registry gate (issue #227): every config-family env key must be declared in the ONE
+      # typed schema (app/contracts.ts), no retired synonym (e.g. NANO_PR_BASE_URL, #223) may reappear
+      # in code, and the registry must reconcile against itself (no synonyms/contradictions). This is
+      # what makes a duplicate/synonymous contract a build failure instead of a silent runtime fallback.
+      - name: Check contract registry (no synonyms / undeclared keys)
+        run: npm run check:contracts
+
       # Runs the full *.test.ts suite under Node's built-in test runner (node:test), which strips
       # TypeScript types on the fly (Node >= 22.6) — no build step.
       - name: Test (Node)

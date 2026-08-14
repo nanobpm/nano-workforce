@@ -8,12 +8,16 @@ import { test } from "node:test";
 import { assert, assertEquals, assertStringIncludes } from "#test-assert";
 import { memBlackboardData } from "../test/blackboardDb.ts";
 import {
+  APP_BLACKBOARD_KINDS,
   appendEntry,
   blackboardUrl,
+  detectContractDeclarationConflicts,
   detectFileClaimConflicts,
   isUniqueViolation,
   mintBlackboardToken,
+  normalizeAppKind,
   normalizeKind,
+  parseContractRef,
   planKeyForToken,
   planKeyForTokenSync,
   publicBaseUrl,
@@ -36,16 +40,9 @@ test("publicBaseUrl: honours the env override and trims a trailing slash", () =>
 });
 
 test("publicBaseUrl: a blank/whitespace override falls back instead of yielding a bad URL", () => {
-  const prev = process.env.NANO_PR_BASE_URL;
-  delete process.env.NANO_PR_BASE_URL;
-  try {
-    assertEquals(publicBaseUrl(""), "http://localhost:3000");
-    assertEquals(publicBaseUrl("   "), "http://localhost:3000");
-    assertEquals(blackboardUrl("t", publicBaseUrl("")), "http://localhost:3000/app/api/hooks/blackboard?token=t");
-  } finally {
-    if (prev === undefined) delete process.env.NANO_PR_BASE_URL;
-    else process.env.NANO_PR_BASE_URL = prev;
-  }
+  assertEquals(publicBaseUrl(""), "http://localhost:3000");
+  assertEquals(publicBaseUrl("   "), "http://localhost:3000");
+  assertEquals(blackboardUrl("t", publicBaseUrl("")), "http://localhost:3000/app/api/hooks/blackboard?token=t");
 });
 
 test("blackboardUrl: capability token rides the query string", () => {
@@ -61,6 +58,30 @@ test("normalizeKind: valid passes through, anything else becomes note", () => {
   assertEquals(normalizeKind("learning"), "learning");
   assertEquals(normalizeKind("bogus"), "note");
   assertEquals(normalizeKind(undefined), "note");
+});
+
+test("normalizeAppKind: passes contract through (the store's own normaliser would coerce it to note)", () => {
+  assertEquals(normalizeAppKind("contract"), "contract");
+  assertEquals(normalizeAppKind("file-claim"), "file-claim");
+  assertEquals(normalizeAppKind("bogus"), "note");
+  assert(APP_BLACKBOARD_KINDS.includes("contract"), "contract is an app-recognised kind");
+  assert(APP_BLACKBOARD_KINDS.includes("note"), "app kinds are a superset of the store's kinds");
+});
+
+test("parseContractRef: parses the <category>:<name> dedupe_key convention", () => {
+  assertEquals(parseContractRef("env:NANO_X"), { category: "env", name: "NANO_X" });
+  assertEquals(parseContractRef("type:BlackboardEntry"), { category: "type", name: "BlackboardEntry" });
+  assertEquals(parseContractRef("bogus:X"), undefined);
+  assertEquals(parseContractRef("nocolon"), undefined);
+  assertEquals(parseContractRef(undefined), undefined);
+});
+
+test("detectContractDeclarationConflicts: flags a retired synonym; clean for a genuinely new key", () => {
+  const rejected = detectContractDeclarationConflicts({ dedupe_key: "env:NANO_PR_BASE_URL", body: "base url" });
+  assertEquals(rejected[0]?.kind, "rejected-synonym");
+  assertEquals(detectContractDeclarationConflicts({ dedupe_key: "env:NANO_TOTALLY_NEW", body: "an unrelated brand new thing about caching" }), []);
+  // No convention → nothing to reconcile against.
+  assertEquals(detectContractDeclarationConflicts({ body: "freeform" }), []);
 });
 
 test("renderCoordinationBrief: leads with a separator and teaches the protocol + URL", () => {
@@ -81,6 +102,10 @@ test("renderCoordinationBrief: leads with a separator and teaches the protocol +
   // Learnings: teaches reading prior gotchas and posting a reusable `learning`.
   assertStringIncludes(brief, "learning");
   assertStringIncludes(brief, "Share what you learn");
+  // Contracts (#227): teaches consulting the registry + blackboard and posting a `contract` entry.
+  assertStringIncludes(brief, "contract");
+  assertStringIncludes(brief, "app/contracts.ts");
+  assertStringIncludes(brief, "kind\":\"contract\"");
 });
 
 test("planKeyForToken: resolves a token to its plan, undefined otherwise (async + sync agree)", async () => {

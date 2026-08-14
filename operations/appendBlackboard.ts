@@ -10,8 +10,9 @@
 
 import {
   appendEntry,
+  detectContractDeclarationConflicts,
   detectFileClaimConflicts,
-  normalizeKind,
+  normalizeAppKind,
   planKeyForToken,
 } from "../app/blackboard.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
@@ -28,25 +29,26 @@ export default defineOperation("appendBlackboard", async ({ req, body }, app) =>
   const b = body ?? {};
   const text = typeof b.body === "string" ? b.body.trim() : "";
   if (!text) return { status: 400, body: { error: "'body' (the note text) is required" } };
-  const kind = normalizeKind(b.kind);
+  const kind = normalizeAppKind(b.kind);
   const files = Array.isArray(b.files) ? b.files.map(String) : [];
   // Normalize once (trim + default to "system") so the value we send to appendEntry matches the
   // value we send to detectFileClaimConflicts. Otherwise an omitted/blank author_task is stored as
   // "system" but conflict detection sees "", and the caller's own prior "system" claims are wrongly
   // reported as sibling conflicts.
   const author_task = (typeof b.author_task === "string" ? b.author_task.trim() : "") || "system";
+  const dedupe_key = typeof b.dedupe_key === "string" ? b.dedupe_key : undefined;
   const res = await appendEntry(app.data, planKey, {
     author_task,
     kind,
     files,
     body: text,
     wave: typeof b.wave === "number" ? b.wave : null,
-    dedupe_key: typeof b.dedupe_key === "string" ? b.dedupe_key : undefined,
+    dedupe_key,
   });
-  // Advisory conflict-of-intent: surface prior sibling claims on the same file(s). Computed AFTER
-  // the append and filtered to claims strictly before ours (id < res.id), so first-writer-wins is
-  // decided by insertion order — a sibling that raced a claim in between is still caught, and our
-  // own just-written row is never reported. Never blocks the append — the agent decides how to react.
+  // Advisory conflict-of-intent. For a `file-claim`, surface prior sibling claims on the same
+  // file(s) — computed AFTER the append and filtered to claims strictly before ours (id < res.id),
+  // so first-writer-wins is decided by insertion order (a sibling that raced a claim in between is
+  // still caught, and our own just-written row is never reported). Never blocks the append.
   const conflicts = kind === "file-claim"
     ? await detectFileClaimConflicts(app.data, planKey, {
       author_task,
@@ -54,14 +56,21 @@ export default defineOperation("appendBlackboard", async ({ req, body }, app) =>
       beforeId: Number(res.id),
     })
     : [];
+  // For a `contract`, surface near-duplicate DECLARATION conflicts (a synonym/contradiction/rejected
+  // synonym vs. the durable registry) so a writer reconciles a divergent contract at authoring time
+  // (#227). Advisory — the agent decides how to react.
+  const contractConflicts = kind === "contract"
+    ? detectContractDeclarationConflicts({ dedupe_key, body: text })
+    : [];
   app.log.info("blackboard entry appended", {
     planKey,
     kind,
     inserted: res.inserted,
     conflicts: conflicts.length,
+    contractConflicts: contractConflicts.length,
   });
   return {
     status: res.inserted ? 201 : 200,
-    body: { id: Number(res.id), inserted: res.inserted, conflicts },
+    body: { id: Number(res.id), inserted: res.inserted, conflicts, contractConflicts },
   };
 });

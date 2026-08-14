@@ -176,3 +176,37 @@ test("POST a non-file-claim carries no conflicts", async () => {
   const res = await call(app, "POST", { token: "tok" }, { author_task: "t", kind: "note", body: "fyi" });
   assertEquals(res.body.conflicts, []);
 });
+
+test("POST kind='contract' persists the contract kind and round-trips through GET (#227)", async () => {
+  const { app } = memApp();
+  await seedPlan(app, "o/r#1", "tok");
+  const post = await call(app, "POST", { token: "tok" }, {
+    author_task: "task-a",
+    kind: "contract",
+    dedupe_key: "env:NANO_WIDGET_TIMEOUT",
+    body: "introducing env key NANO_WIDGET_TIMEOUT — app/widget.ts — widget request timeout in ms",
+  });
+  assertEquals(post.status, 201);
+  // No existing contract matches, so no declaration conflicts.
+  assertEquals(post.body.contractConflicts, []);
+
+  const get = await call(app, "GET", { token: "tok" });
+  assertEquals(get.body.entries.length, 1);
+  // The store's normaliser would coerce an unknown kind to 'note'; the adapter restores 'contract'.
+  assertEquals(get.body.entries[0].kind, "contract");
+});
+
+test("POST kind='contract' reintroducing a rejected synonym surfaces a declaration conflict (#223/#227)", async () => {
+  const { app } = memApp();
+  await seedPlan(app, "o/r#1", "tok");
+  const post = await call(app, "POST", { token: "tok" }, {
+    author_task: "task-b",
+    kind: "contract",
+    dedupe_key: "env:NANO_PR_BASE_URL",
+    body: "base url for the app",
+  });
+  assertEquals(post.status, 201);
+  assertEquals(post.body.contractConflicts.length >= 1, true);
+  assertEquals(post.body.contractConflicts[0].kind, "rejected-synonym");
+  assertEquals(post.body.contractConflicts[0].existingName, "NANO_PR_PUBLIC_BASE_URL");
+});
