@@ -1,3 +1,10 @@
+# [0.67.0](https://github.com/nanobpm/nano-workforce/compare/v0.66.0...v0.67.0) (2026-08-14)
+
+
+### Features
+
+* **agentic:** local-first visibility — on by default, security opt-in (hub) ([#218](https://github.com/nanobpm/nano-workforce/issues/218)) ([ffef1d9](https://github.com/nanobpm/nano-workforce/commit/ffef1d9819679cb6995ad2d2825bce5c6cabccb5)), closes [jwulf/c8ctl-plugin-nano#38](https://github.com/jwulf/c8ctl-plugin-nano/issues/38)
+
 # [0.66.0](https://github.com/nanobpm/nano-workforce/compare/v0.65.0...v0.66.0) (2026-08-14)
 
 
