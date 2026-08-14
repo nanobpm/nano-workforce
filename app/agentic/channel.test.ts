@@ -8,7 +8,7 @@ import { test } from "node:test";
 import { WebSocket } from "ws";
 import { assert, assertEquals } from "#test-assert";
 import { noopLog } from "../../test/log.ts";
-import { type AgenticChannelHandle, mountAgenticChannel } from "./channel.ts";
+import { type AgenticChannelHandle, LOCAL_AGENTIC_TOKEN, mountAgenticChannel } from "./channel.ts";
 import { type AgenticContext, AgenticFamilyRegistry } from "./registry.ts";
 
 const SECRET = "test-agentic-secret";
@@ -241,4 +241,46 @@ test("a missing secret is refused (never mount an open channel)", async (t) => {
   }
   assert(threw, "mountAgenticChannel must reject an empty secret");
   assertEquals(port > 0, true);
+});
+
+test("LOCAL mode (secure:false): the well-known token upgrades with NO credential", async (t) => {
+  const { server, port } = await startHttp();
+  // Local-first default-on: no secret, no credential — a `nano work` worker appears live with the
+  // well-known localhost token alone (security opt-in).
+  const channel = await mountAgenticChannel({
+    server,
+    secret: "",
+    secure: false,
+    data: undefined,
+    log: noopLog(),
+  });
+  t.after(async () => {
+    await channel.teardown();
+    await closeServer(server);
+  });
+
+  const ws = await connect(port, `?token=${LOCAL_AGENTIC_TOKEN}`);
+  assertEquals(ws.readyState, WebSocket.OPEN);
+  assertEquals(channel.hub.connectionCount, 1);
+  assertEquals(channel.inspect().mode, "local");
+  ws.close();
+});
+
+test("LOCAL mode still rejects a wrong token (4401)", async (t) => {
+  const { server, port } = await startHttp();
+  const channel = await mountAgenticChannel({
+    server,
+    secret: "",
+    secure: false,
+    data: undefined,
+    log: noopLog(),
+  });
+  t.after(async () => {
+    await channel.teardown();
+    await closeServer(server);
+  });
+
+  const closedCode = await rejectionCode(port, "?token=not-the-local-token");
+  assertEquals(closedCode, 4401);
+  assertEquals(channel.hub.connectionCount, 0);
 });

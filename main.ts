@@ -46,24 +46,39 @@ const app = await runFromEnv({ engine, host, port: PORT, handleSignals: false })
 // Agentic visibility channel (ADR 0056, epic #142). Ride the app's OWN HTTP server so the channel
 // shares the app port (no sidecar). This is the ONLY main.ts wiring for the whole epic — sibling
 // slices (H1/H3/H4) extend it by dropping a family module under `app/agentic/families/`, never here.
-// Mount only when a shared identity secret is configured, so the app never exposes an
-// unauthenticated upgrade; `app.httpServer` is a `node:http` Server once started (undefined on hosts
-// that don't surface one, e.g. Deno).
+//
+// Local-first (security opt-in): Nano is designed for local use, so the channel is ON BY DEFAULT.
+//   - No secret configured  -> LOCAL mode: well-known localhost token, no credential required, so a
+//     `nano work` worker appears live with zero configuration.
+//   - `NANO_AGENTIC_SECRET` (or `NANO_PR_WEBHOOK_SECRET`) set -> SECURE mode: ADR 0028 identity token
+//     + capability credential required on every upgrade.
+//   - `NANO_AGENTIC=off` (or 0/false/no) -> disabled entirely.
+// `app.httpServer` is a `node:http` Server once started (undefined on hosts that don't surface one,
+// e.g. Deno).
 let agentic: AgenticChannelHandle | undefined;
 const agenticSecret = envVar("NANO_AGENTIC_SECRET") ?? envVar("NANO_PR_WEBHOOK_SECRET");
+const agenticDisabled = /^(0|off|false|no)$/i.test(envVar("NANO_AGENTIC") ?? "");
 const httpServer = app.httpServer;
 if (httpServer instanceof Server) {
-  if (agenticSecret) {
+  if (agenticDisabled) {
+    app.log.info("agentic channel disabled (NANO_AGENTIC=off)");
+  } else {
+    const secure = Boolean(agenticSecret);
     agentic = await mountAgenticChannel({
       server: httpServer,
-      secret: agenticSecret,
+      secret: agenticSecret ?? "",
+      secure,
       data: app.data,
       log: app.log,
     });
-  } else {
-    app.log.warn("agentic channel not mounted: set NANO_AGENTIC_SECRET (or NANO_PR_WEBHOOK_SECRET)");
+    if (!secure) {
+      app.log.info(
+        "agentic channel mounted in LOCAL mode (on by default, no auth). " +
+          "Set NANO_AGENTIC_SECRET for secure mode, or NANO_AGENTIC=off to disable.",
+      );
+    }
   }
-} else if (agenticSecret) {
+} else if (!agenticDisabled) {
   app.log.warn("agentic channel not mounted: app.httpServer is not a node:http Server on this host");
 }
 

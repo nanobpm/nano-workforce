@@ -26,11 +26,31 @@ import { AgenticFamilyRegistry } from "./registry.ts";
 /** The path the agentic channel is served on, on the app's own port. */
 export const AGENTIC_PATH = "/agentic";
 
+/**
+ * The well-known identity token used in LOCAL mode (security opt-in). Nano is local-first: on a
+ * developer's own machine the visibility channel is on by default with no credential friction, so
+ * the hub and the `nano work` worker agree on this constant, well-known localhost token. It is NOT
+ * a secret — it only gates same-machine dev traffic. In secure mode (`secure: true` + a real
+ * `NANO_AGENTIC_SECRET`) this constant is never used and a real ADR 0028 verifier applies. Keep in
+ * lock-step with the worker constant in jwulf/c8ctl-plugin-nano (`c8ctl-plugin.js` LOCAL_AGENTIC_TOKEN).
+ */
+export const LOCAL_AGENTIC_TOKEN = "nano-local";
+
 export interface MountAgenticChannelOptions {
   /** The app's own `node:http` server (share its port; `app.httpServer` narrowed to `Server`). */
   readonly server: Server;
-  /** The shared-secret ADR 0028 identity token every valid peer must present as `?token=…`. */
+  /** The shared-secret ADR 0028 identity token every valid peer must present as `?token=…`. In LOCAL
+   * mode (`secure: false`) this may be empty — the hub substitutes {@link LOCAL_AGENTIC_TOKEN}. */
   readonly secret: string;
+  /**
+   * Security mode. Nano is local-first, so this defaults to `true` (strict) at the library level to
+   * keep the fail-closed contract for any caller that doesn't opt in — but `main.ts` passes
+   * `secure: false` whenever no `NANO_AGENTIC_SECRET` is configured, mounting an on-by-default LOCAL
+   * channel: a well-known localhost token ({@link LOCAL_AGENTIC_TOKEN}) and NO required capability
+   * credential. Set `secure: true` (with a real secret) to require an ADR 0028 identity token AND a
+   * capability credential on every upgrade.
+   */
+  readonly secure?: boolean;
   /** The app's SQLite data layer, threaded to family modules (may be absent when data isn't mounted). */
   readonly data: DataLayer | undefined;
   /** A structured logger for lifecycle lines. */
@@ -67,15 +87,24 @@ async function discoverRegistry(log: Logger): Promise<AgenticFamilyRegistry> {
 export async function mountAgenticChannel(
   opts: MountAgenticChannelOptions,
 ): Promise<AgenticChannelHandle> {
-  const { server, secret, data, log } = opts;
-  if (!secret) throw new Error("mountAgenticChannel requires a non-empty identity secret");
+  const { server, data, log } = opts;
+  // Local-first: `secure` defaults to true at the library level (fail-closed for callers that don't
+  // opt in), but `main.ts` passes `secure: false` for the on-by-default LOCAL channel. In LOCAL mode
+  // an empty secret is fine — we substitute the well-known localhost token and drop the credential
+  // requirement so a `nano work` worker appears live with zero configuration.
+  const secure = opts.secure ?? true;
+  const secret = opts.secret || (secure ? "" : LOCAL_AGENTIC_TOKEN);
+  if (secure && !secret) {
+    throw new Error("mountAgenticChannel (secure mode) requires a non-empty identity secret");
+  }
 
   const transport = new WebSocketChannelTransport({ server, path: AGENTIC_PATH });
   const hub = new AgenticHub({
     transport,
-    // A valid identity token PLUS a required capability credential upgrades; either missing/invalid
-    // is rejected (4401 / 4403). Swap in a real ADR 0028 verifier later by passing an Authenticator.
-    authenticator: sharedSecretAuthenticator({ secret, requireCredential: true }),
+    // Secure mode: a valid identity token PLUS a required capability credential upgrades; either
+    // missing/invalid is rejected (4401 / 4403). Swap in a real ADR 0028 verifier later by passing an
+    // Authenticator. LOCAL mode: token-only (the well-known localhost token), no credential required.
+    authenticator: sharedSecretAuthenticator({ secret, requireCredential: secure }),
     onError: (err, connectionId) =>
       log.warn("agentic hub error", { connectionId, err: String(err) }),
   });
@@ -97,6 +126,7 @@ export async function mountAgenticChannel(
 
   log.info("agentic channel mounted", {
     path: AGENTIC_PATH,
+    mode: secure ? "secure" : "local",
     families: registry.names(),
   });
 
@@ -108,6 +138,7 @@ export async function mountAgenticChannel(
     inspect() {
       return {
         path: AGENTIC_PATH,
+        mode: secure ? "secure" : "local",
         families: registry.names(),
         connections: hub.connectionCount,
         address: hub.address,
