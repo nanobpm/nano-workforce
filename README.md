@@ -263,6 +263,24 @@ active epic already targets the same custom base. See
 | `NANO_PR_MAX_CI_FIX_ROUNDS` | `3` | max `senior:fix-ci` attempts to green a `blocked` PR before escalating; `0` disables (escalate immediately), clamped 0–20 |
 | `NANO_PR_REVIEW_WAIT_TIMEOUT` | `PT20M` | ISO-8601 duration the loop waits for a fresh review before escalating a stalled review (timer arm of the `wait-review` gateway) |
 | `NANO_PR_REVIEW_NUDGE_MINUTES` | `5` | cooldown between the poller's automatic reviewer re-request nudges for one waiting PR (clamped 1–1440) |
+| `NANO_WORKFORCE_BASE_URL` | `http://localhost:3000` | externally-reachable base URL baked into the abandon / blackboard capability URLs handed to remote agents. See [Distributed fleet](#distributed-fleet) |
+
+### Distributed fleet
+
+The abandon and blackboard hooks let a **distributed worker fleet** call back into this
+app. Those capability URLs (`abandonUrl`, `blackboardUrl`) are minted from
+`NANO_WORKFORCE_BASE_URL` and **baked into process variables at instance-seed time**, then
+rendered into each remote agent's prompt. Getting this value right is what lets a remote
+worker reach the callbacks:
+
+- The value **must be reachable from wherever the worker runs** — not `localhost` for a
+  fleet, but an address (LAN IP / hostname) the fleet machines can actually reach.
+- When the app runs **embedded behind the nano console**, the base **must include the
+  reverse-proxy prefix**, e.g.
+  `http://<merlin-lan-ip>:<console-port>/console/app-view/Workforce`. `abandonUrl()`
+  appends `/app/api/hooks/abandon?token=...` (and `blackboardUrl()` the blackboard path).
+- The value is **captured at instance-seed time**. Changing it later does **not** heal
+  already-running instances — re-seed them to pick up the new base.
 
 ### Purge
 
