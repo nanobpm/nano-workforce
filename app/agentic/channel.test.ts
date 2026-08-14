@@ -315,6 +315,32 @@ test("LOCAL mode warns when the server is bound to a non-loopback interface", as
   assert(warned, "LOCAL mode on a non-loopback bind must warn that the well-known token is exposed");
 });
 
+test("LOCAL mode warns when the server bind address is unverifiable (not listening)", async (t) => {
+  const { server } = await startHttp();
+  // Simulate a server whose bind cannot be verified (e.g. mounted before `listen` resolves):
+  // `address()` returns null, so the LOCAL exposure check cannot confirm a loopback-only bind.
+  const realAddress = server.address.bind(server);
+  server.address = () => null;
+  const { log, records } = capturingLog();
+  const channel = await mountAgenticChannel({
+    server,
+    secret: "",
+    secure: false,
+    data: undefined,
+    log,
+  });
+  t.after(async () => {
+    server.address = realAddress;
+    await channel.teardown();
+    await closeServer(server);
+  });
+
+  const warned = records.some(
+    (r) => r.level === "warn" && r.msg.includes("bind address could not be verified"),
+  );
+  assert(warned, "LOCAL mode on an unbound server must warn that the well-known token is unverifiable");
+});
+
 test("LOCAL mode does NOT warn when the server is bound to loopback", async (t) => {
   const { server } = await startHttp();
   const { log, records } = capturingLog();

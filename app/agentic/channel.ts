@@ -40,12 +40,15 @@ export const LOCAL_AGENTIC_TOKEN = "nano-local";
 /**
  * True if `addr` (from {@link Server.address}) is a loopback / same-machine bind — the safety
  * assumption LOCAL mode relies on. A string address is a UNIX domain socket / named pipe (same-host
- * only) and `null` is an unbound server, so both are treated as safe; a TCP bind is loopback only
- * for `127.0.0.0/8` or `::1`. A wildcard bind (`0.0.0.0` / `::`) or any specific public interface is
- * NOT loopback, so the well-known {@link LOCAL_AGENTIC_TOKEN} would be reachable off-box.
+ * only) and is treated as safe; a TCP bind is loopback only for `127.0.0.0/8` or `::1`. A wildcard
+ * bind (`0.0.0.0` / `::`) or any specific public interface is NOT loopback, so the well-known
+ * {@link LOCAL_AGENTIC_TOKEN} would be reachable off-box. `null` (an unbound / not-yet-listening
+ * server) is NOT treated as safe — the bind is unverifiable, so callers must handle it explicitly
+ * rather than silently skipping the exposure check.
  */
 function isLoopbackBind(addr: string | AddressInfo | null): boolean {
-  if (addr === null || typeof addr === "string") return true;
+  if (addr === null) return false;
+  if (typeof addr === "string") return true;
   const host = addr.address;
   return host === "::1" || host === "::ffff:127.0.0.1" || host.startsWith("127.");
 }
@@ -129,14 +132,24 @@ export async function mountAgenticChannel(
   // bound to loopback. The channel rides the app's server and does not own its bind address, so it
   // cannot enforce this — but if the server is exposed on a wildcard/public interface, the token is
   // reachable off-box; warn loudly so an operator either binds to loopback or switches to secure mode.
+  // A `null` address (server not listening yet) is unverifiable — warn rather than silently skipping
+  // the exposure check, since the bind could later resolve to a public interface.
   if (!secure) {
     const addr = server.address();
-    if (!isLoopbackBind(addr)) {
+    if (addr === null) {
+      log.warn(
+        "agentic channel is in LOCAL mode but the server bind address could not be verified " +
+          "(the server is not listening yet) — the well-known LOCAL_AGENTIC_TOKEN cannot be " +
+          "confirmed loopback-only. Mount the channel after the server is listening, set " +
+          "NANO_AGENTIC_SECRET for secure mode, or bind the server to 127.0.0.1.",
+        { mode: "local", bind: null },
+      );
+    } else if (!isLoopbackBind(addr)) {
       log.warn(
         "agentic channel is in LOCAL mode but the server is not bound to loopback — the well-known " +
           "LOCAL_AGENTIC_TOKEN is reachable from other hosts. Set NANO_AGENTIC_SECRET for secure " +
           "mode, or bind the server to 127.0.0.1.",
-        { mode: "local", bind: typeof addr === "object" && addr ? addr.address : String(addr) },
+        { mode: "local", bind: typeof addr === "object" ? addr.address : String(addr) },
       );
     }
   }
