@@ -28,26 +28,13 @@ import {
 import { parsePr, submitPr } from "../../app/service.ts";
 import { parseTaskDelta, readTaskDeltas, recordTaskDelta } from "../../app/taskDelta.ts";
 import { shouldRunTrialMerge, type TrialMergeHead } from "../../app/trialMerge.ts";
+import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 
-interface Result {
-  status?: unknown;
-  summary?: unknown;
-  pr?: unknown;
-  delta?: unknown;
-}
-interface WaveTaskIn {
-  id?: unknown;
-}
-// NOTE (issue #211): this worker reads ARRAY inputs (`waveTasks[]`, `waveResults[]`), which the
-// scalar-only `nano:dataEnvelope` cannot express, so it keeps a hand-written `interface In` pending
-// a decision on extending the envelope schema to arrays. See the PR body's "array inputs" escalation.
-interface In extends Record<string, unknown> {
-  planKey: string;
-  currentWave: number;
-  waveCount: number;
-  waveTasks?: WaveTaskIn[];
-  waveResults?: Result[];
-}
+// Input typed off the model data envelope (`RecordWaveIn` in plan-fanout.bpmn) — ADR 0040. The
+// `waveTasks[]` / `waveResults[]` array fields are `nano:reference`s to the `RecordWaveTaskRef` /
+// `RecordWaveResult` shapes (`list="true"`), so they resolve to `<Shape>[]` with no hand-written
+// interface.
+type In = WorkerInputs["pr.record-wave"];
 interface Out extends Record<string, unknown> {
   currentWave: number;
   hasMoreWaves: boolean;

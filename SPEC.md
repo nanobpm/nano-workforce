@@ -488,9 +488,18 @@ Start(issue) → plan → record-plan → implement (parallel MI) → record-res
   it raises a non-retryable `NO_WORK_DISPATCHED` incident instead of completing
   green — a no-op run must not masquerade as success (issue #86).
 
-**Payloads are untyped** (no `nano:shapes`/`io.nanobpm.dataEnvelope`): the vocab is
-scalar-only and cannot express the `tasks`/`results` lists, so the workers self-type
-`job.variables` inline (like `finalize`). `urban gen` still emits the four task types.
+**App-worker payloads are typed from the model.** Each `pr.*` service task
+(`record-plan`, `record-wave`, `record-trial-merge`, `select-wave`,
+`record-plan-review`, `resolve-trial-attention`, `record-results`, …) carries an
+`io.nanobpm.dataEnvelope.in` shape whose `nano:shapes` express the `tasks`/`results`
+lists directly: worker job-I/O envelopes support `list="true"` arrays — both
+`nano:extend … list="true"` scalar arrays (e.g. `dependsOn`, `conflicts`) and
+`nano:reference … list="true"` object arrays (e.g. `RecordPlanIn.tasks`,
+`RecordWaveIn.waveResults`) — which derive to `T[]` in the generated task types
+(per #211). This job-I/O shape is codegen/typing-only (no runtime filtering); the
+`scalar-only` constraint applies only to **message payload** envelopes that cross
+correlation at runtime, not to these worker in/out shapes. The **agent** tasks
+(`senior:*`) still self-type `job.variables` inline (like `finalize`).
 
 **Domain model** (`db/migrations/004_planning.sql`): `plans` (one row per issue) +
 `plan_tasks` (one row per slice, tracking its `status`/`pr_key`/`summary`).

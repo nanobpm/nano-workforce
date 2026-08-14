@@ -8,21 +8,13 @@ import {
   trialMergeDecision,
   trialMergeTaskId,
 } from "../../app/trialMerge.ts";
+import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 
-// NOTE (issue #211): this worker reads ARRAY inputs (`waveOpenHeads`, `conflicts`, `failing`), which
-// the scalar-only `nano:dataEnvelope` cannot express, so it keeps a hand-written `interface In`
-// pending a decision on extending the envelope schema to arrays. See the PR body's "array inputs"
-// escalation.
-interface In extends Record<string, unknown> {
-  planKey: string;
-  currentWave?: unknown;
-  trialMergeWave?: unknown;
-  waveOpenHeads?: unknown;
-  result?: unknown;
-  conflicts?: unknown;
-  failing?: unknown;
-  summary?: unknown;
-}
+// Input typed off the model data envelope (`RecordTrialMergeIn` in plan-fanout.bpmn) — ADR 0040.
+// The `waveOpenHeads[]` array field is a `nano:reference` to the `RecordTrialMergeHead` shape, and
+// `conflicts[]` / `failing[]` are scalar `list="true"` extends, so all three resolve from the model
+// with no hand-written interface.
+type In = WorkerInputs["pr.record-trial-merge"];
 interface Out extends Record<string, unknown> {
   trialMergeRed: boolean;
   question?: string;

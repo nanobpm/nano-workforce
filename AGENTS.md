@@ -142,13 +142,25 @@ instead of rediscovering them:
   per-child isolation in the testkit). Only vars read by an in-subprocess gateway
   need this — output-only vars (e.g. `summary`, `pr`) are fine.
 
-## Data envelopes are scalar-only
+## Data envelopes: message payloads are scalar-only; worker I/O shapes support arrays
 
-`nano:dataEnvelope` shapes support only **scalar** `nano:extend` types
-(`string`, `integer`, `datetime`, `boolean`) — **not arrays**. When a message
-must carry a list (e.g. failing check names), join it to a scalar (e.g.
-`\n`-separated) in the publisher before it crosses the envelope, and split it on
-the far side if needed.
+Two different `nano:dataEnvelope` uses have different rules — don't conflate them:
+
+- **Message payloads are scalar-only.** A `nano:dataEnvelope` that crosses the
+  engine's message correlation supports only **scalar** `nano:extend` types
+  (`string`, `integer`, `datetime`, `boolean`) — **not arrays**. When a message
+  must carry a list (e.g. failing check names), join it to a scalar (e.g.
+  `\n`-separated) in the publisher before it crosses the envelope, and split it on
+  the far side if needed.
+- **Worker job-I/O shapes support `list="true"` arrays.** A service task's
+  `io.nanobpm.dataEnvelope.in`/`.out` shape is codegen/typing-only (no runtime
+  filtering), so `nano:extend … list="true"` (scalar arrays, e.g. `dependsOn`)
+  and `nano:reference … list="true"` (object arrays) are supported end-to-end and
+  derive to `T[]` in the generated types (per #211 — e.g.
+  `RecordPlanIn.tasks: RecordPlanTask[]`, `RecordWaveIn.waveResults`). Prefer
+  deriving a worker's array inputs from the model this way over a hand-typed
+  `interface In`; don't "fix" a modelled `list="true"` array back to a joined
+  scalar.
 
 ## Urban page runtime: rendering primitives are not JS-truthy
 

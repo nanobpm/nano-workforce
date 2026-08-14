@@ -12,6 +12,55 @@
           <nano:extend name="repo" type="string" />
           <nano:extend name="baseBranch" type="string" />
         </nano:shape>
+        <nano:shape id="RecordPlanTask" name="Record plan — raw planner task">
+          <nano:extend name="id" type="string" optional="true" />
+          <nano:extend name="title" type="string" optional="true" />
+          <nano:extend name="prompt" type="string" optional="true" />
+          <nano:extend name="dependsOn" type="string" list="true" optional="true" />
+        </nano:shape>
+        <nano:shape id="RecordPlanIn" name="Record plan — input">
+          <nano:extend name="planKey" type="string" />
+          <nano:reference name="tasks" ref="RecordPlanTask" list="true" />
+          <nano:extend name="note" type="string" optional="true" />
+        </nano:shape>
+        <nano:shape id="RecordWaveTaskRef" name="Record wave — task ref">
+          <nano:extend name="id" type="string" optional="true" />
+        </nano:shape>
+        <nano:shape id="RecordWaveDelta" name="Record wave — task delta">
+          <nano:extend name="contractChange" type="string" optional="true" />
+          <nano:extend name="newlyTouches" type="string" list="true" optional="true" />
+          <nano:extend name="affectsTasks" type="string" list="true" optional="true" />
+          <nano:extend name="constraint" type="string" optional="true" />
+        </nano:shape>
+        <nano:shape id="RecordWaveResult" name="Record wave — agent result">
+          <nano:extend name="status" type="string" optional="true" />
+          <nano:extend name="summary" type="string" optional="true" />
+          <nano:extend name="pr" type="string" optional="true" />
+          <nano:extend name="delta" type="RecordWaveDelta" optional="true" />
+        </nano:shape>
+        <nano:shape id="RecordWaveIn" name="Record wave — input">
+          <nano:extend name="planKey" type="string" />
+          <nano:extend name="currentWave" type="integer" />
+          <nano:extend name="waveCount" type="integer" />
+          <nano:reference name="waveTasks" ref="RecordWaveTaskRef" list="true" />
+          <nano:reference name="waveResults" ref="RecordWaveResult" list="true" />
+        </nano:shape>
+        <nano:shape id="RecordTrialMergeHead" name="Record trial merge — open head">
+          <nano:extend name="repo" type="string" />
+          <nano:extend name="prNumber" type="integer" />
+          <nano:extend name="headRef" type="string" optional="true" />
+          <nano:extend name="headSha" type="string" optional="true" />
+        </nano:shape>
+        <nano:shape id="RecordTrialMergeIn" name="Record trial merge — input">
+          <nano:extend name="planKey" type="string" />
+          <nano:extend name="currentWave" type="integer" optional="true" />
+          <nano:extend name="trialMergeWave" type="integer" optional="true" />
+          <nano:reference name="waveOpenHeads" ref="RecordTrialMergeHead" list="true" />
+          <nano:extend name="result" type="string" optional="true" />
+          <nano:extend name="conflicts" type="string" list="true" optional="true" />
+          <nano:extend name="failing" type="string" list="true" optional="true" />
+          <nano:extend name="summary" type="string" optional="true" />
+        </nano:shape>
         <nano:shape id="RecordPlanReviewIn" name="Record plan review — input">
           <nano:extend name="planKey" type="string" />
           <nano:extend name="approved" type="boolean" optional="true" />
@@ -68,6 +117,9 @@
     <bpmn:serviceTask id="record-plan" name="Record plan &#38; levelize">
       <bpmn:extensionElements>
         <zeebe:taskDefinition type="pr.record-plan" />
+        <zeebe:properties>
+          <zeebe:property name="io.nanobpm.dataEnvelope.in" value="RecordPlanIn" />
+        </zeebe:properties>
       </bpmn:extensionElements>
       <bpmn:incoming>f_toRecordPlan</bpmn:incoming>
       <bpmn:outgoing>f_toReviewPlan</bpmn:outgoing>
@@ -215,6 +267,9 @@
     <bpmn:serviceTask id="record-wave" name="Record wave &#38; hand off">
       <bpmn:extensionElements>
         <zeebe:taskDefinition type="pr.record-wave" />
+        <zeebe:properties>
+          <zeebe:property name="io.nanobpm.dataEnvelope.in" value="RecordWaveIn" />
+        </zeebe:properties>
       </bpmn:extensionElements>
       <bpmn:incoming>f_toRecordWave</bpmn:incoming>
       <bpmn:outgoing>f_toTrialNeeded</bpmn:outgoing>
@@ -246,6 +301,9 @@
     <bpmn:serviceTask id="record-trial-merge" name="Record trial merge">
       <bpmn:extensionElements>
         <zeebe:taskDefinition type="pr.record-trial-merge" />
+        <zeebe:properties>
+          <zeebe:property name="io.nanobpm.dataEnvelope.in" value="RecordTrialMergeIn" />
+        </zeebe:properties>
       </bpmn:extensionElements>
       <bpmn:incoming>f_toRecordTrialMerge</bpmn:incoming>
       <bpmn:outgoing>f_toGwTrial</bpmn:outgoing>
