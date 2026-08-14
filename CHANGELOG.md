@@ -1,3 +1,10 @@
+# [0.66.0](https://github.com/nanobpm/nano-workforce/compare/v0.65.0...v0.66.0) (2026-08-14)
+
+
+### Features
+
+* derive record-plan/record-wave/record-trial-merge array inputs from the model ([#212](https://github.com/nanobpm/nano-workforce/issues/212)) ([95f1694](https://github.com/nanobpm/nano-workforce/commit/95f16944918b99107e784eed5ab69a5962365ec4)), closes [#211](https://github.com/nanobpm/nano-workforce/issues/211) [#211](https://github.com/nanobpm/nano-workforce/issues/211) [#211](https://github.com/nanobpm/nano-workforce/issues/211) [#211](https://github.com/nanobpm/nano-workforce/issues/211)
+
 # [0.65.0](https://github.com/nanobpm/nano-workforce/compare/v0.64.0...v0.65.0) (2026-08-13)
 
 
