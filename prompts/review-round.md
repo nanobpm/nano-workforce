@@ -58,11 +58,13 @@ Because several agents may run on the same host at once:
 
    ```sh
    # Every open thread across ALL reviews (this is your real backlog, oldest included):
-   # `pageInfo{hasNextPage}` surfaces truncation: if it's `true` there are >100 threads
-   # this page can't see — page through them, never treat one page as "every" thread.
-   gh api graphql -f query='query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){
-     pullRequest(number:$n){reviewThreads(first:100){pageInfo{hasNextPage}nodes{id isResolved path line
-       comments(first:100){nodes{databaseId author{login} body}}}}}}}' -F o=OWNER -F r=REPO -F n=PR
+   # `pageInfo{hasNextPage endCursor}` surfaces truncation AND gives you the cursor to page with: if
+   # `hasNextPage` is `true` there are >100 threads this page can't see — re-run passing that
+   # `endCursor` back as `$after` until `hasNextPage` is `false`; never treat one page as "every"
+   # thread. Omit `-F after=…` (leaving `$after` null) for the first page.
+   gh api graphql -f query='query($o:String!,$r:String!,$n:Int!,$after:String){repository(owner:$o,name:$r){
+     pullRequest(number:$n){reviewThreads(first:100,after:$after){pageInfo{hasNextPage endCursor}nodes{id isResolved path line
+       comments(first:100){nodes{databaseId author{login} body}}}}}}}' -F o=OWNER -F r=REPO -F n=PR   # add -F after=END_CURSOR to page
    ```
 
    Also read Copilot's **suppressed / low-confidence** advisories — the collapsed

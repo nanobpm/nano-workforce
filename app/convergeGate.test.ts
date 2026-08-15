@@ -298,6 +298,28 @@ test("converge-gate: FAILS CLOSED when the target cannot be resolved", async () 
   assertStringIncludes(out.convergeBlockReason ?? "", "could not verify");
 });
 
+test("converge-gate: a non-string prKey does not throw — resolves from repo/prNumber vars", async () => {
+  // `parsePr` calls `.trim()`, so a missing/non-string prKey must not reach it: otherwise the job
+  // throws and retries instead of running the fail-closed gate. A well-formed job carrying valid
+  // repo + prNumber but no prKey must still evaluate normally.
+  const handler = await makeUnderTest({
+    readThreads: async () => [{ isResolved: true, path: "a.ts", bodies: ["ok"] }],
+    readReviewBody: async () => "",
+  });
+  const out = await handler({ variables: { repo: "o/r", prNumber: 1 } } as any, {} as any);
+  assertEquals(out, { convergeBlocked: false, convergeBlockReason: "" });
+});
+
+test("converge-gate: FAILS CLOSED (no throw) when prKey is non-string and repo/prNumber are absent", async () => {
+  const handler = await makeUnderTest({
+    readThreads: async () => [],
+    readReviewBody: async () => "",
+  });
+  const out = await handler({ variables: { prKey: 123 } } as any, {} as any);
+  assertEquals(out.convergeBlocked, true);
+  assertStringIncludes(out.convergeBlockReason ?? "", "could not verify");
+});
+
 test("converge-gate: resolves repo/prNumber from the prKey when the vars are absent", async () => {
   let seen: [string, number] | null = null;
   const handler = await makeUnderTest({
