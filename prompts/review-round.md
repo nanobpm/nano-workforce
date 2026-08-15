@@ -48,20 +48,35 @@ Because several agents may run on the same host at once:
 
 ## What to do in a round
 
-1. **Read the latest review.** Fetch the newest Copilot review + its inline
-   comments on the PR (`gh pr view`, `gh api .../pulls/{n}/reviews`, `.../comments`).
+1. **Read the latest review AND every still-open thread.** Fetch the newest Copilot
+   review + its inline comments on the PR (`gh pr view`, `gh api .../pulls/{n}/reviews`,
+   `.../comments`). Then **also enumerate every UNRESOLVED review thread on the PR**,
+   not just the latest review's comments — findings accumulate as durable threads, so
+   an earlier round's comment stays open until someone resolves it, and the newest
+   review will **not** re-list it. Treat the full set of open threads as your backlog
+   for this round, not only the latest review:
+
+   ```sh
+   # Every open thread across ALL reviews (this is your real backlog, oldest included):
+   gh api graphql -f query='query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){
+     pullRequest(number:$n){reviewThreads(first:100){nodes{id isResolved path line
+       comments(first:100){nodes{databaseId author{login} body}}}}}}}' -F o=OWNER -F r=REPO -F n=PR
+   ```
+
    Also read Copilot's **suppressed / low-confidence** advisories — the collapsed
    "low confidence" list Copilot folds into the **review body** (`.../reviews`
    `body`). These are NOT in the default inline-comment API set, so a plain
    `.../comments` read misses them; scan the review body for them explicitly.
    If `answer` is present, treat it as the human's decision on the escalation you
    raised last round and act on it first.
-2. **Triage each comment** into: *fix* (correct, worth doing), *nitpick* (apply
+2. **Triage each item** into: *fix* (correct, worth doing), *nitpick* (apply
    silently), *needs human input* (design/product/tradeoff you can't decide), or
-   *push back* (wrong / false positive — reply with evidence, make no change).
-   Triage the suppressed / low-confidence advisories the **same** way — but do not
-   treat "suppressed" as either automatically actionable or automatically ignorable:
-   if one is a **cheap, correct** robustness/correctness win, just do it (a
+   *push back* (wrong / false positive — reply with evidence, make no change). Triage
+   **every open thread from step 1**, including ones raised in earlier rounds that the
+   latest review did not repeat — do not skip a thread just because it is not in the
+   newest review. Triage the suppressed / low-confidence advisories the **same** way —
+   but do not treat "suppressed" as either automatically actionable or automatically
+   ignorable: if one is a **cheap, correct** robustness/correctness win, just do it (a
    *nitpick*); otherwise **decline it explicitly with a one-line rationale in your
    `summary`** (e.g. "declined suppressed advisory X — input already validated
    upstream at Y"). Never silently drop one.
