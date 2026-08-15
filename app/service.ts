@@ -7,10 +7,11 @@
 //
 // Data access goes through the record-oriented gateway (`data.table<T>(name, pk)` — the RAD
 // `Table<T>` surface), not hand-written SQL. Row shapes are declared inline here.
+import { readFileSync } from "node:fs";
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { abandonUrl, mintAbandonToken, renderAbandonBrief } from "./abandon.ts";
 import { agentSlaTimeout } from "./agentSla.ts";
-import { deriveFeatureBlockedPatch, deriveFeatureDelivery, deriveFeatureEscalationPatch, FEATURE_BLOCKED_ELEMENT, FEATURE_ESCALATION_ELEMENT, type FeatureRun, featureRuns } from "./feature.ts";
+import { deriveFeatureBlockedPatch, deriveFeatureDelivery, deriveFeatureEscalationPatch, FEATURE_BLOCKED_ELEMENT, FEATURE_ESCALATION_ELEMENT, FEATURE_RUN_STATUSES, type FeatureRun, type FeatureRunStatus, featureRuns } from "./feature.ts";
 import {
   classifyMergeability,
   ensureFreshHeadRun,
@@ -26,8 +27,22 @@ import {
 import { mergeLanes, readExclusions } from "./mergeExclusion.ts";
 import { freshHeadRunAction, headRunPresenceCount, loadMergeProtocol } from "./mergeProtocol.ts";
 import { type PrLaneDecision, planPrLane, taskDependencyDepths } from "./mergeTrain.ts";
-import { plans, planTaskDeps, planTasks } from "./plan.ts";
+import { planReviews, plans, planTaskDeps, planTasks } from "./plan.ts";
 import { clampNudgeMinutes, reviewWaitTimeout } from "./reviewWait.ts";
+import { trialMergeAudits } from "./trialMerge.ts";
+import {
+  buildUserTaskRow,
+  latestOpenEscalationQuestion,
+  latestPlanReviewFindings,
+  latestTrialMergeQuestion,
+  PLAN_REVIEW_ELEMENT,
+  PR_WAIT_ANSWER_ELEMENT,
+  prEscalations,
+  reconcileUserTasks,
+  TRIAL_MERGE_ELEMENT,
+  type UserTaskRow,
+  userTasks,
+} from "./userTasks.ts";
 import { waveMergeTargets } from "./waves.ts";
 
 /** The BPMN process that drives review convergence (`resources/processes/convergence-loop.bpmn`). */
@@ -1374,6 +1389,217 @@ export async function pollFeatureBlocked(data: DataLayer, engine: EngineClient) 
   }
 }
 
+/** The app manifest, read and parsed exactly ONCE at module load. `activeStatusesFor` is invoked
+ * three times during module initialization (the PR/plan/feature constants below); parsing here keeps
+ * that to a single synchronous `readFileSync` + `JSON.parse` instead of one per lookup. */
+const APP_MANIFEST: { instanceTracking?: { table: string; activeStatuses?: string[] }[] } = JSON.parse(
+  readFileSync(new URL("../nano.app.json", import.meta.url), "utf8"),
+);
+
+/** Read a tracked table's parked-and-active statuses from the single source of truth
+ * (`instanceTracking.<table>.activeStatuses` in nano.app.json), so an app-side scan can never drift
+ * from the reconciler's notion of "in-flight". Throws if the binding is missing/empty. */
+function activeStatusesFor(table: string): readonly string[] {
+  const binding = APP_MANIFEST.instanceTracking?.find((b) => b.table === table);
+  if (!binding?.activeStatuses?.length) {
+    throw new Error(
+      `nano.app.json: instanceTracking[table="${table}"].activeStatuses is missing or empty`,
+    );
+  }
+  return binding.activeStatuses;
+}
+
+/** The `pull_requests` statuses a PR instance can be parked-and-active on, DERIVED from the single
+ * source of truth (`instanceTracking.pull_requests.activeStatuses` in nano.app.json) so the app-side
+ * scan can never drift from the reconciler's notion of "in-flight". `pollUserTasks` scans only these
+ * for an open `wait-answer` escalation, so the pass stays O(in-flight PRs), not O(all PRs). */
+export const PR_ACTIVE_STATUSES: readonly string[] = activeStatusesFor("pull_requests");
+
+/** The `plans` statuses a plan instance can be parked-and-active on, DERIVED from the same single
+ * source of truth (`instanceTracking.plans.activeStatuses`) so `pollUserTasks`' plan scan can never
+ * drift from the reconciler — mirroring `PR_ACTIVE_STATUSES` rather than hard-coding a second list. */
+export const PLAN_ACTIVE_STATUSES: readonly string[] = activeStatusesFor("plans");
+
+/** The `feature_runs` statuses a feature instance can be parked-and-active on, DERIVED from the same
+ * single source of truth (`instanceTracking.feature_runs.activeStatuses`) so `pollUserTasks`' feature
+ * scan can never drift from the reconciler — mirroring `PR_ACTIVE_STATUSES`/`PLAN_ACTIVE_STATUSES`
+ * rather than hard-coding a second list. Notably includes the non-terminal `awaiting_operator`, so a
+ * run that terminates while parked at `feature-blocked` still gets the `onTerminated` reconciliation
+ * (rather than stranding at `awaiting_operator` and blocking re-dispatch). Narrowed to the typed
+ * `FeatureRunStatus` union (throwing on any manifest status the code doesn't know) so the derived
+ * list can feed `featureRuns(data).find({ status })` directly. */
+function toFeatureRunStatus(status: string): FeatureRunStatus {
+  for (const known of FEATURE_RUN_STATUSES) if (known === status) return known;
+  throw new Error(`nano.app.json: feature_runs.activeStatuses has unknown status "${status}"`);
+}
+export const FEATURE_ACTIVE_STATUSES: readonly FeatureRunStatus[] =
+  activeStatusesFor("feature_runs").map(toFeatureRunStatus);
+
+/** Reconcile the unified Tasks-inbox read-model (`user_tasks`) against the engine's currently-open
+ * native user-task escalations (issue #236). The Tasks page lists EVERY open escalation awaiting a
+ * human decision — the feature kinds (already denormalised onto `feature_runs` by the two feature
+ * pollers, which run earlier in this pass) plus the epic/PR kinds (`plan-review-decision`,
+ * `trial-merge-decision`, `wait-answer`) that had no app-side pointer at all, so the pages could not
+ * drive their completion. This is the generalisation of `pollFeatureEscalations`/`pollFeatureBlocked`
+ * across all subjects: for each in-flight plan / PR it reads the instance's open user tasks and
+ * projects one `user_tasks` row per escalation, enriching the display `question` from the audit
+ * tables each kind already records. `reconcileUserTasks` then diffs the desired open set against the
+ * persisted rows so a completed task's row is deleted (answered here, via the task inbox, or
+ * out-of-band) and `showCount` reflects live pending work. Best-effort + idempotent — per-instance
+ * failures are isolated so one bad instance never stalls the pass. */
+export async function pollUserTasks(data: DataLayer, engine: EngineClient) {
+  const at = now();
+  const desired: UserTaskRow[] = [];
+  const push = (row: UserTaskRow | null) => {
+    if (row) desired.push(row);
+  };
+
+  // Feature-run escalations — the completable keys are denormalised onto `feature_runs` by
+  // pollFeatureEscalations/pollFeatureBlocked (earlier in this pass), so no per-instance engine read
+  // is needed here.
+  const featureSeen = new Set<string>();
+  for (const status of FEATURE_ACTIVE_STATUSES) {
+    for (const run of await featureRuns(data).find({ status })) {
+      if (featureSeen.has(run.feature_key)) continue;
+      featureSeen.add(run.feature_key);
+      if (run.escalation_user_task_key) {
+        push(
+          buildUserTaskRow(
+            {
+              userTaskKey: run.escalation_user_task_key,
+              elementId: FEATURE_ESCALATION_ELEMENT,
+              subjectType: "feature",
+              subjectKey: run.feature_key,
+              subjectUrl: run.issue_url,
+              question: run.escalation_question,
+              processKey: run.process_key,
+            },
+            at,
+          ),
+        );
+      }
+      if (run.blocked_user_task_key) {
+        push(
+          buildUserTaskRow(
+            {
+              userTaskKey: run.blocked_user_task_key,
+              elementId: FEATURE_BLOCKED_ELEMENT,
+              subjectType: "feature",
+              subjectKey: run.feature_key,
+              subjectUrl: run.issue_url,
+              question: run.delivery_label,
+              processKey: run.process_key,
+            },
+            at,
+          ),
+        );
+      }
+    }
+  }
+
+  // Plan escalations (`plan-review-decision` / `trial-merge-decision`) — read each in-flight plan's
+  // open user tasks and pair them with the open audit row's question/findings. Dedupe by `plan_key`
+  // across the status queries (mirroring the feature-run scan above): a plan whose status transitions
+  // mid-pass could otherwise match twice and push duplicate `desired` rows for one `user_task_key`.
+  const planSeen = new Set<string>();
+  for (const status of PLAN_ACTIVE_STATUSES) {
+    for (const plan of await plans(data).find({ status })) {
+      if (!plan.process_key) continue;
+      if (planSeen.has(plan.plan_key)) continue;
+      planSeen.add(plan.plan_key);
+      let tasks: { userTaskKey: string; elementId?: string }[];
+      try {
+        tasks = await engine.searchUserTasks({ processInstanceKey: plan.process_key });
+      } catch (err) {
+        console.error(`[poller] user tasks (plan ${plan.plan_key}): ${err}`);
+        continue;
+      }
+      for (const t of tasks) {
+        if (t.elementId === PLAN_REVIEW_ELEMENT) {
+          const question = latestPlanReviewFindings(await planReviews(data).find({ plan_key: plan.plan_key }));
+          push(
+            buildUserTaskRow(
+              {
+                userTaskKey: t.userTaskKey,
+                elementId: PLAN_REVIEW_ELEMENT,
+                subjectType: "plan",
+                subjectKey: plan.plan_key,
+                subjectUrl: plan.issue_url,
+                question,
+                processKey: plan.process_key,
+              },
+              at,
+            ),
+          );
+        } else if (t.elementId === TRIAL_MERGE_ELEMENT) {
+          const question = latestTrialMergeQuestion(await trialMergeAudits(data, plan.plan_key));
+          push(
+            buildUserTaskRow(
+              {
+                userTaskKey: t.userTaskKey,
+                elementId: TRIAL_MERGE_ELEMENT,
+                subjectType: "plan",
+                subjectKey: plan.plan_key,
+                subjectUrl: plan.issue_url,
+                question,
+                processKey: plan.process_key,
+              },
+              at,
+            ),
+          );
+        }
+      }
+    }
+  }
+
+  // PR review-loop escalations (`wait-answer`) — read each in-flight PR's open user tasks and pair the
+  // escalation with the open audit row's question. Dedupe by `pr_key` across the status queries (as the
+  // feature-run / plan scans do): a PR whose status transitions mid-pass could otherwise be processed
+  // twice and push duplicate `desired` rows for one `user_task_key`.
+  const prSeen = new Set<string>();
+  for (const status of PR_ACTIVE_STATUSES) {
+    for (const pr of await prs(data).find({ status })) {
+      if (!pr.process_key) continue;
+      if (prSeen.has(pr.pr_key)) continue;
+      prSeen.add(pr.pr_key);
+      let tasks: { userTaskKey: string; elementId?: string }[];
+      try {
+        tasks = await engine.searchUserTasks({ processInstanceKey: pr.process_key });
+      } catch (err) {
+        console.error(`[poller] user tasks (pr ${pr.pr_key}): ${err}`);
+        continue;
+      }
+      for (const t of tasks) {
+        if (t.elementId !== PR_WAIT_ANSWER_ELEMENT) continue;
+        const question = latestOpenEscalationQuestion(await prEscalations(data).find({ pr_key: pr.pr_key, status: "open" }));
+        push(
+          buildUserTaskRow(
+            {
+              userTaskKey: t.userTaskKey,
+              elementId: PR_WAIT_ANSWER_ELEMENT,
+              subjectType: "pr",
+              subjectKey: pr.pr_key,
+              subjectUrl: pr.url,
+              question,
+              processKey: pr.process_key,
+            },
+            at,
+          ),
+        );
+      }
+    }
+  }
+
+  const persisted = await userTasks(data).all();
+  const { inserts, updates, deletes } = reconcileUserTasks(persisted, desired);
+  for (const row of inserts) await userTasks(data).insert(row);
+  for (const row of updates) {
+    const { user_task_key, created_at, ...patch } = row;
+    await userTasks(data).update(user_task_key, { ...patch, updated_at: at });
+  }
+  for (const key of deletes) await userTasks(data).delete(key);
+}
+
 /** One full poll pass: advance the review stage, the merge stage, the wave-merge barrier, and
  * (when the engine REST endpoint is supplied) the job-activation visibility pass and the
  * technical-incident surfacing pass. Called on the self-scheduling loop in `main.ts`. */
@@ -1390,6 +1616,7 @@ export async function pollOnce(
   await pollFeatureDelivery(data);
   await pollFeatureEscalations(data, engine);
   await pollFeatureBlocked(data, engine);
+  await pollUserTasks(data, engine);
   if (engineRest) {
     await pollJobActivation(data, engineRest.restAddress, engineRest.token);
     await pollIncidents(data, engineRest.restAddress, engineRest.token);

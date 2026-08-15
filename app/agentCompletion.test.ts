@@ -21,6 +21,7 @@ import {
   latestCompletion,
   revertAgentCompletion,
   type TaskCompletion,
+  validateEscalationVariables,
 } from "./agentCompletion.ts";
 
 /** A minimal in-memory `Table<T>`: AUTOINCREMENT ids on insert, structural `find`, `get`, `update`. */
@@ -385,4 +386,72 @@ test("latestCompletion returns the newest row by id regardless of insertion orde
   const newest = (await latestCompletion(data, "ut-x"))!;
   assertEquals(newest.id, 3, "the highest-id row for the key wins, not the first found");
   assertEquals(stores.task_completions.rows[0].id, 3, "the backing array is not reordered");
+});
+
+// --- Form-contract enforcement (issue #236 review advisory): a completion must satisfy the linked
+// `.form`'s required-field + select allowed-value contract BEFORE the engine resumes, so a missing or
+// invalid decision can never park the process in an invalid state. Derived from the canonical `.form`,
+// exercised through BOTH completers so agent and human paths reject invalid input identically.
+
+test("completer rejects a completion missing a required form field (no engine resume, no ledger row)", async () => {
+  const stores = { task_completions: { rows: [] as any[], key: "id" } };
+  const data = memData(stores);
+  const { engine, completed } = fakeEngine([{ userTaskKey: "ut-1", elementId: "wait-answer" }]);
+
+  const r = await completeEscalationAsHuman(data, engine, {
+    userTaskKey: "ut-1",
+    operatorId: "alice",
+    variables: { answer: "   " }, // required, but blank
+  });
+
+  assertEquals(r.ok, false);
+  assert(String(r.reason).includes("answer"), "the reason names the missing required field");
+  assertEquals(completed.length, 0, "an invalid completion never resumes the process");
+  assertEquals(stores.task_completions.rows.length, 0, "and no attribution row is written");
+});
+
+test("completer rejects a select value outside the form's allowed set", async () => {
+  const stores = { task_completions: { rows: [] as any[], key: "id" } };
+  const data = memData(stores);
+  const { engine, completed } = fakeEngine([{ userTaskKey: "ut-2", elementId: "trial-merge-decision" }]);
+
+  const r = await completeEscalationAsAgent(data, engine, {
+    userTaskKey: "ut-2",
+    agentId: "bot",
+    variables: { action: "explode" }, // not one of proceed/rebase/abandon
+  });
+
+  assertEquals(r.ok, false);
+  assert(String(r.reason).includes("action"), "the reason names the invalid select field");
+  assertEquals(completed.length, 0, "an out-of-range decision never resumes the process");
+});
+
+test("completer accepts variables that satisfy the form contract (required present + allowed value)", async () => {
+  const stores = { task_completions: { rows: [] as any[], key: "id" } };
+  const data = memData(stores);
+  const { engine, completed } = fakeEngine([{ userTaskKey: "ut-3", elementId: "plan-review-decision" }]);
+
+  const r = await completeEscalationAsHuman(data, engine, {
+    userTaskKey: "ut-3",
+    operatorId: "alice",
+    variables: { directive: "revise", notes: "narrow scope" },
+  });
+
+  assertEquals(r.ok, true);
+  assertEquals(completed.length, 1, "a contract-valid completion resumes the process");
+  assertEquals(completed[0].variables, { directive: "revise", notes: "narrow scope" });
+});
+
+test("validateEscalationVariables derives its contract from the canonical .form files", async () => {
+  // wait-answer -> pr-escalation.form (answer required)
+  assertEquals(validateEscalationVariables("wait-answer", { answer: "ok" }), null);
+  assert(validateEscalationVariables("wait-answer", {}) !== null);
+  // trial-merge-decision -> action required, allowed proceed/rebase/abandon
+  assertEquals(validateEscalationVariables("trial-merge-decision", { action: "abandon" }), null);
+  assert(validateEscalationVariables("trial-merge-decision", { action: "nope" }) !== null);
+  // plan-review-decision -> directive required, allowed proceed/revise
+  assertEquals(validateEscalationVariables("plan-review-decision", { directive: "proceed" }), null);
+  assert(validateEscalationVariables("plan-review-decision", { directive: "" }) !== null);
+  // an element with no linked form contract is not enforced
+  assertEquals(validateEscalationVariables("some-other-task", { whatever: 1 }), null);
 });

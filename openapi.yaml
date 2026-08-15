@@ -1244,6 +1244,59 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/MessageResult"
+  /actions/complete-user-task:
+    post:
+      operationId: completeUserTask
+      summary: "Complete an open native user-task escalation from the nwf Tasks inbox (issue #236).
+        Submits the parked task's typed `.form` variables (e.g. a plan-review `{ directive, notes }`, a
+        trial-merge `{ action, notes }`, or a PR `{ answer }`) to the canonical human completer
+        (completeEscalationAsHuman → completeUserTaskAttributed) — the same resume path the task inbox
+        uses, recording who answered. The completer refuses any user task that is not one of the
+        migrated escalation elements. The feature-run kinds keep their own operations
+        (answer-escalation / acknowledge-blocked); this door is for the plan-review / trial-merge / PR
+        `wait-answer` kinds whose completion is a straight typed pass-through. On success the answered
+        task's read-model row is dropped so the Tasks grid stops offering a decision for it."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+                - userTaskKey
+                - variables
+              properties:
+                userTaskKey:
+                  type: string
+                  minLength: 1
+                  description: The parked escalation user-task key (user_tasks.user_task_key).
+                variables:
+                  type: object
+                  additionalProperties: true
+                  description: The typed form variables the parked task's `.form` expects (kind-specific).
+                operator:
+                  type: string
+                  description: Optional operator handle recorded in the attribution ledger; defaults to "operator".
+      responses:
+        "200":
+          description: The escalation user task was completed and the process resumed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResult"
+        "400":
+          description: A required field was missing/invalid, or the target is not an escalation task.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResult"
+        "404":
+          description: No open escalation user task matches the userTaskKey.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResult"
   /actions/acknowledge-blocked:
     post:
       operationId: acknowledgeBlocked

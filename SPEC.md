@@ -264,8 +264,12 @@ generic Urban **page runtime** (`@nanobpm/app`, ADR 0042) — no hand-written SP
 The page defines status-filtered tabs (active vs. history), a submit form, a
 per-row **Cancel** action, and an expandable detail with the round/escalation
 child grids and a lazily-loaded transcript. The round/escalation grids are
-read-only audit; escalations are answered through the **task inbox** surface at
-`/tasks` (native `userTask`s), not an inline form on this page.
+read-only audit. Open native user-task escalations are additionally resolved
+app-side from the **Tasks** page (`pages/tasks.page.json`, issue #236) — a nav
+tab whose per-kind `dataGrid`s list every open escalation (feature / plan-review
+/ trial-merge / PR review / blocked-run) off the `user_tasks` read-model and
+submit the typed decision to the canonical human completer — so an operator no
+longer depends on Urban's read-only `taskInbox` stub at `/tasks`.
 
 The app-specific business-logic endpoints are **OpenAPI operations** mounted
 under `api.base` (`/app/api`), each implemented by a delegate module in
@@ -282,6 +286,7 @@ The full, authoritative contract is `openapi.yaml` (Swagger UI at
 | `POST` | `/app/api/actions/start/convergence-loop` | parse the PR ref → create the aggregate + start the process (the ONE submit door — page + external callers) |
 | `POST` | `/app/api/actions/start/plan-fanout` | parse the issue ref → start a plan fan-out run (the ONE plan door) |
 | `POST` | `/app/api/actions/message` (`escalation-answered`) | answer an open merge-loop escalation → publish `escalation-answered` (the four #156 escalation kinds are native user tasks answered via the task inbox) |
+| `POST` | `/app/api/actions/complete-user-task` | complete an open native user-task escalation from the Tasks page (plan-review / trial-merge / PR `wait-answer`) → `completeEscalationAsHuman` (the same resume path the task inbox uses) |
 | `GET`/`POST` | `/app/api/hooks/blackboard` | per-plan coordination blackboard (capability-token side-channel) |
 | `GET` | `/app/api/hooks/abandon` | cooperative abandon check (per-PR capability token) |
 

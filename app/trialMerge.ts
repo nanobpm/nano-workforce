@@ -60,6 +60,11 @@ export function trialMergeWaveFromTaskId(taskId: string): number | null {
 
 const auditTable = (data: DataLayer) => data.table<TrialMergeAuditRow>("plan_trial_merges", "id");
 
+/** All trial-merge audit rows for a plan (append-only D3 gate log, 014/021). Display-only read used
+ *  by `pollUserTasks` to enrich the open `trial-merge-decision` escalation with its red summary. */
+export const trialMergeAudits = (data: DataLayer, planKey: string) =>
+  auditTable(data).find({ plan_key: planKey });
+
 function jsonOrNull(v: unknown): string | null {
   if (v == null) return null;
   try {
