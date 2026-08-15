@@ -78,7 +78,7 @@
       <bpmn:extensionElements>
         <zeebe:taskDefinition type="senior:pr-review" />
         <zeebe:linkedResources>
-          <zeebe:linkedResource resourceId="review-round.md" bindingType="latest" linkName="prompt" />
+          <zeebe:linkedResource resourceId="review-round.md" bindingType="latest" resourceType="GenericScript" linkName="prompt" />
         </zeebe:linkedResources>
         <zeebe:properties>
           <zeebe:property name="io.nanobpm.dataEnvelope.in" value="PrReviewRoundIn" />
