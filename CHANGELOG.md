@@ -1,3 +1,10 @@
+## [0.69.1](https://github.com/nanobpm/nano-workforce/compare/v0.69.0...v0.69.1) (2026-08-15)
+
+
+### Bug Fixes
+
+* **models:** add required resourceType to all linkedResources ([#234](https://github.com/nanobpm/nano-workforce/issues/234)) ([#235](https://github.com/nanobpm/nano-workforce/issues/235)) ([a3ac02f](https://github.com/nanobpm/nano-workforce/commit/a3ac02f308c813a778682ace21718f4f7e446c52)), closes [Magikcraft/nano-bpm#768](https://github.com/Magikcraft/nano-bpm/issues/768) [#768](https://github.com/nanobpm/nano-workforce/issues/768)
+
 # [0.69.0](https://github.com/nanobpm/nano-workforce/compare/v0.68.0...v0.69.0) (2026-08-15)
 
 
