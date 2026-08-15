@@ -47,7 +47,7 @@ interface Out extends Record<string, unknown> {
 const str = (v: unknown): string | undefined =>
   typeof v === "string" && v.trim().length > 0 ? v.trim() : undefined;
 
-// The implementation agent reports one of these (see prompts/feature.md). Anything else —
+// The implementation agent reports one of these (see resources/prompts/feature.md). Anything else —
 // including a missing status — is treated as `blocked`: we must not assume a PR was opened,
 // and we only hand off / persist a PR when the status is `opened`.
 type WaveResultStatus = Extract<PlanTaskStatus, "opened" | "blocked" | "skipped">;

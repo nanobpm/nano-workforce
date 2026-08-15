@@ -1,8 +1,10 @@
 // Red/green coverage for the agent-prompt deploy guard (scripts/check-agent-prompts.ts).
 //
-// Since #169 each agent's base prompt is a linked *resource*: `prompts/<token>.md` is deployed as a
-// generic resource (a `models` deploy glob) and each service task links it with
-// `<zeebe:linkedResource resourceId="<token>.md" bindingType="latest" linkName="prompt"/>`. The
+// Since #169 each agent's base prompt is a linked *resource*: `resources/prompts/<token>.md` is
+// deployed as a generic resource and each service task links it with
+// `<zeebe:linkedResource resourceId="<token>.md" bindingType="latest" linkName="prompt"/>`. Under
+// ADR 0062 the app declares no `models`, so the guard discovers deployables by the `resources/`
+// convention walk; a manifest with explicit `models` globs is still honoured as an override. The
 // engine silently OMITS an unresolvable link — a typo'd or undeployed `resourceId` yields a blank
 // base prompt at runtime (the prompt-less-agent root of the empty "(no question provided)"
 // escalations, Magikcraft/nano-bpm #597/#599). These cases assert the guard fails on each broken
@@ -14,11 +16,15 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { checkAgentPrompts } from "./check-agent-prompts.ts";
 
-// A manifest that deploys BPMN and the prompt resources (the migrated shape: prompts are a deploy
-// glob, not a `templates` substitution source).
+// A manifest that deploys BPMN and the prompt resources via an explicit `models` override (the
+// escape hatch — exercised here to prove overrides still work alongside the ADR 0062 convention).
 const MANIFEST = JSON.stringify({
   models: { processes: ["resources/processes/*.bpmn", "prompts/*.md"] },
 });
+
+// The blessed ADR 0062 shape: NO `models` block, so deployables are discovered by the `resources/`
+// convention walk (prompts live at `resources/prompts/*.md`).
+const MANIFEST_CONVENTION = JSON.stringify({ id: "app" });
 
 function link(resourceId: string, bindingType = "latest"): string {
   return `<zeebe:linkedResource resourceId="${resourceId}" bindingType="${bindingType}" linkName="prompt" />`;
@@ -49,6 +55,33 @@ test("passes when every prompt link resolves to a deployed, non-blank, result-em
   assertEquals(res.errors, []);
   assert(res.ok);
   assertEquals(res.resolved, ["review-round"]);
+});
+
+test("discovers prompts by the resources/ convention when the manifest declares no models", () => {
+  const root = fixture({
+    "nano.app.json": MANIFEST_CONVENTION,
+    "resources/processes/loop.bpmn": serviceTask(link("review-round.md")),
+    "resources/prompts/review-round.md": "# Round\nDo the thing, then write `$AGENT_RESULT_FILE`.",
+    // Docs live OUTSIDE resources/ and must never be swept into the deploy set.
+    "docs/agent-guide.md": "# Guide\nnot a deployable",
+  });
+  const res = checkAgentPrompts(root);
+  assertEquals(res.errors, []);
+  assert(res.ok);
+  assertEquals(res.resolved, ["review-round"]);
+});
+
+test("convention walk flags a prompt link that has no deployed resource under resources/", () => {
+  const root = fixture({
+    "nano.app.json": MANIFEST_CONVENTION,
+    "resources/processes/loop.bpmn": serviceTask(link("review-round.md")),
+    // The prompt lives OUTSIDE resources/ (old top-level prompts/ layout) so convention never
+    // deploys it — the link would resolve to nothing at runtime.
+    "prompts/review-round.md": "# Round\nWrite `$AGENT_RESULT_FILE`.",
+  });
+  const res = checkAgentPrompts(root);
+  assert(!res.ok);
+  assert(res.errors.some((e) => e.includes("no deployed resource has that name")));
 });
 
 test("fails when a prompt link references a resourceId with no deployed file", () => {

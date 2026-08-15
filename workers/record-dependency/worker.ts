@@ -6,7 +6,7 @@
 // merged. The process re-enters its existing `wait-deps` catch, so no human has to babysit an
 // ordering constraint the machinery already knows how to satisfy.
 //
-// `dependsOn` is whatever the agent returned (see prompts/fix-ci.md, prompts/rebase.md): a
+// `dependsOn` is whatever the agent returned (see resources/prompts/fix-ci.md, resources/prompts/rebase.md): a
 // string of one or more `owner/repo#N` refs (or PR URLs) separated by commas/whitespace/newlines,
 // or an array of such tokens. We parse each robustly (reusing `parsePr`), drop self-references and
 // duplicates, and insert missing edges idempotently — a worker retry never double-inserts, and an

@@ -307,20 +307,29 @@ both live in the source repo, not in the job payload.
   `retro.bpmn`. These are the source of truth for routing. To understand *why* an
   instance went where it did, read the gateway conditions (FEEL expressions on the
   sequence flows) for the element it is parked on (§5).
-- **Prompts (agent base instructions):** `prompts/*.md` — `review-round.md`,
-  `plan.md`, `feature.md`, `fix-ci.md`, `rebase.md`, `trial-merge.md`, etc. An
-  agent's base prompt is **not** a job variable: it is delivered as a
-  **linked resource** (likewise `plan.md`, …):
+- **Prompts (agent base instructions):** `resources/prompts/*.md` — `review-round.md`,
+  `plan.md`, `feature.md`, `fix-ci.md`, `rebase.md`, `trial-merge.md`, etc. They live
+  under `resources/` so they deploy by convention (ADR 0062 — the app declares no
+  `models`; every file under `resources/` is deployed, one `.md` per task under
+  `resources/prompts/`). An agent's base prompt is **not** a job variable and is **not**
+  a deploy-time `{{token}}` substitution (that templating is removed — there is no
+  back-compat): it is delivered as a **linked resource**, the blessed **and only**
+  prompt-modularity path:
 
   ```xml
-  <zeebe:linkedResource resourceId="review-round.md" bindingType="latest" linkName="prompt"/>
+  <zeebe:linkedResource resourceId="review-round.md" bindingType="latest" resourceType="GenericScript" linkName="prompt"/>
   ```
 
   that the engine
-  resolves to the latest deployed prompt at job activation. Because the binding is
-  `latest`, redeploying one of these files updates the prompt mid-epic without a process
-  redeploy. If an agent misbehaves systematically, the prompt is the first thing
-  to inspect/fix.
+  resolves to the latest deployed prompt at job activation, combined at runtime with the
+  per-task `appendPrompt` FEEL (the task-specific slice appended to this base). Because
+  the binding is `latest`, redeploying one of these files updates the prompt mid-epic
+  without a process redeploy. If an agent misbehaves systematically, the prompt is the
+  first thing to inspect/fix.
+
+  > **Value-injection caveat:** never bake a per-run value (a URL, a flag) into a prompt
+  > at deploy time — that path is gone. Pass it as a runtime job variable / `appendPrompt`
+  > FEEL instead; deploy-time string substitution is not available.
 - **Job contract:** `senior:pr-review` receives `{ prUrl, repo, prNumber, round,
   answer? }` and must return a flat result `{ status, summary, question? }` with
   `status ∈ { converged, addressed, waiting, needs_input, blocked }`. A round that
@@ -329,7 +338,7 @@ both live in the source repo, not in the job payload.
   rather than escalating.
 
 To validate a model/prompt change locally: `npm run layout:check` (BPMN diagram
-freshness), `npm run check:prompts` (every template resolves), `npm run check`
+freshness), `npm run check:prompts` (every prompt link resolves), `npm run check`
 (manifest), `npm run typecheck`, `npm run lint`, `npm test`.
 
 ---

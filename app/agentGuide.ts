@@ -1,7 +1,8 @@
 // The agent operator guide served by GET /app/api/agent (operationId `getAgentInstructions`).
 //
-// The guide itself is authored as plain markdown in `resources/agent-guide.md` (kept out of
-// `prompts/` so it is NOT treated as a deployable agent template) and read from the checkout at
+// The guide itself is authored as plain markdown in `docs/agent-guide.md` (kept OUT of
+// `resources/` so the deploy-by-convention walk does NOT treat it as a deployable model — docs
+// live under `docs/`, ADR 0062) and read from the checkout at
 // module load — same "run the .ts sources directly, inspect the working tree at runtime" approach
 // as version.ts. Two placeholders are substituted per request/deployment so the embedded examples
 // are copy-pasteable against THIS instance:
@@ -15,7 +16,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const REPO_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
-const GUIDE_PATH = join(REPO_ROOT, "resources", "agent-guide.md");
+const GUIDE_PATH = join(REPO_ROOT, "docs", "agent-guide.md");
 
 // Read the raw guide once, at module load. Frozen for the life of the process.
 const RAW_GUIDE: string = (() => {
