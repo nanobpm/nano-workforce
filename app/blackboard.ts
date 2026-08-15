@@ -99,14 +99,15 @@ export function mintBlackboardToken(): string {
 
 /** The externally-reachable base URL agents use to reach this app. Must resolve from WHEREVER the
  * agent runs (co-located or remote/containerised), so it is configured, never hardcoded. Read
- * through the ONE typed env schema ({@link readEnvOr} over `NANO_PR_PUBLIC_BASE_URL`) — there is no
- * second name for this value. The phantom `NANO_PR_BASE_URL` fallback (introduced in #53, cleaned up
- * per #223) is recorded as a rejected synonym in `app/contracts.ts`, so it can never be reintroduced
- * as a silent runtime fallback. */
-export function publicBaseUrl(base: string = readEnvOr("NANO_PR_PUBLIC_BASE_URL")): string {
-  // Skip a blank/whitespace value so an explicitly-set-but-empty NANO_PR_PUBLIC_BASE_URL can't yield
+ * through the ONE typed env schema ({@link readEnvOr} over `NANO_WORKFORCE_BASE_URL`) — there is no
+ * second name for this value. The retired synonyms `NANO_PR_PUBLIC_BASE_URL` (coalesced into the
+ * canonical name in #226) and the phantom `NANO_PR_BASE_URL` fallback (introduced in #53, cleaned
+ * up per #223) are recorded as rejected synonyms in `app/contracts.ts`, so neither can be
+ * reintroduced as a silent runtime fallback. */
+export function publicBaseUrl(base: string = readEnvOr("NANO_WORKFORCE_BASE_URL")): string {
+  // Skip a blank/whitespace value so an explicitly-set-but-empty NANO_WORKFORCE_BASE_URL can't yield
   // a malformed capability URL; fall back to the schema-declared default.
-  const resolved = base.trim() || readEnvOr("NANO_PR_PUBLIC_BASE_URL");
+  const resolved = base.trim() || readEnvOr("NANO_WORKFORCE_BASE_URL");
   return resolved.replace(/\/+$/, "");
 }
 

@@ -1,10 +1,11 @@
 // nano-workforce — the durable contract registry (issue #227, ADR 0004).
 //
 // THE PROBLEM this exists to kill: parallel/sliced agent work keeps producing *two divergent
-// representations of one contract* — an env-key synonym (`NANO_PR_PUBLIC_BASE_URL` vs. its phantom
-// `NANO_PR_BASE_URL` fallback, #223), a wire-shape drift (a producer emitting a legacy frame the
-// hub no longer accepts, nano-ide #234), two type names for one shape — each authored independently
-// against a mock, with the divergence only discovered at runtime.
+// representations of one contract* — an env-key synonym (the canonical `NANO_WORKFORCE_BASE_URL`
+// vs. retired names like `NANO_PR_PUBLIC_BASE_URL`/`NANO_PR_BASE_URL`, #226/#223), a wire-shape
+// drift (a producer emitting a legacy frame the hub no longer accepts, nano-ide #234), two type
+// names for one shape — each authored independently against a mock, with the divergence only
+// discovered at runtime.
 //
 // THE FIX: a first-class, *committed and executable* source of truth for every cross-cutting
 // contract. Declare-once entries (env/config keys, wire-frame shapes, shared exported type/interface
@@ -76,16 +77,17 @@ export type Contract = EnvContract | WireContract | TypeContract | CapabilityUrl
 // ---------------------------------------------------------------------------------------------
 
 export const ENV_CONTRACTS = {
-  NANO_PR_PUBLIC_BASE_URL: {
+  NANO_WORKFORCE_BASE_URL: {
     category: "env",
-    name: "NANO_PR_PUBLIC_BASE_URL",
+    name: "NANO_WORKFORCE_BASE_URL",
     owner: "app/blackboard.ts",
     semantics:
       "Externally-reachable base URL agents use to reach this app (must resolve from wherever the agent runs). Drives every plan's blackboard capability URL.",
     default: "http://localhost:3000",
-    // The phantom fallback introduced alongside this key in #53 (2dcfb8a) and cleaned up per #223.
-    // Recording it here makes its reintroduction a CI failure, not a silent second name for one value.
-    rejectedSynonyms: ["NANO_PR_BASE_URL"],
+    // Retired synonyms, recorded so their reintroduction is a CI failure rather than a silent second
+    // name for one value: `NANO_PR_PUBLIC_BASE_URL` was coalesced into this canonical name in #226;
+    // `NANO_PR_BASE_URL` was a phantom fallback introduced in #53 (2dcfb8a) and cleaned up per #223.
+    rejectedSynonyms: ["NANO_PR_PUBLIC_BASE_URL", "NANO_PR_BASE_URL"],
   },
   NANO_PR_POLL_MS: {
     category: "env",
@@ -197,6 +199,14 @@ export const ENV_CONTRACTS = {
     name: "NANO_ESCALATION_SLA_TIMEOUT",
     owner: "app/plan.ts",
     semantics: "SLA timeout for an escalation user task (FEEL/ISO-8601 duration).",
+  },
+  NANO_PR_AGENT_SLA_TIMEOUT: {
+    category: "env",
+    name: "NANO_PR_AGENT_SLA_TIMEOUT",
+    owner: "app/service.ts",
+    semantics:
+      "SLA timeout for an agent (service) task before its boundary timer fires and the PR escalates for human attention (ISO-8601 duration). A malformed value falls back to the default.",
+    default: "PT2H",
   },
   NANO_APP_DB_URL: {
     category: "env",
@@ -320,8 +330,8 @@ export const CAPABILITY_URL_CONTRACTS = {
     name: "blackboard",
     owner: "app/blackboard.ts",
     semantics:
-      "Per-plan blackboard side-channel. The per-plan token IS the credential; it rides the query string so the agent GET/POSTs the exact string it was handed with no header assembly. The base is `NANO_PR_PUBLIC_BASE_URL` (one env contract), never hardcoded.",
-    scheme: "<NANO_PR_PUBLIC_BASE_URL>/app/api/hooks/blackboard?token=<token>",
+      "Per-plan blackboard side-channel. The per-plan token IS the credential; it rides the query string so the agent GET/POSTs the exact string it was handed with no header assembly. The base is `NANO_WORKFORCE_BASE_URL` (one env contract), never hardcoded.",
+    scheme: "<NANO_WORKFORCE_BASE_URL>/app/api/hooks/blackboard?token=<token>",
   },
 } as const satisfies Record<string, CapabilityUrlContract>;
 

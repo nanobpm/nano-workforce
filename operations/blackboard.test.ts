@@ -223,5 +223,5 @@ test("POST kind='contract' reintroducing a rejected synonym surfaces a declarati
   assertEquals(post.status, 201);
   assertEquals(post.body.contractConflicts.length >= 1, true);
   assertEquals(post.body.contractConflicts[0].kind, "rejected-synonym");
-  assertEquals(post.body.contractConflicts[0].existingName, "NANO_PR_PUBLIC_BASE_URL");
+  assertEquals(post.body.contractConflicts[0].existingName, "NANO_WORKFORCE_BASE_URL");
 });

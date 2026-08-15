@@ -21,6 +21,7 @@ import { Terminal } from "@xterm/xterm";
 
 const DEFAULT_REFRESH_MS = 2000;
 const DEFAULT_STALE_AFTER_MS = 15_000;
+const DEFAULT_PAST_FETCH_TIMEOUT_MS = 15_000;
 
 function isPosInt(value) {
   return Number.isSafeInteger(value) && value > 0;
@@ -181,6 +182,113 @@ function renderSupply(host, doc, view, onDrill) {
   host.appendChild(root);
 }
 
+// ── past-sessions projection + render (mirrors app/agentic/cockpit/transcript-view.ts + -render.ts) ──
+
+function humanBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes < 0) return "0 B";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function humanDuration(ms) {
+  if (ms == null || !Number.isFinite(ms) || ms <= 0) return undefined;
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.round(m / 60);
+  if (h < 48) return `${h}h`;
+  return `${Math.round(h / 24)}d`;
+}
+
+function sessionLabel(t) {
+  const parts = [];
+  if (t.bpmnProcessId != null) parts.push(t.bpmnProcessId);
+  if (t.elementId != null) parts.push(t.elementId);
+  if (t.processInstanceKey != null) parts.push(`inst ${t.processInstanceKey}`);
+  if (t.planKey != null) parts.push(t.planKey);
+  if (parts.length > 0) return parts.join(" \u00b7 ");
+  if (t.jobKey != null) return `job ${t.jobKey}`;
+  return t.stream;
+}
+
+function transcriptsView(report) {
+  const sessions = (report.transcripts ?? [])
+    .map((t) => ({
+      stream: t.stream,
+      label: sessionLabel(t),
+      jobKey: t.jobKey,
+      status: t.status,
+      lifecycle: t.lifecycle,
+      size: humanBytes(t.byteLength),
+      byteLength: t.byteLength,
+      capturedAt: t.completedAt ?? t.createdAt,
+    }))
+    .sort((a, b) => {
+      const byTime = String(b.capturedAt).localeCompare(String(a.capturedAt));
+      return byTime !== 0 ? byTime : a.stream.localeCompare(b.stream);
+    });
+  return { sessions, count: sessions.length, retention: humanDuration(report.retentionMs) };
+}
+
+function sessionRow(doc, session, onReplay, activeStream) {
+  const row = el(doc, "tr", "cockpit-past-session");
+  row.setAttribute("data-stream", session.stream);
+  row.setAttribute("data-status", session.status);
+  if (session.jobKey != null) row.setAttribute("data-job-key", session.jobKey);
+  if (activeStream === session.stream) row.setAttribute("data-active", "true");
+  const nameCell = el(doc, "td", "cockpit-td cockpit-past-name");
+  const button = el(doc, "button", "cockpit-past-replay", session.label);
+  button.setAttribute("type", "button");
+  button.setAttribute("data-stream", session.stream);
+  if (onReplay) button.addEventListener("click", () => onReplay(session.stream));
+  nameCell.appendChild(button);
+  row.appendChild(nameCell);
+  row.appendChild(el(doc, "td", "cockpit-td cockpit-past-status", session.status));
+  row.appendChild(el(doc, "td", "cockpit-td cockpit-past-size", session.size));
+  row.appendChild(el(doc, "td", "cockpit-td cockpit-past-captured", session.capturedAt));
+  return row;
+}
+
+function renderTranscripts(host, doc, view, onReplay, activeStream) {
+  host.replaceChildren();
+  const root = el(doc, "div", "cockpit-past");
+  root.setAttribute("data-session-count", String(view.count));
+  const header = el(doc, "header", "cockpit-past-header");
+  header.appendChild(el(doc, "h2", "cockpit-past-title", "Past sessions"));
+  const summary = el(doc, "span", "cockpit-past-summary", view.retention != null ? `${view.count} \u00b7 kept ${view.retention}` : `${view.count}`);
+  summary.setAttribute("data-summary", "past");
+  header.appendChild(summary);
+  root.appendChild(header);
+  if (view.count === 0) {
+    const empty = el(doc, "div", "cockpit-past-empty", "No captured sessions yet.");
+    empty.setAttribute("data-empty", "true");
+    root.appendChild(empty);
+    host.appendChild(root);
+    return;
+  }
+  const table = el(doc, "table", "cockpit-past-table");
+  const thead = el(doc, "thead", "cockpit-past-thead");
+  const head = el(doc, "tr", "cockpit-past-head");
+  for (const label of ["session", "status", "size", "captured"]) head.appendChild(el(doc, "th", "cockpit-th", label));
+  thead.appendChild(head);
+  table.appendChild(thead);
+  const tbody = el(doc, "tbody", "cockpit-past-tbody");
+  for (const session of view.sessions) tbody.appendChild(sessionRow(doc, session, onReplay, activeStream));
+  table.appendChild(tbody);
+  root.appendChild(table);
+  host.appendChild(root);
+}
+
+/** Feed a fetched transcript's stored chunks through a resume-from-offset TerminalSession (static playback). */
+function replayTranscript(session, data) {
+  session.handle({ op: "subscribed", stream: data.stream, gap: data.gap, nextOffset: data.nextOffset });
+  for (const entry of data.entries ?? []) {
+    session.handle({ stream: data.stream, offset: entry.offset, chunk: entry.chunk });
+  }
+}
+
 // ── boot orchestration (mirrors app/agentic/cockpit/supply-boot.ts) ────────────────────────────
 
 /** An xterm.js-backed terminal sink mounted into `host`. */
@@ -219,6 +327,10 @@ function relaySocketFactory(url) {
  * @param {number} [opts.refreshMs] — poll interval (default 2000).
  * @param {number} [opts.staleAfterMs] — a worker is rendered "stale" once its last heartbeat is at
  *   least this many ms old (default 15000).
+ * @param {number} [opts.pastFetchTimeoutMs] — upper bound (ms) on a single past-sessions transcripts
+ *   fetch; the fetch is aborted past this so a hung endpoint can't wedge the past panel (default 15000).
+ * @param {string} [opts.transcriptsUrl] — the captured-session list endpoint (default
+ *   /app/api/agentic/transcripts) backing the always-on "past sessions" history + replay.
  * @returns a handle with `.dispose()`.
  */
 export function mountCockpit(host, opts = {}) {
@@ -229,6 +341,7 @@ export function mountCockpit(host, opts = {}) {
   }
   const doc = document;
   const reportUrl = opts.reportUrl ?? "/app/api/agentic/supply";
+  const transcriptsUrl = opts.transcriptsUrl ?? "/app/api/agentic/transcripts";
   const hookSecret = opts.hookSecret;
   const relayUrl = opts.relayUrl ?? defaultRelayUrl(opts.relayToken, opts.relayCapability);
   const refreshMs = opts.refreshMs ?? DEFAULT_REFRESH_MS;
@@ -239,20 +352,40 @@ export function mountCockpit(host, opts = {}) {
     throw new RangeError(`mountCockpit(opts.refreshMs): must be a positive safe integer, got ${refreshMs}.`);
   }
   const staleAfterMs = opts.staleAfterMs ?? DEFAULT_STALE_AFTER_MS;
+  // Upper bound on a single "past sessions" transcripts fetch. refreshPast() is single-flight, so a
+  // fetch that HANGS (never settles) would otherwise leave `pastRefreshing` stuck true forever and
+  // permanently disable the past panel; a bounded (aborting) fetch clears the flag so the next poll retries.
+  const pastFetchTimeoutMs = opts.pastFetchTimeoutMs ?? DEFAULT_PAST_FETCH_TIMEOUT_MS;
+  if (!isPosInt(pastFetchTimeoutMs)) {
+    throw new RangeError(
+      `mountCockpit(opts.pastFetchTimeoutMs): must be a positive safe integer, got ${pastFetchTimeoutMs}.`,
+    );
+  }
   const connectRelay = relaySocketFactory(relayUrl);
   const onError = (err) => console.error("[cockpit]", err);
 
-  // Stable skeleton: a volatile list region the poll re-renders + a PERSISTENT terminal region a
-  // refresh never touches (so a drilled-in terminal survives a list refresh).
+  const jsonHeaders = () => {
+    const headers = { accept: "application/json" };
+    if (hookSecret) headers["x-hook-secret"] = hookSecret;
+    return headers;
+  };
+
+  // Stable skeleton: a volatile supply-list region + a volatile "past sessions" region the poll
+  // re-renders, and a PERSISTENT terminal region a refresh never touches (so a drilled-in/replayed
+  // terminal survives a list refresh). The terminal panel title distinguishes live vs replayed.
   host.replaceChildren();
   const shell = el(doc, "div", "cockpit-shell");
   const listRegion = el(doc, "div", "cockpit-supply-region");
+  const pastRegion = el(doc, "div", "cockpit-past-region");
   const terminalPanel = el(doc, "section", "cockpit-terminal");
-  terminalPanel.appendChild(el(doc, "h2", "cockpit-panel-title", "Worker terminal"));
+  terminalPanel.setAttribute("data-terminal-mode", "idle");
+  const terminalTitle = el(doc, "h2", "cockpit-panel-title", "Worker terminal");
+  terminalPanel.appendChild(terminalTitle);
   const terminalHost = el(doc, "div", "cockpit-terminal-host");
   terminalHost.setAttribute("data-terminal", "host");
   terminalPanel.appendChild(terminalHost);
   shell.appendChild(listRegion);
+  shell.appendChild(pastRegion);
   shell.appendChild(terminalPanel);
   host.appendChild(shell);
 
@@ -262,13 +395,36 @@ export function mountCockpit(host, opts = {}) {
   let generation = 0;
   let drill; // { stream, client }
   let terminal; // the current xterm sink
+  let mode; // "live" | "replay" | undefined
+  let shownStream;
+  // Bumped by every drillInto()/replayInto()/dispose() that claims the terminal region, so a slow
+  // replay fetch that resolves after a newer selection drops its result instead of clobbering it.
+  let opToken = 0;
+  // True while a refreshPast() fetch is outstanding, so the supply poll never stacks past-fetches
+  // against a slow/hung transcripts endpoint.
+  let pastRefreshing = false;
 
-  function drillInto(stream) {
-    if (disposed || drill?.stream === stream) return;
+  function setMode(next, stream) {
+    mode = next;
+    shownStream = stream;
+    terminalPanel.setAttribute("data-terminal-mode", next ?? "idle");
+    if (next === "live") terminalTitle.textContent = "Worker terminal — live";
+    else if (next === "replay") terminalTitle.textContent = "Worker terminal — replay (past session)";
+    else terminalTitle.textContent = "Worker terminal";
+  }
+
+  function teardownTerminal() {
     drill?.client.close();
     drill = undefined;
     terminal?.dispose?.();
     terminal = undefined;
+  }
+
+  function drillInto(stream) {
+    if (disposed || (mode === "live" && drill?.stream === stream)) return;
+    // Claim the terminal region: bump the op token so an in-flight replay drops its stale result.
+    opToken++;
+    teardownTerminal();
     try {
       terminalHost.replaceChildren();
       const sink = xtermSink(terminalHost);
@@ -283,8 +439,94 @@ export function mountCockpit(host, opts = {}) {
       session = new TerminalSession({ stream, sink, send: (message) => client.sendRelay(message) });
       client.open();
       drill = { stream, client };
+      setMode("live", stream);
+    } catch (err) {
+      // The new terminal failed to build after the prior one was torn down: reset the region to idle
+      // (and drop any partially-built terminal) so the UI never shows a stale "live"/"replay"
+      // indicator with nothing behind it — symmetric with replayInto(), which clears mode up-front.
+      teardownTerminal();
+      setMode(undefined, undefined);
+      onError(err);
+    }
+  }
+
+  async function replayInto(stream) {
+    if (disposed) return;
+    // Claim the terminal region under a fresh op token, captured for the post-fetch re-check below.
+    const token = ++opToken;
+    // Drop any live drill + prior terminal before fetching so replay never overlaps a live stream.
+    teardownTerminal();
+    setMode(undefined, undefined);
+    let data;
+    try {
+      // Bound the fetch: a transcript endpoint that never responds would otherwise leave replay() pending
+      // forever with an in-flight request and the terminal wedged out of live mode. Abort after
+      // pastFetchTimeoutMs so the fetch always settles (here, rejects) and this catch leaves mode idle.
+      const controller = new AbortController();
+      const abortTimer = setTimeout(() => controller.abort(), pastFetchTimeoutMs);
+      abortTimer.unref?.();
+      let res;
+      try {
+        res = await fetch(`${transcriptsUrl}/${encodeURIComponent(stream)}`, { headers: jsonHeaders(), signal: controller.signal });
+      } finally {
+        clearTimeout(abortTimer);
+      }
+      if (!res.ok) throw new Error(`transcript fetch failed: ${res.status}`);
+      data = await res.json();
     } catch (err) {
       onError(err);
+      return;
+    }
+    // A newer drill/replay (or dispose) claimed the terminal while this fetch was outstanding — drop
+    // the stale result rather than overwrite the newer selection with an out-of-date replay.
+    if (disposed || token !== opToken) return;
+    try {
+      terminalHost.replaceChildren();
+      const sink = xtermSink(terminalHost);
+      terminal = sink;
+      const session = new TerminalSession({ stream, sink, send: () => {}, from: data.from ?? 0 });
+      replayTranscript(session, data);
+      setMode("replay", stream);
+      void refreshPast();
+    } catch (err) {
+      onError(err);
+    }
+  }
+
+  async function refreshPast() {
+    // Single-flight: while one past-fetch is outstanding (including a hung one), skip starting another
+    // so the supply poll can't stack pending fetches against a slow/unresponsive transcripts endpoint.
+    if (pastRefreshing) return;
+    pastRefreshing = true;
+    try {
+      let report;
+      try {
+        // Bound the fetch: refreshPast() is single-flight, so a transcripts endpoint that never responds
+        // would otherwise wedge `pastRefreshing` true forever. Abort after pastFetchTimeoutMs so the fetch
+        // always settles (here, rejects), the finally clears the flag, and the next poll can retry.
+        const controller = new AbortController();
+        const abortTimer = setTimeout(() => controller.abort(), pastFetchTimeoutMs);
+        abortTimer.unref?.();
+        let res;
+        try {
+          res = await fetch(transcriptsUrl, { headers: jsonHeaders(), signal: controller.signal });
+        } finally {
+          clearTimeout(abortTimer);
+        }
+        if (!res.ok) throw new Error(`transcripts fetch failed: ${res.status}`);
+        report = await res.json();
+      } catch (err) {
+        onError(err);
+        return;
+      }
+      if (disposed) return;
+      try {
+        renderTranscripts(pastRegion, doc, transcriptsView(report), replayInto, mode === "replay" ? shownStream : undefined);
+      } catch (err) {
+        onError(err);
+      }
+    } finally {
+      pastRefreshing = false;
     }
   }
 
@@ -292,9 +534,7 @@ export function mountCockpit(host, opts = {}) {
     if (disposed) return;
     let report;
     try {
-      const headers = { accept: "application/json" };
-      if (hookSecret) headers["x-hook-secret"] = hookSecret;
-      const res = await fetch(reportUrl, { headers });
+      const res = await fetch(reportUrl, { headers: jsonHeaders() });
       if (!res.ok) throw new Error(`supply fetch failed: ${res.status}`);
       report = await res.json();
     } catch (err) {
@@ -307,6 +547,8 @@ export function mountCockpit(host, opts = {}) {
     } catch (err) {
       onError(err);
     }
+    // Fire-and-forget: a hung transcripts endpoint must never stall the supply poll's next tick.
+    void refreshPast();
   }
 
   function tick(gen) {
@@ -332,15 +574,14 @@ export function mountCockpit(host, opts = {}) {
   function dispose() {
     if (disposed) return;
     disposed = true;
+    opToken++;
     stop();
-    drill?.client.close();
-    drill = undefined;
-    terminal?.dispose?.();
-    terminal = undefined;
+    teardownTerminal();
+    setMode(undefined, undefined);
   }
 
   start();
-  return { start, stop, dispose, refresh, drill: drillInto };
+  return { start, stop, dispose, refresh, drill: drillInto, replay: replayInto };
 }
 
 /**

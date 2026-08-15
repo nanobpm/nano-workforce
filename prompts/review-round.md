@@ -48,20 +48,39 @@ Because several agents may run on the same host at once:
 
 ## What to do in a round
 
-1. **Read the latest review.** Fetch the newest Copilot review + its inline
-   comments on the PR (`gh pr view`, `gh api .../pulls/{n}/reviews`, `.../comments`).
+1. **Read the latest review AND every still-open thread.** Fetch the newest Copilot
+   review + its inline comments on the PR (`gh pr view`, `gh api .../pulls/{n}/reviews`,
+   `.../comments`). Then **also enumerate every UNRESOLVED review thread on the PR**,
+   not just the latest review's comments — findings accumulate as durable threads, so
+   an earlier round's comment stays open until someone resolves it, and the newest
+   review will **not** re-list it. Treat the full set of open threads as your backlog
+   for this round, not only the latest review:
+
+   ```sh
+   # Every open thread across ALL reviews (this is your real backlog, oldest included):
+   # `pageInfo{hasNextPage endCursor}` surfaces truncation AND gives you the cursor to page with: if
+   # `hasNextPage` is `true` there are >100 threads this page can't see — re-run passing that
+   # `endCursor` back as `$after` until `hasNextPage` is `false`; never treat one page as "every"
+   # thread. Omit `-F after=…` (leaving `$after` null) for the first page.
+   gh api graphql -f query='query($o:String!,$r:String!,$n:Int!,$after:String){repository(owner:$o,name:$r){
+     pullRequest(number:$n){reviewThreads(first:100,after:$after){pageInfo{hasNextPage endCursor}nodes{id isResolved path line
+       comments(first:100){nodes{databaseId author{login} body}}}}}}}' -F o=OWNER -F r=REPO -F n=PR   # add -F after=END_CURSOR to page
+   ```
+
    Also read Copilot's **suppressed / low-confidence** advisories — the collapsed
    "low confidence" list Copilot folds into the **review body** (`.../reviews`
    `body`). These are NOT in the default inline-comment API set, so a plain
    `.../comments` read misses them; scan the review body for them explicitly.
    If `answer` is present, treat it as the human's decision on the escalation you
    raised last round and act on it first.
-2. **Triage each comment** into: *fix* (correct, worth doing), *nitpick* (apply
+2. **Triage each item** into: *fix* (correct, worth doing), *nitpick* (apply
    silently), *needs human input* (design/product/tradeoff you can't decide), or
-   *push back* (wrong / false positive — reply with evidence, make no change).
-   Triage the suppressed / low-confidence advisories the **same** way — but do not
-   treat "suppressed" as either automatically actionable or automatically ignorable:
-   if one is a **cheap, correct** robustness/correctness win, just do it (a
+   *push back* (wrong / false positive — reply with evidence, make no change). Triage
+   **every open thread from step 1**, including ones raised in earlier rounds that the
+   latest review did not repeat — do not skip a thread just because it is not in the
+   newest review. Triage the suppressed / low-confidence advisories the **same** way —
+   but do not treat "suppressed" as either automatically actionable or automatically
+   ignorable: if one is a **cheap, correct** robustness/correctness win, just do it (a
    *nitpick*); otherwise **decline it explicitly with a one-line rationale in your
    `summary`** (e.g. "declined suppressed advisory X — input already validated
    upstream at Y"). Never silently drop one.
@@ -93,6 +112,26 @@ Because several agents may run on the same host at once:
    # Resolve the thread whose databaseId matched the comment you handled:
    gh api graphql -f query='mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{isResolved}}}' -F id=THREAD_NODE_ID
    ```
+5a. **Acknowledge every suppressed / low-confidence advisory with a resolvable ack
+   thread.** Suppressed advisories live in the review **body**, not as inline
+   comment threads, so they cannot be resolved and Copilot **re-lists them every
+   round**. The process now *deterministically blocks convergence* until each one
+   carries a **resolved** acknowledgement, so a decision you only wrote into your
+   `summary` is invisible to the gate. For each suppressed advisory you applied or
+   declined (step 2), post a **new review comment thread** whose body contains the
+   verbatim marker **`nano-ack: <path>:<line>`** — copied exactly from Copilot's
+   bold `**<path>:<line>**` header for that advisory — then **resolve** that thread.
+   The gate matches on the marker **text**, so the thread may sit on any valid diff
+   line; only the exact `path:line` string must match. Example:
+
+   ```sh
+   # Post the ack thread (pick any changed line in the diff for path/line). Use the PR's real HEAD
+   # SHA as commit_id — `git rev-parse HEAD` can drift from the PR head; ask GitHub:
+   CID=$(gh api repos/OWNER/REPO/pulls/PR --jq .head.sha)
+   gh api repos/OWNER/REPO/pulls/PR/comments -f commit_id="$CID" -f path=PATH -F line=LINE -f side=RIGHT \
+     -f body='Applied. nano-ack: <path>:<line>'   # or: 'Declined, false positive — <reason>. nano-ack: <path>:<line>'
+   # Then resolve it exactly like any other thread (map its databaseId -> thread node id -> resolveReviewThread).
+   ```
 6. **Do NOT request, re-request, or remove the reviewer yourself.** Keeping
    Copilot attached is the **process's** job: a deterministic poller ensures a
    Copilot review is requested (idempotently) whenever this PR is waiting, and it
@@ -118,10 +157,17 @@ Consider the PR **converged** when the latest review has no actionable comment:
 - every new comment is a nitpick you already handled or intentionally declined,
   **or**
 - the only remaining items are suppressed / low-confidence advisories you have
-  triaged and either applied or declined-with-rationale (a suppressed advisory
-  you have recorded a decision on does **not** block convergence), **or**
+  triaged and either applied or declined-with-rationale **and acknowledged with a
+  resolved `nano-ack:` thread** (step 5a) — an advisory you have merely decided on
+  in prose still **blocks** convergence until its ack thread is resolved, **or**
 - Copilot is looping — reiterating a point you already addressed or pushed back
   on (two rounds of the same substantive point = converged).
+
+Returning `converged` is necessary but **not sufficient**: after you return it the
+process runs a deterministic gate that re-checks GitHub and will **block** convergence
+(routing to a human) while **any** review thread is unresolved or **any** suppressed
+advisory lacks a resolved `nano-ack:` thread. Resolve every thread and acknowledge
+every advisory (steps 5 + 5a) *before* you converge, or the PR bounces to a human.
 
 ### No review has landed yet — return `waiting`, do NOT escalate
 

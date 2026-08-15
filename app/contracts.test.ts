@@ -12,26 +12,27 @@ import {
 } from "./contracts.ts";
 
 test("readEnv: trims, treats blank/whitespace as unset, reads the injected env", () => {
-  assertEquals(readEnv("NANO_PR_PUBLIC_BASE_URL", { NANO_PR_PUBLIC_BASE_URL: "  https://x  " }), "https://x");
-  assertEquals(readEnv("NANO_PR_PUBLIC_BASE_URL", { NANO_PR_PUBLIC_BASE_URL: "   " }), undefined);
-  assertEquals(readEnv("NANO_PR_PUBLIC_BASE_URL", {}), undefined);
+  assertEquals(readEnv("NANO_WORKFORCE_BASE_URL", { NANO_WORKFORCE_BASE_URL: "  https://x  " }), "https://x");
+  assertEquals(readEnv("NANO_WORKFORCE_BASE_URL", { NANO_WORKFORCE_BASE_URL: "   " }), undefined);
+  assertEquals(readEnv("NANO_WORKFORCE_BASE_URL", {}), undefined);
 });
 
 test("readEnvOr: falls back to the registry default, then to the given fallback", () => {
-  assertEquals(readEnvOr("NANO_PR_PUBLIC_BASE_URL", "x", {}), "http://localhost:3000");
-  assertEquals(readEnvOr("NANO_PR_PUBLIC_BASE_URL", "x", { NANO_PR_PUBLIC_BASE_URL: "https://y" }), "https://y");
+  assertEquals(readEnvOr("NANO_WORKFORCE_BASE_URL", "x", {}), "http://localhost:3000");
+  assertEquals(readEnvOr("NANO_WORKFORCE_BASE_URL", "x", { NANO_WORKFORCE_BASE_URL: "https://y" }), "https://y");
   // A key with no registered default falls through to the caller's fallback.
   assertEquals(readEnvOr("NANO_ESCALATION_SLA_TIMEOUT", "PT24H", {}), "PT24H");
 });
 
-test("rejectedEnvSynonyms: maps the retired NANO_PR_BASE_URL to its canonical key (#223)", () => {
+test("rejectedEnvSynonyms: maps retired base-URL names to the canonical key (#226/#223)", () => {
   const rejected = rejectedEnvSynonyms();
-  assertEquals(rejected.get("NANO_PR_BASE_URL"), "NANO_PR_PUBLIC_BASE_URL");
+  assertEquals(rejected.get("NANO_PR_PUBLIC_BASE_URL"), "NANO_WORKFORCE_BASE_URL");
+  assertEquals(rejected.get("NANO_PR_BASE_URL"), "NANO_WORKFORCE_BASE_URL");
 });
 
 test("envContract: exposes owner + semantics + default for a declared key", () => {
-  const c = envContract("NANO_PR_PUBLIC_BASE_URL");
-  assertEquals(c.name, "NANO_PR_PUBLIC_BASE_URL");
+  const c = envContract("NANO_WORKFORCE_BASE_URL");
+  assertEquals(c.name, "NANO_WORKFORCE_BASE_URL");
   assertEquals(c.default, "http://localhost:3000");
   assert(c.semantics.length > 0, "an env contract must carry semantics");
 });
@@ -51,7 +52,7 @@ test("detectDeclarationConflicts: a differently-named env key with equivalent se
       "Externally-reachable base URL agents use to reach this app; drives every plan's blackboard capability URL.",
   });
   assert(
-    conflicts.some((c) => c.kind === "synonym" && c.existingName === "NANO_PR_PUBLIC_BASE_URL"),
+    conflicts.some((c) => c.kind === "synonym" && c.existingName === "NANO_WORKFORCE_BASE_URL"),
     "a semantically-equivalent env key must be flagged as a synonym of the existing one",
   );
 });
@@ -75,7 +76,7 @@ test("detectDeclarationConflicts: a retired synonym is flagged as rejected-synon
     semantics: "the base url",
   });
   assertEquals(conflicts[0].kind, "rejected-synonym");
-  assertEquals(conflicts[0].existingName, "NANO_PR_PUBLIC_BASE_URL");
+  assertEquals(conflicts[0].existingName, "NANO_WORKFORCE_BASE_URL");
 });
 
 test("detectDeclarationConflicts: a genuinely new, distinct contract is clean", () => {

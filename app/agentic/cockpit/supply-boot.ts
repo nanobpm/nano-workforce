@@ -31,9 +31,15 @@ import {
 import { renderSupply } from "./supply-render.ts";
 import type { SupplyReport } from "./supply-view.ts";
 import { supplyView } from "./supply-view.ts";
+import { renderTranscripts, replayTranscript, type TranscriptDataReport } from "./transcript-render.ts";
+import type { TranscriptListReport } from "./transcript-view.ts";
+import { transcriptsView } from "./transcript-view.ts";
 
 /** Mounts a terminal into `host` and returns the sink relay output is written to. */
 export type CreateTerminal = (host: ElementLike) => TerminalSink;
+
+/** The terminal region's playback mode: a LIVE relay stream vs a REPLAYED (static) stored transcript. */
+export type TerminalMode = "live" | "replay";
 
 /** An opaque poll-timer handle (a Node `Timeout` or a browser timer id). */
 export type TimerHandle = unknown;
@@ -45,6 +51,16 @@ export interface SupplyCockpitEnv {
   readonly doc: DocumentLike;
   /** Fetches the latest SUPPLY report (e.g. over HTTP from the app's `/agentic/supply` endpoint). */
   readonly fetchSupply: () => Promise<SupplyReport>;
+  /**
+   * Fetches the captured-session list (`GET /agentic/transcripts`) for the "past sessions" history.
+   * Optional: when omitted the past-sessions panel is not rendered (live-only cockpit).
+   */
+  readonly fetchTranscripts?: () => Promise<TranscriptListReport>;
+  /**
+   * Fetches a stored transcript's bytes (`GET /agentic/transcripts/{stream}`) for static replay.
+   * Required for the "past sessions" replay to work; must be provided together with {@link fetchTranscripts}.
+   */
+  readonly fetchTranscript?: (stream: string, from?: number) => Promise<TranscriptDataReport>;
   /** Opens a socket to the app relay channel (one per drill-in connection). */
   readonly connectRelay: SocketFactory;
   /** Mounts the terminal widget (xterm.js in the browser) and returns its write sink. */
@@ -61,6 +77,12 @@ export interface SupplyCockpitEnv {
   readonly credit?: number;
   /** A live worker idle longer than this (ms) grades `stale`. Default 15000. */
   readonly staleAfterMs?: number;
+  /**
+   * Upper bound (ms) on a single "past sessions" transcripts fetch. Default 15000. `#refreshPast` is
+   * single-flight, so a fetch that HANGS (never settles) would otherwise wedge the past panel forever;
+   * this timeout guarantees the wait settles so the flag clears and the next poll retries.
+   */
+  readonly pastFetchTimeoutMs?: number;
   /** Notified of a fetch/render/relay error (the poll keeps going). */
   readonly onError?: (err: unknown) => void;
 }
@@ -73,15 +95,20 @@ export interface SupplyCockpitHandle {
   start(): void;
   /** Stop the poll loop (leaves the last render in place). */
   stop(): void;
-  /** Drill into a worker's relay stream, opening a resumable live terminal. */
+  /** Drill into a worker's relay stream, opening a resumable LIVE terminal. */
   drill(stream: string): void;
-  /** The stream currently drilled into, if any. */
+  /** Replay a captured past session's stored transcript statically into the terminal (no live worker). */
+  replay(stream: string): Promise<void>;
+  /** The stream currently drilled into or replayed, if any. */
   readonly currentStream: string | undefined;
+  /** Whether the terminal is showing a LIVE stream or a REPLAYED transcript (undefined when idle). */
+  readonly currentMode: TerminalMode | undefined;
   /** Stop everything and release the terminal connection. */
   dispose(): void;
 }
 
 const DEFAULT_REFRESH_MS = 2000;
+const DEFAULT_PAST_FETCH_TIMEOUT_MS = 15000;
 
 function isPosInt(value: number): boolean {
   return Number.isSafeInteger(value) && value > 0;
@@ -95,8 +122,12 @@ interface Drill {
 class SupplyCockpit implements SupplyCockpitHandle {
   readonly #env: SupplyCockpitEnv;
   readonly #listRegion: ElementLike;
+  readonly #pastRegion: ElementLike | undefined;
   readonly #terminalHost: ElementLike;
+  readonly #terminalTitle: ElementLike;
+  readonly #terminalPanel: ElementLike;
   readonly #refreshMs: number;
+  readonly #pastFetchTimeoutMs: number;
   readonly #setTimer: (run: () => void, ms: number) => TimerHandle;
   readonly #clearTimer: (handle: TimerHandle) => void;
   readonly #timeouts = new Map<number, ReturnType<typeof setTimeout>>();
@@ -108,6 +139,19 @@ class SupplyCockpit implements SupplyCockpitHandle {
   // The currently mounted terminal, tracked so switching streams (and dispose) tears down the prior
   // xterm instance instead of leaking it + its listeners.
   #terminal: TerminalSink | undefined;
+  // The terminal region's current playback: a LIVE relay stream or a REPLAYED stored transcript, and
+  // the stream it is showing — so the past-sessions list can highlight the active replay and the
+  // panel title can distinguish live from replayed.
+  #mode: TerminalMode | undefined;
+  #shownStream: string | undefined;
+  // Bumped by every drill()/replay()/dispose() that takes over the terminal region. replay() is async
+  // (it awaits a transcript fetch); capturing this token before the await and re-checking it after lets
+  // a slow replay drop its result when a newer drill/replay has since claimed the terminal — so a
+  // late-resolving stale fetch can never clobber a newer selection (or leak the newer drill's client).
+  #opToken = 0;
+  // True while a #refreshPast() fetch is in flight, so the supply poll never stacks past-fetches and a
+  // hung transcripts endpoint can't accumulate pending calls.
+  #pastRefreshing = false;
   // Bumped by every start()/stop() so an in-flight #tick() from a previous start cycle can't
   // reschedule after a stop→start race and leave two overlapping poll chains running.
   #generation = 0;
@@ -121,23 +165,38 @@ class SupplyCockpit implements SupplyCockpitHandle {
     if (!isPosInt(this.#refreshMs)) {
       throw new RangeError(`SupplyCockpitEnv.refreshMs must be a positive safe integer, got ${this.#refreshMs}`);
     }
+    this.#pastFetchTimeoutMs = env.pastFetchTimeoutMs ?? DEFAULT_PAST_FETCH_TIMEOUT_MS;
+    if (!isPosInt(this.#pastFetchTimeoutMs)) {
+      throw new RangeError(
+        `SupplyCockpitEnv.pastFetchTimeoutMs must be a positive safe integer, got ${this.#pastFetchTimeoutMs}`,
+      );
+    }
     // setTimer/clearTimer are a matched pair: a caller-supplied setTimer returns opaque handles the
     // default clearTimer (which only understands the internal numeric-handle Map) cannot cancel,
     // leaving an un-stoppable poll loop. Fail fast rather than silently accept one without the other.
     if ((env.setTimer === undefined) !== (env.clearTimer === undefined)) {
       throw new Error("SupplyCockpitEnv.setTimer and clearTimer must be provided together (or neither)");
     }
+    // fetchTranscripts (the past-sessions LIST source) and fetchTranscript (the per-session REPLAY source)
+    // are a matched pair: the past panel is rendered whenever the list source is present, but its replay
+    // buttons route through replay(), which no-ops without the replay source — so a list source without a
+    // replay source surfaces buttons that silently do nothing, and a replay source without a list source
+    // is an unreachable capability. Require both together (or neither) so a half-wired env fails loudly.
+    if ((env.fetchTranscripts === undefined) !== (env.fetchTranscript === undefined)) {
+      throw new Error("SupplyCockpitEnv.fetchTranscripts and fetchTranscript must be provided together (or neither)");
+    }
     this.#setTimer =
       env.setTimer ??
       ((run, ms) => {
         const id = this.#nextTimerId++;
-        this.#timeouts.set(
-          id,
-          setTimeout(() => {
-            this.#timeouts.delete(id);
-            run();
-          }, ms),
-        );
+        const timeout = setTimeout(() => {
+          this.#timeouts.delete(id);
+          run();
+        }, ms);
+        // A pending default timer (poll delay or the past-fetch timeout below) must never keep the
+        // process alive on its own — a no-op in the browser, where timer handles have no `unref`.
+        timeout.unref?.();
+        this.#timeouts.set(id, timeout);
         return id;
       });
     this.#clearTimer =
@@ -151,30 +210,52 @@ class SupplyCockpit implements SupplyCockpitHandle {
         }
       });
 
-    // Build the stable skeleton once: a volatile list region the poll re-renders, and a PERSISTENT
-    // terminal region a refresh never touches.
+    // Build the stable skeleton once: a volatile list region the poll re-renders, an optional volatile
+    // "past sessions" region (rendered only when the transcript read endpoints are wired), and a
+    // PERSISTENT terminal region a refresh never touches (so a drilled-in/replayed terminal survives).
     env.host.replaceChildren();
     const shell = env.doc.createElement("div");
     shell.className = "cockpit-shell";
     this.#listRegion = env.doc.createElement("div");
     this.#listRegion.className = "cockpit-supply-region";
-    const terminalPanel = env.doc.createElement("section");
-    terminalPanel.className = "cockpit-terminal";
-    const title = env.doc.createElement("h2");
-    title.className = "cockpit-panel-title";
-    title.textContent = "Worker terminal";
-    terminalPanel.appendChild(title);
+    // The past-sessions history list only exists when a transcript list source is injected.
+    if (env.fetchTranscripts !== undefined) {
+      this.#pastRegion = env.doc.createElement("div");
+      this.#pastRegion.className = "cockpit-past-region";
+    }
+    this.#terminalPanel = env.doc.createElement("section");
+    this.#terminalPanel.className = "cockpit-terminal";
+    this.#terminalPanel.setAttribute("data-terminal-mode", "idle");
+    this.#terminalTitle = env.doc.createElement("h2");
+    this.#terminalTitle.className = "cockpit-panel-title";
+    this.#terminalTitle.textContent = "Worker terminal";
+    this.#terminalPanel.appendChild(this.#terminalTitle);
     this.#terminalHost = env.doc.createElement("div");
     this.#terminalHost.className = "cockpit-terminal-host";
     this.#terminalHost.setAttribute("data-terminal", "host");
-    terminalPanel.appendChild(this.#terminalHost);
+    this.#terminalPanel.appendChild(this.#terminalHost);
     shell.appendChild(this.#listRegion);
-    shell.appendChild(terminalPanel);
+    if (this.#pastRegion !== undefined) shell.appendChild(this.#pastRegion);
+    shell.appendChild(this.#terminalPanel);
     env.host.appendChild(shell);
   }
 
   get currentStream(): string | undefined {
-    return this.#drill?.stream;
+    return this.#shownStream;
+  }
+
+  get currentMode(): TerminalMode | undefined {
+    return this.#mode;
+  }
+
+  /** Reflect the terminal region's playback mode on the panel (title + `data-terminal-mode`). */
+  #setMode(mode: TerminalMode | undefined, stream: string | undefined): void {
+    this.#mode = mode;
+    this.#shownStream = stream;
+    this.#terminalPanel.setAttribute("data-terminal-mode", mode ?? "idle");
+    if (mode === "live") this.#terminalTitle.textContent = "Worker terminal — live";
+    else if (mode === "replay") this.#terminalTitle.textContent = "Worker terminal — replay (past session)";
+    else this.#terminalTitle.textContent = "Worker terminal";
   }
 
   async refresh(): Promise<void> {
@@ -183,6 +264,7 @@ class SupplyCockpit implements SupplyCockpitHandle {
     try {
       report = await this.#env.fetchSupply();
     } catch (err) {
+      if (this.#disposed) return;
       this.#env.onError?.(err);
       return;
     }
@@ -194,6 +276,93 @@ class SupplyCockpit implements SupplyCockpitHandle {
     } catch (err) {
       this.#env.onError?.(err);
     }
+    // Fire-and-forget: the "past sessions" refresh must never gate the supply poll's next tick. A
+    // transcripts endpoint that hangs (not just rejects) would otherwise stall #refresh() forever and
+    // wedge the live worker list. #refreshPast is single-flight, so a slow fetch can't pile up either.
+    void this.#refreshPast();
+  }
+
+  /** Fetch + render the "past sessions" history list, when a transcript source is wired. Independent
+   * of the supply fetch: a transcript-endpoint fault (or hang) never blocks the live worker list. */
+  async #refreshPast(): Promise<void> {
+    const fetchTranscripts = this.#env.fetchTranscripts;
+    if (fetchTranscripts === undefined || this.#pastRegion === undefined) return;
+    // Single-flight: while one past-fetch is outstanding (including a hung one), skip starting another
+    // so the poll can't stack pending fetches against a slow/unresponsive transcripts endpoint.
+    if (this.#pastRefreshing) return;
+    this.#pastRefreshing = true;
+    try {
+      let report: TranscriptListReport;
+      try {
+        report = await this.#bounded(fetchTranscripts, "transcripts");
+      } catch (err) {
+        if (this.#disposed) return;
+        this.#env.onError?.(err);
+        return;
+      }
+      if (this.#disposed || this.#pastRegion === undefined) return;
+      try {
+        renderTranscripts(this.#pastRegion, this.#env.doc, transcriptsView(report), {
+          onReplay: (stream) => void this.replay(stream),
+          ...(this.#mode === "replay" && this.#shownStream !== undefined ? { activeStream: this.#shownStream } : {}),
+        });
+      } catch (err) {
+        this.#env.onError?.(err);
+      }
+    } finally {
+      this.#pastRefreshing = false;
+    }
+  }
+
+  /**
+   * Race an injected fetch against a timeout so the returned promise ALWAYS settles, even if the fetch
+   * HANGS (never settles, not merely rejects). Both single-flight callers below — the past-sessions list
+   * refresh and a past-session {@link replay} — depend on this: a hung list fetch would leave
+   * `#pastRefreshing` stuck `true` forever (permanently disabling the past panel), and a hung replay fetch
+   * would leave `replay()` pending forever with the terminal wedged out of live mode. Racing the fetch
+   * against a timeout guarantees the wait settles (here, rejects), so the caller's `finally`/`catch` runs
+   * and the next poll can retry. A hung fetch that resolves late is ignored (the `settled` latch drops it).
+   */
+  #bounded<T>(fetch: () => Promise<T>, what: string): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      let settled = false;
+      const handle = this.#setTimer(() => {
+        if (settled) return;
+        settled = true;
+        // Clear our own handle on the timeout arm too, symmetric with the fetch arms below: a
+        // caller-supplied clearTimer may reclaim a handle a fired timer still holds, and clearing here
+        // guards against a custom scheduler re-invoking the callback (the settled latch is belt-and-braces).
+        this.#clearTimer(handle);
+        reject(new Error(`${what} fetch timed out after ${this.#pastFetchTimeoutMs}ms`));
+      }, this.#pastFetchTimeoutMs);
+      // Invoke the fetch inside try/catch so a SYNCHRONOUS throw (not a rejected promise) is handled on the
+      // same arms as an async rejection: clear our timer and reject once. Without this, a sync throw escapes
+      // the executor (rejecting the promise) but leaves the timeout handle scheduled — a leak that fires
+      // (and, under a custom scheduler, could re-fire) long after the wait has already settled.
+      let pending: Promise<T>;
+      try {
+        pending = fetch();
+      } catch (err) {
+        settled = true;
+        this.#clearTimer(handle);
+        reject(err);
+        return;
+      }
+      pending.then(
+        (report) => {
+          if (settled) return;
+          settled = true;
+          this.#clearTimer(handle);
+          resolve(report);
+        },
+        (err) => {
+          if (settled) return;
+          settled = true;
+          this.#clearTimer(handle);
+          reject(err);
+        },
+      );
+    });
   }
 
   start(): void {
@@ -225,7 +394,10 @@ class SupplyCockpit implements SupplyCockpitHandle {
 
   drill(stream: string): void {
     if (this.#disposed) return;
-    if (this.#drill?.stream === stream) return;
+    if (this.#mode === "live" && this.#drill?.stream === stream) return;
+    // Claim the terminal region: bump the op token so any in-flight replay (whose fetch has not yet
+    // resolved) drops its result instead of overwriting this live drill once it lands.
+    this.#opToken++;
     // Close and drop the prior drill up-front so a synchronous failure while building the new one
     // (createTerminal, an invalid TerminalSession credit, or connect throwing) can't leave #drill
     // pointing at an already-closed client. #drill is re-set only once the new client is fully wired.
@@ -260,6 +432,67 @@ class SupplyCockpit implements SupplyCockpitHandle {
       });
       client.open();
       this.#drill = { stream, client };
+      this.#setMode("live", stream);
+    } catch (err) {
+      // Building the new terminal failed AFTER the prior drill + terminal were already torn down
+      // above. Leaving #mode/#shownStream at their prior value would keep the panel showing a stale
+      // "live"/"replay" indicator backing a terminal that no longer exists, and a partially-built
+      // #terminal (createTerminal returned before a later step threw) would leak. Reset the region to
+      // idle — symmetric with replay(), which clears mode up-front — before surfacing the error.
+      this.#drill?.client.close();
+      this.#drill = undefined;
+      this.#terminal?.dispose?.();
+      this.#terminal = undefined;
+      this.#setMode(undefined, undefined);
+      this.#env.onError?.(err);
+    }
+  }
+
+  /**
+   * Replay a captured PAST session's stored transcript into the terminal region — static playback of a
+   * closed stream with NO live worker and NO relay connection. Tears down any live drill first, fetches
+   * the transcript's bytes, and feeds them through the SAME resume-from-offset {@link TerminalSession}
+   * renderer a live stream uses, so the exited agent's terminal renders faithfully. The panel is marked
+   * `replay` so the operator plainly sees it is a past session, not a live one.
+   */
+  async replay(stream: string): Promise<void> {
+    if (this.#disposed) return;
+    const fetchTranscript = this.#env.fetchTranscript;
+    if (fetchTranscript === undefined) return;
+    // Claim the terminal region under a fresh op token, captured for the post-fetch re-check below.
+    const token = ++this.#opToken;
+    // Drop any live drill and the prior terminal before fetching so a replay never runs alongside a
+    // live stream in the same region.
+    this.#drill?.client.close();
+    this.#drill = undefined;
+    this.#terminal?.dispose?.();
+    this.#terminal = undefined;
+    this.#setMode(undefined, undefined);
+
+    let data: TranscriptDataReport;
+    try {
+      // Bound the transcript fetch: a hung endpoint must not leave replay() pending forever with the
+      // terminal wedged out of live mode. The wait always settles, so this catch runs and mode stays idle.
+      data = await this.#bounded(() => fetchTranscript(stream), "transcript");
+    } catch (err) {
+      // Mirror the success path's guard: a replay superseded by a newer op (or a disposed cockpit) must not
+      // surface its late timeout/rejection — the terminal region no longer belongs to this stale replay.
+      if (this.#disposed || token !== this.#opToken) return;
+      this.#env.onError?.(err);
+      return;
+    }
+    // A newer drill()/replay() (or dispose()) claimed the terminal while this fetch was outstanding —
+    // drop this stale result rather than clobber the newer selection with an out-of-date replay.
+    if (this.#disposed || token !== this.#opToken) return;
+    try {
+      this.#terminalHost.replaceChildren();
+      const sink = this.#env.createTerminal(this.#terminalHost);
+      this.#terminal = sink;
+      const session = new TerminalSession({ stream, sink, send: () => {}, from: data.from });
+      replayTranscript(session, data);
+      this.#setMode("replay", stream);
+      // Re-render the past list so the just-selected session shows as active (best-effort).
+      void this.#refreshPast();
     } catch (err) {
       this.#env.onError?.(err);
     }
@@ -268,11 +501,13 @@ class SupplyCockpit implements SupplyCockpitHandle {
   dispose(): void {
     if (this.#disposed) return;
     this.#disposed = true;
+    this.#opToken++;
     this.stop();
     this.#drill?.client.close();
     this.#drill = undefined;
     this.#terminal?.dispose?.();
     this.#terminal = undefined;
+    this.#setMode(undefined, undefined);
   }
 }
 

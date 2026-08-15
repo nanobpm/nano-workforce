@@ -28,7 +28,9 @@ with no mechanism that binds them at authoring time. Two live examples of the *s
 
 1. **Config-key synonym** — `publicBaseUrl()` read `NANO_PR_PUBLIC_BASE_URL` and fell back to a phantom
    `NANO_PR_BASE_URL` (introduced in the same commit, #53/2dcfb8a; nothing set it, the unit test even
-   exercised the wrong name). Two names for one value (#223).
+   exercised the wrong name). Two names for one value (#223). (`NANO_PR_PUBLIC_BASE_URL` was itself
+   later coalesced into the canonical `NANO_WORKFORCE_BASE_URL` in #226; both retired names are now
+   registered rejected synonyms.)
 2. **Wire-shape drift** — a relay *producer* kept emitting the legacy `{stream, offset, chunk}` frame
    while the *hub* had adopted an op-tagged `{op:"produce", …}` sub-protocol; the hub rejected every
    worker terminal chunk. Every isolated slice test was green because each side tested against its own

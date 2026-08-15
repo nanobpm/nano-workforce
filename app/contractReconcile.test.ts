@@ -76,7 +76,7 @@ test("reconcileContracts: a signal for an existing registry contract, reused cor
     {
       authorTask: "task-z",
       category: "env",
-      name: "NANO_PR_PUBLIC_BASE_URL",
+      name: "NANO_WORKFORCE_BASE_URL",
       body: "Externally-reachable base URL agents use to reach this app; drives every plan's blackboard capability URL.",
     },
   ]);

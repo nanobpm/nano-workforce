@@ -77,6 +77,231 @@ export async function fetchPrReviews(
   return (await r.json()) as GhReview[];
 }
 
+// ── Review-comment convergence gate (don't converge with unaddressed comments) ──────────────
+//
+// A PR must not be declared converged while Copilot still has unaddressed review comments. Two
+// kinds must be gated:
+//   • unresolved review THREADS — deterministic (GraphQL `isResolved`).
+//   • SUPPRESSED / low-confidence advisories — Copilot folds these into the review BODY under a
+//     "Suppressed comments (N)" block; they are NOT threads, cannot be resolved, and are re-listed
+//     every round. To make "acknowledged" trackable, the review-round agent must post a RESOLVED
+//     review thread carrying a `nano-ack: <path>:<line>` marker (the exact key from Copilot's
+//     `**path:line**` header) for each advisory it applies or declines. The gate then treats an
+//     advisory as addressed iff a resolved thread carries its ack marker.
+
+/** One PR review thread, narrowed to what the convergence gate needs. */
+export interface ReviewThread {
+  isResolved: boolean;
+  path: string | null;
+  bodies: string[];
+}
+
+/** The `nano-ack:` acknowledgement marker the review-round agent stamps into the resolved thread
+ * it opens per suppressed advisory. The captured group is the advisory key (`path:line`). */
+const ACK_MARKER = /nano-ack:\s*([^\s)>*]+:\d+)/gi;
+
+/** Parse the `path:line` keys of Copilot's suppressed / low-confidence advisories out of a review
+ * body. Copilot renders them under a `<summary>Suppressed comments (N)</summary>` block, each as a
+ * bold `**path:line**` header. Returns the de-duplicated keys (empty when there is no such block). */
+export function parseSuppressedAdvisories(reviewBody: string | null | undefined): string[] {
+  const body = reviewBody ?? "";
+  const idx = body.search(/Suppressed comments\s*\(/i);
+  if (idx < 0) return [];
+  // Scan only from the "Suppressed comments" marker onward so a `**path:line**` elsewhere in the
+  // overview prose can never be mistaken for an advisory.
+  const region = body.slice(idx);
+  const keys = new Set<string>();
+  const re = /\*\*([^*]+?:\d+)\*\*/g;
+  let m: RegExpExecArray | null;
+  // biome-ignore lint/suspicious/noAssignInExpressions: canonical regex-exec accumulation loop
+  while ((m = re.exec(region)) !== null) keys.add(m[1].trim());
+  return [...keys];
+}
+
+/** Extract the acknowledged advisory keys from a set of review threads (only RESOLVED threads
+ * count — an open ack thread is not yet an acknowledgement). */
+export function parseAckedAdvisories(threads: ReviewThread[]): string[] {
+  const acked = new Set<string>();
+  for (const t of threads) {
+    if (!t.isResolved) continue;
+    for (const body of t.bodies) {
+      ACK_MARKER.lastIndex = 0;
+      let m: RegExpExecArray | null;
+      // biome-ignore lint/suspicious/noAssignInExpressions: canonical regex-exec accumulation loop
+      while ((m = ACK_MARKER.exec(body)) !== null) acked.add(m[1].trim());
+    }
+  }
+  return [...acked];
+}
+
+/** Pick the newest Copilot review body from a reviews list (GitHub returns them oldest→newest).
+ * `truncated = true` means we could NOT read every page — the genuinely-latest review may be unread,
+ * so the result is UNVERIFIABLE and we fail CLOSED (`null`) rather than return a stale page's body;
+ * a fail-OPEN on the advisory dimension (reading an old review and missing a newer suppressed
+ * advisory) is the exact class this gate exists to prevent. A verified-complete read with no Copilot
+ * review returns `""` (a verified "no advisories"). Pure; unit-tested. */
+export function pickLatestCopilotReviewBody(
+  reviews: { user?: { login?: string }; body?: string }[],
+  truncated: boolean,
+): string | null {
+  if (truncated) return null;
+  const copilot = reviews.filter((rv) => isCopilot(rv.user?.login));
+  return copilot[copilot.length - 1]?.body ?? "";
+}
+
+/** Fetch the latest Copilot review body for a PR (the newest review authored by the automated
+ * Copilot reviewer). Returns `null` ONLY when no transport is usable (unverifiable → the worker
+ * fails closed); returns `""` when transport is usable but the PR has no Copilot review yet (a
+ * verified "no suppressed advisories"). Throws on a genuine transport failure. This split keeps
+ * `null` from conflating "unverifiable" with "empty" and fail-OPENing the advisory dimension. */
+export async function fetchLatestCopilotReviewBody(
+  repo: string,
+  number: number | string,
+  token: string,
+): Promise<string | null> {
+  const mode = githubTransport();
+  const useGh = mode === "gh" || (mode === "auto" && (await isGhAvailable()));
+  const basePath = `repos/${repo}/pulls/${number}/reviews?per_page=100`;
+  interface Review {
+    user?: { login?: string };
+    body?: string;
+  }
+  if (useGh) {
+    // `--paginate` merges EVERY page of the (oldest→newest) reviews array, so a >100-review
+    // convergence loop still surfaces the genuinely newest Copilot review rather than the oldest
+    // 100 — reading only the first page here would fail-OPEN the advisory dimension.
+    const out = await runGh(["api", "--paginate", basePath, "-H", "Accept: application/vnd.github+json"]);
+    // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+    const reviews = JSON.parse(out) as Review[];
+    return pickLatestCopilotReviewBody(reviews, false);
+  }
+  if (!token) return null;
+  // Page the token transport the same way; 20×100 reviews is far past any real convergence loop, and
+  // a genuinely deeper history we can't reach is unverifiable → fail closed.
+  const reviews: Review[] = [];
+  const MAX_PAGES = 20;
+  for (let page = 1; page <= MAX_PAGES; page++) {
+    const r = await fetch(`https://api.github.com/${basePath}&page=${page}`, {
+      headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json" },
+    });
+    if (!r.ok) throw new Error(`github ${r.status} ${r.statusText}`.trim());
+    // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+    const batch = (await r.json()) as Review[];
+    reviews.push(...batch);
+    // A short page means we've read every review — the list is complete.
+    if (batch.length < 100) return pickLatestCopilotReviewBody(reviews, false);
+    // A full page on the last allowed page is only truncated if GitHub says there's more; trust the
+    // `Link` header's `rel="next"` so an exact multiple of 100 isn't a false positive.
+    if (page === MAX_PAGES && /<[^>]*>;\s*rel="next"/.test(r.headers.get("link") ?? "")) {
+      return pickLatestCopilotReviewBody(reviews, true);
+    }
+  }
+  return pickLatestCopilotReviewBody(reviews, false);
+}
+
+/** Raw GraphQL response shape for the review-threads query. */
+export interface ReviewThreadsResponse {
+  data?: {
+    repository?: {
+      pullRequest?: {
+        reviewThreads?: {
+          pageInfo?: { hasNextPage?: boolean; endCursor?: string | null };
+          nodes?: { isResolved?: boolean; path?: string | null; comments?: { nodes?: { body?: string }[] } }[];
+        };
+      };
+    };
+  };
+}
+
+/** One page of a review-threads GraphQL response, plus the cursor to advance to the next page. */
+export interface ReviewThreadsPage {
+  threads: ReviewThread[];
+  hasNextPage: boolean;
+  endCursor: string | null;
+}
+
+/** Map ONE page of a review-threads GraphQL response, FAILING CLOSED (returns `null`) on an
+ * UNVERIFIABLE read: a missing `reviewThreads` block (GraphQL errors, permission issues, a malformed
+ * payload) OR a page whose completeness signal (`pageInfo.hasNextPage`) is not a readable boolean.
+ * A readable page yields its mapped nodes plus `hasNextPage`/`endCursor` so the CALLER can page to
+ * completeness (`fetchReviewThreads` follows `endCursor` up to a bounded cap). A `first:100` page
+ * cannot see thread 101+, so a truncated read must be paged, not silently mapped to "no more
+ * threads" and converged (a fail-OPEN, the exact class this gate exists to prevent). Exceeding the
+ * caller's page cap while GitHub still reports more is the caller's fail-closed decision, not this
+ * mapper's. Pure; unit-tested. */
+export function parseReviewThreadsPage(payload: ReviewThreadsResponse): ReviewThreadsPage | null {
+  const block = payload.data?.repository?.pullRequest?.reviewThreads;
+  if (!block || typeof block.pageInfo?.hasNextPage !== "boolean") return null;
+  const nodes = block.nodes ?? [];
+  return {
+    threads: nodes.map((t) => ({
+      isResolved: !!t.isResolved,
+      path: t.path ?? null,
+      bodies: (t.comments?.nodes ?? []).map((c) => c.body ?? ""),
+    })),
+    hasNextPage: block.pageInfo.hasNextPage,
+    endCursor: block.pageInfo.endCursor ?? null,
+  };
+}
+
+/** 20×100 review threads is far past any real convergence loop; a genuinely deeper set we can't
+ * page to is unverifiable → fail closed. */
+const MAX_THREAD_PAGES = 20;
+
+/** Fetch ALL of a PR's review threads (resolution state + path + comment bodies) via GraphQL, paging
+ * to completeness up to `MAX_THREAD_PAGES`. `null` when no transport is usable, a page is
+ * unreadable, or the set is still truncated past the page cap (fail closed); throws on a genuine
+ * transport failure. */
+export async function fetchReviewThreads(
+  repo: string,
+  number: number | string,
+  token: string,
+): Promise<ReviewThread[] | null> {
+  const [owner, name] = repo.split("/");
+  const query =
+    "query($o:String!,$r:String!,$n:Int!,$after:String){repository(owner:$o,name:$r){pullRequest(number:$n){" +
+    "reviewThreads(first:100,after:$after){pageInfo{hasNextPage endCursor}nodes{isResolved path comments(first:100){nodes{body}}}}}}}";
+  const mode = githubTransport();
+  const useGh = mode === "gh" || (mode === "auto" && (await isGhAvailable()));
+  if (!useGh && !token) return null;
+
+  const fetchPage = async (after: string | null): Promise<ReviewThreadsResponse> => {
+    if (useGh) {
+      const args = ["api", "graphql", "-f", `query=${query}`, "-F", `o=${owner}`, "-F", `r=${name}`, "-F", `n=${number}`];
+      if (after !== null) args.push("-F", `after=${after}`);
+      const out = await runGh(args);
+      // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+      return JSON.parse(out) as ReviewThreadsResponse;
+    }
+    const variables: Record<string, unknown> = { o: owner, r: name, n: Number(number) };
+    if (after !== null) variables.after = after;
+    const r = await fetch("https://api.github.com/graphql", {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ query, variables }),
+    });
+    if (!r.ok) throw new Error(`github ${r.status} ${r.statusText}`.trim());
+    // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+    return (await r.json()) as ReviewThreadsResponse;
+  };
+
+  const all: ReviewThread[] = [];
+  let after: string | null = null;
+  for (let page = 1; page <= MAX_THREAD_PAGES; page++) {
+    const parsed = parseReviewThreadsPage(await fetchPage(after));
+    // An unreadable page is unverifiable — fail closed rather than converging on a partial read.
+    if (parsed === null) return null;
+    all.push(...parsed.threads);
+    // A confirmed last page is the only complete read.
+    if (!parsed.hasNextPage) return all;
+    // More pages exist but no cursor to advance — unverifiable, fail closed.
+    if (parsed.endCursor === null) return null;
+    after = parsed.endCursor;
+  }
+  // Exceeded the page cap and GitHub still reports more — unverifiable, fail closed.
+  return null;
+}
+
 // ── Copilot re-request (review-wait liveness) ───────────────────────────────
 // A PR parked in `waiting_review` blocks on a *fresh* Copilot review. Copilot won't
 // spontaneously re-review a round with no new commit, and routinely dismisses a re-request, so

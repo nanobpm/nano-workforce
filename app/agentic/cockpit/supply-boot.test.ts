@@ -277,3 +277,37 @@ test("injecting setTimer without clearTimer (or vice versa) fails fast", () => {
     /setTimer and clearTimer must be provided together/,
   );
 });
+
+test("a drill whose terminal build throws resets the panel to idle instead of leaving a stale live indicator", async () => {
+  const r = rig();
+  const cockpit = bootSupplyCockpit(r.env);
+  await cockpit.refresh();
+
+  // First drill succeeds: the panel is live on wk-a.
+  cockpit.drill("wk-a");
+  assert.equal(cockpit.currentMode, "live");
+  assert.equal(cockpit.currentStream, "wk-a");
+  const disposesBefore = r.terminalDisposes;
+
+  // The next drill tears down the live wk-a terminal up-front, then fails to build the new one.
+  const baseCreate = r.env.createTerminal;
+  r.env.createTerminal = () => {
+    throw new Error("createTerminal boom");
+  };
+  cockpit.drill("wk-b");
+  r.env.createTerminal = baseCreate;
+
+  // The failure is surfaced and the prior live terminal was disposed by the up-front teardown.
+  assert.equal(r.errors.length, 1, "the build failure is surfaced to onError");
+  assert.equal(r.terminalDisposes, disposesBefore + 1, "the prior live terminal was torn down");
+
+  // The defect: the panel must NOT keep showing a stale "live wk-a" backed by a terminal that is
+  // gone — the region resets to idle, symmetric with replay() which clears mode up-front.
+  assert.equal(cockpit.currentMode, undefined, "mode reset to idle after a failed drill");
+  assert.equal(cockpit.currentStream, undefined, "stream cleared after a failed drill");
+
+  // And the region recovers: a subsequent successful drill mounts a fresh live terminal.
+  cockpit.drill("wk-a");
+  assert.equal(cockpit.currentMode, "live");
+  assert.equal(cockpit.currentStream, "wk-a");
+});

@@ -10,6 +10,7 @@ export {
   type CreateTerminal,
   type SupplyCockpitEnv,
   type SupplyCockpitHandle,
+  type TerminalMode,
   type TimerHandle,
 } from "./supply-boot.ts";
 export {
@@ -28,3 +29,20 @@ export {
   type SupplyWorkerView,
   supplyView,
 } from "./supply-view.ts";
+export {
+  type RenderTranscriptsOptions,
+  renderTranscripts,
+  replayTranscript,
+  type TranscriptChunkReport,
+  type TranscriptDataReport,
+  type TranscriptsDom,
+} from "./transcript-render.ts";
+export {
+  humanBytes,
+  humanDuration,
+  type TranscriptListReport,
+  type TranscriptSummaryReport,
+  type TranscriptsView,
+  type TranscriptView,
+  transcriptsView,
+} from "./transcript-view.ts";

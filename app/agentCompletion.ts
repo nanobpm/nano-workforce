@@ -20,6 +20,7 @@
 // SAME `completeUserTaskAttributed` (as `human`), so there is exactly one implementation of "complete
 // an escalation user task" — the agent path is an extension of it, not a parallel copy.
 
+import { readFileSync } from "node:fs";
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
 
 const now = () => new Date().toISOString();
@@ -68,6 +69,77 @@ export const ESCALATION_TASK_ELEMENTS: ReadonlySet<string> = new Set([
   "trial-merge-decision",
   "wait-answer", // PR review-loop escalation (convergence-loop.bpmn, U3)
 ]);
+
+/** Each escalation `elementId` → the `.form` whose contract governs its completion variables (the
+ *  BPMN `zeebe:formDefinition formId`). Kept beside `ESCALATION_TASK_ELEMENTS` so the completer
+ *  validates against the SAME `.form` the task inbox renders — one contract, no second field list. */
+const ESCALATION_FORM_BY_ELEMENT: Readonly<Record<string, string>> = {
+  "feature-escalation": "feature-escalation",
+  "plan-review-decision": "plan-review-decision",
+  "trial-merge-decision": "trial-merge-decision",
+  "wait-answer": "pr-escalation",
+};
+
+interface FormContract {
+  /** Field keys marked `validate.required` in the `.form`. */
+  required: string[];
+  /** `select` field key → its allowed `values`. */
+  allowed: Record<string, string[]>;
+}
+
+const formContractCache = new Map<string, FormContract>();
+
+/** Derive a `.form`'s required-field + select allowed-value contract, cached per formId. The `.form`
+ *  files (`resources/forms/*.form`, deployed via nano.app.json) are the CANONICAL contract, so this
+ *  reads them rather than re-encoding the field lists — no drift surface. */
+function formContract(formId: string): FormContract {
+  const cached = formContractCache.get(formId);
+  if (cached) return cached;
+  const raw: {
+    components?: { key?: string; validate?: { required?: boolean }; values?: { value?: string }[] }[];
+  } = JSON.parse(readFileSync(new URL(`../resources/forms/${formId}.form`, import.meta.url), "utf8"));
+  const required: string[] = [];
+  const allowed: Record<string, string[]> = {};
+  for (const c of raw.components ?? []) {
+    if (!c.key) continue;
+    if (c.validate?.required) required.push(c.key);
+    if (c.values?.length) {
+      allowed[c.key] = c.values.map((v) => v.value ?? "").filter((v) => v !== "");
+    }
+  }
+  const contract: FormContract = { required, allowed };
+  formContractCache.set(formId, contract);
+  return contract;
+}
+
+/** Validate completion `variables` against the escalation's `.form` contract (required fields present
+ *  + `select` values within the allowed set), so a completion can never resume the process with a
+ *  missing/invalid decision (e.g. a `wait-answer` with no `answer`, or a `trial-merge-decision` with
+ *  an `action` outside proceed/rebase/abandon). Returns a human-readable reason on violation, or
+ *  `null` when the variables satisfy the contract. Derived from the canonical `.form` — the same
+ *  contract the task inbox renders — so both the agent and human completers reject invalid input the
+ *  exact same way, with one implementation. An element with no linked form contract is not enforced. */
+export function validateEscalationVariables(
+  elementId: string,
+  variables: Record<string, unknown>,
+): string | null {
+  const formId = ESCALATION_FORM_BY_ELEMENT[elementId];
+  if (!formId) return null;
+  const { required, allowed } = formContract(formId);
+  for (const key of required) {
+    const v = variables[key];
+    if (v === undefined || v === null || (typeof v === "string" && v.trim() === "")) {
+      return `${elementId}: "${key}" is required`;
+    }
+  }
+  for (const [key, values] of Object.entries(allowed)) {
+    const v = variables[key];
+    if (v !== undefined && v !== null && !values.includes(String(v))) {
+      return `${elementId}: "${key}" must be one of ${values.join(", ")}`;
+    }
+  }
+  return null;
+}
 
 /** The canonical attributed completer. Records an attribution row in `task_completions` (reversible
  *  iff the actor is an agent) and THEN completes the user task with the exact typed `variables` — so
@@ -183,6 +255,9 @@ export async function completeEscalationAsAgent(
   const resolved = await resolveEscalationTask(engine, userTaskKey);
   if (!resolved.ok) return resolved;
 
+  const invalid = validateEscalationVariables(resolved.elementId, input.variables);
+  if (invalid) return { ok: false, reason: invalid };
+
   const { completionId } = await completeUserTaskAttributed(
     data,
     engine,
@@ -211,6 +286,9 @@ export async function completeEscalationAsHuman(
 
   const resolved = await resolveEscalationTask(engine, userTaskKey);
   if (!resolved.ok) return resolved;
+
+  const invalid = validateEscalationVariables(resolved.elementId, input.variables);
+  if (invalid) return { ok: false, reason: invalid };
 
   const { completionId } = await completeUserTaskAttributed(
     data,

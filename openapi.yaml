@@ -204,6 +204,167 @@ components:
             processed, so the cockpit can line each worker's terminal up with its process instance / plan (H6).
           items:
             $ref: "#/components/schemas/AgenticJobCorrelation"
+    AgenticTranscript:
+      type: object
+      description: One captured agent session's transcript metadata (H3/#146 transcript store). A durable
+        record of an ephemeral agent's terminal stream, readable AFTER the agent has exited. jobKey and
+        the process-instance / plan correlation are derived from the stream id (`job:<jobKey>`) and, when
+        the H6 correlation registry still holds the (live) job, its engine context (advisory, best-effort).
+      required:
+        - stream
+        - lifecycle
+        - status
+        - createdAt
+        - nextOffset
+        - byteLength
+        - chunkCount
+      properties:
+        stream:
+          type: string
+          description: The relay stream id the transcript was captured under (`job:<jobKey>` for a job stream).
+        lifecycle:
+          type: string
+          enum: [ephemeral, long-lived]
+          description: Retention lifecycle — ephemeral (flushed once on job completion, swept after retention)
+            or long-lived (checkpointed, bounded by a rolling offset window).
+        status:
+          type: string
+          enum: [open, completed]
+          description: open (still capturing / reattachable) or completed (the ephemeral run flushed & sealed).
+        createdAt:
+          type: string
+          description: When the stream was first opened, ISO-8601.
+        completedAt:
+          type: string
+          description: When an ephemeral run was flushed & completed, ISO-8601 (absent while open).
+        firstOffset:
+          type: integer
+          description: The oldest retained chunk offset, or absent when the transcript holds no chunks.
+        nextOffset:
+          type: integer
+          description: One past the highest offset ever recorded (the resume high-water mark).
+        byteLength:
+          type: integer
+          description: Total captured bytes across every retained chunk.
+        chunkCount:
+          type: integer
+          description: The number of retained chunks.
+        jobKey:
+          type: string
+          description: The Camunda-8 job key, decoded from a `job:<jobKey>` stream id (absent for other streams).
+        processInstanceKey:
+          type: string
+          description: The owning process instance key, when the correlation is still known (advisory).
+        bpmnProcessId:
+          type: string
+          description: The BPMN process id the job belonged to, when still known (advisory).
+        elementId:
+          type: string
+          description: The BPMN element id (activity/task) the job was for, when still known (advisory).
+        planKey:
+          type: string
+          description: The plan / epic key this job was part of (e.g. owner/repo#142), when still known (advisory).
+    AgenticTranscriptList:
+      type: object
+      description: The list of captured agent sessions (past + open) — the cockpit "past sessions" feed.
+      required:
+        - count
+        - transcripts
+      properties:
+        count:
+          type: integer
+          description: The number of transcripts returned (after any filters).
+        generatedAt:
+          type: string
+          description: When this snapshot was taken, ISO-8601.
+        retentionMs:
+          type: integer
+          description: The completed-ephemeral retention window in ms (how long a finished session is kept
+            before a retention sweep may drop it). Absent when no transcript store is mounted.
+        transcripts:
+          type: array
+          items:
+            $ref: "#/components/schemas/AgenticTranscript"
+    AgenticTranscriptChunk:
+      type: object
+      description: One durable transcript chunk and the offset it was recorded at.
+      required:
+        - offset
+        - chunk
+      properties:
+        offset:
+          type: integer
+          description: The chunk's offset (resume key) — the terminal renderer resumes-from-offset off it.
+        chunk:
+          type: string
+          description: The captured terminal bytes for this offset.
+    AgenticTranscriptData:
+      type: object
+      description: A stored transcript's bytes, range/offset-based so the cockpit terminal replays it through
+        the SAME resume-from-offset renderer it uses for a live stream (static playback of a closed stream).
+      required:
+        - stream
+        - lifecycle
+        - status
+        - createdAt
+        - nextOffset
+        - byteLength
+        - chunkCount
+        - from
+        - gap
+        - entries
+      properties:
+        stream:
+          type: string
+          description: The relay stream id.
+        lifecycle:
+          type: string
+          enum: [ephemeral, long-lived]
+        status:
+          type: string
+          enum: [open, completed]
+        createdAt:
+          type: string
+          description: When the stream was first opened, ISO-8601.
+        completedAt:
+          type: string
+          description: When an ephemeral run was flushed & completed, ISO-8601 (absent while open).
+        nextOffset:
+          type: integer
+          description: One past the highest recorded offset (where a live stream would continue).
+        byteLength:
+          type: integer
+          description: Total captured bytes across the returned chunks.
+        chunkCount:
+          type: integer
+          description: The number of returned chunks.
+        from:
+          type: integer
+          description: The requested resume offset (inclusive) this page starts at.
+        gap:
+          type: boolean
+          description: True when `from` predates the oldest retained offset — earlier chunks were dropped by
+            retention, so the replay is a best-effort resume, not gap-free from `from`.
+        jobKey:
+          type: string
+          description: The Camunda-8 job key, decoded from a `job:<jobKey>` stream id (absent otherwise).
+        processInstanceKey:
+          type: string
+          description: The owning process instance key, when still known (advisory).
+        bpmnProcessId:
+          type: string
+          description: The BPMN process id, when still known (advisory).
+        elementId:
+          type: string
+          description: The BPMN element id, when still known (advisory).
+        planKey:
+          type: string
+          description: The plan / epic key, when still known (advisory).
+        entries:
+          type: array
+          description: The retained chunks with `offset >= from`, in offset order.
+          items:
+            $ref: "#/components/schemas/AgenticTranscriptChunk"
     VersionInfo:
       type: object
       description: The running app's identity (which code is actually live).
@@ -783,6 +944,112 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorBody"
+  /agentic/transcripts:
+    get:
+      operationId: listAgenticTranscripts
+      summary: List captured agent sessions (H3/#146) — the durable transcripts an ephemeral agent flushed
+        on job completion, readable AFTER it exited. Optional filters by jobKey / process instance / plan /
+        time. Advisory read-only; never gates control flow. Feeds the cockpit "past sessions" view.
+      security:
+        - hookSecret: []
+        - {}
+      parameters:
+        - name: jobKey
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Return only the transcript for this Camunda-8 job key (its `job:<jobKey>` stream).
+        - name: processInstanceKey
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Return only transcripts whose (still-known) correlation names this process instance.
+        - name: planKey
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Return only transcripts whose (still-known) correlation names this plan / epic key.
+        - name: since
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Return only sessions created at or after this ISO-8601 instant.
+        - name: until
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Return only sessions created at or before this ISO-8601 instant.
+      responses:
+        "200":
+          description: The captured session list.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgenticTranscriptList"
+        "400":
+          description: A malformed filter (e.g. an unparseable since/until).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+        "401":
+          description: Missing/invalid shared secret (only when NANO_PR_WEBHOOK_SECRET is set).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+  /agentic/transcripts/{stream}:
+    get:
+      operationId: getAgenticTranscript
+      summary: Fetch a stored transcript's bytes (H3/#146), range/offset-based so the cockpit terminal
+        replays it through the same resume-from-offset renderer it uses for a live stream. Advisory
+        read-only; never gates control flow.
+      security:
+        - hookSecret: []
+        - {}
+      parameters:
+        - name: stream
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The relay stream id to fetch (`job:<jobKey>` for a job stream).
+        - name: from
+          in: query
+          required: false
+          schema:
+            type: integer
+          description: Resume from this offset (inclusive). Default 0 (the whole retained transcript).
+      responses:
+        "200":
+          description: The stored transcript bytes from `from`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgenticTranscriptData"
+        "400":
+          description: A malformed `from` offset.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+        "401":
+          description: Missing/invalid shared secret (only when NANO_PR_WEBHOOK_SECRET is set).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+        "404":
+          description: No transcript exists for the given stream.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
   /version:
     get:
       operationId: getVersion
@@ -979,6 +1246,59 @@ paths:
                 answer:
                   type: string
                   description: Guidance for the implementation agent. Required (non-blank) when resolution is answer.
+                operator:
+                  type: string
+                  description: Optional operator handle recorded in the attribution ledger; defaults to "operator".
+      responses:
+        "200":
+          description: The escalation user task was completed and the process resumed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResult"
+        "400":
+          description: A required field was missing/invalid, or the target is not an escalation task.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResult"
+        "404":
+          description: No open escalation user task matches the userTaskKey.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResult"
+  /actions/complete-user-task:
+    post:
+      operationId: completeUserTask
+      summary: "Complete an open native user-task escalation from the nwf Tasks inbox (issue #236).
+        Submits the parked task's typed `.form` variables (e.g. a plan-review `{ directive, notes }`, a
+        trial-merge `{ action, notes }`, or a PR `{ answer }`) to the canonical human completer
+        (completeEscalationAsHuman → completeUserTaskAttributed) — the same resume path the task inbox
+        uses, recording who answered. The completer refuses any user task that is not one of the
+        migrated escalation elements. The feature-run kinds keep their own operations
+        (answer-escalation / acknowledge-blocked); this door is for the plan-review / trial-merge / PR
+        `wait-answer` kinds whose completion is a straight typed pass-through. On success the answered
+        task's read-model row is dropped so the Tasks grid stops offering a decision for it."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+                - userTaskKey
+                - variables
+              properties:
+                userTaskKey:
+                  type: string
+                  minLength: 1
+                  description: The parked escalation user-task key (user_tasks.user_task_key).
+                variables:
+                  type: object
+                  additionalProperties: true
+                  description: The typed form variables the parked task's `.form` expects (kind-specific).
                 operator:
                   type: string
                   description: Optional operator handle recorded in the attribution ledger; defaults to "operator".

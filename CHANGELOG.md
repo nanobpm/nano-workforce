@@ -1,3 +1,45 @@
+# [0.71.0](https://github.com/nanobpm/nano-workforce/compare/v0.70.2...v0.71.0) (2026-08-15)
+
+
+### Features
+
+* add a Tasks page to resolve native user-task escalations in the UI ([#238](https://github.com/nanobpm/nano-workforce/issues/238)) ([4dcd1a1](https://github.com/nanobpm/nano-workforce/commit/4dcd1a1ca1756bec45997ce619ed92bff31d03d6)), closes [210/#220](https://github.com/nanobpm/nano-workforce/issues/220)
+
+## [0.70.2](https://github.com/nanobpm/nano-workforce/compare/v0.70.1...v0.70.2) (2026-08-15)
+
+
+### Bug Fixes
+
+* **merge-loop:** add agent-task liveness SLA backstop for rebase/fix-ci ([#237](https://github.com/nanobpm/nano-workforce/issues/237)) ([c77cdca](https://github.com/nanobpm/nano-workforce/commit/c77cdca974a1e53ef2f9757cc5cedf95068713f1))
+
+## [0.70.1](https://github.com/nanobpm/nano-workforce/compare/v0.70.0...v0.70.1) (2026-08-15)
+
+
+### Bug Fixes
+
+* **convergence:** don't re-review a no-progress round ([#230](https://github.com/nanobpm/nano-workforce/issues/230)) ([a8ea844](https://github.com/nanobpm/nano-workforce/commit/a8ea84444b351989f716124d0b485b42e1ec2a35)), closes [#231](https://github.com/nanobpm/nano-workforce/issues/231) [Magikcraft/nano-bpm#770](https://github.com/Magikcraft/nano-bpm/issues/770) [#770](https://github.com/nanobpm/nano-workforce/issues/770) [nanobpm/nano-workforce#225](https://github.com/nanobpm/nano-workforce/issues/225) [#2](https://github.com/nanobpm/nano-workforce/issues/2) [#770](https://github.com/nanobpm/nano-workforce/issues/770)
+
+# [0.70.0](https://github.com/nanobpm/nano-workforce/compare/v0.69.1...v0.70.0) (2026-08-15)
+
+
+### Features
+
+* **agentic:** transcript read path + cockpit past-session replay ([#222](https://github.com/nanobpm/nano-workforce/issues/222)) ([#225](https://github.com/nanobpm/nano-workforce/issues/225)) ([a93cdd0](https://github.com/nanobpm/nano-workforce/commit/a93cdd0824a3afcb44feffdb2dafc7732154545e)), closes [#refreshPast](https://github.com/nanobpm/nano-workforce/issues/refreshPast) [mode/#shownStream](https://github.com/nanobpm/nano-workforce/issues/shownStream) [#refreshPast](https://github.com/nanobpm/nano-workforce/issues/refreshPast)
+
+## [0.69.1](https://github.com/nanobpm/nano-workforce/compare/v0.69.0...v0.69.1) (2026-08-15)
+
+
+### Bug Fixes
+
+* **models:** add required resourceType to all linkedResources ([#234](https://github.com/nanobpm/nano-workforce/issues/234)) ([#235](https://github.com/nanobpm/nano-workforce/issues/235)) ([a3ac02f](https://github.com/nanobpm/nano-workforce/commit/a3ac02f308c813a778682ace21718f4f7e446c52)), closes [Magikcraft/nano-bpm#768](https://github.com/Magikcraft/nano-bpm/issues/768) [#768](https://github.com/nanobpm/nano-workforce/issues/768)
+
+# [0.69.0](https://github.com/nanobpm/nano-workforce/compare/v0.68.0...v0.69.0) (2026-08-15)
+
+
+### Features
+
+* **agentic:** enable nwf for a remote fleet — loopback-guard the LOCAL token + document network posture ([#224](https://github.com/nanobpm/nano-workforce/issues/224)) ([#228](https://github.com/nanobpm/nano-workforce/issues/228)) ([73f6170](https://github.com/nanobpm/nano-workforce/commit/73f6170ff4c0df0ad6c4eb2a2e6e9b3df5d1e343)), closes [nano-ide#235](https://github.com/nano-ide/issues/235) [nano-ide#235](https://github.com/nano-ide/issues/235)
+
 # [0.68.0](https://github.com/nanobpm/nano-workforce/compare/v0.67.0...v0.68.0) (2026-08-14)
 
 
