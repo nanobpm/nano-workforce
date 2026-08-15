@@ -92,3 +92,19 @@ test("every declared env key's registry name matches its key (no internal drift)
     assertEquals(value.name, key, `ENV_CONTRACTS['${key}'].name must equal its key`);
   }
 });
+
+test("config-family keys read via envVar() are declared (the check:contracts blind spot, PR #229)", () => {
+  // These are read in production through the `envVar("KEY")` helper (app/version.ts, operations/*,
+  // main.ts), which bypasses the typed `readEnv` path. They MUST still be declared, or they are an
+  // unregistered second source of truth — exactly the drift the registry exists to kill (#227).
+  for (const key of [
+    "NANO_PR_WEBHOOK_SECRET",
+    "NANO_AGENTIC_SECRET",
+    "NANO_AGENTIC",
+    "NANO_WORKFORCE_GIT_SHA",
+  ] as const) {
+    assert(key in ENV_CONTRACTS, `${key} must be declared in ENV_CONTRACTS`);
+  }
+  assertEquals(envContract("NANO_PR_WEBHOOK_SECRET").secret, true);
+  assertEquals(envContract("NANO_AGENTIC_SECRET").secret, true);
+});

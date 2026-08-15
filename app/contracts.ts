@@ -155,6 +155,36 @@ export const ENV_CONTRACTS = {
     semantics: "GitHub transport selector (auto|cli|rest).",
     default: "auto",
   },
+  NANO_PR_WEBHOOK_SECRET: {
+    category: "env",
+    name: "NANO_PR_WEBHOOK_SECRET",
+    owner: "operations/*.ts (agentic HTTP hooks)",
+    semantics:
+      "Shared secret authenticating the agentic supply HTTP-hook operations (getAgenticSupply / getAgentInstructions / listActivePrs / getVersion / agentCompleteEscalation / revertEscalationCompletion). Also the fallback secret for NANO_AGENTIC_SECRET.",
+    secret: true,
+  },
+  NANO_AGENTIC_SECRET: {
+    category: "env",
+    name: "NANO_AGENTIC_SECRET",
+    owner: "main.ts",
+    semantics:
+      "Secret authenticating the agentic supply endpoint; falls back to NANO_PR_WEBHOOK_SECRET when unset.",
+    secret: true,
+  },
+  NANO_AGENTIC: {
+    category: "env",
+    name: "NANO_AGENTIC",
+    owner: "main.ts",
+    semantics:
+      "Feature flag for the agentic supply endpoint; a value of 0/off/false/no disables it (enabled when unset).",
+  },
+  NANO_WORKFORCE_GIT_SHA: {
+    category: "env",
+    name: "NANO_WORKFORCE_GIT_SHA",
+    owner: "app/version.ts",
+    semantics:
+      "Explicit git SHA override for version reporting on deploys shipped without a .git directory; version derivation reads .git when unset.",
+  },
   NANO_AUTO_RETRO: {
     category: "env",
     name: "NANO_AUTO_RETRO",

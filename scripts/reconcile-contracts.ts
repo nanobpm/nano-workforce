@@ -19,13 +19,23 @@ import {
 } from "../app/contractReconcile.ts";
 import type { ContractCategory } from "../app/contracts.ts";
 
-function fileUrlToPath(u: string): string | undefined {
+function safeDecodeURIComponent(s: string): string {
+  try {
+    return decodeURIComponent(s);
+  } catch {
+    // Advisory-only pass: a malformed %-escape in NANO_APP_DB_URL must never fail the build. Fall
+    // back to the raw segment so reconciliation still runs (worst case: the file simply isn't found).
+    return s;
+  }
+}
+
+export function fileUrlToPath(u: string): string | undefined {
   if (!u.startsWith("file:")) return undefined;
   if (u.startsWith("file://")) {
-    const p = decodeURIComponent(new URL(u).pathname);
+    const p = safeDecodeURIComponent(new URL(u).pathname);
     return /^\/[A-Za-z]:/.test(p) ? p.slice(1) : p;
   }
-  const p = decodeURIComponent(u.slice("file:".length));
+  const p = safeDecodeURIComponent(u.slice("file:".length));
   return /^\/[A-Za-z]:/.test(p) ? p.slice(1) : p;
 }
 
@@ -67,4 +77,4 @@ function main(): void {
   // Advisory: never fail the build. The hard, registry-only gate is `npm run check:contracts`.
 }
 
-main();
+if (import.meta.main) main();
