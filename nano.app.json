@@ -164,6 +164,10 @@
     {
       "taskType": "pr.retro-record",
       "handler": "workers/retro-record/worker.ts"
+    },
+    {
+      "taskType": "pr.progress-check",
+      "handler": "workers/progress-check/worker.ts"
     }
   ],
   "externalTaskTypes": [

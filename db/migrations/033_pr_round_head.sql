@@ -1,0 +1,16 @@
+-- Track the PR head SHA observed at each recorded convergence round so the loop can detect a
+-- NO-PROGRESS `addressed` round: the agent reported it addressed the review comments, but the
+-- branch head never moved — no commit was actually pushed. Requesting another Copilot review then
+-- loops on byte-identical code (same comments, round after round) until the round cap escalates.
+--
+-- The deterministic `pr.progress-check` guard (workers/progress-check/worker.ts) reads the PR's
+-- current head SHA each continue-round, compares it to this column (the head at the PREVIOUS
+-- round), and — when an `addressed` round's head did not advance — routes the convergence-loop
+-- `gw-progress` gateway to the human `wait-answer` escalation instead of soliciting another
+-- review. It then writes the freshly observed head here as the baseline for the next round. NULL
+-- until the first round observes a head; the guard fails OPEN on a NULL/unreadable head.
+--
+-- Forward-only, additive (expand): the column is nullable with no default. Numbered after the
+-- current highest prefix (032); the runner wraps each file in its own transaction, so this file
+-- must NOT contain BEGIN/COMMIT.
+ALTER TABLE pull_requests ADD COLUMN last_round_head TEXT;
