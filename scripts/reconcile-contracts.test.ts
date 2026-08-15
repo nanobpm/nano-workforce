@@ -27,3 +27,12 @@ test("fileUrlToPath: a malformed file:// URL yields undefined, never throws (PR 
   assertEquals(fileUrlToPath("file://%zz/bad host/db.sqlite"), undefined);
 });
 
+test("fileUrlToPath: strips a query/hash suffix on an opaque file: URL (PR #229)", () => {
+  // A valid SQLite-style URL carries connection params (`?mode=ro`). The opaque `file:` branch must
+  // drop the `?…`/`#…` suffix so the path resolves to a real on-disk file, else reconciliation is
+  // silently disabled by a path that never exists.
+  assertEquals(fileUrlToPath("file:./app.db?mode=ro"), "./app.db");
+  assertEquals(fileUrlToPath("file:./app.db#frag"), "./app.db");
+  assertEquals(fileUrlToPath("file:./app.db?mode=ro&cache=shared#x"), "./app.db");
+});
+

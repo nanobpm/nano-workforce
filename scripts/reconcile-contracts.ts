@@ -44,7 +44,12 @@ export function fileUrlToPath(u: string): string | undefined {
     const p = safeDecodeURIComponent(pathname);
     return /^\/[A-Za-z]:/.test(p) ? p.slice(1) : p;
   }
-  const p = safeDecodeURIComponent(u.slice("file:".length));
+  // Opaque `file:` form (no authority) — the `new URL().pathname` branch above already drops any
+  // query/hash, but here we hold the raw remainder, so strip a `?…`/`#…` suffix ourselves. A valid
+  // SQLite-style URL like `file:./app.db?mode=ro` must resolve to `./app.db`, not `./app.db?mode=ro`
+  // (which never exists on disk and would silently disable blackboard reconciliation).
+  const raw = u.slice("file:".length).replace(/[?#].*$/, "");
+  const p = safeDecodeURIComponent(raw);
   return /^\/[A-Za-z]:/.test(p) ? p.slice(1) : p;
 }
 
@@ -65,7 +70,15 @@ function loadSignals(): ContractSignal[] {
   const url = process.env.NANO_APP_DB_URL ?? "file:./app.db";
   const path = fileUrlToPath(url);
   if (!path || !existsSync(path)) return [];
-  const db = new DatabaseSync(path, { readOnly: true });
+  let db: DatabaseSync;
+  try {
+    db = new DatabaseSync(path, { readOnly: true });
+  } catch {
+    // Advisory-only pass: opening the db can still fail (permission, invalid/corrupt file) even
+    // though the path exists. Degrade to no signals — reconcile the registry alone — rather than
+    // crash a script that must never gate CI.
+    return [];
+  }
   try {
     // biome-ignore lint/plugin: external node:sqlite row shape at the DB boundary — the column list is fixed by the SELECT above.
     const rows = db
