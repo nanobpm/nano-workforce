@@ -9,6 +9,7 @@
 // `Table<T>` surface), not hand-written SQL. Row shapes are declared inline here.
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { abandonUrl, mintAbandonToken, renderAbandonBrief } from "./abandon.ts";
+import { agentSlaTimeout } from "./agentSla.ts";
 import { deriveFeatureBlockedPatch, deriveFeatureDelivery, deriveFeatureEscalationPatch, FEATURE_BLOCKED_ELEMENT, FEATURE_ESCALATION_ELEMENT, type FeatureRun, featureRuns } from "./feature.ts";
 import {
   classifyMergeability,
@@ -57,6 +58,14 @@ export const MAX_CI_FIX_ROUNDS = clampCiFixBudget(process.env.NANO_PR_MAX_CI_FIX
  * set `NANO_PR_MAX_REBASE_ROUNDS=0` to disable auto-rebase (a conflicting PR escalates
  * immediately). Reuses the CI-fix budget clamp (allows 0 = disable, ceiling-capped). */
 export const MAX_REBASE_ROUNDS = clampCiFixBudget(process.env.NANO_PR_MAX_REBASE_ROUNDS, 3);
+
+/** How long a merge-loop AGENT service task (rebase / fix-ci) may sit without completing before its
+ * interrupting timer boundary fires and the PR escalates for human attention. Seeded as the
+ * `agentSlaTimeout` process variable at merge start and evaluated by those tasks' boundary timers.
+ * Unlike a human-decision escalation (PT24H), an agent task has no human in the loop — if its
+ * capability is unstaffed or the agent hangs/crashes without failing the job, the token would
+ * otherwise park forever. Override with `NANO_PR_AGENT_SLA_TIMEOUT` (ISO-8601 duration). */
+export const AGENT_SLA_TIMEOUT = agentSlaTimeout(process.env.NANO_PR_AGENT_SLA_TIMEOUT);
 
 /** How long the convergence loop waits for a fresh review before escalating to a human. Seeded as
  * the `reviewWaitTimeout` process variable at submit and evaluated by the process's
@@ -531,6 +540,7 @@ export async function startMerge(
       ciFixMax: MAX_CI_FIX_ROUNDS,
       rebaseRound: 0,
       rebaseMax: MAX_REBASE_ROUNDS,
+      agentSlaTimeout: AGENT_SLA_TIMEOUT,
       abandonUrl: abUrl,
       abandonBrief: renderAbandonBrief(abUrl),
       // Host-git provisioning (c8ctl): same repository envelope as the convergence loop, so the
