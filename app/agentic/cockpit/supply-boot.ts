@@ -333,7 +333,20 @@ class SupplyCockpit implements SupplyCockpitHandle {
         this.#clearTimer(handle);
         reject(new Error(`${what} fetch timed out after ${this.#pastFetchTimeoutMs}ms`));
       }, this.#pastFetchTimeoutMs);
-      fetch().then(
+      // Invoke the fetch inside try/catch so a SYNCHRONOUS throw (not a rejected promise) is handled on the
+      // same arms as an async rejection: clear our timer and reject once. Without this, a sync throw escapes
+      // the executor (rejecting the promise) but leaves the timeout handle scheduled — a leak that fires
+      // (and, under a custom scheduler, could re-fire) long after the wait has already settled.
+      let pending: Promise<T>;
+      try {
+        pending = fetch();
+      } catch (err) {
+        settled = true;
+        this.#clearTimer(handle);
+        reject(err);
+        return;
+      }
+      pending.then(
         (report) => {
           if (settled) return;
           settled = true;

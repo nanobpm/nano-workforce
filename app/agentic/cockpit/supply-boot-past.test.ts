@@ -355,6 +355,56 @@ test("the bounded-wait timeout clears its own timer handle (no leak / no double-
   cockpit.dispose();
 });
 
+test("a synchronously-throwing fetch clears the bounded-wait timer (no leaked handle) and still settles", async () => {
+  const r = rig();
+  // Same hand-driven timer seam as the timeout-clear test: only clearTimer removes a handle from the map,
+  // so a handle that survives after the bounded wait settles is a genuine leak the custom scheduler never
+  // reclaimed — and, worse, one it could later re-fire.
+  const timers = new Map<number, () => void>();
+  const cleared: number[] = [];
+  let nextId = 0;
+  const boom = new Error("fetchTranscript threw synchronously");
+  const env: SupplyCockpitEnv = {
+    ...r.env,
+    setTimer: (run) => {
+      const id = nextId++;
+      timers.set(id, run);
+      return id;
+    },
+    clearTimer: (handle) => {
+      cleared.push(handle as number);
+      timers.delete(handle as number);
+    },
+    pastFetchTimeoutMs: 5000,
+    // The replay fetch throws SYNCHRONOUSLY (not a rejected promise): before the fix the Promise executor's
+    // throw rejected the bounded wait, but its timeout handle was never cleared — it leaked and would fire
+    // (and under a custom scheduler could re-fire) long after replay() had already settled.
+    fetchTranscript: () => {
+      throw boom;
+    },
+  };
+  const cockpit = bootSupplyCockpit(env);
+  await cockpit.refresh(); // the list fetch resolves, clearing its own bounded timer
+  await flush();
+
+  // Capture exactly the timer the replay's bounded wait schedules. Track every handle seen so far (live
+  // or already-cleared) so the earlier list-fetch's cleared timer isn't miscounted as the replay's.
+  const before = new Set<number>([...timers.keys(), ...cleared]);
+  await cockpit.replay("job:past"); // must settle (reject → caught), not throw out of replay()
+  await flush();
+  const replayTimers = [...new Set([...timers.keys(), ...cleared])].filter((id) => !before.has(id));
+  assert.equal(replayTimers.length, 1, "replay scheduled exactly one bounded-wait timer");
+  const replayTimerId = replayTimers[0];
+
+  // The sync-throw arm MUST clear its own handle — otherwise a custom scheduler leaks it and can re-fire it.
+  assert.ok(cleared.includes(replayTimerId), "the sync-throw arm called clearTimer on its own handle");
+  assert.equal(timers.has(replayTimerId), false, "no leaked timer handle survives a synchronous fetch throw");
+  // The synchronous failure surfaced as an error and left the terminal idle, not stuck in replay.
+  assert.ok(r.errors.includes(boom), "the synchronous fetch throw surfaced as the replay error");
+  assert.equal(cockpit.currentMode, undefined, "a sync-throwing replay leaves the terminal idle, not stuck in replay");
+  cockpit.dispose();
+});
+
 test("constructing with fetchTranscripts but no fetchTranscript fails fast (replay would silently no-op)", () => {
   const r = rig(false);
   assert.throws(
