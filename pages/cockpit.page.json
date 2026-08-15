@@ -13,6 +13,7 @@
           { "label": "Convergence", "page": "home" },
           { "label": "Epics", "page": "epic" },
           { "label": "Feature", "page": "feature" },
+          { "label": "Tasks", "page": "tasks" },
           { "label": "Cockpit", "page": "cockpit" }
         ],
         "sticky": true

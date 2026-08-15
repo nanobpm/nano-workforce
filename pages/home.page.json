@@ -26,6 +26,10 @@
             "page": "feature"
           },
           {
+            "label": "Tasks",
+            "page": "tasks"
+          },
+          {
             "label": "Cockpit",
             "page": "cockpit"
           }
