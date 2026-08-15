@@ -93,10 +93,11 @@ export function reconcileContracts(
   for (const sig of signals) {
     // A structured signal (has category+name) can be checked against the registry precisely.
     if (sig.category && sig.name) {
-      for (const conflict of detectDeclarationConflicts(
+      const conflicts = detectDeclarationConflicts(
         { category: sig.category, name: sig.name, semantics: sig.body },
         contracts,
-      )) {
+      );
+      for (const conflict of conflicts) {
         findings.push({
           kind: conflict.kind === "synonym" ? "synonym" : conflict.kind === "contradiction" ? "contradiction" : "rejected-synonym",
           detail: `${sig.authorTask}: ${conflict.detail}`,
@@ -107,7 +108,12 @@ export function reconcileContracts(
       // Mock-vs-real skew: an in-flight signal for a contract that never landed in the durable
       // registry. The blackboard is the live signal; the registry is the durable truth. A signal
       // with no registry entry is exactly the divergence-only-at-runtime risk the issue names.
-      if (!byName.has(sig.name)) {
+      // BUT a signal already flagged as a synonym or rejected synonym must NOT also be reported as
+      // skew: the correct action is to reuse the existing canonical contract, not to "land" the
+      // proposed (synonymous/retired) name in the registry — so a skew finding there is noise that
+      // contradicts the synonym advice.
+      const isSynonymish = conflicts.some((c) => c.kind === "synonym" || c.kind === "rejected-synonym");
+      if (!byName.has(sig.name) && !isSynonymish) {
         findings.push({
           kind: "mock-vs-real-skew",
           detail: `${sig.authorTask}: signalled contract '${sig.category}:${sig.name}' on the blackboard but it is not in the durable registry — land it in app/contracts.ts or it stays a mock-only agreement.`,

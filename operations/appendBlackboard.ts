@@ -39,7 +39,10 @@ export default defineOperation("appendBlackboard", async ({ req, body }, app) =>
   // "system" but conflict detection sees "", and the caller's own prior "system" claims are wrongly
   // reported as sibling conflicts.
   const author_task = (typeof b.author_task === "string" ? b.author_task.trim() : "") || "system";
-  const dedupe_key = typeof b.dedupe_key === "string" ? b.dedupe_key : undefined;
+  // Trim before it becomes the idempotency key: `dedupe_key` backs a unique index (and is now also
+  // parsed for the `<category>:<name>` contract ref), so accidental leading/trailing whitespace would
+  // otherwise slip past dedupe and create near-identical entries. A blank-after-trim key is no key.
+  const dedupe_key = typeof b.dedupe_key === "string" ? b.dedupe_key.trim() || undefined : undefined;
   const res = await appendEntry(app.data, planKey, {
     author_task,
     kind,

@@ -100,6 +100,18 @@ test("POST is idempotent on dedupe_key (retry → 200, not a duplicate)", async 
   assertEquals(n, 1);
 });
 
+test("POST dedupe_key is trimmed → a whitespace-padded retry still dedupes to one row (#227)", async () => {
+  const { app, db } = memApp();
+  await seedPlan(app, "o/r#1", "tok");
+  assertEquals((await call(app, "POST", { token: "tok" }, { author_task: "t", body: "claim", dedupe_key: "t:claim:1" })).status, 201);
+  // A retry whose key only differs by leading/trailing whitespace must NOT slip past dedupe.
+  const padded = await call(app, "POST", { token: "tok" }, { author_task: "t", body: "claim", dedupe_key: "  t:claim:1  " });
+  assertEquals(padded.status, 200);
+  assertEquals(padded.body.inserted, false);
+  const [{ n }] = db.all<{ n: number }>("SELECT COUNT(*) AS n FROM agentic_blackboard WHERE scope = ?", ["o/r#1"]);
+  assertEquals(n, 1);
+});
+
 test("GET ?since returns only newer entries", async () => {
   const { app } = memApp();
   await seedPlan(app, "o/r#1", "tok");

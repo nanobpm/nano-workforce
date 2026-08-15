@@ -41,6 +41,34 @@ test("reconcileContracts: a signal reintroducing a rejected synonym is flagged",
     report.findings.some((f) => f.kind === "rejected-synonym"),
     "a rejected synonym signalled on the blackboard must be reconciled",
   );
+  // A rejected synonym must NOT also be reported as mock-vs-real skew: the right action is to reuse
+  // the canonical name, not to "land" the retired name in the registry — a skew finding there is
+  // noise that contradicts the rejected-synonym advice.
+  assertEquals(
+    report.findings.filter((f) => f.kind === "mock-vs-real-skew"),
+    [],
+    "a rejected synonym must not double-report as skew",
+  );
+});
+
+test("reconcileContracts: a synonym signal (different name, same thing) is flagged synonym, not skew", () => {
+  const report = reconcileContracts([
+    {
+      authorTask: "task-w",
+      category: "env",
+      name: "NANO_APP_PUBLIC_URL",
+      body: "Externally-reachable base URL agents use to reach this app; drives every plan's blackboard capability URL.",
+    },
+  ]);
+  assert(
+    report.findings.some((f) => f.kind === "synonym"),
+    "a differently-named duplicate of an existing contract must be flagged as a synonym",
+  );
+  assertEquals(
+    report.findings.filter((f) => f.kind === "mock-vs-real-skew"),
+    [],
+    "a synonym must not double-report as skew — reuse the canonical, don't land the new name",
+  );
 });
 
 test("reconcileContracts: a signal for an existing registry contract, reused correctly, is clean of skew", () => {
