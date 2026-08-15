@@ -45,7 +45,10 @@ const CONFIG_KEY_MATCHERS: readonly RegExp[] = [
   /\benvVar\(\s*["']([A-Z][A-Z0-9_]*)["']\s*\)/g,
 ];
 const CONFIG_FAMILY = /^(NANO_|NANOBPMN_|CAMUNDA_|PR_REVIEW_)/;
-const EXPLICIT_CONFIG_KEYS = new Set(["PR_REVIEW_PORT"]);
+// `GITHUB_TOKEN` is the one production credential read outside the config families (app/service.ts,
+// operations/startPlanFanout.ts). It is declared in ENV_CONTRACTS; enforce that declaration here so a
+// future removal from the registry while code still reads it trips the gate (issue #227).
+export const EXPLICIT_CONFIG_KEYS = new Set(["PR_REVIEW_PORT", "GITHUB_TOKEN"]);
 
 /** Every env-key name read in `src` via any supported pattern (dot-access, string-literal
  * bracket-access, or the `envVar("KEY")` helper). Order-preserving, with duplicates, so a caller can

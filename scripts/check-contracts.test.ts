@@ -7,7 +7,8 @@
 // green. These assert `envKeyReads` sees all three patterns so the gate can hold them to the registry.
 import { test } from "node:test";
 import { assert, assertEquals } from "#test-assert";
-import { envKeyReads } from "./check-contracts.ts";
+import { envKeyReads, EXPLICIT_CONFIG_KEYS } from "./check-contracts.ts";
+import { ENV_CONTRACTS } from "../app/contracts.ts";
 
 test("envKeyReads: dot-access is recognised", () => {
   assertEquals(envKeyReads("const x = process.env.NANO_PR_POLL_MS;"), ["NANO_PR_POLL_MS"]);
@@ -38,4 +39,12 @@ test("envKeyReads: catches keys across all patterns in one source", () => {
 test("envKeyReads: a dynamic (non-literal) read is NOT matched", () => {
   // `process.env[name]` (a variable) can't be resolved statically, so it isn't reported.
   assertEquals(envKeyReads("const v = process.env[name];"), []);
+});
+
+test("GITHUB_TOKEN is enforced by the gate and declared in the registry (PR #229 suppressed advisory)", () => {
+  // GITHUB_TOKEN is read in production outside the config families (app/service.ts,
+  // operations/startPlanFanout.ts). Pin it into the enforced set so the gate holds it to its
+  // registry declaration — a future removal from ENV_CONTRACTS while code still reads it must fail.
+  assert(EXPLICIT_CONFIG_KEYS.has("GITHUB_TOKEN"), "GITHUB_TOKEN must be an enforced config key");
+  assert("GITHUB_TOKEN" in ENV_CONTRACTS, "GITHUB_TOKEN must be declared in ENV_CONTRACTS");
 });

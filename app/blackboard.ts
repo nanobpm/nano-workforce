@@ -358,7 +358,9 @@ export async function appendEntry(
     // idempotent retry (or a race) that resolves to an existing id (`inserted: false`), or a row
     // first inserted under a different kind for the same `dedupe_key`, still reads back as `contract`
     // rather than lingering as `note`. The UPDATE is idempotent on an already-`contract` row.
-    data.source().db.run(`UPDATE ${BLACKBOARD_TABLE} SET kind = 'contract' WHERE id = ?`, [Number(res.id)]);
+    // Bind `res.id` as-is (it is `number | bigint`) — coercing a bigint id via `Number(...)` could
+    // lose precision above `Number.MAX_SAFE_INTEGER` and patch the wrong row; SQLite binds bigint natively.
+    data.source().db.run(`UPDATE ${BLACKBOARD_TABLE} SET kind = 'contract' WHERE id = ?`, [res.id]);
   }
   return res;
 }
