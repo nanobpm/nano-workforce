@@ -36,16 +36,11 @@ test("publicBaseUrl: honours the env override and trims a trailing slash", () =>
 });
 
 test("publicBaseUrl: a blank/whitespace override falls back instead of yielding a bad URL", () => {
-  const prev = process.env.NANO_WORKFORCE_BASE_URL;
-  delete process.env.NANO_WORKFORCE_BASE_URL;
-  try {
-    assertEquals(publicBaseUrl(""), "http://localhost:3000");
-    assertEquals(publicBaseUrl("   "), "http://localhost:3000");
-    assertEquals(blackboardUrl("t", publicBaseUrl("")), "http://localhost:3000/app/api/hooks/blackboard?token=t");
-  } finally {
-    if (prev === undefined) delete process.env.NANO_WORKFORCE_BASE_URL;
-    else process.env.NANO_WORKFORCE_BASE_URL = prev;
-  }
+  // Explicit override args bypass the `process.env.NANO_WORKFORCE_BASE_URL` default, so this test
+  // needs no env manipulation — the env-read path is covered by the dedicated test below.
+  assertEquals(publicBaseUrl(""), "http://localhost:3000");
+  assertEquals(publicBaseUrl("   "), "http://localhost:3000");
+  assertEquals(blackboardUrl("t", publicBaseUrl("")), "http://localhost:3000/app/api/hooks/blackboard?token=t");
 });
 
 test("publicBaseUrl: reads NANO_WORKFORCE_BASE_URL from the environment by default", () => {
