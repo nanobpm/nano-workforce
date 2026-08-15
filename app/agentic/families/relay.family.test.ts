@@ -478,6 +478,12 @@ test("sweep cadence: a fraction of the retention window, floored at 1ms and capp
   const oneYearMs = 365 * 24 * 60 * 60 * 1000;
   assert(Math.floor(oneYearMs / 4) > 2_147_483_647, "precondition: an unclamped year/4 overflows the timer");
   assertEquals(sweepIntervalMs(oneYearMs), 2_147_483_647);
+  // A non-finite retention config (NaN, ±Infinity) derives a NaN interval that setInterval() coerces
+  // to a 1ms busy tick. Clamp any non-finite window to the same timer ceiling the overflow case uses,
+  // so a broken config degrades to the slowest safe sweep rather than a busy loop.
+  assertEquals(sweepIntervalMs(Number.NaN), 2_147_483_647);
+  assertEquals(sweepIntervalMs(Number.POSITIVE_INFINITY), 2_147_483_647);
+  assertEquals(sweepIntervalMs(Number.NEGATIVE_INFINITY), 2_147_483_647);
 });
 
 test("drift guard: migration 024 mirrors the canonical transcript DDL byte-for-byte", async () => {

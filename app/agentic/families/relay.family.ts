@@ -50,8 +50,12 @@ const MAX_TIMER_MS = 2_147_483_647;
  * The retention-sweep cadence (ms) for a given ephemeral-retention window: a fraction of the window,
  * floored at 1ms and — crucially — capped at {@link MAX_TIMER_MS} so a large retention config (e.g.
  * a multi-month window) cannot overflow Node's 32-bit timer and degrade the sweep into a busy loop.
+ * A non-finite window (NaN / ±Infinity — a broken config) derives a non-finite interval that
+ * setInterval() would coerce to a 1ms busy tick; clamp it to the same {@link MAX_TIMER_MS} ceiling so
+ * a garbage config degrades to the slowest safe sweep rather than pegging the sweep loop.
  */
 export function sweepIntervalMs(ephemeralRetentionMs: number): number {
+  if (!Number.isFinite(ephemeralRetentionMs)) return MAX_TIMER_MS;
   const interval = Math.floor(ephemeralRetentionMs / SWEEP_DIVISOR);
   return Math.min(MAX_TIMER_MS, Math.max(1, interval));
 }
