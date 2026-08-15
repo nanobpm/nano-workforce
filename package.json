@@ -37,6 +37,8 @@
     "pretypecheck": "urban gen",
     "check:prompts": "node --experimental-strip-types scripts/check-agent-prompts.ts",
     "check:migrations": "node --experimental-strip-types scripts/check-migrations.ts",
+    "check:contracts": "node --experimental-strip-types scripts/check-contracts.ts",
+    "reconcile:contracts": "node --experimental-strip-types scripts/reconcile-contracts.ts",
     "gen": "urban gen",
     "gen:check": "urban gen --check",
     "layout": "node --experimental-strip-types scripts/layout-bpmn.ts",

@@ -1,0 +1,111 @@
+// Unit tests for the durable contract registry + typed env schema (issue #227, ADR 0004).
+import { test } from "node:test";
+import { assert, assertEquals } from "#test-assert";
+import {
+  allContracts,
+  detectDeclarationConflicts,
+  ENV_CONTRACTS,
+  envContract,
+  readEnv,
+  readEnvOr,
+  rejectedEnvSynonyms,
+} from "./contracts.ts";
+
+test("readEnv: trims, treats blank/whitespace as unset, reads the injected env", () => {
+  assertEquals(readEnv("NANO_WORKFORCE_BASE_URL", { NANO_WORKFORCE_BASE_URL: "  https://x  " }), "https://x");
+  assertEquals(readEnv("NANO_WORKFORCE_BASE_URL", { NANO_WORKFORCE_BASE_URL: "   " }), undefined);
+  assertEquals(readEnv("NANO_WORKFORCE_BASE_URL", {}), undefined);
+});
+
+test("readEnvOr: falls back to the registry default, then to the given fallback", () => {
+  assertEquals(readEnvOr("NANO_WORKFORCE_BASE_URL", "x", {}), "http://localhost:3000");
+  assertEquals(readEnvOr("NANO_WORKFORCE_BASE_URL", "x", { NANO_WORKFORCE_BASE_URL: "https://y" }), "https://y");
+  // A key with no registered default falls through to the caller's fallback.
+  assertEquals(readEnvOr("NANO_ESCALATION_SLA_TIMEOUT", "PT24H", {}), "PT24H");
+});
+
+test("rejectedEnvSynonyms: maps retired base-URL names to the canonical key (#226/#223)", () => {
+  const rejected = rejectedEnvSynonyms();
+  assertEquals(rejected.get("NANO_PR_PUBLIC_BASE_URL"), "NANO_WORKFORCE_BASE_URL");
+  assertEquals(rejected.get("NANO_PR_BASE_URL"), "NANO_WORKFORCE_BASE_URL");
+});
+
+test("envContract: exposes owner + semantics + default for a declared key", () => {
+  const c = envContract("NANO_WORKFORCE_BASE_URL");
+  assertEquals(c.name, "NANO_WORKFORCE_BASE_URL");
+  assertEquals(c.default, "http://localhost:3000");
+  assert(c.semantics.length > 0, "an env contract must carry semantics");
+});
+
+test("allContracts: includes env, wire, type, and capability-url entries", () => {
+  const cats = new Set(allContracts().map((c) => c.category));
+  for (const cat of ["env", "wire", "type", "capability-url"] as const) {
+    assert(cats.has(cat), `registry must carry a ${cat} contract`);
+  }
+});
+
+test("detectDeclarationConflicts: a differently-named env key with equivalent semantics is a synonym", () => {
+  const conflicts = detectDeclarationConflicts({
+    category: "env",
+    name: "NANO_PR_EXTERNAL_BASE_URL",
+    semantics:
+      "Externally-reachable base URL agents use to reach this app; drives every plan's blackboard capability URL.",
+  });
+  assert(
+    conflicts.some((c) => c.kind === "synonym" && c.existingName === "NANO_WORKFORCE_BASE_URL"),
+    "a semantically-equivalent env key must be flagged as a synonym of the existing one",
+  );
+});
+
+test("detectDeclarationConflicts: the same name with different semantics is a contradiction", () => {
+  const conflicts = detectDeclarationConflicts({
+    category: "env",
+    name: "NANO_PR_POLL_MS",
+    semantics: "completely unrelated meaning about widget colours and fonts",
+  });
+  assert(
+    conflicts.some((c) => c.kind === "contradiction"),
+    "a redeclaration of an existing name with different semantics must contradict",
+  );
+});
+
+test("detectDeclarationConflicts: a retired synonym is flagged as rejected-synonym", () => {
+  const conflicts = detectDeclarationConflicts({
+    category: "env",
+    name: "NANO_PR_BASE_URL",
+    semantics: "the base url",
+  });
+  assertEquals(conflicts[0].kind, "rejected-synonym");
+  assertEquals(conflicts[0].existingName, "NANO_WORKFORCE_BASE_URL");
+});
+
+test("detectDeclarationConflicts: a genuinely new, distinct contract is clean", () => {
+  const conflicts = detectDeclarationConflicts({
+    category: "env",
+    name: "NANO_WIDGET_TIMEOUT",
+    semantics: "milliseconds a widget waits before giving up on a render",
+  });
+  assertEquals(conflicts, []);
+});
+
+test("every declared env key's registry name matches its key (no internal drift)", () => {
+  for (const [key, value] of Object.entries(ENV_CONTRACTS)) {
+    assertEquals(value.name, key, `ENV_CONTRACTS['${key}'].name must equal its key`);
+  }
+});
+
+test("config-family keys read via envVar() are declared (the check:contracts blind spot, PR #229)", () => {
+  // These are read in production through the `envVar("KEY")` helper (app/version.ts, operations/*,
+  // main.ts), which bypasses the typed `readEnv` path. They MUST still be declared, or they are an
+  // unregistered second source of truth — exactly the drift the registry exists to kill (#227).
+  for (const key of [
+    "NANO_PR_WEBHOOK_SECRET",
+    "NANO_AGENTIC_SECRET",
+    "NANO_AGENTIC",
+    "NANO_WORKFORCE_GIT_SHA",
+  ] as const) {
+    assert(key in ENV_CONTRACTS, `${key} must be declared in ENV_CONTRACTS`);
+  }
+  assertEquals(envContract("NANO_PR_WEBHOOK_SECRET").secret, true);
+  assertEquals(envContract("NANO_AGENTIC_SECRET").secret, true);
+});

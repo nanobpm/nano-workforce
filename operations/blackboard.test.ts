@@ -100,6 +100,18 @@ test("POST is idempotent on dedupe_key (retry → 200, not a duplicate)", async 
   assertEquals(n, 1);
 });
 
+test("POST dedupe_key is trimmed → a whitespace-padded retry still dedupes to one row (#227)", async () => {
+  const { app, db } = memApp();
+  await seedPlan(app, "o/r#1", "tok");
+  assertEquals((await call(app, "POST", { token: "tok" }, { author_task: "t", body: "claim", dedupe_key: "t:claim:1" })).status, 201);
+  // A retry whose key only differs by leading/trailing whitespace must NOT slip past dedupe.
+  const padded = await call(app, "POST", { token: "tok" }, { author_task: "t", body: "claim", dedupe_key: "  t:claim:1  " });
+  assertEquals(padded.status, 200);
+  assertEquals(padded.body.inserted, false);
+  const [{ n }] = db.all<{ n: number }>("SELECT COUNT(*) AS n FROM agentic_blackboard WHERE scope = ?", ["o/r#1"]);
+  assertEquals(n, 1);
+});
+
 test("GET ?since returns only newer entries", async () => {
   const { app } = memApp();
   await seedPlan(app, "o/r#1", "tok");
@@ -175,4 +187,41 @@ test("POST a non-file-claim carries no conflicts", async () => {
   await seedPlan(app, "o/r#1", "tok");
   const res = await call(app, "POST", { token: "tok" }, { author_task: "t", kind: "note", body: "fyi" });
   assertEquals(res.body.conflicts, []);
+  // `contractConflicts` is optional in the schema and only meaningful on a `contract` POST — a
+  // non-`contract` response omits it entirely rather than emitting an always-empty array (#229).
+  assertEquals("contractConflicts" in res.body, false);
+});
+
+test("POST kind='contract' persists the contract kind and round-trips through GET (#227)", async () => {
+  const { app } = memApp();
+  await seedPlan(app, "o/r#1", "tok");
+  const post = await call(app, "POST", { token: "tok" }, {
+    author_task: "task-a",
+    kind: "contract",
+    dedupe_key: "env:NANO_WIDGET_TIMEOUT",
+    body: "introducing env key NANO_WIDGET_TIMEOUT — app/widget.ts — widget request timeout in ms",
+  });
+  assertEquals(post.status, 201);
+  // No existing contract matches, so no declaration conflicts.
+  assertEquals(post.body.contractConflicts, []);
+
+  const get = await call(app, "GET", { token: "tok" });
+  assertEquals(get.body.entries.length, 1);
+  // The store's normaliser would coerce an unknown kind to 'note'; the adapter restores 'contract'.
+  assertEquals(get.body.entries[0].kind, "contract");
+});
+
+test("POST kind='contract' reintroducing a rejected synonym surfaces a declaration conflict (#223/#227)", async () => {
+  const { app } = memApp();
+  await seedPlan(app, "o/r#1", "tok");
+  const post = await call(app, "POST", { token: "tok" }, {
+    author_task: "task-b",
+    kind: "contract",
+    dedupe_key: "env:NANO_PR_BASE_URL",
+    body: "base url for the app",
+  });
+  assertEquals(post.status, 201);
+  assertEquals(post.body.contractConflicts.length >= 1, true);
+  assertEquals(post.body.contractConflicts[0].kind, "rejected-synonym");
+  assertEquals(post.body.contractConflicts[0].existingName, "NANO_WORKFORCE_BASE_URL");
 });

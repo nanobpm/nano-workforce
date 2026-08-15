@@ -59,6 +59,29 @@ Before starting planned work, check for an existing issue or PR. If one is
 already in progress, stop and flag it with a link. Otherwise create and claim an
 issue before writing code.
 
+## Shared contracts: one registry, one typed env schema (issue #227, ADR 0004)
+
+Parallel/sliced work keeps producing **two divergent representations of one contract** — an env-key
+synonym (the canonical `NANO_WORKFORCE_BASE_URL` vs. retired names like `NANO_PR_PUBLIC_BASE_URL`/its
+phantom `NANO_PR_BASE_URL` fallback, #226/#223), a wire-shape drift (nano-ide #234), two type names
+for one shape — each authored against a mock, discovered only at runtime. Prevent it at authoring
+time:
+
+- **Consult the durable registry FIRST — `app/contracts.ts`.** Before introducing a new **env/config
+  key**, **wire-frame shape**, **shared exported type**, or **capability-URL scheme**, check the
+  registry. If a semantically-equivalent contract exists, **reuse it**; otherwise declare it there
+  (owner + semantics per entry).
+- **Env keys go through the ONE typed schema** (`ENV_CONTRACTS` + `readEnv`/`readEnvOr`). Every
+  config-family key (`NANO_*`, `NANOBPMN_*`, `CAMUNDA_*`, `PR_REVIEW_*`) MUST be declared; a synonym or
+  an undeclared key is a **CI failure** (`npm run check:contracts`). A **retired synonym** (e.g.
+  `NANO_PR_BASE_URL`) reappearing in code is a hard failure — never reintroduce a phantom fallback.
+- **Signal in-flight on the blackboard.** When introducing/consuming a cross-cutting contract, POST a
+  `kind:"contract"` entry (`dedupe_key` as `<category>:<name>`, e.g. `env:NANO_X`) so siblings see it
+  before they reinvent it. The write-time guard reports near-duplicate-declaration `contractConflicts`.
+- **Reconcile.** `npm run reconcile:contracts` reads the whole blackboard + registry and reports
+  synonyms / contradictions / mock-vs-real skew (advisory). `npm run check:contracts` is the hard,
+  registry-only gate (also in CI).
+
 ## BPMN: author the semantic model, generate the diagram
 
 **The `.bpmn` files under `resources/processes/` are hand-authored semantic
@@ -226,11 +249,12 @@ npm run check                                         # urban check (manifest va
 npm run layout:check                                  # BPMN diagram freshness (no drift)
 npm run check:prompts                                 # agent-prompt template resolution
 npm run check:migrations                              # migration prefixes (no collisions)
+npm run check:contracts                               # contract registry (no synonyms / undeclared env keys)
 npm test                                              # unit tests (node --test)
 ```
 
 CI (`.github/workflows/ci.yml`) gates lint, typecheck, `urban check`, `layout:check`,
-the prompt check, the migration-prefix check, and the Node test suite. Run `npm run layout <file.bpmn>` after
+the prompt check, the migration-prefix check, the contract-registry check, and the Node test suite. Run `npm run layout <file.bpmn>` after
 any BPMN flow change and commit the regenerated diagram — the `layout:check`
 gate fails the build otherwise.
 

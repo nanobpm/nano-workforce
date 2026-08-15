@@ -8,19 +8,48 @@ import { test } from "node:test";
 import { assert, assertEquals, assertStringIncludes } from "#test-assert";
 import { memBlackboardData } from "../test/blackboardDb.ts";
 import {
+  APP_BLACKBOARD_KINDS,
   appendEntry,
   blackboardUrl,
+  detectContractDeclarationConflicts,
   detectFileClaimConflicts,
   isUniqueViolation,
   mintBlackboardToken,
+  normalizeAppKind,
   normalizeKind,
+  parseContractRef,
   planKeyForToken,
   planKeyForTokenSync,
   publicBaseUrl,
   readBlackboard,
   readBlackboardPage,
   renderCoordinationBrief,
+  toSafeRowId,
 } from "./blackboard.ts";
+
+test("toSafeRowId: passes through safe numbers/bigints, throws above MAX_SAFE_INTEGER (PR #229)", () => {
+  assertEquals(toSafeRowId(42), 42);
+  assertEquals(toSafeRowId(0), 0);
+  // A bigint within the safe range narrows to an identical number.
+  assertEquals(toSafeRowId(9007199254740991n), Number.MAX_SAFE_INTEGER);
+  // Beyond 2^53 a Number(...) coercion would silently lose precision as a `since` cursor — fail loud.
+  let threw = false;
+  try {
+    toSafeRowId(9007199254740993n);
+  } catch {
+    threw = true;
+  }
+  assert(threw, "a bigint id above MAX_SAFE_INTEGER must throw, not silently lose precision");
+  // The number branch guards the same boundary: a driver-returned non-safe-integer must also fail
+  // loud rather than pass through as a lossy cursor (#229).
+  let threwNum = false;
+  try {
+    toSafeRowId(Number.MAX_SAFE_INTEGER + 2);
+  } catch {
+    threwNum = true;
+  }
+  assert(threwNum, "a number id that is not a safe integer must throw, not silently pass through");
+});
 
 test("mintBlackboardToken: URL-safe, unguessable, unique", () => {
   const a = mintBlackboardToken();
@@ -36,7 +65,7 @@ test("publicBaseUrl: honours the env override and trims a trailing slash", () =>
 });
 
 test("publicBaseUrl: a blank/whitespace override falls back instead of yielding a bad URL", () => {
-  // Explicit override args bypass the `process.env.NANO_WORKFORCE_BASE_URL` default, so this test
+  // Explicit override args bypass the `NANO_WORKFORCE_BASE_URL` default, so this test
   // needs no env manipulation — the env-read path is covered by the dedicated test below.
   assertEquals(publicBaseUrl(""), "http://localhost:3000");
   assertEquals(publicBaseUrl("   "), "http://localhost:3000");
@@ -71,6 +100,30 @@ test("normalizeKind: valid passes through, anything else becomes note", () => {
   assertEquals(normalizeKind(undefined), "note");
 });
 
+test("normalizeAppKind: passes contract through (the store's own normaliser would coerce it to note)", () => {
+  assertEquals(normalizeAppKind("contract"), "contract");
+  assertEquals(normalizeAppKind("file-claim"), "file-claim");
+  assertEquals(normalizeAppKind("bogus"), "note");
+  assert(APP_BLACKBOARD_KINDS.includes("contract"), "contract is an app-recognised kind");
+  assert(APP_BLACKBOARD_KINDS.includes("note"), "app kinds are a superset of the store's kinds");
+});
+
+test("parseContractRef: parses the <category>:<name> dedupe_key convention", () => {
+  assertEquals(parseContractRef("env:NANO_X"), { category: "env", name: "NANO_X" });
+  assertEquals(parseContractRef("type:BlackboardEntry"), { category: "type", name: "BlackboardEntry" });
+  assertEquals(parseContractRef("bogus:X"), undefined);
+  assertEquals(parseContractRef("nocolon"), undefined);
+  assertEquals(parseContractRef(undefined), undefined);
+});
+
+test("detectContractDeclarationConflicts: flags a retired synonym; clean for a genuinely new key", () => {
+  const rejected = detectContractDeclarationConflicts({ dedupe_key: "env:NANO_PR_BASE_URL", body: "base url" });
+  assertEquals(rejected[0]?.kind, "rejected-synonym");
+  assertEquals(detectContractDeclarationConflicts({ dedupe_key: "env:NANO_TOTALLY_NEW", body: "an unrelated brand new thing about caching" }), []);
+  // No convention → nothing to reconcile against.
+  assertEquals(detectContractDeclarationConflicts({ body: "freeform" }), []);
+});
+
 test("renderCoordinationBrief: leads with a separator and teaches the protocol + URL", () => {
   const url = "https://h/app/api/hooks/blackboard?token=abc";
   const brief = renderCoordinationBrief(url);
@@ -89,6 +142,13 @@ test("renderCoordinationBrief: leads with a separator and teaches the protocol +
   // Learnings: teaches reading prior gotchas and posting a reusable `learning`.
   assertStringIncludes(brief, "learning");
   assertStringIncludes(brief, "Share what you learn");
+  // Contracts (#227): teaches consulting the registry + blackboard and posting a `contract` entry.
+  assertStringIncludes(brief, "contract");
+  assertStringIncludes(brief, "app/contracts.ts");
+  assertStringIncludes(brief, "kind\":\"contract\"");
+  // The contract-POST write-time guard surfaces overlaps via `contractConflicts` (a `file-claim`
+  // POST uses the separate `conflicts` array); the brief must name the right field.
+  assertStringIncludes(brief, "contractConflicts");
 });
 
 test("planKeyForToken: resolves a token to its plan, undefined otherwise (async + sync agree)", async () => {
@@ -164,6 +224,20 @@ test("appendEntry: a blank body is rejected", async () => {
     threw = true;
   }
   assert(threw, "blank body must throw");
+});
+
+test("appendEntry: a contract append patches the kind even when it collapses onto an existing row (deterministic round-trip)", async () => {
+  const { data } = memBlackboardData();
+  // A prior append under this dedupe_key stored kind `note` (the store's default for an unknown kind).
+  const first = await appendEntry(data, "p", { author_task: "t", body: "seed", kind: "note", dedupe_key: "env:NANO_X" });
+  assertEquals(first.inserted, true);
+  // A later `contract` append with the SAME dedupe_key is a no-op insert (`inserted: false`) — but it
+  // must still leave the row readable as `contract`, not lingering as `note`.
+  const again = await appendEntry(data, "p", { author_task: "t", body: "seed", kind: "contract", dedupe_key: "env:NANO_X" });
+  assertEquals(again.inserted, false, "same dedupe_key is a no-op insert");
+  const entries = await readBlackboard(data, "p");
+  assertEquals(entries.length, 1);
+  assertEquals(entries[0].kind, "contract", "the contract kind is patched deterministically regardless of res.inserted");
 });
 
 test("readBlackboard: since returns only newer entries (incremental poll)", async () => {

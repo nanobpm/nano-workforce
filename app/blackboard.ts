@@ -28,14 +28,43 @@
 // handle (`data.source().db`) — the same physical database the record gateway (`data.table`) uses,
 // so the HTTP hook and the agentic channel share one connection and one table.
 
-import { BlackboardStore, type SqliteDb } from "@nanobpm/agentic/blackboard";
+import {
+  BLACKBOARD_TABLE,
+  BlackboardStore,
+  normalizeKind as normalizeStoreKind,
+  type SqliteDb,
+  BLACKBOARD_KINDS as STORE_KINDS,
+} from "@nanobpm/agentic/blackboard";
 import type { DataLayer } from "@nanobpm/urban";
+import {
+  type ContractCategory,
+  type DeclarationConflict,
+  detectDeclarationConflicts,
+  readEnvOr,
+} from "./contracts.ts";
 
 // Re-export the storage vocabulary from the shared package so there is ONE canonical definition of
 // the kinds, the kind-normaliser, and the unique-violation predicate — the app never keeps a
 // parallel copy that could drift from the store's own semantics.
 export type { BlackboardKind } from "@nanobpm/agentic/blackboard";
 export { BLACKBOARD_KINDS, isUniqueViolation, normalizeKind } from "@nanobpm/agentic/blackboard";
+
+
+/** The app-recognised blackboard kinds: the shared store's kinds PLUS `contract` — the live,
+ * in-flight coordination signal introduced by issue #227 ("I am introducing / consuming contract
+ * X"). It is DERIVED from the store's set (spread, never re-typed), so the two never drift; `contract`
+ * is the only app-local addition, until the shared package promotes it. The durable source of truth
+ * for a contract is the registry (`app/contracts.ts`); this kind is the real-time heads-up that lets
+ * siblings in a wave see a new contract before they independently invent a synonym. */
+export const APP_BLACKBOARD_KINDS = [...STORE_KINDS, "contract"] as const;
+export type AppBlackboardKind = (typeof APP_BLACKBOARD_KINDS)[number];
+
+/** The app-side kind normaliser: passes `contract` through (the store's own normaliser would coerce
+ * it to `note`), and defers to the shared normaliser for every other value so unknown kinds still
+ * default to `note`. ONE place decides the app's kind vocabulary. */
+export function normalizeAppKind(kind: unknown): AppBlackboardKind {
+  return kind === "contract" ? "contract" : normalizeStoreKind(kind);
+}
 
 /** The parsed, agent-facing view of an entry (files decoded to an array). Snake_case is the
  * app/HTTP-hook boundary contract every existing caller and agent already consumes. */
@@ -69,15 +98,17 @@ export function mintBlackboardToken(): string {
 }
 
 /** The externally-reachable base URL agents use to reach this app. Must resolve from WHEREVER the
- * agent runs (co-located or remote/containerised), so it is configured, never hardcoded. */
-export function publicBaseUrl(env: string | undefined = process.env.NANO_WORKFORCE_BASE_URL): string {
-  // Skip the override if it is unset OR blank/whitespace, so an explicitly-set-but-empty
-  // NANO_WORKFORCE_BASE_URL can't yield a malformed capability URL.
-  const base =
-    [env, "http://localhost:3000"]
-      .map((v) => v?.trim())
-      .find((v): v is string => Boolean(v)) ?? "http://localhost:3000";
-  return base.replace(/\/+$/, "");
+ * agent runs (co-located or remote/containerised), so it is configured, never hardcoded. Read
+ * through the ONE typed env schema ({@link readEnvOr} over `NANO_WORKFORCE_BASE_URL`) — there is no
+ * second name for this value. The retired synonyms `NANO_PR_PUBLIC_BASE_URL` (coalesced into the
+ * canonical name in #226) and the phantom `NANO_PR_BASE_URL` fallback (introduced in #53, cleaned
+ * up per #223) are recorded as rejected synonyms in `app/contracts.ts`, so neither can be
+ * reintroduced as a silent runtime fallback. */
+export function publicBaseUrl(base: string = readEnvOr("NANO_WORKFORCE_BASE_URL")): string {
+  // Skip a blank/whitespace value so an explicitly-set-but-empty NANO_WORKFORCE_BASE_URL can't yield
+  // a malformed capability URL; fall back to the schema-declared default.
+  const resolved = base.trim() || readEnvOr("NANO_WORKFORCE_BASE_URL");
+  return resolved.replace(/\/+$/, "");
 }
 
 /** The capability URL for a plan's blackboard: the token rides the query string, so the agent can
@@ -122,7 +153,9 @@ from re-discovering it the hard way.
 
 \`kind\` is one of: \`file-claim\` (you now edit a file outside your original slice),
 \`constraint-change\` (you discovered a constraint that changes another task's direction),
-\`scope-change\` (your contract/scope shifted), \`learning\` (see below), or \`note\`. Set
+\`scope-change\` (your contract/scope shifted), \`contract\` (you are introducing/consuming a shared
+env key / wire shape / type / capability-URL scheme — see below), \`learning\` (see below), or
+\`note\`. Set
 \`author_task\` to your task id. If a retry might make you re-POST the same fact, include a stable
 \`"dedupe_key"\` so it collapses to one entry.
 
@@ -138,6 +171,29 @@ one entry across retries and siblings:
       -d '{"author_task":"<your-task-id>","kind":"learning","dedupe_key":"regen-before-build","body":"Run \`make generate\` before \`cargo build --features console\` — a stale generated surface fails the build with a confusing error."}'
 
 A \`learning\` is advisory and never blocks anyone; it is knowledge for the fleet, not a claim on a file.
+
+**Coordinate SHARED CONTRACTS before you invent one (issue #227).** A *contract* is anything two
+slices must agree on but that each of you could author independently against a mock: an **env/config
+key**, a **wire-frame shape** (a message/relay payload), a **shared exported type/interface name**, or
+a **capability-URL scheme**. Divergent copies of one contract (an env-key synonym, a producer/hub
+wire-shape drift) are only discovered at runtime, after both sides are green against their own mock.
+Prevent it:
+
+- **Consult the durable contract registry FIRST** (\`app/contracts.ts\` — env keys go through the ONE
+  typed \`ENV_CONTRACTS\` schema; wire/type/capability-URL contracts are declared alongside). If a
+  semantically-equivalent contract already exists, **reuse it** (import the shared type, read the
+  existing env key) — never author a synonym. A retired synonym (e.g. \`NANO_PR_BASE_URL\`) is a hard
+  CI failure, not a fallback.
+- **Consult the blackboard \`contract\` entries** below for what siblings are introducing *right now*.
+- **When you introduce OR consume a cross-cutting contract, POST a \`contract\` entry** so siblings see
+  it before they reinvent it, and add the durable declaration to \`app/contracts.ts\`:
+
+      curl -s -X POST "${url}" -H 'content-type: application/json' \\
+        -d '{"author_task":"<your-task-id>","kind":"contract","dedupe_key":"env:NANO_X","body":"introducing env key NANO_X — <owner> — <semantics + default>"}'
+
+The write-time guard reports a \`contractConflicts\` array on a \`contract\` POST when your declaration looks
+like a synonym of, or contradicts, an existing contract — reconcile before proceeding. (A \`file-claim\`
+POST reports its own overlaps in a separate \`conflicts\` array — see below.)
 
 **Stay in sync while you work (this matters most while siblings run in parallel).** The GET
 response includes a \`"cursor"\`. Re-read incrementally — before you start each new file, and at
@@ -280,15 +336,46 @@ export async function detectFileClaimConflicts(
     }));
 }
 
+/** Narrow a SQLite row id (`number | bigint`) to a JS number, failing loudly if it exceeds the
+ * safe-integer range. Blackboard rowids are monotonic and stay far below 2^53 in practice, but the
+ * driver types the id as `number | bigint`; coercing a huge bigint via `Number(...)` would silently
+ * lose precision and corrupt the id where it is used as a `since` cursor. We narrow ONCE here so the
+ * union never escapes `appendEntry` and no caller re-coerces. Both branches guard the safe-integer
+ * boundary: a `bigint` above `MAX_SAFE_INTEGER`, or a driver-returned `number` that is somehow not a
+ * safe integer, both throw rather than silently yield a lossy cursor. */
+export function toSafeRowId(id: number | bigint): number {
+  if (typeof id === "bigint") {
+    if (id > BigInt(Number.MAX_SAFE_INTEGER)) {
+      throw new Error(
+        `blackboard row id ${id} exceeds Number.MAX_SAFE_INTEGER; unsafe to narrow to a JS number cursor`,
+      );
+    }
+    return Number(id);
+  }
+  if (!Number.isSafeInteger(id)) {
+    throw new Error(
+      `blackboard row id ${id} is not a safe integer; unsafe to use as a JS number cursor`,
+    );
+  }
+  return id;
+}
+
 /** Append an entry, idempotently. A blank `body` is rejected. When a `dedupe_key` is supplied and
  * an entry already exists for it on this plan, the write is a no-op and the existing id is
- * returned (`inserted: false`) — so an engine job retry re-POSTing the same fact never duplicates. */
+ * returned (`inserted: false`) — so an engine job retry re-POSTing the same fact never duplicates.
+ *
+ * The `contract` kind (issue #227) is the app-local addition: the shared store's normaliser would
+ * coerce it to `note`, so after the store's insert (which owns all the idempotency/dedupe semantics)
+ * we patch the ONE row's kind column back to `contract`. We reuse the store's insert rather than
+ * hand-writing a parallel one, so there is no drift in the append logic — only the kind vocabulary is
+ * app-extended. */
 export async function appendEntry(
   data: DataLayer,
   planKey: string,
   input: BlackboardInput,
-): Promise<{ inserted: boolean; id: number | bigint }> {
-  return storeFor(data).append(planKey, {
+): Promise<{ inserted: boolean; id: number }> {
+  const appKind = normalizeAppKind(input.kind);
+  const res = storeFor(data).append(planKey, {
     authorTask: input.author_task,
     kind: input.kind,
     files: input.files,
@@ -296,4 +383,47 @@ export async function appendEntry(
     wave: input.wave,
     dedupeKey: input.dedupe_key,
   });
+  if (appKind === "contract") {
+    // The store defaulted `kind` to `note` (its normaliser doesn't know `contract`); restore it on
+    // the resolved row. Patch on EVERY `contract` append — not only when `res.inserted` — so an
+    // idempotent retry (or a race) that resolves to an existing id (`inserted: false`), or a row
+    // first inserted under a different kind for the same `dedupe_key`, still reads back as `contract`
+    // rather than lingering as `note`. The UPDATE is idempotent on an already-`contract` row.
+    // Bind `res.id` as-is (it is `number | bigint`) — coercing a bigint id via `Number(...)` could
+    // lose precision above `Number.MAX_SAFE_INTEGER` and patch the wrong row; SQLite binds bigint natively.
+    data.source().db.run(`UPDATE ${BLACKBOARD_TABLE} SET kind = 'contract' WHERE id = ?`, [res.id]);
+  }
+  return { inserted: res.inserted, id: toSafeRowId(res.id) };
+}
+
+/** Parse a `contract` entry's `dedupe_key` convention `<category>:<name>` (e.g. `env:NANO_X`,
+ * `type:BlackboardEntry`). Returns the category+name when it parses, else undefined. */
+export function parseContractRef(
+  dedupeKey: string | undefined,
+): { category: ContractCategory; name: string } | undefined {
+  if (!dedupeKey) return undefined;
+  const idx = dedupeKey.indexOf(":");
+  if (idx <= 0) return undefined;
+  const category = dedupeKey.slice(0, idx).trim();
+  const name = dedupeKey.slice(idx + 1).trim();
+  if (!name) return undefined;
+  if (category === "env" || category === "wire" || category === "type" || category === "capability-url") {
+    return { category, name };
+  }
+  return undefined;
+}
+
+/** Write-time near-duplicate DECLARATION detection for a `contract` POST (issue #227, AC4). Extends
+ * the store's conflict reporting (`file-claim`) to the declaration surface: given a proposed contract
+ * (its `<category>:<name>` from `dedupe_key`, its semantics from `body`), report any registry entry
+ * that is a synonym (same thing, different name), a contradiction (same name, different meaning), or a
+ * rejected synonym (a retired name). Advisory — surfaced to the writer, never a lock. Returns `[]`
+ * when the entry doesn't carry the `<category>:<name>` convention (nothing to reconcile against). */
+export function detectContractDeclarationConflicts(opts: {
+  dedupe_key?: string;
+  body: string;
+}): DeclarationConflict[] {
+  const ref = parseContractRef(opts.dedupe_key);
+  if (!ref) return [];
+  return detectDeclarationConflicts({ category: ref.category, name: ref.name, semantics: opts.body });
 }

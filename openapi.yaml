@@ -864,6 +864,30 @@ components:
                 type: string
               created_at:
                 type: string
+        contractConflicts:
+          type: array
+          description: >-
+            Near-duplicate contract-DECLARATION conflicts on a `contract` POST (issue #227): a
+            synonym, contradiction, or rejected synonym vs. the durable contract registry. Advisory —
+            surfaced so the writer reconciles a divergent contract at authoring time; never a lock.
+          items:
+            type: object
+            additionalProperties: false
+            required:
+              - kind
+              - proposedName
+              - existingName
+              - detail
+            properties:
+              kind:
+                type: string
+                enum: [synonym, contradiction, rejected-synonym]
+              proposedName:
+                type: string
+              existingName:
+                type: string
+              detail:
+                type: string
     AbandonStatus:
       type: object
       required:
