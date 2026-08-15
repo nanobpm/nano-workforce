@@ -7,7 +7,7 @@
 // GitHub transport forced off so it is hermetic.
 import { test } from "node:test";
 import { assertEquals } from "#test-assert";
-import { pollIncidentsImpl, repoEnvelopeVars, submitPr } from "./service.ts";
+import { parsePr, pollIncidentsImpl, repoEnvelopeVars, submitPr } from "./service.ts";
 
 function memTable(rows: any[], key: string) {
   return {
@@ -381,4 +381,21 @@ test("repoEnvelopeVars emits nothing for a malformed repo (not owner/repo)", () 
       `expected envelope for "${good}"`,
     );
   }
+});
+
+// `parsePr` is total on any input: it is called unguarded from several workers (progress-check,
+// persist-round, persist-escalation, record-dependency) with a process variable that a regression
+// — or an older in-flight instance — could carry as a non-string. `.trim()` on a non-string throws,
+// which would turn a should-fail-open caller into a retrying job. A non-string must resolve to
+// `null` (fail closed) so every caller's fail-open path runs instead of the handler crashing.
+test("parsePr fails closed to null on a non-string input (no throw)", () => {
+  for (const bad of [undefined, null, 123, {}, [], true] as unknown[]) {
+    assertEquals(parsePr(bad as any), null, `expected null for ${JSON.stringify(bad)}`);
+  }
+});
+
+test("parsePr still resolves a well-formed prKey and PR URL", () => {
+  assertEquals(parsePr("owner/repo#42")?.prKey, "owner/repo#42");
+  assertEquals(parsePr("  owner/repo#42  ")?.number, 42);
+  assertEquals(parsePr("https://github.com/owner/repo/pull/7")?.repo, "owner/repo");
 });

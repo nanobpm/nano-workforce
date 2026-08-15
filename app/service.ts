@@ -295,7 +295,11 @@ export async function ensurePr(
 }
 
 /** Parse "owner/repo#123" or a canonical PR URL into its parts. */
-export function parsePr(input: string): ParsedPr | null {
+export function parsePr(input: unknown): ParsedPr | null {
+  // Total on any input: a process-variable regression (or an older in-flight instance) can carry a
+  // non-string prKey, and `.trim()` on a non-string throws — turning a should-fail-open caller into
+  // a retrying job. Fail closed to `null` here so every caller resolves safely instead of throwing.
+  if (typeof input !== "string") return null;
   const s = input.trim();
   let m = s.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/i);
   if (m) {

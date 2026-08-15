@@ -134,11 +134,6 @@ export function parseAckedAdvisories(threads: ReviewThread[]): string[] {
   return [...acked];
 }
 
-/** Fetch the latest Copilot review body for a PR (the newest review authored by the automated
- * Copilot reviewer). Returns `null` ONLY when no transport is usable (unverifiable → the worker
- * fails closed); returns `""` when transport is usable but the PR has no Copilot review yet (a
- * verified "no suppressed advisories"). Throws on a genuine transport failure. This split keeps
- * `null` from conflating "unverifiable" with "empty" and fail-OPENing the advisory dimension. */
 /** Pick the newest Copilot review body from a reviews list (GitHub returns them oldest→newest).
  * `truncated = true` means we could NOT read every page — the genuinely-latest review may be unread,
  * so the result is UNVERIFIABLE and we fail CLOSED (`null`) rather than return a stale page's body;
@@ -154,6 +149,11 @@ export function pickLatestCopilotReviewBody(
   return copilot[copilot.length - 1]?.body ?? "";
 }
 
+/** Fetch the latest Copilot review body for a PR (the newest review authored by the automated
+ * Copilot reviewer). Returns `null` ONLY when no transport is usable (unverifiable → the worker
+ * fails closed); returns `""` when transport is usable but the PR has no Copilot review yet (a
+ * verified "no suppressed advisories"). Throws on a genuine transport failure. This split keeps
+ * `null` from conflating "unverifiable" with "empty" and fail-OPENing the advisory dimension. */
 export async function fetchLatestCopilotReviewBody(
   repo: string,
   number: number | string,
