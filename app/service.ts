@@ -1389,14 +1389,18 @@ export async function pollFeatureBlocked(data: DataLayer, engine: EngineClient) 
   }
 }
 
+/** The app manifest, read and parsed exactly ONCE at module load. `activeStatusesFor` is invoked
+ * three times during module initialization (the PR/plan/feature constants below); parsing here keeps
+ * that to a single synchronous `readFileSync` + `JSON.parse` instead of one per lookup. */
+const APP_MANIFEST: { instanceTracking?: { table: string; activeStatuses?: string[] }[] } = JSON.parse(
+  readFileSync(new URL("../nano.app.json", import.meta.url), "utf8"),
+);
+
 /** Read a tracked table's parked-and-active statuses from the single source of truth
  * (`instanceTracking.<table>.activeStatuses` in nano.app.json), so an app-side scan can never drift
  * from the reconciler's notion of "in-flight". Throws if the binding is missing/empty. */
 function activeStatusesFor(table: string): readonly string[] {
-  const manifest: { instanceTracking?: { table: string; activeStatuses?: string[] }[] } = JSON.parse(
-    readFileSync(new URL("../nano.app.json", import.meta.url), "utf8"),
-  );
-  const binding = manifest.instanceTracking?.find((b) => b.table === table);
+  const binding = APP_MANIFEST.instanceTracking?.find((b) => b.table === table);
   if (!binding?.activeStatuses?.length) {
     throw new Error(`nano.app.json: instanceTracking.${table}.activeStatuses is missing or empty`);
   }
