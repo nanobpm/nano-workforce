@@ -1,3 +1,10 @@
+# [0.72.0](https://github.com/nanobpm/nano-workforce/compare/v0.71.0...v0.72.0) (2026-08-15)
+
+
+### Features
+
+* coordinate shared contracts via a durable registry + blackboard signal + reconciliation pass ([#229](https://github.com/nanobpm/nano-workforce/issues/229)) ([2c250b5](https://github.com/nanobpm/nano-workforce/commit/2c250b51596e1a062c4e09c6aef638010abea793)), closes [#223](https://github.com/nanobpm/nano-workforce/issues/223) [#234](https://github.com/nanobpm/nano-workforce/issues/234) [214/#217](https://github.com/nanobpm/nano-workforce/issues/217) [#223](https://github.com/nanobpm/nano-workforce/issues/223) [#227](https://github.com/nanobpm/nano-workforce/issues/227) [#227](https://github.com/nanobpm/nano-workforce/issues/227)
+
 # [0.71.0](https://github.com/nanobpm/nano-workforce/compare/v0.70.2...v0.71.0) (2026-08-15)
 
 
