@@ -1,3 +1,10 @@
+# [0.73.0](https://github.com/nanobpm/nano-workforce/compare/v0.72.1...v0.73.0) (2026-08-15)
+
+
+### Features
+
+* **deploy:** resources/ deploy-by-convention; drop models; docs→docs/ (ADR 0062 step 3) ([#241](https://github.com/nanobpm/nano-workforce/issues/241)) ([9f7f85c](https://github.com/nanobpm/nano-workforce/commit/9f7f85c1231ce228c4468ac8f5222dd14d84022b)), closes [nanobpm/nano-ide#244](https://github.com/nanobpm/nano-ide/issues/244) [#244](https://github.com/nanobpm/nano-workforce/issues/244) [#239](https://github.com/nanobpm/nano-workforce/issues/239) [nanobpm/nano-ide#244](https://github.com/nanobpm/nano-ide/issues/244) [nanobpm/nano-workforce#239](https://github.com/nanobpm/nano-workforce/issues/239)
+
 ## [0.72.1](https://github.com/nanobpm/nano-workforce/compare/v0.72.0...v0.72.1) (2026-08-15)
 
 
