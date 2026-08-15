@@ -264,6 +264,7 @@ class SupplyCockpit implements SupplyCockpitHandle {
     try {
       report = await this.#env.fetchSupply();
     } catch (err) {
+      if (this.#disposed) return;
       this.#env.onError?.(err);
       return;
     }
@@ -295,6 +296,7 @@ class SupplyCockpit implements SupplyCockpitHandle {
       try {
         report = await this.#bounded(fetchTranscripts, "transcripts");
       } catch (err) {
+        if (this.#disposed) return;
         this.#env.onError?.(err);
         return;
       }
@@ -473,6 +475,9 @@ class SupplyCockpit implements SupplyCockpitHandle {
       // terminal wedged out of live mode. The wait always settles, so this catch runs and mode stays idle.
       data = await this.#bounded(() => fetchTranscript(stream), "transcript");
     } catch (err) {
+      // Mirror the success path's guard: a replay superseded by a newer op (or a disposed cockpit) must not
+      // surface its late timeout/rejection — the terminal region no longer belongs to this stale replay.
+      if (this.#disposed || token !== this.#opToken) return;
       this.#env.onError?.(err);
       return;
     }

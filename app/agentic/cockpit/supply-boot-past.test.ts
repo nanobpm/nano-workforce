@@ -405,6 +405,94 @@ test("a synchronously-throwing fetch clears the bounded-wait timer (no leaked ha
   cockpit.dispose();
 });
 
+test("a supply fetch that rejects AFTER dispose does not surface onError to the torn-down cockpit", async () => {
+  // The success path guards the render with `if (this.#disposed) return;` after awaiting the fetch, but
+  // the catch must honour the same guard: an in-flight fetch that rejects post-dispose must not report an
+  // error into a UI that is already gone. Drive fetchSupply with a promise we reject only after dispose().
+  const r = rig();
+  let rejectSupply: ((err: unknown) => void) | undefined;
+  const env: SupplyCockpitEnv = {
+    ...r.env,
+    fetchSupply: () => new Promise<SupplyReport>((_resolve, reject) => {
+      rejectSupply = reject;
+    }),
+  };
+  const cockpit = bootSupplyCockpit(env);
+
+  const refreshing = cockpit.refresh(); // awaits the (pending) supply fetch
+  await flush();
+  cockpit.dispose(); // tear the cockpit down while the fetch is still outstanding
+  rejectSupply?.(new Error("supply endpoint died after teardown"));
+  await refreshing;
+  await flush();
+
+  assert.deepEqual(r.errors, [], "a post-dispose supply rejection is swallowed, not surfaced to a dead UI");
+});
+
+test("a hung past-list fetch that times out AFTER dispose does not surface onError", async () => {
+  // Same class as the supply path: #refreshPast()'s catch runs when the bounded wait rejects. If dispose()
+  // already fired, surfacing that timeout as an error reports into a torn-down cockpit. Drive the bounded
+  // timeout by hand and fire it only after dispose().
+  const r = rig();
+  const timers = new Map<number, () => void>();
+  let nextId = 0;
+  const env: SupplyCockpitEnv = {
+    ...r.env,
+    setTimer: (run) => {
+      const id = nextId++;
+      timers.set(id, run);
+      return id;
+    },
+    clearTimer: (handle) => {
+      timers.delete(handle as number);
+    },
+    pastFetchTimeoutMs: 5000,
+    fetchTranscripts: () => new Promise<TranscriptListReport>(() => {}), // hangs forever
+  };
+  const cockpit = bootSupplyCockpit(env);
+
+  await cockpit.refresh(); // starts the hung past-fetch and schedules its bounded timeout
+  await flush();
+  cockpit.dispose(); // tear down while the past-fetch is still outstanding
+  for (const run of [...timers.values()]) run(); // fire the bounded timeout -> the wait rejects
+  await flush();
+
+  assert.deepEqual(r.errors, [], "a post-dispose past-list timeout is swallowed, not surfaced to a dead UI");
+});
+
+test("a hung replay fetch that times out AFTER dispose does not surface onError", async () => {
+  // replay()'s catch mirrors the same class. Its success path guards on `this.#disposed || token !== opToken`;
+  // the error path must too, so a replay whose bounded transcript fetch times out after dispose() stays silent.
+  const r = rig();
+  const timers = new Map<number, () => void>();
+  let nextId = 0;
+  const env: SupplyCockpitEnv = {
+    ...r.env,
+    setTimer: (run) => {
+      const id = nextId++;
+      timers.set(id, run);
+      return id;
+    },
+    clearTimer: (handle) => {
+      timers.delete(handle as number);
+    },
+    pastFetchTimeoutMs: 5000,
+    fetchTranscript: () => new Promise<TranscriptDataReport>(() => {}), // hangs forever
+  };
+  const cockpit = bootSupplyCockpit(env);
+  await cockpit.refresh(); // the list fetch resolves, clearing its bounded timer
+  await flush();
+
+  const replaying = cockpit.replay("job:past"); // starts the hung replay fetch + its bounded timeout
+  await flush();
+  cockpit.dispose(); // tear down while the replay fetch is still outstanding
+  for (const run of [...timers.values()]) run(); // fire the bounded timeout -> the wait rejects
+  await replaying;
+  await flush();
+
+  assert.deepEqual(r.errors, [], "a post-dispose replay timeout is swallowed, not surfaced to a dead UI");
+});
+
 test("constructing with fetchTranscripts but no fetchTranscript fails fast (replay would silently no-op)", () => {
   const r = rig(false);
   assert.throws(
