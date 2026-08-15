@@ -7,6 +7,7 @@
 //
 // Data access goes through the record-oriented gateway (`data.table<T>(name, pk)` — the RAD
 // `Table<T>` surface), not hand-written SQL. Row shapes are declared inline here.
+import { readFileSync } from "node:fs";
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { abandonUrl, mintAbandonToken, renderAbandonBrief } from "./abandon.ts";
 import { agentSlaTimeout } from "./agentSla.ts";
@@ -1388,19 +1389,20 @@ export async function pollFeatureBlocked(data: DataLayer, engine: EngineClient) 
   }
 }
 
-/** The `pull_requests` statuses a PR instance can be parked-and-active on (mirrors the
- * `instanceTracking.pull_requests.activeStatuses` in nano.app.json). `pollUserTasks` scans only these
+/** The `pull_requests` statuses a PR instance can be parked-and-active on, DERIVED from the single
+ * source of truth (`instanceTracking.pull_requests.activeStatuses` in nano.app.json) so the app-side
+ * scan can never drift from the reconciler's notion of "in-flight". `pollUserTasks` scans only these
  * for an open `wait-answer` escalation, so the pass stays O(in-flight PRs), not O(all PRs). */
-const PR_ACTIVE_STATUSES: readonly string[] = [
-  "converging",
-  "waiting_review",
-  "escalated",
-  "waiting_deps",
-  "waiting_merge",
-  "waiting_lane",
-  "queued",
-  "merging",
-];
+export const PR_ACTIVE_STATUSES: readonly string[] = ((): readonly string[] => {
+  const manifest: { instanceTracking?: { table: string; activeStatuses?: string[] }[] } = JSON.parse(
+    readFileSync(new URL("../nano.app.json", import.meta.url), "utf8"),
+  );
+  const binding = manifest.instanceTracking?.find((b) => b.table === "pull_requests");
+  if (!binding?.activeStatuses?.length) {
+    throw new Error("nano.app.json: instanceTracking.pull_requests.activeStatuses is missing or empty");
+  }
+  return binding.activeStatuses;
+})();
 
 /** Reconcile the unified Tasks-inbox read-model (`user_tasks`) against the engine's currently-open
  * native user-task escalations (issue #236). The Tasks page lists EVERY open escalation awaiting a
@@ -1550,7 +1552,10 @@ export async function pollUserTasks(data: DataLayer, engine: EngineClient) {
   const persisted = await userTasks(data).all();
   const { inserts, updates, deletes } = reconcileUserTasks(persisted, desired);
   for (const row of inserts) await userTasks(data).insert(row);
-  for (const row of updates) await userTasks(data).update(row.user_task_key, { ...row, updated_at: at });
+  for (const row of updates) {
+    const { user_task_key, created_at, ...patch } = row;
+    await userTasks(data).update(user_task_key, { ...patch, updated_at: at });
+  }
   for (const key of deletes) await userTasks(data).delete(key);
 }
 

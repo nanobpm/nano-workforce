@@ -7,7 +7,7 @@
 import { test } from "node:test";
 import { assert, assertEquals } from "#test-assert";
 import { readFileSync } from "node:fs";
-import { TERMINAL_STATUSES } from "./service.ts";
+import { PR_ACTIVE_STATUSES, TERMINAL_STATUSES } from "./service.ts";
 import { PLAN_TERMINAL_STATUSES } from "./plan.ts";
 
 interface Binding {
@@ -72,4 +72,12 @@ test("instanceTracking: plans activeStatuses covers every in-flight status", asy
   const inFlight = ["planning", "dispatched"];
   const b = bindingFor(await bindings(), "plans");
   assertEquals([...(b.activeStatuses ?? [])].sort(), [...inFlight].sort());
+});
+
+// The app-side `pollUserTasks` scan constant is DERIVED from the manifest at load time (no hand-kept
+// duplicate), so it must match the manifest binding exactly — this closes the drift surface Copilot
+// flagged (a second hard-coded list that could silently diverge from the reconciler's activeStatuses).
+test("PR_ACTIVE_STATUSES is derived from the manifest binding (no drift)", async () => {
+  const b = bindingFor(await bindings(), "pull_requests");
+  assertEquals([...PR_ACTIVE_STATUSES].sort(), [...(b.activeStatuses ?? [])].sort());
 });
