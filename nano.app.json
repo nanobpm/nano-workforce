@@ -4,15 +4,6 @@
   "id": "nano-workforce",
   "name": "Nano Workforce",
   "codename": "nano-workforce",
-  "models": {
-    "processes": [
-      "resources/processes/*.bpmn",
-      "prompts/*.md"
-    ],
-    "forms": [
-      "resources/forms/*.form"
-    ]
-  },
   "data": {
     "default": "app",
     "sources": {

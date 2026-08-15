@@ -1,9 +1,10 @@
 // check-agent-prompts — deploy-safety gate for the agent prompts, now authored as *linked
 // resources* (issue #169) rather than baked `{{token}}` templates.
 //
-// Since #169 each agent's base prompt is a generic resource: `prompts/<token>.md` is deployed as
-// an `application/octet-stream` resource (via a `models` deploy glob — see nano.app.json) and each
-// agent service task links it at job-activation time:
+// Since #169 each agent's base prompt is a generic resource: `resources/prompts/<token>.md` is
+// deployed as an `application/octet-stream` resource (under the ADR 0062 `resources/` deploy-by-
+// convention layout — see nano.app.json, which declares no `models`) and each agent service task
+// links it at job-activation time:
 //
 //   <zeebe:linkedResources>
 //     <zeebe:linkedResource resourceId="review-round.md" bindingType="latest" linkName="prompt" />
@@ -17,9 +18,9 @@
 // #597/#599). This guard turns that silent runtime failure into a hard build failure:
 //
 //   1. Every `linkName="prompt"` link's `resourceId` MUST match a prompt file that the app actually
-//      deploys (a file matched by a `models` deploy glob). This catches both a typo'd `resourceId`
-//      and a prompt that exists on disk but is not wired into a deploy glob (so never reaches the
-//      engine — the link would resolve to nothing).
+//      deploys (a file under the `resources/` convention walk, or a manifest `models` override
+//      glob). This catches both a typo'd `resourceId` and a prompt that exists on disk but is not
+//      wired into the deploy set (so never reaches the engine — the link would resolve to nothing).
 //   2. Each linked prompt file must be non-blank and must teach the agent to emit a machine-readable
 //      result (`$AGENT_RESULT_FILE`, or the `::nano:result::` stdout fallback) — a prose-only agent
 //      leaves `status` blank and the status gateway escalates/stalls (the fix-ci/rebase gap behind
@@ -66,6 +67,33 @@ function expandGlob(root: string, pattern: string): string[] {
     .filter((f) => f.endsWith(`.${ext}`))
     .sort()
     .map((f) => join(dir, f));
+}
+
+// The convention directory (ADR 0062): deploy-only, walked one level deep when the manifest declares
+// no `models`. Must stay in lock-step with urban's `RESOURCES_DIR`/`deployModels`.
+const RESOURCES_DIR = "resources";
+
+// Mirror urban's deploy-by-convention walk (ADR 0062): when the manifest declares no `models`, the
+// deployables are every file directly under `resources/` PLUS every file one directory deeper
+// (`resources/<subdir>/*`) — shallow, one level only. Deeper nesting is intentionally NOT swept in:
+// the deploy dedupe key is the basename, so a deep walk would reintroduce cross-directory basename
+// collision risk. Paths come back repo-relative (with `/`), matching `expandGlob`'s output so the
+// two discovery modes are interchangeable downstream.
+function discoverResources(root: string): string[] {
+  const base = join(root, RESOURCES_DIR);
+  if (!existsSync(base)) return [];
+  const out: string[] = [];
+  for (const entry of readdirSync(base, { withFileTypes: true })) {
+    if (entry.isFile()) {
+      out.push(join(RESOURCES_DIR, entry.name));
+    } else if (entry.isDirectory()) {
+      const sub = join(base, entry.name);
+      for (const f of readdirSync(sub, { withFileTypes: true })) {
+        if (f.isFile()) out.push(join(RESOURCES_DIR, entry.name, f.name));
+      }
+    }
+  }
+  return out.sort();
 }
 
 interface PromptLink {
@@ -130,24 +158,33 @@ export function checkAgentPrompts(root: string): CheckResult {
   }
   // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
   const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as AppManifest;
-  const models = manifest.models ?? {};
 
-  // The resources the app actually DEPLOYS: every file matched by a deploy glob (processes,
-  // decisions, forms). Its deployed resource name is the file's basename — the same string a
-  // `linkedResource resourceId` must reference. Building this from the deploy globs (not from the
-  // prompts/ directory) is what catches a prompt that exists on disk but is wired only into a
-  // non-deploying key (e.g. the retired `models.templates`), so it never reaches the engine.
-  const deployGlobs = [
-    ...(models.processes ?? []),
-    ...(models.decisions ?? []),
-    ...(models.forms ?? []),
-  ];
-  // Keyed by basename (the deployed resource name a `resourceId` references). Two deploy globs
-  // matching files with the same basename would silently overwrite here, so a `resourceId` lookup
-  // could resolve to the wrong file (or mask a misconfiguration). Fail fast on the collision so the
-  // lookup stays unambiguous.
+  // The resources the app actually DEPLOYS. Under ADR 0062 deploy-by-convention this is derived the
+  // SAME way urban's deployModels derives it, so this gate reasons about exactly the file set that
+  // ships to the engine:
+  //   • no `models` block → discover by convention: every file under `resources/` (shallow, one
+  //     level deep). This is nwf's blessed layout — prompts live at `resources/prompts/*.md`.
+  //   • `models` globs present → explicit override, used verbatim (the escape hatch for a
+  //     non-convention layout). A declared-but-empty `models` is still an override, NOT a fallback
+  //     to the convention walk — mirror deployModels, which keys convention off the block's absence.
+  // Either way a deployed resource's name is the file's basename — the same string a
+  // `linkedResource resourceId` must reference — which is what catches a prompt that exists on disk
+  // but is not actually deployed (so it never reaches the engine and the link resolves to nothing).
+  const byConvention = manifest.models === undefined;
+  const deployedRels = byConvention
+    ? discoverResources(root)
+    : [
+        ...(manifest.models?.processes ?? []),
+        ...(manifest.models?.decisions ?? []),
+        ...(manifest.models?.forms ?? []),
+      ].flatMap((p) => expandGlob(root, p));
+
+  // Keyed by basename (the deployed resource name a `resourceId` references). Two deployables sharing
+  // a basename would silently overwrite here — and clobber each other at the engine — so a
+  // `resourceId` lookup could resolve to the wrong file (or mask a misconfiguration). Fail fast on
+  // the collision so the lookup stays unambiguous.
   const deployedFiles = new Map<string, string>();
-  for (const rel of deployGlobs.flatMap((p) => expandGlob(root, p))) {
+  for (const rel of deployedRels) {
     const name = basename(rel);
     const prior = deployedFiles.get(name);
     if (prior != null && prior !== rel) {
@@ -162,11 +199,13 @@ export function checkAgentPrompts(root: string): CheckResult {
   }
 
   // The model files whose XML we scan for `<zeebe:linkedResource>` links.
-  const xmlModelFiles = deployGlobs
-    .flatMap((p) => expandGlob(root, p))
-    .filter((rel) => contentTypeFor(rel) === "text/xml");
+  const xmlModelFiles = deployedRels.filter((rel) => contentTypeFor(rel) === "text/xml");
   if (xmlModelFiles.length === 0) {
-    errors.push(`no BPMN/DMN model files matched ${JSON.stringify(deployGlobs)}`);
+    errors.push(
+      byConvention
+        ? `no BPMN/DMN model files found under ${RESOURCES_DIR}/ by convention`
+        : "no BPMN/DMN model files matched the manifest's models globs",
+    );
   }
 
   let linkCount = 0;
@@ -199,8 +238,9 @@ export function checkAgentPrompts(root: string): CheckResult {
       if (deployedRel == null) {
         errors.push(
           `${rel}: linkName="prompt" resourceId="${link.resourceId}" has no deployed resource — ` +
-            `no file matched by a models deploy glob has that name, so the engine would omit the ` +
-            `link and the agent would run prompt-less`,
+            `no deployed resource has that name — no file under the app's deploy set (the ` +
+            `resources/ convention walk, or the manifest's models globs) matches it, so the engine ` +
+            `would omit the link and the agent would run prompt-less`,
         );
         continue;
       }

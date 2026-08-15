@@ -117,6 +117,33 @@ GENERATED, never hand-edited.**
   that touch a shared process file into one; do **not** paper the collision over
   with a `dependsOn` edge added purely to serialise otherwise-parallel work.
 
+## Deploy by convention: `resources/` (ADR 0062)
+
+**Deployables live under `resources/` and deploy by convention — `nano.app.json`
+declares no `models`.** urban walks `resources/` (shallow, one level deep) and deploys
+every file: `resources/processes/*.bpmn`, `resources/forms/*.form`, and one prompt per
+task under `resources/prompts/*.md`.
+
+- **`resources/` is deploy-only.** Anything under it ships to the engine; anything
+  **outside** it never does. Docs therefore live under `docs/` (e.g.
+  `docs/agent-guide.md`) — put a `.md` in `resources/` only if you actually want it
+  deployed.
+- **No `models` block.** Rely on the convention; add a `models` override *only* for a
+  genuinely non-standard layout (nwf doesn't need one). An explicit `models` is used
+  verbatim and skips the convention walk.
+- **Basenames must be unique across the deploy set** — the deploy dedupe key is the
+  filename only, so two files sharing a basename in different dirs collide. `npm run
+  check:prompts` fails loudly on that.
+- **Agent prompts: linkedResource is the blessed *and only* path.** Each agent service
+  task links its base prompt with
+  `<zeebe:linkedResource resourceId="<token>.md" bindingType="latest" resourceType="GenericScript" linkName="prompt"/>`,
+  which the engine resolves to the latest deployed `resources/prompts/<token>.md` at job
+  activation, combined at runtime with the per-task `appendPrompt` FEEL. `bindingType="latest"`
+  lets a prompt update land mid-epic without a process redeploy.
+- **Deploy-time `{{token}}` templating is removed — no back-compat.** To inject a per-run
+  value (URL, flag) into an agent, pass it as a runtime job variable / `appendPrompt`
+  FEEL; never bake it into a model at deploy time.
+
 ## Engine capabilities (Zeebe parity — use them, don't work around them)
 
 The nanobpmn engine (`~/workspace/nanobpmn` `engine-core`, deployed via the nano
@@ -247,7 +274,7 @@ npm run lint                                          # biome check (incl. ban-`
 npm run typecheck                                     # tsc --noEmit (Node)
 npm run check                                         # urban check (manifest validation)
 npm run layout:check                                  # BPMN diagram freshness (no drift)
-npm run check:prompts                                 # agent-prompt template resolution
+npm run check:prompts                                 # agent-prompt linkedResource resolution
 npm run check:migrations                              # migration prefixes (no collisions)
 npm run check:contracts                               # contract registry (no synonyms / undeclared env keys)
 npm test                                              # unit tests (node --test)

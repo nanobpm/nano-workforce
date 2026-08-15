@@ -1,6 +1,6 @@
 // nano-workforce — structured scope/impl-change report from implementers (D5, issue #55 / #49).
 //
-// The implementer result contract (prompts/feature.md) can carry an optional `delta`: a machine-
+// The implementer result contract (resources/prompts/feature.md) can carry an optional `delta`: a machine-
 // readable record of how a slice's implementation diverged from its brief — a changed contract, a
 // discovered constraint, files it now touches beyond its slice, or other tasks it affects. Before
 // this, that information lived only in PR prose: invisible to the planner, to sibling agents, and

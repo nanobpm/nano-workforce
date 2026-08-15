@@ -248,7 +248,7 @@ export function deriveFeatureBlockedPatch(
 export const featureRuns = (data: DataLayer) => data.table<FeatureRun>("feature_runs", "feature_key");
 
 /** The deterministic task id for a single-issue run — the implementation agent branches
- * `feat/<task.id>` (see prompts/feature.md), so it MUST be derivable from the issue alone
+ * `feat/<task.id>` (see resources/prompts/feature.md), so it MUST be derivable from the issue alone
  * and stable across a resume. The PR is opened on the target repo, so the issue number
  * alone is unambiguous within it. */
 export function featureTaskId(issueNumber: number): string {
@@ -321,7 +321,7 @@ export async function startFeature(
       issueNumber: parsed.number,
       issueUrl: parsed.url,
       // The single slice the implementation agent builds. `task.prompt` is its primary instruction
-      // (prompts/feature.md); `task.id` fixes its deterministic branch `feat/<task.id>` across a
+      // (resources/prompts/feature.md); `task.id` fixes its deterministic branch `feat/<task.id>` across a
       // resume. Unlike an epic, there is no planner — the whole issue IS the slice.
       task: {
         id: featureTaskId(parsed.number),
@@ -337,7 +337,7 @@ export async function startFeature(
       converge,
       autoMerge,
       // A single-issue feature run OWNS its issue (the whole issue is the slice), so the agent may
-      // claim it with a "starting work" comment on a first run (prompts/feature.md). Epic slices
+      // claim it with a "starting work" comment on a first run (resources/prompts/feature.md). Epic slices
       // (plan-fanout) deliberately DO NOT set this — their `issue` is the shared parent epic, which
       // must never be claimed per-slice.
       claimIssue: true,

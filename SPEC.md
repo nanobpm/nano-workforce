@@ -65,11 +65,13 @@ nano-workforce/
   resources/
     processes/
       convergence-loop.bpmn   # the durable convergence process
+    prompts/
+      review-round.md         # agent instructions asset (deployed by the resources/ convention)
   db/
     migrations/
       001_init.sql            # sqlite schema
-  prompts/
-    review-round.md           # agent instructions asset (injected into job data)
+  docs/
+    agent-guide.md            # operator guide (docs live OUTSIDE resources/ — never deployed)
   components/
     review-round.json         # Zeebe element template for the senior:pr-review service task
   SPEC.md                     # this document
@@ -155,8 +157,8 @@ Notes:
 
 The base instructions are **not** a job variable: they are delivered as a
 **linked resource** on the `senior:pr-review` task —
-`<zeebe:linkedResource resourceId="review-round.md" bindingType="latest" linkName="prompt"/>`,
-which the engine resolves to the latest deployed `prompts/review-round.md` at job
+`<zeebe:linkedResource resourceId="review-round.md" bindingType="latest" resourceType="GenericScript" linkName="prompt"/>`,
+which the engine resolves to the latest deployed `resources/prompts/review-round.md` at job
 activation.
 
 **Output** (job result variables):
@@ -178,7 +180,7 @@ gives **each job its own `mkdtemp` run-dir + fresh clone**, runs the agent with
 **reaps that run-dir when the job ends**. So multiple agents on one host do **not**
 collide even in host mode — the isolation lives below the agent.
 
-Consequences the prompt (`prompts/review-round.md`) encodes:
+Consequences the prompt (`resources/prompts/review-round.md`) encodes:
 - The agent works only inside its provided `cwd`; it must **not** re-clone or create
   a separate `git worktree`, and must not touch global/host state.
 - The agent **cleans up anything it creates outside the commit** before returning
@@ -300,25 +302,26 @@ when the engine data is purged, to keep app state and engine state consistent).
 
 ## 9. Prompt delivery — linked resources (`bindingType: latest`)
 
-Each agent task's base prompt lives **only** in its `prompts/*.md` side-car, deployed
-as a **generic resource** and **linked** — not baked — into the model (issue #169).
-`nano.app.json` lists `prompts/*.md` in a `models` deploy glob, so `@nanobpm/urban`
+Each agent task's base prompt lives **only** in its `resources/prompts/*.md` side-car,
+deployed as a **generic resource** and **linked** — not baked — into the model (issue
+#169). Under the ADR 0062 `resources/` deploy-by-convention layout, `nano.app.json`
+declares **no `models`**, so `@nanobpm/urban` walks `resources/` (shallow, one level) and
 deploys each file as an `application/octet-stream` resource whose deployed **name is
-the file's basename** (`prompts/review-round.md` → resource `review-round.md`). Each
-agent service task links it:
+the file's basename** (`resources/prompts/review-round.md` → resource `review-round.md`).
+Each agent service task links it:
 
 ```xml
 <zeebe:linkedResources>
-  <zeebe:linkedResource resourceId="review-round.md" bindingType="latest" linkName="prompt" />
+  <zeebe:linkedResource resourceId="review-round.md" bindingType="latest" resourceType="GenericScript" linkName="prompt" />
 </zeebe:linkedResources>
 ```
 
 At **job activation** the engine resolves the *latest deployed* key for that
 `resourceId` and hands the content to the harness in the `linkedResources` activation
 header; the harness fetches by key and uses it as the base prompt. Because the binding
-is `latest`, **redeploying a single `prompts/*.md` changes the prompt for the next task
-activation in a running epic** — no process redeploy, no in-flight epic restart. This
-is the live-prompt debugging loop: edit one Markdown file, `urban deploy` (or restart
+is `latest`, **redeploying a single `resources/prompts/*.md` changes the prompt for the
+next task activation in a running epic** — no process redeploy, no in-flight epic restart.
+This is the live-prompt debugging loop: edit one Markdown file, `urban deploy` (or restart
 the app, which deploys on boot), and the next agent job of that type picks it up.
 
 > **Latest-for-now, audited.** The engine currently keeps only the latest version per
@@ -332,7 +335,8 @@ the app, which deploys on boot), and the next agent job of that type picks it up
 > `resourceId` is dropped from the activation header (no incident) — the agent would
 > then run prompt-less. `scripts/check-agent-prompts.ts` (CI gate `check:prompts`)
 > guards against this: every `linkName="prompt"` link's `resourceId` must match a
-> prompt file the app actually deploys (a file in a `models` deploy glob), each linked
+> prompt file the app actually deploys (a file under the `resources/` convention walk, or
+> a manifest `models` override glob), each linked
 > prompt must be non-blank and teach the agent to emit a machine-readable result
 > (`$AGENT_RESULT_FILE` / `::nano:result::`), and no task may still carry the retired
 > baked `io.nanobpm.agentTask.task.prompt` header.
@@ -344,7 +348,8 @@ the linked base — the model owns any separator, and a null/empty append leaves
 untouched. Base prompts can't be composed in FEEL (they are quote-heavy, and XML
 attribute escaping would corrupt a FEEL string literal), so composition happens via
 this append seam rather than inline in FEEL. Requires an `@nanobpm/urban` deploy that
-emits generic-resource deployments for `prompts/*.md` and a harness that consumes
+deploys the `resources/` convention (generic-resource deployments for
+`resources/prompts/*.md`) and a harness that consumes
 `linkedResources` and fetches the resource by key.
 
 ## 10. Poller
@@ -554,7 +559,7 @@ the loop runs one parallel `implement` MI fan-out per wave:
   its prerequisites have **landed on the base branch** — not merely opened. This lets
   a blocking prerequisite (e.g. app scaffolding) fully converge and merge before the
   next wave builds on it. `gate_wave` lives in `db/migrations/007_wave_gate.sql`.
-- **Adopting a decomposed epic** (`prompts/plan.md` Step 0): when adopting existing
+- **Adopting a decomposed epic** (`resources/prompts/plan.md` Step 0): when adopting existing
   sub-issues, the planner honours an explicit `Depends-on: #N` / `Blocked by #N`
   directive in a sub-issue body, mapping each prerequisite `#M` to `issue-M` in the
   adopted task's `dependsOn` — so a human-declared blocking order survives adoption.

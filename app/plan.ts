@@ -31,8 +31,10 @@ export const ESCALATION_SLA_TIMEOUT = escalationSlaTimeout(
 const now = () => new Date().toISOString();
 
 // Agent prompts are no longer read by the host. The `senior:plan`, `senior:plan-review`, and
-// `senior:feature` prompts are generic resources (`prompts/plan.md` / `prompts/plan-review.md` /
-// `prompts/feature.md`, deployed via a `models` glob in nano.app.json) linked into each task as
+// `senior:feature` prompts are generic resources (`resources/prompts/plan.md` /
+// `resources/prompts/plan-review.md` / `resources/prompts/feature.md`, deployed under the
+// `resources/` deploy-by-convention layout — nano.app.json declares no `models`) linked into each
+// task as
 // `<zeebe:linkedResource … bindingType="latest" linkName="prompt"/>` and resolved by the engine at
 // job activation. Per-instance dynamic context (a plan's rejection findings, a task's brief) rides
 // `appendPrompt`, which the harness concatenates onto the linked base. The host only carries
@@ -244,7 +246,7 @@ export function normalizeBaseBranch(input: string | null | undefined): string {
 
 /** The per-instance brief appended to an implementer agent's prompt when the plan pins a base
  * branch. It is authoritative over the static "branch off the default branch" wording in
- * prompts/feature.md, so the agent branches off — and opens its PR against — the integration
+ * resources/prompts/feature.md, so the agent branches off — and opens its PR against — the integration
  * branch, and reads the epic's latest landed state there rather than the repo default branch. */
 export function renderBaseBranchBrief(baseBranch: string): string {
   return [

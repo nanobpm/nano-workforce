@@ -1,6 +1,6 @@
 // pr.record-feature — the single-issue `implement` block has finished (issue #172).
 //
-// The `senior:feature` agent reported one of `opened` / `blocked` / `skipped` (prompts/feature.md);
+// The `senior:feature` agent reported one of `opened` / `blocked` / `skipped` (resources/prompts/feature.md);
 // anything else — including a missing status, or an `escalated` status that fell through to abandon
 // (the human abandoned or the SLA fired) — is treated as `blocked`: we must not assume a PR was
 // opened. This worker:
