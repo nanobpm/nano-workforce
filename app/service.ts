@@ -1389,20 +1389,30 @@ export async function pollFeatureBlocked(data: DataLayer, engine: EngineClient) 
   }
 }
 
+/** Read a tracked table's parked-and-active statuses from the single source of truth
+ * (`instanceTracking.<table>.activeStatuses` in nano.app.json), so an app-side scan can never drift
+ * from the reconciler's notion of "in-flight". Throws if the binding is missing/empty. */
+function activeStatusesFor(table: string): readonly string[] {
+  const manifest: { instanceTracking?: { table: string; activeStatuses?: string[] }[] } = JSON.parse(
+    readFileSync(new URL("../nano.app.json", import.meta.url), "utf8"),
+  );
+  const binding = manifest.instanceTracking?.find((b) => b.table === table);
+  if (!binding?.activeStatuses?.length) {
+    throw new Error(`nano.app.json: instanceTracking.${table}.activeStatuses is missing or empty`);
+  }
+  return binding.activeStatuses;
+}
+
 /** The `pull_requests` statuses a PR instance can be parked-and-active on, DERIVED from the single
  * source of truth (`instanceTracking.pull_requests.activeStatuses` in nano.app.json) so the app-side
  * scan can never drift from the reconciler's notion of "in-flight". `pollUserTasks` scans only these
  * for an open `wait-answer` escalation, so the pass stays O(in-flight PRs), not O(all PRs). */
-export const PR_ACTIVE_STATUSES: readonly string[] = ((): readonly string[] => {
-  const manifest: { instanceTracking?: { table: string; activeStatuses?: string[] }[] } = JSON.parse(
-    readFileSync(new URL("../nano.app.json", import.meta.url), "utf8"),
-  );
-  const binding = manifest.instanceTracking?.find((b) => b.table === "pull_requests");
-  if (!binding?.activeStatuses?.length) {
-    throw new Error("nano.app.json: instanceTracking.pull_requests.activeStatuses is missing or empty");
-  }
-  return binding.activeStatuses;
-})();
+export const PR_ACTIVE_STATUSES: readonly string[] = activeStatusesFor("pull_requests");
+
+/** The `plans` statuses a plan instance can be parked-and-active on, DERIVED from the same single
+ * source of truth (`instanceTracking.plans.activeStatuses`) so `pollUserTasks`' plan scan can never
+ * drift from the reconciler — mirroring `PR_ACTIVE_STATUSES` rather than hard-coding a second list. */
+export const PLAN_ACTIVE_STATUSES: readonly string[] = activeStatusesFor("plans");
 
 /** Reconcile the unified Tasks-inbox read-model (`user_tasks`) against the engine's currently-open
  * native user-task escalations (issue #236). The Tasks page lists EVERY open escalation awaiting a
@@ -1471,7 +1481,7 @@ export async function pollUserTasks(data: DataLayer, engine: EngineClient) {
   // across the status queries (mirroring the feature-run scan above): a plan whose status transitions
   // mid-pass could otherwise match twice and push duplicate `desired` rows for one `user_task_key`.
   const planSeen = new Set<string>();
-  for (const status of ["planning", "dispatched"] as const) {
+  for (const status of PLAN_ACTIVE_STATUSES) {
     for (const plan of await plans(data).find({ status })) {
       if (!plan.process_key) continue;
       if (planSeen.has(plan.plan_key)) continue;

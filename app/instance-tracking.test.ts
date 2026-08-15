@@ -7,7 +7,7 @@
 import { test } from "node:test";
 import { assert, assertEquals } from "#test-assert";
 import { readFileSync } from "node:fs";
-import { PR_ACTIVE_STATUSES, TERMINAL_STATUSES } from "./service.ts";
+import { PR_ACTIVE_STATUSES, PLAN_ACTIVE_STATUSES, TERMINAL_STATUSES } from "./service.ts";
 import { PLAN_TERMINAL_STATUSES } from "./plan.ts";
 
 interface Binding {
@@ -80,4 +80,12 @@ test("instanceTracking: plans activeStatuses covers every in-flight status", asy
 test("PR_ACTIVE_STATUSES is derived from the manifest binding (no drift)", async () => {
   const b = bindingFor(await bindings(), "pull_requests");
   assertEquals([...PR_ACTIVE_STATUSES].sort(), [...(b.activeStatuses ?? [])].sort());
+});
+
+// Same guard for the plan scan: `pollUserTasks` no longer hard-codes ["planning","dispatched"] but
+// derives PLAN_ACTIVE_STATUSES from the manifest, so the plan-escalation scan can't drift from the
+// reconciler's activeStatuses any more than the PR scan can.
+test("PLAN_ACTIVE_STATUSES is derived from the manifest binding (no drift)", async () => {
+  const b = bindingFor(await bindings(), "plans");
+  assertEquals([...PLAN_ACTIVE_STATUSES].sort(), [...(b.activeStatuses ?? [])].sort());
 });

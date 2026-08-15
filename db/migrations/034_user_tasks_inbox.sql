@@ -44,7 +44,8 @@ CREATE TABLE user_tasks (
   updated_at    TEXT NOT NULL
 );
 
--- The pages filter the grid by `element_id` (one grid per kind) and order by recency; index both so
--- the read stays O(matching), not O(all open tasks).
-CREATE INDEX idx_user_tasks_element ON user_tasks(element_id);
-CREATE INDEX idx_user_tasks_updated ON user_tasks(updated_at);
+-- The pages filter the grid by `element_id` (one grid per kind) and order by recency
+-- (`WHERE element_id IN (...) ORDER BY updated_at DESC`). A single composite index on
+-- `(element_id, updated_at)` serves both the equality filter and the ordered read in one structure —
+-- no extra sort/scan — so the read stays O(matching), not O(all open tasks), as the table grows.
+CREATE INDEX idx_user_tasks_element_updated ON user_tasks(element_id, updated_at);
