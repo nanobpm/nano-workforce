@@ -279,9 +279,11 @@ machines. Two app surfaces must be reachable from those off-box workers:
   LAN address, not `localhost`**.
 - The **agentic visibility channel** — `/agentic` (WebSocket). In on-by-default **LOCAL mode** it is
   gated only by a *well-known, non-secret* localhost token, so it is enforced **loopback-only**: an
-  off-box peer is refused. To give remote workers visibility, run the channel in **secure mode** by
-  setting `NANO_AGENTIC_SECRET`. (Fleet coordination itself does not depend on this channel — it is
-  visibility only.)
+  off-box peer is refused — as is a **reverse-proxied** peer (a connection carrying an
+  `X-Forwarded-For`/`Forwarded`/`X-Real-IP` header is refused even over loopback, so forwarding
+  `/agentic` through the console proxy cannot smuggle the well-known token off-box). To give remote
+  workers visibility, run the channel in **secure mode** by setting `NANO_AGENTIC_SECRET`. (Fleet
+  coordination itself does not depend on this channel — it is visibility only.)
 
 #### Bind the HTTP server
 

@@ -76,22 +76,56 @@ export function isLoopbackRemote(remote: string | undefined): boolean {
 }
 
 /**
- * Wrap `base` so a peer is admitted ONLY from a loopback remote address. LOCAL mode gates purely on
- * the well-known {@link LOCAL_AGENTIC_TOKEN}, which is not a secret — so once the app is exposed on
- * the LAN (`network.bind: "all"`, issue #224) that token must never be honoured off-box. This
- * enforces the invariant per-connection (a non-loopback peer is closed `4401`), independent of the
- * server's bind, closing the interplay the bind-to-all setting exposes (nano-ide#235). Note this
- * guards ONLY the agentic visibility channel: the capability HTTP hooks (`/app/api/hooks/*`) carry
- * their own unguessable per-request tokens and stay reachable off-box, which is what a remote fleet
- * needs. To attach agentic visibility from off-box, run the channel in SECURE mode instead.
+ * Proxy-forwarding request headers. Their presence means the connection was relayed through a
+ * reverse proxy, so `req.remote` is the *proxy's* address (typically loopback for an embedded/console
+ * proxy) rather than the true client — a loopback `remote` no longer proves a same-host peer. A
+ * genuine same-machine loopback peer connects directly and never carries one of these.
+ */
+const FORWARDING_HEADERS: readonly string[] = ["x-forwarded-for", "forwarded", "x-real-ip"];
+
+/**
+ * True if the handshake carries a proxy-forwarding header — i.e. the connection reached us through a
+ * reverse proxy, so `req.remote` is the proxy, not the originating client. Used to fail LOCAL mode
+ * closed: a relayed connection can present a loopback `remote` (the proxy) while the real client is
+ * off-box, so the well-known token must never be honoured for it (see {@link loopbackOnly}). Headers
+ * are lower-cased by the transport ({@link HandshakeRequest.headers}); an empty/whitespace value is
+ * treated as absent.
+ */
+export function isForwardedConnection(headers: Readonly<Record<string, string>> | undefined): boolean {
+  if (!headers) return false;
+  return FORWARDING_HEADERS.some((h) => {
+    const value = headers[h];
+    return typeof value === "string" && value.trim() !== "";
+  });
+}
+
+/**
+ * Wrap `base` so a peer is admitted ONLY from a direct, same-host loopback connection. LOCAL mode
+ * gates purely on the well-known {@link LOCAL_AGENTIC_TOKEN}, which is not a secret — so once the app
+ * is exposed on the LAN (`network.bind: "all"`, issue #224) that token must never be honoured
+ * off-box. This enforces the invariant per-connection (any other peer is closed `4401`), independent
+ * of the server's bind, closing the interplay the bind-to-all setting exposes (nano-ide#235).
+ *
+ * Two ways a peer can fail to be a same-host loopback client, both refused:
+ *  - a non-loopback `req.remote` (a direct off-box connection); or
+ *  - a proxy-forwarding header ({@link isForwardedConnection}) — the connection was relayed, so a
+ *    loopback `req.remote` is the *proxy*, not the client. Refusing any forwarded connection keeps
+ *    the guard robust even if `/agentic` is inadvertently reverse-proxied over loopback (the
+ *    embedded/console-proxy topology), where the off-box client would otherwise appear same-host.
+ *
+ * Note this guards ONLY the agentic visibility channel: the capability HTTP hooks
+ * (`/app/api/hooks/*`) carry their own unguessable per-request tokens and stay reachable off-box
+ * (including through the console proxy), which is what a remote fleet needs. To attach agentic
+ * visibility from off-box — directly or via a proxy — run the channel in SECURE mode instead.
  */
 export function loopbackOnly(base: Authenticator): Authenticator {
   return (req) => {
-    if (!isLoopbackRemote(req.remote)) {
+    if (isForwardedConnection(req.headers) || !isLoopbackRemote(req.remote)) {
       return {
         ok: false,
         code: AUTH_UNAUTHORIZED,
-        reason: "LOCAL-mode agentic channel is loopback-only; use secure mode (NANO_AGENTIC_SECRET) for off-box peers",
+        reason:
+          "LOCAL-mode agentic channel is loopback-only and refuses reverse-proxied peers; use secure mode (NANO_AGENTIC_SECRET) for off-box or proxied peers",
       };
     }
     return base(req);
