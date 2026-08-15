@@ -496,6 +496,20 @@ function allCheckNames(rollup: RollupEntry[]): string[] {
   return names;
 }
 
+/** True when `err` is GitHub reporting that a ref which parsed as `owner/repo#N` is not a pull
+ * request — either it's an issue (issues and PRs share GitHub's number space, so an issue number
+ * is indistinguishable from a PR number by shape alone) or the number does not exist. Both
+ * transports surface here: `gh` mode throws the GraphQL message "Could not resolve to a
+ * PullRequest with the number of N", and token mode throws `github 404 …` from
+ * `GET /repos/{repo}/pulls/{N}`. A ref that is not a pull request can never merge, so a caller
+ * gating a merge queue on it (see `isDepMerged`) must treat it as non-blocking instead of wedging
+ * forever. Transient failures (rate-limit, 5xx, network) deliberately return `false` so the caller
+ * keeps waiting/retrying rather than silently clearing a real dependency. */
+export function isNotAPullRequestError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /could not resolve to a pullrequest/i.test(msg) || /\bgithub 404\b/i.test(msg);
+}
+
 export async function fetchPrState(
   repo: string,
   number: number | string,

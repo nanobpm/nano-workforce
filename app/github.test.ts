@@ -3,7 +3,7 @@
 // the merge-exclusion graph. Force the token transport and stub `globalThis.fetch`.
 import { test } from "node:test";
 import { assertEquals, assertRejects } from "#test-assert";
-import { BaseBranchMustExistError, ensureBaseBranch, fetchPrFiles } from "./github.ts";
+import { BaseBranchMustExistError, ensureBaseBranch, fetchPrFiles, isNotAPullRequestError } from "./github.ts";
 
 // A fake `fetch` that serves `pages` of file batches; each page N (1-based) returns `pages[N-1]`
 // files (named `f{index}`), setting a `Link: rel="next"` header whenever a later page exists.
@@ -235,4 +235,27 @@ test("ensureBaseBranch: missing non-epic/* branch throws BaseBranchMustExistErro
   assertEquals(err instanceof BaseBranchMustExistError, true);
   // A rejected non-epic/* base must never spawn a wrong-rooted branch.
   assertEquals(state.creates.length, 0);
+});
+
+// A `Depends-on:` ref that resolves to an issue (or a non-existent number) can never merge, so the
+// merge-poller's dependency gate must treat it as non-blocking rather than wedging forever — the
+// exact wedge behind Magikcraft/nano-bpm#806 declaring `Depends-on:` its epic tracking *issue*
+// #796. `isNotAPullRequestError` is the discriminator: it must fire for both transports' "not a PR"
+// signals and stay false for transient failures (which must keep the dependency blocking).
+test("isNotAPullRequestError: gh GraphQL 'not a PullRequest' → true", () => {
+  const err = new Error(
+    "GraphQL: Could not resolve to a PullRequest with the number of 796. (repository.pullRequest)",
+  );
+  assertEquals(isNotAPullRequestError(err), true);
+});
+
+test("isNotAPullRequestError: token-mode 404 → true", () => {
+  assertEquals(isNotAPullRequestError(new Error("github 404 Not Found")), true);
+});
+
+test("isNotAPullRequestError: transient failures stay blocking (false)", () => {
+  assertEquals(isNotAPullRequestError(new Error("github 502 Bad Gateway")), false);
+  assertEquals(isNotAPullRequestError(new Error("API rate limit exceeded")), false);
+  assertEquals(isNotAPullRequestError(new Error("fetch failed")), false);
+  assertEquals(isNotAPullRequestError(null), false);
 });
