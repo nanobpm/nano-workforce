@@ -139,6 +139,21 @@ export function parseAckedAdvisories(threads: ReviewThread[]): string[] {
  * fails closed); returns `""` when transport is usable but the PR has no Copilot review yet (a
  * verified "no suppressed advisories"). Throws on a genuine transport failure. This split keeps
  * `null` from conflating "unverifiable" with "empty" and fail-OPENing the advisory dimension. */
+/** Pick the newest Copilot review body from a reviews list (GitHub returns them oldest→newest).
+ * `truncated = true` means we could NOT read every page — the genuinely-latest review may be unread,
+ * so the result is UNVERIFIABLE and we fail CLOSED (`null`) rather than return a stale page's body;
+ * a fail-OPEN on the advisory dimension (reading an old review and missing a newer suppressed
+ * advisory) is the exact class this gate exists to prevent. A verified-complete read with no Copilot
+ * review returns `""` (a verified "no advisories"). Pure; unit-tested. */
+export function pickLatestCopilotReviewBody(
+  reviews: { user?: { login?: string }; body?: string }[],
+  truncated: boolean,
+): string | null {
+  if (truncated) return null;
+  const copilot = reviews.filter((rv) => isCopilot(rv.user?.login));
+  return copilot[copilot.length - 1]?.body ?? "";
+}
+
 export async function fetchLatestCopilotReviewBody(
   repo: string,
   number: number | string,
@@ -146,31 +161,42 @@ export async function fetchLatestCopilotReviewBody(
 ): Promise<string | null> {
   const mode = githubTransport();
   const useGh = mode === "gh" || (mode === "auto" && (await isGhAvailable()));
-  const path = `repos/${repo}/pulls/${number}/reviews?per_page=100`;
+  const basePath = `repos/${repo}/pulls/${number}/reviews?per_page=100`;
   interface Review {
     user?: { login?: string };
     body?: string;
   }
-  let reviews: Review[];
   if (useGh) {
-    const out = await runGh(["api", path, "-H", "Accept: application/vnd.github+json"]);
+    // `--paginate` merges EVERY page of the (oldest→newest) reviews array, so a >100-review
+    // convergence loop still surfaces the genuinely newest Copilot review rather than the oldest
+    // 100 — reading only the first page here would fail-OPEN the advisory dimension.
+    const out = await runGh(["api", "--paginate", basePath, "-H", "Accept: application/vnd.github+json"]);
     // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
-    reviews = JSON.parse(out) as Review[];
-  } else {
-    if (!token) return null;
-    const r = await fetch(`https://api.github.com/${path}`, {
+    const reviews = JSON.parse(out) as Review[];
+    return pickLatestCopilotReviewBody(reviews, false);
+  }
+  if (!token) return null;
+  // Page the token transport the same way; 20×100 reviews is far past any real convergence loop, and
+  // a genuinely deeper history we can't reach is unverifiable → fail closed.
+  const reviews: Review[] = [];
+  const MAX_PAGES = 20;
+  for (let page = 1; page <= MAX_PAGES; page++) {
+    const r = await fetch(`https://api.github.com/${basePath}&page=${page}`, {
       headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json" },
     });
     if (!r.ok) throw new Error(`github ${r.status} ${r.statusText}`.trim());
     // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
-    reviews = (await r.json()) as Review[];
+    const batch = (await r.json()) as Review[];
+    reviews.push(...batch);
+    // A short page means we've read every review — the list is complete.
+    if (batch.length < 100) return pickLatestCopilotReviewBody(reviews, false);
+    // A full page on the last allowed page is only truncated if GitHub says there's more; trust the
+    // `Link` header's `rel="next"` so an exact multiple of 100 isn't a false positive.
+    if (page === MAX_PAGES && /<[^>]*>;\s*rel="next"/.test(r.headers.get("link") ?? "")) {
+      return pickLatestCopilotReviewBody(reviews, true);
+    }
   }
-  const copilot = reviews.filter((rv) => isCopilot(rv.user?.login));
-  const latest = copilot[copilot.length - 1];
-  // Transport WAS usable here (a null-transport read already returned above), so a missing Copilot
-  // review is a verified "no advisories" — return "" (empty), never `null` (reserved for no
-  // transport, which the worker fail-closes on).
-  return latest?.body ?? "";
+  return pickLatestCopilotReviewBody(reviews, false);
 }
 
 /** Raw GraphQL response shape for the review-threads query. */

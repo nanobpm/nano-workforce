@@ -17,6 +17,7 @@ import {
   parseAckedAdvisories,
   parseReviewThreadsResponse,
   parseSuppressedAdvisories,
+  pickLatestCopilotReviewBody,
   type ReviewThread,
 } from "./github.ts";
 
@@ -42,6 +43,8 @@ test("evaluateConvergeGate: an unacknowledged suppressed advisory blocks converg
   });
   assertEquals(r.convergeBlocked, true);
   assertStringIncludes(r.convergeBlockReason, "spec/a.json:613");
+  // Singular noun for exactly one advisory (explicit, not "advisor" + "y/ies" concatenation).
+  assertStringIncludes(r.convergeBlockReason, "1 unacknowledged suppressed advisory (");
 });
 
 test("evaluateConvergeGate: an ACKNOWLEDGED suppressed advisory no longer blocks convergence", () => {
@@ -51,6 +54,16 @@ test("evaluateConvergeGate: an ACKNOWLEDGED suppressed advisory no longer blocks
     acknowledgedKeys: ["spec/a.json:613"],
   });
   assertEquals(r.convergeBlocked, false);
+});
+
+test("evaluateConvergeGate: multiple unacknowledged advisories use the plural noun", () => {
+  const r = evaluateConvergeGate({
+    unresolvedThreadCount: 0,
+    suppressedKeys: ["x.ts:10", "y.ts:20"],
+    acknowledgedKeys: [],
+  });
+  assertEquals(r.convergeBlocked, true);
+  assertStringIncludes(r.convergeBlockReason, "2 unacknowledged suppressed advisories (");
 });
 
 test("evaluateConvergeGate: reports both a thread and an advisory when both are outstanding", () => {
@@ -160,6 +173,36 @@ test("parseReviewThreadsResponse: FAILS CLOSED (null) when page completeness is 
     },
   });
   assertEquals(mapped, null);
+});
+
+test("pickLatestCopilotReviewBody: picks the NEWEST Copilot review body (oldest\u2192newest order)", () => {
+  const body = pickLatestCopilotReviewBody(
+    [
+      { user: { login: "human" }, body: "human review" },
+      { user: { login: "Copilot" }, body: "old copilot review" },
+      { user: { login: "Copilot" }, body: "newest copilot review" },
+    ],
+    false,
+  );
+  assertEquals(body, "newest copilot review");
+});
+
+test('pickLatestCopilotReviewBody: a complete read with NO Copilot review is verified empty ("")', () => {
+  assertEquals(pickLatestCopilotReviewBody([{ user: { login: "human" }, body: "hi" }], false), "");
+  assertEquals(pickLatestCopilotReviewBody([], false), "");
+});
+
+test("pickLatestCopilotReviewBody: FAILS CLOSED (null) when the reviews read was TRUNCATED", () => {
+  // >100 reviews (a long convergence loop): a first-page-only read returns the OLDEST 100 and misses
+  // the genuinely newest Copilot review, so an unverifiable (truncated) read must block, never return
+  // a stale page's body \u2014 a fail-OPEN on the advisory dimension is the class this gate prevents.
+  assertEquals(
+    pickLatestCopilotReviewBody(
+      [{ user: { login: "Copilot" }, body: "possibly stale" }],
+      true,
+    ),
+    null,
+  );
 });
 
 async function makeUnderTest(deps: {

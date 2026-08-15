@@ -35,7 +35,8 @@ export function evaluateConvergeGate(input: ConvergeGateInput): ConvergeGateResu
     reasons.push(`${n} unresolved review thread${n === 1 ? "" : "s"}`);
   }
   if (unacked.length > 0) {
-    reasons.push(`${unacked.length} unacknowledged suppressed advisor${unacked.length === 1 ? "y" : "ies"} (${unacked.join(", ")})`);
+    const noun = unacked.length === 1 ? "advisory" : "advisories";
+    reasons.push(`${unacked.length} unacknowledged suppressed ${noun} (${unacked.join(", ")})`);
   }
   if (reasons.length === 0) {
     return { convergeBlocked: false, convergeBlockReason: "" };
