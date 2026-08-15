@@ -101,7 +101,7 @@ export function mintBlackboardToken(): string {
 export function publicBaseUrl(base: string = readEnvOr("NANO_PR_PUBLIC_BASE_URL")): string {
   // Skip a blank/whitespace value so an explicitly-set-but-empty NANO_PR_PUBLIC_BASE_URL can't yield
   // a malformed capability URL; fall back to the schema-declared default.
-  const resolved = base.trim() || "http://localhost:3000";
+  const resolved = base.trim() || readEnvOr("NANO_PR_PUBLIC_BASE_URL");
   return resolved.replace(/\/+$/, "");
 }
 
@@ -352,9 +352,12 @@ export async function appendEntry(
     wave: input.wave,
     dedupeKey: input.dedupe_key,
   });
-  if (appKind === "contract" && res.inserted) {
+  if (appKind === "contract") {
     // The store defaulted `kind` to `note` (its normaliser doesn't know `contract`); restore it on
-    // the just-inserted row. Reusing the store's insert keeps a single append/dedupe implementation.
+    // the resolved row. Patch on EVERY `contract` append — not only when `res.inserted` — so an
+    // idempotent retry (or a race) that resolves to an existing id (`inserted: false`), or a row
+    // first inserted under a different kind for the same `dedupe_key`, still reads back as `contract`
+    // rather than lingering as `note`. The UPDATE is idempotent on an already-`contract` row.
     data.source().db.run(`UPDATE ${BLACKBOARD_TABLE} SET kind = 'contract' WHERE id = ?`, [Number(res.id)]);
   }
   return res;

@@ -183,6 +183,20 @@ test("appendEntry: a blank body is rejected", async () => {
   assert(threw, "blank body must throw");
 });
 
+test("appendEntry: a contract append patches the kind even when it collapses onto an existing row (deterministic round-trip)", async () => {
+  const { data } = memBlackboardData();
+  // A prior append under this dedupe_key stored kind `note` (the store's default for an unknown kind).
+  const first = await appendEntry(data, "p", { author_task: "t", body: "seed", kind: "note", dedupe_key: "env:NANO_X" });
+  assertEquals(first.inserted, true);
+  // A later `contract` append with the SAME dedupe_key is a no-op insert (`inserted: false`) — but it
+  // must still leave the row readable as `contract`, not lingering as `note`.
+  const again = await appendEntry(data, "p", { author_task: "t", body: "seed", kind: "contract", dedupe_key: "env:NANO_X" });
+  assertEquals(again.inserted, false, "same dedupe_key is a no-op insert");
+  const entries = await readBlackboard(data, "p");
+  assertEquals(entries.length, 1);
+  assertEquals(entries[0].kind, "contract", "the contract kind is patched deterministically regardless of res.inserted");
+});
+
 test("readBlackboard: since returns only newer entries (incremental poll)", async () => {
   const { data } = memBlackboardData();
   await appendEntry(data, "p", { body: "one" });
