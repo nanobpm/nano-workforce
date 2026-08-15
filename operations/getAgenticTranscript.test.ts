@@ -135,3 +135,31 @@ test("shared-secret guard rejects a missing secret when configured", async () =>
     else process.env["NANO_PR_WEBHOOK_SECRET"] = prev;
   }
 });
+
+test("shared-secret guard admits a correct secret when configured", async () => {
+  const prev = process.env["NANO_PR_WEBHOOK_SECRET"];
+  process.env["NANO_PR_WEBHOOK_SECRET"] = "s3cr3t";
+  relayFamily.mount(mountCtx(memSqlite()));
+  const store = currentRelayTranscriptService()?.store;
+  assert(store !== undefined);
+  store.flush(
+    "job:6494",
+    { since: () => ({ entries: [{ offset: 0, chunk: "aa" }] }), nextOffset: 1 },
+    "ephemeral",
+  );
+  try {
+    const mod = await import(`./getAgenticTranscript.ts?guard=${Date.now()}`);
+    const guarded = mod.default as typeof handler;
+    const ok = (await guarded(input("job:6494", {}, { "x-hook-secret": "s3cr3t" }), app)) as {
+      status: number;
+      body: { stream: string; chunkCount: number };
+    };
+    assertEquals(ok.status, 200);
+    assertEquals(ok.body.stream, "job:6494");
+    assertEquals(ok.body.chunkCount, 1);
+  } finally {
+    relayFamily.teardown?.();
+    if (prev === undefined) delete process.env["NANO_PR_WEBHOOK_SECRET"];
+    else process.env["NANO_PR_WEBHOOK_SECRET"] = prev;
+  }
+});
