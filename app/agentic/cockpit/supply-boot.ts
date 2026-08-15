@@ -285,7 +285,7 @@ class SupplyCockpit implements SupplyCockpitHandle {
     try {
       let report: TranscriptListReport;
       try {
-        report = await this.#fetchTranscriptsBounded(fetchTranscripts);
+        report = await this.#bounded(fetchTranscripts, "transcripts");
       } catch (err) {
         this.#env.onError?.(err);
         return;
@@ -305,24 +305,23 @@ class SupplyCockpit implements SupplyCockpitHandle {
   }
 
   /**
-   * Fetch the past-sessions list with a bounded wait. {@link #refreshPast} is single-flight so a
-   * still-pending fetch is never stacked — but an injected transcripts fetch that HANGS (never settles,
-   * not merely rejects) would otherwise leave `#pastRefreshing` stuck `true` forever, permanently
-   * disabling the past panel even after the endpoint recovers. Racing the fetch against a timeout
-   * guarantees the wait always settles, so `#refreshPast`'s `finally` clears the flag and the next poll
-   * retries. A hung fetch that resolves late is ignored (the `settled` latch drops it).
+   * Race an injected fetch against a timeout so the returned promise ALWAYS settles, even if the fetch
+   * HANGS (never settles, not merely rejects). Both single-flight callers below — the past-sessions list
+   * refresh and a past-session {@link replay} — depend on this: a hung list fetch would leave
+   * `#pastRefreshing` stuck `true` forever (permanently disabling the past panel), and a hung replay fetch
+   * would leave `replay()` pending forever with the terminal wedged out of live mode. Racing the fetch
+   * against a timeout guarantees the wait settles (here, rejects), so the caller's `finally`/`catch` runs
+   * and the next poll can retry. A hung fetch that resolves late is ignored (the `settled` latch drops it).
    */
-  #fetchTranscriptsBounded(
-    fetchTranscripts: () => Promise<TranscriptListReport>,
-  ): Promise<TranscriptListReport> {
-    return new Promise<TranscriptListReport>((resolve, reject) => {
+  #bounded<T>(fetch: () => Promise<T>, what: string): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
       let settled = false;
       const handle = this.#setTimer(() => {
         if (settled) return;
         settled = true;
-        reject(new Error(`transcripts fetch timed out after ${this.#pastFetchTimeoutMs}ms`));
+        reject(new Error(`${what} fetch timed out after ${this.#pastFetchTimeoutMs}ms`));
       }, this.#pastFetchTimeoutMs);
-      fetchTranscripts().then(
+      fetch().then(
         (report) => {
           if (settled) return;
           settled = true;
@@ -435,7 +434,9 @@ class SupplyCockpit implements SupplyCockpitHandle {
 
     let data: TranscriptDataReport;
     try {
-      data = await fetchTranscript(stream);
+      // Bound the transcript fetch: a hung endpoint must not leave replay() pending forever with the
+      // terminal wedged out of live mode. The wait always settles, so this catch runs and mode stays idle.
+      data = await this.#bounded(() => fetchTranscript(stream), "transcript");
     } catch (err) {
       this.#env.onError?.(err);
       return;

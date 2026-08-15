@@ -270,3 +270,41 @@ test("a permanently hung transcripts fetch is bounded by a timeout so the past p
   assert.equal(r.host.byData("stream", "job:past").length >= 1, true, "the recovered past-sessions list renders");
   cockpit.dispose();
 });
+
+test("a permanently hung replay fetch is bounded by a timeout so replay() always settles", async () => {
+  const r = rig();
+  // A hand-driven timer seam lets us fire the bounded-wait timeout deterministically.
+  const timers = new Map<number, () => void>();
+  let nextId = 0;
+  const env: SupplyCockpitEnv = {
+    ...r.env,
+    setTimer: (run) => {
+      const id = nextId++;
+      timers.set(id, run);
+      return id;
+    },
+    clearTimer: (handle) => {
+      timers.delete(handle as number);
+    },
+    pastFetchTimeoutMs: 5000,
+    // The replay transcript fetch hangs forever: before the fix, replay() awaited it and never settled,
+    // leaving the terminal wedged out of live mode with an in-flight request that never completes.
+    fetchTranscript: () => new Promise<TranscriptDataReport>(() => {}),
+  };
+  const cockpit = bootSupplyCockpit(env);
+  await cockpit.refresh(); // the list fetch resolves, clearing its bounded timer
+  await flush();
+
+  // Start a replay whose transcript fetch never settles; it must not hang forever.
+  const replaying = cockpit.replay("job:past");
+  await flush();
+
+  // Fire the bounded-wait timeout: replay() must settle (reject → caught), surfacing the timeout as an
+  // error, rather than hanging the caller forever.
+  for (const run of [...timers.values()]) run();
+  await replaying;
+  await flush();
+  assert.equal(r.errors.length >= 1, true, "the bounded replay wait surfaces the timeout as an error");
+  assert.equal(cockpit.currentMode, undefined, "a timed-out replay leaves the terminal idle, not stuck in replay");
+  cockpit.dispose();
+});

@@ -454,7 +454,18 @@ export function mountCockpit(host, opts = {}) {
     setMode(undefined, undefined);
     let data;
     try {
-      const res = await fetch(`${transcriptsUrl}/${encodeURIComponent(stream)}`, { headers: jsonHeaders() });
+      // Bound the fetch: a transcript endpoint that never responds would otherwise leave replay() pending
+      // forever with an in-flight request and the terminal wedged out of live mode. Abort after
+      // pastFetchTimeoutMs so the fetch always settles (here, rejects) and this catch leaves mode idle.
+      const controller = new AbortController();
+      const abortTimer = setTimeout(() => controller.abort(), pastFetchTimeoutMs);
+      abortTimer.unref?.();
+      let res;
+      try {
+        res = await fetch(`${transcriptsUrl}/${encodeURIComponent(stream)}`, { headers: jsonHeaders(), signal: controller.signal });
+      } finally {
+        clearTimeout(abortTimer);
+      }
       if (!res.ok) throw new Error(`transcript fetch failed: ${res.status}`);
       data = await res.json();
     } catch (err) {
