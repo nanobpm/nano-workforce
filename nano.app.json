@@ -164,6 +164,14 @@
     {
       "taskType": "pr.retro-record",
       "handler": "workers/retro-record/worker.ts"
+    },
+    {
+      "taskType": "pr.progress-check",
+      "handler": "workers/progress-check/worker.ts"
+    },
+    {
+      "taskType": "pr.converge-gate",
+      "handler": "workers/converge-gate/worker.ts"
     }
   ],
   "externalTaskTypes": [
