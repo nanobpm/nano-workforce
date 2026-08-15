@@ -441,6 +441,11 @@ export function mountCockpit(host, opts = {}) {
       drill = { stream, client };
       setMode("live", stream);
     } catch (err) {
+      // The new terminal failed to build after the prior one was torn down: reset the region to idle
+      // (and drop any partially-built terminal) so the UI never shows a stale "live"/"replay"
+      // indicator with nothing behind it — symmetric with replayInto(), which clears mode up-front.
+      teardownTerminal();
+      setMode(undefined, undefined);
       onError(err);
     }
   }

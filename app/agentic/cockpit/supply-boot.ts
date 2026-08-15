@@ -432,6 +432,16 @@ class SupplyCockpit implements SupplyCockpitHandle {
       this.#drill = { stream, client };
       this.#setMode("live", stream);
     } catch (err) {
+      // Building the new terminal failed AFTER the prior drill + terminal were already torn down
+      // above. Leaving #mode/#shownStream at their prior value would keep the panel showing a stale
+      // "live"/"replay" indicator backing a terminal that no longer exists, and a partially-built
+      // #terminal (createTerminal returned before a later step threw) would leak. Reset the region to
+      // idle — symmetric with replay(), which clears mode up-front — before surfacing the error.
+      this.#drill?.client.close();
+      this.#drill = undefined;
+      this.#terminal?.dispose?.();
+      this.#terminal = undefined;
+      this.#setMode(undefined, undefined);
       this.#env.onError?.(err);
     }
   }
