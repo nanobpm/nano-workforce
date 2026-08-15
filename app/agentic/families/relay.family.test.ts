@@ -21,9 +21,11 @@ import { assert, assertEquals } from "#test-assert";
 import { noopLog } from "../../../test/log.ts";
 import {
   createRelayFamily,
+  currentRelayTranscriptService,
   family as relayFamily,
   RELAY_FAMILY_NAME,
   RelayTranscriptService,
+  sweepIntervalMs,
 } from "./relay.family.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -381,6 +383,107 @@ test("advisory resilience: a checkpoint flush failure keeps the long-lived strea
   assertEquals(service.checkpointStream("ctrl"), 3);
   assertEquals(service.transcriptOf("ctrl")?.status, "open");
   service.teardown();
+});
+
+test("mount installs the service singleton for the read path and teardown clears it (#222)", () => {
+  const registry = new ConnectionRegistry();
+  const ctx = {
+    hub: capturingHub() as never,
+    registry: registry as never,
+    transport: undefined as never,
+    data: { source: () => ({ db: memoryDb() }) } as never,
+    log: noopLog(),
+  };
+  const family = createRelayFamily();
+  assertEquals(currentRelayTranscriptService(), undefined, "no singleton before mount");
+  family.mount(ctx);
+  const service = currentRelayTranscriptService();
+  assert(service !== undefined, "mount installs the singleton the read endpoints source");
+  assert(service.store !== undefined, "the mounted service is persisted");
+  family.teardown?.();
+  assertEquals(currentRelayTranscriptService(), undefined, "teardown clears the singleton");
+});
+
+test("mount drives a retention sweep so completed-ephemeral transcripts are retired (#222)", () => {
+  const registry = new ConnectionRegistry();
+  // A tiny retention window + a clock we control: complete an ephemeral stream, advance past retention,
+  // then confirm the family's own sweep surface retires it (the periodic tick calls the same path).
+  let nowMs = 1_000_000;
+  const ctx = {
+    hub: capturingHub() as never,
+    registry: registry as never,
+    transport: undefined as never,
+    data: { source: () => ({ db: memoryDb() }) } as never,
+    log: noopLog(),
+  };
+  const family = createRelayFamily({ transcript: { ephemeralRetentionMs: 10, clock: { now: () => nowMs } } });
+  family.mount(ctx);
+  const service = currentRelayTranscriptService();
+  assert(service !== undefined);
+  service.store?.flush("job:9", { since: () => ({ entries: [{ offset: 0, chunk: "x" }] }), nextOffset: 1 }, "ephemeral");
+  assertEquals(service.transcriptOf("job:9")?.status, "completed");
+  nowMs += 1000; // advance well past the 10ms retention window
+  const retired = service.sweep();
+  assertEquals(retired, ["job:9"], "the completed-ephemeral transcript is retired past retention");
+  assertEquals(service.transcriptOf("job:9"), undefined);
+  family.teardown?.();
+});
+
+test("mount runs an eager retention sweep so a transcript already past retention from a previous run is retired on boot (#222)", () => {
+  const registry = new ConnectionRegistry();
+  // One durable db shared across two mounts models a process restart: the transcript table survives,
+  // so a completed-ephemeral transcript persisted before downtime is still present at the next boot.
+  const db = memoryDb();
+  let nowMs = 1_000_000;
+  const mkCtx = () => ({
+    hub: capturingHub() as never,
+    registry: registry as never,
+    transport: undefined as never,
+    data: { source: () => ({ db }) } as never,
+    log: noopLog(),
+  });
+
+  // First run: persist a completed-ephemeral transcript, then simulate downtime past its retention window.
+  const first = createRelayFamily({ transcript: { ephemeralRetentionMs: 10, clock: { now: () => nowMs } } });
+  first.mount(mkCtx());
+  const s1 = currentRelayTranscriptService();
+  assert(s1 !== undefined);
+  s1.store?.flush("job:stale", { since: () => ({ entries: [{ offset: 0, chunk: "x" }] }), nextOffset: 1 }, "ephemeral");
+  assertEquals(s1.transcriptOf("job:stale")?.status, "completed");
+  first.teardown?.();
+  nowMs += 1000; // downtime elapses well past the 10ms retention window
+
+  // Second run (restart) over the SAME durable db: the eager mount sweep must retire the already-expired
+  // transcript immediately — without waiting for the first periodic tick and without an explicit sweep().
+  const second = createRelayFamily({ transcript: { ephemeralRetentionMs: 10, clock: { now: () => nowMs } } });
+  second.mount(mkCtx());
+  const s2 = currentRelayTranscriptService();
+  assert(s2 !== undefined);
+  assertEquals(
+    s2.transcriptOf("job:stale"),
+    undefined,
+    "the eager mount sweep retires a transcript already past retention from a previous run",
+  );
+  second.teardown?.();
+});
+
+test("sweep cadence: a fraction of the retention window, floored at 1ms and capped at the Node timer max", () => {
+  // A normal retention window derives a quarter-window cadence.
+  assertEquals(sweepIntervalMs(1000), 250);
+  // A tiny/zero window still floors at a live 1ms tick rather than 0.
+  assertEquals(sweepIntervalMs(1), 1);
+  assertEquals(sweepIntervalMs(0), 1);
+  // A very large window (~1 year) would derive a >2^31-1 interval; Node clamps such a delay to 1ms and
+  // busy-loops. Cap it at the 32-bit timer ceiling so the periodic sweep stays a slow tick.
+  const oneYearMs = 365 * 24 * 60 * 60 * 1000;
+  assert(Math.floor(oneYearMs / 4) > 2_147_483_647, "precondition: an unclamped year/4 overflows the timer");
+  assertEquals(sweepIntervalMs(oneYearMs), 2_147_483_647);
+  // A non-finite retention config (NaN, ±Infinity) derives a NaN interval that setInterval() coerces
+  // to a 1ms busy tick. Clamp any non-finite window to the same timer ceiling the overflow case uses,
+  // so a broken config degrades to the slowest safe sweep rather than a busy loop.
+  assertEquals(sweepIntervalMs(Number.NaN), 2_147_483_647);
+  assertEquals(sweepIntervalMs(Number.POSITIVE_INFINITY), 2_147_483_647);
+  assertEquals(sweepIntervalMs(Number.NEGATIVE_INFINITY), 2_147_483_647);
 });
 
 test("drift guard: migration 024 mirrors the canonical transcript DDL byte-for-byte", async () => {

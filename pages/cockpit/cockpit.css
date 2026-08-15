@@ -42,6 +42,7 @@
 }
 
 .cockpit-supply-region,
+.cockpit-past-region,
 .cockpit-terminal {
   background: var(--cockpit-panel);
   border: 1px solid var(--cockpit-edge);
@@ -159,4 +160,73 @@
   min-height: 220px;
   background: #05080b;
   border-radius: 6px;
+}
+
+/* ── Past sessions (H3 read path / #222): the captured-session history + replay. ──────────────── */
+
+.cockpit-past-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.cockpit-past-title {
+  font-size: 13px;
+  margin: 0;
+  color: var(--cockpit-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.cockpit-past-summary {
+  color: var(--cockpit-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.cockpit-past-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+}
+
+.cockpit-past-replay {
+  background: none;
+  border: none;
+  color: var(--cockpit-text);
+  cursor: pointer;
+  font: inherit;
+  padding: 0;
+  text-align: left;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.cockpit-past-replay:hover { color: #58a6ff; }
+
+.cockpit-past-session[data-active="true"] {
+  background: rgba(88, 166, 255, 0.12);
+}
+
+.cockpit-past-status { color: var(--cockpit-muted); }
+.cockpit-past-size { color: var(--cockpit-muted); }
+.cockpit-past-captured { color: var(--cockpit-muted); font-size: 12px; }
+
+.cockpit-past-empty {
+  color: var(--cockpit-muted);
+  padding: 8px 0;
+}
+
+/* Distinguish a live terminal from a replayed (static) past session at a glance. */
+.cockpit-terminal[data-terminal-mode="replay"] {
+  border-color: #8957e5;
+}
+.cockpit-terminal[data-terminal-mode="replay"] .cockpit-panel-title {
+  color: #b392f0;
+}
+.cockpit-terminal[data-terminal-mode="live"] .cockpit-panel-title {
+  color: var(--cockpit-green);
 }
