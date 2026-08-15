@@ -77,6 +77,204 @@ export async function fetchPrReviews(
   return (await r.json()) as GhReview[];
 }
 
+// ── Review-comment convergence gate (don't converge with unaddressed comments) ──────────────
+//
+// A PR must not be declared converged while Copilot still has unaddressed review comments. Two
+// kinds must be gated:
+//   • unresolved review THREADS — deterministic (GraphQL `isResolved`).
+//   • SUPPRESSED / low-confidence advisories — Copilot folds these into the review BODY under a
+//     "Suppressed comments (N)" block; they are NOT threads, cannot be resolved, and are re-listed
+//     every round. To make "acknowledged" trackable, the review-round agent must post a RESOLVED
+//     review thread carrying a `nano-ack: <path>:<line>` marker (the exact key from Copilot's
+//     `**path:line**` header) for each advisory it applies or declines. The gate then treats an
+//     advisory as addressed iff a resolved thread carries its ack marker.
+
+/** One PR review thread, narrowed to what the convergence gate needs. */
+export interface ReviewThread {
+  isResolved: boolean;
+  path: string | null;
+  bodies: string[];
+}
+
+/** The `nano-ack:` acknowledgement marker the review-round agent stamps into the resolved thread
+ * it opens per suppressed advisory. The captured group is the advisory key (`path:line`). */
+const ACK_MARKER = /nano-ack:\s*([^\s)>*]+:\d+)/gi;
+
+/** Parse the `path:line` keys of Copilot's suppressed / low-confidence advisories out of a review
+ * body. Copilot renders them under a `<summary>Suppressed comments (N)</summary>` block, each as a
+ * bold `**path:line**` header. Returns the de-duplicated keys (empty when there is no such block). */
+export function parseSuppressedAdvisories(reviewBody: string | null | undefined): string[] {
+  const body = reviewBody ?? "";
+  const idx = body.search(/Suppressed comments\s*\(/i);
+  if (idx < 0) return [];
+  // Scan only from the "Suppressed comments" marker onward so a `**path:line**` elsewhere in the
+  // overview prose can never be mistaken for an advisory.
+  const region = body.slice(idx);
+  const keys = new Set<string>();
+  const re = /\*\*([^*]+?:\d+)\*\*/g;
+  let m: RegExpExecArray | null;
+  // biome-ignore lint/suspicious/noAssignInExpressions: canonical regex-exec accumulation loop
+  while ((m = re.exec(region)) !== null) keys.add(m[1].trim());
+  return [...keys];
+}
+
+/** Extract the acknowledged advisory keys from a set of review threads (only RESOLVED threads
+ * count — an open ack thread is not yet an acknowledgement). */
+export function parseAckedAdvisories(threads: ReviewThread[]): string[] {
+  const acked = new Set<string>();
+  for (const t of threads) {
+    if (!t.isResolved) continue;
+    for (const body of t.bodies) {
+      ACK_MARKER.lastIndex = 0;
+      let m: RegExpExecArray | null;
+      // biome-ignore lint/suspicious/noAssignInExpressions: canonical regex-exec accumulation loop
+      while ((m = ACK_MARKER.exec(body)) !== null) acked.add(m[1].trim());
+    }
+  }
+  return [...acked];
+}
+
+/** Fetch the latest Copilot review body for a PR (the newest review authored by the automated
+ * Copilot reviewer). Returns `null` ONLY when no transport is usable (unverifiable → the worker
+ * fails closed); returns `""` when transport is usable but the PR has no Copilot review yet (a
+ * verified "no suppressed advisories"). Throws on a genuine transport failure. This split keeps
+ * `null` from conflating "unverifiable" with "empty" and fail-OPENing the advisory dimension. */
+/** Pick the newest Copilot review body from a reviews list (GitHub returns them oldest→newest).
+ * `truncated = true` means we could NOT read every page — the genuinely-latest review may be unread,
+ * so the result is UNVERIFIABLE and we fail CLOSED (`null`) rather than return a stale page's body;
+ * a fail-OPEN on the advisory dimension (reading an old review and missing a newer suppressed
+ * advisory) is the exact class this gate exists to prevent. A verified-complete read with no Copilot
+ * review returns `""` (a verified "no advisories"). Pure; unit-tested. */
+export function pickLatestCopilotReviewBody(
+  reviews: { user?: { login?: string }; body?: string }[],
+  truncated: boolean,
+): string | null {
+  if (truncated) return null;
+  const copilot = reviews.filter((rv) => isCopilot(rv.user?.login));
+  return copilot[copilot.length - 1]?.body ?? "";
+}
+
+export async function fetchLatestCopilotReviewBody(
+  repo: string,
+  number: number | string,
+  token: string,
+): Promise<string | null> {
+  const mode = githubTransport();
+  const useGh = mode === "gh" || (mode === "auto" && (await isGhAvailable()));
+  const basePath = `repos/${repo}/pulls/${number}/reviews?per_page=100`;
+  interface Review {
+    user?: { login?: string };
+    body?: string;
+  }
+  if (useGh) {
+    // `--paginate` merges EVERY page of the (oldest→newest) reviews array, so a >100-review
+    // convergence loop still surfaces the genuinely newest Copilot review rather than the oldest
+    // 100 — reading only the first page here would fail-OPEN the advisory dimension.
+    const out = await runGh(["api", "--paginate", basePath, "-H", "Accept: application/vnd.github+json"]);
+    // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+    const reviews = JSON.parse(out) as Review[];
+    return pickLatestCopilotReviewBody(reviews, false);
+  }
+  if (!token) return null;
+  // Page the token transport the same way; 20×100 reviews is far past any real convergence loop, and
+  // a genuinely deeper history we can't reach is unverifiable → fail closed.
+  const reviews: Review[] = [];
+  const MAX_PAGES = 20;
+  for (let page = 1; page <= MAX_PAGES; page++) {
+    const r = await fetch(`https://api.github.com/${basePath}&page=${page}`, {
+      headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json" },
+    });
+    if (!r.ok) throw new Error(`github ${r.status} ${r.statusText}`.trim());
+    // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+    const batch = (await r.json()) as Review[];
+    reviews.push(...batch);
+    // A short page means we've read every review — the list is complete.
+    if (batch.length < 100) return pickLatestCopilotReviewBody(reviews, false);
+    // A full page on the last allowed page is only truncated if GitHub says there's more; trust the
+    // `Link` header's `rel="next"` so an exact multiple of 100 isn't a false positive.
+    if (page === MAX_PAGES && /<[^>]*>;\s*rel="next"/.test(r.headers.get("link") ?? "")) {
+      return pickLatestCopilotReviewBody(reviews, true);
+    }
+  }
+  return pickLatestCopilotReviewBody(reviews, false);
+}
+
+/** Raw GraphQL response shape for the review-threads query. */
+export interface ReviewThreadsResponse {
+  data?: {
+    repository?: {
+      pullRequest?: {
+        reviewThreads?: {
+          pageInfo?: { hasNextPage?: boolean };
+          nodes?: { isResolved?: boolean; path?: string | null; comments?: { nodes?: { body?: string }[] } }[];
+        };
+      };
+    };
+  };
+}
+
+/** Map a review-threads GraphQL response to `ReviewThread[]`, FAILING CLOSED (returns `null`) on any
+ * UNVERIFIABLE read: a missing `reviewThreads` block (GraphQL errors, permission issues, a malformed
+ * payload) OR a page whose completeness we can't positively confirm — i.e. anything but a confirmed
+ * `pageInfo.hasNextPage === false`. A `first:100` page cannot see thread 101+, and a missing/errored
+ * block cannot be read at all, so either is unverifiable: the worker treats `null` as unverifiable
+ * and blocks, rather than silently mapping it to "no threads" and converging (a fail-OPEN, the exact
+ * class this gate exists to prevent). Only a positively complete page is mapped. Pure; unit-tested. */
+export function parseReviewThreadsResponse(payload: ReviewThreadsResponse): ReviewThread[] | null {
+  const threads = payload.data?.repository?.pullRequest?.reviewThreads;
+  if (!threads || threads.pageInfo?.hasNextPage !== false) return null;
+  const nodes = threads.nodes ?? [];
+  return nodes.map((t) => ({
+    isResolved: !!t.isResolved,
+    path: t.path ?? null,
+    bodies: (t.comments?.nodes ?? []).map((c) => c.body ?? ""),
+  }));
+}
+
+/** Fetch a PR's review threads (resolution state + path + comment bodies) via GraphQL. `null` when
+ * no transport is usable OR the thread page is truncated (fail closed); throws on a genuine
+ * transport failure. */
+export async function fetchReviewThreads(
+  repo: string,
+  number: number | string,
+  token: string,
+): Promise<ReviewThread[] | null> {
+  const [owner, name] = repo.split("/");
+  const query =
+    "query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){pullRequest(number:$n){" +
+    "reviewThreads(first:100){pageInfo{hasNextPage}nodes{isResolved path comments(first:100){nodes{body}}}}}}}";
+  const mode = githubTransport();
+  const useGh = mode === "gh" || (mode === "auto" && (await isGhAvailable()));
+  let payload: ReviewThreadsResponse;
+  if (useGh) {
+    const out = await runGh([
+      "api",
+      "graphql",
+      "-f",
+      `query=${query}`,
+      "-F",
+      `o=${owner}`,
+      "-F",
+      `r=${name}`,
+      "-F",
+      `n=${number}`,
+    ]);
+    // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+    payload = JSON.parse(out) as ReviewThreadsResponse;
+  } else {
+    if (!token) return null;
+    const r = await fetch("https://api.github.com/graphql", {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ query, variables: { o: owner, r: name, n: Number(number) } }),
+    });
+    if (!r.ok) throw new Error(`github ${r.status} ${r.statusText}`.trim());
+    // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+    payload = (await r.json()) as ReviewThreadsResponse;
+  }
+  return parseReviewThreadsResponse(payload);
+}
+
 // ── Copilot re-request (review-wait liveness) ───────────────────────────────
 // A PR parked in `waiting_review` blocks on a *fresh* Copilot review. Copilot won't
 // spontaneously re-review a round with no new commit, and routinely dismisses a re-request, so
