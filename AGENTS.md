@@ -261,3 +261,21 @@ agents:
   PR and reference the closing issue (`Closes #NN`).
 - **Never `git push --force` on `main`;** use `--force-with-lease` on feature
   branches.
+
+## Distributed fleet: NANO_WORKFORCE_BASE_URL
+
+The abandon and blackboard hooks are how a **distributed worker fleet** calls back
+into this app. Their capability URLs (`abandonUrl`, `blackboardUrl`) are minted from a
+single knob, **`NANO_WORKFORCE_BASE_URL`** (`app/blackboard.ts` `publicBaseUrl()`,
+default `http://localhost:3000`), and are **baked into process variables at
+instance-seed time** (`app/service.ts`), then rendered into each remote agent's prompt.
+
+- The value **must be reachable from wherever the worker runs** — `localhost` only
+  works for a co-located agent, never for a remote fleet machine. Use a LAN IP /
+  hostname the fleet can reach.
+- When the app runs **embedded behind the nano console**, the base **must include the
+  reverse-proxy prefix**, e.g.
+  `http://<merlin-lan-ip>:<console-port>/console/app-view/Workforce`. `abandonUrl()`
+  then appends `/app/api/hooks/abandon?token=...`.
+- The base is **captured at instance-seed time**. Changing `NANO_WORKFORCE_BASE_URL`
+  later does **not** heal already-running instances — re-seed to pick up the new value.

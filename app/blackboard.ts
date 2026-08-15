@@ -70,11 +70,11 @@ export function mintBlackboardToken(): string {
 
 /** The externally-reachable base URL agents use to reach this app. Must resolve from WHEREVER the
  * agent runs (co-located or remote/containerised), so it is configured, never hardcoded. */
-export function publicBaseUrl(env: string | undefined = process.env.NANO_PR_PUBLIC_BASE_URL): string {
-  // Cascade through the fallback chain, skipping any value that is unset OR blank/whitespace, so an
-  // explicitly-set-but-empty NANO_PR_PUBLIC_BASE_URL can't yield a malformed capability URL.
+export function publicBaseUrl(env: string | undefined = process.env.NANO_WORKFORCE_BASE_URL): string {
+  // Skip the override if it is unset OR blank/whitespace, so an explicitly-set-but-empty
+  // NANO_WORKFORCE_BASE_URL can't yield a malformed capability URL.
   const base =
-    [env, process.env.NANO_PR_BASE_URL, "http://localhost:3000"]
+    [env, "http://localhost:3000"]
       .map((v) => v?.trim())
       .find((v): v is string => Boolean(v)) ?? "http://localhost:3000";
   return base.replace(/\/+$/, "");

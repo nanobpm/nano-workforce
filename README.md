@@ -263,7 +263,7 @@ active epic already targets the same custom base. See
 | `NANO_PR_MAX_CI_FIX_ROUNDS` | `3` | max `senior:fix-ci` attempts to green a `blocked` PR before escalating; `0` disables (escalate immediately), clamped 0–20 |
 | `NANO_PR_REVIEW_WAIT_TIMEOUT` | `PT20M` | ISO-8601 duration the loop waits for a fresh review before escalating a stalled review (timer arm of the `wait-review` gateway) |
 | `NANO_PR_REVIEW_NUDGE_MINUTES` | `5` | cooldown between the poller's automatic reviewer re-request nudges for one waiting PR (clamped 1–1440) |
-| `NANO_PR_PUBLIC_BASE_URL` | `http://localhost:3000` | externally-reachable base URL for the capability hooks (`/app/api/hooks/*`). Must resolve from **wherever the agent runs** — set it to the app's LAN address (or console-proxy URL) for a remote fleet. Falls back to `NANO_PR_BASE_URL`, then `http://localhost:3000`. See [Fleet networking](#fleet-networking-remote-workers) |
+| `NANO_WORKFORCE_BASE_URL` | `http://localhost:3000` | externally-reachable base URL for the capability hooks (`/app/api/hooks/*`). Must resolve from **wherever the agent runs** — set it to the app's LAN address (or console-proxy URL) for a remote fleet. See [Fleet networking](#fleet-networking-remote-workers) |
 | `NANO_AGENTIC_SECRET` | — | enables **secure mode** for the agentic visibility channel (`/agentic`): requires an ADR 0028 identity token + capability credential from every peer. Required to attach agentic visibility from **off-box** workers; unset = on-by-default **LOCAL mode** (well-known token, loopback peers only). Also accepts `NANO_PR_WEBHOOK_SECRET` |
 
 ### Fleet networking (remote workers)
@@ -275,8 +275,10 @@ machines. Two app surfaces must be reachable from those off-box workers:
   side-effecting agent is handed an unguessable per-run capability URL in its prompt and `curl`s it
   before each irreversible action (an unknown token is a `404`). A remote worker can only reach these
   if (a) the app's HTTP server is bound so off-box hosts can connect, and (b) the base URL baked into
-  that prompt resolves from the worker's host — hence **`NANO_PR_PUBLIC_BASE_URL` must be the app's
-  LAN address, not `localhost`**.
+  that prompt resolves from the worker's host — hence **`NANO_WORKFORCE_BASE_URL` must be the app's
+  LAN address, not `localhost`**. This base is **captured at instance-seed time** and baked into each
+  agent's prompt, so changing it later does **not** heal already-running instances — re-seed them to
+  pick up the new base.
 - The **agentic visibility channel** — `/agentic` (WebSocket). In on-by-default **LOCAL mode** it is
   gated only by a *well-known, non-secret* localhost token, so it is enforced **loopback-only**: an
   off-box peer is refused — as is a **reverse-proxied** peer (a connection carrying an
@@ -310,22 +312,22 @@ nwf composes with two deployment topologies — pick one and point the fleet at 
 
 | Path | When | Fleet uses |
 |---|---|---|
-| **Direct LAN bind** | nwf run standalone for a fleet | Bind the server wide (above) and set `NANO_PR_PUBLIC_BASE_URL=http://<app-lan-host>:3000`. Workers `curl` the hooks directly on the app's LAN address. |
-| **Console reverse-proxy** | nwf embedded behind the nano console at `/console/app-view/Workforce` | Leave the app bound to loopback and set `NANO_PR_PUBLIC_BASE_URL` to the console's public origin + the app-view prefix, so `/app/api/hooks/*` resolves through the proxy. Workers reach the hooks via the console. |
+| **Direct LAN bind** | nwf run standalone for a fleet | Bind the server wide (above) and set `NANO_WORKFORCE_BASE_URL=http://<app-lan-host>:3000`. Workers `curl` the hooks directly on the app's LAN address. |
+| **Console reverse-proxy** | nwf embedded behind the nano console at `/console/app-view/Workforce` | Leave the app bound to loopback and set `NANO_WORKFORCE_BASE_URL` to the console's public origin + the app-view prefix, so `/app/api/hooks/*` resolves through the proxy. Workers reach the hooks via the console. |
 
-Either way the capability URL in each agent's prompt (`${NANO_PR_PUBLIC_BASE_URL}/app/api/hooks/…`)
+Either way the capability URL in each agent's prompt (`${NANO_WORKFORCE_BASE_URL}/app/api/hooks/…`)
 must resolve from the worker's host. **Verify** from a fleet host before relying on it:
 
 ```sh
 # From a remote LAN worker, against the base URL seeded into agent prompts.
 # A live run returns { "prKey": "...", "status": "...", "abandoned": false }; -f exits non-zero on 404.
-curl -fsS "${NANO_PR_PUBLIC_BASE_URL}/app/api/hooks/abandon?token=<per-run-token>"
+curl -fsS "${NANO_WORKFORCE_BASE_URL}/app/api/hooks/abandon?token=<per-run-token>"
 ```
 
 If the `curl` cannot reach the host, off-box agents will (correctly, per the abort contract) treat the
 run as abandoned and stop — the exact failure behind
 [`jwulf/c8ctl-plugin-nano#76`](https://github.com/jwulf/c8ctl-plugin-nano/issues/76). Fix it by
-binding wide + setting a routable `NANO_PR_PUBLIC_BASE_URL`, or by fronting nwf with the console proxy.
+binding wide + setting a routable `NANO_WORKFORCE_BASE_URL`, or by fronting nwf with the console proxy.
 
 
 ### Purge
