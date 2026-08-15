@@ -22,6 +22,7 @@ import { fileURLToPath } from "node:url";
 import type { EngineJob } from "@nanobpm/urban/runtime";
 import { bootTestApp, type TestApp } from "@nanobpm/urban-testkit";
 import { admitGithubState, installAdmitGithub } from "./support/github-admit.ts";
+import { asEngineClient } from "./support/engine-client.ts";
 import { pollFeatureBlocked, pollFeatureEscalations } from "../app/service.ts";
 
 const APP_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -192,7 +193,7 @@ describe("single-issue feature run (#172 — feature.bpmn)", () => {
 
         // The poller fills in the completable user-task key (which no service task can know — the task
         // doesn't exist yet when record-feature runs) so the pages can drive an attributed acknowledge.
-        await pollFeatureBlocked(app.db, app.engine);
+        await pollFeatureBlocked(app.db, asEngineClient(app.engine));
         const denorm = await featureRow(app, featureKey);
         assert.ok(denorm.blocked_user_task_key, "the poller denormalised the completable blocked user-task key");
         assert.equal(denorm.status, "awaiting_operator", "the run stays awaiting_operator while parked");
@@ -214,7 +215,7 @@ describe("single-issue feature run (#172 — feature.bpmn)", () => {
         assert.equal(settled.blocked_user_task_key, null, "the completable-task pointer was cleared on ack");
 
         // A further poll pass is an idempotent no-op — a terminal run is not a candidate.
-        await pollFeatureBlocked(app.db, app.engine);
+        await pollFeatureBlocked(app.db, asEngineClient(app.engine));
         assert.equal((await featureRow(app, featureKey)).status, "blocked");
       },
     );
@@ -297,7 +298,7 @@ describe("single-issue feature run (#172 — feature.bpmn)", () => {
 
         // The poller fills in the completable user-task key (which the service task can't know — the
         // task doesn't exist yet when it runs) so the UI can drive an attributed answer.
-        await pollFeatureEscalations(app.db, app.engine);
+        await pollFeatureEscalations(app.db, asEngineClient(app.engine));
         const escalated = await featureRow(app, featureKey);
         assert.ok(escalated.escalation_user_task_key, "the poller denormalised the completable user-task key");
         assert.equal(escalated.status, "escalated", "the run stays escalated while parked");
@@ -324,7 +325,7 @@ describe("single-issue feature run (#172 — feature.bpmn)", () => {
         assert.equal(settled.escalation_question, null, "the surfaced question was cleared once resolved");
 
         // A further poll pass is an idempotent no-op — a terminal run is not a candidate.
-        await pollFeatureEscalations(app.db, app.engine);
+        await pollFeatureEscalations(app.db, asEngineClient(app.engine));
         assert.equal((await featureRow(app, featureKey)).status, "opened");
       },
     );
