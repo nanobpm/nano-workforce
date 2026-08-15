@@ -5,11 +5,19 @@
 // hub is visible via `inspect()`, families mount/tear-down through the seam, and shutdown is clean.
 import { type AddressInfo, createServer, type Server } from "node:http";
 import { test } from "node:test";
+import { AUTH_UNAUTHORIZED } from "@nanobpm/agentic/channel";
 import { createLogger } from "@nanobpm/urban/runtime";
 import { WebSocket } from "ws";
 import { assert, assertEquals } from "#test-assert";
 import { noopLog } from "../../test/log.ts";
-import { type AgenticChannelHandle, LOCAL_AGENTIC_TOKEN, mountAgenticChannel } from "./channel.ts";
+import {
+  type AgenticChannelHandle,
+  isForwardedConnection,
+  isLoopbackRemote,
+  LOCAL_AGENTIC_TOKEN,
+  loopbackOnly,
+  mountAgenticChannel,
+} from "./channel.ts";
 import { type AgenticContext, AgenticFamilyRegistry } from "./registry.ts";
 
 const SECRET = "test-agentic-secret";
@@ -358,4 +366,80 @@ test("LOCAL mode does NOT warn when the server is bound to loopback", async (t) 
 
   const warned = records.some((r) => r.level === "warn" && r.msg.includes("not bound to loopback"));
   assert(!warned, "a loopback-bound LOCAL channel is the expected safe case and must not warn");
+});
+
+// --- Loopback-only enforcement of the LOCAL well-known token (issue #224 / nano-ide#235) ---
+//
+// The LOCAL token is not a secret, so once the app binds to all interfaces (network.bind: "all") it
+// must never be honoured off-box. `isLoopbackRemote` vets the peer's origin; `loopbackOnly` wraps an
+// authenticator to refuse a non-loopback peer with 4401 while delegating loopback peers to the base.
+
+test("isLoopbackRemote accepts same-host peers and rejects everything else", () => {
+  for (const ok of ["127.0.0.1", "127.0.0.5", "::1", "::ffff:127.0.0.1", "::ffff:127.1.2.3"]) {
+    assert(isLoopbackRemote(ok), `${ok} should be loopback`);
+  }
+  for (const no of [undefined, "", "10.0.0.4", "192.168.1.20", "::ffff:10.0.0.4", "2001:db8::1", "0.0.0.0"]) {
+    assert(!isLoopbackRemote(no), `${String(no)} should NOT be loopback`);
+  }
+});
+
+test("loopbackOnly refuses a non-loopback peer with 4401 and never calls the base authenticator", () => {
+  let baseCalls = 0;
+  const base = () => {
+    baseCalls++;
+    return { ok: true as const, grant: { identity: "peer" } };
+  };
+  const guarded = loopbackOnly(base);
+
+  const remote = guarded({ token: LOCAL_AGENTIC_TOKEN, remote: "10.0.0.4" });
+  assert(!("then" in remote), "authenticator result is synchronous here");
+  assertEquals((remote as { ok: boolean; code?: number }).ok, false);
+  assertEquals((remote as { code?: number }).code, AUTH_UNAUTHORIZED);
+  assertEquals(baseCalls, 0);
+});
+
+test("loopbackOnly delegates a loopback peer to the base authenticator", () => {
+  let baseCalls = 0;
+  const base = () => {
+    baseCalls++;
+    return { ok: true as const, grant: { identity: "peer" } };
+  };
+  const guarded = loopbackOnly(base);
+
+  const local = guarded({ token: LOCAL_AGENTIC_TOKEN, remote: "127.0.0.1" });
+  assertEquals((local as { ok: boolean }).ok, true);
+  assertEquals(baseCalls, 1);
+});
+
+// A reverse proxy that connects to the app over loopback makes an off-box client appear same-host to
+// `req.remote`. `isForwardedConnection` detects the relay from proxy-forwarding headers, so
+// `loopbackOnly` fails closed on a proxied peer even when `req.remote` itself is loopback.
+
+test("isForwardedConnection detects proxy-forwarding headers and ignores absent/empty ones", () => {
+  assert(isForwardedConnection({ "x-forwarded-for": "10.0.0.4" }), "x-forwarded-for marks a relay");
+  assert(isForwardedConnection({ forwarded: "for=10.0.0.4" }), "forwarded marks a relay");
+  assert(isForwardedConnection({ "x-real-ip": "10.0.0.4" }), "x-real-ip marks a relay");
+
+  assert(!isForwardedConnection(undefined), "no headers is a direct connection");
+  assert(!isForwardedConnection({}), "empty headers is a direct connection");
+  assert(!isForwardedConnection({ "x-forwarded-for": "   " }), "whitespace value is treated as absent");
+  assert(!isForwardedConnection({ "content-type": "application/json" }), "unrelated headers are ignored");
+});
+
+test("loopbackOnly refuses a reverse-proxied peer (loopback remote + forwarding header) with 4401", () => {
+  let baseCalls = 0;
+  const base = () => {
+    baseCalls++;
+    return { ok: true as const, grant: { identity: "peer" } };
+  };
+  const guarded = loopbackOnly(base);
+
+  const proxied = guarded({
+    token: LOCAL_AGENTIC_TOKEN,
+    remote: "127.0.0.1",
+    headers: { "x-forwarded-for": "203.0.113.7" },
+  });
+  assertEquals((proxied as { ok: boolean; code?: number }).ok, false);
+  assertEquals((proxied as { code?: number }).code, AUTH_UNAUTHORIZED);
+  assertEquals(baseCalls, 0);
 });

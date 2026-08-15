@@ -17,6 +17,8 @@ import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import {
   AgenticHub,
+  AUTH_UNAUTHORIZED,
+  type Authenticator,
   sharedSecretAuthenticator,
   WebSocketChannelTransport,
 } from "@nanobpm/agentic/channel";
@@ -51,6 +53,83 @@ function isLoopbackBind(addr: string | AddressInfo | null): boolean {
   if (typeof addr === "string") return true;
   const host = addr.address;
   return host === "::1" || host === "::ffff:127.0.0.1" || host.startsWith("127.");
+}
+
+/**
+ * True if a peer's remote address (`req.remote`, i.e. `socket.remoteAddress`) is a same-host /
+ * loopback peer. This is the per-connection counterpart to {@link isLoopbackBind}: while that vets
+ * the *server's* bind, this vets the *client's* origin, so LOCAL mode can be honoured off a
+ * wildcard/all-interfaces bind (`network.bind: "all"`, issue #224) yet still refuse the well-known
+ * {@link LOCAL_AGENTIC_TOKEN} to anything but a same-machine peer. Loopback is `127.0.0.0/8`, `::1`,
+ * or the IPv6-mapped IPv4 forms Node reports on a dual-stack listener (`::ffff:127.x`). An
+ * absent/unparseable remote is NOT provably same-host, so it is treated as non-loopback
+ * (fail-closed), matching the `isLoopbackBind(null) === false` posture.
+ */
+export function isLoopbackRemote(remote: string | undefined): boolean {
+  if (!remote) return false;
+  return (
+    remote === "::1" ||
+    remote === "::ffff:127.0.0.1" ||
+    remote.startsWith("127.") ||
+    remote.startsWith("::ffff:127.")
+  );
+}
+
+/**
+ * Proxy-forwarding request headers. Their presence means the connection was relayed through a
+ * reverse proxy, so `req.remote` is the *proxy's* address (typically loopback for an embedded/console
+ * proxy) rather than the true client — a loopback `remote` no longer proves a same-host peer. A
+ * genuine same-machine loopback peer connects directly and never carries one of these.
+ */
+const FORWARDING_HEADERS: readonly string[] = ["x-forwarded-for", "forwarded", "x-real-ip"];
+
+/**
+ * True if the handshake carries a proxy-forwarding header — i.e. the connection reached us through a
+ * reverse proxy, so `req.remote` is the proxy, not the originating client. Used to fail LOCAL mode
+ * closed: a relayed connection can present a loopback `remote` (the proxy) while the real client is
+ * off-box, so the well-known token must never be honoured for it (see {@link loopbackOnly}). Headers
+ * are lower-cased by the transport ({@link HandshakeRequest.headers}); an empty/whitespace value is
+ * treated as absent.
+ */
+export function isForwardedConnection(headers: Readonly<Record<string, string>> | undefined): boolean {
+  if (!headers) return false;
+  return FORWARDING_HEADERS.some((h) => {
+    const value = headers[h];
+    return typeof value === "string" && value.trim() !== "";
+  });
+}
+
+/**
+ * Wrap `base` so a peer is admitted ONLY from a direct, same-host loopback connection. LOCAL mode
+ * gates purely on the well-known {@link LOCAL_AGENTIC_TOKEN}, which is not a secret — so once the app
+ * is exposed on the LAN (`network.bind: "all"`, issue #224) that token must never be honoured
+ * off-box. This enforces the invariant per-connection (any other peer is closed `4401`), independent
+ * of the server's bind, closing the interplay the bind-to-all setting exposes (nano-ide#235).
+ *
+ * Two ways a peer can fail to be a same-host loopback client, both refused:
+ *  - a non-loopback `req.remote` (a direct off-box connection); or
+ *  - a proxy-forwarding header ({@link isForwardedConnection}) — the connection was relayed, so a
+ *    loopback `req.remote` is the *proxy*, not the client. Refusing any forwarded connection keeps
+ *    the guard robust even if `/agentic` is inadvertently reverse-proxied over loopback (the
+ *    embedded/console-proxy topology), where the off-box client would otherwise appear same-host.
+ *
+ * Note this guards ONLY the agentic visibility channel: the capability HTTP hooks
+ * (`/app/api/hooks/*`) carry their own unguessable per-request tokens and stay reachable off-box
+ * (including through the console proxy), which is what a remote fleet needs. To attach agentic
+ * visibility from off-box — directly or via a proxy — run the channel in SECURE mode instead.
+ */
+export function loopbackOnly(base: Authenticator): Authenticator {
+  return (req) => {
+    if (isForwardedConnection(req.headers) || !isLoopbackRemote(req.remote)) {
+      return {
+        ok: false,
+        code: AUTH_UNAUTHORIZED,
+        reason:
+          "LOCAL-mode agentic channel is loopback-only and refuses reverse-proxied peers; use secure mode (NANO_AGENTIC_SECRET) for off-box or proxied peers",
+      };
+    }
+    return base(req);
+  };
 }
 
 export interface MountAgenticChannelOptions {
@@ -116,39 +195,44 @@ export async function mountAgenticChannel(
   }
 
   const transport = new WebSocketChannelTransport({ server, path: AGENTIC_PATH });
+  // LOCAL mode gates only on the well-known localhost token, so it must be honoured only for a
+  // same-machine peer: wrap the authenticator to refuse any non-loopback remote (see loopbackOnly).
+  // Secure mode presents a real ADR 0028 identity token + capability credential, so it is safe from
+  // any origin and needs no such guard.
+  const baseAuthenticator = sharedSecretAuthenticator({ secret, requireCredential: secure });
   const hub = new AgenticHub({
     transport,
     // Secure mode: a valid identity token PLUS a required capability credential upgrades; either
     // missing/invalid is rejected (4401 / 4403). Swap in a real ADR 0028 verifier later by passing an
-    // Authenticator. LOCAL mode: token-only (the well-known localhost token), no credential required.
-    authenticator: sharedSecretAuthenticator({ secret, requireCredential: secure }),
+    // Authenticator. LOCAL mode: token-only (the well-known localhost token), loopback peers only.
+    authenticator: secure ? baseAuthenticator : loopbackOnly(baseAuthenticator),
     onError: (err, connectionId) =>
       log.warn("agentic hub error", { connectionId, err: String(err) }),
   });
   // Share the app's port: the transport rode the existing server, so it is already listening.
   await transport.ready();
 
-  // LOCAL mode gates only on the well-known localhost token, so it is safe ONLY while the server is
-  // bound to loopback. The channel rides the app's server and does not own its bind address, so it
-  // cannot enforce this — but if the server is exposed on a wildcard/public interface, the token is
-  // reachable off-box; warn loudly so an operator either binds to loopback or switches to secure mode.
-  // A `null` address (server not listening yet) is unverifiable — warn rather than silently skipping
-  // the exposure check, since the bind could later resolve to a public interface.
+  // LOCAL mode is now enforced loopback-only per connection (see loopbackOnly), so the well-known
+  // token can never be honoured off-box even on a wildcard/all-interfaces bind. A non-loopback bind
+  // is still worth surfacing though: it means off-box agentic peers are REFUSED, so a remote worker
+  // fleet gets no visibility until the channel runs in secure mode. Warn so the operator makes the
+  // deliberate choice. A `null` address (server not listening yet) is unverifiable — warn too.
   if (!secure) {
     const addr = server.address();
     if (addr === null) {
       log.warn(
         "agentic channel is in LOCAL mode but the server bind address could not be verified " +
-          "(the server is not listening yet) — the well-known LOCAL_AGENTIC_TOKEN cannot be " +
-          "confirmed loopback-only. Mount the channel after the server is listening, set " +
-          "NANO_AGENTIC_SECRET for secure mode, or bind the server to 127.0.0.1.",
+          "(the server is not listening yet) — the loopback-only enforcement for the well-known " +
+          "LOCAL_AGENTIC_TOKEN cannot be confirmed. Mount the channel after the server is listening, " +
+          "set NANO_AGENTIC_SECRET for secure mode, or bind the server to 127.0.0.1.",
         { mode: "local", bind: null },
       );
     } else if (!isLoopbackBind(addr)) {
       log.warn(
-        "agentic channel is in LOCAL mode but the server is not bound to loopback — the well-known " +
-          "LOCAL_AGENTIC_TOKEN is reachable from other hosts. Set NANO_AGENTIC_SECRET for secure " +
-          "mode, or bind the server to 127.0.0.1.",
+        "agentic channel is in LOCAL mode but the server is not bound to loopback — off-box peers " +
+          "are refused the channel (the well-known LOCAL_AGENTIC_TOKEN is enforced loopback-only), " +
+          "so a remote worker fleet cannot attach visibility. Set NANO_AGENTIC_SECRET for secure " +
+          "mode to serve remote peers, or bind the server to 127.0.0.1.",
         { mode: "local", bind: typeof addr === "object" ? addr.address : String(addr) },
       );
     }

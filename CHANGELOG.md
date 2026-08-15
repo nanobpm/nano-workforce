@@ -1,3 +1,10 @@
+# [0.69.0](https://github.com/nanobpm/nano-workforce/compare/v0.68.0...v0.69.0) (2026-08-15)
+
+
+### Features
+
+* **agentic:** enable nwf for a remote fleet — loopback-guard the LOCAL token + document network posture ([#224](https://github.com/nanobpm/nano-workforce/issues/224)) ([#228](https://github.com/nanobpm/nano-workforce/issues/228)) ([73f6170](https://github.com/nanobpm/nano-workforce/commit/73f6170ff4c0df0ad6c4eb2a2e6e9b3df5d1e343)), closes [nano-ide#235](https://github.com/nano-ide/issues/235) [nano-ide#235](https://github.com/nano-ide/issues/235)
+
 # [0.68.0](https://github.com/nanobpm/nano-workforce/compare/v0.67.0...v0.68.0) (2026-08-14)
 
 
