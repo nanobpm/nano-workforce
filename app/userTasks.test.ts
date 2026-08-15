@@ -5,10 +5,14 @@
 // These are the pure source of truth the poller projects, mirroring `deriveFeatureEscalationPatch`.
 import { test } from "node:test";
 import { assert, assertEquals } from "#test-assert";
+import type { PlanReview } from "./plan.ts";
+import type { TrialMergeAuditRow } from "./trialMerge.ts";
 import {
   buildUserTaskRow,
   PLAN_REVIEW_ELEMENT,
   PR_WAIT_ANSWER_ELEMENT,
+  latestPlanReviewFindings,
+  latestTrialMergeQuestion,
   reconcileUserTasks,
   TRIAL_MERGE_ELEMENT,
   type UserTaskRow,
@@ -114,4 +118,61 @@ test("reconcileUserTasks: a drifted question is an update that preserves the ori
   assertEquals(updates.length, 1);
   assertEquals(updates[0].question, "new");
   assertEquals(updates[0].created_at, "2025-06-01T00:00:00.000Z");
+});
+
+// ── Audit-log derivations for the plan escalations (migration 027 retired the bespoke mirror tables,
+//    so the question text is derived from the surviving `plan_reviews` / `plan_trial_merges` logs). ──
+
+const review = (over: Partial<PlanReview>): PlanReview => ({
+  plan_key: "o/r#20",
+  epoch: 0,
+  round: 0,
+  approved: 0,
+  findings: null,
+  created_at: AT,
+  job_key: null,
+  ...over,
+});
+
+const audit = (over: Partial<TrialMergeAuditRow>): TrialMergeAuditRow => ({
+  id: 1,
+  plan_key: "o/r#20",
+  wave: 0,
+  result: "suite-failed",
+  heads: null,
+  conflicts: null,
+  failing: null,
+  summary: null,
+  job_key: null,
+  resolved: 0,
+  created_at: AT,
+  updated_at: AT,
+  ...over,
+});
+
+test("latestPlanReviewFindings: picks the latest round's findings across epochs", () => {
+  const reviews = [
+    review({ epoch: 0, round: 0, findings: "epoch0 round0" }),
+    review({ epoch: 1, round: 1, findings: "latest" }),
+    review({ epoch: 1, round: 0, findings: "epoch1 round0" }),
+  ];
+  assertEquals(latestPlanReviewFindings(reviews), "latest");
+});
+
+test("latestPlanReviewFindings: null when there are no review rows", () => {
+  assertEquals(latestPlanReviewFindings([]), null);
+});
+
+test("latestTrialMergeQuestion: picks the newest UNRESOLVED red row's summary", () => {
+  const audits = [
+    audit({ id: 1, wave: 0, result: "suite-failed", summary: "old red", resolved: 1 }),
+    audit({ id: 2, wave: 0, result: "suite-failed", summary: "latest red", resolved: 0 }),
+    audit({ id: 3, wave: 1, result: "clean", summary: "green", resolved: 0 }),
+  ];
+  assertEquals(latestTrialMergeQuestion(audits), "latest red");
+});
+
+test("latestTrialMergeQuestion: null when every red row is resolved (escalation answered)", () => {
+  const audits = [audit({ id: 1, result: "suite-failed", summary: "red", resolved: 1 })];
+  assertEquals(latestTrialMergeQuestion(audits), null);
 });

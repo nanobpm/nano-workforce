@@ -19,6 +19,8 @@
 // it open.
 import type { DataLayer } from "@nanobpm/urban";
 import { FEATURE_BLOCKED_ELEMENT, FEATURE_ESCALATION_ELEMENT } from "./feature.ts";
+import type { PlanReview } from "./plan.ts";
+import type { TrialMergeAuditRow } from "./trialMerge.ts";
 
 const now = () => new Date().toISOString();
 
@@ -148,45 +150,41 @@ export function reconcileUserTasks(persisted: UserTaskRow[], desired: UserTaskRo
   return { inserts, updates, deletes };
 }
 
-// ── Audit-table accessors used by the poller to enrich the question text ──────────────────────────
-// These read the denormalised question/findings each escalation kind already records, keyed by the
-// subject, so the Tasks grid can show WHAT is being decided. They are display-only.
+// ── Audit-table accessors + derivations used by the poller to enrich the question text ────────────
+// These read the question/findings each escalation kind already records in a SURVIVING audit table,
+// keyed by the subject, so the Tasks grid can show WHAT is being decided. They are display-only.
+//
+// NB: the bespoke `plan_escalations` / `plan_review_escalations` mirror tables were retired in
+// migration 027 (the CONTRACT phase of the native-userTask migration), so the enrichment is derived
+// from the canonical append-only audit logs that DID survive — `plan_reviews` (the adversarial
+// plan-review log) and `plan_trial_merges` (the D3 trial-merge gate log) — not from a dropped mirror.
+// The PR-loop `escalations` audit table was deliberately KEPT by 027, so `prEscalations` still reads it.
 
-/** One implementation-phase / trial-merge escalation (006_task_escalation.sql, 014_plan_trial_merges).
- *  `status` is open | answered; the poller reads the OPEN row's `question`. */
-export interface PlanEscalationRow {
-  id: number;
-  plan_key: string;
-  task_id: string;
-  corr_key: string;
-  question: string;
-  answer: string | null;
-  draft_pr_key: string | null;
-  status: string;
-  asked_at: string;
-  answered_at: string | null;
+/** Pure: the findings that drove the still-open `plan-review-decision` escalation — the latest
+ *  adversarial plan-review round's critique. `plan_reviews` is append-only per (epoch, round); the
+ *  parked escalation is the tail of the current epoch, so the latest round by (epoch, round) carries
+ *  the rejecting findings the human is being asked to overrule. `null` when there is no round yet. */
+export function latestPlanReviewFindings(reviews: readonly PlanReview[]): string | null {
+  let latest: PlanReview | undefined;
+  for (const r of reviews) {
+    if (!latest || r.epoch > latest.epoch || (r.epoch === latest.epoch && r.round > latest.round)) latest = r;
+  }
+  return latest?.findings ?? null;
 }
 
-export const planEscalations = (data: DataLayer) =>
-  data.table<PlanEscalationRow>("plan_escalations", "id");
-
-/** One plan-review cap escalation (020_plan_review_escalation.sql). `status` is open | answered; the
- *  poller reads the OPEN row's `findings` as the question. */
-export interface PlanReviewEscalationRow {
-  id: number;
-  plan_key: string;
-  epoch: number;
-  round: number;
-  findings: string | null;
-  status: string;
-  directive: string | null;
-  note: string | null;
-  asked_at: string;
-  answered_at: string | null;
+/** Pure: the summary that drove the still-open `trial-merge-decision` escalation — the newest
+ *  UNRESOLVED red trial-merge attempt. `plan_trial_merges` is append-only and supersede-on-insert
+ *  marks superseded rows `resolved = 1`, so the newest unresolved `suite-failed`/`merge-conflict` row
+ *  (highest `id`) is the wave awaiting the human decision. `null` when none is open. */
+export function latestTrialMergeQuestion(audits: readonly TrialMergeAuditRow[]): string | null {
+  let latest: TrialMergeAuditRow | undefined;
+  for (const a of audits) {
+    if (a.resolved === 1) continue;
+    if (a.result !== "suite-failed" && a.result !== "merge-conflict") continue;
+    if (!latest || a.id > latest.id) latest = a;
+  }
+  return latest?.summary ?? null;
 }
-
-export const planReviewEscalations = (data: DataLayer) =>
-  data.table<PlanReviewEscalationRow>("plan_review_escalations", "id");
 
 /** One PR review-loop escalation (001_init.sql `escalations`). `status` is open | answered; the poller
  *  reads the OPEN row's `question`. */

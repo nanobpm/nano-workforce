@@ -26,14 +26,15 @@ import {
 import { mergeLanes, readExclusions } from "./mergeExclusion.ts";
 import { freshHeadRunAction, headRunPresenceCount, loadMergeProtocol } from "./mergeProtocol.ts";
 import { type PrLaneDecision, planPrLane, taskDependencyDepths } from "./mergeTrain.ts";
-import { plans, planTaskDeps, planTasks } from "./plan.ts";
+import { planReviews, plans, planTaskDeps, planTasks } from "./plan.ts";
 import { clampNudgeMinutes, reviewWaitTimeout } from "./reviewWait.ts";
+import { trialMergeAudits } from "./trialMerge.ts";
 import {
   buildUserTaskRow,
+  latestPlanReviewFindings,
+  latestTrialMergeQuestion,
   PLAN_REVIEW_ELEMENT,
   PR_WAIT_ANSWER_ELEMENT,
-  planEscalations,
-  planReviewEscalations,
   prEscalations,
   reconcileUserTasks,
   TRIAL_MERGE_ELEMENT,
@@ -1476,7 +1477,7 @@ export async function pollUserTasks(data: DataLayer, engine: EngineClient) {
       }
       for (const t of tasks) {
         if (t.elementId === PLAN_REVIEW_ELEMENT) {
-          const open = (await planReviewEscalations(data).find({ plan_key: plan.plan_key, status: "open" }))[0];
+          const question = latestPlanReviewFindings(await planReviews(data).find({ plan_key: plan.plan_key }));
           push(
             buildUserTaskRow(
               {
@@ -1485,16 +1486,14 @@ export async function pollUserTasks(data: DataLayer, engine: EngineClient) {
                 subjectType: "plan",
                 subjectKey: plan.plan_key,
                 subjectUrl: plan.issue_url,
-                question: open?.findings ?? null,
+                question,
                 processKey: plan.process_key,
               },
               at,
             ),
           );
         } else if (t.elementId === TRIAL_MERGE_ELEMENT) {
-          const open = (await planEscalations(data).find({ plan_key: plan.plan_key, status: "open" })).find((e) =>
-            e.task_id.startsWith("trial-merge"),
-          );
+          const question = latestTrialMergeQuestion(await trialMergeAudits(data, plan.plan_key));
           push(
             buildUserTaskRow(
               {
@@ -1503,7 +1502,7 @@ export async function pollUserTasks(data: DataLayer, engine: EngineClient) {
                 subjectType: "plan",
                 subjectKey: plan.plan_key,
                 subjectUrl: plan.issue_url,
-                question: open?.question ?? null,
+                question,
                 processKey: plan.process_key,
               },
               at,

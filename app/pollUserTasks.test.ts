@@ -78,8 +78,13 @@ test("pollUserTasks: projects feature / plan-review / trial-merge / PR-wait esca
       { plan_key: "o/r#20", status: "dispatched", process_key: "pp-20", issue_url: "https://github.com/o/r/issues/20" },
       { plan_key: "o/r#21", status: "done", process_key: "pp-21", issue_url: "https://github.com/o/r/issues/21" },
     ],
-    plan_review_escalations: [{ id: 1, plan_key: "o/r#20", status: "open", findings: "scope too broad" }],
-    plan_escalations: [{ id: 1, plan_key: "o/r#20", status: "open", task_id: "trial-merge-wave-0", question: "wave 0 red" }],
+    plan_reviews: [
+      { plan_key: "o/r#20", epoch: 0, round: 0, approved: 0, findings: "scope was fine", created_at: "2025-01-01T00:00:00.000Z" },
+      { plan_key: "o/r#20", epoch: 0, round: 1, approved: 0, findings: "scope too broad", created_at: "2025-01-02T00:00:00.000Z" },
+    ],
+    plan_trial_merges: [
+      { id: 1, plan_key: "o/r#20", wave: 0, result: "suite-failed", summary: "wave 0 red", resolved: 0 },
+    ],
     pull_requests: [
       { pr_key: "o/r#30", status: "escalated", process_key: "rp-30", url: "https://github.com/o/r/pull/30" },
     ],
