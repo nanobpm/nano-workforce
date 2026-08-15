@@ -177,6 +177,14 @@ class SupplyCockpit implements SupplyCockpitHandle {
     if ((env.setTimer === undefined) !== (env.clearTimer === undefined)) {
       throw new Error("SupplyCockpitEnv.setTimer and clearTimer must be provided together (or neither)");
     }
+    // fetchTranscripts (the past-sessions LIST source) and fetchTranscript (the per-session REPLAY source)
+    // are a matched pair: the past panel is rendered whenever the list source is present, but its replay
+    // buttons route through replay(), which no-ops without the replay source — so a list source without a
+    // replay source surfaces buttons that silently do nothing, and a replay source without a list source
+    // is an unreachable capability. Require both together (or neither) so a half-wired env fails loudly.
+    if ((env.fetchTranscripts === undefined) !== (env.fetchTranscript === undefined)) {
+      throw new Error("SupplyCockpitEnv.fetchTranscripts and fetchTranscript must be provided together (or neither)");
+    }
     this.#setTimer =
       env.setTimer ??
       ((run, ms) => {
@@ -319,6 +327,10 @@ class SupplyCockpit implements SupplyCockpitHandle {
       const handle = this.#setTimer(() => {
         if (settled) return;
         settled = true;
+        // Clear our own handle on the timeout arm too, symmetric with the fetch arms below: a
+        // caller-supplied clearTimer may reclaim a handle a fired timer still holds, and clearing here
+        // guards against a custom scheduler re-invoking the callback (the settled latch is belt-and-braces).
+        this.#clearTimer(handle);
         reject(new Error(`${what} fetch timed out after ${this.#pastFetchTimeoutMs}ms`));
       }, this.#pastFetchTimeoutMs);
       fetch().then(

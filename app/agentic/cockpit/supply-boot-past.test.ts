@@ -308,3 +308,74 @@ test("a permanently hung replay fetch is bounded by a timeout so replay() always
   assert.equal(cockpit.currentMode, undefined, "a timed-out replay leaves the terminal idle, not stuck in replay");
   cockpit.dispose();
 });
+
+test("the bounded-wait timeout clears its own timer handle (no leak / no double-fire under custom timers)", async () => {
+  const r = rig();
+  // A hand-driven timer seam: setTimer records the handle, clearTimer records + drops it. Only clearTimer
+  // removes a handle from the map — firing a timer callback does not — so a surviving handle after the
+  // timeout arm fires is a genuine leak the custom clearTimer never got to reclaim.
+  const timers = new Map<number, () => void>();
+  const cleared: number[] = [];
+  let nextId = 0;
+  const env: SupplyCockpitEnv = {
+    ...r.env,
+    setTimer: (run) => {
+      const id = nextId++;
+      timers.set(id, run);
+      return id;
+    },
+    clearTimer: (handle) => {
+      cleared.push(handle as number);
+      timers.delete(handle as number);
+    },
+    pastFetchTimeoutMs: 5000,
+    // The replay fetch hangs forever, so the bounded wait settles via its TIMEOUT arm (not the fetch arm).
+    fetchTranscript: () => new Promise<TranscriptDataReport>(() => {}),
+  };
+  const cockpit = bootSupplyCockpit(env);
+  await cockpit.refresh(); // the list fetch resolves, clearing its own bounded timer
+  await flush();
+
+  // Capture exactly the timer the replay's bounded wait schedules.
+  const before = new Set(timers.keys());
+  const replaying = cockpit.replay("job:past");
+  await flush();
+  const replayTimers = [...timers.keys()].filter((id) => !before.has(id));
+  assert.equal(replayTimers.length, 1, "replay scheduled exactly one bounded-wait timer");
+  const replayTimerId = replayTimers[0];
+
+  // Fire the timeout arm: the wait rejects and replay() settles.
+  timers.get(replayTimerId)?.();
+  await replaying;
+  await flush();
+
+  // The timeout arm MUST clear its own handle — otherwise a custom scheduler leaks it and can re-fire it.
+  assert.ok(cleared.includes(replayTimerId), "the timeout arm called clearTimer on its own handle");
+  assert.equal(timers.has(replayTimerId), false, "no leaked timer handle survives the timeout");
+  cockpit.dispose();
+});
+
+test("constructing with fetchTranscripts but no fetchTranscript fails fast (replay would silently no-op)", () => {
+  const r = rig(false);
+  assert.throws(
+    () => bootSupplyCockpit({ ...r.env, fetchTranscripts: () => Promise.resolve(transcripts) }),
+    /fetchTranscripts and fetchTranscript must be provided together/,
+    "a past list source without a replay source is a half-wired env",
+  );
+});
+
+test("constructing with fetchTranscript but no fetchTranscripts fails fast (unreachable replay source)", () => {
+  const r = rig(false);
+  assert.throws(
+    () => bootSupplyCockpit({ ...r.env, fetchTranscript: () => Promise.resolve(transcriptData) }),
+    /fetchTranscripts and fetchTranscript must be provided together/,
+    "a replay source with no past list to launch it from is half-wired too",
+  );
+});
+
+test("constructing with both transcript sources (or neither) is accepted", () => {
+  const both = rig(true);
+  const neither = rig(false);
+  assert.doesNotThrow(() => bootSupplyCockpit(both.env), "both sources together is the wired-up case");
+  assert.doesNotThrow(() => bootSupplyCockpit(neither.env), "neither source is the transcripts-off case");
+});
