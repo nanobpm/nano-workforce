@@ -1,3 +1,10 @@
+## [0.70.2](https://github.com/nanobpm/nano-workforce/compare/v0.70.1...v0.70.2) (2026-08-15)
+
+
+### Bug Fixes
+
+* **merge-loop:** add agent-task liveness SLA backstop for rebase/fix-ci ([#237](https://github.com/nanobpm/nano-workforce/issues/237)) ([c77cdca](https://github.com/nanobpm/nano-workforce/commit/c77cdca974a1e53ef2f9757cc5cedf95068713f1))
+
 ## [0.70.1](https://github.com/nanobpm/nano-workforce/compare/v0.70.0...v0.70.1) (2026-08-15)
 
 
