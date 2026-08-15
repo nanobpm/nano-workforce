@@ -42,6 +42,20 @@ export const RELAY_FAMILY_NAME = "relay";
  * window (like the presence family runs its maintenance tick at a fraction of the presence TTL). */
 const SWEEP_DIVISOR = 4;
 
+/** Node's setInterval/setTimeout ceiling (2^31-1 ms ≈ 24.8 days). A delay above this overflows the
+ * 32-bit timer and Node silently clamps it to 1ms — turning a slow periodic tick into a busy loop. */
+const MAX_TIMER_MS = 2_147_483_647;
+
+/**
+ * The retention-sweep cadence (ms) for a given ephemeral-retention window: a fraction of the window,
+ * floored at 1ms and — crucially — capped at {@link MAX_TIMER_MS} so a large retention config (e.g.
+ * a multi-month window) cannot overflow Node's 32-bit timer and degrade the sweep into a busy loop.
+ */
+export function sweepIntervalMs(ephemeralRetentionMs: number): number {
+  const interval = Math.floor(ephemeralRetentionMs / SWEEP_DIVISOR);
+  return Math.min(MAX_TIMER_MS, Math.max(1, interval));
+}
+
 /** Read a property off an unknown value without an unsafe `as` cast (mirrors the loader's helper). */
 function readProp(value: unknown, key: string): unknown {
   if (!value || typeof value !== "object") return undefined;
@@ -334,7 +348,7 @@ export function createRelayFamily(options: {
       // (a sweep fault is logged, never thrown) and never keeps the process alive on its own.
       const store = service.store;
       if (store) {
-        const interval = Math.max(1, Math.floor(store.ephemeralRetentionMs / SWEEP_DIVISOR));
+        const interval = sweepIntervalMs(store.ephemeralRetentionMs);
         const tick = () => {
           try {
             const retired = service?.sweep() ?? [];

@@ -136,6 +136,14 @@ class SupplyCockpit implements SupplyCockpitHandle {
   // panel title can distinguish live from replayed.
   #mode: TerminalMode | undefined;
   #shownStream: string | undefined;
+  // Bumped by every drill()/replay()/dispose() that takes over the terminal region. replay() is async
+  // (it awaits a transcript fetch); capturing this token before the await and re-checking it after lets
+  // a slow replay drop its result when a newer drill/replay has since claimed the terminal — so a
+  // late-resolving stale fetch can never clobber a newer selection (or leak the newer drill's client).
+  #opToken = 0;
+  // True while a #refreshPast() fetch is in flight, so the supply poll never stacks past-fetches and a
+  // hung transcripts endpoint can't accumulate pending calls.
+  #pastRefreshing = false;
   // Bumped by every start()/stop() so an in-flight #tick() from a previous start cycle can't
   // reschedule after a stop→start race and leave two overlapping poll chains running.
   #generation = 0;
@@ -244,29 +252,40 @@ class SupplyCockpit implements SupplyCockpitHandle {
     } catch (err) {
       this.#env.onError?.(err);
     }
-    await this.#refreshPast();
+    // Fire-and-forget: the "past sessions" refresh must never gate the supply poll's next tick. A
+    // transcripts endpoint that hangs (not just rejects) would otherwise stall #refresh() forever and
+    // wedge the live worker list. #refreshPast is single-flight, so a slow fetch can't pile up either.
+    void this.#refreshPast();
   }
 
   /** Fetch + render the "past sessions" history list, when a transcript source is wired. Independent
-   * of the supply fetch: a transcript-endpoint fault never blocks the live worker list. */
+   * of the supply fetch: a transcript-endpoint fault (or hang) never blocks the live worker list. */
   async #refreshPast(): Promise<void> {
     const fetchTranscripts = this.#env.fetchTranscripts;
     if (fetchTranscripts === undefined || this.#pastRegion === undefined) return;
-    let report: TranscriptListReport;
+    // Single-flight: while one past-fetch is outstanding (including a hung one), skip starting another
+    // so the poll can't stack pending fetches against a slow/unresponsive transcripts endpoint.
+    if (this.#pastRefreshing) return;
+    this.#pastRefreshing = true;
     try {
-      report = await fetchTranscripts();
-    } catch (err) {
-      this.#env.onError?.(err);
-      return;
-    }
-    if (this.#disposed || this.#pastRegion === undefined) return;
-    try {
-      renderTranscripts(this.#pastRegion, this.#env.doc, transcriptsView(report), {
-        onReplay: (stream) => void this.replay(stream),
-        ...(this.#mode === "replay" && this.#shownStream !== undefined ? { activeStream: this.#shownStream } : {}),
-      });
-    } catch (err) {
-      this.#env.onError?.(err);
+      let report: TranscriptListReport;
+      try {
+        report = await fetchTranscripts();
+      } catch (err) {
+        this.#env.onError?.(err);
+        return;
+      }
+      if (this.#disposed || this.#pastRegion === undefined) return;
+      try {
+        renderTranscripts(this.#pastRegion, this.#env.doc, transcriptsView(report), {
+          onReplay: (stream) => void this.replay(stream),
+          ...(this.#mode === "replay" && this.#shownStream !== undefined ? { activeStream: this.#shownStream } : {}),
+        });
+      } catch (err) {
+        this.#env.onError?.(err);
+      }
+    } finally {
+      this.#pastRefreshing = false;
     }
   }
 
@@ -300,6 +319,9 @@ class SupplyCockpit implements SupplyCockpitHandle {
   drill(stream: string): void {
     if (this.#disposed) return;
     if (this.#mode === "live" && this.#drill?.stream === stream) return;
+    // Claim the terminal region: bump the op token so any in-flight replay (whose fetch has not yet
+    // resolved) drops its result instead of overwriting this live drill once it lands.
+    this.#opToken++;
     // Close and drop the prior drill up-front so a synchronous failure while building the new one
     // (createTerminal, an invalid TerminalSession credit, or connect throwing) can't leave #drill
     // pointing at an already-closed client. #drill is re-set only once the new client is fully wired.
@@ -351,6 +373,8 @@ class SupplyCockpit implements SupplyCockpitHandle {
     if (this.#disposed) return;
     const fetchTranscript = this.#env.fetchTranscript;
     if (fetchTranscript === undefined) return;
+    // Claim the terminal region under a fresh op token, captured for the post-fetch re-check below.
+    const token = ++this.#opToken;
     // Drop any live drill and the prior terminal before fetching so a replay never runs alongside a
     // live stream in the same region.
     this.#drill?.client.close();
@@ -366,7 +390,9 @@ class SupplyCockpit implements SupplyCockpitHandle {
       this.#env.onError?.(err);
       return;
     }
-    if (this.#disposed) return;
+    // A newer drill()/replay() (or dispose()) claimed the terminal while this fetch was outstanding —
+    // drop this stale result rather than clobber the newer selection with an out-of-date replay.
+    if (this.#disposed || token !== this.#opToken) return;
     try {
       this.#terminalHost.replaceChildren();
       const sink = this.#env.createTerminal(this.#terminalHost);
@@ -384,6 +410,7 @@ class SupplyCockpit implements SupplyCockpitHandle {
   dispose(): void {
     if (this.#disposed) return;
     this.#disposed = true;
+    this.#opToken++;
     this.stop();
     this.#drill?.client.close();
     this.#drill = undefined;

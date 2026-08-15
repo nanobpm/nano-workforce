@@ -385,6 +385,12 @@ export function mountCockpit(host, opts = {}) {
   let terminal; // the current xterm sink
   let mode; // "live" | "replay" | undefined
   let shownStream;
+  // Bumped by every drillInto()/replayInto()/dispose() that claims the terminal region, so a slow
+  // replay fetch that resolves after a newer selection drops its result instead of clobbering it.
+  let opToken = 0;
+  // True while a refreshPast() fetch is outstanding, so the supply poll never stacks past-fetches
+  // against a slow/hung transcripts endpoint.
+  let pastRefreshing = false;
 
   function setMode(next, stream) {
     mode = next;
@@ -404,6 +410,8 @@ export function mountCockpit(host, opts = {}) {
 
   function drillInto(stream) {
     if (disposed || (mode === "live" && drill?.stream === stream)) return;
+    // Claim the terminal region: bump the op token so an in-flight replay drops its stale result.
+    opToken++;
     teardownTerminal();
     try {
       terminalHost.replaceChildren();
@@ -427,6 +435,8 @@ export function mountCockpit(host, opts = {}) {
 
   async function replayInto(stream) {
     if (disposed) return;
+    // Claim the terminal region under a fresh op token, captured for the post-fetch re-check below.
+    const token = ++opToken;
     // Drop any live drill + prior terminal before fetching so replay never overlaps a live stream.
     teardownTerminal();
     setMode(undefined, undefined);
@@ -439,7 +449,9 @@ export function mountCockpit(host, opts = {}) {
       onError(err);
       return;
     }
-    if (disposed) return;
+    // A newer drill/replay (or dispose) claimed the terminal while this fetch was outstanding — drop
+    // the stale result rather than overwrite the newer selection with an out-of-date replay.
+    if (disposed || token !== opToken) return;
     try {
       terminalHost.replaceChildren();
       const sink = xtermSink(terminalHost);
@@ -454,20 +466,28 @@ export function mountCockpit(host, opts = {}) {
   }
 
   async function refreshPast() {
-    let report;
+    // Single-flight: while one past-fetch is outstanding (including a hung one), skip starting another
+    // so the supply poll can't stack pending fetches against a slow/unresponsive transcripts endpoint.
+    if (pastRefreshing) return;
+    pastRefreshing = true;
     try {
-      const res = await fetch(transcriptsUrl, { headers: jsonHeaders() });
-      if (!res.ok) throw new Error(`transcripts fetch failed: ${res.status}`);
-      report = await res.json();
-    } catch (err) {
-      onError(err);
-      return;
-    }
-    if (disposed) return;
-    try {
-      renderTranscripts(pastRegion, doc, transcriptsView(report), replayInto, mode === "replay" ? shownStream : undefined);
-    } catch (err) {
-      onError(err);
+      let report;
+      try {
+        const res = await fetch(transcriptsUrl, { headers: jsonHeaders() });
+        if (!res.ok) throw new Error(`transcripts fetch failed: ${res.status}`);
+        report = await res.json();
+      } catch (err) {
+        onError(err);
+        return;
+      }
+      if (disposed) return;
+      try {
+        renderTranscripts(pastRegion, doc, transcriptsView(report), replayInto, mode === "replay" ? shownStream : undefined);
+      } catch (err) {
+        onError(err);
+      }
+    } finally {
+      pastRefreshing = false;
     }
   }
 
@@ -488,7 +508,8 @@ export function mountCockpit(host, opts = {}) {
     } catch (err) {
       onError(err);
     }
-    await refreshPast();
+    // Fire-and-forget: a hung transcripts endpoint must never stall the supply poll's next tick.
+    void refreshPast();
   }
 
   function tick(gen) {
@@ -514,6 +535,7 @@ export function mountCockpit(host, opts = {}) {
   function dispose() {
     if (disposed) return;
     disposed = true;
+    opToken++;
     stop();
     teardownTerminal();
     setMode(undefined, undefined);

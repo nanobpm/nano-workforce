@@ -162,3 +162,55 @@ test("the past-sessions panel is absent when no transcript source is injected (l
   assert.equal(r.host.byData("session-count").length, 0, "no past-sessions region rendered");
   assert.equal(cockpit.currentMode, undefined);
 });
+
+test("a slow replay fetch that resolves after a newer drill does not clobber the live terminal", async () => {
+  const r = rig();
+  // A replay fetch we resolve by hand, so the drill can land first while it is still outstanding.
+  let releaseReplay: (() => void) | undefined;
+  const gated: SupplyCockpitEnv = {
+    ...r.env,
+    fetchTranscript: (stream: string) => {
+      r.fetchedTranscript = stream;
+      return new Promise<TranscriptDataReport>((resolve) => {
+        releaseReplay = () => resolve(transcriptData);
+      });
+    },
+  };
+  const cockpit = bootSupplyCockpit(gated);
+  await cockpit.refresh();
+  await flush();
+
+  // Start a replay whose fetch is still pending, then drill into a live worker.
+  const replaying = cockpit.replay("job:past");
+  cockpit.drill("job:live");
+  assert.equal(cockpit.currentMode, "live");
+  assert.equal(r.sockets.length, 1);
+
+  // The stale replay now resolves — it must NOT overwrite the live terminal or close the live socket.
+  releaseReplay?.();
+  await replaying;
+  await flush();
+  assert.equal(cockpit.currentMode, "live", "the newer live drill wins over the stale replay");
+  assert.equal(cockpit.currentStream, "job:live");
+  assert.equal(r.sockets[0]?.closed, false, "the live relay socket is not torn down by a stale replay");
+  assert.deepEqual(r.terminalWrites, [], "the stale transcript bytes are never rendered");
+});
+
+test("a hanging transcripts fetch does not stall the supply poll", async () => {
+  const r = rig();
+  const stalled: SupplyCockpitEnv = {
+    ...r.env,
+    // Never resolves: before the fix, refresh() awaited this and wedged the poll forever.
+    fetchTranscripts: () => new Promise<TranscriptListReport>(() => {}),
+  };
+  const cockpit = bootSupplyCockpit(stalled);
+
+  // refresh() must resolve despite the hung transcripts fetch, having rendered the live supply list.
+  await cockpit.refresh();
+  assert.equal(r.host.byData("worker", "wk-a").length, 1, "live supply list rendered despite the hang");
+
+  // A second pass still renders the live list (single-flight skips the still-pending past-fetch).
+  await cockpit.refresh();
+  assert.equal(r.host.byData("worker", "wk-a").length, 1, "supply poll keeps making progress");
+  assert.deepEqual(r.errors, []);
+});

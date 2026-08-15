@@ -25,6 +25,7 @@ import {
   family as relayFamily,
   RELAY_FAMILY_NAME,
   RelayTranscriptService,
+  sweepIntervalMs,
 } from "./relay.family.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -426,6 +427,19 @@ test("mount drives a retention sweep so completed-ephemeral transcripts are reti
   assertEquals(retired, ["job:9"], "the completed-ephemeral transcript is retired past retention");
   assertEquals(service.transcriptOf("job:9"), undefined);
   family.teardown?.();
+});
+
+test("sweep cadence: a fraction of the retention window, floored at 1ms and capped at the Node timer max", () => {
+  // A normal retention window derives a quarter-window cadence.
+  assertEquals(sweepIntervalMs(1000), 250);
+  // A tiny/zero window still floors at a live 1ms tick rather than 0.
+  assertEquals(sweepIntervalMs(1), 1);
+  assertEquals(sweepIntervalMs(0), 1);
+  // A very large window (~1 year) would derive a >2^31-1 interval; Node clamps such a delay to 1ms and
+  // busy-loops. Cap it at the 32-bit timer ceiling so the periodic sweep stays a slow tick.
+  const oneYearMs = 365 * 24 * 60 * 60 * 1000;
+  assert(Math.floor(oneYearMs / 4) > 2_147_483_647, "precondition: an unclamped year/4 overflows the timer");
+  assertEquals(sweepIntervalMs(oneYearMs), 2_147_483_647);
 });
 
 test("drift guard: migration 024 mirrors the canonical transcript DDL byte-for-byte", async () => {
