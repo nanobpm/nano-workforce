@@ -58,8 +58,10 @@ Because several agents may run on the same host at once:
 
    ```sh
    # Every open thread across ALL reviews (this is your real backlog, oldest included):
+   # `pageInfo{hasNextPage}` surfaces truncation: if it's `true` there are >100 threads
+   # this page can't see — page through them, never treat one page as "every" thread.
    gh api graphql -f query='query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){
-     pullRequest(number:$n){reviewThreads(first:100){nodes{id isResolved path line
+     pullRequest(number:$n){reviewThreads(first:100){pageInfo{hasNextPage}nodes{id isResolved path line
        comments(first:100){nodes{databaseId author{login} body}}}}}}}' -F o=OWNER -F r=REPO -F n=PR
    ```
 
