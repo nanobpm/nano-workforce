@@ -121,8 +121,9 @@ Because several agents may run on the same host at once:
    line; only the exact `path:line` string must match. Example:
 
    ```sh
-   # Post the ack thread (pick any changed line in the diff for commit_id/path/line):
-   CID=$(gh api graphql -f query='query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){pullRequest(number:$n){comments(first:1){totalCount}}}}' -F o=OWNER -F r=REPO -F n=PR >/dev/null; git rev-parse HEAD)
+   # Post the ack thread (pick any changed line in the diff for path/line). Use the PR's real HEAD
+   # SHA as commit_id — `git rev-parse HEAD` can drift from the PR head; ask GitHub:
+   CID=$(gh api repos/OWNER/REPO/pulls/PR --jq .head.sha)
    gh api repos/OWNER/REPO/pulls/PR/comments -f commit_id="$CID" -f path=PATH -F line=LINE -f side=RIGHT \
      -f body='Applied. nano-ack: <path>:<line>'   # or: 'Declined, false positive — <reason>. nano-ack: <path>:<line>'
    # Then resolve it exactly like any other thread (map its databaseId -> thread node id -> resolveReviewThread).

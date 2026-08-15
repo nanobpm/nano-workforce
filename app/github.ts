@@ -135,7 +135,10 @@ export function parseAckedAdvisories(threads: ReviewThread[]): string[] {
 }
 
 /** Fetch the latest Copilot review body for a PR (the newest review authored by the automated
- * Copilot reviewer). `null` when no transport is usable; throws on a genuine transport failure. */
+ * Copilot reviewer). Returns `null` ONLY when no transport is usable (unverifiable → the worker
+ * fails closed); returns `""` when transport is usable but the PR has no Copilot review yet (a
+ * verified "no suppressed advisories"). Throws on a genuine transport failure. This split keeps
+ * `null` from conflating "unverifiable" with "empty" and fail-OPENing the advisory dimension. */
 export async function fetchLatestCopilotReviewBody(
   repo: string,
   number: number | string,
@@ -164,11 +167,45 @@ export async function fetchLatestCopilotReviewBody(
   }
   const copilot = reviews.filter((rv) => isCopilot(rv.user?.login));
   const latest = copilot[copilot.length - 1];
-  return latest?.body ?? null;
+  // Transport WAS usable here (a null-transport read already returned above), so a missing Copilot
+  // review is a verified "no advisories" — return "" (empty), never `null` (reserved for no
+  // transport, which the worker fail-closes on).
+  return latest?.body ?? "";
+}
+
+/** Raw GraphQL response shape for the review-threads query. */
+export interface ReviewThreadsResponse {
+  data?: {
+    repository?: {
+      pullRequest?: {
+        reviewThreads?: {
+          pageInfo?: { hasNextPage?: boolean };
+          nodes?: { isResolved?: boolean; path?: string | null; comments?: { nodes?: { body?: string }[] } }[];
+        };
+      };
+    };
+  };
+}
+
+/** Map a review-threads GraphQL response to `ReviewThread[]`, FAILING CLOSED (returns `null`) when
+ * the thread page is TRUNCATED (`pageInfo.hasNextPage`). A `first:100` page cannot see thread 101+,
+ * so a truncated read is an *unverifiable* gate — the worker treats `null` as unverifiable and
+ * blocks, rather than silently missing an unresolved thread beyond the page and converging (a
+ * fail-OPEN, the exact class this gate exists to prevent). Pure; unit-tested. */
+export function parseReviewThreadsResponse(payload: ReviewThreadsResponse): ReviewThread[] | null {
+  const threads = payload.data?.repository?.pullRequest?.reviewThreads;
+  if (threads?.pageInfo?.hasNextPage) return null;
+  const nodes = threads?.nodes ?? [];
+  return nodes.map((t) => ({
+    isResolved: !!t.isResolved,
+    path: t.path ?? null,
+    bodies: (t.comments?.nodes ?? []).map((c) => c.body ?? ""),
+  }));
 }
 
 /** Fetch a PR's review threads (resolution state + path + comment bodies) via GraphQL. `null` when
- * no transport is usable; throws on a genuine transport failure. */
+ * no transport is usable OR the thread page is truncated (fail closed); throws on a genuine
+ * transport failure. */
 export async function fetchReviewThreads(
   repo: string,
   number: number | string,
@@ -177,21 +214,10 @@ export async function fetchReviewThreads(
   const [owner, name] = repo.split("/");
   const query =
     "query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){pullRequest(number:$n){" +
-    "reviewThreads(first:100){nodes{isResolved path comments(first:100){nodes{body}}}}}}}";
+    "reviewThreads(first:100){pageInfo{hasNextPage}nodes{isResolved path comments(first:100){nodes{body}}}}}}}";
   const mode = githubTransport();
   const useGh = mode === "gh" || (mode === "auto" && (await isGhAvailable()));
-  interface ThreadsResp {
-    data?: {
-      repository?: {
-        pullRequest?: {
-          reviewThreads?: {
-            nodes?: { isResolved?: boolean; path?: string | null; comments?: { nodes?: { body?: string }[] } }[];
-          };
-        };
-      };
-    };
-  }
-  let payload: ThreadsResp;
+  let payload: ReviewThreadsResponse;
   if (useGh) {
     const out = await runGh([
       "api",
@@ -206,7 +232,7 @@ export async function fetchReviewThreads(
       `n=${number}`,
     ]);
     // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
-    payload = JSON.parse(out) as ThreadsResp;
+    payload = JSON.parse(out) as ReviewThreadsResponse;
   } else {
     if (!token) return null;
     const r = await fetch("https://api.github.com/graphql", {
@@ -216,14 +242,9 @@ export async function fetchReviewThreads(
     });
     if (!r.ok) throw new Error(`github ${r.status} ${r.statusText}`.trim());
     // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
-    payload = (await r.json()) as ThreadsResp;
+    payload = (await r.json()) as ReviewThreadsResponse;
   }
-  const nodes = payload.data?.repository?.pullRequest?.reviewThreads?.nodes ?? [];
-  return nodes.map((t) => ({
-    isResolved: !!t.isResolved,
-    path: t.path ?? null,
-    bodies: (t.comments?.nodes ?? []).map((c) => c.body ?? ""),
-  }));
+  return parseReviewThreadsResponse(payload);
 }
 
 // ── Copilot re-request (review-wait liveness) ───────────────────────────────

@@ -34,7 +34,8 @@ type Out = WorkerOutputs["pr.converge-gate"];
 // Reads a PR's review threads. `null` = no usable transport (treated as an unverifiable read →
 // fail closed). Throws propagate to the fail-closed catch below.
 export type ThreadsReader = (repo: string, prNumber: number) => Promise<ReviewThread[] | null>;
-// Reads the latest Copilot review body. `null` = no Copilot review yet (no suppressed advisories).
+// Reads the latest Copilot review body. `null` = no usable transport (unverifiable → fail closed);
+// `""` = transport usable but no Copilot review yet (verified: no suppressed advisories).
 export type ReviewBodyReader = (repo: string, prNumber: number) => Promise<string | null>;
 
 const defaultReadThreads: ThreadsReader = (repo, prNumber) =>
@@ -69,6 +70,11 @@ export function makeHandler(deps: {
         return { convergeBlocked: true, convergeBlockReason: BLOCK_UNVERIFIABLE };
       }
       const reviewBody = await deps.readReviewBody(ghRepo, ghNumber);
+      // A null review body is an unverifiable read (no usable transport) — fail closed, same as a
+      // null threads read. (An empty STRING is a verified "no Copilot review / no advisories".)
+      if (reviewBody === null) {
+        return { convergeBlocked: true, convergeBlockReason: BLOCK_UNVERIFIABLE };
+      }
       const unresolvedThreadCount = threads.filter((t) => !t.isResolved).length;
       result = evaluateConvergeGate({
         unresolvedThreadCount,

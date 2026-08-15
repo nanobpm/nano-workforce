@@ -15,6 +15,7 @@ import { assert, assertEquals, assertStringIncludes } from "#test-assert";
 import { evaluateConvergeGate } from "./convergeGate.ts";
 import {
   parseAckedAdvisories,
+  parseReviewThreadsResponse,
   parseSuppressedAdvisories,
   type ReviewThread,
 } from "./github.ts";
@@ -102,6 +103,40 @@ test("parseAckedAdvisories: only RESOLVED threads carrying a nano-ack marker cou
   assertEquals(acked, ["spec-app/nano-app.schema.json:613"]);
 });
 
+test("parseReviewThreadsResponse: maps nodes when the thread page is complete", () => {
+  const mapped = parseReviewThreadsResponse({
+    data: {
+      repository: {
+        pullRequest: {
+          reviewThreads: {
+            pageInfo: { hasNextPage: false },
+            nodes: [{ isResolved: false, path: "a.ts", comments: { nodes: [{ body: "please fix" }] } }],
+          },
+        },
+      },
+    },
+  });
+  assertEquals(mapped, [{ isResolved: false, path: "a.ts", bodies: ["please fix"] }]);
+});
+
+test("parseReviewThreadsResponse: FAILS CLOSED (null) when the thread page is TRUNCATED", () => {
+  // >100 threads: the first:100 page cannot see an unresolved thread beyond it, so a truncated read
+  // must be unverifiable (null → worker blocks), never a silent fail-OPEN that drops the overflow.
+  const mapped = parseReviewThreadsResponse({
+    data: {
+      repository: {
+        pullRequest: {
+          reviewThreads: {
+            pageInfo: { hasNextPage: true },
+            nodes: [{ isResolved: true, path: "a.ts", comments: { nodes: [{ body: "ok" }] } }],
+          },
+        },
+      },
+    },
+  });
+  assertEquals(mapped, null);
+});
+
 // ── The worker (with injected readers — never touches git/network) ──────────
 
 async function makeUnderTest(deps: {
@@ -157,6 +192,18 @@ test("converge-gate: FAILS CLOSED when the threads read returns null (no transpo
   const handler = await makeUnderTest({
     readThreads: async () => null,
     readReviewBody: async () => "",
+  });
+  const out = await handler({ variables: { prKey: "o/r#1", repo: "o/r", prNumber: 1 } } as any, {} as any);
+  assertEquals(out.convergeBlocked, true);
+  assertStringIncludes(out.convergeBlockReason ?? "", "could not verify");
+});
+
+test("converge-gate: FAILS CLOSED when the review-body read returns null (no transport)", async () => {
+  // A null review body is unverifiable, not "no advisories" — the gate must block, not fail open on
+  // the suppressed-advisory dimension while the threads read happened to succeed.
+  const handler = await makeUnderTest({
+    readThreads: async () => [{ isResolved: true, path: "a.ts", bodies: ["ok"] }],
+    readReviewBody: async () => null,
   });
   const out = await handler({ variables: { prKey: "o/r#1", repo: "o/r", prNumber: 1 } } as any, {} as any);
   assertEquals(out.convergeBlocked, true);
