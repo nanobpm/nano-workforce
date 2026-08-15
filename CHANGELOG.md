@@ -1,3 +1,10 @@
+## [0.70.1](https://github.com/nanobpm/nano-workforce/compare/v0.70.0...v0.70.1) (2026-08-15)
+
+
+### Bug Fixes
+
+* **convergence:** don't re-review a no-progress round ([#230](https://github.com/nanobpm/nano-workforce/issues/230)) ([a8ea844](https://github.com/nanobpm/nano-workforce/commit/a8ea84444b351989f716124d0b485b42e1ec2a35)), closes [#231](https://github.com/nanobpm/nano-workforce/issues/231) [Magikcraft/nano-bpm#770](https://github.com/Magikcraft/nano-bpm/issues/770) [#770](https://github.com/nanobpm/nano-workforce/issues/770) [nanobpm/nano-workforce#225](https://github.com/nanobpm/nano-workforce/issues/225) [#2](https://github.com/nanobpm/nano-workforce/issues/2) [#770](https://github.com/nanobpm/nano-workforce/issues/770)
+
 # [0.70.0](https://github.com/nanobpm/nano-workforce/compare/v0.69.1...v0.70.0) (2026-08-15)
 
 
