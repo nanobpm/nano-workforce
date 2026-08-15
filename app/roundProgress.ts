@@ -15,27 +15,56 @@
 // the worker and the BPMN gateway can never drift apart.
 
 /** Where a recorded round routes after the progress check:
- *  • `continue`  — request another review round (the head advanced, or the round was not an
- *                  `addressed` round that claims a push, or the head could not be read so we
- *                  fail OPEN rather than fabricate a no-progress escalation).
+ *  • `continue`  — request another review round (the head advanced, or the round carried an
+ *                  explicit non-addressed status — e.g. `waiting` — that claims no push, or the
+ *                  head could not be read so we fail OPEN rather than fabricate a no-progress
+ *                  escalation).
  *  • `escalate`  — an `addressed` round whose PR head did not move: no commit was really pushed,
  *                  so re-review would loop. Escalate to a human instead of looping. */
 export type ProgressRouting = "continue" | "escalate";
 
+// The statuses that route AWAY from gw-status's `addressed`/default arm (see the explicit
+// conditions on f_converged/f_waiting/f_escalate in convergence-loop.bpmn). A round carrying one of
+// these legitimately claims no push and must always continue past the no-progress guard.
+//
+// Everything else — an explicit `addressed`, a blank/unknown/empty status, or any unrecognized
+// string — takes gw-status's `addressed`/default arm, and pr.persist-round records a missing status
+// as `addressed` too. That safe-default `addressed` round is EXACTLY the no-progress trap this guard
+// exists for, so blank/unknown status must be treated as `addressed` here (subject to the head
+// comparison), never waved through. Matching is exact (no trim) to mirror gw-status's `=status =
+// "waiting"` equality: a padded `" waiting "` matches no arm there, so it defaults to `addressed`
+// here as well.
+const NON_ADDRESSED_STATUSES: ReadonlySet<string> = new Set([
+  "waiting",
+  "converged",
+  "needs_input",
+  "blocked",
+]);
+
+/** True when a round's status is `addressed` for no-progress purposes — i.e. NOT one of the
+ * explicitly recognized non-addressed statuses. Blank/unknown/empty status is `addressed` here,
+ * mirroring gw-status's default arm and pr.persist-round's missing-status default. The single
+ * source of truth for both {@link routeProgress} and the pr.progress-check worker's early skip. */
+export function isAddressedStatus(status: string | null | undefined): boolean {
+  return !NON_ADDRESSED_STATUSES.has(status ?? "");
+}
+
 /** Decide whether a recorded round made real progress, exactly as `gw-progress` does.
  *
  * Only an `addressed` round claims the agent pushed changes, so only it can be a no-progress
- * round. A `waiting` round (round 1, awaiting the first review) legitimately has no push and must
- * always continue. The check FAILS OPEN: when either head SHA is unknown — no GitHub transport,
- * a transient read error, or no baseline recorded yet (the first observed round) — we never
- * fabricate a no-progress escalation; we continue and let the round cap / review-wait timeout
- * remain the safety nets. */
+ * round — and blank/unknown status counts as `addressed` (see {@link isAddressedStatus}): it is the
+ * safe-default round this guard exists to catch. An explicitly recognized non-addressed status
+ * (`waiting` on round 1, awaiting the first review, etc.) legitimately has no push and must always
+ * continue. The check FAILS OPEN: when either head SHA is unknown — no GitHub transport, a transient
+ * read error, or no baseline recorded yet (the first observed round) — we never fabricate a
+ * no-progress escalation; we continue and let the round cap / review-wait timeout remain the safety
+ * nets. */
 export function routeProgress(
   status: string | null | undefined,
   previousHead: string | null | undefined,
   currentHead: string | null | undefined,
 ): ProgressRouting {
-  if ((status ?? "") !== "addressed") return "continue";
+  if (!isAddressedStatus(status)) return "continue";
   if (!previousHead || !currentHead) return "continue";
   return currentHead === previousHead ? "escalate" : "continue";
 }

@@ -14,7 +14,7 @@
 // in app/roundProgress.ts, the single source of truth this worker and `gw-progress` both mirror.
 import type { AppJobHandler } from "@nanobpm/urban";
 import { fetchPrHead } from "../../app/github.ts";
-import { routeProgress } from "../../app/roundProgress.ts";
+import { isAddressedStatus, routeProgress } from "../../app/roundProgress.ts";
 import { parsePr } from "../../app/service.ts";
 import type { WorkerInputs, WorkerOutputs } from "../../nano-generated/worker-io.d.ts";
 
@@ -40,9 +40,12 @@ export function makeHandler(deps: { readHead: HeadReader }): AppJobHandler<In, O
   return async (job, app) => {
     const { prKey, status, repo, prNumber } = job.variables;
 
-    // Only an `addressed` round claims a push, so only it can be a no-progress round. Skip the
-    // GitHub read entirely for any other status — a `waiting` round costs nothing and continues.
-    if ((status ?? "") !== "addressed") return { progressed: true };
+    // Only an `addressed` round claims a push, so only it can be a no-progress round — and a
+    // blank/unknown status counts as `addressed` here (gw-status defaults it down the addressed
+    // arm and pr.persist-round records a missing status as `addressed`), so it is the safe-default
+    // trap this guard exists for. Skip the GitHub read entirely only for an explicitly recognized
+    // non-addressed status — a `waiting` round costs nothing and continues.
+    if (!isAddressedStatus(status)) return { progressed: true };
 
     // Prefer the carried repo/prNumber; fall back to parsing the canonical `owner/repo#N` prKey so
     // an older in-flight instance (or a process-variable regression) still resolves a target. If

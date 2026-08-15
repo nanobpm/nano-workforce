@@ -22,12 +22,32 @@ test("routeProgress: an addressed round whose head advanced continues", () => {
   assertEquals(routeProgress("addressed", "sha-1", "sha-2"), "continue");
 });
 
-test("routeProgress: a non-addressed round always continues (no push is expected)", () => {
-  for (const status of [undefined, null, "", "waiting", "converged", "needs_input", "blocked", "x"]) {
+test("routeProgress: an explicit non-addressed round always continues (no push is expected)", () => {
+  // These are the statuses gw-status routes AWAY from the addressed/default arm — a legit no-push
+  // round. They always continue regardless of the head.
+  for (const status of ["waiting", "converged", "needs_input", "blocked"]) {
     assertEquals(
       routeProgress(status, "sha-1", "sha-1"),
       "continue",
       `status ${JSON.stringify(status)} must continue even with an unchanged head`,
+    );
+  }
+});
+
+test("routeProgress: blank/unknown status behaves like addressed (the safe-default trap)", () => {
+  // gw-status defaults blank/unknown/unrecognized status down the addressed arm and pr.persist-round
+  // records a missing status as `addressed`, so the no-progress guard must apply to them too: an
+  // unchanged head escalates, an advanced head continues.
+  for (const status of [undefined, null, "", "x"]) {
+    assertEquals(
+      routeProgress(status, "sha-1", "sha-1"),
+      "escalate",
+      `blank/unknown status ${JSON.stringify(status)} with an unchanged head must escalate like addressed`,
+    );
+    assertEquals(
+      routeProgress(status, "sha-1", "sha-2"),
+      "continue",
+      `blank/unknown status ${JSON.stringify(status)} with an advanced head must continue`,
     );
   }
 });
@@ -87,6 +107,18 @@ test("progress-check: skips the head read entirely for a non-addressed round", a
   assertEquals(out, { progressed: true });
   assertEquals(called, false, "a waiting round never reads the head");
   assertEquals(updates.length, 0, "and never rewrites the baseline");
+});
+
+test("progress-check: a blank/unknown status is treated as addressed — reads the head and can report no progress", async () => {
+  let called = false;
+  const handler = await makeUnderTest(async () => {
+    called = true;
+    return "sha-1";
+  });
+  const { app } = fakeApp({ last_round_head: "sha-1" });
+  const out = await handler({ variables: { prKey: "o/r#1", status: "", repo: "o/r", prNumber: 1 } } as any, app as any);
+  assertEquals(out, { progressed: false }, "a blank-status no-progress round is caught, not waved through");
+  assertEquals(called, true, "a blank status (the safe-default addressed trap) still reads the head");
 });
 
 test("progress-check: an addressed round whose head is unchanged reports progressed:false", async () => {
