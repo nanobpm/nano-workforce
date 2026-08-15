@@ -102,7 +102,7 @@
       <bpmn:extensionElements>
         <zeebe:taskDefinition type="senior:plan" />
         <zeebe:linkedResources>
-          <zeebe:linkedResource resourceId="plan.md" bindingType="latest" linkName="prompt" />
+          <zeebe:linkedResource resourceId="plan.md" bindingType="latest" resourceType="GenericScript" linkName="prompt" />
         </zeebe:linkedResources>
         <zeebe:ioMapping>
           <zeebe:input source="=(if (planFindings = null or planFindings = &#34;&#34;) then &#34;&#34; else &#34;&#10;&#10;---&#10;&#10;A prior review REJECTED your last plan. Address every point, then re-emit the full plan:&#10;&#10;&#34; + planFindings)" target="appendPrompt" />
@@ -128,7 +128,7 @@
       <bpmn:extensionElements>
         <zeebe:taskDefinition type="senior:plan-review" />
         <zeebe:linkedResources>
-          <zeebe:linkedResource resourceId="plan-review.md" bindingType="latest" linkName="prompt" />
+          <zeebe:linkedResource resourceId="plan-review.md" bindingType="latest" resourceType="GenericScript" linkName="prompt" />
         </zeebe:linkedResources>
       </bpmn:extensionElements>
       <bpmn:incoming>f_toReviewPlan</bpmn:incoming>
@@ -209,7 +209,7 @@
         <bpmn:extensionElements>
           <zeebe:taskDefinition type="senior:feature" />
           <zeebe:linkedResources>
-            <zeebe:linkedResource resourceId="feature.md" bindingType="latest" linkName="prompt" />
+            <zeebe:linkedResource resourceId="feature.md" bindingType="latest" resourceType="GenericScript" linkName="prompt" />
           </zeebe:linkedResources>
           <zeebe:ioMapping>
             <zeebe:input source="=&#34;&#10;&#10;---&#10;&#10;&#34; + task.prompt + (if (blackboardBrief = null) then &#34;&#34; else blackboardBrief) + (if (baseBranchBrief = null) then &#34;&#34; else baseBranchBrief)" target="appendPrompt" />
@@ -283,7 +283,7 @@
       <bpmn:extensionElements>
         <zeebe:taskDefinition type="senior:trial-merge" />
         <zeebe:linkedResources>
-          <zeebe:linkedResource resourceId="trial-merge.md" bindingType="latest" linkName="prompt" />
+          <zeebe:linkedResource resourceId="trial-merge.md" bindingType="latest" resourceType="GenericScript" linkName="prompt" />
         </zeebe:linkedResources>
         <zeebe:ioMapping>
           <zeebe:input source="=null" target="result" />
