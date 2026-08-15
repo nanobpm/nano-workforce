@@ -205,7 +205,7 @@ export interface ReviewThreadsResponse {
     repository?: {
       pullRequest?: {
         reviewThreads?: {
-          pageInfo?: { hasNextPage?: boolean };
+          pageInfo?: { hasNextPage?: boolean; endCursor?: string | null };
           nodes?: { isResolved?: boolean; path?: string | null; comments?: { nodes?: { body?: string }[] } }[];
         };
       };
@@ -213,26 +213,44 @@ export interface ReviewThreadsResponse {
   };
 }
 
-/** Map a review-threads GraphQL response to `ReviewThread[]`, FAILING CLOSED (returns `null`) on any
- * UNVERIFIABLE read: a missing `reviewThreads` block (GraphQL errors, permission issues, a malformed
- * payload) OR a page whose completeness we can't positively confirm — i.e. anything but a confirmed
- * `pageInfo.hasNextPage === false`. A `first:100` page cannot see thread 101+, and a missing/errored
- * block cannot be read at all, so either is unverifiable: the worker treats `null` as unverifiable
- * and blocks, rather than silently mapping it to "no threads" and converging (a fail-OPEN, the exact
- * class this gate exists to prevent). Only a positively complete page is mapped. Pure; unit-tested. */
-export function parseReviewThreadsResponse(payload: ReviewThreadsResponse): ReviewThread[] | null {
-  const threads = payload.data?.repository?.pullRequest?.reviewThreads;
-  if (!threads || threads.pageInfo?.hasNextPage !== false) return null;
-  const nodes = threads.nodes ?? [];
-  return nodes.map((t) => ({
-    isResolved: !!t.isResolved,
-    path: t.path ?? null,
-    bodies: (t.comments?.nodes ?? []).map((c) => c.body ?? ""),
-  }));
+/** One page of a review-threads GraphQL response, plus the cursor to advance to the next page. */
+export interface ReviewThreadsPage {
+  threads: ReviewThread[];
+  hasNextPage: boolean;
+  endCursor: string | null;
 }
 
-/** Fetch a PR's review threads (resolution state + path + comment bodies) via GraphQL. `null` when
- * no transport is usable OR the thread page is truncated (fail closed); throws on a genuine
+/** Map ONE page of a review-threads GraphQL response, FAILING CLOSED (returns `null`) on an
+ * UNVERIFIABLE read: a missing `reviewThreads` block (GraphQL errors, permission issues, a malformed
+ * payload) OR a page whose completeness signal (`pageInfo.hasNextPage`) is not a readable boolean.
+ * A readable page yields its mapped nodes plus `hasNextPage`/`endCursor` so the CALLER can page to
+ * completeness (`fetchReviewThreads` follows `endCursor` up to a bounded cap). A `first:100` page
+ * cannot see thread 101+, so a truncated read must be paged, not silently mapped to "no more
+ * threads" and converged (a fail-OPEN, the exact class this gate exists to prevent). Exceeding the
+ * caller's page cap while GitHub still reports more is the caller's fail-closed decision, not this
+ * mapper's. Pure; unit-tested. */
+export function parseReviewThreadsPage(payload: ReviewThreadsResponse): ReviewThreadsPage | null {
+  const block = payload.data?.repository?.pullRequest?.reviewThreads;
+  if (!block || typeof block.pageInfo?.hasNextPage !== "boolean") return null;
+  const nodes = block.nodes ?? [];
+  return {
+    threads: nodes.map((t) => ({
+      isResolved: !!t.isResolved,
+      path: t.path ?? null,
+      bodies: (t.comments?.nodes ?? []).map((c) => c.body ?? ""),
+    })),
+    hasNextPage: block.pageInfo.hasNextPage,
+    endCursor: block.pageInfo.endCursor ?? null,
+  };
+}
+
+/** 20×100 review threads is far past any real convergence loop; a genuinely deeper set we can't
+ * page to is unverifiable → fail closed. */
+const MAX_THREAD_PAGES = 20;
+
+/** Fetch ALL of a PR's review threads (resolution state + path + comment bodies) via GraphQL, paging
+ * to completeness up to `MAX_THREAD_PAGES`. `null` when no transport is usable, a page is
+ * unreadable, or the set is still truncated past the page cap (fail closed); throws on a genuine
  * transport failure. */
 export async function fetchReviewThreads(
   repo: string,
@@ -241,38 +259,47 @@ export async function fetchReviewThreads(
 ): Promise<ReviewThread[] | null> {
   const [owner, name] = repo.split("/");
   const query =
-    "query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){pullRequest(number:$n){" +
-    "reviewThreads(first:100){pageInfo{hasNextPage}nodes{isResolved path comments(first:100){nodes{body}}}}}}}";
+    "query($o:String!,$r:String!,$n:Int!,$after:String){repository(owner:$o,name:$r){pullRequest(number:$n){" +
+    "reviewThreads(first:100,after:$after){pageInfo{hasNextPage endCursor}nodes{isResolved path comments(first:100){nodes{body}}}}}}}";
   const mode = githubTransport();
   const useGh = mode === "gh" || (mode === "auto" && (await isGhAvailable()));
-  let payload: ReviewThreadsResponse;
-  if (useGh) {
-    const out = await runGh([
-      "api",
-      "graphql",
-      "-f",
-      `query=${query}`,
-      "-F",
-      `o=${owner}`,
-      "-F",
-      `r=${name}`,
-      "-F",
-      `n=${number}`,
-    ]);
-    // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
-    payload = JSON.parse(out) as ReviewThreadsResponse;
-  } else {
-    if (!token) return null;
+  if (!useGh && !token) return null;
+
+  const fetchPage = async (after: string | null): Promise<ReviewThreadsResponse> => {
+    if (useGh) {
+      const args = ["api", "graphql", "-f", `query=${query}`, "-F", `o=${owner}`, "-F", `r=${name}`, "-F", `n=${number}`];
+      if (after !== null) args.push("-F", `after=${after}`);
+      const out = await runGh(args);
+      // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+      return JSON.parse(out) as ReviewThreadsResponse;
+    }
+    const variables: Record<string, unknown> = { o: owner, r: name, n: Number(number) };
+    if (after !== null) variables.after = after;
     const r = await fetch("https://api.github.com/graphql", {
       method: "POST",
       headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-      body: JSON.stringify({ query, variables: { o: owner, r: name, n: Number(number) } }),
+      body: JSON.stringify({ query, variables }),
     });
     if (!r.ok) throw new Error(`github ${r.status} ${r.statusText}`.trim());
     // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
-    payload = (await r.json()) as ReviewThreadsResponse;
+    return (await r.json()) as ReviewThreadsResponse;
+  };
+
+  const all: ReviewThread[] = [];
+  let after: string | null = null;
+  for (let page = 1; page <= MAX_THREAD_PAGES; page++) {
+    const parsed = parseReviewThreadsPage(await fetchPage(after));
+    // An unreadable page is unverifiable — fail closed rather than converging on a partial read.
+    if (parsed === null) return null;
+    all.push(...parsed.threads);
+    // A confirmed last page is the only complete read.
+    if (!parsed.hasNextPage) return all;
+    // More pages exist but no cursor to advance — unverifiable, fail closed.
+    if (parsed.endCursor === null) return null;
+    after = parsed.endCursor;
   }
-  return parseReviewThreadsResponse(payload);
+  // Exceeded the page cap and GitHub still reports more — unverifiable, fail closed.
+  return null;
 }
 
 // ── Copilot re-request (review-wait liveness) ───────────────────────────────

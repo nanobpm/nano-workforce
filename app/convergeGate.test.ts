@@ -15,7 +15,7 @@ import { assert, assertEquals, assertStringIncludes } from "#test-assert";
 import { evaluateConvergeGate } from "./convergeGate.ts";
 import {
   parseAckedAdvisories,
-  parseReviewThreadsResponse,
+  parseReviewThreadsPage,
   parseSuppressedAdvisories,
   pickLatestCopilotReviewBody,
   type ReviewThread,
@@ -116,52 +116,61 @@ test("parseAckedAdvisories: only RESOLVED threads carrying a nano-ack marker cou
   assertEquals(acked, ["spec-app/nano-app.schema.json:613"]);
 });
 
-test("parseReviewThreadsResponse: maps nodes when the thread page is complete", () => {
-  const mapped = parseReviewThreadsResponse({
+test("parseReviewThreadsPage: maps nodes and reports a complete (final) page", () => {
+  const page = parseReviewThreadsPage({
     data: {
       repository: {
         pullRequest: {
           reviewThreads: {
-            pageInfo: { hasNextPage: false },
+            pageInfo: { hasNextPage: false, endCursor: null },
             nodes: [{ isResolved: false, path: "a.ts", comments: { nodes: [{ body: "please fix" }] } }],
           },
         },
       },
     },
   });
-  assertEquals(mapped, [{ isResolved: false, path: "a.ts", bodies: ["please fix"] }]);
+  assertEquals(page, {
+    threads: [{ isResolved: false, path: "a.ts", bodies: ["please fix"] }],
+    hasNextPage: false,
+    endCursor: null,
+  });
 });
 
-test("parseReviewThreadsResponse: FAILS CLOSED (null) when the thread page is TRUNCATED", () => {
-  // >100 threads: the first:100 page cannot see an unresolved thread beyond it, so a truncated read
-  // must be unverifiable (null → worker blocks), never a silent fail-OPEN that drops the overflow.
-  const mapped = parseReviewThreadsResponse({
+test("parseReviewThreadsPage: a TRUNCATED page reports hasNextPage + its cursor (caller pages on)", () => {
+  // >100 threads: the first:100 page cannot see thread 101+, so instead of silently dropping the
+  // overflow the mapper surfaces `hasNextPage`/`endCursor` and `fetchReviewThreads` pages to
+  // completeness (or fails closed once its bounded page cap is exhausted).
+  const page = parseReviewThreadsPage({
     data: {
       repository: {
         pullRequest: {
           reviewThreads: {
-            pageInfo: { hasNextPage: true },
+            pageInfo: { hasNextPage: true, endCursor: "CURSOR123" },
             nodes: [{ isResolved: true, path: "a.ts", comments: { nodes: [{ body: "ok" }] } }],
           },
         },
       },
     },
   });
-  assertEquals(mapped, null);
+  assertEquals(page, {
+    threads: [{ isResolved: true, path: "a.ts", bodies: ["ok"] }],
+    hasNextPage: true,
+    endCursor: "CURSOR123",
+  });
 });
 
-test("parseReviewThreadsResponse: FAILS CLOSED (null) when the reviewThreads block is MISSING", () => {
+test("parseReviewThreadsPage: FAILS CLOSED (null) when the reviewThreads block is MISSING", () => {
   // GraphQL errors, permission issues, or a malformed payload can omit `reviewThreads`. Treating that
   // as "no threads" (empty array) is a fail-OPEN — an unverifiable read must return null so the worker
   // blocks/escalates rather than converging on a read that never happened.
-  assertEquals(parseReviewThreadsResponse({}), null);
-  assertEquals(parseReviewThreadsResponse({ data: { repository: { pullRequest: {} } } }), null);
+  assertEquals(parseReviewThreadsPage({}), null);
+  assertEquals(parseReviewThreadsPage({ data: { repository: { pullRequest: {} } } }), null);
 });
 
-test("parseReviewThreadsResponse: FAILS CLOSED (null) when page completeness is UNCONFIRMED", () => {
-  // A present block whose `pageInfo.hasNextPage` we can't read as an explicit `false` is unverifiable:
-  // only a positively complete page may be mapped.
-  const mapped = parseReviewThreadsResponse({
+test("parseReviewThreadsPage: FAILS CLOSED (null) when the completeness signal is UNREADABLE", () => {
+  // A present block whose `pageInfo.hasNextPage` is not a readable boolean is unverifiable — we cannot
+  // tell whether more pages exist, so we cannot safely page or map it.
+  const page = parseReviewThreadsPage({
     data: {
       repository: {
         pullRequest: {
@@ -172,7 +181,7 @@ test("parseReviewThreadsResponse: FAILS CLOSED (null) when page completeness is 
       },
     },
   });
-  assertEquals(mapped, null);
+  assertEquals(page, null);
 });
 
 test("pickLatestCopilotReviewBody: picks the NEWEST Copilot review body (oldest\u2192newest order)", () => {

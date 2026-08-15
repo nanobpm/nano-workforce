@@ -54,10 +54,9 @@ export function makeHandler(deps: {
 }): AppJobHandler<In, Out> {
   return async (job) => {
     const { prKey, repo, prNumber } = job.variables;
-    // `parsePr` calls `.trim()`, so it must only see a string: a missing/non-string prKey would
-    // throw here (before the fail-closed try/catch below) and error/retry the job instead of
-    // running the gate. Guard it so a malformed prKey degrades to the fail-closed target check.
-    const parsed = typeof prKey === "string" ? parsePr(prKey) : null;
+    // `parsePr` is total on any input (fails closed to `null` on a missing/non-string prKey), so
+    // pass it straight through — a malformed prKey degrades to the fail-closed target check below.
+    const parsed = parsePr(prKey);
     const ghRepo = repo ?? parsed?.repo;
     const ghNumber = typeof prNumber === "number" ? prNumber : parsed?.number;
     if (!ghRepo || typeof ghNumber !== "number") {
