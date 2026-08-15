@@ -31,6 +31,7 @@ import { clampNudgeMinutes, reviewWaitTimeout } from "./reviewWait.ts";
 import { trialMergeAudits } from "./trialMerge.ts";
 import {
   buildUserTaskRow,
+  latestOpenEscalationQuestion,
   latestPlanReviewFindings,
   latestTrialMergeQuestion,
   PLAN_REVIEW_ELEMENT,
@@ -1527,7 +1528,7 @@ export async function pollUserTasks(data: DataLayer, engine: EngineClient) {
       }
       for (const t of tasks) {
         if (t.elementId !== PR_WAIT_ANSWER_ELEMENT) continue;
-        const open = (await prEscalations(data).find({ pr_key: pr.pr_key, status: "open" }))[0];
+        const question = latestOpenEscalationQuestion(await prEscalations(data).find({ pr_key: pr.pr_key, status: "open" }));
         push(
           buildUserTaskRow(
             {
@@ -1536,7 +1537,7 @@ export async function pollUserTasks(data: DataLayer, engine: EngineClient) {
               subjectType: "pr",
               subjectKey: pr.pr_key,
               subjectUrl: pr.url,
-              question: open?.question ?? null,
+              question,
               processKey: pr.process_key,
             },
             at,

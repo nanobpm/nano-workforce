@@ -202,3 +202,16 @@ export interface PrEscalationRow {
 
 export const prEscalations = (data: DataLayer) =>
   data.table<PrEscalationRow>("escalations", "id");
+
+/** Pure: the question for the still-open PR review-loop escalation. `escalations` is append-only and
+ *  `id` is an AUTOINCREMENT PK, so when a PR has multiple `open` rows the newest (highest `id`) is the
+ *  live one the human is being asked; a positional `[0]` from an unordered `find` could surface a stale
+ *  row. `null` when there is no open escalation. */
+export function latestOpenEscalationQuestion(rows: readonly PrEscalationRow[]): string | null {
+  let latest: PrEscalationRow | undefined;
+  for (const r of rows) {
+    if (r.status !== "open") continue;
+    if (!latest || r.id > latest.id) latest = r;
+  }
+  return latest?.question ?? null;
+}

@@ -11,8 +11,10 @@ import {
   buildUserTaskRow,
   PLAN_REVIEW_ELEMENT,
   PR_WAIT_ANSWER_ELEMENT,
+  latestOpenEscalationQuestion,
   latestPlanReviewFindings,
   latestTrialMergeQuestion,
+  type PrEscalationRow,
   reconcileUserTasks,
   TRIAL_MERGE_ELEMENT,
   type UserTaskRow,
@@ -175,4 +177,32 @@ test("latestTrialMergeQuestion: picks the newest UNRESOLVED red row's summary", 
 test("latestTrialMergeQuestion: null when every red row is resolved (escalation answered)", () => {
   const audits = [audit({ id: 1, result: "suite-failed", summary: "red", resolved: 1 })];
   assertEquals(latestTrialMergeQuestion(audits), null);
+});
+
+function esc(o: Partial<PrEscalationRow> & { id: number }): PrEscalationRow {
+  return {
+    pr_key: "o/r#1",
+    round_no: 1,
+    kind: "question",
+    question: "q",
+    answer: null,
+    status: "open",
+    asked_at: "t",
+    answered_at: null,
+    ...o,
+  };
+}
+
+test("latestOpenEscalationQuestion: picks the newest OPEN row (highest id), not a positional [0]", () => {
+  const rows = [
+    esc({ id: 3, question: "stale open" }),
+    esc({ id: 7, question: "newest open" }),
+    esc({ id: 9, status: "answered", question: "answered" }),
+  ];
+  assertEquals(latestOpenEscalationQuestion(rows), "newest open");
+});
+
+test("latestOpenEscalationQuestion: null when there is no open escalation", () => {
+  assertEquals(latestOpenEscalationQuestion([esc({ id: 1, status: "answered" })]), null);
+  assertEquals(latestOpenEscalationQuestion([]), null);
 });
