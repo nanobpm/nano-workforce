@@ -21,6 +21,7 @@ import { Terminal } from "@xterm/xterm";
 
 const DEFAULT_REFRESH_MS = 2000;
 const DEFAULT_STALE_AFTER_MS = 15_000;
+const DEFAULT_PAST_FETCH_TIMEOUT_MS = 15_000;
 
 function isPosInt(value) {
   return Number.isSafeInteger(value) && value > 0;
@@ -326,6 +327,8 @@ function relaySocketFactory(url) {
  * @param {number} [opts.refreshMs] — poll interval (default 2000).
  * @param {number} [opts.staleAfterMs] — a worker is rendered "stale" once its last heartbeat is at
  *   least this many ms old (default 15000).
+ * @param {number} [opts.pastFetchTimeoutMs] — upper bound (ms) on a single past-sessions transcripts
+ *   fetch; the fetch is aborted past this so a hung endpoint can't wedge the past panel (default 15000).
  * @param {string} [opts.transcriptsUrl] — the captured-session list endpoint (default
  *   /app/api/agentic/transcripts); enables the "past sessions" history + replay.
  * @returns a handle with `.dispose()`.
@@ -349,6 +352,15 @@ export function mountCockpit(host, opts = {}) {
     throw new RangeError(`mountCockpit(opts.refreshMs): must be a positive safe integer, got ${refreshMs}.`);
   }
   const staleAfterMs = opts.staleAfterMs ?? DEFAULT_STALE_AFTER_MS;
+  // Upper bound on a single "past sessions" transcripts fetch. refreshPast() is single-flight, so a
+  // fetch that HANGS (never settles) would otherwise leave `pastRefreshing` stuck true forever and
+  // permanently disable the past panel; a bounded (aborting) fetch clears the flag so the next poll retries.
+  const pastFetchTimeoutMs = opts.pastFetchTimeoutMs ?? DEFAULT_PAST_FETCH_TIMEOUT_MS;
+  if (!isPosInt(pastFetchTimeoutMs)) {
+    throw new RangeError(
+      `mountCockpit(opts.pastFetchTimeoutMs): must be a positive safe integer, got ${pastFetchTimeoutMs}.`,
+    );
+  }
   const connectRelay = relaySocketFactory(relayUrl);
   const onError = (err) => console.error("[cockpit]", err);
 
@@ -473,7 +485,18 @@ export function mountCockpit(host, opts = {}) {
     try {
       let report;
       try {
-        const res = await fetch(transcriptsUrl, { headers: jsonHeaders() });
+        // Bound the fetch: refreshPast() is single-flight, so a transcripts endpoint that never responds
+        // would otherwise wedge `pastRefreshing` true forever. Abort after pastFetchTimeoutMs so the fetch
+        // always settles (here, rejects), the finally clears the flag, and the next poll can retry.
+        const controller = new AbortController();
+        const abortTimer = setTimeout(() => controller.abort(), pastFetchTimeoutMs);
+        abortTimer.unref?.();
+        let res;
+        try {
+          res = await fetch(transcriptsUrl, { headers: jsonHeaders(), signal: controller.signal });
+        } finally {
+          clearTimeout(abortTimer);
+        }
         if (!res.ok) throw new Error(`transcripts fetch failed: ${res.status}`);
         report = await res.json();
       } catch (err) {

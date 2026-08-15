@@ -77,6 +77,12 @@ export interface SupplyCockpitEnv {
   readonly credit?: number;
   /** A live worker idle longer than this (ms) grades `stale`. Default 15000. */
   readonly staleAfterMs?: number;
+  /**
+   * Upper bound (ms) on a single "past sessions" transcripts fetch. Default 15000. `#refreshPast` is
+   * single-flight, so a fetch that HANGS (never settles) would otherwise wedge the past panel forever;
+   * this timeout guarantees the wait settles so the flag clears and the next poll retries.
+   */
+  readonly pastFetchTimeoutMs?: number;
   /** Notified of a fetch/render/relay error (the poll keeps going). */
   readonly onError?: (err: unknown) => void;
 }
@@ -102,6 +108,7 @@ export interface SupplyCockpitHandle {
 }
 
 const DEFAULT_REFRESH_MS = 2000;
+const DEFAULT_PAST_FETCH_TIMEOUT_MS = 15000;
 
 function isPosInt(value: number): boolean {
   return Number.isSafeInteger(value) && value > 0;
@@ -120,6 +127,7 @@ class SupplyCockpit implements SupplyCockpitHandle {
   readonly #terminalTitle: ElementLike;
   readonly #terminalPanel: ElementLike;
   readonly #refreshMs: number;
+  readonly #pastFetchTimeoutMs: number;
   readonly #setTimer: (run: () => void, ms: number) => TimerHandle;
   readonly #clearTimer: (handle: TimerHandle) => void;
   readonly #timeouts = new Map<number, ReturnType<typeof setTimeout>>();
@@ -157,6 +165,12 @@ class SupplyCockpit implements SupplyCockpitHandle {
     if (!isPosInt(this.#refreshMs)) {
       throw new RangeError(`SupplyCockpitEnv.refreshMs must be a positive safe integer, got ${this.#refreshMs}`);
     }
+    this.#pastFetchTimeoutMs = env.pastFetchTimeoutMs ?? DEFAULT_PAST_FETCH_TIMEOUT_MS;
+    if (!isPosInt(this.#pastFetchTimeoutMs)) {
+      throw new RangeError(
+        `SupplyCockpitEnv.pastFetchTimeoutMs must be a positive safe integer, got ${this.#pastFetchTimeoutMs}`,
+      );
+    }
     // setTimer/clearTimer are a matched pair: a caller-supplied setTimer returns opaque handles the
     // default clearTimer (which only understands the internal numeric-handle Map) cannot cancel,
     // leaving an un-stoppable poll loop. Fail fast rather than silently accept one without the other.
@@ -167,13 +181,14 @@ class SupplyCockpit implements SupplyCockpitHandle {
       env.setTimer ??
       ((run, ms) => {
         const id = this.#nextTimerId++;
-        this.#timeouts.set(
-          id,
-          setTimeout(() => {
-            this.#timeouts.delete(id);
-            run();
-          }, ms),
-        );
+        const timeout = setTimeout(() => {
+          this.#timeouts.delete(id);
+          run();
+        }, ms);
+        // A pending default timer (poll delay or the past-fetch timeout below) must never keep the
+        // process alive on its own — a no-op in the browser, where timer handles have no `unref`.
+        timeout.unref?.();
+        this.#timeouts.set(id, timeout);
         return id;
       });
     this.#clearTimer =
@@ -270,7 +285,7 @@ class SupplyCockpit implements SupplyCockpitHandle {
     try {
       let report: TranscriptListReport;
       try {
-        report = await fetchTranscripts();
+        report = await this.#fetchTranscriptsBounded(fetchTranscripts);
       } catch (err) {
         this.#env.onError?.(err);
         return;
@@ -287,6 +302,41 @@ class SupplyCockpit implements SupplyCockpitHandle {
     } finally {
       this.#pastRefreshing = false;
     }
+  }
+
+  /**
+   * Fetch the past-sessions list with a bounded wait. {@link #refreshPast} is single-flight so a
+   * still-pending fetch is never stacked — but an injected transcripts fetch that HANGS (never settles,
+   * not merely rejects) would otherwise leave `#pastRefreshing` stuck `true` forever, permanently
+   * disabling the past panel even after the endpoint recovers. Racing the fetch against a timeout
+   * guarantees the wait always settles, so `#refreshPast`'s `finally` clears the flag and the next poll
+   * retries. A hung fetch that resolves late is ignored (the `settled` latch drops it).
+   */
+  #fetchTranscriptsBounded(
+    fetchTranscripts: () => Promise<TranscriptListReport>,
+  ): Promise<TranscriptListReport> {
+    return new Promise<TranscriptListReport>((resolve, reject) => {
+      let settled = false;
+      const handle = this.#setTimer(() => {
+        if (settled) return;
+        settled = true;
+        reject(new Error(`transcripts fetch timed out after ${this.#pastFetchTimeoutMs}ms`));
+      }, this.#pastFetchTimeoutMs);
+      fetchTranscripts().then(
+        (report) => {
+          if (settled) return;
+          settled = true;
+          this.#clearTimer(handle);
+          resolve(report);
+        },
+        (err) => {
+          if (settled) return;
+          settled = true;
+          this.#clearTimer(handle);
+          reject(err);
+        },
+      );
+    });
   }
 
   start(): void {

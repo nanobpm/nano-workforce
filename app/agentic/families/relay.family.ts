@@ -359,6 +359,12 @@ export function createRelayFamily(options: {
         };
         sweepTimer = setInterval(tick, interval);
         sweepTimer.unref?.();
+        // Run one sweep eagerly at mount so retention is enforced immediately: the transcript table is
+        // durable across restarts, so without this first pass a completed-ephemeral transcript persisted
+        // before downtime (and already past retention) would linger — listed by the read path — until the
+        // first interval tick fires (potentially far off for a large retention window). Mirrors the
+        // presence family's eager maintenance pass (derivation over duplication).
+        tick();
       }
 
       options.onMounted?.(service);

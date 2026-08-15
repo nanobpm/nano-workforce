@@ -429,6 +429,44 @@ test("mount drives a retention sweep so completed-ephemeral transcripts are reti
   family.teardown?.();
 });
 
+test("mount runs an eager retention sweep so a transcript already past retention from a previous run is retired on boot (#222)", () => {
+  const registry = new ConnectionRegistry();
+  // One durable db shared across two mounts models a process restart: the transcript table survives,
+  // so a completed-ephemeral transcript persisted before downtime is still present at the next boot.
+  const db = memoryDb();
+  let nowMs = 1_000_000;
+  const mkCtx = () => ({
+    hub: capturingHub() as never,
+    registry: registry as never,
+    transport: undefined as never,
+    data: { source: () => ({ db }) } as never,
+    log: noopLog(),
+  });
+
+  // First run: persist a completed-ephemeral transcript, then simulate downtime past its retention window.
+  const first = createRelayFamily({ transcript: { ephemeralRetentionMs: 10, clock: { now: () => nowMs } } });
+  first.mount(mkCtx());
+  const s1 = currentRelayTranscriptService();
+  assert(s1 !== undefined);
+  s1.store?.flush("job:stale", { since: () => ({ entries: [{ offset: 0, chunk: "x" }] }), nextOffset: 1 }, "ephemeral");
+  assertEquals(s1.transcriptOf("job:stale")?.status, "completed");
+  first.teardown?.();
+  nowMs += 1000; // downtime elapses well past the 10ms retention window
+
+  // Second run (restart) over the SAME durable db: the eager mount sweep must retire the already-expired
+  // transcript immediately — without waiting for the first periodic tick and without an explicit sweep().
+  const second = createRelayFamily({ transcript: { ephemeralRetentionMs: 10, clock: { now: () => nowMs } } });
+  second.mount(mkCtx());
+  const s2 = currentRelayTranscriptService();
+  assert(s2 !== undefined);
+  assertEquals(
+    s2.transcriptOf("job:stale"),
+    undefined,
+    "the eager mount sweep retires a transcript already past retention from a previous run",
+  );
+  second.teardown?.();
+});
+
 test("sweep cadence: a fraction of the retention window, floored at 1ms and capped at the Node timer max", () => {
   // A normal retention window derives a quarter-window cadence.
   assertEquals(sweepIntervalMs(1000), 250);

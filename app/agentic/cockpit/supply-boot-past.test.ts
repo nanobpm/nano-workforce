@@ -213,4 +213,60 @@ test("a hanging transcripts fetch does not stall the supply poll", async () => {
   await cockpit.refresh();
   assert.equal(r.host.byData("worker", "wk-a").length, 1, "supply poll keeps making progress");
   assert.deepEqual(r.errors, []);
+  cockpit.dispose();
+});
+
+test("a permanently hung transcripts fetch is bounded by a timeout so the past panel recovers on the next poll", async () => {
+  const r = rig();
+  // A hand-driven timer seam lets us fire the bounded-wait timeout deterministically.
+  const timers = new Map<number, () => void>();
+  let nextId = 0;
+  let fetchCalls = 0;
+  let resolveSecond: ((v: TranscriptListReport) => void) | undefined;
+  const env: SupplyCockpitEnv = {
+    ...r.env,
+    setTimer: (run) => {
+      const id = nextId++;
+      timers.set(id, run);
+      return id;
+    },
+    clearTimer: (handle) => {
+      timers.delete(handle as number);
+    },
+    pastFetchTimeoutMs: 5000,
+    fetchTranscripts: () => {
+      fetchCalls += 1;
+      // The first past-fetch hangs forever; the second (post-recovery) resolves under our control.
+      if (fetchCalls === 1) return new Promise<TranscriptListReport>(() => {});
+      return new Promise<TranscriptListReport>((resolve) => {
+        resolveSecond = resolve;
+      });
+    },
+  };
+  const cockpit = bootSupplyCockpit(env);
+
+  await cockpit.refresh(); // starts the hung past-fetch #1 and schedules its timeout timer
+  await flush();
+  assert.equal(fetchCalls, 1);
+
+  // While the (hung) fetch is outstanding and its timeout has not fired, single-flight blocks a retry.
+  await cockpit.refresh();
+  await flush();
+  assert.equal(fetchCalls, 1, "single-flight: no retry while the outstanding past-fetch is still pending");
+
+  // Fire the bounded-wait timeout: the wait rejects, surfacing one error and clearing the single-flight flag.
+  for (const run of [...timers.values()]) run();
+  await flush();
+  assert.equal(r.errors.length, 1, "the bounded wait surfaces the timeout as one error");
+
+  // The past panel has recovered: the next poll starts a fresh past-fetch (the flag is no longer stuck).
+  await cockpit.refresh();
+  await flush();
+  assert.equal(fetchCalls, 2, "after the timeout the single-flight flag clears, so the next poll retries");
+
+  // And that fresh fetch renders the past-sessions list.
+  resolveSecond?.(transcripts);
+  await flush();
+  assert.equal(r.host.byData("stream", "job:past").length >= 1, true, "the recovered past-sessions list renders");
+  cockpit.dispose();
 });
