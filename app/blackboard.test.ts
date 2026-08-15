@@ -131,6 +131,9 @@ test("renderCoordinationBrief: leads with a separator and teaches the protocol +
   assertStringIncludes(brief, "contract");
   assertStringIncludes(brief, "app/contracts.ts");
   assertStringIncludes(brief, "kind\":\"contract\"");
+  // The contract-POST write-time guard surfaces overlaps via `contractConflicts` (a `file-claim`
+  // POST uses the separate `conflicts` array); the brief must name the right field.
+  assertStringIncludes(brief, "contractConflicts");
 });
 
 test("planKeyForToken: resolves a token to its plan, undefined otherwise (async + sync agree)", async () => {

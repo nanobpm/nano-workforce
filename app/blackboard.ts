@@ -190,8 +190,9 @@ Prevent it:
       curl -s -X POST "${url}" -H 'content-type: application/json' \\
         -d '{"author_task":"<your-task-id>","kind":"contract","dedupe_key":"env:NANO_X","body":"introducing env key NANO_X — <owner> — <semantics + default>"}'
 
-The write-time guard reports a \`conflicts\` array on a \`contract\` POST when your declaration looks like
-a synonym of, or contradicts, an existing contract — reconcile before proceeding.
+The write-time guard reports a \`contractConflicts\` array on a \`contract\` POST when your declaration looks
+like a synonym of, or contradicts, an existing contract — reconcile before proceeding. (A \`file-claim\`
+POST reports its own overlaps in a separate \`conflicts\` array — see below.)
 
 **Stay in sync while you work (this matters most while siblings run in parallel).** The GET
 response includes a \`"cursor"\`. Re-read incrementally — before you start each new file, and at

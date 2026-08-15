@@ -12,6 +12,7 @@
 
 import { existsSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
+import { BLACKBOARD_TABLE } from "@nanobpm/agentic/blackboard";
 import {
   type ContractSignal,
   formatReconciliationReport,
@@ -68,7 +69,9 @@ function loadSignals(): ContractSignal[] {
   try {
     // biome-ignore lint/plugin: external node:sqlite row shape at the DB boundary — the column list is fixed by the SELECT above.
     const rows = db
-      .prepare("SELECT author_task, body, dedupe_key FROM agentic_blackboard WHERE kind = 'contract' ORDER BY id ASC")
+      .prepare(
+        `SELECT author_task, body, dedupe_key FROM ${BLACKBOARD_TABLE} WHERE kind = 'contract' ORDER BY id ASC`,
+      )
       .all() as { author_task: string; body: string; dedupe_key: string | null }[];
     return rows.map((r) => ({ authorTask: r.author_task, body: r.body, ...parseRef(r.dedupe_key) }));
   } catch {
