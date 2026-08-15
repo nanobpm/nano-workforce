@@ -118,3 +118,29 @@ test("complete-user-task: refuses a non-escalation user task (400)", async () =>
   assertEquals(res.status, 400);
   assertEquals(completed, []);
 });
+
+test("complete-user-task: a read-model cleanup failure does not mask a resumed completion (200)", async () => {
+  const { app, completed } = memApp([{ userTaskKey: "ut-5", elementId: "plan-review-decision" }]);
+  // The engine has already resumed the process; a transient delete failure on the latency-optimising
+  // read-model cleanup must not surface as a 5xx for a task that IS completed (poller reconciles).
+  const realTable = app.data.table.bind(app.data);
+  // biome-ignore lint/suspicious/noExplicitAny: test harness cast, mirrors sibling op tests
+  (app.data as any).table = (name: string, pk: string) => {
+    const t = realTable(name, pk);
+    if (name === "user_tasks") {
+      return {
+        ...t,
+        delete: async () => {
+          throw new Error("transient DB error");
+        },
+      };
+    }
+    return t;
+  };
+
+  const res = await call(app, { userTaskKey: "ut-5", variables: { directive: "revise", notes: "narrow scope" } });
+
+  assertEquals(res.status, 200);
+  assertEquals(res.body.ok, true);
+  assertEquals(completed, [{ userTaskKey: "ut-5", variables: { directive: "revise", notes: "narrow scope" } }]);
+});

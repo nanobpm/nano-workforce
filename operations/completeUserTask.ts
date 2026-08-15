@@ -18,6 +18,8 @@
 // On success it removes the answered task's `user_tasks` read-model row so the Tasks grid stops
 // offering a decision for a task that is now completed, without waiting a poll cycle; the poller
 // (`pollUserTasks`) is the durable source of truth and will re-derive the exact same empty state.
+// That read-model cleanup is best-effort — a transient delete failure is logged and swallowed rather
+// than masking a completion the engine has already resumed with a spurious 5xx.
 //
 // The runtime validates the body against openapi.yaml (`userTaskKey` + `variables` required); this
 // delegate narrows the validated shape and applies the shared human-completion contract.
@@ -50,8 +52,17 @@ export default defineOperation("completeUserTask", async ({ body }, app) => {
   if (r.ok) {
     // Reconcile this operation's OWN action immediately: drop the read-model row so the Tasks page
     // stops offering a decision for a task that is now completed. The poller re-derives the same
-    // state, so this is a latency optimisation, not the source of truth.
-    await userTasks(app.data).delete(userTaskKey);
+    // state, so this is a latency optimisation, not the source of truth — make it best-effort so a
+    // transient cleanup failure never masks a completion the engine has already resumed (which would
+    // return a spurious 5xx to the UI for a task that IS done). The poller re-derives the empty state.
+    try {
+      await userTasks(app.data).delete(userTaskKey);
+    } catch (err) {
+      app.log.warn("complete-user-task: read-model cleanup failed (poller will reconcile)", {
+        userTaskKey,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
     app.log.info("operator completed user task", { userTaskKey, elementId: r.elementId });
     return { status: 200, body: { ok: true, completionId: r.completionId, elementId: r.elementId } };
   }
