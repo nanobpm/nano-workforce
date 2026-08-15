@@ -187,15 +187,17 @@ export interface ReviewThreadsResponse {
   };
 }
 
-/** Map a review-threads GraphQL response to `ReviewThread[]`, FAILING CLOSED (returns `null`) when
- * the thread page is TRUNCATED (`pageInfo.hasNextPage`). A `first:100` page cannot see thread 101+,
- * so a truncated read is an *unverifiable* gate — the worker treats `null` as unverifiable and
- * blocks, rather than silently missing an unresolved thread beyond the page and converging (a
- * fail-OPEN, the exact class this gate exists to prevent). Pure; unit-tested. */
+/** Map a review-threads GraphQL response to `ReviewThread[]`, FAILING CLOSED (returns `null`) on any
+ * UNVERIFIABLE read: a missing `reviewThreads` block (GraphQL errors, permission issues, a malformed
+ * payload) OR a page whose completeness we can't positively confirm — i.e. anything but a confirmed
+ * `pageInfo.hasNextPage === false`. A `first:100` page cannot see thread 101+, and a missing/errored
+ * block cannot be read at all, so either is unverifiable: the worker treats `null` as unverifiable
+ * and blocks, rather than silently mapping it to "no threads" and converging (a fail-OPEN, the exact
+ * class this gate exists to prevent). Only a positively complete page is mapped. Pure; unit-tested. */
 export function parseReviewThreadsResponse(payload: ReviewThreadsResponse): ReviewThread[] | null {
   const threads = payload.data?.repository?.pullRequest?.reviewThreads;
-  if (threads?.pageInfo?.hasNextPage) return null;
-  const nodes = threads?.nodes ?? [];
+  if (!threads || threads.pageInfo?.hasNextPage !== false) return null;
+  const nodes = threads.nodes ?? [];
   return nodes.map((t) => ({
     isResolved: !!t.isResolved,
     path: t.path ?? null,

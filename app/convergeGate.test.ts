@@ -137,7 +137,30 @@ test("parseReviewThreadsResponse: FAILS CLOSED (null) when the thread page is TR
   assertEquals(mapped, null);
 });
 
-// ── The worker (with injected readers — never touches git/network) ──────────
+test("parseReviewThreadsResponse: FAILS CLOSED (null) when the reviewThreads block is MISSING", () => {
+  // GraphQL errors, permission issues, or a malformed payload can omit `reviewThreads`. Treating that
+  // as "no threads" (empty array) is a fail-OPEN — an unverifiable read must return null so the worker
+  // blocks/escalates rather than converging on a read that never happened.
+  assertEquals(parseReviewThreadsResponse({}), null);
+  assertEquals(parseReviewThreadsResponse({ data: { repository: { pullRequest: {} } } }), null);
+});
+
+test("parseReviewThreadsResponse: FAILS CLOSED (null) when page completeness is UNCONFIRMED", () => {
+  // A present block whose `pageInfo.hasNextPage` we can't read as an explicit `false` is unverifiable:
+  // only a positively complete page may be mapped.
+  const mapped = parseReviewThreadsResponse({
+    data: {
+      repository: {
+        pullRequest: {
+          reviewThreads: {
+            nodes: [{ isResolved: true, path: "a.ts", comments: { nodes: [{ body: "ok" }] } }],
+          },
+        },
+      },
+    },
+  });
+  assertEquals(mapped, null);
+});
 
 async function makeUnderTest(deps: {
   readThreads: (repo: string, n: number) => Promise<ReviewThread[] | null>;
