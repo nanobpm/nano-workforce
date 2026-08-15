@@ -1467,10 +1467,15 @@ export async function pollUserTasks(data: DataLayer, engine: EngineClient) {
   }
 
   // Plan escalations (`plan-review-decision` / `trial-merge-decision`) — read each in-flight plan's
-  // open user tasks and pair them with the open audit row's question/findings.
+  // open user tasks and pair them with the open audit row's question/findings. Dedupe by `plan_key`
+  // across the status queries (mirroring the feature-run scan above): a plan whose status transitions
+  // mid-pass could otherwise match twice and push duplicate `desired` rows for one `user_task_key`.
+  const planSeen = new Set<string>();
   for (const status of ["planning", "dispatched"] as const) {
     for (const plan of await plans(data).find({ status })) {
       if (!plan.process_key) continue;
+      if (planSeen.has(plan.plan_key)) continue;
+      planSeen.add(plan.plan_key);
       let tasks: { userTaskKey: string; elementId?: string }[];
       try {
         tasks = await engine.searchUserTasks({ processInstanceKey: plan.process_key });
@@ -1517,10 +1522,15 @@ export async function pollUserTasks(data: DataLayer, engine: EngineClient) {
   }
 
   // PR review-loop escalations (`wait-answer`) — read each in-flight PR's open user tasks and pair the
-  // escalation with the open audit row's question.
+  // escalation with the open audit row's question. Dedupe by `pr_key` across the status queries (as the
+  // feature-run / plan scans do): a PR whose status transitions mid-pass could otherwise be processed
+  // twice and push duplicate `desired` rows for one `user_task_key`.
+  const prSeen = new Set<string>();
   for (const status of PR_ACTIVE_STATUSES) {
     for (const pr of await prs(data).find({ status })) {
       if (!pr.process_key) continue;
+      if (prSeen.has(pr.pr_key)) continue;
+      prSeen.add(pr.pr_key);
       let tasks: { userTaskKey: string; elementId?: string }[];
       try {
         tasks = await engine.searchUserTasks({ processInstanceKey: pr.process_key });
