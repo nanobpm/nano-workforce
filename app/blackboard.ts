@@ -334,20 +334,13 @@ export async function detectFileClaimConflicts(
     }));
 }
 
-/** Append an entry, idempotently. A blank `body` is rejected. When a `dedupe_key` is supplied and
- * an entry already exists for it on this plan, the write is a no-op and the existing id is
- * returned (`inserted: false`) — so an engine job retry re-POSTing the same fact never duplicates.
- *
- * The `contract` kind (issue #227) is the app-local addition: the shared store's normaliser would
- * coerce it to `note`, so after the store's insert (which owns all the idempotency/dedupe semantics)
- * we patch the ONE row's kind column back to `contract`. We reuse the store's insert rather than
- * hand-writing a parallel one, so there is no drift in the append logic — only the kind vocabulary is
- * app-extended. */
 /** Narrow a SQLite row id (`number | bigint`) to a JS number, failing loudly if it exceeds the
  * safe-integer range. Blackboard rowids are monotonic and stay far below 2^53 in practice, but the
  * driver types the id as `number | bigint`; coercing a huge bigint via `Number(...)` would silently
  * lose precision and corrupt the id where it is used as a `since` cursor. We narrow ONCE here so the
- * union never escapes `appendEntry` and no caller re-coerces. */
+ * union never escapes `appendEntry` and no caller re-coerces. Both branches guard the safe-integer
+ * boundary: a `bigint` above `MAX_SAFE_INTEGER`, or a driver-returned `number` that is somehow not a
+ * safe integer, both throw rather than silently yield a lossy cursor. */
 export function toSafeRowId(id: number | bigint): number {
   if (typeof id === "bigint") {
     if (id > BigInt(Number.MAX_SAFE_INTEGER)) {
@@ -357,9 +350,23 @@ export function toSafeRowId(id: number | bigint): number {
     }
     return Number(id);
   }
+  if (!Number.isSafeInteger(id)) {
+    throw new Error(
+      `blackboard row id ${id} is not a safe integer; unsafe to use as a JS number cursor`,
+    );
+  }
   return id;
 }
 
+/** Append an entry, idempotently. A blank `body` is rejected. When a `dedupe_key` is supplied and
+ * an entry already exists for it on this plan, the write is a no-op and the existing id is
+ * returned (`inserted: false`) — so an engine job retry re-POSTing the same fact never duplicates.
+ *
+ * The `contract` kind (issue #227) is the app-local addition: the shared store's normaliser would
+ * coerce it to `note`, so after the store's insert (which owns all the idempotency/dedupe semantics)
+ * we patch the ONE row's kind column back to `contract`. We reuse the store's insert rather than
+ * hand-writing a parallel one, so there is no drift in the append logic — only the kind vocabulary is
+ * app-extended. */
 export async function appendEntry(
   data: DataLayer,
   planKey: string,

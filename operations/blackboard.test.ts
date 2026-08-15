@@ -175,6 +175,9 @@ test("POST a non-file-claim carries no conflicts", async () => {
   await seedPlan(app, "o/r#1", "tok");
   const res = await call(app, "POST", { token: "tok" }, { author_task: "t", kind: "note", body: "fyi" });
   assertEquals(res.body.conflicts, []);
+  // `contractConflicts` is optional in the schema and only meaningful on a `contract` POST — a
+  // non-`contract` response omits it entirely rather than emitting an always-empty array (#229).
+  assertEquals("contractConflicts" in res.body, false);
 });
 
 test("POST kind='contract' persists the contract kind and round-trips through GET (#227)", async () => {

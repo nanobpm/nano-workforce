@@ -40,6 +40,15 @@ test("toSafeRowId: passes through safe numbers/bigints, throws above MAX_SAFE_IN
     threw = true;
   }
   assert(threw, "a bigint id above MAX_SAFE_INTEGER must throw, not silently lose precision");
+  // The number branch guards the same boundary: a driver-returned non-safe-integer must also fail
+  // loud rather than pass through as a lossy cursor (#229).
+  let threwNum = false;
+  try {
+    toSafeRowId(Number.MAX_SAFE_INTEGER + 2);
+  } catch {
+    threwNum = true;
+  }
+  assert(threwNum, "a number id that is not a safe integer must throw, not silently pass through");
 });
 
 test("mintBlackboardToken: URL-safe, unguessable, unique", () => {

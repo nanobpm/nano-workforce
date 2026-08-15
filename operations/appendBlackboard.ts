@@ -7,6 +7,9 @@
 //   POST → append one entry: { author_task?, kind?, files?, body, wave?, dedupe_key? }. Idempotent
 //          on (plan, dedupe_key). Returns { id, inserted, conflicts } — `conflicts` lists prior
 //          sibling `file-claim`s on the same file(s) (advisory first-writer-wins; never a lock).
+//          A `contract` POST additionally returns `contractConflicts` (near-duplicate declaration
+//          conflicts vs. the durable registry, #227); the field is absent for other kinds, per the
+//          OpenAPI schema's optional property.
 
 import {
   appendEntry,
@@ -71,6 +74,11 @@ export default defineOperation("appendBlackboard", async ({ req, body }, app) =>
   });
   return {
     status: res.inserted ? 201 : 200,
-    body: { id: res.id, inserted: res.inserted, conflicts, contractConflicts },
+    // `contractConflicts` is only meaningful on a `contract` POST and is optional in the schema, so
+    // omit it entirely for other kinds rather than emitting an always-empty array (keeps the response
+    // shape aligned with the OpenAPI contract, which does not require the field).
+    body: kind === "contract"
+      ? { id: res.id, inserted: res.inserted, conflicts, contractConflicts }
+      : { id: res.id, inserted: res.inserted, conflicts },
   };
 });
