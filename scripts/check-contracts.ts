@@ -82,6 +82,12 @@ function walk(dir: string, out: string[]): void {
   }
 }
 
+/** Path of `file` relative to ROOT, normalised to POSIX separators so it matches the POSIX-style
+ * `EXEMPT_FILES` entries on every platform (Windows `join` yields backslashes — issue #229 review). */
+export function toPosixRel(file: string, root: string = ROOT): string {
+  return file.slice(root.length + 1).replaceAll("\\", "/");
+}
+
 function collectFiles(): string[] {
   const files: string[] = [];
   for (const d of CODE_DIRS) {
@@ -109,7 +115,7 @@ function main(): void {
   const errors: string[] = [];
 
   for (const file of collectFiles()) {
-    const rel = file.slice(ROOT.length + 1);
+    const rel = toPosixRel(file);
     if (EXEMPT_FILES.has(rel)) continue;
     const src = readFileSync(file, "utf8");
     for (const key of envKeyReads(src)) {

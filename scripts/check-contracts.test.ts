@@ -7,7 +7,7 @@
 // green. These assert `envKeyReads` sees all three patterns so the gate can hold them to the registry.
 import { test } from "node:test";
 import { assert, assertEquals } from "#test-assert";
-import { envKeyReads, EXPLICIT_CONFIG_KEYS } from "./check-contracts.ts";
+import { envKeyReads, EXPLICIT_CONFIG_KEYS, toPosixRel } from "./check-contracts.ts";
 import { ENV_CONTRACTS } from "../app/contracts.ts";
 
 test("envKeyReads: dot-access is recognised", () => {
@@ -47,4 +47,12 @@ test("GITHUB_TOKEN is enforced by the gate and declared in the registry (PR #229
   // registry declaration — a future removal from ENV_CONTRACTS while code still reads it must fail.
   assert(EXPLICIT_CONFIG_KEYS.has("GITHUB_TOKEN"), "GITHUB_TOKEN must be an enforced config key");
   assert("GITHUB_TOKEN" in ENV_CONTRACTS, "GITHUB_TOKEN must be declared in ENV_CONTRACTS");
+});
+
+test("toPosixRel: normalises Windows backslashes so EXEMPT_FILES matches cross-platform (PR #229 suppressed advisory)", () => {
+  // On Windows `join` yields backslashes, so `scripts\check-contracts.ts` would never match the
+  // POSIX-style EXEMPT_FILES entry and the checker would self-scan and explode. Normalise them.
+  assertEquals(toPosixRel("C:\\repo\\scripts\\check-contracts.ts", "C:\\repo"), "scripts/check-contracts.ts");
+  // POSIX paths are already correct and pass through unchanged.
+  assertEquals(toPosixRel("/repo/scripts/check-contracts.ts", "/repo"), "scripts/check-contracts.ts");
 });

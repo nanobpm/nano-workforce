@@ -42,7 +42,7 @@ export interface ReconciliationFinding {
 
 export interface ReconciliationReport {
   readonly findings: ReconciliationFinding[];
-  /** Convenience: true when there is anything to reconcile. */
+  /** Convenience: true when there is nothing to reconcile (findings is empty). */
   readonly clean: boolean;
 }
 
