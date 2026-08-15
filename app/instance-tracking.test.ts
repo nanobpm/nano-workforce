@@ -7,8 +7,9 @@
 import { test } from "node:test";
 import { assert, assertEquals } from "#test-assert";
 import { readFileSync } from "node:fs";
-import { PR_ACTIVE_STATUSES, PLAN_ACTIVE_STATUSES, TERMINAL_STATUSES } from "./service.ts";
+import { PR_ACTIVE_STATUSES, PLAN_ACTIVE_STATUSES, FEATURE_ACTIVE_STATUSES, TERMINAL_STATUSES } from "./service.ts";
 import { PLAN_TERMINAL_STATUSES } from "./plan.ts";
+import { FEATURE_TERMINAL_STATUSES } from "./feature.ts";
 
 interface Binding {
   table: string;
@@ -88,4 +89,30 @@ test("PR_ACTIVE_STATUSES is derived from the manifest binding (no drift)", async
 test("PLAN_ACTIVE_STATUSES is derived from the manifest binding (no drift)", async () => {
   const b = bindingFor(await bindings(), "plans");
   assertEquals([...PLAN_ACTIVE_STATUSES].sort(), [...(b.activeStatuses ?? [])].sort());
+});
+
+test("instanceTracking: feature_runs activeStatuses excludes every terminal status", async () => {
+  const b = bindingFor(await bindings(), "feature_runs");
+  for (const terminal of FEATURE_TERMINAL_STATUSES) {
+    assert(!b.activeStatuses?.includes(terminal), `terminal status "${terminal}" must not be active`);
+  }
+});
+
+// Every instance-alive feature status must be reconcilable: a run parked at `feature-blocked`
+// (awaiting_operator) or `feature-escalation` (escalated) — or still running — keeps a live engine
+// instance, so onTerminated must be able to flip it to `abandoned` if that instance terminates.
+// Notably includes `awaiting_operator`: without it a run that terminates while blocked strands at
+// `awaiting_operator` forever and blocks re-dispatch (the drift Copilot flagged on #238).
+test("instanceTracking: feature_runs activeStatuses covers every in-flight status", async () => {
+  const inFlight = ["running", "escalated", "awaiting_operator"];
+  const b = bindingFor(await bindings(), "feature_runs");
+  assertEquals([...(b.activeStatuses ?? [])].sort(), [...inFlight].sort());
+});
+
+// Same no-drift guard for the feature scan: `pollUserTasks` no longer hard-codes
+// ["running","escalated","awaiting_operator"] but derives FEATURE_ACTIVE_STATUSES from the manifest,
+// so the feature-escalation scan can't drift from the reconciler's activeStatuses.
+test("FEATURE_ACTIVE_STATUSES is derived from the manifest binding (no drift)", async () => {
+  const b = bindingFor(await bindings(), "feature_runs");
+  assertEquals([...FEATURE_ACTIVE_STATUSES].sort(), [...(b.activeStatuses ?? [])].sort());
 });

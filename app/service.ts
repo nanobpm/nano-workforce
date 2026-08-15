@@ -11,7 +11,7 @@ import { readFileSync } from "node:fs";
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { abandonUrl, mintAbandonToken, renderAbandonBrief } from "./abandon.ts";
 import { agentSlaTimeout } from "./agentSla.ts";
-import { deriveFeatureBlockedPatch, deriveFeatureDelivery, deriveFeatureEscalationPatch, FEATURE_BLOCKED_ELEMENT, FEATURE_ESCALATION_ELEMENT, type FeatureRun, featureRuns } from "./feature.ts";
+import { deriveFeatureBlockedPatch, deriveFeatureDelivery, deriveFeatureEscalationPatch, FEATURE_BLOCKED_ELEMENT, FEATURE_ESCALATION_ELEMENT, FEATURE_RUN_STATUSES, type FeatureRun, type FeatureRunStatus, featureRuns } from "./feature.ts";
 import {
   classifyMergeability,
   ensureFreshHeadRun,
@@ -1414,6 +1414,21 @@ export const PR_ACTIVE_STATUSES: readonly string[] = activeStatusesFor("pull_req
  * drift from the reconciler — mirroring `PR_ACTIVE_STATUSES` rather than hard-coding a second list. */
 export const PLAN_ACTIVE_STATUSES: readonly string[] = activeStatusesFor("plans");
 
+/** The `feature_runs` statuses a feature instance can be parked-and-active on, DERIVED from the same
+ * single source of truth (`instanceTracking.feature_runs.activeStatuses`) so `pollUserTasks`' feature
+ * scan can never drift from the reconciler — mirroring `PR_ACTIVE_STATUSES`/`PLAN_ACTIVE_STATUSES`
+ * rather than hard-coding a second list. Notably includes the non-terminal `awaiting_operator`, so a
+ * run that terminates while parked at `feature-blocked` still gets the `onTerminated` reconciliation
+ * (rather than stranding at `awaiting_operator` and blocking re-dispatch). Narrowed to the typed
+ * `FeatureRunStatus` union (throwing on any manifest status the code doesn't know) so the derived
+ * list can feed `featureRuns(data).find({ status })` directly. */
+function toFeatureRunStatus(status: string): FeatureRunStatus {
+  for (const known of FEATURE_RUN_STATUSES) if (known === status) return known;
+  throw new Error(`nano.app.json: feature_runs.activeStatuses has unknown status "${status}"`);
+}
+export const FEATURE_ACTIVE_STATUSES: readonly FeatureRunStatus[] =
+  activeStatusesFor("feature_runs").map(toFeatureRunStatus);
+
 /** Reconcile the unified Tasks-inbox read-model (`user_tasks`) against the engine's currently-open
  * native user-task escalations (issue #236). The Tasks page lists EVERY open escalation awaiting a
  * human decision — the feature kinds (already denormalised onto `feature_runs` by the two feature
@@ -1437,7 +1452,7 @@ export async function pollUserTasks(data: DataLayer, engine: EngineClient) {
   // pollFeatureEscalations/pollFeatureBlocked (earlier in this pass), so no per-instance engine read
   // is needed here.
   const featureSeen = new Set<string>();
-  for (const status of ["running", "escalated", "awaiting_operator"] as const) {
+  for (const status of FEATURE_ACTIVE_STATUSES) {
     for (const run of await featureRuns(data).find({ status })) {
       if (featureSeen.has(run.feature_key)) continue;
       featureSeen.add(run.feature_key);
