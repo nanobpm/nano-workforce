@@ -77,6 +77,155 @@ export async function fetchPrReviews(
   return (await r.json()) as GhReview[];
 }
 
+// ── Review-comment convergence gate (don't converge with unaddressed comments) ──────────────
+//
+// A PR must not be declared converged while Copilot still has unaddressed review comments. Two
+// kinds must be gated:
+//   • unresolved review THREADS — deterministic (GraphQL `isResolved`).
+//   • SUPPRESSED / low-confidence advisories — Copilot folds these into the review BODY under a
+//     "Suppressed comments (N)" block; they are NOT threads, cannot be resolved, and are re-listed
+//     every round. To make "acknowledged" trackable, the review-round agent must post a RESOLVED
+//     review thread carrying a `nano-ack: <path>:<line>` marker (the exact key from Copilot's
+//     `**path:line**` header) for each advisory it applies or declines. The gate then treats an
+//     advisory as addressed iff a resolved thread carries its ack marker.
+
+/** One PR review thread, narrowed to what the convergence gate needs. */
+export interface ReviewThread {
+  isResolved: boolean;
+  path: string | null;
+  bodies: string[];
+}
+
+/** The `nano-ack:` acknowledgement marker the review-round agent stamps into the resolved thread
+ * it opens per suppressed advisory. The captured group is the advisory key (`path:line`). */
+const ACK_MARKER = /nano-ack:\s*([^\s)>*]+:\d+)/gi;
+
+/** Parse the `path:line` keys of Copilot's suppressed / low-confidence advisories out of a review
+ * body. Copilot renders them under a `<summary>Suppressed comments (N)</summary>` block, each as a
+ * bold `**path:line**` header. Returns the de-duplicated keys (empty when there is no such block). */
+export function parseSuppressedAdvisories(reviewBody: string | null | undefined): string[] {
+  const body = reviewBody ?? "";
+  const idx = body.search(/Suppressed comments\s*\(/i);
+  if (idx < 0) return [];
+  // Scan only from the "Suppressed comments" marker onward so a `**path:line**` elsewhere in the
+  // overview prose can never be mistaken for an advisory.
+  const region = body.slice(idx);
+  const keys = new Set<string>();
+  const re = /\*\*([^*]+?:\d+)\*\*/g;
+  let m: RegExpExecArray | null;
+  // biome-ignore lint/suspicious/noAssignInExpressions: canonical regex-exec accumulation loop
+  while ((m = re.exec(region)) !== null) keys.add(m[1].trim());
+  return [...keys];
+}
+
+/** Extract the acknowledged advisory keys from a set of review threads (only RESOLVED threads
+ * count — an open ack thread is not yet an acknowledgement). */
+export function parseAckedAdvisories(threads: ReviewThread[]): string[] {
+  const acked = new Set<string>();
+  for (const t of threads) {
+    if (!t.isResolved) continue;
+    for (const body of t.bodies) {
+      ACK_MARKER.lastIndex = 0;
+      let m: RegExpExecArray | null;
+      // biome-ignore lint/suspicious/noAssignInExpressions: canonical regex-exec accumulation loop
+      while ((m = ACK_MARKER.exec(body)) !== null) acked.add(m[1].trim());
+    }
+  }
+  return [...acked];
+}
+
+/** Fetch the latest Copilot review body for a PR (the newest review authored by the automated
+ * Copilot reviewer). `null` when no transport is usable; throws on a genuine transport failure. */
+export async function fetchLatestCopilotReviewBody(
+  repo: string,
+  number: number | string,
+  token: string,
+): Promise<string | null> {
+  const mode = githubTransport();
+  const useGh = mode === "gh" || (mode === "auto" && (await isGhAvailable()));
+  const path = `repos/${repo}/pulls/${number}/reviews?per_page=100`;
+  interface Review {
+    user?: { login?: string };
+    body?: string;
+  }
+  let reviews: Review[];
+  if (useGh) {
+    const out = await runGh(["api", path, "-H", "Accept: application/vnd.github+json"]);
+    // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+    reviews = JSON.parse(out) as Review[];
+  } else {
+    if (!token) return null;
+    const r = await fetch(`https://api.github.com/${path}`, {
+      headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json" },
+    });
+    if (!r.ok) throw new Error(`github ${r.status} ${r.statusText}`.trim());
+    // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+    reviews = (await r.json()) as Review[];
+  }
+  const copilot = reviews.filter((rv) => isCopilot(rv.user?.login));
+  const latest = copilot[copilot.length - 1];
+  return latest?.body ?? null;
+}
+
+/** Fetch a PR's review threads (resolution state + path + comment bodies) via GraphQL. `null` when
+ * no transport is usable; throws on a genuine transport failure. */
+export async function fetchReviewThreads(
+  repo: string,
+  number: number | string,
+  token: string,
+): Promise<ReviewThread[] | null> {
+  const [owner, name] = repo.split("/");
+  const query =
+    "query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){pullRequest(number:$n){" +
+    "reviewThreads(first:100){nodes{isResolved path comments(first:100){nodes{body}}}}}}}";
+  const mode = githubTransport();
+  const useGh = mode === "gh" || (mode === "auto" && (await isGhAvailable()));
+  interface ThreadsResp {
+    data?: {
+      repository?: {
+        pullRequest?: {
+          reviewThreads?: {
+            nodes?: { isResolved?: boolean; path?: string | null; comments?: { nodes?: { body?: string }[] } }[];
+          };
+        };
+      };
+    };
+  }
+  let payload: ThreadsResp;
+  if (useGh) {
+    const out = await runGh([
+      "api",
+      "graphql",
+      "-f",
+      `query=${query}`,
+      "-F",
+      `o=${owner}`,
+      "-F",
+      `r=${name}`,
+      "-F",
+      `n=${number}`,
+    ]);
+    // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+    payload = JSON.parse(out) as ThreadsResp;
+  } else {
+    if (!token) return null;
+    const r = await fetch("https://api.github.com/graphql", {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ query, variables: { o: owner, r: name, n: Number(number) } }),
+    });
+    if (!r.ok) throw new Error(`github ${r.status} ${r.statusText}`.trim());
+    // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+    payload = (await r.json()) as ThreadsResp;
+  }
+  const nodes = payload.data?.repository?.pullRequest?.reviewThreads?.nodes ?? [];
+  return nodes.map((t) => ({
+    isResolved: !!t.isResolved,
+    path: t.path ?? null,
+    bodies: (t.comments?.nodes ?? []).map((c) => c.body ?? ""),
+  }));
+}
+
 // ── Copilot re-request (review-wait liveness) ───────────────────────────────
 // A PR parked in `waiting_review` blocks on a *fresh* Copilot review. Copilot won't
 // spontaneously re-review a round with no new commit, and routinely dismisses a re-request, so
