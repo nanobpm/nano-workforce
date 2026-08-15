@@ -1,3 +1,10 @@
+## [0.72.1](https://github.com/nanobpm/nano-workforce/compare/v0.72.0...v0.72.1) (2026-08-15)
+
+
+### Bug Fixes
+
+* remove question from table ([#240](https://github.com/nanobpm/nano-workforce/issues/240)) ([d672206](https://github.com/nanobpm/nano-workforce/commit/d6722063c3110672f8e2f0ee8c955c7ab0b39577))
+
 # [0.72.0](https://github.com/nanobpm/nano-workforce/compare/v0.71.0...v0.72.0) (2026-08-15)
 
 
