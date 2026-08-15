@@ -1,3 +1,10 @@
+# [0.71.0](https://github.com/nanobpm/nano-workforce/compare/v0.70.2...v0.71.0) (2026-08-15)
+
+
+### Features
+
+* add a Tasks page to resolve native user-task escalations in the UI ([#238](https://github.com/nanobpm/nano-workforce/issues/238)) ([4dcd1a1](https://github.com/nanobpm/nano-workforce/commit/4dcd1a1ca1756bec45997ce619ed92bff31d03d6)), closes [210/#220](https://github.com/nanobpm/nano-workforce/issues/220)
+
 ## [0.70.2](https://github.com/nanobpm/nano-workforce/compare/v0.70.1...v0.70.2) (2026-08-15)
 
 
