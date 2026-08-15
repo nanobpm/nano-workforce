@@ -20,3 +20,10 @@ test("fileUrlToPath: a malformed percent-escape does not throw (best-effort)", (
 test("fileUrlToPath: a non-file URL yields undefined", () => {
   assertEquals(fileUrlToPath("postgres://localhost/db"), undefined);
 });
+
+test("fileUrlToPath: a malformed file:// URL yields undefined, never throws (PR #229)", () => {
+  // `new URL("file://…")` throws on a malformed authority/host. The advisory pass must degrade to
+  // undefined (best-effort: file simply not found) rather than crash a "never gate CI" script.
+  assertEquals(fileUrlToPath("file://%zz/bad host/db.sqlite"), undefined);
+});
+

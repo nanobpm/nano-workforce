@@ -24,7 +24,23 @@ import {
   readBlackboard,
   readBlackboardPage,
   renderCoordinationBrief,
+  toSafeRowId,
 } from "./blackboard.ts";
+
+test("toSafeRowId: passes through safe numbers/bigints, throws above MAX_SAFE_INTEGER (PR #229)", () => {
+  assertEquals(toSafeRowId(42), 42);
+  assertEquals(toSafeRowId(0), 0);
+  // A bigint within the safe range narrows to an identical number.
+  assertEquals(toSafeRowId(9007199254740991n), Number.MAX_SAFE_INTEGER);
+  // Beyond 2^53 a Number(...) coercion would silently lose precision as a `since` cursor — fail loud.
+  let threw = false;
+  try {
+    toSafeRowId(9007199254740993n);
+  } catch {
+    threw = true;
+  }
+  assert(threw, "a bigint id above MAX_SAFE_INTEGER must throw, not silently lose precision");
+});
 
 test("mintBlackboardToken: URL-safe, unguessable, unique", () => {
   const a = mintBlackboardToken();

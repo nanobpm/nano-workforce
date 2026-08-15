@@ -32,7 +32,15 @@ function safeDecodeURIComponent(s: string): string {
 export function fileUrlToPath(u: string): string | undefined {
   if (!u.startsWith("file:")) return undefined;
   if (u.startsWith("file://")) {
-    const p = safeDecodeURIComponent(new URL(u).pathname);
+    let pathname: string;
+    try {
+      pathname = new URL(u).pathname;
+    } catch {
+      // Advisory-only pass: a malformed file:// URL must never fail the build. Give up on this
+      // input (worst case the file simply isn't found) rather than throwing out of reconciliation.
+      return undefined;
+    }
+    const p = safeDecodeURIComponent(pathname);
     return /^\/[A-Za-z]:/.test(p) ? p.slice(1) : p;
   }
   const p = safeDecodeURIComponent(u.slice("file:".length));

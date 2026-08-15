@@ -53,7 +53,7 @@ export default defineOperation("appendBlackboard", async ({ req, body }, app) =>
     ? await detectFileClaimConflicts(app.data, planKey, {
       author_task,
       files,
-      beforeId: Number(res.id),
+      beforeId: res.id,
     })
     : [];
   // For a `contract`, surface near-duplicate DECLARATION conflicts (a synonym/contradiction/rejected
@@ -71,6 +71,6 @@ export default defineOperation("appendBlackboard", async ({ req, body }, app) =>
   });
   return {
     status: res.inserted ? 201 : 200,
-    body: { id: Number(res.id), inserted: res.inserted, conflicts, contractConflicts },
+    body: { id: res.id, inserted: res.inserted, conflicts, contractConflicts },
   };
 });

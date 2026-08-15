@@ -28,7 +28,13 @@
 // handle (`data.source().db`) — the same physical database the record gateway (`data.table`) uses,
 // so the HTTP hook and the agentic channel share one connection and one table.
 
-import { BLACKBOARD_TABLE, BlackboardStore, type SqliteDb } from "@nanobpm/agentic/blackboard";
+import {
+  BLACKBOARD_TABLE,
+  BlackboardStore,
+  normalizeKind as normalizeStoreKind,
+  type SqliteDb,
+  BLACKBOARD_KINDS as STORE_KINDS,
+} from "@nanobpm/agentic/blackboard";
 import type { DataLayer } from "@nanobpm/urban";
 import {
   type ContractCategory,
@@ -43,7 +49,6 @@ import {
 export type { BlackboardKind } from "@nanobpm/agentic/blackboard";
 export { BLACKBOARD_KINDS, isUniqueViolation, normalizeKind } from "@nanobpm/agentic/blackboard";
 
-import { normalizeKind as normalizeStoreKind, BLACKBOARD_KINDS as STORE_KINDS } from "@nanobpm/agentic/blackboard";
 
 /** The app-recognised blackboard kinds: the shared store's kinds PLUS `contract` — the live,
  * in-flight coordination signal introduced by issue #227 ("I am introducing / consuming contract
@@ -338,11 +343,28 @@ export async function detectFileClaimConflicts(
  * we patch the ONE row's kind column back to `contract`. We reuse the store's insert rather than
  * hand-writing a parallel one, so there is no drift in the append logic — only the kind vocabulary is
  * app-extended. */
+/** Narrow a SQLite row id (`number | bigint`) to a JS number, failing loudly if it exceeds the
+ * safe-integer range. Blackboard rowids are monotonic and stay far below 2^53 in practice, but the
+ * driver types the id as `number | bigint`; coercing a huge bigint via `Number(...)` would silently
+ * lose precision and corrupt the id where it is used as a `since` cursor. We narrow ONCE here so the
+ * union never escapes `appendEntry` and no caller re-coerces. */
+export function toSafeRowId(id: number | bigint): number {
+  if (typeof id === "bigint") {
+    if (id > BigInt(Number.MAX_SAFE_INTEGER)) {
+      throw new Error(
+        `blackboard row id ${id} exceeds Number.MAX_SAFE_INTEGER; unsafe to narrow to a JS number cursor`,
+      );
+    }
+    return Number(id);
+  }
+  return id;
+}
+
 export async function appendEntry(
   data: DataLayer,
   planKey: string,
   input: BlackboardInput,
-): Promise<{ inserted: boolean; id: number | bigint }> {
+): Promise<{ inserted: boolean; id: number }> {
   const appKind = normalizeAppKind(input.kind);
   const res = storeFor(data).append(planKey, {
     authorTask: input.author_task,
@@ -362,7 +384,7 @@ export async function appendEntry(
     // lose precision above `Number.MAX_SAFE_INTEGER` and patch the wrong row; SQLite binds bigint natively.
     data.source().db.run(`UPDATE ${BLACKBOARD_TABLE} SET kind = 'contract' WHERE id = ?`, [res.id]);
   }
-  return res;
+  return { inserted: res.inserted, id: toSafeRowId(res.id) };
 }
 
 /** Parse a `contract` entry's `dedupe_key` convention `<category>:<name>` (e.g. `env:NANO_X`,
