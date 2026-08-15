@@ -1402,7 +1402,9 @@ const APP_MANIFEST: { instanceTracking?: { table: string; activeStatuses?: strin
 function activeStatusesFor(table: string): readonly string[] {
   const binding = APP_MANIFEST.instanceTracking?.find((b) => b.table === table);
   if (!binding?.activeStatuses?.length) {
-    throw new Error(`nano.app.json: instanceTracking.${table}.activeStatuses is missing or empty`);
+    throw new Error(
+      `nano.app.json: instanceTracking[table="${table}"].activeStatuses is missing or empty`,
+    );
   }
   return binding.activeStatuses;
 }
