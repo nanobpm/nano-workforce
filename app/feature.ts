@@ -267,7 +267,14 @@ export async function startFeature(
   baseBranch: string,
   converge: boolean,
   autoMerge: boolean,
+  customInstructions: string | null = null,
 ) {
+  // Operator free-text steering for the implementation agent (issue #172 follow-on): blank/absent →
+  // null so the implement task's `appendPrompt` FEEL (`customInstructions = null`) skips the block
+  // rather than appending an empty "Operator custom instructions" heading.
+  const instructions = typeof customInstructions === "string" && customInstructions.trim() !== ""
+    ? customInstructions.trim()
+    : null;
   const table = featureRuns(data);
   const existing = await table.get(parsed.planKey);
   if (existing && !FEATURE_TERMINAL_STATUSES.includes(existing.status)) {
@@ -356,6 +363,10 @@ export async function startFeature(
       // brief rides `appendPrompt` in the implement task, exactly like the epic implementer.
       baseBranch: base,
       baseBranchBrief: renderBaseBranchBrief(base),
+      // Optional operator steering, appended to the implement agent's prompt via the implement
+      // task's `appendPrompt` FEEL (feature.bpmn). Null when none was supplied; persists on the
+      // instance so it also rides the answer-loop redispatch back into the same implement task.
+      customInstructions: instructions,
     },
   });
   const processKey = processInstanceKey == null ? null : String(processInstanceKey);
