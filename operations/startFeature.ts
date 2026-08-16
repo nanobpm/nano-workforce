@@ -115,12 +115,18 @@ export default defineOperation("startFeature", async ({ body }, app) => {
   // Auto-merge is only meaningful as a follow-on to convergence; pin it off when converge is off so
   // the persisted row and the process variable can't disagree.
   const autoMerge = converge && "autoMerge" in body && body.autoMerge === true;
-  const result = await startFeature(app.data, app.engine, parsed, normalizedBase, converge, autoMerge);
+  // Optional operator steering threaded to the implementation agent's prompt. Empty/whitespace is
+  // normalized to null downstream (startFeature) so it never appends an empty instruction block.
+  const customInstructions = "customInstructions" in body && typeof body.customInstructions === "string"
+    ? body.customInstructions
+    : null;
+  const result = await startFeature(app.data, app.engine, parsed, normalizedBase, converge, autoMerge, customInstructions);
   app.log.info("feature run started", {
     featureKey: parsed.planKey,
     requestedBaseBranch: normalizedBase,
     converge,
     autoMerge,
+    hasCustomInstructions: typeof customInstructions === "string" && customInstructions.trim() !== "",
     alreadyRunning: "alreadyRunning" in result && result.alreadyRunning === true,
   });
   return { status: 202, body: result };

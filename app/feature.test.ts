@@ -114,6 +114,42 @@ test("startFeature: seeds the single task slice + base-branch brief onto the ins
   assertEquals(v.status, null);
 });
 
+test("startFeature: custom instructions ride the instance as a variable (trimmed)", async () => {
+  let captured: any = null;
+  const engine = {
+    createInstance: (req: any) => {
+      captured = req;
+      return Promise.resolve({ processInstanceKey: "PI-3" });
+    },
+  } as any;
+  await startFeature(
+    memData({ feature_runs: { rows: [], key: "feature_key" } }),
+    engine,
+    PARSED,
+    "main",
+    false,
+    false,
+    "  prefer Deno; keep the diff small  ",
+  );
+  assertEquals(captured.variables.customInstructions, "prefer Deno; keep the diff small");
+});
+
+test("startFeature: blank/absent custom instructions are seeded as null", async () => {
+  let captured: any = null;
+  const engine = {
+    createInstance: (req: any) => {
+      captured = req;
+      return Promise.resolve({ processInstanceKey: "PI-4" });
+    },
+  } as any;
+  // Absent (default arg) → null.
+  await startFeature(memData({ feature_runs: { rows: [], key: "feature_key" } }), engine, PARSED, "main", false, false);
+  assertEquals(captured.variables.customInstructions, null);
+  // Whitespace-only → null (so the appendPrompt FEEL skips the block instead of appending an empty heading).
+  await startFeature(memData({ feature_runs: { rows: [], key: "feature_key" } }), engine, PARSED, "main", false, false, "   ");
+  assertEquals(captured.variables.customInstructions, null);
+});
+
 test("startFeature: an already-running run short-circuits (no new instance)", async () => {
   const stores = {
     feature_runs: {

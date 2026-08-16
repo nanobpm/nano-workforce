@@ -668,6 +668,13 @@ components:
           description: >-
             Opt in to sharing a custom integration base branch with another already-active epic. See
             `PlanStartByIssue.allowSharedBase`.
+        customInstructions:
+          type: string
+          maxLength: 8000
+          description: >-
+            OPTIONAL free-text steering appended to the implementation agent's prompt for this run
+            (via the implement task's `appendPrompt`). Blank/whitespace is treated as absent. Persists
+            on the instance, so it also applies to the agent's answer-loop redispatch.
     FeatureStartByUrl:
       type: object
       additionalProperties: false
@@ -698,6 +705,12 @@ components:
         allowSharedBase:
           type: boolean
           description: Share a custom integration base with another active epic. See `PlanStartByIssue.allowSharedBase`.
+        customInstructions:
+          type: string
+          maxLength: 8000
+          description: >-
+            OPTIONAL free-text steering appended to the implementation agent's prompt for this run.
+            See `FeatureStartByIssue.customInstructions`.
     MessageResult:
       type: object
       description: The result of publishing a message / answering an escalation. Shape varies by message

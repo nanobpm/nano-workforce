@@ -42,6 +42,7 @@
         "fields": [
           { "key": "issue", "label": "owner/repo#123 or a GitHub issue URL", "type": "text", "required": true, "requiredMessage": "An issue reference is required (owner/repo#123 or an issue URL)" },
           { "key": "baseBranch", "label": "Base branch: the branch the PR targets, e.g. main. A missing epic/* branch is auto-created off default HEAD; a non-epic/* branch must already exist.", "type": "text", "required": true, "requiredMessage": "Name the branch the PR targets (e.g. main or epic/agent-protocol)" },
+          { "key": "customInstructions", "label": "Custom instructions (optional) \u2014 extra steering appended to the implementation agent's prompt, e.g. \u201cprefer Deno; keep the diff small; add integration tests\u201d", "type": "text" },
           { "key": "converge", "label": "Converge \u2014 hand the raised PR to the review-convergence loop", "type": "checkbox" },
           { "key": "autoMerge", "label": "Auto-merge \u2014 after convergence, drive the merge-loop (only applies when Converge is on)", "type": "checkbox" },
           { "key": "confirmDefaultBase", "label": "Confirm landing on the default branch \u2014 required only when the base above IS the repository default", "type": "checkbox" },
