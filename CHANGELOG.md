@@ -1,3 +1,10 @@
+# [0.74.0](https://github.com/nanobpm/nano-workforce/compare/v0.73.1...v0.74.0) (2026-08-16)
+
+
+### Features
+
+* **feature:** thread optional custom instructions to the implementation agent ([#247](https://github.com/nanobpm/nano-workforce/issues/247)) ([8b65495](https://github.com/nanobpm/nano-workforce/commit/8b65495a739b01560937fa108ed4def16c3ffd85))
+
 ## [0.73.1](https://github.com/nanobpm/nano-workforce/compare/v0.73.0...v0.73.1) (2026-08-16)
 
 
