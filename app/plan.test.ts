@@ -59,6 +59,13 @@ test("valid positive integer → honoured", () => {
 // asserts the `plan_reviews` rows for the plan key are gone after a re-plan.
 import { startPlan } from "./plan.ts";
 
+// `startPlan` now fetches the epic issue title (issue #248) via the GitHub transport. Force the
+// token transport with no token so the fetch is a hermetic no-op (returns null) and the row `title`
+// deterministically coalesces to the `owner/repo#N` key — no `gh` subprocess, no network. A
+// dedicated test below stubs a successful fetch to cover the real-title path.
+process.env["NANO_PR_GITHUB_TRANSPORT"] = "token";
+delete process.env["GITHUB_TOKEN"];
+
 function memTable(rows: any[], key: string) {
   return {
     get: (k: any) => Promise.resolve(rows.find((r) => r[key] === k) ?? null),
@@ -498,4 +505,76 @@ test("findActivePlansByBase returns only non-terminal plans on the matching repo
   const active = await findActivePlansByBase(admitData(rows), "o/x", "epic/b");
   assertEquals(active.length, 1);
   assertEquals(active[0].plan_key, "o/x#1");
+});
+
+// Issue #248: the human-readable identity for the epics grids. `startPlan` persists a non-blank
+// `plans.title` on BOTH the insert (new epic) and update (re-plan) paths — the fetched issue title
+// when available, else the `owner/repo#N` key — so the title-led grid never renders a blank cell.
+test("startPlan coalesces title to the key when the fetch yields nothing (insert path)", async () => {
+  const PLAN_KEY = "owner/repo#248";
+  const stores: Record<string, { rows: any[]; key: string }> = {
+    plans: { rows: [], key: "plan_key" },
+    plan_tasks: { rows: [], key: "id" },
+    plan_reviews: { rows: [], key: "plan_key" },
+    plan_task_deps: { rows: [], key: "plan_key" },
+  };
+  const engine = { createInstance: () => Promise.resolve({ processInstanceKey: "PI-T1" }) } as any;
+  await startPlan(memData(stores), engine, {
+    repo: "owner/repo",
+    number: 248,
+    url: "https://github.com/owner/repo/issues/248",
+    planKey: PLAN_KEY,
+  }, "main");
+  assertEquals((stores.plans.rows[0] as any).title, PLAN_KEY);
+});
+
+test("startPlan repopulates a non-blank title on re-plan (update path)", async () => {
+  const PLAN_KEY = "owner/repo#249";
+  const stores: Record<string, { rows: any[]; key: string }> = {
+    plans: { rows: [{ plan_key: PLAN_KEY, status: "done", task_count: 0, title: null }], key: "plan_key" },
+    plan_tasks: { rows: [], key: "id" },
+    plan_reviews: { rows: [], key: "plan_key" },
+    plan_task_deps: { rows: [], key: "plan_key" },
+  };
+  const engine = { createInstance: () => Promise.resolve({ processInstanceKey: "PI-T2" }) } as any;
+  await startPlan(memData(stores), engine, {
+    repo: "owner/repo",
+    number: 249,
+    url: "https://github.com/owner/repo/issues/249",
+    planKey: PLAN_KEY,
+  }, "main");
+  assertEquals((stores.plans.rows[0] as any).title, PLAN_KEY);
+});
+
+test("startPlan persists the real epic issue title when the fetch succeeds", async () => {
+  const prevTok = process.env["GITHUB_TOKEN"];
+  const prevFetch = globalThis.fetch;
+  process.env["GITHUB_TOKEN"] = "t0ken";
+  globalThis.fetch = ((url: string | URL | Request) => {
+    const u = String(url);
+    if (u.endsWith("/repos/owner/repo/issues/250")) {
+      return Promise.resolve(new Response(JSON.stringify({ title: "Ship the epic" }), { status: 200 }));
+    }
+    throw new Error(`unexpected fetch: ${u}`);
+  }) as typeof fetch;
+  try {
+    const stores: Record<string, { rows: any[]; key: string }> = {
+      plans: { rows: [], key: "plan_key" },
+      plan_tasks: { rows: [], key: "id" },
+      plan_reviews: { rows: [], key: "plan_key" },
+      plan_task_deps: { rows: [], key: "plan_key" },
+    };
+    const engine = { createInstance: () => Promise.resolve({ processInstanceKey: "PI-T3" }) } as any;
+    await startPlan(memData(stores), engine, {
+      repo: "owner/repo",
+      number: 250,
+      url: "https://github.com/owner/repo/issues/250",
+      planKey: "owner/repo#250",
+    }, "main");
+    assertEquals((stores.plans.rows[0] as any).title, "Ship the epic");
+  } finally {
+    globalThis.fetch = prevFetch;
+    if (prevTok === undefined) delete process.env["GITHUB_TOKEN"];
+    else process.env["GITHUB_TOKEN"] = prevTok;
+  }
 });

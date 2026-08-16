@@ -55,7 +55,7 @@
           "filter": [{ "field": "plan_key", "eqParam": true }]
         },
         "columns": [
-          { "field": "plan_key", "header": "Issue", "linkField": "issue_url" },
+          { "field": "title", "template": "{{title}}", "header": "Item", "linkField": "issue_url" },
           { "field": "status", "header": "Status", "link": { "kind": "processExplorer", "keyField": "process_key" } },
           { "field": "delivery", "header": "Delivery" },
           { "field": "wave_label", "header": "Wave" },

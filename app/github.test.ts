@@ -3,7 +3,7 @@
 // the merge-exclusion graph. Force the token transport and stub `globalThis.fetch`.
 import { test } from "node:test";
 import { assertEquals, assertRejects } from "#test-assert";
-import { BaseBranchMustExistError, ensureBaseBranch, fetchPrFiles, isNotAPullRequestError } from "./github.ts";
+import { BaseBranchMustExistError, ensureBaseBranch, fetchIssueTitle, fetchPrFiles, isNotAPullRequestError } from "./github.ts";
 
 // A fake `fetch` that serves `pages` of file batches; each page N (1-based) returns `pages[N-1]`
 // files (named `f{index}`), setting a `Link: rel="next"` header whenever a later page exists.
@@ -258,4 +258,58 @@ test("isNotAPullRequestError: transient failures stay blocking (false)", () => {
   assertEquals(isNotAPullRequestError(new Error("API rate limit exceeded")), false);
   assertEquals(isNotAPullRequestError(new Error("fetch failed")), false);
   assertEquals(isNotAPullRequestError(null), false);
+});
+
+// Issue #248: `fetchIssueTitle` labels the epics/feature rows with the real GitHub issue title. It
+// is best-effort and MUST be tolerant of failure (returns null, never throws) so a title fetch can
+// never block an epic/feature start — the caller falls back to the `owner/repo#N` key.
+function withTitleFetch<T>(
+  fetchImpl: typeof globalThis.fetch,
+  token: string | undefined,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const prevMode = process.env["NANO_PR_GITHUB_TRANSPORT"];
+  const prevTok = process.env["GITHUB_TOKEN"];
+  const prevFetch = globalThis.fetch;
+  process.env["NANO_PR_GITHUB_TRANSPORT"] = "token";
+  if (token === undefined) delete process.env["GITHUB_TOKEN"];
+  else process.env["GITHUB_TOKEN"] = token;
+  globalThis.fetch = fetchImpl;
+  const restore = () => {
+    globalThis.fetch = prevFetch;
+    if (prevMode === undefined) delete process.env["NANO_PR_GITHUB_TRANSPORT"];
+    else process.env["NANO_PR_GITHUB_TRANSPORT"] = prevMode;
+    if (prevTok === undefined) delete process.env["GITHUB_TOKEN"];
+    else process.env["GITHUB_TOKEN"] = prevTok;
+  };
+  return fn().finally(restore);
+}
+
+test("fetchIssueTitle: returns the title on a successful token-transport read", async () => {
+  const stub = ((url: string | URL | Request) => {
+    assertEquals(String(url).endsWith("/repos/owner/repo/issues/248"), true);
+    return Promise.resolve(new Response(JSON.stringify({ title: "Surface titles" }), { status: 200 }));
+  }) as typeof fetch;
+  const title = await withTitleFetch(stub, "t0ken", () => fetchIssueTitle("owner/repo", 248, "t0ken"));
+  assertEquals(title, "Surface titles");
+});
+
+test("fetchIssueTitle: a non-2xx response yields null (best-effort, never throws)", async () => {
+  const stub = (() => Promise.resolve(new Response("nope", { status: 404 }))) as typeof fetch;
+  const title = await withTitleFetch(stub, "t0ken", () => fetchIssueTitle("owner/repo", 999, "t0ken"));
+  assertEquals(title, null);
+});
+
+test("fetchIssueTitle: a thrown transport error is swallowed to null", async () => {
+  const stub = (() => Promise.reject(new Error("network down"))) as typeof fetch;
+  const title = await withTitleFetch(stub, "t0ken", () => fetchIssueTitle("owner/repo", 7, "t0ken"));
+  assertEquals(title, null);
+});
+
+test("fetchIssueTitle: token mode with no token is a no-op (null)", async () => {
+  const stub = (() => {
+    throw new Error("fetch must not be called without a token");
+  }) as typeof fetch;
+  const title = await withTitleFetch(stub, undefined, () => fetchIssueTitle("owner/repo", 7, ""));
+  assertEquals(title, null);
 });

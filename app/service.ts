@@ -460,7 +460,9 @@ export async function submitPr(
       status: "converging",
       current_round: 1,
       url: parsed.url,
-      title: title ?? existing.title,
+      // Coalesce to the key so `pull_requests.title` stays non-blank for the title-led grids
+      // (issue #248): a fresh fetch wins, else the prior title, else the `owner/repo#N` key.
+      title: title ?? existing.title ?? parsed.prKey,
       waiting_since: null,
       last_review_id: null,
       last_nudge_at: null,
@@ -476,7 +478,8 @@ export async function submitPr(
       repo: parsed.repo,
       number: parsed.number,
       url: parsed.url,
-      title,
+      // Coalesce to the key so the title-led grids never render a blank identity (issue #248).
+      title: title ?? parsed.prKey,
       status: "converging",
       current_round: 1,
       abandon_token: abandonToken,

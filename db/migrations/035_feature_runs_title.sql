@@ -1,0 +1,15 @@
+-- Surface the GitHub issue title as the primary, human-readable identity on the
+-- feature grids (issue #248, L0). Every dispatch row was keyed only by
+-- `owner/repo#N` — meaningful while you remember the number, opaque hours later.
+--
+-- `plans.title` (004_planning.sql) and `pull_requests.title` already existed;
+-- `feature_runs` had no title column at all. Add one so `startFeature` can persist
+-- the fetched issue title (best-effort), coalesced to the `owner/repo#N` key at
+-- write time so the column is ALWAYS non-blank — the grid's `{{title}}` template
+-- then needs no fallback and a failed/absent fetch still shows a usable identity.
+--
+-- Forward-only, additive (expand): nullable with no default, so pre-#248 rows
+-- grandfather in as NULL (they render by key until re-dispatched). Numbered after
+-- the current highest prefix on origin/main (034); the runner wraps each file in
+-- its own transaction, so this file must NOT contain BEGIN/COMMIT.
+ALTER TABLE feature_runs ADD COLUMN title TEXT;

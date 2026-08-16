@@ -9,6 +9,13 @@ import { test } from "node:test";
 import { assertEquals } from "#test-assert";
 import { FEATURE_PROCESS_ID, FEATURE_TERMINAL_STATUSES, featureTaskId, startFeature } from "./feature.ts";
 
+// `startFeature` now fetches the issue title (issue #248) via the GitHub transport. Force the token
+// transport with no token so the fetch is a hermetic no-op (returns null) — no `gh` subprocess, no
+// network — and the row `title` deterministically coalesces to the `owner/repo#N` key. A dedicated
+// test below stubs a successful fetch to cover the real-title path.
+process.env["NANO_PR_GITHUB_TRANSPORT"] = "token";
+delete process.env["GITHUB_TOKEN"];
+
 function memTable(rows: any[], key: string) {
   return {
     get: (k: any) => Promise.resolve(rows.find((r) => r[key] === k) ?? null),
@@ -220,4 +227,49 @@ test("startFeature: a settled run is restarted in place (status reset, pr/outcom
   assertEquals(row.converge, 1);
   assertEquals(row.auto_merge, 1);
   assertEquals(row.process_key, "PI-2");
+});
+
+// Issue #248: the human-readable identity for the feature grids. Every start persists a non-blank
+// `title` — the fetched issue title when available, else the `owner/repo#N` key — on BOTH the insert
+// (new run) and update (in-place restart) paths, so the title-led grid never renders a blank cell.
+test("startFeature: coalesces title to the key when the fetch yields nothing (insert path)", async () => {
+  const stores = { feature_runs: { rows: [] as any[], key: "feature_key" } };
+  const engine = { createInstance: () => Promise.resolve({ processInstanceKey: "PI-T1" }) } as any;
+  await startFeature(memData(stores), engine, PARSED, "main", false, false);
+  assertEquals(stores.feature_runs.rows[0].title, "owner/repo#42");
+});
+
+test("startFeature: repopulates a non-blank title on the in-place restart (update path)", async () => {
+  const stores = {
+    feature_runs: {
+      rows: [{ feature_key: "owner/repo#42", status: "opened", title: null, process_key: "PI-OLD" }],
+      key: "feature_key",
+    },
+  };
+  const engine = { createInstance: () => Promise.resolve({ processInstanceKey: "PI-T2" }) } as any;
+  await startFeature(memData(stores), engine, PARSED, "main", false, false);
+  assertEquals(stores.feature_runs.rows[0].title, "owner/repo#42");
+});
+
+test("startFeature: persists the real issue title when the fetch succeeds", async () => {
+  const prevTok = process.env["GITHUB_TOKEN"];
+  const prevFetch = globalThis.fetch;
+  process.env["GITHUB_TOKEN"] = "t0ken";
+  globalThis.fetch = ((url: string | URL | Request) => {
+    const u = String(url);
+    if (u.endsWith("/repos/owner/repo/issues/42")) {
+      return Promise.resolve(new Response(JSON.stringify({ title: "Add the widget" }), { status: 200 }));
+    }
+    throw new Error(`unexpected fetch: ${u}`);
+  }) as typeof fetch;
+  try {
+    const stores = { feature_runs: { rows: [] as any[], key: "feature_key" } };
+    const engine = { createInstance: () => Promise.resolve({ processInstanceKey: "PI-T3" }) } as any;
+    await startFeature(memData(stores), engine, PARSED, "main", false, false);
+    assertEquals(stores.feature_runs.rows[0].title, "Add the widget");
+  } finally {
+    globalThis.fetch = prevFetch;
+    if (prevTok === undefined) delete process.env["GITHUB_TOKEN"];
+    else process.env["GITHUB_TOKEN"] = prevTok;
+  }
 });
