@@ -1,3 +1,10 @@
+## [0.73.1](https://github.com/nanobpm/nano-workforce/compare/v0.73.0...v0.73.1) (2026-08-16)
+
+
+### Bug Fixes
+
+* **merge:** treat a Depends-on ref that is not a PR as non-blocking ([#246](https://github.com/nanobpm/nano-workforce/issues/246)) ([c800f81](https://github.com/nanobpm/nano-workforce/commit/c800f81b02b3a9a787d79552f4e5eef9971e3edf)), closes [Magikcraft/nano-bpm#806](https://github.com/Magikcraft/nano-bpm/issues/806)
+
 # [0.73.0](https://github.com/nanobpm/nano-workforce/compare/v0.72.1...v0.73.0) (2026-08-15)
 
 
