@@ -20,6 +20,7 @@ import {
   fetchPrReviews,
   fetchPrState,
   hasPendingCopilotReviewer,
+  isNotAPullRequestError,
   type MergeMethod,
   type PrState,
   requestCopilotReview,
@@ -738,8 +739,23 @@ async function isDepMerged(data: DataLayer, depKey: string, token: string): Prom
   if (tracked && tracked.status === "merged") return true;
   const parsed = parsePr(depKey);
   if (!parsed) return true; // unparseable dep can't be checked on GitHub → treat as cleared so it never wedges the PR
-  const st = await fetchPrState(parsed.repo, parsed.number, token);
-  return st?.merged ?? false;
+  try {
+    const st = await fetchPrState(parsed.repo, parsed.number, token);
+    return st?.merged ?? false;
+  } catch (err) {
+    // A ref that GitHub cannot resolve to a *pull request* — it's an issue (issues and PRs share
+    // GitHub's number space) or the number doesn't exist — can never merge, so it cannot gate a
+    // merge queue. Treat it as cleared (non-blocking) rather than wedging the run at `wait-deps`
+    // forever, as happened when a PR body declared `Depends-on:` its epic tracking *issue*
+    // (Magikcraft/nano-bpm#806 → #796). Transient failures rethrow so the poller logs and retries.
+    if (isNotAPullRequestError(err)) {
+      console.warn(
+        `[poller] dep ${depKey} is not a mergeable pull request (issue or missing) — treating as non-blocking`,
+      );
+      return true;
+    }
+    throw err;
+  }
 }
 
 /** Flip a PR into the transient `merging` status and publish the correlating message, reverting
