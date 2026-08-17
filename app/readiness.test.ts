@@ -61,6 +61,14 @@ test("parseProbe: rejects an invalid onTimeout", () => {
   assertThrows(() => parseProbe({ kind: "http", target: "x", onTimeout: "retry" }), Error, "invalid onTimeout");
 });
 
+test("parseProbe: rejects an invalid poll.backoff (a malformed probe must fail loudly, never silently default)", () => {
+  assertThrows(
+    () => parseProbe({ kind: "http", target: "x", poll: { backoff: "linear" } }),
+    Error,
+    "invalid backoff",
+  );
+});
+
 test("parseProbe: rejects an undeclared credentialEnv (a probe must never inline a secret)", () => {
   assertThrows(
     () => parseProbe({ kind: "http", target: "x", credentialEnv: "MY_SECRET" }),

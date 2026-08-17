@@ -163,11 +163,11 @@ function isOnTimeout(v: string): v is OnTimeout {
   return false;
 }
 
-// `narrowBackoff` widens a validated string to its union without a type assertion (the
-// `no-unsafe-type-assertion` gate bans `as`). The `.includes` guard below decides validity.
-function narrowBackoff(v: string): Backoff {
-  for (const b of BACKOFFS) if (b === v) return b;
-  return DEFAULT_BACKOFF;
+// `isBackoff` narrows a validated string to its union without a type assertion (the
+// `no-unsafe-type-assertion` gate bans `as`).
+function isBackoff(v: string): v is Backoff {
+  for (const b of BACKOFFS) if (b === v) return true;
+  return false;
 }
 
 function parseMatch(raw: Record<string, unknown>): ProbeMatch {
@@ -184,10 +184,13 @@ function parseMatch(raw: Record<string, unknown>): ProbeMatch {
 
 function parsePoll(raw: Record<string, unknown>): ProbePoll {
   const backoffRaw = str(raw.backoff).trim();
+  if (backoffRaw !== "" && !isBackoff(backoffRaw)) {
+    throw new Error(`readiness probe: invalid backoff '${backoffRaw}' (expected ${BACKOFFS.join(", ")})`);
+  }
   return {
     everyMs: num(raw.everyMs),
     timeoutMs: num(raw.timeoutMs),
-    backoff: backoffRaw === "" ? undefined : narrowBackoff(backoffRaw),
+    backoff: backoffRaw === "" ? undefined : backoffRaw,
   };
 }
 

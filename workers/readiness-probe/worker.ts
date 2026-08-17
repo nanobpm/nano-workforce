@@ -43,9 +43,13 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 
 /** The effective poll cadence: the descriptor's values, with `everyMs` defaulting through the env
  * contract (`NANO_READINESS_POLL_EVERY_MS`) when the descriptor omits it, then the built-in
- * defaults/clamps in {@link normalizePoll}. */
-function effectivePoll(poll: ProbePoll | undefined): ReturnType<typeof normalizePoll> {
-  const envEvery = Number(readEnvOr("NANO_READINESS_POLL_EVERY_MS", String(DEFAULT_EVERY_MS)));
+ * defaults/clamps in {@link normalizePoll}. Reads the env value from the injected `env` (not the
+ * ambient `process.env`) so the loop is deterministic under test. */
+function effectivePoll(
+  poll: ProbePoll | undefined,
+  env: Record<string, string | undefined>,
+): ReturnType<typeof normalizePoll> {
+  const envEvery = Number(readEnvOr("NANO_READINESS_POLL_EVERY_MS", String(DEFAULT_EVERY_MS), env));
   const everyMs = poll?.everyMs ?? (Number.isFinite(envEvery) && envEvery >= 1 ? envEvery : DEFAULT_EVERY_MS);
   return normalizePoll({ everyMs, timeoutMs: poll?.timeoutMs, backoff: poll?.backoff });
 }
@@ -63,7 +67,7 @@ export async function pollUntilReady(deps: {
   publish: (detail: string) => Promise<void>;
   log?: (msg: string) => void;
 }): Promise<ProbeResult> {
-  const poll = effectivePoll(deps.probe.poll);
+  const poll = effectivePoll(deps.probe.poll, deps.env);
   const deadline = deps.now() + poll.timeoutMs;
   const label = redactTarget(deps.probe);
   let attempt = 0;

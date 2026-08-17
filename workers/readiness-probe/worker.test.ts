@@ -116,6 +116,26 @@ test("handler: a blank gateKey fails fast (an empty correlationKey would never r
   );
 });
 
+test("pollUntilReady: the poll cadence reads NANO_READINESS_POLL_EVERY_MS from the injected env, not ambient process.env", async () => {
+  const clock = fakeClock();
+  // Descriptor omits everyMs, so the cadence falls back to the env contract. A small injected value
+  // (25ms) makes the loop step through its 100ms budget; the ambient default (15_000ms) would blow
+  // the budget on the first wait and bail at now()=0. Asserting the clock advanced proves the
+  // injected env — not process.env — drove the cadence.
+  const exec = execReturning([{ status: 503, body: "" }]);
+  const res = await pollUntilReady({
+    probe: httpProbe({ timeoutMs: 100, backoff: "fixed" }),
+    gateKey: "gate-env",
+    exec,
+    env: { NANO_READINESS_POLL_EVERY_MS: "25" },
+    now: clock.now,
+    wait: clock.wait,
+    publish: async () => {},
+  });
+  assert(!res.ready, "the never-green probe exhausted its budget");
+  assert(clock.now() > 0, "the injected env's 25ms cadence stepped the clock (ambient default would bail at 0)");
+});
+
 test("READINESS_READY_MESSAGE is the name the gate correlates", () => {
   assertEquals(READINESS_READY_MESSAGE, "readiness-ready");
 });
