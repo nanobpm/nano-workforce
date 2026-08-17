@@ -333,8 +333,8 @@ test("submitPr defaults convergeOnly to false so the global auto-merge default g
 
 // Lineage threading (issue #245): `submitPr` persists the origin `root_request_key` on the PR row
 // and carries it onto the convergence instance; `startMerge` reads it back off the row onto the
-// merge instance. A human/webhook submit that supplies no root leaves it NULL (its own root), and a
-// resubmit that omits the root must not clobber a root already learned.
+// merge instance. A human/webhook submit that supplies no root self-roots on the `pr_key` (its own
+// root), and a resubmit that omits the root must not clobber a root already learned.
 function captureRoot() {
   const stores: Record<string, { rows: unknown[]; key: string }> = {
     pull_requests: { rows: [], key: "pr_key" },
@@ -372,7 +372,7 @@ test("submitPr persists root_request_key and threads it onto the convergence ins
   });
 });
 
-test("submitPr leaves root_request_key NULL for a human/webhook submit (its own root)", async () => {
+test("submitPr self-roots root_request_key on the pr_key for a human/webhook submit (its own root)", async () => {
   await withGithubOff(async () => {
     const { data, engine, stores, get } = captureRoot();
     await submitPr(data, engine, {
@@ -381,9 +381,9 @@ test("submitPr leaves root_request_key NULL for a human/webhook submit (its own 
       url: "https://github.com/owner/repo/pull/9",
       prKey: "owner/repo#9",
     });
-    assertEquals(get(), null);
+    assertEquals(get(), "owner/repo#9");
     const pr = stores.pull_requests.rows[0] as Record<string, unknown>;
-    assertEquals(pr.root_request_key, null);
+    assertEquals(pr.root_request_key, "owner/repo#9");
   });
 });
 

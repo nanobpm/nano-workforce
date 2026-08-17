@@ -457,8 +457,12 @@ export async function submitPr(
   // Lineage (issue #245): the origin identity threaded onto this PR + its convergence/merge
   // instances. A caller (feature/epic hand-off) supplies it on the first submit; a resubmit that
   // omits it must not clobber a root already learned, so coalesce onto the existing row's value. A
-  // human/webhook submit never supplies one → NULL (the PR is its own root).
-  const effectiveRoot = rootRequestKey ?? existing?.root_request_key ?? null;
+  // human/webhook submit supplies none → the PR is its OWN root, so self-root on its `pr_key`
+  // (never NULL): the Lineage page drills into a thread's member PRs by joining
+  // `lineage_threads.root_request_key` → `pull_requests.root_request_key`, and a self-rooted
+  // thread's key IS the `pr_key`, so leaving the PR row NULL would render an empty PR list for it.
+  // Persisting `pr_key` keeps that join honest (the projection self-roots the same key either way).
+  const effectiveRoot = rootRequestKey ?? existing?.root_request_key ?? parsed.prKey;
   if (existing) {
     // A prior run (cancelled, converged, or otherwise superseded) may have left an OPEN
     // escalation row. A fresh convergence run must not inherit that stale answer — the
@@ -519,7 +523,7 @@ export async function submitPr(
       reviewWaitTimeout: REVIEW_WAIT_TIMEOUT,
       // Lineage (issue #245): carry the origin identity onto the convergence instance so every
       // descendant (and any message it correlates) is stitched back to the originating request.
-      // NULL for a human/webhook PR that is its own root.
+      // A human/webhook PR that is its own root carries its own `pr_key` (never NULL — see above).
       rootRequestKey: effectiveRoot,
       // Per-request review-only override: carried on the instance so `pr.finalize` can stop at
       // `converged` for this PR without handing off to the merge-loop, independent of the global
@@ -558,8 +562,9 @@ export async function startMerge(
     await prs(data).update(pr.prKey, { abandon_token: abandonToken, updated_at: now() });
   }
   // Lineage (issue #245): the origin identity was persisted on the PR row at submit; carry it onto
-  // the merge instance too so the merge stage stays stitched to the originating request. NULL for a
-  // human/webhook PR that is its own root.
+  // the merge instance too so the merge stage stays stitched to the originating request. A
+  // self-rooted PR carries its own `pr_key`; `?? null` only tolerates a legacy row predating the
+  // column.
   const rootRequestKey = existing?.root_request_key ?? null;
   const abUrl = abandonUrl(abandonToken);
   // Resolve the PR head branch so the merge agents (fix-ci, rebase) get an isolated clone checked

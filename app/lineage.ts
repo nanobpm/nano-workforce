@@ -180,7 +180,12 @@ function prStageLabel(stage: LineageStage, round: number): string {
 
 /** Derive the stitched thread for one root from its origin and PR rows. Pure + total. */
 export function deriveLineage(origin: LineageOrigin, prsIn: readonly LineagePr[]): LineageThread {
-  const prs = [...prsIn];
+  // Sort deterministically by PR key so the projection is stable across passes: the upstream
+  // collection order is not guaranteed (DataLayer `.all()` has no `ORDER BY`, plus Map iteration),
+  // so an ordering-only difference would otherwise rewrite `lineage_threads.pr_keys` (and could
+  // flip the representative-PR pick among terminal PRs) on steady-state polls, defeating the
+  // idempotence check in `pollLineage`.
+  const prs = [...prsIn].sort((a, b) => a.prKey.localeCompare(b.prKey));
   const prKeys = prs.map((p) => p.prKey);
   const rep = representativePr(prs);
 
@@ -341,9 +346,14 @@ async function collectThreads(data: DataLayer): Promise<Map<string, LineageThrea
   }
 
   const planRows = await plans(data).all();
+  // Prefetch every plan_task once and group by plan_key rather than issuing one query per plan: this
+  // runs on the poller path AND the GET /lineage derivation, so an N+1 over plans would scale poorly
+  // (mirrors the single-prefetch convention in pollDelivery/pollFeatureDelivery in app/service.ts).
   const tasksByPlan = new Map<string, PlanTask[]>();
-  for (const plan of planRows) {
-    tasksByPlan.set(plan.plan_key, await planTasks(data).find({ plan_key: plan.plan_key }));
+  for (const task of await planTasks(data).all()) {
+    const bucket = tasksByPlan.get(task.plan_key) ?? [];
+    bucket.push(task);
+    tasksByPlan.set(task.plan_key, bucket);
   }
   for (const plan of planRows) {
     const taskPrKeys = (tasksByPlan.get(plan.plan_key) ?? [])

@@ -219,6 +219,29 @@ test("pollLineage: projects feature, epic, and self-rooted threads onto lineage_
   assertEquals(after, before, "steady-state pass is a no-op");
 });
 
+test("pollLineage: a self-rooted PR row (root_request_key === pr_key) projects exactly one thread keyed on its pr_key", async () => {
+  // Regression (#245): submitPr now self-roots a human/webhook PR on its own `pr_key` (rather than
+  // NULL) so the Lineage page's `lineage_threads.root_request_key → pull_requests.root_request_key`
+  // drill-down join is non-empty. Guard that this row shape still projects a single self-rooted
+  // thread keyed on the `pr_key` — not double-counted, and not grouped under a phantom origin.
+  const { data, stores } = memData();
+  stores.feature_runs = [];
+  stores.plans = [];
+  stores.plan_tasks = [];
+  stores.pull_requests = [
+    { pr_key: "o/r#42", title: "Human PR", url: "x", status: "converging", current_round: 1, process_key: "c9", outcome: null, root_request_key: "o/r#42" },
+  ];
+
+  await pollLineage(data);
+
+  const threads: LineageThreadRow[] = stores.lineage_threads;
+  assertEquals(threads.length, 1, "one self-rooted thread");
+  assertEquals(threads[0].root_request_key, "o/r#42", "thread key equals the PR row's root_request_key so the page join drills down");
+  assertEquals(threads[0].kind, "pr");
+  assertEquals(JSON.parse(threads[0].pr_keys ?? "[]"), ["o/r#42"]);
+  assertEquals(threads[0].pr_count, 1);
+});
+
 test("listLineage: unknown root returns nothing; known roots stitched", async () => {
   const { data } = memData();
   const threads = await listLineage(data);
