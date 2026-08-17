@@ -11,6 +11,7 @@
         "title": "Nano Workforce",
         "items": [
           { "label": "Overview", "page": "overview" },
+          { "label": "Lineage", "page": "lineage" },
           { "label": "Convergence", "page": "home" },
           { "label": "Epics", "page": "epic" },
           { "label": "Feature", "page": "feature" },

@@ -25,7 +25,7 @@ import {
   planTaskDeps,
   planTasks,
 } from "../../app/plan.ts";
-import { parsePr, submitPr } from "../../app/service.ts";
+import { MAX_ROUNDS, parsePr, submitPr } from "../../app/service.ts";
 import { parseTaskDelta, readTaskDeltas, recordTaskDelta } from "../../app/taskDelta.ts";
 import { shouldRunTrialMerge, type TrialMergeHead } from "../../app/trialMerge.ts";
 import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
@@ -182,7 +182,7 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
       }
 
       try {
-        await submitPr(app.data, app.engine, parsed, depPrKeys);
+        await submitPr(app.data, app.engine, parsed, depPrKeys, MAX_ROUNDS, false, planKey);
       } catch (err) {
         app.log.error(`record-wave: handoff failed for ${parsed.prKey}`, {
           err: String(err),

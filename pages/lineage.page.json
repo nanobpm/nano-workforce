@@ -1,0 +1,146 @@
+{
+  "schemaVersion": "1.0",
+  "title": "Lineage",
+  "nodes": [
+    {
+      "type": "nav",
+      "id": "nav",
+      "props": {
+        "variant": "bar",
+        "title": "Nano Workforce",
+        "items": [
+          { "label": "Overview", "page": "overview" },
+          { "label": "Lineage", "page": "lineage" },
+          { "label": "Convergence", "page": "home" },
+          { "label": "Epics", "page": "epic" },
+          { "label": "Feature", "page": "feature" },
+          { "label": "Tasks", "page": "tasks" },
+          { "label": "Cockpit", "page": "cockpit" }
+        ],
+        "sticky": true
+      }
+    },
+    {
+      "type": "text",
+      "id": "title",
+      "props": { "text": "Lineage \u2014 intent \u2192 progress", "variant": "heading" }
+    },
+    {
+      "type": "text",
+      "id": "subtitle",
+      "props": {
+        "text": "One narrative per request, not a card-swap. Each row is a single arc of your intent \u2014 request \u2192 implementing \u2192 PR opened \u2192 converging (round n) \u2192 merged/converged/abandoned \u2014 stitched from the feature/epic that started it, the PR(s) it produced, and their convergence + merge outcome. The Stage column is the active frontier; drill into a row for its member PR(s) and rounds. Epics fan out to N PR sub-threads. A human/webhook PR with no originating request is shown as its own root.",
+        "variant": "sub"
+      }
+    },
+    {
+      "type": "dataGrid",
+      "id": "threads",
+      "props": {
+        "title": "Lineage threads",
+        "collapsible": true,
+        "defaultCollapsed": false,
+        "showCount": true,
+        "rowKey": "root_request_key",
+        "refreshMs": 5000,
+        "data": {
+          "kind": "datasource",
+          "source": "app",
+          "table": "lineage_threads",
+          "orderBy": { "field": "updated_at", "dir": "desc" },
+          "filter": [{ "field": "active", "in": [1] }]
+        },
+        "tabs": [
+          {
+            "label": "Active",
+            "filter": [{ "field": "active", "in": [1] }]
+          },
+          {
+            "label": "History",
+            "filter": [{ "field": "active", "in": [0] }]
+          }
+        ],
+        "columns": [
+          {
+            "field": "title",
+            "template": "{{title}}",
+            "header": "Intent",
+            "subtitleField": "root_request_key",
+            "truncate": true,
+            "width": "34%",
+            "linkField": "issue_url"
+          },
+          { "field": "kind", "header": "Kind", "width": "6rem" },
+          {
+            "field": "stage_label",
+            "header": "Stage",
+            "truncate": true,
+            "link": { "kind": "processExplorer", "keyField": "process_key" }
+          },
+          { "field": "pr_count", "header": "PRs", "width": "5rem" },
+          { "field": "updated_at", "header": "Updated", "width": "9rem" }
+        ],
+        "detail": {
+          "linkField": "issue_url",
+          "fields": [
+            { "field": "kind", "label": "Origin kind" },
+            { "field": "stage", "label": "Frontier stage" },
+            { "field": "stage_label", "label": "Frontier" },
+            { "field": "issue_url", "label": "Origin issue" },
+            { "field": "pr_count", "label": "PR count" }
+          ],
+          "children": [
+            {
+              "title": "Pull requests in this thread",
+              "source": "app",
+              "table": "pull_requests",
+              "parentField": "root_request_key",
+              "childField": "root_request_key",
+              "orderBy": { "field": "updated_at", "dir": "asc" },
+              "columns": [
+                { "field": "title", "template": "{{title}}", "header": "PR", "subtitleField": "pr_key", "truncate": true, "linkField": "url" },
+                { "field": "status", "header": "Status", "link": { "kind": "processExplorer", "keyField": "process_key" } },
+                { "field": "current_round", "header": "Round" },
+                { "field": "outcome", "header": "Outcome", "truncate": true },
+                { "field": "updated_at", "header": "Updated", "width": "9rem" }
+              ],
+              "detail": {
+                "linkField": "url",
+                "children": [
+                  {
+                    "title": "Rounds",
+                    "source": "app",
+                    "table": "rounds",
+                    "parentField": "pr_key",
+                    "childField": "pr_key",
+                    "orderBy": { "field": "round_no", "dir": "asc" },
+                    "columns": [
+                      { "field": "round_no", "header": "#" },
+                      { "field": "status", "header": "Result" },
+                      { "field": "summary", "header": "Summary" }
+                    ]
+                  },
+                  {
+                    "title": "Escalations",
+                    "source": "app",
+                    "table": "escalations",
+                    "parentField": "pr_key",
+                    "childField": "pr_key",
+                    "orderBy": { "field": "id", "dir": "asc" },
+                    "columns": [
+                      { "field": "round_no", "header": "#" },
+                      { "field": "kind", "header": "Kind" },
+                      { "field": "question", "header": "Question" },
+                      { "field": "status", "header": "Status" },
+                      { "field": "answer", "header": "Answer" }
+                    ]
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

@@ -6,7 +6,8 @@
 import { test } from "node:test";
 import { assert, assertEquals } from "#test-assert";
 import type { DataLayer } from "@nanobpm/urban";
-import { deriveDelivery, pollDelivery, TERMINAL_STATUSES } from "./service.ts";
+import { deriveDelivery, TERMINAL_STATUSES } from "./delivery.ts";
+import { pollDelivery } from "./service.ts";
 
 // A tiny in-memory record gateway (all/find/update/insert), mirroring the fake-app style used
 // across the app tests (see app/taskDelta.test.ts), enough to exercise the `pollDelivery` projection.

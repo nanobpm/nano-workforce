@@ -11,6 +11,7 @@ import { readFileSync } from "node:fs";
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { abandonUrl, mintAbandonToken, renderAbandonBrief } from "./abandon.ts";
 import { agentSlaTimeout } from "./agentSla.ts";
+import { deriveDelivery, TERMINAL_STATUSES } from "./delivery.ts";
 import { deriveFeatureBlockedPatch, deriveFeatureDelivery, deriveFeatureEscalationPatch, FEATURE_BLOCKED_ELEMENT, FEATURE_ESCALATION_ELEMENT, FEATURE_RUN_STATUSES, type FeatureRun, type FeatureRunStatus, featureRuns } from "./feature.ts";
 import {
   classifyMergeability,
@@ -26,6 +27,7 @@ import {
   type PrState,
   requestCopilotReview,
 } from "./github.ts";
+import { pollLineage } from "./lineage.ts";
 import { mergeLanes, readExclusions } from "./mergeExclusion.ts";
 import { freshHeadRunAction, headRunPresenceCount, loadMergeProtocol } from "./mergeProtocol.ts";
 import { type PrLaneDecision, planPrLane, taskDependencyDepths } from "./mergeTrain.ts";
@@ -122,77 +124,6 @@ export const MERGE_ADMIN = ["1", "true", "on", "yes"].includes(
 
 const now = () => new Date().toISOString();
 
-/** A PR is "done" in exactly these states; everything else (converging, waiting_review,
- * escalated, and the merge-stage waiting_deps/waiting_merge/waiting_lane/queued) is in flight. `converged`
- * is terminal only in review-only mode (AUTO_MERGE off); with auto-merge on, a converged PR
- * transitions into the merge stage and lands as `merged`. The status endpoint and the cancel
- * guard both key off this set. */
-export const TERMINAL_STATUSES: readonly string[] = ["converged", "merged", "abandoned"];
-
-/** The derived epic delivery signal (issue #171). Distinct from `plan.status`: `status = done`
- * means "the fan-out finished and ≥1 slice opened a PR, dispatched to convergence" (record-results
- * sets it as soon as one PR opened — other slices may be blocked/skipped), which conflates hand-off
- * with landing. `delivery` reports whether those slice PRs have actually MERGED. */
-export type Delivery = "converging" | "landed";
-
-/** Rollup of a plan's slice-PR landing state, derived by joining `plan_tasks.pr_key` →
- * `pull_requests.status`. Pure and read-only — the single source of truth for the denormalised
- * `plans.delivery` / `plans.delivery_label` columns the poller projects. */
-export interface DeliveryRollup {
-  delivery: Delivery | null;
-  label: string | null;
-  prsOpened: number;
-  prsMerged: number;
-  prsInFlight: number;
-}
-
-/** Derive the delivery signal for one plan from its status and the statuses of its slice PRs.
- *
- * - `converging` — the plan is `done` but ≥1 slice PR is still non-terminal (in flight).
- * - `landed` — every slice PR merged: `prsInFlight == 0 && prsMerged == prsOpened && prsOpened > 0`.
- * - `null` — no positive signal yet: the plan isn't `done`, it opened no PRs, or every PR is
- *   terminal but not all merged (some `abandoned`/`converged` — resolved-not-landed, per the issue).
- *
- * A slice's PR status is "in flight" iff it is NOT in `TERMINAL_STATUSES`; `abandoned`/`converged`
- * count as resolved-not-landed (terminal but not merged), so they never make an epic `landed`. */
-export function deriveDelivery(
-  planStatus: string,
-  prStatuses: readonly string[],
-): DeliveryRollup {
-  const prsOpened = prStatuses.length;
-  let prsMerged = 0;
-  let prsInFlight = 0;
-  for (const s of prStatuses) {
-    if (s === "merged") prsMerged++;
-    else if (!TERMINAL_STATUSES.includes(s)) prsInFlight++;
-  }
-  // `delivery` is only meaningful once the fan-out has been dispatched (`status = done`) and at
-  // least one slice PR exists; otherwise there is nothing to have landed yet.
-  if (planStatus !== "done" || prsOpened === 0) {
-    return { delivery: null, label: null, prsOpened, prsMerged, prsInFlight };
-  }
-  if (prsInFlight > 0) {
-    return {
-      delivery: "converging",
-      label: `${prsMerged}/${prsOpened} slices merged, ${prsInFlight} converging`,
-      prsOpened,
-      prsMerged,
-      prsInFlight,
-    };
-  }
-  if (prsMerged === prsOpened) {
-    return {
-      delivery: "landed",
-      label: `${prsOpened}/${prsOpened} slices merged`,
-      prsOpened,
-      prsMerged,
-      prsInFlight,
-    };
-  }
-  // Every slice PR is terminal but not all merged (some abandoned/converged): resolved, not landed.
-  return { delivery: null, label: null, prsOpened, prsMerged, prsInFlight };
-}
-
 interface PullRequest {
   pr_key: string;
   repo: string;
@@ -233,6 +164,13 @@ interface PullRequest {
   // workflow stage.
   incident_key: string | null;
   incident_message: string | null;
+  // Lineage projection (037_lineage.sql, issue #245): the stable ORIGIN identity (the issue =
+  // feature_key / plan_key) threaded onto this PR by `submitPr`, and passed as a `createInstance`
+  // variable onto the convergence + merge instances so every descendant carries the root. For a
+  // human-opened / webhook PR with no originating request, `submitPr` self-roots it to its own
+  // `pr_key` so the Lineage UI join resolves; a legacy NULL is tolerated the same way by the
+  // lineage read projection (`pollLineage`), which self-roots on `pr_key`.
+  root_request_key: string | null;
 }
 
 interface PrDependency {
@@ -413,6 +351,7 @@ export async function submitPr(
   dependsOn: string[] = [],
   maxRounds: number = MAX_ROUNDS,
   convergeOnly = false,
+  rootRequestKey: string | null = null,
 ) {
   const table = prs(data);
   const existing = await table.get(parsed.prKey);
@@ -447,6 +386,15 @@ export async function submitPr(
   // Cooperative abandon check (#76): reuse the PR's existing capability token across re-runs (and
   // the later merge instance), or mint one for a first submission.
   const abandonToken = existing?.abandon_token ?? mintAbandonToken();
+  // Lineage (issue #245): the origin identity threaded onto this PR + its convergence/merge
+  // instances. A caller (feature/epic hand-off) supplies it on the first submit; a resubmit that
+  // omits it must not clobber a root already learned, so coalesce onto the existing row's value. A
+  // human/webhook submit supplies none → the PR is its OWN root, so self-root on its `pr_key`
+  // (never NULL): the Lineage page drills into a thread's member PRs by joining
+  // `lineage_threads.root_request_key` → `pull_requests.root_request_key`, and a self-rooted
+  // thread's key IS the `pr_key`, so leaving the PR row NULL would render an empty PR list for it.
+  // Persisting `pr_key` keeps that join honest (the projection self-roots the same key either way).
+  const effectiveRoot = rootRequestKey ?? existing?.root_request_key ?? parsed.prKey;
   if (existing) {
     // A prior run (cancelled, converged, or otherwise superseded) may have left an OPEN
     // escalation row. A fresh convergence run must not inherit that stale answer — the
@@ -474,6 +422,7 @@ export async function submitPr(
       converged_at: null,
       merged_at: null,
       abandon_token: abandonToken,
+      root_request_key: effectiveRoot,
       updated_at: ts,
     });
   } else {
@@ -488,6 +437,7 @@ export async function submitPr(
       status: "converging",
       current_round: 1,
       abandon_token: abandonToken,
+      root_request_key: effectiveRoot,
       created_at: ts,
       updated_at: ts,
     });
@@ -503,6 +453,10 @@ export async function submitPr(
       round: 1,
       maxRounds: clampRounds(maxRounds, MAX_ROUNDS),
       reviewWaitTimeout: REVIEW_WAIT_TIMEOUT,
+      // Lineage (issue #245): carry the origin identity onto the convergence instance so every
+      // descendant (and any message it correlates) is stitched back to the originating request.
+      // A human/webhook PR that is its own root carries its own `pr_key` (never NULL — see above).
+      rootRequestKey: effectiveRoot,
       // Per-request review-only override: carried on the instance so `pr.finalize` can stop at
       // `converged` for this PR without handing off to the merge-loop, independent of the global
       // NANO_PR_AUTO_MERGE default. Only ever narrows (never forces merge on when auto-merge is off).
@@ -539,6 +493,11 @@ export async function startMerge(
   if (!existing?.abandon_token) {
     await prs(data).update(pr.prKey, { abandon_token: abandonToken, updated_at: now() });
   }
+  // Lineage (issue #245): the origin identity was persisted on the PR row at submit; carry it onto
+  // the merge instance too so the merge stage stays stitched to the originating request. A
+  // self-rooted PR carries its own `pr_key`; `?? null` only tolerates a legacy row predating the
+  // column.
+  const rootRequestKey = existing?.root_request_key ?? null;
   const abUrl = abandonUrl(abandonToken);
   // Resolve the PR head branch so the merge agents (fix-ci, rebase) get an isolated clone checked
   // out on it (same host-git provisioning path as review-round). Best-effort: an unresolved head
@@ -566,6 +525,8 @@ export async function startMerge(
       rebaseRound: 0,
       rebaseMax: MAX_REBASE_ROUNDS,
       agentSlaTimeout: AGENT_SLA_TIMEOUT,
+      // Lineage (issue #245): thread the origin identity onto the merge instance (see startMerge).
+      rootRequestKey,
       abandonUrl: abUrl,
       abandonBrief: renderAbandonBrief(abUrl),
       // Host-git provisioning (c8ctl): same repository envelope as the convergence loop, so the
@@ -1610,6 +1571,7 @@ export async function pollOnce(
   await pollWaveGates(data, engine, token);
   await pollDelivery(data);
   await pollFeatureDelivery(data);
+  await pollLineage(data);
   await pollFeatureEscalations(data, engine);
   await pollFeatureBlocked(data, engine);
   await pollUserTasks(data, engine);

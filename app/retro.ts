@@ -15,8 +15,8 @@
 // app/plan.ts, app/blackboard.ts, and app/taskDelta.ts.
 import type { DataLayer, EngineClient, Logger } from "@nanobpm/urban";
 import { isUniqueViolation, readBlackboard } from "./blackboard.ts";
+import { TERMINAL_STATUSES } from "./delivery.ts";
 import { planReviews, planTasks } from "./plan.ts";
-import { TERMINAL_STATUSES } from "./service.ts";
 import { aggregateEpicDeltas } from "./taskDelta.ts";
 
 export const RETRO_PROCESS_ID = "retro";

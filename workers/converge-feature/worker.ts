@@ -32,7 +32,7 @@ const handler: AppJobHandler<In, Record<string, never>> = async (job, app) => {
   }
   // `convergeOnly` is the inverse of auto-merge: converge-only stops at `converged`; auto-merge lets
   // the merge-loop drive the merge. `submitPr` is idempotent on the PR key.
-  await submitPr(app.data, app.engine, parsed, [], MAX_ROUNDS, !autoMerge);
+  await submitPr(app.data, app.engine, parsed, [], MAX_ROUNDS, !autoMerge, featureKey);
   await featureRuns(app.data).update(featureKey, {
     status: "converging",
     pr_key: parsed.prKey,

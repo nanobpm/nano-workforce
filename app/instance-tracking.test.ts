@@ -7,7 +7,8 @@
 import { test } from "node:test";
 import { assert, assertEquals } from "#test-assert";
 import { readFileSync } from "node:fs";
-import { PR_ACTIVE_STATUSES, PLAN_ACTIVE_STATUSES, FEATURE_ACTIVE_STATUSES, TERMINAL_STATUSES } from "./service.ts";
+import { PR_ACTIVE_STATUSES, PLAN_ACTIVE_STATUSES, FEATURE_ACTIVE_STATUSES } from "./service.ts";
+import { TERMINAL_STATUSES } from "./delivery.ts";
 import { PLAN_TERMINAL_STATUSES } from "./plan.ts";
 import { FEATURE_TERMINAL_STATUSES } from "./feature.ts";
 
