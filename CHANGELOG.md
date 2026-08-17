@@ -1,3 +1,10 @@
+## [0.82.1](https://github.com/nanobpm/nano-workforce/compare/v0.82.0...v0.82.1) (2026-08-17)
+
+
+### Bug Fixes
+
+* **plan-fanout:** make the wave-merge barrier level-triggered ([#262](https://github.com/nanobpm/nano-workforce/issues/262)) ([#264](https://github.com/nanobpm/nano-workforce/issues/264)) ([ae939d8](https://github.com/nanobpm/nano-workforce/commit/ae939d8e96f136f820fcae9149c120806ddc6f1b))
+
 # [0.82.0](https://github.com/nanobpm/nano-workforce/compare/v0.81.0...v0.82.0) (2026-08-17)
 
 
