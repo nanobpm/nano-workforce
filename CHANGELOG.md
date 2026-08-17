@@ -1,3 +1,10 @@
+# [0.85.0](https://github.com/nanobpm/nano-workforce/compare/v0.84.0...v0.85.0) (2026-08-17)
+
+
+### Features
+
+* **readiness:** capability probe kind — resolve capability→version from publish provenance, late-bind + pin ([#274](https://github.com/nanobpm/nano-workforce/issues/274)) ([#275](https://github.com/nanobpm/nano-workforce/issues/275)) ([33171b7](https://github.com/nanobpm/nano-workforce/commit/33171b73a69d5b130f205be12e7f0988b3f268a6)), closes [#258](https://github.com/nanobpm/nano-workforce/issues/258)
+
 # [0.84.0](https://github.com/nanobpm/nano-workforce/compare/v0.83.0...v0.84.0) (2026-08-17)
 
 
