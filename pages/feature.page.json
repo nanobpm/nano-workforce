@@ -63,23 +63,33 @@
           "source": "app",
           "table": "feature_runs",
           "orderBy": { "field": "updated_at", "dir": "desc" },
-          "filter": [{ "field": "status", "in": ["running", "escalated", "awaiting_operator"] }]
+          "filter": [{ "field": "list_bucket", "in": ["active"] }]
         },
         "tabs": [
-          { "label": "Active", "filter": [{ "field": "status", "in": ["running", "escalated", "awaiting_operator"] }] },
-          { "label": "History", "filter": [{ "field": "status", "in": ["opened", "converging", "merged", "converged", "blocked", "skipped", "failed", "abandoned"] }] },
+          { "label": "Active", "filter": [{ "field": "list_bucket", "in": ["active"] }] },
+          { "label": "History", "filter": [{ "field": "list_bucket", "in": ["history"] }] },
           { "label": "All", "filter": [] }
         ],
         "columns": [
-          { "field": "title", "template": "{{title}}", "header": "Item", "subtitleField": "feature_key", "truncate": true, "width": "34%", "linkField": "issue_url" },
-          { "field": "status", "header": "Status", "link": { "kind": "processExplorer", "keyField": "process_key" } },
-          { "field": "escalation_question", "header": "Escalation", "truncate": true },
-          { "field": "base_branch", "header": "Base branch" },
-          { "field": "pr_key", "header": "PR", "link": { "kind": "page", "page": "home", "keyField": "pr_key" } },
-          { "field": "delivery_label", "header": "Delivery" },
-          { "field": "converge", "header": "Converge" },
-          { "field": "auto_merge", "header": "Auto-merge" },
-          { "field": "outcome", "header": "Outcome" },
+          { "field": "title", "template": "{{title}}", "header": "Item", "subtitleField": "feature_key", "truncate": true, "width": "30%", "linkField": "issue_url" },
+          {
+            "field": "stage",
+            "header": "Pipeline",
+            "kind": "pipeline",
+            "stages": [
+              { "key": "Requested", "label": "Requested" },
+              { "key": "Implementing", "label": "Implementing" },
+              { "key": "PR open", "label": "PR open" },
+              { "key": "Converging", "label": "Converging" },
+              { "key": "Merging", "label": "Merging" },
+              { "key": "Done", "label": "Done" }
+            ],
+            "activeField": "stage",
+            "stateField": "stage_state",
+            "badgeField": "attention",
+            "notInPathField": "stage_skipped",
+            "locus": { "field": "pr_key", "link": { "kind": "page", "page": "home", "keyField": "pr_key" } }
+          },
           { "field": "updated_at", "header": "Updated", "width": "9rem" }
         ],
         "rowActions": [
@@ -100,11 +110,21 @@
               "path": "/app/api/actions/acknowledge-blocked",
               "body": { "userTaskKey": "{{row.blocked_user_task_key}}" }
             }
+          },
+          {
+            "label": "Dismiss",
+            "confirm": "Tick off this finished run? It acknowledges the run as done and files it under History.",
+            "showWhenField": "stage_state",
+            "action": {
+              "path": "/app/api/actions/acknowledge-done",
+              "body": { "feature_key": "{{row.feature_key}}" }
+            }
           }
         ],
         "detail": {
           "fields": [
             { "field": "escalation_question", "label": "Escalation question" },
+            { "field": "base_branch", "label": "Base branch" },
             { "field": "outcome", "label": "Outcome" },
             { "field": "delivery_label", "label": "Delivery" }
           ],
