@@ -39,6 +39,7 @@ import {
   latestTrialMergeQuestion,
   PLAN_REVIEW_ELEMENT,
   PR_WAIT_ANSWER_ELEMENT,
+  PR_WAIT_MERGE_ANSWER_ELEMENT,
   prEscalations,
   reconcileUserTasks,
   TRIAL_MERGE_ELEMENT,
@@ -578,35 +579,6 @@ export async function startMerge(
   return { prKey: pr.prKey, mergeProcessKey: processInstanceKey };
 }
 
-/** Answer an open escalation → record it and resume the process. */
-export async function answerEscalation(
-  data: DataLayer,
-  engine: EngineClient,
-  prKey: string,
-  answer: string,
-) {
-  const open = (await escs(data).find({ pr_key: prKey, status: "open" })).sort((a, b) => b.id - a.id);
-  if (open.length === 0) return { ok: false, reason: "no open escalation" };
-  const ts = now();
-  await escs(data).update(open[0].id, { answer, status: "answered", answered_at: ts });
-  // `pr.persist-escalation` always INSERTs a new open row, so a retry can leave duplicate open rows
-  // for this PR. Retire any older ones to `stale` so none is left `open` to phantom-surface on
-  // /status (mirrors `submitPr`'s resubmit cleanup and the review loop's `pr.answer-escalation`).
-  for (const dup of open.slice(1)) {
-    await escs(data).update(dup.id, { status: "stale" });
-  }
-  await prs(data).update(prKey, {
-    status: "converging",
-    updated_at: ts,
-  });
-  await engine.publishMessage({
-    name: "escalation-answered",
-    correlationKey: prKey,
-    variables: { answer, escalationId: open[0].id },
-  });
-  return { ok: true, escalationId: open[0].id };
-}
-
 /** A PR currently in flight, as reported by the status endpoint. */
 export interface ActivePr {
   prKey: string;
@@ -632,11 +604,11 @@ export interface ActivePr {
  * without reading the datasource directly. The open-escalation question is derived from the
  * canonical `escalations` audit row — the single source of truth (no denormalised PR-row
  * pointer). A PR reads `status="escalated"` only while a token is parked awaiting a human answer,
- * and the row it raised carries `status="open"` until that answer is recorded — by the review
- * loop's `pr.answer-escalation` step on `wait-answer` completion, or the merge loop's
- * `answerEscalation` message path. Deriving from the row (not a per-loop wait mechanism) surfaces
- * BOTH loops' escalations: the merge loop parks on a message catch with no user task, so a
- * user-task probe would silently hide it. Once answered the row leaves `open`, so `openEscalation`
+ * and the row it raised carries `status="open"` until that answer is recorded — by the
+ * `pr.answer-escalation` step on the `wait-answer` (review loop) or `wait-merge-answer` (merge loop)
+ * user-task completion. Both loops now park on a native user task answered through the one canonical
+ * `completeUserTask` door (#256), so deriving from the row (not a per-loop wait mechanism) surfaces
+ * BOTH loops' escalations uniformly. Once answered the row leaves `open`, so `openEscalation`
  * derives back to null. */
 export async function activePrs(data: DataLayer): Promise<ActivePr[]> {
   const all = await prs(data).all();
@@ -1594,13 +1566,13 @@ export async function pollUserTasks(data: DataLayer, engine: EngineClient) {
         continue;
       }
       for (const t of tasks) {
-        if (t.elementId !== PR_WAIT_ANSWER_ELEMENT) continue;
+        if (t.elementId !== PR_WAIT_ANSWER_ELEMENT && t.elementId !== PR_WAIT_MERGE_ANSWER_ELEMENT) continue;
         const question = latestOpenEscalationQuestion(await prEscalations(data).find({ pr_key: pr.pr_key, status: "open" }));
         push(
           buildUserTaskRow(
             {
               userTaskKey: t.userTaskKey,
-              elementId: PR_WAIT_ANSWER_ELEMENT,
+              elementId: t.elementId,
               subjectType: "pr",
               subjectKey: pr.pr_key,
               subjectUrl: pr.url,

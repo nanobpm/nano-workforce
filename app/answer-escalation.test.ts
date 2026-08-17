@@ -8,7 +8,7 @@
 // completion and must transition the latest open row to `answered`, recording the submitted answer.
 //
 // It must ALSO move the `pull_requests` row off `status="escalated"` back to `"converging"`, exactly
-// as the merge-loop's `answerEscalation` message path does. Otherwise the PR stays `escalated` (with
+// (the single reconcile step both the review and merge loops run). Otherwise the PR stays `escalated` (with
 // a now-null `openEscalation`) until the re-entered round's `persist-round` runs — an inconsistent
 // `/status` window and a divergence from the merge loop the two paths are meant to share.
 import { test } from "node:test";
@@ -60,7 +60,7 @@ test("retires the latest open escalation to answered with the submitted answer",
   assertEquals(typeof updates[0].patch.answered_at, "string", "answered_at is stamped");
   assertEquals(prUpdates.length, 1, "the PR row is moved off `escalated`");
   assertEquals(prUpdates[0].key, "o/r#1", "the PR keyed by prKey is updated");
-  assertEquals(prUpdates[0].patch.status, "converging", "mirrors answerEscalation: back to converging");
+  assertEquals(prUpdates[0].patch.status, "converging", "answered escalation returns the PR to converging");
   assertEquals(typeof prUpdates[0].patch.updated_at, "string", "updated_at is stamped");
 });
 

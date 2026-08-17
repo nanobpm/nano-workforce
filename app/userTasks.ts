@@ -36,6 +36,12 @@ export const TRIAL_MERGE_ELEMENT = "trial-merge-decision";
  *  review loop and is handed to the next round. */
 export const PR_WAIT_ANSWER_ELEMENT = "wait-answer";
 
+/** The PR merge-loop escalation user task (merge-loop.bpmn) — a human answer that resumes the merge
+ *  loop (re-arms the merge poller) when the PR can't be landed (not mergeable / merge blocked). The
+ *  same native user-task path as the review loop's `wait-answer` (#256), answered through the one
+ *  canonical `completeUserTask` door and surfaced in this same Tasks inbox. */
+export const PR_WAIT_MERGE_ANSWER_ELEMENT = "wait-merge-answer";
+
 /** One row per currently-open native user-task escalation, denormalised for the Tasks page. Keyed on
  *  the completable `user_task_key` (a task is open at most once). Present iff the engine reports the
  *  task open; `pollUserTasks` deletes it once the task is gone. */
@@ -63,6 +69,7 @@ export const USER_TASK_KIND_LABELS: Readonly<Record<string, string>> = {
   [PLAN_REVIEW_ELEMENT]: "Plan review",
   [TRIAL_MERGE_ELEMENT]: "Trial merge",
   [PR_WAIT_ANSWER_ELEMENT]: "PR review",
+  [PR_WAIT_MERGE_ANSWER_ELEMENT]: "PR merge",
 };
 
 /** The denormalised context the poller has resolved for an open escalation user task. */

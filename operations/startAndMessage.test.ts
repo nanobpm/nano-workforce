@@ -216,9 +216,20 @@ test("postMessage → 400 when name is blank", async () => {
   assertEquals(r.body.error, "name is required");
 });
 
-test("postMessage → 400 when escalation-answered lacks a correlationKey", async () => {
-  const res = await postMessage(input({ name: "escalation-answered", variables: { answer: "yes" } }), app);
+test("postMessage publishes any named message generically (no bespoke escalation branch)", async () => {
+  // Every escalation kind is now a native user task answered via /actions/complete-user-task (#256),
+  // so postMessage no longer special-cases `escalation-answered`; it is a thin generic publish. The
+  // former `escalation-answered`-without-correlationKey 400 branch is gone — such a message now just
+  // publishes (uncorrelated) like any other.
+  let published: { name: string; correlationKey?: string; variables?: unknown } | undefined;
+  const pubApp = {
+    log: noopLog(),
+    engine: { publishMessage: (m: any) => ((published = m), Promise.resolve()) },
+  } as any as AppApi;
+  const res = await postMessage(input({ name: "merge-ready", correlationKey: "o/r#1", variables: { x: 1 } }), pubApp);
   const r = res as any;
-  assertEquals(r.status, 400);
-  assertEquals(r.body.error, "correlationKey is required");
+  assertEquals(r.status, 200);
+  assertEquals(r.body.ok, true);
+  assertEquals(published?.name, "merge-ready");
+  assertEquals(published?.correlationKey, "o/r#1");
 });

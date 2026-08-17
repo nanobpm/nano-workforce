@@ -1182,11 +1182,9 @@ paths:
   /actions/message:
     post:
       operationId: postMessage
-      summary: "Publish a message / answer an escalation. For the merge-loop `escalation-answered`
-        name, runs the merge-loop escalation answer flow; otherwise a plain publishMessage. The
-        epic #156 escalation
-        kinds (task, plan-review, trial-merge, PR review-loop) are native user tasks answered via
-        the task inbox (POST /tasks/api/complete), not this route."
+      summary: "Publish a BPMN message (optionally correlated) into the engine. Every escalation kind
+        (task, plan-review, trial-merge, PR review-loop, PR merge-loop) is a native user task answered
+        via the Tasks inbox / POST /actions/complete-user-task, not this route."
       requestBody:
         required: true
         content:

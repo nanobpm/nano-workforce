@@ -68,6 +68,7 @@ export const ESCALATION_TASK_ELEMENTS: ReadonlySet<string> = new Set([
   "plan-review-decision",
   "trial-merge-decision",
   "wait-answer", // PR review-loop escalation (convergence-loop.bpmn, U3)
+  "wait-merge-answer", // PR merge-loop escalation (merge-loop.bpmn) — same native user-task path (#256)
 ]);
 
 /** Each escalation `elementId` → the `.form` whose contract governs its completion variables (the
@@ -78,6 +79,7 @@ const ESCALATION_FORM_BY_ELEMENT: Readonly<Record<string, string>> = {
   "plan-review-decision": "plan-review-decision",
   "trial-merge-decision": "trial-merge-decision",
   "wait-answer": "pr-escalation",
+  "wait-merge-answer": "pr-escalation",
 };
 
 interface FormContract {

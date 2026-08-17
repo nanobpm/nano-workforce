@@ -235,7 +235,7 @@
       "type": "dataGrid",
       "id": "pr-reviews",
       "props": {
-        "title": "PR review escalations",
+        "title": "PR escalations",
         "data": {
           "kind": "datasource",
           "source": "app",
@@ -244,7 +244,8 @@
             {
               "field": "element_id",
               "in": [
-                "wait-answer"
+                "wait-answer",
+                "wait-merge-answer"
               ]
             }
           ],
@@ -257,6 +258,10 @@
           {
             "field": "subject_key",
             "header": "PR"
+          },
+          {
+            "field": "kind_label",
+            "header": "Stage"
           },
           {
             "field": "subject_url",
@@ -283,7 +288,25 @@
               "field": "question",
               "label": "Escalation question"
             }
-          ]
+          ],
+          "form": {
+            "showWhenField": "user_task_key",
+            "title": "Answer escalation",
+            "promptField": "question",
+            "inputKey": "answer",
+            "inputLabel": "Your answer",
+            "submitLabel": "Answer & resume",
+            "action": {
+              "path": "/app/api/actions/complete-user-task",
+              "successLabel": "Answered — the loop will resume",
+              "body": {
+                "userTaskKey": "{{row.user_task_key}}",
+                "variables": {
+                  "answer": "{{form.answer}}"
+                }
+              }
+            }
+          }
         },
         "refreshMs": 5000
       }

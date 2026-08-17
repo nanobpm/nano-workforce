@@ -200,16 +200,15 @@ Consequences the prompt (`resources/prompts/review-round.md`) encodes:
 |---|---|---|---|
 | `pr-submitted` | — (start) | submit route/webhook | `{repo, prNumber, prUrl, prKey}` |
 | `review-ready` | `prKey` | **poller** | `{reviewId, reviewState, submittedAt}` |
-| `escalation-answered` | `prKey` | merge-loop answer (`answerEscalation`) | `{answer, escalationId}` |
 | `deps-cleared` | `prKey` | **poller** (merge) | — (all `Depends-on` PRs merged) |
 | `merge-ready` | `prKey` | **poller** (merge) | `{mergeState}` (`ready` \| `conflict` \| `blocked`); when `blocked`, also `{failingChecks, failingChecksList}` for the `senior:fix-ci` branch |
 | `merge-landed` | `prKey` | **poller** (merge) | — (queued PR merged, or merged out-of-band) |
 
-Note `escalation-answered` is now used only by the `merge-loop` process (the
-`convergence-loop` review escalation is a native `userTask` answered through the
-task inbox, not this message). The merge-loop `.bpmn` gives it a distinct message
-**id** (and distinct envelope shape ids) to avoid duplicate-id collisions when the
-manifest deploys both files.
+The `escalation-answered` message was retired (#256): the merge-loop escalation is
+now a native `wait-merge-answer` `userTask`, exactly like the `convergence-loop`
+review escalation (`wait-answer`). Both are answered through the ONE canonical
+`completeUserTask` door and surface in the Tasks inbox — there is no longer a
+merge-only message pathway.
 
 ## 7. Domain model (SQLite — `db/migrations/001_init.sql`) — PROPOSED
 
@@ -287,8 +286,8 @@ The full, authoritative contract is `openapi.yaml` (Swagger UI at
 | `GET` | `/app/api/version` | app + engine version |
 | `POST` | `/app/api/actions/start/convergence-loop` | parse the PR ref → create the aggregate + start the process (the ONE submit door — page + external callers) |
 | `POST` | `/app/api/actions/start/plan-fanout` | parse the issue ref → start a plan fan-out run (the ONE plan door) |
-| `POST` | `/app/api/actions/message` (`escalation-answered`) | answer an open merge-loop escalation → publish `escalation-answered` (the four #156 escalation kinds are native user tasks answered via the task inbox) |
-| `POST` | `/app/api/actions/complete-user-task` | complete an open native user-task escalation from the Tasks page (plan-review / trial-merge / PR `wait-answer`) → `completeEscalationAsHuman` (the same resume path the task inbox uses) |
+| `POST` | `/app/api/actions/message` | publish a BPMN message (optionally correlated) into the engine (generic; every escalation kind is now answered via `/actions/complete-user-task`) |
+| `POST` | `/app/api/actions/complete-user-task` | complete an open native user-task escalation from the Tasks page (plan-review / trial-merge / PR `wait-answer` / PR merge `wait-merge-answer`) → `completeEscalationAsHuman` (the same resume path the task inbox uses) |
 | `GET`/`POST` | `/app/api/hooks/blackboard` | per-plan coordination blackboard (capability-token side-channel) |
 | `GET` | `/app/api/hooks/abandon` | cooperative abandon check (per-PR capability token) |
 
@@ -401,7 +400,7 @@ start ─► wait: deps merged ─► arm merge ─► wait: mergeable ─┬─
                                                         └─ could not fix ─► escalate ─┐               │             │
                                                                                       ▼               ▼             ▼
                                                              wait: answered ─► (re-arm) ◄──────── (all escalations)
-                                                                   (escalation-answered)
+                                                            (wait-merge-answer userTask)
 ```
 
 - **CI auto-fix** — a `blocked` verdict means a **required check failed**
@@ -438,7 +437,8 @@ start ─► wait: deps merged ─► arm merge ─► wait: mergeable ─┬─
   recorded in the `merges` audit table.
 - **Escalation** — a conflict or a failing gate raises the same
   `pr.persist-escalation` worker as the review stage (status `escalated`), answered
-  via the merge-loop `escalation-answered` message; answering re-arms and retries.
+  via the native `wait-merge-answer` `userTask` (the same `completeUserTask` door as
+  the review escalation, #256); answering re-arms and retries.
 - **Terminal** — `merged` (with `merged_at`), or `converged` when
   `NANO_PR_AUTO_MERGE=0` (review-only), or `abandoned` on cancel.
 
