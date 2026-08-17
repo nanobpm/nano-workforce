@@ -554,7 +554,7 @@ the loop runs one parallel `implement` MI fan-out per wave:
   `dependsOn`), and advances `currentWave`.
 - **Wave-merge barrier** (`wait-wave-merged`): when a wave has a successor,
   `record-wave` sets `plans.gate_wave` to that wave's index and the process parks at
-  the `wait-wave-merged` catch event. The poller's `pollWaveGates` pass is
+  the `wait-wave-merged` catch event. The poller's `pollWaveGatesImpl` pass is
   **level-triggered**: it publishes the `wave-merged` message (correlated on `planKey`)
   once **every opened PR in that wave has merged** (`app/waves.ts` `waveMergeTargets`
   selects the PRs to wait on; `blocked`/`skipped`/keyless tasks clear vacuously) **and**

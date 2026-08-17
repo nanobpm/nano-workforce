@@ -535,7 +535,7 @@ function subscriptionFetch(open: Set<string>) {
   };
 }
 
-test("pollWaveGates is level-triggered: PRs merged before the token arrives never lose the wave-merged signal (#262)", async () => {
+test("pollWaveGatesImpl is level-triggered: PRs merged before the token arrives never lose the wave-merged signal (#262)", async () => {
   await withGithubOff(async () => {
     const PLAN_KEY = "owner/repo#67";
     const PI = "PI-13794";
@@ -625,7 +625,7 @@ function ambiguousSubscriptionFetch(items: unknown[]) {
   };
 }
 
-test("pollWaveGates never releases the barrier on an unverifiable subscription item (missing/null/mismatched fields)", async () => {
+test("pollWaveGatesImpl never releases the barrier on an unverifiable subscription item (missing/null/mismatched fields)", async () => {
   await withGithubOff(async () => {
     const PLAN_KEY = "owner/repo#67";
     const PI = "PI-13794";
