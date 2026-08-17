@@ -4,6 +4,7 @@
   "id": "nano-workforce",
   "name": "Nano Workforce",
   "codename": "nano-workforce",
+  "network": { "bind": "all" },
   "data": {
     "default": "app",
     "sources": {
