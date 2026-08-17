@@ -1,3 +1,10 @@
+# [0.76.0](https://github.com/nanobpm/nano-workforce/compare/v0.75.0...v0.76.0) (2026-08-17)
+
+
+### Features
+
+* **ui:** adopt urban 0.52.0 dataGrid subtitle/width/truncate on identity grids ([#250](https://github.com/nanobpm/nano-workforce/issues/250)) ([abcae46](https://github.com/nanobpm/nano-workforce/commit/abcae4678e9b2a481372df3a42bc0ddedaa671b3)), closes [#260](https://github.com/nanobpm/nano-workforce/issues/260) [#259](https://github.com/nanobpm/nano-workforce/issues/259) [owner/repo#N](https://github.com/owner/repo/issues/N) [#248](https://github.com/nanobpm/nano-workforce/issues/248) [#249](https://github.com/nanobpm/nano-workforce/issues/249) [#259](https://github.com/nanobpm/nano-workforce/issues/259)
+
 # [0.75.0](https://github.com/nanobpm/nano-workforce/compare/v0.74.0...v0.75.0) (2026-08-17)
 
 
