@@ -165,6 +165,10 @@
     {
       "taskType": "pr.converge-gate",
       "handler": "workers/converge-gate/worker.ts"
+    },
+    {
+      "taskType": "pr.readiness-probe",
+      "handler": "workers/readiness-probe/worker.ts"
     }
   ],
   "externalTaskTypes": [

@@ -1,0 +1,29 @@
+{
+  "id": "readiness-escalation",
+  "schemaVersion": 18,
+  "type": "default",
+  "components": [
+    {
+      "type": "text",
+      "text": "The artifact-readiness wait-gate timed out before its ReadinessProbe went green. A human decision is needed on how to proceed.",
+      "label": "Readiness timeout"
+    },
+    {
+      "type": "select",
+      "key": "resolution",
+      "label": "Resolution",
+      "values": [
+        { "label": "Acknowledge — the artifact is ready / proceed", "value": "acknowledge" },
+        { "label": "Abandon — give up on this gate", "value": "abandon" }
+      ],
+      "validate": {
+        "required": true
+      }
+    },
+    {
+      "type": "textarea",
+      "key": "answer",
+      "label": "Notes for the operator"
+    }
+  ]
+}
