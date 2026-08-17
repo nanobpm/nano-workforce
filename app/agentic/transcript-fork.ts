@@ -88,8 +88,7 @@ export function forkTranscript(
   if (source === target) {
     throw new TranscriptForkError(source, target, "cannot fork a stream onto itself");
   }
-  const sourceMeta = store.get(source);
-  if (sourceMeta === undefined) {
+  if (store.get(source) === undefined) {
     throw new TranscriptForkError(source, target, `source stream "${source}" has no transcript to fork`);
   }
   const existing = store.get(target);
