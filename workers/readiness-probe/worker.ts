@@ -110,8 +110,8 @@ export async function pollUntilReady(deps: {
       return res;
     }
     attempt += 1;
-    const wait = nextDelay(attempt, poll);
-    if (deps.now() + wait >= deadline) {
+    const remaining = deadline - deps.now();
+    if (remaining <= 0) {
       // The gate boundary: the deterministic poll is exhausted. Give the gated fallback (if any) ONE
       // empirical attempt before conceding to the engine timer — a capability provenance under-reports
       // can still resolve here, exactly once, never per unrelated release.
@@ -141,7 +141,11 @@ export async function pollUntilReady(deps: {
           : "probe budget exhausted; engine timer bounds the wait",
       };
     }
-    await deps.wait(wait);
+    // Clamp the sleep to the time left until `deadline` so the worker keeps probing right up to the
+    // SAME bound the engine timer enforces. Sleeping a full `nextDelay` unconditionally would stop
+    // probing up to one backoff early — a window where readiness could flip to ready but no
+    // `readiness-ready` message is published, forcing a spurious timeout escalation.
+    await deps.wait(Math.min(nextDelay(attempt, poll), remaining));
   }
 }
 

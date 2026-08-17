@@ -197,6 +197,34 @@ test("pollUntilReady: a never-green probe exhausts its budget and returns not-re
   assert(clock.now() <= 100, "the loop stopped at (or before) its declared budget");
 });
 
+test("pollUntilReady: keeps probing up to the deadline — a flip-to-ready in the final backoff window is caught, not missed", async () => {
+  // everyMs 10, budget 25: three deterministic probes land at t=0,10,20. A full-backoff sleep from
+  // t=20 would jump to t=30 (past the 25ms bound) and stop probing early, missing a green at t=25 and
+  // forcing a spurious timeout escalation. The clamp keeps probing to the same bound the engine holds.
+  const clock = fakeClock();
+  let publishes = 0;
+  const exec = execReturning([
+    { status: 503, body: "" },
+    { status: 503, body: "" },
+    { status: 503, body: "" },
+    { status: 200, body: "ok" },
+  ]);
+  const res = await pollUntilReady({
+    probe: httpProbe({ everyMs: 10, timeoutMs: 25, backoff: "fixed" }),
+    gateKey: "gate-final-window",
+    exec,
+    env: {},
+    now: clock.now,
+    wait: clock.wait,
+    publish: async () => {
+      publishes += 1;
+    },
+  });
+  assert(res.ready, "the flip-to-ready inside the final backoff window was probed and caught");
+  assertEquals(publishes, 1, "the readiness signal was published exactly once");
+  assert(clock.now() <= 25, "the worker never probed past the engine-enforced deadline");
+});
+
 test("pollUntilReady: an I/O throw is caught and treated as not-ready (never rejects), and its raw message is not leaked", async () => {
   const clock = fakeClock();
   const seen: string[] = [];
