@@ -57,6 +57,7 @@
         },
         "columns": [
           { "field": "title", "template": "{{title}}", "header": "Item", "subtitleField": "plan_key", "truncate": true, "width": "34%", "linkField": "issue_url" },
+          { "field": "epic_phase", "header": "Phase" },
           { "field": "status", "header": "Status", "link": { "kind": "processExplorer", "keyField": "process_key" } },
           { "field": "delivery", "header": "Delivery" },
           { "field": "wave_label", "header": "Wave" },

@@ -1,0 +1,12 @@
+-- 038_plan_epic_phase.sql — issue #261: reify the epic's own domain lifecycle as a derived,
+-- write-time-projected `epic_phase`, so the epic/plan view can show WHICH phase an epic is in —
+-- Planning / Reviewing / Implementing (wave n/t) / Trial merging / Finalizing / Dispatched —
+-- instead of only the process-instance terminal status (`plans.status`, whose `dispatched` is the
+-- `plan-fanout.bpmn` fan-out terminal, not the epic's domain phase).
+--
+-- Forward-only, additive (expand): a nullable TEXT column, display-only. NULL until the plan
+-- lifecycle first stamps it (grandfathering pre-#261 rows), so it never gates control flow. The
+-- value is derived structurally from `plan-fanout.bpmn`'s named activities via each spine worker's
+-- BPMN element id (`app/epicPhase.ts`) and written through the existing plan write path — mirroring
+-- the wave-progress / delivery display projections already on this table.
+ALTER TABLE plans ADD COLUMN epic_phase TEXT;

@@ -67,7 +67,7 @@ test("select-wave projects the active wave onto plans.current_wave", async () =>
   ];
   const plans: Record<string, unknown>[] = [{ plan_key: "owner/repo#63", current_wave: 0 }];
   const out = await handler(
-    { variables: { planKey: "owner/repo#63", currentWave: 1 } } as any,
+    { variables: { planKey: "owner/repo#63", currentWave: 1 }, elementId: "select-wave" } as any,
     fakeApp(rows, [], plans),
   );
   assertEquals((out as { waveTasks: unknown[] }).waveTasks.length, 1);
@@ -76,6 +76,9 @@ test("select-wave projects the active wave onto plans.current_wave", async () =>
   // is pre-formatted for the epics-index at-a-glance column.
   assertEquals(plans[0].wave_count, 2);
   assertEquals(plans[0].wave_label, "2/2");
+  // Domain-phase projection (#261): dispatching the wave marks the epic Implementing (wave n/t),
+  // derived from this worker's BPMN element id + the levelize records.
+  assertEquals(plans[0].epic_phase, "Implementing (wave 2/2)");
 });
 
 test("select-wave nulls all three progress fields when there are no levelized rows", async () => {

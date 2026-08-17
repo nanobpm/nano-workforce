@@ -15,6 +15,7 @@
 // and, crucially, so a later wave's `dependsOn` can reference the PR keys earlier waves produced.
 import type { AppJobHandler } from "@nanobpm/urban";
 import { appendEntry } from "../../app/blackboard.ts";
+import { EPIC_PHASE, implementingPhase } from "../../app/epicPhase.ts";
 import { fetchPrFiles, fetchPrHead } from "../../app/github.ts";
 import { deriveExclusions, recordExclusions } from "../../app/mergeExclusion.ts";
 import { loadMergeProtocol } from "../../app/mergeProtocol.ts";
@@ -280,6 +281,16 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
   const currentWaveProjection = waveCount > 0 ? projectedCurrentWave : null;
   const waveLabel = waveCount > 0 ? `${projectedCurrentWave + 1}/${waveCount}` : null;
 
+  // Domain-phase projection (#261): the wave landed — stamp the phase the epic is ENTERING next,
+  // which is data-dependent here (unlike the structural spine writers). A trial merge runs → Trial
+  // merging; another wave follows → Implementing (next wave n/t); otherwise the finalizer runs →
+  // Finalizing (record-results then advances to the Dispatched terminal).
+  const epicPhase = runTrialMerge
+    ? EPIC_PHASE.TRIAL_MERGING
+    : hasMoreWaves
+      ? implementingPhase(projectedCurrentWave, waveCount)
+      : EPIC_PHASE.FINALIZING;
+
   // Wave-merge barrier: when another wave follows, park the plan-fanout instance at the
   // `wait-wave-merged` catch event until THIS wave's opened PRs have MERGED (not merely opened).
   // `gate_wave` is that durable marker; the poller (`pollWaveGates`) clears it and publishes
@@ -292,6 +303,7 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
       gate_wave: hasMoreWaves ? currentWave : null,
       current_wave: currentWaveProjection,
       wave_label: waveLabel,
+      epic_phase: epicPhase,
       updated_at: ts,
     });
   } catch (err) {

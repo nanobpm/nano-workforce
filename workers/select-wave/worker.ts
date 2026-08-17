@@ -15,6 +15,7 @@
 // Emitting an empty `waveTasks` is fine: the MI activity over an empty collection completes
 // immediately (the same 0-task path the flat fan-out already relied on).
 import type { AppJobHandler } from "@nanobpm/urban";
+import { deriveEpicPhase } from "../../app/epicPhase.ts";
 import { plans, planTaskDeps, planTasks } from "../../app/plan.ts";
 import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 
@@ -53,6 +54,13 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
   // display-only — it must never gate control flow, which stays driven by the process
   // `currentWave`/`waveCount`/`gate_wave` state.
   const waveCount = rows.reduce((m, r) => Math.max(m, r.wave ?? 0), -1) + 1;
+  // Domain-phase projection (#261): select-wave dispatches this wave and is the last host write
+  // before the write-silent `implement` MI, so it durably marks the implementation phase for the
+  // wave it launches — `Implementing (wave n/t)` from the levelize records (job.elementId +
+  // current/total waves). A null derivation (element id absent) must not clobber the phase.
+  const epicPhase = waveCount > 0
+    ? deriveEpicPhase(job.elementId, { current: currentWave, total: waveCount })
+    : null;
   try {
     await plans(app.data).update(planKey, {
       // Keep the three progress fields consistent: with no levelized rows (waveCount 0) there is
@@ -60,6 +68,7 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
       current_wave: waveCount > 0 ? currentWave : null,
       wave_count: waveCount > 0 ? waveCount : null,
       wave_label: waveCount > 0 ? `${currentWave + 1}/${waveCount}` : null,
+      ...(epicPhase ? { epic_phase: epicPhase } : {}),
       updated_at: ts,
     });
   } catch (err) {
