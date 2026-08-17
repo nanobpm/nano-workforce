@@ -11,6 +11,7 @@
 // hand-written SQL — matching app/service.ts.
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { blackboardUrl, mintBlackboardToken, renderCoordinationBrief } from "./blackboard.ts";
+import { EPIC_PHASE } from "./epicPhase.ts";
 import { DEFAULT_ESCALATION_SLA_TIMEOUT, escalationSlaTimeout } from "./escalationSla.ts";
 import { coalesceTitle, ensureBaseBranch, fetchDefaultBranch, fetchIssueTitle } from "./github.ts";
 import { clearExclusions } from "./mergeExclusion.ts";
@@ -82,6 +83,12 @@ export interface Plan {
   // in app/service.ts); `delivery_label` is the human rollup for the epic detail view. Display-only.
   delivery: string | null;
   delivery_label: string | null;
+  // Derived epic domain phase (038_plan_epic_phase.sql, #261): the epic's own lifecycle phase —
+  // Planning / Reviewing / Implementing (wave n/t) / Trial merging / Finalizing / Dispatched —
+  // projected at write time from plan-fanout.bpmn's named activities (app/epicPhase.ts), so the epic
+  // view can show which phase the epic is IN rather than only the process-instance terminal status.
+  // Display-only; NULL until the lifecycle first stamps it (grandfathers pre-#261 rows).
+  epic_phase: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -436,6 +443,9 @@ export async function startPlan(
       issue_url: parsed.url,
       title,
       outcome: null,
+      // Genesis of the domain lifecycle (#261): the epic re-enters Planning. Cleared of any stale
+      // terminal phase from the prior run so the re-plan reads correctly from the first pass.
+      epic_phase: EPIC_PHASE.PLANNING,
       blackboard_token: token,
       base_branch: base,
       updated_at: ts,
@@ -449,6 +459,8 @@ export async function startPlan(
       title,
       status: "planning",
       task_count: 0,
+      // Genesis of the domain lifecycle (#261): a fresh epic starts in Planning.
+      epic_phase: EPIC_PHASE.PLANNING,
       blackboard_token: token,
       base_branch: base,
       created_at: ts,

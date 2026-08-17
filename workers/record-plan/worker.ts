@@ -16,6 +16,7 @@
 // warning; the ordering is lost but every task still runs. No `plan_task_deps` are recorded
 // in that case (the edges were invalid).
 import type { AppJobHandler } from "@nanobpm/urban";
+import { deriveEpicPhase } from "../../app/epicPhase.ts";
 import { planTaskDeps, planTasks } from "../../app/plan.ts";
 import { computeWaves, WaveError, type WaveTask } from "../../app/waves.ts";
 import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
@@ -127,6 +128,11 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
     wave_label: tasks.length > 0 ? `1/${waveCount}` : null,
     updated_at: ts,
   };
+  // Domain-phase projection (#261): recording the plan hands the epic to the `review-plan` agent,
+  // so it enters the Reviewing phase (derived structurally from this worker's BPMN element id).
+  // Guard against a null derivation (element id absent) clobbering the genesis phase.
+  const epicPhase = deriveEpicPhase(job.elementId);
+  if (epicPhase) patch.epic_phase = epicPhase;
   if (tasks.length === 0) patch.outcome = note ? str(note) : "planner emitted no tasks";
   await app.data.table("plans", "plan_key").update(planKey, patch);
 

@@ -144,6 +144,8 @@ test("record-wave retries the same wave when a task is still pending", async () 
   assertEquals((planUpdates[0].patch as Record<string, unknown>).gate_wave, 1);
   // Retry keeps the projection on the same (still-pending) wave.
   assertEquals((planUpdates[0].patch as Record<string, unknown>).current_wave, 1);
+  // Domain-phase projection (#261): more waves remain, so the epic stays Implementing (wave n/t).
+  assertEquals((planUpdates[0].patch as Record<string, unknown>).epic_phase, "Implementing (wave 2/2)");
 });
 
 test("record-wave pins current_wave to the last index and clears gate_wave on the final wave", async () => {
@@ -174,6 +176,9 @@ test("record-wave pins current_wave to the last index and clears gate_wave on th
   assertEquals((planUpdates[0].patch as Record<string, unknown>).gate_wave, null);
   assertEquals((planUpdates[0].patch as Record<string, unknown>).current_wave, 2);
   assertEquals((planUpdates[0].patch as Record<string, unknown>).wave_label, "3/3");
+  // Domain-phase projection (#261): the final wave landed with no successor and no trial merge, so
+  // the epic enters Finalizing (record-results then advances to the Dispatched terminal).
+  assertEquals((planUpdates[0].patch as Record<string, unknown>).epic_phase, "Finalizing");
 });
 
 test("record-wave keeps all wave-progress fields NULL for a taskless plan (waveCount 0)", async () => {

@@ -530,6 +530,17 @@ History: done/failed/abandoned) with a `plan_tasks` child grid showing each task
 status and the PR it produced (`pr_key` cross-references the Pull requests grid for
 convergence status).
 
+**Epic domain phase** (issue #261): `plans.status` only distinguishes the process-instance
+terminal (`dispatched` = "fan-out job done"), not the epic's *domain* lifecycle. The read model
+therefore also carries a derived, display-only `plans.epic_phase` — **Planning → Reviewing →
+Implementing (wave n/t) → Trial merging → Finalizing → Dispatched** — projected at write time from
+`plan-fanout.bpmn`'s named activities via each spine worker's BPMN element id (`app/epicPhase.ts`,
+the single binding; nwf is the first consumer of the urban phase-projection primitive, nano-ide#266).
+The `Implementing` band is wave-labelled from the levelize records (`plan_tasks` waves). The epic /
+epic-detail pages surface it as a **Phase** column. It never gates control flow (that stays driven by
+the process `currentWave`/`waveCount`/`gate_wave`); a post-dispatch cross-instance rollup into
+Converging/Merging is a later seam (nwf#245 / nano-ide#254).
+
 ### 13.1 Dependency waves + merge barrier (issues #20, #26, release-notes-concierge)
 
 The flat `implement → record-results` shape above evolved into a **wave loop**. The
