@@ -131,7 +131,15 @@ export async function pollUntilReady(deps: {
         await deps.publish(settled.detail, settled.bind);
         return settled;
       }
-      return { ready: false, detail: "probe budget exhausted; engine timer bounds the wait" };
+      // Surface the fallback's (already-redacted) diagnostic when one ran and reported not-ready, so a
+      // timeout escalation is actionable instead of a generic "budget exhausted". `settled` is null when
+      // there is no fallback or it threw (logged above), in which case only the generic detail applies.
+      return {
+        ready: false,
+        detail: settled
+          ? `probe budget exhausted; engine timer bounds the wait (fallback: ${settled.detail})`
+          : "probe budget exhausted; engine timer bounds the wait",
+      };
     }
     await deps.wait(wait);
   }

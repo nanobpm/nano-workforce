@@ -171,6 +171,10 @@ test("pollUntilReady: a fallback that does not resolve leaves the not-ready outc
   });
   assert(!res.ready, "an inconclusive fallback keeps the wait bounded by the engine timer");
   assertEquals(publishes, 0, "no readiness signal is published when the fallback does not resolve");
+  assert(
+    res.detail.includes("still nothing"),
+    "the inconclusive fallback's (redacted) diagnostic is surfaced in the returned detail, not discarded",
+  );
 });
 
 test("pollUntilReady: a never-green probe exhausts its budget and returns not-ready WITHOUT publishing", async () => {
