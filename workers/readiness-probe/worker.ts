@@ -41,6 +41,22 @@ export const READINESS_READY_MESSAGE = "readiness-ready";
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+/** The canonical gate-payload keys the matcher's `bind` must never override. `bind` is the
+ * kind-agnostic emit primitive (#274 Gap B), but it flows from matcher output into both the
+ * `readiness-ready` message variables and the worker output — so a matcher that (accidentally or
+ * maliciously) binds `ready`/`detail` could shadow the canonical payload and break the gate
+ * contract. Strip them before spreading so a matcher can only ADD outputs, never overwrite the
+ * shape the gate correlates on. */
+const RESERVED_BIND_KEYS: ReadonlySet<string> = new Set(["ready", "detail"]);
+export function safeBind(bind?: Record<string, string>): Record<string, string> {
+  if (!bind) return {};
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(bind)) {
+    if (!RESERVED_BIND_KEYS.has(k)) out[k] = v;
+  }
+  return out;
+}
+
 /** The effective poll cadence: the descriptor's values, with `everyMs` defaulting through the env
  * contract (`NANO_READINESS_POLL_EVERY_MS`) when the descriptor omits it, then the built-in
  * defaults/clamps in {@link normalizePoll}. Reads the env value from the injected `env` (not the
@@ -99,7 +115,17 @@ export async function pollUntilReady(deps: {
       // The gate boundary: the deterministic poll is exhausted. Give the gated fallback (if any) ONE
       // empirical attempt before conceding to the engine timer — a capability provenance under-reports
       // can still resolve here, exactly once, never per unrelated release.
-      const settled = deps.fallback ? await deps.fallback().catch(() => null) : null;
+      const settled = deps.fallback
+        ? await deps.fallback().catch((err) => {
+            // Never swallow a fallback failure silently — it degrades to "not ready" and is hard
+            // to diagnose. Log only the error class name (no message), consistent with the main
+            // probeOnce error handling, so a target URL/token in the message never leaks.
+            deps.log?.(
+              `readiness probe ${label} fallback error: ${err instanceof Error ? err.name : "Error"}`,
+            );
+            return null;
+          })
+        : null;
       if (settled?.ready) {
         deps.log?.(`readiness probe ${label} fallback: ${settled.detail}`);
         await deps.publish(settled.detail, settled.bind);
@@ -156,12 +182,13 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
         correlationKey: gateKey,
         // `bind` is the kind-agnostic emit primitive (#274 Gap B): forward whatever the matcher
         // discovered (e.g. `resolvedArtifact`) into the message so the gate surfaces it as output.
-        variables: { ready: true, detail, ...(bind ?? {}) },
+        // Reserved keys are stripped so a bind can only ADD outputs, never shadow `ready`/`detail`.
+        variables: { ready: true, detail, ...safeBind(bind) },
       });
     },
     log: (msg) => app.log.info(msg),
   });
-  return { ready: result.ready, detail: result.detail, ...(result.bind ?? {}) };
+  return { ready: result.ready, detail: result.detail, ...safeBind(result.bind) };
 };
 
 export default handler;

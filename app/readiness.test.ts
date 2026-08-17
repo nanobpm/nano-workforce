@@ -126,6 +126,19 @@ test("parseProbe: a capability probe with a blank package throws (provenance is 
   );
 });
 
+test("parseProbe: a capability probe whose capabilityRef carries no numeric id throws (never resolvable)", () => {
+  assertThrows(
+    () =>
+      parseProbe({
+        kind: "capability",
+        target: "github-releases:nanobpm/nano-ide",
+        match: { capabilityRef: "nano-ide#", package: "@nanobpm/urban" },
+      }),
+    Error,
+    "must carry a",
+  );
+});
+
 test("parseProbe: a valid capability probe round-trips its required match fields", () => {
   const p = parseProbe({
     kind: "capability",
@@ -212,6 +225,16 @@ test("parseReleases: reduces a gh api payload to {tag, body}; non-array input yi
   assertEquals(parsed[0]?.tag, "@nanobpm/urban@0.54.0");
   assertEquals(parseReleases("not-an-array").length, 0);
   assertEquals(parseReleases(null).length, 0);
+});
+
+test("parseReleases: flattens the --paginate --slurp array-of-pages shape (>100 releases are seen)", () => {
+  const slurped = [
+    [{ tag_name: "@nanobpm/urban@0.54.0", body: "- #274" }],
+    [{ tag_name: "@nanobpm/urban@0.9.0", body: "- #274" }],
+  ];
+  const tags = parseReleases(slurped).map((r) => r.tag);
+  assertEquals(tags.includes("@nanobpm/urban@0.54.0"), true, "first page's release is seen");
+  assertEquals(tags.includes("@nanobpm/urban@0.9.0"), true, "a later page's release is seen too");
 });
 
 test("parseReleasesTarget: strips the optional github-releases: scheme, else passes owner/repo through", () => {

@@ -185,6 +185,16 @@ export function parseProbe(raw: unknown): ReadinessProbe {
     if (!match?.capabilityRef) {
       throw new Error("readiness probe (capability): 'match.capabilityRef' is required (e.g. 'nano-ide#274' or '#274')");
     }
+    // A ref that carries no numeric issue/PR id (e.g. 'cap274' has a number, but 'nano-ide#' or a
+    // bare word does not) can never resolve — `matchCapability` would only surface it as a timeout
+    // much later. Reject it now, via the SAME canonical parser the resolver uses, so a malformed
+    // edge fails loudly at parse (mirroring the intent of the blank-ref guard above).
+    if (!capabilityNumber(match.capabilityRef)) {
+      throw new Error(
+        `readiness probe (capability): 'match.capabilityRef' ('${match.capabilityRef}') must carry a ` +
+          "numeric issue/PR id (e.g. 'nano-ide#274' or '#274')",
+      );
+    }
     if (!match?.package) {
       throw new Error("readiness probe (capability): 'match.package' is required (provenance is per-package scoped)");
     }
@@ -430,13 +440,22 @@ export function newestPublishedVersion(pkg: string | undefined, releases: readon
 
 /** Parse a raw `gh api .../releases` payload (already JSON-decoded) into the minimal
  * {@link GithubRelease} list the resolver reads. Tolerant: non-array/malformed input yields `[]`,
- * so a bad provenance read degrades to "not ready", never a throw. */
+ * so a bad provenance read degrades to "not ready", never a throw. Also accepts the `--paginate
+ * --slurp` shape — an array whose elements are themselves per-page arrays — flattening one level so
+ * releases beyond the first 100 (the true lowest version that first carried a capability) are seen. */
 export function parseReleases(payload: unknown): GithubRelease[] {
   if (!Array.isArray(payload)) return [];
   const out: GithubRelease[] = [];
-  for (const r of payload) {
-    if (!isRecord(r)) continue;
+  const push = (r: unknown): void => {
+    if (!isRecord(r)) return;
     out.push({ tag: str(r.tag_name), body: str(r.body) });
+  };
+  for (const el of payload) {
+    if (Array.isArray(el)) {
+      for (const r of el) push(r);
+    } else {
+      push(el);
+    }
   }
   return out;
 }
@@ -450,9 +469,12 @@ export function parseReleasesTarget(target: string): string {
 }
 
 /** Build the `gh api` command that lists a repo's releases (the provenance substrate). `gh` reads
- * its token from the ambient env, exactly like the `github-check` kind — no `credentialEnv`. */
+ * its token from the ambient env, exactly like the `github-check` kind — no `credentialEnv`.
+ * `--paginate --slurp` walks the FULL release history (not just the first `per_page=100` page), so a
+ * repo with >100 releases can still surface the lowest version that first carried a capability;
+ * `--slurp` wraps the pages in an outer array that {@link parseReleases} flattens. */
 export function githubReleasesCommand(repo: string): string {
-  return `gh api ${shellQuote(`repos/${repo}/releases?per_page=100`)} -H ${shellQuote("Accept: application/vnd.github+json")}`;
+  return `gh api --paginate --slurp ${shellQuote(`repos/${repo}/releases?per_page=100`)} -H ${shellQuote("Accept: application/vnd.github+json")}`;
 }
 
 

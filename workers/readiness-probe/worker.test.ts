@@ -9,7 +9,7 @@ import { test } from "node:test";
 import { assert, assertEquals, assertRejects } from "#test-assert";
 import type { CommandResult, HttpResponse, ProbeExec, ReadinessProbe } from "../../app/readiness.ts";
 import { parseProbe } from "../../app/readiness.ts";
-import handler, { pollUntilReady, READINESS_READY_MESSAGE, readGateVars } from "./worker.ts";
+import handler, { pollUntilReady, READINESS_READY_MESSAGE, readGateVars, safeBind } from "./worker.ts";
 
 // A virtual clock: `now()` advances only when the loop's `wait(ms)` is called, so a never-ready
 // probe races to its deadline in zero real time (no setTimeout) and the test can never hang.
@@ -39,6 +39,40 @@ function execReturning(seq: Array<HttpResponse>): ProbeExec {
 
 const httpProbe = (poll: ReadinessProbe["poll"]): ReadinessProbe =>
   parseProbe({ kind: "http", target: "https://x/health", poll });
+
+test("safeBind: strips reserved keys (ready/detail) so a bind can only ADD outputs, never shadow the payload", () => {
+  const cleaned = safeBind({ resolvedArtifact: "@nanobpm/urban@0.54.0", ready: "false", detail: "spoofed" });
+  assertEquals(cleaned.resolvedArtifact, "@nanobpm/urban@0.54.0");
+  assertEquals("ready" in cleaned, false, "a bound 'ready' can never override the canonical payload");
+  assertEquals("detail" in cleaned, false, "a bound 'detail' can never override the canonical payload");
+  assertEquals(Object.keys(safeBind(undefined)).length, 0, "an absent bind yields an empty object");
+});
+
+test("pollUntilReady: a fallback that throws is caught, logged by class name (no leak), and stays not-ready", async () => {
+  const clock = fakeClock();
+  const seen: string[] = [];
+  let publishes = 0;
+  const res = await pollUntilReady({
+    probe: httpProbe({ everyMs: 5, timeoutMs: 30, backoff: "fixed" }),
+    gateKey: "gate-fallback-throws",
+    exec: execReturning([{ status: 503, body: "" }]),
+    env: {},
+    now: clock.now,
+    wait: clock.wait,
+    publish: async () => {
+      publishes += 1;
+    },
+    fallback: async () => {
+      throw new Error("boom at https://h/p?token=s3cr3t");
+    },
+    log: (msg) => seen.push(msg),
+  });
+  assert(!res.ready, "a throwing fallback keeps the not-ready outcome for the engine timer");
+  assertEquals(publishes, 0, "nothing is published when the fallback throws");
+  const all = seen.join("\n");
+  assert(all.includes("fallback error: Error"), "the fallback error is logged by class name");
+  assert(!all.includes("s3cr3t"), "the raw error message (with its secret) must not leak");
+});
 
 test("pollUntilReady: publishes readiness-ready once and returns ready when a probe goes green", async () => {
   const clock = fakeClock();
