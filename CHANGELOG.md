@@ -1,3 +1,10 @@
+# [0.78.0](https://github.com/nanobpm/nano-workforce/compare/v0.77.0...v0.78.0) (2026-08-17)
+
+
+### Features
+
+* converge the merge-loop escalation onto one native user-task pathway ([#256](https://github.com/nanobpm/nano-workforce/issues/256)) ([#257](https://github.com/nanobpm/nano-workforce/issues/257)) ([16551ee](https://github.com/nanobpm/nano-workforce/commit/16551ee59015081dcf20294ffdd05a078564b775))
+
 # [0.77.0](https://github.com/nanobpm/nano-workforce/compare/v0.76.0...v0.77.0) (2026-08-17)
 
 
