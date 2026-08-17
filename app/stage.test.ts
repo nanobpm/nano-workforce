@@ -98,7 +98,8 @@ test("awaiting_operator WITHOUT pr_key → Implementing / null, attention 'block
   assertEquals(d.attention, "blocked");
 });
 
-test("deriveListBucket: history iff terminal AND acknowledged, else active", () => {  assertEquals(deriveListBucket("merged", null), "active");
+test("deriveListBucket: history iff terminal AND acknowledged, else active", () => {
+  assertEquals(deriveListBucket("merged", null), "active");
   assertEquals(deriveListBucket("merged", "2024-01-01T00:00:00Z"), "history");
   // A non-terminal status is always active, even if (spuriously) acknowledged.
   assertEquals(deriveListBucket("running", "2024-01-01T00:00:00Z"), "active");
