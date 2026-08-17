@@ -215,3 +215,9 @@ test("redactString/redactTarget: strip userinfo and query (a token often rides e
   const t = redactTarget(parseProbe({ kind: "http", target: "https://h/p?tok=s3cr3t" }));
   assert(!t.includes("s3cr3t"), "the secret must not survive redaction");
 });
+
+test("redactTarget: a command target is never logged — only the kind + a fixed placeholder", () => {
+  const ct = redactTarget(parseProbe({ kind: "command", target: "curl -H 'Authorization: Bearer s3cr3t' https://h/p" }));
+  assertEquals(ct, "command:<redacted>");
+  assert(!ct.includes("s3cr3t"), "an arbitrary shell snippet's secrets must never survive to a log line");
+});

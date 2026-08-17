@@ -6,10 +6,10 @@
 //   • never-ready → it EXHAUSTS its local budget and returns not-ready WITHOUT publishing (the
 //     engine timer, not the worker, is the authoritative bound) — and it must not loop forever.
 import { test } from "node:test";
-import { assert, assertEquals } from "#test-assert";
+import { assert, assertEquals, assertRejects } from "#test-assert";
 import type { CommandResult, HttpResponse, ProbeExec, ReadinessProbe } from "../../app/readiness.ts";
 import { parseProbe } from "../../app/readiness.ts";
-import { pollUntilReady, READINESS_READY_MESSAGE } from "./worker.ts";
+import handler, { pollUntilReady, READINESS_READY_MESSAGE } from "./worker.ts";
 
 // A virtual clock: `now()` advances only when the loop's `wait(ms)` is called, so a never-ready
 // probe races to its deadline in zero real time (no setTimeout) and the test can never hang.
@@ -79,11 +79,12 @@ test("pollUntilReady: a never-green probe exhausts its budget and returns not-re
   assert(clock.now() <= 100, "the loop stopped at (or before) its declared budget");
 });
 
-test("pollUntilReady: an I/O throw is caught and treated as not-ready (never rejects)", async () => {
+test("pollUntilReady: an I/O throw is caught and treated as not-ready (never rejects), and its raw message is not leaked", async () => {
   const clock = fakeClock();
+  const seen: string[] = [];
   const exec: ProbeExec = {
     async httpGet() {
-      throw new Error("connection refused");
+      throw new Error("connection refused to https://h/p?token=s3cr3t");
     },
     async run(): Promise<CommandResult> {
       return { code: 1, stdout: "", stderr: "" };
@@ -97,8 +98,22 @@ test("pollUntilReady: an I/O throw is caught and treated as not-ready (never rej
     now: clock.now,
     wait: clock.wait,
     publish: async () => {},
+    log: (msg) => seen.push(msg),
   });
   assert(!res.ready, "a transport failure is a transient not-ready, not a crash");
+  const all = [res.detail, ...seen].join("\n");
+  assert(!all.includes("s3cr3t"), "the raw error message (with its secret) must not leak");
+  assert(!all.includes("connection refused"), "only the error class is surfaced, not the message");
+});
+
+test("handler: a blank gateKey fails fast (an empty correlationKey would never release the gate)", async () => {
+  const job = { variables: { probe: { kind: "http", target: "https://x/health" }, gateKey: "  " } };
+  await assertRejects(
+    // biome-ignore lint/suspicious/noExplicitAny: minimal job/app stub for the fail-fast guard.
+    () => handler(job as any, {} as any),
+    Error,
+    "gateKey",
+  );
 });
 
 test("READINESS_READY_MESSAGE is the name the gate correlates", () => {

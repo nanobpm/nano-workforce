@@ -399,8 +399,11 @@ export function defaultProbeExec(): ProbeExec {
 // ── Log redaction (ADR 0004 pinned decision 2 — never leak a probe's target/output/credential) ──
 
 /** A log-safe rendering of a probe: kind + a redacted target (URL userinfo and query string
- * stripped, since either can carry a token) — never the credential, body, or stdout. */
+ * stripped, since either can carry a token) — never the credential, body, or stdout. A `command`
+ * target is an arbitrary shell snippet that can easily embed a secret, so it is never logged at all:
+ * only the kind + a fixed placeholder is rendered for it. */
 export function redactTarget(probe: ReadinessProbe): string {
+  if (probe.kind === "command") return `${probe.kind}:<redacted>`;
   return `${probe.kind}:${redactString(probe.target)}`;
 }
 

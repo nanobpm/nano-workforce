@@ -70,7 +70,9 @@ export async function pollUntilReady(deps: {
   for (;;) {
     const res: ProbeResult = await probeOnce(deps.probe, deps.exec, deps.env).catch((err) => ({
       ready: false,
-      detail: `probe error: ${err instanceof Error ? err.message : String(err)}`,
+      // Never surface the raw error message: a fetch/subprocess error can embed the target URL
+      // (with query tokens), command fragments, or other secrets. Log only the error class name.
+      detail: `probe error: ${err instanceof Error ? err.name : "Error"}`,
     }));
     deps.log?.(`readiness probe ${label} attempt ${attempt + 1}: ${res.detail}`);
     if (res.ready) {
@@ -89,6 +91,9 @@ export async function pollUntilReady(deps: {
 const handler: AppJobHandler<In, Out> = async (job, app) => {
   const probe = parseProbe(job.variables.probe);
   const gateKey = String(job.variables.gateKey ?? "").trim();
+  // Fail fast on a blank gateKey: an empty correlationKey publishes a message the gate can never
+  // correlate, so a green probe would still leave the wait to be released only by the timeout arm.
+  if (gateKey === "") throw new Error("readiness-probe: 'gateKey' is required (blank correlation key)");
   const result = await pollUntilReady({
     probe,
     gateKey,
