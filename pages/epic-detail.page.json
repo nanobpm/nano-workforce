@@ -150,7 +150,7 @@
           "kind": "datasource",
           "source": "app",
           "table": "plan_reviews",
-          "orderBy": { "field": "round", "dir": "asc" },
+          "orderBy": { "field": "created_at", "dir": "asc" },
           "filter": [{ "field": "plan_key", "eqParam": true }]
         },
         "header": "Round {{round}} · epoch {{epoch}} · approved {{approved}} · {{created_at}}",
