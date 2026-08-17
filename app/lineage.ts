@@ -364,11 +364,24 @@ async function collectThreads(data: DataLayer): Promise<Map<string, LineageThrea
     threads.set(plan.plan_key, deriveLineage(epicOrigin(plan), prs.map(toLineagePr)));
   }
 
-  // Any remaining PR not claimed by a feature/epic root is its own root (human/webhook, or a
-  // root_request_key with no surviving origin row — tolerate both by self-rooting on the PR).
+  // Any PR not claimed by a feature/epic root is its own root: a human/webhook PR, a legacy row
+  // predating migration 037's backfill, or a `root_request_key` whose origin row no longer survives.
+  // Key each such thread by the root STORED on the PR row (`root_request_key`, falling back to
+  // `pr_key` only for a legacy NULL) so the thread key equals `pull_requests.root_request_key` and
+  // the Lineage page's `lineage_threads.root_request_key → pull_requests.root_request_key`
+  // drill-down join resolves — keying on `pr_key` when the row carries a non-null orphaned root would
+  // render an empty PR list. Group PRs that share one orphaned root into a single thread (they came
+  // from the same request) rather than clobbering each other in the map.
+  const selfRooted = new Map<string, PrRow[]>();
   for (const pr of allPrs) {
     if (claimed.has(pr.pr_key)) continue;
-    threads.set(pr.pr_key, deriveLineage({ kind: "pr", key: pr.pr_key }, [toLineagePr(pr)]));
+    const rootKey = pr.root_request_key ?? pr.pr_key;
+    const bucket = selfRooted.get(rootKey) ?? [];
+    bucket.push(pr);
+    selfRooted.set(rootKey, bucket);
+  }
+  for (const [rootKey, prs] of selfRooted) {
+    threads.set(rootKey, deriveLineage({ kind: "pr", key: rootKey }, prs.map(toLineagePr)));
   }
 
   return threads;

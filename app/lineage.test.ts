@@ -242,6 +242,35 @@ test("pollLineage: a self-rooted PR row (root_request_key === pr_key) projects e
   assertEquals(threads[0].pr_count, 1);
 });
 
+test("pollLineage: an orphaned non-null root (origin row gone) keys the thread on the stored root, not pr_key", async () => {
+  // Regression (#245 review): a PR whose `root_request_key` points at a feature/epic origin row that
+  // no longer survives is unclaimed by any feature/epic thread. Keying its self-rooted thread on
+  // `pr_key` would leave `lineage_threads.root_request_key` (= pr_key) ≠ `pull_requests.root_request_key`
+  // (= the orphaned root), so the page's drill-down join renders an empty PR list. The thread MUST be
+  // keyed on the stored `root_request_key`. Two PRs sharing one orphaned root belong to one thread.
+  const { data, stores } = memData();
+  stores.feature_runs = [];
+  stores.plans = [];
+  stores.plan_tasks = [];
+  stores.pull_requests = [
+    { pr_key: "o/r#71", title: "Orphan A", url: "x", status: "converging", current_round: 1, process_key: "c1", outcome: null, root_request_key: "o/r#7" },
+    { pr_key: "o/r#72", title: "Orphan B", url: "x", status: "merged", current_round: 1, process_key: "c2", outcome: null, root_request_key: "o/r#7" },
+  ];
+
+  await pollLineage(data);
+
+  const threads: LineageThreadRow[] = stores.lineage_threads;
+  assertEquals(threads.length, 1, "both orphaned PRs group into one thread under their shared root");
+  assertEquals(
+    threads[0].root_request_key,
+    "o/r#7",
+    "thread key equals the stored root_request_key so the page join drills down, not the pr_key",
+  );
+  assertEquals(threads[0].kind, "pr");
+  assertEquals(JSON.parse(threads[0].pr_keys ?? "[]").sort(), ["o/r#71", "o/r#72"]);
+  assertEquals(threads[0].pr_count, 2);
+});
+
 test("listLineage: unknown root returns nothing; known roots stitched", async () => {
   const { data } = memData();
   const threads = await listLineage(data);
