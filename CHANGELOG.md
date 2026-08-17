@@ -1,3 +1,10 @@
+# [0.84.0](https://github.com/nanobpm/nano-workforce/compare/v0.83.0...v0.84.0) (2026-08-17)
+
+
+### Features
+
+* **ui:** render narrative epic-detail sections with urban prose renderer ([#270](https://github.com/nanobpm/nano-workforce/issues/270)) ([#271](https://github.com/nanobpm/nano-workforce/issues/271)) ([38c67a4](https://github.com/nanobpm/nano-workforce/commit/38c67a479693730b9a79f3a7b0f88ef574d3a456)), closes [nano-ide#274](https://github.com/nano-ide/issues/274) [#87](https://github.com/nanobpm/nano-workforce/issues/87) [274/#275](https://github.com/nanobpm/nano-workforce/issues/275)
+
 # [0.83.0](https://github.com/nanobpm/nano-workforce/compare/v0.82.1...v0.83.0) (2026-08-17)
 
 
