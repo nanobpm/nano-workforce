@@ -1,3 +1,10 @@
+# [0.82.0](https://github.com/nanobpm/nano-workforce/compare/v0.81.0...v0.82.0) (2026-08-17)
+
+
+### Features
+
+* reify epic domain lifecycle as derived plans.epic_phase ([#261](https://github.com/nanobpm/nano-workforce/issues/261)) ([#265](https://github.com/nanobpm/nano-workforce/issues/265)) ([4cc9dee](https://github.com/nanobpm/nano-workforce/commit/4cc9deee86b800206d264d96269e6a98e8753883)), closes [#266](https://github.com/nanobpm/nano-workforce/issues/266) [nwf#245](https://github.com/nwf/issues/245) [nano-ide#254](https://github.com/nano-ide/issues/254)
+
 # [0.81.0](https://github.com/nanobpm/nano-workforce/compare/v0.80.0...v0.81.0) (2026-08-17)
 
 
