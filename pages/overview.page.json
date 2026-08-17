@@ -123,7 +123,7 @@
           {
             "label": "Abandon",
             "confirm": "Abandon this escalated task? The run gives up on it (no PR).",
-            "showWhenField": "escalation_user_task_key",
+            "showWhenField": "escalation_open",
             "action": {
               "path": "/app/api/actions/answer-escalation",
               "body": { "userTaskKey": "{{row.escalation_user_task_key}}", "resolution": "abandon" }
@@ -145,7 +145,7 @@
             { "field": "outcome", "label": "Outcome" }
           ],
           "form": {
-            "showWhenField": "escalation_user_task_key",
+            "showWhenField": "escalation_open",
             "title": "Answer escalation",
             "promptField": "escalation_question",
             "inputKey": "answer",

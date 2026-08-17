@@ -17,7 +17,7 @@
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { coalesceTitle, fetchIssueTitle } from "./github.ts";
 import { ESCALATION_SLA_TIMEOUT, normalizeBaseBranch, type ParsedIssue, renderBaseBranchBrief } from "./plan.ts";
-import { deriveListBucket, deriveStage } from "./stage.ts";
+import { deriveEscalationOpen, deriveListBucket, deriveStage } from "./stage.ts";
 
 /** The BPMN process this module drives (resources/processes/feature.bpmn). */
 export const FEATURE_PROCESS_ID = "feature";
@@ -63,6 +63,16 @@ export interface FeatureRun {
    * (`completeUserTaskAttributed`) and the pages gate the answer controls on (`showWhenField`). Set by
    * `pollFeatureEscalations` while parked; NULL otherwise. */
   escalation_user_task_key: string | null;
+  /** Gateway projection (issue #272): the single fail-closed "open escalation" display signal, `1` iff
+   * ALL THREE escalation columns agree the run is parked at an answerable escalation
+   * (`status='escalated'` AND `escalation_user_task_key` non-NULL AND `escalation_question` non-NULL),
+   * else `0`. Derived by `deriveEscalationOpen` at write time. The escalation tuple is spread across
+   * three independently-written columns, so an interim read can see a TORN state (a live pointer with a
+   * blank question, or a status lagging behind a cleared question); the pages gate the Abandon action
+   * and the answer form on THIS conjunction instead of on `escalation_user_task_key` alone, so a torn
+   * tuple renders as not-escalated rather than escalated-but-blank. NULL only on legacy rows before the
+   * projection reached them (backfilled once at boot). */
+  escalation_open: number | null;
   /** The completable native `feature-blocked` user-task key the "Acknowledge blocked" affordance posts
    * to (`completeUserTaskAttributed`) and the pages gate the acknowledge control on (`showWhenField`).
    * Kept DISTINCT from `escalation_user_task_key` so the two human tasks (an escalation answer vs a
@@ -296,6 +306,7 @@ const PROJECTION_OUTPUT_KEYS: readonly (keyof FeatureRun)[] = [
   "stage_skipped",
   "attention",
   "list_bucket",
+  "escalation_open",
 ];
 
 /** True when a patch changes at least one field the projection derives from OR one it writes — i.e. the
@@ -326,6 +337,13 @@ function projectFeatureRun(row: Partial<FeatureRun>): Partial<FeatureRun> {
     stage_skipped: skipped,
     attention,
     list_bucket: deriveListBucket(row.status, row.acknowledged_at ?? null),
+    escalation_open: deriveEscalationOpen({
+      status: row.status,
+      escalation_question: row.escalation_question ?? null,
+      escalation_user_task_key: row.escalation_user_task_key ?? null,
+    })
+      ? 1
+      : 0,
   };
 }
 
@@ -370,21 +388,25 @@ export const featureRuns = (data: DataLayer) => {
   });
 };
 
-/** Re-project every feature_runs row through the gateway so rows written before migration 039 (whose
- * projection columns are NULL) get correct `stage`/`stage_state`/`stage_skipped`/`attention`/
- * `list_bucket` values. Idempotent and safe to re-run: it re-derives from each row's own stored fields,
- * so a second pass is a no-op. Runs once at boot (pollOnce) — the gateway keeps every future write
- * fresh, so this only needs to catch legacy rows once. */
+/** Re-project every feature_runs row through the gateway so rows missing any projection column get
+ * correct `stage`/`stage_state`/`stage_skipped`/`attention`/`list_bucket`/`escalation_open` values.
+ * Catches rows written before migration 039 (the pipeline columns) AND rows written before migration
+ * 040 (whose `escalation_open` column is NULL, issue #272). Idempotent and safe to re-run: it
+ * re-derives from each row's own stored fields, so a second pass is a no-op. Runs once at boot
+ * (pollOnce) — the gateway keeps every future write fresh, so this only needs to catch legacy rows.
+ * Reprojecting on a missing `escalation_open` matters for a run parked at a LIVE escalation when
+ * migration 040 lands: `pollFeatureEscalations` writes nothing while it stays parked (no change), so
+ * without this the fail-closed signal would stay NULL and hide a genuinely-open escalation. */
 export async function backfillFeatureStages(data: DataLayer): Promise<number> {
   const table = featureRuns(data);
   const rows = await table.all();
   let stamped = 0;
   for (const row of rows) {
-    // Only touch rows the projection has never reached — a legacy pre-039 row whose `stage` column is
-    // still NULL. The gateway keeps every write fresh, so an already-projected row needs no re-write;
-    // skipping them avoids a full-table rewrite on every boot and keeps `stamped` an honest count of
-    // rows actually backfilled (not the total row count).
-    if (row.stage != null) continue;
+    // Only touch rows the projection has never fully reached — a legacy row whose `stage` (pre-039) or
+    // `escalation_open` (pre-040) column is still NULL. The gateway keeps every write fresh, so a
+    // fully-projected row needs no re-write; skipping them avoids a full-table rewrite on every boot and
+    // keeps `stamped` an honest count of rows actually backfilled (not the total row count).
+    if (row.stage != null && row.escalation_open != null) continue;
     // Re-derive the projection from the legacy row's own stored fields and write it. (An empty patch
     // would now short-circuit the projecting proxy — it only reprojects on a projection-input change —
     // so backfill projects explicitly rather than relying on an empty-patch reproject.)
