@@ -1,3 +1,10 @@
+# [0.80.0](https://github.com/nanobpm/nano-workforce/compare/v0.79.0...v0.80.0) (2026-08-17)
+
+
+### Features
+
+* thread request→PR lineage and project intent→progress ([#245](https://github.com/nanobpm/nano-workforce/issues/245)) ([#253](https://github.com/nanobpm/nano-workforce/issues/253)) ([b603276](https://github.com/nanobpm/nano-workforce/commit/b603276ce65500b351293497e9af7a3e899d73e5))
+
 # [0.79.0](https://github.com/nanobpm/nano-workforce/compare/v0.78.0...v0.79.0) (2026-08-17)
 
 
