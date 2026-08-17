@@ -5,16 +5,26 @@
 // drive it against an in-memory data layer + a stub engine and assert the row shape, the
 // short-circuit on an already-running run, the in-place restart of a settled run, and the seeded
 // process variables (the single `task` slice + the base-branch brief).
-import { test } from "node:test";
+import { after, test } from "node:test";
 import { assertEquals } from "#test-assert";
 import { FEATURE_PROCESS_ID, FEATURE_TERMINAL_STATUSES, featureTaskId, startFeature } from "./feature.ts";
 
 // `startFeature` now fetches the issue title (issue #248) via the GitHub transport. Force the token
 // transport with no token so the fetch is a hermetic no-op (returns null) — no `gh` subprocess, no
 // network — and the row `title` deterministically coalesces to the `owner/repo#N` key. A dedicated
-// test below stubs a successful fetch to cover the real-title path.
+// test below stubs a successful fetch to cover the real-title path. Capture the prior values and
+// restore them after this file's tests so the module-scope mutation never leaks into other test
+// files under concurrent `node --test`.
+const PRIOR_TRANSPORT = process.env["NANO_PR_GITHUB_TRANSPORT"];
+const PRIOR_TOKEN = process.env["GITHUB_TOKEN"];
 process.env["NANO_PR_GITHUB_TRANSPORT"] = "token";
 delete process.env["GITHUB_TOKEN"];
+after(() => {
+  if (PRIOR_TRANSPORT === undefined) delete process.env["NANO_PR_GITHUB_TRANSPORT"];
+  else process.env["NANO_PR_GITHUB_TRANSPORT"] = PRIOR_TRANSPORT;
+  if (PRIOR_TOKEN === undefined) delete process.env["GITHUB_TOKEN"];
+  else process.env["GITHUB_TOKEN"] = PRIOR_TOKEN;
+});
 
 function memTable(rows: any[], key: string) {
   return {

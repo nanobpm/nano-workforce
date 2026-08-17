@@ -4,7 +4,7 @@
 // `NaN`/`0` (e.g. unset, "", "abc"), the cap check `round + 1 >= cap` would never fire and the
 // planner could revise forever. `positiveIntEnv` must fall back to the default on any value that
 // is not a positive integer, so the loop is always bounded.
-import { test } from "node:test";
+import { after, test } from "node:test";
 import { assertEquals, assertRejects, assertThrows } from "#test-assert";
 import { positiveIntEnv } from "./plan.ts";
 
@@ -62,9 +62,19 @@ import { startPlan } from "./plan.ts";
 // `startPlan` now fetches the epic issue title (issue #248) via the GitHub transport. Force the
 // token transport with no token so the fetch is a hermetic no-op (returns null) and the row `title`
 // deterministically coalesces to the `owner/repo#N` key — no `gh` subprocess, no network. A
-// dedicated test below stubs a successful fetch to cover the real-title path.
+// dedicated test below stubs a successful fetch to cover the real-title path. Capture the prior
+// values and restore them after this file's tests so the module-scope mutation never leaks into
+// other test files under concurrent `node --test`.
+const PRIOR_TRANSPORT = process.env["NANO_PR_GITHUB_TRANSPORT"];
+const PRIOR_TOKEN = process.env["GITHUB_TOKEN"];
 process.env["NANO_PR_GITHUB_TRANSPORT"] = "token";
 delete process.env["GITHUB_TOKEN"];
+after(() => {
+  if (PRIOR_TRANSPORT === undefined) delete process.env["NANO_PR_GITHUB_TRANSPORT"];
+  else process.env["NANO_PR_GITHUB_TRANSPORT"] = PRIOR_TRANSPORT;
+  if (PRIOR_TOKEN === undefined) delete process.env["GITHUB_TOKEN"];
+  else process.env["GITHUB_TOKEN"] = PRIOR_TOKEN;
+});
 
 function memTable(rows: any[], key: string) {
   return {
