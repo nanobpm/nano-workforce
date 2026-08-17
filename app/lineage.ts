@@ -150,8 +150,9 @@ function featureOriginStage(status: string): LineageStage {
   }
 }
 
-/** Pick the PR that best represents a single-PR arc's frontier: the sole active one, else the most
- * recently touched terminal one (last in the caller-supplied order). */
+/** Pick the PR that best represents a single-PR arc's frontier: the sole active one, else the last
+ * one in the caller-supplied order. `deriveLineage` supplies a `prKey`-sorted list, so among several
+ * terminal PRs this is the deterministic last-by-key — NOT a timestamp-based "most recent". */
 function representativePr(prs: readonly LineagePr[]): LineagePr | null {
   if (prs.length === 0) return null;
   const active = prs.find((p) => !TERMINAL_STATUSES.includes(p.status));
@@ -196,7 +197,10 @@ export function deriveLineage(origin: LineageOrigin, prsIn: readonly LineagePr[]
 
   if (origin.kind === "epic") {
     // Fan-out: roll the slice PRs up via the shared delivery derivation, then translate to a stage.
-    const rollup = deriveDelivery("done", prs.map((p) => p.status));
+    // Pass the epic's real status (not a hard-coded "done"): we only consume the rollup's PR counts,
+    // which `deriveDelivery` computes independently of `planStatus`, but threading the true status
+    // keeps this correct if the derivation ever gates those counts on it.
+    const rollup = deriveDelivery(origin.status, prs.map((p) => p.status));
     const anyActive = prs.some((p) => !TERMINAL_STATUSES.includes(p.status));
     if (prs.length === 0) {
       stage = origin.status === "planning" ? "planning" : "implementing";
