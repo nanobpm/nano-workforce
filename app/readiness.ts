@@ -126,9 +126,10 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 }
 
 /** Parse + validate a raw descriptor (a process variable) into a typed {@link ReadinessProbe}.
- * Throws a descriptive error on an unknown/missing `kind`, a blank `target`, or an invalid
- * `onTimeout`/`backoff` — a malformed probe must fail loudly at the worker, never silently wait
- * forever. */
+ * Throws a descriptive error on an unknown/missing `kind`, a blank `target`, an invalid
+ * `onTimeout`/`backoff`, or a `credentialEnv` on a non-`http` kind — a malformed probe must fail
+ * loudly at the worker, never silently wait forever (nor let a caller believe a subprocess probe is
+ * authenticated when its credential is silently ignored). */
 export function parseProbe(raw: unknown): ReadinessProbe {
   if (!isRecord(raw)) throw new Error("readiness probe: descriptor must be an object");
   const kind = str(raw.kind).trim();
@@ -151,6 +152,16 @@ export function parseProbe(raw: unknown): ReadinessProbe {
     throw new Error(
       `readiness probe: credentialEnv '${credentialEnv}' is not a declared env-contract key ` +
         "(register it in app/contracts.ts) — a probe must never inline a secret",
+    );
+  }
+  // A credential is only ever consumed by the `http` kind (as an Authorization header). For
+  // command/npm/github-check it would be silently ignored, so reject it here rather than let a
+  // caller believe the subprocess runs authenticated (github-check's `gh api` reads its own token
+  // from the ambient env, not from `credentialEnv`).
+  if (credentialEnv !== undefined && kind !== "http") {
+    throw new Error(
+      `readiness probe (${kind}): 'credentialEnv' is only supported for the 'http' kind ` +
+        "(applied as an Authorization header); it has no effect on a command/npm/github-check probe",
     );
   }
 

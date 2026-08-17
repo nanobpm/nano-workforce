@@ -35,6 +35,8 @@
         </nano:shape>
         <nano:shape id="ReadinessProbeIn" name="Readiness probe — input">
           <nano:extend name="gateKey" type="string" />
+          <nano:extend name="probeTimeout" type="string" />
+          <nano:extend name="onTimeout" type="string" optional="true" />
           <nano:reference name="probe" ref="ReadinessProbe" />
         </nano:shape>
         <nano:shape id="ReadinessProbeOut" name="Readiness probe — result">

@@ -26,15 +26,13 @@ import {
   type ReadinessProbe,
   redactTarget,
 } from "../../app/readiness.ts";
-import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
+import type { WorkerInputs, WorkerOutputs } from "../../nano-generated/worker-io.d.ts";
 
-// Input typed off the model data envelope (`ReadinessProbeIn` in readiness-gate.bpmn). `probe` is a
-// `nano:reference` to the nested `ReadinessProbe` shape, so it derives to the descriptor object.
+// Input/output typed off the model data envelopes (`ReadinessProbeIn` / `ReadinessProbeOut` in
+// readiness-gate.bpmn), the single source of truth for this worker's wire contract (ADR 0040).
+// `probe` is a `nano:reference` to the nested `ReadinessProbe` shape, so it derives to the descriptor.
 type In = WorkerInputs["pr.readiness-probe"];
-interface Out extends Record<string, unknown> {
-  ready: boolean;
-  detail: string;
-}
+type Out = WorkerOutputs["pr.readiness-probe"];
 
 /** The message the gate's event-based gateway correlates on `=gateKey` to release the wait. */
 export const READINESS_READY_MESSAGE = "readiness-ready";

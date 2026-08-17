@@ -79,12 +79,20 @@ test("parseProbe: rejects an undeclared credentialEnv (a probe must never inline
   );
 });
 
-test("parseProbe: accepts a declared credentialEnv and parses nested match/poll", () => {
+test("parseProbe: rejects a credentialEnv on a non-http kind (a subprocess probe never consumes it)", () => {
+  assertThrows(
+    () => parseProbe({ kind: "github-check", target: "o/r@abc", credentialEnv: "GITHUB_TOKEN" }),
+    Error,
+    "only supported for the 'http' kind",
+  );
+});
+
+test("parseProbe: accepts a declared credentialEnv (http) and parses nested match/poll", () => {
   const p = parseProbe({
-    kind: "github-check",
-    target: "o/r@abc",
+    kind: "http",
+    target: "https://x/health",
     credentialEnv: "GITHUB_TOKEN",
-    match: { conclusion: "success", checkName: "build" },
+    match: { status: 200, checkName: "build" },
     poll: { everyMs: 1000, timeoutMs: 60000, backoff: "fixed" },
   });
   assertEquals(p.credentialEnv, "GITHUB_TOKEN");
