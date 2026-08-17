@@ -9,7 +9,7 @@ import { test } from "node:test";
 import { assert, assertEquals, assertRejects } from "#test-assert";
 import type { CommandResult, HttpResponse, ProbeExec, ReadinessProbe } from "../../app/readiness.ts";
 import { parseProbe } from "../../app/readiness.ts";
-import handler, { pollUntilReady, READINESS_READY_MESSAGE, readGateVars } from "./worker.ts";
+import handler, { pollUntilReady, READINESS_READY_MESSAGE, readGateVars, safeBind } from "./worker.ts";
 
 // A virtual clock: `now()` advances only when the loop's `wait(ms)` is called, so a never-ready
 // probe races to its deadline in zero real time (no setTimeout) and the test can never hang.
@@ -40,6 +40,40 @@ function execReturning(seq: Array<HttpResponse>): ProbeExec {
 const httpProbe = (poll: ReadinessProbe["poll"]): ReadinessProbe =>
   parseProbe({ kind: "http", target: "https://x/health", poll });
 
+test("safeBind: strips reserved keys (ready/detail) so a bind can only ADD outputs, never shadow the payload", () => {
+  const cleaned = safeBind({ resolvedArtifact: "@nanobpm/urban@0.54.0", ready: "false", detail: "spoofed" });
+  assertEquals(cleaned.resolvedArtifact, "@nanobpm/urban@0.54.0");
+  assertEquals("ready" in cleaned, false, "a bound 'ready' can never override the canonical payload");
+  assertEquals("detail" in cleaned, false, "a bound 'detail' can never override the canonical payload");
+  assertEquals(Object.keys(safeBind(undefined)).length, 0, "an absent bind yields an empty object");
+});
+
+test("pollUntilReady: a fallback that throws is caught, logged by class name (no leak), and stays not-ready", async () => {
+  const clock = fakeClock();
+  const seen: string[] = [];
+  let publishes = 0;
+  const res = await pollUntilReady({
+    probe: httpProbe({ everyMs: 5, timeoutMs: 30, backoff: "fixed" }),
+    gateKey: "gate-fallback-throws",
+    exec: execReturning([{ status: 503, body: "" }]),
+    env: {},
+    now: clock.now,
+    wait: clock.wait,
+    publish: async () => {
+      publishes += 1;
+    },
+    fallback: async () => {
+      throw new Error("boom at https://h/p?token=s3cr3t");
+    },
+    log: (msg) => seen.push(msg),
+  });
+  assert(!res.ready, "a throwing fallback keeps the not-ready outcome for the engine timer");
+  assertEquals(publishes, 0, "nothing is published when the fallback throws");
+  const all = seen.join("\n");
+  assert(all.includes("fallback error: Error"), "the fallback error is logged by class name");
+  assert(!all.includes("s3cr3t"), "the raw error message (with its secret) must not leak");
+});
+
 test("pollUntilReady: publishes readiness-ready once and returns ready when a probe goes green", async () => {
   const clock = fakeClock();
   const published: Array<{ detail: string }> = [];
@@ -57,6 +91,90 @@ test("pollUntilReady: publishes readiness-ready once and returns ready when a pr
   });
   assert(res.ready, "the probe eventually reported ready");
   assertEquals(published.length, 1, "exactly one readiness message was published");
+});
+
+test("pollUntilReady: forwards a matcher's bind through publish into the message variables (#274 Gap B)", async () => {
+  // A capability probe resolves a version; its bind must flow through publish so the gate can surface
+  // resolvedArtifact as an output. The gh-api stub returns a release whose provenance carries #274.
+  const clock = fakeClock();
+  const published: Array<{ detail: string; bind?: Record<string, string> }> = [];
+  const payload = JSON.stringify([{ tag_name: "@nanobpm/urban@0.54.0", body: "## Provenance\n- #274\n" }]);
+  const exec: ProbeExec = {
+    async httpGet() {
+      return { status: 0, body: "" };
+    },
+    async run(): Promise<CommandResult> {
+      return { code: 0, stdout: payload, stderr: "" };
+    },
+  };
+  const res = await pollUntilReady({
+    probe: parseProbe({
+      kind: "capability",
+      target: "github-releases:nanobpm/nano-ide",
+      match: { capabilityRef: "nano-ide#274", package: "@nanobpm/urban" },
+      poll: { everyMs: 5, timeoutMs: 5000, backoff: "fixed" },
+    }),
+    gateKey: "gate-cap",
+    exec,
+    env: {},
+    now: clock.now,
+    wait: clock.wait,
+    publish: async (detail, bind) => {
+      published.push({ detail, bind });
+    },
+  });
+  assert(res.ready, "the capability edge resolved");
+  assertEquals(published.length, 1, "exactly one readiness message was published");
+  assertEquals(published[0]?.bind?.resolvedArtifact, "@nanobpm/urban@0.54.0", "the resolved artifact flowed through the bind");
+});
+
+test("pollUntilReady: the gated fallback fires ONCE at budget exhaustion and can still resolve+publish", async () => {
+  // Deterministic provenance never resolves (no matching release), so the loop exhausts its budget —
+  // the gate boundary. The fallback thunk then verifies empirically and publishes a bound version.
+  const clock = fakeClock();
+  const published: Array<{ bind?: Record<string, string> }> = [];
+  let fallbackCalls = 0;
+  const res = await pollUntilReady({
+    probe: httpProbe({ everyMs: 5, timeoutMs: 30, backoff: "fixed" }),
+    gateKey: "gate-fallback",
+    exec: execReturning([{ status: 503, body: "" }]),
+    env: {},
+    now: clock.now,
+    wait: clock.wait,
+    publish: async (_detail, bind) => {
+      published.push({ bind });
+    },
+    fallback: async () => {
+      fallbackCalls += 1;
+      return { ready: true, detail: "verified empirically", bind: { resolvedArtifact: "@nanobpm/urban@0.60.0" } };
+    },
+  });
+  assert(res.ready, "the boundary fallback resolved the edge");
+  assertEquals(fallbackCalls, 1, "the fallback fires exactly once, at the boundary — never per attempt");
+  assertEquals(published[0]?.bind?.resolvedArtifact, "@nanobpm/urban@0.60.0");
+});
+
+test("pollUntilReady: a fallback that does not resolve leaves the not-ready outcome for the engine timer", async () => {
+  const clock = fakeClock();
+  let publishes = 0;
+  const res = await pollUntilReady({
+    probe: httpProbe({ everyMs: 5, timeoutMs: 30, backoff: "fixed" }),
+    gateKey: "gate-fallback-noop",
+    exec: execReturning([{ status: 503, body: "" }]),
+    env: {},
+    now: clock.now,
+    wait: clock.wait,
+    publish: async () => {
+      publishes += 1;
+    },
+    fallback: async () => ({ ready: false, detail: "still nothing" }),
+  });
+  assert(!res.ready, "an inconclusive fallback keeps the wait bounded by the engine timer");
+  assertEquals(publishes, 0, "no readiness signal is published when the fallback does not resolve");
+  assert(
+    res.detail.includes("still nothing"),
+    "the inconclusive fallback's (redacted) diagnostic is surfaced in the returned detail, not discarded",
+  );
 });
 
 test("pollUntilReady: a never-green probe exhausts its budget and returns not-ready WITHOUT publishing", async () => {
@@ -77,6 +195,34 @@ test("pollUntilReady: a never-green probe exhausts its budget and returns not-re
   assert(!res.ready, "the wait was bounded — the loop gave up instead of hanging");
   assertEquals(publishes, 0, "a not-ready probe never publishes a readiness signal");
   assert(clock.now() <= 100, "the loop stopped at (or before) its declared budget");
+});
+
+test("pollUntilReady: keeps probing up to the deadline — a flip-to-ready in the final backoff window is caught, not missed", async () => {
+  // everyMs 10, budget 25: three deterministic probes land at t=0,10,20. A full-backoff sleep from
+  // t=20 would jump to t=30 (past the 25ms bound) and stop probing early, missing a green at t=25 and
+  // forcing a spurious timeout escalation. The clamp keeps probing to the same bound the engine holds.
+  const clock = fakeClock();
+  let publishes = 0;
+  const exec = execReturning([
+    { status: 503, body: "" },
+    { status: 503, body: "" },
+    { status: 503, body: "" },
+    { status: 200, body: "ok" },
+  ]);
+  const res = await pollUntilReady({
+    probe: httpProbe({ everyMs: 10, timeoutMs: 25, backoff: "fixed" }),
+    gateKey: "gate-final-window",
+    exec,
+    env: {},
+    now: clock.now,
+    wait: clock.wait,
+    publish: async () => {
+      publishes += 1;
+    },
+  });
+  assert(res.ready, "the flip-to-ready inside the final backoff window was probed and caught");
+  assertEquals(publishes, 1, "the readiness signal was published exactly once");
+  assert(clock.now() <= 25, "the worker never probed past the engine-enforced deadline");
 });
 
 test("pollUntilReady: an I/O throw is caught and treated as not-ready (never rejects), and its raw message is not leaked", async () => {

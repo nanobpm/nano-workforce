@@ -19,6 +19,9 @@
           <nano:extend name="version" type="string" optional="true" />
           <nano:extend name="conclusion" type="string" optional="true" />
           <nano:extend name="checkName" type="string" optional="true" />
+          <nano:extend name="capabilityRef" type="string" optional="true" />
+          <nano:extend name="package" type="string" optional="true" />
+          <nano:extend name="verifyCommand" type="string" optional="true" />
         </nano:shape>
         <nano:shape id="ReadinessProbePoll" name="Readiness probe — poll policy">
           <nano:extend name="everyMs" type="integer" optional="true" />
@@ -42,10 +45,12 @@
         <nano:shape id="ReadinessProbeOut" name="Readiness probe — result">
           <nano:extend name="ready" type="boolean" />
           <nano:extend name="detail" type="string" optional="true" />
+          <nano:extend name="resolvedArtifact" type="string" optional="true" />
         </nano:shape>
         <nano:shape id="ReadinessReady" name="readiness-ready message payload">
           <nano:extend name="ready" type="boolean" />
           <nano:extend name="detail" type="string" optional="true" />
+          <nano:extend name="resolvedArtifact" type="string" optional="true" />
         </nano:shape>
       </nano:shapes>
     </bpmn:extensionElements>

@@ -7,20 +7,27 @@ import { test } from "node:test";
 import { assert, assertEquals, assertRejects, assertStringIncludes, assertThrows } from "#test-assert";
 import {
   type CommandResult,
+  cmpVersion,
   DEFAULT_ATTEMPT_TIMEOUT_MS,
   DEFAULT_EVERY_MS,
   DEFAULT_TIMEOUT_MS,
   defaultProbeExec,
+  type GithubRelease,
   type HttpResponse,
+  makeCapabilityFallback,
   MAX_EVERY_MS,
+  matchCapability,
   matchCommand,
   matchGithubCheck,
   matchHttp,
   matchNpm,
   msToIsoDuration,
+  newestPublishedVersion,
   nextDelay,
   normalizePoll,
   parseProbe,
+  parseReleases,
+  parseReleasesTarget,
   parseRepoRef,
   probeBudgetMs,
   probeOnce,
@@ -100,6 +107,186 @@ test("parseProbe: accepts a declared credentialEnv (http) and parses nested matc
   assertEquals(p.credentialEnv, "GITHUB_TOKEN");
   assertEquals(p.match?.checkName, "build");
   assertEquals(p.poll?.backoff, "fixed");
+});
+
+// ── parseProbe: capability kind (#274 — required capabilityRef + package, fail loudly on blank) ──
+test("parseProbe: a capability probe with a blank capabilityRef throws (a never-resolvable edge must fail loudly)", () => {
+  assertThrows(
+    () => parseProbe({ kind: "capability", target: "github-releases:nanobpm/nano-ide", match: { package: "@nanobpm/urban" } }),
+    Error,
+    "capabilityRef' is required",
+  );
+});
+
+test("parseProbe: a capability probe with a blank package throws (provenance is per-package scoped)", () => {
+  assertThrows(
+    () => parseProbe({ kind: "capability", target: "github-releases:nanobpm/nano-ide", match: { capabilityRef: "#274" } }),
+    Error,
+    "package' is required",
+  );
+});
+
+test("parseProbe: a capability probe whose capabilityRef carries no numeric id throws (never resolvable)", () => {
+  assertThrows(
+    () =>
+      parseProbe({
+        kind: "capability",
+        target: "github-releases:nanobpm/nano-ide",
+        match: { capabilityRef: "nano-ide#", package: "@nanobpm/urban" },
+      }),
+    Error,
+    "must carry a",
+  );
+});
+
+test("parseProbe: a valid capability probe round-trips its required match fields", () => {
+  const p = parseProbe({
+    kind: "capability",
+    target: "github-releases:nanobpm/nano-ide",
+    match: { capabilityRef: "nano-ide#274", package: "@nanobpm/urban", verifyCommand: "node -e 0" },
+  });
+  assertEquals(p.kind, "capability");
+  assertEquals(p.match?.capabilityRef, "nano-ide#274");
+  assertEquals(p.match?.package, "@nanobpm/urban");
+  assertEquals(p.match?.verifyCommand, "node -e 0");
+  assertEquals(p.onTimeout, "escalate");
+});
+
+// ── matchCapability: the deterministic lowest-version-per-package resolver (#274 Gap A) ──────────
+const rel = (tag: string, refs: number[]): GithubRelease => ({
+  tag,
+  body: `Automated release of \`${tag}\`.\n\n## Provenance\n${refs.map((n) => `- #${n}`).join("\n")}\n`,
+});
+const capMatch = { capabilityRef: "nano-ide#274", package: "@nanobpm/urban" };
+
+test("matchCapability: a capability in exactly one release resolves that version and binds resolvedArtifact", () => {
+  const res = matchCapability(capMatch, [rel("@nanobpm/urban@0.54.0", [273, 274, 275])]);
+  assert(res.ready);
+  assertEquals(res.bind?.resolvedArtifact, "@nanobpm/urban@0.54.0");
+});
+
+test("matchCapability: present in multiple releases resolves the LOWEST version (first-carries)", () => {
+  const releases = [
+    rel("@nanobpm/urban@0.60.0", [274]),
+    rel("@nanobpm/urban@0.54.0", [274]),
+    rel("@nanobpm/urban@0.9.0", [274]), // 0.9 < 0.54 numerically — cmpVersion, not lexicographic
+  ];
+  const res = matchCapability(capMatch, releases);
+  assert(res.ready);
+  assertEquals(res.bind?.resolvedArtifact, "@nanobpm/urban@0.9.0");
+});
+
+test("matchCapability: an absent capability is not-ready (still waiting), never throws", () => {
+  const res = matchCapability(capMatch, [rel("@nanobpm/urban@0.54.0", [200, 201])]);
+  assert(!res.ready);
+  assertEquals(res.bind, undefined);
+});
+
+test("matchCapability: the same #C in another package resolves ONLY within the named package", () => {
+  const releases = [
+    rel("@nanobpm/other@1.0.0", [274]), // same #274, wrong package — must be ignored
+    rel("@nanobpm/urban@0.55.0", [274]),
+  ];
+  const res = matchCapability(capMatch, releases);
+  assert(res.ready);
+  assertEquals(res.bind?.resolvedArtifact, "@nanobpm/urban@0.55.0");
+});
+
+test("matchCapability: a prefix ref (#27) never spuriously satisfies #274", () => {
+  assert(!matchCapability(capMatch, [rel("@nanobpm/urban@0.54.0", [27])]).ready);
+});
+
+test("matchCapability: a malformed/empty releases list is not-ready and never throws", () => {
+  assert(!matchCapability(capMatch, []).ready);
+  // biome-ignore lint/suspicious/noExplicitAny: deliberately malformed rows exercise the tolerant guard.
+  assert(!matchCapability(capMatch, [{ tag: 123, body: null } as any, null as any]).ready);
+});
+
+test("matchCapability: the bare '#274' ref form resolves identically to 'nano-ide#274'", () => {
+  const res = matchCapability({ capabilityRef: "#274", package: "@nanobpm/urban" }, [rel("@nanobpm/urban@1.2.3", [274])]);
+  assert(res.ready);
+  assertEquals(res.bind?.resolvedArtifact, "@nanobpm/urban@1.2.3");
+});
+
+test("cmpVersion: numeric dotted compare (0.9 < 0.54 < 0.60), matching nano-ide publish.mjs", () => {
+  assert(cmpVersion("0.9.0", "0.54.0") < 0);
+  assert(cmpVersion("0.54.0", "0.60.0") < 0);
+  assertEquals(cmpVersion("1.2", "1.2.0"), 0);
+});
+
+test("newestPublishedVersion: picks the highest version of the named package only", () => {
+  const releases = [rel("@nanobpm/urban@0.9.0", []), rel("@nanobpm/urban@0.54.0", []), rel("@nanobpm/other@9.9.9", [])];
+  assertEquals(newestPublishedVersion("@nanobpm/urban", releases), "0.54.0");
+  assertEquals(newestPublishedVersion("@nanobpm/missing", releases), undefined);
+});
+
+test("parseReleases: reduces a gh api payload to {tag, body}; non-array input yields []", () => {
+  const parsed = parseReleases([{ tag_name: "@nanobpm/urban@0.54.0", body: "## Provenance\n- #274" }, { nope: 1 }]);
+  assertEquals(parsed[0]?.tag, "@nanobpm/urban@0.54.0");
+  assertEquals(parseReleases("not-an-array").length, 0);
+  assertEquals(parseReleases(null).length, 0);
+});
+
+test("parseReleases: flattens the --paginate --slurp array-of-pages shape (>100 releases are seen)", () => {
+  const slurped = [
+    [{ tag_name: "@nanobpm/urban@0.54.0", body: "- #274" }],
+    [{ tag_name: "@nanobpm/urban@0.9.0", body: "- #274" }],
+  ];
+  const tags = parseReleases(slurped).map((r) => r.tag);
+  assertEquals(tags.includes("@nanobpm/urban@0.54.0"), true, "first page's release is seen");
+  assertEquals(tags.includes("@nanobpm/urban@0.9.0"), true, "a later page's release is seen too");
+});
+
+test("parseReleasesTarget: strips the optional github-releases: scheme, else passes owner/repo through", () => {
+  assertEquals(parseReleasesTarget("github-releases:nanobpm/nano-ide"), "nanobpm/nano-ide");
+  assertEquals(parseReleasesTarget("nanobpm/nano-ide"), "nanobpm/nano-ide");
+});
+
+// ── probeOnce capability dispatch + gated fallback (#274 decision 5) ─────────────────────────────
+test("probeOnce capability: queries the repo's releases and binds the resolved artifact", async () => {
+  const cap: { cmd?: string } = {};
+  const payload = JSON.stringify([{ tag_name: "@nanobpm/urban@0.54.0", body: "## Provenance\n- #274\n" }]);
+  const exec = stubExec({ command: { code: 0, stdout: payload, stderr: "" }, capture: cap });
+  const res = await probeOnce(parseProbe({ kind: "capability", target: "github-releases:nanobpm/nano-ide", match: capMatch }), exec, {});
+  assert(res.ready);
+  assertEquals(res.bind?.resolvedArtifact, "@nanobpm/urban@0.54.0");
+  assertStringIncludes(cap.cmd ?? "", "repos/nanobpm/nano-ide/releases");
+});
+
+test("probeOnce capability: a failed gh api call is not-ready (never throws)", async () => {
+  const exec = stubExec({ command: { code: 1, stdout: "", stderr: "boom" } });
+  const res = await probeOnce(parseProbe({ kind: "capability", target: "nanobpm/nano-ide", match: capMatch }), exec, {});
+  assert(!res.ready);
+});
+
+test("makeCapabilityFallback: null for a capability probe with no verifyCommand (deterministic-only)", async () => {
+  const probe = parseProbe({ kind: "capability", target: "nanobpm/nano-ide", match: capMatch });
+  const fb = makeCapabilityFallback(probe, stubExec({}), {});
+  assertEquals(await fb(), null);
+});
+
+test("makeCapabilityFallback: verifies the NEWEST version empirically and binds it when the verifier passes", async () => {
+  const payload = JSON.stringify([
+    { tag_name: "@nanobpm/urban@0.54.0", body: "no ref" },
+    { tag_name: "@nanobpm/urban@0.60.0", body: "no ref" },
+  ]);
+  const seen: string[] = [];
+  const exec: ProbeExec = {
+    async httpGet() {
+      return { status: 0, body: "" };
+    },
+    async run(command, env) {
+      seen.push(command);
+      if (command.includes("gh api")) return { code: 0, stdout: payload, stderr: "" };
+      // the verifier: assert the newest version was handed to it via the env
+      return { code: env.RESOLVED_VERSION === "0.60.0" ? 0 : 1, stdout: "", stderr: "" };
+    },
+  };
+  const probe = parseProbe({ kind: "capability", target: "nanobpm/nano-ide", match: { ...capMatch, verifyCommand: "verify.sh" } });
+  const res = await makeCapabilityFallback(probe, exec, {})();
+  assert(res?.ready);
+  assertEquals(res?.bind?.resolvedArtifact, "@nanobpm/urban@0.60.0");
+  assert(seen.some((c) => c === "verify.sh"), "the verifier command was run at the boundary");
 });
 
 // ── matchers ────────────────────────────────────────────────────────────────────────────────

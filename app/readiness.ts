@@ -9,18 +9,23 @@
 //
 // The probe is DATA, not code — a {@link ReadinessProbe} descriptor with a `kind` and a per-kind
 // `match` predicate. Authors add a readiness source by adding a `kind`'s matcher, never by editing
-// the BPMN or the worker's control flow. Four built-in kinds ship (`http`, `command`, `npm`,
-// `github-check`); everything else is reached through the `command` escape hatch (ADR 0001 §2
-// pinned decision 1). A probe carries NO secret material — any credential is read at execution
-// time from the typed env-contract (`credentialEnv` names a declared {@link EnvKey}; ADR 0004
-// pinned decision 2) and is redacted from every log line.
+// the BPMN or the worker's control flow. Five built-in kinds ship (`http`, `command`, `npm`,
+// `github-check`, `capability`); everything else is reached through the `command` escape hatch
+// (ADR 0001 §2 pinned decision 1). The `capability` kind (ADR 0001 §4, issue #274) resolves a
+// cross-repo capability edge — "which published version first carries capability C?" — from the
+// publish-provenance substrate and late-binds the discovered `pkg@version` back through the gate
+// via {@link ProbeResult.bind}, the reusable emit primitive. A probe carries NO secret material —
+// any credential is read at execution time from the typed env-contract (`credentialEnv` names a
+// declared {@link EnvKey}; ADR 0004 pinned decision 2) and is redacted from every log line.
 import { isEnvKey, readEnv, readEnvOr } from "./contracts.ts";
 import { isoDuration, isoDurationToMs } from "./reviewWait.ts";
 
 /** The built-in readiness sources. `command` is the escape hatch that subsumes the long tail
  * (`gh`, `curl`, `docker manifest inspect`, a custom probe) — adding a first-class kind later is
- * an additive matcher, not a schema change. */
-export type ProbeKind = "http" | "command" | "npm" | "github-check";
+ * an additive matcher, not a schema change. `capability` is the first such additive kind (#274):
+ * it resolves "which published version first carries capability C?" from the publish-provenance
+ * substrate and binds the discovered `pkg@version` back through the gate (see {@link matchCapability}). */
+export type ProbeKind = "http" | "command" | "npm" | "github-check" | "capability";
 
 /** What the gate does when the bounded wait times out (the engine timer arm fires). */
 export type OnTimeout = "escalate" | "fail" | "continue";
@@ -28,7 +33,7 @@ export type OnTimeout = "escalate" | "fail" | "continue";
 /** Backoff policy between poll attempts. */
 export type Backoff = "fixed" | "exponential";
 
-const PROBE_KINDS: readonly ProbeKind[] = ["http", "command", "npm", "github-check"];
+const PROBE_KINDS: readonly ProbeKind[] = ["http", "command", "npm", "github-check", "capability"];
 const ON_TIMEOUTS: readonly OnTimeout[] = ["escalate", "fail", "continue"];
 const BACKOFFS: readonly Backoff[] = ["fixed", "exponential"];
 
@@ -49,6 +54,18 @@ export interface ProbeMatch {
   readonly conclusion?: string;
   /** github-check: restrict the predicate to the named check run (default: every check run). */
   readonly checkName?: string;
+  /** capability: the upstream issue/PR handle the resolved version must carry in its publish
+   * provenance — `nano-ide#274` or the bare `#274`. Required for the `capability` kind. */
+  readonly capabilityRef?: string;
+  /** capability: the package whose releases are scanned (e.g. `@nanobpm/urban`). Provenance is
+   * per-package scoped — the same `#C` may appear in two packages — so this is required. */
+  readonly package?: string;
+  /** capability: an OPTIONAL empirical verifier command for the gated fallback (decision 5). Run
+   * ONCE at the gate boundary (poll budget exhausted) against the newest published `package`
+   * version when deterministic provenance resolved nothing; exit 0 binds that newest version. Left
+   * unset, the capability edge is deterministic-only. The resolved `pkg@version` and bare version
+   * are exposed to the command as `RESOLVED_ARTIFACT` / `RESOLVED_VERSION`. */
+  readonly verifyCommand?: string;
 }
 
 /** The poll cadence: how often to re-probe, how long to keep trying, and the backoff shape. */
@@ -75,10 +92,24 @@ export interface ReadinessProbe {
   readonly credentialEnv?: string;
 }
 
-/** The result of a single probe attempt. `detail` is a short, already-redacted human note. */
+/** The result of a single probe attempt. `detail` is a short, already-redacted human note.
+ * `bind` is the OPTIONAL late-bound value a matcher discovered (the reusable "emit" primitive,
+ * #274 Gap B): a kind-agnostic `key → value` map the worker forwards into the `readiness-ready`
+ * message so the gate can surface it as an output process variable (e.g. the `capability` kind
+ * binds `{ resolvedArtifact: "@nanobpm/urban@0.54.0" }`). Provenance is public, so nothing in
+ * `bind` is redacted; keep values free of any secret material by construction. */
 export interface ProbeResult {
   readonly ready: boolean;
   readonly detail: string;
+  readonly bind?: Record<string, string>;
+}
+
+/** A single published GitHub Release, reduced to the two fields the capability resolver reads: the
+ * `<package>@<version>` tag and the release body carrying the `## Provenance` `#NNN` refs. Kept
+ * separate from I/O so {@link matchCapability} is pure/unit-testable. */
+export interface GithubRelease {
+  readonly tag: string;
+  readonly body: string;
 }
 
 /** A raw HTTP response the http matcher inspects (kept separate from I/O so it is pure-testable). */
@@ -148,6 +179,26 @@ export function parseProbe(raw: unknown): ReadinessProbe {
   const onTimeout: OnTimeout = onTimeoutRaw === "" ? "escalate" : onTimeoutRaw;
 
   const match = isRecord(raw.match) ? parseMatch(raw.match) : undefined;
+  // A capability edge whose ref or package is blank can never resolve — fail loudly here rather than
+  // wait forever (mirroring the blank-`target` guard above). Both are required for this kind.
+  if (kind === "capability") {
+    if (!match?.capabilityRef) {
+      throw new Error("readiness probe (capability): 'match.capabilityRef' is required (e.g. 'nano-ide#274' or '#274')");
+    }
+    // A ref that carries no numeric issue/PR id (e.g. 'cap274' has a number, but 'nano-ide#' or a
+    // bare word does not) can never resolve — `matchCapability` would only surface it as a timeout
+    // much later. Reject it now, via the SAME canonical parser the resolver uses, so a malformed
+    // edge fails loudly at parse (mirroring the intent of the blank-ref guard above).
+    if (!capabilityNumber(match.capabilityRef)) {
+      throw new Error(
+        `readiness probe (capability): 'match.capabilityRef' ('${match.capabilityRef}') must carry a ` +
+          "numeric issue/PR id (e.g. 'nano-ide#274' or '#274')",
+      );
+    }
+    if (!match?.package) {
+      throw new Error("readiness probe (capability): 'match.package' is required (provenance is per-package scoped)");
+    }
+  }
   const poll = isRecord(raw.poll) ? parsePoll(raw.poll) : undefined;
   const credentialEnv = str(raw.credentialEnv).trim() || undefined;
   if (credentialEnv !== undefined && !isEnvKey(credentialEnv)) {
@@ -197,6 +248,9 @@ function parseMatch(raw: Record<string, unknown>): ProbeMatch {
     version: str(raw.version).trim() || undefined,
     conclusion: str(raw.conclusion).trim() || undefined,
     checkName: str(raw.checkName).trim() || undefined,
+    capabilityRef: str(raw.capabilityRef).trim() || undefined,
+    package: str(raw.package).trim() || undefined,
+    verifyCommand: str(raw.verifyCommand).trim() || undefined,
   };
 }
 
@@ -304,6 +358,126 @@ function versionOf(target: string): string | undefined {
   return v === "" ? undefined : v;
 }
 
+// ── Capability resolver (#274 Gap A — a stable, pure "which version first carries C?" matcher) ───
+
+/** Compare two dotted numeric version strings (`major.minor.patch…`), reusing the exact semantics of
+ * nano-ide `scripts/publish.mjs` `cmpVersion` so the resolver and the publisher agree on ordering.
+ * Missing trailing segments count as 0; returns <0, 0, or >0. */
+export function cmpVersion(a: string, b: string): number {
+  const pa = a.split(".").map(Number);
+  const pb = b.split(".").map(Number);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const d = (pa[i] ?? 0) - (pb[i] ?? 0);
+    if (d !== 0) return d;
+  }
+  return 0;
+}
+
+/** The bare, purely numeric `#NNN` number from a capability handle — `nano-ide#274`, `#274`, or a
+ * naked `274` all normalise to `274`. Returns undefined for anything without a number, so a blank/
+ * malformed ref never accidentally matches. */
+function capabilityNumber(ref: string): string | undefined {
+  const m = ref.match(/(\d+)\s*$/);
+  return m ? m[1] : undefined;
+}
+
+/** Does a release body's `## Provenance` reference `#NNN`? Matched on a `#`-prefixed word boundary so
+ * `#27` never spuriously satisfies `#274`. */
+function bodyReferences(body: string, num: string): boolean {
+  return new RegExp(`#${num}(?!\\d)`).test(body);
+}
+
+/** The `<version>` of a release tagged exactly `<package>@<version>` (numeric-dotted), or undefined
+ * when the tag belongs to another package or is not a version tag. Per-package scoping is enforced
+ * here: a sibling package's provenance can never leak into this package's resolution. */
+function versionForPackage(tag: string, pkg: string): string | undefined {
+  const prefix = `${pkg}@`;
+  if (!tag.startsWith(prefix)) return undefined;
+  const v = tag.slice(prefix.length).trim();
+  return /^\d+(\.\d+)*$/.test(v) ? v : undefined;
+}
+
+/** capability readiness (#274 Gap A): among GitHub Releases tagged `<match.package>@*` whose body
+ * references `match.capabilityRef`, resolve the **lowest** SemVer version — that is the version that
+ * *first* carries the capability (`firstVersion`). Late-binds it as `{ resolvedArtifact }` so the
+ * gate can hand the exact `pkg@version` to the consumer (#274 Gap B). PURE: it operates on an
+ * already-fetched, parsed releases list and NEVER throws — a malformed/empty list is simply
+ * "not ready yet" (keep waiting), so a transient provenance read cannot crash the poll loop. */
+export function matchCapability(match: ProbeMatch | undefined, releases: readonly GithubRelease[]): ProbeResult {
+  const pkg = match?.package;
+  const ref = match?.capabilityRef;
+  if (!pkg || !ref) return { ready: false, detail: "capability: missing package/capabilityRef" };
+  const num = capabilityNumber(ref);
+  if (!num) return { ready: false, detail: "capability: unparseable capabilityRef (no #NNN)" };
+
+  let firstVersion: string | undefined;
+  for (const rel of releases) {
+    if (!rel || typeof rel.tag !== "string" || typeof rel.body !== "string") continue;
+    const version = versionForPackage(rel.tag, pkg);
+    if (!version) continue;
+    if (!bodyReferences(rel.body, num)) continue;
+    if (firstVersion === undefined || cmpVersion(version, firstVersion) < 0) firstVersion = version;
+  }
+  if (firstVersion === undefined) return { ready: false, detail: `capability #${num} not published in ${pkg} yet` };
+  const resolvedArtifact = `${pkg}@${firstVersion}`;
+  return { ready: true, detail: `capability #${num} carried by ${resolvedArtifact}`, bind: { resolvedArtifact } };
+}
+
+/** The **newest** published SemVer version of `pkg` across `releases` — the target of the gated
+ * empirical fallback (decision 5), which installs the latest release and verifies the capability
+ * behaviourally when deterministic provenance resolved nothing. PURE / never throws. */
+export function newestPublishedVersion(pkg: string | undefined, releases: readonly GithubRelease[]): string | undefined {
+  if (!pkg) return undefined;
+  let newest: string | undefined;
+  for (const rel of releases) {
+    if (!rel || typeof rel.tag !== "string") continue;
+    const version = versionForPackage(rel.tag, pkg);
+    if (!version) continue;
+    if (newest === undefined || cmpVersion(version, newest) > 0) newest = version;
+  }
+  return newest;
+}
+
+/** Parse a raw `gh api .../releases` payload (already JSON-decoded) into the minimal
+ * {@link GithubRelease} list the resolver reads. Tolerant: non-array/malformed input yields `[]`,
+ * so a bad provenance read degrades to "not ready", never a throw. Also accepts the `--paginate
+ * --slurp` shape — an array whose elements are themselves per-page arrays — flattening one level so
+ * releases beyond the first 100 (the true lowest version that first carried a capability) are seen. */
+export function parseReleases(payload: unknown): GithubRelease[] {
+  if (!Array.isArray(payload)) return [];
+  const out: GithubRelease[] = [];
+  const push = (r: unknown): void => {
+    if (!isRecord(r)) return;
+    out.push({ tag: str(r.tag_name), body: str(r.body) });
+  };
+  for (const el of payload) {
+    if (Array.isArray(el)) {
+      for (const r of el) push(r);
+    } else {
+      push(el);
+    }
+  }
+  return out;
+}
+
+/** Split a `capability` target (`github-releases:owner/repo`) into the provenance source repo. The
+ * `github-releases:` scheme prefix is optional — a bare `owner/repo` is accepted too. */
+export function parseReleasesTarget(target: string): string {
+  const t = target.trim();
+  const scheme = "github-releases:";
+  return t.startsWith(scheme) ? t.slice(scheme.length).trim() : t;
+}
+
+/** Build the `gh api` command that lists a repo's releases (the provenance substrate). `gh` reads
+ * its token from the ambient env, exactly like the `github-check` kind — no `credentialEnv`.
+ * `--paginate --slurp` walks the FULL release history (not just the first `per_page=100` page), so a
+ * repo with >100 releases can still surface the lowest version that first carried a capability;
+ * `--slurp` wraps the pages in an outer array that {@link parseReleases} flattens. */
+export function githubReleasesCommand(repo: string): string {
+  return `gh api --paginate --slurp ${shellQuote(`repos/${repo}/releases?per_page=100`)} -H ${shellQuote("Accept: application/vnd.github+json")}`;
+}
+
+
 // ── Single probe attempt (does I/O via the injected {@link ProbeExec}) ──────────────────────────
 
 /** Run ONE probe attempt for `probe`, resolving any credential from the typed env-contract and
@@ -332,7 +506,44 @@ export async function probeOnce(
       if (out.code !== 0) return { ready: false, detail: "github-check: gh api failed (not ready)" };
       return matchGithubCheck(probe.match, parseJson(out.stdout));
     }
+    case "capability": {
+      const repo = parseReleasesTarget(probe.target);
+      const out = await exec.run(githubReleasesCommand(repo), env);
+      if (out.code !== 0) return { ready: false, detail: "capability: gh api failed (not ready)" };
+      return matchCapability(probe.match, parseReleases(parseJson(out.stdout)));
+    }
   }
+}
+
+/** Build the gated empirical fallback for a `capability` probe (decision 5) — a thunk the poll loop
+ * runs ONCE at the gate boundary (local budget exhausted) when deterministic provenance resolved
+ * nothing. It installs nothing itself: it fetches releases, picks the NEWEST published version, and
+ * runs the descriptor's `match.verifyCommand` against it (with `RESOLVED_ARTIFACT`/`RESOLVED_VERSION`
+ * in the env) — exit 0 binds that newest version, letting a capability that provenance under-reported
+ * still resolve empirically. Returns `null` (no fallback) for a non-capability probe, a capability
+ * probe with no `verifyCommand` (deterministic-only), or when no version/releases are available — so
+ * the default path stays a pure deterministic lookup and the agent judgment is the gated exception. */
+export function makeCapabilityFallback(
+  probe: ReadinessProbe,
+  exec: ProbeExec,
+  env: Record<string, string | undefined>,
+): () => Promise<ProbeResult | null> {
+  return async () => {
+    if (probe.kind !== "capability") return null;
+    const verify = probe.match?.verifyCommand;
+    const pkg = probe.match?.package;
+    if (!verify || !pkg) return null;
+    const listed = await exec.run(githubReleasesCommand(parseReleasesTarget(probe.target)), env);
+    if (listed.code !== 0) return null;
+    const newest = newestPublishedVersion(pkg, parseReleases(parseJson(listed.stdout)));
+    if (!newest) return null;
+    const artifact = `${pkg}@${newest}`;
+    const res = await exec.run(verify, { ...env, RESOLVED_ARTIFACT: artifact, RESOLVED_VERSION: newest });
+    if (res.code === 0) {
+      return { ready: true, detail: `capability verified empirically at ${artifact}`, bind: { resolvedArtifact: artifact } };
+    }
+    return { ready: false, detail: "capability: empirical verification failed at gate boundary" };
+  };
 }
 
 /** Resolve the credential a probe declares, from the typed env-contract only. Returns undefined
