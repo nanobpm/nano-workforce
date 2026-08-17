@@ -9,7 +9,7 @@ import { test } from "node:test";
 import { assert, assertEquals, assertRejects } from "#test-assert";
 import type { CommandResult, HttpResponse, ProbeExec, ReadinessProbe } from "../../app/readiness.ts";
 import { parseProbe } from "../../app/readiness.ts";
-import handler, { pollUntilReady, READINESS_READY_MESSAGE } from "./worker.ts";
+import handler, { pollUntilReady, READINESS_READY_MESSAGE, readGateVars } from "./worker.ts";
 
 // A virtual clock: `now()` advances only when the loop's `wait(ms)` is called, so a never-ready
 // probe races to its deadline in zero real time (no setTimeout) and the test can never hang.
@@ -190,4 +190,47 @@ test("pollUntilReady: the seeded probeTimeout binds the worker to the gate per-i
 
 test("READINESS_READY_MESSAGE is the name the gate correlates", () => {
   assertEquals(READINESS_READY_MESSAGE, "readiness-ready");
+});
+
+test("readGateVars: returns the RAW (untrimmed) gateKey so the publish key matches the gate's =gateKey subscription", () => {
+  // The gate's message subscription binds correlationKey="=gateKey" (the untrimmed process variable).
+  // If a caller seeds a whitespace-padded gateKey, trimming the publish key would desync it from the
+  // subscription — a green probe would then release the wait only via the timeout arm. So the key we
+  // publish on must be the raw value, byte-for-byte.
+  const { gateKey } = readGateVars({ gateKey: "  gate-x  ", probeTimeout: "PT30M" });
+  assertEquals(gateKey, "  gate-x  ", "the raw gateKey is preserved for byte-for-byte correlation");
+});
+
+test("readGateVars: a blank/whitespace gateKey fails fast (an empty correlationKey can never release the gate)", () => {
+  for (const gateKey of ["", "   "]) {
+    let threw = false;
+    try {
+      readGateVars({ gateKey, probeTimeout: "PT30M" });
+    } catch (err) {
+      threw = true;
+      assert((err as Error).message.includes("gateKey"), "the error names the offending gateKey");
+    }
+    assert(threw, `a ${JSON.stringify(gateKey)} gateKey must fail fast`);
+  }
+});
+
+test("readGateVars: a missing/blank probeTimeout fails fast rather than silently falling back to env", () => {
+  // probeTimeout drives BOTH the gate's engine timers (=probeTimeout). A missing/non-string value used
+  // to fall back to the env-derived twin, breaking the per-instance bound and masking a mis-seeded
+  // instance until it escalated. It must now fail fast.
+  for (const probeTimeout of [undefined, "", "   ", 42, null]) {
+    let threw = false;
+    try {
+      readGateVars({ gateKey: "gate-1", probeTimeout });
+    } catch (err) {
+      threw = true;
+      assert((err as Error).message.includes("probeTimeout"), "the error names the offending probeTimeout");
+    }
+    assert(threw, `a ${JSON.stringify(probeTimeout)} probeTimeout must fail fast`);
+  }
+});
+
+test("readGateVars: passes a valid probeTimeout through raw (the engine timer evaluates the same string)", () => {
+  const { probeTimeout } = readGateVars({ gateKey: "gate-1", probeTimeout: "PT45M" });
+  assertEquals(probeTimeout, "PT45M", "the seeded probeTimeout string flows through unchanged");
 });

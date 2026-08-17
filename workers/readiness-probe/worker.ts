@@ -96,16 +96,37 @@ export async function pollUntilReady(deps: {
   }
 }
 
+/** Normalize the two required process variables the gate seeds, failing fast when either is unusable.
+ *
+ * Both are load-bearing for the worker↔gate binding, so a bad value must surface immediately rather
+ * than silently degrade:
+ *  • `gateKey` is returned **raw** (only validated on a trimmed view). The gate's message subscription
+ *    binds `correlationKey="=gateKey"` — the *untrimmed* process variable — so the publish key must
+ *    match it byte-for-byte. Trimming the key we publish on would desync a whitespace-seeded `gateKey`
+ *    from the gate's subscription, leaving a green probe to release the wait only via the timeout arm.
+ *  • `probeTimeout` is required by the typed input envelope and drives BOTH the gate's engine timers
+ *    (`=probeTimeout`). A missing/blank value used to fall back silently to the env-derived twin,
+ *    breaking the per-instance bound (and masking a mis-seeded instance until it escalates); fail fast
+ *    instead and pass the raw string through so worker and engine share one seeded bound. */
+export function readGateVars(vars: { gateKey?: unknown; probeTimeout?: unknown }): {
+  gateKey: string;
+  probeTimeout: string;
+} {
+  const gateKey = String(vars.gateKey ?? "");
+  if (gateKey.trim() === "") throw new Error("readiness-probe: 'gateKey' is required (blank correlation key)");
+  const { probeTimeout } = vars;
+  if (typeof probeTimeout !== "string" || probeTimeout.trim() === "")
+    throw new Error("readiness-probe: 'probeTimeout' is required (per-instance timer bound)");
+  return { gateKey, probeTimeout };
+}
+
 const handler: AppJobHandler<In, Out> = async (job, app) => {
   const probe = parseProbe(job.variables.probe);
-  const gateKey = String(job.variables.gateKey ?? "").trim();
-  // Fail fast on a blank gateKey: an empty correlationKey publishes a message the gate can never
-  // correlate, so a green probe would still leave the wait to be released only by the timeout arm.
-  if (gateKey === "") throw new Error("readiness-probe: 'gateKey' is required (blank correlation key)");
+  const { gateKey, probeTimeout } = readGateVars(job.variables);
   const result = await pollUntilReady({
     probe,
     gateKey,
-    probeTimeout: typeof job.variables.probeTimeout === "string" ? job.variables.probeTimeout : undefined,
+    probeTimeout,
     exec: defaultProbeExec(),
     env: process.env,
     now: () => Date.now(),
