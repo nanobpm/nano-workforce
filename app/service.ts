@@ -26,6 +26,7 @@ import {
   type PrState,
   requestCopilotReview,
 } from "./github.ts";
+import { pollLineage } from "./lineage.ts";
 import { mergeLanes, readExclusions } from "./mergeExclusion.ts";
 import { freshHeadRunAction, headRunPresenceCount, loadMergeProtocol } from "./mergeProtocol.ts";
 import { type PrLaneDecision, planPrLane, taskDependencyDepths } from "./mergeTrain.ts";
@@ -232,6 +233,12 @@ interface PullRequest {
   // workflow stage.
   incident_key: string | null;
   incident_message: string | null;
+  // Lineage projection (037_lineage.sql, issue #245): the stable ORIGIN identity (the issue =
+  // feature_key / plan_key) threaded onto this PR by `submitPr`, and passed as a `createInstance`
+  // variable onto the convergence + merge instances so every descendant carries the root. NULL for
+  // human-opened / webhook PRs with no originating request — they are their own root, and the
+  // lineage read projection (`pollLineage`) tolerates that by self-rooting on `pr_key`.
+  root_request_key: string | null;
 }
 
 interface PrDependency {
@@ -412,6 +419,7 @@ export async function submitPr(
   dependsOn: string[] = [],
   maxRounds: number = MAX_ROUNDS,
   convergeOnly = false,
+  rootRequestKey: string | null = null,
 ) {
   const table = prs(data);
   const existing = await table.get(parsed.prKey);
@@ -446,6 +454,11 @@ export async function submitPr(
   // Cooperative abandon check (#76): reuse the PR's existing capability token across re-runs (and
   // the later merge instance), or mint one for a first submission.
   const abandonToken = existing?.abandon_token ?? mintAbandonToken();
+  // Lineage (issue #245): the origin identity threaded onto this PR + its convergence/merge
+  // instances. A caller (feature/epic hand-off) supplies it on the first submit; a resubmit that
+  // omits it must not clobber a root already learned, so coalesce onto the existing row's value. A
+  // human/webhook submit never supplies one → NULL (the PR is its own root).
+  const effectiveRoot = rootRequestKey ?? existing?.root_request_key ?? null;
   if (existing) {
     // A prior run (cancelled, converged, or otherwise superseded) may have left an OPEN
     // escalation row. A fresh convergence run must not inherit that stale answer — the
@@ -473,6 +486,7 @@ export async function submitPr(
       converged_at: null,
       merged_at: null,
       abandon_token: abandonToken,
+      root_request_key: effectiveRoot,
       updated_at: ts,
     });
   } else {
@@ -487,6 +501,7 @@ export async function submitPr(
       status: "converging",
       current_round: 1,
       abandon_token: abandonToken,
+      root_request_key: effectiveRoot,
       created_at: ts,
       updated_at: ts,
     });
@@ -502,6 +517,10 @@ export async function submitPr(
       round: 1,
       maxRounds: clampRounds(maxRounds, MAX_ROUNDS),
       reviewWaitTimeout: REVIEW_WAIT_TIMEOUT,
+      // Lineage (issue #245): carry the origin identity onto the convergence instance so every
+      // descendant (and any message it correlates) is stitched back to the originating request.
+      // NULL for a human/webhook PR that is its own root.
+      rootRequestKey: effectiveRoot,
       // Per-request review-only override: carried on the instance so `pr.finalize` can stop at
       // `converged` for this PR without handing off to the merge-loop, independent of the global
       // NANO_PR_AUTO_MERGE default. Only ever narrows (never forces merge on when auto-merge is off).
@@ -538,6 +557,10 @@ export async function startMerge(
   if (!existing?.abandon_token) {
     await prs(data).update(pr.prKey, { abandon_token: abandonToken, updated_at: now() });
   }
+  // Lineage (issue #245): the origin identity was persisted on the PR row at submit; carry it onto
+  // the merge instance too so the merge stage stays stitched to the originating request. NULL for a
+  // human/webhook PR that is its own root.
+  const rootRequestKey = existing?.root_request_key ?? null;
   const abUrl = abandonUrl(abandonToken);
   // Resolve the PR head branch so the merge agents (fix-ci, rebase) get an isolated clone checked
   // out on it (same host-git provisioning path as review-round). Best-effort: an unresolved head
@@ -565,6 +588,8 @@ export async function startMerge(
       rebaseRound: 0,
       rebaseMax: MAX_REBASE_ROUNDS,
       agentSlaTimeout: AGENT_SLA_TIMEOUT,
+      // Lineage (issue #245): thread the origin identity onto the merge instance (see startMerge).
+      rootRequestKey,
       abandonUrl: abUrl,
       abandonBrief: renderAbandonBrief(abUrl),
       // Host-git provisioning (c8ctl): same repository envelope as the convergence loop, so the
@@ -1638,6 +1663,7 @@ export async function pollOnce(
   await pollWaveGates(data, engine, token);
   await pollDelivery(data);
   await pollFeatureDelivery(data);
+  await pollLineage(data);
   await pollFeatureEscalations(data, engine);
   await pollFeatureBlocked(data, engine);
   await pollUserTasks(data, engine);

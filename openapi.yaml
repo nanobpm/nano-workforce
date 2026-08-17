@@ -99,6 +99,99 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/ActivePr"
+    LineagePrView:
+      type: object
+      description: A member PR of a lineage thread (issue #245).
+      additionalProperties: false
+      required:
+        - prKey
+        - title
+        - url
+        - status
+        - round
+        - processKey
+        - outcome
+      properties:
+        prKey:
+          type: string
+        title:
+          type: string
+          nullable: true
+        url:
+          type: string
+        status:
+          type: string
+        round:
+          type: integer
+        processKey:
+          type: string
+          nullable: true
+        outcome:
+          type: string
+          nullable: true
+    LineageThreadView:
+      type: object
+      description: One stitched intent → progress arc, keyed by its origin request (issue #245).
+      additionalProperties: false
+      required:
+        - rootRequestKey
+        - kind
+        - title
+        - issueUrl
+        - stage
+        - stageLabel
+        - processKey
+        - prKeys
+        - prCount
+        - active
+        - prs
+      properties:
+        rootRequestKey:
+          type: string
+          description: The origin issue key (feature_key/plan_key), or a self-rooted pr_key.
+        kind:
+          type: string
+          enum: [feature, epic, pr]
+        title:
+          type: string
+          nullable: true
+        issueUrl:
+          type: string
+          nullable: true
+        stage:
+          type: string
+          description: The active-frontier stage (implementing|converging|merged|…).
+        stageLabel:
+          type: string
+        processKey:
+          type: string
+          nullable: true
+          description: The active-frontier process instance key (for the processExplorer link).
+        prKeys:
+          type: array
+          items:
+            type: string
+        prCount:
+          type: integer
+        active:
+          type: boolean
+          description: True while the arc has an active frontier; false once every stage has settled.
+        prs:
+          type: array
+          items:
+            $ref: "#/components/schemas/LineagePrView"
+    LineageList:
+      type: object
+      required:
+        - count
+        - threads
+      properties:
+        count:
+          type: integer
+        threads:
+          type: array
+          items:
+            $ref: "#/components/schemas/LineageThreadView"
     AgenticSupplyWorker:
       type: object
       description: One connected worker in the supply mirror (H5 cockpit; sourced from the H1 presence registry).
@@ -930,6 +1023,33 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ActivePrList"
+        "401":
+          description: Missing/invalid shared secret (only when NANO_PR_WEBHOOK_SECRET is set).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+  /lineage:
+    get:
+      operationId: getLineage
+      summary: "Intent to progress lineage projection (issue #245): every request stitched into one arc (request, implementation, PRs, convergence, merge, outcome), active frontier first. Pass root to fetch a single origin's thread."
+      security:
+        - hookSecret: []
+        - {}
+      parameters:
+        - name: root
+          in: query
+          required: false
+          schema:
+            type: string
+          description: "An origin request key (feature_key/plan_key) or a self-rooted pr_key. When set, the response contains just that thread (empty if unknown)."
+      responses:
+        "200":
+          description: The stitched lineage threads.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LineageList"
         "401":
           description: Missing/invalid shared secret (only when NANO_PR_WEBHOOK_SECRET is set).
           content:

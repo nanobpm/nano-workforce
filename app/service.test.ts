@@ -7,7 +7,7 @@
 // GitHub transport forced off so it is hermetic.
 import { test } from "node:test";
 import { assertEquals } from "#test-assert";
-import { parsePr, pollIncidentsImpl, repoEnvelopeVars, submitPr } from "./service.ts";
+import { parsePr, pollIncidentsImpl, repoEnvelopeVars, startMerge, submitPr } from "./service.ts";
 
 function memTable(rows: any[], key: string) {
   return {
@@ -328,6 +328,109 @@ test("submitPr defaults convergeOnly to false so the global auto-merge default g
       prKey: "owner/repo#9",
     });
     assertEquals(get(), false);
+  });
+});
+
+// Lineage threading (issue #245): `submitPr` persists the origin `root_request_key` on the PR row
+// and carries it onto the convergence instance; `startMerge` reads it back off the row onto the
+// merge instance. A human/webhook submit that supplies no root leaves it NULL (its own root), and a
+// resubmit that omits the root must not clobber a root already learned.
+function captureRoot() {
+  const stores: Record<string, { rows: unknown[]; key: string }> = {
+    pull_requests: { rows: [], key: "pr_key" },
+    escalations: { rows: [], key: "id" },
+    pr_dependencies: { rows: [], key: "pr_key" },
+  };
+  const data = {
+    table: (name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key),
+  } as any;
+  let captured: unknown;
+  const engine = {
+    createInstance: (req: { variables?: Record<string, unknown> }) => {
+      captured = req.variables?.rootRequestKey;
+      return Promise.resolve({ processInstanceKey: "PI-1" });
+    },
+  } as any;
+  return { data, engine, stores, get: () => captured };
+}
+
+test("submitPr persists root_request_key and threads it onto the convergence instance", async () => {
+  await withGithubOff(async () => {
+    const { data, engine, stores, get } = captureRoot();
+    await submitPr(
+      data,
+      engine,
+      { repo: "owner/repo", number: 8, url: "https://github.com/owner/repo/pull/8", prKey: "owner/repo#8" },
+      [],
+      20,
+      false,
+      "owner/repo#1",
+    );
+    assertEquals(get(), "owner/repo#1");
+    const pr = stores.pull_requests.rows[0] as Record<string, unknown>;
+    assertEquals(pr.root_request_key, "owner/repo#1");
+  });
+});
+
+test("submitPr leaves root_request_key NULL for a human/webhook submit (its own root)", async () => {
+  await withGithubOff(async () => {
+    const { data, engine, stores, get } = captureRoot();
+    await submitPr(data, engine, {
+      repo: "owner/repo",
+      number: 9,
+      url: "https://github.com/owner/repo/pull/9",
+      prKey: "owner/repo#9",
+    });
+    assertEquals(get(), null);
+    const pr = stores.pull_requests.rows[0] as Record<string, unknown>;
+    assertEquals(pr.root_request_key, null);
+  });
+});
+
+test("submitPr resubmit does not clobber an already-learned root when omitted", async () => {
+  await withGithubOff(async () => {
+    const { data, engine, stores, get } = captureRoot();
+    (stores.pull_requests.rows as unknown[]).push({
+      pr_key: "owner/repo#8",
+      repo: "owner/repo",
+      number: 8,
+      url: "https://github.com/owner/repo/pull/8",
+      status: "abandoned", // terminal -> re-open path
+      current_round: 3,
+      root_request_key: "owner/repo#1",
+    });
+    await submitPr(data, engine, {
+      repo: "owner/repo",
+      number: 8,
+      url: "https://github.com/owner/repo/pull/8",
+      prKey: "owner/repo#8",
+    });
+    assertEquals(get(), "owner/repo#1", "resubmit re-threads the learned root");
+    const pr = stores.pull_requests.rows[0] as Record<string, unknown>;
+    assertEquals(pr.root_request_key, "owner/repo#1");
+  });
+});
+
+test("startMerge reads root_request_key off the PR row onto the merge instance", async () => {
+  await withGithubOff(async () => {
+    const { data, engine, get } = captureRoot();
+    await submitPr(
+      data,
+      engine,
+      { repo: "owner/repo", number: 8, url: "https://github.com/owner/repo/pull/8", prKey: "owner/repo#8" },
+      [],
+      20,
+      false,
+      "owner/repo#1",
+    );
+    await startMerge(data, engine, {
+      repo: "owner/repo",
+      number: 8,
+      url: "https://github.com/owner/repo/pull/8",
+      prKey: "owner/repo#8",
+      round: 2,
+    });
+    assertEquals(get(), "owner/repo#1");
   });
 });
 
