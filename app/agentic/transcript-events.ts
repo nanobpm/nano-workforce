@@ -431,7 +431,9 @@ export function deriveView(events: Iterable<TranscriptEvent>): DerivedView {
   };
 }
 
-/** Replace a pending tool with its result in the flat list (tools are stored by reference in turns too). */
+/** Replace a pending tool with its result in the flat list. A pending tool starts as the same object in
+ * both the flat list and its turn (pushed by reference), so {@link pairResultInTurns} locates it there by
+ * identity; each list is then replaced independently with its own resolved copy via {@link withResult}. */
 function pairResult(list: DerivedTool[], target: DerivedTool, result: ToolResultEvent): void {
   const idx = list.indexOf(target);
   if (idx >= 0) list[idx] = withResult(target, result);
