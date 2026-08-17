@@ -606,3 +606,86 @@ test("pollWaveGates is level-triggered: PRs merged before the token arrives neve
     assertEquals(published[0]?.correlationKey, PLAN_KEY);
   });
 });
+
+// Guards the false-positive failure class flagged in review: `waveMergedSubscriptionOpen` must treat
+// a search item with a missing/null/mismatched `messageName`, `correlationKey`, or
+// `messageSubscriptionState` as NOT-open. Defaulting an unverifiable field to its expected value
+// would publish `wave-merged` into a subscription we never confirmed open — buffering a message that
+// trips a LATER wave's barrier, i.e. re-introducing the exact #262 wedge this change prevents. A
+// false negative only costs a retry next pass; a false positive is a wedge, so unknown ⇒ don't match.
+function ambiguousSubscriptionFetch(items: unknown[]) {
+  return (url: string | URL | Request, _init?: RequestInit): Promise<Response> => {
+    const u = typeof url === "string" ? url : url.toString();
+    if (!u.endsWith("/message-subscriptions/search")) {
+      throw new Error(`unexpected fetch: ${u}`);
+    }
+    return Promise.resolve(
+      new Response(JSON.stringify({ items }), { status: 200, headers: { "content-type": "application/json" } }),
+    );
+  };
+}
+
+test("pollWaveGates never releases the barrier on an unverifiable subscription item (missing/null/mismatched fields)", async () => {
+  await withGithubOff(async () => {
+    const PLAN_KEY = "owner/repo#67";
+    const PI = "PI-13794";
+    const plan = {
+      plan_key: PLAN_KEY,
+      process_key: PI,
+      gate_wave: 1 as number | null,
+      updated_at: "t0",
+    };
+    const stores: Record<string, { rows: unknown[]; key: string }> = {
+      plans: { rows: [plan], key: "plan_key" },
+      plan_tasks: {
+        rows: [
+          { id: "owner/repo#67:a", plan_key: PLAN_KEY, wave: 1, status: "opened", pr_key: "owner/repo#68" },
+          { id: "owner/repo#67:b", plan_key: PLAN_KEY, wave: 1, status: "opened", pr_key: "owner/repo#69" },
+        ],
+        key: "id",
+      },
+      pull_requests: {
+        rows: [
+          { pr_key: "owner/repo#68", status: "merged" },
+          { pr_key: "owner/repo#69", status: "merged" },
+        ],
+        key: "pr_key",
+      },
+    };
+    const data = {
+      table: (name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key),
+    } as any;
+
+    const published: { name: string; correlationKey?: string }[] = [];
+    const engine = {
+      publishMessage: (input: { name: string; correlationKey?: string }) => {
+        published.push(input);
+        return Promise.resolve();
+      },
+    } as any;
+    const headers = { "content-type": "application/json" };
+    const prevFetch = globalThis.fetch;
+
+    // Each of these items is ambiguous — it omits or mismatches a field the barrier requires. None
+    // may be treated as an OPEN subscription for THIS plan, so none may release wave 1's gate.
+    const ambiguousItems: unknown[][] = [
+      [{}], // empty item — no fields at all
+      [{ messageName: "wave-merged", correlationKey: PLAN_KEY }], // missing state
+      [{ messageName: "wave-merged", correlationKey: PLAN_KEY, messageSubscriptionState: null }], // null state
+      [{ correlationKey: PLAN_KEY, messageSubscriptionState: "CREATED" }], // missing messageName
+      [{ messageName: "some-other-message", correlationKey: PLAN_KEY, messageSubscriptionState: "CREATED" }],
+      [{ messageName: "wave-merged", messageSubscriptionState: "CREATED" }], // missing correlationKey
+      [{ messageName: "wave-merged", correlationKey: "owner/repo#999", messageSubscriptionState: "CREATED" }],
+    ];
+    for (const items of ambiguousItems) {
+      globalThis.fetch = ambiguousSubscriptionFetch(items) as typeof fetch;
+      try {
+        await pollWaveGatesImpl(data, engine, "", "http://engine/v2", headers);
+      } finally {
+        globalThis.fetch = prevFetch;
+      }
+    }
+    assertEquals(published.length, 0, "must not publish wave-merged on an unverifiable subscription item");
+    assertEquals(plan.gate_wave, 1, "gate_wave must stay armed while no OPEN subscription is confirmed");
+  });
+});

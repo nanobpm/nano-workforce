@@ -1190,14 +1190,19 @@ async function waveMergedSubscriptionOpen(
     const body = (await res.json()) as { items?: MessageSubscriptionSearchItem[] };
     // Re-filter defensively in case the engine ignores a filter field: an OPEN (`CREATED`)
     // subscription for the `wave-merged` message, correlated on THIS plan key, is the barrier we may
-    // publish into. State compared case-insensitively so a future casing tweak can't silently drop
-    // the match; a missing `correlationKey`/`messageName` is accepted because the `processInstanceKey`
-    // filter already pins the result to this one plan-fanout instance.
+    // publish into. Every field must be PRESENT and match explicitly — we never default a
+    // missing/null `messageName`, `correlationKey`, or `messageSubscriptionState` to its expected
+    // value. Doing so would treat an unverifiable item as OPEN and re-introduce the exact #262
+    // failure class (publishing into a subscription we never confirmed open, buffering a message that
+    // trips a later wave's barrier). An item that omits a field is "unknown", so we simply don't
+    // match it: a false negative only costs a retry next pass, whereas a false positive is a wedge.
+    // State is compared case-insensitively so a future casing tweak can't silently drop the match.
     return (body.items ?? []).some(
       (it) =>
-        (it.messageName ?? WAVE_MERGED_MESSAGE) === WAVE_MERGED_MESSAGE &&
-        (it.correlationKey ?? planKey) === planKey &&
-        (it.messageSubscriptionState ?? "CREATED").toUpperCase() === "CREATED",
+        it.messageName === WAVE_MERGED_MESSAGE &&
+        it.correlationKey === planKey &&
+        typeof it.messageSubscriptionState === "string" &&
+        it.messageSubscriptionState.toUpperCase() === "CREATED",
     );
   } catch (err) {
     console.error(`[poller] wave-merged subscription ${planKey}: ${err}`);
