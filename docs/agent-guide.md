@@ -204,19 +204,22 @@ curl -sS -X POST __BASE__/../../tasks/api/complete -H 'content-type: application
   -d '{ "userTaskKey": "<key>", "variables": { "action": "rebase", "notes": "Re-run after the fix." } }'
 ```
 
-**Answer a merge-loop escalation** (the one out-of-scope kind that still uses the
-durable message catch, not a user task). Use the message name `escalation-answered`,
-correlated by the PR key:
+**Answer a PR escalation** (both the review-loop `wait-answer` and the merge-loop
+`wait-merge-answer` — both are now native user tasks answered the same way, #256).
+Use the PR key's parked user task and submit the `pr-escalation` form's `{ answer }`:
 
 ```bash
-curl -sS -X POST __BASE__/actions/message \
+curl -sS -X POST __BASE__/actions/complete-user-task \
   -H 'content-type: application/json' \
   -d '{
-        "name": "escalation-answered",
-        "correlationKey": "owner/repo#123",
+        "userTaskKey": "<key>",
         "variables": { "answer": "Yes — cap the retries at 5 and proceed." }
       }'
 ```
+
+The `userTaskKey` comes from `GET /status` or the Tasks inbox. This is the ONE
+canonical answer door for every escalation kind; the merge loop no longer uses a
+durable `escalation-answered` message catch.
 
 If `NANO_PR_WEBHOOK_SECRET` is set on the deployment, add `-H "x-hook-secret: <secret>"`.
 

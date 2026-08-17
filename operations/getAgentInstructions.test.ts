@@ -42,7 +42,7 @@ test("the guide covers every capability the endpoint promises", async () => {
   assert(md.includes("start/convergence-loop"), "covers submitting a PR for convergence");
   assert(md.includes("convergeOnly"), "documents review-only vs. merge");
   assert(md.includes("start/plan-fanout"), "covers submitting an epic");
-  assert(md.includes("escalation-answered"), "covers answering escalations");
+  assert(md.includes("complete-user-task"), "covers answering escalations via the native user-task door");
   // …debug the system.
   assert(md.includes("/jobs/search") && md.includes("/incidents/search"), "covers engine REST debugging");
   assert(md.includes("processKey") || md.includes("process_key"), "relates instances to PRs");

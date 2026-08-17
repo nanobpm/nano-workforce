@@ -114,6 +114,29 @@ test("pollUserTasks: projects feature / plan-review / trial-merge / PR-wait esca
   assertEquals(byKey["ut-pr"].question, "conflicting reviews");
 });
 
+test("pollUserTasks: projects a merge-loop wait-merge-answer escalation into user_tasks as \"PR merge\"", async () => {
+  // During the merge phase a PR's process_key points at its merge-loop instance; the merge escalation
+  // parks on a native `wait-merge-answer` userTask (#256) and writes the SAME `escalations` row the
+  // review loop does, so the inbox surfaces it exactly like a review escalation — just labelled by
+  // stage. This guards the poller accepting the merge element alongside `wait-answer`.
+  const { data, stores } = memData({
+    pull_requests: [
+      { pr_key: "o/r#31", status: "escalated", process_key: "mp-31", url: "https://github.com/o/r/pull/31" },
+    ],
+    escalations: [{ id: 1, pr_key: "o/r#31", status: "open", question: "not mergeable — resolve the conflict" }],
+  });
+  const engine = fakeEngine({ "mp-31": [{ userTaskKey: "ut-merge", elementId: "wait-merge-answer" }] });
+
+  await pollUserTasks(data, engine);
+
+  const byKey = Object.fromEntries((stores.user_tasks ?? []).map((r) => [r.user_task_key, r]));
+  assertEquals(Object.keys(byKey), ["ut-merge"]);
+  assertEquals(byKey["ut-merge"].element_id, "wait-merge-answer");
+  assertEquals(byKey["ut-merge"].kind_label, "PR merge");
+  assertEquals(byKey["ut-merge"].subject_type, "pr");
+  assertEquals(byKey["ut-merge"].question, "not mergeable — resolve the conflict");
+});
+
 test("pollUserTasks: removes a row once its task is no longer open (completed / out-of-band)", async () => {
   const { data, stores } = memData({
     user_tasks: [
