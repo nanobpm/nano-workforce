@@ -96,7 +96,11 @@ async function pollLoop(): Promise<void> {
   }
   if (!shuttingDown) pollTimer = setTimeout(() => void pollLoop(), POLL_MS);
 }
-if (app.data) pollTimer = setTimeout(() => void pollLoop(), POLL_MS);
+// Run the first pass immediately at boot (not after POLL_MS) so the one-shot feature-stage backfill
+// runs before the UI is relied upon — the Feature Runs grid/tabs filter on the stored `list_bucket`
+// projection, which is NULL on legacy rows until `backfillFeatureStages()` runs inside `pollOnce()`.
+// Deferring the first pass would leave those rows missing from Active/History for up to POLL_MS.
+if (app.data) void pollLoop();
 
 async function drainAndExit(): Promise<void> {
   if (shuttingDown) return;
