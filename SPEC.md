@@ -103,19 +103,22 @@ known at submit time, carried as a process variable and stored on the DB row.
 │      │                     ├── review-ready (msg catch, key = prKey) → round++ ─────┐
 │      │                     └── =reviewWaitTimeout (timer catch)                     │
 │      │                          → [Escalate: review stalled] (blocked)              │
-│      │                          → [Wait: escalation-answered] ──────────────────────┤
+│      │                          → [Wait: wait-answer userTask] ─────────────────────┤
 │      │                                                                             │
 │      └── needs_input     [Record escalation]                       │               │
 │          or blocked  →   (kind = question | blocker)               │               │
-│                          → [Wait: escalation-answered] (msg catch) │               │
+│                          → [Wait: wait-answer userTask]            │               │
+│                          → [record-answer: pr.answer-escalation]   │               │
 │                          → set answer ──────────────────────────────┤               │
 │                                                                    │               │
 └────────────────────────────────────────────────────────────────────┴───────────────┘
 
 Both `needs_input` (the agent has a question) and `blocked` (the agent is stuck
 on something external — auth, a failing push, a missing secret) route to the
-**same escalation path**: record it, sleep at `escalation-answered`, then retry
-the same round with the human's `answer`. They differ only by escalation `kind`,
+**same escalation path**: record it, park on the native `wait-answer` user task
+(answered through the canonical `completeUserTask` door and surfaced in the Tasks
+inbox), reconcile the answer via the `record-answer` (`pr.answer-escalation`)
+step, then retry the same round with the human's `answer`. They differ only by escalation `kind`,
 which the UI uses to label the card. Neither ends the run — a human always gets
 a chance to unblock and resume.
 
