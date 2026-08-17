@@ -8,9 +8,9 @@
 --      plan_key) threaded onto every PR a request spawns. `submitPr` persists it and passes it as a
 --      `createInstance` variable onto the convergence + merge instances; `startMerge` reads it back
 --      off the row. A human-opened / webhook PR with no originating request is self-rooted by
---      `submitPr` (`root_request_key = pr_key`); a legacy pre-migration NULL is self-rooted the same
---      way by this migration's backfill (below), and the projection tolerates any residual NULL by
---      self-rooting on `pr_key`.
+--      `submitPr` (`root_request_key = pr_key`); a legacy pre-migration NULL is backfilled below to
+--      the SAME root submitPr would persist (feature/epic origin key, else self-rooted pr_key), and
+--      the projection tolerates any residual NULL by self-rooting on `pr_key`.
 --
 --   2. `lineage_threads` — a DERIVED read table, one row per `root_request_key` (or a self-rooted
 --      PR's own key), recomputed idempotently each poll pass by `pollLineage` (app/lineage.ts) from
@@ -21,17 +21,34 @@
 --      codebase convention for read-model projections (`plans.delivery`, `feature_runs.delivery_label`)
 --      — this is a denormalised flat table the schema-driven pages read directly.
 --
--- Forward-only, additive (expand): a nullable column with no default, a new table/indexes, and a
--- self-rooting backfill of the new column. Numbered after the current highest prefix (036). The
+-- Forward-only, additive (expand): a nullable column with no default, a new table/indexes, and an
+-- origin-aware backfill of the new column. Numbered after the current highest prefix (036). The
 -- runner wraps each file in its own transaction, so this file must NOT contain BEGIN/COMMIT.
 ALTER TABLE pull_requests ADD COLUMN root_request_key TEXT;
 CREATE INDEX IF NOT EXISTS idx_pr_root ON pull_requests(root_request_key);
 
--- Backfill: every pre-migration PR row has root_request_key = NULL. The projection self-roots such a
--- PR (keying its thread on `pr_key`), but a NULL row would then break the Lineage page's
--- `lineage_threads.root_request_key → pull_requests.root_request_key` drill-down join (thread key
--- `pr_key` ≠ stored NULL), rendering an empty PR list. Self-root each legacy row on its own pr_key,
--- exactly as `submitPr` self-roots a human/webhook PR going forward, so the join resolves. Idempotent.
+-- Backfill: every pre-migration PR row has root_request_key = NULL, which breaks the Lineage page's
+-- `lineage_threads.root_request_key → pull_requests.root_request_key` drill-down join (a NULL never
+-- matches a thread key), rendering an empty PR list. Backfill each row with the SAME root `submitPr`
+-- persists going forward, so the join resolves for already-tracked PRs at deploy time too:
+--   1. a PR spawned by a feature run roots on its origin `feature_runs.feature_key` (submitPr passes
+--      `featureKey` — workers/converge-feature);
+--   2. a PR spawned by an epic slice roots on its origin `plan_tasks.plan_key` (submitPr passes
+--      `planKey` — workers/record-wave);
+--   3. any remaining origin-less PR (human/webhook, or an origin row that no longer survives) is
+--      self-rooted on its own `pr_key`, exactly as `submitPr` self-roots a human/webhook PR.
+-- Origin-aware steps run first so a tracked PR keeps its true origin key rather than being self-rooted
+-- (which would orphan it from its feature/epic thread in the drill-down). All idempotent.
+UPDATE pull_requests SET root_request_key = (
+    SELECT fr.feature_key FROM feature_runs fr WHERE fr.pr_key = pull_requests.pr_key
+  )
+  WHERE root_request_key IS NULL
+    AND EXISTS (SELECT 1 FROM feature_runs fr WHERE fr.pr_key = pull_requests.pr_key);
+UPDATE pull_requests SET root_request_key = (
+    SELECT pt.plan_key FROM plan_tasks pt WHERE pt.pr_key = pull_requests.pr_key
+  )
+  WHERE root_request_key IS NULL
+    AND EXISTS (SELECT 1 FROM plan_tasks pt WHERE pt.pr_key = pull_requests.pr_key);
 UPDATE pull_requests SET root_request_key = pr_key WHERE root_request_key IS NULL;
 
 CREATE TABLE IF NOT EXISTS lineage_threads (
