@@ -109,6 +109,11 @@ export const DEFAULT_TIMEOUT_MS = 1_800_000;
 export const DEFAULT_BACKOFF: Backoff = "exponential";
 /** Ceiling on a single backoff delay (ms) — an exponential ramp can never park a probe for days. */
 export const MAX_EVERY_MS = 5 * 60_000;
+/** Per-attempt I/O deadline (ms) for the default {@link ProbeExec} (60s). Both `fetch` and the
+ * command subprocess are bounded by it, so a single stuck attempt always resolves in bounded time
+ * (as an error the poll loop treats as "not ready yet") instead of hanging the worker forever —
+ * neither the local poll budget nor the engine timer can bound a JS handler blocked inside I/O. */
+export const DEFAULT_ATTEMPT_TIMEOUT_MS = 60_000;
 /** Default gate timeout when neither the descriptor nor `NANO_READINESS_POLL_TIMEOUT` supplies one. */
 export const DEFAULT_READINESS_TIMEOUT = "PT30M";
 
@@ -379,21 +384,35 @@ export function readinessTimeout(
 
 // ── Default I/O implementation (Node) ───────────────────────────────────────────────────────────
 
-/** The production {@link ProbeExec}: `fetch` for http, a shell subprocess for command/npm/gh. */
-export function defaultProbeExec(): ProbeExec {
+/** The production {@link ProbeExec}: `fetch` for http, a shell subprocess for command/npm/gh. Every
+ * attempt is bounded by `attemptTimeoutMs` ({@link DEFAULT_ATTEMPT_TIMEOUT_MS}) — `fetch` via an
+ * `AbortController` and the subprocess via `exec`'s `timeout`/`killSignal` — so a hung endpoint or a
+ * stuck command becomes a bounded error the poll loop retries, never an I/O block the engine timer
+ * cannot cancel. */
+export function defaultProbeExec(attemptTimeoutMs: number = DEFAULT_ATTEMPT_TIMEOUT_MS): ProbeExec {
   return {
     async httpGet(url, headers) {
-      const r = await fetch(url, { headers, redirect: "follow" });
-      const body = await r.text().catch(() => "");
-      return { status: r.status, body };
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), attemptTimeoutMs);
+      try {
+        const r = await fetch(url, { headers, redirect: "follow", signal: controller.signal });
+        const body = await r.text().catch(() => "");
+        return { status: r.status, body };
+      } finally {
+        clearTimeout(timer);
+      }
     },
     async run(command, env) {
       const { exec } = await import("node:child_process");
       return await new Promise<CommandResult>((resolve) => {
-        exec(command, { env, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
-          const code = err && typeof err.code === "number" ? err.code : err ? 1 : 0;
-          resolve({ code, stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
-        });
+        exec(
+          command,
+          { env, maxBuffer: 16 * 1024 * 1024, timeout: attemptTimeoutMs, killSignal: "SIGKILL" },
+          (err, stdout, stderr) => {
+            const code = err && typeof err.code === "number" ? err.code : err ? 1 : 0;
+            resolve({ code, stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+          },
+        );
       });
     },
   };

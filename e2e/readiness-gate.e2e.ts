@@ -185,4 +185,61 @@ describe("nano-workforce artifact-readiness wait-gate (readiness-gate.bpmn)", ()
       rmSync(dbDir, { recursive: true, force: true });
     }
   });
+
+  test("DEFAULT SAFETY: an omitted onTimeout escalates (the gateway default is the safety path, not continue)", async () => {
+    const { app, dbDir } = await boot();
+    try {
+      await app.engine.createInstance({
+        processDefinitionId: "readiness-gate",
+        variables: {
+          gateKey: "gate-default-1",
+          // Neither probe.onTimeout nor a top-level onTimeout is declared.
+          probe: { kind: "command", target: "false", poll: { everyMs: 5, timeoutMs: 40, backoff: "fixed" } },
+          probeTimeout: "PT1M",
+        },
+      });
+      await app.settle();
+      await app.advanceTime(61_000);
+
+      const flows = takenFlows(app);
+      assert.ok(
+        flows.includes("gw-onTimeout->readiness-escalation"),
+        `an omitted onTimeout must default to escalation, never silently continue (flows: ${flows.join(", ")})`,
+      );
+      assert.ok(
+        !flows.includes("gw-onTimeout->gate-continued"),
+        "the safety default must not route to continue",
+      );
+    } finally {
+      await app.stop();
+      rmSync(dbDir, { recursive: true, force: true });
+    }
+  });
+
+  test("probe.onTimeout wins: the descriptor field is preferred over a top-level onTimeout (one source of truth)", async () => {
+    const { app, dbDir } = await boot();
+    try {
+      await app.engine.createInstance({
+        processDefinitionId: "readiness-gate",
+        variables: {
+          gateKey: "gate-probe-pref-1",
+          // The descriptor asks to continue; a stale top-level onTimeout says escalate. probe wins.
+          probe: { kind: "command", target: "false", onTimeout: "continue", poll: { everyMs: 5, timeoutMs: 40, backoff: "fixed" } },
+          probeTimeout: "PT1M",
+          onTimeout: "escalate",
+        },
+      });
+      await app.settle();
+      await app.advanceTime(61_000);
+
+      const flows = takenFlows(app);
+      assert.ok(
+        flows.includes("gw-onTimeout->gate-continued"),
+        `probe.onTimeout ("continue") must win over the top-level onTimeout ("escalate") (flows: ${flows.join(", ")})`,
+      );
+    } finally {
+      await app.stop();
+      rmSync(dbDir, { recursive: true, force: true });
+    }
+  });
 });

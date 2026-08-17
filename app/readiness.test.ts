@@ -4,11 +4,13 @@
 // pure surface: descriptor parse/validation, each kind's matcher, the injectable `probeOnce`
 // dispatch (no network / subprocess), backoff, the ms→ISO timeout derivation, and log redaction.
 import { test } from "node:test";
-import { assert, assertEquals, assertStringIncludes, assertThrows } from "#test-assert";
+import { assert, assertEquals, assertRejects, assertStringIncludes, assertThrows } from "#test-assert";
 import {
   type CommandResult,
+  DEFAULT_ATTEMPT_TIMEOUT_MS,
   DEFAULT_EVERY_MS,
   DEFAULT_TIMEOUT_MS,
+  defaultProbeExec,
   type HttpResponse,
   MAX_EVERY_MS,
   matchCommand,
@@ -228,4 +230,36 @@ test("redactTarget: a command target is never logged — only the kind + a fixed
   const ct = redactTarget(parseProbe({ kind: "command", target: "curl -H 'Authorization: Bearer s3cr3t' https://h/p" }));
   assertEquals(ct, "command:<redacted>");
   assert(!ct.includes("s3cr3t"), "an arbitrary shell snippet's secrets must never survive to a log line");
+});
+
+// ── default ProbeExec: every attempt is bounded (a stuck probe can never hang the worker) ─────
+test("defaultProbeExec.run: a command that outlives the attempt timeout resolves bounded, non-zero", async () => {
+  const exec = defaultProbeExec(50);
+  const start = Date.now();
+  const out = await exec.run("sleep 5", process.env);
+  const elapsed = Date.now() - start;
+  assert(out.code !== 0, "a killed (timed-out) command must report a non-zero exit code, i.e. not ready");
+  assert(elapsed < 4000, `the attempt must resolve in bounded time, not run to completion (took ${elapsed}ms)`);
+});
+
+test("defaultProbeExec.httpGet: a hung endpoint aborts at the attempt timeout instead of hanging forever", async () => {
+  const { createServer } = await import("node:http");
+  const server = createServer(() => {
+    /* never responds — the request hangs until the client aborts */
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+  const addr = server.address();
+  const port = typeof addr === "object" && addr ? addr.port : 0;
+  try {
+    const exec = defaultProbeExec(50);
+    const start = Date.now();
+    await assertRejects(() => exec.httpGet(`http://127.0.0.1:${port}/`, {}));
+    assert(Date.now() - start < 4000, "the fetch must abort at the attempt deadline, not hang");
+  } finally {
+    server.close();
+  }
+});
+
+test("DEFAULT_ATTEMPT_TIMEOUT_MS is a sane bounded default", () => {
+  assert(DEFAULT_ATTEMPT_TIMEOUT_MS > 0 && DEFAULT_ATTEMPT_TIMEOUT_MS <= 5 * 60_000);
 });
