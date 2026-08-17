@@ -9,7 +9,9 @@
 -- then needs no fallback and a failed/absent fetch still shows a usable identity.
 --
 -- Forward-only, additive (expand): nullable with no default, so pre-#248 rows
--- grandfather in as NULL (they render by key until re-dispatched). Numbered after
--- the current highest prefix on origin/main (034); the runner wraps each file in
--- its own transaction, so this file must NOT contain BEGIN/COMMIT.
+-- grandfather in as NULL. Write-time coalescing keeps new rows non-blank; the
+-- follow-up 036_backfill_titles.sql then backfills these legacy NULL/blank titles
+-- to the row key, so the title-led grids never render a blank identity cell.
+-- Numbered after the current highest prefix on origin/main (034); the runner wraps
+-- each file in its own transaction, so this file must NOT contain BEGIN/COMMIT.
 ALTER TABLE feature_runs ADD COLUMN title TEXT;

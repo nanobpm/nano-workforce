@@ -14,6 +14,7 @@ import { agentSlaTimeout } from "./agentSla.ts";
 import { deriveFeatureBlockedPatch, deriveFeatureDelivery, deriveFeatureEscalationPatch, FEATURE_BLOCKED_ELEMENT, FEATURE_ESCALATION_ELEMENT, FEATURE_RUN_STATUSES, type FeatureRun, type FeatureRunStatus, featureRuns } from "./feature.ts";
 import {
   classifyMergeability,
+  coalesceTitle,
   ensureFreshHeadRun,
   fetchPrHead,
   fetchPrMeta,
@@ -462,7 +463,9 @@ export async function submitPr(
       url: parsed.url,
       // Coalesce to the key so `pull_requests.title` stays non-blank for the title-led grids
       // (issue #248): a fresh fetch wins, else the prior title, else the `owner/repo#N` key.
-      title: title ?? existing.title ?? parsed.prKey,
+      // A blank/whitespace title counts as missing (matches the 036 backfill), so an empty
+      // external title never lands as an unlabeled row.
+      title: coalesceTitle(title, existing.title, parsed.prKey),
       waiting_since: null,
       last_review_id: null,
       last_nudge_at: null,
@@ -478,8 +481,9 @@ export async function submitPr(
       repo: parsed.repo,
       number: parsed.number,
       url: parsed.url,
-      // Coalesce to the key so the title-led grids never render a blank identity (issue #248).
-      title: title ?? parsed.prKey,
+      // Coalesce to the key so the title-led grids never render a blank identity (issue #248);
+      // a blank/whitespace external title counts as missing (matches the 036 backfill).
+      title: coalesceTitle(title, parsed.prKey),
       status: "converging",
       current_round: 1,
       abandon_token: abandonToken,

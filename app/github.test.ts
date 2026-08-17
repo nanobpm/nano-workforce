@@ -3,7 +3,7 @@
 // the merge-exclusion graph. Force the token transport and stub `globalThis.fetch`.
 import { test } from "node:test";
 import { assertEquals, assertRejects } from "#test-assert";
-import { BaseBranchMustExistError, ensureBaseBranch, fetchIssueTitle, fetchPrFiles, isNotAPullRequestError } from "./github.ts";
+import { BaseBranchMustExistError, coalesceTitle, ensureBaseBranch, fetchIssueTitle, fetchPrFiles, isNotAPullRequestError } from "./github.ts";
 
 // A fake `fetch` that serves `pages` of file batches; each page N (1-based) returns `pages[N-1]`
 // files (named `f{index}`), setting a `Link: rel="next"` header whenever a later page exists.
@@ -312,4 +312,26 @@ test("fetchIssueTitle: token mode with no token is a no-op (null)", async () => 
   }) as typeof fetch;
   const title = await withTitleFetch(stub, undefined, () => fetchIssueTitle("owner/repo", 7, ""));
   assertEquals(title, null);
+});
+
+// Issue #248: `coalesceTitle` guarantees a non-blank identity for the title-led grids. A best-effort
+// fetch can legitimately return "" (or whitespace) — `??` would persist that blank; `coalesceTitle`
+// treats it as missing (matching the 036 backfill's `trim(title) = ''`) and falls back to the key.
+test("coalesceTitle: a non-blank first candidate wins", () => {
+  assertEquals(coalesceTitle("Real title", "owner/repo#1"), "Real title");
+});
+
+test("coalesceTitle: null/undefined candidates fall through to the key", () => {
+  assertEquals(coalesceTitle(null, "owner/repo#1"), "owner/repo#1");
+  assertEquals(coalesceTitle(undefined, "owner/repo#1"), "owner/repo#1");
+});
+
+test("coalesceTitle: a blank/whitespace title counts as missing", () => {
+  assertEquals(coalesceTitle("", "owner/repo#1"), "owner/repo#1");
+  assertEquals(coalesceTitle("   ", "owner/repo#1"), "owner/repo#1");
+});
+
+test("coalesceTitle: skips a blank middle candidate to the next non-blank one", () => {
+  assertEquals(coalesceTitle("", "Prior title", "owner/repo#1"), "Prior title");
+  assertEquals(coalesceTitle(null, "  ", "owner/repo#1"), "owner/repo#1");
 });

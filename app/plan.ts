@@ -12,7 +12,7 @@
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { blackboardUrl, mintBlackboardToken, renderCoordinationBrief } from "./blackboard.ts";
 import { DEFAULT_ESCALATION_SLA_TIMEOUT, escalationSlaTimeout } from "./escalationSla.ts";
-import { ensureBaseBranch, fetchDefaultBranch, fetchIssueTitle } from "./github.ts";
+import { coalesceTitle, ensureBaseBranch, fetchDefaultBranch, fetchIssueTitle } from "./github.ts";
 import { clearExclusions } from "./mergeExclusion.ts";
 import { clearTaskDeltas } from "./taskDelta.ts";
 
@@ -402,10 +402,13 @@ export async function startPlan(
   const ts = now();
   // Human-readable identity for the epics grids (issue #248): fetch the epic issue's title,
   // best-effort. Coalesce to the `owner/repo#N` key at write time so `plans.title` is ALWAYS
-  // non-blank — the grid's `{{title}}` template then needs no fallback, and a failed/absent fetch
-  // still shows a usable identity (the key) rather than an empty cell. A fetch failure never blocks
-  // the start (`fetchIssueTitle` returns null on any error).
-  const title = (await fetchIssueTitle(parsed.repo, parsed.number, process.env.GITHUB_TOKEN ?? "")) ?? parsed.planKey;
+  // non-blank — the grid's `{{title}}` template then needs no fallback, and a failed/absent/blank
+  // fetch still shows a usable identity (the key) rather than an empty cell. A fetch failure never
+  // blocks the start (`fetchIssueTitle` returns null on any error).
+  const title = coalesceTitle(
+    await fetchIssueTitle(parsed.repo, parsed.number, process.env.GITHUB_TOKEN ?? ""),
+    parsed.planKey,
+  );
   // Mint (or reuse, on a re-plan) this plan's blackboard capability token, and render the
   // coordination brief that carries its concrete URL. The token is the credential; agents reach
   // the blackboard directly with the URL we seed into `appendPrompt` below (#51).

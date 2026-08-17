@@ -15,7 +15,7 @@
 // Data access goes through the record gateway (`data.table`), never hand-written
 // SQL — matching app/plan.ts and app/service.ts.
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
-import { fetchIssueTitle } from "./github.ts";
+import { coalesceTitle, fetchIssueTitle } from "./github.ts";
 import { ESCALATION_SLA_TIMEOUT, normalizeBaseBranch, type ParsedIssue, renderBaseBranchBrief } from "./plan.ts";
 
 /** The BPMN process this module drives (resources/processes/feature.bpmn). */
@@ -290,9 +290,12 @@ export async function startFeature(
   const ts = now();
   // Human-readable identity for the feature grids (issue #248): fetch the issue title best-effort
   // and coalesce to the `owner/repo#N` key so `feature_runs.title` is ALWAYS non-blank (see the
-  // interface note). A fetch failure never blocks the start (`fetchIssueTitle` returns null on any
-  // error).
-  const title = (await fetchIssueTitle(parsed.repo, parsed.number, process.env.GITHUB_TOKEN ?? "")) ?? parsed.planKey;
+  // interface note); a blank/whitespace fetch counts as missing. A fetch failure never blocks the
+  // start (`fetchIssueTitle` returns null on any error).
+  const title = coalesceTitle(
+    await fetchIssueTitle(parsed.repo, parsed.number, process.env.GITHUB_TOKEN ?? ""),
+    parsed.planKey,
+  );
   if (existing) {
     await table.update(parsed.planKey, {
       status: "running",

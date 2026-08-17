@@ -460,6 +460,19 @@ export async function fetchIssueTitle(
   }
 }
 
+/** Coalesce best-effort title candidates to a non-blank identity for the title-led grids (issue
+ * #248). A candidate that is null/undefined OR blank/whitespace-only is treated as missing —
+ * external data (`fetchIssueTitle`/`fetchPrMeta`) can legitimately return `""`, which `??` would
+ * wrongly persist as a blank identity cell. Returns the first non-blank candidate, else the last
+ * one (the caller's key fallback, which is always non-blank). Mirrors the 036 backfill's
+ * `trim(title) = ''` test so write-time and backfill agree. */
+export function coalesceTitle(...candidates: (string | null | undefined)[]): string {
+  for (const c of candidates) {
+    if (c != null && c.trim() !== "") return c;
+  }
+  return candidates[candidates.length - 1] ?? "";
+}
+
 /** A PR's merge state, narrowed to what the merge poller needs to classify landability.
  * `mergeStateStatus` uses GitHub's vocabulary (CLEAN | BLOCKED | BEHIND | DIRTY | UNSTABLE |
  * DRAFT | HAS_HOOKS | UNKNOWN). `failingChecks` is `-1` when the transport can't enumerate
