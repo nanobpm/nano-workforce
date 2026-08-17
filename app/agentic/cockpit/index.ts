@@ -30,6 +30,11 @@ export {
   supplyView,
 } from "./supply-view.ts";
 export {
+  type DerivedTranscriptDom,
+  deriveTranscript,
+  renderDerivedTranscript,
+} from "./transcript-derive.ts";
+export {
   type RenderTranscriptsOptions,
   renderTranscripts,
   replayTranscript,

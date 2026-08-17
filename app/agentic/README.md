@@ -50,6 +50,26 @@ H0 itself needs no migration.
   present as `?token=…`. When neither is set, the channel is **not mounted** (logged), so the app
   never exposes an unauthenticated upgrade.
 
+## Event-sourced transcripts (#251)
+
+The H3 transcript store (`db/migrations/024_agentic_transcript.sql`) is already **append-only and
+offset-keyed** — the log half of dsh's event-sourced-session pattern. `transcript-events.ts` adds the
+derivation half:
+
+- **Typed, merge-extensible event vocabulary** — `parseTranscriptEvent` is the **one** parser that
+  classifies each stored chunk into a typed `TranscriptEvent` (`message` / `tool-call` / `tool-result`
+  / `turn` / `step` / `lifecycle`, plus `stream-chunk` for raw terminal bytes retained **verbatim** for
+  byte-replay fidelity). A structured producer tags a chunk with the `nwfTranscriptEvent` marker;
+  anything else stays a raw `stream-chunk`. Authors extend the vocabulary additively with
+  `mergeTranscriptVocab` — never a second parser.
+- **One `deriveView()` fold** — every higher-level view (the cockpit's structured message/tool/turn
+  view in `cockpit/transcript-derive.ts`, and any future search / token-accounting / export consumer)
+  is a **derivation** of the single log: "the log IS the state". `transcript-events.drift.test.ts`
+  asserts exactly one parser (no consumer re-parses raw bytes).
+- **Replay-by-reseed / fork** — `transcript-fork.ts` seeds a **new** stream from an existing log up to
+  a chosen offset, so an exited session can be branched and replayed independently, offset-parity
+  preserved. Byte-replay and resume-from-offset (`transcript-read.ts`) are untouched.
+
 ## Invariants (ADR 0056)
 
 - **App-tier only** — never the engine. The Camunda-8 job protocol (worker⇄engine) is untouched;
