@@ -7,7 +7,7 @@
 // GitHub transport forced off so it is hermetic.
 import { test } from "node:test";
 import { assertEquals } from "#test-assert";
-import { parsePr, pollIncidentsImpl, repoEnvelopeVars, startMerge, submitPr } from "./service.ts";
+import { parsePr, pollIncidentsImpl, pollWaveGatesImpl, repoEnvelopeVars, startMerge, submitPr } from "./service.ts";
 
 function memTable(rows: any[], key: string) {
   return {
@@ -501,4 +501,108 @@ test("parsePr still resolves a well-formed prKey and PR URL", () => {
   assertEquals(parsePr("owner/repo#42")?.prKey, "owner/repo#42");
   assertEquals(parsePr("  owner/repo#42  ")?.number, 42);
   assertEquals(parsePr("https://github.com/owner/repo/pull/7")?.repo, "owner/repo");
+});
+
+// Red/green regression for the level-triggered wave-merge barrier (issue #262). The barrier is
+// armed (`plans.gate_wave = W`) at wave handoff, long BEFORE the token traverses the slow
+// `trial-merge` agent job and finally opens the `wait-wave-merged` subscription. The old
+// `pollWaveGates` was edge-triggered: the first pass that saw wave W's PRs merged cleared
+// `gate_wave` and published `wave-merged` EXACTLY ONCE. If that happened while the token was still
+// upstream (no open subscription), the message was dropped and — with `gate_wave` now null — never
+// republished, so the epic wedged forever once the token arrived. The fix reconciles the merged
+// state against the engine's OPEN-subscription state every pass, publishing only into an open
+// subscription and never clearing `gate_wave` optimistically.
+//
+// Stubs `/message-subscriptions/search` (keyed by processInstanceKey) so the subscription can be
+// toggled open between passes, and forces the GitHub transport off — the wave's PRs are tracked
+// `merged` rows, so `isDepMerged` resolves them from the DB with no network.
+function subscriptionFetch(open: Set<string>) {
+  return (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    const u = typeof url === "string" ? url : url.toString();
+    if (!u.endsWith("/message-subscriptions/search")) {
+      throw new Error(`unexpected fetch: ${u}`);
+    }
+    const body = JSON.parse(String(init?.body ?? "{}")) as {
+      filter?: { processInstanceKey?: string };
+    };
+    const pik = body.filter?.processInstanceKey ?? "";
+    const items = open.has(pik)
+      ? [{ messageName: "wave-merged", correlationKey: "owner/repo#67", messageSubscriptionState: "CREATED" }]
+      : [];
+    return Promise.resolve(
+      new Response(JSON.stringify({ items }), { status: 200, headers: { "content-type": "application/json" } }),
+    );
+  };
+}
+
+test("pollWaveGates is level-triggered: PRs merged before the token arrives never lose the wave-merged signal (#262)", async () => {
+  await withGithubOff(async () => {
+    const PLAN_KEY = "owner/repo#67";
+    const PI = "PI-13794";
+    // Wave 1 opened two PRs; both are already MERGED (tracked rows → isDepMerged resolves from DB).
+    const plan = {
+      plan_key: PLAN_KEY,
+      process_key: PI,
+      gate_wave: 1 as number | null,
+      updated_at: "t0",
+    };
+    const stores: Record<string, { rows: unknown[]; key: string }> = {
+      plans: { rows: [plan], key: "plan_key" },
+      plan_tasks: {
+        rows: [
+          { id: "owner/repo#67:a", plan_key: PLAN_KEY, wave: 1, status: "opened", pr_key: "owner/repo#68" },
+          { id: "owner/repo#67:b", plan_key: PLAN_KEY, wave: 1, status: "opened", pr_key: "owner/repo#69" },
+        ],
+        key: "id",
+      },
+      pull_requests: {
+        rows: [
+          { pr_key: "owner/repo#68", status: "merged" },
+          { pr_key: "owner/repo#69", status: "merged" },
+        ],
+        key: "pr_key",
+      },
+    };
+    const data = {
+      table: (name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key),
+    } as any;
+
+    const published: { name: string; correlationKey?: string }[] = [];
+    const engine = {
+      publishMessage: (input: { name: string; correlationKey?: string }) => {
+        published.push(input);
+        return Promise.resolve();
+      },
+    } as any;
+    const headers = { "content-type": "application/json" };
+
+    const openSubs = new Set<string>(); // token still upstream of wait-wave-merged → NO open subscription
+    const prevFetch = globalThis.fetch;
+
+    // Pass 1 — the losing ordering: wave 1's PRs are all merged, but the token is parked upstream on
+    // the slow `trial-merge` job, so there is no open `wait-wave-merged` subscription yet. The old
+    // single-shot barrier would publish-into-the-void and CLEAR `gate_wave`, stranding the epic.
+    globalThis.fetch = subscriptionFetch(openSubs) as typeof fetch;
+    try {
+      await pollWaveGatesImpl(data, engine, "", "http://engine/v2", headers);
+    } finally {
+      globalThis.fetch = prevFetch;
+    }
+    // The signal must NOT have been fired into the void, and the gate must remain armed (not stranded).
+    assertEquals(published.length, 0, "must not publish wave-merged with no open subscription");
+    assertEquals(plan.gate_wave, 1, "gate_wave must stay armed until the barrier is actually released");
+
+    // Pass 2 — the token has now advanced to `wait-wave-merged`, opening the subscription. The
+    // level-triggered barrier re-publishes and correlates, releasing the token into wave 2.
+    openSubs.add(PI);
+    globalThis.fetch = subscriptionFetch(openSubs) as typeof fetch;
+    try {
+      await pollWaveGatesImpl(data, engine, "", "http://engine/v2", headers);
+    } finally {
+      globalThis.fetch = prevFetch;
+    }
+    assertEquals(published.length, 1, "must publish wave-merged once the subscription is open");
+    assertEquals(published[0]?.name, "wave-merged");
+    assertEquals(published[0]?.correlationKey, PLAN_KEY);
+  });
 });
