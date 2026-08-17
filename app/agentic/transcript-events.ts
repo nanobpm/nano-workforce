@@ -190,7 +190,11 @@ export const CORE_TRANSCRIPT_VOCAB: TranscriptVocab = Object.freeze({
     if (name === undefined) return undefined;
     const event: ToolCallEvent = { kind: "tool-call", offset, name };
     const callId = str(body, "callId");
-    return callId !== undefined ? { ...event, callId, ...("args" in body ? { args: body.args } : {}) } : "args" in body ? { ...event, args: body.args } : event;
+    return {
+      ...event,
+      ...(callId !== undefined ? { callId } : {}),
+      ...("args" in body ? { args: body.args } : {}),
+    };
   },
   "tool-result": (body, offset) => {
     const ok = typeof body.ok === "boolean" ? body.ok : true;
@@ -457,7 +461,8 @@ function withResult(tool: DerivedTool, result: ToolResultEvent): DerivedTool {
  * to go from stored bytes to a derived view without ever touching a second parser.
  */
 export function deriveViewFromChunks(chunks: Iterable<StoredChunk>, vocab: TranscriptVocab = CORE_TRANSCRIPT_VOCAB): DerivedView {
-  const events: TranscriptEvent[] = [];
-  for (const entry of chunks) events.push(parseTranscriptEvent(entry, vocab));
-  return deriveView(events);
+  function* parsed(): Generator<TranscriptEvent> {
+    for (const entry of chunks) yield parseTranscriptEvent(entry, vocab);
+  }
+  return deriveView(parsed());
 }
