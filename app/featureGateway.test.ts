@@ -138,6 +138,25 @@ test("update touching only projection-irrelevant fields skips the read-back and 
   assertEquals(rows[0].list_bucket, "history");
 });
 
+test("a direct write of a projection output field forces reprojection and overrides the raw value", async () => {
+  const { data, rows } = memData();
+  rows.push({
+    feature_key: "o/r#bypass",
+    status: "running",
+    pr_key: null,
+    converge: 1,
+    auto_merge: 1,
+    stage: "Implementing",
+    stage_state: null,
+    list_bucket: "active",
+  });
+  // A caller tries to bypass derivation by writing the derived column directly. The gateway must NOT
+  // persist the raw value: it re-reads, recomputes from the merged inputs, and overrides it.
+  await featureRuns(data).update("o/r#bypass", { stage: "Done", list_bucket: "history" });
+  assertEquals(rows[0].stage, "Implementing");
+  assertEquals(rows[0].list_bucket, "active");
+});
+
 test("backfillFeatureStages stamps legacy terminal and live rows with helper-derived values", async () => {
   const { data, rows } = memData();
   // Legacy rows written before migration 039 → projection columns absent/NULL.

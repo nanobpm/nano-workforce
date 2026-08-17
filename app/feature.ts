@@ -286,11 +286,24 @@ const PROJECTION_INPUT_KEYS: readonly (keyof FeatureRun)[] = [
   "acknowledged_at",
 ];
 
-/** True when a patch changes at least one field the projection derives from — i.e. the projection must
- * be recomputed. A patch that touches only projection-irrelevant fields (e.g. `updated_at`) leaves the
- * stored projection correct, since the gateway is the sole write path (see `featureRuns`). */
+/** The feature_runs fields the projection WRITES. Included in the reproject trigger so a caller who
+ * writes a derived column directly (e.g. `stage`/`list_bucket`) can never bypass derivation: the
+ * gateway re-reads, recomputes, and OVERRIDES the raw value with the canonical derived one, keeping
+ * "the gateway is the one projection source" a true invariant. Must mirror `projectFeatureRun`'s keys. */
+const PROJECTION_OUTPUT_KEYS: readonly (keyof FeatureRun)[] = [
+  "stage",
+  "stage_state",
+  "stage_skipped",
+  "attention",
+  "list_bucket",
+];
+
+/** True when a patch changes at least one field the projection derives from OR one it writes — i.e. the
+ * projection must be recomputed. A patch touching only projection-irrelevant fields (e.g. `updated_at`)
+ * leaves the stored projection correct, since the gateway is the sole write path (see `featureRuns`); a
+ * patch that writes a derived column directly still forces a reproject so derivation can't be bypassed. */
 function patchAffectsProjection(patch: Partial<FeatureRun>): boolean {
-  return PROJECTION_INPUT_KEYS.some((k) => k in patch);
+  return PROJECTION_INPUT_KEYS.some((k) => k in patch) || PROJECTION_OUTPUT_KEYS.some((k) => k in patch);
 }
 
 /** Compute the write-time projection columns for a fully-merged feature_runs row. Centralised so the
@@ -325,8 +338,10 @@ function projectFeatureRun(row: Partial<FeatureRun>): Partial<FeatureRun> {
  * feature workers) all stay UNCHANGED and automatically get a correct, fresh projection. `update`
  * skips the read-back+reproject for a patch that touches no projection input (e.g. an `updated_at`-only
  * poller write), avoiding a needless `get` roundtrip — the stored projection is already correct since
- * this gateway is the sole write path. Every other method delegates straight through. This is the sole WRITE path to feature_runs (no raw SQL, no other
- * `data.table("feature_runs")` mutation — read-only direct reads in e2e tests notwithstanding), so
+ * this gateway is the sole write path. Every other method delegates straight through. This is the sole
+ * runtime/app-layer WRITE path to feature_runs (no app-code raw SQL, no other `data.table("feature_runs")`
+ * mutation — read-only direct reads in e2e tests, and forward-only data migrations such as
+ * `db/migrations/036_backfill_titles.sql`, notwithstanding), so
  * `stage`/`stage_state`/`stage_skipped`/`attention`/`list_bucket` are
  * always populated and correct for every row and every transition. */
 export const featureRuns = (data: DataLayer) => {
