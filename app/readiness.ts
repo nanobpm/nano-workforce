@@ -15,7 +15,7 @@
 // time from the typed env-contract (`credentialEnv` names a declared {@link EnvKey}; ADR 0004
 // pinned decision 2) and is redacted from every log line.
 import { isEnvKey, readEnv, readEnvOr } from "./contracts.ts";
-import { isoDuration } from "./reviewWait.ts";
+import { isoDuration, isoDurationToMs } from "./reviewWait.ts";
 
 /** The built-in readiness sources. `command` is the escape hatch that subsumes the long tail
  * (`gh`, `curl`, `docker manifest inspect`, a custom probe) — adding a first-class kind later is
@@ -393,6 +393,24 @@ export function readinessTimeout(
   const declared = probe.poll?.timeoutMs;
   if (typeof declared === "number" && declared >= 1) return msToIsoDuration(Math.trunc(declared));
   return isoDuration(readEnvOr("NANO_READINESS_POLL_TIMEOUT", DEFAULT_READINESS_TIMEOUT, env), DEFAULT_READINESS_TIMEOUT);
+}
+
+/** The effective gate budget in **milliseconds** — the ms twin of {@link readinessTimeout}, resolved
+ * by the SAME precedence (descriptor `poll.timeoutMs`, else `NANO_READINESS_POLL_TIMEOUT`, else the
+ * built-in default) and sharing its env key + default. The worker's local poll budget MUST use this
+ * rather than a hard-coded default: an operator who raises `NANO_READINESS_POLL_TIMEOUT` past the
+ * built-in 30m would otherwise stop the worker probing while the gate's engine timer keeps waiting —
+ * a window in which the artifact can go ready with nothing left to observe it, spuriously escalating
+ * the gate. The declared branch stays exact ms (the gate rounds it up to whole seconds for its ISO
+ * timer); the env branch parses through {@link isoDurationToMs}, the same grammar `readinessTimeout`
+ * validates with, so the two bounds can never drift. */
+export function readinessTimeoutMs(
+  probe: ReadinessProbe,
+  env: Record<string, string | undefined> = process.env,
+): number {
+  const declared = probe.poll?.timeoutMs;
+  if (typeof declared === "number" && declared >= 1) return Math.trunc(declared);
+  return isoDurationToMs(readEnvOr("NANO_READINESS_POLL_TIMEOUT", DEFAULT_READINESS_TIMEOUT, env), DEFAULT_READINESS_TIMEOUT);
 }
 
 // ── Default I/O implementation (Node) ───────────────────────────────────────────────────────────

@@ -24,6 +24,7 @@ import {
   parseProbe,
   probeOnce,
   type ReadinessProbe,
+  readinessTimeoutMs,
   redactTarget,
 } from "../../app/readiness.ts";
 import type { WorkerInputs, WorkerOutputs } from "../../nano-generated/worker-io.d.ts";
@@ -66,7 +67,10 @@ export async function pollUntilReady(deps: {
   log?: (msg: string) => void;
 }): Promise<ProbeResult> {
   const poll = effectivePoll(deps.probe.poll, deps.env);
-  const deadline = deps.now() + poll.timeoutMs;
+  // The local budget is the SAME bound as the gate's engine timer (`readinessTimeoutMs` mirrors
+  // `readinessTimeout`), so raising `NANO_READINESS_POLL_TIMEOUT` past the built-in default keeps
+  // the worker probing for the whole wait instead of going silent after 30m — the two never drift.
+  const deadline = deps.now() + readinessTimeoutMs(deps.probe, deps.env);
   const label = redactTarget(deps.probe);
   let attempt = 0;
   for (;;) {

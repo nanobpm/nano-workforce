@@ -8,6 +8,7 @@ import {
   clampNudgeMinutes,
   DEFAULT_REVIEW_NUDGE_MINUTES,
   DEFAULT_REVIEW_WAIT_TIMEOUT,
+  isoDurationToMs,
   MAX_REVIEW_NUDGE_MINUTES,
   reviewWaitTimeout,
 } from "./reviewWait.ts";
@@ -34,6 +35,24 @@ test("reviewWaitTimeout: a valid ISO-8601 duration is honoured and upper-cased",
 test("reviewWaitTimeout: a custom fallback is used when the value is invalid", () => {
   assertEquals(reviewWaitTimeout("nope", "PT10M"), "PT10M");
   assertEquals(reviewWaitTimeout(undefined, "PT10M"), "PT10M");
+});
+
+test("isoDurationToMs: converts each component and sums them", () => {
+  assertEquals(isoDurationToMs("PT1S", "PT0S"), 1000);
+  assertEquals(isoDurationToMs("PT45S", "PT0S"), 45_000);
+  assertEquals(isoDurationToMs("PT30M", "PT0S"), 1_800_000);
+  assertEquals(isoDurationToMs("PT2H", "PT0S"), 7_200_000);
+  assertEquals(isoDurationToMs("PT1H30M", "PT0S"), 5_400_000);
+  assertEquals(isoDurationToMs("P1D", "PT0S"), 86_400_000);
+  assertEquals(isoDurationToMs("P1DT2H", "PT0S"), 93_600_000);
+  assertEquals(isoDurationToMs("P1W", "PT0S"), 604_800_000);
+});
+
+test("isoDurationToMs: blank / absent / malformed → the (parsed) default", () => {
+  assertEquals(isoDurationToMs(undefined, "PT30M"), 1_800_000);
+  assertEquals(isoDurationToMs("", "PT30M"), 1_800_000);
+  assertEquals(isoDurationToMs("20m", "PT5M"), 300_000); // missing leading P → default
+  assertEquals(isoDurationToMs("garbage", "PT5M"), 300_000);
 });
 
 test("clampNudgeMinutes: blank / absent / non-numeric → fallback", () => {

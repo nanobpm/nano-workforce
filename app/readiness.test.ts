@@ -25,6 +25,7 @@ import {
   probeOnce,
   type ProbeExec,
   readinessTimeout,
+  readinessTimeoutMs,
   redactString,
   redactTarget,
 } from "./readiness.ts";
@@ -218,6 +219,19 @@ test("readinessTimeout: derives from poll.timeoutMs, else the env default, else 
   assertEquals(
     readinessTimeout(parseProbe({ kind: "http", target: "x" }), { NANO_READINESS_POLL_TIMEOUT: "PT5M" }),
     "PT5M",
+  );
+});
+
+test("readinessTimeoutMs: the ms twin of readinessTimeout — same precedence, no drift with the gate timer", () => {
+  // Declared budget is taken verbatim in ms (the gate rounds it up to whole seconds for its ISO timer).
+  assertEquals(readinessTimeoutMs(parseProbe({ kind: "http", target: "x", poll: { timeoutMs: 60000 } }), {}), 60000);
+  // Omitted + no env → the built-in default (30m), matching readinessTimeout's PT30M.
+  assertEquals(readinessTimeoutMs(parseProbe({ kind: "http", target: "x" }), {}), 1_800_000);
+  // Omitted + env → the env budget in ms. Regression: this used to fall back to the hard-coded 30m,
+  // stranding the worker while the gate timer waited the full env budget.
+  assertEquals(
+    readinessTimeoutMs(parseProbe({ kind: "http", target: "x" }), { NANO_READINESS_POLL_TIMEOUT: "PT2H" }),
+    7_200_000,
   );
 });
 

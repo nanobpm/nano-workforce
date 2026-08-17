@@ -136,6 +136,32 @@ test("pollUntilReady: the poll cadence reads NANO_READINESS_POLL_EVERY_MS from t
   assert(clock.now() > 0, "the injected env's 25ms cadence stepped the clock (ambient default would bail at 0)");
 });
 
+test("pollUntilReady: an omitted poll.timeoutMs takes the budget from NANO_READINESS_POLL_TIMEOUT, not the built-in 30m", async () => {
+  const clock = fakeClock();
+  // Regression for the worker/gate timeout drift: the gate's engine timer derives from
+  // NANO_READINESS_POLL_TIMEOUT when the descriptor omits poll.timeoutMs, but the worker used to
+  // fall back to the hard-coded 30m default. With a 45m env budget and no descriptor timeout, the
+  // never-green probe must keep polling PAST 30m (up to the 45m the gate itself waits) so it can't
+  // go silent while the gate is still waiting. everyMs is clamped to MAX_EVERY_MS (5m), so ~9 waits
+  // land the clock beyond 30m only if the env budget — not the 30m default — is in force.
+  const exec = execReturning([{ status: 503, body: "" }]);
+  const THIRTY_MIN = 30 * 60_000;
+  const res = await pollUntilReady({
+    probe: httpProbe({ everyMs: 5 * 60_000, backoff: "fixed" }),
+    gateKey: "gate-timeout-env",
+    exec,
+    env: { NANO_READINESS_POLL_TIMEOUT: "PT45M" },
+    now: clock.now,
+    wait: clock.wait,
+    publish: async () => {},
+  });
+  assert(!res.ready, "the never-green probe exhausted its budget");
+  assert(
+    clock.now() > THIRTY_MIN,
+    `the worker honored the 45m env budget (probed past 30m); stopped at ${clock.now()}ms`,
+  );
+});
+
 test("READINESS_READY_MESSAGE is the name the gate correlates", () => {
   assertEquals(READINESS_READY_MESSAGE, "readiness-ready");
 });
