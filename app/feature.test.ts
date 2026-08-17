@@ -239,6 +239,30 @@ test("startFeature: a settled run is restarted in place (status reset, pr/outcom
   assertEquals(row.process_key, "PI-2");
 });
 
+test("startFeature: an in-place restart clears a stale acknowledged_at (re-earn the tick-off)", async () => {
+  const stores = {
+    feature_runs: {
+      rows: [
+        {
+          feature_key: "owner/repo#42",
+          status: "merged",
+          process_key: "PI-OLD",
+          pr_key: "owner/repo#100",
+          acknowledged_at: "2024-01-01T00:00:00Z",
+          converge: 1,
+          auto_merge: 1,
+        },
+      ],
+      key: "feature_key",
+    },
+  };
+  const engine = { createInstance: () => Promise.resolve({ processInstanceKey: "PI-3" }) } as any;
+  await startFeature(memData(stores), engine, PARSED, "main", true, true);
+  const row = stores.feature_runs.rows[0];
+  assertEquals(row.status, "running");
+  assertEquals(row.acknowledged_at, null);
+});
+
 // Issue #248: the human-readable identity for the feature grids. Every start persists a non-blank
 // `title` — the fetched issue title when available, else the `owner/repo#N` key — on BOTH the insert
 // (new run) and update (in-place restart) paths, so the title-led grid never renders a blank cell.

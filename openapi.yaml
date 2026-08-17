@@ -1542,6 +1542,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/MessageResult"
+        "409":
+          description: The feature run is not terminal, so it cannot be ticked off yet.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResult"
   /hooks/agent-complete:
     post:
       operationId: agentCompleteEscalation

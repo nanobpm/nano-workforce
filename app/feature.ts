@@ -301,8 +301,9 @@ function projectFeatureRun(row: Partial<FeatureRun>): Partial<FeatureRun> {
  * `delivery_label`-style write-time projection, but hoisted to the single gateway so the many scattered
  * status writers (startFeature, the service pollers/reconcilers, the acknowledge operations, and the
  * feature workers) all stay UNCHANGED and automatically get a correct, fresh projection. Every other
- * method delegates straight through. This is the sole write path to feature_runs (no raw SQL, no other
- * `data.table("feature_runs")`), so `stage`/`stage_state`/`stage_skipped`/`attention`/`list_bucket` are
+ * method delegates straight through. This is the sole WRITE path to feature_runs (no raw SQL, no other
+ * `data.table("feature_runs")` mutation — read-only direct reads in e2e tests notwithstanding), so
+ * `stage`/`stage_state`/`stage_skipped`/`attention`/`list_bucket` are
  * always populated and correct for every row and every transition. */
 export const featureRuns = (data: DataLayer) => {
   const table = data.table<FeatureRun>("feature_runs", "feature_key");
@@ -336,6 +337,11 @@ export async function backfillFeatureStages(data: DataLayer): Promise<number> {
   const rows = await table.all();
   let stamped = 0;
   for (const row of rows) {
+    // Only touch rows the projection has never reached — a legacy pre-039 row whose `stage` column is
+    // still NULL. The gateway keeps every write fresh, so an already-projected row needs no re-write;
+    // skipping them avoids a full-table rewrite on every boot and keeps `stamped` an honest count of
+    // rows actually backfilled (not the total row count).
+    if (row.stage != null) continue;
     // An empty-patch update flows through the projecting proxy: it re-reads the row, recomputes the
     // projection from the row's own stored fields, and writes it — no field values change.
     await table.update(row.feature_key, {});
@@ -398,6 +404,11 @@ export async function startFeature(
       auto_merge: autoMerge ? 1 : 0,
       outcome: null,
       delivery_label: null,
+      // Clear the operator tick-off so a re-dispatched run is NOT silently dropped into History when
+      // it next settles: a stale `acknowledged_at` from the prior terminal run would make
+      // `deriveListBucket` flip the row to 'history' the moment it completes again, skipping the
+      // intended operator dismissal. A fresh run must re-earn its tick-off.
+      acknowledged_at: null,
       escalation_question: null,
       escalation_user_task_key: null,
       blocked_user_task_key: null,

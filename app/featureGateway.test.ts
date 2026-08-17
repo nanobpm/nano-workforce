@@ -120,3 +120,19 @@ test("backfillFeatureStages stamps legacy terminal and live rows with helper-der
   assertEquals(live.stage_skipped, "Converging Merging");
   assertEquals(live.list_bucket, "active");
 });
+
+test("backfillFeatureStages skips already-projected rows and counts only rows it stamps", async () => {
+  const { data, rows } = memData();
+  // One legacy row (no projection) + one already-projected row (gateway kept it fresh).
+  rows.push({ feature_key: "o/r#legacy", status: "merged", converge: 1, auto_merge: 1, acknowledged_at: null });
+  rows.push({ feature_key: "o/r#fresh", status: "merged", converge: 1, auto_merge: 1, acknowledged_at: null, stage: "Done", stage_state: "ok", stage_skipped: "", attention: null, list_bucket: "active", updated_at: "0" });
+
+  const stamped = await backfillFeatureStages(data);
+  // Only the legacy row is stamped; the already-projected row is skipped.
+  assertEquals(stamped, 1);
+  const legacy = rows.find((r) => r.feature_key === "o/r#legacy");
+  assertEquals(legacy.stage, "Done");
+  // The already-projected row was not re-written (its sentinel updated_at is untouched).
+  const fresh = rows.find((r) => r.feature_key === "o/r#fresh");
+  assertEquals(fresh.updated_at, "0");
+});

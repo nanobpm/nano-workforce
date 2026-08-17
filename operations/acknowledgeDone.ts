@@ -3,7 +3,8 @@
 // run (Done ✓ / Done ✕) directly from the Feature / Overview pages so it drops out of the primary
 // Active list into History. It is the DONE twin of `acknowledgeBlocked` — but a terminal run is NOT
 // parked at a user task, so this op does NOT complete a user task and touches no engine/ledger: it
-// simply stamps `acknowledged_at` on the row via the feature_runs gateway.
+// simply stamps `acknowledged_at` on the row via the feature_runs gateway. It rejects (409) a run that
+// is not yet truly terminal, so it can never pre-seed the tick-off on a still-live run.
 //
 // The gateway (app/feature.ts) recomputes `list_bucket` on that write — a terminal row with
 // `acknowledged_at` set flips to 'history' — so this op NEVER hand-sets `list_bucket` (or any other
@@ -11,6 +12,7 @@
 // the timestamp and keeps the row in History.
 
 import { featureRuns } from "../app/feature.ts";
+import { STAGE_DONE_STATUSES } from "../app/stage.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
 
 const str = (v: unknown): string => (typeof v === "string" ? v.trim() : "");
@@ -29,6 +31,15 @@ export default defineOperation("acknowledgeDone", async ({ body }, app) => {
   if (!run) {
     app.log.warn("acknowledge-done: no such feature run", { featureKey });
     return { status: 404, body: { ok: false, error: "no such feature run" } };
+  }
+
+  // Guard: only a TRULY-terminal run (a `Done`-stage status — the same set `deriveListBucket` moves to
+  // History) may be ticked off. Acknowledging a still-live run (e.g. `running`/`opened`/`converging`)
+  // would pre-seed `acknowledged_at`, so the moment it later settles `deriveListBucket` would drop it
+  // straight into History, skipping the operator tick-off this op exists to require.
+  if (!STAGE_DONE_STATUSES.includes(run.status)) {
+    app.log.warn("acknowledge-done rejected: run is not terminal", { featureKey, status: run.status });
+    return { status: 409, body: { ok: false, error: "feature run is not terminal" } };
   }
 
   // Stamp the dismissal. The gateway recomputes `list_bucket` from the merged row (→ 'history' for a

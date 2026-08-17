@@ -89,3 +89,20 @@ test("acknowledge-done: no such feature run → 404", async () => {
   assertEquals(res.status, 404);
   assertEquals(res.body.ok, false);
 });
+
+test("acknowledge-done: a non-terminal run → 409, no acknowledged_at stamped", async () => {
+  const { app, rows } = memApp([{ feature_key: "o/r#live", status: "running", converge: 1, auto_merge: 1, acknowledged_at: null }]);
+  await featureRuns(app.data).update("o/r#live", { status: "running" });
+  const res = await call(app, { feature_key: "o/r#live" });
+  assertEquals(res.status, 409);
+  assertEquals(res.body.ok, false);
+  assertEquals(rows[0].acknowledged_at, null);
+  assertEquals(rows[0].list_bucket, "active");
+});
+
+test("acknowledge-done: a converging (redispatch-terminal but live) run → 409", async () => {
+  const { app, rows } = memApp([{ feature_key: "o/r#conv", status: "converging", converge: 1, auto_merge: 1, acknowledged_at: null }]);
+  const res = await call(app, { feature_key: "o/r#conv" });
+  assertEquals(res.status, 409);
+  assertEquals(rows[0].acknowledged_at, null);
+});

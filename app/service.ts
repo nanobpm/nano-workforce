@@ -1662,8 +1662,11 @@ export async function pollOnce(
   // gateway keeps every future write fresh, so this only needs to run once per process and is safe to
   // re-run (it re-derives from each row's own stored fields).
   if (!featureStagesBackfilled) {
-    featureStagesBackfilled = true;
+    // Only arm the one-shot guard AFTER a successful backfill: setting it first would swallow a
+    // transient failure (e.g. a DB blip) and leave legacy rows unprojected forever, since every later
+    // pass would skip. On a throw the guard stays false and the next `pollOnce` retries.
     await backfillFeatureStages(data);
+    featureStagesBackfilled = true;
   }
   await pollReviews(data, engine, token);
   await pollMerges(data, engine, token);
