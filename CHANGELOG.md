@@ -1,3 +1,10 @@
+# [0.79.0](https://github.com/nanobpm/nano-workforce/compare/v0.78.0...v0.79.0) (2026-08-17)
+
+
+### Features
+
+* **agentic:** event-sourced transcripts — typed vocabulary + derive fold + replay-by-fork ([#251](https://github.com/nanobpm/nano-workforce/issues/251)) ([#252](https://github.com/nanobpm/nano-workforce/issues/252)) ([afa7190](https://github.com/nanobpm/nano-workforce/commit/afa7190db2c19e088ae3fb058a2b43d72f54a8df)), closes [146/#222](https://github.com/nanobpm/nano-workforce/issues/222)
+
 # [0.78.0](https://github.com/nanobpm/nano-workforce/compare/v0.77.0...v0.78.0) (2026-08-17)
 
 
