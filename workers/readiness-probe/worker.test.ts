@@ -59,6 +59,86 @@ test("pollUntilReady: publishes readiness-ready once and returns ready when a pr
   assertEquals(published.length, 1, "exactly one readiness message was published");
 });
 
+test("pollUntilReady: forwards a matcher's bind through publish into the message variables (#274 Gap B)", async () => {
+  // A capability probe resolves a version; its bind must flow through publish so the gate can surface
+  // resolvedArtifact as an output. The gh-api stub returns a release whose provenance carries #274.
+  const clock = fakeClock();
+  const published: Array<{ detail: string; bind?: Record<string, string> }> = [];
+  const payload = JSON.stringify([{ tag_name: "@nanobpm/urban@0.54.0", body: "## Provenance\n- #274\n" }]);
+  const exec: ProbeExec = {
+    async httpGet() {
+      return { status: 0, body: "" };
+    },
+    async run(): Promise<CommandResult> {
+      return { code: 0, stdout: payload, stderr: "" };
+    },
+  };
+  const res = await pollUntilReady({
+    probe: parseProbe({
+      kind: "capability",
+      target: "github-releases:nanobpm/nano-ide",
+      match: { capabilityRef: "nano-ide#274", package: "@nanobpm/urban" },
+      poll: { everyMs: 5, timeoutMs: 5000, backoff: "fixed" },
+    }),
+    gateKey: "gate-cap",
+    exec,
+    env: {},
+    now: clock.now,
+    wait: clock.wait,
+    publish: async (detail, bind) => {
+      published.push({ detail, bind });
+    },
+  });
+  assert(res.ready, "the capability edge resolved");
+  assertEquals(published.length, 1, "exactly one readiness message was published");
+  assertEquals(published[0]?.bind?.resolvedArtifact, "@nanobpm/urban@0.54.0", "the resolved artifact flowed through the bind");
+});
+
+test("pollUntilReady: the gated fallback fires ONCE at budget exhaustion and can still resolve+publish", async () => {
+  // Deterministic provenance never resolves (no matching release), so the loop exhausts its budget —
+  // the gate boundary. The fallback thunk then verifies empirically and publishes a bound version.
+  const clock = fakeClock();
+  const published: Array<{ bind?: Record<string, string> }> = [];
+  let fallbackCalls = 0;
+  const res = await pollUntilReady({
+    probe: httpProbe({ everyMs: 5, timeoutMs: 30, backoff: "fixed" }),
+    gateKey: "gate-fallback",
+    exec: execReturning([{ status: 503, body: "" }]),
+    env: {},
+    now: clock.now,
+    wait: clock.wait,
+    publish: async (_detail, bind) => {
+      published.push({ bind });
+    },
+    fallback: async () => {
+      fallbackCalls += 1;
+      return { ready: true, detail: "verified empirically", bind: { resolvedArtifact: "@nanobpm/urban@0.60.0" } };
+    },
+  });
+  assert(res.ready, "the boundary fallback resolved the edge");
+  assertEquals(fallbackCalls, 1, "the fallback fires exactly once, at the boundary — never per attempt");
+  assertEquals(published[0]?.bind?.resolvedArtifact, "@nanobpm/urban@0.60.0");
+});
+
+test("pollUntilReady: a fallback that does not resolve leaves the not-ready outcome for the engine timer", async () => {
+  const clock = fakeClock();
+  let publishes = 0;
+  const res = await pollUntilReady({
+    probe: httpProbe({ everyMs: 5, timeoutMs: 30, backoff: "fixed" }),
+    gateKey: "gate-fallback-noop",
+    exec: execReturning([{ status: 503, body: "" }]),
+    env: {},
+    now: clock.now,
+    wait: clock.wait,
+    publish: async () => {
+      publishes += 1;
+    },
+    fallback: async () => ({ ready: false, detail: "still nothing" }),
+  });
+  assert(!res.ready, "an inconclusive fallback keeps the wait bounded by the engine timer");
+  assertEquals(publishes, 0, "no readiness signal is published when the fallback does not resolve");
+});
+
 test("pollUntilReady: a never-green probe exhausts its budget and returns not-ready WITHOUT publishing", async () => {
   const clock = fakeClock();
   let publishes = 0;

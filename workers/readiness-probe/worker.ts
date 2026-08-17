@@ -16,6 +16,7 @@ import { readEnvOr } from "../../app/contracts.ts";
 import {
   DEFAULT_EVERY_MS,
   defaultProbeExec,
+  makeCapabilityFallback,
   nextDelay,
   normalizePoll,
   type ProbeExec,
@@ -64,7 +65,12 @@ export async function pollUntilReady(deps: {
   env: Record<string, string | undefined>;
   now: () => number;
   wait: (ms: number) => Promise<void>;
-  publish: (detail: string) => Promise<void>;
+  publish: (detail: string, bind?: Record<string, string>) => Promise<void>;
+  /** An OPTIONAL last-attempt thunk run ONCE at the gate boundary (local budget exhausted) before
+   * giving up — the seam for the gated empirical fallback (decision 5). A ready result is published
+   * (with its bind) and returned; anything else keeps the not-ready outcome so the engine timer
+   * bounds the wait as usual. Kept generic so the loop stays kind-agnostic. */
+  fallback?: () => Promise<ProbeResult | null>;
   log?: (msg: string) => void;
 }): Promise<ProbeResult> {
   const poll = effectivePoll(deps.probe.poll, deps.env);
@@ -84,12 +90,21 @@ export async function pollUntilReady(deps: {
     }));
     deps.log?.(`readiness probe ${label} attempt ${attempt + 1}: ${res.detail}`);
     if (res.ready) {
-      await deps.publish(res.detail);
+      await deps.publish(res.detail, res.bind);
       return res;
     }
     attempt += 1;
     const wait = nextDelay(attempt, poll);
     if (deps.now() + wait >= deadline) {
+      // The gate boundary: the deterministic poll is exhausted. Give the gated fallback (if any) ONE
+      // empirical attempt before conceding to the engine timer — a capability provenance under-reports
+      // can still resolve here, exactly once, never per unrelated release.
+      const settled = deps.fallback ? await deps.fallback().catch(() => null) : null;
+      if (settled?.ready) {
+        deps.log?.(`readiness probe ${label} fallback: ${settled.detail}`);
+        await deps.publish(settled.detail, settled.bind);
+        return settled;
+      }
       return { ready: false, detail: "probe budget exhausted; engine timer bounds the wait" };
     }
     await deps.wait(wait);
@@ -123,24 +138,30 @@ export function readGateVars(vars: { gateKey?: unknown; probeTimeout?: unknown }
 const handler: AppJobHandler<In, Out> = async (job, app) => {
   const probe = parseProbe(job.variables.probe);
   const { gateKey, probeTimeout } = readGateVars(job.variables);
+  const exec = defaultProbeExec();
   const result = await pollUntilReady({
     probe,
     gateKey,
     probeTimeout,
-    exec: defaultProbeExec(),
+    exec,
     env: process.env,
     now: () => Date.now(),
     wait: sleep,
-    publish: async (detail) => {
+    // The gated empirical fallback (decision 5) — a no-op for every kind but a `capability` probe
+    // that declares a `verifyCommand`, so the deterministic provenance lookup stays the default.
+    fallback: makeCapabilityFallback(probe, exec, process.env),
+    publish: async (detail, bind) => {
       await app.engine.publishMessage({
         name: READINESS_READY_MESSAGE,
         correlationKey: gateKey,
-        variables: { ready: true, detail },
+        // `bind` is the kind-agnostic emit primitive (#274 Gap B): forward whatever the matcher
+        // discovered (e.g. `resolvedArtifact`) into the message so the gate surfaces it as output.
+        variables: { ready: true, detail, ...(bind ?? {}) },
       });
     },
     log: (msg) => app.log.info(msg),
   });
-  return { ready: result.ready, detail: result.detail };
+  return { ready: result.ready, detail: result.detail, ...(result.bind ?? {}) };
 };
 
 export default handler;
