@@ -113,7 +113,7 @@
           },
           {
             "label": "Dismiss",
-            "confirm": "Tick off this finished run? It moves from Active to History.",
+            "confirm": "Tick off this finished run? It acknowledges the run as done and files it under History.",
             "showWhenField": "stage_state",
             "action": {
               "path": "/app/api/actions/acknowledge-done",
