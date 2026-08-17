@@ -1,3 +1,10 @@
+# [0.81.0](https://github.com/nanobpm/nano-workforce/compare/v0.80.0...v0.81.0) (2026-08-17)
+
+
+### Features
+
+* durable artifact-readiness wait-gate primitive (ADR 0001 §2) ([#260](https://github.com/nanobpm/nano-workforce/issues/260)) ([e787488](https://github.com/nanobpm/nano-workforce/commit/e787488c074b9e4e44946a4144b814b34caffe57)), closes [#258](https://github.com/nanobpm/nano-workforce/issues/258) [#259](https://github.com/nanobpm/nano-workforce/issues/259) [#258](https://github.com/nanobpm/nano-workforce/issues/258)
+
 # [0.80.0](https://github.com/nanobpm/nano-workforce/compare/v0.79.0...v0.80.0) (2026-08-17)
 
 
