@@ -35,8 +35,13 @@
  * single derive fold is portable across both hosts. This is the one canonical UTF-8 byte-length
  * implementation the transcript plane derives from (reused by `transcript-read.ts`).
  */
+let cachedTextEncoder: TextEncoder | undefined;
 export function utf8ByteLength(text: string): number {
-  return typeof Buffer !== "undefined" ? Buffer.byteLength(text, "utf8") : new TextEncoder().encode(text).length;
+  if (typeof Buffer !== "undefined") return Buffer.byteLength(text, "utf8");
+  // Cache one TextEncoder in the browser hot path (folding many stream-chunk events) to avoid
+  // allocating a new encoder — and the GC pressure it creates — on every call.
+  cachedTextEncoder ??= new TextEncoder();
+  return cachedTextEncoder.encode(text).length;
 }
 
 /**

@@ -31,7 +31,13 @@ const PARSER_MODULE = join(AGENTIC_DIR, "transcript-events.ts");
 test("the transcript-event marker literal is DEFINED in exactly one module (no second parser)", () => {
   // Consumers reference the marker via the imported `TRANSCRIPT_EVENT_MARKER` identifier; only the ONE
   // parser embeds the marker's string literal. A second module hardcoding it would be a second parser.
-  const owners = sourceFiles(AGENTIC_DIR).filter((path) => readFileSync(path, "utf8").includes(`"${TRANSCRIPT_EVENT_MARKER}"`));
+  // Match every quote form (double, single, backtick) so a second parser can't bypass the guard by
+  // hardcoding the marker in a different literal style.
+  const quotedMarkerForms = ['"', "'", "`"].map((q) => `${q}${TRANSCRIPT_EVENT_MARKER}${q}`);
+  const owners = sourceFiles(AGENTIC_DIR).filter((path) => {
+    const src = readFileSync(path, "utf8");
+    return quotedMarkerForms.some((literal) => src.includes(literal));
+  });
   assertEquals(owners, [PARSER_MODULE]);
 });
 
