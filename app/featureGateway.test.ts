@@ -100,6 +100,44 @@ test("setting acknowledged_at on a terminal row flips list_bucket to 'history'",
   assertEquals(rows[0].stage, "Done");
 });
 
+test("update touching only projection-irrelevant fields skips the read-back and reproject", async () => {
+  const { data, rows } = memData();
+  rows.push({
+    feature_key: "o/r#skip",
+    status: "merged",
+    converge: 1,
+    auto_merge: 1,
+    acknowledged_at: null,
+    stage: "Done",
+    stage_state: "ok",
+    stage_skipped: "",
+    attention: null,
+    list_bucket: "active",
+  });
+  // Count get() calls to prove the projection-irrelevant path does no read-back roundtrip.
+  let gets = 0;
+  const raw = (data as any).table;
+  (data as any).table = (n: string, pk?: string) => {
+    const t = raw(n, pk);
+    const origGet = t.get;
+    t.get = async (id: any) => {
+      gets++;
+      return origGet.call(t, id);
+    };
+    return t;
+  };
+  await featureRuns(data).update("o/r#skip", { updated_at: "2024-06-01T00:00:00Z" });
+  assertEquals(gets, 0);
+  assertEquals(rows[0].updated_at, "2024-06-01T00:00:00Z");
+  // Untouched projection stays as stored.
+  assertEquals(rows[0].list_bucket, "active");
+
+  // A projection-input change (acknowledged_at) DOES read back and reproject.
+  await featureRuns(data).update("o/r#skip", { acknowledged_at: "2024-06-01T00:00:00Z" });
+  assertEquals(gets, 1);
+  assertEquals(rows[0].list_bucket, "history");
+});
+
 test("backfillFeatureStages stamps legacy terminal and live rows with helper-derived values", async () => {
   const { data, rows } = memData();
   // Legacy rows written before migration 039 → projection columns absent/NULL.

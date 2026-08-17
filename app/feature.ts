@@ -271,6 +271,28 @@ export function deriveFeatureBlockedPatch(
   return Object.keys(patch).length > 0 ? patch : null;
 }
 
+/** The feature_runs fields the projection reads. A patch touching none of these cannot change the
+ * derived `stage`/`stage_state`/`stage_skipped`/`attention`/`list_bucket`, so the gateway can skip the
+ * read-back+reproject for it (see the `update` proxy). Kept adjacent to `projectFeatureRun` so the two
+ * stay in lockstep — every field `projectFeatureRun` reads MUST appear here. */
+const PROJECTION_INPUT_KEYS: readonly (keyof FeatureRun)[] = [
+  "status",
+  "pr_key",
+  "converge",
+  "auto_merge",
+  "escalation_question",
+  "escalation_user_task_key",
+  "blocked_user_task_key",
+  "acknowledged_at",
+];
+
+/** True when a patch changes at least one field the projection derives from — i.e. the projection must
+ * be recomputed. A patch that touches only projection-irrelevant fields (e.g. `updated_at`) leaves the
+ * stored projection correct, since the gateway is the sole write path (see `featureRuns`). */
+function patchAffectsProjection(patch: Partial<FeatureRun>): boolean {
+  return PROJECTION_INPUT_KEYS.some((k) => k in patch);
+}
+
 /** Compute the write-time projection columns for a fully-merged feature_runs row. Centralised so the
  * gateway is the ONE place `deriveStage` / `deriveListBucket` are applied — the page, SQL, pollers and
  * workers never re-derive the mapping (AGENTS.md "derivation over duplication"). */
@@ -300,8 +322,10 @@ function projectFeatureRun(row: Partial<FeatureRun>): Partial<FeatureRun> {
  * then recompute the projection from that post-write field set and write it alongside — exactly the
  * `delivery_label`-style write-time projection, but hoisted to the single gateway so the many scattered
  * status writers (startFeature, the service pollers/reconcilers, the acknowledge operations, and the
- * feature workers) all stay UNCHANGED and automatically get a correct, fresh projection. Every other
- * method delegates straight through. This is the sole WRITE path to feature_runs (no raw SQL, no other
+ * feature workers) all stay UNCHANGED and automatically get a correct, fresh projection. `update`
+ * skips the read-back+reproject for a patch that touches no projection input (e.g. an `updated_at`-only
+ * poller write), avoiding a needless `get` roundtrip — the stored projection is already correct since
+ * this gateway is the sole write path. Every other method delegates straight through. This is the sole WRITE path to feature_runs (no raw SQL, no other
  * `data.table("feature_runs")` mutation — read-only direct reads in e2e tests notwithstanding), so
  * `stage`/`stage_state`/`stage_skipped`/`attention`/`list_bucket` are
  * always populated and correct for every row and every transition. */
@@ -314,6 +338,10 @@ export const featureRuns = (data: DataLayer) => {
       }
       if (prop === "update") {
         return async (id: unknown, patch: Partial<FeatureRun>) => {
+          // Only re-read + reproject when the patch changes a projection input. A projection-irrelevant
+          // patch (e.g. an `updated_at`-only poller write) leaves the stored projection correct — the
+          // gateway is the sole write path — so skip the extra `get` roundtrip and delegate straight.
+          if (!patchAffectsProjection(patch)) return target.update(id, patch);
           const existing = await target.get(id);
           const merged: Partial<FeatureRun> = { ...existing, ...patch };
           return target.update(id, { ...patch, ...projectFeatureRun(merged) });
@@ -342,9 +370,10 @@ export async function backfillFeatureStages(data: DataLayer): Promise<number> {
     // skipping them avoids a full-table rewrite on every boot and keeps `stamped` an honest count of
     // rows actually backfilled (not the total row count).
     if (row.stage != null) continue;
-    // An empty-patch update flows through the projecting proxy: it re-reads the row, recomputes the
-    // projection from the row's own stored fields, and writes it — no field values change.
-    await table.update(row.feature_key, {});
+    // Re-derive the projection from the legacy row's own stored fields and write it. (An empty patch
+    // would now short-circuit the projecting proxy — it only reprojects on a projection-input change —
+    // so backfill projects explicitly rather than relying on an empty-patch reproject.)
+    await table.update(row.feature_key, projectFeatureRun(row));
     stamped++;
   }
   return stamped;
