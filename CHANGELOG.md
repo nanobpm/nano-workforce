@@ -1,3 +1,10 @@
+# [0.83.0](https://github.com/nanobpm/nano-workforce/compare/v0.82.1...v0.83.0) (2026-08-17)
+
+
+### Features
+
+* **feature-view:** release intent-first pipeline view with stage chips ([0342edb](https://github.com/nanobpm/nano-workforce/commit/0342edbf67372450d6c499c1d39dc042e8dda342)), closes [#267](https://github.com/nanobpm/nano-workforce/issues/267) [#266](https://github.com/nanobpm/nano-workforce/issues/266)
+
 ## [0.82.1](https://github.com/nanobpm/nano-workforce/compare/v0.82.0...v0.82.1) (2026-08-17)
 
 
