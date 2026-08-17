@@ -43,7 +43,9 @@ export interface ForkTranscriptOptions {
   /**
    * Allow reseeding into a target that already exists. Off by default: forking onto a populated stream
    * would interleave two logs' bytes and defeat offset-parity, so we refuse rather than clobber. When
-   * on, seeding is still idempotent (offset-keyed), so re-running the same fork is a safe no-op.
+   * on, seeding is still idempotent (offset-keyed), so re-running the SAME fork is a safe no-op — but
+   * the existing target must already hold exactly this seed prefix (same offsets, same chunk bytes,
+   * same lifecycle); a target that diverges from the prefix throws rather than silently interleaving.
    */
   readonly allowExisting?: boolean;
 }
@@ -73,8 +75,9 @@ export interface ForkResult {
  * and safe to re-run. The branch is fully independent of its source thereafter: appending to either
  * stream never affects the other.
  *
- * Throws {@link TranscriptForkError} when the source has no transcript, or when the target already
- * exists and `allowExisting` is not set.
+ * Throws {@link TranscriptForkError} when the source has no transcript, when the target already
+ * exists and `allowExisting` is not set, or when `allowExisting` is set but the existing target does
+ * not already match the reseed prefix exactly (divergent chunk bytes/offsets or a different lifecycle).
  */
 export function forkTranscript(
   store: TranscriptStore,
@@ -89,7 +92,8 @@ export function forkTranscript(
   if (sourceMeta === undefined) {
     throw new TranscriptForkError(source, target, `source stream "${source}" has no transcript to fork`);
   }
-  if (!options.allowExisting && store.get(target) !== undefined) {
+  const existing = store.get(target);
+  if (existing !== undefined && !options.allowExisting) {
     throw new TranscriptForkError(source, target, `target stream "${target}" already exists (pass allowExisting to reseed it)`);
   }
 
@@ -98,6 +102,33 @@ export function forkTranscript(
   const chunks: TranscriptChunk[] = store
     .read(source)
     .filter((c) => through === undefined || c.offset <= through);
+
+  // Reseeding onto an EXISTING target (allowExisting) is only safe when that target already holds
+  // exactly the prefix we are about to seed. `record()` is offset-keyed and idempotent, so it silently
+  // no-ops any offset already present — if the existing chunk at that offset differs (or the target
+  // carries offsets outside this prefix, or a different lifecycle), the reseed would leave a stream
+  // that is a MIXTURE of the prior data and the seed, breaking the documented offset-parity invariant.
+  // Validate the overlap before writing and refuse rather than clobber/interleave.
+  if (existing !== undefined) {
+    if (existing.lifecycle !== lifecycle) {
+      throw new TranscriptForkError(
+        source,
+        target,
+        `target stream "${target}" already exists with lifecycle "${existing.lifecycle}", cannot reseed as "${lifecycle}"`,
+      );
+    }
+    const seedByOffset = new Map(chunks.map((c) => [c.offset, c.chunk]));
+    for (const c of store.read(target)) {
+      const expected = seedByOffset.get(c.offset);
+      if (expected === undefined || expected !== c.chunk) {
+        throw new TranscriptForkError(
+          source,
+          target,
+          `target stream "${target}" already contains data that does not match the reseed prefix at offset ${c.offset}; refusing to interleave`,
+        );
+      }
+    }
+  }
 
   // Open the fork explicitly so an empty fork (throughOffset predating the log) is still a real,
   // listed stream under its own lifecycle rather than a phantom — mirrors the store's open-then-record.

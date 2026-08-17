@@ -120,6 +120,35 @@ test("forkTranscript: refuses an existing target unless allowExisting is set", (
   assertEquals(again.seeded, 0);
 });
 
+test("forkTranscript: allowExisting refuses a target whose contents diverge from the reseed prefix", () => {
+  const store = seededStore();
+  recordExited(store, "job:src", 3);
+  // A pre-existing target that carries DIFFERENT bytes at an overlapping offset — reseeding here would
+  // leave an interleaved mixture (offset-keyed record silently no-ops the divergent offset).
+  store.record("fork:diverge", [{ offset: 0, chunk: "not-c0" }], "ephemeral");
+  assertThrows(
+    () => forkTranscript(store, "job:src", "fork:diverge", { allowExisting: true }),
+    TranscriptForkError,
+    "does not match the reseed prefix",
+  );
+  // The target is left untouched — no partial interleave.
+  assertEquals(
+    store.read("fork:diverge").map((c) => c.chunk),
+    ["not-c0"],
+  );
+});
+
+test("forkTranscript: allowExisting refuses a target opened under a different lifecycle", () => {
+  const store = seededStore();
+  recordExited(store, "job:src", 2);
+  store.open("fork:lc", "long-lived");
+  assertThrows(
+    () => forkTranscript(store, "job:src", "fork:lc", { allowExisting: true }),
+    TranscriptForkError,
+    "cannot reseed",
+  );
+});
+
 test("forkTranscript: refuses to fork a stream onto itself", () => {
   const store = seededStore();
   recordExited(store, "job:src", 1);

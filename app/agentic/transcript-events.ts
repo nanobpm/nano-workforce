@@ -28,6 +28,18 @@
 // flow (ADR 0056: app-tier only, advisory).
 
 /**
+ * Runtime-safe UTF-8 byte length. This module is imported by cockpit code that runs in the BROWSER
+ * (via `cockpit/transcript-derive.ts`), where Node's `Buffer` global is not available — a bare
+ * `Buffer.byteLength` would throw at runtime when deriving the view for a replayed transcript. Prefer
+ * `Buffer` when present (Node) and fall back to `TextEncoder` (a Web/Node standard) otherwise, so the
+ * single derive fold is portable across both hosts. This is the one canonical UTF-8 byte-length
+ * implementation the transcript plane derives from (reused by `transcript-read.ts`).
+ */
+export function utf8ByteLength(text: string): number {
+  return typeof Buffer !== "undefined" ? Buffer.byteLength(text, "utf8") : new TextEncoder().encode(text).length;
+}
+
+/**
  * The reserved marker field that distinguishes a structured transcript-event envelope from raw
  * terminal bytes. A stored chunk is decoded as a typed event ONLY when it is a JSON object carrying
  * this field set to the schema version — otherwise it is retained verbatim as a raw `stream-chunk`, so
@@ -392,7 +404,7 @@ export function deriveView(events: Iterable<TranscriptEvent>): DerivedView {
         break;
       }
       case "stream-chunk": {
-        rawByteLength += Buffer.byteLength(event.chunk, "utf8");
+        rawByteLength += utf8ByteLength(event.chunk);
         rawChunkCount++;
         break;
       }

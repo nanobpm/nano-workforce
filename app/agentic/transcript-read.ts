@@ -17,11 +17,12 @@
 import type { TranscriptChunk, TranscriptStore, TranscriptStream } from "@nanobpm/agentic/transcript";
 import type { AgenticTranscript, AgenticTranscriptData } from "../../nano-generated/api-io.d.ts";
 import { type CorrelationRegistry, jobKeyOfStream } from "./correlation.ts";
+import { utf8ByteLength } from "./transcript-events.ts";
 
 /** Total captured bytes across a set of retained chunks (UTF-8, the on-the-wire terminal encoding). */
 export function byteLengthOf(chunks: readonly TranscriptChunk[]): number {
   let total = 0;
-  for (const c of chunks) total += Buffer.byteLength(c.chunk, "utf8");
+  for (const c of chunks) total += utf8ByteLength(c.chunk);
   return total;
 }
 
