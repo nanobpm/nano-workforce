@@ -236,6 +236,29 @@ silently — cheap to avoid, annoying to debug after the fact.
   correctly hides it either way. (This is why the same flag can need `NULL` for a
   badge yet work as `0` for a `showWhenField` button.)
 
+### Renderers are a fixed, version-pinned set — verify against the installed package, not an issue reference
+
+Urban's page renderers are a **finite set fixed by the pinned `@nanobpm/urban`
+version**. Do **not** assume a primitive exists because an issue, changelog, or an
+issue's *Links* section mentions it. Building on a phantom primitive wastes the whole
+change: `urban check` (a CI gate) rejects unknown renderer kinds, but only *after* you
+have authored a page around one. Epic #254's plan bounced three review rounds on exactly
+this — repeatedly asserting a page-level "stepper" primitive had shipped when it had not.
+
+- **Confirm the renderer kind against the installed build**, e.g. the `RENDERERS` map in
+  `node_modules/@nanobpm/urban/dist/runtime/core/modules/pages.js`, and the kinds already
+  used across `pages/*.page.json`. The pin (`^0.53.0`) only guarantees *some* 0.53.x is
+  installed — treat the installed package, not the version range, as the source of truth.
+- **A `nano-ide` issue can ship a DATA read-model, not a page renderer.** #254 shipped the
+  lineage projection (`buildLineageTree`/`getLineage`) — a data primitive, *not* a page
+  renderer; the page-level stepper (#265) was proposed and unshipped. "Primitive shipped
+  in X" ≠ "page renderer available in X." Read *what kind* of primitive an issue delivers.
+- **Build composite visuals as a dataGrid column renderer over stored columns**, not a
+  page-level primitive. The pipeline track is a `dataGrid` column of `"kind": "pipeline"`
+  binding stored `stage`/`stage_state`/`attention`/… (see `pages/feature.page.json`) — the
+  render-only cell renderer that 0.53.x actually ships. Only swap to a page-level primitive
+  once you have verified it exists in the installed build.
+
 ## The poller owns liveness/reconciliation
 
 `main.ts` runs a **self-scheduling** poll loop (`pollOnce` in `app/service.ts`),
