@@ -163,8 +163,9 @@
         ],
         "columns": [
           {
-            "field": "pr_key",
-            "header": "PR",
+            "field": "title",
+            "template": "{{title}}",
+            "header": "Item",
             "linkField": "url"
           },
           {

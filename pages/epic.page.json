@@ -73,7 +73,7 @@
           { "label": "All", "filter": [] }
         ],
         "columns": [
-          { "field": "plan_key", "header": "Epic", "link": { "kind": "page", "page": "epic-detail", "keyField": "plan_key" } },
+          { "field": "title", "template": "{{title}}", "header": "Item", "link": { "kind": "page", "page": "epic-detail", "keyField": "plan_key" } },
           { "field": "status", "header": "Status", "link": { "kind": "processExplorer", "keyField": "process_key" } },
           { "field": "delivery", "header": "Delivery" },
           { "field": "base_branch", "header": "Base branch" },

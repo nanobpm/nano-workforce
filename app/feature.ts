@@ -15,6 +15,7 @@
 // Data access goes through the record gateway (`data.table`), never hand-written
 // SQL — matching app/plan.ts and app/service.ts.
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
+import { coalesceTitle, fetchIssueTitle } from "./github.ts";
 import { ESCALATION_SLA_TIMEOUT, normalizeBaseBranch, type ParsedIssue, renderBaseBranchBrief } from "./plan.ts";
 
 /** The BPMN process this module drives (resources/processes/feature.bpmn). */
@@ -32,6 +33,11 @@ export interface FeatureRun {
   repo: string;
   issue_number: number;
   issue_url: string;
+  /** Human-readable identity (the GitHub issue title) for the feature grids (issue #248). Fetched
+   * best-effort at `startFeature` and coalesced to the `owner/repo#N` key at write time, so it is
+   * ALWAYS non-blank — the grid's `{{title}}` template needs no fallback and a failed/absent title
+   * fetch still shows a usable identity (the key) rather than an empty cell. */
+  title: string | null;
   base_branch: string;
   status: FeatureRunStatus;
   process_key: string | null;
@@ -282,11 +288,20 @@ export async function startFeature(
   }
   const base = normalizeBaseBranch(baseBranch);
   const ts = now();
+  // Human-readable identity for the feature grids (issue #248): fetch the issue title best-effort
+  // and coalesce to the `owner/repo#N` key so `feature_runs.title` is ALWAYS non-blank (see the
+  // interface note); a blank/whitespace fetch counts as missing. A fetch failure never blocks the
+  // start (`fetchIssueTitle` returns null on any error).
+  const title = coalesceTitle(
+    await fetchIssueTitle(parsed.repo, parsed.number, process.env.GITHUB_TOKEN ?? ""),
+    parsed.planKey,
+  );
   if (existing) {
     await table.update(parsed.planKey, {
       status: "running",
       base_branch: base,
       issue_url: parsed.url,
+      title,
       pr_key: null,
       converge: converge ? 1 : 0,
       auto_merge: autoMerge ? 1 : 0,
@@ -303,6 +318,7 @@ export async function startFeature(
       repo: parsed.repo,
       issue_number: parsed.number,
       issue_url: parsed.url,
+      title,
       base_branch: base,
       status: "running",
       process_key: null,

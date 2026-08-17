@@ -429,6 +429,50 @@ export async function fetchPrMeta(
   return { title: j.title ?? null, body: j.body ?? "", headRef: j.head?.ref ?? null };
 }
 
+/** Fetch an issue's title via the configured transport, mirroring `fetchPrMeta` (both `gh` and
+ * token transports). Best-effort and tolerant of failure: returns `null` when no transport is
+ * usable OR when the fetch fails/returns no title, so a caller can label a row with the real issue
+ * title on success and fall back to the `owner/repo#N` key otherwise — a title fetch must never
+ * block an epic/feature start. Unlike the merge-stage reads it does NOT throw on a transport
+ * failure; the identity it feeds is cosmetic, not a correctness gate. */
+export async function fetchIssueTitle(
+  repo: string,
+  number: number | string,
+  token: string,
+): Promise<string | null> {
+  try {
+    if (await useGh()) {
+      const out = await runGh(["issue", "view", String(number), "--repo", repo, "--json", "title"]);
+      // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+      const j = JSON.parse(out) as { title?: string };
+      return j.title ?? null;
+    }
+    if (!token) return null; // token mode with no token → no identity to fetch (caller falls back to the key)
+    const r = await fetch(`https://api.github.com/repos/${repo}/issues/${number}`, {
+      headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json" },
+    });
+    if (!r.ok) return null;
+    // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+    const j = (await r.json()) as { title?: string };
+    return j.title ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Coalesce best-effort title candidates to a non-blank identity for the title-led grids (issue
+ * #248). A candidate that is null/undefined OR blank/whitespace-only is treated as missing —
+ * external data (`fetchIssueTitle`/`fetchPrMeta`) can legitimately return `""`, which `??` would
+ * wrongly persist as a blank identity cell. Returns the first non-blank candidate, else the last
+ * one (the caller's key fallback, which is always non-blank). Mirrors the 036 backfill's
+ * `trim(title) = ''` test so write-time and backfill agree. */
+export function coalesceTitle(...candidates: (string | null | undefined)[]): string {
+  for (const c of candidates) {
+    if (c != null && c.trim() !== "") return c;
+  }
+  return candidates[candidates.length - 1] ?? "";
+}
+
 /** A PR's merge state, narrowed to what the merge poller needs to classify landability.
  * `mergeStateStatus` uses GitHub's vocabulary (CLEAN | BLOCKED | BEHIND | DIRTY | UNSTABLE |
  * DRAFT | HAS_HOOKS | UNKNOWN). `failingChecks` is `-1` when the transport can't enumerate
