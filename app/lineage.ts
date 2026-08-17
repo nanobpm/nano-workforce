@@ -19,9 +19,9 @@
 // them by persisting `root_request_key = pr_key`. The projection self-roots the thread on the
 // `pr_key` (kind `pr`), and also tolerates a legacy NULL `root_request_key` the same way.
 import type { DataLayer } from "@nanobpm/urban";
+import { deriveDelivery, TERMINAL_STATUSES } from "./delivery.ts";
 import { type FeatureRun, featureRuns } from "./feature.ts";
 import { type Plan, type PlanTask, plans, planTasks } from "./plan.ts";
-import { deriveDelivery, TERMINAL_STATUSES } from "./service.ts";
 
 const now = () => new Date().toISOString();
 
