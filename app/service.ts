@@ -12,7 +12,7 @@ import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { abandonUrl, mintAbandonToken, renderAbandonBrief } from "./abandon.ts";
 import { agentSlaTimeout } from "./agentSla.ts";
 import { deriveDelivery, TERMINAL_STATUSES } from "./delivery.ts";
-import { deriveFeatureBlockedPatch, deriveFeatureDelivery, deriveFeatureEscalationPatch, FEATURE_BLOCKED_ELEMENT, FEATURE_ESCALATION_ELEMENT, FEATURE_RUN_STATUSES, type FeatureRun, type FeatureRunStatus, featureRuns } from "./feature.ts";
+import { backfillFeatureStages, deriveFeatureBlockedPatch, deriveFeatureDelivery, deriveFeatureEscalationPatch, FEATURE_BLOCKED_ELEMENT, FEATURE_ESCALATION_ELEMENT, FEATURE_RUN_STATUSES, type FeatureRun, type FeatureRunStatus, featureRuns } from "./feature.ts";
 import {
   classifyMergeability,
   coalesceTitle,
@@ -1647,12 +1647,24 @@ export async function pollUserTasks(data: DataLayer, engine: EngineClient) {
  * The wave-merge barrier is now level-triggered and probes the engine's message-subscription state
  * over the same raw-REST search surface, so it runs only when `engineRest` is supplied (as in
  * production — `main.ts` always passes it). */
+/** One-shot guard so the feature-stage backfill (`backfillFeatureStages`) runs at most once per
+ * process, on the first `pollOnce`. Idempotent regardless, but there is no need to re-scan every row
+ * on every poll. */
+let featureStagesBackfilled = false;
+
 export async function pollOnce(
   data: DataLayer,
   engine: EngineClient,
   token: string,
   engineRest?: { restAddress: string; token?: string },
 ) {
+  // One-shot: re-project any pre-#254 feature_runs rows whose pipeline columns are still NULL. The
+  // gateway keeps every future write fresh, so this only needs to run once per process and is safe to
+  // re-run (it re-derives from each row's own stored fields).
+  if (!featureStagesBackfilled) {
+    featureStagesBackfilled = true;
+    await backfillFeatureStages(data);
+  }
   await pollReviews(data, engine, token);
   await pollMerges(data, engine, token);
   await pollDelivery(data);

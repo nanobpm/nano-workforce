@@ -1501,6 +1501,47 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/MessageResult"
+  /actions/acknowledge-done:
+    post:
+      operationId: acknowledgeDone
+      summary: "Tick off a TERMINAL feature run (issue #254 §5). Stamps `acknowledged_at` on the run so
+        the gateway recomputes its `list_bucket` to 'history', dropping the finished run out of the
+        primary Active list into History. The Done twin of acknowledge-blocked, but a terminal run is
+        not parked at a user task, so this completes no user task and only writes the row. Keyed on the
+        run's `feature_key`; idempotent-safe (re-acknowledging keeps it in History)."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+                - feature_key
+              properties:
+                feature_key:
+                  type: string
+                  minLength: 1
+                  description: The feature run's key (feature_runs.feature_key, `<owner>/<repo>#<n>`).
+      responses:
+        "200":
+          description: The terminal run was acknowledged and moved to History.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResult"
+        "400":
+          description: A required field (feature_key) was missing or invalid.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResult"
+        "404":
+          description: No feature run matches the feature_key.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResult"
   /hooks/agent-complete:
     post:
       operationId: agentCompleteEscalation

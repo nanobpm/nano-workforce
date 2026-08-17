@@ -17,6 +17,7 @@
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { coalesceTitle, fetchIssueTitle } from "./github.ts";
 import { ESCALATION_SLA_TIMEOUT, normalizeBaseBranch, type ParsedIssue, renderBaseBranchBrief } from "./plan.ts";
+import { deriveListBucket, deriveStage } from "./stage.ts";
 
 /** The BPMN process this module drives (resources/processes/feature.bpmn). */
 export const FEATURE_PROCESS_ID = "feature";
@@ -70,6 +71,25 @@ export interface FeatureRun {
    * (`record-blocked-ack` / the acknowledge operation) and, as a self-heal, by `pollFeatureBlocked`
    * when a previously-observed task is completed out-of-band (see `deriveFeatureBlockedPatch`). */
   blocked_user_task_key: string | null;
+  /** Timestamp an operator dismissed a TERMINAL run (§5, `acknowledge-done`); NULL until then. When
+   * set on a terminal row, `list_bucket` flips from 'active' to 'history'. Projection surface. */
+  acknowledged_at: string | null;
+  /** Projection maintained by the feature_runs gateway (like `delivery_label`): the canonical pipeline
+   * stage key from `deriveStage` (Requested|Implementing|PR open|Converging|Merging|Done). The page's
+   * pipeline column binds `activeField` to it. NULL only on legacy rows before `backfillFeatureStages`. */
+  stage: string | null;
+  /** Gateway projection: the active stage's render state from `deriveStage` (`ok`|`failed`|`blocked`|
+   * NULL). The page binds `stateField` to it; NULL means in-progress (renderer shows `active`). */
+  stage_state: string | null;
+  /** Gateway projection: space-separated set of stage keys NOT in this row's path from `deriveStage`
+   * (derived from `converge`/`auto_merge`). The page binds `notInPathField` to it. */
+  stage_skipped: string | null;
+  /** Gateway projection: a short attention badge (`blocked` / `⚠`) for the active stage, or NULL, from
+   * `deriveStage`. The page binds `badgeField` to it. */
+  attention: string | null;
+  /** Gateway projection: the Active/History partition label ('active'|'history'), 'history' iff a
+   * terminal row has been acknowledged. The page's tabs filter on it with flat `in` clauses (§5). */
+  list_bucket: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -251,7 +271,78 @@ export function deriveFeatureBlockedPatch(
   return Object.keys(patch).length > 0 ? patch : null;
 }
 
-export const featureRuns = (data: DataLayer) => data.table<FeatureRun>("feature_runs", "feature_key");
+/** Compute the write-time projection columns for a fully-merged feature_runs row. Centralised so the
+ * gateway is the ONE place `deriveStage` / `deriveListBucket` are applied — the page, SQL, pollers and
+ * workers never re-derive the mapping (AGENTS.md "derivation over duplication"). */
+function projectFeatureRun(row: Partial<FeatureRun>): Partial<FeatureRun> {
+  if (!row.status) return {};
+  const { stage, state, skipped, attention } = deriveStage({
+    status: row.status,
+    pr_key: row.pr_key ?? null,
+    converge: row.converge ?? null,
+    auto_merge: row.auto_merge ?? null,
+    escalation_question: row.escalation_question ?? null,
+    escalation_user_task_key: row.escalation_user_task_key ?? null,
+    blocked_user_task_key: row.blocked_user_task_key ?? null,
+  });
+  return {
+    stage,
+    stage_state: state,
+    stage_skipped: skipped,
+    attention,
+    list_bucket: deriveListBucket(row.status, row.acknowledged_at ?? null),
+  };
+}
+
+/** The feature_runs record gateway (keyed on `feature_key`). Wrapped in a thin projecting proxy so the
+ * derived pipeline columns (`stage`/`stage_state`/`stage_skipped`/`attention`/`list_bucket`) CANNOT be
+ * missed by any writer: `insert` and `update` merge the incoming values over the current stored row,
+ * then recompute the projection from that post-write field set and write it alongside — exactly the
+ * `delivery_label`-style write-time projection, but hoisted to the single gateway so the many scattered
+ * status writers (startFeature, the service pollers/reconcilers, the acknowledge operations, and the
+ * feature workers) all stay UNCHANGED and automatically get a correct, fresh projection. Every other
+ * method delegates straight through. This is the sole write path to feature_runs (no raw SQL, no other
+ * `data.table("feature_runs")`), so `stage`/`stage_state`/`stage_skipped`/`attention`/`list_bucket` are
+ * always populated and correct for every row and every transition. */
+export const featureRuns = (data: DataLayer) => {
+  const table = data.table<FeatureRun>("feature_runs", "feature_key");
+  return new Proxy(table, {
+    get(target, prop) {
+      if (prop === "insert") {
+        return (row: Partial<FeatureRun>) => target.insert({ ...row, ...projectFeatureRun(row) });
+      }
+      if (prop === "update") {
+        return async (id: unknown, patch: Partial<FeatureRun>) => {
+          const existing = await target.get(id);
+          const merged: Partial<FeatureRun> = { ...existing, ...patch };
+          return target.update(id, { ...patch, ...projectFeatureRun(merged) });
+        };
+      }
+      // Delegate every other method straight through. Bind functions to the real target so the
+      // gateway's private class fields (`#src`) resolve — a Proxy `this` would not carry them.
+      const value = Reflect.get(target, prop, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+};
+
+/** Re-project every feature_runs row through the gateway so rows written before migration 039 (whose
+ * projection columns are NULL) get correct `stage`/`stage_state`/`stage_skipped`/`attention`/
+ * `list_bucket` values. Idempotent and safe to re-run: it re-derives from each row's own stored fields,
+ * so a second pass is a no-op. Runs once at boot (pollOnce) — the gateway keeps every future write
+ * fresh, so this only needs to catch legacy rows once. */
+export async function backfillFeatureStages(data: DataLayer): Promise<number> {
+  const table = featureRuns(data);
+  const rows = await table.all();
+  let stamped = 0;
+  for (const row of rows) {
+    // An empty-patch update flows through the projecting proxy: it re-reads the row, recomputes the
+    // projection from the row's own stored fields, and writes it — no field values change.
+    await table.update(row.feature_key, {});
+    stamped++;
+  }
+  return stamped;
+}
 
 /** The deterministic task id for a single-issue run — the implementation agent branches
  * `feat/<task.id>` (see resources/prompts/feature.md), so it MUST be derivable from the issue alone
