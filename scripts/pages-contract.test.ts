@@ -112,6 +112,12 @@ function filterFields(filter: Json): string[] {
   return filter.map((f: Json) => f?.field).filter(Boolean);
 }
 
+// Pull `{{field}}` interpolation names out of a prose renderer's header template (nano-ide#274).
+function templateFields(tpl: Json): string[] {
+  if (typeof tpl !== "string") return [];
+  return [...tpl.matchAll(/\{\{([^{}]+)\}\}/g)].map((m) => m[1].trim()).filter(Boolean);
+}
+
 function collectRefs(page: string, node: Json, out: Ref[]): void {
   if (Array.isArray(node)) {
     for (const v of node) collectRefs(page, v, out);
@@ -120,10 +126,17 @@ function collectRefs(page: string, node: Json, out: Ref[]): void {
   if (!node || typeof node !== "object") return;
 
   // Top-level datasource grid: the datasource lives at `node.data`, while `columns`, `rowKey`,
-  // `filter`/`tabs`, and `detail` are siblings on the same `node` (the grid props).
+  // `filter`/`tabs`, and `detail` are siblings on the same `node` (the grid props). A `prose`
+  // renderer (nano-ide#274) binds the same `node.data` but has no `columns`: its displayed content
+  // is the header template's `{{field}}` refs plus the single `body` field, so fold those in as
+  // "columns" so the field-existence + surface guards below apply to prose sections too.
   const data = node.data;
   if (data && data.kind === "datasource" && typeof data.table === "string") {
-    const columns: string[] = (node.columns ?? []).map((c: Json) => c.field).filter(Boolean);
+    const columns: string[] = [
+      ...(node.columns ?? []).map((c: Json) => c.field),
+      ...templateFields(node.header),
+      ...(typeof node.body === "string" ? [node.body] : []),
+    ].filter(Boolean);
     // Every reference that resolves to a column on this table — the runtime 400s on any of them if
     // it names a column the migrations never created, so all must be guarded, not just displayed
     // columns. `detail.fields`/`detail.linkField` render columns of the same top-level row.
@@ -215,17 +228,19 @@ test("issue #87: plan_reviews is surfaced on the per-epic detail page", async ()
   const onEpicDetail = refs.some(
     (r) => r.page === "epic-detail.page.json" && r.table === "plan_reviews",
   );
-  assert(onEpicDetail, "epic-detail.page.json must bind a grid to plan_reviews (plan-review trace)");
+  assert(onEpicDetail, "epic-detail.page.json must bind the plan-review trace to plan_reviews");
 
-  // The trace is only useful with the verdict + critique columns, so pin them. Assert against the
-  // visibly displayed `columns` (not `fields`, which also holds binding refs like orderBy.field) so
-  // a column silently dropped from the grid UI can't pass by being referenced elsewhere.
+  // The trace is only useful with the verdict + critique surfaced, so pin them. Assert against the
+  // visibly displayed `columns` (not `fields`, which also holds binding refs like orderBy.field) —
+  // for the `prose` renderer (nano-ide#274) these are the header template's `{{round}}`/`{{approved}}`
+  // refs plus the `findings` body — so a field silently dropped from the UI can't pass by being
+  // referenced elsewhere.
   const required = ["round", "approved", "findings"];
   for (const r of refs.filter((x) => x.table === "plan_reviews")) {
     for (const col of required) {
       assert(
         r.columns.includes(col),
-        `${r.page}: plan_reviews grid must expose the "${col}" column`,
+        `${r.page}: plan_reviews trace must surface the "${col}" field`,
       );
     }
   }
