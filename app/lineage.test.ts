@@ -247,3 +247,25 @@ test("listLineage: unknown root returns nothing; known roots stitched", async ()
   const threads = await listLineage(data);
   assertEquals(threads.length, 0);
 });
+
+test("listLineage: deterministic order — active frontier first, then by rootRequestKey", async () => {
+  // Guard the tie-break (#245 review): equal-`active` threads have no per-thread timestamp to sort
+  // on, so ordering must fall back to `rootRequestKey` for a stable, deterministic response instead
+  // of jittering across passes. Insert settled roots out of order plus one active root.
+  const { data, stores } = memData();
+  stores.feature_runs = [];
+  stores.plans = [];
+  stores.plan_tasks = [];
+  stores.pull_requests = [
+    { pr_key: "o/r#3", title: "c", url: "x", status: "merged", current_round: 1, process_key: null, outcome: null, root_request_key: "o/r#3" },
+    { pr_key: "o/r#1", title: "a", url: "x", status: "merged", current_round: 1, process_key: null, outcome: null, root_request_key: "o/r#1" },
+    { pr_key: "o/r#2", title: "b", url: "x", status: "converging", current_round: 1, process_key: "c9", outcome: null, root_request_key: "o/r#2" },
+  ];
+
+  const threads = await listLineage(data);
+  assertEquals(
+    threads.map((t) => t.rootRequestKey),
+    ["o/r#2", "o/r#1", "o/r#3"],
+    "active first, then inactive sorted by rootRequestKey",
+  );
+});

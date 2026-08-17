@@ -15,8 +15,9 @@
 //     the schema-driven pages consume (Urban's datasource cannot read a SQL VIEW), mirroring the
 //     `pollDelivery` / `pollFeatureDelivery` convention.
 //
-// Human-opened / webhook PRs carry a NULL `root_request_key` — they are their OWN root. The
-// projection tolerates that by self-rooting the thread on the `pr_key` (kind `pr`).
+// Human-opened / webhook PRs with no originating request are their OWN root: `submitPr` self-roots
+// them by persisting `root_request_key = pr_key`. The projection self-roots the thread on the
+// `pr_key` (kind `pr`), and also tolerates a legacy NULL `root_request_key` the same way.
 import type { DataLayer } from "@nanobpm/urban";
 import { type FeatureRun, featureRuns } from "./feature.ts";
 import { type Plan, type PlanTask, plans, planTasks } from "./plan.ts";
@@ -441,10 +442,14 @@ export async function getLineage(
   return threads.get(rootRequestKey) ?? null;
 }
 
-/** All stitched threads, most-recently-touched first (active frontier first among ties). */
+/** All stitched threads, active frontier first, then by `rootRequestKey` for a stable,
+ * deterministic order (the projection has no per-thread timestamp to sort on, and equal-`active`
+ * ties would otherwise be nondeterministic across passes). */
 export async function listLineage(data: DataLayer): Promise<LineageThread[]> {
   const threads = await collectThreads(data);
-  return [...threads.values()].sort((a, b) => Number(b.active) - Number(a.active));
+  return [...threads.values()].sort(
+    (a, b) => Number(b.active) - Number(a.active) || a.rootRequestKey.localeCompare(b.rootRequestKey),
+  );
 }
 
 /** Poller pass: recompute every thread and denormalise it onto `lineage_threads` so the

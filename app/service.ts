@@ -235,9 +235,10 @@ interface PullRequest {
   incident_message: string | null;
   // Lineage projection (037_lineage.sql, issue #245): the stable ORIGIN identity (the issue =
   // feature_key / plan_key) threaded onto this PR by `submitPr`, and passed as a `createInstance`
-  // variable onto the convergence + merge instances so every descendant carries the root. NULL for
-  // human-opened / webhook PRs with no originating request — they are their own root, and the
-  // lineage read projection (`pollLineage`) tolerates that by self-rooting on `pr_key`.
+  // variable onto the convergence + merge instances so every descendant carries the root. For a
+  // human-opened / webhook PR with no originating request, `submitPr` self-roots it to its own
+  // `pr_key` so the Lineage UI join resolves; a legacy NULL is tolerated the same way by the
+  // lineage read projection (`pollLineage`), which self-roots on `pr_key`.
   root_request_key: string | null;
 }
 

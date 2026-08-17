@@ -7,8 +7,9 @@
 --   1. `pull_requests.root_request_key` — the stable ORIGIN identity (the issue = feature_key /
 --      plan_key) threaded onto every PR a request spawns. `submitPr` persists it and passes it as a
 --      `createInstance` variable onto the convergence + merge instances; `startMerge` reads it back
---      off the row. Human-opened / webhook PRs with no originating request keep it NULL — they are
---      their own root, and the projection tolerates that.
+--      off the row. A human-opened / webhook PR with no originating request is self-rooted by
+--      `submitPr` (`root_request_key = pr_key`); a legacy NULL is tolerated the same way by the
+--      projection, which self-roots on `pr_key`.
 --
 --   2. `lineage_threads` — a DERIVED read table, one row per `root_request_key` (or a self-rooted
 --      PR when NULL), recomputed idempotently each poll pass by `pollLineage` (app/lineage.ts) from
