@@ -69,7 +69,9 @@ export interface ReadinessProbe {
   readonly poll?: ProbePoll;
   readonly onTimeout?: OnTimeout;
   /** The declared {@link EnvKey} whose value supplies a credential at execution time (e.g.
-   * `GITHUB_TOKEN` for a private `http`/`github-check` probe). Read via `readEnv`, never inlined. */
+   * `GITHUB_TOKEN` for a private `http` probe's `Authorization` header). Supported for the `http`
+   * kind ONLY — `parseProbe` rejects it on any other kind, which consumes credentials from the
+   * ambient env. Read via `readEnv`, never inlined. */
   readonly credentialEnv?: string;
 }
 

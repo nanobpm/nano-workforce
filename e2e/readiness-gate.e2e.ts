@@ -147,12 +147,52 @@ describe("nano-workforce artifact-readiness wait-gate (readiness-gate.bpmn)", ()
       );
       assert.equal(escalations.length, 1, "the bounded timeout opened exactly one escalation userTask");
 
-      // Completing the escalation releases the gate to its terminal — the primitive is fully durable.
+      // Completing the escalation with `acknowledge` releases the gate to its `escalated` terminal
+      // via the resolution gateway (default arm) — the primitive is fully durable.
       await app.engine.completeUserTask(escalations[0].userTaskKey, { resolution: "acknowledge" });
       await app.settle();
+      const ackFlows = takenFlows(app);
       assert.ok(
-        takenFlows(app).includes("readiness-escalation->gate-escalated"),
-        "answering the escalation completed the gate",
+        ackFlows.includes("readiness-escalation->gw-resolution") && ackFlows.includes("gw-resolution->gate-escalated"),
+        "acknowledging the escalation routes through the resolution gateway to gate-escalated",
+      );
+    } finally {
+      await app.stop();
+      rmSync(dbDir, { recursive: true, force: true });
+    }
+  });
+
+  test("ABANDON: an operator who abandons the escalation drives the gate to its `failed` terminal, not `escalated`", async () => {
+    const { app, dbDir } = await boot();
+    try {
+      const { processInstanceKey } = await app.engine.createInstance({
+        processDefinitionId: "readiness-gate",
+        variables: {
+          gateKey: "gate-abandon-1",
+          probe: { kind: "command", target: "false", poll: { everyMs: 5, timeoutMs: 40, backoff: "fixed" } },
+          probeTimeout: "PT1M",
+          onTimeout: "escalate",
+        },
+      });
+      await app.settle();
+      await app.advanceTime(61_000);
+
+      const escalations = (await app.engine.searchUserTasks({ processInstanceKey })).filter(
+        (t) => t.elementId === "readiness-escalation",
+      );
+      assert.equal(escalations.length, 1, "the bounded timeout opened exactly one escalation userTask");
+
+      // `abandon` ("give up on this gate") must NOT be a no-op: it routes to gate-failed, not gate-escalated.
+      await app.engine.completeUserTask(escalations[0].userTaskKey, { resolution: "abandon" });
+      await app.settle();
+      const flows = takenFlows(app);
+      assert.ok(
+        flows.includes("gw-resolution->gate-failed"),
+        `abandoning the escalation routes to gate-failed (flows: ${flows.join(", ")})`,
+      );
+      assert.ok(
+        !flows.includes("gw-resolution->gate-escalated"),
+        "abandon must not reach the escalated terminal",
       );
     } finally {
       await app.stop();

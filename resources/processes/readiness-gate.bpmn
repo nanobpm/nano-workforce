@@ -116,15 +116,20 @@
         <zeebe:assignmentDefinition candidateGroups="operators" />
       </bpmn:extensionElements>
       <bpmn:incoming>f_escalate</bpmn:incoming>
-      <bpmn:outgoing>f_escalated</bpmn:outgoing>
+      <bpmn:outgoing>f_toResolution</bpmn:outgoing>
     </bpmn:userTask>
+    <bpmn:exclusiveGateway id="gw-resolution" name="resolution?" default="f_ack">
+      <bpmn:incoming>f_toResolution</bpmn:incoming>
+      <bpmn:outgoing>f_ack</bpmn:outgoing>
+      <bpmn:outgoing>f_abandon</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
     <bpmn:endEvent id="gate-escalated" name="Escalated">
       <bpmn:extensionElements>
         <zeebe:ioMapping>
           <zeebe:input source="=&#34;escalated&#34;" target="gateOutcome" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
-      <bpmn:incoming>f_escalated</bpmn:incoming>
+      <bpmn:incoming>f_ack</bpmn:incoming>
     </bpmn:endEvent>
     <bpmn:endEvent id="gate-failed" name="Failed">
       <bpmn:extensionElements>
@@ -133,6 +138,7 @@
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_fail</bpmn:incoming>
+      <bpmn:incoming>f_abandon</bpmn:incoming>
     </bpmn:endEvent>
     <bpmn:endEvent id="gate-continued" name="Continued">
       <bpmn:extensionElements>
@@ -158,7 +164,11 @@
     <bpmn:sequenceFlow id="f_continue" name="continue" sourceRef="gw-onTimeout" targetRef="gate-continued">
       <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=(if probe != null and probe.onTimeout != null then probe.onTimeout else onTimeout) = "continue"</bpmn:conditionExpression>
     </bpmn:sequenceFlow>
-    <bpmn:sequenceFlow id="f_escalated" sourceRef="readiness-escalation" targetRef="gate-escalated" />
+    <bpmn:sequenceFlow id="f_toResolution" sourceRef="readiness-escalation" targetRef="gw-resolution" />
+    <bpmn:sequenceFlow id="f_ack" name="acknowledge" sourceRef="gw-resolution" targetRef="gate-escalated" />
+    <bpmn:sequenceFlow id="f_abandon" name="abandon" sourceRef="gw-resolution" targetRef="gate-failed">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=resolution = "abandon"</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
   </bpmn:process>
   <bpmndi:BPMNDiagram id="BPMNDiagram_readiness-gate">
     <bpmndi:BPMNPlane id="BPMNPlane_readiness-gate" bpmnElement="readiness-gate">
@@ -175,12 +185,12 @@
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_probe" bpmnElement="probe">
-        <dc:Bounds x="1138" y="80" width="100" height="80" />
+        <dc:Bounds x="1288" y="80" width="100" height="80" />
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_probe-done" bpmnElement="probe-done">
-        <dc:Bounds x="1338" y="102" width="36" height="36" />
+        <dc:Bounds x="1488" y="102" width="36" height="36" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="1330" y="69" width="53" height="28" />
+          <dc:Bounds x="1480" y="69" width="53" height="28" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_gw-gate" bpmnElement="gw-gate" isMarkerVisible="true">
@@ -216,16 +226,22 @@
       <bpmndi:BPMNShape id="BPMNShape_readiness-escalation" bpmnElement="readiness-escalation">
         <dc:Bounds x="802" y="400" width="100" height="80" />
       </bpmndi:BPMNShape>
-      <bpmndi:BPMNShape id="BPMNShape_gate-escalated" bpmnElement="gate-escalated">
-        <dc:Bounds x="1002" y="422" width="36" height="36" />
+      <bpmndi:BPMNShape id="BPMNShape_gw-resolution" bpmnElement="gw-resolution" isMarkerVisible="true">
+        <dc:Bounds x="1002" y="415" width="50" height="50" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="986" y="463" width="69" height="14" />
+          <dc:Bounds x="987" y="396" width="81" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_gate-escalated" bpmnElement="gate-escalated">
+        <dc:Bounds x="1152" y="422" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1136" y="403" width="69" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_gate-failed" bpmnElement="gate-failed">
-        <dc:Bounds x="834" y="582" width="36" height="36" />
+        <dc:Bounds x="1152" y="582" width="36" height="36" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="828" y="623" width="48" height="14" />
+          <dc:Bounds x="1146" y="623" width="48" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_gate-continued" bpmnElement="gate-continued">
@@ -235,9 +251,9 @@
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_probe-timeout" bpmnElement="probe-timeout">
-        <dc:Bounds x="1170" y="142" width="36" height="36" />
+        <dc:Bounds x="1320" y="142" width="36" height="36" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="1150" y="203" width="76" height="28" />
+          <dc:Bounds x="1300" y="203" width="76" height="28" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
       <bpmndi:BPMNEdge id="BPMNEdge_f_start" bpmnElement="f_start">
@@ -246,11 +262,11 @@
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_toProbe" bpmnElement="f_toProbe">
         <di:waypoint x="266" y="120" />
-        <di:waypoint x="1138" y="120" />
+        <di:waypoint x="1288" y="120" />
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_probed" bpmnElement="f_probed">
-        <di:waypoint x="1238" y="120" />
-        <di:waypoint x="1338" y="120" />
+        <di:waypoint x="1388" y="120" />
+        <di:waypoint x="1488" y="120" />
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_toReady" bpmnElement="f_toReady">
         <di:waypoint x="416" y="280" />
@@ -267,9 +283,16 @@
           <dc:Bounds x="722" y="448" width="60" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
-      <bpmndi:BPMNEdge id="BPMNEdge_f_escalated" bpmnElement="f_escalated">
+      <bpmndi:BPMNEdge id="BPMNEdge_f_toResolution" bpmnElement="f_toResolution">
         <di:waypoint x="902" y="440" />
         <di:waypoint x="1002" y="440" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_f_ack" bpmnElement="f_ack">
+        <di:waypoint x="1052" y="440" />
+        <di:waypoint x="1152" y="440" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1060" y="448" width="84" height="14" />
+        </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_toGate" bpmnElement="f_toGate">
         <di:waypoint x="241" y="145" />
@@ -284,9 +307,9 @@
       <bpmndi:BPMNEdge id="BPMNEdge_f_fail" bpmnElement="f_fail">
         <di:waypoint x="677" y="465" />
         <di:waypoint x="677" y="600" />
-        <di:waypoint x="834" y="600" />
+        <di:waypoint x="1152" y="600" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="740" y="578" width="32" height="14" />
+          <dc:Bounds x="836" y="578" width="32" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_continue" bpmnElement="f_continue">
@@ -297,15 +320,23 @@
           <dc:Bounds x="682" y="673" width="60" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_f_abandon" bpmnElement="f_abandon">
+        <di:waypoint x="1027" y="465" />
+        <di:waypoint x="1027" y="600" />
+        <di:waypoint x="1152" y="600" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1032" y="526" width="53" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_timedOut" bpmnElement="f_timedOut">
         <di:waypoint x="552" y="440" />
         <di:waypoint x="652" y="440" />
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_probeTimeout" bpmnElement="f_probeTimeout">
-        <di:waypoint x="1188" y="178" />
-        <di:waypoint x="1188" y="198" />
-        <di:waypoint x="1356" y="198" />
-        <di:waypoint x="1356" y="138" />
+        <di:waypoint x="1338" y="178" />
+        <di:waypoint x="1338" y="198" />
+        <di:waypoint x="1506" y="198" />
+        <di:waypoint x="1506" y="138" />
       </bpmndi:BPMNEdge>
     </bpmndi:BPMNPlane>
   </bpmndi:BPMNDiagram>
