@@ -1,3 +1,10 @@
+# [0.77.0](https://github.com/nanobpm/nano-workforce/compare/v0.76.0...v0.77.0) (2026-08-17)
+
+
+### Features
+
+* bind the app to all interfaces so a remote worker fleet can reach it ([#224](https://github.com/nanobpm/nano-workforce/issues/224)) ([#255](https://github.com/nanobpm/nano-workforce/issues/255)) ([5968717](https://github.com/nanobpm/nano-workforce/commit/5968717416e13ff739b797822eb0d44ff51cc9cb)), closes [12778/#828](https://github.com/nanobpm/nano-workforce/issues/828) [12801/#252](https://github.com/nanobpm/nano-workforce/issues/252) [#228](https://github.com/nanobpm/nano-workforce/issues/228)
+
 # [0.76.0](https://github.com/nanobpm/nano-workforce/compare/v0.75.0...v0.76.0) (2026-08-17)
 
 
