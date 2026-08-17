@@ -1,0 +1,343 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI" xmlns:dc="http://www.omg.org/spec/DD/20100524/DC" xmlns:di="http://www.omg.org/spec/DD/20100524/DI" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:zeebe="http://camunda.org/schema/zeebe/1.0" xmlns:nano="https://nanobpm.io/schema/shapes/1.0" id="Definitions_nano_workforce_readiness" targetNamespace="http://nanobpm.io/nano-workforce">
+  <bpmn:message id="Message_readinessReady" name="readiness-ready">
+    <bpmn:extensionElements>
+      <zeebe:subscription correlationKey="=gateKey" />
+      <zeebe:properties>
+        <zeebe:property name="io.nanobpm.dataEnvelope.in" value="ReadinessReady" />
+      </zeebe:properties>
+    </bpmn:extensionElements>
+  </bpmn:message>
+  <bpmn:process id="readiness-gate" name="Artifact readiness wait-gate" isExecutable="true">
+    <bpmn:extensionElements>
+      <nano:shapes>
+        <nano:shape id="ReadinessProbeMatch" name="Readiness probe — match predicate">
+          <nano:extend name="status" type="integer" optional="true" />
+          <nano:extend name="bodyIncludes" type="string" optional="true" />
+          <nano:extend name="exitCode" type="integer" optional="true" />
+          <nano:extend name="stdoutIncludes" type="string" optional="true" />
+          <nano:extend name="version" type="string" optional="true" />
+          <nano:extend name="conclusion" type="string" optional="true" />
+          <nano:extend name="checkName" type="string" optional="true" />
+        </nano:shape>
+        <nano:shape id="ReadinessProbePoll" name="Readiness probe — poll policy">
+          <nano:extend name="everyMs" type="integer" optional="true" />
+          <nano:extend name="timeoutMs" type="integer" optional="true" />
+          <nano:extend name="backoff" type="string" optional="true" />
+        </nano:shape>
+        <nano:shape id="ReadinessProbe" name="Readiness probe descriptor">
+          <nano:extend name="kind" type="string" />
+          <nano:extend name="target" type="string" />
+          <nano:reference name="match" ref="ReadinessProbeMatch" />
+          <nano:reference name="poll" ref="ReadinessProbePoll" />
+          <nano:extend name="onTimeout" type="string" optional="true" />
+          <nano:extend name="credentialEnv" type="string" optional="true" />
+        </nano:shape>
+        <nano:shape id="ReadinessProbeIn" name="Readiness probe — input">
+          <nano:extend name="gateKey" type="string" />
+          <nano:extend name="probeTimeout" type="string" />
+          <nano:extend name="onTimeout" type="string" optional="true" />
+          <nano:reference name="probe" ref="ReadinessProbe" />
+        </nano:shape>
+        <nano:shape id="ReadinessProbeOut" name="Readiness probe — result">
+          <nano:extend name="ready" type="boolean" />
+          <nano:extend name="detail" type="string" optional="true" />
+        </nano:shape>
+        <nano:shape id="ReadinessReady" name="readiness-ready message payload">
+          <nano:extend name="ready" type="boolean" />
+          <nano:extend name="detail" type="string" optional="true" />
+        </nano:shape>
+      </nano:shapes>
+    </bpmn:extensionElements>
+    <bpmn:startEvent id="Start" name="Gate opened">
+      <bpmn:outgoing>f_start</bpmn:outgoing>
+    </bpmn:startEvent>
+    <bpmn:parallelGateway id="fork" name="arm probe + gate">
+      <bpmn:incoming>f_start</bpmn:incoming>
+      <bpmn:outgoing>f_toProbe</bpmn:outgoing>
+      <bpmn:outgoing>f_toGate</bpmn:outgoing>
+    </bpmn:parallelGateway>
+    <bpmn:serviceTask id="probe" name="Probe readiness (poll)">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="pr.readiness-probe" />
+        <zeebe:properties>
+          <zeebe:property name="io.nanobpm.dataEnvelope.in" value="ReadinessProbeIn" />
+          <zeebe:property name="io.nanobpm.dataEnvelope.out" value="ReadinessProbeOut" />
+        </zeebe:properties>
+      </bpmn:extensionElements>
+      <bpmn:incoming>f_toProbe</bpmn:incoming>
+      <bpmn:outgoing>f_probed</bpmn:outgoing>
+    </bpmn:serviceTask>
+    <bpmn:boundaryEvent id="probe-timeout" name="Gate timed out" attachedToRef="probe">
+      <bpmn:outgoing>f_probeTimeout</bpmn:outgoing>
+      <bpmn:timerEventDefinition id="ted_probeTimeout">
+        <bpmn:timeDuration xsi:type="bpmn:tFormalExpression">=probeTimeout</bpmn:timeDuration>
+      </bpmn:timerEventDefinition>
+    </bpmn:boundaryEvent>
+    <bpmn:endEvent id="probe-done" name="Probe settled">
+      <bpmn:incoming>f_probed</bpmn:incoming>
+      <bpmn:incoming>f_probeTimeout</bpmn:incoming>
+    </bpmn:endEvent>
+    <bpmn:eventBasedGateway id="gw-gate" name="ready or timeout?">
+      <bpmn:incoming>f_toGate</bpmn:incoming>
+      <bpmn:outgoing>f_toReady</bpmn:outgoing>
+      <bpmn:outgoing>f_toTimeout</bpmn:outgoing>
+    </bpmn:eventBasedGateway>
+    <bpmn:intermediateCatchEvent id="wait-ready" name="Wait: readiness signal">
+      <bpmn:incoming>f_toReady</bpmn:incoming>
+      <bpmn:outgoing>f_ready</bpmn:outgoing>
+      <bpmn:messageEventDefinition id="med_readinessReady" messageRef="Message_readinessReady" />
+    </bpmn:intermediateCatchEvent>
+    <bpmn:intermediateCatchEvent id="wait-timeout" name="Wait: readiness timeout">
+      <bpmn:incoming>f_toTimeout</bpmn:incoming>
+      <bpmn:outgoing>f_timedOut</bpmn:outgoing>
+      <bpmn:timerEventDefinition id="ted_readinessTimeout">
+        <bpmn:timeDuration xsi:type="bpmn:tFormalExpression">=probeTimeout</bpmn:timeDuration>
+      </bpmn:timerEventDefinition>
+    </bpmn:intermediateCatchEvent>
+    <bpmn:endEvent id="gate-ready" name="Ready">
+      <bpmn:extensionElements>
+        <zeebe:ioMapping>
+          <zeebe:input source="=&#34;ready&#34;" target="gateOutcome" />
+        </zeebe:ioMapping>
+      </bpmn:extensionElements>
+      <bpmn:incoming>f_ready</bpmn:incoming>
+    </bpmn:endEvent>
+    <bpmn:exclusiveGateway id="gw-onTimeout" name="on timeout?" default="f_escalate">
+      <bpmn:incoming>f_timedOut</bpmn:incoming>
+      <bpmn:outgoing>f_escalate</bpmn:outgoing>
+      <bpmn:outgoing>f_fail</bpmn:outgoing>
+      <bpmn:outgoing>f_continue</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:userTask id="readiness-escalation" name="Readiness escalation (human)">
+      <bpmn:extensionElements>
+        <zeebe:formDefinition formId="readiness-escalation" />
+        <zeebe:userTask />
+        <zeebe:assignmentDefinition candidateGroups="operators" />
+      </bpmn:extensionElements>
+      <bpmn:incoming>f_escalate</bpmn:incoming>
+      <bpmn:outgoing>f_toResolution</bpmn:outgoing>
+    </bpmn:userTask>
+    <bpmn:exclusiveGateway id="gw-resolution" name="resolution?" default="f_ack">
+      <bpmn:incoming>f_toResolution</bpmn:incoming>
+      <bpmn:outgoing>f_ack</bpmn:outgoing>
+      <bpmn:outgoing>f_abandon</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:endEvent id="gate-escalated" name="Escalated">
+      <bpmn:extensionElements>
+        <zeebe:ioMapping>
+          <zeebe:input source="=&#34;escalated&#34;" target="gateOutcome" />
+        </zeebe:ioMapping>
+      </bpmn:extensionElements>
+      <bpmn:incoming>f_ack</bpmn:incoming>
+    </bpmn:endEvent>
+    <bpmn:endEvent id="gate-failed" name="Failed">
+      <bpmn:extensionElements>
+        <zeebe:ioMapping>
+          <zeebe:input source="=&#34;failed&#34;" target="gateOutcome" />
+        </zeebe:ioMapping>
+      </bpmn:extensionElements>
+      <bpmn:incoming>f_fail</bpmn:incoming>
+      <bpmn:incoming>f_abandon</bpmn:incoming>
+    </bpmn:endEvent>
+    <bpmn:endEvent id="gate-continued" name="Continued">
+      <bpmn:extensionElements>
+        <zeebe:ioMapping>
+          <zeebe:input source="=&#34;continued&#34;" target="gateOutcome" />
+        </zeebe:ioMapping>
+      </bpmn:extensionElements>
+      <bpmn:incoming>f_continue</bpmn:incoming>
+    </bpmn:endEvent>
+    <bpmn:sequenceFlow id="f_start" sourceRef="Start" targetRef="fork" />
+    <bpmn:sequenceFlow id="f_toProbe" sourceRef="fork" targetRef="probe" />
+    <bpmn:sequenceFlow id="f_toGate" sourceRef="fork" targetRef="gw-gate" />
+    <bpmn:sequenceFlow id="f_probed" sourceRef="probe" targetRef="probe-done" />
+    <bpmn:sequenceFlow id="f_probeTimeout" sourceRef="probe-timeout" targetRef="probe-done" />
+    <bpmn:sequenceFlow id="f_toReady" sourceRef="gw-gate" targetRef="wait-ready" />
+    <bpmn:sequenceFlow id="f_toTimeout" sourceRef="gw-gate" targetRef="wait-timeout" />
+    <bpmn:sequenceFlow id="f_ready" sourceRef="wait-ready" targetRef="gate-ready" />
+    <bpmn:sequenceFlow id="f_timedOut" sourceRef="wait-timeout" targetRef="gw-onTimeout" />
+    <bpmn:sequenceFlow id="f_escalate" name="escalate" sourceRef="gw-onTimeout" targetRef="readiness-escalation" />
+    <bpmn:sequenceFlow id="f_fail" name="fail" sourceRef="gw-onTimeout" targetRef="gate-failed">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=(if probe != null and probe.onTimeout != null then probe.onTimeout else onTimeout) = "fail"</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="f_continue" name="continue" sourceRef="gw-onTimeout" targetRef="gate-continued">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=(if probe != null and probe.onTimeout != null then probe.onTimeout else onTimeout) = "continue"</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="f_toResolution" sourceRef="readiness-escalation" targetRef="gw-resolution" />
+    <bpmn:sequenceFlow id="f_ack" name="acknowledge" sourceRef="gw-resolution" targetRef="gate-escalated" />
+    <bpmn:sequenceFlow id="f_abandon" name="abandon" sourceRef="gw-resolution" targetRef="gate-failed">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=resolution = "abandon"</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+  </bpmn:process>
+  <bpmndi:BPMNDiagram id="BPMNDiagram_readiness-gate">
+    <bpmndi:BPMNPlane id="BPMNPlane_readiness-gate" bpmnElement="readiness-gate">
+      <bpmndi:BPMNShape id="BPMNShape_Start" bpmnElement="Start">
+        <dc:Bounds x="80" y="102" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="58" y="143" width="80" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_fork" bpmnElement="fork" isMarkerVisible="true">
+        <dc:Bounds x="216" y="95" width="50" height="50" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="202" y="62" width="78" height="28" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_probe" bpmnElement="probe">
+        <dc:Bounds x="1288" y="80" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_probe-done" bpmnElement="probe-done">
+        <dc:Bounds x="1488" y="102" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1480" y="69" width="53" height="28" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_gw-gate" bpmnElement="gw-gate" isMarkerVisible="true">
+        <dc:Bounds x="366" y="255" width="50" height="50" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="360" y="222" width="63" height="28" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_wait-ready" bpmnElement="wait-ready">
+        <dc:Bounds x="516" y="262" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="501" y="303" width="67" height="42" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_wait-timeout" bpmnElement="wait-timeout">
+        <dc:Bounds x="516" y="422" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="501" y="463" width="67" height="42" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_gate-ready" bpmnElement="gate-ready">
+        <dc:Bounds x="659" y="262" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="657" y="303" width="41" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_gw-onTimeout" bpmnElement="gw-onTimeout" isMarkerVisible="true">
+        <dc:Bounds x="652" y="415" width="50" height="50" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="637" y="396" width="81" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_readiness-escalation" bpmnElement="readiness-escalation">
+        <dc:Bounds x="802" y="400" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_gw-resolution" bpmnElement="gw-resolution" isMarkerVisible="true">
+        <dc:Bounds x="1002" y="415" width="50" height="50" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="987" y="396" width="81" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_gate-escalated" bpmnElement="gate-escalated">
+        <dc:Bounds x="1152" y="422" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1136" y="403" width="69" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_gate-failed" bpmnElement="gate-failed">
+        <dc:Bounds x="1152" y="582" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1146" y="623" width="48" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_gate-continued" bpmnElement="gate-continued">
+        <dc:Bounds x="834" y="742" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="818" y="783" width="69" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_probe-timeout" bpmnElement="probe-timeout">
+        <dc:Bounds x="1320" y="142" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1300" y="203" width="76" height="28" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNEdge id="BPMNEdge_f_start" bpmnElement="f_start">
+        <di:waypoint x="116" y="120" />
+        <di:waypoint x="216" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_f_toProbe" bpmnElement="f_toProbe">
+        <di:waypoint x="266" y="120" />
+        <di:waypoint x="1288" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_f_probed" bpmnElement="f_probed">
+        <di:waypoint x="1388" y="120" />
+        <di:waypoint x="1488" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_f_toReady" bpmnElement="f_toReady">
+        <di:waypoint x="416" y="280" />
+        <di:waypoint x="516" y="280" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_f_ready" bpmnElement="f_ready">
+        <di:waypoint x="552" y="280" />
+        <di:waypoint x="659" y="280" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_f_escalate" bpmnElement="f_escalate">
+        <di:waypoint x="702" y="440" />
+        <di:waypoint x="802" y="440" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="722" y="448" width="60" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_f_toResolution" bpmnElement="f_toResolution">
+        <di:waypoint x="902" y="440" />
+        <di:waypoint x="1002" y="440" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_f_ack" bpmnElement="f_ack">
+        <di:waypoint x="1052" y="440" />
+        <di:waypoint x="1152" y="440" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1060" y="448" width="84" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_f_toGate" bpmnElement="f_toGate">
+        <di:waypoint x="241" y="145" />
+        <di:waypoint x="241" y="280" />
+        <di:waypoint x="366" y="280" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_f_toTimeout" bpmnElement="f_toTimeout">
+        <di:waypoint x="391" y="305" />
+        <di:waypoint x="391" y="440" />
+        <di:waypoint x="516" y="440" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_f_fail" bpmnElement="f_fail">
+        <di:waypoint x="677" y="465" />
+        <di:waypoint x="677" y="600" />
+        <di:waypoint x="1152" y="600" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="836" y="578" width="32" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_f_continue" bpmnElement="f_continue">
+        <di:waypoint x="677" y="465" />
+        <di:waypoint x="677" y="760" />
+        <di:waypoint x="834" y="760" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="682" y="673" width="60" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_f_abandon" bpmnElement="f_abandon">
+        <di:waypoint x="1027" y="465" />
+        <di:waypoint x="1027" y="600" />
+        <di:waypoint x="1152" y="600" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1032" y="526" width="53" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_f_timedOut" bpmnElement="f_timedOut">
+        <di:waypoint x="552" y="440" />
+        <di:waypoint x="652" y="440" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_f_probeTimeout" bpmnElement="f_probeTimeout">
+        <di:waypoint x="1338" y="178" />
+        <di:waypoint x="1338" y="198" />
+        <di:waypoint x="1506" y="198" />
+        <di:waypoint x="1506" y="138" />
+      </bpmndi:BPMNEdge>
+    </bpmndi:BPMNPlane>
+  </bpmndi:BPMNDiagram>
+</bpmn:definitions>

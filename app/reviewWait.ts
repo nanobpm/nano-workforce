@@ -30,6 +30,26 @@ export function isoDuration(raw: string | undefined, def: string): string {
   return s !== "" && ISO_DURATION.test(s) ? s : def;
 }
 
+/** Convert an ISO-8601 duration to whole milliseconds, sharing {@link isoDuration}'s validation and
+ * grammar so a value's ms budget and its BPMN timer string can never derive from two parsers. `raw`
+ * is validated (and normalised) through {@link isoDuration} first, falling back to `def` when it is
+ * absent/blank/malformed. Calendar components carry no anchor date in a bare duration, so `Y`/`M`
+ * use pragmatic fixed lengths (365d / 30d); the realistic inputs here are seconds…days. */
+export function isoDurationToMs(raw: string | undefined, def: string): number {
+  const m = ISO_DURATION.exec(isoDuration(raw, def));
+  if (!m) return 0;
+  const n = (g?: string): number => (g ? Number.parseInt(g, 10) : 0);
+  return (
+    n(m[1]) * 31_536_000_000 + // years (365d)
+    n(m[2]) * 2_592_000_000 + // months (30d)
+    n(m[3]) * 604_800_000 + // weeks
+    n(m[4]) * 86_400_000 + // days
+    n(m[6]) * 3_600_000 + // hours
+    n(m[7]) * 60_000 + // minutes
+    n(m[8]) * 1000 // seconds
+  );
+}
+
 /** Validate an ISO-8601 duration for the review-wait timer, falling back to `def` when the value
  * is absent, blank, or malformed. Thin wrapper over {@link isoDuration}. */
 export function reviewWaitTimeout(

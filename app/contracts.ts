@@ -208,6 +208,22 @@ export const ENV_CONTRACTS = {
       "SLA timeout for an agent (service) task before its boundary timer fires and the PR escalates for human attention (ISO-8601 duration). A malformed value falls back to the default.",
     default: "PT2H",
   },
+  NANO_READINESS_POLL_TIMEOUT: {
+    category: "env",
+    name: "NANO_READINESS_POLL_TIMEOUT",
+    owner: "app/readiness.ts",
+    semantics:
+      "Default bounded timeout (FEEL/ISO-8601 duration) for a ReadinessProbe wait-gate when the probe descriptor declares no poll.timeoutMs. The gate's event-based-gateway timer arm fires after it and escalates, so a probe that never goes green can never wedge a plan. A malformed value falls back to the default.",
+    default: "PT30M",
+  },
+  NANO_READINESS_POLL_EVERY_MS: {
+    category: "env",
+    name: "NANO_READINESS_POLL_EVERY_MS",
+    owner: "workers/readiness-probe/worker.ts",
+    semantics:
+      "Default interval in milliseconds between ReadinessProbe attempts when the probe descriptor declares no poll.everyMs.",
+    default: "15000",
+  },
   NANO_APP_DB_URL: {
     category: "env",
     name: "NANO_APP_DB_URL",
@@ -258,6 +274,13 @@ export const ENV_CONTRACTS = {
 
 /** The set of declared config-key names — the single typed vocabulary of env keys. */
 export type EnvKey = keyof typeof ENV_CONTRACTS;
+
+/** Whether `name` is a declared {@link EnvKey}. A runtime-narrowing guard so a value carried in as
+ * a plain string (e.g. a probe descriptor's `credentialEnv`) can be validated against the ONE
+ * schema before it is read through {@link readEnv} — an undeclared key is rejected, never read. */
+export function isEnvKey(name: string): name is EnvKey {
+  return Object.hasOwn(ENV_CONTRACTS, name);
+}
 
 /** Every declared env contract, widened to {@link EnvContract} (assignment-widening — no `as`), so
  * callers can read the optional `default`/`rejectedSynonyms`/`secret` fields on any entry. */
