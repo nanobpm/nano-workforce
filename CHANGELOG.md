@@ -1,3 +1,10 @@
+# [0.75.0](https://github.com/nanobpm/nano-workforce/compare/v0.74.0...v0.75.0) (2026-08-17)
+
+
+### Features
+
+* surface issue/PR titles on dispatch surfaces ([#248](https://github.com/nanobpm/nano-workforce/issues/248)) ([#249](https://github.com/nanobpm/nano-workforce/issues/249)) ([a63f6dd](https://github.com/nanobpm/nano-workforce/commit/a63f6dd9bab3040cdc61c807bdc999ce9a591299))
+
 # [0.74.0](https://github.com/nanobpm/nano-workforce/compare/v0.73.1...v0.74.0) (2026-08-16)
 
 
