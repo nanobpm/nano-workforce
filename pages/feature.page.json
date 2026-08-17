@@ -70,16 +70,16 @@
           { "label": "All", "filter": [] }
         ],
         "columns": [
-          { "field": "title", "template": "{{title}}", "header": "Item", "linkField": "issue_url" },
+          { "field": "title", "template": "{{title}}", "header": "Item", "subtitleField": "feature_key", "truncate": true, "width": "34%", "linkField": "issue_url" },
           { "field": "status", "header": "Status", "link": { "kind": "processExplorer", "keyField": "process_key" } },
-          { "field": "escalation_question", "header": "Escalation" },
+          { "field": "escalation_question", "header": "Escalation", "truncate": true },
           { "field": "base_branch", "header": "Base branch" },
           { "field": "pr_key", "header": "PR", "link": { "kind": "page", "page": "home", "keyField": "pr_key" } },
           { "field": "delivery_label", "header": "Delivery" },
           { "field": "converge", "header": "Converge" },
           { "field": "auto_merge", "header": "Auto-merge" },
           { "field": "outcome", "header": "Outcome" },
-          { "field": "updated_at", "header": "Updated" }
+          { "field": "updated_at", "header": "Updated", "width": "9rem" }
         ],
         "rowActions": [
           {

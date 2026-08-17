@@ -63,10 +63,10 @@
           ]
         },
         "columns": [
-          { "field": "title", "template": "{{title}}", "header": "Item", "link": { "kind": "page", "page": "home", "keyField": "pr_key" } },
+          { "field": "title", "template": "{{title}}", "header": "Item", "subtitleField": "pr_key", "truncate": true, "width": "36%", "link": { "kind": "page", "page": "home", "keyField": "pr_key" } },
           { "field": "status", "header": "Status", "link": { "kind": "processExplorer", "keyField": "process_key" } },
           { "field": "current_round", "template": "{{current_round}} · {{active_worker}}", "header": "Round · Agent" },
-          { "field": "updated_at", "header": "Updated" }
+          { "field": "updated_at", "header": "Updated", "width": "9rem" }
         ]
       }
     },
@@ -88,10 +88,10 @@
           "filter": [{ "field": "status", "in": ["planning", "dispatched"] }]
         },
         "columns": [
-          { "field": "title", "template": "{{title}}", "header": "Item", "link": { "kind": "page", "page": "epic-detail", "keyField": "plan_key" } },
+          { "field": "title", "template": "{{title}}", "header": "Item", "subtitleField": "plan_key", "truncate": true, "width": "36%", "link": { "kind": "page", "page": "epic-detail", "keyField": "plan_key" } },
           { "field": "status", "header": "Status", "link": { "kind": "processExplorer", "keyField": "process_key" } },
           { "field": "wave_label", "header": "Wave" },
-          { "field": "updated_at", "header": "Updated" }
+          { "field": "updated_at", "header": "Updated", "width": "9rem" }
         ]
       }
     },
@@ -113,10 +113,10 @@
           "filter": [{ "field": "status", "in": ["running", "escalated", "awaiting_operator"] }]
         },
         "columns": [
-          { "field": "title", "template": "{{title}}", "header": "Item", "link": { "kind": "page", "page": "feature", "keyField": "feature_key" } },
+          { "field": "title", "template": "{{title}}", "header": "Item", "subtitleField": "feature_key", "truncate": true, "width": "36%", "link": { "kind": "page", "page": "feature", "keyField": "feature_key" } },
           { "field": "status", "header": "Status", "link": { "kind": "processExplorer", "keyField": "process_key" } },
           { "field": "delivery_label", "header": "Delivery" },
-          { "field": "updated_at", "header": "Updated" }
+          { "field": "updated_at", "header": "Updated", "width": "9rem" }
         ],
         "rowActions": [
           {

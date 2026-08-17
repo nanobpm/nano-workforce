@@ -166,6 +166,9 @@
             "field": "title",
             "template": "{{title}}",
             "header": "Item",
+            "subtitleField": "pr_key",
+            "truncate": true,
+            "width": "36%",
             "linkField": "url"
           },
           {
@@ -179,6 +182,7 @@
           {
             "field": "incident_message",
             "header": "Incident",
+            "truncate": true,
             "badge": {
               "tone": "danger",
               "label": "1"
@@ -194,7 +198,8 @@
           },
           {
             "field": "updated_at",
-            "header": "Updated"
+            "header": "Updated",
+            "width": "9rem"
           }
         ],
         "rowActions": [
