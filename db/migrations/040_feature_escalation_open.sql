@@ -1,0 +1,33 @@
+-- 040_feature_escalation_open.sql — issue #272: collapse the torn open-escalation projection.
+--
+-- A feature run's "open escalation" condition is jointly encoded by THREE independently-written
+-- columns — `status='escalated'`, `escalation_user_task_key` (the completable pointer), and
+-- `escalation_question` — owned by DIFFERENT writers on DIFFERENT schedules:
+--   • `record-feature-escalation` (service task) persists `escalation_question` (pointer still NULL).
+--   • `pollFeatureEscalations` / `deriveFeatureEscalationPatch` (async poller) sets `status='escalated'`
+--     + denormalises `escalation_user_task_key` on the next pass, and clears the tuple when the task
+--     is gone — but only on the next pass.
+--   • the answer/complete operation (`answerFeatureEscalation`) clears the pointer + question eagerly.
+-- Because they are never written as one atomic tuple, a reader can observe a TORN interim state (e.g.
+-- `status=escalated` + pointer set + `question=null`) and the page renders a self-contradictory
+-- escalation — an "answer me" affordance (Abandon action, answer form) for a run with nothing to
+-- answer (observed on nwf#270).
+--
+-- Fix: derive the display-state, don't denormalise it, and FAIL CLOSED. `escalation_open` is a single
+-- write-time-projected signal — `1` iff ALL THREE columns agree the run is parked at an answerable
+-- escalation (`status='escalated'` AND `escalation_user_task_key` non-NULL AND `escalation_question`
+-- non-NULL), else `0`. The pages gate the escalation affordances on THIS conjunction instead of on
+-- `escalation_user_task_key` alone, so a torn tuple renders as NOT escalated rather than
+-- escalated-but-blank. It mirrors the existing `stage` / `list_bucket` display projections: maintained
+-- by the feature_runs gateway (app/feature.ts) from the pure `deriveEscalationOpen` helper (app/stage.ts)
+-- on every write — never hand-derived in SQL, the page, or a poller. Because the gateway reprojects on
+-- the answer operation's eager tuple-clear (which touches projection inputs), the affordance disappears
+-- WITHOUT waiting a poll pass.
+--
+-- Forward-only, additive (expand): nullable with no default, so pre-#272 rows grandfather in as NULL
+-- and never gate control flow. `backfillFeatureStages` (app/feature.ts) stamps rows whose
+-- `escalation_open` is still NULL once at boot — including a run parked at a LIVE escalation when this
+-- lands, which the poller would otherwise never re-write while it stays parked — and the gateway keeps
+-- every future write fresh. Numbered after the current highest prefix on origin/main (039); the runner
+-- wraps each file in its own transaction, so this file must NOT contain BEGIN/COMMIT.
+ALTER TABLE feature_runs ADD COLUMN escalation_open INTEGER;
