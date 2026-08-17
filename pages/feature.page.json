@@ -88,7 +88,7 @@
             "stateField": "stage_state",
             "badgeField": "attention",
             "notInPathField": "stage_skipped",
-            "locus": { "field": "pr_key", "link": { "kind": "page", "page": "home" } }
+            "locus": { "field": "pr_key", "link": { "kind": "page", "page": "home", "keyField": "pr_key" } }
           },
           { "field": "updated_at", "header": "Updated", "width": "9rem" }
         ],
