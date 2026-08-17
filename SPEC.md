@@ -565,11 +565,14 @@ the loop runs one parallel `implement` MI fan-out per wave:
   `dependsOn`), and advances `currentWave`.
 - **Wave-merge barrier** (`wait-wave-merged`): when a wave has a successor,
   `record-wave` sets `plans.gate_wave` to that wave's index and the process parks at
-  the `wait-wave-merged` catch event. The poller's `pollWaveGates` pass publishes the
-  `wave-merged` message (correlated on `planKey`) once **every opened PR in that wave
-  has merged** (`app/waves.ts` `waveMergeTargets` selects the PRs to wait on;
-  `blocked`/`skipped`/keyless tasks clear vacuously), then clears `gate_wave`
-  single-shot. So a `dependsOn` means the dependent wave is not **implemented** until
+  the `wait-wave-merged` catch event. The poller's `pollWaveGatesImpl` pass is
+  **level-triggered**: it publishes the `wave-merged` message (correlated on `planKey`)
+  once **every opened PR in that wave has merged** (`app/waves.ts` `waveMergeTargets`
+  selects the PRs to wait on; `blocked`/`skipped`/keyless tasks clear vacuously) **and**
+  it observes an OPEN `wait-wave-merged` subscription for the plan — so a merge that
+  lands while the token is still upstream can't drop the signal. The poller **never**
+  clears `gate_wave`; `record-wave` owns the marker's lifecycle (re-arming it to the next
+  wave, or clearing it to NULL on the final wave). So a `dependsOn` means the dependent wave is not **implemented** until
   its prerequisites have **landed on the base branch** — not merely opened. This lets
   a blocking prerequisite (e.g. app scaffolding) fully converge and merge before the
   next wave builds on it. `gate_wave` lives in `db/migrations/007_wave_gate.sql`.

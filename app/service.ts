@@ -1141,17 +1141,104 @@ export async function pollIncidentsImpl(
   }
 }
 
-/** Wave-merge barrier poll pass. After `record-wave` hands off a wave that has a successor, the
- * plan-fanout instance parks at the `wait-wave-merged` catch event and `plans.gate_wave` records
- * that wave's index. Here we check whether every OPENED PR in that wave has MERGED and, if so,
- * publish `wave-merged` (correlated on the plan key) to release the next wave's implementation.
+/** The `wave-merged` message name (`resources/processes/plan-fanout.bpmn`): the `wait-wave-merged`
+ * catch event opens a subscription for it (correlated on `=planKey`) once the token arrives, and
+ * the poller publishes it to release the next wave. Single source of truth for the string shared by
+ * the publish and the subscription probe. */
+const WAVE_MERGED_MESSAGE = "wave-merged";
+
+/** The subset of a Camunda-8 `/v2/message-subscriptions/search` result item this app reads to tell
+ * whether the plan-fanout instance is *currently parked* at `wait-wave-merged`. `messageName` is the
+ * awaited message; `correlationKey` is the plan key the catch event binds; `messageSubscriptionState`
+ * is `CREATED` while the subscription is open (waiting) and `CORRELATED`/`DELETED` once consumed. */
+interface MessageSubscriptionSearchItem {
+  messageName?: string;
+  correlationKey?: string | null;
+  messageSubscriptionState?: string;
+}
+
+/** Is the plan-fanout instance `processKey` right now parked at `wait-wave-merged` with an OPEN
+ * (`CREATED`) subscription correlated on `planKey`? Reads the engine's Camunda-8
+ * `/v2/message-subscriptions/search` (the same raw-REST search surface `pollIncidents`/
+ * `pollJobActivation` use). Returns `true` (open — safe to release), `false` (no open subscription —
+ * the token is either upstream of the wait or has already passed through it), or `null` (transport
+ * unhappy / unparseable body — "unknown", so the caller neither publishes nor acts on a guess and
+ * simply retries next tick). This is the load-bearing check that makes the barrier level-triggered:
+ * we only ever publish `wave-merged` into a subscription we've observed OPEN, so a signal can never
+ * be dropped into the void (the #262 wedge) nor buffered to trip a *later* wave's barrier. */
+async function waveMergedSubscriptionOpen(
+  base: string,
+  headers: Record<string, string>,
+  processKey: string,
+  planKey: string,
+): Promise<boolean | null> {
+  try {
+    const res = await fetch(`${base}/message-subscriptions/search`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        filter: {
+          processInstanceKey: processKey,
+          messageName: WAVE_MERGED_MESSAGE,
+          messageSubscriptionState: "CREATED",
+        },
+        page: { limit: 20 },
+      }),
+    });
+    if (!res.ok) return null; // engine unhappy → "unknown", retry next pass
+    // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+    const body = (await res.json()) as { items?: MessageSubscriptionSearchItem[] };
+    // Re-filter defensively in case the engine ignores a filter field: an OPEN (`CREATED`)
+    // subscription for the `wave-merged` message, correlated on THIS plan key, is the barrier we may
+    // publish into. Every field must be PRESENT and match explicitly — we never default a
+    // missing/null `messageName`, `correlationKey`, or `messageSubscriptionState` to its expected
+    // value. Doing so would treat an unverifiable item as OPEN and re-introduce the exact #262
+    // failure class (publishing into a subscription we never confirmed open, buffering a message that
+    // trips a later wave's barrier). An item that omits a field is "unknown", so we simply don't
+    // match it: a false negative only costs a retry next pass, whereas a false positive is a wedge.
+    // State is compared case-insensitively so a future casing tweak can't silently drop the match.
+    return (body.items ?? []).some(
+      (it) =>
+        it.messageName === WAVE_MERGED_MESSAGE &&
+        it.correlationKey === planKey &&
+        typeof it.messageSubscriptionState === "string" &&
+        it.messageSubscriptionState.toUpperCase() === "CREATED",
+    );
+  } catch (err) {
+    console.error(`[poller] wave-merged subscription ${planKey}: ${err}`);
+    return null; // transport threw → "unknown", retry next pass
+  }
+}
+
+/** Wave-merge barrier poll pass (issue #262). After `record-wave` hands off a wave that has a
+ * successor, the plan-fanout instance eventually parks at the `wait-wave-merged` catch event and
+ * `plans.gate_wave` records that wave's index. Here we reconcile, on EVERY pass and idempotently,
+ * the external GitHub fact "every OPENED PR in that wave has MERGED" against the engine fact "is
+ * there an OPEN `wait-wave-merged` subscription for this plan right now?", publishing `wave-merged`
+ * (correlated on the plan key) to release the next wave's implementation whenever BOTH hold.
  *
- * `gate_wave` is cleared single-shot BEFORE publishing (and restored if the publish fails —
- * mirroring `flipToMergingThenPublish`) so a slow pass can't double-signal and a later wave's
- * barrier can't be tripped by a stale message reusing the same plan-key correlation. A wave whose
- * tasks all ended `blocked`/`skipped` (no opened PR to wait on) clears vacuously — there is
- * nothing to merge, and that failure has already cascaded to dependents in `select-wave`. */
-async function pollWaveGates(data: DataLayer, engine: EngineClient, token: string) {
+ * This is deliberately LEVEL-triggered, not the old single-shot edge trigger. The gate is armed at
+ * wave handoff — long before the token traverses `select-wave → trial-merge (a slow agent job) →
+ * … → wait-wave-merged` and opens the subscription. If the wave's PRs merged while the token was
+ * still upstream, the old code published its one `wave-merged` into NO open subscription (dropped)
+ * AND cleared `gate_wave`, so it never republished and the epic wedged forever once the token
+ * finally arrived (#262). We fix the class:
+ *   • We publish ONLY when {@link waveMergedSubscriptionOpen} confirms the token is parked at the
+ *     wait — never into the void — so a merged-before-arrival wave simply waits, and a later pass
+ *     (once the token arrives) republishes and correlates.
+ *   • We NEVER clear `gate_wave` here. `record-wave` owns its lifecycle (it re-arms it to the next
+ *     wave, or clears it to `null` on the final wave), so a signal published into the void can't
+ *     strand the gate, and double-advance is guarded by the open-subscription check — which, by the
+ *     handoff ordering, always matches the wave whose wait is currently open — not by a premature
+ *     clear. A wave whose tasks all ended `blocked`/`skipped` (no opened PR to wait on) has an empty
+ *     merge-target set and so is treated as merged; `record-wave` advances it on the next pass. */
+export async function pollWaveGatesImpl(
+  data: DataLayer,
+  engine: EngineClient,
+  token: string,
+  base: string,
+  headers: Record<string, string>,
+) {
   for (const plan of await plans(data).all()) {
     const gateWave = plan.gate_wave;
     if (gateWave == null) continue;
@@ -1165,18 +1252,14 @@ async function pollWaveGates(data: DataLayer, engine: EngineClient, token: strin
           break;
         }
       }
-      if (!allMerged) continue;
-      await plans(data).update(planKey, { gate_wave: null, updated_at: now() });
-      try {
-        await engine.publishMessage({ name: "wave-merged", correlationKey: planKey, variables: {} });
-      } catch (err) {
-        try {
-          await plans(data).update(planKey, { gate_wave: gateWave, updated_at: now() });
-        } catch (revertErr) {
-          console.error(`[poller] revert wave-gate ${planKey} -> ${gateWave} failed: ${revertErr}`);
-        }
-        throw err;
-      }
+      if (!allMerged) continue; // wave not landed yet → leave the gate armed, retry next pass
+      // The wave has landed on GitHub. Release the barrier ONLY if the token is actually parked at
+      // `wait-wave-merged` (an OPEN subscription for this plan): otherwise publishing would be a
+      // silent no-op that the old code paired with a gate clear — the edge-triggered wedge (#262).
+      if (!plan.process_key) continue; // no instance key to correlate against yet
+      const open = await waveMergedSubscriptionOpen(base, headers, plan.process_key, planKey);
+      if (open !== true) continue; // not parked here yet / already released / unknown → NEVER clear the gate; retry next pass
+      await engine.publishMessage({ name: WAVE_MERGED_MESSAGE, correlationKey: planKey, variables: {} });
       console.log(`[poller] wave ${gateWave} merged -> ${planKey}`);
     } catch (err) {
       console.error(`[poller] wave-gate ${planKey}: ${err}`);
@@ -1559,7 +1642,11 @@ export async function pollUserTasks(data: DataLayer, engine: EngineClient) {
 
 /** One full poll pass: advance the review stage, the merge stage, the wave-merge barrier, and
  * (when the engine REST endpoint is supplied) the job-activation visibility pass and the
- * technical-incident surfacing pass. Called on the self-scheduling loop in `main.ts`. */
+ * technical-incident surfacing pass. Called on the self-scheduling loop in `main.ts`.
+ *
+ * The wave-merge barrier is now level-triggered and probes the engine's message-subscription state
+ * over the same raw-REST search surface, so it runs only when `engineRest` is supplied (as in
+ * production — `main.ts` always passes it). */
 export async function pollOnce(
   data: DataLayer,
   engine: EngineClient,
@@ -1568,7 +1655,6 @@ export async function pollOnce(
 ) {
   await pollReviews(data, engine, token);
   await pollMerges(data, engine, token);
-  await pollWaveGates(data, engine, token);
   await pollDelivery(data);
   await pollFeatureDelivery(data);
   await pollLineage(data);
@@ -1576,6 +1662,10 @@ export async function pollOnce(
   await pollFeatureBlocked(data, engine);
   await pollUserTasks(data, engine);
   if (engineRest) {
+    const base = engineRest.restAddress.replace(/\/+$/, "");
+    const headers: Record<string, string> = { "content-type": "application/json" };
+    if (engineRest.token) headers.authorization = `Bearer ${engineRest.token}`;
+    await pollWaveGatesImpl(data, engine, token, base, headers);
     await pollJobActivation(data, engineRest.restAddress, engineRest.token);
     await pollIncidents(data, engineRest.restAddress, engineRest.token);
   }

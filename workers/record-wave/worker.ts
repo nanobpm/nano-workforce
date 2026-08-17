@@ -293,9 +293,11 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
 
   // Wave-merge barrier: when another wave follows, park the plan-fanout instance at the
   // `wait-wave-merged` catch event until THIS wave's opened PRs have MERGED (not merely opened).
-  // `gate_wave` is that durable marker; the poller (`pollWaveGates`) clears it and publishes
-  // `wave-merged` once the wave has landed. Clear it on the final wave so a re-planned issue can't
-  // inherit a stale gate. Best-effort: a failed marker write must not fail the wave (the poller
+  // `gate_wave` is that durable marker; the level-triggered poller (`pollWaveGatesImpl`) publishes
+  // `wave-merged` once the wave has landed AND it observes an OPEN subscription, but NEVER clears
+  // `gate_wave` — record-wave owns the marker's lifecycle. Re-arm it to the next wave here, or
+  // clear it on the final wave so a re-planned issue can't inherit a stale gate. Best-effort: a
+  // failed marker write must not fail the wave (the poller
   // reconciles from `plan_tasks`/`pull_requests`), but the loop still relies on it to know which
   // wave to watch, so we log a failure loudly.
   try {

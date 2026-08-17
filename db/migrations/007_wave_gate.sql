@@ -10,7 +10,10 @@
 --
 -- `plans.gate_wave` is the durable marker for the barrier: when `record-wave` hands
 -- off a wave that has a successor, it records that wave's index here and the process
--- parks at the `wait-wave-merged` catch event. The poller (`pollWaveGates`) clears it
--- and publishes `wave-merged` once every opened PR in that wave has merged. NULL means
--- the plan is not currently parked at the wave barrier.
+-- parks at the `wait-wave-merged` catch event. The poller (`pollWaveGatesImpl`) is
+-- level-triggered: it publishes `wave-merged` once every opened PR in that wave has
+-- merged AND it observes an OPEN `wait-wave-merged` subscription for the plan, and it
+-- NEVER clears `gate_wave` — `record-wave` owns the marker's lifecycle (re-arming it to
+-- the next wave, or clearing it to NULL on the final wave). NULL means the plan is not
+-- currently parked at the wave barrier.
 ALTER TABLE plans ADD COLUMN gate_wave INTEGER;
