@@ -137,13 +137,15 @@
       }
     },
     {
-      "type": "dataGrid",
+      "type": "prose",
       "id": "plan-reviews",
       "props": {
         "title": "Plan review trace",
         "refreshMs": 5000,
         "collapsible": true,
         "defaultCollapsed": true,
+        "measure": 80,
+        "empty": "No plan reviews recorded yet.",
         "data": {
           "kind": "datasource",
           "source": "app",
@@ -151,24 +153,20 @@
           "orderBy": { "field": "round", "dir": "asc" },
           "filter": [{ "field": "plan_key", "eqParam": true }]
         },
-        "columns": [
-          { "field": "round", "header": "Round" },
-          { "field": "epoch", "header": "Epoch" },
-          { "field": "approved", "header": "Approved? (1/0)" },
-          { "field": "findings", "header": "Reviewer findings" },
-          { "field": "created_at", "header": "Recorded" }
-        ]
+        "header": "Round {{round}} · epoch {{epoch}} · approved {{approved}} · {{created_at}}",
+        "body": "findings"
       }
     },
     {
-      "type": "dataGrid",
+      "type": "prose",
       "id": "plan-review-escalations",
       "props": {
         "title": "Plan-review escalations",
-        "rowKey": "id",
         "refreshMs": 5000,
         "collapsible": true,
         "defaultCollapsed": true,
+        "measure": 80,
+        "empty": "No plan-review escalations.",
         "data": {
           "kind": "datasource",
           "source": "app",
@@ -176,16 +174,8 @@
           "orderBy": { "field": "id", "dir": "desc" },
           "filter": [{ "field": "plan_key", "eqParam": true }]
         },
-        "columns": [
-          { "field": "epoch", "header": "Epoch" },
-          { "field": "round", "header": "Round" },
-          { "field": "findings", "header": "Findings" },
-          { "field": "status", "header": "Status" },
-          { "field": "directive", "header": "Directive" },
-          { "field": "note", "header": "Human note" },
-          { "field": "asked_at", "header": "Asked" },
-          { "field": "answered_at", "header": "Answered" }
-        ]
+        "header": "Round {{round}} · epoch {{epoch}} · {{status}} · directive {{directive}} · asked {{asked_at}} · answered {{answered_at}} · note {{note}}",
+        "body": "findings"
       }
     },
     {
@@ -214,14 +204,15 @@
       }
     },
     {
-      "type": "dataGrid",
+      "type": "prose",
       "id": "coordination-notes",
       "props": {
         "title": "Coordination notes",
-        "rowKey": "id",
         "refreshMs": 5000,
         "collapsible": true,
         "defaultCollapsed": true,
+        "measure": 80,
+        "empty": "No coordination notes posted yet.",
         "data": {
           "kind": "datasource",
           "source": "app",
@@ -229,14 +220,8 @@
           "orderBy": { "field": "id", "dir": "asc" },
           "filter": [{ "field": "plan_key", "eqParam": true }]
         },
-        "columns": [
-          { "field": "wave", "header": "Wave" },
-          { "field": "author_task", "header": "Agent" },
-          { "field": "kind", "header": "Kind" },
-          { "field": "files", "header": "Files" },
-          { "field": "body", "header": "Note" },
-          { "field": "created_at", "header": "Posted" }
-        ]
+        "header": "Wave {{wave}} · {{author_task}} · {{kind}} · files {{files}} · {{created_at}}",
+        "body": "body"
       }
     },
     {
