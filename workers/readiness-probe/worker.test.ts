@@ -162,6 +162,32 @@ test("pollUntilReady: an omitted poll.timeoutMs takes the budget from NANO_READI
   );
 });
 
+test("pollUntilReady: the seeded probeTimeout binds the worker to the gate per-instance, overriding ambient env", async () => {
+  const clock = fakeClock();
+  // Regression for the per-instance worker/gate drift: the gate's engine timers fire off the seeded
+  // `probeTimeout` process variable, so the worker must adopt THAT value, not recompute from the
+  // ambient env. Here the seeded bound (45m) is generous while the ambient env (1m) is stale/smaller.
+  // The env-recomputing code would bail after 1m — going silent while the engine still waits 45m —
+  // so the never-green probe must instead keep polling PAST 30m to prove the seeded value is in force.
+  const exec = execReturning([{ status: 503, body: "" }]);
+  const THIRTY_MIN = 30 * 60_000;
+  const res = await pollUntilReady({
+    probe: httpProbe({ everyMs: 5 * 60_000, backoff: "fixed" }),
+    gateKey: "gate-seeded",
+    probeTimeout: "PT45M",
+    exec,
+    env: { NANO_READINESS_POLL_TIMEOUT: "PT1M" },
+    now: clock.now,
+    wait: clock.wait,
+    publish: async () => {},
+  });
+  assert(!res.ready, "the never-green probe exhausted its (seeded) budget");
+  assert(
+    clock.now() > THIRTY_MIN,
+    `the worker honored the seeded 45m probeTimeout over the 1m env; stopped at ${clock.now()}ms`,
+  );
+});
+
 test("READINESS_READY_MESSAGE is the name the gate correlates", () => {
   assertEquals(READINESS_READY_MESSAGE, "readiness-ready");
 });

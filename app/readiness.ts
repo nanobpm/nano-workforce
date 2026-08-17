@@ -413,6 +413,30 @@ export function readinessTimeoutMs(
   return isoDurationToMs(readEnvOr("NANO_READINESS_POLL_TIMEOUT", DEFAULT_READINESS_TIMEOUT, env), DEFAULT_READINESS_TIMEOUT);
 }
 
+/** The worker's local poll budget in **milliseconds**, bound to the gate **per instance**.
+ *
+ * The gate's engine timers (`resources/processes/readiness-gate.bpmn`) fire off the *process
+ * variable* `probeTimeout` (`<bpmn:timeDuration>=probeTimeout</…>`), seeded once when the gate
+ * instance is created. The worker must adopt that SAME seeded value rather than recompute the bound
+ * from the ambient env ({@link readinessTimeoutMs}): if `NANO_READINESS_POLL_TIMEOUT` changes after
+ * the instance is created (or `probeTimeout` was seeded from a different source), an env-recomputed
+ * worker can stop probing while the engine timer is still waiting — a window where the artifact can
+ * go ready with no worker left to publish `readiness-ready`, spuriously escalating the gate.
+ *
+ * So prefer the seeded `probeTimeout` (parsed through {@link isoDurationToMs}, the same grammar the
+ * engine timer is validated with, so worker-ms and engine-ISO can't drift), and fall back to the
+ * env-derived twin only when it is absent/blank — e.g. a direct caller or unit test that drives the
+ * loop without seeding the process variable. */
+export function probeBudgetMs(
+  probeTimeout: string | undefined,
+  probe: ReadinessProbe,
+  env: Record<string, string | undefined> = process.env,
+): number {
+  const seeded = (probeTimeout ?? "").trim();
+  if (seeded !== "") return isoDurationToMs(seeded, DEFAULT_READINESS_TIMEOUT);
+  return readinessTimeoutMs(probe, env);
+}
+
 // ── Default I/O implementation (Node) ───────────────────────────────────────────────────────────
 
 /** The production {@link ProbeExec}: `fetch` for http, a shell subprocess for command/npm/gh. Every

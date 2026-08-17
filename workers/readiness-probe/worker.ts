@@ -22,9 +22,9 @@ import {
   type ProbePoll,
   type ProbeResult,
   parseProbe,
+  probeBudgetMs,
   probeOnce,
   type ReadinessProbe,
-  readinessTimeoutMs,
   redactTarget,
 } from "../../app/readiness.ts";
 import type { WorkerInputs, WorkerOutputs } from "../../nano-generated/worker-io.d.ts";
@@ -59,6 +59,7 @@ function effectivePoll(
 export async function pollUntilReady(deps: {
   probe: ReadinessProbe;
   gateKey: string;
+  probeTimeout?: string;
   exec: ProbeExec;
   env: Record<string, string | undefined>;
   now: () => number;
@@ -67,10 +68,11 @@ export async function pollUntilReady(deps: {
   log?: (msg: string) => void;
 }): Promise<ProbeResult> {
   const poll = effectivePoll(deps.probe.poll, deps.env);
-  // The local budget is the SAME bound as the gate's engine timer (`readinessTimeoutMs` mirrors
-  // `readinessTimeout`), so raising `NANO_READINESS_POLL_TIMEOUT` past the built-in default keeps
-  // the worker probing for the whole wait instead of going silent after 30m — the two never drift.
-  const deadline = deps.now() + readinessTimeoutMs(deps.probe, deps.env);
+  // The local budget is bound to the gate PER INSTANCE: it adopts the same seeded `probeTimeout`
+  // process variable the gate's engine timers fire off (`=probeTimeout`), falling back to the env-
+  // derived twin only when it's absent. Recomputing from the ambient env would let the worker go
+  // silent while the engine timer is still waiting if the env changed after the instance was seeded.
+  const deadline = deps.now() + probeBudgetMs(deps.probeTimeout, deps.probe, deps.env);
   const label = redactTarget(deps.probe);
   let attempt = 0;
   for (;;) {
@@ -103,6 +105,7 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
   const result = await pollUntilReady({
     probe,
     gateKey,
+    probeTimeout: typeof job.variables.probeTimeout === "string" ? job.variables.probeTimeout : undefined,
     exec: defaultProbeExec(),
     env: process.env,
     now: () => Date.now(),

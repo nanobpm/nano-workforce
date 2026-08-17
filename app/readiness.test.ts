@@ -22,6 +22,7 @@ import {
   normalizePoll,
   parseProbe,
   parseRepoRef,
+  probeBudgetMs,
   probeOnce,
   type ProbeExec,
   readinessTimeout,
@@ -233,6 +234,18 @@ test("readinessTimeoutMs: the ms twin of readinessTimeout — same precedence, n
     readinessTimeoutMs(parseProbe({ kind: "http", target: "x" }), { NANO_READINESS_POLL_TIMEOUT: "PT2H" }),
     7_200_000,
   );
+});
+
+test("probeBudgetMs: prefers the seeded probeTimeout (the gate timer's bound), falling back to the env twin", () => {
+  const probe = parseProbe({ kind: "http", target: "x" });
+  // The seeded probeTimeout wins over the ambient env — binding worker and engine to ONE per-instance
+  // value: a stale env can't shorten the worker while the engine timer waits the seeded budget.
+  assertEquals(probeBudgetMs("PT45M", probe, { NANO_READINESS_POLL_TIMEOUT: "PT1M" }), 2_700_000);
+  // Absent/blank probeTimeout → fall back to the env-derived twin (readinessTimeoutMs).
+  assertEquals(probeBudgetMs(undefined, probe, { NANO_READINESS_POLL_TIMEOUT: "PT2H" }), 7_200_000);
+  assertEquals(probeBudgetMs("   ", probe, {}), 1_800_000);
+  // A malformed seeded value degrades to the built-in default (30m), matching isoDurationToMs.
+  assertEquals(probeBudgetMs("nonsense", probe, { NANO_READINESS_POLL_TIMEOUT: "PT1M" }), 1_800_000);
 });
 
 // ── repo/ref parse + redaction ──────────────────────────────────────────────────────────────
