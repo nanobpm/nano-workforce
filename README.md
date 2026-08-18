@@ -282,9 +282,12 @@ machines. Two app surfaces must be reachable from those off-box workers:
 - The **agentic visibility channel** — `/agentic` (WebSocket). In on-by-default **LOCAL mode** it is
   gated only by a *well-known, non-secret* token that the hub honours from **any origin** — so an
   off-box or reverse-proxied peer appears live with no shared secret, matching the open trusted-LAN
-  posture of the engine itself. Exposure is therefore governed by the app's **bind address** (below),
-  not by the channel: bound to loopback it stays on-box, bound wide it is reachable across the LAN
-  (the server emits a startup WARN when it binds wide in LOCAL mode). To *authenticate* the channel
+  posture of the engine itself. Exposure therefore depends on network reachability — the app's
+  **bind address** (below) *and* any reverse proxy or port forwarding in front of it — not on the
+  channel: bound to loopback it stays on-box *unless a same-host proxy forwards `/agentic`*, bound
+  wide it is reachable across the LAN. The startup WARN only reflects what the server can verify about
+  its own bind (it fires when it binds wide in LOCAL mode); it cannot see proxy-forwarded exposure. To
+  *authenticate* the channel
   instead of leaving it open, run it in **secure mode** by setting `NANO_AGENTIC_SECRET` — the
   **same** env var name and value on the server and on every worker box (the worker presents it as
   its identity token, the hub verifies it against its own). (Fleet coordination itself does not

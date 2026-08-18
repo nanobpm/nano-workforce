@@ -50,7 +50,10 @@ The channel has three modes, selected by environment (see `main.ts`):
 
 - **LOCAL mode (default)** — when neither `NANO_AGENTIC_SECRET` nor its fallback
   `NANO_PR_WEBHOOK_SECRET` is set, the channel **is** mounted with a well-known token: no credential
-  is required, so peers on the trusted LAN can connect off-box (a `WARN` surfaces the exposure).
+  is required, so peers on the trusted LAN can connect off-box. Exposure depends on network
+  reachability (the server bind plus any reverse proxy/port forwarding); the startup `WARN` only
+  fires when the hub can prove the HTTP server is bound non-loopback, so it won't flag exposure
+  created by a same-host proxy forwarding `/agentic`.
 - **SECURE mode** — set `NANO_AGENTIC_SECRET` (falls back to `NANO_PR_WEBHOOK_SECRET`) to require a
   shared identity secret (the same value on the hub and every peer), presented as `?token=…`.
 - **Disabled** — set `NANO_AGENTIC=off` (or `0`/`false`/`no`) to not mount the channel at all.
