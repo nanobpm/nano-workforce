@@ -140,3 +140,19 @@ test("edge endpoints given as issue URLs resolve to the same plan keys", () => {
   assertEquals(edges[0].consumer, key(2));
   assertEquals(edges[0].producer, key(1));
 });
+
+// `deps` arrives untyped from the request body, so a malformed entry must reject with a clean
+// EpicSetValidationError (400), never an uncaught TypeError. Each of these would previously have
+// thrown a raw TypeError (mapping to a 500 at the edge) before the defensive shape checks.
+for (const badDep of [
+  null,
+  "owner/repo#1", // non-object
+  {}, // missing endpoints
+  { consumer: 1, producer: key(1), package: "p", capabilityRef: key(1) }, // non-string consumer
+  { consumer: key(2), producer: key(1), package: 7, capabilityRef: key(1) }, // non-string package
+] as const) {
+  test(`malformed dep entry (${JSON.stringify(badDep)}) is rejected as a 400`, () => {
+    const err = expectReject(() => validateEpicSet([key(1), key(2)], [badDep]));
+    assertEquals(err.status, 400);
+  });
+}

@@ -312,3 +312,33 @@ test("missing body: 400", async () => {
     assertEquals(res.status, 400);
   });
 });
+
+// ── Malformed deps[] entries map to a clean 400 (never an uncaught TypeError/500), nothing persisted.
+// `deps` arrives from an untyped request body, so a null/non-object entry or a non-string field must
+// be rejected as an EpicSetValidationError → 400, with no edge persisted and no branch created.
+for (const [label, badDep] of [
+  ["null entry", null],
+  ["non-object entry (string)", "owner/repo#1"],
+  ["empty object (missing endpoints)", {}],
+  ["non-string consumer", { consumer: 1, producer: `${REPO}#1`, package: "p", capabilityRef: `${REPO}#1` }],
+  ["non-string package", { consumer: `${REPO}#2`, producer: `${REPO}#1`, package: 7, capabilityRef: `${REPO}#1` }],
+] as const) {
+  test(`malformed dep (${label}): 400, nothing persisted/created`, async () => {
+    const gh = freshGithub(REPO);
+    await withGithub(gh, async () => {
+      const { app, tables } = makeApp();
+      const res = await call(app, {
+        epics: [
+          { issue: `${REPO}#1`, baseBranch: "epic/a" },
+          { issue: `${REPO}#2`, baseBranch: "epic/b" },
+        ],
+        deps: [badDep],
+      });
+      assertEquals(res.status, 400);
+      assertEquals(typeof res.body.error, "string");
+      assertEquals(planDepsRows(tables).length, 0);
+      assertEquals(gh.creates, []); // rejected BEFORE any admitPlan side effect
+    });
+  });
+}
+

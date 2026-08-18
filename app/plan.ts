@@ -536,6 +536,9 @@ export function admitPlanErrorResponse(err: unknown): { status: number; error: s
 /** One inter-epic dependency edge as SUBMITTED to the set door: the `consumer` epic waits for the
  * `producer` epic to publish the `{ package, capabilityRef }` capability. `consumer`/`producer` are
  * epic references (`owner/repo#N` or an issue URL); the door resolves them to plan keys. */
+/** The intended shape of one submitted dependency entry. It documents the wire contract; the actual
+ * `deps[]` arrives untyped, so {@link validateEpicSet} validates each entry against this shape at
+ * runtime rather than trusting the type. */
 export interface EpicSetDepInput {
   consumer: string;
   producer: string;
@@ -563,6 +566,11 @@ export class EpicSetValidationError extends Error {
   }
 }
 
+/** Narrow an untyped value to a plain object so its fields can be read as `unknown`. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
 /** Pure, side-effect-free validation of a submitted epic set's SHAPE and DAG — run BEFORE any
  * `admitPlan` call so a cycle or dangling edge is rejected with nothing half-started. Given the
  * submitted set's plan keys (already parsed, in submission order) and the raw edges, it:
@@ -574,8 +582,14 @@ export class EpicSetValidationError extends Error {
  *   • rejects a cycle in the consumer→producer graph, naming the edge that closes it.
  * Returns the edges with both endpoints resolved to plan keys. Throws {@link EpicSetValidationError}
  * (status 400) at the first offending input. Idempotent-friendly: a duplicate EDGE (same
- * consumer→producer submitted twice) is collapsed, not rejected, so a retried set validates. */
-export function validateEpicSet(planKeys: string[], deps: EpicSetDepInput[]): ResolvedEpicSetDep[] {
+ * consumer→producer submitted twice) is collapsed, not rejected, so a retried set validates.
+ *
+ * `deps` is accepted as `unknown[]` because it arrives straight from an untyped request body
+ * (`startEpicSet` forwards `body.deps` verbatim). Every entry's shape is therefore validated
+ * defensively here — a non-object entry (`null`, `{}`), or a non-string endpoint / `package` /
+ * `capabilityRef`, maps to a clean {@link EpicSetValidationError} (400), never an uncaught
+ * TypeError (500). */
+export function validateEpicSet(planKeys: string[], deps: readonly unknown[]): ResolvedEpicSetDep[] {
   if (planKeys.length === 0) {
     throw new EpicSetValidationError(400, "epic set is empty — submit at least one epic");
   }
@@ -609,14 +623,26 @@ export function validateEpicSet(planKeys: string[], deps: EpicSetDepInput[]): Re
   const seenEdges = new Set<string>();
   // consumer plan key → set of producer plan keys it depends on (for the DAG / cycle check).
   const adjacency = new Map<string, Set<string>>();
-  for (const dep of deps) {
-    const consumer = resolveEndpoint(dep.consumer, "consumer");
-    const producer = resolveEndpoint(dep.producer, "producer");
+  for (const rawDep of deps) {
+    if (!isRecord(rawDep)) {
+      throw new EpicSetValidationError(
+        400,
+        "each dependency must be an object with consumer, producer, package and capabilityRef fields",
+      );
+    }
+    if (typeof rawDep.consumer !== "string" || typeof rawDep.producer !== "string") {
+      throw new EpicSetValidationError(
+        400,
+        "each dependency needs string consumer and producer endpoints (owner/repo#123 or an issue URL)",
+      );
+    }
+    const consumer = resolveEndpoint(rawDep.consumer, "consumer");
+    const producer = resolveEndpoint(rawDep.producer, "producer");
     if (consumer === producer) {
       throw new EpicSetValidationError(400, `epic ${consumer} cannot depend on itself`);
     }
-    const pkg = (dep.package ?? "").trim();
-    const capabilityRef = (dep.capabilityRef ?? "").trim();
+    const pkg = (typeof rawDep.package === "string" ? rawDep.package : "").trim();
+    const capabilityRef = (typeof rawDep.capabilityRef === "string" ? rawDep.capabilityRef : "").trim();
     if (pkg.length === 0) {
       throw new EpicSetValidationError(
         400,
