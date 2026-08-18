@@ -69,8 +69,8 @@ export interface MountAgenticChannelOptions {
    * mountAgenticChannel} substitutes {@link LOCAL_AGENTIC_TOKEN} via its local `secret` assignment. */
   readonly secret: string;
   /**
-   * Security mode. Nano is trusted-LAN-first, so this defaults to `true` (strict) at the library
-   * level to keep the fail-closed contract for any caller that doesn't opt in — but `main.ts` passes
+   * Security mode. Defaults to `true` (strict) at the library level — fail-closed for any caller
+   * that doesn't explicitly opt in — but `main.ts` passes
    * `secure: false` whenever no `NANO_AGENTIC_SECRET` is configured, mounting an on-by-default LOCAL
    * channel: a well-known token ({@link LOCAL_AGENTIC_TOKEN}) honoured from any origin, with NO
    * capability credential. Set `secure: true` (with a real secret) to require an ADR 0028 identity
