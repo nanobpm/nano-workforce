@@ -174,13 +174,23 @@ export async function recordPlanDep(data: DataLayer, edge: PlanDepInput): Promis
     );
   }
   const table = planDeps(data);
-  const existing = (await table.find({ plan_key: edge.plan_key })).find(
-    (d) => d.depends_on_plan_key === edge.depends_on_plan_key,
-  );
+  const match = { plan_key: edge.plan_key, depends_on_plan_key: edge.depends_on_plan_key };
+  const existing = (await table.find(match))[0];
   if (existing) return existing;
   const row: PlanDep = { ...edge, created_at: now() };
-  await table.insert(row);
-  return row;
+  try {
+    await table.insert(row);
+    return row;
+  } catch (err) {
+    // A concurrent caller may have inserted the same consumer→producer pair between our find and
+    // our insert (classic check-then-insert race); the composite PRIMARY KEY is the durable
+    // backstop that rejects the loser. Honour the "duplicate re-submission is a no-op" contract by
+    // re-reading and returning the winning row rather than surfacing the constraint error. Only a
+    // genuine non-collision failure (the pair still absent after the re-read) is re-raised.
+    const raced = (await table.find(match))[0];
+    if (raced) return raced;
+    throw err;
+  }
 }
 
 /** All INBOUND edges for `planKey` — i.e. every producer epic this dependent waits on. Empty for a
@@ -196,7 +206,9 @@ export function inboundPlanDeps(data: DataLayer, planKey: string): Promise<PlanD
 export async function planDepsForSet(data: DataLayer, planKeys: string[]): Promise<PlanDep[]> {
   const seen = new Set<string>();
   const out: PlanDep[] = [];
-  for (const key of planKeys) {
+  // De-duplicate the keys first so a repeated key (retries / accidental repeats) does not trigger a
+  // redundant per-key inbound read; the edge de-dup below still guards against any overlap.
+  for (const key of new Set(planKeys)) {
     for (const edge of await inboundPlanDeps(data, key)) {
       const id = `${edge.plan_key}\u0000${edge.depends_on_plan_key}`;
       if (seen.has(id)) continue;
