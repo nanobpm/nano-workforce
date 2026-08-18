@@ -38,9 +38,20 @@ test("rejects a body with no capability as 400", async () => {
 });
 
 test("enforces the shared secret when NANO_PR_WEBHOOK_SECRET is set", async () => {
-  // The module captures the secret at load; when unset (the test default) enrol is open, so this
-  // only asserts the open path returns 200 for a valid body.
-  const res = (await handler(input({ capability: { cognition: "decide" } }), app)) as any;
-  assertEquals(res.status, 200);
-  assert(res.body.serve.includes("decide"));
+  // The module captures the secret at load, so re-import a cache-busted copy with the env var set to
+  // exercise the guarded 401 path and the authorized 200 path.
+  const prev = process.env["NANO_PR_WEBHOOK_SECRET"];
+  process.env["NANO_PR_WEBHOOK_SECRET"] = "s3cr3t";
+  try {
+    const mod = await import(`./enrolAgenticWorker.ts?guard=${Date.now()}`);
+    const guarded = mod.default as typeof handler;
+    const bad = (await guarded(input({ capability: { cognition: "decide" } }), app)) as any;
+    assertEquals(bad.status, 401);
+    const ok = (await guarded(input({ capability: { cognition: "decide" } }, { "x-hook-secret": "s3cr3t" }), app)) as any;
+    assertEquals(ok.status, 200);
+    assert(ok.body.serve.includes("decide"));
+  } finally {
+    if (prev === undefined) delete process.env["NANO_PR_WEBHOOK_SECRET"];
+    else process.env["NANO_PR_WEBHOOK_SECRET"] = prev;
+  }
 });

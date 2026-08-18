@@ -74,6 +74,13 @@ test("diversity SLO is green for distinct-family spar seats, red for a same-fami
   assertEquals(sameFamily.status, "red");
 });
 
-test("CREW_VOCAB is frozen so a consumer cannot mutate the shared artifact", () => {
+test("CREW_VOCAB is deep-frozen so a consumer cannot mutate the shared artifact", () => {
   assert(Object.isFrozen(CREW_VOCAB));
+  // Object.freeze is shallow — assert the nested structures are frozen too, so the "no consumer can
+  // mutate the shared artifact" invariant holds all the way down.
+  assert(Object.isFrozen(CREW_VOCAB.networks));
+  assert(Object.isFrozen(CREW_VOCAB.networks.planning));
+  assert(Object.isFrozen(CREW_VOCAB.networks.planning.roles));
+  assert(Object.isFrozen(CREW_VOCAB.networks.planning.roles.spar));
+  assert(Object.isFrozen(CREW_VOCAB.networks.planning.roles.spar.seats));
 });

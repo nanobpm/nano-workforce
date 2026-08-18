@@ -32,3 +32,22 @@ test("returns 200 with a well-formed demand×supply report", async () => {
   assert(typeof res.body.demandUnavailable === "boolean");
   assert(["green", "amber", "red"].includes(res.body.diversity.status));
 });
+
+test("shared-secret guard rejects a missing secret when configured", async () => {
+  // The delegate captures the secret at import time, so re-import a cache-busted copy with the env
+  // var set to exercise the guarded 401 path and the authorized 200 path.
+  const prev = process.env["NANO_PR_WEBHOOK_SECRET"];
+  process.env["NANO_PR_WEBHOOK_SECRET"] = "s3cr3t";
+  try {
+    const mod = await import(`./getAgenticRegistry.ts?guard=${Date.now()}`);
+    const guarded = mod.default as typeof handler;
+    const bad = (await guarded(input(), app)) as any;
+    assertEquals(bad.status, 401);
+    const ok = (await guarded(input({ "x-hook-secret": "s3cr3t" }), app)) as any;
+    assertEquals(ok.status, 200);
+    assert(typeof ok.body.version === "number");
+  } finally {
+    if (prev === undefined) delete process.env["NANO_PR_WEBHOOK_SECRET"];
+    else process.env["NANO_PR_WEBHOOK_SECRET"] = prev;
+  }
+});

@@ -32,11 +32,29 @@ import { CORE_VOCAB_VERSION, VocabResolver } from "@nanobpm/agentic/vocab";
 export const CREW_VOCAB_VERSION = CORE_VOCAB_VERSION;
 
 /**
- * The nwf crew vocabulary document. Authored in the `@nanobpm/agentic` `VocabDocument` schema so the
- * package resolver/merge/diversity all apply unchanged. Frozen so no consumer can mutate the shared
- * artifact (authors extend it with `mergeVocab`, which returns a fresh document).
+ * Recursively freezes an object graph. `Object.freeze()` is shallow, so a plain freeze on the vocab
+ * artifact still leaves nested `networks` / `roles` / `seats` structures mutable — contradicting the
+ * "no consumer can mutate the shared artifact" invariant. Deep-freezing every nested object and array
+ * makes the whole document genuinely immutable.
  */
-export const CREW_VOCAB: VocabDocument = Object.freeze({
+function deepFreeze<T>(value: T): T {
+  if (value !== null && typeof value === "object" && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const nested of Object.values(value)) {
+      deepFreeze(nested);
+    }
+  }
+  return value;
+}
+
+/**
+ * The nwf crew vocabulary document. Authored in the `@nanobpm/agentic` `VocabDocument` schema so the
+ * package resolver/merge/diversity all apply unchanged. Deep-frozen so no consumer can mutate the
+ * shared artifact — including its nested `networks` / `roles` / `seats` structures (a shallow
+ * `Object.freeze` would leave those mutable). Authors extend it with `mergeVocab`, which returns a
+ * fresh document.
+ */
+export const CREW_VOCAB: VocabDocument = deepFreeze({
   version: CREW_VOCAB_VERSION,
   networks: {
     planning: {
