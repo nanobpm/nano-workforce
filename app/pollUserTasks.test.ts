@@ -51,12 +51,22 @@ function memData(seed: Record<string, any[]> = {}): { data: DataLayer; stores: R
   return { data, stores };
 }
 
-/** A fake engine whose open user tasks are keyed by processInstanceKey (the only field the poller
- *  queries on for plan / PR instances). */
-function fakeEngine(byInstance: Record<string, { userTaskKey: string; elementId?: string }[]>): EngineClient {
+/** A single engine-reported user task in the fixture. `state` mirrors the engine lifecycle; it
+ *  defaults to `"CREATED"` (the only open/answerable state) so existing fixtures read as live tasks.
+ *  A looping instance holds multiple tasks for one element (COMPLETED from prior rounds + the live one). */
+type FakeTask = { userTaskKey: string; elementId?: string; state?: "CREATED" | "COMPLETED" | "CANCELED" };
+
+/** A fake engine whose user tasks are keyed by processInstanceKey (the only field the poller queries on
+ *  for plan / PR instances). It models the real engine's two accessors from ONE fixture so a test
+ *  genuinely exercises the lifecycle-state filtering: `searchUserTasks` returns tasks in ANY state
+ *  (COMPLETED first, as the live API does — issue #294), while `openUserTasks` pins `state:"CREATED"`. */
+function fakeEngine(byInstance: Record<string, FakeTask[]>): EngineClient {
+  const all = (filter?: { processInstanceKey?: string }) =>
+    filter?.processInstanceKey ? (byInstance[filter.processInstanceKey] ?? []) : [];
   return {
-    searchUserTasks: (filter?: { processInstanceKey?: string }) =>
-      Promise.resolve(filter?.processInstanceKey ? (byInstance[filter.processInstanceKey] ?? []) : []),
+    searchUserTasks: (filter?: { processInstanceKey?: string }) => Promise.resolve(all(filter)),
+    openUserTasks: (filter?: { processInstanceKey?: string }) =>
+      Promise.resolve(all(filter).filter((t) => (t.state ?? "CREATED") === "CREATED")),
   } as unknown as EngineClient;
 }
 
@@ -167,6 +177,53 @@ test("pollUserTasks: skips terminal plans and PRs without a process key", async 
     plans: [{ plan_key: "o/r#40", status: "planning", process_key: null, issue_url: "https://github.com/o/r/issues/40" }],
   });
   const engine = fakeEngine({});
+
+  await pollUserTasks(data, engine);
+
+  assertEquals(stores.user_tasks ?? [], []);
+});
+
+// ── Defect-class guard (issue #294): a looping instance holds MULTIPLE tasks for one element ───────
+// The plan-review (review→revise→review) and PR-wait (escalate→answer→re-escalate) elements sit on a
+// loop, so a looping instance holds a COMPLETED task from a prior round alongside the live CREATED one,
+// and the engine returns the COMPLETED one first. Scoping the query to open (CREATED) tasks projects
+// only the live completable key onto `user_tasks`, never a terminal one the page could not complete.
+test("pollUserTasks: a looping plan/PR projects only the CREATED task, never the COMPLETED one", async () => {
+  const { data, stores } = memData({
+    plans: [{ plan_key: "o/r#50", status: "dispatched", process_key: "pp-50", issue_url: "https://github.com/o/r/issues/50" }],
+    plan_reviews: [{ plan_key: "o/r#50", epoch: 0, round: 0, approved: 0, findings: "scope too broad", created_at: "2025-01-01T00:00:00.000Z" }],
+    pull_requests: [{ pr_key: "o/r#51", status: "escalated", process_key: "rp-51", url: "https://github.com/o/r/pull/51" }],
+    escalations: [{ id: 1, pr_key: "o/r#51", status: "open", question: "conflicting reviews" }],
+  });
+  // Each looping instance returns its COMPLETED prior-round task FIRST, then the live CREATED one.
+  const engine = fakeEngine({
+    "pp-50": [
+      { userTaskKey: "ut-plan-completed", elementId: "plan-review-decision", state: "COMPLETED" },
+      { userTaskKey: "ut-plan-live", elementId: "plan-review-decision", state: "CREATED" },
+    ],
+    "rp-51": [
+      { userTaskKey: "ut-pr-completed", elementId: "wait-answer", state: "COMPLETED" },
+      { userTaskKey: "ut-pr-live", elementId: "wait-answer", state: "CREATED" },
+    ],
+  });
+
+  await pollUserTasks(data, engine);
+
+  const keys = (stores.user_tasks ?? []).map((r) => r.user_task_key).sort();
+  // Only the live CREATED keys — the COMPLETED prior-round tasks must never surface a dead affordance.
+  assertEquals(keys, ["ut-plan-live", "ut-pr-live"]);
+});
+
+// Self-heal reached: an instance whose only task for an element is COMPLETED yields no open task, so
+// its row is removed (open-task query returns []), rather than pinning a dead completable pointer.
+test("pollUserTasks: an instance whose only task is COMPLETED surfaces no row", async () => {
+  const { data, stores } = memData({
+    plans: [{ plan_key: "o/r#52", status: "dispatched", process_key: "pp-52", issue_url: "https://github.com/o/r/issues/52" }],
+    plan_reviews: [{ plan_key: "o/r#52", epoch: 0, round: 0, approved: 0, findings: "scope too broad", created_at: "2025-01-01T00:00:00.000Z" }],
+  });
+  const engine = fakeEngine({
+    "pp-52": [{ userTaskKey: "ut-plan-completed", elementId: "plan-review-decision", state: "COMPLETED" }],
+  });
 
   await pollUserTasks(data, engine);
 

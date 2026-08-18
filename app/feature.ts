@@ -181,10 +181,12 @@ export function deriveFeatureDelivery(prStatus: string | null): FeatureDeliveryR
 export const FEATURE_ESCALATION_ELEMENT = "feature-escalation";
 
 /** The parked `feature-escalation` user task, as `pollFeatureEscalations` observes it via
- * `searchUserTasks`: the completable user-task key the pages drive an attributed answer against.
+ *  `openUserTasks` (the open-task-scoped query — issue #294): the completable user-task key the pages
+ *  drive an attributed answer against. Scoping to `state:"CREATED"` is what keeps a looping run — which
+ *  holds COMPLETED prior-round tasks for the same element — from latching the pointer onto a dead task.
  *
  * The agent's `question` is NOT read from here — the WASM testkit engine does not surface a user
- * task's `zeebe:ioMapping`-mapped local variables through `searchUserTasks`, so relying on it would
+ * task's `zeebe:ioMapping`-mapped local variables through the user-task query, so relying on it would
  * make the question untestable. Instead the `record-feature-escalation` service task (feature.bpmn)
  * persists `question` onto the row at escalation entry — see `workers/record-feature-escalation`. */
 export interface FeatureEscalationParked {
@@ -240,8 +242,10 @@ export function deriveFeatureEscalationPatch(
  * `pollFeatureBlocked` reconciles it onto the read model. */
 export const FEATURE_BLOCKED_ELEMENT = "feature-blocked";
 
-/** The parked `feature-blocked` user task, as `pollFeatureBlocked` observes it via `searchUserTasks`:
- * the completable user-task key the pages drive an attributed acknowledgement against. */
+/** The parked `feature-blocked` user task, as `pollFeatureBlocked` observes it via `openUserTasks`
+ *  (the open-task-scoped query — issue #294): the completable user-task key the pages drive an
+ *  attributed acknowledgement against. Scoping to `state:"CREATED"` keeps a re-blocked run — which
+ *  holds COMPLETED prior-round tasks for the same element — from latching the pointer onto a dead task. */
 export interface FeatureBlockedParked {
   userTaskKey: string;
 }
