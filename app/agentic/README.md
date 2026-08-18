@@ -8,7 +8,7 @@ owns the keystone wiring; siblings H1/H3/H4 extend it **without touching the boo
 - **`channel.ts`** — `mountAgenticChannel(...)`. Stands up the `@nanobpm/agentic` WebSocket channel
   + `AgenticHub` on the app's **own** HTTP server (`app.httpServer`, same port as the pages and
   `/app/api/hooks/*` — no sidecar port), authenticates upgrades on `/agentic` (ADR 0028 identity
-  token + a required capability credential, mirroring the blackboard hook's `?token=…` pattern), and
+  token; the capability credential was removed as accept-any friction), and
   mounts every discovered family. Returns a handle whose `teardown()` reverses everything.
 - **`registry.ts`** — the `AgenticFamilyRegistry` seam + the `AgenticFamily` / `AgenticContext`
   contracts. Mounts families on boot, tears them down in **reverse** order on shutdown.

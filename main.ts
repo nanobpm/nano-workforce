@@ -48,10 +48,11 @@ const app = await runFromEnv({ engine, host, port: PORT, handleSignals: false })
 // slices (H1/H3/H4) extend it by dropping a family module under `app/agentic/families/`, never here.
 //
 // Local-first (security opt-in): Nano is designed for local use, so the channel is ON BY DEFAULT.
-//   - No secret configured  -> LOCAL mode: well-known localhost token, no credential required, so a
-//     `nano work` worker appears live with zero configuration.
-//   - `NANO_AGENTIC_SECRET` (or `NANO_PR_WEBHOOK_SECRET`) set -> SECURE mode: ADR 0028 identity token
-//     + capability credential required on every upgrade.
+//   - No secret configured  -> LOCAL mode: well-known token, no credential required, honoured from
+//     any origin, so a `nano work` worker appears live with zero configuration (trusted-LAN posture;
+//     a WARN surfaces the exposure on a non-loopback bind).
+//   - `NANO_AGENTIC_SECRET` (or `NANO_PR_WEBHOOK_SECRET`) set -> SECURE mode: a real ADR 0028 identity
+//     token required on every upgrade (no capability credential — that was accept-any friction).
 //   - `NANO_AGENTIC=off` (or 0/false/no) -> disabled entirely.
 // `app.httpServer` is a `node:http` Server once started (undefined on hosts that don't surface one,
 // e.g. Deno).
@@ -73,9 +74,10 @@ if (httpServer instanceof Server) {
     });
     if (!secure) {
       app.log.info(
-        "agentic channel mounted in LOCAL mode (on by default, token-only — a well-known localhost " +
-          "token, no capability credential). Set NANO_AGENTIC_SECRET for secure mode, or " +
-          "NANO_AGENTIC=off to disable.",
+        "agentic channel mounted in LOCAL mode (on by default, token-only — a well-known token, no " +
+          "capability credential). Honoured from any origin, so on a non-loopback bind it is reachable " +
+          "off-box on the trusted LAN (a WARN surfaces the exposure). Set NANO_AGENTIC_SECRET to " +
+          "require a per-peer secret, or NANO_AGENTIC=off to disable.",
       );
     }
   }

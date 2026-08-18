@@ -264,7 +264,7 @@ active epic already targets the same custom base. See
 | `NANO_PR_REVIEW_WAIT_TIMEOUT` | `PT20M` | ISO-8601 duration the loop waits for a fresh review before escalating a stalled review (timer arm of the `wait-review` gateway) |
 | `NANO_PR_REVIEW_NUDGE_MINUTES` | `5` | cooldown between the poller's automatic reviewer re-request nudges for one waiting PR (clamped 1–1440) |
 | `NANO_WORKFORCE_BASE_URL` | `http://localhost:3000` | externally-reachable base URL for the capability hooks (`/app/api/hooks/*`). Must resolve from **wherever the agent runs** — set it to the app's LAN address (or console-proxy URL) for a remote fleet. See [Fleet networking](#fleet-networking-remote-workers) |
-| `NANO_AGENTIC_SECRET` | — | enables **secure mode** for the agentic visibility channel (`/agentic`): requires an ADR 0028 identity token + capability credential from every peer. Required to attach agentic visibility from **off-box** workers; unset = on-by-default **LOCAL mode** (well-known token, loopback peers only). Also accepts `NANO_PR_WEBHOOK_SECRET` |
+| `NANO_AGENTIC_SECRET` | — | enables **secure mode** for the agentic visibility channel (`/agentic`): requires an ADR 0028 identity token from every peer. Unset = on-by-default **LOCAL mode** — the well-known token is honoured from **any origin** (open on the trusted LAN, matching the engine's posture); exposure is governed by the server bind address, not a shared secret. Also accepts `NANO_PR_WEBHOOK_SECRET` |
 
 ### Fleet networking (remote workers)
 
@@ -280,12 +280,14 @@ machines. Two app surfaces must be reachable from those off-box workers:
   agent's prompt, so changing it later does **not** heal already-running instances — re-seed them to
   pick up the new base.
 - The **agentic visibility channel** — `/agentic` (WebSocket). In on-by-default **LOCAL mode** it is
-  gated only by a *well-known, non-secret* localhost token, so it is enforced **loopback-only**: an
-  off-box peer is refused — as is a **reverse-proxied** peer (a connection carrying an
-  `X-Forwarded-For`/`Forwarded`/`X-Real-IP` header is refused even over loopback, so forwarding
-  `/agentic` through the console proxy cannot smuggle the well-known token off-box). To give remote
-  workers visibility, run the channel in **secure mode** by setting `NANO_AGENTIC_SECRET`. (Fleet
-  coordination itself does not depend on this channel — it is visibility only.)
+  gated only by a *well-known, non-secret* token that the hub honours from **any origin** — so an
+  off-box or reverse-proxied peer appears live with no shared secret, matching the open trusted-LAN
+  posture of the engine itself. Exposure is therefore governed by the app's **bind address** (below),
+  not by the channel: bound to loopback it stays on-box, bound wide it is reachable across the LAN
+  (the server emits a startup WARN when it binds wide in LOCAL mode). To *authenticate* the channel
+  instead of leaving it open, run it in **secure mode** by setting `NANO_AGENTIC_SECRET` (peers then
+  present an ADR 0028 identity token). (Fleet coordination itself does not depend on this channel — it
+  is visibility only.)
 
 #### Bind the HTTP server
 
@@ -300,11 +302,11 @@ opt-in to all interfaces):
 
 > **Status:** this manifest key is delivered by the Urban runtime in
 > [`nanobpm/nano-ide#235`](https://github.com/nanobpm/nano-ide/issues/235) (add the field to the app
-> schema + plumb the bind host to the node adapter). Until that lands, the runtime binds to all
-> interfaces by default (Node's `listen(port)` default), so a fleet already reaches the hooks — but
-> once the parallel *loopback-by-default* change ships, set `"network": { "bind": "all" }` here to
-> keep nwf reachable. This repo is ready for that flip; nwf already enforces the LOCAL-token
-> loopback-only guard so binding wide never exposes the well-known agentic token off-box.
+> schema + plumb the bind host to the node adapter). This repo already ships
+> `"network": { "bind": "all" }` so a fleet reaches the hooks off-box. The agentic visibility channel
+> is **open on the LAN by default** in LOCAL mode (governed by the bind address, with a startup WARN
+> when bound wide), so no loopback-only guard stands between a wide bind and remote worker visibility —
+> set `NANO_AGENTIC_SECRET` if you want to authenticate that channel instead.
 
 #### Choose a path: direct LAN bind vs console proxy
 

@@ -5,17 +5,13 @@
 // hub is visible via `inspect()`, families mount/tear-down through the seam, and shutdown is clean.
 import { type AddressInfo, createServer, type Server } from "node:http";
 import { test } from "node:test";
-import { AUTH_UNAUTHORIZED } from "@nanobpm/agentic/channel";
 import { createLogger } from "@nanobpm/urban/runtime";
 import { WebSocket } from "ws";
 import { assert, assertEquals } from "#test-assert";
 import { noopLog } from "../../test/log.ts";
 import {
   type AgenticChannelHandle,
-  isForwardedConnection,
-  isLoopbackRemote,
   LOCAL_AGENTIC_TOKEN,
-  loopbackOnly,
   mountAgenticChannel,
 } from "./channel.ts";
 import { type AgenticContext, AgenticFamilyRegistry } from "./registry.ts";
@@ -103,7 +99,7 @@ async function mount(
   });
 }
 
-test("a valid identity token + capability credential upgrades on /agentic", async (t) => {
+test("a valid identity token upgrades on /agentic (capability credential no longer required)", async (t) => {
   const { server, port } = await startHttp();
   const channel = await mount(port, server);
   t.after(async () => {
@@ -131,7 +127,7 @@ test("an invalid identity token is rejected (4401)", async (t) => {
   assertEquals(channel.hub.connectionCount, 0);
 });
 
-test("a missing capability credential is rejected (4403)", async (t) => {
+test("SECURE mode upgrades with NO capability credential (credential requirement ripped out)", async (t) => {
   const { server, port } = await startHttp();
   const channel = await mount(port, server);
   t.after(async () => {
@@ -139,8 +135,12 @@ test("a missing capability credential is rejected (4403)", async (t) => {
     await closeServer(server);
   });
 
-  const closedCode = await rejectionCode(port, `?token=${SECRET}`);
-  assertEquals(closedCode, 4403);
+  // The capability credential was accept-any (never verified), so it is no longer required at all:
+  // a valid identity token alone upgrades. Only the token gates the channel.
+  const ws = await connect(port, `?token=${SECRET}`);
+  assertEquals(ws.readyState, WebSocket.OPEN);
+  assertEquals(channel.hub.connectionCount, 1);
+  ws.close();
 });
 
 test("normal HTTP routes keep working alongside the channel", async (t) => {
@@ -303,7 +303,7 @@ function capturingLog(): { log: ReturnType<typeof noopLog>; records: Array<{ lev
   return { log, records };
 }
 
-test("LOCAL mode warns when the server is bound to a non-loopback interface", async (t) => {
+test("LOCAL mode warns the visibility channel is OPEN on the LAN on a non-loopback bind", async (t) => {
   const server = createServer((_req, res) => res.end());
   await new Promise<void>((resolve) => server.listen(0, "0.0.0.0", resolve));
   const { log, records } = capturingLog();
@@ -319,8 +319,8 @@ test("LOCAL mode warns when the server is bound to a non-loopback interface", as
     await closeServer(server);
   });
 
-  const warned = records.some((r) => r.level === "warn" && r.msg.includes("not bound to loopback"));
-  assert(warned, "LOCAL mode on a non-loopback bind must warn that the well-known token is exposed");
+  const warned = records.some((r) => r.level === "warn" && r.msg.includes("OPEN on the LAN"));
+  assert(warned, "LOCAL mode on a non-loopback bind must warn that the visibility channel is exposed");
 });
 
 test("LOCAL mode warns when the server bind address is unverifiable (not listening)", async (t) => {
@@ -346,7 +346,7 @@ test("LOCAL mode warns when the server bind address is unverifiable (not listeni
   const warned = records.some(
     (r) => r.level === "warn" && r.msg.includes("bind address could not be verified"),
   );
-  assert(warned, "LOCAL mode on an unbound server must warn that the well-known token is unverifiable");
+  assert(warned, "LOCAL mode on an unbound server must warn that exposure is unverifiable");
 });
 
 test("LOCAL mode does NOT warn when the server is bound to loopback", async (t) => {
@@ -364,82 +364,43 @@ test("LOCAL mode does NOT warn when the server is bound to loopback", async (t) 
     await closeServer(server);
   });
 
-  const warned = records.some((r) => r.level === "warn" && r.msg.includes("not bound to loopback"));
+  const warned = records.some((r) => r.level === "warn" && r.msg.includes("OPEN on the LAN"));
   assert(!warned, "a loopback-bound LOCAL channel is the expected safe case and must not warn");
 });
 
-// --- Loopback-only enforcement of the LOCAL well-known token (issue #224 / nano-ide#235) ---
+// --- LOCAL mode is trusted-network: the well-known token is honoured from any origin ---
 //
-// The LOCAL token is not a secret, so once the app binds to all interfaces (network.bind: "all") it
-// must never be honoured off-box. `isLoopbackRemote` vets the peer's origin; `loopbackOnly` wraps an
-// authenticator to refuse a non-loopback peer with 4401 while delegating loopback peers to the base.
+// The loopback-only enforcement (and its isLoopbackRemote/isForwardedConnection/loopbackOnly guard)
+// was removed: LOCAL mode now matches the unauthenticated engine's trusted-LAN posture, so a
+// non-loopback / reverse-proxied peer that would previously have been refused now upgrades. Exposure
+// is governed by the server bind + the startup WARN, and SECURE mode (NANO_AGENTIC_SECRET) remains
+// the opt-in for a real per-peer secret.
 
-test("isLoopbackRemote accepts same-host peers and rejects everything else", () => {
-  for (const ok of ["127.0.0.1", "127.0.0.5", "::1", "::ffff:127.0.0.1", "::ffff:127.1.2.3"]) {
-    assert(isLoopbackRemote(ok), `${ok} should be loopback`);
-  }
-  for (const no of [undefined, "", "10.0.0.4", "192.168.1.20", "::ffff:10.0.0.4", "2001:db8::1", "0.0.0.0"]) {
-    assert(!isLoopbackRemote(no), `${String(no)} should NOT be loopback`);
-  }
-});
-
-test("loopbackOnly refuses a non-loopback peer with 4401 and never calls the base authenticator", () => {
-  let baseCalls = 0;
-  const base = () => {
-    baseCalls++;
-    return { ok: true as const, grant: { identity: "peer" } };
-  };
-  const guarded = loopbackOnly(base);
-
-  const remote = guarded({ token: LOCAL_AGENTIC_TOKEN, remote: "10.0.0.4" });
-  assert(!("then" in remote), "authenticator result is synchronous here");
-  assertEquals((remote as { ok: boolean; code?: number }).ok, false);
-  assertEquals((remote as { code?: number }).code, AUTH_UNAUTHORIZED);
-  assertEquals(baseCalls, 0);
-});
-
-test("loopbackOnly delegates a loopback peer to the base authenticator", () => {
-  let baseCalls = 0;
-  const base = () => {
-    baseCalls++;
-    return { ok: true as const, grant: { identity: "peer" } };
-  };
-  const guarded = loopbackOnly(base);
-
-  const local = guarded({ token: LOCAL_AGENTIC_TOKEN, remote: "127.0.0.1" });
-  assertEquals((local as { ok: boolean }).ok, true);
-  assertEquals(baseCalls, 1);
-});
-
-// A reverse proxy that connects to the app over loopback makes an off-box client appear same-host to
-// `req.remote`. `isForwardedConnection` detects the relay from proxy-forwarding headers, so
-// `loopbackOnly` fails closed on a proxied peer even when `req.remote` itself is loopback.
-
-test("isForwardedConnection detects proxy-forwarding headers and ignores absent/empty ones", () => {
-  assert(isForwardedConnection({ "x-forwarded-for": "10.0.0.4" }), "x-forwarded-for marks a relay");
-  assert(isForwardedConnection({ forwarded: "for=10.0.0.4" }), "forwarded marks a relay");
-  assert(isForwardedConnection({ "x-real-ip": "10.0.0.4" }), "x-real-ip marks a relay");
-
-  assert(!isForwardedConnection(undefined), "no headers is a direct connection");
-  assert(!isForwardedConnection({}), "empty headers is a direct connection");
-  assert(!isForwardedConnection({ "x-forwarded-for": "   " }), "whitespace value is treated as absent");
-  assert(!isForwardedConnection({ "content-type": "application/json" }), "unrelated headers are ignored");
-});
-
-test("loopbackOnly refuses a reverse-proxied peer (loopback remote + forwarding header) with 4401", () => {
-  let baseCalls = 0;
-  const base = () => {
-    baseCalls++;
-    return { ok: true as const, grant: { identity: "peer" } };
-  };
-  const guarded = loopbackOnly(base);
-
-  const proxied = guarded({
-    token: LOCAL_AGENTIC_TOKEN,
-    remote: "127.0.0.1",
-    headers: { "x-forwarded-for": "203.0.113.7" },
+test("LOCAL mode upgrades an off-box / proxied peer (loopback-only guard removed)", async (t) => {
+  const { server, port } = await startHttp();
+  const channel = await mountAgenticChannel({
+    server,
+    secret: "",
+    secure: false,
+    data: undefined,
+    log: noopLog(),
   });
-  assertEquals((proxied as { ok: boolean; code?: number }).ok, false);
-  assertEquals((proxied as { code?: number }).code, AUTH_UNAUTHORIZED);
-  assertEquals(baseCalls, 0);
+  t.after(async () => {
+    await channel.teardown();
+    await closeServer(server);
+  });
+
+  // A proxy-forwarding header used to fail LOCAL mode closed (a reverse-proxied peer was refused).
+  // With the guard gone the well-known token alone upgrades, regardless of origin/relay.
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/agentic?token=${LOCAL_AGENTIC_TOKEN}`, {
+    headers: { "x-forwarded-for": "10.0.0.4" },
+  });
+  await new Promise<void>((resolve, reject) => {
+    ws.on("open", () => resolve());
+    ws.on("error", () => {/* close frame carries the reason */});
+    ws.on("close", (code, reason) => reject(new Error(`closed ${code}: ${reason.toString()}`)));
+  });
+  assertEquals(ws.readyState, WebSocket.OPEN);
+  assertEquals(channel.hub.connectionCount, 1);
+  ws.close();
 });
