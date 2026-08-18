@@ -32,6 +32,7 @@
       const cfg = window.__NANO_APP_VIEW__ ?? {};
       mountCockpit(cfg.host ?? document.getElementById("cockpit-root"), {
         reportUrl: cfg.reportUrl,
+        transcriptsUrl: cfg.transcriptsUrl,
         relayUrl: cfg.relayUrl,
         hookSecret: cfg.hookSecret,
         relayToken: cfg.relayToken,
