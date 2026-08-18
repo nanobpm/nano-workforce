@@ -193,9 +193,16 @@ Consequences the prompt (`resources/prompts/review-round.md`) encodes:
   `io.nanobpm.agentTask.repository.url`; the **app** supplies it — plus the head
   branch as `…repository.ref` — as a process variable at `createInstance`
   (`repoEnvelopeVars` in `app/service.ts`, resolving the head via `fetchPrMeta`/
-  `fetchPrHead`). The harness is PR-agnostic: it does **not** derive the head branch
-  from `prNumber`/`prUrl`. When the head can't be resolved the envelope is omitted and
-  the agent falls back to the worker's launch directory (the legacy behavior).
+  `fetchPrHead`). The envelope also carries clone-shaping fields so large monorepos
+  provision within the c8ctl clone timeout (issue #287): `singleBranch: true` and
+  `filter: "blob:none"` request a **branch-scoped, treeless partial clone** (the full
+  commit graph is kept — no `--depth 1` — so `git merge-base` / the review 3-dot diff
+  stays correct while blobs fetch lazily), and, when the PR base branch is resolvable,
+  an optional `…repository.baseRef` so the harness fetches the base tip alongside the
+  head and keeps `origin/<base>` reachable for the diff. The harness is PR-agnostic: it
+  does **not** derive the head branch from `prNumber`/`prUrl`. When the head can't be
+  resolved the envelope is omitted and the agent falls back to the worker's launch
+  directory (the legacy behavior).
 
 ## 6. Signals
 
@@ -625,8 +632,11 @@ but encode incompatible decisions about a shared contract** — a genuine design
   integration provisions the repo and checks out the PR's head branch (it must
   already give the worker repo access to work at all). The **app** resolves the head
   branch and passes it in the `io.nanobpm.agentTask.repository.{url,ref}` envelope
-  (a `createInstance` process variable — see `repoEnvelopeVars`); the harness is
-  PR-agnostic and provisions from that envelope. The worker stays a pure provisioner.
+  (a `createInstance` process variable — see `repoEnvelopeVars`), along with the
+  branch-scoped, treeless clone-shaping fields (`singleBranch`, `filter`, optional
+  `baseRef`) that let large monorepos provision within the clone timeout (#287); the
+  harness is PR-agnostic and provisions from that envelope. The worker stays a pure
+  provisioner.
 - **review-ready via GitHub webhook** — same message, swappable faster trigger,
   when the app is publicly reachable. Deferred (poller-only for v1).
 - **Supervised vs external worker** — the agent runs as an external
