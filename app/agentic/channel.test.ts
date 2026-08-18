@@ -374,9 +374,9 @@ test("LOCAL mode does NOT warn when the server is bound to loopback", async (t) 
 // was removed: LOCAL mode now matches the unauthenticated engine's trusted-LAN posture, so a
 // non-loopback / reverse-proxied peer that would previously have been refused now upgrades. Exposure
 // is governed by the server bind + the startup WARN, and SECURE mode (NANO_AGENTIC_SECRET) remains
-// the opt-in for a real per-peer secret.
+// the opt-in for a shared secret (the same value on the hub and every peer).
 
-test("LOCAL mode upgrades an off-box / proxied peer (loopback-only guard removed)", async (t) => {
+test("LOCAL mode upgrades a reverse-proxied / forwarded peer (loopback-only guard removed)", async (t) => {
   const { server, port } = await startHttp();
   const channel = await mountAgenticChannel({
     server,
@@ -391,7 +391,8 @@ test("LOCAL mode upgrades an off-box / proxied peer (loopback-only guard removed
   });
 
   // A proxy-forwarding header used to fail LOCAL mode closed (a reverse-proxied peer was refused).
-  // With the guard gone the well-known token alone upgrades, regardless of origin/relay.
+  // With the guard gone the well-known token alone upgrades this forwarded/reverse-proxied
+  // connection (still to 127.0.0.1, now carrying an x-forwarded-for header).
   const ws = new WebSocket(`ws://127.0.0.1:${port}/agentic?token=${LOCAL_AGENTIC_TOKEN}`, {
     headers: { "x-forwarded-for": "10.0.0.4" },
   });

@@ -51,8 +51,9 @@ const app = await runFromEnv({ engine, host, port: PORT, handleSignals: false })
 //   - No secret configured  -> LOCAL mode: well-known token, no credential required, honoured from
 //     any origin, so a `nano work` worker appears live with zero configuration (trusted-LAN posture;
 //     a WARN surfaces the exposure on a non-loopback bind).
-//   - `NANO_AGENTIC_SECRET` (or `NANO_PR_WEBHOOK_SECRET`) set -> SECURE mode: a real ADR 0028 identity
-//     token required on every upgrade (no capability credential — that was accept-any friction).
+//   - `NANO_AGENTIC_SECRET` (or `NANO_PR_WEBHOOK_SECRET`) set -> SECURE mode: a shared-secret ADR 0028
+//     identity token (the same value on the hub and every peer) required on every upgrade (no
+//     capability credential — that was accept-any friction).
 //   - `NANO_AGENTIC=off` (or 0/false/no) -> disabled entirely.
 // `app.httpServer` is a `node:http` Server once started (undefined on hosts that don't surface one,
 // e.g. Deno).
@@ -77,7 +78,8 @@ if (httpServer instanceof Server) {
         "agentic channel mounted in LOCAL mode (on by default, token-only — a well-known token, no " +
           "capability credential). Honoured from any origin, so on a non-loopback bind it is reachable " +
           "off-box on the trusted LAN (a WARN surfaces the exposure). Set NANO_AGENTIC_SECRET to " +
-          "require a per-peer secret, or NANO_AGENTIC=off to disable.",
+          "require a shared secret (the same value on the hub and every peer), or NANO_AGENTIC=off to " +
+          "disable.",
       );
     }
   }

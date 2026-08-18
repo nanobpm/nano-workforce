@@ -33,8 +33,9 @@ export const AGENTIC_PATH = "/agentic";
  * worker agree on this constant, well-known token. It is NOT a secret — LOCAL mode is designed for a
  * trusted LAN and the token is honoured from ANY origin (the same trust posture the unauthenticated
  * engine already relies on); a non-loopback bind therefore leaves the visibility channel OPEN on the
- * LAN, which the startup WARN surfaces. Set `NANO_AGENTIC_SECRET` (SECURE mode) to require a real
- * per-peer secret instead. Keep in lock-step with the worker constant in jwulf/c8ctl-plugin-nano
+ * LAN, which the startup WARN surfaces. Set `NANO_AGENTIC_SECRET` (SECURE mode) to require a shared
+ * secret (the same value on the hub and every peer) instead. Keep in lock-step with the worker
+ * constant in jwulf/c8ctl-plugin-nano
  * (`c8ctl-plugin.js` LOCAL_AGENTIC_TOKEN).
  */
 export const LOCAL_AGENTIC_TOKEN = "nano-local";
@@ -58,13 +59,14 @@ function isLoopbackBind(addr: string | AddressInfo | null): boolean {
 // LOCAL mode honours the well-known token from ANY origin: exposure is governed by the server bind
 // (loopback by default) and surfaced by the startup WARN below, matching the trusted-network posture
 // the unauthenticated engine already relies on. Set NANO_AGENTIC_SECRET (SECURE mode) to require a
-// real per-peer secret instead.
+// shared secret (the same value on the hub and every peer) instead.
 
 export interface MountAgenticChannelOptions {
   /** The app's own `node:http` server (share its port; `app.httpServer` narrowed to `Server`). */
   readonly server: Server;
-  /** The shared-secret ADR 0028 identity token every valid peer must present as `?token=…`. In LOCAL
-   * mode (`secure: false`) this may be empty — the hub substitutes {@link LOCAL_AGENTIC_TOKEN}. */
+  /** The shared-secret ADR 0028 identity token every valid peer must present as `?token=…` (the same
+   * value on the hub and every peer). In LOCAL mode (`secure: false`) this may be empty — {@link
+   * mountAgenticChannel} substitutes {@link LOCAL_AGENTIC_TOKEN} via its local `secret` assignment. */
   readonly secret: string;
   /**
    * Security mode. Nano is trusted-LAN-first, so this defaults to `true` (strict) at the library
