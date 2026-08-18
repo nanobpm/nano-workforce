@@ -406,6 +406,10 @@ export interface PrMeta {
    * workspace checkout (`io.nanobpm.agentTask.repository.ref`) so the review agent lands on the
    * PR branch instead of the worker's launch directory. `null` when GitHub doesn't return it. */
   headRef: string | null;
+  /** The PR's base branch name (e.g. `main`). Emitted in the repository envelope so the c8ctl
+   * harness fetches the base tip alongside the single-branch head clone, keeping `git diff
+   * origin/<base>...HEAD` (the review 3-dot diff) computable. `null` when GitHub doesn't return it. */
+  baseRef: string | null;
 }
 
 export async function fetchPrMeta(
@@ -414,10 +418,10 @@ export async function fetchPrMeta(
   token: string,
 ): Promise<PrMeta | null> {
   if (await useGh()) {
-    const out = await runGh(["pr", "view", String(number), "--repo", repo, "--json", "title,body,headRefName"]);
+    const out = await runGh(["pr", "view", String(number), "--repo", repo, "--json", "title,body,headRefName,baseRefName"]);
     // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
-    const j = JSON.parse(out) as { title?: string; body?: string; headRefName?: string | null };
-    return { title: j.title ?? null, body: j.body ?? "", headRef: j.headRefName ?? null };
+    const j = JSON.parse(out) as { title?: string; body?: string; headRefName?: string | null; baseRefName?: string | null };
+    return { title: j.title ?? null, body: j.body ?? "", headRef: j.headRefName ?? null, baseRef: j.baseRefName ?? null };
   }
   if (!token) return null;
   const r = await fetch(`https://api.github.com/repos/${repo}/pulls/${number}`, {
@@ -425,8 +429,8 @@ export async function fetchPrMeta(
   });
   if (!r.ok) throw new Error(`github ${r.status} ${r.statusText}`.trim());
   // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
-  const j = (await r.json()) as { title?: string; body?: string; head?: { ref?: string | null } };
-  return { title: j.title ?? null, body: j.body ?? "", headRef: j.head?.ref ?? null };
+  const j = (await r.json()) as { title?: string; body?: string; head?: { ref?: string | null }; base?: { ref?: string | null } };
+  return { title: j.title ?? null, body: j.body ?? "", headRef: j.head?.ref ?? null, baseRef: j.base?.ref ?? null };
 }
 
 /** Fetch an issue's title via the configured transport, mirroring `fetchPrMeta` (both `gh` and
@@ -666,12 +670,12 @@ export async function fetchPrHead(
   repo: string,
   number: number | string,
   token: string,
-): Promise<{ headRef: string | null; headSha: string | null } | null> {
+): Promise<{ headRef: string | null; headSha: string | null; baseRef: string | null } | null> {
   if (await useGh()) {
-    const out = await runGh(["pr", "view", String(number), "--repo", repo, "--json", "headRefName,headRefOid"]);
+    const out = await runGh(["pr", "view", String(number), "--repo", repo, "--json", "headRefName,headRefOid,baseRefName"]);
     // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
-    const j = JSON.parse(out) as { headRefName?: string | null; headRefOid?: string | null };
-    return { headRef: j.headRefName ?? null, headSha: j.headRefOid ?? null };
+    const j = JSON.parse(out) as { headRefName?: string | null; headRefOid?: string | null; baseRefName?: string | null };
+    return { headRef: j.headRefName ?? null, headSha: j.headRefOid ?? null, baseRef: j.baseRefName ?? null };
   }
   if (!token) return null;
   const r = await fetch(`https://api.github.com/repos/${repo}/pulls/${number}`, {
@@ -679,8 +683,8 @@ export async function fetchPrHead(
   });
   if (!r.ok) throw new Error(`github ${r.status} ${r.statusText}`.trim());
   // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
-  const j = (await r.json()) as { head?: { ref?: string | null; sha?: string | null } };
-  return { headRef: j.head?.ref ?? null, headSha: j.head?.sha ?? null };
+  const j = (await r.json()) as { head?: { ref?: string | null; sha?: string | null }; base?: { ref?: string | null } };
+  return { headRef: j.head?.ref ?? null, headSha: j.head?.sha ?? null, baseRef: j.base?.ref ?? null };
 }
 
 /** The PR's current base branch ref — the branch this PR would land *into*. `null` when no
