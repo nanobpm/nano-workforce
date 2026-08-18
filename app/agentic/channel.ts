@@ -59,8 +59,9 @@ function isLoopbackBind(addr: string | AddressInfo | null): boolean {
 // LOCAL mode honours the well-known token from ANY origin: exposure depends on network reachability
 // — the server bind (loopback by default) plus any reverse proxy/port forwarding in front of it —
 // matching the trusted-network posture the unauthenticated engine already relies on. The startup
-// WARN below only reflects what the server can verify about its own bind (it fires on a wide bind);
-// it cannot detect a same-host proxy forwarding /agentic. Set NANO_AGENTIC_SECRET (SECURE mode) to
+// WARN below only reflects what the server can verify about its own bind (it fires on a wide bind,
+// or when the bind can't be verified — `server.address()` is `null`); it cannot detect a same-host
+// proxy forwarding /agentic. Set NANO_AGENTIC_SECRET (SECURE mode) to
 // require a shared secret (the same value on the hub and every peer) instead.
 
 export interface MountAgenticChannelOptions {
