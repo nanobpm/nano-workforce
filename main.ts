@@ -77,9 +77,10 @@ if (httpServer instanceof Server) {
       app.log.info(
         "agentic channel mounted in LOCAL mode (on by default, token-only — a well-known token, no " +
           "capability credential). Honoured from any origin, so on a non-loopback bind it is reachable " +
-          "off-box on the trusted LAN (a WARN surfaces the exposure). Set NANO_AGENTIC_SECRET to " +
-          "require a shared secret (the same value on the hub and every peer), or NANO_AGENTIC=off to " +
-          "disable.",
+          "off-box on the trusted LAN (a WARN surfaces a provably wide bind; it cannot detect exposure " +
+          "created by a same-host reverse proxy forwarding /agentic while the app stays loopback-bound). " +
+          "Set NANO_AGENTIC_SECRET to require a shared secret (the same value on the hub and every peer), " +
+          "or NANO_AGENTIC=off to disable.",
       );
     }
   }
