@@ -587,11 +587,15 @@ export function mountCockpit(host, opts = {}) {
 /**
  * Derive the channel WebSocket URL from the current origin (path `/agentic`).
  *
- * The agentic hub authenticates upgrades with `sharedSecretAuthenticator({ requireCredential: true })`,
- * so a bare `ws(s)://host/agentic` is rejected (4401/4403). When a `token` (and optional `capability`)
- * are supplied, they are appended as the `?token=…&capability=…` query the hub requires; without them
- * the default URL cannot authenticate and drill-in will be refused — pass credentials (or an explicit
- * `relayUrl`) for secured deployments.
+ * The agentic hub authenticates upgrades with an identity token only
+ * (`sharedSecretAuthenticator({ requireCredential: false })`) — no capability credential is required.
+ * In SECURE mode a bare `ws(s)://host/agentic` is rejected (4401) until a valid `token` is supplied;
+ * in LOCAL mode the hub still requires a `token` query param, but it is a well-known, non-secret
+ * value the hub accepts from any origin. Auth is token-only — a `capability` is legacy and ignored
+ * by the current hub (`requireCredential: false`); it is still appended to the query when supplied
+ * (`?token=…&capability=…`) for backward compatibility but plays no part in authenticating the
+ * upgrade. Without a token neither mode can authenticate and drill-in will be refused — pass a
+ * token (or an explicit `relayUrl`) for secured deployments.
  */
 function defaultRelayUrl(token, capability) {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";

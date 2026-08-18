@@ -2,8 +2,8 @@
 //
 // This is the keystone of the agentic-visibility epic (#142): it stands up the WebSocket channel +
 // hub on the app's OWN HTTP server (same port as the pages and `/app/api/hooks/*` — no sidecar
-// port), authenticates each upgrade (ADR 0028 identity token + a capability credential, mirroring
-// the `?token=…` pattern the blackboard hook uses), and mounts every registered family module
+// port), authenticates each upgrade (ADR 0028 identity token; the capability credential was removed
+// as it was accept-any friction), and mounts every registered family module
 // through the {@link AgenticFamilyRegistry} seam.
 //
 // `main.ts` calls {@link mountAgenticChannel} once after `runFromEnv` and calls the returned
@@ -17,8 +17,6 @@ import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import {
   AgenticHub,
-  AUTH_UNAUTHORIZED,
-  type Authenticator,
   sharedSecretAuthenticator,
   WebSocketChannelTransport,
 } from "@nanobpm/agentic/channel";
@@ -30,12 +28,15 @@ import { AgenticFamilyRegistry } from "./registry.ts";
 export const AGENTIC_PATH = "/agentic";
 
 /**
- * The well-known identity token used in LOCAL mode (security opt-in). Nano is local-first: on a
- * developer's own machine the visibility channel is on by default with no credential friction, so
- * the hub and the `nano work` worker agree on this constant, well-known localhost token. It is NOT
- * a secret — it only gates same-machine dev traffic. In secure mode (`secure: true` + a real
- * `NANO_AGENTIC_SECRET`) this constant is never used and a real ADR 0028 verifier applies. Keep in
- * lock-step with the worker constant in jwulf/c8ctl-plugin-nano (`c8ctl-plugin.js` LOCAL_AGENTIC_TOKEN).
+ * The well-known identity token used in LOCAL mode (the default). Nano is trusted-network-first: the
+ * visibility channel is on by default with no credential friction, so the hub and the `nano work`
+ * worker agree on this constant, well-known token. It is NOT a secret — LOCAL mode is designed for a
+ * trusted LAN and the token is honoured from ANY origin (the same trust posture the unauthenticated
+ * engine already relies on); a non-loopback bind therefore leaves the visibility channel OPEN on the
+ * LAN, which the startup WARN surfaces. Set `NANO_AGENTIC_SECRET` (SECURE mode) to require a shared
+ * secret (the same value on the hub and every peer) instead. Keep in lock-step with the worker
+ * constant in jwulf/c8ctl-plugin-nano
+ * (`c8ctl-plugin.js` LOCAL_AGENTIC_TOKEN).
  */
 export const LOCAL_AGENTIC_TOKEN = "nano-local";
 
@@ -55,96 +56,28 @@ function isLoopbackBind(addr: string | AddressInfo | null): boolean {
   return host === "::1" || host === "::ffff:127.0.0.1" || host.startsWith("127.");
 }
 
-/**
- * True if a peer's remote address (`req.remote`, i.e. `socket.remoteAddress`) is a same-host /
- * loopback peer. This is the per-connection counterpart to {@link isLoopbackBind}: while that vets
- * the *server's* bind, this vets the *client's* origin, so LOCAL mode can be honoured off a
- * wildcard/all-interfaces bind (`network.bind: "all"`, issue #224) yet still refuse the well-known
- * {@link LOCAL_AGENTIC_TOKEN} to anything but a same-machine peer. Loopback is `127.0.0.0/8`, `::1`,
- * or the IPv6-mapped IPv4 forms Node reports on a dual-stack listener (`::ffff:127.x`). An
- * absent/unparseable remote is NOT provably same-host, so it is treated as non-loopback
- * (fail-closed), matching the `isLoopbackBind(null) === false` posture.
- */
-export function isLoopbackRemote(remote: string | undefined): boolean {
-  if (!remote) return false;
-  return (
-    remote === "::1" ||
-    remote === "::ffff:127.0.0.1" ||
-    remote.startsWith("127.") ||
-    remote.startsWith("::ffff:127.")
-  );
-}
-
-/**
- * Proxy-forwarding request headers. Their presence means the connection was relayed through a
- * reverse proxy, so `req.remote` is the *proxy's* address (typically loopback for an embedded/console
- * proxy) rather than the true client — a loopback `remote` no longer proves a same-host peer. A
- * genuine same-machine loopback peer connects directly and never carries one of these.
- */
-const FORWARDING_HEADERS: readonly string[] = ["x-forwarded-for", "forwarded", "x-real-ip"];
-
-/**
- * True if the handshake carries a proxy-forwarding header — i.e. the connection reached us through a
- * reverse proxy, so `req.remote` is the proxy, not the originating client. Used to fail LOCAL mode
- * closed: a relayed connection can present a loopback `remote` (the proxy) while the real client is
- * off-box, so the well-known token must never be honoured for it (see {@link loopbackOnly}). Headers
- * are lower-cased by the transport ({@link HandshakeRequest.headers}); an empty/whitespace value is
- * treated as absent.
- */
-export function isForwardedConnection(headers: Readonly<Record<string, string>> | undefined): boolean {
-  if (!headers) return false;
-  return FORWARDING_HEADERS.some((h) => {
-    const value = headers[h];
-    return typeof value === "string" && value.trim() !== "";
-  });
-}
-
-/**
- * Wrap `base` so a peer is admitted ONLY from a direct, same-host loopback connection. LOCAL mode
- * gates purely on the well-known {@link LOCAL_AGENTIC_TOKEN}, which is not a secret — so once the app
- * is exposed on the LAN (`network.bind: "all"`, issue #224) that token must never be honoured
- * off-box. This enforces the invariant per-connection (any other peer is closed `4401`), independent
- * of the server's bind, closing the interplay the bind-to-all setting exposes (nano-ide#235).
- *
- * Two ways a peer can fail to be a same-host loopback client, both refused:
- *  - a non-loopback `req.remote` (a direct off-box connection); or
- *  - a proxy-forwarding header ({@link isForwardedConnection}) — the connection was relayed, so a
- *    loopback `req.remote` is the *proxy*, not the client. Refusing any forwarded connection keeps
- *    the guard robust even if `/agentic` is inadvertently reverse-proxied over loopback (the
- *    embedded/console-proxy topology), where the off-box client would otherwise appear same-host.
- *
- * Note this guards ONLY the agentic visibility channel: the capability HTTP hooks
- * (`/app/api/hooks/*`) carry their own unguessable per-request tokens and stay reachable off-box
- * (including through the console proxy), which is what a remote fleet needs. To attach agentic
- * visibility from off-box — directly or via a proxy — run the channel in SECURE mode instead.
- */
-export function loopbackOnly(base: Authenticator): Authenticator {
-  return (req) => {
-    if (isForwardedConnection(req.headers) || !isLoopbackRemote(req.remote)) {
-      return {
-        ok: false,
-        code: AUTH_UNAUTHORIZED,
-        reason:
-          "LOCAL-mode agentic channel is loopback-only and refuses reverse-proxied peers; use secure mode (NANO_AGENTIC_SECRET) for off-box or proxied peers",
-      };
-    }
-    return base(req);
-  };
-}
+// LOCAL mode honours the well-known token from ANY origin: exposure depends on network reachability
+// — the server bind (loopback by default) plus any reverse proxy/port forwarding in front of it —
+// matching the trusted-network posture the unauthenticated engine already relies on. The startup
+// WARN below only reflects what the server can verify about its own bind (it fires on a wide bind,
+// or when the bind can't be verified — `server.address()` is `null`); it cannot detect a same-host
+// proxy forwarding /agentic. Set NANO_AGENTIC_SECRET (SECURE mode) to
+// require a shared secret (the same value on the hub and every peer) instead.
 
 export interface MountAgenticChannelOptions {
   /** The app's own `node:http` server (share its port; `app.httpServer` narrowed to `Server`). */
   readonly server: Server;
-  /** The shared-secret ADR 0028 identity token every valid peer must present as `?token=…`. In LOCAL
-   * mode (`secure: false`) this may be empty — the hub substitutes {@link LOCAL_AGENTIC_TOKEN}. */
+  /** The shared-secret ADR 0028 identity token every valid peer must present as `?token=…` (the same
+   * value on the hub and every peer). In LOCAL mode (`secure: false`) this may be empty — {@link
+   * mountAgenticChannel} substitutes {@link LOCAL_AGENTIC_TOKEN} via its local `secret` assignment. */
   readonly secret: string;
   /**
-   * Security mode. Nano is local-first, so this defaults to `true` (strict) at the library level to
-   * keep the fail-closed contract for any caller that doesn't opt in — but `main.ts` passes
+   * Security mode. Defaults to `true` (strict) at the library level — fail-closed for any caller
+   * that doesn't explicitly opt in — but `main.ts` passes
    * `secure: false` whenever no `NANO_AGENTIC_SECRET` is configured, mounting an on-by-default LOCAL
-   * channel: a well-known localhost token ({@link LOCAL_AGENTIC_TOKEN}) and NO required capability
-   * credential. Set `secure: true` (with a real secret) to require an ADR 0028 identity token AND a
-   * capability credential on every upgrade.
+   * channel: a well-known token ({@link LOCAL_AGENTIC_TOKEN}) honoured from any origin, with NO
+   * capability credential. Set `secure: true` (with a real secret) to require an ADR 0028 identity
+   * token on every upgrade.
    */
   readonly secure?: boolean;
   /** The app's SQLite data layer, threaded to family modules (may be absent when data isn't mounted). */
@@ -195,44 +128,44 @@ export async function mountAgenticChannel(
   }
 
   const transport = new WebSocketChannelTransport({ server, path: AGENTIC_PATH });
-  // LOCAL mode gates only on the well-known localhost token, so it must be honoured only for a
-  // same-machine peer: wrap the authenticator to refuse any non-loopback remote (see loopbackOnly).
-  // Secure mode presents a real ADR 0028 identity token + capability credential, so it is safe from
-  // any origin and needs no such guard.
-  const baseAuthenticator = sharedSecretAuthenticator({ secret, requireCredential: secure });
+  // Identity-token-only auth in both modes: SECURE verifies the token against the real
+  // NANO_AGENTIC_SECRET; LOCAL accepts the well-known token from any origin. The capability
+  // credential is intentionally NOT required — nano-workforce never verified it (accept-any), so it
+  // was pure configuration friction; a real ADR 0028 capability check can reintroduce it later by
+  // passing a verifier.
+  const authenticator = sharedSecretAuthenticator({ secret, requireCredential: false });
   const hub = new AgenticHub({
     transport,
-    // Secure mode: a valid identity token PLUS a required capability credential upgrades; either
-    // missing/invalid is rejected (4401 / 4403). Swap in a real ADR 0028 verifier later by passing an
-    // Authenticator. LOCAL mode: token-only (the well-known localhost token), loopback peers only.
-    authenticator: secure ? baseAuthenticator : loopbackOnly(baseAuthenticator),
+    // A valid identity token upgrades (4401 on mismatch). SECURE mode's token is the real secret;
+    // LOCAL mode's is the well-known token, honoured from any origin (trusted-LAN posture).
+    authenticator,
     onError: (err, connectionId) =>
       log.warn("agentic hub error", { connectionId, err: String(err) }),
   });
   // Share the app's port: the transport rode the existing server, so it is already listening.
   await transport.ready();
 
-  // LOCAL mode is now enforced loopback-only per connection (see loopbackOnly), so the well-known
-  // token can never be honoured off-box even on a wildcard/all-interfaces bind. A non-loopback bind
-  // is still worth surfacing though: it means off-box agentic peers are REFUSED, so a remote worker
-  // fleet gets no visibility until the channel runs in secure mode. Warn so the operator makes the
-  // deliberate choice. A `null` address (server not listening yet) is unverifiable — warn too.
+  // LOCAL mode honours the well-known token (not a secret) from any origin. On a loopback bind that
+  // only reaches same-host peers; on a non-loopback bind the visibility channel is OPEN on the LAN —
+  // anyone who can reach this port can attach and watch worker presence/terminals. That is the
+  // intended trusted-network posture, but it must never be silent, so warn. A `null` address (server
+  // not listening yet) is unverifiable — warn too, since it may be exposed.
   if (!secure) {
     const addr = server.address();
     if (addr === null) {
       log.warn(
         "agentic channel is in LOCAL mode but the server bind address could not be verified " +
-          "(the server is not listening yet) — the loopback-only enforcement for the well-known " +
-          "LOCAL_AGENTIC_TOKEN cannot be confirmed. Mount the channel after the server is listening, " +
-          "set NANO_AGENTIC_SECRET for secure mode, or bind the server to 127.0.0.1.",
+          "(the server is not listening yet) — if it is bound off-box the visibility channel is " +
+          "OPEN on the LAN with the well-known token. Mount the channel after the server is " +
+          "listening, set NANO_AGENTIC_SECRET to require a secret, or NANO_AGENTIC=off to disable.",
         { mode: "local", bind: null },
       );
     } else if (!isLoopbackBind(addr)) {
       log.warn(
-        "agentic channel is in LOCAL mode but the server is not bound to loopback — off-box peers " +
-          "are refused the channel (the well-known LOCAL_AGENTIC_TOKEN is enforced loopback-only), " +
-          "so a remote worker fleet cannot attach visibility. Set NANO_AGENTIC_SECRET for secure " +
-          "mode to serve remote peers, or bind the server to 127.0.0.1.",
+        "agentic channel is in LOCAL mode and the server is not bound to loopback — the visibility " +
+          "channel is OPEN on the LAN: any peer that can reach this port can attach with the " +
+          "well-known token and watch worker presence/terminals. Set NANO_AGENTIC_SECRET to require " +
+          "a secret, or NANO_AGENTIC=off to disable.",
         { mode: "local", bind: typeof addr === "object" ? addr.address : String(addr) },
       );
     }

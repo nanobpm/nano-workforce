@@ -8,7 +8,7 @@ owns the keystone wiring; siblings H1/H3/H4 extend it **without touching the boo
 - **`channel.ts`** — `mountAgenticChannel(...)`. Stands up the `@nanobpm/agentic` WebSocket channel
   + `AgenticHub` on the app's **own** HTTP server (`app.httpServer`, same port as the pages and
   `/app/api/hooks/*` — no sidecar port), authenticates upgrades on `/agentic` (ADR 0028 identity
-  token + a required capability credential, mirroring the blackboard hook's `?token=…` pattern), and
+  token; the capability credential was removed because it was accept-any friction), and
   mounts every discovered family. Returns a handle whose `teardown()` reverses everything.
 - **`registry.ts`** — the `AgenticFamilyRegistry` seam + the `AgenticFamily` / `AgenticContext`
   contracts. Mounts families on boot, tears them down in **reverse** order on shutdown.
@@ -46,9 +46,18 @@ H0 itself needs no migration.
 
 ## Configuration
 
-- `NANO_AGENTIC_SECRET` (falls back to `NANO_PR_WEBHOOK_SECRET`) — the shared identity secret peers
-  present as `?token=…`. When neither is set, the channel is **not mounted** (logged), so the app
-  never exposes an unauthenticated upgrade.
+The channel has three modes, selected by environment (see `main.ts`):
+
+- **LOCAL mode (default)** — when neither `NANO_AGENTIC_SECRET` nor its fallback
+  `NANO_PR_WEBHOOK_SECRET` is set, the channel **is** mounted with a well-known token: no *shared
+  secret* (and no capability credential) is required — the well-known token is still presented, so
+  peers on the trusted LAN can connect off-box. Exposure depends on network
+  reachability (the server bind plus any reverse proxy/port forwarding); the startup `WARN` fires
+  when the hub sees a non-loopback bind **or** cannot verify the bind at all (`server.address()` is
+  `null`), so it won't flag exposure created by a same-host proxy forwarding `/agentic`.
+- **SECURE mode** — set `NANO_AGENTIC_SECRET` (falls back to `NANO_PR_WEBHOOK_SECRET`) to require a
+  shared identity secret (the same value on the hub and every peer), presented as `?token=…`.
+- **Disabled** — set `NANO_AGENTIC=off` (or `0`/`false`/`no`) to not mount the channel at all.
 
 ## Event-sourced transcripts (#251)
 
