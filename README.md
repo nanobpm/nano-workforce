@@ -264,7 +264,7 @@ active epic already targets the same custom base. See
 | `NANO_PR_REVIEW_WAIT_TIMEOUT` | `PT20M` | ISO-8601 duration the loop waits for a fresh review before escalating a stalled review (timer arm of the `wait-review` gateway) |
 | `NANO_PR_REVIEW_NUDGE_MINUTES` | `5` | cooldown between the poller's automatic reviewer re-request nudges for one waiting PR (clamped 1–1440) |
 | `NANO_WORKFORCE_BASE_URL` | `http://localhost:3000` | externally-reachable base URL for the capability hooks (`/app/api/hooks/*`). Must resolve from **wherever the agent runs** — set it to the app's LAN address (or console-proxy URL) for a remote fleet. See [Fleet networking](#fleet-networking-remote-workers) |
-| `NANO_AGENTIC_SECRET` | — | enables **secure mode** for the agentic visibility channel (`/agentic`): requires an ADR 0028 identity token from every peer. Unset = on-by-default **LOCAL mode** — the well-known token is honoured from **any origin** (open on the trusted LAN, matching the engine's posture); exposure is governed by the server bind address, not a shared secret. Also accepts `NANO_PR_WEBHOOK_SECRET` |
+| `NANO_AGENTIC_SECRET` | — | enables **secure mode** for the agentic visibility channel (`/agentic`): every peer must present the **same** `NANO_AGENTIC_SECRET` value (set the identical env var on the server and every worker box — Tab A → Slot A). Unset = on-by-default **LOCAL mode** — the well-known token is honoured from **any origin** (open on the trusted LAN, matching the engine's posture); exposure is governed by the server bind address, not a shared secret. Also accepts `NANO_PR_WEBHOOK_SECRET` |
 
 ### Fleet networking (remote workers)
 
@@ -285,9 +285,10 @@ machines. Two app surfaces must be reachable from those off-box workers:
   posture of the engine itself. Exposure is therefore governed by the app's **bind address** (below),
   not by the channel: bound to loopback it stays on-box, bound wide it is reachable across the LAN
   (the server emits a startup WARN when it binds wide in LOCAL mode). To *authenticate* the channel
-  instead of leaving it open, run it in **secure mode** by setting `NANO_AGENTIC_SECRET` (peers then
-  present an ADR 0028 identity token). (Fleet coordination itself does not depend on this channel — it
-  is visibility only.)
+  instead of leaving it open, run it in **secure mode** by setting `NANO_AGENTIC_SECRET` — the
+  **same** env var name and value on the server and on every worker box (the worker presents it as
+  its identity token, the hub verifies it against its own). (Fleet coordination itself does not
+  depend on this channel — it is visibility only.)
 
 #### Bind the HTTP server
 
