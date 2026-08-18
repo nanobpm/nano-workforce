@@ -1,3 +1,10 @@
+# [0.87.0](https://github.com/nanobpm/nano-workforce/compare/v0.86.0...v0.87.0) (2026-08-18)
+
+
+### Features
+
+* **agentic:** frictionless zero-config cockpit — LOCAL mode accepts a tokenless upgrade ([#283](https://github.com/nanobpm/nano-workforce/issues/283)) ([b23dfbb](https://github.com/nanobpm/nano-workforce/commit/b23dfbb018241e4719c6ea664f6428d094069aa6)), closes [#278](https://github.com/nanobpm/nano-workforce/issues/278) [#224](https://github.com/nanobpm/nano-workforce/issues/224) [#282](https://github.com/nanobpm/nano-workforce/issues/282)
+
 # [0.86.0](https://github.com/nanobpm/nano-workforce/compare/v0.85.3...v0.86.0) (2026-08-18)
 
 
