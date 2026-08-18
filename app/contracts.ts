@@ -334,6 +334,15 @@ export const WIRE_CONTRACTS = {
       "Op-tagged relay control frame a worker terminal chunk producer emits and the hub consumes. The op-tagged shape superseded the legacy positional `{stream, offset, chunk}` frame (nano-ide #234/#236); a producer must emit the op-tagged shape or the hub rejects it as `malformed relay message payload`.",
     shape: '{ op: "produce", incarnation: number, stream: string, offset: number, chunk: string }',
   },
+  "io.nanobpm.agentTask.repository": {
+    category: "wire",
+    name: "io.nanobpm.agentTask.repository",
+    owner: "app/service.ts",
+    semantics:
+      "Repo-provisioning envelope the app emits as a `createInstance` process variable (`repoEnvelopeVars`) and the c8ctl worker harness consumes to provision an isolated clone on the PR head branch. Beyond `{provider,url,ref}`, it carries clone-shaping fields for large monorepos (issue #287): `singleBranch:true` + `filter:\"blob:none\"` (a branch-scoped, blobless partial clone — trees fetched up-front, blobs lazily, no `--depth 1` so the merge-base/3-dot diff stays valid) and an optional `baseRef` (the PR base branch, emitted only when resolvable, so the harness fetches its tip and keeps `origin/<base>` reachable). Gated on c8ctl provisioner support (jwulf/c8ctl-plugin-nano#91).",
+    shape:
+      '{ provider: "github", url: string, ref: string, singleBranch: true, filter: "blob:none", baseRef?: string }',
+  },
 } as const satisfies Record<string, WireContract>;
 
 export const TYPE_CONTRACTS = {

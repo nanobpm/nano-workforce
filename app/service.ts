@@ -325,9 +325,10 @@ const AGENT_TASK_NS = "io.nanobpm.agentTask";
  * launch-dir behavior rather than silently cloning the repo's default branch. The static
  * `task.prompt` header on the service task deep-merges with this over the same namespace.
  *
- * The clone is requested **branch-scoped and treeless** (`singleBranch: true` + `filter:
+ * The clone is requested **branch-scoped and blobless** (`singleBranch: true` + `filter:
  * "blob:none"`) so large monorepos (e.g. `camunda/camunda`, ~1.16 GB) provision within the c8ctl
- * clone timeout instead of full-cloning the whole history (issue #287). A treeless partial clone
+ * clone timeout instead of full-cloning the whole history (issue #287). `blob:none` is a *blobless*
+ * partial clone (trees are still fetched up-front — a *treeless* clone would be `--filter=tree:0`); it
  * keeps the full *commit graph* (so `git merge-base` / the review 3-dot diff stays correct) while
  * fetching file blobs lazily — small upfront, correct diffs. `--depth 1` is deliberately NOT used:
  * it would drop the merge-base and break `git diff origin/<base>...HEAD`. When the PR base branch
@@ -349,7 +350,7 @@ export function repoEnvelopeVars(repo: string, ref: string | null, baseRef: stri
         provider: "github",
         url: `https://github.com/${repo}.git`,
         ref,
-        // Branch-scoped, treeless partial clone (issue #287): fetch only the head branch with lazy
+        // Branch-scoped, blobless partial clone (issue #287): fetch only the head branch with lazy
         // blobs so large monorepos provision within the clone timeout. Single-branch + blob:none
         // (not --depth 1) preserves the commit graph so the review's `git diff origin/<base>...HEAD`
         // has a valid merge-base. Gated on c8ctl provisioner support (jwulf/c8ctl-plugin-nano#91).

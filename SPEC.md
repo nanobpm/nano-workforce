@@ -195,7 +195,8 @@ Consequences the prompt (`resources/prompts/review-round.md`) encodes:
   (`repoEnvelopeVars` in `app/service.ts`, resolving the head via `fetchPrMeta`/
   `fetchPrHead`). The envelope also carries clone-shaping fields so large monorepos
   provision within the c8ctl clone timeout (issue #287): `singleBranch: true` and
-  `filter: "blob:none"` request a **branch-scoped, treeless partial clone** (the full
+  `filter: "blob:none"` request a **branch-scoped, blobless partial clone** (trees are
+  still fetched up-front — a *treeless* clone would be `--filter=tree:0`; the full
   commit graph is kept — no `--depth 1` — so `git merge-base` / the review 3-dot diff
   stays correct while blobs fetch lazily), and, when the PR base branch is resolvable,
   an optional `…repository.baseRef` so the harness fetches the base tip alongside the
@@ -633,7 +634,7 @@ but encode incompatible decisions about a shared contract** — a genuine design
   already give the worker repo access to work at all). The **app** resolves the head
   branch and passes it in the `io.nanobpm.agentTask.repository.{url,ref}` envelope
   (a `createInstance` process variable — see `repoEnvelopeVars`), along with the
-  branch-scoped, treeless clone-shaping fields (`singleBranch`, `filter`, optional
+  branch-scoped, blobless clone-shaping fields (`singleBranch`, `filter`, optional
   `baseRef`) that let large monorepos provision within the clone timeout (#287); the
   harness is PR-agnostic and provisions from that envelope. The worker stays a pure
   provisioner.

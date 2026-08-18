@@ -444,7 +444,7 @@ test("repoEnvelopeVars emits the repository envelope keyed on the PR head branch
   assertEquals(env.repository.url, "https://github.com/owner/repo.git");
   assertEquals(env.repository.ref, "feat/issue-12");
   assertEquals(env.repository.provider, "github");
-  // Branch-scoped, treeless partial clone (issue #287): large monorepos provision within the clone
+  // Branch-scoped, blobless partial clone (issue #287): large monorepos provision within the clone
   // timeout while the full commit graph is kept so `git diff origin/<base>...HEAD` has a merge-base.
   assertEquals(env.repository.singleBranch, true);
   assertEquals(env.repository.filter, "blob:none");
@@ -454,7 +454,7 @@ test("repoEnvelopeVars emits the repository envelope keyed on the PR head branch
 
 test("repoEnvelopeVars omits baseRef when the base branch is unresolved", () => {
   const env = (repoEnvelopeVars("owner/repo", "feat/issue-12") as any)["io.nanobpm.agentTask"];
-  // The single-branch/treeless partial-clone request still stands without a base ref…
+  // The single-branch/blobless partial-clone request still stands without a base ref…
   assertEquals(env.repository.singleBranch, true);
   assertEquals(env.repository.filter, "blob:none");
   // …but `baseRef` is omitted entirely rather than emitted as null (no key at all).
