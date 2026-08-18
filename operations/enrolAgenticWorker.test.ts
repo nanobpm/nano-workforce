@@ -62,6 +62,13 @@ test("rejects malformed capability fields (non-string cognition/family, non-numb
   assertEquals(badWeight.status, 400);
 });
 
+test("rejects non-finite capability.weight (NaN/Infinity) as 400", async () => {
+  const nanWeight = (await handler(input({ capability: { cognition: "planning", weight: Number.NaN } }), app)) as any;
+  assertEquals(nanWeight.status, 400);
+  const infWeight = (await handler(input({ capability: { cognition: "planning", weight: Number.POSITIVE_INFINITY } }), app)) as any;
+  assertEquals(infWeight.status, 400);
+});
+
 test("enforces the shared secret when NANO_PR_WEBHOOK_SECRET is set", async () => {
   // The module captures the secret at load, so re-import a cache-busted copy with the env var set to
   // exercise the guarded 401 path and the authorized 200 path.

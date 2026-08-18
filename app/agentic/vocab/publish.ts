@@ -24,7 +24,8 @@ export function vocabRequirements(): VocabRequirement[] {
       if (role.network !== undefined) requirement.network = role.network;
       if (role.weight !== undefined) requirement.weight = role.weight;
       return requirement;
-    });
+    })
+    .sort((a, b) => a.token.localeCompare(b.token));
 }
 
 /** The full published vocab view for `GET /agentic/vocab`. */

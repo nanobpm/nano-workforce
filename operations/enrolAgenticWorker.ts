@@ -55,9 +55,15 @@ export default defineOperation("enrolAgenticWorker", ({ req, body }, app) => {
       return { status: 400, body: { error: `\`${name}\` must be a string when provided` } };
     }
   }
-  if (body.capability.weight !== undefined && typeof body.capability.weight !== "number") {
-    app.log.warn("enrolAgenticWorker rejected: non-number capability.weight");
-    return { status: 400, body: { error: "`capability.weight` must be a number when provided" } };
+  if (
+    body.capability.weight !== undefined &&
+    (typeof body.capability.weight !== "number" || !Number.isFinite(body.capability.weight))
+  ) {
+    app.log.warn("enrolAgenticWorker rejected: non-finite capability.weight");
+    return {
+      status: 400,
+      body: { error: "`capability.weight` must be a finite number when provided" },
+    };
   }
 
   // Fold a top-level `host` into the capability when the capability didn't carry its own — a worker
