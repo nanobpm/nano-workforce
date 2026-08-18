@@ -69,3 +69,29 @@ test("engineRestAddress derives a /v2 REST base by default", () => {
   const address = engineRestAddress();
   assert(address.startsWith("http"), "an http(s) base");
 });
+
+test("engineRestAddress strips trailing slashes from an explicit CAMUNDA_REST_ADDRESS", () => {
+  const prev = process.env.CAMUNDA_REST_ADDRESS;
+  try {
+    process.env.CAMUNDA_REST_ADDRESS = "http://engine.example:8080/v2///";
+    assertEquals(engineRestAddress(), "http://engine.example:8080/v2");
+  } finally {
+    if (prev === undefined) delete process.env.CAMUNDA_REST_ADDRESS;
+    else process.env.CAMUNDA_REST_ADDRESS = prev;
+  }
+});
+
+test("engineRestAddress strips trailing slashes from the derived NANOBPMN_BASE_URL base", () => {
+  const prevExplicit = process.env.CAMUNDA_REST_ADDRESS;
+  const prevBase = process.env.NANOBPMN_BASE_URL;
+  try {
+    delete process.env.CAMUNDA_REST_ADDRESS;
+    process.env.NANOBPMN_BASE_URL = "http://engine.example:8080//";
+    assertEquals(engineRestAddress(), "http://engine.example:8080/v2");
+  } finally {
+    if (prevExplicit === undefined) delete process.env.CAMUNDA_REST_ADDRESS;
+    else process.env.CAMUNDA_REST_ADDRESS = prevExplicit;
+    if (prevBase === undefined) delete process.env.NANOBPMN_BASE_URL;
+    else process.env.NANOBPMN_BASE_URL = prevBase;
+  }
+});

@@ -44,7 +44,7 @@ export interface RegistryReport extends DemandSupplyReport {
  * defaulting to `http://localhost:8080/v2`. Read through the declared env schema (ADR 0004).
  */
 export function engineRestAddress(): string {
-  const explicit = envVar("CAMUNDA_REST_ADDRESS");
+  const explicit = envVar("CAMUNDA_REST_ADDRESS")?.replace(/\/+$/, "");
   if (explicit) return explicit;
   const base = (envVar("NANOBPMN_BASE_URL") ?? "http://localhost:8080").replace(/\/+$/, "");
   return `${base}/v2`;
