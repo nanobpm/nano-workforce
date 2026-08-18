@@ -53,6 +53,15 @@ test("rejects non-string optional fields (host / capability.host / instance) as 
   assertEquals(badInstance.status, 400);
 });
 
+test("rejects malformed capability fields (non-string cognition/family, non-number weight) as 400", async () => {
+  const badCognition = (await handler(input({ capability: { cognition: 7 } }), app)) as any;
+  assertEquals(badCognition.status, 400);
+  const badFamily = (await handler(input({ capability: { cognition: "ci", family: ["frontier"] } }), app)) as any;
+  assertEquals(badFamily.status, 400);
+  const badWeight = (await handler(input({ capability: { cognition: "planning", weight: "5" } }), app)) as any;
+  assertEquals(badWeight.status, 400);
+});
+
 test("enforces the shared secret when NANO_PR_WEBHOOK_SECRET is set", async () => {
   // The module captures the secret at load, so re-import a cache-busted copy with the env var set to
   // exercise the guarded 401 path and the authorized 200 path.

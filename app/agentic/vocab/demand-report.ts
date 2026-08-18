@@ -39,9 +39,11 @@ export interface RegistryReport extends DemandSupplyReport {
 }
 
 /**
- * Derive the engine's C8 v2 REST base the demand reader targets — the same resolution `main.ts` uses:
- * an explicit `CAMUNDA_REST_ADDRESS` wins, else it is derived from `NANOBPMN_BASE_URL` (+ `/v2`),
- * defaulting to `http://localhost:8080/v2`. Read through the declared env schema (ADR 0004).
+ * Derive the engine's C8 v2 REST base the demand reader targets — the same precedence/derivation
+ * `main.ts` uses: an explicit `CAMUNDA_REST_ADDRESS` wins, else it is derived from `NANOBPMN_BASE_URL`
+ * (+ `/v2`), defaulting to `http://localhost:8080/v2`. Read through the declared env schema (ADR 0004).
+ * (This reader additionally strips trailing slashes off an explicit `CAMUNDA_REST_ADDRESS`, which
+ * `main.ts` does not, so the derived base is well-formed regardless of a trailing `/`.)
  */
 export function engineRestAddress(): string {
   const explicit = envVar("CAMUNDA_REST_ADDRESS")?.replace(/\/+$/, "");
