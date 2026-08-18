@@ -37,6 +37,15 @@ test("rejects a body with no capability as 400", async () => {
   assertEquals(res.status, 400);
 });
 
+test("rejects non-string optional fields (host / capability.host / instance) as 400", async () => {
+  const badHost = (await handler(input({ capability: { cognition: "ci" }, host: 42 }), app)) as any;
+  assertEquals(badHost.status, 400);
+  const badCapHost = (await handler(input({ capability: { cognition: "ci", host: { nested: true } } }), app)) as any;
+  assertEquals(badCapHost.status, 400);
+  const badInstance = (await handler(input({ capability: { cognition: "ci" }, instance: 7 }), app)) as any;
+  assertEquals(badInstance.status, 400);
+});
+
 test("enforces the shared secret when NANO_PR_WEBHOOK_SECRET is set", async () => {
   // The module captures the secret at load, so re-import a cache-busted copy with the env var set to
   // exercise the guarded 401 path and the authorized 200 path.

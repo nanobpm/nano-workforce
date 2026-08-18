@@ -29,6 +29,21 @@ export default defineOperation("enrolAgenticWorker", ({ req, body }, app) => {
     app.log.warn("enrolAgenticWorker rejected: missing/invalid capability");
     return { status: 400, body: { error: "a `capability` object is required" } };
   }
+  // A directly-invoked delegate bypasses the OpenAPI runtime validation, so the optional string
+  // fields this operation folds into the capability / echoes back (`host`, `capability.host`,
+  // `instance`) can arrive with the wrong type. Reject that as a 400 rather than passing a malformed
+  // Capability into the resolver (unexpected behavior) or emitting a non-string `instance` (500).
+  const optionalStrings: Array<[string, unknown]> = [
+    ["host", body.host],
+    ["capability.host", body.capability.host],
+    ["instance", body.instance],
+  ];
+  for (const [name, value] of optionalStrings) {
+    if (value !== undefined && typeof value !== "string") {
+      app.log.warn("enrolAgenticWorker rejected: non-string optional field", { field: name });
+      return { status: 400, body: { error: `\`${name}\` must be a string when provided` } };
+    }
+  }
 
   // Fold a top-level `host` into the capability when the capability didn't carry its own — a worker
   // may declare its host either on the capability or beside it (ADR 0059 `{ capability, host }`).
