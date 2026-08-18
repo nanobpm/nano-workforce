@@ -304,6 +304,41 @@ test("unparseable epic reference: 400", async () => {
   });
 });
 
+// ── Reference extraction enforces EXACTLY-ONE-of issue|url (the operation contract) ──────────────
+test("epic naming BOTH issue and url: 400, nothing created", async () => {
+  const gh = freshGithub(REPO);
+  await withGithub(gh, async () => {
+    const { app } = makeApp();
+    const res = await call(app, {
+      epics: [{ issue: `${REPO}#1`, url: `https://github.com/${REPO}/issues/1`, baseBranch: "epic/a" }],
+    });
+    assertEquals(res.status, 400);
+    assertEquals(typeof res.body.error, "string");
+    assertEquals(gh.creates, []); // rejected BEFORE any admitPlan side effect
+  });
+});
+
+test("epic with issue:null falls through to a valid url (key-presence must not win)", async () => {
+  const gh = freshGithub(REPO);
+  await withGithub(gh, async () => {
+    const { app } = makeApp();
+    const res = await call(app, {
+      epics: [{ issue: null, url: `https://github.com/${REPO}/issues/7`, baseBranch: "epic/a" }],
+    });
+    assertEquals(res.status, 202);
+    assertEquals(res.body.epics, [{ planKey: `${REPO}#7`, baseBranch: "epic/a" }]);
+  });
+});
+
+test("epic with neither issue nor url (both null): 400", async () => {
+  const gh = freshGithub(REPO);
+  await withGithub(gh, async () => {
+    const { app } = makeApp();
+    const res = await call(app, { epics: [{ issue: null, url: null, baseBranch: "epic/a" }] });
+    assertEquals(res.status, 400);
+  });
+});
+
 test("missing body: 400", async () => {
   const gh = freshGithub(REPO);
   await withGithub(gh, async () => {

@@ -59,7 +59,19 @@ export default defineOperation("startEpicSet", async ({ body }, app) => {
       app.log.warn("start-epic-set rejected: malformed epic entry");
       return { status: 400, body: { error: "each epic must be an object with issue|url and baseBranch" } };
     }
-    const ref = "issue" in m ? m.issue : "url" in m ? m.url : undefined;
+    // Enforce EXACTLY-ONE-of issue|url (the operation contract + the error message below). Read each
+    // field through `in`-narrowing and validate it is a NON-BLANK STRING, so a key that is present
+    // but null/blank (e.g. `{ issue: null, url: "…" }`) does NOT count as provided — it falls through
+    // to the other field instead of bare key-presence silently winning.
+    const issueVal = "issue" in m ? m.issue : undefined;
+    const urlVal = "url" in m ? m.url : undefined;
+    const hasIssue = typeof issueVal === "string" && issueVal.trim().length > 0;
+    const hasUrl = typeof urlVal === "string" && urlVal.trim().length > 0;
+    if (hasIssue && hasUrl) {
+      app.log.warn("start-epic-set rejected: epic names both issue and url");
+      return { status: 400, body: { error: "each epic needs exactly one of issue or url, not both" } };
+    }
+    const ref = hasIssue ? issueVal : hasUrl ? urlVal : undefined;
     if (typeof ref !== "string" || ref.trim().length === 0) {
       app.log.warn("start-epic-set rejected: epic missing issue/url");
       return { status: 400, body: { error: "each epic needs exactly one of issue or url (owner/repo#123 or an issue URL)" } };
