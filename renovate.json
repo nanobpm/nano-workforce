@@ -1,21 +1,19 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": ["config:recommended"],
-  "customManagers": [
-    {
-    "customType": "regex",
-    "description": "Keep the @nanobpm/urban pin in deno.json's import map in sync with the npm registry (the npm manager only sees package.json, so without this deno.json would drift).",
-    "fileMatch": ["^deno\\.jsonc?$"],
-    "matchStrings": [
-      ],
-      "datasourceTemplate": "npm"
-    }
-  ],
   "packageRules": [
     {
-      "description": "Land the package.json and deno.json bumps for @nanobpm/urban in a single PR so the two pins can never diverge.",
-      "matchPackageNames": ["@nanobpm/urban"],
-      "groupName": "@nanobpm/urban"
+      "description": "Auto-merge non-major @nanobpm/* updates once CI is green. These are first-party packages we publish from nano-ide; CI (typecheck + test) is the gate. For 0.x pins a caret range locks the minor, so Renovate's range bump is what actually pulls a new minor through; automerging it keeps nwf on the latest urban without manual PRs. platformAutomerge is off because main is unprotected, so Renovate waits for its own green branch status before merging.",
+      "matchPackageNames": ["/^@nanobpm//"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "automerge": true,
+      "platformAutomerge": false
+    },
+    {
+      "description": "Major @nanobpm/* updates may be breaking - require a human to review and merge.",
+      "matchPackageNames": ["/^@nanobpm//"],
+      "matchUpdateTypes": ["major"],
+      "automerge": false
     }
   ]
 }
