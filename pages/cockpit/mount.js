@@ -318,7 +318,8 @@ function relaySocketFactory(url) {
  *
  * @param {Element} host — where the cockpit renders (standalone: document.body; embedded: the App-View host).
  * @param {object} [opts]
- * @param {string} [opts.reportUrl] — the supply JSON endpoint the app serves.
+ * @param {string} [opts.reportUrl] — the supply JSON endpoint the app serves (default
+ *   `"app/api/agentic/supply"`, base-relative).
  * @param {string} [opts.relayUrl]  — the agentic channel WebSocket URL (with auth token + capability query).
  * @param {string} [opts.hookSecret] — shared secret sent as `x-hook-secret` on the report fetch when the
  *   app's supply endpoint is guarded by NANO_PR_WEBHOOK_SECRET (omit for open deployments).
