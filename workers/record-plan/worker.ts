@@ -16,8 +16,9 @@
 // warning; the ordering is lost but every task still runs. No `plan_task_deps` are recorded
 // in that case (the edges were invalid).
 import type { AppJobHandler } from "@nanobpm/urban";
+import { type CapabilityNeed, parseCapabilityNeeds } from "../../app/capabilityNeed.ts";
 import { deriveEpicPhase } from "../../app/epicPhase.ts";
-import { planTaskDeps, planTasks } from "../../app/plan.ts";
+import { planTaskDeps, planTaskNeeds, planTasks } from "../../app/plan.ts";
 import { computeWaves, WaveError, type WaveTask } from "../../app/waves.ts";
 import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 
@@ -30,6 +31,10 @@ interface NormalTask {
   title: string;
   prompt: string;
   dependsOn: string[];
+  // Cross-repo capability edges declared on the task (issue #289). Normalised + de-duped; empty when
+  // the task consumes no upstream capability. Levelized into `plan_task_needs`, NOT the wave DAG —
+  // a capability edge gates a task on an EXTERNAL publish, never on a sibling task's wave.
+  needs: CapabilityNeed[];
 }
 interface Out extends Record<string, unknown> {
   currentWave: number;
@@ -54,6 +59,9 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
       // Dedupe: a planner-emitted `["a","a"]` would otherwise violate the
       // `plan_task_deps` PK on the second edge insert and fail the job.
       dependsOn: [...new Set(strList(t?.dependsOn))],
+      // Cross-repo capability edges (issue #289): tolerant-parse + de-dupe; a malformed need is
+      // dropped, never fatal. Independent of the wave DAG — these gate on an external publish.
+      needs: parseCapabilityNeeds(t?.needs),
     };
   });
 
@@ -90,6 +98,10 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
   // `plan_task_deps` is keyed on `plan_key`, so one delete clears the plan's whole edge set.
   const depTable = planTaskDeps(app.data);
   await depTable.delete(planKey);
+  // `plan_task_needs` is likewise keyed on `plan_key` — one delete clears the plan's capability
+  // edges before rewrite (issue #289). Independent of the DAG-degrade path below.
+  const needTable = planTaskNeeds(app.data);
+  await needTable.delete(planKey);
 
   for (let i = 0; i < tasks.length; i++) {
     const t = tasks[i];
@@ -112,6 +124,17 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
           depends_on_task_id: dep,
         });
       }
+    }
+    // Capability edges persist regardless of `depsValid` — they gate on an external publish, not on
+    // the (possibly malformed) intra-epic DAG. The PK dedupes a task listing the same edge twice.
+    for (const need of t.needs) {
+      await needTable.insert({
+        plan_key: planKey,
+        task_id: t.id,
+        capability_ref: need.capabilityRef,
+        package: need.package,
+        verify_command: need.verifyCommand ?? null,
+      });
     }
   }
 

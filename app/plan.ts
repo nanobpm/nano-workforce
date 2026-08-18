@@ -138,6 +138,25 @@ export interface PlanTaskDep {
 export const planTaskDeps = (data: DataLayer) =>
   data.table<PlanTaskDep>("plan_task_deps", "plan_key");
 
+/** One cross-repo CAPABILITY EDGE on a plan task (041_plan_task_needs.sql, issue #289): the
+ * consuming `task_id` must not start until the upstream capability `capability_ref` first ships as
+ * a published `package` version. Levelized from the planner's `RecordPlanTask.needs[]` by
+ * `pr.record-plan`, read back by `pr.select-wave` to gate the task before dispatch. Keyed on
+ * `plan_key` (like {@link PlanTaskDep}) so one delete clears a plan's whole need set on re-plan.
+ *
+ * `capability_ref` is the STABLE handle (`owner/repo#NNN` | `repo#NNN` | `#NNN`) — NEVER a version
+ * (the #263 core decision). `package` is the per-package-scoped provenance artifact. `verify_command`
+ * is the optional gated empirical fallback (#274 decision 5); NULL means deterministic-provenance-only. */
+export interface PlanTaskNeed {
+  plan_key: string;
+  task_id: string;
+  capability_ref: string;
+  package: string;
+  verify_command: string | null;
+}
+export const planTaskNeeds = (data: DataLayer) =>
+  data.table<PlanTaskNeed>("plan_task_needs", "plan_key");
+
 /** One adversarial plan-review round (006_plan_review.sql): the `senior:plan-review` agent's
  * verdict on the plan before fan-out. Append-only within a plan run; the current round is
  * `count(plan_reviews)`. Re-planning a finished issue clears the prior rows (see startPlan) so

@@ -12,11 +12,17 @@
           <nano:extend name="repo" type="string" />
           <nano:extend name="baseBranch" type="string" />
         </nano:shape>
+        <nano:shape id="CapabilityNeed" name="Cross-repo capability dependency (issue #289)">
+          <nano:extend name="capabilityRef" type="string" optional="true" />
+          <nano:extend name="package" type="string" optional="true" />
+          <nano:extend name="verifyCommand" type="string" optional="true" />
+        </nano:shape>
         <nano:shape id="RecordPlanTask" name="Record plan — raw planner task">
           <nano:extend name="id" type="string" optional="true" />
           <nano:extend name="title" type="string" optional="true" />
           <nano:extend name="prompt" type="string" optional="true" />
           <nano:extend name="dependsOn" type="string" list="true" optional="true" />
+          <nano:reference name="needs" ref="CapabilityNeed" list="true" optional="true" />
         </nano:shape>
         <nano:shape id="RecordPlanIn" name="Record plan — input">
           <nano:extend name="planKey" type="string" />

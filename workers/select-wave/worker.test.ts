@@ -25,12 +25,18 @@ interface DepRow {
   depends_on_task_id: string;
 }
 
-function fakeApp(rows: Row[], deps: DepRow[], plans: Record<string, unknown>[] = []) {
+function fakeApp(rows: Row[], deps: DepRow[], plans: Record<string, unknown>[] = [], needs: Record<string, unknown>[] = []) {
   return {
     log: { error() {}, info() {}, warn() {} },
     data: {
       table(name: string, key: string) {
-        const store = name === "plan_tasks" ? rows : name === "plans" ? plans : deps;
+        const store = name === "plan_tasks"
+          ? rows
+          : name === "plans"
+          ? plans
+          : name === "plan_task_needs"
+          ? needs
+          : deps;
         return {
           find: (q: any) =>
             Promise.resolve(
@@ -158,4 +164,30 @@ test("select-wave still skips dependents behind failed or otherwise non-open dep
       assertEquals(rows[1].summary, "dependency not opened: a");
     });
   }
+});
+
+test("select-wave attaches each dispatched task's capability needs, [] when none (issue #289)", async () => {
+  const rows: Row[] = [
+    { id: 1, plan_key: "owner/repo#63", task_id: "a", title: "A", prompt: "do A", status: "pending", wave: 1 },
+    { id: 2, plan_key: "owner/repo#63", task_id: "b", title: "B", prompt: "do B", status: "pending", wave: 1 },
+  ];
+  const needs: Record<string, unknown>[] = [
+    {
+      plan_key: "owner/repo#63",
+      task_id: "a",
+      capability_ref: "nanobpm/nano-ide#274",
+      package: "@nanobpm/urban",
+      verify_command: "verify.sh",
+    },
+  ];
+  const out = await handler(
+    { variables: { planKey: "owner/repo#63", currentWave: 1 } } as any,
+    fakeApp(rows, [], [], needs),
+  );
+  const waveTasks = (out as { waveTasks: any[] }).waveTasks;
+  const byId = new Map(waveTasks.map((t) => [t.id, t]));
+  assertEquals(byId.get("a").needs, [
+    { capabilityRef: "nanobpm/nano-ide#274", package: "@nanobpm/urban", verifyCommand: "verify.sh" },
+  ]);
+  assertEquals(byId.get("b").needs, []);
 });

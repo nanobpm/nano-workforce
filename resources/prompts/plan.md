@@ -204,7 +204,14 @@ Write a JSON object of **result variables** to the file named by the
       "id": "short-stable-slug",
       "title": "One-line summary of the slice",
       "prompt": "Full, self-contained instructions for the implementing agent: what to build, where, acceptance criteria.",
-      "dependsOn": ["id-of-a-task-this-one-builds-on"]
+      "dependsOn": ["id-of-a-task-this-one-builds-on"],
+      "needs": [
+        {
+          "capabilityRef": "owner/repo#274",
+          "package": "@nanobpm/urban",
+          "verifyCommand": "optional shell probe, exit 0 == capability present"
+        }
+      ]
     }
   ]
 }
@@ -223,6 +230,27 @@ Rules:
   sub-issue tasks (Step 0), derive `dependsOn` from any `Depends-on: #N` /
   `Blocked by #N` directive in the sub-issue body (mapping each prerequisite `#M`
   to `issue-M`) — otherwise leave it empty.
+- `needs` — an optional array of **cross-repo capability edges**. Use it (and only
+  it) when a slice consumes an upstream capability that ships as a **published
+  package version from another repo** — e.g. it needs a new `@nanobpm/urban` API
+  that lands in some future release. This is different from `dependsOn` (which
+  orders slices *within this epic*): `needs` blocks the task until the capability
+  is **published**, then late-binds and pins the exact `package@version` into the
+  agent's prompt automatically. Each entry:
+  - `capabilityRef` — the **stable upstream handle**, never a version: the
+    issue/PR that introduces the capability, written as **`owner/repo#NNN`** (the
+    `owner/repo` names the repo whose GitHub Releases the gate polls for publish
+    provenance). Only set this when the sub-issue text explicitly references such
+    an upstream capability (a `Needs:`/`Consumes:` line, a "requires
+    `@pkg` ≥ the release carrying #NNN" note). **Do not** invent one, and **do not**
+    put a version here.
+  - `package` — the npm package whose releases carry that provenance (e.g.
+    `@nanobpm/urban`).
+  - `verifyCommand` — OPTIONAL. A shell probe (exit 0 == capability present) used
+    only as a gated empirical fallback when provenance is inconclusive; omit it for
+    the common deterministic case.
+  Omit `needs` entirely for the overwhelmingly common case of a slice with no
+  cross-repo capability dependency.
 - `prompt` — must stand alone: the implementing agent sees only this prompt plus
   the issue reference, not your reasoning.
 - Emit `{ "tasks": [] }` if the issue needs no code (and say why in a

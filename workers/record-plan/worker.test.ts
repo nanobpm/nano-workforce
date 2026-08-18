@@ -17,6 +17,7 @@ interface Row extends Record<string, unknown> {
 function fakeApp() {
   const planTasks: Row[] = [];
   const planTaskDeps: Row[] = [];
+  const planTaskNeeds: Row[] = [];
   const plans: Row[] = [{ plan_key: "owner/repo#137" }];
   let nextId = 1;
   const app = {
@@ -27,6 +28,8 @@ function fakeApp() {
           ? planTasks
           : name === "plan_task_deps"
           ? planTaskDeps
+          : name === "plan_task_needs"
+          ? planTaskNeeds
           : plans;
         return {
           find: (q: Record<string, unknown>) =>
@@ -52,7 +55,7 @@ function fakeApp() {
       },
     },
   } as any;
-  return { app, plans, planTasks };
+  return { app, plans, planTasks, planTaskNeeds };
 }
 
 test("record-plan initializes wave progress fields for a taskful plan", async () => {
@@ -86,4 +89,33 @@ test("record-plan leaves all three wave progress fields NULL for a taskless plan
   assertEquals(plans[0].wave_count, null);
   assertEquals(plans[0].current_wave, null);
   assertEquals(plans[0].wave_label, null);
+});
+
+test("record-plan persists per-task capability needs into plan_task_needs (issue #289)", async () => {
+  const { app, planTaskNeeds } = fakeApp();
+  await handler(
+    {
+      variables: {
+        planKey: "owner/repo#137",
+        tasks: [
+          {
+            id: "a",
+            prompt: "do A",
+            needs: [
+              { capabilityRef: "nanobpm/nano-ide#274", package: "@nanobpm/urban", verifyCommand: "v.sh" },
+              { capabilityRef: "  ", package: "dropme" }, // malformed -> dropped by parse
+            ],
+          },
+          { id: "b", prompt: "do B", dependsOn: ["a"] }, // no needs
+        ],
+      },
+    } as any,
+    app,
+  );
+  assertEquals(planTaskNeeds.length, 1);
+  assertEquals(planTaskNeeds[0].plan_key, "owner/repo#137");
+  assertEquals(planTaskNeeds[0].task_id, "a");
+  assertEquals(planTaskNeeds[0].capability_ref, "nanobpm/nano-ide#274");
+  assertEquals(planTaskNeeds[0].package, "@nanobpm/urban");
+  assertEquals(planTaskNeeds[0].verify_command, "v.sh");
 });

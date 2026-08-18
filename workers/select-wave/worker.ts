@@ -15,8 +15,9 @@
 // Emitting an empty `waveTasks` is fine: the MI activity over an empty collection completes
 // immediately (the same 0-task path the flat fan-out already relied on).
 import type { AppJobHandler } from "@nanobpm/urban";
+import type { CapabilityNeed } from "../../app/capabilityNeed.ts";
 import { deriveEpicPhase } from "../../app/epicPhase.ts";
-import { plans, planTaskDeps, planTasks } from "../../app/plan.ts";
+import { plans, planTaskDeps, planTaskNeeds, planTasks } from "../../app/plan.ts";
 import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 
 // Input typed off the model data envelope (`SelectWaveIn` in plan-fanout.bpmn) — ADR 0040.
@@ -25,6 +26,10 @@ interface WaveTaskOut {
   id: string;
   title: string;
   prompt: string;
+  // Cross-repo capability edges to gate this task on before its agent starts (issue #289). Empty
+  // for a task with no upstream capability dependency; carried through so the fan-out can gate on
+  // each need (readiness-gate) and late-bind the resolved `pkg@version` into the agent's prompt.
+  needs: CapabilityNeed[];
 }
 interface Out extends Record<string, unknown> {
   waveTasks: WaveTaskOut[];
@@ -85,6 +90,20 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
     depsByTask.set(d.task_id, list);
   }
 
+  // Cross-repo capability edges (issue #289): loaded once and grouped per task so each dispatched
+  // wave task carries its `needs[]` for the fan-out to gate on. A task with no needs gets [].
+  const needRows = await planTaskNeeds(app.data).find({ plan_key: planKey });
+  const needsByTask = new Map<string, CapabilityNeed[]>();
+  for (const n of needRows) {
+    const list = needsByTask.get(n.task_id) ?? [];
+    list.push({
+      capabilityRef: n.capability_ref,
+      package: n.package,
+      ...(n.verify_command ? { verifyCommand: n.verify_command } : {}),
+    });
+    needsByTask.set(n.task_id, list);
+  }
+
   const waveTasks: WaveTaskOut[] = [];
   for (const r of rows) {
     if ((r.wave ?? 0) !== currentWave) continue;
@@ -105,7 +124,12 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
       continue;
     }
     if (depIds.some((d) => statusById.get(d) === "waiting-for-lane")) continue;
-    waveTasks.push({ id: r.task_id, title: r.title ?? r.task_id, prompt: r.prompt ?? "" });
+    waveTasks.push({
+      id: r.task_id,
+      title: r.title ?? r.task_id,
+      prompt: r.prompt ?? "",
+      needs: needsByTask.get(r.task_id) ?? [],
+    });
   }
 
   return { waveTasks };
