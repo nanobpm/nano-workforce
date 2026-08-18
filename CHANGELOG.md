@@ -1,3 +1,10 @@
+## [0.85.3](https://github.com/nanobpm/nano-workforce/compare/v0.85.2...v0.85.3) (2026-08-18)
+
+
+### Bug Fixes
+
+* resolve cockpit endpoints base-relative so Studio App-View populates ([#280](https://github.com/nanobpm/nano-workforce/issues/280)) ([eb7b69b](https://github.com/nanobpm/nano-workforce/commit/eb7b69bf5e3df192205e5ac227e36a01ceb71a2b)), closes [#279](https://github.com/nanobpm/nano-workforce/issues/279)
+
 ## [0.85.2](https://github.com/nanobpm/nano-workforce/compare/v0.85.1...v0.85.2) (2026-08-18)
 
 
