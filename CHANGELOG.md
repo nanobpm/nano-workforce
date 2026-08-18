@@ -1,3 +1,10 @@
+# [0.86.0](https://github.com/nanobpm/nano-workforce/compare/v0.85.3...v0.86.0) (2026-08-18)
+
+
+### Features
+
+* **agentic:** enrolment hub — crew vocab, capability→SERVE & demand×supply board ([#152](https://github.com/nanobpm/nano-workforce/issues/152)) ([#281](https://github.com/nanobpm/nano-workforce/issues/281)) ([baf74e7](https://github.com/nanobpm/nano-workforce/commit/baf74e736a53af55883a78dcf1f84cc1d6c140c7)), closes [#145](https://github.com/nanobpm/nano-workforce/issues/145) [red/#blue](https://github.com/nanobpm/nano-workforce/issues/blue) [#153](https://github.com/nanobpm/nano-workforce/issues/153) [#red](https://github.com/nanobpm/nano-workforce/issues/red) [#blue](https://github.com/nanobpm/nano-workforce/issues/blue) [#145](https://github.com/nanobpm/nano-workforce/issues/145) [#153](https://github.com/nanobpm/nano-workforce/issues/153) [#board-root](https://github.com/nanobpm/nano-workforce/issues/board-root)
+
 ## [0.85.3](https://github.com/nanobpm/nano-workforce/compare/v0.85.2...v0.85.3) (2026-08-18)
 
 
