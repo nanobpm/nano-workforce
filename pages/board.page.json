@@ -1,0 +1,51 @@
+{
+  "schemaVersion": "1.0",
+  "title": "Board",
+  "nodes": [
+    {
+      "type": "nav",
+      "id": "nav",
+      "props": {
+        "variant": "bar",
+        "title": "Nano Workforce",
+        "items": [
+          { "label": "Overview", "page": "overview" },
+          { "label": "Lineage", "page": "lineage" },
+          { "label": "Convergence", "page": "home" },
+          { "label": "Epics", "page": "epic" },
+          { "label": "Feature", "page": "feature" },
+          { "label": "Tasks", "page": "tasks" },
+          { "label": "Cockpit", "page": "cockpit" },
+          { "label": "Board", "page": "board" }
+        ],
+        "sticky": true
+      }
+    },
+    {
+      "type": "text",
+      "id": "title",
+      "props": {
+        "text": "Demand \u00d7 supply board",
+        "variant": "heading"
+      }
+    },
+    {
+      "type": "text",
+      "id": "intro",
+      "props": {
+        "text": "The enrolment epic's demand\u00d7supply matrix: what the deployed models DEMAND (their taskDefinition leaves) diffed against live SUPPLY (the connected workers, resolved through the crew vocabulary), grouped by network. Missing agent types \u2014 a demanded leaf with no supplier \u2014 light RED, and the diversity SLO grades the red/blue seats (green when the seats are distinct families, red on a same-family collision). Read-only and advisory; it never gates a BPMN flow. The same view renders embedded here (App View) and standalone on a phone.",
+        "variant": "sub"
+      }
+    },
+    {
+      "type": "appView",
+      "id": "board",
+      "props": {
+        "title": "Demand \u00d7 supply",
+        "embed": "./board/embed.html",
+        "standalone": "./board/standalone.html",
+        "fill": true
+      }
+    }
+  ]
+}

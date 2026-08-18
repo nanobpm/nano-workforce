@@ -297,6 +297,278 @@ components:
             processed, so the cockpit can line each worker's terminal up with its process instance / plan (H6).
           items:
             $ref: "#/components/schemas/AgenticJobCorrelation"
+    VocabRequirement:
+      type: object
+      description: One crew-vocab leaf token's flattened enrolment gate — the capability `requires`
+        predicates, seat sizing, and diversity flag a worker sees without re-deriving the tree.
+      required:
+        - token
+        - role
+        - requires
+        - seats
+        - seatsDistinctFamily
+      properties:
+        token:
+          type: string
+          description: The leaf routing token (`network[.subnetwork…].role`, or a bare role).
+        network:
+          type: string
+          description: The network segment, absent for a bare role.
+        role:
+          type: string
+          description: The role segment.
+        weight:
+          type: number
+          description: The role's cognition weight, if declared.
+        requires:
+          type: array
+          description: The enrolment `requires` predicates (source form, e.g. `cognition=planning`).
+          items:
+            type: string
+        seats:
+          description: Either a seat count (integer ≥ 0) or the explicit named-seat list.
+          oneOf:
+            - type: integer
+              minimum: 0
+            - type: array
+              items:
+                type: string
+        seatsDistinctFamily:
+          type: boolean
+          description: When true, seats must be filled by distinct families (the diversity SLO opt-in).
+    VocabView:
+      type: object
+      description: The published crew vocabulary artifact — the ONE capability→token map (ADR 0059).
+      required:
+        - version
+        - networks
+        - requirements
+      properties:
+        version:
+          type: integer
+          description: The crew-vocab artifact version.
+        networks:
+          type: object
+          additionalProperties: true
+          description: The raw networks/roles tree, in the `@nanobpm/agentic` VocabDocument schema.
+        requirements:
+          type: array
+          description: The flattened per-token enrolment requirements, sorted by token.
+          items:
+            $ref: "#/components/schemas/VocabRequirement"
+    Capability:
+      type: object
+      description: A worker's declared enrolment capability. NEVER a routing token — it gates enrolment.
+      properties:
+        cognition:
+          type: string
+          description: The worker's cognition class (e.g. planning / implementation / qa / ci / decide).
+        weight:
+          type: number
+          description: The cognition weight (the one numeric capability field).
+        family:
+          type: string
+          description: The model family (the diversity-SLO seat filler, e.g. frontier / kimi / qwen).
+        host:
+          type: string
+          description: Where the worker runs.
+    EnrolRequest:
+      type: object
+      description: A worker's enrol request — its declared capability (ADR 0059 revised, per-worker).
+      required:
+        - capability
+      properties:
+        capability:
+          $ref: "#/components/schemas/Capability"
+        host:
+          type: string
+          description: Where the worker runs. Folded into `capability.host` when the latter is absent.
+        instance:
+          type: string
+          description: The worker instance id, echoed back for provenance (optional).
+    EnrolledRole:
+      type: object
+      description: One matched role in an enrolment resolution — provenance for the resolved SERVE set.
+      required:
+        - token
+        - seatsDistinctFamily
+      properties:
+        token:
+          type: string
+        weight:
+          type: number
+        seatsDistinctFamily:
+          type: boolean
+    EnrolResult:
+      type: object
+      description: The resolved SERVE set for an enrolled capability (ADR 0059 REGISTER→SERVE).
+      required:
+        - serve
+        - roles
+        - demandVersion
+        - leaseTtl
+      properties:
+        instance:
+          type: string
+          description: The worker instance id, echoed from the request when supplied.
+        serve:
+          type: array
+          description: The SERVE token set — sorted, de-duplicated leaf tokens the worker may serve.
+          items:
+            type: string
+        roles:
+          type: array
+          description: The matched roles (sorted by token) the SERVE tokens came from.
+          items:
+            $ref: "#/components/schemas/EnrolledRole"
+        demandVersion:
+          type: integer
+          description: The crew-vocab version the capability was resolved against.
+        leaseTtl:
+          type: integer
+          description: The liveness lease TTL in ms — the worker must heartbeat within this window.
+    TokenDemand:
+      type: object
+      description: One demanded routing token and the live supply against it.
+      required:
+        - token
+        - supply
+        - instances
+        - satisfied
+      properties:
+        token:
+          type: string
+          description: The demanded routing token (a deployed `taskDefinition` leaf's type).
+        supply:
+          type: integer
+          description: How many registered workers currently serve this token.
+        instances:
+          type: array
+          description: The instances serving it, sorted.
+          items:
+            type: string
+        satisfied:
+          type: boolean
+          description: False when no registered worker serves it — a missing agent type.
+    NetworkDemand:
+      type: object
+      description: The demand×supply picture for one network prefix.
+      required:
+        - network
+        - tokens
+        - missing
+      properties:
+        network:
+          type: string
+          description: The network prefix bucket (the `network` segment, or a bare token's own name).
+        tokens:
+          type: array
+          description: Every demanded token in the bucket, sorted by token.
+          items:
+            $ref: "#/components/schemas/TokenDemand"
+        missing:
+          type: array
+          description: The demanded tokens in this bucket with zero supply, sorted.
+          items:
+            type: string
+    SeatAssignment:
+      type: object
+      description: One seat of a role filled by a worker of a given family.
+      required:
+        - seat
+        - family
+      properties:
+        seat:
+          type: string
+        family:
+          type: string
+        instance:
+          type: string
+    RoleDiversity:
+      type: object
+      description: The diversity grade for a single role.
+      required:
+        - token
+        - seatsDistinctFamily
+        - assignments
+        - collidingFamilies
+        - status
+      properties:
+        token:
+          type: string
+        seatsDistinctFamily:
+          type: boolean
+        assignments:
+          type: array
+          items:
+            $ref: "#/components/schemas/SeatAssignment"
+        collidingFamilies:
+          type: array
+          items:
+            type: string
+        status:
+          type: string
+          enum: [green, amber, red]
+    DiversityReport:
+      type: object
+      description: The diversity SLO over the correlated live registry (ADR 0056 §10).
+      required:
+        - status
+        - roles
+      properties:
+        status:
+          type: string
+          enum: [green, amber, red]
+          description: The worst grade across all roles (red > amber > green).
+        roles:
+          type: array
+          description: Per-role grades, sorted by token.
+          items:
+            $ref: "#/components/schemas/RoleDiversity"
+    RegistryReport:
+      type: object
+      description: The demand×supply report — deployed demand diffed against live supply, per network,
+        with missing-agent-type reds and the diversity SLO (enrolment epic 152 slice N1).
+      required:
+        - version
+        - generatedAt
+        - demandUnavailable
+        - networks
+        - missing
+        - nonAgentic
+        - diversity
+        - status
+      properties:
+        version:
+          type: integer
+          description: The crew-vocab version the report was resolved against.
+        generatedAt:
+          type: string
+          description: When the report was computed, ISO-8601.
+        demandUnavailable:
+          type: boolean
+          description: True when the deployed demand could not be read from the engine (supply-only report).
+        networks:
+          type: array
+          description: Per-network demand×supply, sorted by network.
+          items:
+            $ref: "#/components/schemas/NetworkDemand"
+        missing:
+          type: array
+          description: Every missing agent type across all networks, sorted and de-duplicated.
+          items:
+            type: string
+        nonAgentic:
+          type: array
+          description: Deployed taskDefinition types that are NOT valid routing tokens (ordinary C8 jobs).
+          items:
+            type: string
+        diversity:
+          $ref: "#/components/schemas/DiversityReport"
+        status:
+          type: string
+          enum: [green, amber, red]
+          description: The overall SLO — worst of the missing-agent signal and the diversity SLO.
     AgenticTranscript:
       type: object
       description: One captured agent session's transcript metadata (H3/#146 transcript store). A durable
@@ -1071,6 +1343,84 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AgenticSupplyReport"
+        "401":
+          description: Missing/invalid shared secret (only when NANO_PR_WEBHOOK_SECRET is set).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+  /agentic/vocab:
+    get:
+      operationId: getAgenticVocab
+      summary: The crew vocabulary artifact (enrolment epic 152 slice N1) — the ONE capability→token map a
+        worker resolves its SERVE set against. Returns the networks/roles tree plus the flattened
+        per-token enrolment requirements and the artifact version. Read-only; advisory.
+      security:
+        - hookSecret: []
+        - {}
+      responses:
+        "200":
+          description: The published vocab view.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VocabView"
+        "401":
+          description: Missing/invalid shared secret (only when NANO_PR_WEBHOOK_SECRET is set).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+  /agentic/enrol:
+    post:
+      operationId: enrolAgenticWorker
+      summary: Resolve a worker's declared enrolment capability to its SERVE token set (ADR 0059 revised
+        REGISTER→SERVE, per-worker). Returns the SERVE leaf tokens, the vocab version resolved against,
+        and the liveness lease TTL. Pure/deterministic — idempotent per (app, worker).
+      security:
+        - hookSecret: []
+        - {}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EnrolRequest"
+      responses:
+        "200":
+          description: The resolved SERVE set for the declared capability.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EnrolResult"
+        "400":
+          description: A malformed enrol body (missing/invalid capability).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+        "401":
+          description: Missing/invalid shared secret (only when NANO_PR_WEBHOOK_SECRET is set).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+  /agentic/registry:
+    get:
+      operationId: getAgenticRegistry
+      summary: The demand×supply report (enrolment epic 152 slice N1) — deployed demand (the models'
+        taskDefinition leaves) diffed against live supply (the presence registry resolved through the
+        crew vocab), per network, with missing-agent-type reds and the diversity SLO. Read-only; advisory.
+      security:
+        - hookSecret: []
+        - {}
+      responses:
+        "200":
+          description: The demand×supply report.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RegistryReport"
         "401":
           description: Missing/invalid shared secret (only when NANO_PR_WEBHOOK_SECRET is set).
           content:

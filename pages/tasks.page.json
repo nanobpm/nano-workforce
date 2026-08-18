@@ -36,6 +36,10 @@
           {
             "label": "Cockpit",
             "page": "cockpit"
+          },
+          {
+            "label": "Board",
+            "page": "board"
           }
         ]
       }

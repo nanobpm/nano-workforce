@@ -31,15 +31,25 @@
       import { mountCockpit } from "./mount.js";
 
       // Standalone: mount into the page body. Endpoints default to the current origin; override via
-      // ?report= and ?relay= for a remote app. For a secured deployment, pass the report guard secret
-      // via ?secret= (sent as x-hook-secret) and the relay credentials via ?token= and ?capability=.
+      // ?report= and ?relay= for a remote app. For a secured deployment, pass the sensitive
+      // credentials via the URL fragment — the report guard secret via #secret= (sent as
+      // x-hook-secret) and the relay credentials via #token= and #capability= — NOT the query string,
+      // so they never leak via server access logs, browser history, or the Referer header. The
+      // fragment is stripped from the address bar immediately after it is read.
       const params = new URLSearchParams(location.search);
+      const secrets = new URLSearchParams(location.hash.slice(1));
+      const hookSecret = secrets.get("secret") ?? undefined;
+      const relayToken = secrets.get("token") ?? undefined;
+      const relayCapability = secrets.get("capability") ?? undefined;
+      if (location.hash) {
+        history.replaceState(null, "", location.pathname + location.search);
+      }
       mountCockpit(document.getElementById("cockpit-root"), {
         reportUrl: params.get("report") ?? undefined,
         relayUrl: params.get("relay") ?? undefined,
-        hookSecret: params.get("secret") ?? undefined,
-        relayToken: params.get("token") ?? undefined,
-        relayCapability: params.get("capability") ?? undefined,
+        hookSecret,
+        relayToken,
+        relayCapability,
       });
     </script>
   </body>
