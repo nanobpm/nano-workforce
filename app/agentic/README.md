@@ -49,8 +49,9 @@ H0 itself needs no migration.
 The channel has three modes, selected by environment (see `main.ts`):
 
 - **LOCAL mode (default)** — when neither `NANO_AGENTIC_SECRET` nor its fallback
-  `NANO_PR_WEBHOOK_SECRET` is set, the channel **is** mounted with a well-known token: no credential
-  is required, so peers on the trusted LAN can connect off-box. Exposure depends on network
+  `NANO_PR_WEBHOOK_SECRET` is set, the channel **is** mounted with a well-known token: no *shared
+  secret* (and no capability credential) is required — the well-known token is still presented, so
+  peers on the trusted LAN can connect off-box. Exposure depends on network
   reachability (the server bind plus any reverse proxy/port forwarding); the startup `WARN` fires
   when the hub sees a non-loopback bind **or** cannot verify the bind at all (`server.address()` is
   `null`), so it won't flag exposure created by a same-host proxy forwarding `/agentic`.
