@@ -329,6 +329,7 @@ components:
           description: Either a seat count (integer ≥ 0) or the explicit named-seat list.
           oneOf:
             - type: integer
+              minimum: 0
             - type: array
               items:
                 type: string
