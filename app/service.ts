@@ -323,8 +323,17 @@ const AGENT_TASK_NS = "io.nanobpm.agentTask";
  * a usable checkout for repos already present locally). `ref` MUST be the PR head branch; when it
  * is unresolved we emit nothing (no `repository.url`) so the harness falls back to the legacy
  * launch-dir behavior rather than silently cloning the repo's default branch. The static
- * `task.prompt` header on the service task deep-merges with this over the same namespace. */
-export function repoEnvelopeVars(repo: string, ref: string | null): Record<string, unknown> {
+ * `task.prompt` header on the service task deep-merges with this over the same namespace.
+ *
+ * The clone is requested **branch-scoped and treeless** (`singleBranch: true` + `filter:
+ * "blob:none"`) so large monorepos (e.g. `camunda/camunda`, ~1.16 GB) provision within the c8ctl
+ * clone timeout instead of full-cloning the whole history (issue #287). A treeless partial clone
+ * keeps the full *commit graph* (so `git merge-base` / the review 3-dot diff stays correct) while
+ * fetching file blobs lazily — small upfront, correct diffs. `--depth 1` is deliberately NOT used:
+ * it would drop the merge-base and break `git diff origin/<base>...HEAD`. When the PR base branch
+ * is known we also emit `baseRef` so the harness fetches the base tip alongside the head, keeping
+ * that base reachable for the diff. */
+export function repoEnvelopeVars(repo: string, ref: string | null, baseRef: string | null = null): Record<string, unknown> {
   if (!ref) return {};
   // Defence in depth: every current caller derives `repo` from parsePr/parseIssue (regex-bounded to
   // `owner/repo`), but this is an exported helper the fan-out epic gives many new callers. A repo
@@ -336,7 +345,20 @@ export function repoEnvelopeVars(repo: string, ref: string | null): Record<strin
   if (!/^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/.test(repo) || /\.git$/i.test(repo)) return {};
   return {
     [AGENT_TASK_NS]: {
-      repository: { provider: "github", url: `https://github.com/${repo}.git`, ref },
+      repository: {
+        provider: "github",
+        url: `https://github.com/${repo}.git`,
+        ref,
+        // Branch-scoped, treeless partial clone (issue #287): fetch only the head branch with lazy
+        // blobs so large monorepos provision within the clone timeout. Single-branch + blob:none
+        // (not --depth 1) preserves the commit graph so the review's `git diff origin/<base>...HEAD`
+        // has a valid merge-base. Gated on c8ctl provisioner support (jwulf/c8ctl-plugin-nano#91).
+        singleBranch: true,
+        filter: "blob:none",
+        // The base branch this PR targets — emitted so the harness fetches its tip alongside the
+        // single-branch head, keeping `origin/<base>` reachable for the diff. Omitted when unknown.
+        ...(baseRef ? { baseRef } : {}),
+      },
     },
   };
 }
@@ -364,12 +386,14 @@ export async function submitPr(
   const token = process.env.GITHUB_TOKEN ?? "";
   let title: string | null = null;
   let headRef: string | null = null;
+  let baseRef: string | null = null;
   const depKeys = new Set(dependsOn.map((d) => parsePr(d)?.prKey).filter((k): k is string => !!k));
   try {
     const meta = await fetchPrMeta(parsed.repo, parsed.number, token);
     if (meta) {
       title = meta.title;
       headRef = meta.headRef;
+      baseRef = meta.baseRef;
       for (const k of parseDependsOn(meta.body)) depKeys.add(k);
     }
   } catch (err) {
@@ -468,7 +492,7 @@ export async function submitPr(
       // Host-git provisioning (c8ctl): deliver the repository envelope so the `senior:pr-review`
       // harness clones an isolated workspace checked out on the PR head branch. Spread last so an
       // unresolved head (`{}`) leaves the other vars untouched.
-      ...repoEnvelopeVars(parsed.repo, headRef),
+      ...repoEnvelopeVars(parsed.repo, headRef, baseRef),
     },
   });
   const processKey = processInstanceKey == null ? null : String(processInstanceKey);
@@ -504,8 +528,11 @@ export async function startMerge(
   // means the envelope is omitted and the agent falls back to the worker's launch dir.
   const token = process.env.GITHUB_TOKEN ?? "";
   let headRef: string | null = null;
+  let baseRef: string | null = null;
   try {
-    headRef = (await fetchPrHead(pr.repo, pr.number, token))?.headRef ?? null;
+    const head = await fetchPrHead(pr.repo, pr.number, token);
+    headRef = head?.headRef ?? null;
+    baseRef = head?.baseRef ?? null;
   } catch (err) {
     console.warn(`[startMerge] ${pr.prKey} head branch fetch: ${err}`);
   }
@@ -531,7 +558,7 @@ export async function startMerge(
       abandonBrief: renderAbandonBrief(abUrl),
       // Host-git provisioning (c8ctl): same repository envelope as the convergence loop, so the
       // fix-ci/rebase agents operate on an isolated checkout of the PR head branch.
-      ...repoEnvelopeVars(pr.repo, headRef),
+      ...repoEnvelopeVars(pr.repo, headRef, baseRef),
     },
   });
   if (processInstanceKey != null) {

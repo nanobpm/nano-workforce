@@ -439,11 +439,26 @@ test("startMerge reads root_request_key off the PR row onto the merge instance",
 // checkout ref, and omitted entirely when the head branch couldn't be resolved (so the harness
 // falls back to the legacy launch-dir behavior instead of cloning the wrong default branch).
 test("repoEnvelopeVars emits the repository envelope keyed on the PR head branch", () => {
-  const vars = repoEnvelopeVars("owner/repo", "feat/issue-12");
+  const vars = repoEnvelopeVars("owner/repo", "feat/issue-12", "main");
   const env = (vars as any)["io.nanobpm.agentTask"];
   assertEquals(env.repository.url, "https://github.com/owner/repo.git");
   assertEquals(env.repository.ref, "feat/issue-12");
   assertEquals(env.repository.provider, "github");
+  // Branch-scoped, treeless partial clone (issue #287): large monorepos provision within the clone
+  // timeout while the full commit graph is kept so `git diff origin/<base>...HEAD` has a merge-base.
+  assertEquals(env.repository.singleBranch, true);
+  assertEquals(env.repository.filter, "blob:none");
+  // The base branch is emitted so the harness fetches its tip, keeping `origin/<base>` reachable.
+  assertEquals(env.repository.baseRef, "main");
+});
+
+test("repoEnvelopeVars omits baseRef when the base branch is unresolved", () => {
+  const env = (repoEnvelopeVars("owner/repo", "feat/issue-12") as any)["io.nanobpm.agentTask"];
+  // The single-branch/treeless partial-clone request still stands without a base ref…
+  assertEquals(env.repository.singleBranch, true);
+  assertEquals(env.repository.filter, "blob:none");
+  // …but `baseRef` is omitted entirely rather than emitted as null (no key at all).
+  assertEquals("baseRef" in env.repository, false);
 });
 
 test("repoEnvelopeVars emits nothing when the head branch is unresolved", () => {
