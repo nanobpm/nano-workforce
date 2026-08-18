@@ -1,3 +1,10 @@
+# [0.88.0](https://github.com/nanobpm/nano-workforce/compare/v0.87.0...v0.88.0) (2026-08-18)
+
+
+### Features
+
+* **service:** branch-scoped treeless clone for review-job repo envelope ([#287](https://github.com/nanobpm/nano-workforce/issues/287)) ([#288](https://github.com/nanobpm/nano-workforce/issues/288)) ([c90dc23](https://github.com/nanobpm/nano-workforce/commit/c90dc23274fbb5e19835e25eef755f88337ab86f)), closes [jwulf/c8ctl-plugin-nano#91](https://github.com/jwulf/c8ctl-plugin-nano/issues/91)
+
 # [0.87.0](https://github.com/nanobpm/nano-workforce/compare/v0.86.0...v0.87.0) (2026-08-18)
 
 
