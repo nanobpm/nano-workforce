@@ -13,17 +13,24 @@
     <!--
       Standalone shell (phone / direct link). Loads the SAME ./mount.js the console App-View embed
       uses, so the standalone and embedded views render identically. Endpoints default to the current
-      origin; override the report endpoint via ?report= and, for a secured deployment, pass the
-      report guard secret via ?secret= (sent as x-hook-secret).
+      origin; override the report endpoint via ?report=. For a secured deployment, pass the report
+      guard secret via the URL fragment #secret= (sent as x-hook-secret) — NOT the query string, so it
+      never leaks via server access logs, browser history, or the Referer header. The fragment is
+      stripped from the address bar immediately after it is read.
     -->
     <main id="board-root"></main>
     <script type="module">
       import { mountBoard } from "./mount.js";
 
       const params = new URLSearchParams(location.search);
+      const secrets = new URLSearchParams(location.hash.slice(1));
+      const hookSecret = secrets.get("secret") ?? undefined;
+      if (location.hash) {
+        history.replaceState(null, "", location.pathname + location.search);
+      }
       mountBoard(document.getElementById("board-root"), {
         reportUrl: params.get("report") ?? undefined,
-        hookSecret: params.get("secret") ?? undefined,
+        hookSecret,
       });
     </script>
   </body>
