@@ -1,3 +1,10 @@
+## [0.85.1](https://github.com/nanobpm/nano-workforce/compare/v0.85.0...v0.85.1) (2026-08-18)
+
+
+### Bug Fixes
+
+* **deps:** bump @nanobpm/urban to ^0.55.0 ([#276](https://github.com/nanobpm/nano-workforce/issues/276)) ([08fe794](https://github.com/nanobpm/nano-workforce/commit/08fe794280c32e5a63cc4fd5a166dd4e35c1b8e8)), closes [276/#277](https://github.com/nanobpm/nano-workforce/issues/277)
+
 # [0.85.0](https://github.com/nanobpm/nano-workforce/compare/v0.84.0...v0.85.0) (2026-08-17)
 
 
