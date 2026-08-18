@@ -37,6 +37,13 @@ test("rejects a body with no capability as 400", async () => {
   assertEquals(res.status, 400);
 });
 
+test("rejects an array body or array capability as 400", async () => {
+  const arrayBody = (await handler(input([]), app)) as any;
+  assertEquals(arrayBody.status, 400);
+  const arrayCapability = (await handler(input({ capability: [] }), app)) as any;
+  assertEquals(arrayCapability.status, 400);
+});
+
 test("rejects non-string optional fields (host / capability.host / instance) as 400", async () => {
   const badHost = (await handler(input({ capability: { cognition: "ci" }, host: 42 }), app)) as any;
   assertEquals(badHost.status, 400);

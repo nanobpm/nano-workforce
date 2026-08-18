@@ -25,7 +25,14 @@ export default defineOperation("enrolAgenticWorker", ({ req, body }, app) => {
   }
   // The runtime validates a well-formed body against openapi.yaml, but a directly-invoked delegate
   // (or a missing body) leaves `body` undefined — guard so that becomes a 400, not a 500.
-  if (!body || typeof body !== "object" || typeof body.capability !== "object" || body.capability === null) {
+  if (
+    !body ||
+    typeof body !== "object" ||
+    Array.isArray(body) ||
+    typeof body.capability !== "object" ||
+    body.capability === null ||
+    Array.isArray(body.capability)
+  ) {
     app.log.warn("enrolAgenticWorker rejected: missing/invalid capability");
     return { status: 400, body: { error: "a `capability` object is required" } };
   }
