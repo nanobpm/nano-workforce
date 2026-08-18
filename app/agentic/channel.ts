@@ -15,6 +15,7 @@
 // is untouched; advisory semantics preserved (a family never gates a BPMN sequence flow).
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import type { HandshakeRequest } from "@nanobpm/agentic/channel";
 import {
   AgenticHub,
   sharedSecretAuthenticator,
@@ -133,7 +134,18 @@ export async function mountAgenticChannel(
   // credential is intentionally NOT required — nano-workforce never verified it (accept-any), so it
   // was pure configuration friction; a real ADR 0028 capability check can reintroduce it later by
   // passing a verifier.
-  const authenticator = sharedSecretAuthenticator({ secret, requireCredential: false });
+  const baseAuthenticator = sharedSecretAuthenticator({ secret, requireCredential: false });
+  // LOCAL mode is frictionless-first (#282): the well-known token is PUBLIC, so requiring a client to
+  // echo it adds no security — only friction. A genuinely zero-config cockpit (`defaultRelayUrl`
+  // sends no `?token=`) must attach on the trusted LAN, so a TOKENLESS upgrade is treated as
+  // presenting the well-known token. SECURE mode is unaffected: it keeps demanding the real secret on
+  // every upgrade, so a tokenless (or wrong) upgrade is still rejected (4401).
+  const authenticator = secure
+    ? baseAuthenticator
+    : (req: HandshakeRequest) =>
+        req.token === undefined && req.query?.token === undefined
+          ? baseAuthenticator({ ...req, token: secret })
+          : baseAuthenticator(req);
   const hub = new AgenticHub({
     transport,
     // A valid identity token upgrades (4401 on mismatch). SECURE mode's token is the real secret;
