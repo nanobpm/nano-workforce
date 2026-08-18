@@ -343,6 +343,15 @@ export const WIRE_CONTRACTS = {
     shape:
       '{ provider: "github", url: string, ref: string, singleBranch: true, filter: "blob:none", baseRef?: string }',
   },
+  "epicSet.submit": {
+    category: "wire",
+    name: "epicSet.submit",
+    owner: "operations/startEpicSet.ts",
+    semantics:
+      "Set/batch admission payload POSTed to /actions/start/epic-set (issue #292, slice S2). Submits a whole set of epics plus the inter-epic dependency edges between them in one all-or-nothing call. Each `epics[]` member carries the same per-epic admission inputs as PlanStart (issue|url + baseBranch + allowSharedBase/confirmDefaultBase); each `deps[]` edge declares `consumer` waits for `producer`'s published { package, capabilityRef } capability, both endpoints naming epics in the set. Declared in openapi.yaml as EpicSetStart; S3 (lowering) and S4 (visibility) build on the edges this persists into plan_deps — consume this ONE shape, do not re-declare a synonym.",
+    shape:
+      '{ epics: Array<{ issue|url: string, baseBranch: string, allowSharedBase?: boolean, confirmDefaultBase?: boolean }>, deps?: Array<{ consumer: string, producer: string, package: string, capabilityRef: string }> }',
+  },
 } as const satisfies Record<string, WireContract>;
 
 export const TYPE_CONTRACTS = {

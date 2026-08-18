@@ -13,7 +13,13 @@ import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { blackboardUrl, mintBlackboardToken, renderCoordinationBrief } from "./blackboard.ts";
 import { EPIC_PHASE } from "./epicPhase.ts";
 import { DEFAULT_ESCALATION_SLA_TIMEOUT, escalationSlaTimeout } from "./escalationSla.ts";
-import { coalesceTitle, ensureBaseBranch, fetchDefaultBranch, fetchIssueTitle } from "./github.ts";
+import {
+  BaseBranchMustExistError,
+  coalesceTitle,
+  ensureBaseBranch,
+  fetchDefaultBranch,
+  fetchIssueTitle,
+} from "./github.ts";
 import { clearExclusions } from "./mergeExclusion.ts";
 import { clearTaskDeltas } from "./taskDelta.ts";
 
@@ -471,6 +477,197 @@ export async function admitPlan(
   }
 
   return base;
+}
+
+/** Map an error thrown by {@link admitPlan} to the HTTP status + message the admission-door
+ * operations return at the edge, or `null` when the error is not an admission decision and must be
+ * re-raised (a genuine 500). Shared by the single-issue door (`startPlanFanout`) and the set/batch
+ * door (`startEpicSet`, issue #292 S2) so both map an epic's admission failure identically — a base
+ * rule reject is a 400, the shared-base conflict a 409. Keeping this in ONE place stops the two doors
+ * drifting on which admission failure maps to which status. */
+export function admitPlanErrorResponse(err: unknown): { status: number; error: string } | null {
+  if (err instanceof MissingBaseBranchError) {
+    return {
+      status: 400,
+      error: "baseBranch is required (name the integration branch, e.g. epic/agent-protocol)",
+    };
+  }
+  if (err instanceof InvalidBaseBranchError) {
+    return {
+      status: 400,
+      error: "invalid baseBranch (must be a plausible git branch name, e.g. epic/agent-protocol)",
+    };
+  }
+  if (err instanceof BaseBranchMustExistError) {
+    return {
+      status: 400,
+      error:
+        `baseBranch "${err.branch}" does not exist and is not an epic/* branch, so it is not ` +
+        `auto-created — create it first, or use the epic/* convention`,
+    };
+  }
+  if (err instanceof DefaultBaseNotConfirmedError) {
+    return {
+      status: 400,
+      error:
+        `baseBranch "${err.branch}" is the repository default branch — every task would land ` +
+        `directly on it with no integration branch. Re-submit with confirmDefaultBase: true to proceed`,
+    };
+  }
+  if (err instanceof SharedBaseError) {
+    return {
+      status: 409,
+      error:
+        `baseBranch "${err.branch}" is already in use by another active epic. Re-submit with ` +
+        `allowSharedBase: true to stack on it, or name a distinct epic/* branch`,
+    };
+  }
+  return null;
+}
+
+// ── Set/batch admission (issue #292, slice S2) ───────────────────────────────
+// The set-admission door (`operations/startEpicSet.ts`) admits a WHOLE set of epics plus the
+// inter-epic dependency edges between them in one all-or-nothing call. The pure validation below
+// (reference integrity + DAG check) runs BEFORE any `admitPlan` side effect, so a malformed set is a
+// clean 4xx with nothing half-started (no base branch created, no edge persisted). Persisting the
+// validated edges into `plan_deps` (S1) is the door's only durable write; scheduling/lowering
+// (starting roots, seeding the capability readiness-gate, version binding) is slice S3.
+
+/** One inter-epic dependency edge as SUBMITTED to the set door: the `consumer` epic waits for the
+ * `producer` epic to publish the `{ package, capabilityRef }` capability. `consumer`/`producer` are
+ * epic references (`owner/repo#N` or an issue URL); the door resolves them to plan keys. */
+export interface EpicSetDepInput {
+  consumer: string;
+  producer: string;
+  package: string;
+  capabilityRef: string;
+}
+
+/** A validated inter-epic edge — both endpoints resolved to plan keys, ready to persist as a
+ * {@link PlanDep} (`plan_key = consumer`, `depends_on_plan_key = producer`). */
+export interface ResolvedEpicSetDep {
+  consumer: string;
+  producer: string;
+  package: string;
+  capabilityRef: string;
+}
+
+/** A set-admission validation failure that carries the HTTP status the door returns at the edge
+ * (always a 4xx — a malformed set is the caller's error, not a server fault). */
+export class EpicSetValidationError extends Error {
+  readonly status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "EpicSetValidationError";
+    this.status = status;
+  }
+}
+
+/** Pure, side-effect-free validation of a submitted epic set's SHAPE and DAG — run BEFORE any
+ * `admitPlan` call so a cycle or dangling edge is rejected with nothing half-started. Given the
+ * submitted set's plan keys (already parsed, in submission order) and the raw edges, it:
+ *   • rejects an empty set;
+ *   • rejects a duplicate epic in the set;
+ *   • parses each edge endpoint and rejects an unparseable/self/dangling edge (an endpoint not in
+ *     the submitted set);
+ *   • rejects a blank `package`/`capabilityRef`;
+ *   • rejects a cycle in the consumer→producer graph, naming the edge that closes it.
+ * Returns the edges with both endpoints resolved to plan keys. Throws {@link EpicSetValidationError}
+ * (status 400) at the first offending input. Idempotent-friendly: a duplicate EDGE (same
+ * consumer→producer submitted twice) is collapsed, not rejected, so a retried set validates. */
+export function validateEpicSet(planKeys: string[], deps: EpicSetDepInput[]): ResolvedEpicSetDep[] {
+  if (planKeys.length === 0) {
+    throw new EpicSetValidationError(400, "epic set is empty — submit at least one epic");
+  }
+  const inSet = new Set<string>();
+  for (const key of planKeys) {
+    if (inSet.has(key)) {
+      throw new EpicSetValidationError(400, `epic ${key} appears more than once in the submitted set`);
+    }
+    inSet.add(key);
+  }
+
+  const resolveEndpoint = (ref: string, role: "consumer" | "producer"): string => {
+    const parsed = parseIssue(ref);
+    if (!parsed) {
+      throw new EpicSetValidationError(
+        400,
+        `dependency ${role} "${ref}" could not be parsed (use owner/repo#123 or an issue URL)`,
+      );
+    }
+    if (!inSet.has(parsed.planKey)) {
+      throw new EpicSetValidationError(
+        400,
+        `dependency ${role} ${parsed.planKey} is not one of the submitted epics — every edge must ` +
+          `connect two epics in the set`,
+      );
+    }
+    return parsed.planKey;
+  };
+
+  const resolved: ResolvedEpicSetDep[] = [];
+  const seenEdges = new Set<string>();
+  // consumer plan key → set of producer plan keys it depends on (for the DAG / cycle check).
+  const adjacency = new Map<string, Set<string>>();
+  for (const dep of deps) {
+    const consumer = resolveEndpoint(dep.consumer, "consumer");
+    const producer = resolveEndpoint(dep.producer, "producer");
+    if (consumer === producer) {
+      throw new EpicSetValidationError(400, `epic ${consumer} cannot depend on itself`);
+    }
+    const pkg = (dep.package ?? "").trim();
+    const capabilityRef = (dep.capabilityRef ?? "").trim();
+    if (pkg.length === 0) {
+      throw new EpicSetValidationError(
+        400,
+        `dependency ${consumer} → ${producer} is missing a package (the producer's published package)`,
+      );
+    }
+    if (capabilityRef.length === 0) {
+      throw new EpicSetValidationError(
+        400,
+        `dependency ${consumer} → ${producer} is missing a capabilityRef (the producer's issue handle)`,
+      );
+    }
+    const edgeId = `${consumer}\u0000${producer}`;
+    if (seenEdges.has(edgeId)) continue; // duplicate edge in one submission → collapse (idempotent)
+    seenEdges.add(edgeId);
+    resolved.push({ consumer, producer, package: pkg, capabilityRef });
+    const producers = adjacency.get(consumer) ?? new Set<string>();
+    producers.add(producer);
+    adjacency.set(consumer, producers);
+  }
+
+  assertAcyclic(adjacency);
+  return resolved;
+}
+
+/** Depth-first cycle check over the consumer→producer graph. Throws {@link EpicSetValidationError}
+ * (400) naming an edge on the cycle the moment one is found — the "reject at the offending edge"
+ * guarantee. A pure in-memory walk (no I/O), so it runs before any admission side effect. */
+function assertAcyclic(adjacency: Map<string, Set<string>>): void {
+  const VISITING = 1;
+  const DONE = 2;
+  const state = new Map<string, number>();
+  const visit = (node: string, stack: string[]): void => {
+    state.set(node, VISITING);
+    stack.push(node);
+    for (const next of adjacency.get(node) ?? []) {
+      const s = state.get(next);
+      if (s === VISITING) {
+        throw new EpicSetValidationError(
+          400,
+          `dependency cycle detected: ${[...stack, next].join(" → ")} — the edge set must be a DAG`,
+        );
+      }
+      if (s !== DONE) visit(next, stack);
+    }
+    stack.pop();
+    state.set(node, DONE);
+  };
+  for (const node of adjacency.keys()) {
+    if (state.get(node) !== DONE) visit(node, []);
+  }
 }
 
 /** Register a plan row (if new) and start the plan-fanout process. Idempotent on
