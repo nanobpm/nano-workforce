@@ -398,7 +398,9 @@ test("LOCAL mode upgrades a reverse-proxied / forwarded peer (loopback-only guar
   });
   await new Promise<void>((resolve, reject) => {
     ws.on("open", () => resolve());
-    ws.on("error", () => {/* close frame carries the reason */});
+    // This test expects OPEN, so a transport error (which may arrive without a paired close)
+    // must reject rather than hang the promise forever.
+    ws.on("error", (err) => reject(err));
     ws.on("close", (code, reason) => reject(new Error(`closed ${code}: ${reason.toString()}`)));
   });
   assertEquals(ws.readyState, WebSocket.OPEN);
