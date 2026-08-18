@@ -398,10 +398,12 @@ test("LOCAL mode upgrades a reverse-proxied / forwarded peer (loopback-only guar
   });
   await new Promise<void>((resolve, reject) => {
     // Bound the wait so a stalled handshake fails fast instead of hanging CI forever.
-    const timer = setTimeout(
-      () => reject(new Error("upgrade neither opened nor closed in time")),
-      REJECTION_TIMEOUT_MS,
-    );
+    const timer = setTimeout(() => {
+      // Terminate the still-pending socket so a stalled handshake can't keep the
+      // event loop alive after we reject.
+      ws.terminate();
+      reject(new Error("upgrade neither opened nor closed in time"));
+    }, REJECTION_TIMEOUT_MS);
     timer.unref?.();
     ws.on("open", () => {
       clearTimeout(timer);
@@ -411,6 +413,7 @@ test("LOCAL mode upgrades a reverse-proxied / forwarded peer (loopback-only guar
     // must reject rather than hang the promise forever.
     ws.on("error", (err) => {
       clearTimeout(timer);
+      ws.terminate();
       reject(err);
     });
     ws.on("close", (code, reason) => {
