@@ -1,3 +1,10 @@
+## [0.88.1](https://github.com/nanobpm/nano-workforce/compare/v0.88.0...v0.88.1) (2026-08-18)
+
+
+### Bug Fixes
+
+* scope user-task pollers to open tasks so they can't latch a COMPLETED task ([#297](https://github.com/nanobpm/nano-workforce/issues/297)) ([131a796](https://github.com/nanobpm/nano-workforce/commit/131a796dfaed8f9b2eb25526f6583b86b8d7b0df)), closes [#294](https://github.com/nanobpm/nano-workforce/issues/294)
+
 # [0.88.0](https://github.com/nanobpm/nano-workforce/compare/v0.87.0...v0.88.0) (2026-08-18)
 
 
