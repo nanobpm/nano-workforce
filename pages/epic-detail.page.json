@@ -16,7 +16,8 @@
           { "label": "Epics", "page": "epic" },
           { "label": "Feature", "page": "feature" },
           { "label": "Tasks", "page": "tasks" },
-          { "label": "Cockpit", "page": "cockpit" }
+          { "label": "Cockpit", "page": "cockpit" },
+          { "label": "Board", "page": "board" }
         ]
       }
     },
