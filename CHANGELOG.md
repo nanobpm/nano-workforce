@@ -1,3 +1,10 @@
+## [0.85.2](https://github.com/nanobpm/nano-workforce/compare/v0.85.1...v0.85.2) (2026-08-18)
+
+
+### Bug Fixes
+
+* **agentic:** open LOCAL channel on trusted LAN, drop unverified capability credential ([#278](https://github.com/nanobpm/nano-workforce/issues/278)) ([dc1e37a](https://github.com/nanobpm/nano-workforce/commit/dc1e37a8771beeb18e7e66b36bcfaffa498ed509))
+
 ## [0.85.1](https://github.com/nanobpm/nano-workforce/compare/v0.85.0...v0.85.1) (2026-08-18)
 
 
