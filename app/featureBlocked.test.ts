@@ -49,12 +49,22 @@ function memData(): { data: DataLayer; stores: Record<string, any[]> } {
   return { data, stores };
 }
 
-/** A fake engine whose open user tasks are keyed by processInstanceKey (the only field
- *  pollFeatureBlocked queries on). */
-function fakeEngine(byInstance: Record<string, { userTaskKey: string; elementId?: string }[]>): EngineClient {
+/** A single engine-reported user task in the fixture. `state` mirrors the engine lifecycle; it
+ *  defaults to `"CREATED"` (the only open/answerable state) so existing fixtures read as live tasks.
+ *  A looping run holds multiple tasks for one element (COMPLETED from prior rounds + the live one). */
+type FakeTask = { userTaskKey: string; elementId?: string; state?: "CREATED" | "COMPLETED" | "CANCELED" };
+
+/** A fake engine whose user tasks are keyed by processInstanceKey (the only field
+ *  pollFeatureBlocked queries on). It models the real engine's two accessors from ONE fixture so a test
+ *  genuinely exercises the lifecycle-state filtering: `searchUserTasks` returns tasks in ANY state
+ *  (COMPLETED first, as the live API does — issue #294), while `openUserTasks` pins `state:"CREATED"`. */
+function fakeEngine(byInstance: Record<string, FakeTask[]>): EngineClient {
+  const all = (filter?: { processInstanceKey?: string }) =>
+    filter?.processInstanceKey ? (byInstance[filter.processInstanceKey] ?? []) : [];
   return {
-    searchUserTasks: (filter?: { processInstanceKey?: string }) =>
-      Promise.resolve(filter?.processInstanceKey ? (byInstance[filter.processInstanceKey] ?? []) : []),
+    searchUserTasks: (filter?: { processInstanceKey?: string }) => Promise.resolve(all(filter)),
+    openUserTasks: (filter?: { processInstanceKey?: string }) =>
+      Promise.resolve(all(filter).filter((t) => (t.state ?? "CREATED") === "CREATED")),
   } as unknown as EngineClient;
 }
 
@@ -128,6 +138,43 @@ test("pollFeatureBlocked: a parked non-blocked task (feature-escalation) does no
     { feature_key: "o/r#5", status: "awaiting_operator", process_key: "500", blocked_user_task_key: null },
   ];
   const engine = fakeEngine({ "500": [{ userTaskKey: "ut-5", elementId: "feature-escalation" }] });
+
+  await pollFeatureBlocked(data, engine);
+
+  assertEquals(stores.feature_runs[0].blocked_user_task_key, null);
+});
+
+// ── Defect-class guard (issue #294): a looping run holds MULTIPLE feature-blocked tasks ────────────
+// The blocked wait sits on a blocked→ack loop, so a re-blocked run holds a COMPLETED feature-blocked
+// task from a prior round alongside the live CREATED one; the engine returns the COMPLETED task first.
+// Scoping the query to open (CREATED) tasks records the live key, never the terminal one.
+test("pollFeatureBlocked: a looping run records the CREATED task, never the COMPLETED one", async () => {
+  const { data, stores } = memData();
+  stores.feature_runs = [
+    { feature_key: "o/r#6", status: "awaiting_operator", process_key: "600", blocked_user_task_key: null },
+  ];
+  const engine = fakeEngine({
+    "600": [
+      { userTaskKey: "ut-completed", elementId: "feature-blocked", state: "COMPLETED" },
+      { userTaskKey: "ut-live", elementId: "feature-blocked", state: "CREATED" },
+    ],
+  });
+
+  await pollFeatureBlocked(data, engine);
+
+  assertEquals(stores.feature_runs[0].blocked_user_task_key, "ut-live");
+});
+
+// Self-heal reached: a run past the blocked wait whose only feature-blocked task is COMPLETED must
+// clear the stale pointer (open-task query returns [] → `parked=null`), not latch it on the dead key.
+test("pollFeatureBlocked: a run whose only feature-blocked task is COMPLETED clears the stale pointer", async () => {
+  const { data, stores } = memData();
+  stores.feature_runs = [
+    { feature_key: "o/r#7", status: "awaiting_operator", process_key: "700", blocked_user_task_key: "ut-7" },
+  ];
+  const engine = fakeEngine({
+    "700": [{ userTaskKey: "ut-7", elementId: "feature-blocked", state: "COMPLETED" }],
+  });
 
   await pollFeatureBlocked(data, engine);
 

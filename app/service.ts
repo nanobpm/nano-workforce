@@ -1410,7 +1410,7 @@ export async function pollFeatureEscalations(data: DataLayer, engine: EngineClie
   for (const run of candidates) {
     if (!run.process_key) continue;
     try {
-      const tasks = await engine.searchUserTasks({ processInstanceKey: run.process_key });
+      const tasks = await engine.openUserTasks({ processInstanceKey: run.process_key });
       const task = tasks.find((t) => t.elementId === FEATURE_ESCALATION_ELEMENT);
       const parked = task ? { userTaskKey: task.userTaskKey } : null;
       const patch = deriveFeatureEscalationPatch(run, parked);
@@ -1444,7 +1444,7 @@ export async function pollFeatureBlocked(data: DataLayer, engine: EngineClient) 
   for (const run of await featureRuns(data).find({ status: "awaiting_operator" })) {
     if (!run.process_key) continue;
     try {
-      const tasks = await engine.searchUserTasks({ processInstanceKey: run.process_key });
+      const tasks = await engine.openUserTasks({ processInstanceKey: run.process_key });
       const task = tasks.find((t) => t.elementId === FEATURE_BLOCKED_ELEMENT);
       const parked = task ? { userTaskKey: task.userTaskKey } : null;
       const patch = deriveFeatureBlockedPatch(run, parked);
@@ -1577,7 +1577,7 @@ export async function pollUserTasks(data: DataLayer, engine: EngineClient) {
       planSeen.add(plan.plan_key);
       let tasks: { userTaskKey: string; elementId?: string }[];
       try {
-        tasks = await engine.searchUserTasks({ processInstanceKey: plan.process_key });
+        tasks = await engine.openUserTasks({ processInstanceKey: plan.process_key });
       } catch (err) {
         console.error(`[poller] user tasks (plan ${plan.plan_key}): ${err}`);
         continue;
@@ -1632,7 +1632,7 @@ export async function pollUserTasks(data: DataLayer, engine: EngineClient) {
       prSeen.add(pr.pr_key);
       let tasks: { userTaskKey: string; elementId?: string }[];
       try {
-        tasks = await engine.searchUserTasks({ processInstanceKey: pr.process_key });
+        tasks = await engine.openUserTasks({ processInstanceKey: pr.process_key });
       } catch (err) {
         console.error(`[poller] user tasks (pr ${pr.pr_key}): ${err}`);
         continue;
