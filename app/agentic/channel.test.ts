@@ -294,6 +294,77 @@ test("LOCAL mode still rejects a wrong token (4401)", async (t) => {
   assertEquals(channel.hub.connectionCount, 0);
 });
 
+// --- Frictionless zero-config: LOCAL mode accepts a TOKENLESS upgrade (#282) ---
+// The well-known LOCAL token is public, so requiring the client to echo it is pure friction: a
+// genuinely zero-config cockpit (no `?token=`) must attach on the trusted LAN. LOCAL mode therefore
+// treats a missing token as presenting the well-known token.
+
+test("LOCAL mode (secure:false): a TOKENLESS upgrade opens (zero-config, #282)", async (t) => {
+  const { server, port } = await startHttp();
+  const channel = await mountAgenticChannel({
+    server,
+    secret: "",
+    secure: false,
+    data: undefined,
+    log: noopLog(),
+  });
+  t.after(async () => {
+    await channel.teardown();
+    await closeServer(server);
+  });
+
+  // No query at all — the browser cockpit's zero-config default (`defaultRelayUrl` sends no token).
+  const ws = await connect(port, "");
+  assertEquals(ws.readyState, WebSocket.OPEN);
+  assertEquals(channel.hub.connectionCount, 1);
+  ws.close();
+});
+
+test("SECURE mode still REJECTS a tokenless upgrade (4401) — substitution is LOCAL-only (#282)", async (t) => {
+  const { server, port } = await startHttp();
+  const channel = await mountAgenticChannel({
+    server,
+    secret: SECRET,
+    secure: true,
+    data: undefined,
+    log: noopLog(),
+  });
+  t.after(async () => {
+    await channel.teardown();
+    await closeServer(server);
+  });
+
+  const closedCode = await rejectionCode(port, "");
+  assertEquals(closedCode, 4401);
+  assertEquals(channel.hub.connectionCount, 0);
+});
+
+test("LOCAL mode with a CUSTOM token still REJECTS a tokenless upgrade (no bypass, #282)", async (t) => {
+  const { server, port } = await startHttp();
+  // A caller opting into a non-default token in LOCAL mode (secure:false + a custom secret) is NOT
+  // the frictionless well-known-token posture — the tokenless substitution must NOT apply, so a
+  // client cannot bypass the custom token by omitting `?token=`.
+  const channel = await mountAgenticChannel({
+    server,
+    secret: "custom-local-token",
+    secure: false,
+    data: undefined,
+    log: noopLog(),
+  });
+  t.after(async () => {
+    await channel.teardown();
+    await closeServer(server);
+  });
+
+  const closedCode = await rejectionCode(port, "");
+  assertEquals(closedCode, 4401);
+  assertEquals(channel.hub.connectionCount, 0);
+  // The custom token itself still upgrades.
+  const ws = await connect(port, "?token=custom-local-token");
+  assertEquals(ws.readyState, WebSocket.OPEN);
+  ws.close();
+});
+
 /** A capturing `Logger`: records every `(level, msg)` pair the sink receives. */
 function capturingLog(): { log: ReturnType<typeof noopLog>; records: Array<{ level: string; msg: string }> } {
   const records: Array<{ level: string; msg: string }> = [];
