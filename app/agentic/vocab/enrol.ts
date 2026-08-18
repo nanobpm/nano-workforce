@@ -57,13 +57,16 @@ export function leaseTtlMs(): number {
 export function resolveEnrolment(capability: Capability): EnrolmentResult {
   const resolver = crewResolver();
   const resolution: Resolution = resolver.resolve(capability);
-  const roles: EnrolledRole[] = resolution.roles.map((role) => {
-    const out: EnrolledRole = { token: role.token, seatsDistinctFamily: role.seatsDistinctFamily };
-    if (role.weight !== undefined) return { ...out, weight: role.weight };
-    return out;
-  });
+  const roles: EnrolledRole[] = resolution.roles
+    .map((role) => {
+      const out: EnrolledRole = { token: role.token, seatsDistinctFamily: role.seatsDistinctFamily };
+      if (role.weight !== undefined) return { ...out, weight: role.weight };
+      return out;
+    })
+    .sort((a, b) => a.token.localeCompare(b.token));
+  const serve = [...new Set(resolution.tokens)].sort((a, b) => a.localeCompare(b));
   return {
-    serve: resolution.tokens,
+    serve,
     roles,
     demandVersion: CREW_VOCAB_VERSION,
     leaseTtl: leaseTtlMs(),

@@ -37,3 +37,13 @@ test("a capability that fills no role gets an empty SERVE set", () => {
   assertEquals(result.serve, []);
   assertEquals(result.roles, []);
 });
+
+test("serve is sorted and de-duplicated, and roles are sorted by token", () => {
+  const result = resolveEnrolment(planner);
+  assertEquals([...result.serve], [...result.serve].sort((a, b) => a.localeCompare(b)));
+  assertEquals(new Set(result.serve).size, result.serve.length);
+  assertEquals(
+    result.roles.map((r) => r.token),
+    result.roles.map((r) => r.token).sort((a, b) => a.localeCompare(b)),
+  );
+});
