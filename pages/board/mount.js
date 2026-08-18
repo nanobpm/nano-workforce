@@ -103,7 +103,8 @@ function renderError(root, message) {
  * endpoint; `config.hookSecret` is sent as `x-hook-secret` for a secured deployment.
  */
 export function mountBoard(host, config = {}) {
-  const root = host instanceof HTMLElement ? host : document.getElementById("board-root");
+  const isElement = host != null && host.nodeType === 1 && typeof host.innerHTML === "string";
+  const root = isElement ? host : document.getElementById("board-root");
   if (!root) return () => {};
   const reportUrl = config.reportUrl ?? DEFAULT_REPORT_URL;
   const headers = config.hookSecret ? { "x-hook-secret": config.hookSecret } : {};
