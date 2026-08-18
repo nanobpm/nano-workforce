@@ -354,6 +354,14 @@ export const TYPE_CONTRACTS = {
       "The snake_case, agent-facing view of a blackboard entry — the HTTP-hook boundary shape every caller and agent consumes. Both the read and write halves import this ONE definition.",
     module: "app/blackboard.ts",
   },
+  PlanDep: {
+    category: "type",
+    name: "PlanDep",
+    owner: "app/plan.ts",
+    semantics:
+      "One INTER-epic dependency edge (issue #292): dependent epic `plan_key` waits for producer epic `depends_on_plan_key`, gated by the producer's `{ package, capability_ref }` capability descriptor. Set admission (S2), planner lowering (S3), and operator visibility (S4) all import this ONE row shape from app/plan.ts — no re-declared synonym.",
+    module: "app/plan.ts",
+  },
 } as const satisfies Record<string, TypeContract>;
 
 export const CAPABILITY_URL_CONTRACTS = {

@@ -138,6 +138,75 @@ export interface PlanTaskDep {
 export const planTaskDeps = (data: DataLayer) =>
   data.table<PlanTaskDep>("plan_task_deps", "plan_key");
 
+/** One INTER-epic dependency edge in the plan-set DAG (issue #292, slice S1): the epic `plan_key`
+ * waits for the producer epic `depends_on_plan_key` to publish a capability before it may fan out.
+ *
+ * This is the coarser sibling of {@link PlanTaskDep} (which orders TASKS *within* one epic into
+ * waves). A `PlanDep` orders whole EPICS relative to each other. The edge additionally carries the
+ * gating contract descriptor the capability probe (slice S3) resolves against:
+ *   • `package` — the producer epic's published package name, and
+ *   • `capability_ref` — the producer epic's issue handle, used to resolve which published
+ *     `pkg@version` FIRST carries the awaited capability (late-bound into the dependent's build).
+ * Keyed on `plan_key` (the dependent) so a single delete clears a dependent's whole inbound edge set
+ * — mirroring how `plan_task_deps` is keyed on `plan_key`. See db/migrations/041_inter_epic_plan_deps.sql
+ * for the durable constraints (one edge per consumer→producer pair; no self-edge). */
+export interface PlanDep {
+  plan_key: string;
+  depends_on_plan_key: string;
+  package: string;
+  capability_ref: string;
+  created_at: string;
+}
+export const planDeps = (data: DataLayer) => data.table<PlanDep>("plan_deps", "plan_key");
+
+/** The fields an admission caller supplies for one inter-epic edge; `created_at` is stamped here. */
+export type PlanDepInput = Omit<PlanDep, "created_at">;
+
+/** Record one inter-epic dependency edge, enforcing the schema's two invariants at the app layer too
+ * (the durable table backstops both, but the in-memory test data layer does not): an epic may not
+ * depend on itself, and a consumer→producer edge is recorded at most once. A duplicate re-submission
+ * is a no-op that returns the existing row rather than throwing, so batch admission (S2) stays
+ * idempotent; a self-edge is a programming/validation error and throws. */
+export async function recordPlanDep(data: DataLayer, edge: PlanDepInput): Promise<PlanDep> {
+  if (edge.plan_key === edge.depends_on_plan_key) {
+    throw new Error(
+      `plan_deps: self-edge rejected — epic ${edge.plan_key} cannot depend on itself`,
+    );
+  }
+  const table = planDeps(data);
+  const existing = (await table.find({ plan_key: edge.plan_key })).find(
+    (d) => d.depends_on_plan_key === edge.depends_on_plan_key,
+  );
+  if (existing) return existing;
+  const row: PlanDep = { ...edge, created_at: now() };
+  await table.insert(row);
+  return row;
+}
+
+/** All INBOUND edges for `planKey` — i.e. every producer epic this dependent waits on. Empty for a
+ * root epic (no inter-epic dependencies). */
+export function inboundPlanDeps(data: DataLayer, planKey: string): Promise<PlanDep[]> {
+  return planDeps(data).find({ plan_key: planKey });
+}
+
+/** Every inter-epic edge whose dependent is in `planKeys` — the whole DAG for a submitted plan set.
+ * Reads per-key (not a table scan) so it composes with the same equality-filtered data layer the
+ * unit tests exercise. Producers outside the set are still returned as edge fields; the set
+ * validator (S3) is what rejects an edge naming an unsubmitted epic. */
+export async function planDepsForSet(data: DataLayer, planKeys: string[]): Promise<PlanDep[]> {
+  const seen = new Set<string>();
+  const out: PlanDep[] = [];
+  for (const key of planKeys) {
+    for (const edge of await inboundPlanDeps(data, key)) {
+      const id = `${edge.plan_key}\u0000${edge.depends_on_plan_key}`;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      out.push(edge);
+    }
+  }
+  return out;
+}
+
 /** One adversarial plan-review round (006_plan_review.sql): the `senior:plan-review` agent's
  * verdict on the plan before fan-out. Append-only within a plan run; the current round is
  * `count(plan_reviews)`. Re-planning a finished issue clears the prior rows (see startPlan) so
