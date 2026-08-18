@@ -47,7 +47,7 @@ const app = await runFromEnv({ engine, host, port: PORT, handleSignals: false })
 // shares the app port (no sidecar). This is the ONLY main.ts wiring for the whole epic — sibling
 // slices (H1/H3/H4) extend it by dropping a family module under `app/agentic/families/`, never here.
 //
-// Local-first (security opt-in): Nano is designed for local use, so the channel is ON BY DEFAULT.
+// Trusted-LAN by default (security opt-in): Nano runs on a trusted network, so the channel is ON BY DEFAULT.
 //   - No secret configured  -> LOCAL mode: well-known token, no credential required, honoured from
 //     any origin, so a `nano work` worker appears live with zero configuration (trusted-LAN posture;
 //     a WARN surfaces the exposure on a non-loopback bind).
