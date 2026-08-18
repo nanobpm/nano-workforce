@@ -138,14 +138,18 @@ export async function mountAgenticChannel(
   // LOCAL mode is frictionless-first (#282): the well-known token is PUBLIC, so requiring a client to
   // echo it adds no security — only friction. A genuinely zero-config cockpit (`defaultRelayUrl`
   // sends no `?token=`) must attach on the trusted LAN, so a TOKENLESS upgrade is treated as
-  // presenting the well-known token. SECURE mode is unaffected: it keeps demanding the real secret on
-  // every upgrade, so a tokenless (or wrong) upgrade is still rejected (4401).
-  const authenticator = secure
-    ? baseAuthenticator
-    : (req: HandshakeRequest) =>
+  // presenting the well-known token. This substitution is scoped to the DEFAULT LOCAL posture only
+  // (`secret === LOCAL_AGENTIC_TOKEN`): a caller that opts into a CUSTOM token in LOCAL mode
+  // (`secure:false` + a non-default `secret`) still requires that token — a tokenless client can't
+  // bypass it. SECURE mode is likewise unaffected: it keeps demanding the real secret, so a tokenless
+  // (or wrong) upgrade is still rejected (4401).
+  const substituteWellKnownToken = !secure && secret === LOCAL_AGENTIC_TOKEN;
+  const authenticator = substituteWellKnownToken
+    ? (req: HandshakeRequest) =>
         req.token === undefined && req.query?.token === undefined
           ? baseAuthenticator({ ...req, token: secret })
-          : baseAuthenticator(req);
+          : baseAuthenticator(req)
+    : baseAuthenticator;
   const hub = new AgenticHub({
     transport,
     // A valid identity token upgrades (4401 on mismatch). SECURE mode's token is the real secret;
