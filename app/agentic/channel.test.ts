@@ -397,11 +397,26 @@ test("LOCAL mode upgrades a reverse-proxied / forwarded peer (loopback-only guar
     headers: { "x-forwarded-for": "10.0.0.4" },
   });
   await new Promise<void>((resolve, reject) => {
-    ws.on("open", () => resolve());
+    // Bound the wait so a stalled handshake fails fast instead of hanging CI forever.
+    const timer = setTimeout(
+      () => reject(new Error("upgrade neither opened nor closed in time")),
+      REJECTION_TIMEOUT_MS,
+    );
+    timer.unref?.();
+    ws.on("open", () => {
+      clearTimeout(timer);
+      resolve();
+    });
     // This test expects OPEN, so a transport error (which may arrive without a paired close)
     // must reject rather than hang the promise forever.
-    ws.on("error", (err) => reject(err));
-    ws.on("close", (code, reason) => reject(new Error(`closed ${code}: ${reason.toString()}`)));
+    ws.on("error", (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+    ws.on("close", (code, reason) => {
+      clearTimeout(timer);
+      reject(new Error(`closed ${code}: ${reason.toString()}`));
+    });
   });
   assertEquals(ws.readyState, WebSocket.OPEN);
   assertEquals(channel.hub.connectionCount, 1);
