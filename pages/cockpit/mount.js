@@ -330,7 +330,7 @@ function relaySocketFactory(url) {
  * @param {number} [opts.pastFetchTimeoutMs] — upper bound (ms) on a single past-sessions transcripts
  *   fetch; the fetch is aborted past this so a hung endpoint can't wedge the past panel (default 15000).
  * @param {string} [opts.transcriptsUrl] — the captured-session list endpoint (default
- *   /app/api/agentic/transcripts) backing the always-on "past sessions" history + replay.
+ *   app/api/agentic/transcripts, base-relative) backing the always-on "past sessions" history + replay.
  * @returns a handle with `.dispose()`.
  */
 export function mountCockpit(host, opts = {}) {
@@ -340,8 +340,16 @@ export function mountCockpit(host, opts = {}) {
     );
   }
   const doc = document;
-  const reportUrl = opts.reportUrl ?? "/app/api/agentic/supply";
-  const transcriptsUrl = opts.transcriptsUrl ?? "/app/api/agentic/transcripts";
+  // Base-relative defaults (no leading slash) so the browser resolves them against the document's
+  // baseURI. Standalone (served at the app root) this is the origin root; through the Studio console
+  // App-View the document base is the app-view path (`/console/app-view/<AppName>/`) while the iframe
+  // ORIGIN is the console (:8080) — an absolute (leading-slash) path would resolve against the console
+  // origin root (`:8080/app/api/agentic/supply` → 404) instead of the app-view base that proxies the
+  // API, leaving the cockpit empty (#279). A base-relative default lands on the right endpoint both
+  // ways, so the cockpit populates identically standalone and embedded even though the console never
+  // injects window.__NANO_APP_VIEW__.
+  const reportUrl = opts.reportUrl ?? "app/api/agentic/supply";
+  const transcriptsUrl = opts.transcriptsUrl ?? "app/api/agentic/transcripts";
   const hookSecret = opts.hookSecret;
   const relayUrl = opts.relayUrl ?? defaultRelayUrl(opts.relayToken, opts.relayCapability);
   const refreshMs = opts.refreshMs ?? DEFAULT_REFRESH_MS;
