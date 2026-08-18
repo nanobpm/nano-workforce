@@ -329,8 +329,8 @@ function relaySocketFactory(url) {
  *   least this many ms old (default 15000).
  * @param {number} [opts.pastFetchTimeoutMs] — upper bound (ms) on a single past-sessions transcripts
  *   fetch; the fetch is aborted past this so a hung endpoint can't wedge the past panel (default 15000).
- * @param {string} [opts.transcriptsUrl] — the captured-session list endpoint (default
- *   app/api/agentic/transcripts, base-relative) backing the always-on "past sessions" history + replay.
+ * @param {string} [opts.transcriptsUrl] — the captured-session list endpoint backing the always-on
+ *   "past sessions" history + replay (default `"app/api/agentic/transcripts"`, base-relative).
  * @returns a handle with `.dispose()`.
  */
 export function mountCockpit(host, opts = {}) {
