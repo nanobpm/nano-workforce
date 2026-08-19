@@ -29,9 +29,21 @@ test("it ships the crew's leaf tokens", () => {
     "implementation.reviewer",
     "ci.runner",
     "decide",
+    "senior",
   ]) {
     assert(tokens.includes(expected), `expected token ${expected}`);
   }
+});
+
+test("a representative senior worker resolves the rank-gated `senior` role (any cognition, weight>=4)", () => {
+  const implementation = crewResolver().resolve({ cognition: "implementation", weight: 5, family: "frontier" });
+  const planning = crewResolver().resolve({ cognition: "planning", weight: 4, family: "kimi" });
+  assert(implementation.tokens.includes("senior"), "an implementation senior serves `senior`");
+  assert(planning.tokens.includes("senior"), "a planning senior serves `senior` (rank, not cognition)");
+});
+
+test("a junior-weight worker does not resolve the `senior` rank role", () => {
+  assert(!crewResolver().resolve({ cognition: "implementation", weight: 2, family: "kimi" }).tokens.includes("senior"));
 });
 
 test("the spar role carries two distinct-family named seats", () => {

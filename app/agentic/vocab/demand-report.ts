@@ -23,6 +23,7 @@ import type { RegistryReport as WireRegistryReport } from "../../../nano-generat
 import { envVar } from "../../version.ts";
 import { currentPresenceRegistry } from "../families/presence.family.ts";
 import { CREW_VOCAB_VERSION, crewResolver } from "./crew-vocab.ts";
+import { jobTypeToRoutingToken } from "./job-types.ts";
 
 /** The full registry report: the package's demand×supply model plus this app's version/provenance. */
 export interface RegistryReport extends DemandSupplyReport {
@@ -83,13 +84,32 @@ export interface BuildRegistryInput {
 }
 
 /**
+ * Bridge the deployed fleet agent job types onto crew routing tokens so the demand×supply match can
+ * see live supply for them. The deployed AGENT tasks are colon-form job types (`senior:feature`,
+ * `senior:retro`, …) the crew vocab's dot-form SERVE tokens never string-match; each such leaf is
+ * rewritten to the routing token an enrolled worker resolves (`senior:<task>` → `senior`, the bare
+ * rank role) via {@link jobTypeToRoutingToken}. Ordinary host jobs (`pr.*`, already dot-form tokens)
+ * are not in colon form, so they pass through untouched. Element provenance is preserved. (Issue #323
+ * design choice 1b: an app-tier job-type → routing-token derivation, no parallel task-type list.)
+ */
+export function bridgeDemandLeaves(
+  taskDefinitions: readonly TaskDefinitionLeaf[] | undefined,
+): readonly TaskDefinitionLeaf[] | undefined {
+  if (taskDefinitions === undefined) return undefined;
+  return taskDefinitions.map((leaf) => {
+    const token = jobTypeToRoutingToken(leaf.taskType);
+    return token === undefined ? leaf : { ...leaf, taskType: token };
+  });
+}
+
+/**
  * Compute the registry report from demand + supply. Pure and deterministic (every list the package
  * emits is sorted), so it is safe to render straight into the board and diff frame-to-frame.
  */
 export function buildRegistryReport(input: BuildRegistryInput): RegistryReport {
   const demandUnavailable = input.taskDefinitions === undefined;
   const report = computeDemandSupply({
-    taskDefinitions: input.taskDefinitions ?? [],
+    taskDefinitions: bridgeDemandLeaves(input.taskDefinitions) ?? [],
     workers: input.workers,
     resolver: crewResolver(),
   });
