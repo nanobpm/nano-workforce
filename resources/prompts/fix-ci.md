@@ -117,7 +117,7 @@ machine-readable result one of two ways:
    # nothing to fix — the failing checks are stale/transient (CANCELLED superseded on the same head SHA, head already green); just re-attempt the merge:
    printf '%s' '{"status":"reattempt","pushed":false,"summary":"Failing checks are CANCELLED runs superseded by a green run on the same head SHA — nothing to fix, re-queue the merge"}' > "$AGENT_RESULT_FILE"
    # ordering constraint — must wait for another PR to land first:
-   printf '%s' '{"status":"waiting-on-pr","summary":"Blocked by the linked-issue gate","dependsOn":"owner/repo#123"}' > "$AGENT_RESULT_FILE"
+   printf '%s' '{"status":"waiting-on-pr","pushed":false,"summary":"Blocked by the linked-issue gate","dependsOn":"owner/repo#123"}' > "$AGENT_RESULT_FILE"
    # genuinely stuck — a human must decide:
    printf '%s' '{"status":"blocked","pushed":false,"summary":"CI needs an NPM_TOKEN secret I cannot set","question":"Add the NPM_TOKEN repo secret, then answer to rerun."}' > "$AGENT_RESULT_FILE"
    ```
@@ -147,5 +147,5 @@ cancelled checks, an infra blip), return **`reattempt`** (with `pushed: false`) 
 merge is simply re-attempted from ground truth — do **not** default to `blocked`, which
 pages a human. Reserve `blocked` for a genuine human decision with a concrete
 `question`. A missing result is treated by the process as *no verdict* and reconciled
-from ground truth (it re-arms the merge poller), so it will not merge on its own — emit
-`reattempt` explicitly rather than relying on that fall-through.
+from ground truth (it re-arms the merge poller), which is slower and drops your explicit
+classification — emit `reattempt` explicitly rather than relying on that fall-through.
