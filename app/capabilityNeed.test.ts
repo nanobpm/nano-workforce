@@ -81,11 +81,17 @@ test("capabilityReleasesRepo: owner/repo prefix yields the releases source, bare
 
 // ── capabilityGateKey ────────────────────────────────────────────────────────────────────────────
 
-test("capabilityGateKey: <planKey>:<taskId>:<capabilityRef> (stable across a resume)", () => {
+test("capabilityGateKey: <planKey>:<taskId>:<capabilityRef>:<package> (stable across a resume)", () => {
   assertEquals(
-    capabilityGateKey("owner/repo#289", "issue-289", "nanobpm/nano-ide#274"),
-    "owner/repo#289:issue-289:nanobpm/nano-ide#274",
+    capabilityGateKey("owner/repo#289", "issue-289", "nanobpm/nano-ide#274", "@nanobpm/urban"),
+    "owner/repo#289:issue-289:nanobpm/nano-ide#274:@nanobpm/urban",
   );
+});
+
+test("capabilityGateKey: same capabilityRef, different package → distinct keys (no gate collision)", () => {
+  const a = capabilityGateKey("owner/repo#289", "issue-289", "nanobpm/nano-ide#274", "@nanobpm/urban");
+  const b = capabilityGateKey("owner/repo#289", "issue-289", "nanobpm/nano-ide#274", "@nanobpm/urban-testkit");
+  assertEquals(a === b, false);
 });
 
 // ── capabilityNeedToProbeInput ───────────────────────────────────────────────────────────────────
@@ -101,7 +107,7 @@ test("capabilityNeedToProbeInput: maps a need to the readiness-gate capability p
     taskId: "issue-289",
     probeTimeout: "PT12H",
   });
-  assertEquals(input.gateKey, "owner/repo#289:issue-289:nanobpm/nano-ide#274");
+  assertEquals(input.gateKey, "owner/repo#289:issue-289:nanobpm/nano-ide#274:@nanobpm/urban");
   assertEquals(input.probeTimeout, "PT12H");
   assertEquals(input.onTimeout, "escalate");
   assertEquals(input.probe.kind, "capability");

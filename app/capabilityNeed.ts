@@ -115,10 +115,20 @@ export class UnresolvableCapabilityRefError extends Error {
   }
 }
 
-/** The gate's correlation/idempotency key for a task's capability edge: `<planKey>:<taskId>:<capabilityRef>`
- * (issue #289 design §2). Stable across a resume so a re-dispatched agent re-attaches to the same gate. */
-export function capabilityGateKey(planKey: string, taskId: string, capabilityRef: string): string {
-  return `${planKey}:${taskId}:${capabilityRef}`;
+/** The gate's correlation/idempotency key for a task's capability edge:
+ * `<planKey>:<taskId>:<capabilityRef>:<package>` (issue #289 design §2). Stable across a resume so a
+ * re-dispatched agent re-attaches to the same gate. `package` is part of the identity because a task
+ * can legitimately declare the SAME `capabilityRef` for different packages (`parseCapabilityNeeds`
+ * de-dupes on `capabilityRef+package`; `plan_task_needs`' PK includes `package`) — each
+ * `(capabilityRef, package)` edge is a distinct need with its own gate row, so the key must be 1:1
+ * with the need or two edges would collide on one gate row and only one could ever resolve. */
+export function capabilityGateKey(
+  planKey: string,
+  taskId: string,
+  capabilityRef: string,
+  pkg: string,
+): string {
+  return `${planKey}:${taskId}:${capabilityRef}:${pkg}`;
 }
 
 /** The message name plan-fanout's per-task capability barrier (`wait-caps-resolved`) subscribes to and
@@ -158,7 +168,7 @@ export function capabilityNeedToProbeInput(
     onTimeout: "escalate",
   };
   return {
-    gateKey: capabilityGateKey(opts.planKey, opts.taskId, need.capabilityRef),
+    gateKey: capabilityGateKey(opts.planKey, opts.taskId, need.capabilityRef, need.package),
     probeTimeout: opts.probeTimeout,
     onTimeout: "escalate",
     probe,

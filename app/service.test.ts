@@ -926,7 +926,7 @@ test("pollCapabilityGatesImpl: idempotent — a resolved gate is reused without 
   const PI = "PI-292";
   const TASK = "gap-d";
   const barrierKey = `${PLAN_KEY}:${TASK}`;
-  const gateKey = `${PLAN_KEY}:${TASK}:nanobpm/nano-ide#274`;
+  const gateKey = `${PLAN_KEY}:${TASK}:nanobpm/nano-ide#274:@nanobpm/urban`;
   const stores: Record<string, { rows: any[]; key: string }> = {
     plans: { rows: [{ plan_key: PLAN_KEY, process_key: PI }], key: "plan_key" },
     plan_task_needs: {
@@ -975,6 +975,51 @@ test("pollCapabilityGatesImpl: idempotent — a resolved gate is reused without 
   assertEquals(calls.length, 0, "already-resolved need is never re-probed");
   assertEquals(published.length, 1, "the still-parked barrier is released from the pinned artifact");
   assertEquals(published[0]?.correlationKey, barrierKey);
+});
+
+test("pollCapabilityGatesImpl: two needs sharing a capabilityRef across packages get distinct gate rows (#290)", async () => {
+  // Regression for the gate_key collision: `capabilityGateKey` folds `package` into the key, so a task
+  // that declares the SAME `capabilityRef` for two different packages tracks each `(capabilityRef,
+  // package)` edge on its OWN gate row and starts its OWN readiness-gate. With the old package-blind key
+  // the second need would alias the first row, only one gate would ever start, and the second package
+  // could never resolve — wedging the barrier forever.
+  const PLAN_KEY = "owner/repo#12";
+  const PI = "PI-294";
+  const TASK = "gap-f";
+  const barrierKey = `${PLAN_KEY}:${TASK}`;
+  const stores: Record<string, { rows: any[]; key: string }> = {
+    plans: { rows: [{ plan_key: PLAN_KEY, process_key: PI }], key: "plan_key" },
+    plan_task_needs: {
+      rows: [
+        { plan_key: PLAN_KEY, task_id: TASK, capability_ref: "nanobpm/nano-ide#274", package: "@nanobpm/urban", verify_command: null },
+        { plan_key: PLAN_KEY, task_id: TASK, capability_ref: "nanobpm/nano-ide#274", package: "@nanobpm/urban-testkit", verify_command: null },
+      ],
+      key: "plan_key",
+    },
+    capability_gates: { rows: [], key: "gate_key" },
+  };
+  const data = capsDataLayer(stores);
+  const { engine, created, published } = capsEngine();
+  const { exec } = capsProbeExec(false); // neither capability published yet — both stay pending
+  const headers = { "content-type": "application/json" };
+  const open = new Set<string>([`${PI}|${barrierKey}`]);
+  const prevFetch = globalThis.fetch;
+  globalThis.fetch = capsSubscriptionFetch(open) as typeof fetch;
+  try {
+    await pollCapabilityGatesImpl(data, engine, "http://engine/v2", headers, exec, {});
+  } finally {
+    globalThis.fetch = prevFetch;
+  }
+
+  // Two distinct gate rows (one per package) — no collision, no aliasing.
+  assertEquals(stores.capability_gates.rows.length, 2, "one gate row per (capabilityRef, package) need");
+  const gateKeys = stores.capability_gates.rows.map((r) => r.gate_key).sort();
+  assertEquals(gateKeys, [
+    `${PLAN_KEY}:${TASK}:nanobpm/nano-ide#274:@nanobpm/urban`,
+    `${PLAN_KEY}:${TASK}:nanobpm/nano-ide#274:@nanobpm/urban-testkit`,
+  ]);
+  assertEquals(created.length, 2, "each need starts its own readiness-gate");
+  assertEquals(published.length, 0, "barrier NOT released while either need is unresolved");
 });
 
 test("pollCapabilityGatesImpl: scopes the barrier subscription search server-side by correlationKey (#290)", async () => {

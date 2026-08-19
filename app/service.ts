@@ -1426,7 +1426,7 @@ export async function pollCapabilityGatesImpl(
         const resolved: ResolvedCapability[] = [];
         let allResolved = true;
         for (const need of needs) {
-          const gateKey = capabilityGateKey(planKey, taskId, need.capabilityRef);
+          const gateKey = capabilityGateKey(planKey, taskId, need.capabilityRef, need.package);
           let row = await gateTable.findOne({ gate_key: gateKey });
 
           // Shape the need into the readiness-gate's probe input. A handle that names no owner/repo

@@ -177,8 +177,10 @@ export const planTaskNeeds = (data: DataLayer) =>
  * published `pkg@version`; on match it stamps `resolved_artifact` and flips `status` to `resolved`.
  * When every one of a task's needs is `resolved` the reconciler publishes `caps-resolved` (releasing
  * the barrier with the late-bound brief). Keyed on the readiness-gate correlation key
- * `<plan_key>:<task_id>:<capability_ref>` ({@link capabilityGateKey}) so a host restart re-derives
- * the whole picture from the DB — never re-starting a gate nor re-publishing a settled barrier. */
+ * `<plan_key>:<task_id>:<capability_ref>:<package>` ({@link capabilityGateKey}) so a host restart
+ * re-derives the whole picture from the DB — never re-starting a gate nor re-publishing a settled
+ * barrier. `package` is part of the key so two needs sharing a `capability_ref` across different
+ * packages never collide on one gate row. */
 export interface CapabilityGate {
   gate_key: string;
   plan_key: string;

@@ -10,8 +10,11 @@
 -- publishes `caps-resolved` with the late-bound resolved-dependencies brief, releasing the barrier.
 --
 -- This table is that reconciler's durable, idempotent state: ONE row per (plan, task, need),
--- identified by the readiness-gate correlation key `<plan_key>:<task_id>:<capability_ref>`
--- (capabilityGateKey). It records the started gate's instance key (so we start it exactly once) and
+-- identified by the readiness-gate correlation key `<plan_key>:<task_id>:<capability_ref>:<package>`
+-- (capabilityGateKey). `package` is part of the key because a task can declare the same
+-- `capability_ref` for different packages (plan_task_needs' PK includes `package`), so each
+-- `(capability_ref, package)` edge must map 1:1 to its own gate row. It records the started gate's
+-- instance key (so we start it exactly once) and
 -- the resolved `pkg@version` once the deterministic provenance lookup goes green, so a host restart
 -- re-derives the whole picture from the DB (never re-starts a gate, never re-publishes a settled
 -- barrier). `status` is 'pending' until the need resolves, then 'resolved'.
@@ -21,7 +24,7 @@
 -- wraps each file in its own transaction, so no BEGIN/COMMIT here.
 
 CREATE TABLE capability_gates (
-  gate_key          TEXT PRIMARY KEY,   -- readiness-gate correlation key: <plan_key>:<task_id>:<capability_ref>
+  gate_key          TEXT PRIMARY KEY,   -- readiness-gate correlation key: <plan_key>:<task_id>:<capability_ref>:<package>
   plan_key          TEXT NOT NULL REFERENCES plans(plan_key),
   task_id           TEXT NOT NULL,      -- the consuming task's slug
   capability_ref    TEXT NOT NULL,      -- upstream handle: owner/repo#NNN | repo#NNN | #NNN (never a version)
