@@ -207,3 +207,41 @@ test("pr.merge routes a refused merge through the blocked branch (escalation pay
     },
   );
 });
+
+test("pr.merge routes a transient base-moved race through the retry branch (no escalation payload)", async () => {
+  // #334: GitHub aborts the merge PUT with the 405 "Base branch was modified. Review and try the
+  // merge again." race. `mergePr` classifies it as `retry` (not `blocked`), and the retry arm of
+  // `matchTags` returns ONLY the loop-terminal `mergeStatus` — no `status`/`question` escalation
+  // payload — so the model re-attempts on the settled base instead of paging a human.
+  await withGithub(
+    (url) => {
+      if (/\/pulls\/\d+\/merge$/.test(url))
+        return new Response("Base branch was modified. Review and try the merge again.", {
+          status: 405,
+          statusText: "Method Not Allowed",
+        });
+      if (/\/pulls\/\d+$/.test(url)) return new Response(JSON.stringify({ merged: false, mergeable_state: "clean" }));
+      return null; // no AGENTS.md / merge-protocol.json → DEFAULT gh-merge protocol
+    },
+    async (calls) => {
+      const { app, stores } = fakeApp();
+      const out = (await handler(
+        { variables: { prKey: "acme/widgets#11", repo: "acme/widgets", prNumber: 11 } } as any,
+        app,
+      )) as Record<string, unknown>;
+
+      // Retry arm: transient — surfaces the loop-terminal `mergeStatus` only, NO escalation fields.
+      assertEquals(out, { mergeStatus: "retry" });
+      assertEquals(out.status, undefined);
+      assertEquals(out.question, undefined);
+
+      // Attempted a real merge PUT and recorded the retry audit row (not a swallowed block).
+      assertEquals(
+        calls.some((c) => /\/pulls\/\d+\/merge$/.test(c.url) && c.method === "PUT"),
+        true,
+      );
+      assertEquals(stores.merges.length, 1);
+      assertEquals(stores.merges[0].outcome, "retry");
+    },
+  );
+});

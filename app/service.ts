@@ -104,6 +104,14 @@ export const MAX_CI_FIX_ROUNDS = clampCiFixBudget(process.env.NANO_PR_MAX_CI_FIX
  * immediately). Reuses the CI-fix budget clamp (allows 0 = disable, ceiling-capped). */
 export const MAX_REBASE_ROUNDS = clampCiFixBudget(process.env.NANO_PR_MAX_REBASE_ROUNDS, 3);
 
+/** How many times the merge stage will re-attempt a merge that GitHub aborted with a *transient*
+ * base/head-moved race (see `isTransientMergeRace`) before giving up and escalating to a human.
+ * The re-attempt runs on the settled base (no remediation agent); the cap keeps a continuously
+ * moving base — or a persistently-failing merge — from spinning forever, escalating within
+ * seconds-to-minutes instead. Default 5; set `NANO_PR_MAX_MERGE_RETRIES=0` to disable transient
+ * retry (a race escalates immediately). Reuses the CI-fix budget clamp (allows 0 = disable). */
+export const MAX_MERGE_RETRIES = clampCiFixBudget(process.env.NANO_PR_MAX_MERGE_RETRIES, 5);
+
 /** How long a merge-loop AGENT service task (rebase / fix-ci) may sit without completing before its
  * interrupting timer boundary fires and the PR escalates for human attention. Seeded as the
  * `agentSlaTimeout` process variable at merge start and evaluated by those tasks' boundary timers.
@@ -577,6 +585,8 @@ export async function startMerge(
       ciFixMax: MAX_CI_FIX_ROUNDS,
       rebaseRound: 0,
       rebaseMax: MAX_REBASE_ROUNDS,
+      mergeRetryRound: 0,
+      mergeRetryMax: MAX_MERGE_RETRIES,
       agentSlaTimeout: AGENT_SLA_TIMEOUT,
       // Lineage (issue #245): thread the origin identity onto the merge instance (see startMerge).
       rootRequestKey,

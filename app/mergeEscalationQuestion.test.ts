@@ -103,6 +103,23 @@ test("the question distinguishes all four blocked/SLA triggers rather than a sin
   assertStringIncludes(el, 'agentVerdict = "blocked"', "must branch CI could-not-fix vs SLA on the agent verdict binding, not the overwritten status");
 });
 
+test("retry-budget-exhausted escalation reads as a repeated race, not a generic merge refusal", () => {
+  // `f_mr_giveup` (transient merge-retry budget exhausted) routes into merge-esc-attempt with
+  // mergeState = "ready" AND mergeStatus = "retry". Without a dedicated branch this reused the
+  // generic gate-blocked ("Investigate why GitHub refused the merge") text, which is misleading for
+  // a repeated base/head-moved race whose retry budget simply ran out. The question must branch on
+  // mergeStatus = "retry" — ahead of the generic `mergeState = "ready"` arm — and name the budget.
+  assert(escAttempt, "merge-esc-attempt service task must exist");
+  const el = escAttempt![0];
+  assertStringIncludes(el, 'mergeStatus = "retry"', "must branch the retry-budget-exhausted escalation on mergeStatus = retry");
+  assertStringIncludes(el, "mergeRetryMax", "the retry-exhausted question must surface the retry budget");
+  // The retry branch must precede the generic `mergeState = "ready"` branch, or the generic arm
+  // (also true here) would shadow it and re-emit the misleading refusal text.
+  const retryIdx = el.indexOf('mergeStatus = "retry"');
+  const readyIdx = el.indexOf('mergeState = "ready"');
+  assert(retryIdx !== -1 && readyIdx !== -1 && retryIdx < readyIdx, "the retry branch must be evaluated before the generic ready branch");
+});
+
 test("a gw-merge-escalated guard honours persist-escalation's escalated:false (mirrors the convergence loop)", () => {
   // The escalation output no longer flows UNCONDITIONALLY into the durable answer wait: it passes
   // through a gateway that reads the worker's `escalated` output.

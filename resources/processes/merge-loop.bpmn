@@ -106,6 +106,7 @@
       <bpmn:incoming>f_reb_rebased</bpmn:incoming>
       <bpmn:incoming>f_m_evicted</bpmn:incoming>
       <bpmn:incoming>f_m_escReenter</bpmn:incoming>
+      <bpmn:incoming>f_mr_go</bpmn:incoming>
       <bpmn:outgoing>f_m_arm</bpmn:outgoing>
     </bpmn:serviceTask>
     <bpmn:intermediateCatchEvent id="wait-mergeable" name="Wait: mergeable">
@@ -127,6 +128,9 @@
           <zeebe:property name="io.nanobpm.dataEnvelope.in" value="MergeAttemptIn" />
           <zeebe:property name="io.nanobpm.dataEnvelope.out" value="MergeAttemptOut" />
         </zeebe:properties>
+        <zeebe:ioMapping>
+          <zeebe:output source="=if mergeStatus = &#34;retry&#34; then mergeRetryRound + 1 else mergeRetryRound" target="mergeRetryRound" />
+        </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_m_mReady</bpmn:incoming>
       <bpmn:outgoing>f_m_attempt</bpmn:outgoing>
@@ -135,7 +139,13 @@
       <bpmn:incoming>f_m_attempt</bpmn:incoming>
       <bpmn:outgoing>f_m_gMerged</bpmn:outgoing>
       <bpmn:outgoing>f_m_gQueued</bpmn:outgoing>
+      <bpmn:outgoing>f_m_gRetry</bpmn:outgoing>
       <bpmn:outgoing>f_m_gBlocked</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:exclusiveGateway id="gw-merge-retry" name="retry within budget?" default="f_mr_giveup">
+      <bpmn:incoming>f_m_gRetry</bpmn:incoming>
+      <bpmn:outgoing>f_mr_go</bpmn:outgoing>
+      <bpmn:outgoing>f_mr_giveup</bpmn:outgoing>
     </bpmn:exclusiveGateway>
     <bpmn:eventBasedGateway id="eg-landed" name="landed or evicted?">
       <bpmn:incoming>f_m_gQueued</bpmn:incoming>
@@ -193,7 +203,7 @@
         </zeebe:properties>
         <zeebe:ioMapping>
           <zeebe:input source="=status" target="agentVerdict" />
-          <zeebe:input source="=&#34;This PR cannot be merged and needs a human decision. &#34; + (if mergeState = &#34;conflict&#34; then &#34;The automated rebase agent could not resolve the merge conflicts on this branch. Resolve them manually (or reply with guidance), then reply to retry.&#34; else if mergeState = &#34;ready&#34; then &#34;The merge attempt did not land (merge result: &#34; + mergeStatus + &#34;). Investigate why GitHub refused the merge, then reply to retry.&#34; else if agentVerdict = &#34;blocked&#34; then &#34;The automated CI-fix agent could not make the required checks green. Fix the failing checks on the branch (or reply with guidance), then reply to retry.&#34; else &#34;The automated CI-fix agent exceeded its time budget (SLA) before the required checks went green. Check its progress or intervene, then reply to retry.&#34;)" target="question" />
+          <zeebe:input source="=&#34;This PR cannot be merged and needs a human decision. &#34; + (if mergeState = &#34;conflict&#34; then &#34;The automated rebase agent could not resolve the merge conflicts on this branch. Resolve them manually (or reply with guidance), then reply to retry.&#34; else if mergeStatus = &#34;retry&#34; then &#34;The merge kept losing a race with concurrent updates to the base branch and exhausted its automatic retry budget (&#34; + string(mergeRetryMax) + &#34; retries). This is a repeated transient race, not a conflict, failing check, or permissions block. Reply to retry, or investigate why the base branch keeps moving.&#34; else if mergeState = &#34;ready&#34; then &#34;The merge attempt did not land (merge result: &#34; + mergeStatus + &#34;). Investigate why GitHub refused the merge, then reply to retry.&#34; else if agentVerdict = &#34;blocked&#34; then &#34;The automated CI-fix agent could not make the required checks green. Fix the failing checks on the branch (or reply with guidance), then reply to retry.&#34; else &#34;The automated CI-fix agent exceeded its time budget (SLA) before the required checks went green. Check its progress or intervene, then reply to retry.&#34;)" target="question" />
           <zeebe:input source="=&#34;blocked&#34;" target="status" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
@@ -201,6 +211,7 @@
       <bpmn:incoming>f_ci_blocked</bpmn:incoming>
       <bpmn:incoming>f_reb_blocked</bpmn:incoming>
       <bpmn:incoming>f_ci_sla</bpmn:incoming>
+      <bpmn:incoming>f_mr_giveup</bpmn:incoming>
       <bpmn:outgoing>f_m_escA</bpmn:outgoing>
     </bpmn:serviceTask>
     <bpmn:exclusiveGateway id="gw-merge-escalated" name="escalation opened?" default="f_m_escReenter">
@@ -370,6 +381,13 @@
     <bpmn:sequenceFlow id="f_m_gQueued" name="queued" sourceRef="gw-merge" targetRef="eg-landed">
       <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=mergeStatus = "queued"</bpmn:conditionExpression>
     </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="f_m_gRetry" name="retry (base moved)" sourceRef="gw-merge" targetRef="gw-merge-retry">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=mergeStatus = "retry"</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="f_mr_go" name="within budget" sourceRef="gw-merge-retry" targetRef="arm-merge">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=mergeRetryRound &lt;= mergeRetryMax</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="f_mr_giveup" name="budget exhausted" sourceRef="gw-merge-retry" targetRef="merge-esc-attempt" />
     <bpmn:sequenceFlow id="f_eg_landed" sourceRef="eg-landed" targetRef="wait-landed" />
     <bpmn:sequenceFlow id="f_eg_evicted" sourceRef="eg-landed" targetRef="wait-evicted" />
     <bpmn:sequenceFlow id="f_m_evicted" sourceRef="wait-evicted" targetRef="arm-merge" />
@@ -425,6 +443,12 @@
           <dc:Bounds x="1022" y="150" width="53" height="28" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_gw-merge-retry" bpmnElement="gw-merge-retry" isMarkerVisible="true">
+        <dc:Bounds x="1263" y="1215" width="50" height="50" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1344" y="1250" width="88" height="28" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_eg-landed" bpmnElement="eg-landed" isMarkerVisible="true">
         <dc:Bounds x="1263" y="255" width="50" height="50" />
         <bpmndi:BPMNLabel>
@@ -453,27 +477,27 @@
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_merge-esc-conflict" bpmnElement="merge-esc-conflict">
-        <dc:Bounds x="1238" y="1520" width="100" height="80" />
+        <dc:Bounds x="1238" y="1680" width="100" height="80" />
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_merge-esc-attempt" bpmnElement="merge-esc-attempt">
-        <dc:Bounds x="1438" y="1040" width="100" height="80" />
+        <dc:Bounds x="1438" y="1200" width="100" height="80" />
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_gw-merge-escalated" bpmnElement="gw-merge-escalated" isMarkerVisible="true">
-        <dc:Bounds x="1663" y="1055" width="50" height="50" />
+        <dc:Bounds x="1663" y="1215" width="50" height="50" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="1651" y="1022" width="74" height="28" />
+          <dc:Bounds x="1651" y="1182" width="74" height="28" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_wait-merge-answer" bpmnElement="wait-merge-answer">
-        <dc:Bounds x="1838" y="1040" width="100" height="80" />
+        <dc:Bounds x="1838" y="1200" width="100" height="80" />
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_record-merge-answer" bpmnElement="record-merge-answer">
-        <dc:Bounds x="2038" y="1040" width="100" height="80" />
+        <dc:Bounds x="2038" y="1200" width="100" height="80" />
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_gw-ci-fix" bpmnElement="gw-ci-fix" isMarkerVisible="true">
-        <dc:Bounds x="863" y="1535" width="50" height="50" />
+        <dc:Bounds x="863" y="1695" width="50" height="50" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="769" y="1553" width="89" height="14" />
+          <dc:Bounds x="769" y="1713" width="89" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_fix-ci" bpmnElement="fix-ci">
@@ -512,7 +536,7 @@
       <bpmndi:BPMNShape id="BPMNShape_be_rebase_sla" bpmnElement="be_rebase_sla">
         <dc:Bounds x="1070" y="942" width="36" height="36" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="1046" y="1043" width="84" height="14" />
+          <dc:Bounds x="1046" y="1023" width="84" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
       <bpmndi:BPMNEdge id="BPMNEdge_f_m_start" bpmnElement="f_m_start">
@@ -554,10 +578,10 @@
         <di:waypoint x="1870" y="120" />
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_ci_giveup" bpmnElement="f_ci_giveup">
-        <di:waypoint x="913" y="1560" />
-        <di:waypoint x="1238" y="1560" />
+        <di:waypoint x="913" y="1720" />
+        <di:waypoint x="1238" y="1720" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="1032" y="1527" width="67" height="28" />
+          <dc:Bounds x="1032" y="1687" width="67" height="28" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_ci_reconcile" bpmnElement="f_ci_reconcile">
@@ -574,11 +598,11 @@
         <di:waypoint x="933" y="280" />
         <di:waypoint x="933" y="305" />
         <di:waypoint x="1333" y="305" />
-        <di:waypoint x="1333" y="1500" />
-        <di:waypoint x="1288" y="1500" />
-        <di:waypoint x="1288" y="1520" />
+        <di:waypoint x="1333" y="1660" />
+        <di:waypoint x="1288" y="1660" />
+        <di:waypoint x="1288" y="1680" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="1338" y="1246" width="67" height="28" />
+          <dc:Bounds x="1338" y="1406" width="67" height="28" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_reb_reconcile" bpmnElement="f_reb_reconcile">
@@ -588,6 +612,13 @@
         <di:waypoint x="402" y="160" />
         <bpmndi:BPMNLabel>
           <dc:Bounds x="804" y="939" width="82" height="56" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_f_mr_giveup" bpmnElement="f_mr_giveup">
+        <di:waypoint x="1313" y="1240" />
+        <di:waypoint x="1438" y="1240" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1352" y="1307" width="67" height="28" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_eg_landed" bpmnElement="f_eg_landed">
@@ -600,40 +631,44 @@
         <di:waypoint x="1688" y="160" />
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_m_escC" bpmnElement="f_m_escC">
-        <di:waypoint x="1338" y="1560" />
-        <di:waypoint x="1888" y="1560" />
-        <di:waypoint x="1888" y="1120" />
+        <di:waypoint x="1338" y="1720" />
+        <di:waypoint x="1888" y="1720" />
+        <di:waypoint x="1888" y="1280" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_f_m_escA" bpmnElement="f_m_escA">
+        <di:waypoint x="1538" y="1240" />
+        <di:waypoint x="1663" y="1240" />
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_m_escReenter" bpmnElement="f_m_escReenter">
-        <di:waypoint x="1688" y="1105" />
-        <di:waypoint x="1688" y="1140" />
-        <di:waypoint x="402" y="1140" />
+        <di:waypoint x="1688" y="1265" />
+        <di:waypoint x="1688" y="1300" />
+        <di:waypoint x="402" y="1300" />
         <di:waypoint x="402" y="160" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="1008" y="1093" width="74" height="42" />
+          <dc:Bounds x="1008" y="1305" width="74" height="42" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_m_answerRecord" bpmnElement="f_m_answerRecord">
-        <di:waypoint x="1938" y="1080" />
-        <di:waypoint x="2038" y="1080" />
+        <di:waypoint x="1938" y="1240" />
+        <di:waypoint x="2038" y="1240" />
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_m_answer" bpmnElement="f_m_answer">
-        <di:waypoint x="2088" y="1120" />
-        <di:waypoint x="2088" y="1140" />
-        <di:waypoint x="402" y="1140" />
+        <di:waypoint x="2088" y="1280" />
+        <di:waypoint x="2088" y="1300" />
+        <di:waypoint x="402" y="1300" />
         <di:waypoint x="402" y="160" />
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_m_mCiFix" bpmnElement="f_m_mCiFix">
         <di:waypoint x="713" y="145" />
         <di:waypoint x="713" y="318" />
         <di:waypoint x="1358" y="318" />
-        <di:waypoint x="1358" y="1020" />
-        <di:waypoint x="863" y="1020" />
-        <di:waypoint x="863" y="1515" />
-        <di:waypoint x="888" y="1515" />
-        <di:waypoint x="888" y="1535" />
+        <di:waypoint x="1358" y="1180" />
+        <di:waypoint x="863" y="1180" />
+        <di:waypoint x="863" y="1675" />
+        <di:waypoint x="888" y="1675" />
+        <di:waypoint x="888" y="1695" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="971" y="1025" width="60" height="42" />
+          <dc:Bounds x="1011" y="1133" width="60" height="42" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_m_mRebase" bpmnElement="f_m_mRebase">
@@ -648,33 +683,33 @@
         <di:waypoint x="713" y="145" />
         <di:waypoint x="713" y="318" />
         <di:waypoint x="1333" y="318" />
-        <di:waypoint x="1333" y="1020" />
-        <di:waypoint x="1218" y="1020" />
-        <di:waypoint x="1218" y="1540" />
-        <di:waypoint x="1238" y="1540" />
+        <di:waypoint x="1333" y="1180" />
+        <di:waypoint x="1218" y="1180" />
+        <di:waypoint x="1218" y="1700" />
+        <di:waypoint x="1238" y="1700" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="1243" y="702" width="85" height="14" />
+          <dc:Bounds x="1243" y="722" width="85" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_ci_go" bpmnElement="f_ci_go">
-        <di:waypoint x="888" y="1585" />
-        <di:waypoint x="888" y="1605" />
-        <di:waypoint x="2158" y="1605" />
+        <di:waypoint x="888" y="1745" />
+        <di:waypoint x="888" y="1765" />
+        <di:waypoint x="2158" y="1765" />
         <di:waypoint x="2158" y="555" />
         <di:waypoint x="1018" y="555" />
         <di:waypoint x="1018" y="580" />
         <di:waypoint x="1038" y="580" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="2163" y="1066" width="49" height="28" />
+          <dc:Bounds x="2163" y="1146" width="49" height="28" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_ci_blocked" bpmnElement="f_ci_blocked">
         <di:waypoint x="1313" y="600" />
         <di:waypoint x="1418" y="600" />
-        <di:waypoint x="1418" y="1080" />
-        <di:waypoint x="1438" y="1080" />
+        <di:waypoint x="1418" y="1240" />
+        <di:waypoint x="1438" y="1240" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="1423" y="863" width="89" height="14" />
+          <dc:Bounds x="1423" y="853" width="89" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_ci_wait" bpmnElement="f_ci_wait">
@@ -689,21 +724,23 @@
         <di:waypoint x="913" y="280" />
         <di:waypoint x="933" y="280" />
         <di:waypoint x="933" y="305" />
-        <di:waypoint x="1558" y="305" />
-        <di:waypoint x="1558" y="1125" />
-        <di:waypoint x="1418" y="1125" />
+        <di:waypoint x="1733" y="305" />
+        <di:waypoint x="1733" y="1660" />
+        <di:waypoint x="1243" y="1660" />
+        <di:waypoint x="1243" y="1195" />
+        <di:waypoint x="1418" y="1195" />
         <di:waypoint x="1418" y="875" />
         <di:waypoint x="1018" y="875" />
         <di:waypoint x="1018" y="900" />
         <di:waypoint x="1038" y="900" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="1563" y="701" width="49" height="28" />
+          <dc:Bounds x="1248" y="1414" width="49" height="28" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_reb_blocked" bpmnElement="f_reb_blocked">
         <di:waypoint x="1313" y="920" />
         <di:waypoint x="1488" y="920" />
-        <di:waypoint x="1488" y="1040" />
+        <di:waypoint x="1488" y="1200" />
         <bpmndi:BPMNLabel>
           <dc:Bounds x="1429" y="887" width="64" height="28" />
         </bpmndi:BPMNLabel>
@@ -724,6 +761,20 @@
           <dc:Bounds x="1093" y="206" width="46" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_f_m_gRetry" bpmnElement="f_m_gRetry">
+        <di:waypoint x="1088" y="95" />
+        <di:waypoint x="1088" y="75" />
+        <di:waypoint x="1926" y="75" />
+        <di:waypoint x="1926" y="318" />
+        <di:waypoint x="1643" y="318" />
+        <di:waypoint x="1643" y="1285" />
+        <di:waypoint x="1263" y="1285" />
+        <di:waypoint x="1288" y="1285" />
+        <di:waypoint x="1288" y="1265" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1746" y="285" width="78" height="28" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_eg_evicted" bpmnElement="f_eg_evicted">
         <di:waypoint x="1288" y="305" />
         <di:waypoint x="1288" y="440" />
@@ -735,10 +786,10 @@
         <di:waypoint x="1926" y="75" />
         <di:waypoint x="1926" y="820" />
         <di:waypoint x="1418" y="820" />
-        <di:waypoint x="1418" y="1060" />
-        <di:waypoint x="1438" y="1060" />
+        <di:waypoint x="1418" y="1220" />
+        <di:waypoint x="1438" y="1220" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="1931" y="441" width="53" height="14" />
+          <dc:Bounds x="1931" y="562" width="53" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_ci_done" bpmnElement="f_ci_done">
@@ -749,20 +800,16 @@
         <di:waypoint x="1138" y="920" />
         <di:waypoint x="1263" y="920" />
       </bpmndi:BPMNEdge>
-      <bpmndi:BPMNEdge id="BPMNEdge_f_m_escA" bpmnElement="f_m_escA">
-        <di:waypoint x="1538" y="1080" />
-        <di:waypoint x="1663" y="1080" />
-      </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_m_escWait" bpmnElement="f_m_escWait">
-        <di:waypoint x="1713" y="1080" />
-        <di:waypoint x="1838" y="1080" />
+        <di:waypoint x="1713" y="1240" />
+        <di:waypoint x="1838" y="1240" />
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_reb_sla" bpmnElement="f_reb_sla">
         <di:waypoint x="1088" y="978" />
         <di:waypoint x="1088" y="998" />
         <di:waypoint x="1218" y="998" />
-        <di:waypoint x="1218" y="1560" />
-        <di:waypoint x="1238" y="1560" />
+        <di:waypoint x="1218" y="1720" />
+        <di:waypoint x="1238" y="1720" />
         <bpmndi:BPMNLabel>
           <dc:Bounds x="1118" y="965" width="70" height="28" />
         </bpmndi:BPMNLabel>
@@ -772,12 +819,12 @@
         <di:waypoint x="1088" y="678" />
         <di:waypoint x="1018" y="678" />
         <di:waypoint x="1018" y="540" />
-        <di:waypoint x="1618" y="540" />
-        <di:waypoint x="1618" y="820" />
+        <di:waypoint x="1558" y="540" />
+        <di:waypoint x="1558" y="820" />
         <di:waypoint x="1526" y="820" />
-        <di:waypoint x="1526" y="1040" />
+        <di:waypoint x="1526" y="1200" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="1243" y="507" width="70" height="28" />
+          <dc:Bounds x="1253" y="507" width="70" height="28" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_ci_fixed" bpmnElement="f_ci_fixed">
@@ -795,7 +842,7 @@
         <di:waypoint x="402" y="1000" />
         <di:waypoint x="402" y="160" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="799" y="1008" width="53" height="14" />
+          <dc:Bounds x="819" y="1008" width="53" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_dep_rewait" bpmnElement="f_dep_rewait">
@@ -803,6 +850,15 @@
         <di:waypoint x="1488" y="820" />
         <di:waypoint x="234" y="820" />
         <di:waypoint x="234" y="138" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_f_mr_go" bpmnElement="f_mr_go">
+        <di:waypoint x="1288" y="1265" />
+        <di:waypoint x="1288" y="1285" />
+        <di:waypoint x="402" y="1285" />
+        <di:waypoint x="402" y="160" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="808" y="1252" width="49" height="28" />
+        </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_m_evicted" bpmnElement="f_m_evicted">
         <di:waypoint x="1488" y="458" />
