@@ -18,7 +18,8 @@
 -- The backfill coalesces existing rows to `subject_key` (matching the write-time coalesce
 -- in `pollUserTasks`, which re-derives the real title in place on the next poll — a
 -- completed task's row is deleted, not migrated). Idempotent: re-running is a no-op once
--- set. Numbered after the current highest prefix on origin/main (042); the runner wraps
+-- set. Renumbered from 043 to 046 to resolve an apply-order prefix collision with
+-- 043_pr_epic_phase.sql (both landed ~concurrently on main); the runner wraps
 -- each file in its own transaction, so this file must NOT contain BEGIN/COMMIT.
 ALTER TABLE user_tasks ADD COLUMN subject_title TEXT;
 UPDATE user_tasks SET subject_title = subject_key WHERE subject_title IS NULL OR trim(subject_title) = '';
