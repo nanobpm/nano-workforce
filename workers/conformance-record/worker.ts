@@ -92,7 +92,11 @@ const handler: AppJobHandler<In> = async (job, app) => {
     summary,
     report,
     processKey,
-    reviewStatus: hasDeviations ? "reviewing" : "reviewed",
+    // Only enter the `reviewing` inbox scan when we actually have a `processKey` to key off — a
+    // null key can never be found by `pollUserTasks` (it skips rows without `process_key`) nor
+    // cleared by the `instanceTracking` `onTerminated` binding, so a `reviewing` row with no key
+    // would wedge forever. Settle straight to `reviewed` in that (defensive) case.
+    reviewStatus: hasDeviations && processKey != null ? "reviewing" : "reviewed",
   });
 
   app.log.info(

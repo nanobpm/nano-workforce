@@ -182,7 +182,8 @@ test("pollUserTasks: sources the feature-escalation question from the feature_es
   assertEquals(byKey["ut-feat"].question, "latest ask");
 });
 
-test("pollUserTasks: projects a blocked feature run (feature-blocked) with the delivery_label as its question (issue #332)", async () => {  // A blocked run parks on the native `feature-blocked` operator task at the non-terminal
+test("pollUserTasks: projects a blocked feature run (feature-blocked) with the delivery_label as its question (issue #332)", async () => {
+  // A blocked run parks on the native `feature-blocked` operator task at the non-terminal
   // `awaiting_operator` status. The poller reads it from the engine directly (no denormalised pointer)
   // and projects it onto the Tasks inbox, sourcing the display text from the run's `delivery_label`.
   const { data, stores } = memData({

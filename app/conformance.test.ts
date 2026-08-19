@@ -199,7 +199,8 @@ test("recordConformance: inserts then updates the same plan_key row in place", a
   assertEquals(stores["plan_conformance"][0].has_deviations, 0);
 });
 
-test("recordConformance: rethrows a non-unique (FOREIGN KEY) constraint error instead of swallowing it", async () => {  let updated = false;
+test("recordConformance: rethrows a non-unique (FOREIGN KEY) constraint error instead of swallowing it", async () => {
+  let updated = false;
   const table = {
     async insert() {
       throw new Error("FOREIGN KEY constraint failed");
