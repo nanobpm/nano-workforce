@@ -95,6 +95,9 @@ function openDataSource(db: DatabaseSync): MemDataSource {
 export function memDataFor(migrationFiles: readonly string[]): { data: DataLayer; db: DatabaseSync } {
   const db = new DatabaseSync(":memory:");
   openDbs.add(db);
+  // SQLite disables FK enforcement by default; enable it so migrations with foreign keys are
+  // exercised (and FK violations surface) exactly as the migration-specific tests do.
+  db.exec("PRAGMA foreign_keys = ON;");
   for (const file of migrationFiles) {
     const sql = readFileSync(fileURLToPath(new URL(`../db/migrations/${file}`, import.meta.url)), "utf8");
     db.exec(sql);

@@ -422,8 +422,11 @@ components:
         durableResume:
           type: boolean
           description: >-
-            Whether this worker was recorded as a durable-resume participant (issue #325, ADR 0062
-            Slice 5/5), echoed from the request. Present only when the request supplied it.
+            Echo of the request's durable-resume declaration (issue #325, ADR 0062 Slice 5/5).
+            Present only when the request supplied it. This reflects the value the worker sent, not a
+            guarantee of durable persistence — recording into the durable-resume registry is
+            best-effort (skipped when `instance` is absent/blank, and a registry write hiccup is
+            logged without failing enrolment).
         serve:
           type: array
           description: The SERVE token set — sorted, de-duplicated leaf tokens the worker may serve.

@@ -123,6 +123,16 @@ test("a declaration without an instance is echoed but not persisted (enrolment i
   assertEquals(await new DurableResumeRegistry(data).anyParticipant(), false, "nothing recorded without an instance key");
 });
 
+test("a blank/whitespace instance is echoed but not persisted (avoids a shared registry-row collision)", async () => {
+  const { data } = memDataFor(["052_worker_durable_resume.sql"]);
+  const withData = { log: noopLog(), data } as unknown as AppApi;
+  const res = (await handler(input({ capability: { cognition: "decide" }, instance: "   ", durableResume: true }), withData)) as any;
+  assertEquals(res.status, 200);
+  assertEquals(res.body.instance, "   ", "still echoed verbatim");
+  assertEquals(res.body.durableResume, true, "still echoed");
+  assertEquals(await new DurableResumeRegistry(data).anyParticipant(), false, "nothing recorded for a blank instance key");
+});
+
 test("enforces the shared secret when NANO_PR_WEBHOOK_SECRET is set", async () => {
   // The module captures the secret at load, so re-import a cache-busted copy with the env var set to
   // exercise the guarded 401 path and the authorized 200 path.
