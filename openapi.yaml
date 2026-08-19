@@ -954,11 +954,12 @@ components:
           minLength: 1
           description: The producer epic's issue handle, used to resolve which published pkg@version first carries the capability (S3).
     StartEpicSetResult:
-      description: The result of a successful set admission — the epics admitted and the edges staged (FK-free in `admitted_plan_deps`) for S3 to materialize.
+      description: The result of a successful set admission + lowering (issue #292, slice S3) — the epics admitted, the roots started immediately, the dependents started behind their leading capability readiness-gate, and the inter-epic edges materialized into `plan_deps`.
       type: object
       required:
         - epics
         - roots
+        - dependents
         - edges
       properties:
         epics:
@@ -976,12 +977,28 @@ components:
                 type: string
         roots:
           type: array
-          description: The plan keys of epics with NO inbound edge — the roots S3 starts immediately.
+          description: The plan keys of epics with NO inbound edge — the roots started immediately (fan out right away).
           items:
             type: string
+        dependents:
+          type: array
+          description: The epics with ≥1 inbound edge — started behind a leading capability readiness-gate that holds wave 0 until every listed producer publishes its capability.
+          items:
+            type: object
+            required:
+              - planKey
+              - producers
+            properties:
+              planKey:
+                type: string
+              producers:
+                type: array
+                description: The producer plan keys whose capabilities this dependent waits for (ALL must be green before it fans out).
+                items:
+                  type: string
         edges:
           type: array
-          description: The inter-epic edges staged FK-free into `admitted_plan_deps` for S3 to materialize into `plan_deps` (endpoints resolved to plan keys).
+          description: The inter-epic edges materialized into the durable `plan_deps` graph (endpoints resolved to plan keys).
           items:
             type: object
             required:

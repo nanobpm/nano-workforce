@@ -168,18 +168,27 @@ test("valid DAG: admits all epics and persists all edges", async () => {
     assertEquals(res.body.edges, [
       { consumer: `${REPO}#2`, producer: `${REPO}#1`, package: "@scope/pkg", capabilityRef: `${REPO}#1` },
     ]);
-    // S2 admits + STAGES (epics and edges) but NEVER starts an epic and NEVER writes the durable
-    // `plans` / `plan_deps` graph (that is S3).
-    assertEquals(started.length, 0);
-    assertEquals(planDepsRows(tables).length, 0); // durable plan_deps untouched by S2
+    // S2 admits + STAGES (epics and edges); S3 (this slice) then reads that staging and LOWERS the
+    // set — starting every epic (roots immediately, dependents behind a seeded capability preflight)
+    // and materializing the durable `plan_deps` graph after the `plans` rows exist.
+    assertEquals(started.length, 2); // both epics started by the S3 lowering
+    assertEquals(planDepsRows(tables).length, 1); // durable edge materialized by S3
     const epicRows = admittedEpicRows(tables);
-    assertEquals(epicRows.length, 2); // both epics staged (roots included) for S3 to materialize
+    assertEquals(epicRows.length, 2); // both epics staged (roots included) then materialized
     const rows = admittedDepRows(tables);
     assertEquals(rows.length, 1);
     assertEquals(rows[0].plan_key, `${REPO}#2`);
     assertEquals(rows[0].depends_on_plan_key, `${REPO}#1`);
     assertEquals(rows[0].package, "@scope/pkg");
     assertEquals(rows[0].capability_ref, `${REPO}#1`);
+    // The dependent (#2) is seeded with a capability probe + bounded timeout; the root (#1) starts
+    // with none so it fans out immediately.
+    const startedByKey = new Map(started.map((s) => [s.variables?.["planKey"], s.variables ?? {}]));
+    const rootVars = startedByKey.get(`${REPO}#1`);
+    const depVars = startedByKey.get(`${REPO}#2`);
+    assertEquals(rootVars?.["readinessProbes"], null);
+    assertEquals(Array.isArray(depVars?.["readinessProbes"]), true);
+    assertEquals((depVars?.["readinessProbes"] as unknown[]).length, 1);
   });
 });
 
@@ -485,7 +494,11 @@ function makeSqliteApp(
 ) {
   const db = new DatabaseSync(":memory:");
   db.exec("PRAGMA foreign_keys = ON;");
-  db.exec("CREATE TABLE plans (plan_key TEXT PRIMARY KEY, repo TEXT, base_branch TEXT, status TEXT);");
+  db.exec(
+    "CREATE TABLE plans (plan_key TEXT PRIMARY KEY, repo TEXT, issue_number INTEGER, issue_url TEXT, " +
+      "title TEXT, base_branch TEXT, status TEXT, task_count INTEGER, epic_phase TEXT, " +
+      "blackboard_token TEXT, list_bucket TEXT, ack_open INTEGER, created_at TEXT, updated_at TEXT);",
+  );
   for (const p of seedPlans) {
     db.prepare("INSERT INTO plans (plan_key, repo, base_branch, status) VALUES (?, ?, ?, ?)")
       .run(p.plan_key, p.repo, p.base_branch, p.status);
@@ -520,7 +533,7 @@ function makeSqliteApp(
   return { app, db };
 }
 
-test("SQLite (FK ON): admits a set with NO plans row, stages FK-free, never writes plan_deps", async () => {
+test("SQLite (FK ON): admits a set with NO plans row, then S3 lowering starts plans FK-first and materializes plan_deps", async () => {
   const gh = freshGithub(REPO);
   await withGithub(gh, async () => {
     const { app, db } = makeSqliteApp(); // no plans rows — the first-submission FK-failure condition
@@ -532,10 +545,13 @@ test("SQLite (FK ON): admits a set with NO plans row, stages FK-free, never writ
         ],
         deps: [{ consumer: `${REPO}#2`, producer: `${REPO}#1`, package: "@scope/pkg", capabilityRef: `${REPO}#1` }],
       });
-      // Under the old code this was a 500 FK violation on `plan_deps.plan_key`.
+      // Under the old code this was a 500 FK violation on `plan_deps.plan_key`. S3 lowering inserts
+      // BOTH `plans` rows before recording the edge, so the durable `plan_deps` FK is satisfied.
       assertEquals(res.status, 202);
+      const planN = db.prepare("SELECT COUNT(*) AS n FROM plans").get() as { n: number };
+      assertEquals(planN.n, 2); // both epics materialized a plans row
       const planDepN = db.prepare("SELECT COUNT(*) AS n FROM plan_deps").get() as { n: number };
-      assertEquals(planDepN.n, 0); // durable plan_deps untouched by S2
+      assertEquals(planDepN.n, 1); // durable edge materialized FK-clean by S3
       const staged = db
         .prepare("SELECT plan_key, depends_on_plan_key, package FROM admitted_plan_deps")
         .all() as { plan_key: string; depends_on_plan_key: string; package: string }[];
