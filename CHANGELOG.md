@@ -1,3 +1,10 @@
+# [0.96.0](https://github.com/nanobpm/nano-workforce/compare/v0.95.0...v0.96.0) (2026-08-19)
+
+
+### Features
+
+* **escalations:** consolidate on native user_tasks — expand half (issue [#305](https://github.com/nanobpm/nano-workforce/issues/305)) ([#310](https://github.com/nanobpm/nano-workforce/issues/310)) ([fc5f4d4](https://github.com/nanobpm/nano-workforce/commit/fc5f4d4680223d0c7ca4572a7f883ce4257a26a5)), closes [nano-ide#333](https://github.com/nano-ide/issues/333)
+
 # [0.95.0](https://github.com/nanobpm/nano-workforce/compare/v0.94.0...v0.95.0) (2026-08-19)
 
 
