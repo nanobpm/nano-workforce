@@ -75,15 +75,9 @@
           { "label": "All", "filter": [] }
         ],
         "columns": [
-          { "field": "title", "template": "{{title}}", "header": "Item", "subtitleField": "plan_key", "truncate": true, "width": "34%", "link": { "kind": "page", "page": "epic-detail", "keyField": "plan_key" } },
-          { "field": "epic_phase", "header": "Phase" },
-          { "field": "status", "header": "Status", "link": { "kind": "processExplorer", "keyField": "process_key" } },
-          { "field": "delivery", "header": "Delivery" },
-          { "field": "wait_gate_label", "header": "Wait gate" },
-          { "field": "promotion_state", "header": "Promotion" },
-          { "field": "delivery_label", "header": "Landing" },
-          { "field": "base_branch", "header": "Base branch" },
-          { "field": "wave_label", "header": "Wave" },
+          { "field": "title", "template": "{{title}}", "header": "Item", "subtitleField": "plan_key", "truncate": true, "width": "38%", "link": { "kind": "page", "page": "epic-detail", "keyField": "plan_key" } },
+          { "field": "epic_phase", "header": "Phase", "link": { "kind": "processExplorer", "keyField": "process_key" } },
+          { "field": "delivery_label", "header": "Delivery", "truncate": true },
           { "field": "task_count", "header": "Tasks" },
           { "field": "issue_number", "header": "Issue", "linkField": "issue_url" },
           { "field": "updated_at", "header": "Updated", "width": "9rem", "format": "datetime" }
