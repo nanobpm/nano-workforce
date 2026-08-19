@@ -11,6 +11,7 @@ import { PR_ACTIVE_STATUSES, PLAN_ACTIVE_STATUSES, FEATURE_ACTIVE_STATUSES } fro
 import { TERMINAL_STATUSES } from "./delivery.ts";
 import { PLAN_TERMINAL_STATUSES } from "./plan.ts";
 import { FEATURE_TERMINAL_STATUSES } from "./feature.ts";
+import { CONFORMANCE_REVIEWING_STATUS } from "./conformance.ts";
 
 interface Binding {
   table: string;
@@ -116,4 +117,27 @@ test("instanceTracking: feature_runs activeStatuses covers every in-flight statu
 test("FEATURE_ACTIVE_STATUSES is derived from the manifest binding (no drift)", async () => {
   const b = bindingFor(await bindings(), "feature_runs");
   assertEquals([...FEATURE_ACTIVE_STATUSES].sort(), [...(b.activeStatuses ?? [])].sort());
+});
+
+// The retro conformance-escalation lifecycle has exactly one in-flight `review_status` — `reviewing`
+// (the only status `pollUserTasks` scans via `activeConformanceReviews`) — and settles to `reviewed`.
+// Tie the manifest binding to the code's single source of truth (`CONFORMANCE_REVIEWING_STATUS`) so
+// the two can't drift: if a future change adds a new in-flight status but forgets the manifest, a
+// terminated retro instance would strand in `review_status='reviewing'` and never clear (issue #96
+// class of drift — the exact gap Copilot flagged on this binding).
+test("instanceTracking: plan_conformance activeStatuses is exactly the reviewing status (no drift)", async () => {
+  const b = bindingFor(await bindings(), "plan_conformance");
+  assertEquals([...(b.activeStatuses ?? [])].sort(), [CONFORMANCE_REVIEWING_STATUS]);
+});
+
+// The settled status the reconciler flips a terminated row to (`onTerminated.set.review_status`)
+// must NOT itself be listed active — otherwise `onTerminated` would leave the row scannable and the
+// reconciler could clobber a settled run (mirrors the "excludes every terminal status" guards above).
+test("instanceTracking: plan_conformance onTerminated status is not active", async () => {
+  const b = bindingFor(await bindings(), "plan_conformance");
+  const settled = b.onTerminated.set.review_status;
+  assert(
+    typeof settled === "string" && !b.activeStatuses?.includes(settled),
+    `onTerminated review_status "${String(settled)}" must not be listed active`,
+  );
 });
