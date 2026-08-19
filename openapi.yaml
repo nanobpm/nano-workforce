@@ -1924,7 +1924,9 @@ paths:
                   description: The epic's key (plans.plan_key, `<owner>/<repo>#<n>`).
       responses:
         "200":
-          description: The landed epic was acknowledged and moved to History.
+          description: The resolved epic was acknowledged and moved to History. Applies to any
+            resolved epic — whether all slices merged (`delivery=landed`) or it resolved-not-landed
+            (`delivery=null`), not only landed epics.
           content:
             application/json:
               schema:

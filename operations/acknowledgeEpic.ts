@@ -11,8 +11,11 @@
 // a derived projection. Keyed on the row's `plan_key`. Idempotent-safe: re-acknowledging re-stamps
 // the timestamp and keeps the row in History.
 //
-// It rejects (409) an epic that is NOT fully landed (`status=done, delivery=landed`), so it can never
-// pre-seed the tick-off on a still-live or still-converging epic — those must stay visible in Active.
+// It rejects (409) an epic that is NOT yet resolved — i.e. anything the `epicIsAcknowledgeable`
+// guard refuses: a non-`done` status (`planning`/`dispatched`), or `done` but still `converging`. A
+// resolved epic is acknowledgeable whether all slices merged (`delivery=landed`) or it resolved-not-
+// landed (`delivery=null`); only a still-live or still-converging epic is refused, so those stay
+// visible in Active and can never pre-seed the tick-off.
 
 import { epicIsAcknowledgeable } from "../app/delivery.ts";
 import { plans } from "../app/plan.ts";

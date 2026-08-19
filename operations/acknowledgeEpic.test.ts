@@ -78,6 +78,22 @@ test("acknowledge-epic: a still-converging epic is rejected (409) and stays Acti
   assertEquals(rows[0].list_bucket, "active");
 });
 
+test("acknowledge-epic: a resolved-not-landed epic (delivery=null) is accepted (200) and flips to History", async () => {
+  const { app, rows } = memApp([{ plan_key: "o/r#2b", status: "done", delivery: null, acknowledged_at: null }]);
+  // Seed the projection as the gateway would have on the last write (resolved-not-landed, unacknowledged → active).
+  await plans(app.data).update("o/r#2b", { delivery: null });
+  assertEquals(rows[0].list_bucket, "active");
+  assertEquals(rows[0].ack_open, 1);
+
+  const res = await call(app, { plan_key: "o/r#2b" });
+
+  assertEquals(res.status, 200);
+  assertEquals(res.body.ok, true);
+  assertEquals(typeof rows[0].acknowledged_at, "string");
+  assertEquals(rows[0].list_bucket, "history");
+  assertEquals(rows[0].ack_open, 0);
+});
+
 test("acknowledge-epic: a live (dispatched) epic is rejected (409)", async () => {
   const { app } = memApp([{ plan_key: "o/r#3", status: "dispatched", delivery: null, acknowledged_at: null }]);
   const res = await call(app, { plan_key: "o/r#3" });
