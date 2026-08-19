@@ -1,3 +1,10 @@
+## [0.96.1](https://github.com/nanobpm/nano-workforce/compare/v0.96.0...v0.96.1) (2026-08-19)
+
+
+### Bug Fixes
+
+* **pages:** redesign the Epics table to a lean 6-column list ([#327](https://github.com/nanobpm/nano-workforce/issues/327)) ([#328](https://github.com/nanobpm/nano-workforce/issues/328)) ([b5842b3](https://github.com/nanobpm/nano-workforce/commit/b5842b33c89abb2db0aa6161fdddf32293452771)), closes [#87](https://github.com/nanobpm/nano-workforce/issues/87)
+
 # [0.96.0](https://github.com/nanobpm/nano-workforce/compare/v0.95.0...v0.96.0) (2026-08-19)
 
 
