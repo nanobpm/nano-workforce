@@ -40,6 +40,20 @@ test("recordEnrolment is an idempotent upsert — a re-enrol overwrites the flag
   assertEquals(await reg.isParticipant("w1"), true);
 });
 
+test("the registry normalises keys and ignores a blank/whitespace instance", async () => {
+  const { data } = mem();
+  const reg = new DurableResumeRegistry(data);
+  // A blank or whitespace-only key cannot key a reachable row and must never open the fleet gate.
+  await reg.recordEnrolment("", true);
+  await reg.recordEnrolment("   ", true);
+  assertEquals(await reg.anyParticipant(), false, "a blank/whitespace enrolment is ignored, gate stays closed");
+  assertEquals(await reg.isParticipant("   "), false, "a blank key is never a participant");
+  // A padded key is canonicalised (trimmed) so reads and writes agree on one row — no unreachable dup.
+  await reg.recordEnrolment("  w1  ", true);
+  assertEquals(await reg.isParticipant("w1"), true, "a padded write is readable by the trimmed key");
+  assertEquals(await reg.isParticipant("  w1  "), true, "a padded read normalises to the same row");
+});
+
 test("anyParticipant is the fleet-level existence probe over participants", async () => {
   const { data } = mem();
   const reg = new DurableResumeRegistry(data);

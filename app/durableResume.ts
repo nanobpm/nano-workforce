@@ -68,34 +68,49 @@ export class DurableResumeRegistry {
     return this.#data.table<WorkerDurableResumeRow>("worker_durable_resume", "instance");
   }
 
+  /** Canonicalise an instance key: trim surrounding whitespace and reject a blank one. The instance is
+   * the table PRIMARY KEY and drives the fleet-wide gate via {@link anyParticipant}, so a whitespace or
+   * differently-trimmed key would create an unreachable row — or, worse, open the gate on a blank key.
+   * Normalising here makes every registry entry point safe by default rather than relying on each call
+   * site to pre-trim. Returns the trimmed key, or `undefined` when it is empty/whitespace. */
+  static #normaliseInstance(instance: string): string | undefined {
+    const trimmed = instance.trim();
+    return trimmed.length > 0 ? trimmed : undefined;
+  }
+
   /**
    * Record a worker's durable-resume participation at enrolment (an idempotent UPSERT keyed by
    * `instance`). A re-enrol overwrites the flag so a harness that gains — or loses — durable-resume
    * support across a redeploy is reflected. The `findOne`-then-insert is racy under a concurrent
    * duplicate enrol, so a PRIMARY KEY fence collision folds into the update path rather than surfacing
-   * as an error (the same end-state either way).
+   * as an error (the same end-state either way). A blank/whitespace `instance` is ignored (no-op) — it
+   * cannot key a reachable row and a blank key would let unrelated workers collide on one registry row.
    */
   async recordEnrolment(instance: string, durableResume: boolean): Promise<void> {
+    const key = DurableResumeRegistry.#normaliseInstance(instance);
+    if (key === undefined) return;
     const table = this.#table();
     const now = new Date().toISOString();
     const flag = durableResume ? 1 : 0;
-    const existing = await table.findOne({ instance });
+    const existing = await table.findOne({ instance: key });
     if (existing) {
-      await table.update(instance, { durable_resume: flag, updated_at: now });
+      await table.update(key, { durable_resume: flag, updated_at: now });
       return;
     }
     try {
-      await table.insert({ instance, durable_resume: flag, updated_at: now });
+      await table.insert({ instance: key, durable_resume: flag, updated_at: now });
     } catch (err) {
       if (!isFenceCollision(err)) throw err;
-      await table.update(instance, { durable_resume: flag, updated_at: now });
+      await table.update(key, { durable_resume: flag, updated_at: now });
     }
   }
 
   /** Whether a specific worker instance is a durable-resume participant. `false` for an unknown
-   * instance (never enrolled) — the safe default (graceful degradation). */
+   * instance (never enrolled) or a blank/whitespace key — the safe default (graceful degradation). */
   async isParticipant(instance: string): Promise<boolean> {
-    const row = await this.#table().findOne({ instance });
+    const key = DurableResumeRegistry.#normaliseInstance(instance);
+    if (key === undefined) return false;
+    const row = await this.#table().findOne({ instance: key });
     return row?.durable_resume === 1;
   }
 
