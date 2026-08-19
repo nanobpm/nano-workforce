@@ -10,11 +10,11 @@
 // (app/service.ts) projects: `buildUserTaskRow` (one open task → a desired row) and
 // `reconcileUserTasks` (the desired set vs the persisted set → the minimal upserts + deletes). The
 // engine iteration + writes live in the poller; the decisions live here so they are unit-testable
-// without a host, mirroring `deriveFeatureEscalationPatch`.
+// without a host.
 //
 // Completion is NOT owned here — the page posts the typed form variables to the ONE canonical human
-// completer (`completeEscalationAsHuman`, app/agentCompletion.ts) / the existing feature answer &
-// acknowledge operations, the exact resume path the task inbox uses. This module only makes the open
+// completer (`completeEscalationAsHuman`, app/agentCompletion.ts) via the `complete-user-task` door,
+// the exact resume path the task inbox uses. This module only makes the open
 // tasks visible; a completed task's row is removed on the next pass when the engine no longer reports
 // it open.
 import type { DataLayer } from "@nanobpm/urban";

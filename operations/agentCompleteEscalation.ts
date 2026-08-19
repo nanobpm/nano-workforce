@@ -46,8 +46,8 @@ export default defineOperation("agentCompleteEscalation", async ({ req, body }, 
     app.log.info("agent completed escalation", { userTaskKey, agentId, elementId: r.elementId });
     return { status: 200, body: { ok: true, completionId: r.completionId, elementId: r.elementId } };
   }
-  // A non-escalation / missing-target is a client error; an unknown key is a 404.
-  const status = r.reason === "no open escalation task" ? 404 : 400;
+  // A non-completable / missing-target is a client error; an unknown key is a 404.
+  const status = r.reason === "no open completable task" ? 404 : 400;
   app.log.warn("agent-complete: not completed", { userTaskKey, reason: r.reason });
   return { status, body: { ok: false, error: r.reason } };
 });

@@ -72,56 +72,6 @@ test("update {status:'escalated'} on a row with no pr_key projects Implementing 
   assertEquals(rows[0].stage_state, null);
 });
 
-// issue #272: the fail-closed open-escalation projection. The escalation tuple is spread across three
-// independently-written columns; the gateway projects `escalation_open=1` ONLY when all three agree.
-test("escalation_open is 1 only when status=escalated AND pointer AND question all present", async () => {
-  const { data, rows } = memData();
-  rows.push({ feature_key: "o/r#esc", status: "running", pr_key: null, converge: 1, auto_merge: 1 });
-  // A complete, answerable escalation → 1.
-  await featureRuns(data).update("o/r#esc", {
-    status: "escalated",
-    escalation_user_task_key: "ut-9",
-    escalation_question: "which base branch?",
-  });
-  assertEquals(rows[0].escalation_open, 1);
-});
-
-test("a torn escalation tuple projects escalation_open=0 (renders not-escalated, fail closed)", async () => {
-  const { data, rows } = memData();
-  // Simulate the exit-path/poller race: the question was cleared while status + pointer still lag in the
-  // escalated projection (the mirror tear observed on nwf#270). The page must NOT show an escalation.
-  rows.push({
-    feature_key: "o/r#torn",
-    status: "escalated",
-    pr_key: null,
-    converge: 1,
-    auto_merge: 1,
-    escalation_user_task_key: "ut-9",
-    escalation_question: "which base?",
-    escalation_open: 1,
-  });
-  await featureRuns(data).update("o/r#torn", { escalation_question: null });
-  assertEquals(rows[0].escalation_open, 0);
-});
-
-test("clearing the escalation tuple flips escalation_open to 0 without waiting a poll pass", async () => {
-  const { data, rows } = memData();
-  // The answer operation eagerly clears pointer + question; the gateway reprojects on that same write,
-  // so the affordance disappears immediately (issue #272 acceptance: no poll-pass lag).
-  rows.push({
-    feature_key: "o/r#ans",
-    status: "escalated",
-    pr_key: null,
-    converge: 1,
-    auto_merge: 1,
-    escalation_user_task_key: "ut-9",
-    escalation_question: "which base?",
-    escalation_open: 1,
-  });
-  await featureRuns(data).update("o/r#ans", { escalation_user_task_key: null, escalation_question: null });
-  assertEquals(rows[0].escalation_open, 0);
-});
-
 test("a run with converge=false projects stage_skipped containing Converging and Merging", async () => {
   const { data, rows } = memData();
   rows.push({ feature_key: "o/r#5", status: "running", converge: 0, auto_merge: 0 });
@@ -212,9 +162,9 @@ test("backfillFeatureStages stamps legacy terminal and live rows with helper-der
   // Legacy rows written before migration 039 → projection columns absent/NULL.
   rows.push({ feature_key: "o/r#8", status: "merged", converge: 1, auto_merge: 1, acknowledged_at: "2024-01-01T00:00:00Z" });
   rows.push({ feature_key: "o/r#9", status: "running", pr_key: null, converge: 0, auto_merge: 0 });
-  // A legacy row parked at a LIVE escalation when migration 040 lands: escalation_open is NULL and the
-  // poller won't re-write it while it stays parked, so backfill MUST reproject it to 1 (issue #272).
-  rows.push({ feature_key: "o/r#esc", status: "escalated", pr_key: null, converge: 1, auto_merge: 1, escalation_user_task_key: "ut-9", escalation_question: "which base?" });
+  // A legacy row parked at a LIVE escalation: its projection columns are absent/NULL, so backfill MUST
+  // reproject its pipeline stage (issue #254). Issue #332 dropped the escalation_* denormalisation.
+  rows.push({ feature_key: "o/r#esc", status: "escalated", pr_key: null, converge: 1, auto_merge: 1 });
 
   const stamped = await backfillFeatureStages(data);
   assertEquals(stamped, 3);
@@ -229,24 +179,23 @@ test("backfillFeatureStages stamps legacy terminal and live rows with helper-der
   assertEquals(live.stage_state, null);
   assertEquals(live.stage_skipped, "Converging Merging");
   assertEquals(live.list_bucket, "active");
-  assertEquals(live.escalation_open, 0);
 
   const escalated = rows.find((r) => r.feature_key === "o/r#esc");
-  assertEquals(escalated.escalation_open, 1);
+  assertEquals(escalated.stage, "Implementing");
+  assertEquals(escalated.attention, "⚠");
 });
 
 test("backfillFeatureStages skips already-projected rows and counts only rows it stamps", async () => {
   const { data, rows } = memData();
   // One legacy row (no projection) + one already-projected row (gateway kept it fresh).
   rows.push({ feature_key: "o/r#legacy", status: "merged", converge: 1, auto_merge: 1, acknowledged_at: null });
-  rows.push({ feature_key: "o/r#fresh", status: "merged", converge: 1, auto_merge: 1, acknowledged_at: null, stage: "Done", stage_state: "ok", stage_skipped: "", attention: null, list_bucket: "active", escalation_open: 0, updated_at: "0" });
+  rows.push({ feature_key: "o/r#fresh", status: "merged", converge: 1, auto_merge: 1, acknowledged_at: null, stage: "Done", stage_state: "ok", stage_skipped: "", attention: null, list_bucket: "active", updated_at: "0" });
 
   const stamped = await backfillFeatureStages(data);
   // Only the legacy row is stamped; the already-projected row is skipped.
   assertEquals(stamped, 1);
   const legacy = rows.find((r) => r.feature_key === "o/r#legacy");
   assertEquals(legacy.stage, "Done");
-  assertEquals(legacy.escalation_open, 0);
   // The already-projected row was not re-written (its sentinel updated_at is untouched).
   const fresh = rows.find((r) => r.feature_key === "o/r#fresh");
   assertEquals(fresh.updated_at, "0");

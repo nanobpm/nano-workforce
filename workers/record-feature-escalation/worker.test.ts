@@ -1,9 +1,10 @@
 // Unit coverage for pr.record-feature-escalation — a feature run parked on the native
 // `feature-escalation` user task (issue #210). Runs on the `escalated` arm, before the user task
-// exists, and must flip the row to the non-terminal `escalated` status and persist the agent's
-// `question` so the nwf UI can surface it (the poller can't read task-local vars, so this is the
-// question's source of truth). It clears the completable-task pointer to NULL (the task does not
-// exist yet, so any non-null value is stale); the poller fills the real key once it is observable.
+// exists, and must flip the row to the non-terminal `escalated` status and append the agent's
+// `question` to the canonical `feature_escalations` audit log so the nwf UI can surface it (the poller
+// can't read task-local vars, so this is the question's source of truth). Issue #332 dropped the
+// denormalised `feature_runs.escalation_question` / `escalation_user_task_key` columns, so this worker
+// now only flips the status and appends the audit row.
 import { test } from "node:test";
 import { assertEquals } from "#test-assert";
 import { noopLog } from "../../test/log.ts";
@@ -43,8 +44,8 @@ function fakeApp(rows: Record<string, unknown>[]): any {
   };
 }
 
-test("record-feature-escalation: flips the run to escalated and persists the question", async () => {
-  const rows = [{ feature_key: "owner/repo#7", status: "running", escalation_question: null, escalation_user_task_key: null }];
+test("record-feature-escalation: flips the run to escalated and appends the question to the audit log", async () => {
+  const rows = [{ feature_key: "owner/repo#7", status: "running" }];
   const app = fakeApp(rows);
   const out = await handler(
     { jobKey: "job-1", variables: { featureKey: "owner/repo#7", question: "Which API should I use?" } } as never,
@@ -52,11 +53,8 @@ test("record-feature-escalation: flips the run to escalated and persists the que
   );
   assertEquals(out, {});
   assertEquals(rows[0].status, "escalated");
-  assertEquals(rows[0].escalation_question, "Which API should I use?");
-  // The user task does not exist yet — the pointer is cleared to NULL here (poller fills the real key).
-  assertEquals(rows[0].escalation_user_task_key, null);
-  // Dual-write (issue #305): the question is ALSO appended to the canonical `feature_escalations`
-  // audit log so `pollUserTasks` can source it from a surviving table once the denormalised column drops.
+  // Issue #305/#332: the question is the sole responsibility of the canonical `feature_escalations`
+  // audit log so `pollUserTasks` can source it from a surviving table (the denormalised column is gone).
   assertEquals(app.stores.feature_escalations.length, 1);
   assertEquals(app.stores.feature_escalations[0].feature_key, "owner/repo#7");
   assertEquals(app.stores.feature_escalations[0].question, "Which API should I use?");
@@ -68,7 +66,7 @@ test("record-feature-escalation: a retried job (same jobKey) reuses its audit ro
   // before job completion re-runs with the SAME jobKey. The `job_key` idempotency guard must reuse the
   // existing `feature_escalations` row rather than append a duplicate (which would bloat the append-only
   // log and could skew "latest question" selection). Mirrors `record-plan-review`'s `plan_reviews` guard.
-  const rows = [{ feature_key: "owner/repo#7", status: "running", escalation_question: null, escalation_user_task_key: null }];
+  const rows = [{ feature_key: "owner/repo#7", status: "running" }];
   const app = fakeApp(rows);
   const job = { jobKey: "job-retry", variables: { featureKey: "owner/repo#7", question: "Which API?" } } as never;
   await handler(job, app);
@@ -77,22 +75,11 @@ test("record-feature-escalation: a retried job (same jobKey) reuses its audit ro
   assertEquals(app.stores.feature_escalations[0].job_key, "job-retry");
 });
 
-test("record-feature-escalation: clears a stale completable-task pointer at escalation entry", async () => {
-  // The task does not exist yet here, so a non-null key can only be stale (a prior escalation's key
-  // left behind, a manual DB repair, etc). Leaving it would bind the pages' answer/abandon affordance
-  // to the wrong task until the poller overwrites it; clear it so the row reads "key unknown here".
-  const rows = [{ feature_key: "owner/repo#9", status: "running", escalation_question: null, escalation_user_task_key: "stale-ut" }];
-  const app = fakeApp(rows);
-  await handler({ jobKey: "job-9", variables: { featureKey: "owner/repo#9", question: "Q?" } } as never, app);
-  assertEquals(rows[0].status, "escalated");
-  assertEquals(rows[0].escalation_question, "Q?");
-  assertEquals(rows[0].escalation_user_task_key, null);
-});
-
-test("record-feature-escalation: a blank/absent question is persisted as NULL (badge/affordance stay off)", async () => {
-  const rows = [{ feature_key: "owner/repo#8", status: "running", escalation_question: null }];
+test("record-feature-escalation: a blank/absent question is appended as NULL (badge/affordance stay off)", async () => {
+  const rows = [{ feature_key: "owner/repo#8", status: "running" }];
   const app = fakeApp(rows);
   await handler({ jobKey: "job-8", variables: { featureKey: "owner/repo#8", question: "   " } } as never, app);
   assertEquals(rows[0].status, "escalated");
-  assertEquals(rows[0].escalation_question, null);
+  assertEquals(app.stores.feature_escalations.length, 1);
+  assertEquals(app.stores.feature_escalations[0].question, null);
 });

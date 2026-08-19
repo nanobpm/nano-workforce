@@ -62,11 +62,15 @@ function memData(stores: Record<string, { rows: any[]; key: string }>) {
   } as any;
 }
 
-/** A stub engine recording every `completeUserTask`, with a seeded set of open user tasks. */
+/** A stub engine recording every `completeUserTask`, with a seeded set of open user tasks. The
+ *  completers resolve tasks via `openUserTasks` (CREATED only), so the fixture exposes it; a legacy
+ *  `searchUserTasks` (ANY state) is also present to prove the completer does NOT reach for it. */
 function fakeEngine(openTasks: Array<{ userTaskKey: string; elementId?: string }>) {
   const completed: Array<{ userTaskKey: string; variables?: Record<string, unknown> }> = [];
   const engine = {
-    searchUserTasks: (_filter?: Record<string, unknown>) => Promise.resolve(openTasks),
+    openUserTasks: (_filter?: Record<string, unknown>) => Promise.resolve(openTasks),
+    searchUserTasks: (_filter?: Record<string, unknown>) =>
+      Promise.reject(new Error("completer must resolve via openUserTasks, not searchUserTasks")),
     completeUserTask: (userTaskKey: string, variables?: Record<string, unknown>) => {
       completed.push({ userTaskKey, variables });
       return Promise.resolve();
@@ -118,7 +122,7 @@ test("agent completer refuses a non-escalation user task (scoped to the migrated
   });
 
   assertEquals(r.ok, false);
-  assertEquals(r.reason, "not an escalation task");
+  assertEquals(r.reason, "not a completable task");
   assertEquals(completed.length, 0, "a non-escalation task is never completed");
   assertEquals(stores.task_completions.rows.length, 0, "and no attribution row is written");
 });
@@ -137,8 +141,38 @@ test("agent completer is a no-op for an unknown userTaskKey", async () => {
   });
 
   assertEquals(r.ok, false);
-  assertEquals(r.reason, "no open escalation task");
+  assertEquals(r.reason, "no open completable task");
   assertEquals(completed.length, 0);
+});
+
+test("completer resolves only OPEN tasks — a completed/canceled task's key is a 404-style no-op, not a doomed re-completion", async () => {
+  // A looping instance keeps COMPLETED/CANCELED user tasks alongside the live one. If the completer
+  // matched by key against ANY-state tasks (`searchUserTasks`), a stale key would drive a re-completion
+  // that the engine rejects with a 5xx instead of the intended "no open task" no-op. The completer must
+  // query `openUserTasks` (CREATED only), so a key that exists only as a non-open task does not match.
+  const stores = { task_completions: { rows: [] as any[], key: "id" } };
+  const data = memData(stores);
+  const completed: Array<{ userTaskKey: string }> = [];
+  const engine = {
+    // No open tasks…
+    openUserTasks: () => Promise.resolve([]),
+    // …even though a completed task with this key exists in the full (any-state) search.
+    searchUserTasks: () => Promise.resolve([{ userTaskKey: "ut-done", elementId: "feature-escalation" }]),
+    completeUserTask: (userTaskKey: string) => {
+      completed.push({ userTaskKey });
+      return Promise.resolve();
+    },
+  } as any;
+
+  const r = await completeEscalationAsHuman(data, engine, {
+    userTaskKey: "ut-done",
+    operatorId: "alice",
+    variables: { resolution: "abandon" },
+  });
+
+  assertEquals(r.ok, false);
+  assertEquals(r.reason, "no open completable task");
+  assertEquals(completed.length, 0, "a non-open key never drives a doomed re-completion");
 });
 
 test("a HUMAN operator completes a feature escalation via the SAME attributed resume path (issue #210)", async () => {
@@ -166,6 +200,35 @@ test("a HUMAN operator completes a feature escalation via the SAME attributed re
   assertEquals(row.reversible, 0, "a human completion is the authority (not reversible)");
 });
 
+test("feature-blocked is HUMAN-completable but NOT agent-completable (issue #332)", async () => {
+  // Issue #332 folded the bespoke `acknowledge-blocked` door onto the canonical human completer, so a
+  // HUMAN operator retires a blocked run through `completeEscalationAsHuman`. It stays OUTSIDE the agent
+  // surface (`ESCALATION_TASK_ELEMENTS`) — an agent must never acknowledge a blocked run on a human's
+  // behalf — so the agent completer refuses it.
+  const stores = { task_completions: { rows: [] as any[], key: "id" } };
+  const data = memData(stores);
+  const { engine, completed } = fakeEngine([{ userTaskKey: "ut-b", elementId: "feature-blocked" }]);
+
+  const asAgent = await completeEscalationAsAgent(data, engine, {
+    userTaskKey: "ut-b",
+    agentId: "bot",
+    variables: { note: "n" },
+  });
+  assertEquals(asAgent.ok, false, "the agent completer refuses feature-blocked");
+  assertEquals(asAgent.reason, "not a completable task");
+  assertEquals(completed.length, 0);
+
+  const asHuman = await completeEscalationAsHuman(data, engine, {
+    userTaskKey: "ut-b",
+    operatorId: "alice",
+    variables: { note: "reassigned to a human" },
+  });
+  assertEquals(asHuman.ok, true, "the human completer retires feature-blocked");
+  assertEquals(asHuman.elementId, "feature-blocked");
+  assertEquals(completed.length, 1);
+  assertEquals(completed[0].variables, { note: "reassigned to a human" });
+});
+
 test("human completer refuses a non-escalation user task and is a no-op for an unknown key", async () => {
   const stores = { task_completions: { rows: [] as any[], key: "id" } };
   const data = memData(stores);
@@ -177,7 +240,7 @@ test("human completer refuses a non-escalation user task and is a no-op for an u
     variables: { resolution: "abandon" },
   });
   assertEquals(notEsc.ok, false);
-  assertEquals(notEsc.reason, "not an escalation task");
+  assertEquals(notEsc.reason, "not a completable task");
 
   const missing = await completeEscalationAsHuman(data, engine, {
     userTaskKey: "ut-missing",
@@ -185,7 +248,7 @@ test("human completer refuses a non-escalation user task and is a no-op for an u
     variables: { resolution: "abandon" },
   });
   assertEquals(missing.ok, false);
-  assertEquals(missing.reason, "no open escalation task");
+  assertEquals(missing.reason, "no open completable task");
 
   assertEquals(completed.length, 0, "neither refusal completes a task");
   assertEquals(stores.task_completions.rows.length, 0, "and no attribution row is written");
@@ -454,4 +517,27 @@ test("validateEscalationVariables derives its contract from the canonical .form 
   assert(validateEscalationVariables("plan-review-decision", { directive: "" }) !== null);
   // an element with no linked form contract is not enforced
   assertEquals(validateEscalationVariables("some-other-task", { whatever: 1 }), null);
+});
+
+test("feature-escalation demands non-blank answer on the answer path, but not on the hidden abandon path", async () => {
+  // resolution=answer shows the conditional `answer` field, which is required → blank/missing rejected.
+  assert(
+    validateEscalationVariables("feature-escalation", { resolution: "answer" }) !== null,
+    "resolution=answer with no guidance is rejected",
+  );
+  assert(
+    validateEscalationVariables("feature-escalation", { resolution: "answer", answer: "   " }) !== null,
+    "resolution=answer with whitespace-only guidance is rejected",
+  );
+  assertEquals(
+    validateEscalationVariables("feature-escalation", { resolution: "answer", answer: "use v2" }),
+    null,
+    "resolution=answer with real guidance passes",
+  );
+  // resolution=abandon HIDES the `answer` field, so its required-ness is not enforced.
+  assertEquals(
+    validateEscalationVariables("feature-escalation", { resolution: "abandon" }),
+    null,
+    "the abandon path does not demand the hidden answer field",
+  );
 });

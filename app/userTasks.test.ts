@@ -2,7 +2,7 @@
 // one resolved open escalation user task into its desired `user_tasks` row (or null for a
 // non-escalation / blank key), and `reconcileUserTasks` diffs the desired open set against the
 // persisted rows into the minimal insert/update/delete plan the `pollUserTasks` reconcile applies.
-// These are the pure source of truth the poller projects, mirroring `deriveFeatureEscalationPatch`.
+// These are the pure source of truth the poller projects.
 import { test } from "node:test";
 import { assert, assertEquals } from "#test-assert";
 import type { PlanReview } from "./plan.ts";

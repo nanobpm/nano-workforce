@@ -1,19 +1,21 @@
 // POST /app/api/actions/complete-user-task → operationId `completeUserTask` (issue #236).
 //
-// The nwf **Tasks** page's decision affordance for the epic/PR native escalations that had no
-// app-side completion path — `plan-review-decision`, `trial-merge-decision`, and the PR review-loop
-// `wait-answer`. An operator submits the parked task's typed `.form` variables (e.g. a plan-review
-// `{ directive, notes }`, a trial-merge `{ action, notes }`, or a PR `{ answer }`) directly from the
-// Tasks inbox instead of only from Urban's read-only task-inbox stub.
+// The nwf **Tasks** page's decision affordance for the native user-task escalations that had no
+// app-side completion path — `plan-review-decision`, `trial-merge-decision`, the PR review-loop
+// `wait-answer`, the feature escalation `feature-escalation`, and the human-only `feature-blocked`
+// acknowledgement. An operator submits the parked task's typed `.form` variables (e.g. a plan-review
+// `{ directive, notes }`, a trial-merge `{ action, notes }`, a PR `{ answer }`, a feature escalation
+// `{ resolution, answer }`, or a blocked-run `{ note }`) directly from the Tasks inbox instead of only
+// from Urban's read-only task-inbox stub.
 //
 // It routes through the ONE canonical human completer (`completeEscalationAsHuman` →
 // `completeUserTaskAttributed`), so the completion uses the exact same typed variables and engine
 // resume path a human drives from the task inbox — no parallel completion — while recording WHO
 // answered in the `task_completions` ledger. That completer refuses any user task that is not one of
-// the migrated escalation elements (`ESCALATION_TASK_ELEMENTS`), so this generic door can never
-// complete an arbitrary internal user task. The feature-run kinds keep their own reconcile-bearing
-// operations (`answer-escalation` / `acknowledge-blocked`); this door is for the escalation kinds
-// whose completion is a straight typed pass-through.
+// the human-completable elements (`HUMAN_COMPLETABLE_ELEMENTS`), so this generic door can never
+// complete an arbitrary internal user task. Issue #332 retired the bespoke feature-run reconcile doors
+// (`answer-escalation` / `acknowledge-blocked`) and folded `feature-escalation` / `feature-blocked`
+// onto this one canonical door.
 //
 // On success it removes the answered task's `user_tasks` read-model row so the Tasks grid stops
 // offering a decision for a task that is now completed, without waiting a poll cycle; the poller
@@ -66,7 +68,7 @@ export default defineOperation("completeUserTask", async ({ body }, app) => {
     app.log.info("operator completed user task", { userTaskKey, elementId: r.elementId });
     return { status: 200, body: { ok: true, completionId: r.completionId, elementId: r.elementId } };
   }
-  const status = r.reason === "no open escalation task" ? 404 : 400;
+  const status = r.reason === "no open completable task" ? 404 : 400;
   app.log.warn("complete-user-task: not completed", { userTaskKey, reason: r.reason });
   return { status, body: { ok: false, error: r.reason } };
 });

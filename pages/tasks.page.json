@@ -119,22 +119,6 @@
           }
         ],
         "rowKey": "user_task_key",
-        "rowActions": [
-          {
-            "label": "Abandon",
-            "confirm": "Abandon this escalated task? The run gives up on it (no PR).",
-            "showWhenField": "user_task_key",
-            "action": {
-              "path": "/app/api/actions/complete-user-task",
-              "body": {
-                "userTaskKey": "{{row.user_task_key}}",
-                "variables": {
-                  "resolution": "abandon"
-                }
-              }
-            }
-          }
-        ],
         "detail": {
           "linkField": "subject_url",
           "fields": [
@@ -147,18 +131,32 @@
             "showWhenField": "user_task_key",
             "title": "Answer escalation",
             "promptField": "question",
-            "inputKey": "answer",
-            "inputLabel": "Guidance for the implementation agent",
-            "submitLabel": "Answer & re-dispatch",
+            "submitLabel": "Submit decision",
+            "fields": [
+              {
+                "inputKey": "resolution",
+                "type": "select",
+                "inputLabel": "Resolution",
+                "options": [
+                  { "value": "answer", "label": "Answer — re-dispatch the task with this guidance" },
+                  { "value": "abandon", "label": "Abandon — give up on this task" }
+                ]
+              },
+              {
+                "inputKey": "answer",
+                "type": "textarea",
+                "inputLabel": "Answer / guidance for the implementation agent",
+                "conditional": {
+                  "hide": "=resolution != \"answer\""
+                }
+              }
+            ],
             "action": {
               "path": "/app/api/actions/complete-user-task",
-              "successLabel": "Answered — the agent will resume",
+              "successLabel": "Decision submitted — the process will continue",
               "body": {
                 "userTaskKey": "{{row.user_task_key}}",
-                "variables": {
-                  "resolution": "answer",
-                  "answer": "{{form.answer}}"
-                }
+                "variables": "{{form}}"
               }
             }
           }
@@ -220,22 +218,6 @@
           }
         ],
         "rowKey": "user_task_key",
-        "rowActions": [
-          {
-            "label": "Proceed",
-            "confirm": "Proceed with the current plan as-is? It is dispatched unchanged.",
-            "showWhenField": "user_task_key",
-            "action": {
-              "path": "/app/api/actions/complete-user-task",
-              "body": {
-                "userTaskKey": "{{row.user_task_key}}",
-                "variables": {
-                  "directive": "proceed"
-                }
-              }
-            }
-          }
-        ],
         "detail": {
           "linkField": "subject_url",
           "fields": [
@@ -246,20 +228,34 @@
           ],
           "form": {
             "showWhenField": "user_task_key",
-            "title": "Revise — send the plan back to the planner",
+            "title": "Review the plan",
             "promptField": "question",
-            "inputKey": "notes",
-            "inputLabel": "Revision guidance for the planner",
-            "submitLabel": "Revise & re-plan",
+            "submitLabel": "Submit decision",
+            "fields": [
+              {
+                "inputKey": "directive",
+                "type": "select",
+                "inputLabel": "Directive",
+                "options": [
+                  { "value": "proceed", "label": "Proceed — dispatch the current plan as-is" },
+                  { "value": "revise", "label": "Revise — send the plan back to the planner" }
+                ]
+              },
+              {
+                "inputKey": "notes",
+                "type": "textarea",
+                "inputLabel": "Revision guidance for the planner",
+                "conditional": {
+                  "hide": "=directive != \"revise\""
+                }
+              }
+            ],
             "action": {
               "path": "/app/api/actions/complete-user-task",
-              "successLabel": "Sent back — the planner will revise",
+              "successLabel": "Decision recorded",
               "body": {
                 "userTaskKey": "{{row.user_task_key}}",
-                "variables": {
-                  "directive": "revise",
-                  "notes": "{{form.notes}}"
-                }
+                "variables": "{{form}}"
               }
             }
           }
@@ -321,50 +317,6 @@
           }
         ],
         "rowKey": "user_task_key",
-        "rowActions": [
-          {
-            "label": "Proceed",
-            "confirm": "Accept the red trial merge and continue?",
-            "showWhenField": "user_task_key",
-            "action": {
-              "path": "/app/api/actions/complete-user-task",
-              "body": {
-                "userTaskKey": "{{row.user_task_key}}",
-                "variables": {
-                  "action": "proceed"
-                }
-              }
-            }
-          },
-          {
-            "label": "Rebase",
-            "confirm": "Re-run the trial merge?",
-            "showWhenField": "user_task_key",
-            "action": {
-              "path": "/app/api/actions/complete-user-task",
-              "body": {
-                "userTaskKey": "{{row.user_task_key}}",
-                "variables": {
-                  "action": "rebase"
-                }
-              }
-            }
-          },
-          {
-            "label": "Abandon",
-            "confirm": "Stop and finalize the plan?",
-            "showWhenField": "user_task_key",
-            "action": {
-              "path": "/app/api/actions/complete-user-task",
-              "body": {
-                "userTaskKey": "{{row.user_task_key}}",
-                "variables": {
-                  "action": "abandon"
-                }
-              }
-            }
-          }
-        ],
         "detail": {
           "linkField": "subject_url",
           "fields": [
@@ -372,7 +324,38 @@
               "field": "question",
               "label": "Trial merge"
             }
-          ]
+          ],
+          "form": {
+            "showWhenField": "user_task_key",
+            "title": "Trial-merge decision",
+            "promptField": "question",
+            "submitLabel": "Submit decision",
+            "fields": [
+              {
+                "inputKey": "action",
+                "type": "select",
+                "inputLabel": "Action",
+                "options": [
+                  { "value": "proceed", "label": "Proceed — accept the red trial merge and continue" },
+                  { "value": "rebase", "label": "Rebase — re-run the trial merge" },
+                  { "value": "abandon", "label": "Abandon — stop and finalize the plan" }
+                ]
+              },
+              {
+                "inputKey": "notes",
+                "type": "textarea",
+                "inputLabel": "Notes"
+              }
+            ],
+            "action": {
+              "path": "/app/api/actions/complete-user-task",
+              "successLabel": "Decision recorded",
+              "body": {
+                "userTaskKey": "{{row.user_task_key}}",
+                "variables": "{{form}}"
+              }
+            }
+          }
         },
         "refreshMs": 5000
       }
@@ -532,11 +515,13 @@
             "inputLabel": "Disposition note (what you did / why)",
             "submitLabel": "Acknowledge & close",
             "action": {
-              "path": "/app/api/actions/acknowledge-blocked",
+              "path": "/app/api/actions/complete-user-task",
               "successLabel": "Acknowledged — the run will close",
               "body": {
                 "userTaskKey": "{{row.user_task_key}}",
-                "note": "{{form.note}}"
+                "variables": {
+                  "note": "{{form.note}}"
+                }
               }
             }
           }

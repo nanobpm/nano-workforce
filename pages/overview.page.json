@@ -165,48 +165,10 @@
           { "field": "delivery_label", "header": "Delivery" },
           { "field": "updated_at", "header": "Updated", "width": "9rem", "format": "datetime" }
         ],
-        "rowActions": [
-          {
-            "label": "Abandon",
-            "confirm": "Abandon this escalated task? The run gives up on it (no PR).",
-            "showWhenField": "escalation_open",
-            "action": {
-              "path": "/app/api/actions/answer-escalation",
-              "body": { "userTaskKey": "{{row.escalation_user_task_key}}", "resolution": "abandon" }
-            }
-          },
-          {
-            "label": "Acknowledge blocked",
-            "confirm": "Acknowledge this blocked run? It settles to terminal blocked (the agent could not open a PR).",
-            "showWhenField": "blocked_user_task_key",
-            "action": {
-              "path": "/app/api/actions/acknowledge-blocked",
-              "body": { "userTaskKey": "{{row.blocked_user_task_key}}" }
-            }
-          }
-        ],
         "detail": {
           "fields": [
-            { "field": "escalation_question", "label": "Escalation question" },
             { "field": "outcome", "label": "Outcome" }
-          ],
-          "form": {
-            "showWhenField": "escalation_open",
-            "title": "Answer escalation",
-            "promptField": "escalation_question",
-            "inputKey": "answer",
-            "inputLabel": "Guidance for the implementation agent",
-            "submitLabel": "Answer & re-dispatch",
-            "action": {
-              "path": "/app/api/actions/answer-escalation",
-              "successLabel": "Answered — the agent will resume",
-              "body": {
-                "userTaskKey": "{{row.escalation_user_task_key}}",
-                "resolution": "answer",
-                "answer": "{{form.answer}}"
-              }
-            }
-          }
+          ]
         }
       }
     }

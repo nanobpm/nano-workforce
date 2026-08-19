@@ -1,8 +1,9 @@
 // Integration test for `pollUserTasks` (issue #236) — the reconcile that projects the engine's
 // currently-open native user-task escalations onto the unified `user_tasks` read-model the Tasks page
-// reads. It generalises the two feature pollers across every subject: feature runs (denormalised
-// keys), in-flight plans (`plan-review-decision` / `trial-merge-decision`), and in-flight PRs
-// (`wait-answer`). A completed task's row is removed on the next pass so `showCount` tracks live work.
+// reads. It reads each in-flight subject's open tasks from the engine directly: feature runs
+// (`feature-escalation` / `feature-blocked`, issue #332), in-flight plans (`plan-review-decision` /
+// `trial-merge-decision`), and in-flight PRs (`wait-answer`). A completed task's row is removed on the
+// next pass so `showCount` tracks live work.
 import { test } from "node:test";
 import { assertEquals } from "#test-assert";
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
@@ -79,11 +80,11 @@ test("pollUserTasks: projects feature / plan-review / trial-merge / PR-wait esca
         process_key: "fp-10",
         issue_url: "https://github.com/o/r/issues/10",
         title: "Add the framework selector",
-        escalation_user_task_key: "ut-feat",
-        escalation_question: "which framework?",
-        blocked_user_task_key: null,
         delivery_label: null,
       },
+    ],
+    feature_escalations: [
+      { id: 1, feature_key: "o/r#10", question: "which framework?", created_at: "2025-01-01T00:00:00.000Z", job_key: "j1" },
     ],
     plans: [
       { plan_key: "o/r#20", status: "dispatched", process_key: "pp-20", issue_url: "https://github.com/o/r/issues/20", title: "Broaden the epic scope" },
@@ -102,6 +103,7 @@ test("pollUserTasks: projects feature / plan-review / trial-merge / PR-wait esca
     escalations: [{ id: 1, pr_key: "o/r#30", status: "open", question: "conflicting reviews" }],
   });
   const engine = fakeEngine({
+    "fp-10": [{ userTaskKey: "ut-feat", elementId: "feature-escalation" }],
     "pp-20": [
       { userTaskKey: "ut-plan", elementId: "plan-review-decision" },
       { userTaskKey: "ut-trial", elementId: "trial-merge-decision" },
@@ -152,10 +154,10 @@ test("pollUserTasks: projects a merge-loop wait-merge-answer escalation into use
   assertEquals(byKey["ut-merge"].question, "not mergeable — resolve the conflict");
 });
 
-test("pollUserTasks: sources the feature-escalation question from the feature_escalations audit log (issue #305)", async () => {
-  // The canonical source is the append-only `feature_escalations` log (what `record-feature-escalation`
-  // writes); the denormalised `feature_runs.escalation_question` is a legacy fallback during the expand
-  // phase. When both exist the newest audit row wins, so a re-escalation shows the latest question.
+test("pollUserTasks: sources the feature-escalation question from the feature_escalations audit log (issue #305/#332)", async () => {
+  // The canonical (and now sole) source is the append-only `feature_escalations` log — what
+  // `record-feature-escalation` writes; issue #332 dropped the denormalised `feature_runs.escalation_question`
+  // column. When several audit rows exist the newest wins, so a re-escalation shows the latest question.
   const { data, stores } = memData({
     feature_runs: [
       {
@@ -164,9 +166,6 @@ test("pollUserTasks: sources the feature-escalation question from the feature_es
         process_key: "fp-42",
         issue_url: "https://github.com/o/r/issues/42",
         title: "Wire the audit log",
-        escalation_user_task_key: "ut-feat",
-        escalation_question: "stale legacy question",
-        blocked_user_task_key: null,
         delivery_label: null,
       },
     ],
@@ -181,6 +180,33 @@ test("pollUserTasks: sources the feature-escalation question from the feature_es
 
   const byKey = Object.fromEntries((stores.user_tasks ?? []).map((r) => [r.user_task_key, r]));
   assertEquals(byKey["ut-feat"].question, "latest ask");
+});
+
+test("pollUserTasks: projects a blocked feature run (feature-blocked) with the delivery_label as its question (issue #332)", async () => {
+  // A blocked run parks on the native `feature-blocked` operator task at the non-terminal
+  // `awaiting_operator` status. The poller reads it from the engine directly (no denormalised pointer)
+  // and projects it onto the Tasks inbox, sourcing the display text from the run's `delivery_label`.
+  const { data, stores } = memData({
+    feature_runs: [
+      {
+        feature_key: "o/r#60",
+        status: "awaiting_operator",
+        process_key: "fp-60",
+        issue_url: "https://github.com/o/r/issues/60",
+        title: "Blocked slice",
+        delivery_label: "agent gave up: no PR",
+      },
+    ],
+  });
+  const engine = fakeEngine({ "fp-60": [{ userTaskKey: "ut-blocked", elementId: "feature-blocked" }] });
+
+  await pollUserTasks(data, engine);
+
+  const byKey = Object.fromEntries((stores.user_tasks ?? []).map((r) => [r.user_task_key, r]));
+  assertEquals(Object.keys(byKey), ["ut-blocked"]);
+  assertEquals(byKey["ut-blocked"].element_id, "feature-blocked");
+  assertEquals(byKey["ut-blocked"].subject_type, "feature");
+  assertEquals(byKey["ut-blocked"].question, "agent gave up: no PR");
 });
 
 test("pollUserTasks: removes a row once its task is no longer open (completed / out-of-band)", async () => {

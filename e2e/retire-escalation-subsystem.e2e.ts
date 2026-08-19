@@ -155,6 +155,32 @@ describe("retire escalation subsystem (U7 — destructive contract phase)", () =
     }
   });
 
+  test("issue #332 contract phase: feature_runs escalation columns + bespoke feature doors are gone", async () => {
+    // The destructive contract phase of #305 dropped the denormalised feature-run escalation surface now
+    // that escalation state lives on the native `user_tasks` inbox + the `feature_escalations` audit log.
+    const featureCols = await columnNames(app, "feature_runs");
+    assert.ok(featureCols.length > 0, "feature_runs table still exists");
+    for (const dropped of [
+      "escalation_question",
+      "escalation_user_task_key",
+      "blocked_user_task_key",
+      "escalation_open",
+    ]) {
+      assert.ok(!featureCols.includes(dropped), `feature_runs.${dropped} column dropped (#332)`);
+    }
+
+    // The bespoke feature-run answer doors are gone — the ONE canonical `/actions/complete-user-task`
+    // door now completes `feature-escalation` / `feature-blocked` alongside the epic/PR kinds.
+    for (const path of ["/app/api/actions/answer-escalation", "/app/api/actions/acknowledge-blocked"]) {
+      const res = await app.callRoute({
+        method: "POST",
+        path,
+        body: JSON.stringify({ userTaskKey: "x" }),
+      });
+      assert.equal(res.status, 404, `retired feature door ${path} is unmounted (404)`);
+    }
+  });
+
   test("an escalation still round-trips via userTask + inbox with no denormalised pointer or dead form", async () => {
     const api = app.api;
     assert.ok(api, "the OpenAPI driver is available");

@@ -21,6 +21,9 @@
       "label": "Answer / guidance for the implementation agent",
       "conditional": {
         "hide": "=resolution != \"answer\""
+      },
+      "validate": {
+        "required": true
       }
     }
   ]

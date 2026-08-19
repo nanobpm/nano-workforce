@@ -1,15 +1,17 @@
 // Tests for the POST /app/api/actions/complete-user-task operation `completeUserTask` (issue #236).
 // The nwf Tasks page's decision affordance for the plan-review / trial-merge / PR `wait-answer`
-// escalations: it routes the typed form variables through the canonical human completer
-// (completeEscalationAsHuman → completeUserTaskAttributed), resuming the process exactly as the task
-// inbox would, and drops the answered task's read-model row so the grid stops offering a decision.
+// escalations plus the feature kinds `feature-escalation` / `feature-blocked` (issue #332 folded the
+// bespoke feature doors onto this one canonical door): it routes the typed form variables through the
+// canonical human completer (completeEscalationAsHuman → completeUserTaskAttributed), resuming the
+// process exactly as the task inbox would, and drops the answered task's read-model row so the grid
+// stops offering a decision.
 import { test } from "node:test";
 import { assertEquals } from "#test-assert";
 import type { AppApi } from "@nanobpm/urban";
 import { noopLog } from "../test/log.ts";
 import handler from "./completeUserTask.ts";
 
-// biome-ignore lint/suspicious/noExplicitAny: in-memory doubles, mirrors acknowledgeBlocked.test.ts
+// biome-ignore lint/suspicious/noExplicitAny: in-memory doubles, mirrors sibling op tests
 function memApp(openTasks: { userTaskKey: string; elementId?: string }[]): {
   app: AppApi;
   // biome-ignore lint/suspicious/noExplicitAny: see above
@@ -49,6 +51,7 @@ function memApp(openTasks: { userTaskKey: string; elementId?: string }[]): {
     };
   }
   const engine = {
+    openUserTasks: async () => openTasks,
     searchUserTasks: async () => openTasks,
     completeUserTask: async (userTaskKey: string, variables: Record<string, unknown>) => {
       completed.push({ userTaskKey, variables });
@@ -106,14 +109,30 @@ test("complete-user-task: non-object variables are rejected 400", async () => {
   assertEquals(res.status, 400);
 });
 
-test("complete-user-task: an unknown key is a 404 (no open escalation task)", async () => {
+test("complete-user-task: an unknown key is a 404 (no open completable task)", async () => {
   const { app } = memApp([]);
   const res = await call(app, { userTaskKey: "ghost", variables: { answer: "x" } });
   assertEquals(res.status, 404);
 });
 
-test("complete-user-task: refuses a non-escalation user task (400)", async () => {
+test("complete-user-task: completes a feature-blocked acknowledgement with the typed note (issue #332)", async () => {
   const { app, completed } = memApp([{ userTaskKey: "ut-4", elementId: "feature-blocked" }]);
+  const res = await call(app, { userTaskKey: "ut-4", variables: { note: "reassigned" } });
+  assertEquals(res.status, 200);
+  assertEquals(res.body.elementId, "feature-blocked");
+  assertEquals(completed, [{ userTaskKey: "ut-4", variables: { note: "reassigned" } }]);
+});
+
+test("complete-user-task: completes a feature-escalation answer (issue #332)", async () => {
+  const { app, completed } = memApp([{ userTaskKey: "ut-6", elementId: "feature-escalation" }]);
+  const res = await call(app, { userTaskKey: "ut-6", variables: { resolution: "answer", answer: "use v2" } });
+  assertEquals(res.status, 200);
+  assertEquals(res.body.elementId, "feature-escalation");
+  assertEquals(completed, [{ userTaskKey: "ut-6", variables: { resolution: "answer", answer: "use v2" } }]);
+});
+
+test("complete-user-task: refuses a non-completable internal user task (400)", async () => {
+  const { app, completed } = memApp([{ userTaskKey: "ut-4", elementId: "some-internal-task" }]);
   const res = await call(app, { userTaskKey: "ut-4", variables: { note: "x" } });
   assertEquals(res.status, 400);
   assertEquals(completed, []);

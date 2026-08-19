@@ -26,11 +26,6 @@ const handler: AppJobHandler<In, Record<string, never>> = async (job, app) => {
   await featureRuns(app.data).update(featureKey, {
     status: "blocked",
     delivery_label: note ? `operator: ${note}` : "acknowledged",
-    // The run has left the `feature-blocked` wait, so clear the denormalised completable-task pointer
-    // the pages gate the "Acknowledge blocked" affordance on. pollFeatureBlocked only sweeps
-    // `awaiting_operator` runs, so this terminal-ward transition must clear it itself or a stale pointer
-    // would linger on the now-terminal row.
-    blocked_user_task_key: null,
     updated_at: ts,
   });
   app.log.info("record-blocked-ack", { featureKey, note: note ?? null });
