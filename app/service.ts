@@ -25,6 +25,7 @@ import { deriveDelivery, TERMINAL_STATUSES } from "./delivery.ts";
 import { backfillFeatureStages, deriveFeatureDelivery, FEATURE_BLOCKED_ELEMENT, FEATURE_ESCALATION_ELEMENT, FEATURE_RUN_STATUSES, type FeatureRunStatus, featureEscalations, featureRuns } from "./feature.ts";
 import {
   classifyMergeability,
+  classifyPrLiveness,
   coalesceTitle,
   ensureFreshHeadRun,
   ensurePromotionPr,
@@ -925,7 +926,8 @@ async function pollMerges(data: DataLayer, engine: EngineClient, token: string) 
     try {
       const st = await fetchPrState(repo, number, token);
       if (st === null) continue; // no transport → skip this PR (others may still advance)
-      if (st.merged) {
+      const liveness = classifyPrLiveness(st);
+      if (liveness === "merged") {
         // Landed out-of-band (a maintainer clicked Merge, a mergify queue merged it, etc.). The
         // instance is parked at `wait-mergeable`, which subscribes to `merge-ready` — NOT
         // `merge-landed` (that catch, `wait-landed`, only exists later, after we enqueue). Publishing
@@ -939,6 +941,21 @@ async function pollMerges(data: DataLayer, engine: EngineClient, token: string) 
           variables: { mergeState: "ready", failingChecks: 0, failingChecksList: "" },
         });
         console.log(`[poller] already merged -> ${prKey}`);
+        continue;
+      }
+      if (liveness === "closed") {
+        // Closed on GitHub WITHOUT merging (e.g. superseded by a newer PR — #350). The PR can never
+        // land, so it must NOT be classified as blocked/conflict and escalated (that orphans the
+        // process on a dead PR, #342). Route it through the same canonical `merge-ready` → `ready` →
+        // `attempt-merge` path as the merged case; the merge worker's closed short-circuit records a
+        // terminal `abandoned` audit row and drives the loop down its terminate/abandon end event.
+        // One canonical abandon implementation lives in the worker — the poller only routes to it.
+        await flipToMergingThenPublish(data, engine, prKey, "waiting_merge", {
+          name: "merge-ready",
+          correlationKey: prKey,
+          variables: { mergeState: "ready", failingChecks: 0, failingChecksList: "" },
+        });
+        console.log(`[poller] closed without merging -> ${prKey}`);
         continue;
       }
       const verdict = classifyMergeability(st);

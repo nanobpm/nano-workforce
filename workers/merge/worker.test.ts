@@ -245,3 +245,41 @@ test("pr.merge routes a transient base-moved race through the retry branch (no e
     },
   );
 });
+
+test("pr.merge abandons a closed-not-merged PR without escalating (terminal abandon, #342)", async () => {
+  // #342/#350: a PR CLOSED on GitHub without merging (e.g. superseded by a newer PR) can never
+  // land. The worker must NOT fall through to the land protocol — that returns blocked/conflict and
+  // escalates a merge no human can complete, orphaning the process on a dead PR. Instead it records
+  // a terminal `abandoned` audit row and returns `mergeStatus:"abandoned"` (the model's
+  // terminate/abandon end event), opening NO escalation. Symmetric with the already-merged
+  // short-circuit; both are decided from the same single live-state read.
+  await withGithub(
+    (url) => {
+      // Single-PR GET → PR is closed (state="closed") and NOT merged.
+      if (/\/pulls\/\d+$/.test(url))
+        return new Response(JSON.stringify({ merged: false, state: "closed", mergeable_state: "dirty" }));
+      return null; // no AGENTS.md / merge-protocol.json → DEFAULT gh-merge protocol
+    },
+    async (calls) => {
+      const { app, stores } = fakeApp();
+      const out = (await handler(
+        { variables: { prKey: "acme/widgets#13", repo: "acme/widgets", prNumber: 13 } } as any,
+        app,
+      )) as Record<string, unknown>;
+
+      // Abandon short-circuit: loop-terminal `mergeStatus` only, NO escalation payload.
+      assertEquals(out, { mergeStatus: "abandoned" });
+      assertEquals(out.status, undefined);
+      assertEquals(out.question, undefined);
+
+      // Records exactly one terminal audit row tagged as the closed-PR abandon path.
+      assertEquals(stores.merges.length, 1);
+      assertEquals(stores.merges[0].outcome, "abandoned");
+      assertEquals(stores.merges[0].method, "pr-closed");
+
+      // Never attempts a merge PUT or posts an enqueue comment on the dead PR (only the read GET).
+      assertEquals(calls.some((c) => /\/merge$/.test(c.url)), false);
+      assertEquals(calls.some((c) => /\/comments$/.test(c.url)), false);
+    },
+  );
+});

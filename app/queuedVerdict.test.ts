@@ -11,6 +11,7 @@ import { queuedVerdict } from "./service.ts";
 function st(over: Partial<PrState>): PrState {
   return {
     merged: false,
+    state: "open",
     mergeStateStatus: "CLEAN",
     failingChecks: 0,
     failingCheckNames: [],

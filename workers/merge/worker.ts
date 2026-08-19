@@ -14,7 +14,7 @@ import type { AppJobHandler } from "@nanobpm/urban";
 import { matchTags, tag } from "@nanobpm/urban/effect";
 import { abandonTokenFromUrl } from "../../app/abandon.ts";
 import { checkBaseTarget, classifyBaseGuard } from "../../app/baseGuard.ts";
-import { enqueueViaComment, fetchPrState, mergePr } from "../../app/github.ts";
+import { classifyPrLiveness, enqueueViaComment, fetchPrState, mergePr } from "../../app/github.ts";
 import { classifyMergeLanding, DEFAULT_MERGE_PROTOCOL, loadMergeProtocol } from "../../app/mergeProtocol.ts";
 import { ensurePr, MERGE_ADMIN, MERGE_METHOD } from "../../app/service.ts";
 import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
@@ -23,7 +23,7 @@ import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 type In = WorkerInputs["pr.merge"];
 
 interface Out extends Record<string, unknown> {
-  mergeStatus: "merged" | "queued" | "blocked" | "retry";
+  mergeStatus: "merged" | "queued" | "blocked" | "retry" | "abandoned";
   status?: string;
   question?: string;
 }
@@ -54,7 +54,8 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
   // FK parent, and BEFORE the base-guard/protocol logic. Best-effort: a transport hiccup falls through
   // to the normal path rather than blocking a genuine merge.
   const pre = await fetchPrState(repo, prNumber, token).catch(() => null);
-  if (pre?.merged) {
+  const liveness = classifyPrLiveness(pre);
+  if (liveness === "merged") {
     await app.data.table("merges", "id").insert({
       pr_key: prKey,
       outcome: "merged",
@@ -63,6 +64,24 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
       at: now,
     });
     return { mergeStatus: "merged" };
+  }
+
+  // Closed-not-merged short-circuit (#342). A PR CLOSED on GitHub without merging (e.g. superseded
+  // by a newer PR) can never land: falling through to the land protocol would return
+  // blocked/conflict and escalate a merge no human can complete, orphaning the process on a dead
+  // PR (#350). Instead record a terminal `abandoned` audit row and drive the loop down its
+  // terminate/abandon end event — NOT `merge-esc-conflict`. This opens NO escalation and parks NO
+  // user task: a closed PR is terminal state, not a human decision. Symmetric with the merged
+  // short-circuit above and runs on the same live-state read, so one `fetchPrState` classifies both.
+  if (liveness === "closed") {
+    await app.data.table("merges", "id").insert({
+      pr_key: prKey,
+      outcome: "abandoned",
+      method: "pr-closed",
+      detail: "PR was closed on GitHub without merging (e.g. superseded) — abandoning the merge loop",
+      at: now,
+    });
+    return { mergeStatus: "abandoned" };
   }
 
   // Dead-end-base guard (#60): never land a PR into a base branch that has itself already merged
