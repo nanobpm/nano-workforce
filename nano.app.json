@@ -163,6 +163,10 @@
       "handler": "workers/retro-record/worker.ts"
     },
     {
+      "taskType": "pr.conformance-record",
+      "handler": "workers/conformance-record/worker.ts"
+    },
+    {
       "taskType": "pr.progress-check",
       "handler": "workers/progress-check/worker.ts"
     },
@@ -183,7 +187,8 @@
     "senior:plan-review",
     "senior:feature",
     "senior:trial-merge",
-    "senior:retro"
+    "senior:retro",
+    "senior:conformance"
   ],
   "surfaces": {
     "taskInbox": {

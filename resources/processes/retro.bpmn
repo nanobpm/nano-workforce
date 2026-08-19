@@ -13,6 +13,18 @@
           <nano:extend name="pr" type="string" optional="true" />
           <nano:extend name="summary" type="string" optional="true" />
         </nano:shape>
+        <nano:shape id="ConformanceRecordIn" name="Record conformance — input">
+          <nano:extend name="planKey" type="string" />
+          <nano:extend name="status" type="string" optional="true" />
+          <nano:extend name="commentUrl" type="string" optional="true" />
+          <nano:extend name="slicesMet" type="integer" optional="true" />
+          <nano:extend name="slicesReduced" type="integer" optional="true" />
+          <nano:extend name="slicesNotVerified" type="integer" optional="true" />
+          <nano:extend name="deviationsRaised" type="integer" optional="true" />
+          <nano:extend name="deviationsUnraised" type="integer" optional="true" />
+          <nano:extend name="hasDeviations" type="boolean" optional="true" />
+          <nano:extend name="summary" type="string" optional="true" />
+        </nano:shape>
       </nano:shapes>
     </bpmn:extensionElements>
     <bpmn:startEvent id="Start" name="Epic complete">
@@ -26,6 +38,29 @@
         </zeebe:properties>
       </bpmn:extensionElements>
       <bpmn:incoming>f_start</bpmn:incoming>
+      <bpmn:outgoing>f_toConformance</bpmn:outgoing>
+    </bpmn:serviceTask>
+    <bpmn:serviceTask id="conformance" name="Verify implementation vs spec (agent)">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="senior:conformance" />
+        <zeebe:linkedResources>
+          <zeebe:linkedResource resourceId="conformance.md" bindingType="latest" resourceType="GenericScript" linkName="prompt" />
+        </zeebe:linkedResources>
+        <zeebe:ioMapping>
+          <zeebe:input source="=conformanceDigest" target="appendPrompt" />
+        </zeebe:ioMapping>
+      </bpmn:extensionElements>
+      <bpmn:incoming>f_toConformance</bpmn:incoming>
+      <bpmn:outgoing>f_toRecordConformance</bpmn:outgoing>
+    </bpmn:serviceTask>
+    <bpmn:serviceTask id="record-conformance" name="Record conformance">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="pr.conformance-record" />
+        <zeebe:properties>
+          <zeebe:property name="io.nanobpm.dataEnvelope.in" value="ConformanceRecordIn" />
+        </zeebe:properties>
+      </bpmn:extensionElements>
+      <bpmn:incoming>f_toRecordConformance</bpmn:incoming>
       <bpmn:outgoing>f_toSynthesize</bpmn:outgoing>
     </bpmn:serviceTask>
     <bpmn:serviceTask id="synthesize" name="Synthesize &#38; promote (agent)">
@@ -55,7 +90,9 @@
       <bpmn:incoming>f_toEnd</bpmn:incoming>
     </bpmn:endEvent>
     <bpmn:sequenceFlow id="f_start" sourceRef="Start" targetRef="gather" />
-    <bpmn:sequenceFlow id="f_toSynthesize" sourceRef="gather" targetRef="synthesize" />
+    <bpmn:sequenceFlow id="f_toConformance" sourceRef="gather" targetRef="conformance" />
+    <bpmn:sequenceFlow id="f_toRecordConformance" sourceRef="conformance" targetRef="record-conformance" />
+    <bpmn:sequenceFlow id="f_toSynthesize" sourceRef="record-conformance" targetRef="synthesize" />
     <bpmn:sequenceFlow id="f_toRecord" sourceRef="synthesize" targetRef="record" />
     <bpmn:sequenceFlow id="f_toEnd" sourceRef="record" targetRef="End" />
   </bpmn:process>
@@ -70,33 +107,47 @@
       <bpmndi:BPMNShape id="BPMNShape_gather" bpmnElement="gather">
         <dc:Bounds x="216" y="80" width="100" height="80" />
       </bpmndi:BPMNShape>
-      <bpmndi:BPMNShape id="BPMNShape_synthesize" bpmnElement="synthesize">
+      <bpmndi:BPMNShape id="BPMNShape_conformance" bpmnElement="conformance">
         <dc:Bounds x="416" y="80" width="100" height="80" />
       </bpmndi:BPMNShape>
-      <bpmndi:BPMNShape id="BPMNShape_record" bpmnElement="record">
+      <bpmndi:BPMNShape id="BPMNShape_record-conformance" bpmnElement="record-conformance">
         <dc:Bounds x="616" y="80" width="100" height="80" />
       </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_synthesize" bpmnElement="synthesize">
+        <dc:Bounds x="816" y="80" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_record" bpmnElement="record">
+        <dc:Bounds x="1016" y="80" width="100" height="80" />
+      </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_End" bpmnElement="End">
-        <dc:Bounds x="816" y="102" width="36" height="36" />
+        <dc:Bounds x="1216" y="102" width="36" height="36" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="794" y="143" width="80" height="14" />
+          <dc:Bounds x="1194" y="143" width="80" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
       <bpmndi:BPMNEdge id="BPMNEdge_f_start" bpmnElement="f_start">
         <di:waypoint x="116" y="120" />
         <di:waypoint x="216" y="120" />
       </bpmndi:BPMNEdge>
-      <bpmndi:BPMNEdge id="BPMNEdge_f_toSynthesize" bpmnElement="f_toSynthesize">
+      <bpmndi:BPMNEdge id="BPMNEdge_f_toConformance" bpmnElement="f_toConformance">
         <di:waypoint x="316" y="120" />
         <di:waypoint x="416" y="120" />
       </bpmndi:BPMNEdge>
-      <bpmndi:BPMNEdge id="BPMNEdge_f_toRecord" bpmnElement="f_toRecord">
+      <bpmndi:BPMNEdge id="BPMNEdge_f_toRecordConformance" bpmnElement="f_toRecordConformance">
         <di:waypoint x="516" y="120" />
         <di:waypoint x="616" y="120" />
       </bpmndi:BPMNEdge>
-      <bpmndi:BPMNEdge id="BPMNEdge_f_toEnd" bpmnElement="f_toEnd">
+      <bpmndi:BPMNEdge id="BPMNEdge_f_toSynthesize" bpmnElement="f_toSynthesize">
         <di:waypoint x="716" y="120" />
         <di:waypoint x="816" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_f_toRecord" bpmnElement="f_toRecord">
+        <di:waypoint x="916" y="120" />
+        <di:waypoint x="1016" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_f_toEnd" bpmnElement="f_toEnd">
+        <di:waypoint x="1116" y="120" />
+        <di:waypoint x="1216" y="120" />
       </bpmndi:BPMNEdge>
     </bpmndi:BPMNPlane>
   </bpmndi:BPMNDiagram>

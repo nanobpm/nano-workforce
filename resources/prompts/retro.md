@@ -10,6 +10,11 @@ so the *next* fleet — and human contributors — never re-learn it the hard wa
 You are the mechanism that lifts a lesson from "a thing one agent happened to hit" to "a thing the
 repo now tells everyone up front."
 
+> **Scope:** a separate **conformance** agent runs before you and audits whether the epic met its
+> spec (posting its own report on the epic issue). That is *not* your job — do **not** re-verify
+> acceptance or re-litigate scope here. Focus purely on distilling reusable **lessons** and
+> promoting them into the repo.
+
 ## Input
 
 The job payload (stdin JSON) carries:

@@ -14,7 +14,8 @@
 // Data access goes through the record gateway (`data.table`), never hand-written SQL — matching
 // app/plan.ts, app/blackboard.ts, and app/taskDelta.ts.
 import type { DataLayer, EngineClient, Logger } from "@nanobpm/urban";
-import { isUniqueViolation, readBlackboard } from "./blackboard.ts";
+import { type BlackboardEntry, isUniqueViolation, readBlackboard } from "./blackboard.ts";
+import { hasDeliveredImplementationForPlan } from "./conformance.ts";
 import { TERMINAL_STATUSES } from "./delivery.ts";
 import { planReviews, planTasks } from "./plan.ts";
 import { aggregateEpicDeltas } from "./taskDelta.ts";
@@ -110,14 +111,22 @@ export interface RetroDigest {
 /** Gather a plan's reflection material: the `learning` blackboard entries (the headline), plus the
  * task-delta rollup (contract changes, discovered constraints, cross-slice file touches), the
  * plan-review trace (rounds + rejection findings), the task-outcome shape, and any other
- * non-learning blackboard notes for colour. Reads only — no writes. */
-export async function gatherRetro(data: DataLayer, planKey: string): Promise<RetroDigest> {
+ * non-learning blackboard notes for colour. Reads only — no writes.
+ *
+ * `entries` lets a caller that has already scanned the blackboard for this plan (e.g.
+ * `pr.retro-gather`, which also runs {@link gatherConformance}) pass those entries in so the plan is
+ * scanned once, not once per gatherer — see workers/retro-gather. Omitted, it reads them itself. */
+export async function gatherRetro(
+  data: DataLayer,
+  planKey: string,
+  entries?: BlackboardEntry[],
+): Promise<RetroDigest> {
   const plan = await plansTbl(data).get(planKey);
-  const entries = await readBlackboard(data, planKey);
-  const learnings = entries
+  const bbEntries = entries ?? (await readBlackboard(data, planKey));
+  const learnings = bbEntries
     .filter((e) => e.kind === "learning")
     .map((e) => ({ author_task: e.author_task, body: e.body, created_at: e.created_at }));
-  const notes = entries
+  const notes = bbEntries
     .filter((e) => e.kind !== "learning")
     .map((e) => ({ author_task: e.author_task, kind: e.kind, body: e.body }));
   const deltas = await aggregateEpicDeltas(data, planKey);
@@ -310,12 +319,19 @@ export async function maybeStartRetro(
     if (!(await isPlanComplete(data, planKey))) return { started: false, planKey, reason: "incomplete" };
 
     const digest = await gatherRetro(data, planKey);
-    if (isDigestEmpty(digest)) {
+    // The retro digest can be empty (no learnings/deltas/notes, cleanly-approved plan) yet the epic
+    // still shipped real code — in which case conformance has something to verify even though the
+    // lessons agent has nothing to distil. So run whenever there is EITHER reflection material OR
+    // landed implementation to audit; only truly skip when there is neither. The landed-implementation
+    // probe is gathered lazily (only when the digest is empty) and via the lightweight
+    // hasDeliveredImplementationForPlan — which inspects only plan_tasks + PR status, with no
+    // blackboard scan — so we avoid discarded DB work on every terminal-PR event.
+    if (isDigestEmpty(digest) && !(await hasDeliveredImplementationForPlan(data, planKey))) {
       if (!(await claimRetroStart(data, planKey))) return { started: false, planKey, reason: "already-started" };
-      // Nothing to reflect on — stamp anyway so we don't re-check on every future terminal PR of a
-      // (now settled) plan, and record a skipped retro for visibility.
+      // Nothing to reflect on and nothing shipped to verify — stamp anyway so we don't re-check on
+      // every future terminal PR of a (now settled) plan, and record a skipped retro for visibility.
       await plansTbl(data).update(planKey, { retro_started_at: now(), updated_at: now() });
-      await recordRetro(data, planKey, { status: "skipped", summary: "No learnings, deltas, or notes to retrospect." });
+      await recordRetro(data, planKey, { status: "skipped", summary: "No learnings, deltas, notes, or landed implementation to retrospect." });
       return { started: false, planKey, reason: "nothing-to-retro" };
     }
 

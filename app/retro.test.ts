@@ -166,6 +166,17 @@ test("gatherRetro: separates learnings from notes and folds in deltas", async ()
   assertEquals(d.repo, "acme/widgets");
 });
 
+test("gatherRetro: uses pre-fetched blackboard entries instead of re-scanning", async () => {
+  const { data, stores } = memData();
+  seedPlan(stores);
+  // A learning lives in the store, but the caller passes an EMPTY pre-fetched snapshot — gatherRetro
+  // must honour what it was handed and not re-read the store.
+  await appendEntry(data, PLAN, { author_task: "t1", kind: "learning", body: "should be ignored" });
+  const d = await gatherRetro(data, PLAN, []);
+  assertEquals(d.counts.learnings, 0);
+  assertEquals(d.notes.length, 0);
+});
+
 test("gatherRetro: folds in the plan-review trace and task-outcome shape", async () => {
   const { data, stores } = memData();
   seedPlan(stores);
@@ -382,11 +393,13 @@ test("maybeStartRetro: bails while the plan is incomplete", async () => {
   assertEquals(stores["plans"][0].retro_started_at, null, "must not stamp an incomplete plan");
 });
 
-test("maybeStartRetro: complete but empty → records a skipped retro, does not start the process", async () => {
+test("maybeStartRetro: complete but nothing landed (PR abandoned) → records a skipped retro, does not start", async () => {
   const { data, stores } = memData();
   seedPlan(stores);
+  // The only task's PR was abandoned: the plan is complete (abandoned is terminal) but shipped no
+  // code, so there is neither reflection material nor an implementation to audit.
   seedTask(stores, { id: "t1", status: "opened", pr_key: "acme/widgets#10" });
-  seedPr(stores, "acme/widgets#10", "merged");
+  seedPr(stores, "acme/widgets#10", "abandoned");
   const { engine, started } = fakeEngine();
 
   const r = await maybeStartRetro(data, engine, "acme/widgets#10");
@@ -395,6 +408,23 @@ test("maybeStartRetro: complete but empty → records a skipped retro, does not 
   assertEquals(started.length, 0);
   assert(stores["plans"][0].retro_started_at, "stamped so we don't re-check forever");
   assertEquals(stores["plan_retros"][0].status, "skipped");
+});
+
+test("maybeStartRetro: complete with landed code but no learnings → still starts (conformance has something to verify)", async () => {
+  const { data, stores } = memData();
+  seedPlan(stores);
+  // A merged PR but zero learnings/deltas/notes: the retro digest is empty, but there IS delivered
+  // implementation to audit for conformance — so the process must still start.
+  seedTask(stores, { id: "t1", status: "opened", pr_key: "acme/widgets#10" });
+  seedPr(stores, "acme/widgets#10", "merged");
+  const { engine, started } = fakeEngine();
+
+  const r = await maybeStartRetro(data, engine, "acme/widgets#10");
+  assertEquals(r.started, true);
+  assertEquals(r.planKey, PLAN);
+  assertEquals(started.length, 1);
+  assertEquals(started[0].processDefinitionId, "retro");
+  assert(stores["plans"][0].retro_started_at, "retro_started_at must be stamped");
 });
 
 test("maybeStartRetro: a rejected review round alone is enough to fire the retro", async () => {

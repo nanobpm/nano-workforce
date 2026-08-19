@@ -37,6 +37,8 @@ function memData(): { data: DataLayer; stores: Record<string, any[]> } {
 test("retro-gather: emits a digest brief + learning count for the plan", async () => {
   const { data, stores } = memData();
   stores["plans"] = [{ plan_key: "o/r#3", repo: "o/r", issue_url: "https://x/3", title: "Epic" }];
+  stores["plan_tasks"] = [{ id: 1, plan_key: "o/r#3", task_index: 0, task_id: "t1", title: "Auth", prompt: "add auth", status: "opened", pr_key: "o/r#10" }];
+  stores["pull_requests"] = [{ pr_key: "o/r#10", status: "merged" }];
   await appendEntry(data, "o/r#3", { author_task: "t1", kind: "learning", body: "regen before build" });
   await appendEntry(data, "o/r#3", { author_task: "t2", kind: "learning", body: "use nextest" });
 
@@ -50,6 +52,10 @@ test("retro-gather: emits a digest brief + learning count for the plan", async (
   assertStringIncludes(String(out.retroDigest), "regen before build");
   assertStringIncludes(String(out.retroDigest), "use nextest");
   assertStringIncludes(String(out.retroDigest), "o/r#3");
+  // The gather step also produces the conformance brief pointing at the landed PR + slice spec.
+  assertStringIncludes(String(out.conformanceDigest), "Conformance input");
+  assertStringIncludes(String(out.conformanceDigest), "o/r#10");
+  assertStringIncludes(String(out.conformanceDigest), "add auth");
 });
 
 test("retro-gather: an epic with no learnings still renders a valid brief", async () => {
