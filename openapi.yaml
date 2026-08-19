@@ -393,7 +393,8 @@ components:
             — an ENROLMENT attribute, never a routing token. Recorded per instance so the app emits
             the world-restore marker only to a fleet with a participant; a harness that omits it (or
             sets false) redrives a re-leased round from scratch. Recorded only when `instance` is
-            supplied.
+            a non-blank string — a missing, empty, or whitespace-only `instance` is echoed back for
+            provenance but the flag is not persisted.
     EnrolledRole:
       type: object
       description: One matched role in an enrolment resolution — provenance for the resolved SERVE set.
