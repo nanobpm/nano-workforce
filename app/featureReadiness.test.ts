@@ -95,6 +95,27 @@ test("parseFeatureReadiness: a bare repo#N handle is rejected (cannot name a pro
   assertEquals(threw, true);
 });
 
+test("parseFeatureReadiness: a handle whose repo carries shell metacharacters is rejected (no injection into the command probe)", () => {
+  // The `command` fallback interpolates `parsed.repo` into a shell string run via `exec`. `parseIssue`'s
+  // `owner/repo#N` branch matches `[^#]+` for the slug, so a crafted handle could smuggle `;`/`$()`/backticks
+  // into the readiness worker's shell. Desugaring MUST reject any repo that isn't a valid GitHub slug.
+  for (const evil of [
+    "octo/cat; rm -rf /#7",
+    "octo/cat$(touch pwned)#7",
+    "octo/`whoami`#7",
+    "octo/cat rm#7",
+  ]) {
+    let threw = false;
+    try {
+      parseFeatureReadiness({ blockedOn: [evil] }, ENV);
+    } catch (err) {
+      threw = true;
+      assertEquals((err as Error).message.includes("owner/repo"), true);
+    }
+    assertEquals(threw, true);
+  }
+});
+
 test("parseFeatureReadiness: a non-string blockedOn entry is rejected", () => {
   let threw = false;
   try {

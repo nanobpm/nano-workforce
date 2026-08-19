@@ -53,6 +53,13 @@ function isNonEmptyString(v: unknown): v is string {
   return typeof v === "string" && v.trim() !== "";
 }
 
+/** A valid GitHub `owner/repo` slug: both segments are restricted to the characters GitHub itself
+ * allows (alphanumerics, `-`, `_`, `.`). `parseIssue`'s shorthand branch matches `[^#]+` for the
+ * slug, so it would otherwise admit shell metacharacters (`;`, `$( )`, backticks, spaces) that get
+ * interpolated verbatim into the `command` probe's `exec` string (and the `capability` target).
+ * Constraining the slug here shuts that injection surface for the whole `blockedOn` desugaring. */
+const GITHUB_SLUG = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
+
 /** Normalise a single `blockedOn` handle into a `capability` (with `consumerPackage`) or `command`
  * (fallback) probe. The handle MUST parse as a full `owner/repo#N` reference — a bare `repo#N`
  * cannot name a provenance source repo unambiguously, so it fails loudly here rather than desugaring
@@ -63,6 +70,14 @@ function desugarHandle(handle: string, consumerPackage: string | null): Readines
     throw new Error(
       `feature readiness: blockedOn handle '${handle}' must be a full 'owner/repo#123' reference ` +
         "(a bare 'repo#123' cannot name the upstream provenance repo)",
+    );
+  }
+  // `parsed.number` is numeric (via `Number`), but `parsed.repo` is an unconstrained slug that lands in
+  // a shell `command` target — reject anything that isn't a plain GitHub `owner/repo` before we build it.
+  if (!GITHUB_SLUG.test(parsed.repo)) {
+    throw new Error(
+      `feature readiness: blockedOn handle '${handle}' has an invalid 'owner/repo' slug — only ` +
+        "alphanumerics, '-', '_' and '.' are allowed in each segment",
     );
   }
   if (consumerPackage) {
