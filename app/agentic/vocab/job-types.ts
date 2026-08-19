@@ -19,7 +19,7 @@
 // "prompt">` on the service task) so a regression guard can enumerate the real demand corpus straight
 // from the models and assert every agent job type resolves to a suppliable token.
 
-import { isValidToken } from "@nanobpm/agentic/protocol";
+import { isSegmentName } from "@nanobpm/agentic/protocol";
 
 /**
  * Derive the crew routing token an enrolled worker resolves to for a deployed fleet agent job type,
@@ -37,9 +37,13 @@ export function jobTypeToRoutingToken(jobType: string): string | undefined {
   const rank = jobType.slice(0, colon);
   const task = jobType.slice(colon + 1);
   if (task.length === 0) return undefined;
-  // The rank must be a valid single-segment routing token (a bare role like `senior`); anything else
-  // is not a fleet agent job type this bridge can route.
-  return isValidToken(rank) ? rank : undefined;
+  // The grammar is exactly `<rank>:<task>` with a SINGLE colon: a further colon (e.g.
+  // `senior:feature:extra`) is not this form, so reject it rather than silently deriving `senior`.
+  if (task.indexOf(":") !== -1) return undefined;
+  // The rank must be a bare SINGLE-SEGMENT routing token (a role like `senior`) — not a dotted,
+  // multi-segment token like `implementation.senior`, which would distort demand/supply matching.
+  // `isSegmentName` enforces the single-segment `[a-z][a-z0-9-]*` grammar (no dots, no seat marker).
+  return isSegmentName(rank) ? rank : undefined;
 }
 
 const SERVICE_TASK = /<(?:\w+:)?serviceTask\b[\s\S]*?<\/(?:\w+:)?serviceTask>/g;

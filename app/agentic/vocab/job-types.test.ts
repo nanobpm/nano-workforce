@@ -47,6 +47,17 @@ test("jobTypeToRoutingToken returns undefined for malformed / non-routing rank f
   assertEquals(jobTypeToRoutingToken("Senior:feature"), undefined); // not a valid segment
 });
 
+test("jobTypeToRoutingToken rejects a dotted (multi-segment) rank prefix", () => {
+  // A dotted prefix is a multi-segment routing token, not a bare rank role — bridging it would
+  // distort demand/supply matching, so it must not derive.
+  assertEquals(jobTypeToRoutingToken("implementation.senior:feature"), undefined);
+  assertEquals(jobTypeToRoutingToken("planning.spar:plan"), undefined);
+});
+
+test("jobTypeToRoutingToken rejects a multi-colon job type (not `<rank>:<task>` form)", () => {
+  assertEquals(jobTypeToRoutingToken("senior:feature:extra"), undefined);
+});
+
 test("promptBearingTaskTypes picks a prompt-linked agent task and skips a plain host task", () => {
   const xml = `
     <bpmn:serviceTask id="host">
