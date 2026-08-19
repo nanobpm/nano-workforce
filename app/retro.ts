@@ -15,6 +15,7 @@
 // app/plan.ts, app/blackboard.ts, and app/taskDelta.ts.
 import type { DataLayer, EngineClient, Logger } from "@nanobpm/urban";
 import { isUniqueViolation, readBlackboard } from "./blackboard.ts";
+import { gatherConformance, hasDeliveredImplementation } from "./conformance.ts";
 import { TERMINAL_STATUSES } from "./delivery.ts";
 import { planReviews, planTasks } from "./plan.ts";
 import { aggregateEpicDeltas } from "./taskDelta.ts";
@@ -310,12 +311,17 @@ export async function maybeStartRetro(
     if (!(await isPlanComplete(data, planKey))) return { started: false, planKey, reason: "incomplete" };
 
     const digest = await gatherRetro(data, planKey);
-    if (isDigestEmpty(digest)) {
+    // The retro digest can be empty (no learnings/deltas/notes, cleanly-approved plan) yet the epic
+    // still shipped real code — in which case conformance has something to verify even though the
+    // lessons agent has nothing to distil. So run whenever there is EITHER reflection material OR
+    // landed implementation to audit; only truly skip when there is neither.
+    const conformance = await gatherConformance(data, planKey);
+    if (isDigestEmpty(digest) && !hasDeliveredImplementation(conformance)) {
       if (!(await claimRetroStart(data, planKey))) return { started: false, planKey, reason: "already-started" };
-      // Nothing to reflect on — stamp anyway so we don't re-check on every future terminal PR of a
-      // (now settled) plan, and record a skipped retro for visibility.
+      // Nothing to reflect on and nothing shipped to verify — stamp anyway so we don't re-check on
+      // every future terminal PR of a (now settled) plan, and record a skipped retro for visibility.
       await plansTbl(data).update(planKey, { retro_started_at: now(), updated_at: now() });
-      await recordRetro(data, planKey, { status: "skipped", summary: "No learnings, deltas, or notes to retrospect." });
+      await recordRetro(data, planKey, { status: "skipped", summary: "No learnings, deltas, notes, or landed implementation to retrospect." });
       return { started: false, planKey, reason: "nothing-to-retro" };
     }
 
