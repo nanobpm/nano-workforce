@@ -11,10 +11,14 @@
 -- column is ALWAYS non-blank — the grid's `{{subject_title}}` template then needs no
 -- fallback and a missing subject title still shows a usable identity.
 --
--- Forward-only, additive (expand): nullable with no default, so pre-#308 rows
--- grandfather in as NULL. `pollUserTasks` re-derives every open task each pass, so the
--- reconcile back-fills the title in place on the next poll — no separate backfill file
--- is needed (a completed task's row is deleted, not migrated). Numbered after the
--- current highest prefix on origin/main (042); the runner wraps each file in its own
--- transaction, so this file must NOT contain BEGIN/COMMIT.
+-- Forward-only, additive (expand): nullable with no default, then backfilled in the
+-- same migration so the column is non-blank immediately — pre-#308 rows would otherwise
+-- grandfather in as NULL and the grid's `{{subject_title}}` primary line would render a
+-- blank/"null" identity for the window between deploy and the first `pollUserTasks` pass.
+-- The backfill coalesces existing rows to `subject_key` (matching the write-time coalesce
+-- in `pollUserTasks`, which re-derives the real title in place on the next poll — a
+-- completed task's row is deleted, not migrated). Idempotent: re-running is a no-op once
+-- set. Numbered after the current highest prefix on origin/main (042); the runner wraps
+-- each file in its own transaction, so this file must NOT contain BEGIN/COMMIT.
 ALTER TABLE user_tasks ADD COLUMN subject_title TEXT;
+UPDATE user_tasks SET subject_title = subject_key WHERE subject_title IS NULL OR trim(subject_title) = '';
