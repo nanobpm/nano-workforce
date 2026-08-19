@@ -73,8 +73,8 @@ test("class-1 blocked goldens genuinely have multiple top-level start/end events
   const countTag = (xml: string, tag: string): number =>
     (xml.match(new RegExp(`<bpmn:${tag}\\b`, "g")) ?? []).length;
 
-  const multiEndBlocked = new Set(["spine-demo", "readiness-gate", "feature", "merge-loop", "plan-fanout"]);
-  for (const model of multiEndBlocked) {
+  const multiStartEndBlocked = new Set(["spine-demo", "readiness-gate", "feature", "merge-loop", "plan-fanout"]);
+  for (const model of multiStartEndBlocked) {
     const xml = readFileSync(goldenPath(model), "utf8");
     const starts = countTag(xml, "startEvent");
     const ends = countTag(xml, "endEvent");

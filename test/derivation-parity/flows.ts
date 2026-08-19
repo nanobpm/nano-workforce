@@ -103,7 +103,7 @@ const MULTI_START_END_BLOCK =
   "converges all danglers into one <endEvent id=\"End\">; this golden has " +
   "multiple top-level start and/or end events, which the published compiler " +
   "cannot reproduce. Awaits an upstream terminal/explicit-end (+ multi-start) " +
-  "construct in @nanobpm/workflow (nano-ide) or relaxed node-surface acceptance.";
+  "construct in @nanobpm/workflow (nano-ide).";
 
 /** All seven ports, keyed by model, in the epic's stated authoring order. */
 export const PORTS: readonly PortEntry[] = [
