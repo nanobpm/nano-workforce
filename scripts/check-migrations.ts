@@ -21,7 +21,18 @@ const MIGRATIONS_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "db",
 
 // Historical collisions that predate this gate. Forward-only + already applied ⇒ cannot be
 // renumbered. New duplicates are NOT allowed here — fix them before merge.
-const GRANDFATHERED_DUPES: ReadonlySet<string> = new Set(["004", "005", "006", "007"]);
+//
+// 049 is a grandfathered post-hoc collision: three independently-merged PRs each took the then-next
+// free prefix on their own branch and landed a `049_*.sql` (#290 `049_plan_task_needs`, #337
+// `049_world_checkpoint`, #339 `049_drop_feature_escalation_surface`). Because a per-branch prefix is
+// computed without visibility of sibling branches, the collision was SILENT at each PR's green CI and
+// only surfaced once all three were on main — exactly the merge-time failure mode this gate warns
+// about, realised across three PRs that never saw each other. By the time it was caught the three
+// migrations were already applied forward-only on main and production, so — like 004–007 — they
+// cannot be renumbered (a rename re-runs `CREATE TABLE`/`ALTER TABLE DROP COLUMN` on migrated DBs and
+// fails). They create three disjoint schema objects, so their relative apply order is irrelevant.
+// Grandfather 049; any NEW duplicate prefix still fails the build.
+const GRANDFATHERED_DUPES: ReadonlySet<string> = new Set(["004", "005", "006", "007", "049"]);
 
 const PREFIX = /^(\d{3})_[^/]*\.sql$/;
 
