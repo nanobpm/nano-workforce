@@ -1898,6 +1898,55 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/MessageResult"
+  /actions/acknowledge-epic:
+    post:
+      operationId: acknowledgeEpic
+      summary: "Dismiss a RESOLVED epic (issue #298). Stamps `acknowledged_at` on the `plans` row so
+        the gateway recomputes its `list_bucket` to 'history' (and `ack_open` to 0), dropping the
+        resolved epic out of the Active epic list into History. The epic twin of acknowledge-done, but
+        a resolved epic is not parked at a user task, so this completes no user task and only writes the
+        row. Keyed on the epic's `plan_key`. Rejects (409) an epic that is not yet resolved (still
+        `planning`/`dispatched`, or `done` but still `converging`), so a converging epic stays visible
+        in Active. Idempotent-safe (re-acknowledging keeps it in History)."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+                - plan_key
+              properties:
+                plan_key:
+                  type: string
+                  minLength: 1
+                  description: The epic's key (plans.plan_key, `<owner>/<repo>#<n>`).
+      responses:
+        "200":
+          description: The landed epic was acknowledged and moved to History.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResult"
+        "400":
+          description: A required field (plan_key) was missing or invalid.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResult"
+        "404":
+          description: No epic matches the plan_key.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResult"
+        "409":
+          description: The epic is not yet resolved (still planning/dispatched, or converging), so it cannot be dismissed yet.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResult"
   /hooks/agent-complete:
     post:
       operationId: agentCompleteEscalation

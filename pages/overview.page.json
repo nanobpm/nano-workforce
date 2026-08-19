@@ -88,13 +88,25 @@
           "source": "app",
           "table": "plans",
           "orderBy": { "field": "updated_at", "dir": "desc" },
-          "filter": [{ "field": "status", "in": ["planning", "dispatched"] }]
+          "filter": [{ "field": "list_bucket", "in": ["active"] }]
         },
         "columns": [
           { "field": "title", "template": "{{title}}", "header": "Item", "subtitleField": "plan_key", "truncate": true, "width": "36%", "link": { "kind": "page", "page": "epic-detail", "keyField": "plan_key" } },
           { "field": "status", "header": "Status", "link": { "kind": "processExplorer", "keyField": "process_key" } },
+          { "field": "delivery_label", "header": "Landing" },
           { "field": "wave_label", "header": "Wave" },
           { "field": "updated_at", "header": "Updated", "width": "9rem" }
+        ],
+        "rowActions": [
+          {
+            "label": "Dismiss",
+            "confirm": "Dismiss this resolved epic? Its slices have all reached a terminal state \u2014 it acknowledges the epic and files it under History.",
+            "showWhenField": "ack_open",
+            "action": {
+              "path": "/app/api/actions/acknowledge-epic",
+              "body": { "plan_key": "{{row.plan_key}}" }
+            }
+          }
         ]
       }
     },

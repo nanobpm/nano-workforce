@@ -11,6 +11,7 @@
 // hand-written SQL — matching app/service.ts.
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { blackboardUrl, mintBlackboardToken, renderCoordinationBrief } from "./blackboard.ts";
+import { deriveEpicBucket, epicIsAcknowledgeable } from "./delivery.ts";
 import { EPIC_PHASE } from "./epicPhase.ts";
 import { DEFAULT_ESCALATION_SLA_TIMEOUT, escalationSlaTimeout } from "./escalationSla.ts";
 import { coalesceTitle, ensureBaseBranch, fetchDefaultBranch, fetchIssueTitle } from "./github.ts";
@@ -100,6 +101,19 @@ export interface Plan {
   //                       which has nothing to promote). Display-only; projected by the poller.
   promotion_pr: string | null;
   promotion_state: string | null;
+  // Active/History partition + operator tick-off (044_plan_list_bucket.sql, #298). Derived,
+  // write-time-projected by the `plans` gateway (below) from the pure `deriveEpicBucket` /
+  // `epicIsAcknowledgeable` helpers (app/delivery.ts) — never written by the plan lifecycle or a
+  // poller directly. Bucket epics on the derived `delivery` rollup, not raw `status`, so a `done`
+  // epic still converging — or landed-but-unpromoted — does not vanish from Active.
+  //   • acknowledged_at — NULL until an operator dismisses a resolved `done` epic (acknowledge-epic).
+  //   • list_bucket     — 'active' | 'history': the page tabs filter on this flat column.
+  //   • ack_open        — 1 | 0: 1 iff a resolved (`done`, not converging) but unacknowledged epic,
+  //                       gating the Dismiss button's `showWhenField`. NULL only on pre-#298 rows
+  //                       until `backfillPlanBuckets`.
+  acknowledged_at: string | null;
+  list_bucket: string | null;
+  ack_open: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -136,7 +150,82 @@ export const PLAN_TASK_STATUSES = [
 ] as const;
 export type PlanTaskStatus = typeof PLAN_TASK_STATUSES[number];
 
-export const plans = (data: DataLayer) => data.table<Plan>("plans", "plan_key");
+export const plans = (data: DataLayer) => {
+  const table = data.table<Plan>("plans", "plan_key");
+  return new Proxy(table, {
+    get(target, prop) {
+      if (prop === "insert") {
+        return (row: Partial<Plan>) => target.insert({ ...row, ...projectPlanBucket(row) });
+      }
+      if (prop === "update") {
+        return async (id: unknown, patch: Partial<Plan>) => {
+          // Only re-read + reproject when the patch changes a projection input (status / delivery /
+          // acknowledged_at) or writes a derived column directly. A projection-irrelevant patch (e.g.
+          // an `updated_at`- or `wave_label`-only write) leaves the stored projection correct — the
+          // gateway is the sole write path — so skip the extra `get` roundtrip and delegate straight.
+          if (!patchAffectsPlanProjection(patch)) return target.update(id, patch);
+          const existing = await target.get(id);
+          const merged: Partial<Plan> = { ...existing, ...patch };
+          return target.update(id, { ...patch, ...projectPlanBucket(merged) });
+        };
+      }
+      // Delegate every other method straight through. Bind functions to the real target so the
+      // gateway's private class fields resolve — a Proxy `this` would not carry them.
+      const value = Reflect.get(target, prop, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+};
+
+/** The `plans` fields the bucket projection READS: a patch touching none of these (and none it
+ * writes) cannot change `list_bucket`/`ack_open`, so the gateway skips the read-back+reproject. Kept
+ * adjacent to {@link projectPlanBucket} so the two stay in lockstep. */
+const PLAN_PROJECTION_INPUT_KEYS: readonly (keyof Plan)[] = ["status", "delivery", "acknowledged_at"];
+
+/** The `plans` fields the bucket projection WRITES. Included in the reproject trigger so a caller who
+ * writes a derived column directly (e.g. `list_bucket`/`ack_open`) can never bypass derivation: the
+ * gateway re-reads, recomputes, and OVERRIDES the raw value with the canonical derived one. */
+const PLAN_PROJECTION_OUTPUT_KEYS: readonly (keyof Plan)[] = ["list_bucket", "ack_open"];
+
+/** True when a patch changes at least one field the bucket projection derives from OR one it writes —
+ * i.e. the projection must be recomputed (mirrors feature.ts `patchAffectsProjection`). */
+function patchAffectsPlanProjection(patch: Partial<Plan>): boolean {
+  return (
+    PLAN_PROJECTION_INPUT_KEYS.some((k) => k in patch) ||
+    PLAN_PROJECTION_OUTPUT_KEYS.some((k) => k in patch)
+  );
+}
+
+/** Compute the write-time bucket projection columns for a merged `plans` row. Centralised so the
+ * gateway is the ONE place `deriveEpicBucket` / `epicIsAcknowledgeable` are applied — the page, SQL,
+ * pollers and workers never re-derive the mapping (AGENTS.md "derivation over duplication"). */
+function projectPlanBucket(row: Partial<Plan>): Partial<Plan> {
+  if (!row.status) return {};
+  return {
+    list_bucket: deriveEpicBucket(row.status, row.delivery ?? null, row.acknowledged_at ?? null),
+    ack_open:
+      epicIsAcknowledgeable(row.status, row.delivery ?? null) && (row.acknowledged_at ?? null) === null
+        ? 1
+        : 0,
+  };
+}
+
+/** Re-project every `plans` row through the gateway so rows written before migration 042 (whose
+ * `list_bucket`/`ack_open` are NULL) get a correct Active/History bucket. Idempotent and safe to
+ * re-run: it re-derives from each row's own stored fields, so a second pass is a no-op. Runs once at
+ * boot (pollOnce) — the gateway keeps every future write fresh, so this only needs to catch legacy
+ * rows. Returns the count actually stamped. Mirrors `backfillFeatureStages` (app/feature.ts). */
+export async function backfillPlanBuckets(data: DataLayer): Promise<number> {
+  const table = plans(data);
+  let stamped = 0;
+  for (const row of await table.all()) {
+    // Only touch rows the projection has never reached — a legacy row whose `list_bucket` is NULL.
+    if (row.list_bucket != null) continue;
+    await table.update(row.plan_key, projectPlanBucket(row));
+    stamped++;
+  }
+  return stamped;
+}
 export const planTasks = (data: DataLayer) => data.table<PlanTask>("plan_tasks", "id");
 
 /** One dependency edge in the plan DAG (issue #20): `task_id` waits for `depends_on_task_id`.

@@ -1,0 +1,31 @@
+-- 044_plan_list_bucket.sql — issue #298: bucket EPICS on the derived `delivery` rollup, not raw
+-- `plan.status`, so a `done` epic whose slice PRs are still CONVERGING — or one that has fully LANDED
+-- but still needs its integration→main promotion PR — does NOT silently vanish from the Active epic
+-- lists the instant `status = done`. Mirrors the feature-run Active/History tick-off partition
+-- (038/039 `feature_runs`): reify the partition as a derived, write-time-projected column so the
+-- declarative epic/overview page tabs can filter with only stored `{"field":…}` `in` clauses (the
+-- dataGrid page DSL has no OR / IS NULL), and give epics the same operator "Dismiss" affordance
+-- feature runs already have.
+--
+-- Columns (all maintained by the `plans` gateway — app/plan.ts — from the pure `deriveEpicBucket` /
+-- `epicIsAcknowledgeable` helpers in app/delivery.ts on every write, never hand-derived in SQL, the
+-- page, or a poller):
+--   • acknowledged_at — NULL until an operator dismisses a fully-LANDED epic (acknowledge-epic). The
+--                       twin of feature_runs.acknowledged_at (039).
+--   • list_bucket     — 'active' | 'history': deriveEpicBucket(status, delivery, acknowledged_at).
+--                       Active = live epics (planning/dispatched) + `done` epics not yet acknowledged
+--                       (still converging, landed-but-unpromoted, or resolved-not-landed); History =
+--                       acknowledged `done` epics and terminal failed/abandoned epics.
+--   • ack_open        — 1 | 0: 1 iff the epic is a RESOLVED (`done`, not `converging`) but
+--                       unacknowledged epic — the Active states that carry the Dismiss affordance — so
+--                       the page's `showWhenField` gates the button precisely. Mirrors
+--                       feature_runs.escalation_open (040).
+--
+-- Forward-only, additive (expand): all nullable with no default, so pre-#298 rows grandfather in as
+-- NULL and never gate control flow. `backfillPlanBuckets` (app/plan.ts) stamps legacy rows once at
+-- boot, and the gateway keeps every future write fresh. Numbered after the current highest prefix on
+-- origin/main (041); the runner wraps each file in its own transaction, so this file must NOT contain
+-- BEGIN/COMMIT.
+ALTER TABLE plans ADD COLUMN acknowledged_at TEXT;
+ALTER TABLE plans ADD COLUMN list_bucket TEXT;
+ALTER TABLE plans ADD COLUMN ack_open INTEGER;
