@@ -1,6 +1,8 @@
 // pr.merge — attempt to land the PR (SPEC §11). Returns `mergeStatus`:
 //   • merged  — landed now (direct merge)            → process marks it merged
 //   • queued  — added to the repo's merge queue       → process waits for `merge-landed`
+//   • retry   — transient base/head-moved race        → process re-attempts on the settled base
+//               via the bounded retry gate (no human, no remediation agent)
 //   • blocked — GitHub refused (conflict / failing gate / perms) → escalate to a human, who
 //               resolves it and replies to retry (the process re-arms and re-polls).
 // HOW it lands is governed by the target repo's published merge protocol (#43): a `mergify-queue`
@@ -21,7 +23,7 @@ import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 type In = WorkerInputs["pr.merge"];
 
 interface Out extends Record<string, unknown> {
-  mergeStatus: "merged" | "queued" | "blocked";
+  mergeStatus: "merged" | "queued" | "blocked" | "retry";
   status?: string;
   question?: string;
 }
@@ -92,7 +94,7 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
   const protocol = await loadMergeProtocol(repo, token).catch(() => null);
   const method = protocol?.land.method ?? "gh-merge";
 
-  let outcome: "merged" | "queued" | "blocked";
+  let outcome: "merged" | "queued" | "blocked" | "retry";
   let detail: string;
   let auditMethod: string;
 
@@ -130,7 +132,7 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
 
   // Exhaustive dispatch on the land outcome. Modelled as a tagged value so
   // `matchTags` forces a handler for every case — adding a new outcome to the
-  // `"merged" | "queued" | "blocked"` union becomes a compile error here rather
+  // `"merged" | "queued" | "blocked" | "retry"` union becomes a compile error here rather
   // than silently falling through to the "blocked" branch.
   const docHint = protocol?.doc ? ` See the repo's merge protocol (${protocol.doc}).` : "";
   return await matchTags(tag(outcome, { detail }), {
@@ -142,6 +144,10 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
       return { mergeStatus: "queued" };
     },
     merged: async () => ({ mergeStatus: "merged" }),
+    // retry → a transient base/head-moved race (GitHub told us to re-attempt). Re-enter the merge
+    // loop on the settled base via the model's bounded retry gate — NO human escalation, NO
+    // remediation agent. The gate caps the attempts so a continuously-moving base still escalates.
+    retry: async () => ({ mergeStatus: "retry" }),
     // blocked → hand the escalation machinery a concrete question.
     blocked: async (o) => ({
       mergeStatus: "blocked",

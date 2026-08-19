@@ -822,14 +822,26 @@ export interface MergeOptions {
   admin: boolean;
 }
 export interface MergeResult {
-  outcome: "merged" | "queued" | "blocked";
+  outcome: "merged" | "queued" | "blocked" | "retry";
   detail: string;
 }
 
+/** GitHub-flagged *retryable* merge races: the base (or head) branch advanced between the
+ * mergeability read and the merge mutation, so GitHub aborted the merge with a "… try the merge
+ * again" message. These are transient — GitHub itself tells us to just retry — so the merge loop
+ * must re-attempt on the settled base, NOT page a human. Matches GitHub's stable message across
+ * both the GraphQL `mergePullRequest` error and its HTTP 405 REST variant. Kept narrow — the exact
+ * "<Base|Head> branch was modified" phrase — so a genuine block (conflict, failing required check,
+ * 403 perms, 422 not-mergeable) is never swallowed as transient. */
+export function isTransientMergeRace(detail: string): boolean {
+  return /\b(?:base|head) branch was modified\b/i.test(detail);
+}
+
 /** Attempt to land the PR. Returns `merged` (landed now), `queued` (added to the repo's merge
- * queue — the poller then watches for it to land), or `blocked` (GitHub refused — a human must
- * resolve it, then reply to retry). `null` when no transport is usable. Never throws for a
- * refused merge; only a genuine transport failure propagates. */
+ * queue — the poller then watches for it to land), `retry` (a transient base/head-moved race —
+ * GitHub says to re-attempt on the settled base, no human needed), or `blocked` (GitHub refused —
+ * a human must resolve it, then reply to retry). `null` when no transport is usable. Never throws
+ * for a refused merge; only a genuine transport failure propagates. */
 export async function mergePr(
   repo: string,
   number: number | string,
@@ -850,6 +862,9 @@ export async function mergePr(
       // A merge-queue-required branch surfaces as an error on older gh; treat as queued when the
       // message says so, otherwise it is a genuine block (conflict, failing gate, perms).
       if (/added to the merge queue|enqueued/i.test(msg)) return { outcome: "queued", detail: msg };
+      // A base/head-moved race is transient (GitHub says to retry) — re-enter the merge loop
+      // rather than escalate. Checked before the catch-all block so it is never swallowed as blocked.
+      if (isTransientMergeRace(msg)) return { outcome: "retry", detail: msg };
       return { outcome: "blocked", detail: msg };
     }
   }
@@ -877,6 +892,9 @@ export async function mergePr(
     return { outcome: "queued", detail: "merge accepted; PR not yet landed (awaiting merge queue)" };
   }
   const detail = `github ${r.status} ${r.statusText}: ${(await r.text()).slice(0, 300)}`.trim();
+  // The REST merge endpoint returns 405 "Base branch was modified. Review and try the merge again."
+  // for the same transient race — classify it as retry, not a human-actionable block.
+  if (isTransientMergeRace(detail)) return { outcome: "retry", detail };
   return { outcome: "blocked", detail };
 }
 
