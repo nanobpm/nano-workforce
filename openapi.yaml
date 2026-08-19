@@ -954,7 +954,7 @@ components:
           minLength: 1
           description: The producer epic's issue handle, used to resolve which published pkg@version first carries the capability (S3).
     StartEpicSetResult:
-      description: The result of a successful set admission — the epics admitted and the edges persisted.
+      description: The result of a successful set admission — the epics admitted and the edges staged (FK-free in `admitted_plan_deps`) for S3 to materialize.
       type: object
       required:
         - epics
@@ -981,7 +981,7 @@ components:
             type: string
         edges:
           type: array
-          description: The inter-epic edges persisted into `plan_deps` (endpoints resolved to plan keys).
+          description: The inter-epic edges staged FK-free into `admitted_plan_deps` for S3 to materialize into `plan_deps` (endpoints resolved to plan keys).
           items:
             type: object
             required:
@@ -1782,8 +1782,10 @@ paths:
         anything: each epic passes the same `admitPlan` gate as the single-issue door, every edge must
         connect two epics in the submitted set, and the edge set must be an acyclic DAG. A malformed
         set fails as one clean 4xx at the offending epic/edge with nothing half-started — no edge is
-        persisted. On success the validated edges are recorded in `plan_deps`; scheduling/lowering
-        (starting roots, seeding the capability readiness-gate, version binding) is a later slice.
+        persisted. On success the admitted epics and validated edges are staged FK-free into
+        `admitted_epics` / `admitted_plan_deps`; materializing them into `plans` / `plan_deps` and
+        scheduling/lowering (starting roots, seeding the capability readiness-gate, version binding)
+        is a later slice (S3).
         Idempotent on the set: re-submitting the identical set records no duplicate edge.
       requestBody:
         required: true
@@ -1793,7 +1795,7 @@ paths:
               $ref: "#/components/schemas/EpicSetStart"
       responses:
         "202":
-          description: The whole set validated; every epic was admitted and every edge persisted.
+          description: The whole set validated; every epic was admitted and every edge staged FK-free (in `admitted_plan_deps`) for S3 to materialize.
           content:
             application/json:
               schema:

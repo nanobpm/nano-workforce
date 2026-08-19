@@ -601,8 +601,9 @@ export function admitPlanErrorResponse(err: unknown): { status: number; error: s
 // The set-admission door (`operations/startEpicSet.ts`) admits a WHOLE set of epics plus the
 // inter-epic dependency edges between them in one all-or-nothing call. The pure validation below
 // (reference integrity + DAG check) runs BEFORE any `admitPlan` side effect, so a malformed set is a
-// clean 4xx with nothing half-started (no base branch created, no edge persisted). Persisting the
-// validated edges into `plan_deps` (S1) is the door's only durable write; scheduling/lowering
+// clean 4xx with nothing half-started (no base branch created, no edge persisted). The door's only
+// durable write is staging the admitted epics + validated edges FK-free into `admitted_epics` /
+// `admitted_plan_deps`; materializing them into `plans` / `plan_deps` and scheduling/lowering
 // (starting roots, seeding the capability readiness-gate, version binding) is slice S3.
 
 /** One inter-epic dependency edge as SUBMITTED to the set door: the `consumer` epic waits for the
