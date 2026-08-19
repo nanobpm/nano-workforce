@@ -404,6 +404,23 @@ test("converge-gate: FAILS CLOSED when the PR-body read returns null (no transpo
   assertStringIncludes(out.convergeBlockReason ?? "", "could not read the PR description");
 });
 
+test("converge-gate: FAILS CLOSED with the SCOPE reason when the PR-body read throws", async () => {
+  // A transport failure while reading/parsing the PR body is a scope-integrity read failure, not a
+  // review-comment verification failure: it must surface BLOCK_UNVERIFIABLE_BODY, not the generic
+  // review-comment BLOCK_UNVERIFIABLE — otherwise the human escalation is pointed at review threads
+  // when the real problem is the PR description could not be read.
+  const handler = await makeUnderTest({
+    readThreads: async () => [{ isResolved: true, path: "a.ts", bodies: ["ok"] }],
+    readReviewBody: async () => "",
+    readPrBody: async () => {
+      throw new Error("boom");
+    },
+  });
+  const out = await handler({ variables: { prKey: "o/r#1", repo: "o/r", prNumber: 1 } } as any, {} as any);
+  assertEquals(out.convergeBlocked, true);
+  assertStringIncludes(out.convergeBlockReason ?? "", "could not read the PR description");
+});
+
 // ── Structural guard over the committed BPMN (no engine) ─────────────────────
 
 const bpmn = readFileSync("resources/processes/convergence-loop.bpmn", "utf8");

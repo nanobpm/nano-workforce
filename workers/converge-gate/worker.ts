@@ -99,6 +99,22 @@ export function makeHandler(deps: {
       if (reviewBody === null) {
         return { convergeBlocked: true, convergeBlockReason: BLOCK_UNVERIFIABLE };
       }
+      const unresolvedThreadCount = threads.filter((t) => !t.isResolved).length;
+      result = evaluateConvergeGate({
+        unresolvedThreadCount,
+        suppressedKeys: parseSuppressedAdvisories(reviewBody),
+        acknowledgedKeys: parseAckedAdvisories(threads),
+      });
+    } catch {
+      return { convergeBlocked: true, convergeBlockReason: BLOCK_UNVERIFIABLE };
+    }
+
+    // The scope-integrity guard (#313) reads/parses the PR description in its OWN try — a transport
+    // or parse failure here is a scope read failure, so it must surface BLOCK_UNVERIFIABLE_BODY, not
+    // the review-comment BLOCK_UNVERIFIABLE above. Sharing one catch would mislabel a description
+    // read failure as a review-thread verification failure and point the human escalation at the
+    // wrong place.
+    try {
       // The PR description drives the scope-integrity guard (#313). A null read is unverifiable —
       // fail closed with a scope-specific reason. (An empty STRING is a verified empty description:
       // no closing keyword, no deferral, so the scope guard passes.)
@@ -106,15 +122,9 @@ export function makeHandler(deps: {
       if (prBody === null) {
         return { convergeBlocked: true, convergeBlockReason: BLOCK_UNVERIFIABLE_BODY };
       }
-      const unresolvedThreadCount = threads.filter((t) => !t.isResolved).length;
-      result = evaluateConvergeGate({
-        unresolvedThreadCount,
-        suppressedKeys: parseSuppressedAdvisories(reviewBody),
-        acknowledgedKeys: parseAckedAdvisories(threads),
-      });
       scopeReason = evaluateScopeGuard({ prBody }).scopeBlockReason;
     } catch {
-      return { convergeBlocked: true, convergeBlockReason: BLOCK_UNVERIFIABLE };
+      return { convergeBlocked: true, convergeBlockReason: BLOCK_UNVERIFIABLE_BODY };
     }
 
     // Both guards gate the same handoff to the merge loop: block if EITHER the review-comment gate
