@@ -12,13 +12,14 @@
 // NANO_PR_WEBHOOK_SECRET is set, callers must present it via the x-hook-secret header. Unset → open.
 import type { Capability } from "@nanobpm/agentic/protocol";
 import { resolveEnrolment } from "../app/agentic/vocab/enrol.ts";
+import { DurableResumeRegistry } from "../app/durableResume.ts";
 import { envVar } from "../app/version.ts";
 import type { EnrolResult } from "../nano-generated/api-io.d.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
 
 const SECRET = envVar("NANO_PR_WEBHOOK_SECRET") ?? "";
 
-export default defineOperation("enrolAgenticWorker", ({ req, body }, app) => {
+export default defineOperation("enrolAgenticWorker", async ({ req, body }, app) => {
   if (SECRET && req.headers.get("x-hook-secret") !== SECRET) {
     app.log.warn("enrolAgenticWorker rejected: missing/invalid shared secret");
     return { status: 401, body: { error: "unauthorized" } };
@@ -65,6 +66,13 @@ export default defineOperation("enrolAgenticWorker", ({ req, body }, app) => {
       body: { error: "`capability.weight` must be a finite number when provided" },
     };
   }
+  // The durable-resume enrolment attribute (issue #325, ADR 0062 Slice 5/5) — a boolean the harness
+  // advertises. A directly-invoked delegate bypasses the OpenAPI runtime validation, so guard the type
+  // here (a non-boolean would corrupt the {0,1} enrolment flag the world-restore gate reads).
+  if (body.durableResume !== undefined && typeof body.durableResume !== "boolean") {
+    app.log.warn("enrolAgenticWorker rejected: non-boolean durableResume");
+    return { status: 400, body: { error: "`durableResume` must be a boolean when provided" } };
+  }
 
   // Fold a top-level `host` into the capability when the capability didn't carry its own — a worker
   // may declare its host either on the capability or beside it (ADR 0059 `{ capability, host }`).
@@ -74,6 +82,26 @@ export default defineOperation("enrolAgenticWorker", ({ req, body }, app) => {
       : body.capability;
 
   const resolved = resolveEnrolment(capability);
+
+  // Durable-resume enrolment gate (issue #325, ADR 0062 Slice 5/5): record whether this worker's
+  // harness advertises durable-resume so the world-restore marker is emitted only to a fleet with a
+  // participant. Recorded per instance (ADR 0056 §7 — an enrolment attribute, never a routing token),
+  // so it needs a non-blank `instance`; a declaration without one — or with a blank/whitespace
+  // string — is echoed but not persisted (a blank key would let unrelated workers collide on the
+  // same registry row and wrongly open/close the fleet-wide durable-resume gate). Omission of the
+  // field on a re-enrol persists an explicit `false` (degrade to scratch), so a harness that previously
+  // advertised durable-resume and later re-enrols without the field clears its stale `true` rather than
+  // leaving `fleetSupportsDurableResume()` true indefinitely. Best-effort — the enrolment resolution
+  // must not fail on a registry write hiccup.
+  const instanceKey = body.instance?.trim();
+  if (app.data && instanceKey) {
+    try {
+      await new DurableResumeRegistry(app.data).recordEnrolment(instanceKey, body.durableResume ?? false);
+    } catch (err) {
+      app.log.warn("enrolAgenticWorker: durable-resume record failed", { instance: instanceKey, err: String(err) });
+    }
+  }
+
   const result: EnrolResult = {
     serve: [...resolved.serve],
     roles: resolved.roles.map((role) => {
@@ -85,6 +113,7 @@ export default defineOperation("enrolAgenticWorker", ({ req, body }, app) => {
     leaseTtl: resolved.leaseTtl,
   };
   if (body.instance !== undefined) result.instance = body.instance;
+  if (body.durableResume !== undefined) result.durableResume = body.durableResume;
 
   app.log.info("agentic enrol resolved", { instance: body.instance, serve: result.serve, family: capability.family });
   return { status: 200, body: result };

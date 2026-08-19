@@ -7,7 +7,10 @@
 // GitHub transport forced off so it is hermetic.
 import { test } from "node:test";
 import { assertEquals } from "#test-assert";
-import { parsePr, pollCapabilityGatesImpl, pollIncidentsImpl, pollWaveGatesImpl, repoEnvelopeVars, startMerge, submitPr } from "./service.ts";
+import { memDataFor } from "../test/worldDb.ts";
+import { DurableResumeRegistry } from "./durableResume.ts";
+import { WorldStore } from "./world/index.ts";
+import { parsePr, pollCapabilityGatesImpl, pollIncidentsImpl, pollWaveGatesImpl, repoEnvelopeVars, startMerge, submitPr, worldRestoreSha } from "./service.ts";
 
 function memTable(rows: any[], key: string) {
   return {
@@ -517,6 +520,35 @@ test("repoEnvelopeVars emits commitSha only for a well-formed 40-hex SHA (world-
   // Omitted entirely when there is no checkpoint SHA at all (the common first-activation case).
   const none = (repoEnvelopeVars("owner/repo", "feat/x", "main") as any)["io.nanobpm.agentTask"].repository;
   assertEquals("commitSha" in none, false);
+});
+
+// Durable-resume enrolment gate (issue #325, ADR 0062 Slice 5/5): `worldRestoreSha` — the seam
+// `submitPr`/`startMerge` thread into `repoEnvelopeVars` — hands the harness the last push-checkpoint
+// ONLY when the enrolled fleet advertises `durable-resume`. With no participant it degrades to null,
+// so the round redrives from scratch (exactly as today). Proven against a REAL in-memory SQLite db
+// with the world (049) + enrolment (052) schemas applied.
+test("worldRestoreSha is gated on the durable-resume enrolment: participant → SHA, none → null", async () => {
+  const { data } = memDataFor(["049_world_checkpoint.sql", "052_worker_durable_resume.sql"]);
+  const PR = "owner/repo#7";
+  const sha = "77ee0993cc6ad4493da0f7551212ef16722135db";
+  await new WorldStore(data).recordCheckpoint({ prKey: PR, roundNo: 1, commitSha: sha });
+
+  // No participant enrolled yet — graceful degradation: no resume marker even though a checkpoint exists.
+  assertEquals(await worldRestoreSha(data, PR), null, "no participant → redrive from scratch");
+
+  // A non-participant enrolment still does not open the gate (a fleet of only non-participants).
+  await new DurableResumeRegistry(data).recordEnrolment("legacy-1", false);
+  assertEquals(await worldRestoreSha(data, PR), null, "only non-participants → still scratch");
+
+  // One participant makes the mixed fleet resume-capable: the checkpoint SHA is now emitted.
+  await new DurableResumeRegistry(data).recordEnrolment("modern-1", true);
+  assertEquals(await worldRestoreSha(data, PR), sha, "a participant → resume at the checkpoint SHA");
+});
+
+test("worldRestoreSha is null when a participant is enrolled but the PR has no checkpoint yet", async () => {
+  const { data } = memDataFor(["049_world_checkpoint.sql", "052_worker_durable_resume.sql"]);
+  await new DurableResumeRegistry(data).recordEnrolment("modern-1", true);
+  assertEquals(await worldRestoreSha(data, "owner/repo#8"), null, "nothing to reconstruct on a first activation");
 });
 
 // `parsePr` is total on any input: it is called unguarded from several workers (progress-check,

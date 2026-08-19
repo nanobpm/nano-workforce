@@ -386,6 +386,15 @@ components:
         instance:
           type: string
           description: The worker instance id, echoed back for provenance (optional).
+        durableResume:
+          type: boolean
+          description: >-
+            Whether this worker's harness advertises durable-resume (issue #325, ADR 0062 Slice 5/5)
+            — an ENROLMENT attribute, never a routing token. Recorded per instance so the app emits
+            the world-restore marker only to a fleet with a participant; a harness that omits it (or
+            sets false) redrives a re-leased round from scratch. Recorded only when `instance` is
+            a non-blank string — a missing, empty, or whitespace-only `instance` is echoed back for
+            provenance but the flag is not persisted.
     EnrolledRole:
       type: object
       description: One matched role in an enrolment resolution — provenance for the resolved SERVE set.
@@ -411,6 +420,14 @@ components:
         instance:
           type: string
           description: The worker instance id, echoed from the request when supplied.
+        durableResume:
+          type: boolean
+          description: >-
+            Echo of the request's durable-resume declaration (issue #325, ADR 0062 Slice 5/5).
+            Present only when the request supplied it. This reflects the value the worker sent, not a
+            guarantee of durable persistence — recording into the durable-resume registry is
+            best-effort (skipped when `instance` is absent/blank, and a registry write hiccup is
+            logged without failing enrolment).
         serve:
           type: array
           description: The SERVE token set — sorted, de-duplicated leaf tokens the worker may serve.

@@ -402,6 +402,14 @@ export const TYPE_CONTRACTS = {
       "The mind/world checkpoint contract shape (issue #324, ADR 0062 Slice 4/5). `{ commitSha, effectLedger }` — the ONE type both the world marker (recorded in `world_checkpoints`/`world_effects`) and the mind checkpoint (Slice 1's `session.checkpoint`) derive from, so a single derivation feeds both halves and they cannot diverge. Its `effectLedger` is `Effect[]` (the fence-keyed irreversible-action ledger). The world half imports it from app/world; when Slice 1's harness-side `@nanobpm/agentic/session` lands it MUST reuse this shape, not re-declare a synonym.",
     module: "app/world/checkpoint.ts",
   },
+  DurableResumeRegistry: {
+    category: "type",
+    name: "DurableResumeRegistry",
+    owner: "app/durableResume.ts",
+    semantics:
+      "The `durable-resume` ENROLMENT GATE (issue #325, ADR 0062 Slice 5/5, the INTEGRATION slice). `durable-resume` is a worker attribute declared at enrolment (ADR 0056 §7 — capability gates enrolment, NEVER the routing token `network.role#seat`), recorded per worker instance in `worker_durable_resume` (migration 052). The enrol door (`operations/enrolAgenticWorker.ts`) records it via `recordEnrolment`; `app/service.ts` consults `fleetSupportsDurableResume` before emitting the world-restore `commitSha` (the `io.nanobpm.agentTask.repository` envelope) so a re-leased `senior:pr-review` round RESUMES only on a participating fleet and gracefully DEGRADES (redriven from scratch) otherwise. Consume this ONE module for the durable-resume gate — do not re-declare a synonym or read the flag off a second store.",
+    module: "app/durableResume.ts",
+  },
 } as const satisfies Record<string, TypeContract>;
 
 export const CAPABILITY_URL_CONTRACTS = {
