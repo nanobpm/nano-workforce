@@ -161,8 +161,11 @@ export const plans = (data: DataLayer) => {
         return async (id: unknown, patch: Partial<Plan>) => {
           // Only re-read + reproject when the patch changes a projection input (status / delivery /
           // acknowledged_at) or writes a derived column directly. A projection-irrelevant patch (e.g.
-          // an `updated_at`- or `wave_label`-only write) leaves the stored projection correct — the
-          // gateway is the sole write path — so skip the extra `get` roundtrip and delegate straight.
+          // an `updated_at`- or `wave_label`-only write — including the direct `data.table` writes in
+          // e.g. `app/retro.ts` that stamp `retro_started_at`) leaves the stored projection correct, so
+          // skip the extra `get` roundtrip and delegate straight. Any bucket-relevant write
+          // (status/delivery/acknowledged_at or a derived column) MUST go through this gateway to stay
+          // reprojected.
           if (!patchAffectsPlanProjection(patch)) return target.update(id, patch);
           const existing = await target.get(id);
           const merged: Partial<Plan> = { ...existing, ...patch };
