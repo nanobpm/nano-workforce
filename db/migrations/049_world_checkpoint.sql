@@ -41,7 +41,15 @@ CREATE TABLE IF NOT EXISTS world_checkpoints (
   created_at        TEXT NOT NULL,
   -- One checkpoint per (pr, offset): the join records mind + world at the SAME offset, so a duplicate
   -- offset for one PR would mean two worlds claiming one turn boundary — reject it.
-  UNIQUE(pr_key, checkpoint_offset)
+  UNIQUE(pr_key, checkpoint_offset),
+  -- One checkpoint per (pr, commit SHA): `recordCheckpoint` is idempotent on `{pr_key, commit_sha}`
+  -- (it `findOne`s the existing row and REUSES its offset rather than allocating a fresh one), but the
+  -- application check alone is racy — a concurrent/duplicate persist-round could still land two rows
+  -- for one SHA, and `findOne` would then pick an arbitrary offset, reintroducing the "newest
+  -- checkpoint shadows the real effect tail" silent-effect-loss class. This constraint makes the
+  -- invariant durable: a second row for the same SHA is rejected at the schema, so the offset a SHA
+  -- maps to is unique and stable.
+  UNIQUE(pr_key, commit_sha)
 );
 
 -- The newest checkpoint for a PR is `MAX(checkpoint_offset)`; index the lookup the restore path runs.

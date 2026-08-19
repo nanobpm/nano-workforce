@@ -3,7 +3,7 @@
 // and the durable fence (`UNIQUE(pr_key, idempotency_key)` → `isApplied`/`markApplied`) are proven,
 // not mocked.
 import { test } from "node:test";
-import { assert, assertEquals, assertRejects } from "#test-assert";
+import { assert, assertEquals, assertRejects, assertThrows } from "#test-assert";
 import { memWorldData } from "../../test/worldDb.ts";
 import type { Effect } from "./effect-ledger.ts";
 import { WorldStore } from "./store.ts";
@@ -188,4 +188,24 @@ test("recordCheckpoint is atomic: a mid-write effect failure rolls back the chec
   const effs = Number((db.prepare("SELECT COUNT(*) AS c FROM world_effects").get() as { c: number }).c);
   assertEquals(cps, 0, "the checkpoint row was rolled back — no half-written checkpoint");
   assertEquals(effs, 0, "the first effect row was rolled back too — the whole write is atomic");
+});
+
+test("the schema enforces one checkpoint row per (pr, commit SHA) — a raw duplicate insert is rejected", async () => {
+  const { data, db } = memWorldData();
+  const store = new WorldStore(data);
+  // The application path is idempotent (reuses the offset), so exercise the DURABLE guard directly:
+  // a second raw row for the same {pr_key, commit_sha} — as a racing/duplicate writer or legacy data
+  // could produce — must be rejected by `UNIQUE(pr_key, commit_sha)`, not silently accepted (which
+  // would let `findOne` pick an arbitrary offset and shadow the real effect tail).
+  await store.recordCheckpoint({ prKey: PR, roundNo: 1, commitSha: "sha-a" });
+  assertThrows(
+    () =>
+      db
+        .prepare("INSERT INTO world_checkpoints (pr_key, round_no, checkpoint_offset, commit_sha, created_at) VALUES (?, ?, ?, ?, ?)")
+        .run(PR, 2, 1, "sha-a", new Date().toISOString()),
+    Error,
+    "UNIQUE",
+  );
+  const cps = await data.table("world_checkpoints", "id").find({ pr_key: PR, commit_sha: "sha-a" });
+  assertEquals(cps.length, 1, "still exactly one checkpoint row for the SHA");
 });
