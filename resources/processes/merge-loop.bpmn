@@ -189,8 +189,9 @@
           <zeebe:property name="io.nanobpm.dataEnvelope.out" value="EscalationOut" />
         </zeebe:properties>
         <zeebe:ioMapping>
+          <zeebe:input source="=status" target="agentVerdict" />
+          <zeebe:input source="=&#34;This PR cannot be merged and needs a human decision. &#34; + (if mergeState = &#34;conflict&#34; then &#34;The automated rebase agent could not resolve the merge conflicts on this branch. Resolve them manually (or reply with guidance), then reply to retry.&#34; else if mergeState = &#34;ready&#34; then &#34;The merge attempt did not land (merge result: &#34; + mergeStatus + &#34;). Investigate why GitHub refused the merge, then reply to retry.&#34; else if agentVerdict = &#34;blocked&#34; then &#34;The automated CI-fix agent could not make the required checks green. Fix the failing checks on the branch (or reply with guidance), then reply to retry.&#34; else &#34;The automated CI-fix agent exceeded its time budget (SLA) before the required checks went green. Check its progress or intervene, then reply to retry.&#34;)" target="question" />
           <zeebe:input source="=&#34;blocked&#34;" target="status" />
-          <zeebe:input source="=&#34;This PR cannot be merged and needs a human decision. &#34; + (if mergeState = &#34;conflict&#34; then &#34;The automated rebase agent could not resolve the merge conflicts on this branch. Resolve them manually (or reply with guidance), then reply to retry.&#34; else if mergeState = &#34;ready&#34; then &#34;The merge attempt did not land (merge result: &#34; + mergeStatus + &#34;). Investigate why GitHub refused the merge, then reply to retry.&#34; else if status = &#34;blocked&#34; then &#34;The automated CI-fix agent could not make the required checks green. Fix the failing checks on the branch (or reply with guidance), then reply to retry.&#34; else &#34;The automated CI-fix agent exceeded its time budget (SLA) before the required checks went green. Check its progress or intervene, then reply to retry.&#34;)" target="question" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_m_gBlocked</bpmn:incoming>

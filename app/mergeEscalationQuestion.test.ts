@@ -68,8 +68,12 @@ test("the question distinguishes all four blocked/SLA triggers rather than a sin
   assertStringIncludes(el, "mergeStatus", "the gate-blocked question must surface the merge result");
   // rebase could-not-resolve (conflict arm).
   assertStringIncludes(el, 'mergeState = "conflict"', "must branch on the rebase (conflict) trigger");
-  // CI could-not-fix vs CI SLA both arrive with mergeState = blocked — split on the agent `status`.
-  assertStringIncludes(el, 'status = "blocked"', "must branch CI could-not-fix vs SLA on the agent status");
+  // CI could-not-fix vs CI SLA both arrive with mergeState = blocked — split on the agent verdict,
+  // captured into a dedicated `agentVerdict` binding so the escalation-classification `status =
+  // "blocked"` override in the SAME ioMapping cannot make the SLA branch unreachable (issue #329
+  // review). Assert the question branches on that binding, not on the overwritten `status`.
+  assertStringIncludes(el, "agentVerdict", "must capture the agent verdict into a dedicated binding");
+  assertStringIncludes(el, 'agentVerdict = "blocked"', "must branch CI could-not-fix vs SLA on the agent verdict binding, not the overwritten status");
 });
 
 test("a gw-merge-escalated guard honours persist-escalation's escalated:false (mirrors the convergence loop)", () => {
