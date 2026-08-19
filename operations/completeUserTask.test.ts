@@ -109,7 +109,7 @@ test("complete-user-task: non-object variables are rejected 400", async () => {
   assertEquals(res.status, 400);
 });
 
-test("complete-user-task: an unknown key is a 404 (no open escalation task)", async () => {
+test("complete-user-task: an unknown key is a 404 (no open completable task)", async () => {
   const { app } = memApp([]);
   const res = await call(app, { userTaskKey: "ghost", variables: { answer: "x" } });
   assertEquals(res.status, 404);

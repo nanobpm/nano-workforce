@@ -297,9 +297,9 @@ async function resolveEscalationTask(
 ): Promise<{ ok: true; elementId: string } | { ok: false; reason: string }> {
   const open = await engine.openUserTasks();
   const match = open.find((t) => t.userTaskKey === userTaskKey);
-  if (!match) return { ok: false, reason: "no open escalation task" };
+  if (!match) return { ok: false, reason: "no open completable task" };
   if (!match.elementId || !allowed.has(match.elementId)) {
-    return { ok: false, reason: "not an escalation task" };
+    return { ok: false, reason: "not a completable task" };
   }
   return { ok: true, elementId: match.elementId };
 }

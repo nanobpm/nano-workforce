@@ -68,7 +68,7 @@ export default defineOperation("completeUserTask", async ({ body }, app) => {
     app.log.info("operator completed user task", { userTaskKey, elementId: r.elementId });
     return { status: 200, body: { ok: true, completionId: r.completionId, elementId: r.elementId } };
   }
-  const status = r.reason === "no open escalation task" ? 404 : 400;
+  const status = r.reason === "no open completable task" ? 404 : 400;
   app.log.warn("complete-user-task: not completed", { userTaskKey, reason: r.reason });
   return { status, body: { ok: false, error: r.reason } };
 });

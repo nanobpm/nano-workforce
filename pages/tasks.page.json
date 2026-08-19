@@ -153,7 +153,7 @@
             ],
             "action": {
               "path": "/app/api/actions/complete-user-task",
-              "successLabel": "Answered — the agent will resume",
+              "successLabel": "Decision submitted — the process will continue",
               "body": {
                 "userTaskKey": "{{row.user_task_key}}",
                 "variables": "{{form}}"

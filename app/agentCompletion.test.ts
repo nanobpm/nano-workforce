@@ -122,7 +122,7 @@ test("agent completer refuses a non-escalation user task (scoped to the migrated
   });
 
   assertEquals(r.ok, false);
-  assertEquals(r.reason, "not an escalation task");
+  assertEquals(r.reason, "not a completable task");
   assertEquals(completed.length, 0, "a non-escalation task is never completed");
   assertEquals(stores.task_completions.rows.length, 0, "and no attribution row is written");
 });
@@ -141,7 +141,7 @@ test("agent completer is a no-op for an unknown userTaskKey", async () => {
   });
 
   assertEquals(r.ok, false);
-  assertEquals(r.reason, "no open escalation task");
+  assertEquals(r.reason, "no open completable task");
   assertEquals(completed.length, 0);
 });
 
@@ -171,7 +171,7 @@ test("completer resolves only OPEN tasks — a completed/canceled task's key is 
   });
 
   assertEquals(r.ok, false);
-  assertEquals(r.reason, "no open escalation task");
+  assertEquals(r.reason, "no open completable task");
   assertEquals(completed.length, 0, "a non-open key never drives a doomed re-completion");
 });
 
@@ -215,7 +215,7 @@ test("feature-blocked is HUMAN-completable but NOT agent-completable (issue #332
     variables: { note: "n" },
   });
   assertEquals(asAgent.ok, false, "the agent completer refuses feature-blocked");
-  assertEquals(asAgent.reason, "not an escalation task");
+  assertEquals(asAgent.reason, "not a completable task");
   assertEquals(completed.length, 0);
 
   const asHuman = await completeEscalationAsHuman(data, engine, {
@@ -240,7 +240,7 @@ test("human completer refuses a non-escalation user task and is a no-op for an u
     variables: { resolution: "abandon" },
   });
   assertEquals(notEsc.ok, false);
-  assertEquals(notEsc.reason, "not an escalation task");
+  assertEquals(notEsc.reason, "not a completable task");
 
   const missing = await completeEscalationAsHuman(data, engine, {
     userTaskKey: "ut-missing",
@@ -248,7 +248,7 @@ test("human completer refuses a non-escalation user task and is a no-op for an u
     variables: { resolution: "abandon" },
   });
   assertEquals(missing.ok, false);
-  assertEquals(missing.reason, "no open escalation task");
+  assertEquals(missing.reason, "no open completable task");
 
   assertEquals(completed.length, 0, "neither refusal completes a task");
   assertEquals(stores.task_completions.rows.length, 0, "and no attribution row is written");
