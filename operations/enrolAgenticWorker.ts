@@ -86,11 +86,14 @@ export default defineOperation("enrolAgenticWorker", async ({ req, body }, app) 
   // Durable-resume enrolment gate (issue #325, ADR 0062 Slice 5/5): record whether this worker's
   // harness advertises durable-resume so the world-restore marker is emitted only to a fleet with a
   // participant. Recorded per instance (ADR 0056 §7 — an enrolment attribute, never a routing token),
-  // so it needs the `instance`; a declaration without one is echoed but not persisted. Best-effort —
-  // the enrolment resolution must not fail on a registry write hiccup.
-  if (app.data && body.instance !== undefined && body.durableResume !== undefined) {
+  // so it needs the `instance`; a declaration without one is echoed but not persisted. Omission of the
+  // field on a re-enrol persists an explicit `false` (degrade to scratch), so a harness that previously
+  // advertised durable-resume and later re-enrols without the field clears its stale `true` rather than
+  // leaving `fleetSupportsDurableResume()` true indefinitely. Best-effort — the enrolment resolution
+  // must not fail on a registry write hiccup.
+  if (app.data && body.instance !== undefined) {
     try {
-      await new DurableResumeRegistry(app.data).recordEnrolment(body.instance, body.durableResume);
+      await new DurableResumeRegistry(app.data).recordEnrolment(body.instance, body.durableResume ?? false);
     } catch (err) {
       app.log.warn("enrolAgenticWorker: durable-resume record failed", { instance: body.instance, err: String(err) });
     }

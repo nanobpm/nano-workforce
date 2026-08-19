@@ -100,6 +100,20 @@ test("records durable-resume participation in the registry when a data layer + i
   assertEquals(await new DurableResumeRegistry(data).anyParticipant(), true);
 });
 
+test("a re-enrol omitting durableResume persists an explicit false, clearing a stale true (degrade to scratch)", async () => {
+  const { data } = memDataFor(["052_worker_durable_resume.sql"]);
+  const withData = { log: noopLog(), data } as unknown as AppApi;
+  // First enrol advertises durable-resume.
+  await handler(input({ capability: { cognition: "decide" }, instance: "w1", durableResume: true }), withData);
+  assertEquals(await new DurableResumeRegistry(data).isParticipant("w1"), true);
+  // Re-enrol WITHOUT the field (downgrade/rollback/client bug) must clear the stale flag.
+  const res = (await handler(input({ capability: { cognition: "decide" }, instance: "w1" }), withData)) as any;
+  assertEquals(res.status, 200);
+  assertEquals("durableResume" in res.body, false, "still omitted from the echo");
+  assertEquals(await new DurableResumeRegistry(data).isParticipant("w1"), false, "stale true cleared");
+  assertEquals(await new DurableResumeRegistry(data).anyParticipant(), false);
+});
+
 test("a declaration without an instance is echoed but not persisted (enrolment is per-instance)", async () => {
   const { data } = memDataFor(["052_worker_durable_resume.sql"]);
   const withData = { log: noopLog(), data } as unknown as AppApi;
