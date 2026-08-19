@@ -54,7 +54,14 @@ import {
   planTasks,
 } from "./plan.ts";
 import { derivePromotionState, isPromotable, promotionPrBody, promotionPrTitle } from "./promotion.ts";
-import { defaultProbeExec, type ProbeExec, probeOnce, type ReadinessProbe, readinessTimeout } from "./readiness.ts";
+import {
+  defaultProbeExec,
+  type ProbeExec,
+  probeOnce,
+  READINESS_READY_MESSAGE,
+  type ReadinessProbe,
+  readinessTimeout,
+} from "./readiness.ts";
 import { clampNudgeMinutes, reviewWaitTimeout } from "./reviewWait.ts";
 import { trialMergeAudits } from "./trialMerge.ts";
 import {
@@ -658,7 +665,17 @@ export async function activePrs(data: DataLayer): Promise<ActivePr[]> {
 
 /** One review-ready poll pass (SPEC §10): for every PR waiting on a review, fetch its GitHub
  * reviews (via the host `gh` CLI or a token — see `app/github.ts`) and, on a fresh one,
- * correlate a `review-ready` message to resume the loop. */
+ * correlate the canonical `readiness-ready` message to resume the loop.
+ *
+ * This is the review-ready wait re-expressed on the ONE `ReadinessProbe` wait-gate contract
+ * (ADR 0001 §2, issue #259): the convergence-loop parks on the canonical `readiness-ready` gate
+ * (event-based gateway racing the signal against the bounded `reviewWaitTimeout` timer), and this
+ * canonical self-scheduling poller publishes that signal out-of-band when a fresh review lands —
+ * the "out-of-band poller-correlated shape" #258 pinned decision 3 reserved for exactly this
+ * migration. There is no bespoke `review-ready` message any more: one mechanism, no drift. The
+ * fresh-review detection + Copilot nudge below stay here because review freshness is inherently
+ * STATEFUL (keyed off `last_review_id`/`waiting_since`), which the stateless probe matchers cannot
+ * subsume — the poller owns the forward-progress guarantee, the gate owns the bounded wait. */
 async function pollReviews(data: DataLayer, engine: EngineClient, token: string) {
   const waiting = await prs(data).find({ status: "waiting_review" });
   for (const pr of waiting) {
@@ -682,9 +699,12 @@ async function pollReviews(data: DataLayer, engine: EngineClient, token: string)
       }
       await prs(data).update(prKey, { last_review_id: fresh.id, status: "converging", updated_at: now() });
       await engine.publishMessage({
-        name: "review-ready",
+        name: READINESS_READY_MESSAGE,
         correlationKey: prKey,
-        variables: { reviewId: fresh.id, reviewState: fresh.state, submittedAt: fresh.submitted_at },
+        // The canonical readiness-signal payload (`ReadinessReady` shape): the gate only needs to
+        // know the probe went green. The fresh review's id/state is bookkept above on the PR row,
+        // not carried on the message — the convergence-loop consumes only the round increment.
+        variables: { ready: true, detail: `review ${fresh.id} (${fresh.state})` },
       });
       console.log(`[poller] review ${fresh.id} (${fresh.state}) -> ${prKey}`);
     } catch (err) {

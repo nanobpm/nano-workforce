@@ -348,7 +348,7 @@ export async function hasPendingCopilotReviewer(
 }
 
 /** Request a fresh Copilot review on the PR (REST reviewers endpoint, exact `[bot]` login), so
- * the process's `review-ready` catch can eventually fire. Returns `"requested"` on success,
+ * the process's `readiness-ready` review wait-gate catch can eventually fire. Returns `"requested"` on success,
  * `"unavailable"` when Copilot is not an assignable reviewer on that repo (HTTP 422 — e.g.
  * Copilot review not enabled there), or `null` when no transport is usable. Never throws for the
  * 422 "not assignable" case; only a genuine transport failure propagates. */
