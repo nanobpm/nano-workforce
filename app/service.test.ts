@@ -10,7 +10,7 @@ import { assertEquals } from "#test-assert";
 import { memDataFor } from "../test/worldDb.ts";
 import { DurableResumeRegistry } from "./durableResume.ts";
 import { WorldStore } from "./world/index.ts";
-import { parsePr, pollCapabilityGatesImpl, pollIncidentsImpl, pollWaveGatesImpl, repoEnvelopeVars, startMerge, submitPr, worldRestoreSha } from "./service.ts";
+import { abandonClosedPr, parsePr, pollCapabilityGatesImpl, pollIncidentsImpl, pollWaveGatesImpl, repoEnvelopeVars, startMerge, submitPr, worldRestoreSha } from "./service.ts";
 
 function memTable(rows: any[], key: string) {
   return {
@@ -864,6 +864,31 @@ test("pollWaveGatesImpl releases the wave when a member PR is closed-unmerged an
     if (prevTok !== undefined) process.env["GITHUB_TOKEN"] = prevTok;
     else delete process.env["GITHUB_TOKEN"];
   }
+});
+
+// #352 review: `abandonClosedPr` must be genuinely idempotent. It is reached from BOTH observers of a
+// closed-unmerged member (merge worker + wave gate) and can be retried by the poller, so an
+// unconditional `merges` insert would spam the audit with duplicate `outcome:"abandoned"/method:
+// "pr-closed"` rows and skew reporting. Re-running it re-stamps the terminal status but writes the
+// audit row only once.
+test("abandonClosedPr is idempotent — the terminal merges audit row is written at most once (#352)", async () => {
+  const stores: Record<string, { rows: any[]; key: string }> = {
+    pull_requests: { rows: [{ pr_key: "owner/repo#70", status: "converging" }], key: "pr_key" },
+    plan_tasks: { rows: [{ id: "owner/repo#67:b", plan_key: "owner/repo#67", wave: 2, status: "opened", pr_key: "owner/repo#70" }], key: "id" },
+    merges: { rows: [], key: "id" },
+  };
+  const data = {
+    table: (name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key),
+  } as any;
+
+  await abandonClosedPr(data, "owner/repo#70", "closed without merging");
+  await abandonClosedPr(data, "owner/repo#70", "closed without merging"); // retry / second observer
+
+  // Terminal status re-stamped, but exactly one audit row despite two calls.
+  assertEquals(stores.pull_requests.rows.find((r) => r.pr_key === "owner/repo#70")?.status, "abandoned");
+  assertEquals(stores.plan_tasks.rows.find((r) => r.id === "owner/repo#67:b")?.status, "abandoned");
+  assertEquals(stores.merges.rows.length, 1, "no duplicate abandoned/pr-closed audit rows on retry");
+  assertEquals((stores.merges.rows[0] as any).method, "pr-closed");
 });
 
 

@@ -856,17 +856,24 @@ async function isDepMerged(data: DataLayer, depKey: string, token: string): Prom
  * Flipping the **task** row (not only the PR row) is essential: `waveMergeTargets` keys on
  * `plan_tasks.status`, so a still-`opened` task keeps a dead PR in the blocking set and wedges the
  * wave barrier forever; an `abandoned` task drops out (the wave completes on its surviving merged
- * members) and stops `isPlanComplete`/the Epics table counting a phantom open task. Idempotent
- * enough for a poller retry: re-running just re-stamps the same terminal status. */
+ * members) and stops `isPlanComplete`/the Epics table counting a phantom open task. Idempotent for a
+ * poller retry (or the two observers — merge worker + wave gate — racing the same closed PR):
+ * re-running just re-stamps the same terminal status, and the terminal `merges` audit row is written
+ * only once (guarded on an existing `abandoned`/`pr-closed` row for this PR) so retries can't spam the
+ * audit with duplicate rows and skew reporting. */
 export async function abandonClosedPr(data: DataLayer, prKey: string, detail: string): Promise<void> {
   const ts = now();
-  await data.table("merges", "id").insert({
-    pr_key: prKey,
-    outcome: "abandoned",
-    method: "pr-closed",
-    detail,
-    at: ts,
-  });
+  const merges = data.table("merges", "id");
+  const alreadyAudited = (await merges.find({ pr_key: prKey, outcome: "abandoned", method: "pr-closed" })).length > 0;
+  if (!alreadyAudited) {
+    await merges.insert({
+      pr_key: prKey,
+      outcome: "abandoned",
+      method: "pr-closed",
+      detail,
+      at: ts,
+    });
+  }
   await prs(data).update(prKey, { status: ABANDONED_STATUS, updated_at: ts });
   for (const t of await planTasks(data).find({ pr_key: prKey })) {
     await planTasks(data).update(t.id, { status: ABANDONED_STATUS, updated_at: ts });
@@ -891,7 +898,7 @@ async function classifyWaveTarget(
 ): Promise<"cleared" | "closed" | "pending"> {
   const tracked = await prs(data).get(prKey);
   if (tracked && tracked.status === "merged") return "cleared";
-  if (tracked && tracked.status === ABANDONED_STATUS) return "closed"; // already reconciled → non-blocking
+  if (tracked && tracked.status === ABANDONED_STATUS) return "cleared"; // already reconciled terminal → non-blocking, no re-reconcile needed
   const parsed = parsePr(prKey);
   if (!parsed) return "cleared"; // unparseable ref can't be checked → never wedge the barrier
   let st: Awaited<ReturnType<typeof fetchPrState>>;
