@@ -17,7 +17,7 @@
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { coalesceTitle, fetchIssueTitle } from "./github.ts";
 import { ESCALATION_SLA_TIMEOUT, normalizeBaseBranch, type ParsedIssue, renderBaseBranchBrief } from "./plan.ts";
-import { deriveEscalationOpen, deriveListBucket, deriveStage } from "./stage.ts";
+import { deriveListBucket, deriveStage } from "./stage.ts";
 
 /** The BPMN process this module drives (resources/processes/feature.bpmn). */
 export const FEATURE_PROCESS_ID = "feature";
@@ -52,35 +52,6 @@ export interface FeatureRun {
    * outcome is written to `status` itself; this carries the sub-state / note (e.g. "merged",
    * "waiting_review", or "operator: <note>"). */
   delivery_label: string | null;
-  /** The parked `feature-escalation` user task's `question`, persisted at escalation entry by the
-   * `record-feature-escalation` worker (NOT by `pollFeatureEscalations` while parked, which
-   * deliberately never writes it) so the pages can show what the agent asked. NULL whenever the run
-   * is not parked at an escalation — cleared on the exit paths (`record-feature` / the answer
-   * operation), and, as a self-heal, by `pollFeatureEscalations` when a previously-observed task is
-   * completed out-of-band (see `deriveFeatureEscalationPatch`). */
-  escalation_question: string | null;
-  /** The completable native `feature-escalation` user-task key the answer affordance posts to
-   * (`completeUserTaskAttributed`) and the pages gate the answer controls on (`showWhenField`). Set by
-   * `pollFeatureEscalations` while parked; NULL otherwise. */
-  escalation_user_task_key: string | null;
-  /** Gateway projection (issue #272): the single fail-closed "open escalation" display signal, `1` iff
-   * ALL THREE escalation columns agree the run is parked at an answerable escalation
-   * (`status='escalated'` AND `escalation_user_task_key` non-NULL AND `escalation_question` non-NULL),
-   * else `0`. Derived by `deriveEscalationOpen` at write time. The escalation tuple is spread across
-   * three independently-written columns, so an interim read can see a TORN state (a live pointer with a
-   * blank question, or a status lagging behind a cleared question); the pages gate the Abandon action
-   * and the answer form on THIS conjunction instead of on `escalation_user_task_key` alone, so a torn
-   * tuple renders as not-escalated rather than escalated-but-blank. NULL only on legacy rows before the
-   * projection reached them (backfilled once at boot). */
-  escalation_open: number | null;
-  /** The completable native `feature-blocked` user-task key the "Acknowledge blocked" affordance posts
-   * to (`completeUserTaskAttributed`) and the pages gate the acknowledge control on (`showWhenField`).
-   * Kept DISTINCT from `escalation_user_task_key` so the two human tasks (an escalation answer vs a
-   * blocked-run acknowledgement) are never conflated. Set by `pollFeatureBlocked` while a run is parked
-   * at `feature-blocked` (status `awaiting_operator`); NULL otherwise — cleared on the exit paths
-   * (`record-blocked-ack` / the acknowledge operation) and, as a self-heal, by `pollFeatureBlocked`
-   * when a previously-observed task is completed out-of-band (see `deriveFeatureBlockedPatch`). */
-  blocked_user_task_key: string | null;
   /** Timestamp an operator dismissed a TERMINAL run (§5, `acknowledge-done`); NULL until then. When
    * set on a terminal row, `list_bucket` flips from 'active' to 'history'. Projection surface. */
   acknowledged_at: string | null;
@@ -107,7 +78,7 @@ export interface FeatureRun {
 export const FEATURE_RUN_STATUSES = [
   "running", // the agent is implementing
   "escalated", // NON-terminal: the run is parked at the `feature-escalation` operator user task,
-  // waiting on a human answer (denormalised from the parked user task by pollFeatureEscalations)
+  // waiting on a human answer (set by record-feature-escalation; surfaced on the Tasks inbox by pollUserTasks)
   "opened", // a PR was raised and the run ends here (converge was not requested)
   "converging", // the opened PR was handed to the convergence loop (live state via pr_key → pull_requests)
   "awaiting_operator", // NON-terminal: the run is blocked and parked at the feature-blocked operator user task
@@ -177,7 +148,8 @@ export function deriveFeatureDelivery(prStatus: string | null): FeatureDeliveryR
 }
 
 /** The `feature-escalation` user-task element id (feature.bpmn) — the native operator wait a run
- * parks on when the agent escalates. `pollFeatureEscalations` reconciles it onto the read model. */
+ * parks on when the agent escalates. `pollUserTasks` reads the engine's open task for this element to
+ * project it onto the `user_tasks` Tasks inbox. */
 export const FEATURE_ESCALATION_ELEMENT = "feature-escalation";
 
 /** One append-only audit row per `feature-escalation` ENTRY (issue #305). Mirrors the surviving
@@ -223,110 +195,11 @@ export async function recordFeatureEscalation(
   });
 }
 
-/** The parked `feature-escalation` user task, as `pollFeatureEscalations` observes it via
- *  `openUserTasks` (the open-task-scoped query — issue #294): the completable user-task key the pages
- *  drive an attributed answer against. Scoping to `state:"CREATED"` is what keeps a looping run — which
- *  holds COMPLETED prior-round tasks for the same element — from latching the pointer onto a dead task.
- *
- * The agent's `question` is NOT read from here — the WASM testkit engine does not surface a user
- * task's `zeebe:ioMapping`-mapped local variables through the user-task query, so relying on it would
- * make the question untestable. Instead the `record-feature-escalation` service task (feature.bpmn)
- * persists `question` onto the row at escalation entry — see `workers/record-feature-escalation`. */
-export interface FeatureEscalationParked {
-  userTaskKey: string;
-}
-
-/** Pure source of truth for the escalation read-model reconcile (`pollFeatureEscalations`): given a
- * run and whether it is currently parked at `feature-escalation`, return the minimal `feature_runs`
- * patch reconciling the run's LIVENESS (status + completable-task pointer) with the observed park
- * state (or null when nothing changed, so the poller skips the write). Idempotent, and — crucially —
- * self-healing across the brief window between the `record-feature-escalation` service task and the
- * user task actually appearing: a premature "not parked" reset to `running` is re-flipped to
- * `escalated` on the next pass once the task is observed.
- *
- * - parked → flip `status` to `escalated` and denormalise the completable `userTaskKey` so the pages
- *   can drive an attributed answer. It never writes `escalation_question` while parked — that is the
- *   service task's to own (set) and the exit paths' to clear (record-feature / the answer operation),
- *   so the poller can never clobber the persisted question during that self-healing window.
- * - un-parked → clear the completable-task pointer; a run still marked `escalated` has resumed
- *   (answered / looped back to implement-task), so it returns to `running`. A run already advanced
- *   past `escalated` by a downstream worker keeps that status — only the pointer is cleared. Once the
- *   pointer was actually OBSERVED (non-NULL) and the task is now gone, `escalation_question` is also
- *   cleared here, self-healing a question left populated when the task was completed out-of-band
- *   (bypassing the answer operation). This is gated on the observed pointer precisely so it cannot
- *   fire in the pre-observation self-healing window, where the pointer is still NULL. */
-export function deriveFeatureEscalationPatch(
-  run: Pick<FeatureRun, "status" | "escalation_user_task_key">,
-  parked: FeatureEscalationParked | null,
-): Partial<FeatureRun> | null {
-  const patch: Partial<FeatureRun> = {};
-  if (parked) {
-    if (run.status !== "escalated") patch.status = "escalated";
-    if (run.escalation_user_task_key !== parked.userTaskKey) patch.escalation_user_task_key = parked.userTaskKey;
-  } else {
-    if (run.status === "escalated") patch.status = "running";
-    // Un-park cleanup — fires ONLY once the poller has actually OBSERVED the task (pointer non-NULL)
-    // and it is now gone. This self-heals a `question` left populated when the task was completed
-    // out-of-band (e.g. an external task UI, bypassing the answer operation that normally clears it),
-    // which would otherwise keep the UI showing an Escalation on a run that has resumed. Gating on
-    // the pointer being non-NULL is what makes it safe: during the brief self-healing window between
-    // `record-feature-escalation` (which persists the question but leaves the pointer NULL) and the
-    // task appearing, the pointer is NULL, so this never clobbers the freshly-persisted question.
-    if (run.escalation_user_task_key !== null) {
-      patch.escalation_user_task_key = null;
-      patch.escalation_question = null;
-    }
-  }
-  return Object.keys(patch).length > 0 ? patch : null;
-}
-
 /** The `feature-blocked` user-task element id (feature.bpmn) — the native operator wait a run parks on
  * when the agent reports a `blocked` outcome (it gave up / the escalation was abandoned or timed out).
- * `pollFeatureBlocked` reconciles it onto the read model. */
+ * `pollUserTasks` reads the engine's open task for this element to project it onto the `user_tasks`
+ * Tasks inbox. */
 export const FEATURE_BLOCKED_ELEMENT = "feature-blocked";
-
-/** The parked `feature-blocked` user task, as `pollFeatureBlocked` observes it via `openUserTasks`
- *  (the open-task-scoped query — issue #294): the completable user-task key the pages drive an
- *  attributed acknowledgement against. Scoping to `state:"CREATED"` keeps a re-blocked run — which
- *  holds COMPLETED prior-round tasks for the same element — from latching the pointer onto a dead task. */
-export interface FeatureBlockedParked {
-  userTaskKey: string;
-}
-
-/** Pure source of truth for the blocked read-model reconcile (`pollFeatureBlocked`), the blocked twin
- * of `deriveFeatureEscalationPatch`: given a run and whether it is currently parked at `feature-blocked`,
- * return the minimal `feature_runs` patch reconciling the completable-task pointer with the observed park
- * state (or null when nothing changed, so the poller skips the write). Idempotent and self-healing.
- *
- * Unlike the escalation reconcile, the STATUS flip is NOT owned here: `record-feature` already persists
- * the row as `awaiting_operator` in the same token path before the `feature-blocked` user task is
- * created, and `record-blocked-ack` settles it to the terminal `blocked` on completion. So this only
- * reconciles the completable-task POINTER — never the status — so it can never overwrite the terminal
- * `blocked` the acknowledgement worker has already written.
- *
- * - parked → denormalise the completable `userTaskKey` so the pages can drive an attributed acknowledge.
- * - un-parked → clear the pointer ONLY once it was actually OBSERVED (non-NULL) and the task is now gone.
- *   Gating on the observed pointer is what makes it safe across the brief self-healing window between
- *   `record-feature` (which persists `awaiting_operator` but leaves the pointer NULL) and the user task
- *   appearing: in that window the pointer is NULL, so this never fires, and the next pass fills it in once
- *   the task is observable. Once observed and then gone (e.g. an out-of-band completion), the stale
- *   pointer is cleared so the pages stop offering an acknowledge control for a task that no longer exists. */
-export function deriveFeatureBlockedPatch(
-  run: Pick<FeatureRun, "blocked_user_task_key">,
-  parked: FeatureBlockedParked | null,
-): Partial<FeatureRun> | null {
-  const patch: Partial<FeatureRun> = {};
-  if (parked) {
-    if (run.blocked_user_task_key !== parked.userTaskKey) patch.blocked_user_task_key = parked.userTaskKey;
-  } else {
-    // Un-park cleanup — fires ONLY once the poller has actually OBSERVED the task (pointer non-NULL) and
-    // it is now gone. Gating on the pointer being non-NULL is what makes it safe: during the brief
-    // self-healing window between `record-feature` (which persists `awaiting_operator` but leaves the
-    // pointer NULL) and the task appearing, the pointer is NULL, so this never clears prematurely.
-    if (run.blocked_user_task_key !== null) patch.blocked_user_task_key = null;
-  }
-  return Object.keys(patch).length > 0 ? patch : null;
-}
 
 /** The feature_runs fields the projection reads. A patch touching none of these cannot change the
  * derived `stage`/`stage_state`/`stage_skipped`/`attention`/`list_bucket`, so the gateway can skip the
@@ -337,9 +210,6 @@ const PROJECTION_INPUT_KEYS: readonly (keyof FeatureRun)[] = [
   "pr_key",
   "converge",
   "auto_merge",
-  "escalation_question",
-  "escalation_user_task_key",
-  "blocked_user_task_key",
   "acknowledged_at",
 ];
 
@@ -353,7 +223,6 @@ const PROJECTION_OUTPUT_KEYS: readonly (keyof FeatureRun)[] = [
   "stage_skipped",
   "attention",
   "list_bucket",
-  "escalation_open",
 ];
 
 /** True when a patch changes at least one field the projection derives from OR one it writes — i.e. the
@@ -374,9 +243,6 @@ function projectFeatureRun(row: Partial<FeatureRun>): Partial<FeatureRun> {
     pr_key: row.pr_key ?? null,
     converge: row.converge ?? null,
     auto_merge: row.auto_merge ?? null,
-    escalation_question: row.escalation_question ?? null,
-    escalation_user_task_key: row.escalation_user_task_key ?? null,
-    blocked_user_task_key: row.blocked_user_task_key ?? null,
   });
   return {
     stage,
@@ -384,13 +250,6 @@ function projectFeatureRun(row: Partial<FeatureRun>): Partial<FeatureRun> {
     stage_skipped: skipped,
     attention,
     list_bucket: deriveListBucket(row.status, row.acknowledged_at ?? null),
-    escalation_open: deriveEscalationOpen({
-      status: row.status,
-      escalation_question: row.escalation_question ?? null,
-      escalation_user_task_key: row.escalation_user_task_key ?? null,
-    })
-      ? 1
-      : 0,
   };
 }
 
@@ -436,24 +295,20 @@ export const featureRuns = (data: DataLayer) => {
 };
 
 /** Re-project every feature_runs row through the gateway so rows missing any projection column get
- * correct `stage`/`stage_state`/`stage_skipped`/`attention`/`list_bucket`/`escalation_open` values.
- * Catches rows written before migration 039 (the pipeline columns) AND rows written before migration
- * 040 (whose `escalation_open` column is NULL, issue #272). Idempotent and safe to re-run: it
- * re-derives from each row's own stored fields, so a second pass is a no-op. Runs once at boot
- * (pollOnce) — the gateway keeps every future write fresh, so this only needs to catch legacy rows.
- * Reprojecting on a missing `escalation_open` matters for a run parked at a LIVE escalation when
- * migration 040 lands: `pollFeatureEscalations` writes nothing while it stays parked (no change), so
- * without this the fail-closed signal would stay NULL and hide a genuinely-open escalation. */
+ * correct `stage`/`stage_state`/`stage_skipped`/`attention`/`list_bucket` values. Catches rows written
+ * before migration 039 (the pipeline columns). Idempotent and safe to re-run: it re-derives from each
+ * row's own stored fields, so a second pass is a no-op. Runs once at boot (pollOnce) — the gateway keeps
+ * every future write fresh, so this only needs to catch legacy rows. */
 export async function backfillFeatureStages(data: DataLayer): Promise<number> {
   const table = featureRuns(data);
   const rows = await table.all();
   let stamped = 0;
   for (const row of rows) {
-    // Only touch rows the projection has never fully reached — a legacy row whose `stage` (pre-039) or
-    // `escalation_open` (pre-040) column is still NULL. The gateway keeps every write fresh, so a
-    // fully-projected row needs no re-write; skipping them avoids a full-table rewrite on every boot and
-    // keeps `stamped` an honest count of rows actually backfilled (not the total row count).
-    if (row.stage != null && row.escalation_open != null) continue;
+    // Only touch rows the projection has never reached — a legacy row whose `stage` (pre-039) column is
+    // still NULL. The gateway keeps every write fresh, so a fully-projected row needs no re-write;
+    // skipping them avoids a full-table rewrite on every boot and keeps `stamped` an honest count of
+    // rows actually backfilled (not the total row count).
+    if (row.stage != null) continue;
     // Re-derive the projection from the legacy row's own stored fields and write it. (An empty patch
     // would now short-circuit the projecting proxy — it only reprojects on a projection-input change —
     // so backfill projects explicitly rather than relying on an empty-patch reproject.)
@@ -522,9 +377,6 @@ export async function startFeature(
       // `deriveListBucket` flip the row to 'history' the moment it completes again, skipping the
       // intended operator dismissal. A fresh run must re-earn its tick-off.
       acknowledged_at: null,
-      escalation_question: null,
-      escalation_user_task_key: null,
-      blocked_user_task_key: null,
       updated_at: ts,
     });
   } else {
@@ -542,9 +394,6 @@ export async function startFeature(
       auto_merge: autoMerge ? 1 : 0,
       outcome: null,
       delivery_label: null,
-      escalation_question: null,
-      escalation_user_task_key: null,
-      blocked_user_task_key: null,
       created_at: ts,
       updated_at: ts,
     });

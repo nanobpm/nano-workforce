@@ -43,9 +43,6 @@ export interface StageInput {
   pr_key?: string | null;
   converge?: number | boolean | null;
   auto_merge?: number | boolean | null;
-  escalation_question?: string | null;
-  escalation_user_task_key?: string | null;
-  blocked_user_task_key?: string | null;
 }
 
 /** The derived pipeline projection for one run. `skipped` is a space-separated set of stage keys not
@@ -94,42 +91,13 @@ export function deriveStage(run: StageInput): DerivedStage {
 
   // `attention`: a short badge for the active stage (the renderer colours it from `state`). This is how
   // a parked `awaiting_operator`/`escalated` run surfaces as attention WITHOUT altering its stage.
-  const attention = run.blocked_user_task_key
-    ? "blocked"
-    : run.escalation_user_task_key || run.escalation_question
-      ? "⚠"
-      : null;
+  // Derived from `status` alone (issue #332): the parked-task pointers that used to source it were
+  // dropped with the denormalised escalation surface, and the authoritative "who is waiting on a human"
+  // list now lives on the `user_tasks` Tasks inbox. `awaiting_operator` (parked at `feature-blocked`)
+  // shows the blocked glyph; `escalated` (parked at `feature-escalation`) shows the ⚠ badge.
+  const attention = status === "awaiting_operator" ? "blocked" : status === "escalated" ? "⚠" : null;
 
   return { stage, state, skipped: skippedKeys.join(" "), attention };
-}
-
-/** Derive the single fail-closed "open escalation" display signal for one feature run (issue #272).
- *
- * The open-escalation condition is jointly encoded by THREE independently-written columns —
- * `status='escalated'`, `escalation_user_task_key` (the completable pointer), and `escalation_question`
- * — owned by different writers on different schedules (the `record-feature-escalation` service task
- * sets the question; `pollFeatureEscalations`/`deriveFeatureEscalationPatch` sets status + pointer; the
- * answer operation clears the tuple). Because they are not written as one atomic tuple, a reader can
- * observe a TORN interim state (e.g. `status=escalated` + pointer set + `question=null`) and render a
- * self-contradictory escalation — an "answer me" affordance with nothing to answer.
- *
- * Collapse that class at the consumer: the pages gate the escalation affordances (Abandon / answer
- * form) on this ONE derived conjunction rather than on any single column, so a torn tuple renders as
- * NOT escalated (fail closed) instead of escalated-but-blank. `true` iff ALL THREE fields agree the run
- * is parked at an answerable escalation; any missing field yields `false`. Maintained as a write-time
- * projection by the feature_runs gateway (like `stage`/`list_bucket`), so it stays fresh on every write
- * — including the answer operation's eager tuple-clear, which makes the affordance disappear WITHOUT
- * waiting a poll pass. Pure and read-only. */
-export function deriveEscalationOpen(run: {
-  status: string;
-  escalation_question?: string | null;
-  escalation_user_task_key?: string | null;
-}): boolean {
-  return (
-    run.status === "escalated" &&
-    (run.escalation_user_task_key ?? "") !== "" &&
-    (run.escalation_question ?? "") !== ""
-  );
 }
 
 /** The Active/History partition label (§5), maintained at write time so the flat-DSL page tabs filter

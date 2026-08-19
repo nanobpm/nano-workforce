@@ -71,6 +71,23 @@ export const ESCALATION_TASK_ELEMENTS: ReadonlySet<string> = new Set([
   "wait-merge-answer", // PR merge-loop escalation (merge-loop.bpmn) — same native user-task path (#256)
 ]);
 
+/** The `feature-blocked` operator user-task element id (feature.bpmn) — the native wait a run parks on
+ *  when the agent reports a `blocked` outcome. Unlike an escalation it is NOT agent-answerable (only a
+ *  human operator retires a blocked run), so it lives OUTSIDE `ESCALATION_TASK_ELEMENTS` — the agent
+ *  completer (`completeEscalationAsAgent`) must never touch it — but it IS a human-completable decision
+ *  on the Tasks inbox, so the HUMAN completer accepts it (issue #332 folded the bespoke
+ *  `acknowledge-blocked` door onto the one canonical `complete-user-task` door). */
+export const FEATURE_BLOCKED_TASK_ELEMENT = "feature-blocked";
+
+/** The user-task `elementId`s a HUMAN operator may complete from the Tasks inbox via the one canonical
+ *  `complete-user-task` door: every agent-answerable escalation PLUS the human-only `feature-blocked`
+ *  acknowledgement. The AGENT completer stays scoped to `ESCALATION_TASK_ELEMENTS` (no `feature-blocked`),
+ *  so widening the human surface never lets an agent retire a blocked run. */
+export const HUMAN_COMPLETABLE_ELEMENTS: ReadonlySet<string> = new Set([
+  ...ESCALATION_TASK_ELEMENTS,
+  FEATURE_BLOCKED_TASK_ELEMENT,
+]);
+
 /** Each escalation `elementId` → the `.form` whose contract governs its completion variables (the
  *  BPMN `zeebe:formDefinition formId`). Kept beside `ESCALATION_TASK_ELEMENTS` so the completer
  *  validates against the SAME `.form` the task inbox renders — one contract, no second field list. */
@@ -80,6 +97,7 @@ const ESCALATION_FORM_BY_ELEMENT: Readonly<Record<string, string>> = {
   "trial-merge-decision": "trial-merge-decision",
   "wait-answer": "pr-escalation",
   "wait-merge-answer": "pr-escalation",
+  "feature-blocked": "feature-blocked",
 };
 
 interface FormContract {
@@ -222,18 +240,20 @@ export interface AgentCompleteResult {
   elementId?: string;
 }
 
-/** Resolve a parked escalation user task by key: return its `elementId` if it is one of the migrated
- *  escalation tasks, or a failure reason otherwise. Shared by the agent and human completers so both
- *  refuse a non-escalation / missing target the exact same way (a key with no matching open
- *  escalation task is a 404-style no-op). */
+/** Resolve a parked escalation user task by key: return its `elementId` if it is one of the `allowed`
+ *  completable tasks, or a failure reason otherwise. Shared by the agent and human completers so both
+ *  refuse a non-completable / missing target the exact same way (a key with no matching open task is a
+ *  404-style no-op). The AGENT completer passes the default `ESCALATION_TASK_ELEMENTS`; the HUMAN
+ *  completer passes the wider `HUMAN_COMPLETABLE_ELEMENTS` (which also admits `feature-blocked`). */
 async function resolveEscalationTask(
   engine: EngineClient,
   userTaskKey: string,
+  allowed: ReadonlySet<string> = ESCALATION_TASK_ELEMENTS,
 ): Promise<{ ok: true; elementId: string } | { ok: false; reason: string }> {
   const open = await engine.searchUserTasks();
   const match = open.find((t) => t.userTaskKey === userTaskKey);
   if (!match) return { ok: false, reason: "no open escalation task" };
-  if (!match.elementId || !ESCALATION_TASK_ELEMENTS.has(match.elementId)) {
+  if (!match.elementId || !allowed.has(match.elementId)) {
     return { ok: false, reason: "not an escalation task" };
   }
   return { ok: true, elementId: match.elementId };
@@ -275,7 +295,8 @@ export async function completeEscalationAsAgent(
  *  affordance resumes the process through the one implementation a human uses from the task inbox —
  *  no parallel completion path — while recording WHO answered in the `task_completions` ledger. A
  *  human completion is the authority (not reversible). A key with no matching open escalation task is
- *  a 404-style no-op. */
+ *  a 404-style no-op. The human surface is the wider `HUMAN_COMPLETABLE_ELEMENTS`, so it also retires a
+ *  `feature-blocked` acknowledgement (issue #332 folded the bespoke `acknowledge-blocked` door here). */
 export async function completeEscalationAsHuman(
   data: DataLayer,
   engine: EngineClient,
@@ -286,7 +307,7 @@ export async function completeEscalationAsHuman(
   const operatorId = input.operatorId.trim();
   if (!operatorId) return { ok: false, reason: "operatorId is required" };
 
-  const resolved = await resolveEscalationTask(engine, userTaskKey);
+  const resolved = await resolveEscalationTask(engine, userTaskKey, HUMAN_COMPLETABLE_ELEMENTS);
   if (!resolved.ok) return resolved;
 
   const invalid = validateEscalationVariables(resolved.elementId, input.variables);
@@ -299,44 +320,6 @@ export async function completeEscalationAsHuman(
     { kind: "human", id: operatorId },
   );
   return { ok: true, completionId, userTaskKey, elementId: resolved.elementId };
-}
-
-/** The `feature-blocked` operator user-task element id (feature.bpmn). Unlike an escalation this is not
- *  an agent-answerable task — it is a blocked-run acknowledgement only a human operator retires — so it
- *  lives outside `ESCALATION_TASK_ELEMENTS` (the agent completer must never touch it) and has its own
- *  human-only completer below. */
-export const FEATURE_BLOCKED_TASK_ELEMENT = "feature-blocked";
-
-/** Complete the `feature-blocked` operator user task AS A HUMAN (issue #220). The blocked twin of
- *  `completeEscalationAsHuman`: it resolves the parked task by key, refuses anything that is not the
- *  `feature-blocked` task, and routes the operator's typed form variables (an optional `note`) through
- *  the SAME canonical `completeUserTaskAttributed` — so the nwf "Acknowledge blocked" affordance resumes
- *  the process (→ `pr.record-blocked-ack`, which settles the row to terminal `blocked`) through the one
- *  completion a human drives from the task inbox, recording WHO acknowledged in the `task_completions`
- *  ledger. A human completion is the authority (not reversible). A key with no matching open
- *  `feature-blocked` task is a 404-style no-op. */
-export async function completeBlockedAsHuman(
-  data: DataLayer,
-  engine: EngineClient,
-  input: { userTaskKey: string; variables: Record<string, unknown>; operatorId: string },
-): Promise<AgentCompleteResult> {
-  const userTaskKey = input.userTaskKey.trim();
-  if (!userTaskKey) return { ok: false, reason: "userTaskKey is required" };
-  const operatorId = input.operatorId.trim();
-  if (!operatorId) return { ok: false, reason: "operatorId is required" };
-
-  const open = await engine.searchUserTasks();
-  const match = open.find((t) => t.userTaskKey === userTaskKey);
-  if (!match) return { ok: false, reason: "no open blocked task" };
-  if (match.elementId !== FEATURE_BLOCKED_TASK_ELEMENT) return { ok: false, reason: "not a blocked task" };
-
-  const { completionId } = await completeUserTaskAttributed(
-    data,
-    engine,
-    { userTaskKey, elementId: match.elementId, variables: input.variables },
-    { kind: "human", id: operatorId },
-  );
-  return { ok: true, completionId, userTaskKey, elementId: match.elementId };
 }
 
 export interface RevertResult {

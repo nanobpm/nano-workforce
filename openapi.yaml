@@ -1908,69 +1908,17 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/MessageResult"
-  /actions/answer-escalation:
-    post:
-      operationId: answerFeatureEscalation
-      summary: "Answer a native feature-run escalation (issue #210). Completes the parked
-        `feature-escalation` user task with the operator's typed form variables (resolution=answer/abandon
-        + guidance), driving the canonical attributed completer (completeUserTaskAttributed) — the same
-        resume path the task inbox uses, recording who answered. The poller then reconciles the run off
-        `escalated`. This is the nwf UI's answer affordance for a feature run parked on a human decision."
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              additionalProperties: false
-              required:
-                - userTaskKey
-                - resolution
-              properties:
-                userTaskKey:
-                  type: string
-                  minLength: 1
-                  description: The parked `feature-escalation` user-task key (feature_runs.escalation_user_task_key).
-                resolution:
-                  type: string
-                  enum: [answer, abandon]
-                  description: answer ⇒ re-dispatch the implement task with the guidance; abandon ⇒ give up on the task.
-                answer:
-                  type: string
-                  description: Guidance for the implementation agent. Required (non-blank) when resolution is answer.
-                operator:
-                  type: string
-                  description: Optional operator handle recorded in the attribution ledger; defaults to "operator".
-      responses:
-        "200":
-          description: The escalation user task was completed and the process resumed.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/MessageResult"
-        "400":
-          description: A required field was missing/invalid, or the target is not an escalation task.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/MessageResult"
-        "404":
-          description: No open escalation user task matches the userTaskKey.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/MessageResult"
   /actions/complete-user-task:
     post:
       operationId: completeUserTask
       summary: "Complete an open native user-task escalation from the nwf Tasks inbox (issue #236).
         Submits the parked task's typed `.form` variables (e.g. a plan-review `{ directive, notes }`, a
-        trial-merge `{ action, notes }`, or a PR `{ answer }`) to the canonical human completer
-        (completeEscalationAsHuman → completeUserTaskAttributed) — the same resume path the task inbox
-        uses, recording who answered. The completer refuses any user task that is not one of the
-        migrated escalation elements. The feature-run kinds keep their own operations
-        (answer-escalation / acknowledge-blocked); this door is for the plan-review / trial-merge / PR
-        `wait-answer` kinds whose completion is a straight typed pass-through. On success the answered
+        trial-merge `{ action, notes }`, a PR `{ answer }`, a feature escalation `{ resolution, answer }`,
+        or a blocked-run `{ note }`) to the canonical human completer (completeEscalationAsHuman →
+        completeUserTaskAttributed) — the same resume path the task inbox uses, recording who answered.
+        The completer refuses any user task that is not one of the human-completable elements. Issue #332
+        retired the bespoke feature-run doors (answer-escalation / acknowledge-blocked) and folded
+        `feature-escalation` / `feature-blocked` onto this one canonical door. On success the answered
         task's read-model row is dropped so the Tasks grid stops offering a decision for it."
       requestBody:
         required: true
@@ -2013,61 +1961,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/MessageResult"
-  /actions/acknowledge-blocked:
-    post:
-      operationId: acknowledgeBlocked
-      summary: "Acknowledge a blocked native feature run (issue #220). Completes the parked
-        `feature-blocked` operator user task with the operator's optional disposition note, driving the
-        canonical attributed completer (completeUserTaskAttributed) — the same resume path the task inbox
-        uses, recording who acknowledged. Completing it fires pr.record-blocked-ack, settling the run to
-        the terminal `blocked` status with the note, and the poller reconciles the completable-task
-        pointer off the row. This is the nwf UI's completion affordance for a feature run parked as
-        blocked (the blocked twin of answer-escalation)."
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              additionalProperties: false
-              required:
-                - userTaskKey
-              properties:
-                userTaskKey:
-                  type: string
-                  minLength: 1
-                  description: The parked `feature-blocked` user-task key (feature_runs.blocked_user_task_key).
-                note:
-                  type: string
-                  description: Optional operator disposition note, recorded on the run (delivery_label). Blank ⇒ "acknowledged".
-                operator:
-                  type: string
-                  description: Optional operator handle recorded in the attribution ledger; defaults to "operator".
-      responses:
-        "200":
-          description: The blocked user task was completed and the process resumed.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/MessageResult"
-        "400":
-          description: A required field was missing/invalid, or the target is not a blocked task.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/MessageResult"
-        "404":
-          description: No open blocked user task matches the userTaskKey.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/MessageResult"
   /actions/acknowledge-done:
     post:
       operationId: acknowledgeDone
       summary: "Tick off a TERMINAL feature run (issue #254 §5). Stamps `acknowledged_at` on the run so
         the gateway recomputes its `list_bucket` to 'history', dropping the finished run out of the
-        primary Active list into History. The Done twin of acknowledge-blocked, but a terminal run is
+        primary Active list into History. The Done twin of the blocked acknowledgement, but a terminal run is
         not parked at a user task, so this completes no user task and only writes the row. Keyed on the
         run's `feature_key`; idempotent-safe (re-acknowledging keeps it in History)."
       requestBody:

@@ -55,7 +55,7 @@
   },
   "dependencies": {
     "@nanobpm/agentic": "^0.1.0",
-    "@nanobpm/urban": "^0.61.0"
+    "@nanobpm/urban": "^0.68.1"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.11",

@@ -5,15 +5,12 @@
 import { test } from "node:test";
 import { assert, assertEquals } from "#test-assert";
 import { FEATURE_RUN_STATUSES } from "./feature.ts";
-import { deriveEscalationOpen, deriveListBucket, deriveStage, type StageInput } from "./stage.ts";
+import { deriveListBucket, deriveStage, type StageInput } from "./stage.ts";
 
 const base = (over: Partial<StageInput> & { status: string }): StageInput => ({
   pr_key: null,
   converge: 1,
   auto_merge: 1,
-  escalation_question: null,
-  escalation_user_task_key: null,
-  blocked_user_task_key: null,
   ...over,
 });
 
@@ -71,10 +68,11 @@ test("skipped: the three converge/auto_merge cases", () => {
   assertEquals(deriveStage(base({ status: "running", converge: 1, auto_merge: 1 })).skipped, "");
 });
 
-test("attention: blocked, escalation, none", () => {
-  assertEquals(deriveStage(base({ status: "awaiting_operator", blocked_user_task_key: "ut-1" })).attention, "blocked");
-  assertEquals(deriveStage(base({ status: "escalated", escalation_user_task_key: "ut-2" })).attention, "⚠");
-  assertEquals(deriveStage(base({ status: "escalated", escalation_question: "which base?" })).attention, "⚠");
+test("attention: derives from status alone (blocked, escalation, none)", () => {
+  // Issue #332 dropped the denormalised escalation pointer/question columns; `attention` is now a pure
+  // function of `status` — `awaiting_operator` (a parked blocked run) → "blocked", `escalated` → "⚠".
+  assertEquals(deriveStage(base({ status: "awaiting_operator" })).attention, "blocked");
+  assertEquals(deriveStage(base({ status: "escalated" })).attention, "⚠");
   assertEquals(deriveStage(base({ status: "running" })).attention, null);
 });
 
@@ -92,7 +90,7 @@ test("escalated WITHOUT pr_key → Implementing / null", () => {
 });
 
 test("awaiting_operator WITHOUT pr_key → Implementing / null, attention 'blocked' when parked", () => {
-  const d = deriveStage(base({ status: "awaiting_operator", pr_key: null, blocked_user_task_key: "ut-3" }));
+  const d = deriveStage(base({ status: "awaiting_operator", pr_key: null }));
   assertEquals(d.stage, "Implementing");
   assertEquals(d.state, null);
   assertEquals(d.attention, "blocked");
@@ -104,48 +102,4 @@ test("deriveListBucket: history iff terminal AND acknowledged, else active", () 
   // A non-terminal status is always active, even if (spuriously) acknowledged.
   assertEquals(deriveListBucket("running", "2024-01-01T00:00:00Z"), "active");
   assertEquals(deriveListBucket("blocked", "2024-01-01T00:00:00Z"), "history");
-});
-
-// deriveEscalationOpen (issue #272): the single fail-closed "open escalation" display signal. TRUE iff
-// all three independently-written escalation columns AGREE the run is parked at an answerable
-// escalation; any single missing/torn field yields FALSE so the pages render not-escalated.
-test("deriveEscalationOpen: true only when status, pointer AND question all present", () => {
-  assertEquals(
-    deriveEscalationOpen({ status: "escalated", escalation_user_task_key: "ut-7", escalation_question: "which base?" }),
-    true,
-  );
-});
-
-test("deriveEscalationOpen: torn tuple (pointer set, question blank) renders as NOT escalated", () => {
-  // The mirror tear observed on nwf#270: status=escalated + live pointer + blank question.
-  assertEquals(
-    deriveEscalationOpen({ status: "escalated", escalation_user_task_key: "ut-7", escalation_question: null }),
-    false,
-  );
-  assertEquals(
-    deriveEscalationOpen({ status: "escalated", escalation_user_task_key: "ut-7", escalation_question: "" }),
-    false,
-  );
-});
-
-test("deriveEscalationOpen: torn tuple (question set, pointer null) renders as NOT escalated", () => {
-  // The entry-window tear: record-feature-escalation persisted the question but the poller has not yet
-  // denormalised the pointer.
-  assertEquals(
-    deriveEscalationOpen({ status: "escalated", escalation_user_task_key: null, escalation_question: "which base?" }),
-    false,
-  );
-});
-
-test("deriveEscalationOpen: a resumed run whose status lags behind a cleared tuple is NOT escalated", () => {
-  // status still 'escalated' but the answer op already cleared pointer + question → fail closed.
-  assertEquals(
-    deriveEscalationOpen({ status: "escalated", escalation_user_task_key: null, escalation_question: null }),
-    false,
-  );
-  // A non-escalated status can never be open regardless of stray column values.
-  assertEquals(
-    deriveEscalationOpen({ status: "running", escalation_user_task_key: "ut-7", escalation_question: "which base?" }),
-    false,
-  );
 });

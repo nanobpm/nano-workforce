@@ -12,7 +12,7 @@ import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { abandonUrl, mintAbandonToken, renderAbandonBrief } from "./abandon.ts";
 import { agentSlaTimeout } from "./agentSla.ts";
 import { deriveDelivery, TERMINAL_STATUSES } from "./delivery.ts";
-import { backfillFeatureStages, deriveFeatureBlockedPatch, deriveFeatureDelivery, deriveFeatureEscalationPatch, FEATURE_BLOCKED_ELEMENT, FEATURE_ESCALATION_ELEMENT, FEATURE_RUN_STATUSES, type FeatureRun, type FeatureRunStatus, featureEscalations, featureRuns } from "./feature.ts";
+import { backfillFeatureStages, deriveFeatureDelivery, FEATURE_BLOCKED_ELEMENT, FEATURE_ESCALATION_ELEMENT, FEATURE_RUN_STATUSES, type FeatureRunStatus, featureEscalations, featureRuns } from "./feature.ts";
 import {
   classifyMergeability,
   coalesceTitle,
@@ -1511,83 +1511,6 @@ export async function pollFeatureDelivery(data: DataLayer) {
   }
 }
 
-/** Reconcile each in-flight FEATURE run against its native `feature-escalation` user task (issue
- * #210 — feature-run escalations were invisible in the nwf UI). When a feature run escalates it parks
- * on the `feature-escalation` operator user task (an engine wait); no worker runs, so `feature_runs`
- * — which the schema-driven pages read — stayed `running` with nothing to show. This is the
- * `feature_runs` twin of `pollFeatureDelivery`: for each run that can be parked at (or resuming from)
- * the escalation, read its open user tasks and project the parked task onto the row via the pure
- * `deriveFeatureEscalationPatch` — flipping `status` to `escalated` and denormalising the escalation's
- * completable `userTaskKey` so the pages can drive an answer, and flipping back to `running` (clearing
- * the pointer) once it un-parks. It never writes `escalation_question` — that is persisted by the
- * `record-feature-escalation` worker at escalation entry and cleared on the exit paths, so the poller
- * can never clobber the source of truth for the question.
- *
- * Candidates are only the runs that could be parked here — `running` (may have just escalated) and
- * `escalated` (may have just resumed) — queried via the `feature_runs(status)` index, so the pass
- * stays O(in-flight), not O(total runs). Terminal-ward transitions THROUGH `record-feature` (answer
- * → abandon, SLA auto-abandon, done) clear the pointer in that worker, so a run that has already left
- * `escalated` never needs sweeping here. Best-effort + idempotent — per-run failures are isolated. */
-export async function pollFeatureEscalations(data: DataLayer, engine: EngineClient) {
-  const seen = new Set<string>();
-  const candidates: FeatureRun[] = [];
-  for (const status of ["running", "escalated"] as const) {
-    for (const run of await featureRuns(data).find({ status })) {
-      if (seen.has(run.feature_key)) continue;
-      seen.add(run.feature_key);
-      candidates.push(run);
-    }
-  }
-  for (const run of candidates) {
-    if (!run.process_key) continue;
-    try {
-      const tasks = await engine.openUserTasks({ processInstanceKey: run.process_key });
-      const task = tasks.find((t) => t.elementId === FEATURE_ESCALATION_ELEMENT);
-      const parked = task ? { userTaskKey: task.userTaskKey } : null;
-      const patch = deriveFeatureEscalationPatch(run, parked);
-      if (patch) {
-        await featureRuns(data).update(run.feature_key, { ...patch, updated_at: now() });
-      }
-    } catch (err) {
-      console.error(`[poller] feature escalation ${run.feature_key}: ${err}`);
-    }
-  }
-}
-
-/** Reconcile each BLOCKED FEATURE run against its native `feature-blocked` user task (issue #220 —
- * a blocked run parked at `feature-blocked` had no completion affordance in nwf). When a feature run
- * reaches a `blocked` outcome `record-feature` holds the row at the NON-terminal `awaiting_operator`
- * status and it parks on the `feature-blocked` operator user task (an engine wait); no worker runs, so
- * the schema-driven pages — which read `feature_runs` — had a status to show but NO pointer to drive a
- * completion action, so the run sat parked forever unless completed out-of-band. This is the blocked
- * twin of `pollFeatureEscalations`: for each run parked at (or resuming from) the blocked wait, read its
- * open user tasks and project the parked task's completable `userTaskKey` onto the row via the pure
- * `deriveFeatureBlockedPatch`, so the pages can drive an "Acknowledge blocked" action, and clear the
- * pointer once it un-parks. It never touches `status` — `record-feature` owns the `awaiting_operator`
- * flip and `record-blocked-ack` owns the terminal `blocked`, so the poller can never clobber either.
- *
- * Candidates are only the runs that could be parked here — `awaiting_operator` (parked at, or just
- * un-parked from, the blocked wait) — queried via the `feature_runs(status)` index, so the pass stays
- * O(in-flight), not O(total runs). The terminal-ward transition THROUGH `record-blocked-ack` (and the
- * acknowledge operation) clears the pointer, so a run that has already settled to `blocked` never needs
- * sweeping here. Best-effort + idempotent — per-run failures are isolated. */
-export async function pollFeatureBlocked(data: DataLayer, engine: EngineClient) {
-  for (const run of await featureRuns(data).find({ status: "awaiting_operator" })) {
-    if (!run.process_key) continue;
-    try {
-      const tasks = await engine.openUserTasks({ processInstanceKey: run.process_key });
-      const task = tasks.find((t) => t.elementId === FEATURE_BLOCKED_ELEMENT);
-      const parked = task ? { userTaskKey: task.userTaskKey } : null;
-      const patch = deriveFeatureBlockedPatch(run, parked);
-      if (patch) {
-        await featureRuns(data).update(run.feature_key, { ...patch, updated_at: now() });
-      }
-    } catch (err) {
-      console.error(`[poller] feature blocked ${run.feature_key}: ${err}`);
-    }
-  }
-}
-
 /** The app manifest, read and parsed exactly ONCE at module load. `activeStatusesFor` is invoked
  * three times during module initialization (the PR/plan/feature constants below); parsing here keeps
  * that to a single synchronous `readFileSync` + `JSON.parse` instead of one per lookup. */
@@ -1636,16 +1559,14 @@ export const FEATURE_ACTIVE_STATUSES: readonly FeatureRunStatus[] =
 
 /** Reconcile the unified Tasks-inbox read-model (`user_tasks`) against the engine's currently-open
  * native user-task escalations (issue #236). The Tasks page lists EVERY open escalation awaiting a
- * human decision — the feature kinds (already denormalised onto `feature_runs` by the two feature
- * pollers, which run earlier in this pass) plus the epic/PR kinds (`plan-review-decision`,
- * `trial-merge-decision`, `wait-answer`) that had no app-side pointer at all, so the pages could not
- * drive their completion. This is the generalisation of `pollFeatureEscalations`/`pollFeatureBlocked`
- * across all subjects: for each in-flight plan / PR it reads the instance's open user tasks and
- * projects one `user_tasks` row per escalation, enriching the display `question` from the audit
- * tables each kind already records. `reconcileUserTasks` then diffs the desired open set against the
- * persisted rows so a completed task's row is deleted (answered here, via the task inbox, or
- * out-of-band) and `showCount` reflects live pending work. Best-effort + idempotent — per-instance
- * failures are isolated so one bad instance never stalls the pass. */
+ * human decision — the feature kinds (`feature-escalation` / `feature-blocked`) plus the epic/PR kinds
+ * (`plan-review-decision`, `trial-merge-decision`, `wait-answer`) — that otherwise had no app-side
+ * pointer, so the pages could not drive their completion. For each in-flight feature / plan / PR it
+ * reads the instance's open user tasks and projects one `user_tasks` row per escalation, enriching the
+ * display `question` from the audit tables each kind already records. `reconcileUserTasks` then diffs
+ * the desired open set against the persisted rows so a completed task's row is deleted (answered here,
+ * via the task inbox, or out-of-band) and `showCount` reflects live pending work. Best-effort +
+ * idempotent — per-instance failures are isolated so one bad instance never stalls the pass. */
 export async function pollUserTasks(data: DataLayer, engine: EngineClient) {
   const at = now();
   const desired: UserTaskRow[] = [];
@@ -1653,54 +1574,63 @@ export async function pollUserTasks(data: DataLayer, engine: EngineClient) {
     if (row) desired.push(row);
   };
 
-  // Feature-run escalations — the completable keys are denormalised onto `feature_runs` by
-  // pollFeatureEscalations/pollFeatureBlocked (earlier in this pass), so no per-instance engine read
-  // is needed here.
+  // Feature-run escalations / blocked runs — read each in-flight feature run's open user tasks directly
+  // from the engine (issue #332: the denormalised `feature_runs.escalation_user_task_key` /
+  // `blocked_user_task_key` pointers were dropped in the contract phase, so this now reads the live
+  // task exactly as the plan/PR scans below do — one canonical read, no denormalised mirror). Dedupe by
+  // `feature_key` across the status queries so a run whose status transitions mid-pass is not processed
+  // twice.
   const featureSeen = new Set<string>();
   for (const status of FEATURE_ACTIVE_STATUSES) {
     for (const run of await featureRuns(data).find({ status })) {
+      if (!run.process_key) continue;
       if (featureSeen.has(run.feature_key)) continue;
       featureSeen.add(run.feature_key);
-      if (run.escalation_user_task_key) {
-        // Source the question from the canonical append-only `feature_escalations` audit log (issue
-        // #305) — the surviving table `record-feature-escalation` writes — falling back to the legacy
-        // denormalised `feature_runs.escalation_question` while both coexist (expand phase). This is the
-        // feature analogue of the plan-review/trial-merge/PR-loop question enrichment below, and lets the
-        // denormalised column be dropped in the contract phase without the Tasks grid losing the text.
-        const question = latestFeatureEscalationQuestion(await featureEscalations(data).find({ feature_key: run.feature_key })) ??
-          run.escalation_question;
-        push(
-          buildUserTaskRow(
-            {
-              userTaskKey: run.escalation_user_task_key,
-              elementId: FEATURE_ESCALATION_ELEMENT,
-              subjectType: "feature",
-              subjectKey: run.feature_key,
-              subjectTitle: run.title,
-              subjectUrl: run.issue_url,
-              question,
-              processKey: run.process_key,
-            },
-            at,
-          ),
-        );
+      let tasks: { userTaskKey: string; elementId?: string }[];
+      try {
+        tasks = await engine.openUserTasks({ processInstanceKey: run.process_key });
+      } catch (err) {
+        console.error(`[poller] user tasks (feature ${run.feature_key}): ${err}`);
+        continue;
       }
-      if (run.blocked_user_task_key) {
-        push(
-          buildUserTaskRow(
-            {
-              userTaskKey: run.blocked_user_task_key,
-              elementId: FEATURE_BLOCKED_ELEMENT,
-              subjectType: "feature",
-              subjectKey: run.feature_key,
-              subjectTitle: run.title,
-              subjectUrl: run.issue_url,
-              question: run.delivery_label,
-              processKey: run.process_key,
-            },
-            at,
-          ),
-        );
+      for (const t of tasks) {
+        if (t.elementId === FEATURE_ESCALATION_ELEMENT) {
+          // Source the question from the canonical append-only `feature_escalations` audit log (issue
+          // #305) — the surviving table `record-feature-escalation` writes — the feature analogue of the
+          // plan-review/trial-merge/PR-loop question enrichment below.
+          const question = latestFeatureEscalationQuestion(await featureEscalations(data).find({ feature_key: run.feature_key }));
+          push(
+            buildUserTaskRow(
+              {
+                userTaskKey: t.userTaskKey,
+                elementId: FEATURE_ESCALATION_ELEMENT,
+                subjectType: "feature",
+                subjectKey: run.feature_key,
+                subjectTitle: run.title,
+                subjectUrl: run.issue_url,
+                question,
+                processKey: run.process_key,
+              },
+              at,
+            ),
+          );
+        } else if (t.elementId === FEATURE_BLOCKED_ELEMENT) {
+          push(
+            buildUserTaskRow(
+              {
+                userTaskKey: t.userTaskKey,
+                elementId: FEATURE_BLOCKED_ELEMENT,
+                subjectType: "feature",
+                subjectKey: run.feature_key,
+                subjectTitle: run.title,
+                subjectUrl: run.issue_url,
+                question: run.delivery_label,
+                processKey: run.process_key,
+              },
+              at,
+            ),
+          );
+        }
       }
     }
   }
@@ -1858,8 +1788,6 @@ export async function pollOnce(
   await pollPromotion(data, engine, token);
   await pollFeatureDelivery(data);
   await pollLineage(data);
-  await pollFeatureEscalations(data, engine);
-  await pollFeatureBlocked(data, engine);
   await pollUserTasks(data, engine);
   if (engineRest) {
     const base = engineRest.restAddress.replace(/\/+$/, "");

@@ -166,6 +166,35 @@ test("a HUMAN operator completes a feature escalation via the SAME attributed re
   assertEquals(row.reversible, 0, "a human completion is the authority (not reversible)");
 });
 
+test("feature-blocked is HUMAN-completable but NOT agent-completable (issue #332)", async () => {
+  // Issue #332 folded the bespoke `acknowledge-blocked` door onto the canonical human completer, so a
+  // HUMAN operator retires a blocked run through `completeEscalationAsHuman`. It stays OUTSIDE the agent
+  // surface (`ESCALATION_TASK_ELEMENTS`) — an agent must never acknowledge a blocked run on a human's
+  // behalf — so the agent completer refuses it.
+  const stores = { task_completions: { rows: [] as any[], key: "id" } };
+  const data = memData(stores);
+  const { engine, completed } = fakeEngine([{ userTaskKey: "ut-b", elementId: "feature-blocked" }]);
+
+  const asAgent = await completeEscalationAsAgent(data, engine, {
+    userTaskKey: "ut-b",
+    agentId: "bot",
+    variables: { note: "n" },
+  });
+  assertEquals(asAgent.ok, false, "the agent completer refuses feature-blocked");
+  assertEquals(asAgent.reason, "not an escalation task");
+  assertEquals(completed.length, 0);
+
+  const asHuman = await completeEscalationAsHuman(data, engine, {
+    userTaskKey: "ut-b",
+    operatorId: "alice",
+    variables: { note: "reassigned to a human" },
+  });
+  assertEquals(asHuman.ok, true, "the human completer retires feature-blocked");
+  assertEquals(asHuman.elementId, "feature-blocked");
+  assertEquals(completed.length, 1);
+  assertEquals(completed[0].variables, { note: "reassigned to a human" });
+});
+
 test("human completer refuses a non-escalation user task and is a no-op for an unknown key", async () => {
   const stores = { task_completions: { rows: [] as any[], key: "id" } };
   const data = memData(stores);
