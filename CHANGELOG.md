@@ -1,3 +1,10 @@
+# [0.99.0](https://github.com/nanobpm/nano-workforce/compare/v0.98.1...v0.99.0) (2026-08-19)
+
+
+### Features
+
+* **review-loop:** re-express the review-ready wait on the ReadinessProbe gate ([#259](https://github.com/nanobpm/nano-workforce/issues/259)) ([#338](https://github.com/nanobpm/nano-workforce/issues/338)) ([4d86509](https://github.com/nanobpm/nano-workforce/commit/4d86509f1f55dd9b31417add323e04da5b574b3d)), closes [#258](https://github.com/nanobpm/nano-workforce/issues/258) [#258](https://github.com/nanobpm/nano-workforce/issues/258)
+
 ## [0.98.1](https://github.com/nanobpm/nano-workforce/compare/v0.98.0...v0.98.1) (2026-08-19)
 
 
