@@ -11,6 +11,7 @@
 // hand-written SQL — matching app/service.ts.
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { blackboardUrl, mintBlackboardToken, renderCoordinationBrief } from "./blackboard.ts";
+import { capsWaitTimeout, DEFAULT_CAPS_WAIT_TIMEOUT } from "./capsWait.ts";
 import { EPIC_PHASE } from "./epicPhase.ts";
 import { DEFAULT_ESCALATION_SLA_TIMEOUT, escalationSlaTimeout } from "./escalationSla.ts";
 import { coalesceTitle, ensureBaseBranch, fetchDefaultBranch, fetchIssueTitle } from "./github.ts";
@@ -27,6 +28,17 @@ export const PLAN_PROCESS_ID = "plan-fanout";
 export const ESCALATION_SLA_TIMEOUT = escalationSlaTimeout(
   process.env.NANO_ESCALATION_SLA_TIMEOUT,
   DEFAULT_ESCALATION_SLA_TIMEOUT,
+);
+
+/** The fleet-wide capability-barrier bound (ISO-8601 duration) seeded onto every plan-fanout instance
+ * as the `capsWaitTimeout` process variable and evaluated by the `wait-caps-timeout` timer arm of the
+ * `wait-caps-resolved` event-based gateway. An operator sets `NANO_CAPS_WAIT_TIMEOUT`; a malformed
+ * value falls back to {@link DEFAULT_CAPS_WAIT_TIMEOUT} so a bad env can never deploy an
+ * uninterpretable timer. Bounds a task's wait on an unresolvable cross-repo capability so it escalates
+ * to an operator instead of parking forever. */
+export const CAPS_WAIT_TIMEOUT = capsWaitTimeout(
+  process.env.NANO_CAPS_WAIT_TIMEOUT,
+  DEFAULT_CAPS_WAIT_TIMEOUT,
 );
 
 const now = () => new Date().toISOString();
@@ -533,6 +545,12 @@ export async function startPlan(
       // `operators` candidate group); an operator/agent can claim/reassign via the task inbox.
       escalationSlaTimeout: ESCALATION_SLA_TIMEOUT,
       escalationAssignee: null,
+      // Capability-barrier bound (#289): the validated ISO-8601 duration read by the
+      // `wait-caps-timeout` timer arm of the `wait-caps-resolved` event-based gateway. A task whose
+      // declared cross-repo capabilities never resolve (most acutely an unresolvable capabilityRef the
+      // host reconciler can never gate) escalates to the `feature-escalation` operator user task when
+      // this elapses, instead of parking at the barrier forever — durable in-process liveness.
+      capsWaitTimeout: CAPS_WAIT_TIMEOUT,
       // Coordination blackboard (#51): the capability URL + the protocol brief that each
       // implementer agent gets appended to its prompt (composed into `appendPrompt` in
       // plan-fanout.bpmn's implement-task). Advisory shared state, delivered in-band, used

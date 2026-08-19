@@ -337,8 +337,8 @@ describe("plan-fanout escalations (U2 — task + plan-review + trial-merge → u
         // and must be parked at `wait-caps-resolved` (the feature agent has NOT run yet).
         const parked = takenFlows(app);
         assert.ok(
-          parked.includes("w_gw_needs->wait-caps-resolved"),
-          `task with needs routed to the barrier (flows: ${parked.join(", ")})`,
+          parked.includes("w_gw_needs->w_gw_caps") && parked.includes("w_gw_caps->wait-caps-resolved"),
+          `task with needs routed through the barrier gateway to wait-caps-resolved (flows: ${parked.join(", ")})`,
         );
         assert.ok(
           !parked.includes("w_gw_needs->implement-task"),
@@ -367,6 +367,81 @@ describe("plan-fanout escalations (U2 — task + plan-review + trial-merge → u
           `the late-bound resolved-deps brief reached the agent (got: ${JSON.stringify(featureBrief)})`,
         );
         assert.ok(processKey, "processKey resolved");
+      },
+    );
+  });
+
+  // Capability barrier liveness (issue #289): a task whose declared cross-repo capability NEVER
+  // resolves (the reviewer's `UnresolvableCapabilityRefError` wedge: a `caps-resolved` message the
+  // host reconciler can never publish) must NOT park at `wait-caps-resolved` forever. The barrier is
+  // an event-based gateway racing the resolve message against a bounded `capsWaitTimeout` timer; when
+  // the bound elapses the timer arm fires and the token escalates to the `feature-escalation` operator
+  // user task (with a seeded operator `question`). We never publish `caps-resolved` — advancing the
+  // virtual clock past the seeded bound is the only way the token can move, so a green here proves the
+  // durable in-process bound (a barrier with no timer would simply hang, taking no flow).
+  test("capability edge: an unresolvable barrier escalates to the operator when the bound elapses (#289)", async () => {
+    const capTaskPlan: Stub = () => ({
+      tasks: [
+        {
+          id: "t1",
+          title: "T1",
+          prompt: "do t1",
+          // A bare handle names no owner/repo releases source — unresolvable, so caps-resolved never comes.
+          needs: [{ capabilityRef: "#274", package: "@nanobpm/urban" }],
+        },
+      ],
+    });
+    let featureRan = false;
+    await withApp(
+      {
+        "senior:plan": capTaskPlan,
+        "senior:plan-review": approveReview,
+        "senior:feature": () => {
+          featureRan = true;
+          return { status: "opened", summary: "built t1", pr: "owner/repo#2" };
+        },
+      },
+      async ({ app, processKey }) => {
+        // Parked at the barrier: the agent has not run and no timeout flow has been taken yet.
+        assert.equal(featureRan, false, "the agent is not dispatched while parked at the barrier");
+        const parked = takenFlows(app);
+        assert.ok(
+          parked.includes("w_gw_caps->wait-caps-resolved") && parked.includes("w_gw_caps->wait-caps-timeout"),
+          `both barrier arms are armed by the event-based gateway (flows: ${parked.join(", ")})`,
+        );
+        assert.ok(!parked.includes("wait-caps-timeout->feature-escalation"), "the timeout has not fired yet");
+
+        // Never publish caps-resolved — let the bound (default P1D) elapse. Advancing past it is the
+        // ONLY way the token can move, so this proves the wait is genuinely bounded.
+        await app.advanceTime(25 * 60 * 60 * 1000);
+        await app.settle();
+
+        const flows = takenFlows(app);
+        assert.ok(
+          flows.includes("wait-caps-timeout->feature-escalation"),
+          `the caps bound escalated the parked task to the operator (flows: ${flows.join(", ")})`,
+        );
+        assert.ok(
+          !flows.includes("wait-caps-resolved->implement-task"),
+          "the resolve arm was withdrawn — the token did not also proceed as if resolved",
+        );
+        assert.equal(featureRan, false, "the agent was NOT dispatched — the unresolved task escalated instead");
+
+        // The escalation is a genuine, operable operator decision point: answering it loops the
+        // child back to re-dispatch the task (the operator having unblocked/decided), exactly like an
+        // agent-raised escalation — proving this is a real bounded wait + operator escalation, not a
+        // dead end.
+        const task = await openTask(app, processKey, "feature-escalation");
+        assert.ok(task.userTaskKey, "the caps-timeout escalation carries a completable userTaskKey");
+        await app.engine.completeUserTask(task.userTaskKey, { resolution: "answer", answer: "shipped it manually" });
+        await app.settle();
+
+        const answered = takenFlows(app);
+        assert.ok(
+          answered.includes("w_gw_answer->implement-task"),
+          `answering the caps escalation routed back to implement-task (flows: ${answered.join(", ")})`,
+        );
+        assert.equal(featureRan, true, "the agent was dispatched once the operator answered the caps escalation");
       },
     );
   });
