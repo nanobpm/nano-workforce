@@ -7,18 +7,50 @@
       "id": "nav",
       "props": {
         "variant": "bar",
-        "sticky": true,
         "title": "Nano Workforce",
         "items": [
-          { "label": "Overview", "page": "overview" },
-          { "label": "Lineage", "page": "lineage" },
-          { "label": "Convergence", "page": "home" },
-          { "label": "Epics", "page": "epic" },
-          { "label": "Feature", "page": "feature" },
-          { "label": "Tasks", "page": "tasks" },
-          { "label": "Cockpit", "page": "cockpit" },
-          { "label": "Board", "page": "board" }
-        ]
+          {
+            "label": "Overview",
+            "page": "overview"
+          },
+          {
+            "label": "Lineage",
+            "page": "lineage"
+          },
+          {
+            "label": "Convergence",
+            "page": "home"
+          },
+          {
+            "label": "Epics",
+            "page": "epic"
+          },
+          {
+            "label": "Feature",
+            "page": "feature"
+          },
+          {
+            "label": "Tasks",
+            "page": "tasks",
+            "badge": {
+              "source": "app",
+              "table": "user_tasks",
+              "filter": [],
+              "tone": "danger",
+              "refreshMs": 5000,
+              "hideWhenZero": true
+            }
+          },
+          {
+            "label": "Cockpit",
+            "page": "cockpit"
+          },
+          {
+            "label": "Board",
+            "page": "board"
+          }
+        ],
+        "sticky": true
       }
     },
     {
