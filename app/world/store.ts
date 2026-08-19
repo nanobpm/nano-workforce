@@ -219,7 +219,10 @@ export class WorldStore {
         await effects.insert({
           pr_key: prKey,
           checkpoint_offset: offset,
-          seq: 0,
+          // Append AFTER the tail already recorded at this offset — restarting at `seq 0` would
+          // collide with a sibling effect at the same offset and make `effectTail`'s tie-sort
+          // (`a.seq - b.seq`) non-deterministic, destabilising restore/audit ordering.
+          seq: await WorldStore.#nextSeqOn(effects, prKey, offset),
           kind: effect.kind,
           idempotency_key: effect.idempotencyKey,
           description: effect.description ?? null,

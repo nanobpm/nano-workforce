@@ -209,3 +209,27 @@ test("the schema enforces one checkpoint row per (pr, commit SHA) — a raw dupl
   const cps = await data.table("world_checkpoints", "id").find({ pr_key: PR, commit_sha: "sha-a" });
   assertEquals(cps.length, 1, "still exactly one checkpoint row for the SHA");
 });
+
+test("fenceFor.markApplied appends new effects at the next seq — no seq collision at a shared offset", async () => {
+  const { data, db } = memWorldData();
+  const store = new WorldStore(data);
+  // recordCheckpoint seeds offset 0 with the default push effect at seq 0.
+  await store.recordCheckpoint({ prKey: PR, roundNo: 1, commitSha: "sha-a" });
+  const fence = store.fenceFor(PR, 0);
+  // Two brand-new applied effects at the SAME offset must NOT both land at seq 0 (which would make
+  // effectTail's `a.seq - b.seq` tie-sort non-deterministic) — each takes the next available seq.
+  await fence.markApplied({ kind: "pr-comment", idempotencyKey: "c-1" });
+  await fence.markApplied({ kind: "merge", idempotencyKey: "m-1" });
+  const seqs = (
+    db.prepare("SELECT seq FROM world_effects WHERE pr_key = ? AND checkpoint_offset = 0 ORDER BY seq").all(PR) as {
+      seq: number;
+    }[]
+  ).map((r) => r.seq);
+  assertEquals(seqs, [0, 1, 2], "each new effect appends at a distinct, monotonically increasing seq");
+  const tail = await store.effectTail(PR, 0);
+  assertEquals(
+    tail.map((e) => e.idempotencyKey),
+    ["sha-a", "c-1", "m-1"],
+    "effectTail is deterministically ordered — insertion order, no ties",
+  );
+});
