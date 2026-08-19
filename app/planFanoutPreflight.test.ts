@@ -63,6 +63,7 @@ test("a never-green producer escalates (bounded) without wedging: probe timeout 
   assertStringIncludes(sub, "=escalationSlaTimeout", "the escalation is bounded by the shared SLA");
   assert(hasFlow("be_pf_probe_timeout", "readiness-escalation-pf"), "a timed-out probe routes to escalation");
   assert(hasFlow("pf_gw", "readiness-escalation-pf"), "a not-ready probe routes to escalation");
+  assert(hasFlow("be_pf_sla", "pf_end"), "an elapsed escalation SLA settles the preflight instead of wedging");
 });
 
 test("the bound resolvedArtifacts version rides the implement task's appendPrompt", () => {

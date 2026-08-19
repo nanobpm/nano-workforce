@@ -133,6 +133,7 @@
         <bpmn:outgoing>pf_toResolution</bpmn:outgoing>
       </bpmn:userTask>
       <bpmn:boundaryEvent id="be_pf_sla" name="SLA elapsed" attachedToRef="readiness-escalation-pf">
+        <bpmn:outgoing>pf_sla</bpmn:outgoing>
         <bpmn:timerEventDefinition id="ted_pf_sla">
           <bpmn:timeDuration xsi:type="bpmn:tFormalExpression">=escalationSlaTimeout</bpmn:timeDuration>
         </bpmn:timerEventDefinition>
@@ -146,6 +147,7 @@
         <bpmn:incoming>pf_ready</bpmn:incoming>
         <bpmn:incoming>pf_proceed</bpmn:incoming>
         <bpmn:incoming>pf_abandon</bpmn:incoming>
+        <bpmn:incoming>pf_sla</bpmn:incoming>
       </bpmn:endEvent>
       <bpmn:sequenceFlow id="pf_toProbe" sourceRef="pf_start" targetRef="preflight-probe" />
       <bpmn:sequenceFlow id="pf_probed" sourceRef="preflight-probe" targetRef="pf_gw" />
@@ -159,6 +161,7 @@
       <bpmn:sequenceFlow id="pf_abandon" name="abandon" sourceRef="pf_gw_res" targetRef="pf_end">
         <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=resolution = "abandon"</bpmn:conditionExpression>
       </bpmn:sequenceFlow>
+      <bpmn:sequenceFlow id="pf_sla" name="SLA auto-abandon" sourceRef="be_pf_sla" targetRef="pf_end" />
     </bpmn:subProcess>
     <bpmn:serviceTask id="ensure-base-branch" name="Ensure base branch">
       <bpmn:extensionElements>
@@ -1031,6 +1034,15 @@
         <di:waypoint x="566" y="120" />
         <bpmndi:BPMNLabel>
           <dc:Bounds x="341" y="93" width="67" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_pf_sla" bpmnElement="pf_sla">
+        <di:waypoint x="616" y="178" />
+        <di:waypoint x="616" y="198" />
+        <di:waypoint x="934" y="198" />
+        <di:waypoint x="934" y="138" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="731" y="165" width="88" height="28" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
     </bpmndi:BPMNPlane>
