@@ -7,6 +7,7 @@ import { appendEntry } from "./blackboard.ts";
 import {
   gatherConformance,
   hasDeliveredImplementation,
+  hasDeliveredImplementationForPlan,
   recordConformance,
   renderConformanceBrief,
 } from "./conformance.ts";
@@ -108,6 +109,25 @@ test("hasDeliveredImplementation: true iff at least one PR landed", async () => 
   assert(!hasDeliveredImplementation(await gatherConformance(data, PLAN)));
   stores["pull_requests"] = [{ pr_key: "acme/widgets#10", status: "merged" }];
   assert(hasDeliveredImplementation(await gatherConformance(data, PLAN)));
+});
+
+test("hasDeliveredImplementationForPlan: matches the digest without a blackboard scan", async () => {
+  const { data, stores } = memData();
+  seedPlan(stores);
+  seedTask(stores, { id: 1, task_index: 0, task_id: "t1", status: "opened", pr_key: "acme/widgets#10" });
+  seedTask(stores, { id: 2, task_index: 1, task_id: "t2", status: "skipped", pr_key: null });
+  seedPr(stores, "acme/widgets#10", "abandoned");
+  // No landed PR yet — agrees with the full-digest helper.
+  assertEquals(await hasDeliveredImplementationForPlan(data, PLAN), false);
+  assertEquals(hasDeliveredImplementation(await gatherConformance(data, PLAN)), false);
+  // A landed PR flips both to true.
+  stores["pull_requests"] = [{ pr_key: "acme/widgets#10", status: "converged" }];
+  assertEquals(await hasDeliveredImplementationForPlan(data, PLAN), true);
+  assertEquals(hasDeliveredImplementation(await gatherConformance(data, PLAN)), true);
+  // The cheap check must not touch the blackboard.
+  const before = (stores["blackboard"] ?? []).length;
+  await hasDeliveredImplementationForPlan(data, PLAN);
+  assertEquals((stores["blackboard"] ?? []).length, before);
 });
 
 test("renderConformanceBrief: lists PRs to examine, the spec, and raised deviations", () => {

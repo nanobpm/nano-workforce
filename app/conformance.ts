@@ -38,6 +38,15 @@ interface PlanRow extends Record<string, unknown> {
 const plansTbl = (data: DataLayer) => data.table<PlanRow>("plans", "plan_key");
 const prsTbl = (data: DataLayer) =>
   data.table<{ pr_key: string; status: string }>("pull_requests", "pr_key");
+
+/** A slice's PR "landed" iff it exists and reached a non-abandoned terminal status. The single
+ * predicate both {@link gatherConformance} and {@link hasDeliveredImplementationForPlan} apply, so
+ * the full digest and the cheap trigger check can't disagree about what counts as landed. */
+async function isLanded(data: DataLayer, prKey: string | null | undefined): Promise<boolean> {
+  if (!prKey) return false;
+  const pr = await prsTbl(data).get(prKey);
+  return !!pr && LANDED_PR_STATUSES.has(pr.status);
+}
 const conformanceTbl = (data: DataLayer) =>
   data.table<{ plan_key: string } & Record<string, unknown>>("plan_conformance", "plan_key");
 
@@ -81,12 +90,8 @@ export async function gatherConformance(
   const slices: ConformanceSlice[] = [];
   const deliveredPrs: string[] = [];
   for (const t of tasks) {
-    let landed = false;
-    if (t.pr_key) {
-      const pr = await prsTbl(data).get(t.pr_key);
-      landed = !!pr && LANDED_PR_STATUSES.has(pr.status);
-      if (landed) deliveredPrs.push(t.pr_key);
-    }
+    const landed = await isLanded(data, t.pr_key);
+    if (landed && t.pr_key) deliveredPrs.push(t.pr_key);
     slices.push({
       taskId: t.task_id,
       title: t.title ?? null,
@@ -118,6 +123,22 @@ export async function gatherConformance(
  * digest itself is empty. */
 export function hasDeliveredImplementation(d: ConformanceDigest): boolean {
   return d.deliveredPrs.length > 0;
+}
+
+/** Cheap trigger check for the retro gate: does this plan have ANY landed implementation to examine?
+ * Inspects only plan_tasks + pull_requests (short-circuiting on the first landed PR) and — unlike
+ * {@link gatherConformance} — performs no blackboard scan, so the empty-digest trigger in
+ * app/retro.ts doesn't pay to compute `scopeChanges` it would discard. Shares {@link isLanded} with
+ * the full digest so the two can't drift on what "landed" means. */
+export async function hasDeliveredImplementationForPlan(
+  data: DataLayer,
+  planKey: string,
+): Promise<boolean> {
+  const tasks = await planTasks(data).find({ plan_key: planKey });
+  for (const t of tasks) {
+    if (await isLanded(data, t.pr_key)) return true;
+  }
+  return false;
 }
 
 /** Render the digest as the compact markdown brief handed to the conformance agent (rides
