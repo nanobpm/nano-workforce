@@ -19,6 +19,7 @@ export {
   type Fence,
   type FenceOutcome,
   fenceReplay,
+  isCommitSha,
   isEffectKind,
 } from "./effect-ledger.ts";
 export { execGitRunner, type GitRunner } from "./git.ts";

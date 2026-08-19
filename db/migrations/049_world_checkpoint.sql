@@ -66,6 +66,13 @@ CREATE TABLE IF NOT EXISTS world_effects (
   description       TEXT,                    -- human audit note (nullable)
   applied           INTEGER NOT NULL DEFAULT 0,  -- 1 once its side effect is realised; 0 = pending tail
   created_at        TEXT NOT NULL,
+  -- `applied` is a strict boolean domain — the fence reads it as "already realised?", so a stray
+  -- value (a future writer bug, a corrupt row on this externalised durability boundary) would make
+  -- the replay silently mis-skip or re-apply an effect. Pin it to {0,1} at the schema. (`kind` is
+  -- deliberately NOT CHECK-constrained here: its valid set is the canonical `EFFECT_KINDS` tuple in
+  -- app/world/effect-ledger.ts and is already enforced at the write boundary by `isEffectKind`;
+  -- re-listing the values in SQL would be a second source of truth that drifts when a kind is added.)
+  CHECK (applied IN (0, 1)),
   -- The durable FENCE: an effect's idempotency key is unique within a PR, so replaying a tail can
   -- never re-record — and hence never re-apply — an effect that already landed.
   UNIQUE(pr_key, idempotency_key)

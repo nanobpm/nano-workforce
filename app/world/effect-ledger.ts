@@ -31,6 +31,16 @@ export function isEffectKind(kind: unknown): kind is EffectKind {
   return typeof kind === "string" && EFFECT_KINDS.some((k) => k === kind);
 }
 
+/** True when `sha` is a well-formed 40-hex git commit SHA (a full object name). The world-restore
+ * marker's `commitSha` is used as an EXACT checkout target (`git fetch && git checkout <sha>`), so a
+ * branch name, an abbreviated/short ref, or a whitespace-tainted value could reconstruct to a moved
+ * branch tip or fail restore — undermining the "reconstruct the exact tree at <sha>" contract. Both
+ * the EMIT boundary (`repoEnvelopeVars`) and the READ boundary (`worldMarkerOf`) validate through
+ * this ONE canonical matcher so the two can never drift. */
+export function isCommitSha(sha: unknown): sha is string {
+  return typeof sha === "string" && /^[0-9a-f]{40}$/i.test(sha);
+}
+
 /** One irreversible action in the effect ledger. `idempotencyKey` is the effect's natural identity —
  * the value that makes "did this already happen?" answerable WITHOUT re-doing it. Two ledger entries
  * with the same key denote the same real-world effect, so the fence collapses them to one. */

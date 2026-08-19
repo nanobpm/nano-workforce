@@ -61,7 +61,7 @@ import {
 } from "./userTasks.ts";
 import { deriveWaitGate } from "./waitGate.ts";
 import { waveMergeTargets } from "./waves.ts";
-import { WorldStore } from "./world/index.ts";
+import { isCommitSha, WorldStore } from "./world/index.ts";
 
 /** The BPMN process that drives review convergence (`resources/processes/convergence-loop.bpmn`). */
 export const PROCESS_ID = "convergence-loop";
@@ -391,7 +391,7 @@ export function repoEnvelopeVars(
         // unintended ref (a moved branch tip) or fail provisioning. A malformed value degrades to
         // omission — the harness then clones the head branch tip, the pre-#324 behaviour. Omitted too
         // when the PR has no durable push-checkpoint yet.
-        ...(commitSha && /^[0-9a-f]{40}$/i.test(commitSha) ? { commitSha } : {}),
+        ...(isCommitSha(commitSha) ? { commitSha } : {}),
       },
     },
   };

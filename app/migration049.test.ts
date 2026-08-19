@@ -85,3 +85,28 @@ test("world_effects.applied defaults to 0 (a pending tail entry) unless set", ()
   assertEquals(row.applied, 0, "an effect recorded before it is performed is pending by default");
   assert(true);
 });
+
+test("world_effects CHECK(applied IN (0,1)): the fence's boolean domain is pinned at the schema", () => {
+  const db = migratedDb();
+  // The fence reads `applied` as "already realised?" — a stray value (a future writer bug or a
+  // corrupt row on this externalised durability boundary) must be rejected, not silently mis-skip
+  // or re-apply an effect on replay.
+  assertThrows(
+    () =>
+      db
+        .prepare(
+          `INSERT INTO world_effects (pr_key, checkpoint_offset, seq, kind, idempotency_key, applied, created_at)
+           VALUES ('o/r#1', 0, 0, 'push', 'sha-bad', 2, 't')`,
+        )
+        .run(),
+    undefined,
+    "CHECK constraint failed",
+  );
+  // The two legal values both insert fine.
+  insertEffect(db, "o/r#1", "sha-applied"); // applied = 1
+  db.prepare(
+    `INSERT INTO world_effects (pr_key, checkpoint_offset, seq, kind, idempotency_key, applied, created_at)
+     VALUES ('o/r#1', 0, 1, 'push', 'sha-pending', 0, 't')`,
+  ).run();
+  assertEquals(Number((db.prepare("SELECT COUNT(*) c FROM world_effects").get() as { c: number }).c), 2);
+});

@@ -7,7 +7,7 @@
 import type { AppJobHandler } from "@nanobpm/urban";
 import { abandonTokenFromUrl } from "../../app/abandon.ts";
 import { ensurePr, parsePr } from "../../app/service.ts";
-import { type Effect, isEffectKind, recordWorldCheckpoint, WorldStore } from "../../app/world/index.ts";
+import { type Effect, isCommitSha, isEffectKind, recordWorldCheckpoint, WorldStore } from "../../app/world/index.ts";
 import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 
 // Input is typed off the model data envelope (`PrPersistRoundIn` in convergence-loop.bpmn),
@@ -66,11 +66,19 @@ function normalizeEffect(raw: unknown): Effect | null {
 export function worldMarkerOf(vars: Record<string, unknown>): WorldMarker | null {
   // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
   const m = vars[WORLD_MARKER_KEY] as { commitSha?: unknown; effects?: unknown } | undefined;
-  if (!m || typeof m.commitSha !== "string" || m.commitSha.trim() === "") return null;
+  if (!m || typeof m.commitSha !== "string") return null;
+  // `commitSha` is used as an EXACT checkout target on restore (`git fetch && git checkout <sha>`),
+  // so validate it is a well-formed 40-hex SHA — the SAME guard the emit boundary `repoEnvelopeVars`
+  // applies (via `isCommitSha`) so the two boundaries can't drift. An arbitrary ref (e.g. `main`) or
+  // an abbreviated SHA would reconstruct to a moved branch tip or fail restore, undermining the
+  // "reconstruct the exact tree at <sha>" contract. Trim first so a whitespace-tainted valid SHA
+  // still passes; a value that isn't a full object name degrades to no checkpoint (a `waiting` round).
+  const commitSha = m.commitSha.trim();
+  if (!isCommitSha(commitSha)) return null;
   const effects = Array.isArray(m.effects)
     ? m.effects.map(normalizeEffect).filter((e): e is Effect => e !== null)
     : undefined;
-  return { commitSha: m.commitSha.trim(), ...(effects && effects.length > 0 ? { effects } : {}) };
+  return { commitSha, ...(effects && effects.length > 0 ? { effects } : {}) };
 }
 
 const handler: AppJobHandler<In> = async (job, app) => {
