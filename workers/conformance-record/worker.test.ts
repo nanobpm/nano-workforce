@@ -98,6 +98,41 @@ test("conformance-record: coerces filed without a comment URL to skipped", async
   assertEquals(stores.plan_conformance[0].comment_url, null);
 });
 
+test("conformance-record: a non-filed status carries no verdict counts or deviations", async () => {
+  const { app, stores } = fakeApp();
+  // A "filed" that downgrades to skipped (no comment) must not persist the agent's counts /
+  // has_deviations — a skipped/blocked audit produced no verified verdict, so the row would be
+  // internally inconsistent (status=skipped yet has_deviations=1 with non-zero counts).
+  await handler(
+    {
+      variables: {
+        planKey: "o/r#11",
+        status: "filed",
+        slicesMet: 4,
+        slicesReduced: 1,
+        slicesNotVerified: 1,
+        deviationsRaised: 2,
+        deviationsUnraised: 1,
+        hasDeviations: true,
+        summary: "audit ran but never posted",
+        "io.nanobpm.agentResult": { output: "transcript explaining why" },
+      },
+    } as any,
+    app as any,
+  );
+  const row = stores.plan_conformance[0];
+  assertEquals(row.status, "skipped");
+  assertEquals(row.slices_met, 0);
+  assertEquals(row.slices_reduced, 0);
+  assertEquals(row.slices_not_verified, 0);
+  assertEquals(row.deviations_raised, 0);
+  assertEquals(row.deviations_unraised, 0);
+  assertEquals(row.has_deviations, 0);
+  // summary + report are human-readable context — retained so a skipped/blocked row still explains itself.
+  assertEquals(row.summary, "audit ran but never posted");
+  assertEquals(row.report, "transcript explaining why");
+});
+
 test("conformance-record: honours an explicit blocked status", async () => {
   const { app, stores } = fakeApp();
   await handler(

@@ -43,26 +43,34 @@ const handler: AppJobHandler<In> = async (job, app) => {
   const status = asStatus(job.variables.status, commentUrl !== null);
   const summary = asStr(job.variables.summary);
 
-  const slicesReduced = asInt(job.variables.slicesReduced);
-  const slicesNotVerified = asInt(job.variables.slicesNotVerified);
-  const deviationsUnraised = asInt(job.variables.deviationsUnraised);
-  // Derive `has_deviations` from ground truth rather than trusting the agent's boolean alone: any
-  // reduced / not-verified item, or any unraised deviation, means the epic did not cleanly meet its
-  // spec. The agent's flag is honoured as an additional trigger but can't suppress a real signal.
-  const hasDeviations = job.variables.hasDeviations === true ||
-    slicesReduced > 0 || slicesNotVerified > 0 || deviationsUnraised > 0;
-
   // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
   const env = (job.variables as Record<string, unknown>)[AGENT_RESULT_KEY] as { output?: unknown } | undefined;
   const report = typeof env?.output === "string" ? env.output : null;
 
+  // Only a "filed" audit produced a verified verdict; a skipped/blocked one has no trustworthy
+  // per-item counts or deviations, so persist zeros rather than whatever the agent hoisted. This
+  // keeps the row internally consistent (no status="skipped" with has_deviations=1) and honours the
+  // schema/prompt contract that skipped/blocked audits omit counts. summary + report are retained as
+  // human-readable context explaining why the audit didn't file.
+  const filed = status === "filed";
+  const slicesReduced = filed ? asInt(job.variables.slicesReduced) : 0;
+  const slicesNotVerified = filed ? asInt(job.variables.slicesNotVerified) : 0;
+  const deviationsUnraised = filed ? asInt(job.variables.deviationsUnraised) : 0;
+  // Derive `has_deviations` from ground truth rather than trusting the agent's boolean alone: any
+  // reduced / not-verified item, or any unraised deviation, means the epic did not cleanly meet its
+  // spec. The agent's flag is honoured as an additional trigger but can't suppress a real signal.
+  // Forced false for a non-filed audit (all counts are zeroed above, and there is no verified verdict).
+  const hasDeviations = filed &&
+    (job.variables.hasDeviations === true ||
+      slicesReduced > 0 || slicesNotVerified > 0 || deviationsUnraised > 0);
+
   await recordConformance(app.data, planKey, {
     status,
-    commentUrl: status === "filed" ? commentUrl : null,
-    slicesMet: asInt(job.variables.slicesMet),
+    commentUrl: filed ? commentUrl : null,
+    slicesMet: filed ? asInt(job.variables.slicesMet) : 0,
     slicesReduced,
     slicesNotVerified,
-    deviationsRaised: asInt(job.variables.deviationsRaised),
+    deviationsRaised: filed ? asInt(job.variables.deviationsRaised) : 0,
     deviationsUnraised,
     hasDeviations,
     summary,
