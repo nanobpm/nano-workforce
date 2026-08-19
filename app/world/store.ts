@@ -113,6 +113,23 @@ export class WorldStore {
     return err instanceof Error && /UNIQUE constraint failed/i.test(err.message);
   }
 
+  /** Reconcile an existing ledger row's `applied` flag toward a LATER record's knowledge: flip a
+   * still-pending row (`applied=0`) to realised (`applied=1`) once we know the effect has now landed
+   * (`applied=true`). This is monotone — it NEVER un-applies a row (`1` never goes back to `0`) and
+   * never marks a still-pending record applied — so a re-record can only ever advance the fence, not
+   * retreat it. It is the ONE place a pending→applied transition is written, so the record path
+   * (`#appendEffect`) and the replay path (`markApplied`) reconcile identically instead of each
+   * re-encoding the flip (a drift surface). Without it, `#appendEffect`'s duplicate-key short-circuit
+   * would leave a pending row pending forever even after the effect landed, so a later `restoreWorld`
+   * would re-apply an already-executed side effect. */
+  static async #reconcileApplied(
+    effects: Table<WorldEffectRow>,
+    row: WorldEffectRow,
+    applied: boolean,
+  ): Promise<void> {
+    if (applied && row.applied !== 1) await effects.update(row.id, { applied: 1 });
+  }
+
   /** Insert the checkpoint row for a not-yet-seen `{prKey, commitSha}`, allocating the next offset, and
    * tolerate the fence firing. `recordCheckpoint`'s `findOne`-then-insert is racy: a concurrent/duplicate
    * persist-round can insert the SAME SHA between our read and our write, so the insert hits
@@ -189,9 +206,12 @@ export class WorldStore {
     });
   }
 
-  /** Append one effect to the ledger via `effects`, skipping a re-record of an idempotency key already
-   * present (the durable fence — the second record of one real effect is a no-op, not a second row).
-   * Static so a transaction-scoped `Table` can be threaded in (see {@link recordCheckpoint}). */
+  /** Append one effect to the ledger via `effects`, collapsing a re-record of an idempotency key
+   * already present to the durable fence's no-op (the second record of one real effect is never a
+   * second row). A re-record still RECONCILES the surviving row's `applied` flag: a tail effect first
+   * recorded pending (`applied=false`) and later re-recorded once it landed (`applied=true`) must
+   * advance the fence to realised, or a later `restoreWorld` would re-apply an already-executed side
+   * effect. Static so a transaction-scoped `Table` can be threaded in (see {@link recordCheckpoint}). */
   static async #appendEffect(
     effects: Table<WorldEffectRow>,
     prKey: string,
@@ -202,7 +222,10 @@ export class WorldStore {
     now: string,
   ): Promise<void> {
     const existing = await effects.findOne({ pr_key: prKey, idempotency_key: effect.idempotencyKey });
-    if (existing) return;
+    if (existing) {
+      await WorldStore.#reconcileApplied(effects, existing, applied);
+      return;
+    }
     try {
       await effects.insert({
         pr_key: prKey,
@@ -218,8 +241,11 @@ export class WorldStore {
       // A concurrent/duplicate writer recorded this idempotency key between our `findOne` and our
       // `insert` — the fence firing IS the intended outcome (one real effect → exactly one row), so
       // treat the collision as the same no-op the `existing` short-circuit above already is, not a
-      // surfaced error that fails the persist-round.
+      // surfaced error that fails the persist-round. Still reconcile the raced row's `applied` flag,
+      // exactly as the `existing` branch does, so a landed effect isn't left pending on the winner row.
       if (!WorldStore.#isFenceCollision(err)) throw err;
+      const raced = await effects.findOne({ pr_key: prKey, idempotency_key: effect.idempotencyKey });
+      if (raced) await WorldStore.#reconcileApplied(effects, raced, applied);
     }
   }
 
@@ -258,7 +284,7 @@ export class WorldStore {
       async markApplied(effect: Effect): Promise<void> {
         const row = await effects.findOne({ pr_key: prKey, idempotency_key: effect.idempotencyKey });
         if (row) {
-          if (row.applied !== 1) await effects.update(row.id, { applied: 1 });
+          await WorldStore.#reconcileApplied(effects, row, true);
           return;
         }
         try {
@@ -282,7 +308,7 @@ export class WorldStore {
           // it by re-reading and flipping `applied`, rather than failing the restore over a fence we
           // WANTED to hold.
           const raced = await effects.findOne({ pr_key: prKey, idempotency_key: effect.idempotencyKey });
-          if (raced && raced.applied !== 1) await effects.update(raced.id, { applied: 1 });
+          if (raced) await WorldStore.#reconcileApplied(effects, raced, true);
         }
       },
     };

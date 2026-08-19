@@ -350,3 +350,59 @@ test("fenceFor.markApplied tolerates a concurrent effect insert — reconciles t
   const rows = await data.table("world_effects", "id").find({ pr_key: PR, idempotency_key: "m-1" });
   assertEquals(rows.length, 1, "exactly one row for the key — the fence collapsed the duplicate");
 });
+
+test("recordCheckpoint re-recording a pending effect as applied reconciles the fence — no re-apply on restore", async () => {
+  const { data } = memWorldData();
+  const store = new WorldStore(data);
+  // Round records a tail effect PENDING (applied=false) — recorded before it is performed.
+  await store.recordCheckpoint({
+    prKey: PR,
+    roundNo: 1,
+    commitSha: "sha-a",
+    effects: [{ kind: "pr-comment", idempotencyKey: "c-1" }],
+    applied: false,
+  });
+  const fence = store.fenceFor(PR, 0);
+  assertEquals(await fence.isApplied("c-1"), false, "pending before it lands");
+  // The effect lands; a later record of the SAME key now knows it is applied. The duplicate-key
+  // short-circuit must NOT drop that knowledge — it must reconcile the surviving row to applied, or a
+  // later restore re-applies an already-executed side effect.
+  await store.recordCheckpoint({
+    prKey: PR,
+    roundNo: 2,
+    commitSha: "sha-a",
+    effects: [{ kind: "pr-comment", idempotencyKey: "c-1" }],
+    applied: true,
+  });
+  assertEquals(
+    await fence.isApplied("c-1"),
+    true,
+    "a re-record that knows the effect landed flips the pending row to applied (fence reconciled)",
+  );
+  const rows = await data.table("world_effects", "id").find({ pr_key: PR, idempotency_key: "c-1" });
+  assertEquals(rows.length, 1, "still exactly one row — the fence collapsed the re-record, it did not duplicate");
+});
+
+test("recordCheckpoint re-recording an applied effect as pending never un-applies it (monotone fence)", async () => {
+  const { data } = memWorldData();
+  const store = new WorldStore(data);
+  await store.recordCheckpoint({
+    prKey: PR,
+    roundNo: 1,
+    commitSha: "sha-a",
+    effects: [{ kind: "pr-comment", idempotencyKey: "c-1" }],
+    applied: true,
+  });
+  const fence = store.fenceFor(PR, 0);
+  assertEquals(await fence.isApplied("c-1"), true, "applied after it lands");
+  // A stray re-record carrying applied=false must NOT retreat the fence — an already-executed effect
+  // cannot become pending again, or a restore would re-apply it.
+  await store.recordCheckpoint({
+    prKey: PR,
+    roundNo: 2,
+    commitSha: "sha-a",
+    effects: [{ kind: "pr-comment", idempotencyKey: "c-1" }],
+    applied: false,
+  });
+  assertEquals(await fence.isApplied("c-1"), true, "a later pending re-record never un-applies (fence is monotone)");
+});
