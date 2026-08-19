@@ -484,6 +484,11 @@ export function coalesceTitle(...candidates: (string | null | undefined)[]): str
  * failing gates (empty in token mode) so the CI-fix agent knows what to make green. */
 export interface PrState {
   merged: boolean;
+  /** GitHub's high-level PR lifecycle state, normalised to `"open" | "closed" | "merged"`. A PR
+   * closed *without* merging reports `"closed"` (GitHub also reports a merged PR as `"closed"` on
+   * the REST list, but `merged` disambiguates it). Lets a caller gate on PR liveness — see
+   * `classifyPrLiveness` — so neither loop escalates against a non-open PR (#342). */
+  state: "open" | "closed" | "merged";
   mergeStateStatus: string;
   failingChecks: number;
   failingCheckNames: string[];
@@ -584,8 +589,10 @@ export async function fetchPrState(
     };
     const rollup = j.statusCheckRollup ?? [];
     const names = failingCheckNames(rollup);
+    const merged = j.state === "MERGED" || !!j.mergedAt;
     return {
-      merged: j.state === "MERGED" || !!j.mergedAt,
+      merged,
+      state: merged ? "merged" : (j.state ?? "").toUpperCase() === "CLOSED" ? "closed" : "open",
       mergeStateStatus: (j.mergeStateStatus || "UNKNOWN").toUpperCase(),
       failingChecks: names.length,
       failingCheckNames: names,
@@ -604,14 +611,19 @@ export async function fetchPrState(
   const j = (await r.json()) as {
     merged?: boolean;
     merged_at?: string | null;
+    state?: string;
     mergeable_state?: string;
     draft?: boolean;
     head?: { sha?: string | null };
   };
+  const restMerged = !!j.merged || !!j.merged_at;
   return {
     // The single-PR GET returns a `merged` boolean (unlike the list endpoint); we also honour
     // `merged_at` so this mirrors the gh branch's `state === "MERGED" || mergedAt` rule.
-    merged: !!j.merged || !!j.merged_at,
+    merged: restMerged,
+    // REST reports a merged PR as `state:"closed"` too, so `merged` disambiguates: a `closed` PR
+    // here is genuinely closed WITHOUT merging (e.g. superseded) — the #342 abandon case.
+    state: restMerged ? "merged" : (j.state ?? "").toLowerCase() === "closed" ? "closed" : "open",
     mergeStateStatus: normalizeMergeState(j.mergeable_state ?? "unknown"),
     failingChecks: -1, // REST here doesn't enumerate checks → classifier treats BLOCKED as "wait"
     failingCheckNames: [], // …and the CI-fix agent gets no per-check list in token mode
@@ -620,6 +632,27 @@ export async function fetchPrState(
     isDraft: !!j.draft,
     headRefOid: j.head?.sha ?? null,
   };
+}
+
+/** Map a PR's live GitHub state to one **liveness** verdict shared by both durable loops (merge +
+ * convergence), so neither can ever escalate against a non-open PR (#342):
+ *
+ *   • `open`     — proceed with the normal protocol.
+ *   • `merged`   — already landed (out-of-band); complete the loop as merged.
+ *   • `closed`   — closed on GitHub WITHOUT merging (e.g. superseded); the PR can never merge, so
+ *                  the loop must **abandon** (terminate) it — NOT escalate a merge no human can
+ *                  complete. This is terminal state, not a human decision.
+ *   • `unknown`  — a transport hiccup left us without live state (`fetchPrState` returned null);
+ *                  stay conservative and fall through to the normal path rather than abandoning a
+ *                  PR we could not read.
+ *
+ * Deriving all three from one source keeps a single canonical liveness gate instead of each loop
+ * re-implementing `pre?.merged`/closed checks against drifting field names. */
+export function classifyPrLiveness(pre: PrState | null): "open" | "merged" | "closed" | "unknown" {
+  if (!pre) return "unknown";
+  if (pre.merged) return "merged";
+  if (pre.state === "closed") return "closed";
+  return "open";
 }
 
 /** The changed file paths of a PR (for the D2 conflict-scan, #58). `gh` returns them directly;

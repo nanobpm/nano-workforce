@@ -3,7 +3,7 @@
 // the merge-exclusion graph. Force the token transport and stub `globalThis.fetch`.
 import { test } from "node:test";
 import { assertEquals, assertRejects } from "#test-assert";
-import { BaseBranchMustExistError, coalesceTitle, createPullRequest, ensureBaseBranch, ensurePromotionPr, fetchIssueTitle, fetchPrFiles, isNotAPullRequestError, listPrsForHead } from "./github.ts";
+import { BaseBranchMustExistError, classifyPrLiveness, coalesceTitle, createPullRequest, ensureBaseBranch, ensurePromotionPr, fetchIssueTitle, fetchPrFiles, isNotAPullRequestError, listPrsForHead, type PrState } from "./github.ts";
 
 // A fake `fetch` that serves `pages` of file batches; each page N (1-based) returns `pages[N-1]`
 // files (named `f{index}`), setting a `Link: rel="next"` header whenever a later page exists.
@@ -427,4 +427,39 @@ test("ensurePromotionPr: creates when none exists, then reuses on a re-run (idem
   assertEquals(second?.created, false);
   assertEquals(second?.number, 500);
   assertEquals(state.creates.length, 1);
+});
+// The shared PR-liveness gate (#342) maps live GitHub state onto one of {open, merged, closed,
+// unknown} so neither durable loop (merge/convergence) can escalate against a non-open PR. A closed
+// PR is terminal (abandon), a merged PR completes, and a null read stays conservative (unknown →
+// proceed as before). `merged` wins over `state` because a merged PR also reports state="closed".
+function prState(over: Partial<PrState>): PrState {
+  return {
+    merged: false,
+    state: "open",
+    mergeStateStatus: "CLEAN",
+    failingChecks: 0,
+    failingCheckNames: [],
+    presentCheckNames: [],
+    totalChecks: 0,
+    isDraft: false,
+    headRefOid: null,
+    ...over,
+  };
+}
+
+test("classifyPrLiveness: an open PR proceeds", () => {
+  assertEquals(classifyPrLiveness(prState({ state: "open" })), "open");
+});
+
+test("classifyPrLiveness: a merged PR completes (merged wins over a closed state)", () => {
+  assertEquals(classifyPrLiveness(prState({ merged: true, state: "closed" })), "merged");
+  assertEquals(classifyPrLiveness(prState({ merged: true, state: "merged" })), "merged");
+});
+
+test("classifyPrLiveness: a closed-not-merged PR is terminal (abandon)", () => {
+  assertEquals(classifyPrLiveness(prState({ merged: false, state: "closed" })), "closed");
+});
+
+test("classifyPrLiveness: a null read (transport hiccup) is unknown — never abandons blind", () => {
+  assertEquals(classifyPrLiveness(null), "unknown");
 });
