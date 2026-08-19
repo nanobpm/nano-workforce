@@ -1,3 +1,10 @@
+## [0.101.1](https://github.com/nanobpm/nano-workforce/compare/v0.101.0...v0.101.1) (2026-08-19)
+
+
+### Bug Fixes
+
+* **merge-loop:** abandon a closed-not-merged PR instead of escalating ([#342](https://github.com/nanobpm/nano-workforce/issues/342)) ([#343](https://github.com/nanobpm/nano-workforce/issues/343)) ([10ea6be](https://github.com/nanobpm/nano-workforce/commit/10ea6be0e23c9315dfb71a6c94958826a1795a8c)), closes [#350](https://github.com/nanobpm/nano-workforce/issues/350)
+
 # [0.101.0](https://github.com/nanobpm/nano-workforce/compare/v0.100.0...v0.101.0) (2026-08-19)
 
 
