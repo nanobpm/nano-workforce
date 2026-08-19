@@ -5,18 +5,41 @@
 // (`@nanobpm/workflow/test-support` — `normalize` / `assertDerivationParity`),
 // proving the code-first and model-first representations agree.
 //
-// STATUS / BLOCKER (see `README.md` in this directory and the escalation on
-// nano-ide#320): the published builder surface `@nanobpm/workflow@0.12.0`
-// derives EXACTLY ONE top-level `<bpmn:startEvent id="Start">` and EXACTLY ONE
-// `<bpmn:endEvent id="End">`, converging every top-level dangling branch into
-// that single end (see `Compiler.compile` in the package's `declarative.ts`).
-// Five of the seven goldens have MULTIPLE top-level start and/or end events and
-// therefore cannot reach whole-model structural parity until the workflow
-// compiler grows a terminal / explicit-end (and multi-start) construct — a
-// change that lives in the upstream `@nanobpm/workflow` package (nano-ide), not
-// here. Those five are marked `blockedReason` below so the suite documents
-// exactly why, and a resumed run can flip them to a real port once the upstream
-// construct lands (or the acceptance is relaxed to node-surface parity).
+// STATUS (per the human decision on the nano-ide#320 escalation — (c)+(a): land
+// the structurally-derivable goldens NOW at full whole-model parity, park the
+// rest pending an upstream construct, and do NOT relax to node-surface parity):
+//
+//   • retro — PORTED and green under full `assertDerivationParity`. A linear
+//     single-start/single-end agent pipeline that the structured `defineFlow`
+//     compiler reproduces exactly.
+//
+//   • The other six are `blockedReason`-parked, in TWO distinct classes, each
+//     awaiting an upstream `@nanobpm/workflow` (nano-ide) construct + re-release
+//     — never a golden edit and never relaxed acceptance:
+//
+//     (1) MULTI top-level start/end (spine-demo, readiness-gate, feature,
+//         merge-loop, plan-fanout). `@nanobpm/workflow@0.12.0` derives EXACTLY
+//         ONE `<bpmn:startEvent id="Start">` + ONE `<bpmn:endEvent id="End">`,
+//         converging every dangler into that single end (see `Compiler.compile`
+//         in the package's `declarative.ts`). Needs a terminal/explicit-end
+//         (+ multi-start) construct.
+//
+//     (2) ARBITRARY control-flow graph (convergence-loop). Single start/end —
+//         so it clears class (1) — but its topology is NOT expressible with the
+//         structured-only builder (`loop`/`switch`/`branch`), empirically proven
+//         (see `derivation-parity.test.ts`): its loop head `review-round` is a
+//         serviceTask that MERGES three back-edges directly (in=3), whereas
+//         `loop()` always inserts an exclusive-gateway loop head (the task stays
+//         in=1); `gw-status` is a single exclusive gateway with FOUR
+//         heterogeneous-condition out-edges (two `=x = "v"`, one complex boolean,
+//         one default) which no `switch`/`branch` emits; and `gw-escalated` is a
+//         single gateway that is simultaneously a five-way merge and a two-way
+//         split. Single start/end is necessary but NOT sufficient. Needs an
+//         arbitrary-graph / explicit-join (named-target) builder — a SUPERSET of
+//         the class-(1) gap.
+//
+// A resumed run flips any parked model to a real `flow` once the corresponding
+// upstream construct lands and `@nanobpm/workflow` is bumped past 0.12.0.
 
 import { defineFlow, envelope } from "@nanobpm/workflow";
 import type { DeclarativeFlow } from "@nanobpm/workflow";
@@ -91,10 +114,16 @@ export const PORTS: readonly PortEntry[] = [
   {
     model: "convergence-loop",
     blockedReason:
-      "not yet ported: single start/end (structurally derivable) but a complex " +
-      "loop whose head `review-round` is re-entered from three points across " +
-      "five exclusive gateways; a faithful structured-loop port is pending. " +
-      "Not blocked by the compiler start/end limitation.",
+      "blocked (arbitrary control-flow graph): single top-level start/end, but " +
+      "its topology is not expressible with @nanobpm/workflow@0.12.0's " +
+      "structured-only builder (loop/switch/branch). Proven in the test suite: " +
+      "the loop head `review-round` is a serviceTask that merges 3 back-edges " +
+      "directly (in=3), but loop() always inserts an exclusive-gateway head " +
+      "(task stays in=1); `gw-status` is one gateway with 4 heterogeneous-" +
+      "condition out-edges (no switch/branch emits that); `gw-escalated` is one " +
+      "gateway that is at once a 5-way merge and a 2-way split. Awaits an " +
+      "arbitrary-graph / explicit-join (named-target) builder upstream in " +
+      "@nanobpm/workflow (nano-ide) — a superset of the multi-start/end gap.",
   },
   {
     model: "merge-loop",

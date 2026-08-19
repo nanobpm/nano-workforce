@@ -8,16 +8,18 @@
 // sequence flows, message subscriptions, timer/boundary definitions, user tasks,
 // and linked resources — with a legible red/green diff on mismatch.
 //
-// Ported models run a real `assertDerivationParity`; models still blocked by the
-// upstream single-start/end compiler limitation (see `./flows.ts`) are reported
-// as skipped WITH their precise reason, and a companion diagnostic proves the
-// blocker is real by asserting the goldens' start/end multiplicity. No golden is
-// modified to force a match — the derivation must reproduce the checked-in file.
+// Ported models run a real `assertDerivationParity`; parked models (see
+// `./flows.ts`) are reported as skipped WITH their precise reason, in two
+// blocker classes — class 1: multiple top-level start/end events; class 2:
+// arbitrary control-flow graph (`convergence-loop`). Companion diagnostics prove
+// each blocker is real against the goldens themselves. No golden is modified to
+// force a match — the derivation must reproduce the checked-in file.
 
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
 import { assert, assertEquals } from "#test-assert";
-import { assertDerivationParity } from "@nanobpm/workflow/test-support";
+import { assertDerivationParity, normalize } from "@nanobpm/workflow/test-support";
+import { declarativeToBpmn, defineFlow } from "@nanobpm/workflow";
 import { PORTS } from "./flows.ts";
 
 const ROOT = decodeURIComponent(new URL("../../", import.meta.url).pathname);
@@ -62,11 +64,12 @@ test("every corpus model is either ported or has a documented blocker", () => {
   }
 });
 
-// The blocker is not a guess: prove it against the goldens themselves. The five
-// models marked blocked-by-compiler have MORE THAN ONE top-level start and/or
-// end event, which the published `@nanobpm/workflow@0.12.0` compiler (a single
+// The blockers are not guesses — prove each against the goldens themselves.
+//
+// CLASS 1 — five goldens have MORE THAN ONE top-level start and/or end event,
+// which the published `@nanobpm/workflow@0.12.0` compiler (a single
 // `<startEvent id="Start">` + single `<endEvent id="End">`) cannot derive.
-test("blocked goldens genuinely have multiple top-level start/end events", () => {
+test("class-1 blocked goldens genuinely have multiple top-level start/end events", () => {
   const countTag = (xml: string, tag: string): number =>
     (xml.match(new RegExp(`<bpmn:${tag}\\b`, "g")) ?? []).length;
 
@@ -81,10 +84,61 @@ test("blocked goldens genuinely have multiple top-level start/end events", () =>
     );
   }
 
-  // The two single-start/single-end goldens are the structurally-derivable ones.
+  // The two single-start/single-end goldens (retro, convergence-loop) clear
+  // class 1; retro is fully ported, convergence-loop is class-2 blocked below.
   for (const model of ["retro", "convergence-loop"]) {
     const xml = readFileSync(goldenPath(model), "utf8");
     assertEquals(countTag(xml, "startEvent"), 1, `${model} should have one start event`);
     assertEquals(countTag(xml, "endEvent"), 1, `${model} should have one end event`);
   }
+});
+
+// CLASS 2 — convergence-loop has a single start/end (clears class 1) but an
+// ARBITRARY control-flow graph the structured-only builder cannot emit. Prove
+// the three specific features against the golden itself.
+test("convergence-loop golden has arbitrary-graph features the structured builder cannot emit", () => {
+  const xml = readFileSync(goldenPath("convergence-loop"), "utf8");
+  const between = (id: string, closeTag: string, tag: string): number => {
+    // Count <bpmn:<tag>> occurrences inside the element `id`, whose end is its
+    // own </bpmn:<closeTag>> (not the first nested close tag).
+    const open = xml.indexOf(`id="${id}"`);
+    assert(open >= 0, `convergence-loop golden is missing element id="${id}"`);
+    const rest = xml.slice(open);
+    const close = rest.indexOf(`</bpmn:${closeTag}>`);
+    const body = rest.slice(0, close);
+    return (body.match(new RegExp(`<bpmn:${tag}\\b`, "g")) ?? []).length;
+  };
+  // (a) the loop head is a serviceTask that MERGES three back-edges directly.
+  assertEquals(between("review-round", "serviceTask", "incoming"), 3, "review-round should merge 3 flows on the task itself");
+  // (b) a single exclusive gateway forks FOUR heterogeneous-condition out-edges.
+  assertEquals(between("gw-status", "exclusiveGateway", "outgoing"), 4, "gw-status should be a 4-way exclusive gateway");
+  // (c) a single exclusive gateway is at once a 5-way merge and a 2-way split.
+  assertEquals(between("gw-escalated", "exclusiveGateway", "incoming"), 5, "gw-escalated should merge 5 flows");
+  assertEquals(between("gw-escalated", "exclusiveGateway", "outgoing"), 2, "gw-escalated should also split 2 ways");
+});
+
+// CLASS 2, empirical — demonstrate WHY the structured builder cannot reproduce
+// (a): a `loop()` whose body starts with a task derives an exclusive-gateway
+// loop head that absorbs the back-edge (in>=2), leaving the task itself at
+// in=1. The golden instead merges its back-edges directly into `review-round`
+// (in=3) with no loop-head gateway — a shape the builder cannot express.
+test("loop() inserts a gateway head, so back-edges cannot merge into a task", () => {
+  const probe = defineFlow("loop-head-probe", (w) => {
+    w.loop((b) => {
+      b.task("review-round", { jobType: "senior:pr-review" });
+      b.branch("done", { then: (g) => g.break() });
+    });
+  });
+  const model = normalize(declarativeToBpmn(probe));
+  const inDegree = (n: string): number => Number(/<in=(\d+)/.exec(n)?.[1] ?? "0");
+  const gateways = model.nodes.filter((n) => n.startsWith("exclusiveGateway"));
+  const tasks = model.nodes.filter((n) => n.startsWith("serviceTask"));
+  assert(
+    gateways.some((n) => inDegree(n) >= 2),
+    "loop() should derive an exclusive-gateway head that absorbs the back-edge (in>=2)",
+  );
+  assert(
+    tasks.every((n) => inDegree(n) <= 1),
+    "the loop-body task cannot itself be the back-edge merge (it stays in<=1)",
+  );
 });
