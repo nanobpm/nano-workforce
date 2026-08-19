@@ -1153,12 +1153,65 @@ components:
             Accepted by the schema today but currently has no runtime effect. When implemented it
             will be the required acknowledgement when `baseBranch` names the repository default
             branch. See `PlanStartByIssue.confirmDefaultBase`.
+    ReadinessProbe:
+      description: >-
+        A single durable readiness probe (issue #258, #295) the feature run must satisfy before its
+        implementation agent is dispatched. `kind` selects the source; `target` + `match` are the
+        per-kind predicate. The `capability` kind resolves "which published `pkg@version` first
+        carries capability C?" from publish provenance and late-binds it into the run. See
+        `app/readiness.ts` for the full per-kind semantics.
+      type: object
+      additionalProperties: false
+      required:
+        - kind
+        - target
+      properties:
+        kind:
+          type: string
+          enum: [http, command, npm, github-check, capability]
+          description: The readiness source. `command` is the escape hatch; `capability` resolves a cross-repo published-artifact edge.
+        target:
+          type: string
+          minLength: 1
+          description: The kind-specific target (a URL, a shell command, a `pkg@version`, an `owner/repo@ref`, or `github-releases:owner/repo`).
+        onTimeout:
+          type: string
+          enum: [escalate, fail, continue]
+          description: What the gate does when the bounded wait elapses (default `escalate`).
+        credentialEnv:
+          type: string
+          description: A declared env-contract key supplying a credential (http kind only). Names a key, never a secret value.
+        match:
+          type: object
+          additionalProperties: false
+          description: The per-kind readiness predicate; every field is optional and read only by the kinds that understand it.
+          properties:
+            status: { type: integer, description: "http: the exact status that means ready (default any 2xx)." }
+            bodyIncludes: { type: string, description: "http: a substring the response body must contain." }
+            exitCode: { type: integer, description: "command: the exit code that means ready (default 0)." }
+            stdoutIncludes: { type: string, description: "command/npm: a substring stdout must contain." }
+            version: { type: string, description: "npm: the version that must be published." }
+            conclusion: { type: string, description: "github-check: the conclusion that means ready (default success)." }
+            checkName: { type: string, description: "github-check: restrict to the named check run." }
+            capabilityRef: { type: string, description: "capability: the upstream issue/PR handle the resolved version must carry." }
+            package: { type: string, description: "capability: the package whose releases are scanned for provenance." }
+            verifyCommand: { type: string, description: "capability: optional empirical verifier run once at the gate boundary." }
+        poll:
+          type: object
+          additionalProperties: false
+          description: The poll cadence (how often to re-probe, how long to keep trying, and the backoff shape).
+          properties:
+            everyMs: { type: integer, description: Interval between poll attempts (ms). }
+            timeoutMs: { type: integer, description: Bounded budget (ms) before the gate escalates. }
+            backoff: { type: string, enum: [fixed, exponential], description: Backoff shape between attempts. }
     FeatureStart:
       description: The start-feature request body — a SINGLE-issue feature run. Names the target issue
         by EXACTLY ONE of `issue` (an `owner/repo#123` reference) or `url` (a bare issue URL), plus a
         REQUIRED `baseBranch` (ADR 0003, same admission as the epic path), and the two optional
-        follow-on knobs `converge` / `autoMerge`. Modeled as `oneOf` named variants (Camunda REST v2
-        pattern) so an ambiguous or empty target is a 400 at the edge.
+        follow-on knobs `converge` / `autoMerge`. May also carry an intake-time readiness gate
+        (`readiness` and/or `blockedOn` + `consumerPackage`, per issue 295) that parks the run until
+        the declared upstreams land. Modeled as `oneOf` named variants (Camunda REST v2 pattern) so an
+        ambiguous or empty target is a 400 at the edge.
       oneOf:
         - $ref: "#/components/schemas/FeatureStartByIssue"
         - $ref: "#/components/schemas/FeatureStartByUrl"
@@ -1210,6 +1263,36 @@ components:
             OPTIONAL free-text steering appended to the implementation agent's prompt for this run
             (via the implement task's `appendPrompt`). Blank/whitespace is treated as absent. Persists
             on the instance, so it also applies to the agent's answer-loop redispatch.
+        readiness:
+          type: array
+          maxItems: 32
+          items:
+            $ref: "#/components/schemas/ReadinessProbe"
+          description: >-
+            OPTIONAL intake-time readiness gate (issue #295): one or more durable probes the run must
+            ALL satisfy before its implementation agent is dispatched. The run parks (durably, bounded
+            by the gate's escalating timer) at the leading readiness preflight until every probe goes
+            green. Absent/empty ⇒ the run implements immediately, unchanged.
+        blockedOn:
+          type: array
+          maxItems: 32
+          items:
+            type: string
+            minLength: 1
+          description: >-
+            OPTIONAL ergonomic shorthand for `readiness` (issue #295): a list of upstream
+            `owner/repo#123` issue/PR handles the run waits to land. With `consumerPackage` each
+            desugars to a `capability` probe (resolve which published `pkg@version` first carries the
+            handle, and late-bind it into the run); without it, to a `command` probe that goes green
+            once the referenced issue/PR is closed/merged.
+        consumerPackage:
+          type: string
+          minLength: 1
+          description: >-
+            OPTIONAL npm package name (e.g. `@nanobpm/engine-wasm`) the `blockedOn` shorthand resolves
+            its handles against — the consumer dependency whose published provenance must carry each
+            awaited upstream. When present, `blockedOn` desugars to `capability` probes and the
+            resolved `pkg@version` is late-bound into the implementation agent's brief.
     FeatureStartByUrl:
       type: object
       additionalProperties: false
@@ -1246,6 +1329,23 @@ components:
           description: >-
             OPTIONAL free-text steering appended to the implementation agent's prompt for this run.
             See `FeatureStartByIssue.customInstructions`.
+        readiness:
+          type: array
+          maxItems: 32
+          items:
+            $ref: "#/components/schemas/ReadinessProbe"
+          description: OPTIONAL intake-time readiness gate. See `FeatureStartByIssue.readiness`.
+        blockedOn:
+          type: array
+          maxItems: 32
+          items:
+            type: string
+            minLength: 1
+          description: OPTIONAL readiness shorthand — upstream `owner/repo#123` handles to wait on. See `FeatureStartByIssue.blockedOn`.
+        consumerPackage:
+          type: string
+          minLength: 1
+          description: OPTIONAL package the `blockedOn` handles resolve against. See `FeatureStartByIssue.consumerPackage`.
     MessageResult:
       type: object
       description: The result of publishing a message / answering an escalation. Shape varies by message

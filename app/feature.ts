@@ -17,7 +17,19 @@
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { coalesceTitle, fetchIssueTitle } from "./github.ts";
 import { ESCALATION_SLA_TIMEOUT, normalizeBaseBranch, type ParsedIssue, renderBaseBranchBrief } from "./plan.ts";
+import type { ReadinessProbe } from "./readiness.ts";
 import { deriveListBucket, deriveStage } from "./stage.ts";
+
+/** Optional intake-time readiness gate for a feature run (issue #295): the `capability`/`command`/…
+ * probes the run must ALL satisfy before its implementation agent is dispatched (parked, durably, at
+ * the leading readiness preflight in feature.bpmn), plus the single ISO-8601 bound the preflight's
+ * escalation timers fire off. Both are DERIVED once from the submitted `readiness`/`blockedOn` intake
+ * by {@link parseFeatureReadiness} (app/featureReadiness.ts). Empty/absent ⇒ the gate is skipped and
+ * the run proceeds straight to implementation, exactly as today's submissions do. */
+export interface FeatureReadinessOptions {
+  readonly probes?: ReadinessProbe[];
+  readonly probeTimeout?: string | null;
+}
 
 /** The BPMN process this module drives (resources/processes/feature.bpmn). */
 export const FEATURE_PROCESS_ID = "feature";
@@ -339,7 +351,22 @@ export async function startFeature(
   converge: boolean,
   autoMerge: boolean,
   customInstructions: string | null = null,
+  readiness: FeatureReadinessOptions = {},
 ) {
+  // Intake-time readiness gate (issue #295): the probes the run must satisfy before it implements,
+  // and the bound its preflight escalation timers fire off. Both are load-bearing together —
+  // `pr.readiness-probe` rejects a blank `probeTimeout` and the preflight timers read `=probeTimeout`
+  // — so a non-empty probe set seeded without a bound would incident at runtime. Fail fast at the
+  // start door instead (mirroring `startPlan`); `parseFeatureReadiness` always derives the two
+  // together, so this only fires for a mis-seeded direct caller.
+  const readinessProbes = readiness.probes && readiness.probes.length > 0 ? readiness.probes : null;
+  if (readinessProbes && (readiness.probeTimeout ?? "").trim() === "") {
+    throw new Error(
+      `startFeature(${parsed.planKey}): ${readinessProbes.length} readiness probe(s) seeded without a ` +
+        "probeTimeout — the preflight escalation timers (=probeTimeout) and pr.readiness-probe both require " +
+        "a non-blank bound. Derive it via parseFeatureReadiness before starting a gated feature.",
+    );
+  }
   // Operator free-text steering for the implementation agent (issue #172 follow-on): blank/absent →
   // null so the implement task's `appendPrompt` FEEL (`customInstructions = null`) skips the block
   // rather than appending an empty "Operator custom instructions" heading.
@@ -447,6 +474,21 @@ export async function startFeature(
       // task's `appendPrompt` FEEL (feature.bpmn). Null when none was supplied; persists on the
       // instance so it also rides the answer-loop redispatch back into the same implement task.
       customInstructions: instructions,
+      // Intake-time readiness gate (issue #295): the leading preflight the feature run parks on until
+      // every declared probe goes green (feature.bpmn `gw-readiness` → `readiness-preflight`). A
+      // submission with NO readiness carries `null` here, so the gateway routes straight to
+      // `ensure-base-branch` and the run implements immediately — behaviour unchanged for today's
+      // features. `probeTimeout` bounds the preflight's escalation timers (derived once from the same
+      // probes); `gateKey` is the non-blank correlation key the probe worker publishes
+      // `readiness-ready` on (required even in the preflight, which reads the probe's synchronous
+      // result); `resolvedArtifacts` is filled by the preflight on green — the exact `pkg@version`s
+      // first carrying each awaited capability — and rides the implement task's `appendPrompt` so the
+      // agent bumps the consumer dependency to exactly the bound version. Seeded `null` so a
+      // gate-less run still resolves the variable in that FEEL instead of raising an incident.
+      readinessProbes,
+      probeTimeout: readinessProbes ? (readiness.probeTimeout ?? null) : null,
+      gateKey: readinessProbes ? `feature-readiness:${parsed.planKey}` : null,
+      resolvedArtifacts: null,
     },
   });
   const processKey = processInstanceKey == null ? null : String(processInstanceKey);

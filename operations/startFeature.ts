@@ -13,6 +13,7 @@
 // confirm-default / shared-base rules, with the same typed-error → HTTP mapping.
 
 import { startFeature } from "../app/feature.ts";
+import { parseFeatureReadiness } from "../app/featureReadiness.ts";
 import { BaseBranchMustExistError } from "../app/github.ts";
 import {
   admitPlan,
@@ -22,6 +23,7 @@ import {
   parseIssue,
   SharedBaseError,
 } from "../app/plan.ts";
+import type { ReadinessProbe } from "../app/readiness.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
 
 export default defineOperation("startFeature", async ({ body }, app) => {
@@ -120,13 +122,39 @@ export default defineOperation("startFeature", async ({ body }, app) => {
   const customInstructions = "customInstructions" in body && typeof body.customInstructions === "string"
     ? body.customInstructions
     : null;
-  const result = await startFeature(app.data, app.engine, parsed, normalizedBase, converge, autoMerge, customInstructions);
+  // Intake-time readiness gate (issue #295): desugar the optional `readiness` descriptors and/or the
+  // `blockedOn` shorthand (resolved against `consumerPackage`) into the probes + bound the run parks
+  // on before implementing. A malformed gate (bad descriptor, unparseable handle, blank package) is a
+  // 400 at the edge — it must never wait forever at runtime.
+  let readiness: { probes: ReadinessProbe[]; probeTimeout: string | null };
+  try {
+    readiness = parseFeatureReadiness({
+      readiness: "readiness" in body ? body.readiness : undefined,
+      blockedOn: "blockedOn" in body ? body.blockedOn : undefined,
+      consumerPackage: "consumerPackage" in body ? body.consumerPackage : undefined,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "invalid readiness gate";
+    app.log.warn("start-feature rejected: invalid readiness gate", { message });
+    return { status: 400, body: { error: message } };
+  }
+  const result = await startFeature(
+    app.data,
+    app.engine,
+    parsed,
+    normalizedBase,
+    converge,
+    autoMerge,
+    customInstructions,
+    { probes: readiness.probes, probeTimeout: readiness.probeTimeout },
+  );
   app.log.info("feature run started", {
     featureKey: parsed.planKey,
     requestedBaseBranch: normalizedBase,
     converge,
     autoMerge,
     hasCustomInstructions: typeof customInstructions === "string" && customInstructions.trim() !== "",
+    readinessProbes: readiness.probes.length,
     alreadyRunning: "alreadyRunning" in result && result.alreadyRunning === true,
   });
   return { status: 202, body: result };
