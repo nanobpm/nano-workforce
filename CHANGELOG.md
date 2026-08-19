@@ -1,3 +1,10 @@
+## [0.98.1](https://github.com/nanobpm/nano-workforce/compare/v0.98.0...v0.98.1) (2026-08-19)
+
+
+### Bug Fixes
+
+* **merge-loop:** transient 'Base branch was modified' merge race → bounded retry, not escalate ([#335](https://github.com/nanobpm/nano-workforce/issues/335)) ([4093d50](https://github.com/nanobpm/nano-workforce/commit/4093d50b0ecd1a226bcfe7a5ecca10ba1db0937a)), closes [#330](https://github.com/nanobpm/nano-workforce/issues/330) [#334](https://github.com/nanobpm/nano-workforce/issues/334)
+
 # [0.98.0](https://github.com/nanobpm/nano-workforce/compare/v0.97.1...v0.98.0) (2026-08-19)
 
 
