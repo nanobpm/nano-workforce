@@ -12,11 +12,11 @@
 // shapes the escalation payload on a block.
 import type { AppJobHandler } from "@nanobpm/urban";
 import { matchTags, tag } from "@nanobpm/urban/effect";
-import { ABANDONED_STATUS, abandonTokenFromUrl } from "../../app/abandon.ts";
+import { abandonTokenFromUrl } from "../../app/abandon.ts";
 import { checkBaseTarget, classifyBaseGuard } from "../../app/baseGuard.ts";
 import { classifyPrLiveness, enqueueViaComment, fetchPrState, mergePr } from "../../app/github.ts";
 import { classifyMergeLanding, DEFAULT_MERGE_PROTOCOL, loadMergeProtocol } from "../../app/mergeProtocol.ts";
-import { ensurePr, MERGE_ADMIN, MERGE_METHOD } from "../../app/service.ts";
+import { abandonClosedPr, ensurePr, MERGE_ADMIN, MERGE_METHOD } from "../../app/service.ts";
 import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 
 // Input typed off the model data envelope (`MergeAttemptIn` in merge-loop.bpmn) — ADR 0040.
@@ -74,22 +74,17 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
   // user task: a closed PR is terminal state, not a human decision. Symmetric with the merged
   // short-circuit above and runs on the same live-state read, so one `fetchPrState` classifies both.
   if (liveness === "closed") {
-    await app.data.table("merges", "id").insert({
-      pr_key: prKey,
-      outcome: "abandoned",
-      method: "pr-closed",
-      detail: "PR was closed on GitHub without merging (e.g. superseded) — abandoning the merge loop",
-      at: now,
-    });
-    // Terminal status write. This branch drives the model's terminate/abandon end event, which runs
-    // NO mark-merged worker (the merged path's `pr.mark-merged` is what sets `status:"merged"`). If
-    // we don't flip the row here it lingers on its in-flight status (e.g. the transient `merging`),
-    // so `activePrs`/delivery keep treating a dead PR as live. Symmetric with mark-merged's write;
-    // `ensurePr` above guarantees the row exists to update.
-    await app.data.table("pull_requests", "pr_key").update(prKey, {
-      status: ABANDONED_STATUS,
-      updated_at: now,
-    });
+    // One canonical abandon writer (`abandonClosedPr`, app/service.ts) records the terminal `merges`
+    // audit row and flips the `pull_requests` row — and every `plan_tasks` row keyed to this PR — to
+    // `abandoned`. Flipping the task row (not just the PR row) drops a dead wave member out of the
+    // wave-merge gate (#352). This branch drives the model's terminate/abandon end event, which runs
+    // NO mark-merged worker, so the terminal write must happen here; `ensurePr` above guarantees the
+    // PR row exists to update. Symmetric with the merged short-circuit on the same live-state read.
+    await abandonClosedPr(
+      app.data,
+      prKey,
+      "PR was closed on GitHub without merging (e.g. superseded) — abandoning the merge loop",
+    );
     return { mergeStatus: "abandoned" };
   }
 

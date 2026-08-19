@@ -127,3 +127,15 @@ test("waveMergeTargets → a wave with no opened PRs clears vacuously (empty)", 
   ];
   assertEquals(waveMergeTargets(tasks, 0), []);
 });
+
+// #352: a wave member whose PR was closed-unmerged is reconciled to the terminal `abandoned`
+// status. Such a task must NOT stay in the blocking set — a dead PR can never reach `merged`, so
+// leaving it in would wedge the wave-merge barrier forever. The surviving merged member is the only
+// target the gate waits on.
+test("waveMergeTargets → an abandoned (closed-unmerged) wave member drops out of the blocking set", () => {
+  const tasks: WaveGateTask[] = [
+    { wave: 0, status: "opened", pr_key: "o/r#1" },
+    { wave: 0, status: "abandoned", pr_key: "o/r#2" }, // PR closed without merging → reconciled terminal
+  ];
+  assertEquals(waveMergeTargets(tasks, 0), ["o/r#1"]);
+});

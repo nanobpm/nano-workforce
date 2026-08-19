@@ -26,7 +26,7 @@ CREATE TABLE plan_tasks (
   task_id     TEXT NOT NULL,               -- planner-supplied slug (or "t<index>")
   title       TEXT,
   prompt      TEXT,
-  status      TEXT NOT NULL,               -- pending | opened | blocked | skipped
+  status      TEXT NOT NULL,               -- pending | opened | blocked | skipped | escalated | waiting-for-lane | abandoned
   pr_key      TEXT,                         -- the PR this slice produced ("<owner>/<repo>#<n>")
   summary     TEXT,
   created_at  TEXT NOT NULL,
