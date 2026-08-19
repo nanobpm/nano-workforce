@@ -78,6 +78,7 @@ test("pollUserTasks: projects feature / plan-review / trial-merge / PR-wait esca
         status: "escalated",
         process_key: "fp-10",
         issue_url: "https://github.com/o/r/issues/10",
+        title: "Add the framework selector",
         escalation_user_task_key: "ut-feat",
         escalation_question: "which framework?",
         blocked_user_task_key: null,
@@ -85,7 +86,7 @@ test("pollUserTasks: projects feature / plan-review / trial-merge / PR-wait esca
       },
     ],
     plans: [
-      { plan_key: "o/r#20", status: "dispatched", process_key: "pp-20", issue_url: "https://github.com/o/r/issues/20" },
+      { plan_key: "o/r#20", status: "dispatched", process_key: "pp-20", issue_url: "https://github.com/o/r/issues/20", title: "Broaden the epic scope" },
       { plan_key: "o/r#21", status: "done", process_key: "pp-21", issue_url: "https://github.com/o/r/issues/21" },
     ],
     plan_reviews: [
@@ -96,7 +97,7 @@ test("pollUserTasks: projects feature / plan-review / trial-merge / PR-wait esca
       { id: 1, plan_key: "o/r#20", wave: 0, result: "suite-failed", summary: "wave 0 red", resolved: 0 },
     ],
     pull_requests: [
-      { pr_key: "o/r#30", status: "escalated", process_key: "rp-30", url: "https://github.com/o/r/pull/30" },
+      { pr_key: "o/r#30", status: "escalated", process_key: "rp-30", url: "https://github.com/o/r/pull/30", title: "Resolve the reviews" },
     ],
     escalations: [{ id: 1, pr_key: "o/r#30", status: "open", question: "conflicting reviews" }],
   });
@@ -115,13 +116,17 @@ test("pollUserTasks: projects feature / plan-review / trial-merge / PR-wait esca
   assertEquals(Object.keys(byKey).sort(), ["ut-feat", "ut-plan", "ut-pr", "ut-trial"]);
   assertEquals(byKey["ut-feat"].kind_label, "Feature escalation");
   assertEquals(byKey["ut-feat"].question, "which framework?");
+  assertEquals(byKey["ut-feat"].subject_title, "Add the framework selector");
   assertEquals(byKey["ut-plan"].kind_label, "Plan review");
   assertEquals(byKey["ut-plan"].question, "scope too broad");
+  assertEquals(byKey["ut-plan"].subject_title, "Broaden the epic scope");
   assertEquals(byKey["ut-trial"].kind_label, "Trial merge");
   assertEquals(byKey["ut-trial"].question, "wave 0 red");
+  assertEquals(byKey["ut-trial"].subject_title, "Broaden the epic scope");
   assertEquals(byKey["ut-pr"].kind_label, "PR review");
   assertEquals(byKey["ut-pr"].subject_type, "pr");
   assertEquals(byKey["ut-pr"].question, "conflicting reviews");
+  assertEquals(byKey["ut-pr"].subject_title, "Resolve the reviews");
 });
 
 test("pollUserTasks: projects a merge-loop wait-merge-answer escalation into user_tasks as \"PR merge\"", async () => {

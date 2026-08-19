@@ -1,0 +1,20 @@
+-- Surface the subject's human-readable title as the primary identity on the Tasks
+-- grids (issue #308), mirroring the Features list. Every `user_tasks` row was keyed
+-- only by `subject_key` (`owner/repo#N`) — meaningful while you remember the number,
+-- opaque hours later. The Features list already leads with `{{title}}` and shows the
+-- key as a subtitle; the Tasks grids could only show the bare key.
+--
+-- The title is DERIVED (no new fetch): each escalation's subject already persists a
+-- title in a surviving table keyed by `subject_key` — `feature_runs.title`,
+-- `plans.title`, `pull_requests.title`. `pollUserTasks` reads it from the subject row
+-- already in scope this pass and coalesces to `subject_key` at write time so the
+-- column is ALWAYS non-blank — the grid's `{{subject_title}}` template then needs no
+-- fallback and a missing subject title still shows a usable identity.
+--
+-- Forward-only, additive (expand): nullable with no default, so pre-#308 rows
+-- grandfather in as NULL. `pollUserTasks` re-derives every open task each pass, so the
+-- reconcile back-fills the title in place on the next poll — no separate backfill file
+-- is needed (a completed task's row is deleted, not migrated). Numbered after the
+-- current highest prefix on origin/main (042); the runner wraps each file in its own
+-- transaction, so this file must NOT contain BEGIN/COMMIT.
+ALTER TABLE user_tasks ADD COLUMN subject_title TEXT;

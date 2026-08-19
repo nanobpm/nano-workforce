@@ -84,8 +84,12 @@
         },
         "columns": [
           {
-            "field": "subject_key",
-            "header": "Feature"
+            "field": "subject_title",
+            "template": "{{subject_title}}",
+            "header": "Item",
+            "subtitleField": "subject_key",
+            "truncate": true,
+            "linkField": "subject_url"
           },
           {
             "field": "subject_url",
@@ -141,8 +145,12 @@
         },
         "columns": [
           {
-            "field": "subject_key",
-            "header": "Epic"
+            "field": "subject_title",
+            "template": "{{subject_title}}",
+            "header": "Item",
+            "subtitleField": "subject_key",
+            "truncate": true,
+            "linkField": "subject_url"
           },
           {
             "field": "question",
@@ -202,8 +210,12 @@
         },
         "columns": [
           {
-            "field": "subject_key",
-            "header": "Epic"
+            "field": "subject_title",
+            "template": "{{subject_title}}",
+            "header": "Item",
+            "subtitleField": "subject_key",
+            "truncate": true,
+            "linkField": "subject_url"
           },
           {
             "field": "question",
@@ -264,8 +276,12 @@
         },
         "columns": [
           {
-            "field": "subject_key",
-            "header": "PR"
+            "field": "subject_title",
+            "template": "{{subject_title}}",
+            "header": "Item",
+            "subtitleField": "subject_key",
+            "truncate": true,
+            "linkField": "subject_url"
           },
           {
             "field": "kind_label",
@@ -343,8 +359,12 @@
         },
         "columns": [
           {
-            "field": "subject_key",
-            "header": "Feature"
+            "field": "subject_title",
+            "template": "{{subject_title}}",
+            "header": "Item",
+            "subtitleField": "subject_key",
+            "truncate": true,
+            "linkField": "subject_url"
           },
           {
             "field": "question",
