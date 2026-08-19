@@ -5,7 +5,7 @@
 //   - Reconstruction + fence: restore INVERTS the push (`git fetch` + `git checkout <sha>`) and
 //     fence-replays the effect tail so no already-applied effect is repeated.
 import { test } from "node:test";
-import { assert, assertEquals } from "#test-assert";
+import { assert, assertEquals, assertRejects } from "#test-assert";
 import { memWorldData } from "../../test/worldDb.ts";
 import { recordWorldCheckpoint, restoreWorld, type SessionCheckpoint } from "./checkpoint.ts";
 import type { Effect } from "./effect-ledger.ts";
@@ -123,7 +123,9 @@ test("restoreWorld re-applies only a genuinely-pending tail effect (crash before
   // The push landed (applied) but its trailing comment was only RECORDED as pending (applied=false)
   // before the worker crashed. Restore must re-apply exactly the comment.
   await recordWorldCheckpoint(store, { prKey: PR, roundNo: 1, commitSha: "sha-a", effects: [{ kind: "push", idempotencyKey: "sha-a" }] });
-  // Record the pending comment at the same offset via a second store call with applied=false.
+  // Record the pending comment at the NEXT offset (offset 1) via a second store call with
+  // applied=false — `recordCheckpoint` always allocates the next monotonic offset, so this becomes
+  // the newest checkpoint whose tail is the still-pending comment.
   await store.recordCheckpoint({
     prKey: PR,
     roundNo: 1,
@@ -141,6 +143,43 @@ test("restoreWorld re-applies only a genuinely-pending tail effect (crash before
   const reapplied2: string[] = [];
   await restoreWorld(git, store, PR, { apply: (e) => reapplied2.push(e.idempotencyKey) });
   assertEquals(reapplied2, [], "the second resume repeats nothing — idempotent");
+});
+
+test("restoreWorld THROWS rather than silently losing a genuinely-pending tail effect when no executor is supplied", async () => {
+  const { data } = memWorldData();
+  const store = new WorldStore(data);
+  await recordWorldCheckpoint(store, { prKey: PR, roundNo: 1, commitSha: "sha-a", effects: [{ kind: "push", idempotencyKey: "sha-a" }] });
+  // A trailing comment recorded PENDING (applied=false): the crash landed before it executed.
+  await store.recordCheckpoint({ prKey: PR, roundNo: 1, commitSha: "sha-a2", effects: [{ kind: "pr-comment", idempotencyKey: "c-1" }], applied: false });
+  const git = fakeGit();
+  // With no `apply` executor, marking the pending effect applied would SILENTLY DROP it — so restore
+  // must throw instead of advancing the fence past an un-executed effect.
+  await assertRejects(() => restoreWorld(git, store, PR), Error, "genuinely pending");
+  // The fence was NOT advanced: a later restore WITH an executor still re-applies the comment exactly
+  // once (the effect survived the guarded restore rather than being lost).
+  const reapplied: string[] = [];
+  const res = await restoreWorld(git, store, PR, { apply: (e) => reapplied.push(e.idempotencyKey) });
+  assertEquals(reapplied, ["c-1"], "the pending effect survived and is re-applied once");
+  assertEquals(res?.applied.map((e) => e.idempotencyKey), ["c-1"]);
+});
+
+test("restoreWorld with no executor is fine when every tail effect is already applied (the guard never fires)", async () => {
+  const { data } = memWorldData();
+  const store = new WorldStore(data);
+  // Both effects recorded applied on the forward path — nothing pending, so no executor is needed.
+  await recordWorldCheckpoint(store, {
+    prKey: PR,
+    roundNo: 1,
+    commitSha: "sha-a",
+    effects: [
+      { kind: "push", idempotencyKey: "sha-a" },
+      { kind: "pr-comment", idempotencyKey: "c-1" },
+    ],
+  });
+  const git = fakeGit();
+  const res = await restoreWorld(git, store, PR);
+  assertEquals(res?.applied, [], "nothing is applied");
+  assertEquals(res?.skipped.map((e) => e.idempotencyKey), ["sha-a", "c-1"], "both are skipped by the fence");
 });
 
 test("restoreWorld returns null when the PR has no push-checkpoint (nothing to reconstruct)", async () => {

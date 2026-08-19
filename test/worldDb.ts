@@ -61,6 +61,34 @@ function gateway(db: DatabaseSync, name: string, pk: string) {
   };
 }
 
+/** A minimal self-referential `DataSource`-shaped gateway over the real db: the `table` surface plus
+ * a real `tx()` that BEGIN/COMMIT/ROLLBACKs on the underlying SQLite connection, so the world store's
+ * atomic `recordCheckpoint` (checkpoint + effects in one transaction) is exercised against genuine
+ * transaction semantics rather than mocked. `tx(fn)` passes the SAME source object to `fn`, so a test
+ * that decorates `table` on the returned source sees its decoration inside the transaction too. */
+type MemDataSource = {
+  table: (name: string, pk?: string) => ReturnType<typeof gateway>;
+  tx<T>(fn: (t: MemDataSource) => Promise<T>): Promise<T>;
+};
+
+function openDataSource(db: DatabaseSync): MemDataSource {
+  const ds: MemDataSource = {
+    table: (name, pk = "id") => gateway(db, name, pk),
+    async tx(fn) {
+      db.exec("BEGIN");
+      try {
+        const r = await fn(ds);
+        db.exec("COMMIT");
+        return r;
+      } catch (e) {
+        db.exec("ROLLBACK");
+        throw e;
+      }
+    },
+  };
+  return ds;
+}
+
 /** A `DataLayer` stub over a fresh in-memory db with the world schema applied. */
 export function memWorldData(): { data: DataLayer; db: DatabaseSync } {
   const db = new DatabaseSync(":memory:");
@@ -69,6 +97,7 @@ export function memWorldData(): { data: DataLayer; db: DatabaseSync } {
   db.exec(sql);
   const data = {
     table: (name: string, pk = "id") => gateway(db, name, pk),
+    open: () => openDataSource(db),
   } as unknown as DataLayer;
   return { data, db };
 }

@@ -13,11 +13,13 @@ export {
   type WorldRestoreResult,
 } from "./checkpoint.ts";
 export {
+  EFFECT_KINDS,
   type Effect,
   type EffectKind,
   type Fence,
   type FenceOutcome,
   fenceReplay,
+  isEffectKind,
 } from "./effect-ledger.ts";
 export { execGitRunner, type GitRunner } from "./git.ts";
 export { type LastCheckpoint, type RecordCheckpointInput, WorldStore } from "./store.ts";

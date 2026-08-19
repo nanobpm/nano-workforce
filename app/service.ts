@@ -385,9 +385,13 @@ export function repoEnvelopeVars(
         // single-branch head, keeping `origin/<base>` reachable for the diff. Omitted when unknown.
         ...(baseRef ? { baseRef } : {}),
         // World-restore (issue #324): the last pushed SHA a replacement activation reconstructs the
-        // working tree to (inverting the round's push into a fetch+checkout). Omitted when the PR has
-        // no durable push-checkpoint yet, so a first activation clones the head branch normally.
-        ...(commitSha ? { commitSha } : {}),
+        // working tree to (inverting the round's push into a fetch+checkout). Only emitted when it is
+        // a well-formed 40-hex commit SHA: `commitSha` is forwarded to the harness as an EXACT
+        // checkout target, so a non-SHA ref or a whitespace-tainted value could reconstruct to an
+        // unintended ref (a moved branch tip) or fail provisioning. A malformed value degrades to
+        // omission — the harness then clones the head branch tip, the pre-#324 behaviour. Omitted too
+        // when the PR has no durable push-checkpoint yet.
+        ...(commitSha && /^[0-9a-f]{40}$/i.test(commitSha) ? { commitSha } : {}),
       },
     },
   };

@@ -94,8 +94,10 @@ export interface RestoreOptions {
   /** The remote to fetch the checkpoint SHA from (default `origin`). */
   readonly remote?: string;
   /** Runs a fenced tail effect (a `pr-comment`/`merge` that must be re-attempted because it did not
-   * land before the crash). Omitted → tail effects are only fenced (never re-applied), which is the
-   * safe default when the caller has no executor: an already-applied effect is skipped regardless. */
+   * land before the crash). Omit ONLY when the tail cannot contain a genuinely-pending effect (every
+   * effect already applied): with no executor a genuinely-pending effect would be silently dropped,
+   * so `restoreWorld` instead THROWS on one rather than marking it applied without executing it. An
+   * already-applied effect is skipped regardless of this option. */
   readonly apply?: (effect: Effect) => void | Promise<void>;
 }
 
@@ -121,9 +123,20 @@ export async function restoreWorld(
   await git.fetch(opts.remote ?? "origin");
   await git.checkout(last.commitSha);
   // Fence-replay the effect tail: already-applied effects skip (idempotent — "no duplicate
-  // push/comment"); a genuinely-pending effect is re-applied via `apply` (a no-op skip when none).
+  // push/comment"). A genuinely-pending effect is re-applied via `opts.apply`. When no executor was
+  // supplied, DON'T advance the fence for a pending effect — marking it applied without running it
+  // would silently lose the effect. Instead throw, converting that silent-loss class into a loud,
+  // caught failure. `fenceReplay` invokes `apply` ONLY for genuinely-missing effects, so this guard
+  // never fires when every tail effect is already applied (the safe no-executor case).
   const tail = await store.effectTail(prKey, last.offset);
   const fence = store.fenceFor(prKey, last.offset);
-  const outcome = await fenceReplay(tail, fence, opts.apply ?? (() => {}));
+  const apply =
+    opts.apply ??
+    ((effect: Effect): never => {
+      throw new Error(
+        `restoreWorld(${prKey}): no \`apply\` executor supplied, but effect ${effect.kind}:${effect.idempotencyKey} is genuinely pending — refusing to mark it applied without executing it (silent effect loss). Pass \`opts.apply\` to re-apply pending tail effects.`,
+      );
+    });
+  const outcome = await fenceReplay(tail, fence, apply);
   return { offset: last.offset, commitSha: last.commitSha, ...outcome };
 }

@@ -7,7 +7,7 @@
 import type { AppJobHandler } from "@nanobpm/urban";
 import { abandonTokenFromUrl } from "../../app/abandon.ts";
 import { ensurePr, parsePr } from "../../app/service.ts";
-import { type Effect, recordWorldCheckpoint, WorldStore } from "../../app/world/index.ts";
+import { type Effect, isEffectKind, recordWorldCheckpoint, WorldStore } from "../../app/world/index.ts";
 import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 
 // Input is typed off the model data envelope (`PrPersistRoundIn` in convergence-loop.bpmn),
@@ -46,15 +46,29 @@ interface WorldMarker {
   readonly effects?: readonly Effect[];
 }
 
-function worldMarkerOf(vars: Record<string, unknown>): WorldMarker | null {
+/** Normalize one externally-supplied effect from the harness `worldMarker`, or `null` when it is not
+ * a usable effect. This is a CONTRACT BOUNDARY: the marker arrives from out-of-process, so both the
+ * fence key AND the effect kind are untrusted. We (a) TRIM `idempotencyKey` so whitespace variants of
+ * one real effect collapse to a single fence key rather than manufacturing distinct ledger rows that
+ * defeat the fence, and (b) validate `kind` against the canonical {@link EFFECT_KINDS} so an unknown
+ * kind can never enter the durable ledger. `description` is trimmed to a non-empty note or dropped. */
+function normalizeEffect(raw: unknown): Effect | null {
+  // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+  const e = raw as { kind?: unknown; idempotencyKey?: unknown; description?: unknown } | null | undefined;
+  if (!e || !isEffectKind(e.kind)) return null;
+  if (typeof e.idempotencyKey !== "string") return null;
+  const idempotencyKey = e.idempotencyKey.trim();
+  if (idempotencyKey === "") return null;
+  const description = typeof e.description === "string" ? e.description.trim() : "";
+  return { kind: e.kind, idempotencyKey, ...(description !== "" ? { description } : {}) };
+}
+
+export function worldMarkerOf(vars: Record<string, unknown>): WorldMarker | null {
   // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
   const m = vars[WORLD_MARKER_KEY] as { commitSha?: unknown; effects?: unknown } | undefined;
   if (!m || typeof m.commitSha !== "string" || m.commitSha.trim() === "") return null;
   const effects = Array.isArray(m.effects)
-    ? // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
-      (m.effects as Effect[]).filter(
-        (e) => e && typeof e.idempotencyKey === "string" && e.idempotencyKey.trim() !== "",
-      )
+    ? m.effects.map(normalizeEffect).filter((e): e is Effect => e !== null)
     : undefined;
   return { commitSha: m.commitSha.trim(), ...(effects && effects.length > 0 ? { effects } : {}) };
 }

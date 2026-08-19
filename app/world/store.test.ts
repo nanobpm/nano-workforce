@@ -3,7 +3,7 @@
 // and the durable fence (`UNIQUE(pr_key, idempotency_key)` → `isApplied`/`markApplied`) are proven,
 // not mocked.
 import { test } from "node:test";
-import { assert, assertEquals } from "#test-assert";
+import { assert, assertEquals, assertRejects } from "#test-assert";
 import { memWorldData } from "../../test/worldDb.ts";
 import type { Effect } from "./effect-ledger.ts";
 import { WorldStore } from "./store.ts";
@@ -90,4 +90,48 @@ test("fenceFor.markApplied records a brand-new applied effect when the key is ab
   const fence = store.fenceFor(PR, 0);
   await fence.markApplied({ kind: "merge", idempotencyKey: "m-1" });
   assert(await fence.isApplied("m-1"), "a newly-applied effect is now fenced");
+});
+
+test("recordCheckpoint is atomic: a mid-write effect failure rolls back the checkpoint row too", async () => {
+  const { data, db } = memWorldData();
+  // Decorate the transaction-scoped data source so the SECOND `world_effects` insert throws — a crash
+  // AFTER the checkpoint row + first effect but BEFORE the second. Without an enclosing transaction
+  // this leaves a checkpoint whose fence is missing ledger rows; the atomic write must roll it ALL back.
+  const realOpen = (data as unknown as { open: () => Record<string, unknown> }).open.bind(data);
+  (data as unknown as { open: () => Record<string, unknown> }).open = () => {
+    const ds = realOpen();
+    const realTable = (ds.table as (name: string, pk?: string) => Record<string, unknown>).bind(ds);
+    let effectInserts = 0;
+    ds.table = (name: string, pk?: string) => {
+      const t = realTable(name, pk);
+      if (name === "world_effects") {
+        const realInsert = (t.insert as (row: unknown) => Promise<number>).bind(t);
+        t.insert = async (row: unknown) => {
+          if (++effectInserts === 2) throw new Error("simulated crash mid-append");
+          return realInsert(row);
+        };
+      }
+      return t;
+    };
+    return ds;
+  };
+  const store = new WorldStore(data);
+  await assertRejects(
+    () =>
+      store.recordCheckpoint({
+        prKey: PR,
+        roundNo: 1,
+        commitSha: "sha-a",
+        effects: [
+          { kind: "push", idempotencyKey: "k1" },
+          { kind: "pr-comment", idempotencyKey: "k2" },
+        ],
+      }),
+    Error,
+    "simulated crash mid-append",
+  );
+  const cps = Number((db.prepare("SELECT COUNT(*) AS c FROM world_checkpoints").get() as { c: number }).c);
+  const effs = Number((db.prepare("SELECT COUNT(*) AS c FROM world_effects").get() as { c: number }).c);
+  assertEquals(cps, 0, "the checkpoint row was rolled back — no half-written checkpoint");
+  assertEquals(effs, 0, "the first effect row was rolled back too — the whole write is atomic");
 });

@@ -17,8 +17,19 @@
 /** The classes of irreversible action the world-restore fence guards. Each maps to a natural
  * idempotency key: a `push` to its commit SHA, a `pr-comment` to the comment id, a `merge` to the
  * merge key. Anything reversible (a scratch file write reconstructed by the checkout) is NOT an
- * effect — only actions whose re-execution would be observable to the outside world belong here. */
-export type EffectKind = "push" | "pr-comment" | "merge";
+ * effect — only actions whose re-execution would be observable to the outside world belong here.
+ *
+ * The runtime tuple is the ONE canonical list (derivation over duplication): {@link EffectKind} is
+ * derived from it, and a contract boundary that must validate an externally-supplied kind (e.g. the
+ * `worldMarker` the harness reports) checks membership against it rather than re-listing the values. */
+export const EFFECT_KINDS = ["push", "pr-comment", "merge"] as const;
+export type EffectKind = (typeof EFFECT_KINDS)[number];
+
+/** True when `kind` is one of the known {@link EFFECT_KINDS}. The guard a contract boundary uses to
+ * reject an unexpected effect kind before it enters the durable ledger. */
+export function isEffectKind(kind: unknown): kind is EffectKind {
+  return typeof kind === "string" && EFFECT_KINDS.some((k) => k === kind);
+}
 
 /** One irreversible action in the effect ledger. `idempotencyKey` is the effect's natural identity —
  * the value that makes "did this already happen?" answerable WITHOUT re-doing it. Two ledger entries
