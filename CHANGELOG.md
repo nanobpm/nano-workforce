@@ -1,3 +1,10 @@
+## [0.102.1](https://github.com/nanobpm/nano-workforce/compare/v0.102.0...v0.102.1) (2026-08-19)
+
+
+### Bug Fixes
+
+* **merge-loop:** re-attempt merge for stale/transient CI instead of paging a human ([#348](https://github.com/nanobpm/nano-workforce/issues/348)) ([#350](https://github.com/nanobpm/nano-workforce/issues/350)) ([87ce2d6](https://github.com/nanobpm/nano-workforce/commit/87ce2d69e893b4b0f965f481d6c247fb8fcb84e8))
+
 # [0.102.0](https://github.com/nanobpm/nano-workforce/compare/v0.101.1...v0.102.0) (2026-08-19)
 
 
