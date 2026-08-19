@@ -1,3 +1,10 @@
+# [0.105.0](https://github.com/nanobpm/nano-workforce/compare/v0.104.0...v0.105.0) (2026-08-19)
+
+
+### Features
+
+* examine epic implementation against spec in retro (conformance) ([#355](https://github.com/nanobpm/nano-workforce/issues/355)) ([c52d059](https://github.com/nanobpm/nano-workforce/commit/c52d0594d767c551d31ed967d1ef79cb30e82ceb)), closes [#217](https://github.com/nanobpm/nano-workforce/issues/217) [#216](https://github.com/nanobpm/nano-workforce/issues/216) [#217](https://github.com/nanobpm/nano-workforce/issues/217)
+
 # [0.104.0](https://github.com/nanobpm/nano-workforce/compare/v0.103.0...v0.104.0) (2026-08-19)
 
 
