@@ -41,6 +41,7 @@ test("buildUserTaskRow: a plan-review task becomes a labelled row with its findi
     kind_label: "Plan review",
     subject_type: "plan",
     subject_key: "o/r#1",
+    subject_title: "o/r#1",
     subject_url: "https://github.com/o/r/issues/1",
     question: "cap reached: revise scope",
     process_key: "pk-1",
@@ -80,6 +81,28 @@ test("buildUserTaskRow: a blank userTaskKey or subjectKey yields null", () => {
   );
 });
 
+test("buildUserTaskRow: subject_title carries the subject title, trimmed, and coalesces to subject_key when absent/blank (issue #308)", () => {
+  const titled = buildUserTaskRow(
+    {
+      userTaskKey: "ut-t1",
+      elementId: PLAN_REVIEW_ELEMENT,
+      subjectType: "plan",
+      subjectKey: "o/r#1",
+      subjectTitle: "  Add the widget  ",
+    },
+    AT,
+  );
+  assertEquals(titled?.subject_title, "Add the widget");
+
+  for (const subjectTitle of [undefined, null, "   "]) {
+    const row = buildUserTaskRow(
+      { userTaskKey: "ut-t2", elementId: PLAN_REVIEW_ELEMENT, subjectType: "plan", subjectKey: "o/r#2", subjectTitle },
+      AT,
+    );
+    assertEquals(row?.subject_title, "o/r#2");
+  }
+});
+
 function row(key: string, extra: Partial<UserTaskRow> = {}): UserTaskRow {
   return {
     user_task_key: key,
@@ -87,6 +110,7 @@ function row(key: string, extra: Partial<UserTaskRow> = {}): UserTaskRow {
     kind_label: "Plan review",
     subject_type: "plan",
     subject_key: "o/r#1",
+    subject_title: "o/r#1",
     subject_url: null,
     question: null,
     process_key: null,
