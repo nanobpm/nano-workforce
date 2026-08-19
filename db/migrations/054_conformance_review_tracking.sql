@@ -10,7 +10,10 @@
 -- `plan_conformance` the retro run's tracking row: `process_key` is the retro process instance, and
 -- `review_status` is its escalation lifecycle — `reviewing` while the ack task is open (the poller
 -- scans these), `reviewed` once the run settles (set by `record-conformance` when there is nothing to
--- escalate, and by `instanceTracking.onTerminated` when the acked instance ends).
+-- escalate, by the `pr.conformance-ack` worker (`acknowledgeConformance`) when an operator
+-- acknowledges the escalation and the retro instance COMPLETES normally, and — as a crash/cancel
+-- safety net — by `instanceTracking.onTerminated` when the retro instance is TERMINATED rather than
+-- completing).
 --
 -- Forward-only, additive (expand): two nullable/defaulted columns on the table 052 just added; the
 -- runner wraps each file in its own transaction, so this file must NOT contain BEGIN/COMMIT.
