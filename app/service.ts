@@ -33,7 +33,14 @@ import { pollLineage } from "./lineage.ts";
 import { mergeLanes, readExclusions } from "./mergeExclusion.ts";
 import { freshHeadRunAction, headRunPresenceCount, loadMergeProtocol } from "./mergeProtocol.ts";
 import { type PrLaneDecision, planPrLane, taskDependencyDepths } from "./mergeTrain.ts";
-import { backfillPlanBuckets, planReviews, plans, planTaskDeps, planTasks } from "./plan.ts";
+import {
+  backfillPlanBuckets,
+  inboundPlanDeps,
+  planReviews,
+  plans,
+  planTaskDeps,
+  planTasks,
+} from "./plan.ts";
 import { derivePromotionState, isPromotable, promotionPrBody, promotionPrTitle } from "./promotion.ts";
 import { clampNudgeMinutes, reviewWaitTimeout } from "./reviewWait.ts";
 import { trialMergeAudits } from "./trialMerge.ts";
@@ -51,6 +58,7 @@ import {
   type UserTaskRow,
   userTasks,
 } from "./userTasks.ts";
+import { deriveWaitGate } from "./waitGate.ts";
 import { waveMergeTargets } from "./waves.ts";
 
 /** The BPMN process that drives review convergence (`resources/processes/convergence-loop.bpmn`). */
@@ -1350,6 +1358,40 @@ export async function pollDelivery(data: DataLayer) {
   }
 }
 
+/** Idempotent read-model pass (issue #292 slice S4): project each DEPENDENT epic's inter-epic gate
+ * state onto its `plans` row so the epic index/detail views can show — as flat columns — which
+ * producer/package a parked dependent is blocked on, its poll cadence + escalation deadline, and the
+ * bound `pkg@version` once green. Mirrors `pollDelivery`: joins each plan against its inbound
+ * `plan_deps` edges (the S1 read API) and stamps the pure `deriveWaitGate` (app/waitGate.ts) result,
+ * writing only when the projection actually changes so a steady-state pass is a no-op. Read-only over
+ * the state S1–S3 produce — it NEVER touches admission, scheduling, or `plan.status`.
+ *
+ * A ROOT epic (no inbound edge) derives `{ null, null }` — no wait-gate; any stale projection left by
+ * a prior edge (e.g. an edge later removed) is cleared defensively so the read model never keeps a
+ * phantom gate. */
+export async function pollWaitGate(data: DataLayer) {
+  for (const plan of await plans(data).all()) {
+    try {
+      const edges = await inboundPlanDeps(data, plan.plan_key);
+      const { wait_gate, wait_gate_label } = deriveWaitGate(edges, {
+        status: plan.status,
+        current_wave: plan.current_wave,
+        bound_artifacts: plan.bound_artifacts,
+        created_at: plan.created_at,
+      });
+      if (plan.wait_gate !== wait_gate || plan.wait_gate_label !== wait_gate_label) {
+        await plans(data).update(plan.plan_key, {
+          wait_gate,
+          wait_gate_label,
+          updated_at: now(),
+        });
+      }
+    } catch (err) {
+      console.error(`[poller] wait-gate ${plan.plan_key}: ${err}`);
+    }
+  }
+}
+
 /** Idempotent promotion pass (issue #299): open — and then track — the `epic/* → <default>`
  * promotion PR for every epic that has LANDED on a custom integration branch. This is the missing
  * counterpart to `ensureBaseBranch`: that creates the `epic/*` branch slices merge into; this
@@ -1804,6 +1846,7 @@ export async function pollOnce(
   await pollReviews(data, engine, token);
   await pollMerges(data, engine, token);
   await pollDelivery(data);
+  await pollWaitGate(data);
   await pollPromotion(data, engine, token);
   await pollFeatureDelivery(data);
   await pollLineage(data);

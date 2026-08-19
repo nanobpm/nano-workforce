@@ -79,6 +79,7 @@
           { "field": "epic_phase", "header": "Phase" },
           { "field": "status", "header": "Status", "link": { "kind": "processExplorer", "keyField": "process_key" } },
           { "field": "delivery", "header": "Delivery" },
+          { "field": "wait_gate_label", "header": "Wait gate" },
           { "field": "promotion_state", "header": "Promotion" },
           { "field": "delivery_label", "header": "Landing" },
           { "field": "base_branch", "header": "Base branch" },
