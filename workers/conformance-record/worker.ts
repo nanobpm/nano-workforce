@@ -80,6 +80,21 @@ const handler: AppJobHandler<In> = async (job, app) => {
   // never drifts to a number and break the string-filter reads in `pollUserTasks`/`openUserTasks` —
   // the same `String(...)` coercion app/service.ts applies when it stamps `process_key`.
   const processKey = job.processInstanceKey != null ? String(job.processInstanceKey) : null;
+
+  // Invariant: an escalation must be trackable. If we found deviations to escalate but have no
+  // process key to key the `reviewing` row off, the `hasDeviations` return below would still route
+  // retro to the `conformance-escalation` user task — yet `pollUserTasks` can never surface that ack
+  // (it skips rows without `process_key`) nor can the `onTerminated` binding ever clear it, so the
+  // escalation wedges forever, invisible to any human. Rather than record that silent, unreachable
+  // state, fail loudly so the run retries/alerts. `job.processInstanceKey` is always present for an
+  // activated job, so this only fires on a genuine engine-contract violation.
+  if (hasDeviations && processKey == null) {
+    throw new Error(
+      `conformance-record: ${planKey} has deviations to escalate but no processInstanceKey to track ` +
+        "the escalation — refusing to route to an untrackable conformance-escalation ack task",
+    );
+  }
+
   await recordConformance(app.data, planKey, {
     status,
     commentUrl: filed ? commentUrl : null,
@@ -95,8 +110,9 @@ const handler: AppJobHandler<In> = async (job, app) => {
     // Only enter the `reviewing` inbox scan when we actually have a `processKey` to key off — a
     // null key can never be found by `pollUserTasks` (it skips rows without `process_key`) nor
     // cleared by the `instanceTracking` `onTerminated` binding, so a `reviewing` row with no key
-    // would wedge forever. Settle straight to `reviewed` in that (defensive) case.
-    reviewStatus: hasDeviations && processKey != null ? "reviewing" : "reviewed",
+    // would wedge forever. The invariant guard above already rejected `hasDeviations` with a null
+    // key, so `reviewing` here always carries a non-null `processKey`.
+    reviewStatus: hasDeviations ? "reviewing" : "reviewed",
   });
 
   app.log.info(
