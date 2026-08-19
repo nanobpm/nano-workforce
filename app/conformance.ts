@@ -292,6 +292,10 @@ export async function acknowledgeConformance(
   const trimmed = typeof note === "string" && note.trim() ? note.trim() : null;
   const existing = await conformanceTbl(data).get(planKey);
   if (!existing) return;
+  // At-least-once worker semantics can retry `pr.conformance-ack` after a successful DB update; the
+  // row is already settled at `reviewed`, so short-circuit to keep the operation idempotent (a retry
+  // must not re-append a duplicate `Operator ack: …` block to the audit trail).
+  if (existing.review_status === "reviewed") return;
   const prior = typeof existing.summary === "string" ? existing.summary : null;
   const summary = trimmed ? (prior ? `${prior}\n\nOperator ack: ${trimmed}` : `Operator ack: ${trimmed}`) : prior;
   await conformanceTbl(data).update(planKey, {

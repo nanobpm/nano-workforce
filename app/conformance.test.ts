@@ -263,6 +263,18 @@ test("acknowledgeConformance: settles the row at reviewed and folds the note int
   assertEquals(row.summary, "slice 2 reduced\n\nOperator ack: filed follow-up #9");
 });
 
+test("acknowledgeConformance: is idempotent — a retry after settling does not re-append the note", async () => {
+  const { data, stores } = memData();
+  stores["plan_conformance"] = [
+    { plan_key: PLAN, process_key: "p1", review_status: "reviewing", summary: "slice 2 reduced" },
+  ];
+  await acknowledgeConformance(data, PLAN, "filed follow-up #9");
+  await acknowledgeConformance(data, PLAN, "filed follow-up #9");
+  const row = stores["plan_conformance"][0];
+  assertEquals(row.review_status, "reviewed");
+  assertEquals(row.summary, "slice 2 reduced\n\nOperator ack: filed follow-up #9");
+});
+
 test("acknowledgeConformance: a blank note settles the row without changing the summary", async () => {
   const { data, stores } = memData();
   stores["plan_conformance"] = [
