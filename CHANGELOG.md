@@ -1,3 +1,10 @@
+# [0.97.0](https://github.com/nanobpm/nano-workforce/compare/v0.96.1...v0.97.0) (2026-08-19)
+
+
+### Features
+
+* **nav:** live open-tasks count badge on the Tasks nav item ([#306](https://github.com/nanobpm/nano-workforce/issues/306)) ([#330](https://github.com/nanobpm/nano-workforce/issues/330)) ([10aa55a](https://github.com/nanobpm/nano-workforce/commit/10aa55af9a3d5c60f13391f9e17361b6b33ac653)), closes [nano-ide#338](https://github.com/nano-ide/issues/338) [nano-ide#342](https://github.com/nano-ide/issues/342)
+
 ## [0.96.1](https://github.com/nanobpm/nano-workforce/compare/v0.96.0...v0.96.1) (2026-08-19)
 
 
