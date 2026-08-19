@@ -521,17 +521,78 @@ interface RollupEntry {
   name?: string;
   context?: string;
   workflowName?: string;
+  /** CheckRun timestamps (GraphQL `statusCheckRollup`). A superseded run and the newer run that
+   * replaced it carry the same check name but different times, so they order the runs of one check.
+   * StatusContext carries `createdAt` instead. All are ISO-8601 or absent. */
+  startedAt?: string;
+  completedAt?: string;
+  createdAt?: string;
 }
+
+/** The canonical identity of a check across its reruns: its name (CheckRun) or context
+ * (StatusContext), falling back to its `workflowName` and finally the sentinel `"check"` when
+ * neither is present. GitHub CI concurrency can leave several runs of the SAME check on one head
+ * commit — a superseded run plus the newer run that replaced it — so this is what we group by. */
+function checkKey(c: RollupEntry): string {
+  return c.name || c.context || c.workflowName || "check";
+}
+
+/** A run's ordering timestamp (newest wins): its completion, else its start, else its creation.
+ * `0` when none is present (the shape carries no time) so a timed run always outranks an untimed
+ * one. */
+function runOrder(c: RollupEntry): number {
+  const t = c.completedAt || c.startedAt || c.createdAt;
+  if (!t) return 0;
+  const ms = Date.parse(t);
+  return Number.isNaN(ms) ? 0 : ms;
+}
+
+/** True when a run's conclusion is `CANCELLED` — the state GitHub CI concurrency stamps on a run it
+ * supersedes with a newer run on the identical head SHA (a stale/transient cancellation, not a code
+ * defect). */
+function isCancelled(c: RollupEntry): boolean {
+  return (c.conclusion || c.state || "").toUpperCase() === "CANCELLED";
+}
+
+/** Collapse a head's rollup to the **newest run per check**. GitHub's CI-concurrency cancellation
+ * (issue #348) leaves BOTH a superseded run (stamped `CANCELLED`) and the newer run that replaced
+ * it on the *same head SHA*, under the same check name. Counting the stale `CANCELLED` as a failure
+ * escalates a self-healing PR whose head is actually green. The rollup is already scoped to the head
+ * commit, so grouping by check name and keeping the newest run per name yields one ground-truth
+ * conclusion per `(headSha, checkName)`. Ties (equal/absent timestamps) prefer a non-`CANCELLED`
+ * run, so a superseded cancellation never shadows the real result even when GitHub omits times. */
+export function latestRunPerCheck(rollup: RollupEntry[]): RollupEntry[] {
+  const newest = new Map<string, RollupEntry>();
+  for (const c of rollup) {
+    const key = checkKey(c);
+    const prev = newest.get(key);
+    if (prev === undefined) {
+      newest.set(key, c);
+      continue;
+    }
+    const dt = runOrder(c) - runOrder(prev);
+    if (dt > 0) {
+      newest.set(key, c);
+    } else if (dt === 0 && isCancelled(prev) && !isCancelled(c)) {
+      // Same/unknown time: a CANCELLED run is the superseded one — the real result wins.
+      newest.set(key, c);
+    }
+  }
+  return [...newest.values()];
+}
+
 /** Names of the checks whose result is a hard failure (as opposed to pending/success). Covers
  * both the CheckRun shape (`conclusion` + `name`/`workflowName`) and the legacy StatusContext
  * shape (`state` + `context`). The names are what the CI-fix agent is handed so it knows which
- * gates to make green; `failingChecks` (the count) is derived from this list. */
-function failingCheckNames(rollup: RollupEntry[]): string[] {
+ * gates to make green; `failingChecks` (the count) is derived from this list. Derivation is over the
+ * **newest run per check** (`latestRunPerCheck`) so a `CANCELLED` run superseded by a newer green
+ * run on the identical head SHA is not counted as a failing gate (issue #348). */
+export function failingCheckNames(rollup: RollupEntry[]): string[] {
   const bad = new Set(["FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE", "ERROR"]);
   const names: string[] = [];
-  for (const c of rollup) {
+  for (const c of latestRunPerCheck(rollup)) {
     const v = (c.conclusion || c.state || "").toUpperCase();
-    if (bad.has(v)) names.push(c.name || c.context || c.workflowName || "check");
+    if (bad.has(v)) names.push(checkKey(c));
   }
   return names;
 }
@@ -539,10 +600,11 @@ function failingCheckNames(rollup: RollupEntry[]): string[] {
 /** Names of every head check present, regardless of state. Covers both the CheckRun shape
  * (`name`/`workflowName`) and the legacy StatusContext shape (`context`). Used to test whether a
  * repo's *required* checks are present on the head — so an unrelated always-on check (e.g.
- * Mergify's "Merge Queue") doesn't masquerade as the required CI run having already happened. */
-function allCheckNames(rollup: RollupEntry[]): string[] {
+ * Mergify's "Merge Queue") doesn't masquerade as the required CI run having already happened.
+ * Deduped to the newest run per check so a superseded rerun doesn't list a check name twice. */
+export function allCheckNames(rollup: RollupEntry[]): string[] {
   const names: string[] = [];
-  for (const c of rollup) {
+  for (const c of latestRunPerCheck(rollup)) {
     const name = c.name || c.context || c.workflowName;
     if (name) names.push(name);
   }

@@ -118,11 +118,14 @@ test("ci-fix result: a missing/ambiguous status reconciles from ground truth, no
     flowHasId("f_ci_reconcile", "gw-ci-result", "arm-merge"),
     "f_ci_reconcile must default gw-ci-result → arm-merge (reconcile)",
   );
-  // Escalation reserved for the agent's explicit `blocked` verdict.
+  // Escalation reserved for the agent's explicit `blocked` verdict — but now via a
+  // reconcile-before-escalate guard (issue #348): a `blocked` with no push reconciles once from
+  // ground truth, and only a still-blocked PR reaches the human escalation.
   const ciBlocked = flat.match(/<bpmn:sequenceFlow[^>]*id="f_ci_blocked"[\s\S]*?<\/bpmn:sequenceFlow>/);
   assert(ciBlocked, "f_ci_blocked flow missing");
   assertStringIncludes(ciBlocked![0], 'status = "blocked"');
-  assert(hasFlow("gw-ci-result", "merge-esc-attempt"), "gw-ci-result → merge-esc-attempt (blocked) missing");
+  assert(hasFlow("gw-ci-result", "gw-ci-blocked"), "blocked verdict must pass through gw-ci-blocked (reconcile-before-escalate)");
+  assert(hasFlow("gw-ci-blocked", "merge-esc-attempt"), "gw-ci-blocked → merge-esc-attempt (still blocked) missing");
 });
 
 test("regression: the conflict verdict passes through the rebase actor, not straight to escalation", () => {
