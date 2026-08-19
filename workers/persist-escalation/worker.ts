@@ -9,10 +9,13 @@
 // durable review wait instead of routing here (see app/roundResultDefault.ts). This worker keeps
 // the same rule as defence-in-depth via the canonical taxonomy: if a blank-question job ever
 // reaches it, it opens NO escalation and reports `escalated:false` rather than FABRICATING a
-// question (the retired failure mode) or throwing an un-remediable incident. The convergence-loop
-// model branches on that `escalated` output (`gw-escalated`): a `false` return re-enters the loop
-// via `gw-guard` instead of flowing into the `wait-answer` catch, so a non-escalation can never
-// wedge a token on a durable wait that has no escalation for a human to answer.
+// question (the retired failure mode) or throwing an un-remediable incident. EVERY convergence-loop
+// escalation arm — the agent-verdict `persist-escalation` AND the four control-flow arms
+// (`persist-escalation-noprogress`, `persist-review-stalled`, `persist-escalation-blockedcomments`,
+// `persist-escalation-maxrounds`) — now routes its `escalated` output through the `gw-escalated`
+// gateway (issue #333): a `false` return re-enters the loop via `gw-guard` instead of flowing into
+// the `wait-answer` catch, so a non-escalation (e.g. a blank `convergeBlockReason`) can never wedge
+// a token on a durable wait that has no escalation for a human to answer.
 import type { AppJobHandler } from "@nanobpm/urban";
 import { abandonTokenFromUrl } from "../../app/abandon.ts";
 import { classifyEscalation } from "../../app/escalationTaxonomy.ts";

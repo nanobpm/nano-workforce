@@ -180,3 +180,35 @@ test("persist-escalation heals from the prKey when repo/prNumber are absent", as
     "the running agent's abandon token is preserved from abandonUrl, not re-minted",
   );
 });
+
+// #333 — the control-flow escalation arms (no-progress / review-stalled / unaddressed-comments /
+// max-rounds) each set an explicit `status="blocked"` + a concrete `question` via `zeebe:input`
+// (recordRound=false for the three that run after `persist-round`). They now route through
+// `gw-escalated`, which branches on the worker's `escalated` output. This pins the contract that
+// gateway depends on: a control-flow arm with a real question OPENS an escalation and returns
+// `escalated:true` + the (trimmed) question, so gw-escalated parks a wait carrying that question —
+// never a dead wait with a null question (the #333 defect).
+test("a control-flow arm with a concrete question opens an escalation gw-escalated can park", async () => {
+  const { app, inserts } = fakeApp();
+  const question = "No review arrived within the review-wait timeout (PT20M). A human must decide how to proceed.";
+  const job = { variables: { prKey: "o/r#5", round: 2, status: "blocked", question, recordRound: false } };
+  const out = await handler(job as any, app as any);
+  assertEquals((out as any).escalated, true, "a real control-flow escalation reports escalated:true");
+  assertEquals((out as any).question, question, "the question is returned for the wait-answer form");
+  assertEquals(inserts.escalations.length, 1, "an escalation row is opened");
+  assertEquals(inserts.rounds.length, 0, "recordRound=false suppresses a duplicate round row");
+});
+
+// #333 — conversely, the `persist-escalation-blockedcomments` arm maps its question from the
+// OPTIONAL `convergeBlockReason`. A blank reason is a NON-escalation: the worker opens nothing and
+// returns `escalated:false`, so gw-escalated's default RE-ENTERS the loop instead of parking a dead
+// `wait-answer` with a null question. This is the exact wedge the guard eliminates.
+test("a control-flow arm with a blank question opens nothing so gw-escalated re-enters", async () => {
+  const { app, inserts, updates } = fakeApp();
+  const job = { variables: { prKey: "o/r#5", round: 2, status: "blocked", question: "  ", recordRound: false } };
+  const out = await handler(job as any, app as any);
+  assertEquals((out as any).escalated, false, "a blank-reason arm reports escalated:false");
+  assertEquals((out as any).escalationId, null, "no escalation id is minted");
+  assertEquals(inserts.escalations.length, 0, "no dead escalation is fabricated");
+  assertEquals(updates.pull_requests?.length ?? 0, 0, "the PR is never flipped to escalated");
+});
