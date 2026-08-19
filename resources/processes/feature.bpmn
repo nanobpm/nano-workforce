@@ -21,8 +21,87 @@
       </nano:shapes>
     </bpmn:extensionElements>
     <bpmn:startEvent id="Start" name="Issue submitted">
-      <bpmn:outgoing>f_toEnsureBase</bpmn:outgoing>
+      <bpmn:outgoing>f_toReadinessGw</bpmn:outgoing>
     </bpmn:startEvent>
+    <bpmn:exclusiveGateway id="gw-readiness" name="gated (has readiness probe)?" default="f_readiness_skip">
+      <bpmn:incoming>f_toReadinessGw</bpmn:incoming>
+      <bpmn:outgoing>f_readiness_gate</bpmn:outgoing>
+      <bpmn:outgoing>f_readiness_skip</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:subProcess id="readiness-preflight" name="Await upstream readiness (preflight)">
+      <bpmn:incoming>f_readiness_gate</bpmn:incoming>
+      <bpmn:outgoing>f_readiness_done</bpmn:outgoing>
+      <bpmn:multiInstanceLoopCharacteristics>
+        <bpmn:extensionElements>
+          <zeebe:loopCharacteristics inputCollection="=readinessProbes" inputElement="probe" outputCollection="resolvedArtifacts" outputElement="=resolvedArtifact" />
+        </bpmn:extensionElements>
+      </bpmn:multiInstanceLoopCharacteristics>
+      <bpmn:startEvent id="pf_start" name="Awaiting readiness">
+        <bpmn:outgoing>pf_toProbe</bpmn:outgoing>
+      </bpmn:startEvent>
+      <bpmn:serviceTask id="preflight-probe" name="Probe readiness (poll)">
+        <bpmn:extensionElements>
+          <zeebe:taskDefinition type="pr.readiness-probe" />
+          <zeebe:properties>
+            <zeebe:property name="io.nanobpm.dataEnvelope.in" value="ReadinessProbeIn" />
+            <zeebe:property name="io.nanobpm.dataEnvelope.out" value="ReadinessProbeOut" />
+          </zeebe:properties>
+        </bpmn:extensionElements>
+        <bpmn:incoming>pf_toProbe</bpmn:incoming>
+        <bpmn:outgoing>pf_probed</bpmn:outgoing>
+      </bpmn:serviceTask>
+      <bpmn:boundaryEvent id="be_pf_probe_timeout" name="Probe timed out" attachedToRef="preflight-probe">
+        <bpmn:outgoing>pf_probeTimedOut</bpmn:outgoing>
+        <bpmn:timerEventDefinition id="ted_pf_probe_timeout">
+          <bpmn:timeDuration xsi:type="bpmn:tFormalExpression">=probeTimeout</bpmn:timeDuration>
+        </bpmn:timerEventDefinition>
+      </bpmn:boundaryEvent>
+      <bpmn:exclusiveGateway id="pf_gw" name="upstream ready?" default="pf_escalate">
+        <bpmn:incoming>pf_probed</bpmn:incoming>
+        <bpmn:outgoing>pf_ready</bpmn:outgoing>
+        <bpmn:outgoing>pf_escalate</bpmn:outgoing>
+      </bpmn:exclusiveGateway>
+      <bpmn:userTask id="readiness-escalation-pf" name="Upstream readiness stalled (human)">
+        <bpmn:extensionElements>
+          <zeebe:formDefinition formId="readiness-escalation" />
+          <zeebe:userTask />
+          <zeebe:assignmentDefinition candidateGroups="operators" />
+        </bpmn:extensionElements>
+        <bpmn:incoming>pf_escalate</bpmn:incoming>
+        <bpmn:incoming>pf_probeTimedOut</bpmn:incoming>
+        <bpmn:outgoing>pf_toResolution</bpmn:outgoing>
+      </bpmn:userTask>
+      <bpmn:boundaryEvent id="be_pf_sla" name="SLA elapsed" attachedToRef="readiness-escalation-pf">
+        <bpmn:outgoing>pf_sla</bpmn:outgoing>
+        <bpmn:timerEventDefinition id="ted_pf_sla">
+          <bpmn:timeDuration xsi:type="bpmn:tFormalExpression">=escalationSlaTimeout</bpmn:timeDuration>
+        </bpmn:timerEventDefinition>
+      </bpmn:boundaryEvent>
+      <bpmn:exclusiveGateway id="pf_gw_res" name="resolution?" default="pf_proceed">
+        <bpmn:incoming>pf_toResolution</bpmn:incoming>
+        <bpmn:outgoing>pf_proceed</bpmn:outgoing>
+        <bpmn:outgoing>pf_abandon</bpmn:outgoing>
+      </bpmn:exclusiveGateway>
+      <bpmn:endEvent id="pf_end" name="Readiness settled">
+        <bpmn:incoming>pf_ready</bpmn:incoming>
+        <bpmn:incoming>pf_proceed</bpmn:incoming>
+        <bpmn:incoming>pf_abandon</bpmn:incoming>
+        <bpmn:incoming>pf_sla</bpmn:incoming>
+      </bpmn:endEvent>
+      <bpmn:sequenceFlow id="pf_toProbe" sourceRef="pf_start" targetRef="preflight-probe" />
+      <bpmn:sequenceFlow id="pf_probed" sourceRef="preflight-probe" targetRef="pf_gw" />
+      <bpmn:sequenceFlow id="pf_ready" name="ready" sourceRef="pf_gw" targetRef="pf_end">
+        <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=ready = true</bpmn:conditionExpression>
+      </bpmn:sequenceFlow>
+      <bpmn:sequenceFlow id="pf_escalate" name="stalled" sourceRef="pf_gw" targetRef="readiness-escalation-pf" />
+      <bpmn:sequenceFlow id="pf_probeTimedOut" name="timed out" sourceRef="be_pf_probe_timeout" targetRef="readiness-escalation-pf" />
+      <bpmn:sequenceFlow id="pf_toResolution" sourceRef="readiness-escalation-pf" targetRef="pf_gw_res" />
+      <bpmn:sequenceFlow id="pf_proceed" name="acknowledge" sourceRef="pf_gw_res" targetRef="pf_end" />
+      <bpmn:sequenceFlow id="pf_abandon" name="abandon" sourceRef="pf_gw_res" targetRef="pf_end">
+        <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=resolution = "abandon"</bpmn:conditionExpression>
+      </bpmn:sequenceFlow>
+      <bpmn:sequenceFlow id="pf_sla" name="SLA auto-abandon" sourceRef="be_pf_sla" targetRef="pf_end" />
+    </bpmn:subProcess>
     <bpmn:serviceTask id="ensure-base-branch" name="Ensure base branch">
       <bpmn:extensionElements>
         <zeebe:taskDefinition type="pr.ensure-base-branch" />
@@ -34,7 +113,8 @@
           <zeebe:input source="=baseBranch" target="baseBranch" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
-      <bpmn:incoming>f_toEnsureBase</bpmn:incoming>
+      <bpmn:incoming>f_readiness_skip</bpmn:incoming>
+      <bpmn:incoming>f_readiness_done</bpmn:incoming>
       <bpmn:outgoing>f_toImplement</bpmn:outgoing>
     </bpmn:serviceTask>
     <bpmn:serviceTask id="implement-task" name="Implement (agent)">
@@ -44,7 +124,7 @@
           <zeebe:linkedResource resourceId="feature.md" bindingType="latest" resourceType="GenericScript" linkName="prompt" />
         </zeebe:linkedResources>
         <zeebe:ioMapping>
-          <zeebe:input source="=&#34;&#10;&#10;---&#10;&#10;&#34; + task.prompt + (if (baseBranchBrief = null) then &#34;&#34; else baseBranchBrief) + (if (customInstructions = null) then &#34;&#34; else &#34;&#10;&#10;---&#10;&#10;## Operator custom instructions&#10;&#10;The operator supplied these instructions for this run — follow them:&#10;&#10;&#34; + customInstructions)" target="appendPrompt" />
+          <zeebe:input source="=&#34;&#10;&#10;---&#10;&#10;&#34; + task.prompt + (if (baseBranchBrief = null) then &#34;&#34; else baseBranchBrief) + (if (resolvedArtifacts = null or count(resolvedArtifacts[item != null]) = 0) then &#34;&#34; else (&#34;&#10;&#10;---&#10;&#10;**Bound upstream readiness (intake gate).** This feature was scheduled to wait until an upstream landed and published. Build/install/clone against EXACTLY these resolved published versions (the ones first carrying the awaited capability), and bump the consumer dependency to them — never merely the newest:&#10;&#10;&#34; + string join(resolvedArtifacts[item != null], &#34;&#10;&#34;))) + (if (customInstructions = null) then &#34;&#34; else &#34;&#10;&#10;---&#10;&#10;## Operator custom instructions&#10;&#10;The operator supplied these instructions for this run — follow them:&#10;&#10;&#34; + customInstructions)" target="appendPrompt" />
           <zeebe:output source="=status" target="status" />
           <zeebe:output source="=question" target="question" />
         </zeebe:ioMapping>
@@ -145,7 +225,12 @@
       <bpmn:incoming>f_toEndConverged</bpmn:incoming>
       <bpmn:incoming>f_blockedEnd</bpmn:incoming>
     </bpmn:endEvent>
-    <bpmn:sequenceFlow id="f_toEnsureBase" sourceRef="Start" targetRef="ensure-base-branch" />
+    <bpmn:sequenceFlow id="f_toReadinessGw" sourceRef="Start" targetRef="gw-readiness" />
+    <bpmn:sequenceFlow id="f_readiness_gate" name="gated" sourceRef="gw-readiness" targetRef="readiness-preflight">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=readinessProbes != null and count(readinessProbes) &gt; 0</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="f_readiness_skip" name="no gate" sourceRef="gw-readiness" targetRef="ensure-base-branch" />
+    <bpmn:sequenceFlow id="f_readiness_done" sourceRef="readiness-preflight" targetRef="ensure-base-branch" />
     <bpmn:sequenceFlow id="f_toImplement" sourceRef="ensure-base-branch" targetRef="implement-task" />
     <bpmn:sequenceFlow id="w_toGw" sourceRef="implement-task" targetRef="w_gw" />
     <bpmn:sequenceFlow id="w_escalate" name="escalated" sourceRef="w_gw" targetRef="record-feature-escalation">
@@ -180,173 +265,311 @@
           <dc:Bounds x="63" y="143" width="70" height="28" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_gw-readiness" bpmnElement="gw-readiness" isMarkerVisible="true">
+        <dc:Bounds x="216" y="95" width="50" height="50" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="206" y="48" width="71" height="42" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_readiness-preflight" bpmnElement="readiness-preflight">
+        <dc:Bounds x="366" y="240" width="100" height="80" />
+      </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_ensure-base-branch" bpmnElement="ensure-base-branch">
-        <dc:Bounds x="216" y="80" width="100" height="80" />
+        <dc:Bounds x="566" y="80" width="100" height="80" />
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_implement-task" bpmnElement="implement-task">
-        <dc:Bounds x="416" y="80" width="100" height="80" />
+        <dc:Bounds x="766" y="80" width="100" height="80" />
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_w_gw" bpmnElement="w_gw" isMarkerVisible="true">
-        <dc:Bounds x="616" y="95" width="50" height="50" />
+        <dc:Bounds x="966" y="95" width="50" height="50" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="604" y="76" width="74" height="14" />
+          <dc:Bounds x="954" y="76" width="74" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_record-feature-escalation" bpmnElement="record-feature-escalation">
-        <dc:Bounds x="766" y="240" width="100" height="80" />
+        <dc:Bounds x="1116" y="240" width="100" height="80" />
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_feature-escalation" bpmnElement="feature-escalation">
-        <dc:Bounds x="966" y="240" width="100" height="80" />
+        <dc:Bounds x="1316" y="240" width="100" height="80" />
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_w_gw_answer" bpmnElement="w_gw_answer" isMarkerVisible="true">
-        <dc:Bounds x="1166" y="255" width="50" height="50" />
+        <dc:Bounds x="1516" y="255" width="50" height="50" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="1163" y="236" width="56" height="14" />
+          <dc:Bounds x="1513" y="236" width="56" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_record-feature" bpmnElement="record-feature">
-        <dc:Bounds x="1316" y="80" width="100" height="80" />
+        <dc:Bounds x="1666" y="80" width="100" height="80" />
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_gw-blocked" bpmnElement="gw-blocked" isMarkerVisible="true">
-        <dc:Bounds x="1516" y="95" width="50" height="50" />
+        <dc:Bounds x="1866" y="95" width="50" height="50" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="1511" y="76" width="60" height="14" />
+          <dc:Bounds x="1861" y="76" width="60" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_feature-blocked" bpmnElement="feature-blocked">
-        <dc:Bounds x="1666" y="400" width="100" height="80" />
+        <dc:Bounds x="2016" y="400" width="100" height="80" />
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_record-blocked-ack" bpmnElement="record-blocked-ack">
-        <dc:Bounds x="1866" y="400" width="100" height="80" />
+        <dc:Bounds x="2216" y="400" width="100" height="80" />
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_gw-converge" bpmnElement="gw-converge" isMarkerVisible="true">
-        <dc:Bounds x="1691" y="95" width="50" height="50" />
+        <dc:Bounds x="2041" y="95" width="50" height="50" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="1683" y="76" width="67" height="14" />
+          <dc:Bounds x="2033" y="76" width="67" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_converge" bpmnElement="converge">
-        <dc:Bounds x="1866" y="240" width="100" height="80" />
+        <dc:Bounds x="2216" y="240" width="100" height="80" />
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_End" bpmnElement="End">
-        <dc:Bounds x="2066" y="102" width="36" height="36" />
+        <dc:Bounds x="2416" y="102" width="36" height="36" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="2067" y="83" width="34" height="14" />
+          <dc:Bounds x="2417" y="83" width="34" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_be_feature_sla" bpmnElement="be_feature_sla">
-        <dc:Bounds x="998" y="302" width="36" height="36" />
+        <dc:Bounds x="1348" y="302" width="36" height="36" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="974" y="383" width="84" height="14" />
+          <dc:Bounds x="1324" y="383" width="84" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
-      <bpmndi:BPMNEdge id="BPMNEdge_f_toEnsureBase" bpmnElement="f_toEnsureBase">
+      <bpmndi:BPMNEdge id="BPMNEdge_f_toReadinessGw" bpmnElement="f_toReadinessGw">
         <di:waypoint x="116" y="120" />
         <di:waypoint x="216" y="120" />
       </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_f_readiness_skip" bpmnElement="f_readiness_skip">
+        <di:waypoint x="266" y="120" />
+        <di:waypoint x="566" y="120" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="391" y="98" width="50" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_toImplement" bpmnElement="f_toImplement">
-        <di:waypoint x="316" y="120" />
-        <di:waypoint x="416" y="120" />
+        <di:waypoint x="666" y="120" />
+        <di:waypoint x="766" y="120" />
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_w_toGw" bpmnElement="w_toGw">
-        <di:waypoint x="516" y="120" />
-        <di:waypoint x="616" y="120" />
+        <di:waypoint x="866" y="120" />
+        <di:waypoint x="966" y="120" />
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_w_done" bpmnElement="w_done">
-        <di:waypoint x="666" y="120" />
-        <di:waypoint x="1316" y="120" />
+        <di:waypoint x="1016" y="120" />
+        <di:waypoint x="1666" y="120" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="975" y="98" width="32" height="14" />
+          <dc:Bounds x="1325" y="98" width="32" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_toBlockedGw" bpmnElement="f_toBlockedGw">
-        <di:waypoint x="1416" y="120" />
-        <di:waypoint x="1516" y="120" />
+        <di:waypoint x="1766" y="120" />
+        <di:waypoint x="1866" y="120" />
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_notBlocked" bpmnElement="f_notBlocked">
-        <di:waypoint x="1566" y="120" />
-        <di:waypoint x="1691" y="120" />
+        <di:waypoint x="1916" y="120" />
+        <di:waypoint x="2041" y="120" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="1590" y="98" width="78" height="14" />
+          <dc:Bounds x="1940" y="98" width="78" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_noConverge" bpmnElement="f_noConverge">
-        <di:waypoint x="1741" y="120" />
-        <di:waypoint x="2066" y="120" />
+        <di:waypoint x="2091" y="120" />
+        <di:waypoint x="2416" y="120" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="1868" y="98" width="71" height="14" />
+          <dc:Bounds x="2218" y="98" width="71" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_w_abandon" bpmnElement="w_abandon">
-        <di:waypoint x="1216" y="280" />
-        <di:waypoint x="1366" y="280" />
-        <di:waypoint x="1366" y="160" />
+        <di:waypoint x="1566" y="280" />
+        <di:waypoint x="1716" y="280" />
+        <di:waypoint x="1716" y="160" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="1265" y="258" width="53" height="14" />
+          <dc:Bounds x="1615" y="258" width="53" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_f_readiness_gate" bpmnElement="f_readiness_gate">
+        <di:waypoint x="241" y="145" />
+        <di:waypoint x="241" y="280" />
+        <di:waypoint x="366" y="280" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="246" y="206" width="39" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_w_escalate" bpmnElement="w_escalate">
-        <di:waypoint x="641" y="145" />
-        <di:waypoint x="641" y="280" />
-        <di:waypoint x="766" y="280" />
+        <di:waypoint x="991" y="145" />
+        <di:waypoint x="991" y="280" />
+        <di:waypoint x="1116" y="280" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="646" y="206" width="67" height="14" />
+          <dc:Bounds x="996" y="206" width="67" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_blocked" bpmnElement="f_blocked">
-        <di:waypoint x="1541" y="145" />
-        <di:waypoint x="1541" y="440" />
-        <di:waypoint x="1666" y="440" />
+        <di:waypoint x="1891" y="145" />
+        <di:waypoint x="1891" y="440" />
+        <di:waypoint x="2016" y="440" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="1546" y="286" width="53" height="14" />
+          <dc:Bounds x="1896" y="286" width="53" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_converge" bpmnElement="f_converge">
-        <di:waypoint x="1716" y="145" />
-        <di:waypoint x="1716" y="280" />
-        <di:waypoint x="1866" y="280" />
+        <di:waypoint x="2066" y="145" />
+        <di:waypoint x="2066" y="280" />
+        <di:waypoint x="2216" y="280" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="1721" y="206" width="60" height="14" />
+          <dc:Bounds x="2071" y="206" width="60" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_f_readiness_done" bpmnElement="f_readiness_done">
+        <di:waypoint x="466" y="280" />
+        <di:waypoint x="616" y="280" />
+        <di:waypoint x="616" y="160" />
+      </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_w_toEscalationTask" bpmnElement="w_toEscalationTask">
-        <di:waypoint x="866" y="280" />
-        <di:waypoint x="966" y="280" />
+        <di:waypoint x="1216" y="280" />
+        <di:waypoint x="1316" y="280" />
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_w_toAnswerGw" bpmnElement="w_toAnswerGw">
-        <di:waypoint x="1066" y="280" />
-        <di:waypoint x="1166" y="280" />
+        <di:waypoint x="1416" y="280" />
+        <di:waypoint x="1516" y="280" />
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_toBlockedAck" bpmnElement="f_toBlockedAck">
-        <di:waypoint x="1766" y="440" />
-        <di:waypoint x="1866" y="440" />
+        <di:waypoint x="2116" y="440" />
+        <di:waypoint x="2216" y="440" />
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_blockedEnd" bpmnElement="f_blockedEnd">
-        <di:waypoint x="1966" y="440" />
-        <di:waypoint x="2084" y="440" />
-        <di:waypoint x="2084" y="138" />
+        <di:waypoint x="2316" y="440" />
+        <di:waypoint x="2434" y="440" />
+        <di:waypoint x="2434" y="138" />
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_toEndConverged" bpmnElement="f_toEndConverged">
-        <di:waypoint x="1966" y="280" />
-        <di:waypoint x="2084" y="280" />
-        <di:waypoint x="2084" y="138" />
+        <di:waypoint x="2316" y="280" />
+        <di:waypoint x="2434" y="280" />
+        <di:waypoint x="2434" y="138" />
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_w_sla" bpmnElement="w_sla">
-        <di:waypoint x="1016" y="338" />
-        <di:waypoint x="1016" y="358" />
+        <di:waypoint x="1366" y="338" />
         <di:waypoint x="1366" y="358" />
-        <di:waypoint x="1366" y="160" />
+        <di:waypoint x="1716" y="358" />
+        <di:waypoint x="1716" y="160" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="1207" y="325" width="88" height="28" />
+          <dc:Bounds x="1557" y="325" width="88" height="28" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_w_answerLoop" bpmnElement="w_answerLoop">
-        <di:waypoint x="1191" y="305" />
-        <di:waypoint x="1191" y="360" />
-        <di:waypoint x="466" y="360" />
-        <di:waypoint x="466" y="160" />
+        <di:waypoint x="1541" y="305" />
+        <di:waypoint x="1541" y="360" />
+        <di:waypoint x="816" y="360" />
+        <di:waypoint x="816" y="160" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="804" y="338" width="49" height="14" />
+          <dc:Bounds x="1154" y="338" width="49" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+    </bpmndi:BPMNPlane>
+  </bpmndi:BPMNDiagram>
+  <bpmndi:BPMNDiagram id="BPMNDiagram_readiness-preflight">
+    <bpmndi:BPMNPlane id="BPMNPlane_readiness-preflight" bpmnElement="readiness-preflight">
+      <bpmndi:BPMNShape id="BPMNShape_pf_start" bpmnElement="pf_start">
+        <dc:Bounds x="80" y="102" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="65" y="143" width="67" height="28" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_preflight-probe" bpmnElement="preflight-probe">
+        <dc:Bounds x="216" y="80" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_pf_gw" bpmnElement="pf_gw" isMarkerVisible="true">
+        <dc:Bounds x="416" y="95" width="50" height="50" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="370" y="150" width="63" height="28" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_readiness-escalation-pf" bpmnElement="readiness-escalation-pf">
+        <dc:Bounds x="566" y="80" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_pf_gw_res" bpmnElement="pf_gw_res" isMarkerVisible="true">
+        <dc:Bounds x="766" y="95" width="50" height="50" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="751" y="76" width="81" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_pf_end" bpmnElement="pf_end">
+        <dc:Bounds x="916" y="102" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="900" y="69" width="69" height="28" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_be_pf_probe_timeout" bpmnElement="be_pf_probe_timeout">
+        <dc:Bounds x="248" y="142" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="225" y="203" width="83" height="28" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_be_pf_sla" bpmnElement="be_pf_sla">
+        <dc:Bounds x="598" y="142" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="574" y="223" width="84" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNEdge id="BPMNEdge_pf_toProbe" bpmnElement="pf_toProbe">
+        <di:waypoint x="116" y="120" />
+        <di:waypoint x="216" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_pf_probed" bpmnElement="pf_probed">
+        <di:waypoint x="316" y="120" />
+        <di:waypoint x="416" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_pf_escalate" bpmnElement="pf_escalate">
+        <di:waypoint x="466" y="120" />
+        <di:waypoint x="566" y="120" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="480" y="98" width="53" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_pf_toResolution" bpmnElement="pf_toResolution">
+        <di:waypoint x="666" y="120" />
+        <di:waypoint x="766" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_pf_proceed" bpmnElement="pf_proceed">
+        <di:waypoint x="816" y="120" />
+        <di:waypoint x="916" y="120" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="824" y="128" width="84" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_pf_ready" bpmnElement="pf_ready">
+        <di:waypoint x="441" y="145" />
+        <di:waypoint x="441" y="200" />
+        <di:waypoint x="934" y="200" />
+        <di:waypoint x="934" y="138" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="668" y="178" width="39" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_pf_abandon" bpmnElement="pf_abandon">
+        <di:waypoint x="816" y="120" />
+        <di:waypoint x="916" y="120" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="840" y="158" width="53" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_pf_probeTimedOut" bpmnElement="pf_probeTimedOut">
+        <di:waypoint x="266" y="178" />
+        <di:waypoint x="266" y="198" />
+        <di:waypoint x="336" y="198" />
+        <di:waypoint x="336" y="82" />
+        <di:waypoint x="546" y="82" />
+        <di:waypoint x="546" y="120" />
+        <di:waypoint x="566" y="120" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="341" y="93" width="67" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_pf_sla" bpmnElement="pf_sla">
+        <di:waypoint x="616" y="178" />
+        <di:waypoint x="616" y="198" />
+        <di:waypoint x="934" y="198" />
+        <di:waypoint x="934" y="138" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="731" y="165" width="88" height="28" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
     </bpmndi:BPMNPlane>

@@ -307,3 +307,74 @@ test("startFeature: persists the real issue title when the fetch succeeds", asyn
     else process.env["GITHUB_TOKEN"] = prevTok;
   }
 });
+
+test("startFeature: no readiness ⇒ readinessProbes/probeTimeout/gateKey seeded null (gate skipped)", async () => {
+  let captured: any = null;
+  const engine = {
+    createInstance: (req: any) => {
+      captured = req;
+      return Promise.resolve({ processInstanceKey: "PI-R0" });
+    },
+  } as any;
+  await startFeature(memData({ feature_runs: { rows: [], key: "feature_key" } }), engine, PARSED, "main", false, false);
+  const v = captured.variables;
+  assertEquals(v.readinessProbes, null);
+  assertEquals(v.probeTimeout, null);
+  assertEquals(v.gateKey, null);
+  assertEquals(v.resolvedArtifacts, null);
+});
+
+test("startFeature: readiness probes seed the gate variables + a non-blank correlation key", async () => {
+  let captured: any = null;
+  const engine = {
+    createInstance: (req: any) => {
+      captured = req;
+      return Promise.resolve({ processInstanceKey: "PI-R1" });
+    },
+  } as any;
+  const probes = [
+    {
+      kind: "capability",
+      target: "github-releases:nanobpm/nano-bpm",
+      match: { package: "@nanobpm/engine-wasm", capabilityRef: "nanobpm/nano-bpm#631" },
+      onTimeout: "escalate",
+    },
+  ] as any;
+  await startFeature(
+    memData({ feature_runs: { rows: [], key: "feature_key" } }),
+    engine,
+    PARSED,
+    "main",
+    false,
+    false,
+    null,
+    { probes, probeTimeout: "PT30M" },
+  );
+  const v = captured.variables;
+  assertEquals(v.readinessProbes, probes);
+  assertEquals(v.probeTimeout, "PT30M");
+  // The preflight probe worker requires a non-blank gateKey to publish readiness-ready on.
+  assertEquals(v.gateKey, "feature-readiness:owner/repo#42");
+  assertEquals(v.resolvedArtifacts, null);
+});
+
+test("startFeature: probes without a probeTimeout fail fast (both are load-bearing together)", async () => {
+  const engine = { createInstance: () => Promise.resolve({ processInstanceKey: "PI-R2" }) } as any;
+  let threw = false;
+  try {
+    await startFeature(
+      memData({ feature_runs: { rows: [], key: "feature_key" } }),
+      engine,
+      PARSED,
+      "main",
+      false,
+      false,
+      null,
+      { probes: [{ kind: "command", target: "x" }] as any, probeTimeout: null },
+    );
+  } catch (err) {
+    threw = true;
+    assertEquals((err as Error).message.includes("probeTimeout"), true);
+  }
+  assertEquals(threw, true);
+});
