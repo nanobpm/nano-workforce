@@ -2,6 +2,8 @@
 import { test } from "node:test";
 import { assert, assertEquals } from "#test-assert";
 import type { AppApi } from "@nanobpm/urban";
+import { memDataFor } from "../test/worldDb.ts";
+import { DurableResumeRegistry } from "../app/durableResume.ts";
 import { noopLog } from "../test/log.ts";
 import handler from "./enrolAgenticWorker.ts";
 
@@ -67,6 +69,44 @@ test("rejects non-finite capability.weight (NaN/Infinity) as 400", async () => {
   assertEquals(nanWeight.status, 400);
   const infWeight = (await handler(input({ capability: { cognition: "planning", weight: Number.POSITIVE_INFINITY } }), app)) as any;
   assertEquals(infWeight.status, 400);
+});
+
+// Durable-resume enrolment gate (issue #325, ADR 0062 Slice 5/5).
+test("echoes durableResume back in the result when the worker declares it", async () => {
+  const on = (await handler(input({ capability: { cognition: "decide" }, instance: "w1", durableResume: true }), app)) as any;
+  assertEquals(on.status, 200);
+  assertEquals(on.body.durableResume, true);
+  const off = (await handler(input({ capability: { cognition: "decide" }, instance: "w2", durableResume: false }), app)) as any;
+  assertEquals(off.body.durableResume, false);
+});
+
+test("omits durableResume from the result when the worker does not declare it", async () => {
+  const res = (await handler(input({ capability: { cognition: "decide" }, instance: "w1" }), app)) as any;
+  assertEquals(res.status, 200);
+  assertEquals("durableResume" in res.body, false);
+});
+
+test("rejects a non-boolean durableResume as 400", async () => {
+  const res = (await handler(input({ capability: { cognition: "decide" }, instance: "w1", durableResume: "yes" }), app)) as any;
+  assertEquals(res.status, 400);
+});
+
+test("records durable-resume participation in the registry when a data layer + instance are present", async () => {
+  const { data } = memDataFor(["052_worker_durable_resume.sql"]);
+  const withData = { log: noopLog(), data } as unknown as AppApi;
+  const res = (await handler(input({ capability: { cognition: "decide" }, instance: "w1", durableResume: true }), withData)) as any;
+  assertEquals(res.status, 200);
+  assertEquals(await new DurableResumeRegistry(data).isParticipant("w1"), true);
+  assertEquals(await new DurableResumeRegistry(data).anyParticipant(), true);
+});
+
+test("a declaration without an instance is echoed but not persisted (enrolment is per-instance)", async () => {
+  const { data } = memDataFor(["052_worker_durable_resume.sql"]);
+  const withData = { log: noopLog(), data } as unknown as AppApi;
+  const res = (await handler(input({ capability: { cognition: "decide" }, durableResume: true }), withData)) as any;
+  assertEquals(res.status, 200);
+  assertEquals(res.body.durableResume, true, "still echoed");
+  assertEquals(await new DurableResumeRegistry(data).anyParticipant(), false, "nothing recorded without an instance key");
 });
 
 test("enforces the shared secret when NANO_PR_WEBHOOK_SECRET is set", async () => {

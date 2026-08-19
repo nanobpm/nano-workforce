@@ -89,15 +89,24 @@ function openDataSource(db: DatabaseSync): MemDataSource {
   return ds;
 }
 
-/** A `DataLayer` stub over a fresh in-memory db with the world schema applied. */
-export function memWorldData(): { data: DataLayer; db: DatabaseSync } {
+/** A `DataLayer` stub over a fresh in-memory db with the given migration files applied (in order).
+ * The generic factory behind {@link memWorldData} — reused by tests that need a different durable
+ * table (e.g. `worker_durable_resume`, migration 052) without re-authoring the gateway/tx shim. */
+export function memDataFor(migrationFiles: readonly string[]): { data: DataLayer; db: DatabaseSync } {
   const db = new DatabaseSync(":memory:");
   openDbs.add(db);
-  const sql = readFileSync(fileURLToPath(new URL("../db/migrations/049_world_checkpoint.sql", import.meta.url)), "utf8");
-  db.exec(sql);
+  for (const file of migrationFiles) {
+    const sql = readFileSync(fileURLToPath(new URL(`../db/migrations/${file}`, import.meta.url)), "utf8");
+    db.exec(sql);
+  }
   const data = {
     table: (name: string, pk = "id") => gateway(db, name, pk),
     open: () => openDataSource(db),
   } as unknown as DataLayer;
   return { data, db };
+}
+
+/** A `DataLayer` stub over a fresh in-memory db with the world schema applied. */
+export function memWorldData(): { data: DataLayer; db: DatabaseSync } {
+  return memDataFor(["049_world_checkpoint.sql"]);
 }

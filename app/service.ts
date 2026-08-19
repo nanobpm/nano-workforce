@@ -22,6 +22,7 @@ import {
   UnresolvableCapabilityRefError,
 } from "./capabilityNeed.ts";
 import { deriveDelivery, TERMINAL_STATUSES } from "./delivery.ts";
+import { fleetSupportsDurableResume } from "./durableResume.ts";
 import { backfillFeatureStages, deriveFeatureDelivery, FEATURE_BLOCKED_ELEMENT, FEATURE_ESCALATION_ELEMENT, FEATURE_RUN_STATUSES, type FeatureRunStatus, featureEscalations, featureRuns } from "./feature.ts";
 import {
   classifyMergeability,
@@ -441,6 +442,19 @@ async function lastPushedSha(data: DataLayer, prKey: string): Promise<string | n
   }
 }
 
+/** The world-restore SHA to emit into the repo-provisioning envelope for a PR, GATED on the
+ * `durable-resume` enrolment (issue #325, ADR 0062 Slice 5/5). Only when the enrolled fleet includes a
+ * durable-resume participant (`fleetSupportsDurableResume`) do we hand the harness the last
+ * push-checkpoint so a replacement activation RESUMES by reconstructing the exact pushed tree
+ * (inverting `git push` → `git fetch && git checkout <sha>`). With no participant the marker is
+ * omitted (`null`), so the round redrives from scratch — graceful degradation, exactly as today.
+ * Resume is purely additive: gating on the enrolment attribute, not a sequence flow, keeps the
+ * engine/C8 job protocol untouched (ADR 0056 boundary). */
+export async function worldRestoreSha(data: DataLayer, prKey: string): Promise<string | null> {
+  if (!(await fleetSupportsDurableResume(data))) return null;
+  return lastPushedSha(data, prKey);
+}
+
 /** Register a PR row (if new) and start the convergence process. Idempotent on prKey. Optional
  * `dependsOn` (explicit refs) is unioned with any `Depends-on:` line parsed from the PR body and
  * recorded as the PR's merge-stage dependency set. */
@@ -547,9 +561,11 @@ export async function submitPr(
   const abUrl = abandonUrl(abandonToken);
   // World-restore (issue #324, ADR 0062 Slice 4/5): a re-run of convergence for a PR that already
   // pushed is a resume — carry its last durable push-checkpoint so a replacement activation on a
-  // fresh worktree reconstructs the tree to the EXACT pushed SHA. Absent (null) on a first submit,
-  // which leaves the envelope unchanged.
-  const worldSha = await lastPushedSha(data, parsed.prKey);
+  // fresh worktree reconstructs the tree to the EXACT pushed SHA. GATED (issue #325, Slice 5/5) on the
+  // fleet advertising `durable-resume`: with no participant it stays null, so the round redrives from
+  // scratch (graceful degradation). Absent (null) on a first submit, which leaves the envelope
+  // unchanged.
+  const worldSha = await worldRestoreSha(data, parsed.prKey);
   const { processInstanceKey } = await engine.createInstance({
     processDefinitionId: PROCESS_ID,
     variables: {
@@ -623,8 +639,10 @@ export async function startMerge(
     console.warn(`[startMerge] ${pr.prKey} head branch unresolved — merge-agent workspace won't be provisioned`);
   }
   // World-restore (issue #324): the merge stage runs on the same durable working tree; carry the
-  // last push-checkpoint so a replacement fix-ci/rebase activation reconstructs the exact SHA.
-  const worldSha = await lastPushedSha(data, pr.prKey);
+  // last push-checkpoint so a replacement fix-ci/rebase activation reconstructs the exact SHA. GATED
+  // (issue #325, Slice 5/5) on the fleet advertising `durable-resume` — otherwise null, so the merge
+  // agents redrive from scratch (graceful degradation).
+  const worldSha = await worldRestoreSha(data, pr.prKey);
   const { processInstanceKey } = await engine.createInstance({
     processDefinitionId: MERGE_PROCESS_ID,
     variables: {
