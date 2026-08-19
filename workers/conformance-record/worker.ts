@@ -22,7 +22,16 @@ function asStr(v: unknown): string | null {
 }
 
 function asInt(v: unknown): number {
-  return typeof v === "number" && Number.isFinite(v) ? Math.max(0, Math.trunc(v)) : 0;
+  // Tolerate a numeric string ("1") too — the agentTask runner hoists result-JSON keys as-is, and an
+  // agent may emit counts as strings; silently coercing those to 0 would wrongly clear the verdict.
+  const n = typeof v === "number" ? v : typeof v === "string" && v.trim() !== "" ? Number(v) : Number.NaN;
+  return Number.isFinite(n) ? Math.max(0, Math.trunc(n)) : 0;
+}
+
+// Tolerant boolean coercion mirroring record-plan-review's `isApproved`: honour boolean `true` OR a
+// case-insensitive "true" string, so a stringified flag the agent hoists isn't silently dropped.
+function asBool(v: unknown): boolean {
+  return v === true || (typeof v === "string" && v.trim().toLowerCase() === "true");
 }
 
 function asStatus(v: unknown, hasComment: boolean): "filed" | "skipped" | "blocked" {
@@ -61,7 +70,7 @@ const handler: AppJobHandler<In> = async (job, app) => {
   // spec. The agent's flag is honoured as an additional trigger but can't suppress a real signal.
   // Forced false for a non-filed audit (all counts are zeroed above, and there is no verified verdict).
   const hasDeviations = filed &&
-    (job.variables.hasDeviations === true ||
+    (asBool(job.variables.hasDeviations) ||
       slicesReduced > 0 || slicesNotVerified > 0 || deviationsUnraised > 0);
 
   await recordConformance(app.data, planKey, {

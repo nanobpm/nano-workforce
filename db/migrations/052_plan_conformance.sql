@@ -16,7 +16,7 @@ CREATE TABLE plan_conformance (
   status               TEXT NOT NULL,               -- filed | skipped | blocked (the agent's result status)
   comment_url          TEXT,                         -- the conformance report comment the agent posted on the epic issue, or NULL
   slices_met           INTEGER NOT NULL DEFAULT 0,  -- items fully delivered as specified
-  slices_reduced       INTEGER NOT NULL DEFAULT 0,  -- items delivered in a reduced/partial form
+  slices_reduced       INTEGER NOT NULL DEFAULT 0,  -- items delivered in a reduced/partial form, incl. met-in-unit-only (unit-tested but not proven live-wired)
   slices_not_verified  INTEGER NOT NULL DEFAULT 0,  -- items the agent could not confirm from the implementation (e.g. no live wiring / synthetic only)
   deviations_raised    INTEGER NOT NULL DEFAULT 0,  -- scope deviations agents flagged during implementation (`scope-change` entries)
   deviations_unraised  INTEGER NOT NULL DEFAULT 0,  -- scope deviations the agent found by examining the code that were NEVER flagged

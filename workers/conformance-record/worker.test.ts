@@ -133,6 +133,53 @@ test("conformance-record: a non-filed status carries no verdict counts or deviat
   assertEquals(row.report, "transcript explaining why");
 });
 
+test("conformance-record: coerces string-encoded numeric counts hoisted by the agent", async () => {
+  const { app, stores } = fakeApp();
+  // The agentTask runner hoists result-JSON keys as-is; an agent may emit counts as strings ("1").
+  // These must be parsed, not silently coerced to 0 (which would wrongly clear the verdict).
+  await handler(
+    {
+      variables: {
+        planKey: "o/r#12",
+        status: "filed",
+        commentUrl: "https://x/12#c",
+        slicesMet: "4",
+        slicesReduced: "1",
+        slicesNotVerified: "0",
+        deviationsRaised: "2",
+        deviationsUnraised: "0",
+        hasDeviations: false,
+      },
+    } as any,
+    app as any,
+  );
+  const row = stores.plan_conformance[0];
+  assertEquals(row.slices_met, 4);
+  assertEquals(row.slices_reduced, 1);
+  assertEquals(row.deviations_raised, 2);
+  // A reduced item is ground truth for a deviation even though the agent's flag was false.
+  assertEquals(row.has_deviations, 1);
+});
+
+test("conformance-record: honours a string-encoded hasDeviations flag", async () => {
+  const { app, stores } = fakeApp();
+  // A clean epic (no reduced / not-verified / unraised) where the agent emits hasDeviations as the
+  // string "true" must still record a deviation — a stringified boolean can't silently be dropped.
+  await handler(
+    {
+      variables: {
+        planKey: "o/r#13",
+        status: "filed",
+        commentUrl: "https://x/13#c",
+        slicesMet: 3,
+        hasDeviations: "true",
+      },
+    } as any,
+    app as any,
+  );
+  assertEquals(stores.plan_conformance[0].has_deviations, 1);
+});
+
 test("conformance-record: honours an explicit blocked status", async () => {
   const { app, stores } = fakeApp();
   await handler(
