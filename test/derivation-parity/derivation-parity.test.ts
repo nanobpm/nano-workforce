@@ -105,6 +105,7 @@ test("convergence-loop golden has arbitrary-graph features the structured builde
     assert(open >= 0, `convergence-loop golden is missing element id="${id}"`);
     const rest = xml.slice(open);
     const close = rest.indexOf(`</bpmn:${closeTag}>`);
+    assert(close >= 0, `convergence-loop golden element id="${id}" is missing its closing </bpmn:${closeTag}>`);
     const body = rest.slice(0, close);
     return (body.match(new RegExp(`<bpmn:${tag}\\b`, "g")) ?? []).length;
   };

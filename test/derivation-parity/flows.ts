@@ -44,16 +44,25 @@
 import { defineFlow, envelope } from "@nanobpm/workflow";
 import type { DeclarativeFlow } from "@nanobpm/workflow";
 
-/** One model's port entry: the golden basename, the derived flow (when it can be
- *  reproduced), and — when it cannot yet — the reason it is blocked. */
-export interface PortEntry {
-  /** The golden model basename under `resources/processes/<model>.bpmn`. */
-  readonly model: string;
-  /** The derived `defineFlow`, when a structurally-faithful port exists. */
-  readonly flow?: DeclarativeFlow;
-  /** Present when whole-model parity is not yet achievable — why, precisely. */
-  readonly blockedReason?: string;
-}
+/** One model's port entry: the golden basename plus EITHER the derived flow
+ *  (when it can be reproduced) OR the reason it is blocked — never both and never
+ *  neither. Modelled as a discriminated union so a partial/contradictory entry
+ *  (both `flow` and `blockedReason`, or neither) fails to compile. */
+export type PortEntry =
+  | {
+      /** The golden model basename under `resources/processes/<model>.bpmn`. */
+      readonly model: string;
+      /** The derived `defineFlow` — a structurally-faithful port exists. */
+      readonly flow: DeclarativeFlow;
+      readonly blockedReason?: never;
+    }
+  | {
+      /** The golden model basename under `resources/processes/<model>.bpmn`. */
+      readonly model: string;
+      readonly flow?: never;
+      /** Why whole-model parity is not yet achievable — precisely. */
+      readonly blockedReason: string;
+    };
 
 // ── retro ────────────────────────────────────────────────────────────────────
 // A linear agent pipeline (single start, single end): gather → synthesize
@@ -89,7 +98,7 @@ const retro = defineFlow(
 /** The single-top-level-end/start compiler limitation, reused as the
  *  `blockedReason` for every golden that has more than one top-level start
  *  and/or end event. */
-const MULTI_END_BLOCK =
+const MULTI_START_END_BLOCK =
   "blocked: @nanobpm/workflow@0.12.0 derives a single top-level start/end and " +
   "converges all danglers into one <endEvent id=\"End\">; this golden has " +
   "multiple top-level start and/or end events, which the published compiler " +
@@ -101,15 +110,15 @@ export const PORTS: readonly PortEntry[] = [
   { model: "retro", flow: retro },
   {
     model: "spine-demo",
-    blockedReason: `${MULTI_END_BLOCK} (spine-demo: 1 start, 2 ends)`,
+    blockedReason: `${MULTI_START_END_BLOCK} (spine-demo: 1 start, 2 ends)`,
   },
   {
     model: "readiness-gate",
-    blockedReason: `${MULTI_END_BLOCK} (readiness-gate: 1 start, 5 ends)`,
+    blockedReason: `${MULTI_START_END_BLOCK} (readiness-gate: 1 start, 5 ends)`,
   },
   {
     model: "feature",
-    blockedReason: `${MULTI_END_BLOCK} (feature: 2 starts, 2 ends)`,
+    blockedReason: `${MULTI_START_END_BLOCK} (feature: 2 starts, 2 ends)`,
   },
   {
     model: "convergence-loop",
@@ -127,10 +136,10 @@ export const PORTS: readonly PortEntry[] = [
   },
   {
     model: "merge-loop",
-    blockedReason: `${MULTI_END_BLOCK} (merge-loop: 1 start, 2 ends)`,
+    blockedReason: `${MULTI_START_END_BLOCK} (merge-loop: 1 start, 2 ends)`,
   },
   {
     model: "plan-fanout",
-    blockedReason: `${MULTI_END_BLOCK} (plan-fanout: 3 starts, 3 ends)`,
+    blockedReason: `${MULTI_START_END_BLOCK} (plan-fanout: 3 starts, 3 ends)`,
   },
 ];
