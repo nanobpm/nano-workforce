@@ -608,10 +608,9 @@ export function admitPlanErrorResponse(err: unknown): { status: number; error: s
 
 /** One inter-epic dependency edge as SUBMITTED to the set door: the `consumer` epic waits for the
  * `producer` epic to publish the `{ package, capabilityRef }` capability. `consumer`/`producer` are
- * epic references (`owner/repo#N` or an issue URL); the door resolves them to plan keys. */
-/** The intended shape of one submitted dependency entry. It documents the wire contract; the actual
- * `deps[]` arrives untyped, so {@link validateEpicSet} validates each entry against this shape at
- * runtime rather than trusting the type. */
+ * epic references (`owner/repo#N` or an issue URL); the door resolves them to plan keys. This type
+ * documents the wire contract only — the actual `deps[]` arrives untyped, so {@link validateEpicSet}
+ * validates each entry against this shape at runtime rather than trusting the type. */
 export interface EpicSetDepInput {
   consumer: string;
   producer: string;
