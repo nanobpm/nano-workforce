@@ -26,10 +26,19 @@ CREATE TABLE feature_escalations (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   feature_key TEXT NOT NULL,
   question    TEXT,
-  created_at  TEXT NOT NULL
+  created_at  TEXT NOT NULL,
+  -- Idempotency guard: the engine `jobKey` that wrote the row, exactly like `plan_reviews`
+  -- (migration 007) and `plan_trial_merges`. `record-feature-escalation` is at-least-once — a job
+  -- retried after the insert (crash/timeout before job completion) re-runs with the SAME `jobKey`, so
+  -- the writer reuses its existing row instead of appending a duplicate, which would otherwise bloat
+  -- this append-only log. NULL only for backfill rows (below), which have no originating job.
+  job_key     TEXT
 );
 
 CREATE INDEX idx_feature_escalations_feature ON feature_escalations(feature_key, id);
+-- Unique per (feature_key, job_key) enforces the retry guard. SQLite treats NULLs as distinct in a
+-- UNIQUE index, so the backfill's NULL-job_key rows never collide with each other or a live insert.
+CREATE UNIQUE INDEX idx_feature_escalations_job ON feature_escalations(feature_key, job_key);
 
 -- Backfill: seed one audit row for every run currently parked at an answerable escalation with a
 -- captured question, so a run parked WHEN THIS LANDS keeps showing its question after the poller

@@ -190,6 +190,10 @@ export interface FeatureEscalationRow {
   feature_key: string;
   question: string | null;
   created_at: string;
+  /** The engine `jobKey` that wrote the row — an idempotency guard so a `record-feature-escalation`
+   *  job retried after its insert (crash/timeout pre-completion) reuses its row instead of appending a
+   *  duplicate (mirrors `plan_reviews.job_key`). NULL only for migration-048 backfill rows. */
+  job_key: string | null;
 }
 
 /** Accessor for the append-only `feature_escalations` audit log (migration 048). Written by
@@ -200,15 +204,22 @@ export const featureEscalations = (data: DataLayer) =>
 
 /** Append one `feature_escalations` audit row capturing the agent's escalation `question` while it is
  *  still in scope on the `record-feature-escalation` job. Append-only, so this is the canonical record
- *  of what was asked — `pollUserTasks` reads the newest row per feature as the live question. */
+ *  of what was asked — `pollUserTasks` reads the newest row per feature as the live question. The
+ *  `jobKey` is an idempotency guard: `record-feature-escalation` is at-least-once, so a retry after the
+ *  insert (crash/timeout pre-completion) re-runs with the SAME `jobKey` and must reuse the existing row
+ *  rather than append a duplicate (mirrors `record-plan-review` guarding `plan_reviews` by `job_key`). */
 export async function recordFeatureEscalation(
   data: DataLayer,
-  entry: { featureKey: string; question: string | null },
+  entry: { featureKey: string; question: string | null; jobKey: string },
 ): Promise<void> {
-  await featureEscalations(data).insert({
+  const table = featureEscalations(data);
+  // A prior attempt of THIS job already recorded its row — reuse it, don't append a duplicate.
+  if (await table.findOne({ feature_key: entry.featureKey, job_key: entry.jobKey })) return;
+  await table.insert({
     feature_key: entry.featureKey,
     question: entry.question,
     created_at: new Date().toISOString(),
+    job_key: entry.jobKey,
   });
 }
 

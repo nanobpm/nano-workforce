@@ -234,9 +234,9 @@ test("latestOpenEscalationQuestion: null when there is no open escalation", () =
 
 test("latestFeatureEscalationQuestion: picks the newest audit row (highest id), not a positional [0]", () => {
   const rows = [
-    { id: 3, feature_key: "o/r#1", question: "stale", created_at: "t0" },
-    { id: 8, feature_key: "o/r#1", question: "newest", created_at: "t1" },
-    { id: 5, feature_key: "o/r#1", question: "middle", created_at: "t2" },
+    { id: 3, feature_key: "o/r#1", question: "stale", created_at: "t0", job_key: "j0" },
+    { id: 8, feature_key: "o/r#1", question: "newest", created_at: "t1", job_key: "j1" },
+    { id: 5, feature_key: "o/r#1", question: "middle", created_at: "t2", job_key: "j2" },
   ];
   assertEquals(latestFeatureEscalationQuestion(rows), "newest");
 });

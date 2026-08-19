@@ -40,7 +40,7 @@ const handler: AppJobHandler<In> = async (job, app) => {
   // column is dropped in the contract phase — the feature analogue of `record-plan-review` writing
   // `plan_reviews`. Dual-write for now (the column above still feeds the legacy page reads); the log
   // is authoritative for `pollUserTasks`.
-  await recordFeatureEscalation(app.data, { featureKey, question });
+  await recordFeatureEscalation(app.data, { featureKey, question, jobKey: job.jobKey });
   app.log.info("record-feature-escalation", { featureKey, hasQuestion: question !== null });
   return {};
 };
