@@ -23,7 +23,8 @@
         }
       },
       { "label": "Cockpit", "page": "cockpit" },
-      { "label": "Board", "page": "board" }
+      { "label": "Board", "page": "board" },
+      { "label": "Velocity", "page": "velocity" }
     ],
     "sticky": true
   }

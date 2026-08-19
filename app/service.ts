@@ -43,6 +43,7 @@ import {
 import { pollLineage } from "./lineage.ts";
 import { mergeLanes, readExclusions } from "./mergeExclusion.ts";
 import { freshHeadRunAction, headRunPresenceCount, loadMergeProtocol } from "./mergeProtocol.ts";
+import { pollMergesPerDay } from "./mergesPerDay.ts";
 import { type PrLaneDecision, planPrLane, taskDependencyDepths } from "./mergeTrain.ts";
 import {
   backfillPlanBuckets,
@@ -2116,6 +2117,7 @@ export async function pollOnce(
   await pollPromotion(data, engine, token);
   await pollFeatureDelivery(data);
   await pollLineage(data);
+  await pollMergesPerDay(data);
   await pollUserTasks(data, engine);
   if (engineRest) {
     const base = engineRest.restAddress.replace(/\/+$/, "");
