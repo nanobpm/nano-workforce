@@ -168,18 +168,25 @@ export const planDeps = (data: DataLayer) => data.table<PlanDep>("plan_deps", "p
 /** The fields an admission caller supplies for one inter-epic edge; `created_at` is stamped here. */
 export type PlanDepInput = Omit<PlanDep, "created_at">;
 
-/** Record one inter-epic dependency edge, enforcing the schema's two invariants at the app layer too
- * (the durable table backstops both, but the in-memory test data layer does not): an epic may not
- * depend on itself, and a consumer→producer edge is recorded at most once. A duplicate re-submission
- * is a no-op that returns the existing row rather than throwing, so batch admission (S2) stays
- * idempotent; a self-edge is a programming/validation error and throws. */
-export async function recordPlanDep(data: DataLayer, edge: PlanDepInput): Promise<PlanDep> {
+/** The record-gateway shape both the durable `plan_deps` table and its FK-free admission-staging
+ * twin `admitted_plan_deps` expose. Both hold the identical {@link PlanDep} row, so the idempotent
+ * edge-insert below is written once against this shape and reused for both. */
+type PlanDepTable = ReturnType<typeof planDeps>;
+
+/** Insert one inter-epic edge into `table` idempotently, enforcing the schema's two invariants at
+ * the app layer too (the durable table backstops both, but the in-memory test data layer does not):
+ * an epic may not depend on itself, and a consumer→producer edge is recorded at most once. A
+ * duplicate re-submission is a no-op that returns the existing row rather than throwing, so batch
+ * admission (S2) stays idempotent; a self-edge is a programming/validation error and throws. `label`
+ * only names the offending table in the self-edge error. */
+async function insertEdgeIdempotent(
+  table: PlanDepTable,
+  label: string,
+  edge: PlanDepInput,
+): Promise<PlanDep> {
   if (edge.plan_key === edge.depends_on_plan_key) {
-    throw new Error(
-      `plan_deps: self-edge rejected — epic ${edge.plan_key} cannot depend on itself`,
-    );
+    throw new Error(`${label}: self-edge rejected — epic ${edge.plan_key} cannot depend on itself`);
   }
-  const table = planDeps(data);
   const match = { plan_key: edge.plan_key, depends_on_plan_key: edge.depends_on_plan_key };
   const existing = (await table.find(match))[0];
   if (existing) return existing;
@@ -197,6 +204,71 @@ export async function recordPlanDep(data: DataLayer, edge: PlanDepInput): Promis
     if (raced) return raced;
     throw err;
   }
+}
+
+/** Record one inter-epic dependency edge into the durable `plan_deps` graph. Idempotent on the
+ * consumer→producer pair; a self-edge throws. NOTE: `plan_deps.plan_key` foreign-keys to an admitted
+ * `plans` row, so this is written by slice S3 (planner lowering), NOT by the S2 admission door —
+ * S2 stages edges FK-free via {@link recordAdmittedPlanDep} instead. */
+export function recordPlanDep(data: DataLayer, edge: PlanDepInput): Promise<PlanDep> {
+  return insertEdgeIdempotent(planDeps(data), "plan_deps", edge);
+}
+
+/** One STAGED admitted epic (issue #292 slice S2, db/migrations/043_epic_set_admission_staging.sql):
+ * the FK-free record the set/batch admission door persists per admitted epic so a crash between
+ * admission and lowering does not lose the set. It carries exactly what slice S3 (lowering) needs to
+ * MATERIALIZE the durable `plans` row — repo, issue number/url, and the normalized integration base
+ * branch admitPlan resolved. Keyed on `plan_key`, one staged row per epic (idempotent re-submit). */
+export interface AdmittedEpic {
+  plan_key: string;
+  repo: string;
+  issue_number: number;
+  issue_url: string;
+  base_branch: string;
+  created_at: string;
+}
+export const admittedEpics = (data: DataLayer) =>
+  data.table<AdmittedEpic>("admitted_epics", "plan_key");
+
+/** The FK-free staging twin of `plan_deps` (db/migrations/043_epic_set_admission_staging.sql): the
+ * validated inter-epic edges the S2 admission door stages before any `plans` row exists. Same row
+ * shape as {@link PlanDep}; slice S3 reads it to materialize the durable `plan_deps` edges. */
+export const admittedPlanDeps = (data: DataLayer) =>
+  data.table<PlanDep>("admitted_plan_deps", "plan_key");
+
+/** The fields an admission caller supplies for one staged admitted epic; `created_at` is stamped
+ * here (mirrors {@link PlanDepInput}). */
+export type AdmittedEpicInput = Omit<AdmittedEpic, "created_at">;
+
+/** Stage one admitted epic (issue #292 slice S2). Idempotent on `plan_key`: a re-submitted set that
+ * re-admits the same epic is a no-op returning the existing staged row, so the whole set door stays
+ * idempotent (mirroring {@link recordAdmittedPlanDep}). */
+export async function recordAdmittedEpic(
+  data: DataLayer,
+  epic: AdmittedEpicInput,
+): Promise<AdmittedEpic> {
+  const table = admittedEpics(data);
+  const existing = await table.get(epic.plan_key);
+  if (existing) return existing;
+  const row: AdmittedEpic = { ...epic, created_at: now() };
+  try {
+    await table.insert(row);
+    return row;
+  } catch (err) {
+    // Concurrent re-admission of the same epic races on the PRIMARY KEY (plan_key); honour the
+    // idempotent no-op contract by returning the winning row rather than surfacing the collision.
+    const raced = await table.get(epic.plan_key);
+    if (raced) return raced;
+    throw err;
+  }
+}
+
+/** Stage one validated inter-epic edge (issue #292 slice S2) into the FK-free `admitted_plan_deps`
+ * table. Idempotent on the consumer→producer pair; a self-edge throws. This is the S2 door's
+ * persistence for edges — it does NOT touch `plan_deps` (whose FK requires a `plans` row S2 has not
+ * created); slice S3 materializes the durable edge from this staging. */
+export function recordAdmittedPlanDep(data: DataLayer, edge: PlanDepInput): Promise<PlanDep> {
+  return insertEdgeIdempotent(admittedPlanDeps(data), "admitted_plan_deps", edge);
 }
 
 /** All INBOUND edges for `planKey` — i.e. every producer epic this dependent waits on. Empty for a

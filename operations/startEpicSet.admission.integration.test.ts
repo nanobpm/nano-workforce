@@ -1,13 +1,19 @@
 // Integration + unit coverage for the SET/BATCH admission door (issue #292, slice S2) — driven
 // through the operation EDGE `startEpicSet`. Proves the all-or-nothing admission contract:
-//   • a valid DAG of epics admits every member AND persists every edge into plan_deps;
-//   • a submitted cycle is rejected at the offending edge with NO partial start / NO edge persisted;
+//   • a valid DAG of epics admits every member AND stages every edge into `admitted_plan_deps`
+//     (S2's FK-free staging), writing NOTHING to the durable `plans` / `plan_deps` graph (that is S3);
+//   • a submitted cycle is rejected at the offending edge with NO partial start / NO edge staged;
 //   • an edge naming an epic outside the set is a clean 400;
 //   • a per-epic admission failure (base rules / shared-base) maps to the same 4xx as the single door;
 //   • re-submitting the identical set is a no-op (no duplicate edge, no double-admit).
 // It runs the real delegate against an in-memory app/data/engine and a faked github transport, exactly
 // like startPlanFanout.admission.integration.test.ts — no network, deterministic on a single run.
+// A SQLite-backed FK regression (foreign_keys=ON, migrations 041+043 applied) additionally proves S2
+// admits with NO `plans` row present and stages FK-free, never FK-failing on `plan_deps`.
+import { readFileSync } from "node:fs";
+import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import { assertEquals } from "#test-assert";
 import type { AppApi } from "@nanobpm/urban";
 import { resetDefaultBranchCache } from "../app/github.ts";
@@ -74,9 +80,11 @@ async function withGithub<T>(state: GithubState, fn: () => Promise<T>): Promise<
 }
 
 // ── in-memory app (data + engine) ────────────────────────────────────────────────────────────────
-// The delegate reads/writes `plans` (admitPlan's shared-base guard) and `plan_deps` (recordPlanDep).
-// `plan_deps` is keyed on `plan_key` but holds MANY rows per key (composite edge), so the generic
-// table's `get` (first row for the key) is not used for it — the delegate only `find`s + `insert`s.
+// The delegate reads `plans` (admitPlan's shared-base guard) and STAGES into `admitted_epics` +
+// `admitted_plan_deps` (recordAdmittedEpic / recordAdmittedPlanDep) — it never writes the durable
+// `plan_deps`. `admitted_plan_deps` is keyed on `plan_key` but holds MANY rows per key (composite
+// edge), so the generic table's `get` (first row for the key) is not used for it — the delegate only
+// `find`s + `insert`s.
 function makeApp(seedPlans: Record<string, unknown>[] = []) {
   const tables = new Map<string, Record<string, unknown>[]>();
   tables.set("plans", [...seedPlans]);
@@ -135,6 +143,11 @@ function freshGithub(repo: string, extraBranches: string[] = []): GithubState {
 
 const REPO = "owner/repo";
 const call = (app: AppApi, body: unknown) => startEpicSet(input(body), app) as Promise<any>;
+// S2 stages into `admitted_plan_deps` / `admitted_epics` and must NEVER touch the durable `plan_deps`.
+const admittedDepRows = (tables: Map<string, Record<string, unknown>[]>) =>
+  tables.get("admitted_plan_deps") ?? [];
+const admittedEpicRows = (tables: Map<string, Record<string, unknown>[]>) =>
+  tables.get("admitted_epics") ?? [];
 const planDepsRows = (tables: Map<string, Record<string, unknown>[]>) => tables.get("plan_deps") ?? [];
 
 // ── Happy path: a valid DAG admits every member and persists every edge ──────────────────────────
@@ -155,9 +168,13 @@ test("valid DAG: admits all epics and persists all edges", async () => {
     assertEquals(res.body.edges, [
       { consumer: `${REPO}#2`, producer: `${REPO}#1`, package: "@scope/pkg", capabilityRef: `${REPO}#1` },
     ]);
-    // S2 admits + persists edges but NEVER starts an epic (that is S3).
+    // S2 admits + STAGES (epics and edges) but NEVER starts an epic and NEVER writes the durable
+    // `plans` / `plan_deps` graph (that is S3).
     assertEquals(started.length, 0);
-    const rows = planDepsRows(tables);
+    assertEquals(planDepsRows(tables).length, 0); // durable plan_deps untouched by S2
+    const epicRows = admittedEpicRows(tables);
+    assertEquals(epicRows.length, 2); // both epics staged (roots included) for S3 to materialize
+    const rows = admittedDepRows(tables);
     assertEquals(rows.length, 1);
     assertEquals(rows[0].plan_key, `${REPO}#2`);
     assertEquals(rows[0].depends_on_plan_key, `${REPO}#1`);
@@ -179,6 +196,8 @@ test("independent roots: a set with no deps admits every epic as a root, no edge
     assertEquals(res.status, 202);
     assertEquals(res.body.roots.sort(), [`${REPO}#1`, `${REPO}#2`]);
     assertEquals(res.body.edges, []);
+    assertEquals(admittedDepRows(tables).length, 0);
+    assertEquals(admittedEpicRows(tables).length, 2); // both roots staged
     assertEquals(planDepsRows(tables).length, 0);
   });
 });
@@ -200,7 +219,7 @@ test("cycle: rejected 400 with no edge persisted and no branch created", async (
     });
     assertEquals(res.status, 400);
     assertEquals(typeof res.body.error, "string");
-    assertEquals(planDepsRows(tables).length, 0); // nothing persisted
+    assertEquals(admittedDepRows(tables).length, 0); // nothing staged
     assertEquals(gh.creates, []); // cycle rejected BEFORE any admitPlan side effect
   });
 });
@@ -216,7 +235,7 @@ test("edge naming an epic outside the set: 400, nothing persisted/created", asyn
     });
     assertEquals(res.status, 400);
     assertEquals(typeof res.body.error, "string");
-    assertEquals(planDepsRows(tables).length, 0);
+    assertEquals(admittedDepRows(tables).length, 0);
     assertEquals(gh.creates, []);
   });
 });
@@ -246,7 +265,8 @@ test("unadmittable epic (default base without confirm): 400, no edge persisted",
       deps: [{ consumer: `${REPO}#2`, producer: `${REPO}#1`, package: "p", capabilityRef: `${REPO}#1` }],
     });
     assertEquals(res.status, 400);
-    assertEquals(planDepsRows(tables).length, 0); // edges persisted only after ALL epics admit
+    assertEquals(admittedDepRows(tables).length, 0); // edges staged only after ALL epics admit
+    assertEquals(admittedEpicRows(tables).length, 0); // no epic staged on a partial-admit reject
   });
 });
 
@@ -278,10 +298,12 @@ test("idempotent: re-submitting the identical set does not duplicate edges", asy
     };
     const first = await call(app, set);
     assertEquals(first.status, 202);
-    assertEquals(planDepsRows(tables).length, 1);
+    assertEquals(admittedDepRows(tables).length, 1);
+    assertEquals(admittedEpicRows(tables).length, 2);
     const second = await call(app, set);
     assertEquals(second.status, 202);
-    assertEquals(planDepsRows(tables).length, 1); // no duplicate edge on retry
+    assertEquals(admittedDepRows(tables).length, 1); // no duplicate edge on retry
+    assertEquals(admittedEpicRows(tables).length, 2); // no duplicate epic on retry
   });
 });
 
@@ -371,9 +393,113 @@ for (const [label, badDep] of [
       });
       assertEquals(res.status, 400);
       assertEquals(typeof res.body.error, "string");
-      assertEquals(planDepsRows(tables).length, 0);
+      assertEquals(admittedDepRows(tables).length, 0);
       assertEquals(gh.creates, []); // rejected BEFORE any admitPlan side effect
     });
   });
 }
+
+// ── SQLite-backed FK regression (issue #292 S2) ──────────────────────────────────────────────────
+// The in-memory data layer above does NOT enforce SQLite constraints — notably `plan_deps.plan_key`'s
+// FK to `plans` (041). So it could not have caught the FK-violation the S2 door originally shipped:
+// it wrote validated edges into `plan_deps` while admitting via `admitPlan` (which creates NO `plans`
+// row), so a first-time set submission FK-failed (500). The fix (design decision on #292): S2 admits
+// + STAGES into its own FK-free `admitted_epics` / `admitted_plan_deps` (043); S3 materializes the
+// durable graph. These tests drive the real delegate against a real `node:sqlite` db with
+// foreign_keys=ON and migrations 041+043 applied, proving the door no longer FK-fails and never
+// writes `plan_deps`.
+
+/** A DataLayer over a real in-memory SQLite db with foreign_keys ON, migrations 041+043 applied, and a
+ * minimal `plans` shape (the columns admitPlan's shared-base guard reads + the PK 041's FK references).
+ * Seeds NO plans rows by default — that is exactly the first-submission condition the old code
+ * FK-failed on. */
+function makeSqliteApp(
+  seedPlans: { plan_key: string; repo: string; base_branch: string; status: string }[] = [],
+) {
+  const db = new DatabaseSync(":memory:");
+  db.exec("PRAGMA foreign_keys = ON;");
+  db.exec("CREATE TABLE plans (plan_key TEXT PRIMARY KEY, repo TEXT, base_branch TEXT, status TEXT);");
+  for (const p of seedPlans) {
+    db.prepare("INSERT INTO plans (plan_key, repo, base_branch, status) VALUES (?, ?, ?, ?)")
+      .run(p.plan_key, p.repo, p.base_branch, p.status);
+  }
+  for (const f of ["041_inter_epic_plan_deps.sql", "043_epic_set_admission_staging.sql"]) {
+    db.exec(readFileSync(fileURLToPath(new URL(`../db/migrations/${f}`, import.meta.url)), "utf8"));
+  }
+  const q = (id: string) => `"${id.replace(/"/g, '""')}"`;
+  const coerce = (v: unknown) => (v === null ? null : typeof v === "boolean" ? (v ? 1 : 0) : v) as any;
+  const table = (name: string, key: string) => ({
+    get: (k: unknown) =>
+      Promise.resolve(db.prepare(`SELECT * FROM ${q(name)} WHERE ${q(key)} = ?`).get(coerce(k)) ?? null),
+    find: (query: Record<string, unknown>) => {
+      const keys = Object.keys(query);
+      const clause = keys.length ? `WHERE ${keys.map((k) => `${q(k)} = ?`).join(" AND ")}` : "";
+      return Promise.resolve(db.prepare(`SELECT * FROM ${q(name)} ${clause}`).all(...keys.map((k) => coerce(query[k]))));
+    },
+    insert: (r: Record<string, unknown>) => {
+      const keys = Object.keys(r).filter((k) => r[k] !== undefined);
+      db.prepare(`INSERT INTO ${q(name)} (${keys.map(q).join(", ")}) VALUES (${keys.map(() => "?").join(", ")})`)
+        .run(...keys.map((k) => coerce(r[k])));
+      return Promise.resolve(r);
+    },
+    update: () => Promise.resolve(null),
+    delete: () => Promise.resolve(),
+  });
+  const app = {
+    data: { table },
+    engine: { createInstance: () => Promise.resolve({ processInstanceKey: "PI-1" }) },
+    log: noopLog(),
+  } as any as AppApi;
+  return { app, db };
+}
+
+test("SQLite (FK ON): admits a set with NO plans row, stages FK-free, never writes plan_deps", async () => {
+  const gh = freshGithub(REPO);
+  await withGithub(gh, async () => {
+    const { app, db } = makeSqliteApp(); // no plans rows — the first-submission FK-failure condition
+    try {
+      const res = await call(app, {
+        epics: [
+          { issue: `${REPO}#1`, baseBranch: "epic/producer" },
+          { issue: `${REPO}#2`, baseBranch: "epic/consumer" },
+        ],
+        deps: [{ consumer: `${REPO}#2`, producer: `${REPO}#1`, package: "@scope/pkg", capabilityRef: `${REPO}#1` }],
+      });
+      // Under the old code this was a 500 FK violation on `plan_deps.plan_key`.
+      assertEquals(res.status, 202);
+      const planDepN = db.prepare("SELECT COUNT(*) AS n FROM plan_deps").get() as { n: number };
+      assertEquals(planDepN.n, 0); // durable plan_deps untouched by S2
+      const staged = db
+        .prepare("SELECT plan_key, depends_on_plan_key, package FROM admitted_plan_deps")
+        .all() as { plan_key: string; depends_on_plan_key: string; package: string }[];
+      assertEquals(staged.length, 1);
+      assertEquals(staged[0].plan_key, `${REPO}#2`);
+      assertEquals(staged[0].depends_on_plan_key, `${REPO}#1`);
+      const epicN = db.prepare("SELECT COUNT(*) AS n FROM admitted_epics").get() as { n: number };
+      assertEquals(epicN.n, 2); // both epics staged for S3 to materialize
+    } finally {
+      db.close();
+    }
+  });
+});
+
+test("SQLite: plan_deps FK rejects an unbacked edge, but the admitted_plan_deps staging twin accepts it", () => {
+  const { db } = makeSqliteApp();
+  try {
+    const edge = (t: string) =>
+      `INSERT INTO ${t} (plan_key, depends_on_plan_key, package, capability_ref, created_at) VALUES ('o/r#2','o/r#1','p','o/r#1','t')`;
+    let fkThrew = false;
+    try {
+      db.prepare(edge("plan_deps")).run(); // no plans row for o/r#2 → FK violation
+    } catch {
+      fkThrew = true;
+    }
+    assertEquals(fkThrew, true); // proves plan_deps.plan_key REFERENCES plans(plan_key) is real + ON
+    db.prepare(edge("admitted_plan_deps")).run(); // FK-free staging twin accepts the same unbacked edge
+    const n = db.prepare("SELECT COUNT(*) AS n FROM admitted_plan_deps").get() as { n: number };
+    assertEquals(n.n, 1);
+  } finally {
+    db.close();
+  }
+});
 

@@ -12,15 +12,20 @@
 //      DAG. This runs BEFORE any `admitPlan` call, so a cycle / dangling edge is a clean 400 with no
 //      base branch created and no edge written.
 //   3. Run the existing `admitPlan` gate PER epic (base-branch rules + shared-base guard). The first
-//      failure maps to its 4xx (400/409) via the shared `admitPlanErrorResponse`, before any edge is
+//      failure maps to its 4xx (400/409) via the shared `admitPlanErrorResponse`, before anything is
 //      persisted.
-//   4. Only once every epic admits: persist the validated edges into `plan_deps` (S1's `recordPlanDep`,
-//      itself idempotent), then return the admitted epics, the roots, and the persisted edges.
+//   4. Only once every epic admits: STAGE the admitted set — each epic into `admitted_epics` and each
+//      validated edge into `admitted_plan_deps` — then return the admitted epics, the roots, and the
+//      staged edges.
 //
-// This slice deliberately does NOT start any epic or seed any readiness gate — scheduling/lowering
-// (starting roots, seeding the capability gate, binding the resolved version) is slice S3, which hooks
-// into this admission flow. Re-submitting the identical set is a no-op (admitPlan is idempotent on an
-// already-created base + an inactive plan; recordPlanDep collapses a duplicate edge).
+// This slice deliberately does NOT start any epic or seed any readiness gate, and — per the #292
+// design decision — it MATERIALIZES neither a `plans` row nor a `plan_deps` edge. Both are owned by
+// slice S3 (planner lowering: schedule roots, seed the capability gate, bind the resolved version),
+// which reads this staging and creates `plans` + `plan_deps` when it schedules roots — where the
+// `plan_deps.plan_key REFERENCES plans(plan_key)` FK is satisfied by construction. S2 persists into
+// its OWN FK-FREE staging tables instead, so a first-time set submission can never FK-fail here.
+// Re-submitting the identical set is a no-op (admitPlan is idempotent on an already-created base + an
+// inactive plan; the staging records collapse a duplicate epic/edge).
 
 import {
   admitPlan,
@@ -28,7 +33,8 @@ import {
   EpicSetValidationError,
   type ParsedIssue,
   parseIssue,
-  recordPlanDep,
+  recordAdmittedEpic,
+  recordAdmittedPlanDep,
   validateEpicSet,
 } from "../app/plan.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
@@ -107,7 +113,7 @@ export default defineOperation("startEpicSet", async ({ body }, app) => {
   // persisted. `selfPlanKey` excludes the epic's own active row so an idempotent re-submit does not
   // 409 against itself.
   const token = process.env.GITHUB_TOKEN ?? "";
-  const admitted: { planKey: string; baseBranch: string }[] = [];
+  const admitted: { parsed: ParsedIssue; baseBranch: string }[] = [];
   for (const member of members) {
     try {
       const normalizedBase = await admitPlan(app.data, member.parsed.repo, member.baseBranch, token, {
@@ -115,7 +121,7 @@ export default defineOperation("startEpicSet", async ({ body }, app) => {
         confirmDefaultBase: member.confirmDefaultBase,
         selfPlanKey: member.parsed.planKey,
       });
-      admitted.push({ planKey: member.parsed.planKey, baseBranch: normalizedBase });
+      admitted.push({ parsed: member.parsed, baseBranch: normalizedBase });
     } catch (err) {
       const mapped = admitPlanErrorResponse(err);
       if (mapped) {
@@ -133,9 +139,24 @@ export default defineOperation("startEpicSet", async ({ body }, app) => {
     }
   }
 
-  // ── Step 4: persist the validated edges (idempotent). Only reached once the WHOLE set admitted. ─
+  // ── Step 4: STAGE the admitted set + validated edges (idempotent). S2 is the admission DOOR only:
+  // per the #292 design decision it persists into ITS OWN FK-FREE staging tables and MATERIALIZES
+  // neither a `plans` row nor a `plan_deps` edge. Slice S3 (planner lowering) reads this staging and
+  // creates `plans` + `plan_deps` when it schedules roots — where the `plan_deps.plan_key REFERENCES
+  // plans(plan_key)` FK is satisfied by construction. Each admitted epic (INCLUDING roots) is staged
+  // so S3 can materialize its `plans` row; each validated edge is staged FK-free. Only reached once
+  // the WHOLE set admitted.
+  for (const a of admitted) {
+    await recordAdmittedEpic(app.data, {
+      plan_key: a.parsed.planKey,
+      repo: a.parsed.repo,
+      issue_number: a.parsed.number,
+      issue_url: a.parsed.url,
+      base_branch: a.baseBranch,
+    });
+  }
   for (const edge of edges) {
-    await recordPlanDep(app.data, {
+    await recordAdmittedPlanDep(app.data, {
       plan_key: edge.consumer,
       depends_on_plan_key: edge.producer,
       package: edge.package,
@@ -145,7 +166,7 @@ export default defineOperation("startEpicSet", async ({ body }, app) => {
 
   // Roots = admitted epics with no inbound edge — the ones S3 will start immediately.
   const dependents = new Set(edges.map((e) => e.consumer));
-  const roots = admitted.map((a) => a.planKey).filter((k) => !dependents.has(k));
+  const roots = admitted.map((a) => a.parsed.planKey).filter((k) => !dependents.has(k));
 
   app.log.info("epic set admitted", {
     epics: admitted.length,
@@ -155,7 +176,7 @@ export default defineOperation("startEpicSet", async ({ body }, app) => {
   return {
     status: 202,
     body: {
-      epics: admitted,
+      epics: admitted.map((a) => ({ planKey: a.parsed.planKey, baseBranch: a.baseBranch })),
       roots,
       edges: edges.map((e) => ({
         consumer: e.consumer,
