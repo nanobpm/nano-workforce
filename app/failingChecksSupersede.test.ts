@@ -76,7 +76,7 @@ test("latestRunPerCheck keeps exactly one run per check name (newest)", () => {
   assert(a && a.conclusion === "SUCCESS", "check `a` resolves to its newest (green) run");
 });
 
-test("presentCheckNames dedupes superseded reruns to a single name", () => {
+test("allCheckNames dedupes superseded reruns to a single name", () => {
   const rollup = [
     { name: "engine-core", conclusion: "CANCELLED", startedAt: "2024-01-01T00:00:00Z" },
     { name: "engine-core", conclusion: "SUCCESS", startedAt: "2024-01-01T00:02:00Z" },

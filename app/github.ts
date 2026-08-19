@@ -530,7 +530,8 @@ interface RollupEntry {
 }
 
 /** The canonical identity of a check across its reruns: its name (CheckRun) or context
- * (StatusContext). GitHub CI concurrency can leave several runs of the SAME check on one head
+ * (StatusContext), falling back to its `workflowName` and finally the sentinel `"check"` when
+ * neither is present. GitHub CI concurrency can leave several runs of the SAME check on one head
  * commit — a superseded run plus the newer run that replaced it — so this is what we group by. */
 function checkKey(c: RollupEntry): string {
   return c.name || c.context || c.workflowName || "check";
