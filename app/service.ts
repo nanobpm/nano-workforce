@@ -896,8 +896,9 @@ export async function abandonClosedPr(data: DataLayer, prKey: string, detail: st
     }
   }
   await prs(data).update(prKey, { status: ABANDONED_STATUS, updated_at: ts });
-  for (const t of await planTasks(data).find({ pr_key: prKey })) {
-    await planTasks(data).update(t.id, { status: ABANDONED_STATUS, updated_at: ts });
+  const tasks = planTasks(data);
+  for (const t of await tasks.find({ pr_key: prKey })) {
+    await tasks.update(t.id, { status: ABANDONED_STATUS, updated_at: ts });
   }
 }
 
