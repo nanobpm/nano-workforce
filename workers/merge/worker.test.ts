@@ -26,6 +26,10 @@ function fakeApp() {
               Promise.resolve(
                 store.filter((r) => Object.entries(q).every(([f, v]) => r[f] === v)),
               ),
+            findOne: (q: any) =>
+              Promise.resolve(
+                store.find((r) => Object.entries(q).every(([f, v]) => r[f] === v)) ?? null,
+              ),
             insert: (row: any) => {
               store.push(row);
               return Promise.resolve(store.length);

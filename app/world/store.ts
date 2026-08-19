@@ -10,6 +10,7 @@
 // duplicated (AGENTS.md "derivation over duplication": the tree is derived from `remote SHA +
 // effect-tail`, never snapshot into a log).
 import type { DataLayer, Table } from "@nanobpm/urban";
+import { isUniqueConstraintFence } from "../dbFence.ts";
 import type { Effect, EffectKind, Fence } from "./effect-ledger.ts";
 
 /** A persisted push-checkpoint row (`world_checkpoints`). */
@@ -104,13 +105,12 @@ export class WorldStore {
    * concurrent/duplicate writer inserted the row BETWEEN our `findOne` and our `insert`. Every insert
    * in this store guards a UNIQUE constraint (`UNIQUE(pr_key, commit_sha)` / `(pr_key, checkpoint_offset)`
    * on checkpoints, `UNIQUE(pr_key, idempotency_key)` on effects), so a check-then-insert is inherently
-   * racy under the at-least-once persist-round delivery + a distributed fleet. This is the ONE place the
-   * store classifies a fence collision, so the three insert sites below turn it into the SAME intended
-   * idempotent outcome instead of each re-encoding the driver's error shape (a drift surface). Matched on
-   * the message substring the RAD `Table` surface propagates verbatim — the same one the schema tests
-   * assert on — because that surface hides the concrete driver error type. */
+   * racy under the at-least-once persist-round delivery + a distributed fleet. Delegates to the ONE
+   * canonical classifier ({@link isUniqueConstraintFence}) so this store, `abandonClosedPr`, and any
+   * future fence site share a single implementation instead of each re-encoding the driver's error
+   * shape (AGENTS.md: "no drift surfaces"). */
   static #isFenceCollision(err: unknown): boolean {
-    return err instanceof Error && /UNIQUE constraint failed/i.test(err.message);
+    return isUniqueConstraintFence(err);
   }
 
   /** Reconcile an existing ledger row's `applied` flag toward a LATER record's knowledge: flip a

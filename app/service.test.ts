@@ -6,11 +6,11 @@
 // loop already guards in `startPlan`). Drives `submitPr` against an in-memory data layer with the
 // GitHub transport forced off so it is hermetic.
 import { test } from "node:test";
-import { assertEquals } from "#test-assert";
+import { assertEquals, assertRejects, assertStringIncludes } from "#test-assert";
 import { memDataFor } from "../test/worldDb.ts";
 import { DurableResumeRegistry } from "./durableResume.ts";
 import { WorldStore } from "./world/index.ts";
-import { parsePr, pollCapabilityGatesImpl, pollIncidentsImpl, pollWaveGatesImpl, repoEnvelopeVars, startMerge, submitPr, worldRestoreSha } from "./service.ts";
+import { abandonClosedPr, parsePr, pollCapabilityGatesImpl, pollIncidentsImpl, pollWaveGatesImpl, repoEnvelopeVars, startMerge, submitPr, worldRestoreSha } from "./service.ts";
 
 function memTable(rows: any[], key: string) {
   return {
@@ -755,7 +755,195 @@ test("pollWaveGatesImpl never releases the barrier on an unverifiable subscripti
   });
 });
 
-// ── pollCapabilityGatesImpl — the host half of the cross-repo capability edge (issue #289) ──────────
+// #352: a wave WEDGES forever at `wait-wave-merged` when one member PR is closed on GitHub WITHOUT
+// merging (abandoned / superseded / perpetually conflicting). The old gate released only when EVERY
+// wave-target PR reached `merged`, so a closed-unmerged member kept `allMerged = false` forever and
+// the epic could never advance. The fix classifies each target against live GitHub state and, for a
+// closed-unmerged one, (a) treats it as NON-blocking so the wave completes on its surviving merged
+// members and (b) reconciles it terminal — flipping BOTH the `pull_requests` row and its
+// `plan_tasks` row to `abandoned` so it drops out of `waveMergeTargets` and the epic read model.
+//
+// Forces token transport WITH a token and stubs `fetch` to answer both the single-PR GET (the closed
+// member reports state="closed", merged:false) and `/message-subscriptions/search` (barrier open).
+function closedMemberFetch(open: Set<string>, closedNumbers: Set<number>) {
+  return (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    const u = typeof url === "string" ? url : url.toString();
+    const pullMatch = u.match(/\/repos\/[^/]+\/[^/]+\/pulls\/(\d+)$/);
+    if (pullMatch) {
+      const n = Number(pullMatch[1]);
+      const body = closedNumbers.has(n)
+        ? { merged: false, state: "closed", mergeable_state: "dirty" }
+        : { merged: true, state: "closed", mergeable_state: "clean" };
+      return Promise.resolve(
+        new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } }),
+      );
+    }
+    if (u.endsWith("/message-subscriptions/search")) {
+      const pik = (JSON.parse(String(init?.body ?? "{}")) as { filter?: { processInstanceKey?: string } })
+        .filter?.processInstanceKey ?? "";
+      const items = open.has(pik)
+        ? [{ messageName: "wave-merged", correlationKey: "owner/repo#67", messageSubscriptionState: "CREATED" }]
+        : [];
+      return Promise.resolve(
+        new Response(JSON.stringify({ items }), { status: 200, headers: { "content-type": "application/json" } }),
+      );
+    }
+    throw new Error(`unexpected fetch: ${u}`);
+  };
+}
+
+test("pollWaveGatesImpl releases the wave when a member PR is closed-unmerged and reconciles it terminal (#352)", async () => {
+  const prevMode = process.env["NANO_PR_GITHUB_TRANSPORT"];
+  const prevTok = process.env["GITHUB_TOKEN"];
+  process.env["NANO_PR_GITHUB_TRANSPORT"] = "token";
+  process.env["GITHUB_TOKEN"] = "test-token"; // token present → fetchPrState hits the stubbed REST GET
+  try {
+    const PLAN_KEY = "owner/repo#67";
+    const PI = "PI-13794";
+    const plan = { plan_key: PLAN_KEY, process_key: PI, gate_wave: 2 as number | null, updated_at: "t0" };
+    const stores: Record<string, { rows: any[]; key: string }> = {
+      plans: { rows: [plan], key: "plan_key" },
+      plan_tasks: {
+        rows: [
+          // A surviving MERGED member (tracked row → no network) and a member whose PR was CLOSED
+          // on GitHub without merging while its task was still `opened` (never reached merge stage).
+          { id: "owner/repo#67:a", plan_key: PLAN_KEY, wave: 2, status: "opened", pr_key: "owner/repo#68" },
+          { id: "owner/repo#67:b", plan_key: PLAN_KEY, wave: 2, status: "opened", pr_key: "owner/repo#70" },
+        ],
+        key: "id",
+      },
+      pull_requests: {
+        rows: [
+          { pr_key: "owner/repo#68", status: "merged" },
+          { pr_key: "owner/repo#70", status: "converging" }, // not merged in the DB → falls to live GitHub read
+        ],
+        key: "pr_key",
+      },
+      merges: { rows: [], key: "id" },
+    };
+    const data = {
+      table: (name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key),
+    } as any;
+
+    const published: { name: string; correlationKey?: string }[] = [];
+    const engine = {
+      publishMessage: (input: { name: string; correlationKey?: string }) => {
+        published.push(input);
+        return Promise.resolve();
+      },
+    } as any;
+    const headers = { "content-type": "application/json" };
+    const prevFetch = globalThis.fetch;
+
+    globalThis.fetch = closedMemberFetch(new Set([PI]), new Set([70])) as typeof fetch;
+    try {
+      await pollWaveGatesImpl(data, engine, "test-token", "http://engine/v2", headers);
+    } finally {
+      globalThis.fetch = prevFetch;
+    }
+
+    // The barrier RELEASES — the closed-unmerged member no longer wedges the wave.
+    assertEquals(published.length, 1, "must publish wave-merged once the closed member is treated non-blocking");
+    assertEquals(published[0]?.name, "wave-merged");
+    assertEquals(published[0]?.correlationKey, PLAN_KEY);
+
+    // The closed member is reconciled terminal: PR row + its plan_tasks row flip to `abandoned`,
+    // and a terminal `merges` audit row is recorded (the canonical abandon writer).
+    const prRow = stores.pull_requests.rows.find((r) => r.pr_key === "owner/repo#70");
+    assertEquals(prRow?.status, "abandoned");
+    const taskRow = stores.plan_tasks.rows.find((r) => r.id === "owner/repo#67:b");
+    assertEquals(taskRow?.status, "abandoned");
+    assertEquals(stores.merges.rows.length, 1);
+    assertEquals((stores.merges.rows[0] as any).outcome, "abandoned");
+    assertEquals((stores.merges.rows[0] as any).method, "pr-closed");
+    // The surviving merged member is untouched.
+    assertEquals(stores.plan_tasks.rows.find((r) => r.id === "owner/repo#67:a")?.status, "opened");
+  } finally {
+    if (prevMode !== undefined) process.env["NANO_PR_GITHUB_TRANSPORT"] = prevMode;
+    else delete process.env["NANO_PR_GITHUB_TRANSPORT"];
+    if (prevTok !== undefined) process.env["GITHUB_TOKEN"] = prevTok;
+    else delete process.env["GITHUB_TOKEN"];
+  }
+});
+
+// #352 review: `abandonClosedPr` must be genuinely idempotent. It is reached from BOTH observers of a
+// closed-unmerged member (merge worker + wave gate) and can be retried by the poller, so an
+// unconditional `merges` insert would spam the audit with duplicate `outcome:"abandoned"/method:
+// "pr-closed"` rows and skew reporting. Re-running it re-stamps the terminal status but writes the
+// audit row only once.
+test("abandonClosedPr is idempotent — the terminal merges audit row is written at most once (#352)", async () => {
+  const stores: Record<string, { rows: any[]; key: string }> = {
+    pull_requests: { rows: [{ pr_key: "owner/repo#70", status: "converging" }], key: "pr_key" },
+    plan_tasks: { rows: [{ id: "owner/repo#67:b", plan_key: "owner/repo#67", wave: 2, status: "opened", pr_key: "owner/repo#70" }], key: "id" },
+    merges: { rows: [], key: "id" },
+  };
+  const data = {
+    table: (name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key),
+  } as any;
+
+  await abandonClosedPr(data, "owner/repo#70", "closed without merging");
+  await abandonClosedPr(data, "owner/repo#70", "closed without merging"); // retry / second observer
+
+  // Terminal status re-stamped, but exactly one audit row despite two calls.
+  assertEquals(stores.pull_requests.rows.find((r) => r.pr_key === "owner/repo#70")?.status, "abandoned");
+  assertEquals(stores.plan_tasks.rows.find((r) => r.id === "owner/repo#67:b")?.status, "abandoned");
+  assertEquals(stores.merges.rows.length, 1, "no duplicate abandoned/pr-closed audit rows on retry");
+  assertEquals((stores.merges.rows[0] as any).method, "pr-closed");
+});
+
+// #352 review (suppressed advisory app/service.ts:863): `abandonClosedPr` writes the terminal
+// `merges` audit row — an FK child of `pull_requests.pr_key` — and must not assume the parent row
+// exists. The merge-worker caller pre-heals with `ensurePr`, but the wave-gate self-heal path
+// (`pollWaveGatesImpl`) does NOT, so in an engine/app.db desync the canonical writer could observe a
+// closed member whose `pull_requests` row is missing and hit a `FOREIGN KEY constraint failed`,
+// wedging the poller pass. The canonical writer must self-heal the parent (idempotent `ensurePr`)
+// before the FK-child insert, symmetrically for BOTH callers. Read-model witness: with a missing
+// parent row the old code's `prs.update` was a silent no-op, so the PR was never reconciled terminal.
+test("abandonClosedPr self-heals a missing pull_requests parent row before the FK-child audit insert (#352)", async () => {
+  const stores: Record<string, { rows: any[]; key: string }> = {
+    pull_requests: { rows: [], key: "pr_key" }, // desync: parent row is MISSING
+    plan_tasks: { rows: [{ id: "owner/repo#67:c", plan_key: "owner/repo#67", wave: 3, status: "opened", pr_key: "owner/repo#71" }], key: "id" },
+    merges: { rows: [], key: "id" },
+  };
+  const data = {
+    table: (name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key),
+  } as any;
+
+  await abandonClosedPr(data, "owner/repo#71", "closed without merging");
+
+  // The parent row is reconstructed AND flipped terminal, so the FK-child audit row has a parent.
+  const parent = stores.pull_requests.rows.find((r) => r.pr_key === "owner/repo#71");
+  assertEquals(parent?.status, "abandoned", "missing parent pull_requests row is self-healed and reconciled terminal");
+  assertEquals(parent?.repo, "owner/repo", "reconstructed parent carries the parsed repo");
+  assertEquals(parent?.number, 71, "reconstructed parent carries the parsed number");
+  assertEquals(stores.plan_tasks.rows.find((r) => r.id === "owner/repo#67:c")?.status, "abandoned");
+  assertEquals(stores.merges.rows.length, 1, "terminal audit row written once");
+});
+
+// #352 review (suppressed advisory app/service.ts:861): the self-heal only runs when `parsePr(prKey)`
+// succeeds, so a MALFORMED prKey (engine/app.db desync, a process-variable regression) would skip
+// the heal yet still reach `merges.insert` — which, with a missing parent, fails with an opaque
+// `FOREIGN KEY constraint failed`, the exact incident this helper exists to prevent. The canonical
+// writer must fail closed with a clear, actionable error naming the bad key, not leak an FK incident.
+test("abandonClosedPr rejects a malformed prKey with a clear error before any FK-child insert (#352)", async () => {
+  const stores: Record<string, { rows: any[]; key: string }> = {
+    pull_requests: { rows: [], key: "pr_key" },
+    plan_tasks: { rows: [], key: "id" },
+    merges: { rows: [], key: "id" },
+  };
+  const data = {
+    table: (name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key),
+  } as any;
+
+  const err = await assertRejects(() => abandonClosedPr(data, "not-a-valid-pr-key", "closed without merging"));
+  assertStringIncludes((err as Error).message, "malformed prKey");
+  assertStringIncludes((err as Error).message, "not-a-valid-pr-key");
+  // No audit row and no terminal side effects leaked before the guard fired.
+  assertEquals(stores.merges.rows.length, 0, "no FK-child audit insert attempted on a malformed prKey");
+  assertEquals(stores.pull_requests.rows.length, 0, "no parent row written on a malformed prKey");
+});
+
+
 //
 // plan-fanout parks a task with capability `needs` at the `wait-caps-resolved` message barrier. This
 // reconciler, on every pass, (a) starts the durable `readiness-gate` once per need, (b) does a single

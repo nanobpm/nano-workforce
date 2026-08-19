@@ -9,7 +9,7 @@
 // `Table<T>` surface), not hand-written SQL. Row shapes are declared inline here.
 import { readFileSync } from "node:fs";
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
-import { abandonUrl, mintAbandonToken, renderAbandonBrief } from "./abandon.ts";
+import { ABANDONED_STATUS, abandonUrl, mintAbandonToken, renderAbandonBrief } from "./abandon.ts";
 import { agentSlaTimeout } from "./agentSla.ts";
 import {
   CAPS_RESOLVED_MESSAGE,
@@ -21,6 +21,7 @@ import {
   renderResolvedDepsBrief,
   UnresolvableCapabilityRefError,
 } from "./capabilityNeed.ts";
+import { isUniqueConstraintFence } from "./dbFence.ts";
 import { deriveDelivery, TERMINAL_STATUSES } from "./delivery.ts";
 import { fleetSupportsDurableResume } from "./durableResume.ts";
 import { backfillFeatureStages, deriveFeatureDelivery, FEATURE_BLOCKED_ELEMENT, FEATURE_ESCALATION_ELEMENT, FEATURE_RUN_STATUSES, type FeatureRunStatus, featureEscalations, featureRuns } from "./feature.ts";
@@ -844,6 +845,110 @@ async function isDepMerged(data: DataLayer, depKey: string, token: string): Prom
   }
 }
 
+/** Canonically retire a **closed-unmerged** PR's read model. Writes the terminal `merges` audit row
+ * and flips BOTH the `pull_requests` row and every `plan_tasks` row keyed to the PR to `abandoned`.
+ *
+ * This is the ONE canonical abandon implementation, reached from BOTH entry points that observe a
+ * wave/merge member closed on GitHub without merging (#352):
+ *   • the merge stage — `workers/merge` `attempt-merge` closed short-circuit (#342), and
+ *   • the wave-merge gate — `pollWaveGatesImpl`'s self-heal for a PR closed out-of-band while its
+ *     task was still `opened` (never reached the merge stage, so `pollMerges` never saw it).
+ *
+ * Flipping the **task** row (not only the PR row) is essential: `waveMergeTargets` keys on
+ * `plan_tasks.status`, so a still-`opened` task keeps a dead PR in the blocking set and wedges the
+ * wave barrier forever; an `abandoned` task drops out (the wave completes on its surviving merged
+ * members) and stops `isPlanComplete`/the Epics table counting a phantom open task. Idempotent for a
+ * poller retry (or the two observers — merge worker + wave gate — racing the same closed PR):
+ * re-running just re-stamps the same terminal status, and the terminal `merges` audit row is written
+ * only once: the fast-path guard skips the insert when an `abandoned`/`pr-closed` row already exists,
+ * and — because that check-then-insert is racy under the two observers (merge worker + wave gate)
+ * racing the same closed PR — a DB-level partial UNIQUE fence (`ux_merges_abandon_pr_closed`,
+ * migration 053) rejects a concurrent duplicate, which we swallow as the same idempotent outcome. So
+ * retries (sequential OR concurrent) can't spam the audit with duplicate rows and skew reporting.
+ *
+ * Self-heals the FK parent first: the `merges` audit row is an FK child of `pull_requests.pr_key`, so
+ * before writing it we ensure the parent row exists via the idempotent {@link ensurePr}. The merge
+ * worker already pre-heals, but the wave-gate self-heal path does not — and in an engine/app.db
+ * desync (the exact class `ensurePr` heals) it can observe a closed member whose `pull_requests` row
+ * is missing. Healing inside the ONE canonical writer covers BOTH callers symmetrically, so the
+ * FK-child insert can never hit `FOREIGN KEY constraint failed` and wedge the poller pass. */
+export async function abandonClosedPr(data: DataLayer, prKey: string, detail: string): Promise<void> {
+  const ts = now();
+  const parsed = parsePr(prKey);
+  // Self-heal the FK parent, but ONLY when `prKey` is well-formed. A malformed key can't be healed
+  // (there's no repo/number to `ensurePr`), and silently skipping the heal would let the downstream
+  // `merges.insert` fail with an opaque `FOREIGN KEY constraint failed` — the exact incident this
+  // helper exists to prevent. Fail closed with a clear, actionable error instead.
+  if (!parsed) {
+    throw new Error(`abandonClosedPr: malformed prKey ${JSON.stringify(prKey)} — cannot self-heal the pull_requests FK parent`);
+  }
+  await ensurePr(data, { prKey, repo: parsed.repo, number: parsed.number });
+  const merges = data.table("merges", "id");
+  const alreadyAudited =
+    (await merges.findOne({ pr_key: prKey, outcome: "abandoned", method: "pr-closed" })) !== null;
+  if (!alreadyAudited) {
+    try {
+      await merges.insert({
+        pr_key: prKey,
+        outcome: "abandoned",
+        method: "pr-closed",
+        detail,
+        at: ts,
+      });
+    } catch (err) {
+      // The `find`-then-`insert` guard above is racy: the merge worker and the wave-gate self-heal
+      // path can both observe "no row" and both insert. The partial UNIQUE fence
+      // (`ux_merges_abandon_pr_closed`, migration 053) rejects the loser — tolerate that collision as
+      // the SAME idempotent outcome the guard intends, and only that. Any other error rethrows.
+      if (!isUniqueConstraintFence(err)) throw err;
+    }
+  }
+  await prs(data).update(prKey, { status: ABANDONED_STATUS, updated_at: ts });
+  const tasks = planTasks(data);
+  for (const t of await tasks.find({ pr_key: prKey })) {
+    await tasks.update(t.id, { status: ABANDONED_STATUS, updated_at: ts });
+  }
+}
+
+/** Classify a wave-merge target PR against GitHub ground truth for the wave gate (#352):
+ *   • `cleared` — merged (tracked `merged` row, an out-of-band `merged` live state, or an
+ *     already-`abandoned` tracked row / non-PR ref that can never block) → non-blocking.
+ *   • `closed`  — live GitHub state is closed WITHOUT merging → non-blocking, and the caller must
+ *     reconcile it terminal via {@link abandonClosedPr} so it leaves the target set.
+ *   • `pending` — still open, or read successfully but in an ambiguous (`unknown`) live state → still
+ *     blocks the wave. A *thrown* transport error (network/5xx) is NOT swallowed here: it rethrows so
+ *     the poller pass logs and retries — behaviourally identical for the barrier (it stays armed and
+ *     re-checks next pass), and canonical with {@link isDepMerged}, which rethrows transient failures
+ *     the same way. Only a `not-a-pull-request` error is caught (→ `cleared`).
+ *
+ * Mirrors {@link isDepMerged} (tracked-row fast path, then a live read, `not-a-pull-request` treated
+ * as cleared, transient errors rethrown) but adds the closed-unmerged branch the wave barrier lacked
+ * — the direct analogue of the merge stage's `classifyPrLiveness === "closed"` abandon. Conservative:
+ * an unreadable PR never resolves to a terminal `cleared`/`closed`, so a false negative only costs a
+ * retry while a false positive that would drop a live member is impossible. */
+async function classifyWaveTarget(
+  data: DataLayer,
+  prKey: string,
+  token: string,
+): Promise<"cleared" | "closed" | "pending"> {
+  const tracked = await prs(data).get(prKey);
+  if (tracked && tracked.status === "merged") return "cleared";
+  if (tracked && tracked.status === ABANDONED_STATUS) return "cleared"; // already reconciled terminal → non-blocking, no re-reconcile needed
+  const parsed = parsePr(prKey);
+  if (!parsed) return "cleared"; // unparseable ref can't be checked → never wedge the barrier
+  let st: Awaited<ReturnType<typeof fetchPrState>>;
+  try {
+    st = await fetchPrState(parsed.repo, parsed.number, token);
+  } catch (err) {
+    if (isNotAPullRequestError(err)) return "cleared"; // an issue/missing number can never merge
+    throw err;
+  }
+  const liveness = classifyPrLiveness(st);
+  if (liveness === "merged") return "cleared";
+  if (liveness === "closed") return "closed";
+  return "pending"; // read OK but open or ambiguous (`unknown`) live state → stay conservative and keep blocking
+}
+
 /** Flip a PR into the transient `merging` status and publish the correlating message, reverting
  * to `prevStatus` if the publish fails. `merging` is deliberately a status no poll branch scans
  * (so a slow pass can't double-signal), which means a publish failure *after* the flip would
@@ -1409,7 +1514,23 @@ export async function pollWaveGatesImpl(
       let allMerged = true;
       const tasks = await planTasks(data).find({ plan_key: planKey });
       for (const prKey of waveMergeTargets(tasks, gateWave)) {
-        if (!(await isDepMerged(data, prKey, token))) {
+        const state = await classifyWaveTarget(data, prKey, token);
+        if (state === "closed") {
+          // Self-heal (#352): a wave-target PR closed on GitHub WITHOUT merging (abandoned /
+          // superseded / perpetually conflicting) can never reach `merged`, so it must NOT keep the
+          // barrier armed forever. Retire it through the canonical abandon writer — flipping the
+          // `plan_tasks` row terminal so it drops out of `waveMergeTargets` and the epic read model —
+          // and treat it as non-blocking: the wave completes on its surviving merged members. This is
+          // the wave-gate reach of the SAME abandon path the merge stage uses for a closed member.
+          await abandonClosedPr(
+            data,
+            prKey,
+            "wave-target PR was closed on GitHub without merging — reconciling terminal so the wave gate can advance",
+          );
+          console.log(`[poller] wave-target closed without merging -> ${prKey}`);
+          continue;
+        }
+        if (state === "pending") {
           allMerged = false;
           break;
         }

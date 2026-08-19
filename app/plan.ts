@@ -181,6 +181,12 @@ export const PLAN_TASK_STATUSES = [
   "skipped",
   "escalated",
   "waiting-for-lane",
+  // Terminal: the task's PR was closed on GitHub without merging (abandoned / superseded /
+  // perpetually conflicting). Set by the canonical abandon writer (`abandonClosedPr`, app/service.ts)
+  // reached from BOTH the merge stage and the wave-merge gate. An `abandoned` task drops out of
+  // `waveMergeTargets` (so a dead member never wedges the wave barrier — #352) and stops
+  // `isPlanComplete`/the Epics table counting a phantom open task.
+  "abandoned",
 ] as const;
 export type PlanTaskStatus = typeof PLAN_TASK_STATUSES[number];
 

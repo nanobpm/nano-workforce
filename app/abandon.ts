@@ -20,11 +20,20 @@
 import type { DataLayer } from "@nanobpm/urban";
 import { publicBaseUrl } from "./blackboard.ts";
 
-/** The one app-row status that means "this run was cancelled". Convergence/merge terminal states
- * `converged`/`merged` are NOT abandonment — only an explicit cancel flips a live run here. */
+/** The one app-row status meaning a PR is terminally abandoned — the run must not be worked on
+ * further. Two disjoint producers flip a row here, and both are non-completion terminals that must
+ * stop a servicing agent:
+ *   1. an explicit **cancel** of a live convergence/merge run (Urban's cancel primitive, via the
+ *      `instanceTracking` `onTerminated.set` patch), and
+ *   2. **`abandonClosedPr`** reconciling a wave-member PR that was **closed on GitHub without
+ *      merging** (#352) — for both `pull_requests` and its `plan_tasks`.
+ * Convergence/merge terminal states `converged`/`merged` are NOT abandonment. In either abandoned
+ * case a servicing agent should stop, so the abandon-check endpoint treating both as `abandoned:
+ * true` is correct. */
 export const ABANDONED_STATUS = "abandoned";
 
-/** True when a PR's app-row status means the run was cancelled and the agent must not act. */
+/** True when a PR's app-row status is terminally abandoned (run cancelled, or PR closed-unmerged)
+ * and the agent must not act. */
 export function isAbandoned(status: string | null | undefined): boolean {
   return status === ABANDONED_STATUS;
 }
