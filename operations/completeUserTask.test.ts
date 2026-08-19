@@ -51,6 +51,7 @@ function memApp(openTasks: { userTaskKey: string; elementId?: string }[]): {
     };
   }
   const engine = {
+    openUserTasks: async () => openTasks,
     searchUserTasks: async () => openTasks,
     completeUserTask: async (userTaskKey: string, variables: Record<string, unknown>) => {
       completed.push({ userTaskKey, variables });

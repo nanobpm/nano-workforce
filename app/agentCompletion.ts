@@ -100,34 +100,71 @@ const ESCALATION_FORM_BY_ELEMENT: Readonly<Record<string, string>> = {
   "feature-blocked": "feature-blocked",
 };
 
+/** A field's `conditional.hide` rule, parsed from the FEEL subset the `.form` files use
+ *  (`=<ref> != "<value>"` / `=<ref> == "<value>"`). A required field is only enforced when it is
+ *  actually shown, so an "answer only when resolution=answer" field is not demanded on the abandon
+ *  path. */
+interface HideRule {
+  ref: string;
+  op: "==" | "!=";
+  value: string;
+}
+
 interface FormContract {
   /** Field keys marked `validate.required` in the `.form`. */
   required: string[];
   /** `select` field key → its allowed `values`. */
   allowed: Record<string, string[]>;
+  /** Field key → its `conditional.hide` rule (only for fields whose visibility is conditional). */
+  hideWhen: Record<string, HideRule>;
 }
 
 const formContractCache = new Map<string, FormContract>();
 
-/** Derive a `.form`'s required-field + select allowed-value contract, cached per formId. The `.form`
- *  files (`resources/forms/*.form`, deployed via nano.app.json) are the CANONICAL contract, so this
- *  reads them rather than re-encoding the field lists — no drift surface. */
+/** Parse the `.form` FEEL subset used by `conditional.hide` — `=<ref> (!=|==) "<value>"` — into a
+ *  structured rule, or `null` for anything outside that subset (treated as "always shown", so a
+ *  required field is never silently skipped by an unrecognised expression). */
+function parseHide(expr: string | undefined): HideRule | null {
+  if (!expr) return null;
+  const m = /^=\s*([A-Za-z_$][\w$]*)\s*(==|!=)\s*"([^"]*)"\s*$/.exec(expr);
+  if (!m) return null;
+  const op = m[2] === "==" ? "==" : "!=";
+  return { ref: m[1], op, value: m[3] };
+}
+
+/** Whether a `conditional.hide` rule hides its field given the submitted `variables`. */
+function isHidden(rule: HideRule, variables: Record<string, unknown>): boolean {
+  const actual = String(variables[rule.ref] ?? "");
+  return rule.op === "!=" ? actual !== rule.value : actual === rule.value;
+}
+
+/** Derive a `.form`'s required-field + select allowed-value + conditional-visibility contract, cached
+ *  per formId. The `.form` files (`resources/forms/*.form`, deployed via nano.app.json) are the
+ *  CANONICAL contract, so this reads them rather than re-encoding the field lists — no drift surface. */
 function formContract(formId: string): FormContract {
   const cached = formContractCache.get(formId);
   if (cached) return cached;
   const raw: {
-    components?: { key?: string; validate?: { required?: boolean }; values?: { value?: string }[] }[];
+    components?: {
+      key?: string;
+      validate?: { required?: boolean };
+      values?: { value?: string }[];
+      conditional?: { hide?: string };
+    }[];
   } = JSON.parse(readFileSync(new URL(`../resources/forms/${formId}.form`, import.meta.url), "utf8"));
   const required: string[] = [];
   const allowed: Record<string, string[]> = {};
+  const hideWhen: Record<string, HideRule> = {};
   for (const c of raw.components ?? []) {
     if (!c.key) continue;
     if (c.validate?.required) required.push(c.key);
     if (c.values?.length) {
       allowed[c.key] = c.values.map((v) => v.value ?? "").filter((v) => v !== "");
     }
+    const hide = parseHide(c.conditional?.hide);
+    if (hide) hideWhen[c.key] = hide;
   }
-  const contract: FormContract = { required, allowed };
+  const contract: FormContract = { required, allowed, hideWhen };
   formContractCache.set(formId, contract);
   return contract;
 }
@@ -135,18 +172,23 @@ function formContract(formId: string): FormContract {
 /** Validate completion `variables` against the escalation's `.form` contract (required fields present
  *  + `select` values within the allowed set), so a completion can never resume the process with a
  *  missing/invalid decision (e.g. a `wait-answer` with no `answer`, or a `trial-merge-decision` with
- *  an `action` outside proceed/rebase/abandon). Returns a human-readable reason on violation, or
- *  `null` when the variables satisfy the contract. Derived from the canonical `.form` — the same
- *  contract the task inbox renders — so both the agent and human completers reject invalid input the
- *  exact same way, with one implementation. An element with no linked form contract is not enforced. */
+ *  an `action` outside proceed/rebase/abandon). A conditionally-shown required field is only enforced
+ *  when its `conditional.hide` rule leaves it visible — so a `feature-escalation` with
+ *  `resolution="answer"` demands a non-blank `answer` (re-dispatch guidance), but the `abandon` path,
+ *  which hides `answer`, does not. Returns a human-readable reason on violation, or `null` when the
+ *  variables satisfy the contract. Derived from the canonical `.form` — the same contract the task
+ *  inbox renders — so both the agent and human completers reject invalid input the exact same way,
+ *  with one implementation. An element with no linked form contract is not enforced. */
 export function validateEscalationVariables(
   elementId: string,
   variables: Record<string, unknown>,
 ): string | null {
   const formId = ESCALATION_FORM_BY_ELEMENT[elementId];
   if (!formId) return null;
-  const { required, allowed } = formContract(formId);
+  const { required, allowed, hideWhen } = formContract(formId);
   for (const key of required) {
+    const hide = hideWhen[key];
+    if (hide && isHidden(hide, variables)) continue;
     const v = variables[key];
     if (v === undefined || v === null || (typeof v === "string" && v.trim() === "")) {
       return `${elementId}: "${key}" is required`;
@@ -244,13 +286,16 @@ export interface AgentCompleteResult {
  *  completable tasks, or a failure reason otherwise. Shared by the agent and human completers so both
  *  refuse a non-completable / missing target the exact same way (a key with no matching open task is a
  *  404-style no-op). The AGENT completer passes the default `ESCALATION_TASK_ELEMENTS`; the HUMAN
- *  completer passes the wider `HUMAN_COMPLETABLE_ELEMENTS` (which also admits `feature-blocked`). */
+ *  completer passes the wider `HUMAN_COMPLETABLE_ELEMENTS` (which also admits `feature-blocked`).
+ *  Queries `openUserTasks` (lifecycle-state `CREATED` only), NOT `searchUserTasks` (which returns
+ *  tasks in ANY state) — a looping instance keeps COMPLETED/CANCELED tasks whose key could otherwise
+ *  match and drive a doomed re-completion (a thrown 5xx) instead of the intended 404-style no-op. */
 async function resolveEscalationTask(
   engine: EngineClient,
   userTaskKey: string,
   allowed: ReadonlySet<string> = ESCALATION_TASK_ELEMENTS,
 ): Promise<{ ok: true; elementId: string } | { ok: false; reason: string }> {
-  const open = await engine.searchUserTasks();
+  const open = await engine.openUserTasks();
   const match = open.find((t) => t.userTaskKey === userTaskKey);
   if (!match) return { ok: false, reason: "no open escalation task" };
   if (!match.elementId || !allowed.has(match.elementId)) {
