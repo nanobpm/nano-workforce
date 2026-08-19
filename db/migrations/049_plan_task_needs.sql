@@ -16,7 +16,7 @@
 -- Keyed on `plan_key` (like plan_task_deps) so a single delete clears a plan's whole need set on a
 -- re-plan / idempotent re-run. Forward-only, additive (expand): a brand-new table, so pre-#289 rows
 -- and plans carry no needs and behave exactly as before. Numbered after the current highest prefix
--- on origin/main (040); the runner wraps each file in its own transaction, so no BEGIN/COMMIT here.
+-- on origin/main (048); the runner wraps each file in its own transaction, so no BEGIN/COMMIT here.
 
 CREATE TABLE plan_task_needs (
   plan_key        TEXT NOT NULL REFERENCES plans(plan_key),

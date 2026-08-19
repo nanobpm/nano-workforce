@@ -19,7 +19,7 @@
 -- re-derives the whole picture from the DB (never re-starts a gate, never re-publishes a settled
 -- barrier). `status` is 'pending' until the need resolves, then 'resolved'.
 --
--- Numbered after the current highest prefix on origin/main (041); forward-only, additive (expand):
+-- Numbered after the current highest prefix on origin/main (048); forward-only, additive (expand):
 -- a brand-new table, so pre-#289 plans carry no gate rows and behave exactly as before. The runner
 -- wraps each file in its own transaction, so no BEGIN/COMMIT here.
 
