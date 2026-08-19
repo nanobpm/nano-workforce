@@ -1,3 +1,10 @@
+# [0.94.0](https://github.com/nanobpm/nano-workforce/compare/v0.93.0...v0.94.0) (2026-08-19)
+
+
+### Features
+
+* **pages:** feature-runs current stage links to the process instance ([#316](https://github.com/nanobpm/nano-workforce/issues/316)) ([4984f13](https://github.com/nanobpm/nano-workforce/commit/4984f13c1a3bd101499763731843ee4807bec49e)), closes [#315](https://github.com/nanobpm/nano-workforce/issues/315) [nano-ide#347](https://github.com/nano-ide/issues/347) [nanobpm/nano-ide#348](https://github.com/nanobpm/nano-ide/issues/348) [#311](https://github.com/nanobpm/nano-workforce/issues/311) [#307](https://github.com/nanobpm/nano-workforce/issues/307)
+
 # [0.93.0](https://github.com/nanobpm/nano-workforce/compare/v0.92.0...v0.93.0) (2026-08-19)
 
 
