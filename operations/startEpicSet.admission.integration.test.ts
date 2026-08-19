@@ -284,6 +284,57 @@ test("shared custom base with an active plan: 409 (shared-base guard)", async ()
   });
 });
 
+// ── Intra-set shared-base collision: two members reaching for the SAME custom base ───────────────
+// admitPlan's rule 4 only sees DURABLE `plans` rows, and S2 materializes none, so without an
+// in-request guard two epics in one set could both grab the same custom integration branch and
+// silently defeat ADR 0003 rule 4. The door must reject the collision itself, all-or-nothing.
+test("intra-set: two epics on the same custom base, neither opting in → 409, nothing staged", async () => {
+  const gh = freshGithub(REPO, ["epic/shared"]);
+  await withGithub(gh, async () => {
+    const { app, tables } = makeApp();
+    const res = await call(app, {
+      epics: [
+        { issue: `${REPO}#1`, baseBranch: "epic/shared" },
+        { issue: `${REPO}#2`, baseBranch: "epic/shared" },
+      ],
+    });
+    assertEquals(res.status, 409);
+    assertEquals(typeof res.body.error, "string");
+    assertEquals(admittedEpicRows(tables).length, 0); // all-or-nothing: nothing staged on reject
+    assertEquals(admittedDepRows(tables).length, 0);
+  });
+});
+
+test("intra-set: same custom base admitted when the later epic opts in with allowSharedBase", async () => {
+  const gh = freshGithub(REPO, ["epic/shared"]);
+  await withGithub(gh, async () => {
+    const { app, tables } = makeApp();
+    const res = await call(app, {
+      epics: [
+        { issue: `${REPO}#1`, baseBranch: "epic/shared" },
+        { issue: `${REPO}#2`, baseBranch: "epic/shared", allowSharedBase: true },
+      ],
+    });
+    assertEquals(res.status, 202);
+    assertEquals(admittedEpicRows(tables).length, 2);
+  });
+});
+
+test("intra-set: two epics on the DEFAULT base (both confirmed) do NOT collide", async () => {
+  const gh = freshGithub(REPO);
+  await withGithub(gh, async () => {
+    const { app, tables } = makeApp();
+    const res = await call(app, {
+      epics: [
+        { issue: `${REPO}#1`, baseBranch: "main", confirmDefaultBase: true },
+        { issue: `${REPO}#2`, baseBranch: "main", confirmDefaultBase: true },
+      ],
+    });
+    assertEquals(res.status, 202); // default branch is exempt from the shared-base guard (rule 3/4)
+    assertEquals(admittedEpicRows(tables).length, 2);
+  });
+});
+
 // ── Idempotency: re-submitting the identical set records no duplicate edge ────────────────────────
 test("idempotent: re-submitting the identical set does not duplicate edges", async () => {
   const gh = freshGithub(REPO);

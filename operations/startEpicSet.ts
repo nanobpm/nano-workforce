@@ -11,9 +11,10 @@
 //      connects two epics IN the set), no self-edge, non-blank capability descriptor, and an acyclic
 //      DAG. This runs BEFORE any `admitPlan` call, so a cycle / dangling edge is a clean 400 with no
 //      base branch created and no edge written.
-//   3. Run the existing `admitPlan` gate PER epic (base-branch rules + shared-base guard). The first
-//      failure maps to its 4xx (400/409) via the shared `admitPlanErrorResponse`, before anything is
-//      persisted.
+//   3. Run the existing `admitPlan` gate PER epic (base-branch rules + shared-base guard), PLUS an
+//      in-request intra-set shared-base guard (two members of the same set cannot silently grab the
+//      same custom base, which admitPlan's durable-only rule 4 would miss). The first failure maps to
+//      its 4xx (400/409) via the shared `admitPlanErrorResponse`, before anything is persisted.
 //   4. Only once every epic admits: STAGE the admitted set — each epic into `admitted_epics` and each
 //      validated edge into `admitted_plan_deps` — then return the admitted epics, the roots, and the
 //      staged edges.
@@ -27,6 +28,7 @@
 // Re-submitting the identical set is a no-op (admitPlan is idempotent on an already-created base + an
 // inactive plan; the staging records collapse a duplicate epic/edge).
 
+import { fetchDefaultBranch } from "../app/github.ts";
 import {
   admitPlan,
   admitPlanErrorResponse,
@@ -35,6 +37,7 @@ import {
   parseIssue,
   recordAdmittedEpic,
   recordAdmittedPlanDep,
+  SharedBaseError,
   validateEpicSet,
 } from "../app/plan.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
@@ -121,6 +124,14 @@ export default defineOperation("startEpicSet", async ({ body }, app) => {
   // 409 against itself.
   const token = process.env.GITHUB_TOKEN ?? "";
   const admitted: { parsed: ParsedIssue; baseBranch: string }[] = [];
+  // Intra-set shared-base guard: admitPlan's rule 4 only inspects DURABLE `plans` rows, and S2
+  // materializes none, so two members of THIS set reaching for the same custom integration branch
+  // would both slip past it and silently defeat ADR 0003 rule 4. Track each admitted member's
+  // custom (non-default) base per repo and reject a second, non-opted-in claim on it — mirroring the
+  // durable guard (the already-admitted member occupies the base regardless of its own flag; only a
+  // newcomer that sets `allowSharedBase: true` may stack on it). The default branch is exempt, just
+  // as it is in rule 4.
+  const claimedBases = new Map<string, Set<string>>();
   for (const member of members) {
     try {
       const normalizedBase = await admitPlan(app.data, member.parsed.repo, member.baseBranch, token, {
@@ -128,6 +139,16 @@ export default defineOperation("startEpicSet", async ({ body }, app) => {
         confirmDefaultBase: member.confirmDefaultBase,
         selfPlanKey: member.parsed.planKey,
       });
+      const defaultBranch = await fetchDefaultBranch(member.parsed.repo, token);
+      const isDefaultBase = defaultBranch !== null && normalizedBase === defaultBranch;
+      if (!isDefaultBase) {
+        const claimed = claimedBases.get(member.parsed.repo);
+        if (member.allowSharedBase !== true && claimed?.has(normalizedBase)) {
+          throw new SharedBaseError(member.parsed.repo, normalizedBase);
+        }
+        if (claimed) claimed.add(normalizedBase);
+        else claimedBases.set(member.parsed.repo, new Set([normalizedBase]));
+      }
       admitted.push({ parsed: member.parsed, baseBranch: normalizedBase });
     } catch (err) {
       const mapped = admitPlanErrorResponse(err);
