@@ -55,6 +55,13 @@ export default defineOperation("startEpicSet", async ({ body }, app) => {
     app.log.warn("start-epic-set rejected: missing or malformed request body");
     return { status: 400, body: { error: "request body is required: { epics: [...], deps?: [...] }" } };
   }
+  // `deps` is optional, but when provided it MUST be an array. A non-array `deps` (e.g. `deps: {…}`)
+  // would otherwise be silently coerced to `[]` — admitting the set while dropping every declared
+  // edge — so reject it with a clean 400 rather than losing the caller's intent.
+  if (body.deps != null && !Array.isArray(body.deps)) {
+    app.log.warn("start-epic-set rejected: deps is not an array");
+    return { status: 400, body: { error: "deps must be an array of dependency edges when provided" } };
+  }
   const depsRaw = Array.isArray(body.deps) ? body.deps : [];
 
   // ── Step 1: parse every epic reference into an admission-ready member ───────────────────────────

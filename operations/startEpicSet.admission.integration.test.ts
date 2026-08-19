@@ -326,6 +326,22 @@ test("unparseable epic reference: 400", async () => {
   });
 });
 
+// `deps`, when provided, MUST be an array. A non-array `deps` (e.g. an object) must be a clean 400,
+// not silently coerced to `[]` — which would admit the set while dropping every declared edge.
+test("non-array deps: 400, nothing admitted", async () => {
+  const gh = freshGithub(REPO);
+  await withGithub(gh, async () => {
+    const { app } = makeApp();
+    const res = await call(app, {
+      epics: [{ issue: `${REPO}#1`, baseBranch: "epic/a" }],
+      deps: { consumer: `${REPO}#1`, producer: `${REPO}#1` },
+    });
+    assertEquals(res.status, 400);
+    assertEquals(typeof res.body.error, "string");
+    assertEquals(gh.creates, []); // rejected BEFORE any admitPlan side effect
+  });
+});
+
 // ── Reference extraction enforces EXACTLY-ONE-of issue|url (the operation contract) ──────────────
 test("epic naming BOTH issue and url: 400, nothing created", async () => {
   const gh = freshGithub(REPO);

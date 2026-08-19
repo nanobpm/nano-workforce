@@ -141,6 +141,17 @@ test("edge endpoints given as issue URLs resolve to the same plan keys", () => {
   assertEquals(edges[0].producer, key(1));
 });
 
+// `deps` endpoints arrive untyped from the request body, so a padded-but-valid endpoint
+// (" owner/repo#1 ") must be trimmed and accepted — matching how the epic-member path trims — not
+// rejected as unparseable.
+test("whitespace-padded dep endpoints are trimmed and resolved", () => {
+  const edges = validateEpicSet(
+    [key(1), key(2)],
+    [{ consumer: ` ${key(2)} `, producer: `  ${key(1)}`, package: "p", capabilityRef: key(1) }],
+  );
+  assertEquals(edges, [{ consumer: key(2), producer: key(1), package: "p", capabilityRef: key(1) }]);
+});
+
 // `deps` arrives untyped from the request body, so a malformed entry must reject with a clean
 // EpicSetValidationError (400), never an uncaught TypeError. Each of these would previously have
 // thrown a raw TypeError (mapping to a 500 at the edge) before the defensive shape checks.

@@ -675,7 +675,9 @@ export function validateEpicSet(planKeys: string[], deps: readonly unknown[]): R
   }
 
   const resolveEndpoint = (ref: string, role: "consumer" | "producer"): string => {
-    const parsed = parseIssue(ref);
+    // Trim like the epic-member path (`parseIssue(ref.trim())` in startEpicSet) so an otherwise-valid
+    // padded endpoint (" owner/repo#1 ") from an untyped JSON payload is not rejected as unparseable.
+    const parsed = parseIssue(ref.trim());
     if (!parsed) {
       throw new EpicSetValidationError(
         400,
