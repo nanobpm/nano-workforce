@@ -490,7 +490,7 @@ function makeSqliteApp(
     db.prepare("INSERT INTO plans (plan_key, repo, base_branch, status) VALUES (?, ?, ?, ?)")
       .run(p.plan_key, p.repo, p.base_branch, p.status);
   }
-  for (const f of ["041_inter_epic_plan_deps.sql", "043_epic_set_admission_staging.sql"]) {
+  for (const f of ["041_inter_epic_plan_deps.sql", "045_epic_set_admission_staging.sql"]) {
     db.exec(readFileSync(fileURLToPath(new URL(`../db/migrations/${f}`, import.meta.url)), "utf8"));
   }
   const q = (id: string) => `"${id.replace(/"/g, '""')}"`;

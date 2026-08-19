@@ -1,3 +1,31 @@
+# [0.91.0](https://github.com/nanobpm/nano-workforce/compare/v0.90.0...v0.91.0) (2026-08-19)
+
+
+### Features
+
+* **tasks:** show subject title with repo/issue# as subtitle ([#308](https://github.com/nanobpm/nano-workforce/issues/308)) ([#311](https://github.com/nanobpm/nano-workforce/issues/311)) ([5771b38](https://github.com/nanobpm/nano-workforce/commit/5771b38abc33f4f88329d69c808214dfd42f5113))
+
+# [0.90.0](https://github.com/nanobpm/nano-workforce/compare/v0.89.0...v0.90.0) (2026-08-19)
+
+
+### Features
+
+* **convergence:** surface epic / cross-slice lineage on the PR-row detail ([#307](https://github.com/nanobpm/nano-workforce/issues/307)) ([7010b88](https://github.com/nanobpm/nano-workforce/commit/7010b88889529aec173c552bab2a1e7b881ba9da)), closes [nanobpm/nano-workforce#304](https://github.com/nanobpm/nano-workforce/issues/304)
+
+# [0.89.0](https://github.com/nanobpm/nano-workforce/compare/v0.88.1...v0.89.0) (2026-08-19)
+
+
+### Features
+
+* auto-open the epic integration-branch → default-branch promotion PR on landing ([#299](https://github.com/nanobpm/nano-workforce/issues/299)) ([#300](https://github.com/nanobpm/nano-workforce/issues/300)) ([24a8854](https://github.com/nanobpm/nano-workforce/commit/24a885484ae69bd654edd4d05fa198561e2db5dd))
+
+## [0.88.1](https://github.com/nanobpm/nano-workforce/compare/v0.88.0...v0.88.1) (2026-08-18)
+
+
+### Bug Fixes
+
+* scope user-task pollers to open tasks so they can't latch a COMPLETED task ([#297](https://github.com/nanobpm/nano-workforce/issues/297)) ([131a796](https://github.com/nanobpm/nano-workforce/commit/131a796dfaed8f9b2eb25526f6583b86b8d7b0df)), closes [#294](https://github.com/nanobpm/nano-workforce/issues/294)
+
 # [0.88.0](https://github.com/nanobpm/nano-workforce/compare/v0.87.0...v0.88.0) (2026-08-18)
 
 

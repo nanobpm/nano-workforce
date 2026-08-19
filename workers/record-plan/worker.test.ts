@@ -29,6 +29,7 @@ function fakeApp() {
           ? planTaskDeps
           : plans;
         return {
+          get: (k: unknown) => Promise.resolve(store.find((r) => r[key] === k)),
           find: (q: Record<string, unknown>) =>
             Promise.resolve(
               store.filter((r) => Object.entries(q).every(([f, v]) => r[f] === v)),

@@ -533,10 +533,16 @@ the same flat operation the form posts. `baseBranch`
 is required and admitted through the ADR 0003 gate (auto-create `epic/*`, confirm-default,
 shared-base guard).
 
-**Visibility**: the home page adds a **Plans** grid (Active: planning/dispatched;
-History: done/failed/abandoned) with a `plan_tasks` child grid showing each task's
-status and the PR it produced (`pr_key` cross-references the Pull requests grid for
-convergence status).
+**Visibility**: the home page adds a **Plans** grid (`plan_tasks` child grid showing each
+task's status and the PR it produced — `pr_key` cross-references the Pull requests grid for
+convergence status). Epics bucket into Active / History on the **derived `plans.list_bucket`**
+(issue #298), NOT raw `plans.status`: bucketing on raw `status` made an epic vanish from Active
+the instant `status=done`, even though `done` only means "fan-out dispatched to convergence" —
+its slice PRs may still be **converging**, or all merged (**landed**) but still needing the
+integration→main promotion PR. `deriveEpicBucket` (app/delivery.ts) keeps a `done` epic in Active
+until an operator **dismisses** it (`POST /actions/acknowledge-epic` stamps `plans.acknowledged_at`,
+the twin of the feature-run tick-off); a still-`converging` epic is never dismissable, and
+`failed`/`abandoned` epics fall to History directly. Projected at write time by the `plans` gateway.
 
 **Epic domain phase** (issue #261): `plans.status` only distinguishes the process-instance
 terminal (`dispatched` = "fan-out job done"), not the epic's *domain* lifecycle. The read model

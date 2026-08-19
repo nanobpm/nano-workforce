@@ -14,7 +14,7 @@
 import type { AppJobHandler } from "@nanobpm/urban";
 import { BpmnError } from "@nanobpm/urban";
 import { deriveEpicPhase } from "../../app/epicPhase.ts";
-import { planTasks } from "../../app/plan.ts";
+import { plans, planTasks } from "../../app/plan.ts";
 import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 
 // Input typed off the model data envelope (`RecordResultsIn` in plan-fanout.bpmn) — ADR 0040.
@@ -39,7 +39,7 @@ const handler: AppJobHandler<In> = async (job, app) => {
     const outcome = rows.length === 0
       ? "no work dispatched — the planner produced no tasks"
       : "no work dispatched — every task was blocked or skipped";
-    await app.data.table("plans", "plan_key").update(planKey, {
+    await plans(app.data).update(planKey, {
       status: "failed",
       outcome,
       updated_at: ts,
@@ -56,7 +56,7 @@ const handler: AppJobHandler<In> = async (job, app) => {
   // outcome, and stamping "Dispatched" against a failed epic would misread. A null derivation
   // (element id absent) must not clobber the last implementing phase.
   const epicPhase = deriveEpicPhase(job.elementId);
-  await app.data.table("plans", "plan_key").update(planKey, {
+  await plans(app.data).update(planKey, {
     status: "done",
     outcome: `${opened} PR(s) dispatched to convergence`,
     ...(epicPhase ? { epic_phase: epicPhase } : {}),

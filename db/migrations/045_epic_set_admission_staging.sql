@@ -1,4 +1,4 @@
--- 043_epic_set_admission_staging.sql — issue #292 slice S2: durable ADMISSION STAGING for the
+-- 045_epic_set_admission_staging.sql — issue #292 slice S2: durable ADMISSION STAGING for the
 -- set/batch door (`startEpicSet`).
 --
 -- S2 is the admission DOOR + DAG validator only; it deliberately does NOT start any epic and does

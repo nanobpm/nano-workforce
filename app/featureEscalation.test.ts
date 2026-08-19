@@ -50,12 +50,22 @@ function memData(): { data: DataLayer; stores: Record<string, any[]> } {
   return { data, stores };
 }
 
-/** A fake engine whose open user tasks are keyed by processInstanceKey (the only field
- *  pollFeatureEscalations queries on). */
-function fakeEngine(byInstance: Record<string, { userTaskKey: string; elementId?: string }[]>): EngineClient {
+/** A single engine-reported user task in the fixture. `state` mirrors the engine lifecycle; it
+ *  defaults to `"CREATED"` (the only open/answerable state) so existing fixtures read as live tasks.
+ *  A looping run holds multiple tasks for one element (COMPLETED from prior rounds + the live one). */
+type FakeTask = { userTaskKey: string; elementId?: string; state?: "CREATED" | "COMPLETED" | "CANCELED" };
+
+/** A fake engine whose user tasks are keyed by processInstanceKey (the only field
+ *  pollFeatureEscalations queries on). It models the real engine's two accessors from ONE fixture so a
+ *  test genuinely exercises the lifecycle-state filtering: `searchUserTasks` returns tasks in ANY state
+ *  (COMPLETED first, as the live API does — issue #294), while `openUserTasks` pins `state:"CREATED"`. */
+function fakeEngine(byInstance: Record<string, FakeTask[]>): EngineClient {
+  const all = (filter?: { processInstanceKey?: string }) =>
+    filter?.processInstanceKey ? (byInstance[filter.processInstanceKey] ?? []) : [];
   return {
-    searchUserTasks: (filter?: { processInstanceKey?: string }) =>
-      Promise.resolve(filter?.processInstanceKey ? (byInstance[filter.processInstanceKey] ?? []) : []),
+    searchUserTasks: (filter?: { processInstanceKey?: string }) => Promise.resolve(all(filter)),
+    openUserTasks: (filter?: { processInstanceKey?: string }) =>
+      Promise.resolve(all(filter).filter((t) => (t.state ?? "CREATED") === "CREATED")),
   } as unknown as EngineClient;
 }
 
@@ -177,4 +187,49 @@ test("pollFeatureEscalations: a parked non-escalation task (feature-blocked) doe
 
   assertEquals(stores.feature_runs[0].status, "running");
   assertEquals(stores.feature_runs[0].escalation_user_task_key, null);
+});
+
+// ── Defect-class guard (issue #294): a looping run holds MULTIPLE feature-escalation tasks ─────────
+// A run in an escalate→answer→implement→re-escalate loop holds a COMPLETED feature-escalation task
+// from a prior round alongside the live CREATED one. The engine returns the COMPLETED task first, so a
+// poller that reads UNFILTERED tasks and `.find`s by element latches onto the terminal key — pinning
+// the pointer at a dead task. Scoping the query to open (CREATED) tasks resolves the live one.
+test("pollFeatureEscalations: a looping run resolves the CREATED task, never the COMPLETED one", async () => {
+  const { data, stores } = memData();
+  stores.feature_runs = [
+    { feature_key: "o/r#7", status: "running", process_key: "700", escalation_question: null, escalation_user_task_key: null },
+  ];
+  // Engine returns the COMPLETED (prior-round) task FIRST, then the live CREATED one (issue #294).
+  const engine = fakeEngine({
+    "700": [
+      { userTaskKey: "ut-completed", elementId: "feature-escalation", state: "COMPLETED" },
+      { userTaskKey: "ut-live", elementId: "feature-escalation", state: "CREATED" },
+    ],
+  });
+
+  await pollFeatureEscalations(data, engine);
+
+  assertEquals(stores.feature_runs[0].status, "escalated");
+  // Must be the live CREATED task, not the COMPLETED prior-round one.
+  assertEquals(stores.feature_runs[0].escalation_user_task_key, "ut-live");
+});
+
+// Self-heal reached: once a run finally exits escalation for good, only a lingering COMPLETED
+// feature-escalation task remains. The open-task query returns [], so `parked=null` and the run
+// resets escalated→running — instead of a false-positive pointer built from the terminal task pinning
+// `status='escalated'` forever.
+test("pollFeatureEscalations: a run whose only feature-escalation task is COMPLETED self-heals to running", async () => {
+  const { data, stores } = memData();
+  stores.feature_runs = [
+    { feature_key: "o/r#8", status: "escalated", process_key: "800", escalation_question: "Q", escalation_user_task_key: "ut-8" },
+  ];
+  const engine = fakeEngine({
+    "800": [{ userTaskKey: "ut-8", elementId: "feature-escalation", state: "COMPLETED" }],
+  });
+
+  await pollFeatureEscalations(data, engine);
+
+  assertEquals(stores.feature_runs[0].status, "running");
+  assertEquals(stores.feature_runs[0].escalation_user_task_key, null);
+  assertEquals(stores.feature_runs[0].escalation_question, null);
 });

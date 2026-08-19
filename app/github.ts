@@ -1091,3 +1091,153 @@ export async function ensureBaseBranch(
   const created = await createBranchRef(repo, branch, defaultSha, token);
   return created ? "created" : "exists";
 }
+
+// ── Epic promotion PR (issue #299) ──────────────────────────────────────────
+// Once an epic's slices have all merged into its `epic/*` integration branch, the poller opens a
+// single `epic/* → <default>` promotion PR to deliver the epic. These helpers are the GitHub side
+// of that: discover an already-open promotion PR (idempotency against a crash between create and
+// the DB write) and, when none exists, create it.
+
+/** A pull request discovered for a head branch — the subset the promotion idempotency check reads. */
+export interface HeadPr {
+  number: number;
+  url: string;
+  state: string;
+  baseRef: string | null;
+}
+
+/** List the PRs (any state) whose HEAD branch is `headBranch` on `repo`. Used to reconcile the
+ * promotion PR idempotently: an `epic/*` integration branch is only ever the HEAD of its promotion
+ * PR (slices target it as their BASE), so any result is that promotion PR. Returns `null` when no
+ * transport is usable (idle — the caller retries next pass). */
+export async function listPrsForHead(
+  repo: string,
+  headBranch: string,
+  token: string,
+): Promise<HeadPr[] | null> {
+  if (await useGh()) {
+    const out = await runGh([
+      "pr",
+      "list",
+      "--repo",
+      repo,
+      "--head",
+      headBranch,
+      "--state",
+      "all",
+      "--json",
+      "number,url,state,baseRefName",
+      "--limit",
+      "20",
+    ]);
+    // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+    const arr = JSON.parse(out) as { number?: number; url?: string; state?: string; baseRefName?: string | null }[];
+    return arr.map((p) => ({
+      number: Number(p.number),
+      url: p.url ?? "",
+      state: (p.state ?? "").toLowerCase(),
+      baseRef: p.baseRefName ?? null,
+    }));
+  }
+  if (!token) return null;
+  const owner = repo.split("/")[0];
+  const r = await fetch(
+    `https://api.github.com/repos/${repo}/pulls?state=all&head=${encodeURIComponent(`${owner}:${headBranch}`)}&per_page=20`,
+    { headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json" } },
+  );
+  if (!r.ok) throw new Error(`github ${r.status} ${r.statusText}`.trim());
+  // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+  const arr = (await r.json()) as { number?: number; html_url?: string; state?: string; base?: { ref?: string | null } }[];
+  return arr.map((p) => ({
+    number: Number(p.number),
+    url: p.html_url ?? "",
+    state: (p.state ?? "").toLowerCase(),
+    baseRef: p.base?.ref ?? null,
+  }));
+}
+
+/** The identity of a freshly-created (or reused) PR. */
+export interface CreatedPr {
+  number: number;
+  url: string;
+}
+
+/** Open a pull request from `headBranch` into `baseBranch` on `repo`. Returns the new PR's
+ * number + URL, or `null` when no transport is usable (idle — the caller retries next pass). Throws
+ * on a genuine create failure so the caller logs and retries rather than silently losing the PR. */
+export async function createPullRequest(
+  repo: string,
+  headBranch: string,
+  baseBranch: string,
+  title: string,
+  body: string,
+  token: string,
+): Promise<CreatedPr | null> {
+  if (await useGh()) {
+    const out = await runGh([
+      "pr",
+      "create",
+      "--repo",
+      repo,
+      "--base",
+      baseBranch,
+      "--head",
+      headBranch,
+      "--title",
+      title,
+      "--body",
+      body,
+    ]);
+    // `gh pr create` prints the new PR's URL on stdout; parse its number from the canonical path.
+    const url = out.trim().split(/\s+/).pop() ?? "";
+    const m = url.match(/\/pull\/(\d+)/);
+    if (!m) throw new Error(`could not parse a PR number from \`gh pr create\` output: ${out.trim()}`);
+    return { number: Number(m[1]), url };
+  }
+  if (!token) return null;
+  const r = await fetch(`https://api.github.com/repos/${repo}/pulls`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${token}`,
+      accept: "application/vnd.github+json",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ title, head: headBranch, base: baseBranch, body }),
+  });
+  if (!r.ok) throw new Error(`github ${r.status} ${r.statusText}: ${(await r.text()).slice(0, 300)}`.trim());
+  // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+  const j = (await r.json()) as { number?: number; html_url?: string };
+  return { number: Number(j.number), url: j.html_url ?? "" };
+}
+
+/** The outcome of `ensurePromotionPr`: the promotion PR's number + URL and whether THIS call
+ * created it (`created: false` ⇒ an existing one was reused, keeping the open idempotent). */
+export interface EnsurePromotionPrResult extends CreatedPr {
+  created: boolean;
+}
+
+/** Idempotently guarantee the `headBranch → baseBranch` promotion PR exists on `repo`. First
+ * reconciles against GitHub — an `epic/*` integration branch is only ever the HEAD of its own
+ * promotion PR, so ANY open/merged PR from it IS that promotion PR and is reused (this closes the
+ * window where a crash between GitHub-create and the DB write would otherwise duplicate the PR).
+ * Only when none exists is a new one created. Returns `null` when no transport is usable. */
+export async function ensurePromotionPr(
+  repo: string,
+  headBranch: string,
+  baseBranch: string,
+  title: string,
+  body: string,
+  token: string,
+): Promise<EnsurePromotionPrResult | null> {
+  const existing = await listPrsForHead(repo, headBranch, token);
+  if (existing === null) return null; // no transport → retry next pass
+  // Prefer a PR that already targets the intended base; otherwise reuse any PR from this branch
+  // (the head is unique to the promotion PR, so this can only be it).
+  const reuse = existing.find((p) => p.baseRef === baseBranch) ?? existing[0];
+  if (reuse && Number.isFinite(reuse.number) && reuse.number > 0) {
+    return { number: reuse.number, url: reuse.url, created: false };
+  }
+  const created = await createPullRequest(repo, headBranch, baseBranch, title, body, token);
+  if (!created) return null;
+  return { ...created, created: true };
+}
