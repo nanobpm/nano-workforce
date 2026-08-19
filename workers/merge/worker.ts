@@ -12,7 +12,7 @@
 // shapes the escalation payload on a block.
 import type { AppJobHandler } from "@nanobpm/urban";
 import { matchTags, tag } from "@nanobpm/urban/effect";
-import { abandonTokenFromUrl } from "../../app/abandon.ts";
+import { ABANDONED_STATUS, abandonTokenFromUrl } from "../../app/abandon.ts";
 import { checkBaseTarget, classifyBaseGuard } from "../../app/baseGuard.ts";
 import { classifyPrLiveness, enqueueViaComment, fetchPrState, mergePr } from "../../app/github.ts";
 import { classifyMergeLanding, DEFAULT_MERGE_PROTOCOL, loadMergeProtocol } from "../../app/mergeProtocol.ts";
@@ -80,6 +80,15 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
       method: "pr-closed",
       detail: "PR was closed on GitHub without merging (e.g. superseded) — abandoning the merge loop",
       at: now,
+    });
+    // Terminal status write. This branch drives the model's terminate/abandon end event, which runs
+    // NO mark-merged worker (the merged path's `pr.mark-merged` is what sets `status:"merged"`). If
+    // we don't flip the row here it lingers on its in-flight status (e.g. the transient `merging`),
+    // so `activePrs`/delivery keep treating a dead PR as live. Symmetric with mark-merged's write;
+    // `ensurePr` above guarantees the row exists to update.
+    await app.data.table("pull_requests", "pr_key").update(prKey, {
+      status: ABANDONED_STATUS,
+      updated_at: now,
     });
     return { mergeStatus: "abandoned" };
   }

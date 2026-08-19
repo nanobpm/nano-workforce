@@ -277,6 +277,13 @@ test("pr.merge abandons a closed-not-merged PR without escalating (terminal aban
       assertEquals(stores.merges[0].outcome, "abandoned");
       assertEquals(stores.merges[0].method, "pr-closed");
 
+      // Flips the PR row to the terminal `abandoned` status. This path drives a terminate end event
+      // that runs NO mark-merged/mark-abandoned worker, so the worker must set the terminal status
+      // itself — otherwise the row stays in a non-terminal in-flight status (e.g. `merging`) and is
+      // tracked/scanned forever even though the merge loop is done (#342 review).
+      const prRow = stores.pull_requests.find((r) => r.pr_key === "acme/widgets#13");
+      assertEquals(prRow?.status, "abandoned");
+
       // Never attempts a merge PUT or posts an enqueue comment on the dead PR (only the read GET).
       assertEquals(calls.some((c) => /\/merge$/.test(c.url)), false);
       assertEquals(calls.some((c) => /\/comments$/.test(c.url)), false);
