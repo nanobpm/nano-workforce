@@ -1,3 +1,10 @@
+# [0.98.0](https://github.com/nanobpm/nano-workforce/compare/v0.97.1...v0.98.0) (2026-08-19)
+
+
+### Features
+
+* host-orchestrated per-task capability barrier for epic dispatch ([#289](https://github.com/nanobpm/nano-workforce/issues/289)) ([#290](https://github.com/nanobpm/nano-workforce/issues/290)) ([bb2f4bf](https://github.com/nanobpm/nano-workforce/commit/bb2f4bffb04b63d3b43bdec762d37770d03b1efb)), closes [263/#274](https://github.com/nanobpm/nano-workforce/issues/274)
+
 ## [0.97.1](https://github.com/nanobpm/nano-workforce/compare/v0.97.0...v0.97.1) (2026-08-19)
 
 
