@@ -90,6 +90,16 @@ export class WorldStore {
     return Math.max(...rows.map((r) => r.checkpoint_offset)) + 1;
   }
 
+  /** The next intra-checkpoint `seq` for `{prKey, offset}` — `0` for a fresh offset, else `max + 1`.
+   * When a re-record REUSES an existing offset (idempotent on the commit SHA), any newly-supplied
+   * effect must be appended AFTER the tail already recorded there, not restart at `seq 0` and collide
+   * with it. Read on the same transaction handle the effects are then appended on. */
+  static async #nextSeqOn(effects: Table<WorldEffectRow>, prKey: string, offset: number): Promise<number> {
+    const rows = await effects.find({ pr_key: prKey, checkpoint_offset: offset });
+    if (rows.length === 0) return 0;
+    return Math.max(...rows.map((r) => r.seq)) + 1;
+  }
+
   /**
    * Record a push-checkpoint: allocate the next offset, persist `{commitSha}`, and append the round's
    * irreversible effects to the ledger (each fenced by `UNIQUE(pr_key, idempotency_key)`). Returns
@@ -104,6 +114,14 @@ export class WorldStore {
    * Idempotent on the effect fence: an effect whose idempotency key is already in the ledger is not
    * re-inserted (so a duplicate record can never manufacture a second real effect). The checkpoint
    * row itself is guarded by `UNIQUE(pr_key, checkpoint_offset)`.
+   *
+   * Idempotent on the commit SHA: a re-record of the SAME `{prKey, commitSha}` (a retried/duplicate
+   * persist-round job) REUSES the existing checkpoint's offset instead of allocating a fresh one.
+   * Allocating a new offset would make a duplicate the newest `lastCheckpoint` while its effect tail
+   * is empty (the global `(pr_key, idempotency_key)` fence skips the already-recorded effects), so a
+   * later `restoreWorld` would read the empty tail and IGNORE genuinely-pending effects recorded on
+   * the earlier offset — silent effect loss. Reusing the offset keeps the pending tail attached to
+   * the surviving newest checkpoint; any newly-supplied effect is appended at that same offset.
    */
   async recordCheckpoint(input: RecordCheckpointInput): Promise<number> {
     const { prKey, roundNo, commitSha } = input;
@@ -113,15 +131,20 @@ export class WorldStore {
     return this.#data.open().tx(async (t) => {
       const checkpoints = t.table<WorldCheckpointRow>("world_checkpoints", "id");
       const effectsTable = t.table<WorldEffectRow>("world_effects", "id");
-      const offset = await WorldStore.#nextOffsetOn(checkpoints, prKey);
-      await checkpoints.insert({
-        pr_key: prKey,
-        round_no: roundNo,
-        checkpoint_offset: offset,
-        commit_sha: commitSha,
-        created_at: now,
-      });
-      let seq = 0;
+      const existing = await checkpoints.findOne({ pr_key: prKey, commit_sha: commitSha });
+      const offset = existing
+        ? existing.checkpoint_offset
+        : await WorldStore.#nextOffsetOn(checkpoints, prKey);
+      if (!existing) {
+        await checkpoints.insert({
+          pr_key: prKey,
+          round_no: roundNo,
+          checkpoint_offset: offset,
+          commit_sha: commitSha,
+          created_at: now,
+        });
+      }
+      let seq = await WorldStore.#nextSeqOn(effectsTable, prKey, offset);
       for (const effect of effects) {
         await WorldStore.#appendEffect(effectsTable, prKey, offset, seq++, effect, applied, now);
       }

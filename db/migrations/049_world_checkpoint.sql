@@ -51,7 +51,7 @@ CREATE INDEX IF NOT EXISTS idx_world_checkpoints_pr
 CREATE TABLE IF NOT EXISTS world_effects (
   id                INTEGER PRIMARY KEY AUTOINCREMENT,
   pr_key            TEXT NOT NULL,           -- the PR whose ledger this effect belongs to
-  checkpoint_offset INTEGER NOT NULL,        -- the checkpoint boundary this effect was recorded at/after
+  checkpoint_offset INTEGER NOT NULL,        -- the exact checkpoint boundary this effect was recorded at
   seq               INTEGER NOT NULL,        -- intra-checkpoint order the fence replays effects in
   kind              TEXT NOT NULL,           -- push | pr-comment | merge (an irreversible action class)
   idempotency_key   TEXT NOT NULL,           -- commit SHA / comment id / merge key — the fence key
@@ -63,6 +63,7 @@ CREATE TABLE IF NOT EXISTS world_effects (
   UNIQUE(pr_key, idempotency_key)
 );
 
--- The restore path reads the effect tail for a PR at/after a given offset, in `seq` order.
+-- The restore path reads the effect tail recorded at a checkpoint's exact `checkpoint_offset`, in
+-- `seq` order (an exact-offset lookup, not a range scan).
 CREATE INDEX IF NOT EXISTS idx_world_effects_pr_offset
   ON world_effects(pr_key, checkpoint_offset, seq);

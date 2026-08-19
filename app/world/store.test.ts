@@ -65,6 +65,60 @@ test("the durable fence: a re-recorded idempotency key is not a second effect ro
   assertEquals(rows.length, 1, "one real effect → exactly one ledger row, despite two records");
 });
 
+test("recordCheckpoint is idempotent on the commit SHA: a re-record reuses the offset, never orphaning a pending tail", async () => {
+  const { data } = memWorldData();
+  const store = new WorldStore(data);
+  // Round records a checkpoint at a push with a PENDING tail effect (recorded before it is performed).
+  const first = await store.recordCheckpoint({
+    prKey: PR,
+    roundNo: 1,
+    commitSha: "sha-a",
+    effects: [push("sha-a"), { kind: "pr-comment", idempotencyKey: "c-1" }],
+    applied: false,
+  });
+  assertEquals(first, 0, "first checkpoint is offset 0");
+  // A retried/duplicate persist-round records the SAME {prKey, commitSha}. A naive impl allocates a
+  // fresh offset whose tail is empty (the global fence skips the already-recorded effects), making it
+  // the newest checkpoint and orphaning the genuinely-pending "c-1" effect on offset 0 — silent loss.
+  const second = await store.recordCheckpoint({
+    prKey: PR,
+    roundNo: 2,
+    commitSha: "sha-a",
+    effects: [push("sha-a"), { kind: "pr-comment", idempotencyKey: "c-1" }],
+    applied: false,
+  });
+  assertEquals(second, 0, "the re-record REUSES the existing offset, not a new one");
+  const last = await store.lastCheckpoint(PR);
+  assertEquals(last?.offset, 0, "the newest checkpoint is still the one carrying the pending tail");
+  const tail = await store.effectTail(PR, last?.offset ?? -1);
+  assertEquals(
+    tail.map((e) => e.idempotencyKey),
+    ["sha-a", "c-1"],
+    "the pending tail survives on the surviving checkpoint — no orphaned/ignored pending effect",
+  );
+  const cps = await data.table("world_checkpoints", "id").find({ pr_key: PR });
+  assertEquals(cps.length, 1, "exactly one checkpoint row for the SHA, despite two records");
+});
+
+test("recordCheckpoint reusing an offset appends a newly-supplied effect after the existing tail", async () => {
+  const { data } = memWorldData();
+  const store = new WorldStore(data);
+  await store.recordCheckpoint({ prKey: PR, roundNo: 1, commitSha: "sha-a", effects: [push("sha-a")] });
+  // Same SHA re-recorded, now carrying an ADDITIONAL effect (e.g. a PR comment made after the push).
+  const offset = await store.recordCheckpoint({
+    prKey: PR,
+    roundNo: 1,
+    commitSha: "sha-a",
+    effects: [push("sha-a"), { kind: "pr-comment", idempotencyKey: "c-2" }],
+  });
+  const tail = await store.effectTail(PR, offset);
+  assertEquals(
+    tail.map((e) => e.idempotencyKey),
+    ["sha-a", "c-2"],
+    "the new effect is appended after the existing tail on the reused offset, in seq order",
+  );
+});
+
 test("fenceFor.isApplied is true only once an effect is recorded AND applied; markApplied flips it", async () => {
   const { data } = memWorldData();
   const store = new WorldStore(data);
