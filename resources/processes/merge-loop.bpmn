@@ -96,6 +96,9 @@
         <zeebe:properties>
           <zeebe:property name="io.nanobpm.dataEnvelope.in" value="MergeArmIn" />
         </zeebe:properties>
+        <zeebe:ioMapping>
+          <zeebe:output source="=null" target="status" />
+        </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_m_deps</bpmn:incoming>
       <bpmn:incoming>f_m_answer</bpmn:incoming>

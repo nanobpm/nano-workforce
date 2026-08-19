@@ -57,8 +57,31 @@ test("merge-esc-attempt carries a non-blank, human-actionable status + question"
   assertStringIncludes(el, 'target="question"', "merge-esc-attempt must set a non-blank `question`");
   // Tighten: assert the explicit `status` INPUT MAPPING sets blocked, not merely the substring
   // `="blocked"` (which the FEEL question's `agentVerdict = "blocked"` comparison would also satisfy
-  // even if the status mapping were removed/changed).
-  assertStringIncludes(el, 'source="="blocked"" target="status"', "the explicit `status` input mapping must set `blocked`");
+  // even if the status mapping were removed/changed). Match tolerant of attribute order/spacing: the
+  // file is XML and a formatter could reorder `source`/`target` within the tag.
+  const escInputs = el.match(/<zeebe:input\b[^>]*\/>/g) ?? [];
+  const setsBlockedStatus = escInputs.some(
+    (t) => t.includes('target="status"') && t.includes('source="="blocked""'),
+  );
+  assert(setsBlockedStatus, "the explicit `status` input mapping must set `blocked`");
+});
+
+test("arm-merge clears the prior verdict `status` so a stale `blocked` cannot misclassify the CI-fix SLA escalation", () => {
+  // merge-esc-attempt captures `agentVerdict = status` to split its CI could-not-fix vs SLA question
+  // arms. On the SLA boundary path (`f_ci_sla`) no worker sets a fresh `status`, and every escalation
+  // task overwrites `status = "blocked"` (merge-esc-attempt line 194, merge-esc-conflict line 174).
+  // Without a reset, a retry after any prior escalation re-enters fix-ci with `status` still
+  // "blocked", so an SLA timeout would render the wrong ("could not fix") question. arm-merge is the
+  // single loop hub every fix-ci entry passes through, so clearing `status` there (to null) each
+  // iteration guarantees a genuine SLA reads no stale verdict. Nothing between arm-merge and the next
+  // verdict-setter (fix-ci/rebase) reads `status`, so the reset is safe.
+  const armRaw = flat.match(/<bpmn:serviceTask\b[^>]*\bid="arm-merge"[\s\S]*?<\/bpmn:serviceTask>/);
+  assert(armRaw, "arm-merge service task must exist");
+  const armOutputs = armRaw![0].match(/<zeebe:output\b[^>]*\/>/g) ?? [];
+  const clearsStatus = armOutputs.some(
+    (t) => t.includes('target="status"') && t.includes('source="=null"'),
+  );
+  assert(clearsStatus, "arm-merge must reset `status` to null each loop iteration so a stale `blocked` cannot misclassify the SLA escalation");
 });
 
 test("the question distinguishes all four blocked/SLA triggers rather than a single generic string", () => {
