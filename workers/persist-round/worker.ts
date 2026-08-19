@@ -7,6 +7,7 @@
 import type { AppJobHandler } from "@nanobpm/urban";
 import { abandonTokenFromUrl } from "../../app/abandon.ts";
 import { ensurePr, parsePr } from "../../app/service.ts";
+import { type Effect, recordWorldCheckpoint, WorldStore } from "../../app/world/index.ts";
 import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 
 // Input is typed off the model data envelope (`PrPersistRoundIn` in convergence-loop.bpmn),
@@ -30,6 +31,32 @@ function transcriptOf(vars: Record<string, unknown>): string | null {
 function workerOf(vars: Record<string, unknown>): string | undefined {
   const v = vars.agent;
   return typeof v === "string" && v.trim() !== "" ? v.trim() : undefined;
+}
+
+/** The world-restore marker (issue #324, ADR 0062 Slice 4/5, the WORLD half). When a round pushed
+ * changes, the c8ctl harness reports `{commitSha, effects?}` under this reserved key so the app
+ * records a durable push-checkpoint: the pushed SHA a replacement activation reconstructs the working
+ * tree to (inverting `git push` → `git fetch && git checkout <sha>`), plus the round's irreversible
+ * effect ledger (each fence-keyed) so a resume skips an already-applied effect. Absent (a `waiting`
+ * round, or a harness predating #324) → no checkpoint is recorded (nothing was pushed). */
+const WORLD_MARKER_KEY = "worldMarker";
+
+interface WorldMarker {
+  readonly commitSha: string;
+  readonly effects?: readonly Effect[];
+}
+
+function worldMarkerOf(vars: Record<string, unknown>): WorldMarker | null {
+  // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+  const m = vars[WORLD_MARKER_KEY] as { commitSha?: unknown; effects?: unknown } | undefined;
+  if (!m || typeof m.commitSha !== "string" || m.commitSha.trim() === "") return null;
+  const effects = Array.isArray(m.effects)
+    ? // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+      (m.effects as Effect[]).filter(
+        (e) => e && typeof e.idempotencyKey === "string" && e.idempotencyKey.trim() !== "",
+      )
+    : undefined;
+  return { commitSha: m.commitSha.trim(), ...(effects && effects.length > 0 ? { effects } : {}) };
 }
 
 const handler: AppJobHandler<In> = async (job, app) => {
@@ -74,6 +101,25 @@ const handler: AppJobHandler<In> = async (job, app) => {
     waiting_since: now,
     updated_at: now,
   });
+
+  // World checkpoint (issue #324, ADR 0062 Slice 4/5): when this round pushed, record the durable
+  // push-checkpoint — the pushed SHA a replacement activation reconstructs the tree to, plus the
+  // round's fence-keyed effect ledger. The JOIN to the mind's `session.checkpoint(...)` (Slice 1)
+  // happens harness-side (out of process); here we persist the WORLD marker so restore can invert
+  // the push. Best-effort: a checkpoint-store failure must not fail an already-recorded round.
+  const marker = worldMarkerOf(job.variables);
+  if (marker) {
+    try {
+      await recordWorldCheckpoint(new WorldStore(app.data), {
+        prKey,
+        roundNo: round,
+        commitSha: marker.commitSha,
+        ...(marker.effects ? { effects: marker.effects } : {}),
+      });
+    } catch (err) {
+      app.log.warn("world checkpoint record failed", { prKey, round, err: String(err) });
+    }
+  }
 
   return {};
 };

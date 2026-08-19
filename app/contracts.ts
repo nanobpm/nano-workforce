@@ -339,9 +339,9 @@ export const WIRE_CONTRACTS = {
     name: "io.nanobpm.agentTask.repository",
     owner: "app/service.ts",
     semantics:
-      "Repo-provisioning envelope the app emits as a `createInstance` process variable (`repoEnvelopeVars`) and the c8ctl worker harness consumes to provision an isolated clone on the PR head branch. Beyond `{provider,url,ref}`, it carries clone-shaping fields for large monorepos (issue #287): `singleBranch:true` + `filter:\"blob:none\"` (a branch-scoped, blobless partial clone — trees fetched up-front, blobs lazily, no `--depth 1` so the merge-base/3-dot diff stays valid) and an optional `baseRef` (the PR base branch, emitted only when resolvable, so the harness fetches its tip and keeps `origin/<base>` reachable). Gated on c8ctl provisioner support (jwulf/c8ctl-plugin-nano#91).",
+      "Repo-provisioning envelope the app emits as a `createInstance` process variable (`repoEnvelopeVars`) and the c8ctl worker harness consumes to provision an isolated clone on the PR head branch. Beyond `{provider,url,ref}`, it carries clone-shaping fields for large monorepos (issue #287): `singleBranch:true` + `filter:\"blob:none\"` (a branch-scoped, blobless partial clone — trees fetched up-front, blobs lazily, no `--depth 1` so the merge-base/3-dot diff stays valid) and an optional `baseRef` (the PR base branch, emitted only when resolvable, so the harness fetches its tip and keeps `origin/<base>` reachable). World-restore (issue #324, ADR 0062 Slice 4/5): an optional `commitSha` — the last durable push-checkpoint — is emitted so a REPLACEMENT activation on a fresh worktree reconstructs the tree to the EXACT pushed SHA (inverting the round's `git push` into `git fetch && git checkout <sha>`), omitted when the PR has no checkpoint yet. Gated on c8ctl provisioner support (jwulf/c8ctl-plugin-nano#91).",
     shape:
-      '{ provider: "github", url: string, ref: string, singleBranch: true, filter: "blob:none", baseRef?: string }',
+      '{ provider: "github", url: string, ref: string, singleBranch: true, filter: "blob:none", baseRef?: string, commitSha?: string }',
   },
   "epicSet.submit": {
     category: "wire",
@@ -351,6 +351,14 @@ export const WIRE_CONTRACTS = {
       "Set/batch admission payload POSTed to /actions/start/epic-set (issue #292, slice S2). Submits a whole set of epics plus the inter-epic dependency edges between them in one all-or-nothing call. Each `epics[]` member carries the same per-epic admission inputs as PlanStart (issue|url + baseBranch + allowSharedBase/confirmDefaultBase); each `deps[]` edge declares `consumer` waits for `producer`'s published { package, capabilityRef } capability, both endpoints naming epics in the set. Declared in openapi.yaml as EpicSetStart. S2 admits + STAGES the set into its own FK-free `admitted_epics` / `admitted_plan_deps` (043) — it writes NEITHER `plans` NOR `plan_deps`; slice S3 (lowering) reads that staging to materialize the durable graph, and S4 (visibility) builds on it — consume this ONE shape, do not re-declare a synonym.",
     shape:
       '{ epics: Array<{ issue|url: string, baseBranch: string, allowSharedBase?: boolean, confirmDefaultBase?: boolean }>, deps?: Array<{ consumer: string, producer: string, package: string, capabilityRef: string }> }',
+  },
+  "world.checkpoint": {
+    category: "wire",
+    name: "world.checkpoint",
+    owner: "app/world/checkpoint.ts",
+    semantics:
+      "The mind/world checkpoint JOIN shape (issue #324, ADR 0062 Slice 4/5, the WORLD half). At each push the app derives ONE `{commitSha, effectLedger}` and records it in the durable world store (`world_checkpoints`/`world_effects`) AND passes the SAME object to the mind's `session.checkpoint(commitSha, effectLedger)` (Slice 1, `@nanobpm/agentic/session`), so mind + world commit at the SAME per-PR monotonic offset — closing the divergence failure (harness thinks it hasn't pushed but the push landed, or vice-versa). `effectLedger` entries carry a fence idempotency key (push→commit SHA, PR comment→comment id, `gh merge`→merge key); on a re-lease `restoreWorld` inverts the push (`git fetch && git checkout <commitSha>`) then fence-replays the tail so an already-applied effect is skipped, not repeated. Consume this ONE shape from app/world — do not re-declare a synonym.",
+    shape: '{ commitSha: string, effectLedger: Array<{ kind: "push"|"pr-comment"|"merge", idempotencyKey: string, description?: string }> }',
   },
 } as const satisfies Record<string, WireContract>;
 
@@ -370,6 +378,14 @@ export const TYPE_CONTRACTS = {
     semantics:
       "One INTER-epic dependency edge (issue #292): dependent epic `plan_key` waits for producer epic `depends_on_plan_key`, gated by the producer's `{ package, capability_ref }` capability descriptor. This ONE row shape backs BOTH the durable `plan_deps` table (materialized by planner lowering S3) AND its FK-free admission-staging twin `admitted_plan_deps` (staged by the S2 door). Set admission (S2), planner lowering (S3), and operator visibility (S4) all import it from app/plan.ts — no re-declared synonym.",
     module: "app/plan.ts",
+  },
+  SessionCheckpoint: {
+    category: "type",
+    name: "SessionCheckpoint",
+    owner: "app/world/checkpoint.ts",
+    semantics:
+      "The mind/world checkpoint contract shape (issue #324, ADR 0062 Slice 4/5). `{ commitSha, effectLedger }` — the ONE type both the world marker (recorded in `world_checkpoints`/`world_effects`) and the mind checkpoint (Slice 1's `session.checkpoint`) derive from, so a single derivation feeds both halves and they cannot diverge. Its `effectLedger` is `Effect[]` (the fence-keyed irreversible-action ledger). The world half imports it from app/world; when Slice 1's harness-side `@nanobpm/agentic/session` lands it MUST reuse this shape, not re-declare a synonym.",
+    module: "app/world/checkpoint.ts",
   },
 } as const satisfies Record<string, TypeContract>;
 

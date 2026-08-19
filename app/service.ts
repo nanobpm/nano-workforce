@@ -61,6 +61,7 @@ import {
 } from "./userTasks.ts";
 import { deriveWaitGate } from "./waitGate.ts";
 import { waveMergeTargets } from "./waves.ts";
+import { WorldStore } from "./world/index.ts";
 
 /** The BPMN process that drives review convergence (`resources/processes/convergence-loop.bpmn`). */
 export const PROCESS_ID = "convergence-loop";
@@ -345,8 +346,20 @@ const AGENT_TASK_NS = "io.nanobpm.agentTask";
  * fetching file blobs lazily — small upfront, correct diffs. `--depth 1` is deliberately NOT used:
  * it would drop the merge-base and break `git diff origin/<base>...HEAD`. When the PR base branch
  * is known we also emit `baseRef` so the harness fetches the base tip alongside the head, keeping
- * that base reachable for the diff. */
-export function repoEnvelopeVars(repo: string, ref: string | null, baseRef: string | null = null): Record<string, unknown> {
+ * that base reachable for the diff.
+ *
+ * World-restore (issue #324, ADR 0062 Slice 4/5): when a PR already has a durable push-checkpoint,
+ * `commitSha` is emitted so a REPLACEMENT activation (a fresh worktree after a lease loss)
+ * reconstructs the working tree to the EXACT pushed SHA — the inversion of the round's outbound
+ * `git push` into an inbound `git fetch && git checkout <sha>` — rather than to a branch tip that may
+ * have moved. Omitted (no key) when the PR has no checkpoint yet, so a first activation clones the
+ * head branch normally. */
+export function repoEnvelopeVars(
+  repo: string,
+  ref: string | null,
+  baseRef: string | null = null,
+  commitSha: string | null = null,
+): Record<string, unknown> {
   if (!ref) return {};
   // Defence in depth: every current caller derives `repo` from parsePr/parseIssue (regex-bounded to
   // `owner/repo`), but this is an exported helper the fan-out epic gives many new callers. A repo
@@ -371,9 +384,27 @@ export function repoEnvelopeVars(repo: string, ref: string | null, baseRef: stri
         // The base branch this PR targets — emitted so the harness fetches its tip alongside the
         // single-branch head, keeping `origin/<base>` reachable for the diff. Omitted when unknown.
         ...(baseRef ? { baseRef } : {}),
+        // World-restore (issue #324): the last pushed SHA a replacement activation reconstructs the
+        // working tree to (inverting the round's push into a fetch+checkout). Omitted when the PR has
+        // no durable push-checkpoint yet, so a first activation clones the head branch normally.
+        ...(commitSha ? { commitSha } : {}),
       },
     },
   };
+}
+
+/** The last durable push-checkpoint SHA for a PR (issue #324, ADR 0062 Slice 4/5), or `null` when it
+ * has none yet. Threaded into `repoEnvelopeVars` so a replacement activation reconstructs the exact
+ * pushed tree. Best-effort: any store read failure (a legacy DB predating migration 049, an in-flight
+ * desync) degrades to `null` — the harness then clones the head branch tip, the pre-#324 behaviour —
+ * rather than blocking a submit/merge on the world store. */
+async function lastPushedSha(data: DataLayer, prKey: string): Promise<string | null> {
+  try {
+    return (await new WorldStore(data).lastCheckpoint(prKey))?.commitSha ?? null;
+  } catch (err) {
+    console.warn(`[world] ${prKey} last-checkpoint read: ${err}`);
+    return null;
+  }
 }
 
 /** Register a PR row (if new) and start the convergence process. Idempotent on prKey. Optional
@@ -480,6 +511,11 @@ export async function submitPr(
     });
   }
   const abUrl = abandonUrl(abandonToken);
+  // World-restore (issue #324, ADR 0062 Slice 4/5): a re-run of convergence for a PR that already
+  // pushed is a resume — carry its last durable push-checkpoint so a replacement activation on a
+  // fresh worktree reconstructs the tree to the EXACT pushed SHA. Absent (null) on a first submit,
+  // which leaves the envelope unchanged.
+  const worldSha = await lastPushedSha(data, parsed.prKey);
   const { processInstanceKey } = await engine.createInstance({
     processDefinitionId: PROCESS_ID,
     variables: {
@@ -505,7 +541,7 @@ export async function submitPr(
       // Host-git provisioning (c8ctl): deliver the repository envelope so the `senior:pr-review`
       // harness clones an isolated workspace checked out on the PR head branch. Spread last so an
       // unresolved head (`{}`) leaves the other vars untouched.
-      ...repoEnvelopeVars(parsed.repo, headRef, baseRef),
+      ...repoEnvelopeVars(parsed.repo, headRef, baseRef, worldSha),
     },
   });
   const processKey = processInstanceKey == null ? null : String(processInstanceKey);
@@ -552,6 +588,9 @@ export async function startMerge(
   if (!headRef) {
     console.warn(`[startMerge] ${pr.prKey} head branch unresolved — merge-agent workspace won't be provisioned`);
   }
+  // World-restore (issue #324): the merge stage runs on the same durable working tree; carry the
+  // last push-checkpoint so a replacement fix-ci/rebase activation reconstructs the exact SHA.
+  const worldSha = await lastPushedSha(data, pr.prKey);
   const { processInstanceKey } = await engine.createInstance({
     processDefinitionId: MERGE_PROCESS_ID,
     variables: {
@@ -571,7 +610,7 @@ export async function startMerge(
       abandonBrief: renderAbandonBrief(abUrl),
       // Host-git provisioning (c8ctl): same repository envelope as the convergence loop, so the
       // fix-ci/rebase agents operate on an isolated checkout of the PR head branch.
-      ...repoEnvelopeVars(pr.repo, headRef, baseRef),
+      ...repoEnvelopeVars(pr.repo, headRef, baseRef, worldSha),
     },
   });
   if (processInstanceKey != null) {
