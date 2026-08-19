@@ -1,3 +1,10 @@
+## [0.97.1](https://github.com/nanobpm/nano-workforce/compare/v0.97.0...v0.97.1) (2026-08-19)
+
+
+### Bug Fixes
+
+* **merge-loop:** give merge-blocked escalation a question + gw-escalated guard ([#329](https://github.com/nanobpm/nano-workforce/issues/329)) ([#331](https://github.com/nanobpm/nano-workforce/issues/331)) ([abb2952](https://github.com/nanobpm/nano-workforce/commit/abb2952b5ff5874ff928085167f4a0fd5f0580e5))
+
 # [0.97.0](https://github.com/nanobpm/nano-workforce/compare/v0.96.1...v0.97.0) (2026-08-19)
 
 
