@@ -33,7 +33,7 @@ import { pollLineage } from "./lineage.ts";
 import { mergeLanes, readExclusions } from "./mergeExclusion.ts";
 import { freshHeadRunAction, headRunPresenceCount, loadMergeProtocol } from "./mergeProtocol.ts";
 import { type PrLaneDecision, planPrLane, taskDependencyDepths } from "./mergeTrain.ts";
-import { planReviews, plans, planTaskDeps, planTasks } from "./plan.ts";
+import { backfillPlanBuckets, planReviews, plans, planTaskDeps, planTasks } from "./plan.ts";
 import { derivePromotionState, isPromotable, promotionPrBody, promotionPrTitle } from "./promotion.ts";
 import { clampNudgeMinutes, reviewWaitTimeout } from "./reviewWait.ts";
 import { trialMergeAudits } from "./trialMerge.ts";
@@ -1773,6 +1773,11 @@ export async function pollUserTasks(data: DataLayer, engine: EngineClient) {
  * on every poll. */
 let featureStagesBackfilled = false;
 
+/** One-shot guard so the epic-bucket backfill (`backfillPlanBuckets`, #298) runs at most once per
+ * process, on the first `pollOnce` — re-projecting pre-migration-042 `plans` rows whose
+ * `list_bucket` is still NULL. The gateway keeps every future write fresh; idempotent regardless. */
+let planBucketsBackfilled = false;
+
 export async function pollOnce(
   data: DataLayer,
   engine: EngineClient,
@@ -1788,6 +1793,13 @@ export async function pollOnce(
     // pass would skip. On a throw the guard stays false and the next `pollOnce` retries.
     await backfillFeatureStages(data);
     featureStagesBackfilled = true;
+  }
+  // One-shot: re-project any pre-#298 `plans` rows whose `list_bucket` is still NULL, so a legacy
+  // epic buckets correctly into Active/History from the first pass. Guard armed only after success so
+  // a transient failure retries next pass (mirrors the feature-stage backfill above).
+  if (!planBucketsBackfilled) {
+    await backfillPlanBuckets(data);
+    planBucketsBackfilled = true;
   }
   await pollReviews(data, engine, token);
   await pollMerges(data, engine, token);

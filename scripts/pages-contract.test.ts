@@ -270,31 +270,30 @@ test("issue #205: overview is the landing page and first nav item", async () => 
   }
 
   // Three collapsible active-work sections, one per dispatch surface, each with a
-  // live count in its header (showCount) and a persisted collapse toggle (collapsible).
-  const expected: Record<string, string[]> = {
-    pull_requests: [
-      "converging",
-      "waiting_review",
-      "escalated",
-      "waiting_deps",
-      "waiting_merge",
-      "queued",
-      "merging",
-    ],
-    plans: ["planning", "dispatched"],
-    feature_runs: ["running", "escalated", "awaiting_operator"],
+  // live count in its header (showCount) and a persisted collapse toggle (collapsible). Each filters
+  // its Active list on a `{field, in:[...]}` predicate: the PR / feature surfaces on `status`, but the
+  // EPIC surface buckets on the DERIVED `list_bucket` (issue #298) — NOT raw `status` — so a `done`
+  // epic still converging, or landed-but-unpromoted, does not vanish from the in-flight Epics section
+  // the instant `status=done`. Guarding the field here is the regression guard for that defect class.
+  const expected: Record<string, { field: string; in: string[] }> = {
+    pull_requests: {
+      field: "status",
+      in: ["converging", "waiting_review", "escalated", "waiting_deps", "waiting_merge", "queued", "merging"],
+    },
+    plans: { field: "list_bucket", in: ["active"] },
+    feature_runs: { field: "status", in: ["running", "escalated", "awaiting_operator"] },
   };
   const grids = (overview.nodes ?? []).filter((n: Json) => n.type === "dataGrid");
-  for (const [table, statuses] of Object.entries(expected)) {
+  for (const [table, { field, in: values }] of Object.entries(expected)) {
     const grid = grids.find((g: Json) => g.props?.data?.table === table);
     assert(grid, `overview.page.json must have a section bound to "${table}"`);
     assert(grid.props.collapsible === true, `overview "${table}" section must be collapsible`);
     assert(grid.props.showCount === true, `overview "${table}" section must show a live count`);
-    const filter = grid.props?.data?.filter?.find((f: Json) => f.field === "status");
-    assert(filter, `overview "${table}" section must filter on status`);
+    const filter = grid.props?.data?.filter?.find((f: Json) => f.field === field);
+    assert(filter, `overview "${table}" section must filter on ${field}`);
     assert(
-      JSON.stringify([...filter.in].sort()) === JSON.stringify([...statuses].sort()),
-      `overview "${table}" section must filter to the active statuses ${JSON.stringify(statuses)}`,
+      JSON.stringify([...filter.in].sort()) === JSON.stringify([...values].sort()),
+      `overview "${table}" section must filter ${field} to ${JSON.stringify(values)}`,
     );
   }
 });
