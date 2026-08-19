@@ -1,6 +1,6 @@
 // Unit tests for the spec-conformance review stage (app/conformance.ts, 052_plan_conformance.sql).
 import { test } from "node:test";
-import { assert, assertEquals, assertStringIncludes } from "#test-assert";
+import { assert, assertEquals, assertRejects, assertStringIncludes } from "#test-assert";
 import type { DataLayer } from "@nanobpm/urban";
 import { memBlackboardSource } from "../test/blackboardDb.ts";
 import { appendEntry } from "./blackboard.ts";
@@ -240,6 +240,24 @@ test("recordConformance: persists the retro instance key and the escalation revi
   const clean = stores["plan_conformance"].find((r) => r.plan_key === "acme/widgets#8");
   assertEquals(clean.process_key, null);
   assertEquals(clean.review_status, "reviewed");
+});
+
+test("recordConformance: rejects an untrackable `reviewing` row with a null processKey (invariant guard)", async () => {
+  const { data, stores } = memData();
+  // A `reviewing` row with no `process_key` is unreachable: `pollUserTasks` skips rows without a
+  // key and the `instanceTracking` binding keys off `process_key`, so it would strand the review
+  // forever. The API must refuse to persist that state, not just the worker call site.
+  await assertRejects(
+    () =>
+      recordConformance(data, PLAN, {
+        status: "filed",
+        hasDeviations: true,
+        reviewStatus: "reviewing",
+      }),
+    Error,
+    "untrackable",
+  );
+  assertEquals(stores["plan_conformance"] ?? [], []);
 });
 
 test("activeConformanceReviews: returns only the rows still `reviewing`", async () => {

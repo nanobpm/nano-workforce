@@ -256,6 +256,19 @@ export async function recordConformance(
   input: ConformanceInput,
 ): Promise<void> {
   const ts = now();
+  const processKey = input.processKey ?? null;
+  const reviewStatus = input.reviewStatus ?? "reviewed";
+  // Invariant: a `reviewing` row must be trackable. `pollUserTasks` skips rows without a
+  // `process_key` and the `instanceTracking` binding keys off `process_key`, so a `reviewing` row
+  // with a null key can never be surfaced to an operator nor cleared — it wedges forever. The
+  // conformance-record worker already guards its own call site, but `recordConformance` is a public
+  // API: reject the untrackable combination here too so no future caller can encode it.
+  if (reviewStatus === CONFORMANCE_REVIEWING_STATUS && processKey == null) {
+    throw new Error(
+      `recordConformance: ${planKey} would persist review_status='reviewing' with no process_key — ` +
+        "refusing to record an untrackable escalation that no poller or onTerminated binding can clear",
+    );
+  }
   const fields = {
     status: input.status,
     comment_url: input.commentUrl ?? null,
@@ -267,8 +280,8 @@ export async function recordConformance(
     has_deviations: input.hasDeviations ? 1 : 0,
     summary: input.summary ?? null,
     report: input.report ?? null,
-    process_key: input.processKey ?? null,
-    review_status: input.reviewStatus ?? "reviewed",
+    process_key: processKey,
+    review_status: reviewStatus,
     updated_at: ts,
   };
   try {
