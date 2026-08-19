@@ -13,6 +13,7 @@ import handler from "./worker.ts";
 function fakeApp(rows: Record<string, unknown>[]): any {
   const stores: Record<string, Record<string, unknown>[]> = { feature_runs: rows };
   return {
+    stores,
     data: {
       table(name: string, key: string) {
         const store = (stores[name] ??= []);
@@ -51,6 +52,11 @@ test("record-feature-escalation: flips the run to escalated and persists the que
   assertEquals(rows[0].escalation_question, "Which API should I use?");
   // The user task does not exist yet — the pointer is cleared to NULL here (poller fills the real key).
   assertEquals(rows[0].escalation_user_task_key, null);
+  // Dual-write (issue #305): the question is ALSO appended to the canonical `feature_escalations`
+  // audit log so `pollUserTasks` can source it from a surviving table once the denormalised column drops.
+  assertEquals(app.stores.feature_escalations.length, 1);
+  assertEquals(app.stores.feature_escalations[0].feature_key, "owner/repo#7");
+  assertEquals(app.stores.feature_escalations[0].question, "Which API should I use?");
 });
 
 test("record-feature-escalation: clears a stale completable-task pointer at escalation entry", async () => {

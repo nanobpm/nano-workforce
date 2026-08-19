@@ -180,6 +180,38 @@ export function deriveFeatureDelivery(prStatus: string | null): FeatureDeliveryR
  * parks on when the agent escalates. `pollFeatureEscalations` reconciles it onto the read model. */
 export const FEATURE_ESCALATION_ELEMENT = "feature-escalation";
 
+/** One append-only audit row per `feature-escalation` ENTRY (issue #305). Mirrors the surviving
+ *  `plan_reviews` / `escalations` / `plan_trial_merges` audit logs: it is the canonical, poller-readable
+ *  source for a parked run's escalation `question`, so the denormalised `feature_runs.escalation_question`
+ *  column can be dropped in the later contract phase. `id` is an AUTOINCREMENT PK, so the newest row per
+ *  `feature_key` is the live question (`latestFeatureEscalationQuestion`). Never updated or deleted. */
+export interface FeatureEscalationRow {
+  id: number;
+  feature_key: string;
+  question: string | null;
+  created_at: string;
+}
+
+/** Accessor for the append-only `feature_escalations` audit log (migration 048). Written by
+ *  `record-feature-escalation` (one row per escalation entry), read by `pollUserTasks` to enrich the
+ *  open `feature-escalation` task's question — the feature analogue of `plan_reviews` / `escalations`. */
+export const featureEscalations = (data: DataLayer) =>
+  data.table<FeatureEscalationRow>("feature_escalations", "id");
+
+/** Append one `feature_escalations` audit row capturing the agent's escalation `question` while it is
+ *  still in scope on the `record-feature-escalation` job. Append-only, so this is the canonical record
+ *  of what was asked — `pollUserTasks` reads the newest row per feature as the live question. */
+export async function recordFeatureEscalation(
+  data: DataLayer,
+  entry: { featureKey: string; question: string | null },
+): Promise<void> {
+  await featureEscalations(data).insert({
+    feature_key: entry.featureKey,
+    question: entry.question,
+    created_at: new Date().toISOString(),
+  });
+}
+
 /** The parked `feature-escalation` user task, as `pollFeatureEscalations` observes it via
  *  `openUserTasks` (the open-task-scoped query — issue #294): the completable user-task key the pages
  *  drive an attributed answer against. Scoping to `state:"CREATED"` is what keeps a looping run — which

@@ -12,7 +12,7 @@ import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { abandonUrl, mintAbandonToken, renderAbandonBrief } from "./abandon.ts";
 import { agentSlaTimeout } from "./agentSla.ts";
 import { deriveDelivery, TERMINAL_STATUSES } from "./delivery.ts";
-import { backfillFeatureStages, deriveFeatureBlockedPatch, deriveFeatureDelivery, deriveFeatureEscalationPatch, FEATURE_BLOCKED_ELEMENT, FEATURE_ESCALATION_ELEMENT, FEATURE_RUN_STATUSES, type FeatureRun, type FeatureRunStatus, featureRuns } from "./feature.ts";
+import { backfillFeatureStages, deriveFeatureBlockedPatch, deriveFeatureDelivery, deriveFeatureEscalationPatch, FEATURE_BLOCKED_ELEMENT, FEATURE_ESCALATION_ELEMENT, FEATURE_RUN_STATUSES, type FeatureRun, type FeatureRunStatus, featureEscalations, featureRuns } from "./feature.ts";
 import {
   classifyMergeability,
   coalesceTitle,
@@ -46,6 +46,7 @@ import { clampNudgeMinutes, reviewWaitTimeout } from "./reviewWait.ts";
 import { trialMergeAudits } from "./trialMerge.ts";
 import {
   buildUserTaskRow,
+  latestFeatureEscalationQuestion,
   latestOpenEscalationQuestion,
   latestPlanReviewFindings,
   latestTrialMergeQuestion,
@@ -1661,6 +1662,13 @@ export async function pollUserTasks(data: DataLayer, engine: EngineClient) {
       if (featureSeen.has(run.feature_key)) continue;
       featureSeen.add(run.feature_key);
       if (run.escalation_user_task_key) {
+        // Source the question from the canonical append-only `feature_escalations` audit log (issue
+        // #305) — the surviving table `record-feature-escalation` writes — falling back to the legacy
+        // denormalised `feature_runs.escalation_question` while both coexist (expand phase). This is the
+        // feature analogue of the plan-review/trial-merge/PR-loop question enrichment below, and lets the
+        // denormalised column be dropped in the contract phase without the Tasks grid losing the text.
+        const question = latestFeatureEscalationQuestion(await featureEscalations(data).find({ feature_key: run.feature_key })) ??
+          run.escalation_question;
         push(
           buildUserTaskRow(
             {
@@ -1670,7 +1678,7 @@ export async function pollUserTasks(data: DataLayer, engine: EngineClient) {
               subjectKey: run.feature_key,
               subjectTitle: run.title,
               subjectUrl: run.issue_url,
-              question: run.escalation_question,
+              question,
               processKey: run.process_key,
             },
             at,

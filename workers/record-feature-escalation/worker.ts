@@ -13,7 +13,7 @@
 // variables through `searchUserTasks`, so the process variable must be persisted while it is still
 // in scope on the job.
 import type { AppJobHandler } from "@nanobpm/urban";
-import { featureRuns } from "../../app/feature.ts";
+import { featureRuns, recordFeatureEscalation } from "../../app/feature.ts";
 import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 
 // Input typed off the model data envelope (`RecordFeatureEscalationIn` in feature.bpmn) — ADR 0040.
@@ -35,6 +35,12 @@ const handler: AppJobHandler<In> = async (job, app) => {
     escalation_user_task_key: null,
     updated_at: new Date().toISOString(),
   });
+  // Append the question to the canonical `feature_escalations` audit log (issue #305) so the poller
+  // can source it from a SURVIVING table once the denormalised `feature_runs.escalation_question`
+  // column is dropped in the contract phase — the feature analogue of `record-plan-review` writing
+  // `plan_reviews`. Dual-write for now (the column above still feeds the legacy page reads); the log
+  // is authoritative for `pollUserTasks`.
+  await recordFeatureEscalation(app.data, { featureKey, question });
   app.log.info("record-feature-escalation", { featureKey, hasQuestion: question !== null });
   return {};
 };

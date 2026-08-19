@@ -11,6 +11,7 @@ import {
   buildUserTaskRow,
   PLAN_REVIEW_ELEMENT,
   PR_WAIT_ANSWER_ELEMENT,
+  latestFeatureEscalationQuestion,
   latestOpenEscalationQuestion,
   latestPlanReviewFindings,
   latestTrialMergeQuestion,
@@ -229,4 +230,17 @@ test("latestOpenEscalationQuestion: picks the newest OPEN row (highest id), not 
 test("latestOpenEscalationQuestion: null when there is no open escalation", () => {
   assertEquals(latestOpenEscalationQuestion([esc({ id: 1, status: "answered" })]), null);
   assertEquals(latestOpenEscalationQuestion([]), null);
+});
+
+test("latestFeatureEscalationQuestion: picks the newest audit row (highest id), not a positional [0]", () => {
+  const rows = [
+    { id: 3, feature_key: "o/r#1", question: "stale", created_at: "t0" },
+    { id: 8, feature_key: "o/r#1", question: "newest", created_at: "t1" },
+    { id: 5, feature_key: "o/r#1", question: "middle", created_at: "t2" },
+  ];
+  assertEquals(latestFeatureEscalationQuestion(rows), "newest");
+});
+
+test("latestFeatureEscalationQuestion: null when the feature has no recorded escalation", () => {
+  assertEquals(latestFeatureEscalationQuestion([]), null);
 });
