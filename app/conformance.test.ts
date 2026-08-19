@@ -281,6 +281,15 @@ test("acknowledgeConformance: settles the row at reviewed and folds the note int
   assertEquals(row.summary, "slice 2 reduced\n\nOperator ack: filed follow-up #9");
 });
 
+test("acknowledgeConformance: fails loudly when the plan_conformance row is missing", async () => {
+  const { data } = memData();
+  await assertRejects(
+    () => acknowledgeConformance(data, PLAN, "filed follow-up #9"),
+    Error,
+    PLAN,
+  );
+});
+
 test("acknowledgeConformance: is idempotent — a retry after settling does not re-append the note", async () => {
   const { data, stores } = memData();
   stores["plan_conformance"] = [

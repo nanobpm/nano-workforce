@@ -304,7 +304,17 @@ export async function acknowledgeConformance(
 ): Promise<void> {
   const trimmed = typeof note === "string" && note.trim() ? note.trim() : null;
   const existing = await conformanceTbl(data).get(planKey);
-  if (!existing) return;
+  // Invariant: the ack task only fires after the escalation parked this exact `planKey` at
+  // `review_status='reviewing'`, so the row must exist. A missing row means a wrong/mismatched
+  // `planKey` (or unexpected DB state); silently returning would let the `retro` instance COMPLETE
+  // while the real conformance row stays stuck in `reviewing`, so `pollUserTasks` scans it forever.
+  // Fail loudly so the job retries/alerts instead of silently encoding the mismatch.
+  if (!existing) {
+    throw new Error(
+      `acknowledgeConformance: no plan_conformance row for ${planKey} — ` +
+        "refusing to settle a missing/mismatched escalation that would leave the real row stuck in 'reviewing'",
+    );
+  }
   // At-least-once worker semantics can retry `pr.conformance-ack` after a successful DB update; the
   // row is already settled at `reviewed`, so short-circuit to keep the operation idempotent (a retry
   // must not re-append a duplicate `Operator ack: …` block to the audit trail).
