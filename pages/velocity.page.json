@@ -66,7 +66,7 @@
       "type": "text",
       "id": "subtitle",
       "props": {
-        "text": "Merged-per-day burn-down / throughput \u2014 how many PRs the fleet landed each calendar day, derived directly from the merge audit trail. Each row is one day: the bar is scaled against the busiest day, the header shows that day's merged count and the running burn-up total.",
+        "text": "Merged-per-day throughput \u2014 how many PRs the fleet landed each calendar day, derived directly from the merge audit trail. Each row is one day: the bar is scaled against the busiest day, the header shows that day's merged count and the running burn-up total.",
         "variant": "sub"
       }
     },

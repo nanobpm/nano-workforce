@@ -1,8 +1,11 @@
-// Merged-per-day burn-down / throughput read model (issue #344).
+// Merged-per-day throughput / burn-up read model (issue #344).
 //
 // A simple time-series behind the console's "Velocity" page: how many PRs the fleet landed each
-// calendar day. Every land is already audited in the `merges` table (004_merge.sql) — one row per
-// merge attempt, `outcome ∈ {merged|queued|blocked}`, `at` = ISO timestamp — so merged-per-day is
+// calendar day (throughput), plus a running `cumulative` burn-up total. Every land is already
+// audited in the `merges` table (004_merge.sql) — one row per merge attempt, whose `outcome`
+// includes `merged`, `queued`, `blocked` and `retry` (see the merge classifier in github.ts; the
+// set is not exhaustive), `at` = ISO timestamp. Only `outcome = 'merged'` rows feed this aggregate,
+// so merged-per-day is
 // fully DERIVABLE from that audit trail with NO new write-path bookkeeping (AGENTS.md: "Derivation
 // over duplication"). The canonical aggregate is the one in the issue:
 //

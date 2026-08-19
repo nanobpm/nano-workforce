@@ -1,7 +1,8 @@
--- Merged-per-day burn-down / throughput read model (issue #344).
+-- Merged-per-day throughput / burn-up read model (issue #344).
 --
--- Every land is already audited in `merges` (004_merge.sql): one row per merge attempt, with
--- `outcome ∈ {merged|queued|blocked}` and `at` = ISO timestamp. The per-calendar-day merged count is
+-- Every land is already audited in `merges` (004_merge.sql): one row per merge attempt, whose
+-- `outcome` includes `merged`, `queued`, `blocked` and `retry` (the set is not exhaustive) and
+-- `at` = ISO timestamp. Only `outcome = 'merged'` rows count. The per-calendar-day merged count is
 -- therefore fully DERIVABLE from that audit trail — no new write-path bookkeeping (AGENTS.md:
 -- "Derivation over duplication"). The canonical aggregate is:
 --
