@@ -48,6 +48,10 @@
           {
             "label": "Board",
             "page": "board"
+          },
+          {
+            "label": "Velocity",
+            "page": "velocity"
           }
         ],
         "sticky": true

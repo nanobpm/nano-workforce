@@ -76,7 +76,10 @@ test("the migrated wait stays bounded: an event-based gateway races the signal a
 });
 
 test("the timeout arm escalates to a human (the wait cannot hang forever)", () => {
-  // timer catch → persist-review-stalled (records the escalation) → wait-answer (native userTask).
+  // timer catch → persist-review-stalled (records the escalation) → gw-escalated → wait-answer.
+  // Since #340 every escalation arm converges on the shared `gw-escalated` gateway (no per-arm twin
+  // edge to the userTask — derivation over duplication), which routes to the native `wait-answer`
+  // userTask when an escalation actually opened (`escalated = true`). Assert that canonical path.
   assert(
     /sourceRef="wait-review-timeout"[^>]*targetRef="persist-review-stalled"|targetRef="persist-review-stalled"[^>]*sourceRef="wait-review-timeout"/.test(
       flat,
@@ -84,9 +87,18 @@ test("the timeout arm escalates to a human (the wait cannot hang forever)", () =
     "a timed-out review wait routes to the stalled-review escalation",
   );
   assert(
-    /sourceRef="persist-review-stalled"[^>]*targetRef="wait-answer"|targetRef="wait-answer"[^>]*sourceRef="persist-review-stalled"/.test(
+    /sourceRef="persist-review-stalled"[^>]*targetRef="gw-escalated"|targetRef="gw-escalated"[^>]*sourceRef="persist-review-stalled"/.test(
       flat,
     ),
-    "the stalled-review escalation parks on the human answer userTask",
+    "the stalled-review escalation converges on the shared gw-escalated gateway",
+  );
+  const escWait = flat.match(
+    /<bpmn:sequenceFlow\b[^>]*\bsourceRef="gw-escalated"[^>]*\btargetRef="wait-answer"[^>]*>[\s\S]*?<\/bpmn:sequenceFlow>/,
+  );
+  assert(escWait, "gw-escalated must route to the human answer userTask (wait-answer)");
+  assertStringIncludes(
+    escWait![0],
+    "escalated = true",
+    "gw-escalated parks on wait-answer only when an escalation actually opened",
   );
 });
