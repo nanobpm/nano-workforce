@@ -1,3 +1,10 @@
+# [0.91.0](https://github.com/nanobpm/nano-workforce/compare/v0.90.0...v0.91.0) (2026-08-19)
+
+
+### Features
+
+* **tasks:** show subject title with repo/issue# as subtitle ([#308](https://github.com/nanobpm/nano-workforce/issues/308)) ([#311](https://github.com/nanobpm/nano-workforce/issues/311)) ([5771b38](https://github.com/nanobpm/nano-workforce/commit/5771b38abc33f4f88329d69c808214dfd42f5113))
+
 # [0.90.0](https://github.com/nanobpm/nano-workforce/compare/v0.89.0...v0.90.0) (2026-08-19)
 
 
