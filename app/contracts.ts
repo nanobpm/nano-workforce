@@ -117,6 +117,13 @@ export const ENV_CONTRACTS = {
     semantics: "Maximum rebase attempts per PR.",
     default: "3",
   },
+  NANO_PR_MAX_MERGE_RETRIES: {
+    category: "env",
+    name: "NANO_PR_MAX_MERGE_RETRIES",
+    owner: "app/service.ts",
+    semantics: "Maximum transient base/head-moved merge-race retries per PR before escalating.",
+    default: "5",
+  },
   NANO_PR_REVIEW_WAIT_TIMEOUT: {
     category: "env",
     name: "NANO_PR_REVIEW_WAIT_TIMEOUT",

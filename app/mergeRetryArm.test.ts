@@ -51,7 +51,7 @@ test("retry arm mirrors the fix-ci arm: budget gate → re-arm, exhausted → es
   // Within budget → re-arm the merge poller (re-attempt on the settled base). No remediation agent.
   assert(hasFlow("gw-merge-retry", "arm-merge"), "gw-merge-retry → arm-merge (within budget) missing");
   assert(flowHasId("f_mr_go", "gw-merge-retry", "arm-merge"), "f_mr_go must be gw-merge-retry → arm-merge");
-  assertStringIncludes(flat, "mergeRetryRound &lt; mergeRetryMax");
+  assertStringIncludes(flat, "mergeRetryRound &lt;= mergeRetryMax");
 
   // Budget exhausted → the EXISTING human escalation (merge-esc-attempt), and it is the gateway default
   // so a continuously-moving base can never spin past the cap.
@@ -66,10 +66,12 @@ test("retry arm mirrors the fix-ci arm: budget gate → re-arm, exhausted → es
   );
 });
 
-test("the retry arm advances the attempt counter so the budget can actually be exhausted", () => {
-  // The merge attempt increments the retry/attempt counter (like fix-ci/rebase advance their
-  // rounds), so N consecutive retries trip the `mergeRetryRound < mergeRetryMax` gate at the cap.
-  assertStringIncludes(flat, "=mergeRetryRound + 1");
+test("the retry arm advances the attempt counter only on a transient retry outcome", () => {
+  // The counter advances ONLY when the merge attempt returned `retry` — mirroring how fix-ci/rebase
+  // advance their own rounds only on their own remediation — so unrelated merge attempts (initial,
+  // post-rebase, post-fix-ci, post-evict) can't consume the transient-retry budget. N consecutive
+  // transient races then trip the `mergeRetryRound <= mergeRetryMax` gate at exactly the cap.
+  assertStringIncludes(flat, "=if mergeStatus = &#34;retry&#34; then mergeRetryRound + 1 else mergeRetryRound");
 });
 
 test("the retry arm has NO remediation agent (contrast the conflict/rebase arm)", () => {
