@@ -233,3 +233,120 @@ test("fenceFor.markApplied appends new effects at the next seq — no seq collis
     "effectTail is deterministically ordered — insertion order, no ties",
   );
 });
+
+test("recordCheckpoint tolerates a concurrent duplicate checkpoint insert — reuses the raced offset, no spurious failure", async () => {
+  const { data, db } = memWorldData();
+  // The check-then-insert race the `UNIQUE(pr_key, commit_sha)` fence guards: a concurrent/duplicate
+  // persist-round lands the checkpoint row for the SAME {pr, commit SHA} AFTER our `findOne` missed but
+  // BEFORE our `insert`. Decorate the transaction-scoped checkpoints table so the first insert first
+  // writes a concurrent row for the SHA, then delegates — the real insert now hits the fence.
+  const realOpen = (data as unknown as { open: () => Record<string, unknown> }).open.bind(data);
+  (data as unknown as { open: () => Record<string, unknown> }).open = () => {
+    const ds = realOpen();
+    const realTable = (ds.table as (name: string, pk?: string) => Record<string, unknown>).bind(ds);
+    let injected = false;
+    ds.table = (name: string, pk?: string) => {
+      const t = realTable(name, pk);
+      if (name === "world_checkpoints") {
+        const realInsert = (t.insert as (row: unknown) => Promise<number>).bind(t);
+        t.insert = async (row: unknown) => {
+          if (!injected) {
+            injected = true;
+            db.prepare(
+              "INSERT INTO world_checkpoints (pr_key, round_no, checkpoint_offset, commit_sha, created_at) VALUES (?, ?, ?, ?, ?)",
+            ).run(PR, 9, 0, "sha-a", new Date().toISOString());
+          }
+          return realInsert(row);
+        };
+      }
+      return t;
+    };
+    return ds;
+  };
+  const store = new WorldStore(data);
+  const offset = await store.recordCheckpoint({ prKey: PR, roundNo: 1, commitSha: "sha-a" });
+  assertEquals(offset, 0, "the race is reconciled to the winner's offset, not surfaced as a spurious error");
+  const cps = await data.table("world_checkpoints", "id").find({ pr_key: PR, commit_sha: "sha-a" });
+  assertEquals(cps.length, 1, "exactly one checkpoint row for the SHA — the fence held");
+  assertEquals(
+    (await store.effectTail(PR, offset)).map((e) => e.idempotencyKey),
+    ["sha-a"],
+    "the push effect still lands at the reused offset",
+  );
+});
+
+test("recordCheckpoint tolerates a concurrent duplicate effect insert — the fence collapses it, no spurious failure", async () => {
+  const { data, db } = memWorldData();
+  // The effect ledger's `UNIQUE(pr_key, idempotency_key)` fence, raced: a concurrent writer records the
+  // SAME idempotency key between our `findOne` miss and our `insert`. Decorate so the FIRST effect insert
+  // first writes a concurrent row for that key, then delegates — the real insert hits the fence.
+  const realOpen = (data as unknown as { open: () => Record<string, unknown> }).open.bind(data);
+  (data as unknown as { open: () => Record<string, unknown> }).open = () => {
+    const ds = realOpen();
+    const realTable = (ds.table as (name: string, pk?: string) => Record<string, unknown>).bind(ds);
+    let injected = false;
+    ds.table = (name: string, pk?: string) => {
+      const t = realTable(name, pk);
+      if (name === "world_effects") {
+        const realInsert = (t.insert as (row: unknown) => Promise<number>).bind(t);
+        t.insert = async (row: unknown) => {
+          if (!injected) {
+            injected = true;
+            db.prepare(
+              "INSERT INTO world_effects (pr_key, checkpoint_offset, seq, kind, idempotency_key, description, applied, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ).run(PR, 0, 0, "push", "sha-a", null, 1, new Date().toISOString());
+          }
+          return realInsert(row);
+        };
+      }
+      return t;
+    };
+    return ds;
+  };
+  const store = new WorldStore(data);
+  const offset = await store.recordCheckpoint({
+    prKey: PR,
+    roundNo: 1,
+    commitSha: "sha-a",
+    effects: [push("sha-a"), { kind: "pr-comment", idempotencyKey: "c-1" }],
+  });
+  const dup = await data.table("world_effects", "id").find({ pr_key: PR, idempotency_key: "sha-a" });
+  assertEquals(dup.length, 1, "the raced idempotency key yields exactly one row — the fence collapsed the duplicate");
+  assertEquals(
+    (await store.effectTail(PR, offset)).map((e) => e.idempotencyKey),
+    ["sha-a", "c-1"],
+    "the remaining effect still records after the collapsed duplicate — no spurious failure",
+  );
+});
+
+test("fenceFor.markApplied tolerates a concurrent effect insert — reconciles the raced row to applied, no spurious failure", async () => {
+  const { data, db } = memWorldData();
+  const store = new WorldStore(data);
+  await store.recordCheckpoint({ prKey: PR, roundNo: 1, commitSha: "sha-a" });
+  // Race markApplied's check-then-insert: a concurrent restore records the SAME key (as a PENDING tail
+  // entry) between our `findOne` miss and our `insert`. Decorate `table` so the effect insert first
+  // writes that concurrent pending row, then delegates — the real insert hits the fence.
+  const realTable = (data as unknown as { table: (name: string, pk?: string) => Record<string, unknown> }).table.bind(data);
+  let injected = false;
+  (data as unknown as { table: (name: string, pk?: string) => Record<string, unknown> }).table = (name: string, pk?: string) => {
+    const t = realTable(name, pk);
+    if (name === "world_effects") {
+      const realInsert = (t.insert as (row: unknown) => Promise<number>).bind(t);
+      t.insert = async (row: unknown) => {
+        if (!injected) {
+          injected = true;
+          db.prepare(
+            "INSERT INTO world_effects (pr_key, checkpoint_offset, seq, kind, idempotency_key, description, applied, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+          ).run(PR, 0, 5, "merge", "m-1", null, 0, new Date().toISOString());
+        }
+        return realInsert(row);
+      };
+    }
+    return t;
+  };
+  const fence = store.fenceFor(PR, 0);
+  await fence.markApplied({ kind: "merge", idempotencyKey: "m-1" });
+  assert(await fence.isApplied("m-1"), "the raced pending row is reconciled to applied, not left pending or surfaced as an error");
+  const rows = await data.table("world_effects", "id").find({ pr_key: PR, idempotency_key: "m-1" });
+  assertEquals(rows.length, 1, "exactly one row for the key — the fence collapsed the duplicate");
+});

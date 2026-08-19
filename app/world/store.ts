@@ -100,6 +100,52 @@ export class WorldStore {
     return Math.max(...rows.map((r) => r.seq)) + 1;
   }
 
+  /** True when `err` is the durable fence firing — a SQLite `UNIQUE constraint failed` raised because a
+   * concurrent/duplicate writer inserted the row BETWEEN our `findOne` and our `insert`. Every insert
+   * in this store guards a UNIQUE constraint (`UNIQUE(pr_key, commit_sha)` / `(pr_key, checkpoint_offset)`
+   * on checkpoints, `UNIQUE(pr_key, idempotency_key)` on effects), so a check-then-insert is inherently
+   * racy under the at-least-once persist-round delivery + a distributed fleet. This is the ONE place the
+   * store classifies a fence collision, so the three insert sites below turn it into the SAME intended
+   * idempotent outcome instead of each re-encoding the driver's error shape (a drift surface). Matched on
+   * the message substring the RAD `Table` surface propagates verbatim — the same one the schema tests
+   * assert on — because that surface hides the concrete driver error type. */
+  static #isFenceCollision(err: unknown): boolean {
+    return err instanceof Error && /UNIQUE constraint failed/i.test(err.message);
+  }
+
+  /** Insert the checkpoint row for a not-yet-seen `{prKey, commitSha}`, allocating the next offset, and
+   * tolerate the fence firing. `recordCheckpoint`'s `findOne`-then-insert is racy: a concurrent/duplicate
+   * persist-round can insert the SAME SHA between our read and our write, so the insert hits
+   * `UNIQUE(pr_key, commit_sha)`. Rather than surface it as a spurious job failure, re-read the winner's
+   * row and REUSE its offset — the exact idempotent-on-SHA outcome the non-racing path yields. If the
+   * collision was instead a pure offset race with a DIFFERENT SHA (`UNIQUE(pr_key, checkpoint_offset)`),
+   * the SHA re-read misses and we rethrow, letting the job retry allocate a fresh offset. Returns the
+   * offset the SHA is durably bound to. */
+  static async #insertCheckpointFenced(
+    checkpoints: Table<WorldCheckpointRow>,
+    prKey: string,
+    roundNo: number,
+    commitSha: string,
+    now: string,
+  ): Promise<number> {
+    const offset = await WorldStore.#nextOffsetOn(checkpoints, prKey);
+    try {
+      await checkpoints.insert({
+        pr_key: prKey,
+        round_no: roundNo,
+        checkpoint_offset: offset,
+        commit_sha: commitSha,
+        created_at: now,
+      });
+      return offset;
+    } catch (err) {
+      if (!WorldStore.#isFenceCollision(err)) throw err;
+      const raced = await checkpoints.findOne({ pr_key: prKey, commit_sha: commitSha });
+      if (!raced) throw err;
+      return raced.checkpoint_offset;
+    }
+  }
+
   /**
    * Record a push-checkpoint: allocate the next offset, persist `{commitSha}`, and append the round's
    * irreversible effects to the ledger (each fenced by `UNIQUE(pr_key, idempotency_key)`). Returns
@@ -134,16 +180,7 @@ export class WorldStore {
       const existing = await checkpoints.findOne({ pr_key: prKey, commit_sha: commitSha });
       const offset = existing
         ? existing.checkpoint_offset
-        : await WorldStore.#nextOffsetOn(checkpoints, prKey);
-      if (!existing) {
-        await checkpoints.insert({
-          pr_key: prKey,
-          round_no: roundNo,
-          checkpoint_offset: offset,
-          commit_sha: commitSha,
-          created_at: now,
-        });
-      }
+        : await WorldStore.#insertCheckpointFenced(checkpoints, prKey, roundNo, commitSha, now);
       let seq = await WorldStore.#nextSeqOn(effectsTable, prKey, offset);
       for (const effect of effects) {
         await WorldStore.#appendEffect(effectsTable, prKey, offset, seq++, effect, applied, now);
@@ -166,16 +203,24 @@ export class WorldStore {
   ): Promise<void> {
     const existing = await effects.findOne({ pr_key: prKey, idempotency_key: effect.idempotencyKey });
     if (existing) return;
-    await effects.insert({
-      pr_key: prKey,
-      checkpoint_offset: offset,
-      seq,
-      kind: effect.kind,
-      idempotency_key: effect.idempotencyKey,
-      description: effect.description ?? null,
-      applied: applied ? 1 : 0,
-      created_at: now,
-    });
+    try {
+      await effects.insert({
+        pr_key: prKey,
+        checkpoint_offset: offset,
+        seq,
+        kind: effect.kind,
+        idempotency_key: effect.idempotencyKey,
+        description: effect.description ?? null,
+        applied: applied ? 1 : 0,
+        created_at: now,
+      });
+    } catch (err) {
+      // A concurrent/duplicate writer recorded this idempotency key between our `findOne` and our
+      // `insert` — the fence firing IS the intended outcome (one real effect → exactly one row), so
+      // treat the collision as the same no-op the `existing` short-circuit above already is, not a
+      // surfaced error that fails the persist-round.
+      if (!WorldStore.#isFenceCollision(err)) throw err;
+    }
   }
 
   /** The newest push-checkpoint for a PR, or `null` when the PR has none (nothing pushed yet, so
@@ -216,19 +261,29 @@ export class WorldStore {
           if (row.applied !== 1) await effects.update(row.id, { applied: 1 });
           return;
         }
-        await effects.insert({
-          pr_key: prKey,
-          checkpoint_offset: offset,
-          // Append AFTER the tail already recorded at this offset — restarting at `seq 0` would
-          // collide with a sibling effect at the same offset and make `effectTail`'s tie-sort
-          // (`a.seq - b.seq`) non-deterministic, destabilising restore/audit ordering.
-          seq: await WorldStore.#nextSeqOn(effects, prKey, offset),
-          kind: effect.kind,
-          idempotency_key: effect.idempotencyKey,
-          description: effect.description ?? null,
-          applied: 1,
-          created_at: new Date().toISOString(),
-        });
+        try {
+          await effects.insert({
+            pr_key: prKey,
+            checkpoint_offset: offset,
+            // Append AFTER the tail already recorded at this offset — restarting at `seq 0` would
+            // collide with a sibling effect at the same offset and make `effectTail`'s tie-sort
+            // (`a.seq - b.seq`) non-deterministic, destabilising restore/audit ordering.
+            seq: await WorldStore.#nextSeqOn(effects, prKey, offset),
+            kind: effect.kind,
+            idempotency_key: effect.idempotencyKey,
+            description: effect.description ?? null,
+            applied: 1,
+            created_at: new Date().toISOString(),
+          });
+        } catch (err) {
+          if (!WorldStore.#isFenceCollision(err)) throw err;
+          // A concurrent restore/replay recorded this key between our `findOne` and our `insert`. The
+          // desired end-state is simply "applied", which is already (or nearly) achieved — reconcile to
+          // it by re-reading and flipping `applied`, rather than failing the restore over a fence we
+          // WANTED to hold.
+          const raced = await effects.findOne({ pr_key: prKey, idempotency_key: effect.idempotencyKey });
+          if (raced && raced.applied !== 1) await effects.update(raced.id, { applied: 1 });
+        }
       },
     };
   }
