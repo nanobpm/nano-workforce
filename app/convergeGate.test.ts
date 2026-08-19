@@ -467,11 +467,15 @@ test("gw-converge-gate default arm finalizes with no condition", () => {
   assert(!/conditionExpression/.test(ok), "the default arm must carry no conditionExpression");
 });
 
-test("the blocked-comments escalation lands on the human wait-answer task with an answerable escalation", () => {
-  const f = flowElement("f_blockedWait");
-  assert(f, "f_blockedWait flow missing");
+test("the blocked-comments escalation routes through gw-escalated toward an answerable wait-answer", () => {
+  // #333: previously this flowed UNCONDITIONALLY into wait-answer, so a blank convergeBlockReason
+  // (the question is mapped from that OPTIONAL variable) opened no escalation yet still parked a
+  // dead wait with a null question. It now routes through gw-escalated, which parks wait-answer
+  // only on a real escalation and otherwise re-enters the loop.
+  const f = flowElement("f_blockedGate");
+  assert(f, "f_blockedGate flow missing");
   assertStringIncludes(f, 'sourceRef="persist-escalation-blockedcomments"');
-  assertStringIncludes(f, 'targetRef="wait-answer"');
+  assertStringIncludes(f, 'targetRef="gw-escalated"');
   const task = flat.match(
     /<bpmn:serviceTask\b[^>]*\bid="persist-escalation-blockedcomments"[^>]*>.*?<\/bpmn:serviceTask>/,
   );

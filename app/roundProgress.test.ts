@@ -210,11 +210,14 @@ test("gw-progress default arm re-enters the review wait with no condition", () =
   assert(!/conditionExpression/.test(ok), "the default arm must carry no conditionExpression");
 });
 
-test("the no-progress escalation lands on the human wait-answer task", () => {
-  const f = flowElement("f_noprogressWait");
-  assert(f, "f_noprogressWait flow missing");
+test("the no-progress escalation routes through gw-escalated toward the human wait-answer task", () => {
+  // #333: the arm no longer flows UNCONDITIONALLY into wait-answer — it routes through the
+  // gw-escalated guard, which parks wait-answer only when the worker opened a real escalation
+  // (escalated=true) and otherwise re-enters the loop (never a dead wait with a null question).
+  const f = flowElement("f_noprogressGate");
+  assert(f, "f_noprogressGate flow missing");
   assertStringIncludes(f, 'sourceRef="persist-escalation-noprogress"');
-  assertStringIncludes(f, 'targetRef="wait-answer"');
+  assertStringIncludes(f, 'targetRef="gw-escalated"');
   // It opens a real, answerable escalation (blocked status + a concrete question) so it is never a
   // blank-question non-escalation that would wedge the token on the wait.
   const task = flat.match(
