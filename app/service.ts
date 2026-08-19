@@ -21,6 +21,7 @@ import {
   renderResolvedDepsBrief,
   UnresolvableCapabilityRefError,
 } from "./capabilityNeed.ts";
+import { isUniqueConstraintFence } from "./dbFence.ts";
 import { deriveDelivery, TERMINAL_STATUSES } from "./delivery.ts";
 import { fleetSupportsDurableResume } from "./durableResume.ts";
 import { backfillFeatureStages, deriveFeatureDelivery, FEATURE_BLOCKED_ELEMENT, FEATURE_ESCALATION_ELEMENT, FEATURE_RUN_STATUSES, type FeatureRunStatus, featureEscalations, featureRuns } from "./feature.ts";
@@ -859,8 +860,11 @@ async function isDepMerged(data: DataLayer, depKey: string, token: string): Prom
  * members) and stops `isPlanComplete`/the Epics table counting a phantom open task. Idempotent for a
  * poller retry (or the two observers — merge worker + wave gate — racing the same closed PR):
  * re-running just re-stamps the same terminal status, and the terminal `merges` audit row is written
- * only once (guarded on an existing `abandoned`/`pr-closed` row for this PR) so retries can't spam the
- * audit with duplicate rows and skew reporting.
+ * only once: the fast-path guard skips the insert when an `abandoned`/`pr-closed` row already exists,
+ * and — because that check-then-insert is racy under the two observers (merge worker + wave gate)
+ * racing the same closed PR — a DB-level partial UNIQUE fence (`ux_merges_abandon_pr_closed`,
+ * migration 053) rejects a concurrent duplicate, which we swallow as the same idempotent outcome. So
+ * retries (sequential OR concurrent) can't spam the audit with duplicate rows and skew reporting.
  *
  * Self-heals the FK parent first: the `merges` audit row is an FK child of `pull_requests.pr_key`, so
  * before writing it we ensure the parent row exists via the idempotent {@link ensurePr}. The merge
@@ -875,13 +879,21 @@ export async function abandonClosedPr(data: DataLayer, prKey: string, detail: st
   const merges = data.table("merges", "id");
   const alreadyAudited = (await merges.find({ pr_key: prKey, outcome: "abandoned", method: "pr-closed" })).length > 0;
   if (!alreadyAudited) {
-    await merges.insert({
-      pr_key: prKey,
-      outcome: "abandoned",
-      method: "pr-closed",
-      detail,
-      at: ts,
-    });
+    try {
+      await merges.insert({
+        pr_key: prKey,
+        outcome: "abandoned",
+        method: "pr-closed",
+        detail,
+        at: ts,
+      });
+    } catch (err) {
+      // The `find`-then-`insert` guard above is racy: the merge worker and the wave-gate self-heal
+      // path can both observe "no row" and both insert. The partial UNIQUE fence
+      // (`ux_merges_abandon_pr_closed`, migration 053) rejects the loser — tolerate that collision as
+      // the SAME idempotent outcome the guard intends, and only that. Any other error rethrows.
+      if (!isUniqueConstraintFence(err)) throw err;
+    }
   }
   await prs(data).update(prKey, { status: ABANDONED_STATUS, updated_at: ts });
   for (const t of await planTasks(data).find({ pr_key: prKey })) {
