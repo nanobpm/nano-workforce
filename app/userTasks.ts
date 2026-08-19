@@ -18,7 +18,7 @@
 // tasks visible; a completed task's row is removed on the next pass when the engine no longer reports
 // it open.
 import type { DataLayer } from "@nanobpm/urban";
-import { FEATURE_BLOCKED_ELEMENT, FEATURE_ESCALATION_ELEMENT } from "./feature.ts";
+import { FEATURE_BLOCKED_ELEMENT, FEATURE_ESCALATION_ELEMENT, type FeatureEscalationRow } from "./feature.ts";
 import type { PlanReview } from "./plan.ts";
 import type { TrialMergeAuditRow } from "./trialMerge.ts";
 
@@ -229,6 +229,20 @@ export function latestOpenEscalationQuestion(rows: readonly PrEscalationRow[]): 
   let latest: PrEscalationRow | undefined;
   for (const r of rows) {
     if (r.status !== "open") continue;
+    if (!latest || r.id > latest.id) latest = r;
+  }
+  return latest?.question ?? null;
+}
+
+/** Pure: the question for the still-open `feature-escalation`, sourced from the append-only
+ *  `feature_escalations` audit log (migration 048) — the feature analogue of `latestOpenEscalationQuestion`.
+ *  `record-feature-escalation` appends one row per escalation entry, so the newest row (highest `id`) is
+ *  the live question the operator is being asked; a run that escalated, was answered, then re-escalated
+ *  with a fresh question is covered because the later entry has the higher `id`. `null` when the feature
+ *  has no recorded escalation (the poller then falls back to the legacy `feature_runs` column). */
+export function latestFeatureEscalationQuestion(rows: readonly FeatureEscalationRow[]): string | null {
+  let latest: FeatureEscalationRow | undefined;
+  for (const r of rows) {
     if (!latest || r.id > latest.id) latest = r;
   }
   return latest?.question ?? null;

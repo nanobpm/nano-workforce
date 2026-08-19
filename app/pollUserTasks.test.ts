@@ -152,6 +152,37 @@ test("pollUserTasks: projects a merge-loop wait-merge-answer escalation into use
   assertEquals(byKey["ut-merge"].question, "not mergeable — resolve the conflict");
 });
 
+test("pollUserTasks: sources the feature-escalation question from the feature_escalations audit log (issue #305)", async () => {
+  // The canonical source is the append-only `feature_escalations` log (what `record-feature-escalation`
+  // writes); the denormalised `feature_runs.escalation_question` is a legacy fallback during the expand
+  // phase. When both exist the newest audit row wins, so a re-escalation shows the latest question.
+  const { data, stores } = memData({
+    feature_runs: [
+      {
+        feature_key: "o/r#42",
+        status: "escalated",
+        process_key: "fp-42",
+        issue_url: "https://github.com/o/r/issues/42",
+        title: "Wire the audit log",
+        escalation_user_task_key: "ut-feat",
+        escalation_question: "stale legacy question",
+        blocked_user_task_key: null,
+        delivery_label: null,
+      },
+    ],
+    feature_escalations: [
+      { id: 1, feature_key: "o/r#42", question: "first ask", created_at: "2025-01-01T00:00:00.000Z", job_key: "j1" },
+      { id: 2, feature_key: "o/r#42", question: "latest ask", created_at: "2025-01-02T00:00:00.000Z", job_key: "j2" },
+    ],
+  });
+  const engine = fakeEngine({ "fp-42": [{ userTaskKey: "ut-feat", elementId: "feature-escalation" }] });
+
+  await pollUserTasks(data, engine);
+
+  const byKey = Object.fromEntries((stores.user_tasks ?? []).map((r) => [r.user_task_key, r]));
+  assertEquals(byKey["ut-feat"].question, "latest ask");
+});
+
 test("pollUserTasks: removes a row once its task is no longer open (completed / out-of-band)", async () => {
   const { data, stores } = memData({
     user_tasks: [
