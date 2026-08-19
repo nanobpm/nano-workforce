@@ -976,3 +976,60 @@ test("pollCapabilityGatesImpl: idempotent — a resolved gate is reused without 
   assertEquals(published.length, 1, "the still-parked barrier is released from the pinned artifact");
   assertEquals(published[0]?.correlationKey, barrierKey);
 });
+
+test("pollCapabilityGatesImpl: scopes the barrier subscription search server-side by correlationKey (#290)", async () => {
+  // Regression for the page-limit false negative: the capability barrier opens ONE subscription per
+  // task, so a plan with many parked siblings can overflow a process+message-only search page and omit
+  // THIS task's subscription — wedging its gate forever. The reconciler must therefore scope the search
+  // by `correlationKey`. This stub emulates an engine that HONOURS the server-side `correlationKey`
+  // filter: it returns the open item only when the request carries the matching key (as the real engine
+  // does), so the old process+message-only filter would come back empty and never release the barrier.
+  const PLAN_KEY = "owner/repo#11";
+  const PI = "PI-293";
+  const TASK = "gap-e";
+  const barrierKey = `${PLAN_KEY}:${TASK}`;
+  const stores: Record<string, { rows: any[]; key: string }> = {
+    plans: { rows: [{ plan_key: PLAN_KEY, process_key: PI }], key: "plan_key" },
+    plan_task_needs: {
+      rows: [
+        {
+          plan_key: PLAN_KEY,
+          task_id: TASK,
+          capability_ref: "nanobpm/nano-ide#274",
+          package: "@nanobpm/urban",
+          verify_command: null,
+        },
+      ],
+      key: "plan_key",
+    },
+    capability_gates: { rows: [], key: "gate_key" },
+  };
+  const data = capsDataLayer(stores);
+  const { engine, published } = capsEngine();
+  const { exec } = capsProbeExec(true);
+  const headers = { "content-type": "application/json" };
+  const seenFilters: Array<Record<string, unknown>> = [];
+  const prevFetch = globalThis.fetch;
+  globalThis.fetch = ((url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    const u = typeof url === "string" ? url : url.toString();
+    if (!u.endsWith("/message-subscriptions/search")) throw new Error(`unexpected fetch: ${u}`);
+    const filter = (JSON.parse(String(init?.body ?? "{}")) as { filter?: Record<string, unknown> }).filter ?? {};
+    seenFilters.push(filter);
+    // Engine honours the server-side correlationKey filter: only the exactly-scoped query sees the item.
+    const items =
+      filter.correlationKey === barrierKey
+        ? [{ messageName: "caps-resolved", correlationKey: barrierKey, messageSubscriptionState: "CREATED" }]
+        : [];
+    return Promise.resolve(
+      new Response(JSON.stringify({ items }), { status: 200, headers: { "content-type": "application/json" } }),
+    );
+  }) as typeof fetch;
+  try {
+    await pollCapabilityGatesImpl(data, engine, "http://engine/v2", headers, exec, {});
+  } finally {
+    globalThis.fetch = prevFetch;
+  }
+  assertEquals(seenFilters[0]?.correlationKey, barrierKey, "search is scoped server-side by the barrier key");
+  assertEquals(published.length, 1, "the scoped search still finds THIS task's subscription and releases it");
+  assertEquals(published[0]?.correlationKey, barrierKey);
+});

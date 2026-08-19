@@ -21,8 +21,8 @@
           <nano:extend name="baseBranch" type="string" />
         </nano:shape>
         <nano:shape id="CapabilityNeed" name="Cross-repo capability dependency (issue #289)">
-          <nano:extend name="capabilityRef" type="string" optional="true" />
-          <nano:extend name="package" type="string" optional="true" />
+          <nano:extend name="capabilityRef" type="string" />
+          <nano:extend name="package" type="string" />
           <nano:extend name="verifyCommand" type="string" optional="true" />
         </nano:shape>
         <nano:shape id="RecordPlanTask" name="Record plan — raw planner task">

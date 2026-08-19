@@ -1318,7 +1318,14 @@ const READINESS_GATE_PROCESS_ID = "readiness-gate";
  * signal is never dropped into the void nor buffered to trip a later task's barrier. Returns `true`
  * (open — safe to release), `false` (no open subscription), or `null` (transport unhappy / unparseable
  * — "unknown", retry next pass). Every field must be present and match explicitly (an item omitting a
- * field is "unknown", not a match) — a false negative only costs a retry, a false positive is a wedge. */
+ * field is "unknown", not a match) — a false negative only costs a retry, a false positive is a wedge.
+ *
+ * Unlike the wave-merge barrier (one subscription per plan, correlated on `planKey`), the capability
+ * barrier opens ONE subscription PER TASK (each on its own `<planKey>:<taskId>` key), so a single
+ * plan-fanout instance can have MANY `caps-resolved` subscriptions open at once. We therefore scope the
+ * search server-side by `correlationKey` too — filtering only on process + message could return a page
+ * of sibling tasks' subscriptions that overflows the page limit and omits THIS task's, a false negative
+ * that wedges the gate forever. The client-side re-filter below is retained defensively. */
 async function messageSubscriptionOpen(
   base: string,
   headers: Record<string, string>,
@@ -1331,7 +1338,7 @@ async function messageSubscriptionOpen(
       method: "POST",
       headers,
       body: JSON.stringify({
-        filter: { processInstanceKey: processKey, messageName, messageSubscriptionState: "CREATED" },
+        filter: { processInstanceKey: processKey, messageName, correlationKey, messageSubscriptionState: "CREATED" },
         page: { limit: 50 },
       }),
     });
