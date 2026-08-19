@@ -66,9 +66,12 @@ function remainderDefersScope(text: string): boolean {
 }
 
 // A FILED follow-up issue link for the deferred remainder: an explicit tracking marker followed by
-// an issue ref. This is the machine-checkable contract feature.md asks split slices to emit.
+// an issue ref — a bare `#123`, a cross-repo `owner/repo#123`, or a full issue URL (matching the
+// closing-keyword parser, so an explicit `https://github.com/<owner>/<repo>/issues/<n>` link counts
+// as a tracked follow-up rather than being mistaken for untracked prose). This is the
+// machine-checkable contract feature.md asks split slices to emit.
 const FOLLOWUP_MARKER =
-  /\b(?:deferred[- ]to|tracked[- ]in|tracking issue|follow[- ]?ups?(?:\s+issue)?)\b[\s:]*(?:[\w.-]+\/[\w.-]+)?#\d+/i;
+  /\b(?:deferred[- ]to|tracked[- ]in|tracking issue|follow[- ]?ups?(?:\s+issue)?)\b[\s:]*(?:https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/issues\/\d+|(?:[\w.-]+\/[\w.-]+)?#\d+)/i;
 
 /** The distinct issue refs a body closes via a GitHub closing keyword, in first-seen order. */
 export function findClosingKeywordRefs(body: string | null | undefined): string[] {

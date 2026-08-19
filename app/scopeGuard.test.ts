@@ -135,4 +135,13 @@ test("hasFollowupIssueRef: only an explicit tracking marker + issue ref counts",
   assert(hasFollowupIssueRef("Follow up issue: #900"), "Follow up issue marker");
   assert(!hasFollowupIssueRef("The rest is deferred."), "bare deferral prose is not a filed link");
   assert(!hasFollowupIssueRef("Refs #631"), "a parent ref is not a remainder tracker");
+  // A full GitHub issue URL is a valid filed follow-up link, same as the closing-keyword parser accepts.
+  assert(
+    hasFollowupIssueRef("Deferred-to: https://github.com/owner/repo/issues/872"),
+    "Deferred-to marker with a full issue URL",
+  );
+  assert(
+    hasFollowupIssueRef("Follow-up issue: https://github.com/nanobpm/nano-workforce/issues/900"),
+    "Follow-up marker with a full issue URL",
+  );
 });
