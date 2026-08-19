@@ -17,6 +17,8 @@ import {
   classifyMergeability,
   coalesceTitle,
   ensureFreshHeadRun,
+  ensurePromotionPr,
+  fetchDefaultBranch,
   fetchPrHead,
   fetchPrMeta,
   fetchPrReviews,
@@ -32,6 +34,7 @@ import { mergeLanes, readExclusions } from "./mergeExclusion.ts";
 import { freshHeadRunAction, headRunPresenceCount, loadMergeProtocol } from "./mergeProtocol.ts";
 import { type PrLaneDecision, planPrLane, taskDependencyDepths } from "./mergeTrain.ts";
 import { planReviews, plans, planTaskDeps, planTasks } from "./plan.ts";
+import { derivePromotionState, isPromotable, promotionPrBody, promotionPrTitle } from "./promotion.ts";
 import { clampNudgeMinutes, reviewWaitTimeout } from "./reviewWait.ts";
 import { trialMergeAudits } from "./trialMerge.ts";
 import {
@@ -1347,6 +1350,91 @@ export async function pollDelivery(data: DataLayer) {
   }
 }
 
+/** Idempotent promotion pass (issue #299): open — and then track — the `epic/* → <default>`
+ * promotion PR for every epic that has LANDED on a custom integration branch. This is the missing
+ * counterpart to `ensureBaseBranch`: that creates the `epic/*` branch slices merge into; this
+ * delivers the fully-landed branch to the default branch. Runs AFTER `pollDelivery` so it reads the
+ * freshly-projected `delivery = landed` signal.
+ *
+ * Per promotable plan (`isPromotable`: `delivery = landed` AND base is `epic/*`):
+ *   • No promotion PR yet → open ONE `epic/* → <default>` PR (idempotent against a remote head-branch
+ *     lookup, so a crash between GitHub-create and the `promotion_pr` write can't duplicate it),
+ *     record `promotion_pr`, mark `promotion_state = open`, and enroll it into the convergence + merge
+ *     loop via `submitPr` (a real PR that must go green + converge before it merges — never an
+ *     auto-merge). If the PR can't be opened this pass (no default branch resolvable, no transport),
+ *     leave it at `promotion_state = ready` and retry next pass.
+ *   • Promotion PR already recorded → project `promotion_state` from its live status
+ *     (`merged → promoted`, else `open`); if its `pull_requests` row is absent (a prior `submitPr`
+ *     failed / DB desync) re-enroll it (idempotent).
+ *
+ * A `main`-based epic (base is not `epic/*`) is never promotable — its slices already landed on the
+ * default branch, so there is nothing to promote. Best-effort + per-plan isolated. */
+export async function pollPromotion(data: DataLayer, engine: EngineClient, token: string) {
+  // Preload every PR status once per pass (mirrors pollDelivery — avoids an N+1 `prs(data).get`).
+  const statusByPrKey = new Map<string, string>();
+  for (const pr of await prs(data).all()) statusByPrKey.set(pr.pr_key, pr.status);
+  for (const plan of await plans(data).all()) {
+    if (!isPromotable(plan)) continue;
+    const base = plan.base_branch;
+    if (!base) continue; // narrowed by isPromotable, but keep the type-checker honest
+    try {
+      // Already opened → project state from the promotion PR's live status, and re-enroll it if its
+      // convergence row went missing (a prior submit failed, or the app/engine store desynced).
+      if (plan.promotion_pr) {
+        const prStatus = statusByPrKey.get(plan.promotion_pr) ?? null;
+        const nextState = derivePromotionState(true, prStatus === "merged");
+        if (plan.promotion_state !== nextState) {
+          await plans(data).update(plan.plan_key, { promotion_state: nextState, updated_at: now() });
+        }
+        if (prStatus === null) {
+          const parsed = parsePr(plan.promotion_pr);
+          if (parsed) await submitPr(data, engine, parsed);
+        }
+        continue;
+      }
+      // Not opened yet: this epic is ready to promote. Resolve the target (default) branch; without
+      // it we can't open the PR this pass, so surface `ready` and retry.
+      const target = await fetchDefaultBranch(plan.repo, token);
+      if (!target || target === base) {
+        // `target === base` is a defensive guard (an `epic/*` base can't be the default), but never
+        // open a branch-into-itself PR. Either way, mark ready and retry.
+        if (plan.promotion_state !== "ready") {
+          await plans(data).update(plan.plan_key, { promotion_state: "ready", updated_at: now() });
+        }
+        continue;
+      }
+      const tasks = await planTasks(data).find({ plan_key: plan.plan_key });
+      const slicePrKeys = tasks.map((t) => t.pr_key).filter((k): k is string => !!k);
+      const epicTitle = coalesceTitle(plan.title, plan.plan_key);
+      const title = promotionPrTitle(base, target, epicTitle);
+      const body = promotionPrBody(base, target, plan.plan_key, slicePrKeys);
+      const result = await ensurePromotionPr(plan.repo, base, target, title, body, token);
+      if (!result) {
+        // No transport this pass — surface ready-to-promote and retry.
+        if (plan.promotion_state !== "ready") {
+          await plans(data).update(plan.plan_key, { promotion_state: "ready", updated_at: now() });
+        }
+        continue;
+      }
+      const promotionPrKey = `${plan.repo}#${result.number}`;
+      // Persist the idempotency key + state BEFORE enrolling, so a submit failure can never lead a
+      // later pass to open a second PR (it will see `promotion_pr` set and only re-enroll).
+      await plans(data).update(plan.plan_key, {
+        promotion_pr: promotionPrKey,
+        promotion_state: "open",
+        updated_at: now(),
+      });
+      const parsed = parsePr(promotionPrKey);
+      if (parsed) await submitPr(data, engine, parsed);
+      console.log(
+        `[poller] promotion PR ${result.created ? "opened" : "reused"} ${promotionPrKey} (${base} -> ${target})`,
+      );
+    } catch (err) {
+      console.error(`[poller] promotion ${plan.plan_key}: ${err}`);
+    }
+  }
+}
+
 /** Reconcile each in-flight FEATURE run against its handed-off PR (fix: Feature history stuck at
  * `converging`). A feature run ends its own process with `status = converging` and its PR's live
  * outcome (merged / converged / abandoned) thereafter lives only on the `pull_requests` row keyed
@@ -1699,6 +1787,7 @@ export async function pollOnce(
   await pollReviews(data, engine, token);
   await pollMerges(data, engine, token);
   await pollDelivery(data);
+  await pollPromotion(data, engine, token);
   await pollFeatureDelivery(data);
   await pollLineage(data);
   await pollFeatureEscalations(data, engine);

@@ -89,6 +89,17 @@ export interface Plan {
   // view can show which phase the epic is IN rather than only the process-instance terminal status.
   // Display-only; NULL until the lifecycle first stamps it (grandfathers pre-#261 rows).
   epic_phase: string | null;
+  // Epic integration-branch → default-branch promotion (042_plan_promotion.sql, #299). When an epic
+  // targets a custom `epic/*` integration branch and every slice PR has merged (`delivery = landed`),
+  // the poller's `pollPromotion` pass opens exactly ONE `epic/* → <default>` promotion PR and drives
+  // it through the same convergence + merge protocol as every other PR (see app/promotion.ts).
+  //   • promotion_pr    — the `owner/repo#N` key of that promotion PR, or NULL until one is opened.
+  //                       PRIMARY idempotency key: a set value never re-opens a second PR.
+  //   • promotion_state — the epic-card progression 'ready' → 'open' → 'promoted', or NULL until the
+  //                       epic first becomes promotable (also NULL forever for a `main`-based epic,
+  //                       which has nothing to promote). Display-only; projected by the poller.
+  promotion_pr: string | null;
+  promotion_state: string | null;
   created_at: string;
   updated_at: string;
 }
