@@ -19,3 +19,9 @@
 -- runner wraps each file in its own transaction, so this file must NOT contain BEGIN/COMMIT.
 ALTER TABLE plan_conformance ADD COLUMN process_key TEXT;
 ALTER TABLE plan_conformance ADD COLUMN review_status TEXT NOT NULL DEFAULT 'reviewed';
+
+-- `pollUserTasks` scans open retro escalations by `review_status = 'reviewing'` every poll pass
+-- (app/conformance.ts `activeConformanceReviews`). Index it so the common-case status scan stays a
+-- cheap lookup instead of a full table scan as conformance rows accumulate — mirrors the
+-- `idx_feature_runs_status` precedent (028) for the equivalent status-scanned aggregate.
+CREATE INDEX IF NOT EXISTS idx_plan_conformance_review_status ON plan_conformance(review_status);
