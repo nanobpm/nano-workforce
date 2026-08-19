@@ -1,3 +1,10 @@
+# [0.95.0](https://github.com/nanobpm/nano-workforce/compare/v0.94.0...v0.95.0) (2026-08-19)
+
+
+### Features
+
+* **pages:** render "Updated" columns in the viewer's local time ([#302](https://github.com/nanobpm/nano-workforce/issues/302)) ([a73504d](https://github.com/nanobpm/nano-workforce/commit/a73504d6d6ebc968f21fa0f49eebf72774aa4b51)), closes [nano-ide#327](https://github.com/nano-ide/issues/327) [nano-ide#329](https://github.com/nano-ide/issues/329) [#301](https://github.com/nanobpm/nano-workforce/issues/301) [nano-ide#329](https://github.com/nano-ide/issues/329)
+
 # [0.94.0](https://github.com/nanobpm/nano-workforce/compare/v0.93.0...v0.94.0) (2026-08-19)
 
 
