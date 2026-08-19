@@ -1,3 +1,10 @@
+# [0.93.0](https://github.com/nanobpm/nano-workforce/compare/v0.92.0...v0.93.0) (2026-08-19)
+
+
+### Features
+
+* enforce scope-integrity guards in the review-convergence loop ([#314](https://github.com/nanobpm/nano-workforce/issues/314)) ([0a2a012](https://github.com/nanobpm/nano-workforce/commit/0a2a012b5d11e129de27633f1ef8508bc0fb457b)), closes [#631](https://github.com/nanobpm/nano-workforce/issues/631) [#863](https://github.com/nanobpm/nano-workforce/issues/863) [#872](https://github.com/nanobpm/nano-workforce/issues/872) [#N](https://github.com/nanobpm/nano-workforce/issues/N) [#N](https://github.com/nanobpm/nano-workforce/issues/N) [#N](https://github.com/nanobpm/nano-workforce/issues/N) [#313](https://github.com/nanobpm/nano-workforce/issues/313) [#N](https://github.com/nanobpm/nano-workforce/issues/N) [owner/repo#N](https://github.com/owner/repo/issues/N)
+
 # [0.92.0](https://github.com/nanobpm/nano-workforce/compare/v0.91.0...v0.92.0) (2026-08-19)
 
 
