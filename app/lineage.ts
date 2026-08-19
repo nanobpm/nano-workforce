@@ -344,7 +344,9 @@ function toLineagePr(row: PrRow): LineagePr {
 
 /** Assemble the origin + PR set for every root from the live gateway rows, then derive each thread.
  * Reused by both `getLineage` (single root, on demand) and `pollLineage` (all roots, projected). */
-async function collectThreads(data: DataLayer): Promise<Map<string, LineageThread>> {
+async function collectThreads(
+  data: DataLayer,
+): Promise<{ threads: Map<string, LineageThread>; allPrs: PrRow[] }> {
   const allPrs = await prRows(data).all();
   const prByKey = new Map<string, PrRow>();
   for (const pr of allPrs) prByKey.set(pr.pr_key, pr);
@@ -408,7 +410,7 @@ async function collectThreads(data: DataLayer): Promise<Map<string, LineageThrea
     threads.set(rootKey, deriveLineage({ kind: "pr", key: rootKey }, prs.map(toLineagePr)));
   }
 
-  return threads;
+  return { threads, allPrs };
 }
 
 /** Union the PRs a feature root owns: those threaded to it + its own denormalised `pr_key`. */
@@ -476,7 +478,7 @@ export async function getLineage(
   data: DataLayer,
   rootRequestKey: string,
 ): Promise<LineageThread | null> {
-  const threads = await collectThreads(data);
+  const { threads } = await collectThreads(data);
   return threads.get(rootRequestKey) ?? null;
 }
 
@@ -484,7 +486,7 @@ export async function getLineage(
  * deterministic order (the projection has no per-thread timestamp to sort on, and equal-`active`
  * ties would otherwise be nondeterministic across passes). */
 export async function listLineage(data: DataLayer): Promise<LineageThread[]> {
-  const threads = await collectThreads(data);
+  const { threads } = await collectThreads(data);
   return [...threads.values()].sort(
     (a, b) => Number(b.active) - Number(a.active) || a.rootRequestKey.localeCompare(b.rootRequestKey),
   );
@@ -495,8 +497,9 @@ export async function listLineage(data: DataLayer): Promise<LineageThread[]> {
  * when the projection actually changes. Best-effort; per-root failures are isolated. */
 export async function pollLineage(data: DataLayer): Promise<void> {
   let threads: Map<string, LineageThread>;
+  let allPrs: PrRow[];
   try {
-    threads = await collectThreads(data);
+    ({ threads, allPrs } = await collectThreads(data));
   } catch (err) {
     console.error(`[poller] lineage collect: ${err}`);
     return;
@@ -555,7 +558,7 @@ export async function pollLineage(data: DataLayer): Promise<void> {
       console.error(`[poller] lineage ${thread.rootRequestKey}: ${err}`);
     }
   }
-  await projectEpicPhaseLabels(data, threads);
+  await projectEpicPhaseLabels(data, threads, allPrs);
 }
 
 /** Denormalise each epic thread's phase label down onto its member PRs' `pull_requests.epic_phase_label`
@@ -567,21 +570,17 @@ export async function pollLineage(data: DataLayer): Promise<void> {
 async function projectEpicPhaseLabels(
   data: DataLayer,
   threads: Map<string, LineageThread>,
+  allPrs: PrRow[],
 ): Promise<void> {
   // Desired label per member PR: an epic thread stamps its `epicPhaseLabel`, every other thread NULL.
   const desired = new Map<string, string | null>();
   for (const thread of threads.values()) {
     for (const key of thread.prKeys) desired.set(key, thread.epicPhaseLabel);
   }
+  // Reuse the PR rows `collectThreads` already read this pass rather than re-scanning the whole
+  // `pull_requests` table — the projection only writes the rows whose label actually changed.
   const table = prRows(data);
-  let rows: PrRow[];
-  try {
-    rows = await table.all();
-  } catch (err) {
-    console.error(`[poller] lineage epic-phase read: ${err}`);
-    return;
-  }
-  for (const pr of rows) {
+  for (const pr of allPrs) {
     const want = desired.get(pr.pr_key) ?? null;
     if ((pr.epic_phase_label ?? null) === want) continue; // steady state — no write
     try {

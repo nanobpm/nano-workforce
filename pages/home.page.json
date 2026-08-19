@@ -259,15 +259,30 @@
               "label": "Outcome"
             },
             {
-              "field": "root_request_key",
-              "label": "Epic root"
-            },
-            {
               "field": "epic_phase_label",
               "label": "Epic phase"
             }
           ],
           "children": [
+            {
+              "title": "Epic",
+              "source": "app",
+              "table": "plans",
+              "parentField": "root_request_key",
+              "childField": "plan_key",
+              "columns": [
+                {
+                  "field": "title",
+                  "header": "Epic root",
+                  "truncate": true,
+                  "linkField": "issue_url"
+                },
+                {
+                  "field": "epic_phase",
+                  "header": "Phase"
+                }
+              ]
+            },
             {
               "title": "Epic slices",
               "source": "app",
