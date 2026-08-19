@@ -102,6 +102,7 @@
       <bpmn:incoming>f_ci_fixed</bpmn:incoming>
       <bpmn:incoming>f_reb_rebased</bpmn:incoming>
       <bpmn:incoming>f_m_evicted</bpmn:incoming>
+      <bpmn:incoming>f_m_escReenter</bpmn:incoming>
       <bpmn:outgoing>f_m_arm</bpmn:outgoing>
     </bpmn:serviceTask>
     <bpmn:intermediateCatchEvent id="wait-mergeable" name="Wait: mergeable">
@@ -187,6 +188,10 @@
           <zeebe:property name="io.nanobpm.dataEnvelope.in" value="EscalationIn" />
           <zeebe:property name="io.nanobpm.dataEnvelope.out" value="EscalationOut" />
         </zeebe:properties>
+        <zeebe:ioMapping>
+          <zeebe:input source="=&#34;blocked&#34;" target="status" />
+          <zeebe:input source="=&#34;This PR cannot be merged and needs a human decision. &#34; + (if mergeState = &#34;conflict&#34; then &#34;The automated rebase agent could not resolve the merge conflicts on this branch. Resolve them manually (or reply with guidance), then reply to retry.&#34; else if mergeState = &#34;ready&#34; then &#34;The merge attempt did not land (merge result: &#34; + mergeStatus + &#34;). Investigate why GitHub refused the merge, then reply to retry.&#34; else if status = &#34;blocked&#34; then &#34;The automated CI-fix agent could not make the required checks green. Fix the failing checks on the branch (or reply with guidance), then reply to retry.&#34; else &#34;The automated CI-fix agent exceeded its time budget (SLA) before the required checks went green. Check its progress or intervene, then reply to retry.&#34;)" target="question" />
+        </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_m_gBlocked</bpmn:incoming>
       <bpmn:incoming>f_ci_blocked</bpmn:incoming>
@@ -194,6 +199,11 @@
       <bpmn:incoming>f_ci_sla</bpmn:incoming>
       <bpmn:outgoing>f_m_escA</bpmn:outgoing>
     </bpmn:serviceTask>
+    <bpmn:exclusiveGateway id="gw-merge-escalated" name="escalation opened?" default="f_m_escReenter">
+      <bpmn:incoming>f_m_escA</bpmn:incoming>
+      <bpmn:outgoing>f_m_escWait</bpmn:outgoing>
+      <bpmn:outgoing>f_m_escReenter</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
     <bpmn:userTask id="wait-merge-answer" name="Answer escalation">
       <bpmn:extensionElements>
         <zeebe:formDefinition formId="pr-escalation" />
@@ -204,7 +214,7 @@
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_m_escC</bpmn:incoming>
-      <bpmn:incoming>f_m_escA</bpmn:incoming>
+      <bpmn:incoming>f_m_escWait</bpmn:incoming>
       <bpmn:outgoing>f_m_answerRecord</bpmn:outgoing>
     </bpmn:userTask>
     <bpmn:serviceTask id="record-merge-answer" name="Record answer">
@@ -363,7 +373,11 @@
     <bpmn:sequenceFlow id="f_m_landed" sourceRef="wait-landed" targetRef="mark-merged" />
     <bpmn:sequenceFlow id="f_m_done" sourceRef="mark-merged" targetRef="MergeEnd" />
     <bpmn:sequenceFlow id="f_m_escC" sourceRef="merge-esc-conflict" targetRef="wait-merge-answer" />
-    <bpmn:sequenceFlow id="f_m_escA" sourceRef="merge-esc-attempt" targetRef="wait-merge-answer" />
+    <bpmn:sequenceFlow id="f_m_escA" sourceRef="merge-esc-attempt" targetRef="gw-merge-escalated" />
+    <bpmn:sequenceFlow id="f_m_escWait" sourceRef="gw-merge-escalated" targetRef="wait-merge-answer">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=escalated = true</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="f_m_escReenter" name="no escalation opened" sourceRef="gw-merge-escalated" targetRef="arm-merge" />
     <bpmn:sequenceFlow id="f_m_answerRecord" sourceRef="wait-merge-answer" targetRef="record-merge-answer" />
     <bpmn:sequenceFlow id="f_m_answer" sourceRef="record-merge-answer" targetRef="arm-merge" />
     <bpmn:sequenceFlow id="f_reb_sla" name="agent SLA elapsed" sourceRef="be_rebase_sla" targetRef="merge-esc-conflict" />
@@ -440,11 +454,17 @@
       <bpmndi:BPMNShape id="BPMNShape_merge-esc-attempt" bpmnElement="merge-esc-attempt">
         <dc:Bounds x="1438" y="1040" width="100" height="80" />
       </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_gw-merge-escalated" bpmnElement="gw-merge-escalated" isMarkerVisible="true">
+        <dc:Bounds x="1663" y="1055" width="50" height="50" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1651" y="1022" width="74" height="28" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_wait-merge-answer" bpmnElement="wait-merge-answer">
-        <dc:Bounds x="1638" y="1040" width="100" height="80" />
+        <dc:Bounds x="1838" y="1040" width="100" height="80" />
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_record-merge-answer" bpmnElement="record-merge-answer">
-        <dc:Bounds x="1838" y="1040" width="100" height="80" />
+        <dc:Bounds x="2038" y="1040" width="100" height="80" />
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_gw-ci-fix" bpmnElement="gw-ci-fix" isMarkerVisible="true">
         <dc:Bounds x="863" y="1535" width="50" height="50" />
@@ -577,16 +597,25 @@
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_m_escC" bpmnElement="f_m_escC">
         <di:waypoint x="1338" y="1560" />
-        <di:waypoint x="1688" y="1560" />
-        <di:waypoint x="1688" y="1120" />
+        <di:waypoint x="1888" y="1560" />
+        <di:waypoint x="1888" y="1120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_f_m_escReenter" bpmnElement="f_m_escReenter">
+        <di:waypoint x="1688" y="1105" />
+        <di:waypoint x="1688" y="1140" />
+        <di:waypoint x="402" y="1140" />
+        <di:waypoint x="402" y="160" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1008" y="1093" width="74" height="42" />
+        </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_m_answerRecord" bpmnElement="f_m_answerRecord">
-        <di:waypoint x="1738" y="1080" />
-        <di:waypoint x="1838" y="1080" />
+        <di:waypoint x="1938" y="1080" />
+        <di:waypoint x="2038" y="1080" />
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_m_answer" bpmnElement="f_m_answer">
-        <di:waypoint x="1888" y="1120" />
-        <di:waypoint x="1888" y="1140" />
+        <di:waypoint x="2088" y="1120" />
+        <di:waypoint x="2088" y="1140" />
         <di:waypoint x="402" y="1140" />
         <di:waypoint x="402" y="160" />
       </bpmndi:BPMNEdge>
@@ -626,13 +655,13 @@
       <bpmndi:BPMNEdge id="BPMNEdge_f_ci_go" bpmnElement="f_ci_go">
         <di:waypoint x="888" y="1585" />
         <di:waypoint x="888" y="1605" />
-        <di:waypoint x="1958" y="1605" />
-        <di:waypoint x="1958" y="555" />
+        <di:waypoint x="2158" y="1605" />
+        <di:waypoint x="2158" y="555" />
         <di:waypoint x="1018" y="555" />
         <di:waypoint x="1018" y="580" />
         <di:waypoint x="1038" y="580" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="1963" y="1066" width="49" height="28" />
+          <dc:Bounds x="2163" y="1066" width="49" height="28" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_ci_blocked" bpmnElement="f_ci_blocked">
@@ -657,14 +686,14 @@
         <di:waypoint x="933" y="280" />
         <di:waypoint x="933" y="305" />
         <di:waypoint x="1558" y="305" />
-        <di:waypoint x="1558" y="1500" />
-        <di:waypoint x="1418" y="1500" />
+        <di:waypoint x="1558" y="1125" />
+        <di:waypoint x="1418" y="1125" />
         <di:waypoint x="1418" y="875" />
         <di:waypoint x="1018" y="875" />
         <di:waypoint x="1018" y="900" />
         <di:waypoint x="1038" y="900" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="1464" y="1467" width="49" height="28" />
+          <dc:Bounds x="1563" y="701" width="49" height="28" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_reb_blocked" bpmnElement="f_reb_blocked">
@@ -718,7 +747,11 @@
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_m_escA" bpmnElement="f_m_escA">
         <di:waypoint x="1538" y="1080" />
-        <di:waypoint x="1638" y="1080" />
+        <di:waypoint x="1663" y="1080" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_f_m_escWait" bpmnElement="f_m_escWait">
+        <di:waypoint x="1713" y="1080" />
+        <di:waypoint x="1838" y="1080" />
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_reb_sla" bpmnElement="f_reb_sla">
         <di:waypoint x="1088" y="978" />
