@@ -875,9 +875,17 @@ async function isDepMerged(data: DataLayer, depKey: string, token: string): Prom
 export async function abandonClosedPr(data: DataLayer, prKey: string, detail: string): Promise<void> {
   const ts = now();
   const parsed = parsePr(prKey);
-  if (parsed) await ensurePr(data, { prKey, repo: parsed.repo, number: parsed.number });
+  // Self-heal the FK parent, but ONLY when `prKey` is well-formed. A malformed key can't be healed
+  // (there's no repo/number to `ensurePr`), and silently skipping the heal would let the downstream
+  // `merges.insert` fail with an opaque `FOREIGN KEY constraint failed` — the exact incident this
+  // helper exists to prevent. Fail closed with a clear, actionable error instead.
+  if (!parsed) {
+    throw new Error(`abandonClosedPr: malformed prKey ${JSON.stringify(prKey)} — cannot self-heal the pull_requests FK parent`);
+  }
+  await ensurePr(data, { prKey, repo: parsed.repo, number: parsed.number });
   const merges = data.table("merges", "id");
-  const alreadyAudited = (await merges.find({ pr_key: prKey, outcome: "abandoned", method: "pr-closed" })).length > 0;
+  const alreadyAudited =
+    (await merges.findOne({ pr_key: prKey, outcome: "abandoned", method: "pr-closed" })) !== null;
   if (!alreadyAudited) {
     try {
       await merges.insert({

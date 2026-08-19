@@ -6,7 +6,7 @@
 // loop already guards in `startPlan`). Drives `submitPr` against an in-memory data layer with the
 // GitHub transport forced off so it is hermetic.
 import { test } from "node:test";
-import { assertEquals } from "#test-assert";
+import { assertEquals, assertRejects, assertStringIncludes } from "#test-assert";
 import { memDataFor } from "../test/worldDb.ts";
 import { DurableResumeRegistry } from "./durableResume.ts";
 import { WorldStore } from "./world/index.ts";
@@ -918,6 +918,29 @@ test("abandonClosedPr self-heals a missing pull_requests parent row before the F
   assertEquals(parent?.number, 71, "reconstructed parent carries the parsed number");
   assertEquals(stores.plan_tasks.rows.find((r) => r.id === "owner/repo#67:c")?.status, "abandoned");
   assertEquals(stores.merges.rows.length, 1, "terminal audit row written once");
+});
+
+// #352 review (suppressed advisory app/service.ts:861): the self-heal only runs when `parsePr(prKey)`
+// succeeds, so a MALFORMED prKey (engine/app.db desync, a process-variable regression) would skip
+// the heal yet still reach `merges.insert` — which, with a missing parent, fails with an opaque
+// `FOREIGN KEY constraint failed`, the exact incident this helper exists to prevent. The canonical
+// writer must fail closed with a clear, actionable error naming the bad key, not leak an FK incident.
+test("abandonClosedPr rejects a malformed prKey with a clear error before any FK-child insert (#352)", async () => {
+  const stores: Record<string, { rows: any[]; key: string }> = {
+    pull_requests: { rows: [], key: "pr_key" },
+    plan_tasks: { rows: [], key: "id" },
+    merges: { rows: [], key: "id" },
+  };
+  const data = {
+    table: (name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key),
+  } as any;
+
+  const err = await assertRejects(() => abandonClosedPr(data, "not-a-valid-pr-key", "closed without merging"));
+  assertStringIncludes((err as Error).message, "malformed prKey");
+  assertStringIncludes((err as Error).message, "not-a-valid-pr-key");
+  // No audit row and no terminal side effects leaked before the guard fired.
+  assertEquals(stores.merges.rows.length, 0, "no FK-child audit insert attempted on a malformed prKey");
+  assertEquals(stores.pull_requests.rows.length, 0, "no parent row written on a malformed prKey");
 });
 
 
