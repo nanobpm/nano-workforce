@@ -39,12 +39,29 @@ function gatewayDefault(id: string, def: string): boolean {
   return m[0].includes(`default="${def}"`);
 }
 
+// Assert the conditionExpression *of a specific sequenceFlow* contains `needle`, so the guard
+// cannot be satisfied by the same substring appearing on an unrelated flow (e.g. the
+// merge-esc-attempt question FEEL also mentions `mergeStatus = "retry"`).
+function flowHasCondition(id: string, needle: string): boolean {
+  const m = flat.match(
+    new RegExp(`<bpmn:sequenceFlow\\b[^>]*\\bid="${id}"[^>]*>(.*?)</bpmn:sequenceFlow>`),
+  );
+  if (!m) return false;
+  const cond = m[1].match(/<bpmn:conditionExpression\b[^>]*>(.*?)<\/bpmn:conditionExpression>/);
+  return cond ? cond[1].includes(needle) : false;
+}
+
 test("gw-merge routes the retry outcome to a dedicated budget gate, not to a human", () => {
   // A `retry` merge result must reach the retry-budget gate…
   assert(hasFlow("gw-merge", "gw-merge-retry"), "gw-merge → gw-merge-retry (retry) missing");
   // …guarded by the exact retry condition (mergeStatus = "retry").
   assert(flowHasId("f_m_gRetry", "gw-merge", "gw-merge-retry"), "f_m_gRetry must be gw-merge → gw-merge-retry");
-  assertStringIncludes(flat, 'mergeStatus = "retry"');
+  // Assert the retry condition on f_m_gRetry ITSELF — not merely anywhere in the model — so the
+  // guard cannot be satisfied by the identical substring in the merge-esc-attempt question FEEL.
+  assert(
+    flowHasCondition("f_m_gRetry", 'mergeStatus = "retry"'),
+    'f_m_gRetry conditionExpression must be mergeStatus = "retry"',
+  );
 });
 
 test("retry arm mirrors the fix-ci arm: budget gate → re-arm, exhausted → escalate", () => {
