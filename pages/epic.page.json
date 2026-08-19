@@ -79,6 +79,7 @@
           { "field": "epic_phase", "header": "Phase" },
           { "field": "status", "header": "Status", "link": { "kind": "processExplorer", "keyField": "process_key" } },
           { "field": "delivery", "header": "Delivery" },
+          { "field": "promotion_state", "header": "Promotion" },
           { "field": "base_branch", "header": "Base branch" },
           { "field": "wave_label", "header": "Wave" },
           { "field": "task_count", "header": "Tasks" },

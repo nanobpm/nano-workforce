@@ -61,6 +61,7 @@
           { "field": "epic_phase", "header": "Phase" },
           { "field": "status", "header": "Status", "link": { "kind": "processExplorer", "keyField": "process_key" } },
           { "field": "delivery", "header": "Delivery" },
+          { "field": "promotion_state", "header": "Promotion" },
           { "field": "wave_label", "header": "Wave" },
           { "field": "task_count", "header": "Tasks" },
           { "field": "updated_at", "header": "Updated", "width": "9rem" }
@@ -72,6 +73,7 @@
             { "field": "issue_number", "label": "Issue number" },
             { "field": "base_branch", "label": "Base branch (blank = repo default)" },
             { "field": "delivery_label", "label": "Delivery rollup (slices merged / converging)" },
+            { "field": "promotion_pr", "label": "Promotion PR (epic/* → default branch)" },
             { "field": "outcome", "label": "Outcome" }
           ]
         }
