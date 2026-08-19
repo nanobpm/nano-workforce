@@ -114,15 +114,17 @@ export function immutabilityErrorsFromDiff(statusOutput: string): string[] {
 }
 
 /** Fail on any rename, delete, or content change to a migration already present at the baseline — a
- *  merged migration is immutable (issue #357). Additions are fine. */
-function checkImmutability(errors: string[]): void {
+ *  merged migration is immutable (issue #357). Additions are fine. Returns whether the immutability
+ *  gate actually ran (false when it was skipped because no baseline/diff was available), so the
+ *  caller's success message doesn't claim a guarantee the gate never checked. */
+function checkImmutability(errors: string[]): boolean {
   const baseline = resolveBaseline();
   if (baseline === null) {
     console.warn(
       "check-migrations: WARN — no origin/main baseline resolvable; skipping the immutability check " +
         "(CI runs it with full history via fetch-depth: 0).",
     );
-    return;
+    return false;
   }
 
   let statusOutput: string;
@@ -141,10 +143,11 @@ function checkImmutability(errors: string[]): void {
     console.warn(
       `check-migrations: WARN — could not diff migrations against ${baseline}; skipping the immutability check.`,
     );
-    return;
+    return false;
   }
 
   errors.push(...immutabilityErrorsFromDiff(statusOutput));
+  return true;
 }
 
 function main(): void {
@@ -179,15 +182,18 @@ function main(): void {
     }
   }
 
-  checkImmutability(errors);
+  const immutabilityChecked = checkImmutability(errors);
 
   if (errors.length > 0) {
     console.error(`check-migrations: db/migrations failed its merge-safety checks:\n${errors.join("\n")}`);
     process.exit(1);
   }
 
+  const immutabilityClause = immutabilityChecked
+    ? "none renamed/deleted/edited"
+    : "immutability check skipped (no baseline)";
   console.log(
-    `check-migrations: OK (${files.length} migrations, no colliding prefixes, none renamed/deleted/edited).`,
+    `check-migrations: OK (${files.length} migrations, no colliding prefixes, ${immutabilityClause}).`,
   );
 }
 

@@ -9,6 +9,7 @@
 // records the new filename as applied. This is a pure ledger-alias — it makes NO schema change — and
 // is safe to run repeatedly and on a healthy DB (it only acts on the broken state). After running it,
 // restart the node; the renamed migration is skipped and boot completes.
+import { existsSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { healMigrationLedger } from "../app/migrationHeal.ts";
 
@@ -17,6 +18,15 @@ function main(): void {
   if (!dbPath) {
     console.error(
       "usage: node --experimental-strip-types scripts/heal-migration-ledger.ts <path-to-sqlite.db>",
+    );
+    process.exit(2);
+  }
+
+  // `DatabaseSync` silently CREATES an empty DB when the path doesn't exist, so a typo'd path would
+  // "heal" a brand-new empty file and misleadingly report "nothing to heal". Fail loudly instead.
+  if (!existsSync(dbPath)) {
+    console.error(
+      `heal-migration-ledger: ${dbPath} — no such file. Pass the path to the existing install's SQLite DB.`,
     );
     process.exit(2);
   }
