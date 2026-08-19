@@ -46,4 +46,4 @@ function main(): void {
   }
 }
 
-main();
+if (import.meta.main) main();
