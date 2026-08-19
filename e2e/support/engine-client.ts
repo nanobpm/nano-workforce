@@ -9,10 +9,10 @@ import type { TestApp } from "@nanobpm/urban-testkit";
 // production adapters (`SdkEngineClient`) implement both for real.
 //
 //  - `getForm` (urban 0.49.0, ADR 0062): the original instance of this lag. Now implemented by the
-//    pinned testkit (0.5.0), so this guard is a no-op there; kept as defence against version skew.
+//    currently pinned testkit, so this guard is a no-op there; kept as defence against version skew.
 //    These hermetic flows drive completion directly and never resolve a form schema, so the fallback
 //    returns `null` — the documented "no matching form" path.
-//  - `openUserTasks` (issue #294 moved the pollers onto it): the CURRENT gap — testkit 0.5.0 has
+//  - `openUserTasks` (issue #294 moved the pollers onto it): the CURRENT gap — the pinned testkit has
 //    `searchUserTasks` but not the open-task-scoped `openUserTasks`, so a poller call throws
 //    `not a function` (swallowed by the poller's try/catch) and the read-model denormalisation
 //    silently no-ops. Polyfill it as `searchUserTasks({ state: "CREATED" })` — byte-for-byte what
