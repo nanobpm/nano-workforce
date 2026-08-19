@@ -15,18 +15,19 @@
 //      in-request intra-set shared-base guard (two members of the same set cannot silently grab the
 //      same custom base, which admitPlan's durable-only rule 4 would miss). The first failure maps to
 //      its 4xx (400/409) via the shared `admitPlanErrorResponse`, before anything is persisted.
-//   4. Only once every epic admits: STAGE the admitted set — each epic into `admitted_epics` and each
-//      validated edge into `admitted_plan_deps` — then return the admitted epics, the roots, and the
-//      staged edges.
+//   4. Once every epic admits: STAGE the admitted set — each epic into `admitted_epics` and each
+//      validated edge into `admitted_plan_deps` — then LOWER it (issue #292 slice S3): start every
+//      ROOT immediately, start every DEPENDENT behind its leading capability readiness-gate, and
+//      materialize the durable `plan_deps` edges. Returns the admitted epics, the roots, the gated
+//      dependents, and the materialized edges.
 //
-// This slice deliberately does NOT start any epic or seed any readiness gate, and — per the #292
-// design decision — it MATERIALIZES neither a `plans` row nor a `plan_deps` edge. Both are owned by
-// slice S3 (planner lowering: schedule roots, seed the capability gate, bind the resolved version),
-// which reads this staging and creates `plans` + `plan_deps` when it schedules roots — where the
-// `plan_deps.plan_key REFERENCES plans(plan_key)` FK is satisfied by construction. S2 persists into
-// its OWN FK-FREE staging tables instead, so a first-time set submission can never FK-fail here.
-// Re-submitting the identical set is a no-op (admitPlan is idempotent on an already-created base + an
-// inactive plan; the staging records collapse a duplicate epic/edge).
+// The FK-free staging (step 4a) survives a crash between admission and lowering: `lowerAdmittedSet`
+// reads `admitted_epics` / `admitted_plan_deps` and creates the durable `plans` row (via `startPlan`)
+// before recording each `plan_deps` edge, so the `plan_deps.plan_key REFERENCES plans(plan_key)` FK
+// is satisfied by construction. Re-submitting the identical set is a no-op: `admitPlan` is idempotent
+// on an already-created base + inactive plan, the staging records collapse a duplicate epic/edge, and
+// lowering neither double-starts an epic nor re-seeds a gate (`startPlan` short-circuits a running
+// plan) nor duplicates a durable edge.
 
 import { fetchDefaultBranch } from "../app/github.ts";
 import {
@@ -40,6 +41,7 @@ import {
   SharedBaseError,
   validateEpicSet,
 } from "../app/plan.ts";
+import { lowerAdmittedSet } from "../app/planLowering.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
 
 /** One parsed, admission-ready epic member: its parsed issue reference plus the per-epic admission
@@ -167,13 +169,13 @@ export default defineOperation("startEpicSet", async ({ body }, app) => {
     }
   }
 
-  // ── Step 4: STAGE the admitted set + validated edges (idempotent). S2 is the admission DOOR only:
-  // per the #292 design decision it persists into ITS OWN FK-FREE staging tables and MATERIALIZES
-  // neither a `plans` row nor a `plan_deps` edge. Slice S3 (planner lowering) reads this staging and
-  // creates `plans` + `plan_deps` when it schedules roots — where the `plan_deps.plan_key REFERENCES
-  // plans(plan_key)` FK is satisfied by construction. Each admitted epic (INCLUDING roots) is staged
-  // so S3 can materialize its `plans` row; each validated edge is staged FK-free. Only reached once
-  // the WHOLE set admitted.
+  // ── Step 4: STAGE the admitted set + validated edges FK-free (idempotent), THEN lower it (step 5).
+  // Staging first keeps the door crash-safe: `admitted_epics` / `admitted_plan_deps` carry exactly
+  // what `lowerAdmittedSet` needs to materialize the durable `plans` + `plan_deps` graph, so a crash
+  // between staging and lowering loses nothing (a re-dispatch re-reads the staging). The staging
+  // tables are FK-free (no `plans` row need exist yet); lowering creates the `plans` row before
+  // recording each `plan_deps` edge, so the FK holds by construction. Each admitted epic (INCLUDING
+  // roots) is staged; each validated edge is staged. Only reached once the WHOLE set admitted.
   for (const a of admitted) {
     await recordAdmittedEpic(app.data, {
       plan_key: a.parsed.planKey,
@@ -192,20 +194,25 @@ export default defineOperation("startEpicSet", async ({ body }, app) => {
     });
   }
 
-  // Roots = admitted epics with no inbound edge — the ones S3 will start immediately.
-  const dependents = new Set(edges.map((e) => e.consumer));
-  const roots = admitted.map((a) => a.parsed.planKey).filter((k) => !dependents.has(k));
+  // ── Step 5: LOWER the admitted set into a running schedule (issue #292, slice S3). Now that the
+  // whole set has admitted and staged, materialize it: start every ROOT immediately, start every
+  // DEPENDENT behind its leading capability readiness-gate (seeded from its inbound edges), and
+  // materialize the durable `plan_deps` edges. Idempotent — a re-submitted set neither double-starts
+  // an epic nor re-seeds a gate nor duplicates an edge (see lowerAdmittedSet).
+  const lowered = await lowerAdmittedSet(app.data, app.engine, planKeys);
 
-  app.log.info("epic set admitted", {
+  app.log.info("epic set admitted + lowered", {
     epics: admitted.length,
     edges: edges.length,
-    roots: roots.length,
+    roots: lowered.roots.length,
+    dependents: lowered.dependents.length,
   });
   return {
     status: 202,
     body: {
       epics: admitted.map((a) => ({ planKey: a.parsed.planKey, baseBranch: a.baseBranch })),
-      roots,
+      roots: lowered.roots,
+      dependents: lowered.dependents,
       edges: edges.map((e) => ({
         consumer: e.consumer,
         producer: e.producer,

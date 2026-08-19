@@ -22,6 +22,7 @@ import {
   fetchIssueTitle,
 } from "./github.ts";
 import { clearExclusions } from "./mergeExclusion.ts";
+import type { ReadinessProbe } from "./readiness.ts";
 import { clearTaskDeltas } from "./taskDelta.ts";
 
 /** The BPMN process this module drives (resources/processes/plan-fanout.bpmn). */
@@ -873,6 +874,20 @@ function assertAcyclic(adjacency: Map<string, Set<string>>): void {
   }
 }
 
+/** Optional scheduling inputs a planner (slice S3) threads into a plan-fanout instance at start.
+ *
+ * `readinessProbes` is the set of `capability` {@link ReadinessProbe} descriptors a DEPENDENT epic
+ * must satisfy before it fans out any wave — one per inbound inter-epic edge (its producers). The
+ * plan-fanout process runs them as a LEADING readiness-gate preflight (resources/processes/plan-fanout.bpmn):
+ * a root epic (no inbound edge) is started with `undefined`/empty here and skips the gate entirely,
+ * fanning out immediately exactly as a single epic does today. `probeTimeout` is the ISO-8601 bound
+ * the preflight's timers fire off (derived once, via {@link readinessTimeout}, from the same probes)
+ * so a never-publishing producer escalates in bounded time instead of wedging the dependent. */
+export interface StartPlanOptions {
+  readinessProbes?: ReadinessProbe[];
+  probeTimeout?: string;
+}
+
 /** Register a plan row (if new) and start the plan-fanout process. Idempotent on
  * planKey: a plan already in flight is not restarted. */
 export async function startPlan(
@@ -880,7 +895,21 @@ export async function startPlan(
   engine: EngineClient,
   parsed: ParsedIssue,
   baseBranch: string,
+  opts: StartPlanOptions = {},
 ) {
+  // A gated dependent must carry BOTH its probes and the bound its preflight timers fire off:
+  // `pr.readiness-probe` rejects a blank `probeTimeout` (worker.ts) and the preflight escalation
+  // timers read `=probeTimeout`, so a non-empty probe set with a null/blank bound would incident at
+  // runtime. Fail fast at the start door instead — the lowering (planLowering.ts) always derives the
+  // two together via `readinessTimeout`, so this only fires for a mis-seeded direct caller.
+  const probes = opts.readinessProbes && opts.readinessProbes.length > 0 ? opts.readinessProbes : null;
+  if (probes && (opts.probeTimeout ?? "").trim() === "") {
+    throw new Error(
+      `startPlan(${parsed.planKey}): ${probes.length} readiness probe(s) seeded without a probeTimeout — ` +
+        "the preflight escalation timers (=probeTimeout) and pr.readiness-probe both require a non-blank " +
+        "bound. Derive it via readinessTimeout (see planLowering) before starting a gated dependent.",
+    );
+  }
   const table = plans(data);
   const existing = await table.get(parsed.planKey);
   if (existing && !PLAN_TERMINAL_STATUSES.includes(existing.status)) {
@@ -982,6 +1011,25 @@ export async function startPlan(
       // (normalizeBaseBranch rejects blank), so the brief is always rendered.
       baseBranch: base,
       baseBranchBrief: renderBaseBranchBrief(base),
+      // Inter-epic scheduling (issue #292, slice S3): the leading capability readiness-gate the
+      // plan-fanout runs as a PREFLIGHT before wave 0. `readinessProbes` is a DEPENDENT epic's set
+      // of `capability` probes (one per inbound `plan_deps` edge / producer); it is `null` for a
+      // ROOT (no inbound edge), whose preflight gateway then routes straight past the gate so it
+      // fans out immediately. `probeTimeout` bounds the preflight's escalation timers (derived once
+      // from the same probes) so a never-publishing producer escalates without wedging the set.
+      // `resolvedArtifacts` is filled by the preflight on green — the exact `pkg@version`s carrying
+      // each awaited capability (one per probe, `null` for any that escalated). It rides the
+      // implement task's `appendPrompt` (like `baseBranchBrief`) so slices build against exactly the
+      // bound version. Seeded `null` here so a ROOT (which never runs the preflight) still resolves
+      // the variable in that FEEL expression instead of raising an incident.
+      readinessProbes: probes,
+      probeTimeout: opts.probeTimeout ?? null,
+      // The preflight probe worker (`pr.readiness-probe`) requires a non-blank `gateKey` correlation
+      // key (it publishes `readiness-ready` on it). The typed `ReadinessProbeIn` envelope projects it
+      // from THIS process scope (not task-local ioMapping), so it is seeded here — one per dependent
+      // instance. A ROOT never runs the preflight, so its `gateKey` stays `null`, unused.
+      gateKey: probes ? `preflight:${parsed.planKey}` : null,
+      resolvedArtifacts: null,
     },
   });
   const processKey = processInstanceKey == null ? null : String(processInstanceKey);
