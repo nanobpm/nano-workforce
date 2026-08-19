@@ -648,7 +648,7 @@ but encode incompatible decisions about a shared contract** — a genuine design
   `baseRef`) that let large monorepos provision within the clone timeout (#287); the
   harness is PR-agnostic and provisions from that envelope. The worker stays a pure
   provisioner.
-- **review-ready via GitHub webhook** — same `readiness-ready` message, swappable faster trigger,
+- **readiness-ready via GitHub webhook** — same `readiness-ready` message, swappable faster trigger,
   when the app is publicly reachable. Deferred (poller-only for v1).
 - **Supervised vs external worker** — the agent runs as an external
   `c8ctl nano work` daemon by default; a supervised in-server mode is possible
