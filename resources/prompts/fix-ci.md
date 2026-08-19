@@ -75,15 +75,30 @@ Return a structured result:
   first, as `owner/repo#N` refs (or PR URLs), separated by commas or spaces. The
   process records the dependency and automatically re-attempts the merge once every
   named PR has landed.
+- `status: "reattempt"` — you pushed **no** commit because there was **nothing to fix
+  on the branch**: the failing required checks are **stale / transient** — e.g.
+  `CANCELLED` runs superseded by a newer run on the *identical head SHA* (GitHub CI
+  concurrency), a newer run on the same SHA that is already green, or an infrastructure
+  blip — and the PR's head is actually mergeable. This is **not** a defect and **not** a
+  human decision: the merge should simply be **re-queued from ground truth**. Set
+  `pushed: false` and say in `summary` why the checks are stale (which runs, on which
+  SHA). The process re-arms the merge poller, which re-derives mergeability and merges
+  when the head is green — **no human is pulled in**. Prefer this over `blocked` for
+  every "nothing was wrong / the failure was transient / the head already looks green"
+  case.
 - `status: "blocked"` — you could **not** fix it and it genuinely needs a human
   **decision** (a secret, an upstream change, or a judgement call). Set `question` to a
   concise, specific description of what is blocking and what a human must decide.
-  Reserve this for a real decision — if the PR is merely waiting on another PR, use
-  `waiting-on-pr` instead so no human is pulled in.
+  Reserve this for a **real** human decision — if the PR is merely waiting on another PR
+  use `waiting-on-pr`, and if the failing checks are stale/transient with nothing to fix
+  use `reattempt`. `blocked` **pages a human**, so never use it for a self-healing PR.
 
-Never report `fixed` unless you actually pushed a change. If nothing was wrong on
-the branch (the failure was transient infrastructure), say so in `summary` and
-return `blocked` so a human can decide whether to just retry the merge.
+Report whether you pushed via `pushed` (`true` after you commit + push a fix, `false`
+when you changed nothing). Never report `fixed` unless you actually pushed a change. If
+nothing was wrong on the branch (the failure was transient infrastructure / stale
+cancelled checks and the head is green), return **`reattempt`** (with `pushed: false`)
+so the merge is simply re-attempted from ground truth — do **not** return `blocked`,
+which would needlessly page a human.
 
 ### How to return it (the wire mechanism)
 
@@ -98,11 +113,13 @@ machine-readable result one of two ways:
 
    ```sh
    # pushed a fix you believe turns the failing checks green:
-   printf '%s' '{"status":"fixed","summary":"Fixed the flaky timeout in auth.test.ts and pushed"}' > "$AGENT_RESULT_FILE"
+   printf '%s' '{"status":"fixed","pushed":true,"summary":"Fixed the flaky timeout in auth.test.ts and pushed"}' > "$AGENT_RESULT_FILE"
+   # nothing to fix — the failing checks are stale/transient (CANCELLED superseded on the same head SHA, head already green); just re-attempt the merge:
+   printf '%s' '{"status":"reattempt","pushed":false,"summary":"Failing checks are CANCELLED runs superseded by a green run on the same head SHA — nothing to fix, re-queue the merge"}' > "$AGENT_RESULT_FILE"
    # ordering constraint — must wait for another PR to land first:
    printf '%s' '{"status":"waiting-on-pr","summary":"Blocked by the linked-issue gate","dependsOn":"owner/repo#123"}' > "$AGENT_RESULT_FILE"
    # genuinely stuck — a human must decide:
-   printf '%s' '{"status":"blocked","summary":"CI needs an NPM_TOKEN secret I cannot set","question":"Add the NPM_TOKEN repo secret, then answer to rerun."}' > "$AGENT_RESULT_FILE"
+   printf '%s' '{"status":"blocked","pushed":false,"summary":"CI needs an NPM_TOKEN secret I cannot set","question":"Add the NPM_TOKEN repo secret, then answer to rerun."}' > "$AGENT_RESULT_FILE"
    ```
 
    Write this file **once**, at the very end, with your final result. Keep it a flat
@@ -125,7 +142,10 @@ a non-zero exit means a genuine crash and the job is retried.
 **Emitting a machine-readable result is your mandatory final step — never exit
 silently.** It is the last thing you do on every path out of this job (including after
 a push, or when you conclude nothing can be fixed). If you are ever unsure which status
-applies, return **`blocked`** with a `summary` and a concrete `question` rather than
-leaving without a result — a missing result is treated as an unclassified merge
-escalation that pulls in a human and stalls the merge, so relying on that default
-wastes the attempt.
+applies but the PR's **head looks green / the failure was transient** (stale or
+cancelled checks, an infra blip), return **`reattempt`** (with `pushed: false`) so the
+merge is simply re-attempted from ground truth — do **not** default to `blocked`, which
+pages a human. Reserve `blocked` for a genuine human decision with a concrete
+`question`. A missing result is treated by the process as *no verdict* and reconciled
+from ground truth (it re-arms the merge poller), so it will not merge on its own — emit
+`reattempt` explicitly rather than relying on that fall-through.

@@ -424,8 +424,30 @@ start ─► wait: deps merged ─► arm merge ─► wait: mergeable ─┬─
   check names ride `appendPrompt`) to green the checks on the branch, then re-arms the
   poller. It repeats while `ciFixRound < ciFixMax`
   (`NANO_PR_MAX_CI_FIX_ROUNDS`, default 3; `0` disables). Only when the budget is
-  exhausted, the agent reports `blocked`, or the branch is in `conflict` does it fall
-  through to the human escalation path.
+  exhausted, the agent reports `blocked` *and the PR is still blocked after a
+  ground-truth reconcile*, or the branch is in `conflict` does it fall through to the
+  human escalation path.
+
+- **Stale / transient checks — re-attempt, don't escalate** (issue #348) — GitHub's CI
+  concurrency **cancels** a superseded workflow run while a newer run on the *identical
+  head SHA* takes over. Both land in the head's `statusCheckRollup` under the same check
+  name — the stale one stamped `CANCELLED`, the live one green. This is a
+  **CI-concurrency-cancellation drift class**, not a code defect, defended at three
+  layers so it never pages a human:
+  - **Derivation (root cause)** — the merge poller's check derivation collapses the
+    rollup to the **newest run per `(headSha, checkName)`** (`latestRunPerCheck`) before
+    classifying, so a `CANCELLED` run superseded by a newer green run is **not** counted
+    as a failing gate. The phantom `blocked` never arises, so `fix-ci` is not even armed.
+  - **Agent verdict** — when `fix-ci` pushes nothing because the failing checks are
+    stale/transient (head already green), it returns `status: "reattempt"` (with
+    `pushed: false`). That routes to `arm-merge` — the merge is simply re-queued from
+    ground truth. The prompt reserves `blocked` for a genuine human decision (a missing
+    secret, an un-fixable failure), never a self-healing PR.
+  - **Reconcile-before-escalate guard** — even a *mislabelled* `blocked` self-heals: a
+    `blocked` verdict with no push (`pushed != true`) reconciles **once** via ground
+    truth (`gw-ci-blocked` → `ci-reconcile`, which re-arms the canonical merge poller and
+    sets `ciBlockedReconciled`), and escalates only if the PR is **still** blocked on the
+    re-derived state.
 
 - **Discovered dependency** — a `senior:fix-ci` or `senior:rebase` agent may find that
   the PR cannot land because **another PR must merge first** (a required linked-issue
