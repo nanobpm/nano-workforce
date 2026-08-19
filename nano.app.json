@@ -119,6 +119,10 @@
       "handler": "workers/select-wave/worker.ts"
     },
     {
+      "taskType": "pr.caps-prepare",
+      "handler": "workers/caps-prepare/worker.ts"
+    },
+    {
       "taskType": "pr.record-wave",
       "handler": "workers/record-wave/worker.ts"
     },

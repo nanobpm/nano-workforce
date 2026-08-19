@@ -11,6 +11,7 @@
 // hand-written SQL — matching app/service.ts.
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { blackboardUrl, mintBlackboardToken, renderCoordinationBrief } from "./blackboard.ts";
+import { capsWaitTimeout, DEFAULT_CAPS_WAIT_TIMEOUT } from "./capsWait.ts";
 import { deriveEpicBucket, epicIsAcknowledgeable } from "./delivery.ts";
 import { EPIC_PHASE } from "./epicPhase.ts";
 import { DEFAULT_ESCALATION_SLA_TIMEOUT, escalationSlaTimeout } from "./escalationSla.ts";
@@ -35,6 +36,17 @@ export const PLAN_PROCESS_ID = "plan-fanout";
 export const ESCALATION_SLA_TIMEOUT = escalationSlaTimeout(
   process.env.NANO_ESCALATION_SLA_TIMEOUT,
   DEFAULT_ESCALATION_SLA_TIMEOUT,
+);
+
+/** The fleet-wide capability-barrier bound (ISO-8601 duration) seeded onto every plan-fanout instance
+ * as the `capsWaitTimeout` process variable and evaluated by the `wait-caps-timeout` timer arm of the
+ * `wait-caps-resolved` event-based gateway. An operator sets `NANO_CAPS_WAIT_TIMEOUT`; a malformed
+ * value falls back to {@link DEFAULT_CAPS_WAIT_TIMEOUT} so a bad env can never deploy an
+ * uninterpretable timer. Bounds a task's wait on an unresolvable cross-repo capability so it escalates
+ * to an operator instead of parking forever. */
+export const CAPS_WAIT_TIMEOUT = capsWaitTimeout(
+  process.env.NANO_CAPS_WAIT_TIMEOUT,
+  DEFAULT_CAPS_WAIT_TIMEOUT,
 );
 
 const now = () => new Date().toISOString();
@@ -263,6 +275,51 @@ export interface PlanTaskDep {
 export const planTaskDeps = (data: DataLayer) =>
   data.table<PlanTaskDep>("plan_task_deps", "plan_key");
 
+/** One cross-repo CAPABILITY EDGE on a plan task (049_plan_task_needs.sql, issue #289): the
+ * consuming `task_id` must not start until the upstream capability `capability_ref` first ships as
+ * a published `package` version. Levelized from the planner's `RecordPlanTask.needs[]` by
+ * `pr.record-plan`, read back by `pr.select-wave` to gate the task before dispatch. Keyed on
+ * `plan_key` (like {@link PlanTaskDep}) so one delete clears a plan's whole need set on re-plan.
+ *
+ * `capability_ref` is the STABLE handle (`owner/repo#NNN` | `repo#NNN` | `#NNN`) — NEVER a version
+ * (the #263 core decision). `package` is the per-package-scoped provenance artifact. `verify_command`
+ * is the optional gated empirical fallback (#274 decision 5); NULL means deterministic-provenance-only. */
+export interface PlanTaskNeed {
+  plan_key: string;
+  task_id: string;
+  capability_ref: string;
+  package: string;
+  verify_command: string | null;
+}
+export const planTaskNeeds = (data: DataLayer) =>
+  data.table<PlanTaskNeed>("plan_task_needs", "plan_key");
+
+/** One host-orchestrated CAPABILITY GATE (050_capability_gates.sql, issue #289): the durable,
+ * idempotent state the `pollCapabilityGatesImpl` reconciler keeps for ONE (plan, task, capability
+ * need) while its plan-fanout fan-out is parked at the `wait-caps-resolved` barrier. The host starts
+ * the EXISTING `readiness-gate` process (#258) per need — recording its instance key on `process_key`
+ * so it starts exactly once — and, each pass, reconciles whether the capability has shipped as a
+ * published `pkg@version`; on match it stamps `resolved_artifact` and flips `status` to `resolved`.
+ * When every one of a task's needs is `resolved` the reconciler publishes `caps-resolved` (releasing
+ * the barrier with the late-bound brief). Keyed on the readiness-gate correlation key
+ * `<plan_key>:<task_id>:<capability_ref>:<package>` ({@link capabilityGateKey}) so a host restart
+ * re-derives the whole picture from the DB — never re-starting a gate nor re-publishing a settled
+ * barrier. `package` is part of the key so two needs sharing a `capability_ref` across different
+ * packages never collide on one gate row. */
+export interface CapabilityGate {
+  gate_key: string;
+  plan_key: string;
+  task_id: string;
+  capability_ref: string;
+  package: string;
+  status: string;
+  resolved_artifact: string | null;
+  process_key: string | null;
+  created_at: string;
+  updated_at: string;
+}
+export const capabilityGates = (data: DataLayer) =>
+  data.table<CapabilityGate>("capability_gates", "gate_key");
 /** One INTER-epic dependency edge in the plan-set DAG (issue #292, slice S1): the epic `plan_key`
  * waits for the producer epic `depends_on_plan_key` to publish a capability before it may fan out.
  *
@@ -1014,6 +1071,12 @@ export async function startPlan(
       // `operators` candidate group); an operator/agent can claim/reassign via the task inbox.
       escalationSlaTimeout: ESCALATION_SLA_TIMEOUT,
       escalationAssignee: null,
+      // Capability-barrier bound (#289): the validated ISO-8601 duration read by the
+      // `wait-caps-timeout` timer arm of the `wait-caps-resolved` event-based gateway. A task whose
+      // declared cross-repo capabilities never resolve (most acutely an unresolvable capabilityRef the
+      // host reconciler can never gate) escalates to the `feature-escalation` operator user task when
+      // this elapses, instead of parking at the barrier forever — durable in-process liveness.
+      capsWaitTimeout: CAPS_WAIT_TIMEOUT,
       // Coordination blackboard (#51): the capability URL + the protocol brief that each
       // implementer agent gets appended to its prompt (composed into `appendPrompt` in
       // plan-fanout.bpmn's implement-task). Advisory shared state, delivered in-band, used

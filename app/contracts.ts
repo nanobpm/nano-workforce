@@ -208,6 +208,14 @@ export const ENV_CONTRACTS = {
       "SLA timeout for an agent (service) task before its boundary timer fires and the PR escalates for human attention (ISO-8601 duration). A malformed value falls back to the default.",
     default: "PT2H",
   },
+  NANO_CAPS_WAIT_TIMEOUT: {
+    category: "env",
+    name: "NANO_CAPS_WAIT_TIMEOUT",
+    owner: "app/plan.ts",
+    semantics:
+      "Bounded wait (FEEL/ISO-8601 duration) a plan-fanout task may park at the wait-caps-resolved capability barrier before the event-based gateway's timer arm fires and it escalates to an operator. Bounds a permanently-unresolvable capability handle (UnresolvableCapabilityRefError) so it can never silently wedge the epic. A malformed value falls back to the default.",
+    default: "P1D",
+  },
   NANO_READINESS_POLL_TIMEOUT: {
     category: "env",
     name: "NANO_READINESS_POLL_TIMEOUT",

@@ -23,12 +23,15 @@ test("select-wave's input envelope carries resolvedArtifacts so the worker can c
   assertStringIncludes(shape![0], 'name="resolvedArtifacts" type="string" list="true" optional="true"');
 });
 
-test("the epics index projects the wait-gate column", () => {
+test("the epics index is the lean list; the wait-gate lives on the detail panel", () => {
+  // The Epics index was redesigned to a lean list (issue #327): the Wait gate (like Base branch and
+  // Promotion) moved OFF the index onto the epic-detail panel, where it is asserted below. So the
+  // index no longer carries the wait-gate column — it only needs the lean grid to exist.
   const page = JSON.parse(readFileSync("pages/epic.page.json", "utf8"));
   const grid = page.nodes.find((n: any) => n.id === "epic-plans");
   assert(grid, "epics index must have the epic-plans grid");
   const cols: string[] = grid.props.columns.map((c: any) => c.field);
-  assert(cols.includes("wait_gate_label"), "the index shows the wait-gate at a glance");
+  assert(!cols.includes("wait_gate_label"), "the wait-gate moved to the epic-detail panel");
 });
 
 test("the epic detail projects both the DAG (plan_deps) and the wait-gate state", () => {
