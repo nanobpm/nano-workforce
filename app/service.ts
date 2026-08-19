@@ -2207,7 +2207,7 @@ export async function pollUserTasks(data: DataLayer, engine: EngineClient) {
   // Conformance-review acks (`conformance-escalation`) — the advisory `retro` process parks on a
   // human ack when the spec-conformance audit finds the epic did NOT cleanly meet its spec (issue
   // #216). retro is not one of the delivery aggregates above, so its instance is tracked on
-  // `plan_conformance` (migration 053): scan each row still `reviewing`, read its open ack task, and
+  // `plan_conformance` (migration 054): scan each row still `reviewing`, read its open ack task, and
   // project it keyed to the epic (plan) subject, sourcing the question from the audit's `summary`.
   for (const review of await activeConformanceReviews(data)) {
     if (!review.process_key) continue;

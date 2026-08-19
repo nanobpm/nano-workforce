@@ -26,7 +26,7 @@ const now = () => new Date().toISOString();
 export const CONFORMANCE_ESCALATION_ELEMENT = "conformance-escalation";
 
 /** The `review_status` a `plan_conformance` row carries while its escalation ack task is OPEN — the
- * only status `pollUserTasks` scans (migration 053). Every settled run is `reviewed`. */
+ * only status `pollUserTasks` scans (migration 054). Every settled run is `reviewed`. */
 export const CONFORMANCE_REVIEWING_STATUS = "reviewing";
 
 /** A slice PR "landed" — its implementation is really in the tree and worth examining — when its
@@ -238,7 +238,7 @@ export interface ConformanceInput {
   summary?: string | null;
   report?: string | null;
   /** The retro process instance this conformance ran in — the tracking key `pollUserTasks` reads to
-   * find an open escalation user task (migration 053). */
+   * find an open escalation user task (migration 054). */
   processKey?: string | null;
   /** Escalation lifecycle: `reviewing` while the ack task is open (poller scans these), else
    * `reviewed`. Defaults to `reviewed` — only an escalation flips it to `reviewing`. */

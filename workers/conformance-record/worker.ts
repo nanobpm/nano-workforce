@@ -75,7 +75,7 @@ const handler: AppJobHandler<In> = async (job, app) => {
 
   // Track this retro instance on the conformance row so `pollUserTasks` can find the escalation ack
   // task, but only mark it `reviewing` when there IS something to escalate — a clean run settles
-  // straight to `reviewed` and never enters the inbox scan (migration 053). Coerce the instance key
+  // straight to `reviewed` and never enters the inbox scan (migration 054). Coerce the instance key
   // to a string (the engine can hand back a numeric key) so `plan_conformance.process_key` (TEXT)
   // never drifts to a number and break the string-filter reads in `pollUserTasks`/`openUserTasks` —
   // the same `String(...)` coercion app/service.ts applies when it stamps `process_key`.
