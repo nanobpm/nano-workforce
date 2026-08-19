@@ -150,8 +150,10 @@ export const DEFAULT_ATTEMPT_TIMEOUT_MS = 60_000;
 /** Default gate timeout when neither the descriptor nor `NANO_READINESS_POLL_TIMEOUT` supplies one. */
 export const DEFAULT_READINESS_TIMEOUT = "PT30M";
 
-/** The ONE canonical readiness-signal message the wait-gate correlates on `=gateKey` to release the
- * wait (ADR 0001 §2). Both the in-flow probe worker (`pr.readiness-probe`) and the out-of-band
+/** The ONE canonical readiness-signal message the wait-gate correlates on to release the wait
+ * (ADR 0001 §2) — the correlation key is per-caller (`=gateKey` for the in-flow probe worker,
+ * `=prKey` for the review-ready wait), not a single fixed key. Both the in-flow probe worker
+ * (`pr.readiness-probe`) and the out-of-band
  * poller-correlated shape used by the review-ready migration (#259, per #258 pinned decision 3)
  * publish under this ONE name — so there is a single "wait for the world" message, no bespoke twin. */
 export const READINESS_READY_MESSAGE = "readiness-ready";

@@ -141,7 +141,7 @@ Notes:
   re-recording the round** (it passes `recordRound=false`), so a single round is
   never logged as both `addressed` and `blocked`. This wait is re-expressed on the
   ONE `ReadinessProbe` wait-gate primitive (#258, ADR 0001 §2); it replaced a bare
-  `readiness-ready` catch that could hang
+  `review-ready` catch that could hang
   indefinitely: Copilot won't re-review a round with no new commit and routinely
   dismisses a re-request, so with no timeout a review that never arrives wedged
   the loop (observed: three convergence processes stalled ~22h). The poller's
