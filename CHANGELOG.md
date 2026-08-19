@@ -1,3 +1,10 @@
+# [0.104.0](https://github.com/nanobpm/nano-workforce/compare/v0.103.0...v0.104.0) (2026-08-19)
+
+
+### Features
+
+* **durable-resume:** enrolment gate + re-lease world-restore wiring ([#325](https://github.com/nanobpm/nano-workforce/issues/325)) ([#351](https://github.com/nanobpm/nano-workforce/issues/351)) ([b495dfa](https://github.com/nanobpm/nano-workforce/commit/b495dfabfda3e9e0953c6637342b79ca0c8148cc))
+
 # [0.103.0](https://github.com/nanobpm/nano-workforce/compare/v0.102.1...v0.103.0) (2026-08-19)
 
 
