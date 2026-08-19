@@ -9,8 +9,10 @@
 //   • ROOT — an epic seeded with `readinessProbes = null` skips the gate entirely
 //     (`gw-readiness → ensure-base-branch`), fanning out immediately as a single epic does today.
 //
-// The probe is a deterministic shell builtin (`true`) with a bound artifact, so the flow is hermetic
-// (no network, no GitHub for the gate itself). GitHub transport is forced offline to match siblings.
+// The probe is a deterministic shell builtin (`true`) with a bound artifact, so the gate itself is
+// hermetic (no network, no GitHub). The fan-out head (`pr.ensure-base-branch`) that follows a green
+// gate is handled by the shared hermetic admit-github stub (installAdmitGithub) like the sibling
+// plan-fanout e2es, so the whole flow runs offline.
 // We assert on the cumulative taken sequence flows (the WASM engine folds completed variables away).
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -19,6 +21,7 @@ import { dirname, join, resolve } from "node:path";
 import { after, before, describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { bootTestApp, type TestApp } from "@nanobpm/urban-testkit";
+import { admitGithubState, installAdmitGithub } from "./support/github-admit.ts";
 
 const APP_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -75,13 +78,21 @@ async function boot(): Promise<{ app: TestApp; dbDir: string }> {
 }
 
 describe("plan-fanout inter-epic capability preflight (plan-fanout.bpmn, issue #292 S3)", () => {
+  let restoreGithub: (() => void) | undefined;
+
   before(() => {
     for (const [k, v] of Object.entries(GITHUB_ENV_OVERRIDES)) {
       savedEnv.set(k, process.env[k]);
       process.env[k] = v;
     }
+    // The fan-out head (`pr.ensure-base-branch`, ADR 0003) reads/creates the base ref via the token
+    // transport, which would throw `no GitHub transport available` under an empty token. Pin the
+    // shared hermetic admit-github stub (dummy token + fetch intercept) like the sibling plan-fanout
+    // e2es so base-branch admission is deterministic and offline.
+    restoreGithub = installAdmitGithub(admitGithubState("owner/repo", "main"));
   });
   after(() => {
+    restoreGithub?.();
     for (const [k, v] of savedEnv) {
       if (v === undefined) delete process.env[k];
       else process.env[k] = v;

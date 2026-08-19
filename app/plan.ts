@@ -897,6 +897,19 @@ export async function startPlan(
   baseBranch: string,
   opts: StartPlanOptions = {},
 ) {
+  // A gated dependent must carry BOTH its probes and the bound its preflight timers fire off:
+  // `pr.readiness-probe` rejects a blank `probeTimeout` (worker.ts) and the preflight escalation
+  // timers read `=probeTimeout`, so a non-empty probe set with a null/blank bound would incident at
+  // runtime. Fail fast at the start door instead — the lowering (planLowering.ts) always derives the
+  // two together via `readinessTimeout`, so this only fires for a mis-seeded direct caller.
+  const probes = opts.readinessProbes && opts.readinessProbes.length > 0 ? opts.readinessProbes : null;
+  if (probes && (opts.probeTimeout ?? "").trim() === "") {
+    throw new Error(
+      `startPlan(${parsed.planKey}): ${probes.length} readiness probe(s) seeded without a probeTimeout — ` +
+        "the preflight escalation timers (=probeTimeout) and pr.readiness-probe both require a non-blank " +
+        "bound. Derive it via readinessTimeout (see planLowering) before starting a gated dependent.",
+    );
+  }
   const table = plans(data);
   const existing = await table.get(parsed.planKey);
   if (existing && !PLAN_TERMINAL_STATUSES.includes(existing.status)) {
@@ -1009,13 +1022,13 @@ export async function startPlan(
       // implement task's `appendPrompt` (like `baseBranchBrief`) so slices build against exactly the
       // bound version. Seeded `null` here so a ROOT (which never runs the preflight) still resolves
       // the variable in that FEEL expression instead of raising an incident.
-      readinessProbes: opts.readinessProbes && opts.readinessProbes.length > 0 ? opts.readinessProbes : null,
+      readinessProbes: probes,
       probeTimeout: opts.probeTimeout ?? null,
       // The preflight probe worker (`pr.readiness-probe`) requires a non-blank `gateKey` correlation
       // key (it publishes `readiness-ready` on it). The typed `ReadinessProbeIn` envelope projects it
       // from THIS process scope (not task-local ioMapping), so it is seeded here — one per dependent
       // instance. A ROOT never runs the preflight, so its `gateKey` stays `null`, unused.
-      gateKey: opts.readinessProbes && opts.readinessProbes.length > 0 ? `preflight:${parsed.planKey}` : null,
+      gateKey: probes ? `preflight:${parsed.planKey}` : null,
       resolvedArtifacts: null,
     },
   });
