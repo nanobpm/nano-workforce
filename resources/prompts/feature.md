@@ -80,8 +80,37 @@ against the wrong base will not be merged into the epic.
 3. Implement `task.prompt`. Keep the change scoped to this slice only.
 4. Commit (sign off — this repo family enforces DCO: `git commit -s`), push the
    branch, and open a pull request with `gh pr create` describing the slice and
-   linking the parent issue (`Depends-on:`/`Closes` as appropriate).
+   linking the parent issue (`Depends-on:`/`Closes` as appropriate — but read the
+   scope-split rule below before you reach for `Closes`).
 5. Clean up any scratch clone/worktree you created outside the commit.
+
+## Closing keywords vs. scope splits — don't close a broader-scoped parent
+
+The convergence loop runs a deterministic **scope-integrity gate** on your PR
+before it can merge (`workers/converge-gate` → `app/scopeGuard.ts`). It exists
+because a parity slice was once silently under-delivered: an agent shipped one
+half, documented the deferred remainder honestly in a `## Scope` section, yet
+still `Closes #N`'d the broader parent and filed **no** follow-up. The issue read
+as done, `gh issue list` showed nothing outstanding, and a downstream consumer was
+blocked on exactly the deferred half. Two rules keep that from recurring — the
+gate **blocks and escalates to a human** if you break either:
+
+1. **A `Closes/Fixes/Resolves #N` closing keyword means you delivered #N's FULL
+   stated scope.** If you split scope — shipping only part and deferring the rest
+   — do **not** close-keyword the parent. Use a non-closing ref instead
+   (`Refs #N` / `Part of #N`) and **leave #N open** (or convert #N into a
+   tracking/umbrella issue for the remainder). The gate flags any PR that both
+   closes #N and also contains deferral prose (a `## Scope` section, "deferred",
+   "out of scope").
+2. **A deferred remainder must be a FILED, tracked issue — never just prose.** If
+   your PR defers part of its scope, **file a follow-up issue for each deferred
+   item** and link it in the PR body with an explicit tracking marker the gate can
+   see: `Deferred-to: #N`, `Tracked-in: #N`, or `Follow-up: #N`. A deferral that
+   lives only in commit/PR/ADR text is an invisible, unclaimable drift surface.
+
+So: deliver the whole thing → `Closes #N`. Split it → `Refs #N`, file the
+remainder, and link it with `Deferred-to: #<new-issue>`.
+
 
 > **Do not request the Copilot review yourself.** When you open a *ready* PR the
 > app enrolls it into the review-convergence loop and requests the initial

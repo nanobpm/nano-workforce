@@ -217,9 +217,12 @@ test("pickLatestCopilotReviewBody: FAILS CLOSED (null) when the reviews read was
 async function makeUnderTest(deps: {
   readThreads: (repo: string, n: number) => Promise<ReviewThread[] | null>;
   readReviewBody: (repo: string, n: number) => Promise<string | null>;
+  readPrBody?: (repo: string, n: number) => Promise<string | null>;
 }) {
   const { makeHandler } = await import("../workers/converge-gate/worker.ts");
-  return makeHandler(deps);
+  // Default the scope-guard PR-body read to a verified-empty description so the comment-gate tests
+  // below exercise only the review-comment dimension; scope-guard tests pass an explicit body.
+  return makeHandler({ readPrBody: async () => "", ...deps });
 }
 
 test("converge-gate: a clean PR is allowed to converge", async () => {
@@ -340,6 +343,82 @@ test("converge-gate: resolves repo/prNumber from the prKey when the vars are abs
   });
   await handler({ variables: { prKey: "o/r#7" } } as any, {} as any);
   assertEquals(seen, ["o/r", 7]);
+});
+
+// ── The scope-integrity guard through the worker (#313) ─────────────────────
+
+test("converge-gate: a partial delivery that Closes a broader-scoped parent blocks convergence", async () => {
+  const handler = await makeUnderTest({
+    readThreads: async () => [],
+    readReviewBody: async () => "",
+    readPrBody: async () =>
+      "Delivers the nested ad-hoc half.\n\n## Scope\nEmbedded SUB_PROCESS tools remain the deferred refinement.\n\nCloses #631",
+  });
+  const out = await handler({ variables: { prKey: "o/r#1", repo: "o/r", prNumber: 1 } } as any, {} as any);
+  assertEquals(out.convergeBlocked, true);
+  assertStringIncludes(out.convergeBlockReason ?? "", "Scope integrity blocked");
+  assertStringIncludes(out.convergeBlockReason ?? "", "#631");
+});
+
+test("converge-gate: a deferral with a filed follow-up issue and a non-closing ref converges", async () => {
+  const handler = await makeUnderTest({
+    readThreads: async () => [],
+    readReviewBody: async () => "",
+    readPrBody: async () =>
+      "Delivers the nested ad-hoc half.\n\n## Scope\nEmbedded SUB_PROCESS tools are deferred.\nTracked-in: #872\n\nRefs #631",
+  });
+  const out = await handler({ variables: { prKey: "o/r#1", repo: "o/r", prNumber: 1 } } as any, {} as any);
+  assertEquals(out, { convergeBlocked: false, convergeBlockReason: "" });
+});
+
+test("converge-gate: a full-scope Closes PR with no deferral prose converges", async () => {
+  const handler = await makeUnderTest({
+    readThreads: async () => [],
+    readReviewBody: async () => "",
+    readPrBody: async () => "Implements the feature end to end.\n\nCloses #313",
+  });
+  const out = await handler({ variables: { prKey: "o/r#1", repo: "o/r", prNumber: 1 } } as any, {} as any);
+  assertEquals(out, { convergeBlocked: false, convergeBlockReason: "" });
+});
+
+test("converge-gate: a scope block and a comment block are reported together", async () => {
+  const handler = await makeUnderTest({
+    readThreads: async () => [{ isResolved: false, path: "a.ts", bodies: ["please fix"] }],
+    readReviewBody: async () => "",
+    readPrBody: async () => "Ships one half.\n\nDeferred: the rest.\n\nCloses #631",
+  });
+  const out = await handler({ variables: { prKey: "o/r#1", repo: "o/r", prNumber: 1 } } as any, {} as any);
+  assertEquals(out.convergeBlocked, true);
+  assertStringIncludes(out.convergeBlockReason ?? "", "unresolved review thread");
+  assertStringIncludes(out.convergeBlockReason ?? "", "Scope integrity blocked");
+});
+
+test("converge-gate: FAILS CLOSED when the PR-body read returns null (no transport)", async () => {
+  const handler = await makeUnderTest({
+    readThreads: async () => [{ isResolved: true, path: "a.ts", bodies: ["ok"] }],
+    readReviewBody: async () => "",
+    readPrBody: async () => null,
+  });
+  const out = await handler({ variables: { prKey: "o/r#1", repo: "o/r", prNumber: 1 } } as any, {} as any);
+  assertEquals(out.convergeBlocked, true);
+  assertStringIncludes(out.convergeBlockReason ?? "", "could not read the PR description");
+});
+
+test("converge-gate: FAILS CLOSED with the SCOPE reason when the PR-body read throws", async () => {
+  // A transport failure while reading/parsing the PR body is a scope-integrity read failure, not a
+  // review-comment verification failure: it must surface BLOCK_UNVERIFIABLE_BODY, not the generic
+  // review-comment BLOCK_UNVERIFIABLE — otherwise the human escalation is pointed at review threads
+  // when the real problem is the PR description could not be read.
+  const handler = await makeUnderTest({
+    readThreads: async () => [{ isResolved: true, path: "a.ts", bodies: ["ok"] }],
+    readReviewBody: async () => "",
+    readPrBody: async () => {
+      throw new Error("boom");
+    },
+  });
+  const out = await handler({ variables: { prKey: "o/r#1", repo: "o/r", prNumber: 1 } } as any, {} as any);
+  assertEquals(out.convergeBlocked, true);
+  assertStringIncludes(out.convergeBlockReason ?? "", "could not read the PR description");
 });
 
 // ── Structural guard over the committed BPMN (no engine) ─────────────────────
