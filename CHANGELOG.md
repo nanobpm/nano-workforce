@@ -1,3 +1,15 @@
+# [0.92.0](https://github.com/nanobpm/nano-workforce/compare/v0.91.0...v0.92.0) (2026-08-19)
+
+
+### Bug Fixes
+
+* **e2e:** polyfill EngineClient.openUserTasks in the testkit shim ([#309](https://github.com/nanobpm/nano-workforce/issues/309)) ([#312](https://github.com/nanobpm/nano-workforce/issues/312)) ([22609d5](https://github.com/nanobpm/nano-workforce/commit/22609d57789d09a1062cf8388b37a76ef293d4f0)), closes [#297](https://github.com/nanobpm/nano-workforce/issues/297) [#294](https://github.com/nanobpm/nano-workforce/issues/294)
+
+
+### Features
+
+* **epics:** bucket epics on delivery, not raw status, with a dismiss affordance ([#303](https://github.com/nanobpm/nano-workforce/issues/303)) ([4f9bd1a](https://github.com/nanobpm/nano-workforce/commit/4f9bd1a6d2853ffeacbdd6b744d9dd4efffba0ea)), closes [#298](https://github.com/nanobpm/nano-workforce/issues/298) [#298](https://github.com/nanobpm/nano-workforce/issues/298)
+
 # [0.91.0](https://github.com/nanobpm/nano-workforce/compare/v0.90.0...v0.91.0) (2026-08-19)
 
 
