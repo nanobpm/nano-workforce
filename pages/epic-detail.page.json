@@ -64,7 +64,7 @@
           { "field": "promotion_state", "header": "Promotion" },
           { "field": "wave_label", "header": "Wave" },
           { "field": "task_count", "header": "Tasks" },
-          { "field": "updated_at", "header": "Updated", "width": "9rem" }
+          { "field": "updated_at", "header": "Updated", "width": "9rem", "format": "datetime" }
         ],
         "detail": {
           "linkField": "issue_url",
@@ -127,7 +127,7 @@
           { "field": "status", "header": "Status" },
           { "field": "pr_key", "header": "PR" },
           { "field": "summary", "header": "Summary" },
-          { "field": "updated_at", "header": "Updated" }
+          { "field": "updated_at", "header": "Updated", "format": "datetime" }
         ],
         "detail": {
           "fields": [
@@ -202,7 +202,7 @@
           { "field": "task_b", "header": "Task B" },
           { "field": "files", "header": "Shared files" },
           { "field": "source", "header": "Source" },
-          { "field": "updated_at", "header": "Updated" }
+          { "field": "updated_at", "header": "Updated", "format": "datetime" }
         ]
       }
     },

@@ -207,6 +207,7 @@
           {
             "field": "updated_at",
             "header": "Updated",
+            "format": "datetime",
             "width": "9rem"
           }
         ],
