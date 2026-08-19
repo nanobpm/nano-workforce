@@ -300,4 +300,74 @@ describe("plan-fanout escalations (U2 — task + plan-review + trial-merge → u
       `abandon routed to record-results (flows: ${flows.join(", ")})`,
     );
   });
+
+  // Capability edge (issue #289): a task that declares cross-repo `needs` must PARK at the
+  // `wait-caps-resolved` barrier (never take the no-needs shortcut), and publishing `caps-resolved`
+  // correlated on the per-task barrier key `<planKey>:<taskId>` must release it into `implement-task`
+  // with the late-bound resolved-deps brief appended to the agent prompt. This ALSO proves the
+  // subprocess-level `capsGateKey = planKey + ":" + task.id` ioMapping resolves (the correlation would
+  // never match otherwise).
+  test("capability edge: a task with needs parks at wait-caps-resolved and caps-resolved releases it (#289)", async () => {
+    const capTaskPlan: Stub = () => ({
+      tasks: [
+        {
+          id: "t1",
+          title: "T1",
+          prompt: "do t1",
+          needs: [{ capabilityRef: "nanobpm/nano-ide#274", package: "@nanobpm/urban" }],
+        },
+      ],
+    });
+    let featureBrief: unknown;
+    await withApp(
+      {
+        "senior:plan": capTaskPlan,
+        "senior:plan-review": approveReview,
+        "senior:feature": (job) => {
+          featureBrief = (job.variables as Record<string, unknown>)?.["resolvedDepsBrief"];
+          return { status: "opened", summary: "built t1", pr: "owner/repo#2" };
+        },
+      },
+      async ({ app, planKey, processKey }) => {
+        const needRows = await app.db
+          .table<{ plan_key: string; task_id: string; capability_ref: string }>("plan_task_needs", "plan_key")
+          .find({ plan_key: planKey });
+        assert.ok(needRows.length > 0, "the task's capability need was persisted");
+        // The fan-out must have reached the barrier gateway's needs branch, NOT the no-needs shortcut,
+        // and must be parked at `wait-caps-resolved` (the feature agent has NOT run yet).
+        const parked = takenFlows(app);
+        assert.ok(
+          parked.includes("w_gw_needs->wait-caps-resolved"),
+          `task with needs routed to the barrier (flows: ${parked.join(", ")})`,
+        );
+        assert.ok(
+          !parked.includes("w_gw_needs->implement-task"),
+          "the no-needs shortcut was NOT taken for a task that declares needs",
+        );
+        assert.equal(featureBrief, undefined, "the agent has not been dispatched while parked at the barrier");
+
+        // Release the barrier exactly as the host reconciler would: publish `caps-resolved` correlated
+        // on the per-task barrier key with the late-bound resolved-deps brief.
+        const barrierKey = `${planKey}:t1`;
+        await app.engine.publishMessage({
+          name: "caps-resolved",
+          correlationKey: barrierKey,
+          variables: { resolvedDepsBrief: "\n\nRESOLVED: @nanobpm/urban@0.54.0" },
+        });
+        await app.settle();
+
+        const flows = takenFlows(app);
+        assert.ok(
+          flows.includes("wait-caps-resolved->implement-task"),
+          `caps-resolved released the barrier into implement-task (flows: ${flows.join(", ")})`,
+        );
+        assert.equal(
+          featureBrief,
+          "\n\nRESOLVED: @nanobpm/urban@0.54.0",
+          `the late-bound resolved-deps brief reached the agent (got: ${JSON.stringify(featureBrief)})`,
+        );
+        assert.ok(processKey, "processKey resolved");
+      },
+    );
+  });
 });

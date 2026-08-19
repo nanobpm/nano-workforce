@@ -11,6 +11,16 @@ import { readFileSync } from "node:fs";
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { abandonUrl, mintAbandonToken, renderAbandonBrief } from "./abandon.ts";
 import { agentSlaTimeout } from "./agentSla.ts";
+import {
+  CAPS_RESOLVED_MESSAGE,
+  type CapabilityNeed,
+  capabilityGateKey,
+  capabilityNeedToProbeInput,
+  capabilityTaskBarrierKey,
+  type ResolvedCapability,
+  renderResolvedDepsBrief,
+  UnresolvableCapabilityRefError,
+} from "./capabilityNeed.ts";
 import { deriveDelivery, TERMINAL_STATUSES } from "./delivery.ts";
 import { backfillFeatureStages, deriveFeatureBlockedPatch, deriveFeatureDelivery, deriveFeatureEscalationPatch, FEATURE_BLOCKED_ELEMENT, FEATURE_ESCALATION_ELEMENT, FEATURE_RUN_STATUSES, type FeatureRun, type FeatureRunStatus, featureRuns } from "./feature.ts";
 import {
@@ -31,7 +41,8 @@ import { pollLineage } from "./lineage.ts";
 import { mergeLanes, readExclusions } from "./mergeExclusion.ts";
 import { freshHeadRunAction, headRunPresenceCount, loadMergeProtocol } from "./mergeProtocol.ts";
 import { type PrLaneDecision, planPrLane, taskDependencyDepths } from "./mergeTrain.ts";
-import { planReviews, plans, planTaskDeps, planTasks } from "./plan.ts";
+import { capabilityGates, planReviews, plans, planTaskDeps, planTaskNeeds, planTasks } from "./plan.ts";
+import { defaultProbeExec, type ProbeExec, probeOnce, type ReadinessProbe, readinessTimeout } from "./readiness.ts";
 import { clampNudgeMinutes, reviewWaitTimeout } from "./reviewWait.ts";
 import { trialMergeAudits } from "./trialMerge.ts";
 import {
@@ -1295,6 +1306,224 @@ export async function pollWaveGatesImpl(
   }
 }
 
+/** The readiness-gate process id (`resources/processes/readiness-gate.bpmn`) the capability reconciler
+ * starts one instance of per unresolved need — the durable, bounded, resumable wait that escalates to
+ * an operator if the capability never ships (#258). Single source of truth for the string. */
+const READINESS_GATE_PROCESS_ID = "readiness-gate";
+
+/** Generic sibling of {@link waveMergedSubscriptionOpen}: is `processKey` right now parked at a catch
+ * event with an OPEN (`CREATED`) subscription for `messageName` correlated on `correlationKey`? The
+ * capability barrier (`wait-caps-resolved`) uses this to stay level-triggered exactly like the
+ * wave-merge barrier — we publish `caps-resolved` ONLY into a subscription we've observed open, so a
+ * signal is never dropped into the void nor buffered to trip a later task's barrier. Returns `true`
+ * (open — safe to release), `false` (no open subscription), or `null` (transport unhappy / unparseable
+ * — "unknown", retry next pass). Every field must be present and match explicitly (an item omitting a
+ * field is "unknown", not a match) — a false negative only costs a retry, a false positive is a wedge. */
+async function messageSubscriptionOpen(
+  base: string,
+  headers: Record<string, string>,
+  processKey: string,
+  messageName: string,
+  correlationKey: string,
+): Promise<boolean | null> {
+  try {
+    const res = await fetch(`${base}/message-subscriptions/search`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        filter: { processInstanceKey: processKey, messageName, messageSubscriptionState: "CREATED" },
+        page: { limit: 50 },
+      }),
+    });
+    if (!res.ok) return null;
+    // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+    const body = (await res.json()) as { items?: MessageSubscriptionSearchItem[] };
+    return (body.items ?? []).some(
+      (it) =>
+        it.messageName === messageName &&
+        it.correlationKey === correlationKey &&
+        typeof it.messageSubscriptionState === "string" &&
+        it.messageSubscriptionState.toUpperCase() === "CREATED",
+    );
+  } catch (err) {
+    console.error(`[poller] caps-resolved subscription ${correlationKey}: ${err}`);
+    return null;
+  }
+}
+
+/** The gate timeout (ISO-8601) seeded onto every capability readiness-gate. A capability need carries
+ * no per-probe poll policy, so the bound is always the env/default (`NANO_READINESS_POLL_TIMEOUT`,
+ * else 30m) — derived from readiness.ts's ONE place so it can't drift from the worker's local budget. */
+function capabilityGateTimeout(env: Record<string, string | undefined>): string {
+  return readinessTimeout({ kind: "capability", target: "" } satisfies ReadinessProbe, env);
+}
+
+/** Capability-edge reconcile pass (issue #289). The host half of the "consumer readiness edge":
+ * plan-fanout's per-task fan-out parks at the `wait-caps-resolved` message barrier for any task that
+ * declared cross-repo capability `needs` (041_plan_task_needs.sql). Here we reconcile, on EVERY pass
+ * and idempotently, each such parked task against the external fact "has every one of its needed
+ * capabilities shipped as a published `pkg@version`?", publishing `caps-resolved` (correlated on the
+ * per-task barrier key) with the late-bound resolved-dependencies brief to release the agent whenever
+ * ALL its needs resolve.
+ *
+ * The bounded/durable/resumable WAIT is NOT re-implemented here — it lives in the EXISTING
+ * `readiness-gate` process (#258), which we start exactly once per need (recording its instance key on
+ * `capability_gates.process_key`) so a capability that never ships escalates to an operator instead of
+ * wedging the epic. This pass only (a) starts those gates and (b) performs a single DETERMINISTIC
+ * provenance lookup per unresolved need (`probeOnce`, the gate's OWN matcher, reused verbatim — never a
+ * second poll loop) to capture the resolved `pkg@version` for the late-bind. All state is durable in
+ * `capability_gates`, so a host restart re-derives the picture from the DB: it never re-starts a gate,
+ * never re-probes a resolved need, and — being level-triggered on the open subscription — never
+ * re-publishes into a released barrier.
+ *
+ * Concurrency correctness (issue #289 §4, inherited from #274): an unrelated upstream release during
+ * the wait does NOT resolve the edge (the provenance predicate matches only the capability-bearing
+ * version) and does NOT spin an agent (this pass uses the deterministic lookup only — the gated
+ * empirical `verifyCommand` fallback lives solely in the gate's worker, never here, so it can never
+ * fire per unrelated release). */
+export async function pollCapabilityGatesImpl(
+  data: DataLayer,
+  engine: EngineClient,
+  base: string,
+  headers: Record<string, string>,
+  exec: ProbeExec = defaultProbeExec(),
+  env: Record<string, string | undefined> = process.env,
+) {
+  const gateTable = capabilityGates(data);
+  const probeTimeout = capabilityGateTimeout(env);
+  for (const plan of await plans(data).all()) {
+    const planKey = plan.plan_key;
+    const processKey = plan.process_key;
+    if (!processKey) continue; // no instance key to correlate the barrier against yet
+    const needRows = await planTaskNeeds(data).find({ plan_key: planKey });
+    if (needRows.length === 0) continue;
+    // Group needs by consuming task — a task's barrier releases ONCE, fanning in ALL its needs.
+    const needsByTask = new Map<string, CapabilityNeed[]>();
+    for (const n of needRows) {
+      const list = needsByTask.get(n.task_id) ?? [];
+      list.push({
+        capabilityRef: n.capability_ref,
+        package: n.package,
+        ...(n.verify_command ? { verifyCommand: n.verify_command } : {}),
+      });
+      needsByTask.set(n.task_id, list);
+    }
+    for (const [taskId, needs] of needsByTask) {
+      const barrierKey = capabilityTaskBarrierKey(planKey, taskId);
+      try {
+        // Only reconcile a task whose fan-out is actually parked at `wait-caps-resolved` (an OPEN
+        // subscription): otherwise publishing would be a signal into the void (the #262 wedge class).
+        const open = await messageSubscriptionOpen(base, headers, processKey, CAPS_RESOLVED_MESSAGE, barrierKey);
+        if (open !== true) continue; // not parked here yet / already released / unknown → retry next pass
+
+        const resolved: ResolvedCapability[] = [];
+        let allResolved = true;
+        for (const need of needs) {
+          const gateKey = capabilityGateKey(planKey, taskId, need.capabilityRef);
+          let row = await gateTable.findOne({ gate_key: gateKey });
+
+          // Shape the need into the readiness-gate's probe input. A handle that names no owner/repo
+          // releases source is un-pollable — record it so the operator sees the wedge, and treat the
+          // need as unresolved (it can only clear once the handle is corrected on a re-plan).
+          let probeInput: ReturnType<typeof capabilityNeedToProbeInput>;
+          try {
+            probeInput = capabilityNeedToProbeInput(need, { planKey, taskId, probeTimeout });
+          } catch (err) {
+            if (err instanceof UnresolvableCapabilityRefError) {
+              if (!row) {
+                await gateTable.insert({
+                  gate_key: gateKey,
+                  plan_key: planKey,
+                  task_id: taskId,
+                  capability_ref: need.capabilityRef,
+                  package: need.package,
+                  status: "pending",
+                  resolved_artifact: null,
+                  process_key: null,
+                  created_at: now(),
+                  updated_at: now(),
+                });
+              }
+              console.error(`[poller] capability-gate ${gateKey}: ${err.message}`);
+              allResolved = false;
+              continue;
+            }
+            throw err;
+          }
+
+          // First sighting: record the gate row so we start it exactly once and survive a restart.
+          if (!row) {
+            await gateTable.insert({
+              gate_key: gateKey,
+              plan_key: planKey,
+              task_id: taskId,
+              capability_ref: need.capabilityRef,
+              package: need.package,
+              status: "pending",
+              resolved_artifact: null,
+              process_key: null,
+              created_at: now(),
+              updated_at: now(),
+            });
+            row = await gateTable.findOne({ gate_key: gateKey });
+          }
+
+          // Start the EXISTING durable readiness-gate exactly once (bounded wait + operator escalation
+          // if the capability never ships). Idempotent: guarded on `process_key`, so a restart never
+          // double-starts. A start failure is non-fatal — we retry the start next pass.
+          if (row && !row.process_key) {
+            try {
+              const { processInstanceKey } = await engine.createInstance({
+                processDefinitionId: READINESS_GATE_PROCESS_ID,
+                variables: {
+                  gateKey: probeInput.gateKey,
+                  probeTimeout: probeInput.probeTimeout,
+                  onTimeout: probeInput.onTimeout,
+                  probe: probeInput.probe,
+                },
+              });
+              await gateTable.update(gateKey, { process_key: processInstanceKey, updated_at: now() });
+              row.process_key = processInstanceKey;
+            } catch (err) {
+              console.error(`[poller] capability-gate ${gateKey} start: ${err}`);
+            }
+          }
+
+          // Already resolved on an earlier pass → reuse the pinned artifact (never re-probe).
+          if (row && row.status === "resolved" && row.resolved_artifact) {
+            resolved.push({ capabilityRef: need.capabilityRef, resolvedArtifact: row.resolved_artifact });
+            continue;
+          }
+
+          // One deterministic provenance lookup (NOT a wait loop): has the capability shipped?
+          const result = await probeOnce(probeInput.probe, exec, env);
+          const artifact = result.bind?.resolvedArtifact;
+          if (result.ready && artifact) {
+            await gateTable.update(gateKey, { status: "resolved", resolved_artifact: artifact, updated_at: now() });
+            resolved.push({ capabilityRef: need.capabilityRef, resolvedArtifact: artifact });
+          } else {
+            allResolved = false;
+          }
+        }
+
+        // Fan-in: release the task ONLY when every need resolved. The brief pins each
+        // `capabilityRef → pkg@version` into the agent's prompt (late-bind, issue #289 §3).
+        if (allResolved && resolved.length === needs.length) {
+          const resolvedDepsBrief = renderResolvedDepsBrief(resolved);
+          await engine.publishMessage({
+            name: CAPS_RESOLVED_MESSAGE,
+            correlationKey: barrierKey,
+            variables: { resolvedDepsBrief },
+          });
+          console.log(`[poller] capabilities resolved -> ${barrierKey} (${resolved.length})`);
+        }
+      } catch (err) {
+        console.error(`[poller] capability-gate ${barrierKey}: ${err}`);
+      }
+    }
+  }
+}
+
 /** Idempotent read-model pass: recompute each plan's derived `delivery` signal (issue #171) by
  * joining its slice tasks' `pr_key` → `pull_requests.status`, and denormalise it onto the `plans`
  * row so the epics overview / detail views can read it as a flat column (Urban's datasource can't
@@ -1709,6 +1938,7 @@ export async function pollOnce(
     const headers: Record<string, string> = { "content-type": "application/json" };
     if (engineRest.token) headers.authorization = `Bearer ${engineRest.token}`;
     await pollWaveGatesImpl(data, engine, token, base, headers);
+    await pollCapabilityGatesImpl(data, engine, base, headers);
     await pollJobActivation(data, engineRest.restAddress, engineRest.token);
     await pollIncidents(data, engineRest.restAddress, engineRest.token);
   }

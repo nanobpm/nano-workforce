@@ -121,6 +121,20 @@ export function capabilityGateKey(planKey: string, taskId: string, capabilityRef
   return `${planKey}:${taskId}:${capabilityRef}`;
 }
 
+/** The message name plan-fanout's per-task capability barrier (`wait-caps-resolved`) subscribes to and
+ * the host publishes to release the gated task once every one of its capability needs has resolved
+ * (issue #289 §2/§3). The single source of truth for the string shared by the BPMN subscription and
+ * the host publisher, mirroring `WAVE_MERGED_MESSAGE`. */
+export const CAPS_RESOLVED_MESSAGE = "caps-resolved";
+
+/** The per-TASK barrier correlation key `<planKey>:<taskId>` the `wait-caps-resolved` catch binds
+ * and the host publishes `caps-resolved` on (issue #289 §2). Distinct from {@link capabilityGateKey}
+ * (which is per-NEED): a task fans in ALL its needs, so its barrier releases ONCE, keyed on the task —
+ * not once per need. Stable across a resume so a re-dispatched fan-out re-attaches to the same barrier. */
+export function capabilityTaskBarrierKey(planKey: string, taskId: string): string {
+  return `${planKey}:${taskId}`;
+}
+
 /** Map a normalised {@link CapabilityNeed} to the EXISTING `readiness-gate` process input (#289 §2):
  * a `capability` probe scanning the handle's releases source for the package's provenance, bounded by
  * `probeTimeout` and escalating on timeout. Reuses the gate + matcher verbatim (derivation over

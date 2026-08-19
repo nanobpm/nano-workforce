@@ -157,6 +157,31 @@ export interface PlanTaskNeed {
 export const planTaskNeeds = (data: DataLayer) =>
   data.table<PlanTaskNeed>("plan_task_needs", "plan_key");
 
+/** One host-orchestrated CAPABILITY GATE (042_capability_gates.sql, issue #289): the durable,
+ * idempotent state the `pollCapabilityGatesImpl` reconciler keeps for ONE (plan, task, capability
+ * need) while its plan-fanout fan-out is parked at the `wait-caps-resolved` barrier. The host starts
+ * the EXISTING `readiness-gate` process (#258) per need — recording its instance key on `process_key`
+ * so it starts exactly once — and, each pass, reconciles whether the capability has shipped as a
+ * published `pkg@version`; on match it stamps `resolved_artifact` and flips `status` to `resolved`.
+ * When every one of a task's needs is `resolved` the reconciler publishes `caps-resolved` (releasing
+ * the barrier with the late-bound brief). Keyed on the readiness-gate correlation key
+ * `<plan_key>:<task_id>:<capability_ref>` ({@link capabilityGateKey}) so a host restart re-derives
+ * the whole picture from the DB — never re-starting a gate nor re-publishing a settled barrier. */
+export interface CapabilityGate {
+  gate_key: string;
+  plan_key: string;
+  task_id: string;
+  capability_ref: string;
+  package: string;
+  status: string;
+  resolved_artifact: string | null;
+  process_key: string | null;
+  created_at: string;
+  updated_at: string;
+}
+export const capabilityGates = (data: DataLayer) =>
+  data.table<CapabilityGate>("capability_gates", "gate_key");
+
 /** One adversarial plan-review round (006_plan_review.sql): the `senior:plan-review` agent's
  * verdict on the plan before fan-out. Append-only within a plan run; the current round is
  * `count(plan_reviews)`. Re-planning a finished issue clears the prior rows (see startPlan) so

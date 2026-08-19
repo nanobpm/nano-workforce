@@ -7,7 +7,7 @@
 // GitHub transport forced off so it is hermetic.
 import { test } from "node:test";
 import { assertEquals } from "#test-assert";
-import { parsePr, pollIncidentsImpl, pollWaveGatesImpl, repoEnvelopeVars, startMerge, submitPr } from "./service.ts";
+import { parsePr, pollCapabilityGatesImpl, pollIncidentsImpl, pollWaveGatesImpl, repoEnvelopeVars, startMerge, submitPr } from "./service.ts";
 
 function memTable(rows: any[], key: string) {
   return {
@@ -15,6 +15,8 @@ function memTable(rows: any[], key: string) {
     all: () => Promise.resolve([...rows]),
     find: (q: any) =>
       Promise.resolve(rows.filter((r) => Object.entries(q).every(([f, v]) => r[f] === v))),
+    findOne: (q: any) =>
+      Promise.resolve(rows.find((r) => Object.entries(q).every(([f, v]) => r[f] === v)) ?? null),
     insert: (r: any) => {
       rows.push(r);
       return Promise.resolve(r);
@@ -703,4 +705,274 @@ test("pollWaveGatesImpl never releases the barrier on an unverifiable subscripti
     assertEquals(published.length, 0, "must not publish wave-merged on an unverifiable subscription item");
     assertEquals(plan.gate_wave, 1, "gate_wave must stay armed while no OPEN subscription is confirmed");
   });
+});
+
+// ── pollCapabilityGatesImpl — the host half of the cross-repo capability edge (issue #289) ──────────
+//
+// plan-fanout parks a task with capability `needs` at the `wait-caps-resolved` message barrier. This
+// reconciler, on every pass, (a) starts the durable `readiness-gate` once per need, (b) does a single
+// DETERMINISTIC provenance lookup (`probeOnce`, reused verbatim), and (c) publishes `caps-resolved`
+// (correlated on the per-task barrier key `<planKey>:<taskId>`) with the late-bound resolved-deps brief
+// ONLY when EVERY need has shipped as a published `pkg@version` AND the barrier subscription is open.
+//
+// Stubs: `/message-subscriptions/search` (toggle the barrier open per barrier key), a capture engine
+// (`createInstance`/`publishMessage`), and a `ProbeExec` returning a canned `gh api .../releases`
+// payload so `matchCapability` resolves the lowest capability-bearing version — all hermetic.
+
+function capsSubscriptionFetch(openKeys: Set<string>) {
+  return (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    const u = typeof url === "string" ? url : url.toString();
+    if (!u.endsWith("/message-subscriptions/search")) throw new Error(`unexpected fetch: ${u}`);
+    const body = JSON.parse(String(init?.body ?? "{}")) as {
+      filter?: { messageName?: string; processInstanceKey?: string };
+    };
+    const key = body.filter?.processInstanceKey ?? "";
+    // The reconciler filters by processInstanceKey + messageName; we toggle by barrier correlationKey,
+    // which the search response carries back on each item. Return an open item for every requested key
+    // registered in `openKeys` (keyed by the barrier correlationKey the caller expects).
+    const items = [...openKeys]
+      .filter((k) => k.startsWith(`${key}|`))
+      .map((k) => ({
+        messageName: "caps-resolved",
+        correlationKey: k.slice(k.indexOf("|") + 1),
+        messageSubscriptionState: "CREATED",
+      }));
+    return Promise.resolve(
+      new Response(JSON.stringify({ items }), { status: 200, headers: { "content-type": "application/json" } }),
+    );
+  };
+}
+
+// A `ProbeExec` whose `gh api .../releases` output resolves `capabilityRef` #274 to `@nanobpm/urban@0.54.0`
+// (the LOWEST version whose body references #274) — or resolves nothing when `ready` is false.
+function capsProbeExec(ready: boolean) {
+  const releases = ready
+    ? [
+        { tag_name: "@nanobpm/urban@0.55.0", body: "## Provenance\n- nanobpm/nano-ide#274" },
+        { tag_name: "@nanobpm/urban@0.54.0", body: "## Provenance\n- nanobpm/nano-ide#274" },
+        { tag_name: "@nanobpm/urban@0.53.0", body: "unrelated" },
+      ]
+    : [{ tag_name: "@nanobpm/urban@0.53.0", body: "unrelated" }];
+  const calls: string[] = [];
+  return {
+    calls,
+    exec: {
+      httpGet: () => Promise.reject(new Error("no http probe expected")),
+      run: (command: string) => {
+        calls.push(command);
+        return Promise.resolve({ code: 0, stdout: JSON.stringify(releases), stderr: "" });
+      },
+    },
+  };
+}
+
+function capsDataLayer(stores: Record<string, { rows: any[]; key: string }>) {
+  return {
+    table: (name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key),
+  } as any;
+}
+
+function capsEngine() {
+  const created: { processDefinitionId?: string; variables?: Record<string, unknown> }[] = [];
+  const published: { name: string; correlationKey?: string; variables?: Record<string, unknown> }[] = [];
+  let seq = 0;
+  return {
+    created,
+    published,
+    engine: {
+      createInstance: (req: { processDefinitionId?: string; variables?: Record<string, unknown> }) => {
+        created.push(req);
+        return Promise.resolve({ processInstanceKey: `RG-${++seq}` });
+      },
+      publishMessage: (input: { name: string; correlationKey?: string; variables?: Record<string, unknown> }) => {
+        published.push(input);
+        return Promise.resolve();
+      },
+    } as any,
+  };
+}
+
+test("pollCapabilityGatesImpl: releases a task once every need ships, starting the gate + publishing the resolved brief (#289)", async () => {
+  const PLAN_KEY = "owner/repo#7";
+  const PI = "PI-289";
+  const TASK = "gap-a";
+  const barrierKey = `${PLAN_KEY}:${TASK}`;
+  const stores: Record<string, { rows: any[]; key: string }> = {
+    plans: { rows: [{ plan_key: PLAN_KEY, process_key: PI }], key: "plan_key" },
+    plan_task_needs: {
+      rows: [
+        {
+          plan_key: PLAN_KEY,
+          task_id: TASK,
+          capability_ref: "nanobpm/nano-ide#274",
+          package: "@nanobpm/urban",
+          verify_command: null,
+        },
+      ],
+      key: "plan_key",
+    },
+    capability_gates: { rows: [], key: "gate_key" },
+  };
+  const data = capsDataLayer(stores);
+  const { engine, created, published } = capsEngine();
+  const { exec, calls } = capsProbeExec(true);
+  const headers = { "content-type": "application/json" };
+  const open = new Set<string>([`${PI}|${barrierKey}`]);
+  const prevFetch = globalThis.fetch;
+  globalThis.fetch = capsSubscriptionFetch(open) as typeof fetch;
+  try {
+    await pollCapabilityGatesImpl(data, engine, "http://engine/v2", headers, exec, {});
+  } finally {
+    globalThis.fetch = prevFetch;
+  }
+
+  // The durable readiness-gate was started exactly once, its instance key persisted.
+  assertEquals(created.length, 1, "readiness-gate started exactly once");
+  assertEquals(created[0]?.processDefinitionId, "readiness-gate");
+  assertEquals(stores.capability_gates.rows.length, 1);
+  assertEquals(stores.capability_gates.rows[0]?.process_key, "RG-1");
+  assertEquals(stores.capability_gates.rows[0]?.status, "resolved");
+  assertEquals(stores.capability_gates.rows[0]?.resolved_artifact, "@nanobpm/urban@0.54.0");
+
+  // The barrier was released once with the late-bound brief pinning the LOWEST capability-bearing version.
+  assertEquals(published.length, 1, "caps-resolved published once");
+  assertEquals(published[0]?.name, "caps-resolved");
+  assertEquals(published[0]?.correlationKey, barrierKey);
+  const brief = String(published[0]?.variables?.["resolvedDepsBrief"] ?? "");
+  assertEquals(brief.includes("@nanobpm/urban@0.54.0"), true, "brief pins the resolved artifact");
+  assertEquals(brief.includes("nanobpm/nano-ide#274"), true, "brief names the capability ref");
+  assertEquals(calls.length, 1, "one deterministic provenance lookup");
+});
+
+test("pollCapabilityGatesImpl: an unresolved need starts the gate but never releases the barrier (#289)", async () => {
+  const PLAN_KEY = "owner/repo#8";
+  const PI = "PI-290";
+  const TASK = "gap-b";
+  const barrierKey = `${PLAN_KEY}:${TASK}`;
+  const stores: Record<string, { rows: any[]; key: string }> = {
+    plans: { rows: [{ plan_key: PLAN_KEY, process_key: PI }], key: "plan_key" },
+    plan_task_needs: {
+      rows: [
+        {
+          plan_key: PLAN_KEY,
+          task_id: TASK,
+          capability_ref: "nanobpm/nano-ide#274",
+          package: "@nanobpm/urban",
+          verify_command: null,
+        },
+      ],
+      key: "plan_key",
+    },
+    capability_gates: { rows: [], key: "gate_key" },
+  };
+  const data = capsDataLayer(stores);
+  const { engine, created, published } = capsEngine();
+  const { exec } = capsProbeExec(false); // capability not published yet
+  const headers = { "content-type": "application/json" };
+  const open = new Set<string>([`${PI}|${barrierKey}`]);
+  const prevFetch = globalThis.fetch;
+  globalThis.fetch = capsSubscriptionFetch(open) as typeof fetch;
+  try {
+    await pollCapabilityGatesImpl(data, engine, "http://engine/v2", headers, exec, {});
+  } finally {
+    globalThis.fetch = prevFetch;
+  }
+
+  // The gate is still started (bounded/durable wait + operator escalation) but no release.
+  assertEquals(created.length, 1, "gate started even while unresolved");
+  assertEquals(stores.capability_gates.rows[0]?.status, "pending");
+  assertEquals(stores.capability_gates.rows[0]?.resolved_artifact, null);
+  assertEquals(published.length, 0, "barrier NOT released until the capability ships");
+});
+
+test("pollCapabilityGatesImpl: level-triggered — no publish and no re-probe when the barrier subscription is not open (#289)", async () => {
+  const PLAN_KEY = "owner/repo#9";
+  const PI = "PI-291";
+  const TASK = "gap-c";
+  const stores: Record<string, { rows: any[]; key: string }> = {
+    plans: { rows: [{ plan_key: PLAN_KEY, process_key: PI }], key: "plan_key" },
+    plan_task_needs: {
+      rows: [
+        {
+          plan_key: PLAN_KEY,
+          task_id: TASK,
+          capability_ref: "nanobpm/nano-ide#274",
+          package: "@nanobpm/urban",
+          verify_command: null,
+        },
+      ],
+      key: "plan_key",
+    },
+    capability_gates: { rows: [], key: "gate_key" },
+  };
+  const data = capsDataLayer(stores);
+  const { engine, created, published } = capsEngine();
+  const { exec, calls } = capsProbeExec(true);
+  const headers = { "content-type": "application/json" };
+  const prevFetch = globalThis.fetch;
+  globalThis.fetch = capsSubscriptionFetch(new Set<string>()) as typeof fetch; // barrier not parked
+  try {
+    await pollCapabilityGatesImpl(data, engine, "http://engine/v2", headers, exec, {});
+  } finally {
+    globalThis.fetch = prevFetch;
+  }
+  assertEquals(published.length, 0, "no publish into a subscription that is not open");
+  assertEquals(created.length, 0, "no gate work until the task is parked at the barrier");
+  assertEquals(calls.length, 0, "no provenance probe until the task is parked at the barrier");
+});
+
+test("pollCapabilityGatesImpl: idempotent — a resolved gate is reused without a re-probe or a second publish (#289)", async () => {
+  const PLAN_KEY = "owner/repo#10";
+  const PI = "PI-292";
+  const TASK = "gap-d";
+  const barrierKey = `${PLAN_KEY}:${TASK}`;
+  const gateKey = `${PLAN_KEY}:${TASK}:nanobpm/nano-ide#274`;
+  const stores: Record<string, { rows: any[]; key: string }> = {
+    plans: { rows: [{ plan_key: PLAN_KEY, process_key: PI }], key: "plan_key" },
+    plan_task_needs: {
+      rows: [
+        {
+          plan_key: PLAN_KEY,
+          task_id: TASK,
+          capability_ref: "nanobpm/nano-ide#274",
+          package: "@nanobpm/urban",
+          verify_command: null,
+        },
+      ],
+      key: "plan_key",
+    },
+    capability_gates: {
+      rows: [
+        {
+          gate_key: gateKey,
+          plan_key: PLAN_KEY,
+          task_id: TASK,
+          capability_ref: "nanobpm/nano-ide#274",
+          package: "@nanobpm/urban",
+          status: "resolved",
+          resolved_artifact: "@nanobpm/urban@0.54.0",
+          process_key: "RG-EXISTING",
+          created_at: "t0",
+          updated_at: "t0",
+        },
+      ],
+      key: "gate_key",
+    },
+  };
+  const data = capsDataLayer(stores);
+  const { engine, created, published } = capsEngine();
+  const { exec, calls } = capsProbeExec(true);
+  const headers = { "content-type": "application/json" };
+  const open = new Set<string>([`${PI}|${barrierKey}`]);
+  const prevFetch = globalThis.fetch;
+  globalThis.fetch = capsSubscriptionFetch(open) as typeof fetch;
+  try {
+    await pollCapabilityGatesImpl(data, engine, "http://engine/v2", headers, exec, {});
+  } finally {
+    globalThis.fetch = prevFetch;
+  }
+  assertEquals(created.length, 0, "already-started gate is never re-started");
+  assertEquals(calls.length, 0, "already-resolved need is never re-probed");
+  assertEquals(published.length, 1, "the still-parked barrier is released from the pinned artifact");
+  assertEquals(published[0]?.correlationKey, barrierKey);
 });
