@@ -103,8 +103,8 @@ export class DurableResumeRegistry {
    * gate the world-restore emission consults. `false` when none is enrolled (nobody advertises
    * durable-resume), so the resume marker is omitted and the round redrives from scratch. */
   async anyParticipant(): Promise<boolean> {
-    const rows = await this.#table().find({ durable_resume: 1 });
-    return rows.length > 0;
+    const row = await this.#table().findOne({ durable_resume: 1 });
+    return row != null;
   }
 }
 
