@@ -84,8 +84,7 @@ test("conformance-record: derives has_deviations from ground truth even when the
   assertEquals(stores.plan_conformance[0].has_deviations, 1);
 });
 
-test("conformance-record: a clean epic records has_deviations = 0", async () => {
-  const { app, stores } = fakeApp();
+test("conformance-record: a clean epic records has_deviations = 0", async () => {  const { app, stores } = fakeApp();
   const out = await handler(
     { processInstanceKey: "retro-inst-7", variables: { planKey: "o/r#7", status: "filed", commentUrl: "https://x/7#c", slicesMet: 3, hasDeviations: false } } as any,
     app as any,
@@ -205,4 +204,16 @@ test("conformance-record: defaults to skipped when the agent reported nothing", 
     app as any,
   );
   assertEquals(stores.plan_conformance[0].status, "skipped");
+});
+
+test("conformance-record: coerces a numeric processInstanceKey to a string (TEXT process_key never drifts)", async () => {
+  const { app, stores } = fakeApp();
+  await handler(
+    { processInstanceKey: 220592130 as any, variables: { planKey: "o/r#11", status: "filed", commentUrl: "https://x/11#c", slicesNotVerified: 1 } } as any,
+    app as any,
+  );
+  const row = stores.plan_conformance[0];
+  assertEquals(row.process_key, "220592130");
+  assertEquals(typeof row.process_key, "string");
+  assertEquals(row.review_status, "reviewing");
 });
