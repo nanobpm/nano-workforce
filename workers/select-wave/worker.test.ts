@@ -81,6 +81,43 @@ test("select-wave projects the active wave onto plans.current_wave", async () =>
   assertEquals(plans[0].epic_phase, "Implementing (wave 2/2)");
 });
 
+test("select-wave captures the preflight's resolvedArtifacts onto plans.bound_artifacts (#292 S4)", async () => {
+  // A dependent epic reaching select-wave proves its S3 capability preflight went green; the bound
+  // pkg@version(s) ride `resolvedArtifacts` and must be captured for the S4 operator projection.
+  const rows: Row[] = [
+    { id: 1, plan_key: "owner/repo#63", task_id: "a", title: "A", prompt: "do A", status: "pending", wave: 0 },
+  ];
+  const plans: Record<string, unknown>[] = [{ plan_key: "owner/repo#63" }];
+  await handler(
+    {
+      variables: {
+        planKey: "owner/repo#63",
+        currentWave: 0,
+        // MI output collection: one entry per producer probe; null/empty/whitespace-only entries
+        // are filtered out (a probe may publish without a bind).
+        resolvedArtifacts: ["@scope/api@1.4.0", null, "", "   ", "@scope/core@2.0.0"],
+      },
+      elementId: "select-wave",
+    } as any,
+    fakeApp(rows, [], plans),
+  );
+  assertEquals(plans[0].bound_artifacts, JSON.stringify(["@scope/api@1.4.0", "@scope/core@2.0.0"]));
+});
+
+test("select-wave leaves bound_artifacts untouched for a root epic (no resolvedArtifacts)", async () => {
+  // A root fans out with no preflight -> resolvedArtifacts is null; the stamp must not write an
+  // empty/garbage bound_artifacts (the S4 projection reads NULL as "no bound version").
+  const rows: Row[] = [
+    { id: 1, plan_key: "owner/repo#63", task_id: "a", title: "A", prompt: "do A", status: "pending", wave: 0 },
+  ];
+  const plans: Record<string, unknown>[] = [{ plan_key: "owner/repo#63" }];
+  await handler(
+    { variables: { planKey: "owner/repo#63", currentWave: 0 }, elementId: "select-wave" } as any,
+    fakeApp(rows, [], plans),
+  );
+  assertEquals(plans[0].bound_artifacts, undefined);
+});
+
 test("select-wave nulls all three progress fields when there are no levelized rows", async () => {
   // No plan_tasks rows => waveCount 0. current_wave must be NULL too (not a stray index against a
   // NULL wave_count/wave_label), matching the documented "NULL until dispatched with tasks".

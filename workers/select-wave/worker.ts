@@ -61,6 +61,16 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
   const epicPhase = waveCount > 0
     ? deriveEpicPhase(job.elementId, { current: currentWave, total: waveCount })
     : null;
+  // Inter-epic gate projection (#292 slice S4): reaching select-wave proves this epic's leading
+  // capability PREFLIGHT (S3) already went GREEN, so capture the `resolvedArtifacts` the preflight
+  // bound — the exact `pkg@version`s first carrying each producer's awaited capability — onto the
+  // plan row. `pollWaitGate` (app/service.ts) reads this to show a satisfied dependent's bound
+  // version. NULL for a root (no preflight → no resolved artifacts); display-only, control flow is
+  // unchanged. Filter the MI output to non-blank strings (a probe may publish without a bind),
+  // mirroring the `resolvedArtifacts[item != null]` filter the implement-task prompt uses.
+  const boundArtifacts = Array.isArray(job.variables.resolvedArtifacts)
+    ? job.variables.resolvedArtifacts.filter((v): v is string => typeof v === "string" && v.trim().length > 0)
+    : [];
   try {
     await plans(app.data).update(planKey, {
       // Keep the three progress fields consistent: with no levelized rows (waveCount 0) there is
@@ -69,6 +79,7 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
       wave_count: waveCount > 0 ? waveCount : null,
       wave_label: waveCount > 0 ? `${currentWave + 1}/${waveCount}` : null,
       ...(epicPhase ? { epic_phase: epicPhase } : {}),
+      ...(boundArtifacts.length > 0 ? { bound_artifacts: JSON.stringify(boundArtifacts) } : {}),
       updated_at: ts,
     });
   } catch (err) {

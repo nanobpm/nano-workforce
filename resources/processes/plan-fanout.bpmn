@@ -70,6 +70,7 @@
         <nano:shape id="SelectWaveIn" name="Select wave — input">
           <nano:extend name="planKey" type="string" />
           <nano:extend name="currentWave" type="integer" />
+          <nano:extend name="resolvedArtifacts" type="string" list="true" optional="true" />
         </nano:shape>
         <nano:shape id="ResolveTrialAttentionIn" name="Clear trial attention — input">
           <nano:extend name="planKey" type="string" />

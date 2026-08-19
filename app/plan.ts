@@ -121,6 +121,21 @@ export interface Plan {
   acknowledged_at: string | null;
   list_bucket: string | null;
   ack_open: number | null;
+  // Operator visibility for the inter-epic gate (047_plan_wait_gate.sql, #292 slice S4). Derived,
+  // display-only projection over the S1 `plan_deps` edges + this epic's own S3 preflight lifecycle —
+  // recomputed idempotently by `pollWaitGate` (app/service.ts) from the pure `deriveWaitGate`
+  // (app/waitGate.ts); NEVER written by admission/scheduling (this slice is read-only). A ROOT epic
+  // (no inbound edge) carries NULL for both — it shows no wait-gate; pre-S4 rows grandfather in NULL.
+  //   • wait_gate       — 'waiting' (parked at the preflight, blocked on a producer's capability) |
+  //                       'ready' (preflight green, fanned out, bound to a version) | 'escalated'
+  //                       (the gate's bounded timeout elapsed with no publish).
+  //   • wait_gate_label — the human at-a-glance rollup the epic index/detail read as a flat column.
+  wait_gate: string | null;
+  wait_gate_label: string | null;
+  // JSON array of the resolved `pkg@version` strings the S3 preflight bound (the exact versions first
+  // carrying each producer's capability), stamped by the `select-wave` worker from the
+  // `resolvedArtifacts` process variable once the gate goes green. NULL until green / for roots.
+  bound_artifacts: string | null;
   created_at: string;
   updated_at: string;
 }

@@ -61,6 +61,7 @@
           { "field": "epic_phase", "header": "Phase" },
           { "field": "status", "header": "Status", "link": { "kind": "processExplorer", "keyField": "process_key" } },
           { "field": "delivery", "header": "Delivery" },
+          { "field": "wait_gate_label", "header": "Wait gate" },
           { "field": "promotion_state", "header": "Promotion" },
           { "field": "wave_label", "header": "Wave" },
           { "field": "task_count", "header": "Tasks" },
@@ -73,10 +74,37 @@
             { "field": "issue_number", "label": "Issue number" },
             { "field": "base_branch", "label": "Base branch (blank = repo default)" },
             { "field": "delivery_label", "label": "Delivery rollup (slices merged / converging)" },
+            { "field": "wait_gate_label", "label": "Inter-epic gate (waiting on / bound version / escalated)" },
+            { "field": "bound_artifacts", "label": "Bound producer capabilities (pkg@version)" },
             { "field": "promotion_pr", "label": "Promotion PR (epic/* → default branch)" },
             { "field": "outcome", "label": "Outcome" }
           ]
         }
+      }
+    },
+    {
+      "type": "dataGrid",
+      "id": "inter-epic-deps",
+      "props": {
+        "title": "Inter-epic dependencies (waiting on)",
+        "rowKey": "depends_on_plan_key",
+        "refreshMs": 5000,
+        "collapsible": true,
+        "defaultCollapsed": true,
+        "empty": "No inter-epic dependencies — this is a root epic (it starts immediately, no capability wait-gate).",
+        "data": {
+          "kind": "datasource",
+          "source": "app",
+          "table": "plan_deps",
+          "orderBy": { "field": "created_at", "dir": "asc" },
+          "filter": [{ "field": "plan_key", "eqParam": true }]
+        },
+        "columns": [
+          { "field": "depends_on_plan_key", "header": "Waits on (producer epic)" },
+          { "field": "package", "header": "Package" },
+          { "field": "capability_ref", "header": "Capability ref" },
+          { "field": "created_at", "header": "Recorded", "width": "9rem" }
+        ]
       }
     },
     {

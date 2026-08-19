@@ -1,0 +1,34 @@
+-- 047_plan_wait_gate.sql — issue #292 slice S4: make the inter-epic schedule OBSERVABLE to an
+-- operator. S1 landed the `plan_deps` edges (which epic waits on which); S3 lowers each dependent
+-- behind a leading `capability` readiness PREFLIGHT (plan-fanout.bpmn) that holds wave 0 until every
+-- producer publishes the awaited `pkg@version`, then escalates (bounded) on timeout. Until now a
+-- parked dependent was a SILENT stall — the epic views showed no wave, no delivery, no reason.
+--
+-- This slice reifies the dependent's gate state as three derived, display-only columns on `plans`,
+-- mirroring the existing `delivery`/`delivery_label` (029) and `wave_label` (022) projections so the
+-- declarative epic index/detail dataGrids read them as flat columns (Urban's datasource can't read a
+-- SQL VIEW or join). All three are DERIVED — never written by the plan lifecycle nor hand-derived in
+-- SQL or the page:
+--   • wait_gate       — the dependent's gate state: 'waiting' (parked at the preflight, blocked on a
+--                       producer's capability) | 'ready' (the preflight went green and the epic has
+--                       fanned out, bound to a concrete version) | 'escalated' (the gate's bounded
+--                       timeout elapsed with no publish). NULL for a ROOT epic (no inbound edge → no
+--                       wait-gate) and for pre-S4 rows. Recomputed idempotently by `pollWaitGate`
+--                       (app/service.ts) from the pure `deriveWaitGate` (app/waitGate.ts), joining
+--                       each plan's inbound `plan_deps` edges against its own lifecycle.
+--   • wait_gate_label — the human at-a-glance rollup the epic index/detail show, e.g.
+--                       "waiting on owner/repo#12 @ @scope/pkg · re-checks every 30s · escalates by …"
+--                       or "ready · bound @scope/pkg@1.4.0". NULL alongside `wait_gate`.
+--   • bound_artifacts — JSON array of the resolved `pkg@version` strings the preflight bound (the
+--                       exact versions FIRST carrying each producer's capability), stamped by the
+--                       `select-wave` worker from the `resolvedArtifacts` process variable the
+--                       preflight produced — the same value that rides the implement task's prompt.
+--                       NULL until the gate goes green (and for roots, whose preflight is skipped).
+--
+-- Forward-only, additive (expand): all nullable with no default, so pre-S4 rows grandfather in as
+-- NULL and never gate control flow (this is read-only projection over S1–S3 state — admission and
+-- scheduling are untouched). Numbered after the current highest prefix on origin/main (046); the
+-- runner wraps each file in its own transaction, so this file must NOT contain BEGIN/COMMIT.
+ALTER TABLE plans ADD COLUMN wait_gate TEXT;
+ALTER TABLE plans ADD COLUMN wait_gate_label TEXT;
+ALTER TABLE plans ADD COLUMN bound_artifacts TEXT;
