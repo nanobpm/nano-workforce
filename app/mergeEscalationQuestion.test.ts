@@ -55,13 +55,17 @@ test("merge-esc-attempt carries a non-blank, human-actionable status + question"
   assertStringIncludes(el, "<zeebe:ioMapping", "merge-esc-attempt must set an ioMapping (was absent — the #329 defect)");
   assertStringIncludes(el, 'target="status"', "merge-esc-attempt must set a `status`");
   assertStringIncludes(el, 'target="question"', "merge-esc-attempt must set a non-blank `question`");
-  assertStringIncludes(el, '="blocked"', "the escalation status must be `blocked`");
+  // Tighten: assert the explicit `status` INPUT MAPPING sets blocked, not merely the substring
+  // `="blocked"` (which the FEEL question's `agentVerdict = "blocked"` comparison would also satisfy
+  // even if the status mapping were removed/changed).
+  assertStringIncludes(el, 'source="="blocked"" target="status"', "the explicit `status` input mapping must set `blocked`");
 });
 
 test("the question distinguishes all four blocked/SLA triggers rather than a single generic string", () => {
   // Four flows route into merge-esc-attempt — the gate `blocked` default, CI could-not-fix,
   // rebase could-not-resolve, and the CI-fix SLA. Each is a legitimately different escalation and
   // the question must explain which one fired.
+  assert(escAttempt, "merge-esc-attempt service task must exist");
   const el = escAttempt![0];
   // gate blocked (gw-merge default): distinguishes on the `ready` mergeState + surfaces mergeStatus.
   assertStringIncludes(el, 'mergeState = "ready"', "must branch on the gate-blocked (ready) trigger");
