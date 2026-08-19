@@ -1,3 +1,10 @@
+# [0.90.0](https://github.com/nanobpm/nano-workforce/compare/v0.89.0...v0.90.0) (2026-08-19)
+
+
+### Features
+
+* **convergence:** surface epic / cross-slice lineage on the PR-row detail ([#307](https://github.com/nanobpm/nano-workforce/issues/307)) ([7010b88](https://github.com/nanobpm/nano-workforce/commit/7010b88889529aec173c552bab2a1e7b881ba9da)), closes [nanobpm/nano-workforce#304](https://github.com/nanobpm/nano-workforce/issues/304)
+
 # [0.89.0](https://github.com/nanobpm/nano-workforce/compare/v0.88.1...v0.89.0) (2026-08-19)
 
 
