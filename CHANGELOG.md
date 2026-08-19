@@ -1,3 +1,10 @@
+## [0.99.1](https://github.com/nanobpm/nano-workforce/compare/v0.99.0...v0.99.1) (2026-08-19)
+
+
+### Bug Fixes
+
+* **convergence-loop:** route every escalation arm through gw-escalated ([#333](https://github.com/nanobpm/nano-workforce/issues/333)) ([#340](https://github.com/nanobpm/nano-workforce/issues/340)) ([0ad7a5c](https://github.com/nanobpm/nano-workforce/commit/0ad7a5c08a659a0ca26dc48def8c024d21a3a53a)), closes [#329](https://github.com/nanobpm/nano-workforce/issues/329)
+
 # [0.99.0](https://github.com/nanobpm/nano-workforce/compare/v0.98.1...v0.99.0) (2026-08-19)
 
 
