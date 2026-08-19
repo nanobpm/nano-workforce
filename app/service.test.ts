@@ -891,6 +891,35 @@ test("abandonClosedPr is idempotent — the terminal merges audit row is written
   assertEquals((stores.merges.rows[0] as any).method, "pr-closed");
 });
 
+// #352 review (suppressed advisory app/service.ts:863): `abandonClosedPr` writes the terminal
+// `merges` audit row — an FK child of `pull_requests.pr_key` — and must not assume the parent row
+// exists. The merge-worker caller pre-heals with `ensurePr`, but the wave-gate self-heal path
+// (`pollWaveGatesImpl`) does NOT, so in an engine/app.db desync the canonical writer could observe a
+// closed member whose `pull_requests` row is missing and hit a `FOREIGN KEY constraint failed`,
+// wedging the poller pass. The canonical writer must self-heal the parent (idempotent `ensurePr`)
+// before the FK-child insert, symmetrically for BOTH callers. Read-model witness: with a missing
+// parent row the old code's `prs.update` was a silent no-op, so the PR was never reconciled terminal.
+test("abandonClosedPr self-heals a missing pull_requests parent row before the FK-child audit insert (#352)", async () => {
+  const stores: Record<string, { rows: any[]; key: string }> = {
+    pull_requests: { rows: [], key: "pr_key" }, // desync: parent row is MISSING
+    plan_tasks: { rows: [{ id: "owner/repo#67:c", plan_key: "owner/repo#67", wave: 3, status: "opened", pr_key: "owner/repo#71" }], key: "id" },
+    merges: { rows: [], key: "id" },
+  };
+  const data = {
+    table: (name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key),
+  } as any;
+
+  await abandonClosedPr(data, "owner/repo#71", "closed without merging");
+
+  // The parent row is reconstructed AND flipped terminal, so the FK-child audit row has a parent.
+  const parent = stores.pull_requests.rows.find((r) => r.pr_key === "owner/repo#71");
+  assertEquals(parent?.status, "abandoned", "missing parent pull_requests row is self-healed and reconciled terminal");
+  assertEquals(parent?.repo, "owner/repo", "reconstructed parent carries the parsed repo");
+  assertEquals(parent?.number, 71, "reconstructed parent carries the parsed number");
+  assertEquals(stores.plan_tasks.rows.find((r) => r.id === "owner/repo#67:c")?.status, "abandoned");
+  assertEquals(stores.merges.rows.length, 1, "terminal audit row written once");
+});
+
 
 //
 // plan-fanout parks a task with capability `needs` at the `wait-caps-resolved` message barrier. This

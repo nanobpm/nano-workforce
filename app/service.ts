@@ -860,9 +860,18 @@ async function isDepMerged(data: DataLayer, depKey: string, token: string): Prom
  * poller retry (or the two observers — merge worker + wave gate — racing the same closed PR):
  * re-running just re-stamps the same terminal status, and the terminal `merges` audit row is written
  * only once (guarded on an existing `abandoned`/`pr-closed` row for this PR) so retries can't spam the
- * audit with duplicate rows and skew reporting. */
+ * audit with duplicate rows and skew reporting.
+ *
+ * Self-heals the FK parent first: the `merges` audit row is an FK child of `pull_requests.pr_key`, so
+ * before writing it we ensure the parent row exists via the idempotent {@link ensurePr}. The merge
+ * worker already pre-heals, but the wave-gate self-heal path does not — and in an engine/app.db
+ * desync (the exact class `ensurePr` heals) it can observe a closed member whose `pull_requests` row
+ * is missing. Healing inside the ONE canonical writer covers BOTH callers symmetrically, so the
+ * FK-child insert can never hit `FOREIGN KEY constraint failed` and wedge the poller pass. */
 export async function abandonClosedPr(data: DataLayer, prKey: string, detail: string): Promise<void> {
   const ts = now();
+  const parsed = parsePr(prKey);
+  if (parsed) await ensurePr(data, { prKey, repo: parsed.repo, number: parsed.number });
   const merges = data.table("merges", "id");
   const alreadyAudited = (await merges.find({ pr_key: prKey, outcome: "abandoned", method: "pr-closed" })).length > 0;
   if (!alreadyAudited) {
@@ -885,12 +894,17 @@ export async function abandonClosedPr(data: DataLayer, prKey: string, detail: st
  *     already-`abandoned` tracked row / non-PR ref that can never block) → non-blocking.
  *   • `closed`  — live GitHub state is closed WITHOUT merging → non-blocking, and the caller must
  *     reconcile it terminal via {@link abandonClosedPr} so it leaves the target set.
- *   • `pending` — still open, or the transport couldn't read it (unknown) → still blocks the wave.
+ *   • `pending` — still open, or read successfully but in an ambiguous (`unknown`) live state → still
+ *     blocks the wave. A *thrown* transport error (network/5xx) is NOT swallowed here: it rethrows so
+ *     the poller pass logs and retries — behaviourally identical for the barrier (it stays armed and
+ *     re-checks next pass), and canonical with {@link isDepMerged}, which rethrows transient failures
+ *     the same way. Only a `not-a-pull-request` error is caught (→ `cleared`).
  *
  * Mirrors {@link isDepMerged} (tracked-row fast path, then a live read, `not-a-pull-request` treated
- * as cleared) but adds the closed-unmerged branch the wave barrier lacked — the direct analogue of
- * the merge stage's `classifyPrLiveness === "closed"` abandon. Conservative: an unreadable PR stays
- * `pending` (a false negative only costs a retry; a false positive would drop a live member). */
+ * as cleared, transient errors rethrown) but adds the closed-unmerged branch the wave barrier lacked
+ * — the direct analogue of the merge stage's `classifyPrLiveness === "closed"` abandon. Conservative:
+ * an unreadable PR never resolves to a terminal `cleared`/`closed`, so a false negative only costs a
+ * retry while a false positive that would drop a live member is impossible. */
 async function classifyWaveTarget(
   data: DataLayer,
   prKey: string,
@@ -911,7 +925,7 @@ async function classifyWaveTarget(
   const liveness = classifyPrLiveness(st);
   if (liveness === "merged") return "cleared";
   if (liveness === "closed") return "closed";
-  return "pending"; // open, or unknown transport → stay conservative and keep blocking
+  return "pending"; // read OK but open or ambiguous (`unknown`) live state → stay conservative and keep blocking
 }
 
 /** Flip a PR into the transient `merging` status and publish the correlating message, reverting
