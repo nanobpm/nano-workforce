@@ -56,6 +56,10 @@ export type LineageOrigin =
       issueUrl: string | null;
       status: string;
       processKey: string | null;
+      // The epic's derived domain phase (`plans.epic_phase`, 038_plan_epic_phase.sql) — e.g.
+      // "Implementing (wave 3/5)". NULL for pre-#261 epics that never stamped a phase; the thread
+      // then falls back to its delivery-rollup `stageLabel` for the projected `epicPhaseLabel`.
+      epicPhase: string | null;
     }
   | {
       // A human/webhook PR with no originating request: its own root.
@@ -73,6 +77,12 @@ export interface LineageThread {
   stage: LineageStage;
   /** Human narrative rollup for the timeline (e.g. "Converging (round 2)", "3/5 slices merged, …"). */
   stageLabel: string;
+  /** The epic-phase/stage label projected onto each member PR's `pull_requests.epic_phase_label`, so
+   *  the Convergence PR-row detail can show an epic slice its parent epic's phase (issue #304). For an
+   *  epic thread it is the epic's `epic_phase` (e.g. "Implementing (wave 3/5)"), falling back to the
+   *  delivery-rollup `stageLabel` when the epic never stamped a phase. NULL for feature/self-rooted
+   *  threads — their member PRs are not epic slices, so the epic panel stays empty for them. */
+  epicPhaseLabel: string | null;
   /** The active-frontier process instance (for the processExplorer link), best-effort. */
   processKey: string | null;
   prKeys: string[];
@@ -238,6 +248,12 @@ export function deriveLineage(origin: LineageOrigin, prsIn: readonly LineagePr[]
   }
 
   const active = !TERMINAL_STAGES.includes(stage);
+  // Epic slices carry their parent epic's phase down to the PR-row detail (issue #304): prefer the
+  // epic's own stamped `epic_phase`, falling back to the delivery-rollup `stageLabel` for a
+  // grandfathered epic that never stamped one. Feature/self-rooted threads are not epics, so their
+  // member PRs get no epic label.
+  const epicPhaseLabel =
+    origin.kind === "epic" ? (origin.epicPhase ?? stageLabel) : null;
   return {
     rootRequestKey: origin.key,
     kind: origin.kind,
@@ -245,6 +261,7 @@ export function deriveLineage(origin: LineageOrigin, prsIn: readonly LineagePr[]
     issueUrl: origin.kind === "pr" ? null : origin.issueUrl,
     stage,
     stageLabel,
+    epicPhaseLabel,
     processKey,
     prKeys,
     prCount: prKeys.length,
@@ -287,6 +304,9 @@ interface PrRow {
   process_key: string | null;
   outcome: string | null;
   root_request_key: string | null;
+  // Epic-phase projection this module maintains (issue #304, migration 043): the parent epic's phase
+  // label for an epic slice PR, NULL otherwise. Read here only to keep the write idempotent.
+  epic_phase_label: string | null;
 }
 
 const prRows = (data: DataLayer) => data.table<PrRow>("pull_requests", "pr_key");
@@ -446,6 +466,7 @@ function epicOrigin(plan: Plan): LineageOrigin {
     issueUrl: plan.issue_url,
     status: plan.status,
     processKey: plan.process_key,
+    epicPhase: plan.epic_phase,
   };
 }
 
@@ -532,6 +553,41 @@ export async function pollLineage(data: DataLayer): Promise<void> {
       }
     } catch (err) {
       console.error(`[poller] lineage ${thread.rootRequestKey}: ${err}`);
+    }
+  }
+  await projectEpicPhaseLabels(data, threads);
+}
+
+/** Denormalise each epic thread's phase label down onto its member PRs' `pull_requests.epic_phase_label`
+ * (issue #304), so the Convergence PR-row detail can show an escalated slice its parent epic's phase
+ * without a cross-join to `plans` / `lineage_threads`. Every PR belongs to exactly one thread, so a
+ * PR whose thread is a feature/self-root is cleared to NULL — no stale epic label survives if a PR is
+ * re-rooted. Idempotent: writes only the rows whose label actually changed. Mirrors the write-time
+ * projection convention (`delivery_label`, `epic_phase`). Best-effort; failures are isolated. */
+async function projectEpicPhaseLabels(
+  data: DataLayer,
+  threads: Map<string, LineageThread>,
+): Promise<void> {
+  // Desired label per member PR: an epic thread stamps its `epicPhaseLabel`, every other thread NULL.
+  const desired = new Map<string, string | null>();
+  for (const thread of threads.values()) {
+    for (const key of thread.prKeys) desired.set(key, thread.epicPhaseLabel);
+  }
+  const table = prRows(data);
+  let rows: PrRow[];
+  try {
+    rows = await table.all();
+  } catch (err) {
+    console.error(`[poller] lineage epic-phase read: ${err}`);
+    return;
+  }
+  for (const pr of rows) {
+    const want = desired.get(pr.pr_key) ?? null;
+    if ((pr.epic_phase_label ?? null) === want) continue; // steady state — no write
+    try {
+      await table.update(pr.pr_key, { epic_phase_label: want });
+    } catch (err) {
+      console.error(`[poller] lineage epic-phase ${pr.pr_key}: ${err}`);
     }
   }
 }

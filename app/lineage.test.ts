@@ -75,7 +75,7 @@ test("feature: an escalated run surfaces the escalation stage", () => {
 
 test("epic: rolls up N slice PRs and stays active while any is in flight", () => {
   const t = deriveLineage(
-    { kind: "epic", key: "o/r#9", title: "Big epic", issueUrl: "u", status: "done", processKey: "e1" },
+    { kind: "epic", key: "o/r#9", title: "Big epic", issueUrl: "u", status: "done", processKey: "e1", epicPhase: "Implementing (wave 2/3)" },
     [
       pr({ prKey: "o/r#10", status: "merged" }),
       pr({ prKey: "o/r#11", status: "converging", processKey: "c11" }),
@@ -85,6 +85,7 @@ test("epic: rolls up N slice PRs and stays active while any is in flight", () =>
   assertEquals(t.kind, "epic");
   assertEquals(t.stage, "converging");
   assertEquals(t.stageLabel, "1/3 slices merged, 1 converging");
+  assertEquals(t.epicPhaseLabel, "Implementing (wave 2/3)", "an epic thread carries its stamped epic_phase down to member PRs");
   assertEquals(t.processKey, "c11");
   assertEquals(t.prCount, 3);
   assert(t.active);
@@ -92,17 +93,18 @@ test("epic: rolls up N slice PRs and stays active while any is in flight", () =>
 
 test("epic: all slices merged settles as merged", () => {
   const t = deriveLineage(
-    { kind: "epic", key: "o/r#9", title: "Big epic", issueUrl: "u", status: "done", processKey: "e1" },
+    { kind: "epic", key: "o/r#9", title: "Big epic", issueUrl: "u", status: "done", processKey: "e1", epicPhase: null },
     [pr({ prKey: "o/r#10", status: "merged" }), pr({ prKey: "o/r#11", status: "merged" })],
   );
   assertEquals(t.stage, "merged");
   assertEquals(t.stageLabel, "2/2 slices merged");
+  assertEquals(t.epicPhaseLabel, "2/2 slices merged", "a grandfathered epic (no epic_phase) falls back to its delivery-rollup stage label");
   assert(!t.active);
 });
 
 test("epic: mixed terminal (none in flight, not all merged) is resolved, not landed", () => {
   const t = deriveLineage(
-    { kind: "epic", key: "o/r#9", title: "E", issueUrl: "u", status: "done", processKey: "e1" },
+    { kind: "epic", key: "o/r#9", title: "E", issueUrl: "u", status: "done", processKey: "e1", epicPhase: "Finalizing" },
     [pr({ prKey: "o/r#10", status: "merged" }), pr({ prKey: "o/r#11", status: "abandoned" })],
   );
   assertEquals(t.stage, "resolved");
@@ -111,11 +113,21 @@ test("epic: mixed terminal (none in flight, not all merged) is resolved, not lan
 
 test("epic: planning with no PRs yet", () => {
   const t = deriveLineage(
-    { kind: "epic", key: "o/r#9", title: "E", issueUrl: "u", status: "planning", processKey: "e1" },
+    { kind: "epic", key: "o/r#9", title: "E", issueUrl: "u", status: "planning", processKey: "e1", epicPhase: "Planning" },
     [],
   );
   assertEquals(t.stage, "planning");
   assert(t.active);
+});
+
+test("feature/self-rooted threads carry no epic phase label", () => {
+  const feat = deriveLineage(
+    { kind: "feature", key: "o/r#1", title: "X", issueUrl: "u", status: "converging", processKey: "f1" },
+    [pr({ prKey: "o/r#2", status: "converging" })],
+  );
+  assertEquals(feat.epicPhaseLabel, null, "a feature PR is not an epic slice");
+  const self = deriveLineage({ kind: "pr", key: "o/r#5" }, [pr({ prKey: "o/r#5", status: "converging" })]);
+  assertEquals(self.epicPhaseLabel, null, "a self-rooted PR is not an epic slice");
 });
 
 // ── self-rooted (human/webhook) PR ───────────────────────────────────────────────────────────
@@ -174,7 +186,7 @@ test("pollLineage: projects feature, epic, and self-rooted threads onto lineage_
     { feature_key: "o/r#1", title: "Feature", issue_url: "u1", status: "converging", process_key: "f1", pr_key: "o/r#100" },
   ];
   stores.plans = [
-    { plan_key: "o/r#2", title: "Epic", issue_url: "u2", status: "done", process_key: "e1" },
+    { plan_key: "o/r#2", title: "Epic", issue_url: "u2", status: "done", process_key: "e1", epic_phase: "Implementing (wave 1/2)" },
   ];
   stores.plan_tasks = [
     { id: 1, plan_key: "o/r#2", pr_key: "o/r#200" },
@@ -211,6 +223,14 @@ test("pollLineage: projects feature, epic, and self-rooted threads onto lineage_
   assertEquals(human?.kind, "pr");
   assertEquals(human?.stage, "merged");
   assertEquals(human?.active, 0);
+
+  // Epic-phase projection (#304): each epic slice PR gets its parent epic's phase label; the feature
+  // and self-rooted PRs (not epic slices) are left NULL, so their PR-row detail shows no epic panel.
+  const prById = (k: string) => stores.pull_requests.find((r: any) => r.pr_key === k);
+  assertEquals(prById("o/r#200").epic_phase_label, "Implementing (wave 1/2)", "epic slice S1 carries the epic phase");
+  assertEquals(prById("o/r#201").epic_phase_label, "Implementing (wave 1/2)", "epic slice S2 carries the epic phase");
+  assertEquals(prById("o/r#100").epic_phase_label ?? null, null, "a feature PR is not an epic slice");
+  assertEquals(prById("o/r#300").epic_phase_label ?? null, null, "a self-rooted PR is not an epic slice");
 
   // Idempotent: a second pass with no state change writes nothing new (same row count, same ts).
   const before = stores.lineage_threads.map((r: LineageThreadRow) => r.updated_at);
