@@ -12,10 +12,18 @@
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { blackboardUrl, mintBlackboardToken, renderCoordinationBrief } from "./blackboard.ts";
 import { capsWaitTimeout, DEFAULT_CAPS_WAIT_TIMEOUT } from "./capsWait.ts";
+import { deriveEpicBucket, epicIsAcknowledgeable } from "./delivery.ts";
 import { EPIC_PHASE } from "./epicPhase.ts";
 import { DEFAULT_ESCALATION_SLA_TIMEOUT, escalationSlaTimeout } from "./escalationSla.ts";
-import { coalesceTitle, ensureBaseBranch, fetchDefaultBranch, fetchIssueTitle } from "./github.ts";
+import {
+  BaseBranchMustExistError,
+  coalesceTitle,
+  ensureBaseBranch,
+  fetchDefaultBranch,
+  fetchIssueTitle,
+} from "./github.ts";
 import { clearExclusions } from "./mergeExclusion.ts";
+import type { ReadinessProbe } from "./readiness.ts";
 import { clearTaskDeltas } from "./taskDelta.ts";
 
 /** The BPMN process this module drives (resources/processes/plan-fanout.bpmn). */
@@ -101,6 +109,45 @@ export interface Plan {
   // view can show which phase the epic is IN rather than only the process-instance terminal status.
   // Display-only; NULL until the lifecycle first stamps it (grandfathers pre-#261 rows).
   epic_phase: string | null;
+  // Epic integration-branch → default-branch promotion (042_plan_promotion.sql, #299). When an epic
+  // targets a custom `epic/*` integration branch and every slice PR has merged (`delivery = landed`),
+  // the poller's `pollPromotion` pass opens exactly ONE `epic/* → <default>` promotion PR and drives
+  // it through the same convergence + merge protocol as every other PR (see app/promotion.ts).
+  //   • promotion_pr    — the `owner/repo#N` key of that promotion PR, or NULL until one is opened.
+  //                       PRIMARY idempotency key: a set value never re-opens a second PR.
+  //   • promotion_state — the epic-card progression 'ready' → 'open' → 'promoted', or NULL until the
+  //                       epic first becomes promotable (also NULL forever for a `main`-based epic,
+  //                       which has nothing to promote). Display-only; projected by the poller.
+  promotion_pr: string | null;
+  promotion_state: string | null;
+  // Active/History partition + operator tick-off (044_plan_list_bucket.sql, #298). Derived,
+  // write-time-projected by the `plans` gateway (below) from the pure `deriveEpicBucket` /
+  // `epicIsAcknowledgeable` helpers (app/delivery.ts) — never written by the plan lifecycle or a
+  // poller directly. Bucket epics on the derived `delivery` rollup, not raw `status`, so a `done`
+  // epic still converging — or landed-but-unpromoted — does not vanish from Active.
+  //   • acknowledged_at — NULL until an operator dismisses a resolved `done` epic (acknowledge-epic).
+  //   • list_bucket     — 'active' | 'history': the page tabs filter on this flat column.
+  //   • ack_open        — 1 | 0: 1 iff a resolved (`done`, not converging) but unacknowledged epic,
+  //                       gating the Dismiss button's `showWhenField`. NULL only on pre-#298 rows
+  //                       until `backfillPlanBuckets`.
+  acknowledged_at: string | null;
+  list_bucket: string | null;
+  ack_open: number | null;
+  // Operator visibility for the inter-epic gate (047_plan_wait_gate.sql, #292 slice S4). Derived,
+  // display-only projection over the S1 `plan_deps` edges + this epic's own S3 preflight lifecycle —
+  // recomputed idempotently by `pollWaitGate` (app/service.ts) from the pure `deriveWaitGate`
+  // (app/waitGate.ts); NEVER written by admission/scheduling (this slice is read-only). A ROOT epic
+  // (no inbound edge) carries NULL for both — it shows no wait-gate; pre-S4 rows grandfather in NULL.
+  //   • wait_gate       — 'waiting' (parked at the preflight, blocked on a producer's capability) |
+  //                       'ready' (preflight green, fanned out, bound to a version) | 'escalated'
+  //                       (the gate's bounded timeout elapsed with no publish).
+  //   • wait_gate_label — the human at-a-glance rollup the epic index/detail read as a flat column.
+  wait_gate: string | null;
+  wait_gate_label: string | null;
+  // JSON array of the resolved `pkg@version` strings the S3 preflight bound (the exact versions first
+  // carrying each producer's capability), stamped by the `select-wave` worker from the
+  // `resolvedArtifacts` process variable once the gate goes green. NULL until green / for roots.
+  bound_artifacts: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -137,7 +184,85 @@ export const PLAN_TASK_STATUSES = [
 ] as const;
 export type PlanTaskStatus = typeof PLAN_TASK_STATUSES[number];
 
-export const plans = (data: DataLayer) => data.table<Plan>("plans", "plan_key");
+export const plans = (data: DataLayer) => {
+  const table = data.table<Plan>("plans", "plan_key");
+  return new Proxy(table, {
+    get(target, prop) {
+      if (prop === "insert") {
+        return (row: Partial<Plan>) => target.insert({ ...row, ...projectPlanBucket(row) });
+      }
+      if (prop === "update") {
+        return async (id: unknown, patch: Partial<Plan>) => {
+          // Only re-read + reproject when the patch changes a projection input (status / delivery /
+          // acknowledged_at) or writes a derived column directly. A projection-irrelevant patch (e.g.
+          // an `updated_at`- or `wave_label`-only write — including the direct `data.table` writes in
+          // e.g. `app/retro.ts` that stamp `retro_started_at`) leaves the stored projection correct, so
+          // skip the extra `get` roundtrip and delegate straight. Any bucket-relevant write
+          // (status/delivery/acknowledged_at or a derived column) MUST go through this gateway to stay
+          // reprojected.
+          if (!patchAffectsPlanProjection(patch)) return target.update(id, patch);
+          const existing = await target.get(id);
+          const merged: Partial<Plan> = { ...existing, ...patch };
+          return target.update(id, { ...patch, ...projectPlanBucket(merged) });
+        };
+      }
+      // Delegate every other method straight through. Bind functions to the real target so the
+      // gateway's private class fields resolve — a Proxy `this` would not carry them.
+      const value = Reflect.get(target, prop, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+};
+
+/** The `plans` fields the bucket projection READS: a patch touching none of these (and none it
+ * writes) cannot change `list_bucket`/`ack_open`, so the gateway skips the read-back+reproject. Kept
+ * adjacent to {@link projectPlanBucket} so the two stay in lockstep. */
+const PLAN_PROJECTION_INPUT_KEYS: readonly (keyof Plan)[] = ["status", "delivery", "acknowledged_at"];
+
+/** The `plans` fields the bucket projection WRITES. Included in the reproject trigger so a caller who
+ * writes a derived column directly (e.g. `list_bucket`/`ack_open`) can never bypass derivation: the
+ * gateway re-reads, recomputes, and OVERRIDES the raw value with the canonical derived one. */
+const PLAN_PROJECTION_OUTPUT_KEYS: readonly (keyof Plan)[] = ["list_bucket", "ack_open"];
+
+/** True when a patch changes at least one field the bucket projection derives from OR one it writes —
+ * i.e. the projection must be recomputed (mirrors feature.ts `patchAffectsProjection`). */
+function patchAffectsPlanProjection(patch: Partial<Plan>): boolean {
+  return (
+    PLAN_PROJECTION_INPUT_KEYS.some((k) => k in patch) ||
+    PLAN_PROJECTION_OUTPUT_KEYS.some((k) => k in patch)
+  );
+}
+
+/** Compute the write-time bucket projection columns for a merged `plans` row. Centralised so the
+ * gateway is the ONE place `deriveEpicBucket` / `epicIsAcknowledgeable` are applied — the page, SQL,
+ * pollers and workers never re-derive the mapping (AGENTS.md "derivation over duplication"). */
+function projectPlanBucket(row: Partial<Plan>): Partial<Plan> {
+  if (!row.status) return {};
+  return {
+    list_bucket: deriveEpicBucket(row.status, row.delivery ?? null, row.acknowledged_at ?? null),
+    ack_open:
+      epicIsAcknowledgeable(row.status, row.delivery ?? null) && (row.acknowledged_at ?? null) === null
+        ? 1
+        : 0,
+  };
+}
+
+/** Re-project every `plans` row through the gateway so rows written before migration 042 (whose
+ * `list_bucket`/`ack_open` are NULL) get a correct Active/History bucket. Idempotent and safe to
+ * re-run: it re-derives from each row's own stored fields, so a second pass is a no-op. Runs once at
+ * boot (pollOnce) — the gateway keeps every future write fresh, so this only needs to catch legacy
+ * rows. Returns the count actually stamped. Mirrors `backfillFeatureStages` (app/feature.ts). */
+export async function backfillPlanBuckets(data: DataLayer): Promise<number> {
+  const table = plans(data);
+  let stamped = 0;
+  for (const row of await table.all()) {
+    // Only touch rows the projection has never reached — a legacy row whose `list_bucket` is NULL.
+    if (row.list_bucket != null) continue;
+    await table.update(row.plan_key, projectPlanBucket(row));
+    stamped++;
+  }
+  return stamped;
+}
 export const planTasks = (data: DataLayer) => data.table<PlanTask>("plan_tasks", "id");
 
 /** One dependency edge in the plan DAG (issue #20): `task_id` waits for `depends_on_task_id`.
@@ -150,7 +275,7 @@ export interface PlanTaskDep {
 export const planTaskDeps = (data: DataLayer) =>
   data.table<PlanTaskDep>("plan_task_deps", "plan_key");
 
-/** One cross-repo CAPABILITY EDGE on a plan task (041_plan_task_needs.sql, issue #289): the
+/** One cross-repo CAPABILITY EDGE on a plan task (049_plan_task_needs.sql, issue #289): the
  * consuming `task_id` must not start until the upstream capability `capability_ref` first ships as
  * a published `package` version. Levelized from the planner's `RecordPlanTask.needs[]` by
  * `pr.record-plan`, read back by `pr.select-wave` to gate the task before dispatch. Keyed on
@@ -169,7 +294,7 @@ export interface PlanTaskNeed {
 export const planTaskNeeds = (data: DataLayer) =>
   data.table<PlanTaskNeed>("plan_task_needs", "plan_key");
 
-/** One host-orchestrated CAPABILITY GATE (042_capability_gates.sql, issue #289): the durable,
+/** One host-orchestrated CAPABILITY GATE (050_capability_gates.sql, issue #289): the durable,
  * idempotent state the `pollCapabilityGatesImpl` reconciler keeps for ONE (plan, task, capability
  * need) while its plan-fanout fan-out is parked at the `wait-caps-resolved` barrier. The host starts
  * the EXISTING `readiness-gate` process (#258) per need — recording its instance key on `process_key`
@@ -195,6 +320,158 @@ export interface CapabilityGate {
 }
 export const capabilityGates = (data: DataLayer) =>
   data.table<CapabilityGate>("capability_gates", "gate_key");
+/** One INTER-epic dependency edge in the plan-set DAG (issue #292, slice S1): the epic `plan_key`
+ * waits for the producer epic `depends_on_plan_key` to publish a capability before it may fan out.
+ *
+ * This is the coarser sibling of {@link PlanTaskDep} (which orders TASKS *within* one epic into
+ * waves). A `PlanDep` orders whole EPICS relative to each other. The edge additionally carries the
+ * gating contract descriptor the capability probe (slice S3) resolves against:
+ *   • `package` — the producer epic's published package name, and
+ *   • `capability_ref` — the producer epic's issue handle, used to resolve which published
+ *     `pkg@version` FIRST carries the awaited capability (late-bound into the dependent's build).
+ * Keyed on `plan_key` (the dependent) so a single delete clears a dependent's whole inbound edge set
+ * — mirroring how `plan_task_deps` is keyed on `plan_key`. See db/migrations/041_inter_epic_plan_deps.sql
+ * for the durable constraints (one edge per consumer→producer pair; no self-edge). */
+export interface PlanDep {
+  plan_key: string;
+  depends_on_plan_key: string;
+  package: string;
+  capability_ref: string;
+  created_at: string;
+}
+export const planDeps = (data: DataLayer) => data.table<PlanDep>("plan_deps", "plan_key");
+
+/** The fields an admission caller supplies for one inter-epic edge; `created_at` is stamped here. */
+export type PlanDepInput = Omit<PlanDep, "created_at">;
+
+/** The record-gateway shape both the durable `plan_deps` table and its FK-free admission-staging
+ * twin `admitted_plan_deps` expose. Both hold the identical {@link PlanDep} row, so the idempotent
+ * edge-insert below is written once against this shape and reused for both. */
+type PlanDepTable = ReturnType<typeof planDeps>;
+
+/** Insert one inter-epic edge into `table` idempotently, enforcing the schema's two invariants at
+ * the app layer too (the durable table backstops both, but the in-memory test data layer does not):
+ * an epic may not depend on itself, and a consumer→producer edge is recorded at most once. A
+ * duplicate re-submission is a no-op that returns the existing row rather than throwing, so batch
+ * admission (S2) stays idempotent; a self-edge is a programming/validation error and throws. `label`
+ * only names the offending table in the self-edge error. */
+async function insertEdgeIdempotent(
+  table: PlanDepTable,
+  label: string,
+  edge: PlanDepInput,
+): Promise<PlanDep> {
+  if (edge.plan_key === edge.depends_on_plan_key) {
+    throw new Error(`${label}: self-edge rejected — epic ${edge.plan_key} cannot depend on itself`);
+  }
+  const match = { plan_key: edge.plan_key, depends_on_plan_key: edge.depends_on_plan_key };
+  const existing = (await table.find(match))[0];
+  if (existing) return existing;
+  const row: PlanDep = { ...edge, created_at: now() };
+  try {
+    await table.insert(row);
+    return row;
+  } catch (err) {
+    // A concurrent caller may have inserted the same consumer→producer pair between our find and
+    // our insert (classic check-then-insert race); the composite PRIMARY KEY is the durable
+    // backstop that rejects the loser. Honour the "duplicate re-submission is a no-op" contract by
+    // re-reading and returning the winning row rather than surfacing the constraint error. Only a
+    // genuine non-collision failure (the pair still absent after the re-read) is re-raised.
+    const raced = (await table.find(match))[0];
+    if (raced) return raced;
+    throw err;
+  }
+}
+
+/** Record one inter-epic dependency edge into the durable `plan_deps` graph. Idempotent on the
+ * consumer→producer pair; a self-edge throws. NOTE: `plan_deps.plan_key` foreign-keys to an admitted
+ * `plans` row, so this is written by slice S3 (planner lowering), NOT by the S2 admission door —
+ * S2 stages edges FK-free via {@link recordAdmittedPlanDep} instead. */
+export function recordPlanDep(data: DataLayer, edge: PlanDepInput): Promise<PlanDep> {
+  return insertEdgeIdempotent(planDeps(data), "plan_deps", edge);
+}
+
+/** One STAGED admitted epic (issue #292 slice S2, db/migrations/045_epic_set_admission_staging.sql):
+ * the FK-free record the set/batch admission door persists per admitted epic so a crash between
+ * admission and lowering does not lose the set. It carries exactly what slice S3 (lowering) needs to
+ * MATERIALIZE the durable `plans` row — repo, issue number/url, and the normalized integration base
+ * branch admitPlan resolved. Keyed on `plan_key`, one staged row per epic (idempotent re-submit). */
+export interface AdmittedEpic {
+  plan_key: string;
+  repo: string;
+  issue_number: number;
+  issue_url: string;
+  base_branch: string;
+  created_at: string;
+}
+export const admittedEpics = (data: DataLayer) =>
+  data.table<AdmittedEpic>("admitted_epics", "plan_key");
+
+/** The FK-free staging twin of `plan_deps` (db/migrations/045_epic_set_admission_staging.sql): the
+ * validated inter-epic edges the S2 admission door stages before any `plans` row exists. Same row
+ * shape as {@link PlanDep}; slice S3 reads it to materialize the durable `plan_deps` edges. */
+export const admittedPlanDeps = (data: DataLayer) =>
+  data.table<PlanDep>("admitted_plan_deps", "plan_key");
+
+/** The fields an admission caller supplies for one staged admitted epic; `created_at` is stamped
+ * here (mirrors {@link PlanDepInput}). */
+export type AdmittedEpicInput = Omit<AdmittedEpic, "created_at">;
+
+/** Stage one admitted epic (issue #292 slice S2). Idempotent on `plan_key`: a re-submitted set that
+ * re-admits the same epic is a no-op returning the existing staged row, so the whole set door stays
+ * idempotent (mirroring {@link recordAdmittedPlanDep}). */
+export async function recordAdmittedEpic(
+  data: DataLayer,
+  epic: AdmittedEpicInput,
+): Promise<AdmittedEpic> {
+  const table = admittedEpics(data);
+  const existing = await table.get(epic.plan_key);
+  if (existing) return existing;
+  const row: AdmittedEpic = { ...epic, created_at: now() };
+  try {
+    await table.insert(row);
+    return row;
+  } catch (err) {
+    // Concurrent re-admission of the same epic races on the PRIMARY KEY (plan_key); honour the
+    // idempotent no-op contract by returning the winning row rather than surfacing the collision.
+    const raced = await table.get(epic.plan_key);
+    if (raced) return raced;
+    throw err;
+  }
+}
+
+/** Stage one validated inter-epic edge (issue #292 slice S2) into the FK-free `admitted_plan_deps`
+ * table. Idempotent on the consumer→producer pair; a self-edge throws. This is the S2 door's
+ * persistence for edges — it does NOT touch `plan_deps` (whose FK requires a `plans` row S2 has not
+ * created); slice S3 materializes the durable edge from this staging. */
+export function recordAdmittedPlanDep(data: DataLayer, edge: PlanDepInput): Promise<PlanDep> {
+  return insertEdgeIdempotent(admittedPlanDeps(data), "admitted_plan_deps", edge);
+}
+
+/** All INBOUND edges for `planKey` — i.e. every producer epic this dependent waits on. Empty for a
+ * root epic (no inter-epic dependencies). */
+export function inboundPlanDeps(data: DataLayer, planKey: string): Promise<PlanDep[]> {
+  return planDeps(data).find({ plan_key: planKey });
+}
+
+/** Every inter-epic edge whose dependent is in `planKeys` — the whole DAG for a submitted plan set.
+ * Reads per-key (not a table scan) so it composes with the same equality-filtered data layer the
+ * unit tests exercise. Producers outside the set are still returned as edge fields; the set
+ * validator (S3) is what rejects an edge naming an unsubmitted epic. */
+export async function planDepsForSet(data: DataLayer, planKeys: string[]): Promise<PlanDep[]> {
+  const seen = new Set<string>();
+  const out: PlanDep[] = [];
+  // De-duplicate the keys first so a repeated key (retries / accidental repeats) does not trigger a
+  // redundant per-key inbound read; the edge de-dup below still guards against any overlap.
+  for (const key of new Set(planKeys)) {
+    for (const edge of await inboundPlanDeps(data, key)) {
+      const id = `${edge.plan_key}\u0000${edge.depends_on_plan_key}`;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      out.push(edge);
+    }
+  }
+  return out;
+}
 
 /** One adversarial plan-review round (006_plan_review.sql): the `senior:plan-review` agent's
  * verdict on the plan before fan-out. Append-only within a plan run; the current round is
@@ -450,6 +727,239 @@ export async function admitPlan(
   return base;
 }
 
+/** Map an error thrown by {@link admitPlan} to the HTTP status + message the admission-door
+ * operations return at the edge, or `null` when the error is not an admission decision and must be
+ * re-raised (a genuine 500). Shared by the single-issue door (`startPlanFanout`) and the set/batch
+ * door (`startEpicSet`, issue #292 S2) so both map an epic's admission failure identically — a base
+ * rule reject is a 400, the shared-base conflict a 409. Keeping this in ONE place stops the two doors
+ * drifting on which admission failure maps to which status. */
+export function admitPlanErrorResponse(err: unknown): { status: number; error: string } | null {
+  if (err instanceof MissingBaseBranchError) {
+    return {
+      status: 400,
+      error: "baseBranch is required (name the integration branch, e.g. epic/agent-protocol)",
+    };
+  }
+  if (err instanceof InvalidBaseBranchError) {
+    return {
+      status: 400,
+      error: "invalid baseBranch (must be a plausible git branch name, e.g. epic/agent-protocol)",
+    };
+  }
+  if (err instanceof BaseBranchMustExistError) {
+    return {
+      status: 400,
+      error:
+        `baseBranch "${err.branch}" does not exist and is not an epic/* branch, so it is not ` +
+        `auto-created — create it first, or use the epic/* convention`,
+    };
+  }
+  if (err instanceof DefaultBaseNotConfirmedError) {
+    return {
+      status: 400,
+      error:
+        `baseBranch "${err.branch}" is the repository default branch — every task would land ` +
+        `directly on it with no integration branch. Re-submit with confirmDefaultBase: true to proceed`,
+    };
+  }
+  if (err instanceof SharedBaseError) {
+    return {
+      status: 409,
+      error:
+        `baseBranch "${err.branch}" is already in use by another active epic. Re-submit with ` +
+        `allowSharedBase: true to stack on it, or name a distinct epic/* branch`,
+    };
+  }
+  return null;
+}
+
+// ── Set/batch admission (issue #292, slice S2) ───────────────────────────────
+// The set-admission door (`operations/startEpicSet.ts`) admits a WHOLE set of epics plus the
+// inter-epic dependency edges between them in one all-or-nothing call. The pure validation below
+// (reference integrity + DAG check) runs BEFORE any `admitPlan` side effect, so a malformed set is a
+// clean 4xx with nothing half-started (no base branch created, no edge persisted). The door's only
+// durable write is staging the admitted epics + validated edges FK-free into `admitted_epics` /
+// `admitted_plan_deps`; materializing them into `plans` / `plan_deps` and scheduling/lowering
+// (starting roots, seeding the capability readiness-gate, version binding) is slice S3.
+
+/** One inter-epic dependency edge as SUBMITTED to the set door: the `consumer` epic waits for the
+ * `producer` epic to publish the `{ package, capabilityRef }` capability. `consumer`/`producer` are
+ * epic references (`owner/repo#N` or an issue URL); the door resolves them to plan keys. This type
+ * documents the wire contract only — the actual `deps[]` arrives untyped, so {@link validateEpicSet}
+ * validates each entry against this shape at runtime rather than trusting the type. */
+export interface EpicSetDepInput {
+  consumer: string;
+  producer: string;
+  package: string;
+  capabilityRef: string;
+}
+
+/** A validated inter-epic edge — both endpoints resolved to plan keys, ready to persist as a
+ * {@link PlanDep} (`plan_key = consumer`, `depends_on_plan_key = producer`). */
+export interface ResolvedEpicSetDep {
+  consumer: string;
+  producer: string;
+  package: string;
+  capabilityRef: string;
+}
+
+/** A set-admission validation failure that carries the HTTP status the door returns at the edge
+ * (always a 4xx — a malformed set is the caller's error, not a server fault). */
+export class EpicSetValidationError extends Error {
+  readonly status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "EpicSetValidationError";
+    this.status = status;
+  }
+}
+
+/** Narrow an untyped value to a plain object so its fields can be read as `unknown`. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+/** Pure, side-effect-free validation of a submitted epic set's SHAPE and DAG — run BEFORE any
+ * `admitPlan` call so a cycle or dangling edge is rejected with nothing half-started. Given the
+ * submitted set's plan keys (already parsed, in submission order) and the raw edges, it:
+ *   • rejects an empty set;
+ *   • rejects a duplicate epic in the set;
+ *   • parses each edge endpoint and rejects an unparseable/self/dangling edge (an endpoint not in
+ *     the submitted set);
+ *   • rejects a blank `package`/`capabilityRef`;
+ *   • rejects a cycle in the consumer→producer graph, naming the edge that closes it.
+ * Returns the edges with both endpoints resolved to plan keys. Throws {@link EpicSetValidationError}
+ * (status 400) at the first offending input. Idempotent-friendly: a duplicate EDGE (same
+ * consumer→producer submitted twice) is collapsed, not rejected, so a retried set validates.
+ *
+ * `deps` is accepted as `unknown[]` because it arrives straight from an untyped request body
+ * (`startEpicSet` forwards `body.deps` verbatim). Every entry's shape is therefore validated
+ * defensively here — a non-object entry (`null`, `{}`), or a non-string endpoint / `package` /
+ * `capabilityRef`, maps to a clean {@link EpicSetValidationError} (400), never an uncaught
+ * TypeError (500). */
+export function validateEpicSet(planKeys: string[], deps: readonly unknown[]): ResolvedEpicSetDep[] {
+  if (planKeys.length === 0) {
+    throw new EpicSetValidationError(400, "epic set is empty — submit at least one epic");
+  }
+  const inSet = new Set<string>();
+  for (const key of planKeys) {
+    if (inSet.has(key)) {
+      throw new EpicSetValidationError(400, `epic ${key} appears more than once in the submitted set`);
+    }
+    inSet.add(key);
+  }
+
+  const resolveEndpoint = (ref: string, role: "consumer" | "producer"): string => {
+    // Trim like the epic-member path (`parseIssue(ref.trim())` in startEpicSet) so an otherwise-valid
+    // padded endpoint (" owner/repo#1 ") from an untyped JSON payload is not rejected as unparseable.
+    const parsed = parseIssue(ref.trim());
+    if (!parsed) {
+      throw new EpicSetValidationError(
+        400,
+        `dependency ${role} "${ref}" could not be parsed (use owner/repo#123 or an issue URL)`,
+      );
+    }
+    if (!inSet.has(parsed.planKey)) {
+      throw new EpicSetValidationError(
+        400,
+        `dependency ${role} ${parsed.planKey} is not one of the submitted epics — every edge must ` +
+          `connect two epics in the set`,
+      );
+    }
+    return parsed.planKey;
+  };
+
+  const resolved: ResolvedEpicSetDep[] = [];
+  const seenEdges = new Set<string>();
+  // consumer plan key → set of producer plan keys it depends on (for the DAG / cycle check).
+  const adjacency = new Map<string, Set<string>>();
+  for (const rawDep of deps) {
+    if (!isRecord(rawDep)) {
+      throw new EpicSetValidationError(
+        400,
+        "each dependency must be an object with consumer, producer, package and capabilityRef fields",
+      );
+    }
+    if (typeof rawDep.consumer !== "string" || typeof rawDep.producer !== "string") {
+      throw new EpicSetValidationError(
+        400,
+        "each dependency needs string consumer and producer endpoints (owner/repo#123 or an issue URL)",
+      );
+    }
+    const consumer = resolveEndpoint(rawDep.consumer, "consumer");
+    const producer = resolveEndpoint(rawDep.producer, "producer");
+    if (consumer === producer) {
+      throw new EpicSetValidationError(400, `epic ${consumer} cannot depend on itself`);
+    }
+    const pkg = (typeof rawDep.package === "string" ? rawDep.package : "").trim();
+    const capabilityRef = (typeof rawDep.capabilityRef === "string" ? rawDep.capabilityRef : "").trim();
+    if (pkg.length === 0) {
+      throw new EpicSetValidationError(
+        400,
+        `dependency ${consumer} → ${producer} is missing a package (the producer's published package)`,
+      );
+    }
+    if (capabilityRef.length === 0) {
+      throw new EpicSetValidationError(
+        400,
+        `dependency ${consumer} → ${producer} is missing a capabilityRef (the producer's issue handle)`,
+      );
+    }
+    const edgeId = `${consumer}\u0000${producer}`;
+    if (seenEdges.has(edgeId)) continue; // duplicate edge in one submission → collapse (idempotent)
+    seenEdges.add(edgeId);
+    resolved.push({ consumer, producer, package: pkg, capabilityRef });
+    const producers = adjacency.get(consumer) ?? new Set<string>();
+    producers.add(producer);
+    adjacency.set(consumer, producers);
+  }
+
+  assertAcyclic(adjacency);
+  return resolved;
+}
+
+/** Depth-first cycle check over the consumer→producer graph. Throws {@link EpicSetValidationError}
+ * (400) naming an edge on the cycle the moment one is found — the "reject at the offending edge"
+ * guarantee. A pure in-memory walk (no I/O), so it runs before any admission side effect. */
+function assertAcyclic(adjacency: Map<string, Set<string>>): void {
+  const VISITING = 1;
+  const DONE = 2;
+  const state = new Map<string, number>();
+  const visit = (node: string, stack: string[]): void => {
+    state.set(node, VISITING);
+    stack.push(node);
+    for (const next of adjacency.get(node) ?? []) {
+      const s = state.get(next);
+      if (s === VISITING) {
+        throw new EpicSetValidationError(
+          400,
+          `dependency cycle detected: ${[...stack, next].join(" → ")} — the edge set must be a DAG`,
+        );
+      }
+      if (s !== DONE) visit(next, stack);
+    }
+    stack.pop();
+    state.set(node, DONE);
+  };
+  for (const node of adjacency.keys()) {
+    if (state.get(node) !== DONE) visit(node, []);
+  }
+}
+
+/** Optional scheduling inputs a planner (slice S3) threads into a plan-fanout instance at start.
+ *
+ * `readinessProbes` is the set of `capability` {@link ReadinessProbe} descriptors a DEPENDENT epic
+ * must satisfy before it fans out any wave — one per inbound inter-epic edge (its producers). The
+ * plan-fanout process runs them as a LEADING readiness-gate preflight (resources/processes/plan-fanout.bpmn):
+ * a root epic (no inbound edge) is started with `undefined`/empty here and skips the gate entirely,
+ * fanning out immediately exactly as a single epic does today. `probeTimeout` is the ISO-8601 bound
+ * the preflight's timers fire off (derived once, via {@link readinessTimeout}, from the same probes)
+ * so a never-publishing producer escalates in bounded time instead of wedging the dependent. */
+export interface StartPlanOptions {
+  readinessProbes?: ReadinessProbe[];
+  probeTimeout?: string;
+}
+
 /** Register a plan row (if new) and start the plan-fanout process. Idempotent on
  * planKey: a plan already in flight is not restarted. */
 export async function startPlan(
@@ -457,7 +967,21 @@ export async function startPlan(
   engine: EngineClient,
   parsed: ParsedIssue,
   baseBranch: string,
+  opts: StartPlanOptions = {},
 ) {
+  // A gated dependent must carry BOTH its probes and the bound its preflight timers fire off:
+  // `pr.readiness-probe` rejects a blank `probeTimeout` (worker.ts) and the preflight escalation
+  // timers read `=probeTimeout`, so a non-empty probe set with a null/blank bound would incident at
+  // runtime. Fail fast at the start door instead — the lowering (planLowering.ts) always derives the
+  // two together via `readinessTimeout`, so this only fires for a mis-seeded direct caller.
+  const probes = opts.readinessProbes && opts.readinessProbes.length > 0 ? opts.readinessProbes : null;
+  if (probes && (opts.probeTimeout ?? "").trim() === "") {
+    throw new Error(
+      `startPlan(${parsed.planKey}): ${probes.length} readiness probe(s) seeded without a probeTimeout — ` +
+        "the preflight escalation timers (=probeTimeout) and pr.readiness-probe both require a non-blank " +
+        "bound. Derive it via readinessTimeout (see planLowering) before starting a gated dependent.",
+    );
+  }
   const table = plans(data);
   const existing = await table.get(parsed.planKey);
   if (existing && !PLAN_TERMINAL_STATUSES.includes(existing.status)) {
@@ -565,6 +1089,25 @@ export async function startPlan(
       // (normalizeBaseBranch rejects blank), so the brief is always rendered.
       baseBranch: base,
       baseBranchBrief: renderBaseBranchBrief(base),
+      // Inter-epic scheduling (issue #292, slice S3): the leading capability readiness-gate the
+      // plan-fanout runs as a PREFLIGHT before wave 0. `readinessProbes` is a DEPENDENT epic's set
+      // of `capability` probes (one per inbound `plan_deps` edge / producer); it is `null` for a
+      // ROOT (no inbound edge), whose preflight gateway then routes straight past the gate so it
+      // fans out immediately. `probeTimeout` bounds the preflight's escalation timers (derived once
+      // from the same probes) so a never-publishing producer escalates without wedging the set.
+      // `resolvedArtifacts` is filled by the preflight on green — the exact `pkg@version`s carrying
+      // each awaited capability (one per probe, `null` for any that escalated). It rides the
+      // implement task's `appendPrompt` (like `baseBranchBrief`) so slices build against exactly the
+      // bound version. Seeded `null` here so a ROOT (which never runs the preflight) still resolves
+      // the variable in that FEEL expression instead of raising an incident.
+      readinessProbes: probes,
+      probeTimeout: opts.probeTimeout ?? null,
+      // The preflight probe worker (`pr.readiness-probe`) requires a non-blank `gateKey` correlation
+      // key (it publishes `readiness-ready` on it). The typed `ReadinessProbeIn` envelope projects it
+      // from THIS process scope (not task-local ioMapping), so it is seeded here — one per dependent
+      // instance. A ROOT never runs the preflight, so its `gateKey` stays `null`, unused.
+      gateKey: probes ? `preflight:${parsed.planKey}` : null,
+      resolvedArtifacts: null,
     },
   });
   const processKey = processInstanceKey == null ? null : String(processInstanceKey);

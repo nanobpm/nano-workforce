@@ -7,18 +7,50 @@
       "id": "nav",
       "props": {
         "variant": "bar",
-        "sticky": true,
         "title": "Nano Workforce",
         "items": [
-          { "label": "Overview", "page": "overview" },
-          { "label": "Lineage", "page": "lineage" },
-          { "label": "Convergence", "page": "home" },
-          { "label": "Epics", "page": "epic" },
-          { "label": "Feature", "page": "feature" },
-          { "label": "Tasks", "page": "tasks" },
-          { "label": "Cockpit", "page": "cockpit" },
-          { "label": "Board", "page": "board" }
-        ]
+          {
+            "label": "Overview",
+            "page": "overview"
+          },
+          {
+            "label": "Lineage",
+            "page": "lineage"
+          },
+          {
+            "label": "Convergence",
+            "page": "home"
+          },
+          {
+            "label": "Epics",
+            "page": "epic"
+          },
+          {
+            "label": "Feature",
+            "page": "feature"
+          },
+          {
+            "label": "Tasks",
+            "page": "tasks",
+            "badge": {
+              "source": "app",
+              "table": "user_tasks",
+              "filter": [],
+              "tone": "danger",
+              "refreshMs": 5000,
+              "hideWhenZero": true
+            }
+          },
+          {
+            "label": "Cockpit",
+            "page": "cockpit"
+          },
+          {
+            "label": "Board",
+            "page": "board"
+          }
+        ],
+        "sticky": true
       }
     },
     {
@@ -61,9 +93,11 @@
           { "field": "epic_phase", "header": "Phase" },
           { "field": "status", "header": "Status", "link": { "kind": "processExplorer", "keyField": "process_key" } },
           { "field": "delivery", "header": "Delivery" },
+          { "field": "wait_gate_label", "header": "Wait gate" },
+          { "field": "promotion_state", "header": "Promotion" },
           { "field": "wave_label", "header": "Wave" },
           { "field": "task_count", "header": "Tasks" },
-          { "field": "updated_at", "header": "Updated", "width": "9rem" }
+          { "field": "updated_at", "header": "Updated", "width": "9rem", "format": "datetime" }
         ],
         "detail": {
           "linkField": "issue_url",
@@ -72,9 +106,37 @@
             { "field": "issue_number", "label": "Issue number" },
             { "field": "base_branch", "label": "Base branch (blank = repo default)" },
             { "field": "delivery_label", "label": "Delivery rollup (slices merged / converging)" },
+            { "field": "wait_gate_label", "label": "Inter-epic gate (waiting on / bound version / escalated)" },
+            { "field": "bound_artifacts", "label": "Bound producer capabilities (pkg@version)" },
+            { "field": "promotion_pr", "label": "Promotion PR (epic/* → default branch)" },
             { "field": "outcome", "label": "Outcome" }
           ]
         }
+      }
+    },
+    {
+      "type": "dataGrid",
+      "id": "inter-epic-deps",
+      "props": {
+        "title": "Inter-epic dependencies (waiting on)",
+        "rowKey": "depends_on_plan_key",
+        "refreshMs": 5000,
+        "collapsible": true,
+        "defaultCollapsed": true,
+        "empty": "No inter-epic dependencies — this is a root epic (it starts immediately, no capability wait-gate).",
+        "data": {
+          "kind": "datasource",
+          "source": "app",
+          "table": "plan_deps",
+          "orderBy": { "field": "created_at", "dir": "asc" },
+          "filter": [{ "field": "plan_key", "eqParam": true }]
+        },
+        "columns": [
+          { "field": "depends_on_plan_key", "header": "Waits on (producer epic)" },
+          { "field": "package", "header": "Package" },
+          { "field": "capability_ref", "header": "Capability ref" },
+          { "field": "created_at", "header": "Recorded", "width": "9rem" }
+        ]
       }
     },
     {
@@ -125,7 +187,7 @@
           { "field": "status", "header": "Status" },
           { "field": "pr_key", "header": "PR" },
           { "field": "summary", "header": "Summary" },
-          { "field": "updated_at", "header": "Updated" }
+          { "field": "updated_at", "header": "Updated", "format": "datetime" }
         ],
         "detail": {
           "fields": [
@@ -200,7 +262,7 @@
           { "field": "task_b", "header": "Task B" },
           { "field": "files", "header": "Shared files" },
           { "field": "source", "header": "Source" },
-          { "field": "updated_at", "header": "Updated" }
+          { "field": "updated_at", "header": "Updated", "format": "datetime" }
         ]
       }
     },

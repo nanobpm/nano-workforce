@@ -3,7 +3,7 @@
 // the merge-exclusion graph. Force the token transport and stub `globalThis.fetch`.
 import { test } from "node:test";
 import { assertEquals, assertRejects } from "#test-assert";
-import { BaseBranchMustExistError, coalesceTitle, ensureBaseBranch, fetchIssueTitle, fetchPrFiles, isNotAPullRequestError } from "./github.ts";
+import { BaseBranchMustExistError, coalesceTitle, createPullRequest, ensureBaseBranch, ensurePromotionPr, fetchIssueTitle, fetchPrFiles, isNotAPullRequestError, listPrsForHead } from "./github.ts";
 
 // A fake `fetch` that serves `pages` of file batches; each page N (1-based) returns `pages[N-1]`
 // files (named `f{index}`), setting a `Link: rel="next"` header whenever a later page exists.
@@ -334,4 +334,97 @@ test("coalesceTitle: a blank/whitespace title counts as missing", () => {
 test("coalesceTitle: skips a blank middle candidate to the next non-blank one", () => {
   assertEquals(coalesceTitle("", "Prior title", "owner/repo#1"), "Prior title");
   assertEquals(coalesceTitle(null, "  ", "owner/repo#1"), "owner/repo#1");
+});
+
+// ── Epic promotion PR helpers (issue #299) ──────────────────────────────────
+// The promotion pass opens exactly one `epic/* → <default>` PR per landed epic. These unit tests
+// pin the GitHub token-transport primitives it relies on: reading PRs by head branch (idempotency
+// reconciliation), creating a PR, and the `ensurePromotionPr` reuse-vs-create decision.
+interface FakePulls {
+  repo: string;
+  // head branch → list of PRs opened from it
+  byHead: Map<string, { number: number; state: string; baseRef: string }[]>;
+  creates: { head: string; base: string; number: number }[];
+  next: number;
+}
+
+function pullsFetch(state: FakePulls) {
+  return (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    const u = new URL(String(url));
+    const method = (init?.method ?? "GET").toUpperCase();
+    const path = u.pathname;
+    if (method === "GET" && path === `/repos/${state.repo}/pulls`) {
+      const head = (u.searchParams.get("head") ?? "").split(":").pop() ?? "";
+      const list = state.byHead.get(head) ?? [];
+      return Promise.resolve(
+        jsonResponse(
+          list.map((p) => ({
+            number: p.number,
+            html_url: `https://github.com/${state.repo}/pull/${p.number}`,
+            state: p.state,
+            base: { ref: p.baseRef },
+          })),
+        ),
+      );
+    }
+    if (method === "POST" && path === `/repos/${state.repo}/pulls`) {
+      // biome-ignore lint/plugin: test fixture parsing an external body shape
+      const body = JSON.parse(String(init?.body ?? "{}")) as { head?: string; base?: string };
+      const head = String(body.head ?? "");
+      const base = String(body.base ?? "");
+      const number = state.next++;
+      state.creates.push({ head, base, number });
+      const arr = state.byHead.get(head) ?? [];
+      arr.push({ number, state: "open", baseRef: base });
+      state.byHead.set(head, arr);
+      return Promise.resolve(jsonResponse({ number, html_url: `https://github.com/${state.repo}/pull/${number}` }, 201));
+    }
+    return Promise.resolve(new Response(`unexpected ${method} ${path}`, { status: 500 }));
+  };
+}
+
+async function withPulls<T>(state: FakePulls, fn: () => Promise<T>): Promise<T> {
+  const prevMode = process.env["NANO_PR_GITHUB_TRANSPORT"];
+  const prevFetch = globalThis.fetch;
+  process.env["NANO_PR_GITHUB_TRANSPORT"] = "token";
+  globalThis.fetch = pullsFetch(state) as typeof fetch;
+  try {
+    return await fn();
+  } finally {
+    globalThis.fetch = prevFetch;
+    if (prevMode === undefined) delete process.env["NANO_PR_GITHUB_TRANSPORT"];
+    else process.env["NANO_PR_GITHUB_TRANSPORT"] = prevMode;
+  }
+}
+
+function freshPulls(): FakePulls {
+  return { repo: "o/r", byHead: new Map(), creates: [], next: 500 };
+}
+
+test("listPrsForHead: returns the PRs opened from a head branch", async () => {
+  const state = freshPulls();
+  state.byHead.set("epic/x", [{ number: 12, state: "open", baseRef: "main" }]);
+  const list = await withPulls(state, () => listPrsForHead("o/r", "epic/x", "tok"));
+  assertEquals(list?.length, 1);
+  assertEquals(list?.[0].number, 12);
+  assertEquals(list?.[0].baseRef, "main");
+});
+
+test("createPullRequest: opens a PR and returns its number + url", async () => {
+  const state = freshPulls();
+  const pr = await withPulls(state, () => createPullRequest("o/r", "epic/x", "main", "T", "B", "tok"));
+  assertEquals(pr?.number, 500);
+  assertEquals(state.creates.length, 1);
+  assertEquals(state.creates[0].base, "main");
+});
+
+test("ensurePromotionPr: creates when none exists, then reuses on a re-run (idempotent)", async () => {
+  const state = freshPulls();
+  const first = await withPulls(state, () => ensurePromotionPr("o/r", "epic/x", "main", "T", "B", "tok"));
+  assertEquals(first?.created, true);
+  assertEquals(first?.number, 500);
+  const second = await withPulls(state, () => ensurePromotionPr("o/r", "epic/x", "main", "T", "B", "tok"));
+  assertEquals(second?.created, false);
+  assertEquals(second?.number, 500);
+  assertEquals(state.creates.length, 1);
 });

@@ -26,9 +26,23 @@ function fakeApp(rows: Row[]) {
     data: {
       table(name: string, key: string) {
         if (name === "plans") {
+          // A full in-memory table double so the real `plans` gateway proxy (which reads back the row
+          // to reproject `list_bucket`/`ack_open`) works: get/all/insert/update, update upserting so a
+          // worker that updates an as-yet-unseeded plan still lands a row (mirrors production, where
+          // startPlan inserted it first).
           return {
+            all: () => Promise.resolve(plans.slice()),
+            get: (k: any) => Promise.resolve(plans.find((p) => p[key] === k)),
+            find: (q: any) =>
+              Promise.resolve(plans.filter((p) => Object.entries(q).every(([f, v]) => p[f] === v))),
+            insert: (row: any) => {
+              plans.push({ ...row });
+              return Promise.resolve(row[key]);
+            },
             update: (k: any, patch: any) => {
-              plans.push({ [key]: k, ...patch });
+              const existing = plans.find((p) => p[key] === k);
+              if (existing) Object.assign(existing, patch);
+              else plans.push({ [key]: k, ...patch });
               return Promise.resolve(patch);
             },
           };
@@ -63,6 +77,8 @@ test("no opened PRs (empty plan) hard-fails with NO_WORK_DISPATCHED", async () =
   const plan = app._plans.at(-1) as Record<string, unknown>;
   assertEquals(plan.status, "failed");
   assertEquals(plan.outcome, "no work dispatched — the planner produced no tasks");
+  // The gateway projects the bucket: a failed epic settles to History (no tick-off needed).
+  assertEquals(plan.list_bucket, "history");
 });
 
 test("tasks present but none opened (all skipped/blocked) hard-fails", async () => {
@@ -86,4 +102,6 @@ test("at least one opened PR finalizes cleanly (no throw)", async () => {
   const plan = app._plans.at(-1) as Record<string, unknown>;
   assertEquals(plan.status, "done");
   assertEquals(plan.outcome, "1 PR(s) dispatched to convergence");
+  // A just-`done` epic (delivery not yet projected) stays in Active — it must not vanish (#298).
+  assertEquals(plan.list_bucket, "active");
 });

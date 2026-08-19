@@ -1,7 +1,7 @@
--- 042_capability_gates.sql — issue #289: the host-orchestrated CAPABILITY GATE tracker.
+-- 050_capability_gates.sql — issue #289: the host-orchestrated CAPABILITY GATE tracker.
 --
 -- When plan-fanout dispatches a wave task that declared a cross-repo capability edge (`needs`, see
--- 041_plan_task_needs.sql), its per-task fan-out parks at the `wait-caps-resolved` message barrier
+-- 049_plan_task_needs.sql), its per-task fan-out parks at the `wait-caps-resolved` message barrier
 -- (plan-fanout.bpmn) instead of starting the agent. The host reconciler (`pollCapabilityGatesImpl`
 -- in app/service.ts) then, for each such parked task, starts the EXISTING durable `readiness-gate`
 -- process (readiness-gate.bpmn, #258) once per need — the bounded/idempotent/resumable wait that

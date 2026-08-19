@@ -9,14 +9,46 @@
         "variant": "bar",
         "title": "Nano Workforce",
         "items": [
-          { "label": "Overview", "page": "overview" },
-          { "label": "Lineage", "page": "lineage" },
-          { "label": "Convergence", "page": "home" },
-          { "label": "Epics", "page": "epic" },
-          { "label": "Feature", "page": "feature" },
-          { "label": "Tasks", "page": "tasks" },
-          { "label": "Cockpit", "page": "cockpit" },
-          { "label": "Board", "page": "board" }
+          {
+            "label": "Overview",
+            "page": "overview"
+          },
+          {
+            "label": "Lineage",
+            "page": "lineage"
+          },
+          {
+            "label": "Convergence",
+            "page": "home"
+          },
+          {
+            "label": "Epics",
+            "page": "epic"
+          },
+          {
+            "label": "Feature",
+            "page": "feature"
+          },
+          {
+            "label": "Tasks",
+            "page": "tasks",
+            "badge": {
+              "source": "app",
+              "table": "user_tasks",
+              "filter": [],
+              "tone": "danger",
+              "refreshMs": 5000,
+              "hideWhenZero": true
+            }
+          },
+          {
+            "label": "Cockpit",
+            "page": "cockpit"
+          },
+          {
+            "label": "Board",
+            "page": "board"
+          }
         ],
         "sticky": true
       }
@@ -79,7 +111,7 @@
             "link": { "kind": "processExplorer", "keyField": "process_key" }
           },
           { "field": "pr_count", "header": "PRs", "width": "5rem" },
-          { "field": "updated_at", "header": "Updated", "width": "9rem" }
+          { "field": "updated_at", "header": "Updated", "width": "9rem", "format": "datetime" }
         ],
         "detail": {
           "linkField": "issue_url",
@@ -103,7 +135,7 @@
                 { "field": "status", "header": "Status", "link": { "kind": "processExplorer", "keyField": "process_key" } },
                 { "field": "current_round", "header": "Round" },
                 { "field": "outcome", "header": "Outcome", "truncate": true },
-                { "field": "updated_at", "header": "Updated", "width": "9rem" }
+                { "field": "updated_at", "header": "Updated", "width": "9rem", "format": "datetime" }
               ],
               "detail": {
                 "linkField": "url",

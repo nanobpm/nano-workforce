@@ -351,6 +351,15 @@ export const WIRE_CONTRACTS = {
     shape:
       '{ provider: "github", url: string, ref: string, singleBranch: true, filter: "blob:none", baseRef?: string }',
   },
+  "epicSet.submit": {
+    category: "wire",
+    name: "epicSet.submit",
+    owner: "operations/startEpicSet.ts",
+    semantics:
+      "Set/batch admission payload POSTed to /actions/start/epic-set (issue #292, slice S2). Submits a whole set of epics plus the inter-epic dependency edges between them in one all-or-nothing call. Each `epics[]` member carries the same per-epic admission inputs as PlanStart (issue|url + baseBranch + allowSharedBase/confirmDefaultBase); each `deps[]` edge declares `consumer` waits for `producer`'s published { package, capabilityRef } capability, both endpoints naming epics in the set. Declared in openapi.yaml as EpicSetStart. S2 admits + STAGES the set into its own FK-free `admitted_epics` / `admitted_plan_deps` (043) — it writes NEITHER `plans` NOR `plan_deps`; slice S3 (lowering) reads that staging to materialize the durable graph, and S4 (visibility) builds on it — consume this ONE shape, do not re-declare a synonym.",
+    shape:
+      '{ epics: Array<{ issue|url: string, baseBranch: string, allowSharedBase?: boolean, confirmDefaultBase?: boolean }>, deps?: Array<{ consumer: string, producer: string, package: string, capabilityRef: string }> }',
+  },
 } as const satisfies Record<string, WireContract>;
 
 export const TYPE_CONTRACTS = {
@@ -361,6 +370,14 @@ export const TYPE_CONTRACTS = {
     semantics:
       "The snake_case, agent-facing view of a blackboard entry — the HTTP-hook boundary shape every caller and agent consumes. Both the read and write halves import this ONE definition.",
     module: "app/blackboard.ts",
+  },
+  PlanDep: {
+    category: "type",
+    name: "PlanDep",
+    owner: "app/plan.ts",
+    semantics:
+      "One INTER-epic dependency edge (issue #292): dependent epic `plan_key` waits for producer epic `depends_on_plan_key`, gated by the producer's `{ package, capability_ref }` capability descriptor. This ONE row shape backs BOTH the durable `plan_deps` table (materialized by planner lowering S3) AND its FK-free admission-staging twin `admitted_plan_deps` (staged by the S2 door). Set admission (S2), planner lowering (S3), and operator visibility (S4) all import it from app/plan.ts — no re-declared synonym.",
+    module: "app/plan.ts",
   },
 } as const satisfies Record<string, TypeContract>;
 

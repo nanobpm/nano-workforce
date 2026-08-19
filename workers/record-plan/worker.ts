@@ -18,7 +18,7 @@
 import type { AppJobHandler } from "@nanobpm/urban";
 import { type CapabilityNeed, parseCapabilityNeeds } from "../../app/capabilityNeed.ts";
 import { deriveEpicPhase } from "../../app/epicPhase.ts";
-import { planTaskDeps, planTaskNeeds, planTasks } from "../../app/plan.ts";
+import { plans, planTaskDeps, planTaskNeeds, planTasks } from "../../app/plan.ts";
 import { computeWaves, WaveError, type WaveTask } from "../../app/waves.ts";
 import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 
@@ -157,7 +157,7 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
   const epicPhase = deriveEpicPhase(job.elementId);
   if (epicPhase) patch.epic_phase = epicPhase;
   if (tasks.length === 0) patch.outcome = note ? str(note) : "planner emitted no tasks";
-  await app.data.table("plans", "plan_key").update(planKey, patch);
+  await plans(app.data).update(planKey, patch);
 
   // Kick off the wave loop at wave 0.
   return { currentWave: 0, waveCount };

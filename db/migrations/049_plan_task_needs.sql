@@ -1,4 +1,4 @@
--- 041_plan_task_needs.sql — issue #289: the cross-repo CAPABILITY EDGE on a plan task.
+-- 049_plan_task_needs.sql — issue #289: the cross-repo CAPABILITY EDGE on a plan task.
 --
 -- A plan task may declare a cross-repo capability dependency (the "consumer readiness edge",
 -- ADR 0001 §4, #263): it consumes an upstream capability C that is published as some

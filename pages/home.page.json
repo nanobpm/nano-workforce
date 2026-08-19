@@ -31,7 +31,15 @@
           },
           {
             "label": "Tasks",
-            "page": "tasks"
+            "page": "tasks",
+            "badge": {
+              "source": "app",
+              "table": "user_tasks",
+              "filter": [],
+              "tone": "danger",
+              "refreshMs": 5000,
+              "hideWhenZero": true
+            }
           },
           {
             "label": "Cockpit",
@@ -207,6 +215,7 @@
           {
             "field": "updated_at",
             "header": "Updated",
+            "format": "datetime",
             "width": "9rem"
           }
         ],
@@ -257,9 +266,62 @@
             {
               "field": "outcome",
               "label": "Outcome"
+            },
+            {
+              "field": "epic_phase_label",
+              "label": "Epic phase"
             }
           ],
           "children": [
+            {
+              "title": "Epic",
+              "source": "app",
+              "table": "plans",
+              "parentField": "root_request_key",
+              "childField": "plan_key",
+              "columns": [
+                {
+                  "field": "title",
+                  "header": "Epic root",
+                  "truncate": true,
+                  "linkField": "issue_url"
+                },
+                {
+                  "field": "epic_phase",
+                  "header": "Phase"
+                }
+              ]
+            },
+            {
+              "title": "Epic slices",
+              "source": "app",
+              "table": "plan_tasks",
+              "parentField": "root_request_key",
+              "childField": "plan_key",
+              "orderBy": {
+                "field": "task_index",
+                "dir": "asc"
+              },
+              "columns": [
+                {
+                  "field": "task_id",
+                  "header": "Slice"
+                },
+                {
+                  "field": "title",
+                  "header": "Title",
+                  "truncate": true
+                },
+                {
+                  "field": "status",
+                  "header": "Status"
+                },
+                {
+                  "field": "pr_key",
+                  "header": "PR"
+                }
+              ]
+            },
             {
               "title": "Rounds",
               "source": "app",

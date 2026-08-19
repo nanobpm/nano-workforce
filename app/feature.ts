@@ -180,11 +180,56 @@ export function deriveFeatureDelivery(prStatus: string | null): FeatureDeliveryR
  * parks on when the agent escalates. `pollFeatureEscalations` reconciles it onto the read model. */
 export const FEATURE_ESCALATION_ELEMENT = "feature-escalation";
 
+/** One append-only audit row per `feature-escalation` ENTRY (issue #305). Mirrors the surviving
+ *  `plan_reviews` / `escalations` / `plan_trial_merges` audit logs: it is the canonical, poller-readable
+ *  source for a parked run's escalation `question`, so the denormalised `feature_runs.escalation_question`
+ *  column can be dropped in the later contract phase. `id` is an AUTOINCREMENT PK, so the newest row per
+ *  `feature_key` is the live question (`latestFeatureEscalationQuestion`). Never updated or deleted. */
+export interface FeatureEscalationRow {
+  id: number;
+  feature_key: string;
+  question: string | null;
+  created_at: string;
+  /** The engine `jobKey` that wrote the row — an idempotency guard so a `record-feature-escalation`
+   *  job retried after its insert (crash/timeout pre-completion) reuses its row instead of appending a
+   *  duplicate (mirrors `plan_reviews.job_key`). NULL only for migration-048 backfill rows. */
+  job_key: string | null;
+}
+
+/** Accessor for the append-only `feature_escalations` audit log (migration 048). Written by
+ *  `record-feature-escalation` (one row per escalation entry), read by `pollUserTasks` to enrich the
+ *  open `feature-escalation` task's question — the feature analogue of `plan_reviews` / `escalations`. */
+export const featureEscalations = (data: DataLayer) =>
+  data.table<FeatureEscalationRow>("feature_escalations", "id");
+
+/** Append one `feature_escalations` audit row capturing the agent's escalation `question` while it is
+ *  still in scope on the `record-feature-escalation` job. Append-only, so this is the canonical record
+ *  of what was asked — `pollUserTasks` reads the newest row per feature as the live question. The
+ *  `jobKey` is an idempotency guard: `record-feature-escalation` is at-least-once, so a retry after the
+ *  insert (crash/timeout pre-completion) re-runs with the SAME `jobKey` and must reuse the existing row
+ *  rather than append a duplicate (mirrors `record-plan-review` guarding `plan_reviews` by `job_key`). */
+export async function recordFeatureEscalation(
+  data: DataLayer,
+  entry: { featureKey: string; question: string | null; jobKey: string },
+): Promise<void> {
+  const table = featureEscalations(data);
+  // A prior attempt of THIS job already recorded its row — reuse it, don't append a duplicate.
+  if (await table.findOne({ feature_key: entry.featureKey, job_key: entry.jobKey })) return;
+  await table.insert({
+    feature_key: entry.featureKey,
+    question: entry.question,
+    created_at: new Date().toISOString(),
+    job_key: entry.jobKey,
+  });
+}
+
 /** The parked `feature-escalation` user task, as `pollFeatureEscalations` observes it via
- * `searchUserTasks`: the completable user-task key the pages drive an attributed answer against.
+ *  `openUserTasks` (the open-task-scoped query — issue #294): the completable user-task key the pages
+ *  drive an attributed answer against. Scoping to `state:"CREATED"` is what keeps a looping run — which
+ *  holds COMPLETED prior-round tasks for the same element — from latching the pointer onto a dead task.
  *
  * The agent's `question` is NOT read from here — the WASM testkit engine does not surface a user
- * task's `zeebe:ioMapping`-mapped local variables through `searchUserTasks`, so relying on it would
+ * task's `zeebe:ioMapping`-mapped local variables through the user-task query, so relying on it would
  * make the question untestable. Instead the `record-feature-escalation` service task (feature.bpmn)
  * persists `question` onto the row at escalation entry — see `workers/record-feature-escalation`. */
 export interface FeatureEscalationParked {
@@ -240,8 +285,10 @@ export function deriveFeatureEscalationPatch(
  * `pollFeatureBlocked` reconciles it onto the read model. */
 export const FEATURE_BLOCKED_ELEMENT = "feature-blocked";
 
-/** The parked `feature-blocked` user task, as `pollFeatureBlocked` observes it via `searchUserTasks`:
- * the completable user-task key the pages drive an attributed acknowledgement against. */
+/** The parked `feature-blocked` user task, as `pollFeatureBlocked` observes it via `openUserTasks`
+ *  (the open-task-scoped query — issue #294): the completable user-task key the pages drive an
+ *  attributed acknowledgement against. Scoping to `state:"CREATED"` keeps a re-blocked run — which
+ *  holds COMPLETED prior-round tasks for the same element — from latching the pointer onto a dead task. */
 export interface FeatureBlockedParked {
   userTaskKey: string;
 }

@@ -306,6 +306,60 @@ test("startPlan grandfathers a pre-existing null base_branch row: re-plan reads 
   assertEquals(seen.baseBranch, "epic/gate-branch");
 });
 
+test("startPlan fails fast when readiness probes are seeded without a probeTimeout (unusable gate)", async () => {
+  // A gated dependent's preflight escalation timers read `=probeTimeout` and `pr.readiness-probe`
+  // rejects a blank bound, so a non-empty probe set with a null/blank `probeTimeout` would incident
+  // at runtime. Guard the whole class at the start door: reject it before any side effect, and never
+  // create the process instance. The lowering always derives the pair together, so this only fires
+  // for a mis-seeded direct caller.
+  const PLAN_KEY = "owner/repo#292";
+  const stores: Record<string, { rows: any[]; key: string }> = {
+    plans: { rows: [], key: "plan_key" },
+    plan_tasks: { rows: [], key: "id" },
+    plan_reviews: { rows: [], key: "plan_key" },
+    plan_escalations: { rows: [], key: "id" },
+    plan_task_deps: { rows: [], key: "plan_key" },
+  };
+  const data = memData(stores);
+  let created = false;
+  const engine = {
+    createInstance: () => {
+      created = true;
+      return Promise.resolve({ processInstanceKey: "PI-292" });
+    },
+  } as any;
+
+  const probe = { kind: "command", target: "true", resolvedArtifact: "@scope/pkg@1.0.0" };
+  await assertRejects(
+    () =>
+      startPlan(
+        data,
+        engine,
+        { repo: "owner/repo", number: 292, url: "https://github.com/owner/repo/issues/292", planKey: PLAN_KEY },
+        "epic/gate-branch",
+        { readinessProbes: [probe] as any },
+      ),
+    Error,
+    "probeTimeout",
+  );
+  // A blank/whitespace bound is rejected the same way.
+  await assertRejects(
+    () =>
+      startPlan(
+        data,
+        engine,
+        { repo: "owner/repo", number: 292, url: "https://github.com/owner/repo/issues/292", planKey: PLAN_KEY },
+        "epic/gate-branch",
+        { readinessProbes: [probe] as any, probeTimeout: "   " },
+      ),
+    Error,
+    "probeTimeout",
+  );
+  // No side effect leaked: no plan row written, no process instance created.
+  assertEquals(stores.plans.rows.length, 0);
+  assertEquals(created, false);
+});
+
 // ── admitPlan decision matrix (ADR 0003 §Decision, rules 1-4) ────────────────
 // The fail-fast admission gate composes four ORDERED rules before any fan-out. These drive it
 // through a faked github transport (token mode + stubbed `globalThis.fetch`) and an in-memory

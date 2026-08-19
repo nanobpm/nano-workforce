@@ -13,6 +13,40 @@ const leaf = (taskType: string): TaskDefinitionLeaf => ({ taskType, process: "p"
 
 const plannerFrontier: RegisteredWorker = { instance: "w-front", capability: { cognition: "planning", weight: 5, family: "frontier" } };
 const plannerKimi: RegisteredWorker = { instance: "w-kimi", capability: { cognition: "planning", weight: 5, family: "kimi" } };
+const seniorImpl: RegisteredWorker = { instance: "w-senior", capability: { cognition: "implementation", weight: 5, family: "frontier" } };
+
+test("a deployed colon-form agent job type resolves to live supply from an enrolled senior worker (#323)", () => {
+  const report = buildRegistryReport({
+    taskDefinitions: [leaf("senior:feature"), leaf("senior:retro"), leaf("senior:rebase")],
+    workers: [seniorImpl],
+    now: NOW,
+  });
+  // All three colon-form agent job types bridge onto the bare `senior` routing role, which the senior
+  // worker supplies — so the board shows live supply, not a false RED, and nothing is nonAgentic.
+  assertEquals(report.missing, []);
+  assertEquals(report.nonAgentic, []);
+  const senior = report.networks.find((n) => n.network === "senior");
+  assert(senior !== undefined, "the `senior` network bucket is present");
+  const token = senior.tokens.find((t) => t.token === "senior");
+  assert(token !== undefined);
+  assertEquals(token.satisfied, true);
+  assertEquals(token.supply, 1);
+  assertEquals(token.instances, ["w-senior"]);
+});
+
+test("an agent job type with no enrolled senior worker is flagged missing, not nonAgentic (#323)", () => {
+  const report = buildRegistryReport({ taskDefinitions: [leaf("senior:feature")], workers: [], now: NOW });
+  assert(report.missing.includes("senior"), "senior demand with no supplier is missing (red)");
+  assertEquals(report.nonAgentic, []);
+  assertEquals(report.status, "red");
+});
+
+test("ordinary host jobs (pr.*) are not colon-form and pass through the bridge untouched", () => {
+  const report = buildRegistryReport({ taskDefinitions: [leaf("pr.finalize")], workers: [], now: NOW });
+  const pr = report.networks.find((n) => n.network === "pr");
+  assert(pr !== undefined, "pr.finalize stays a pr-network routing token");
+  assert(pr.tokens.some((t) => t.token === "pr.finalize"));
+});
 
 test("flags a demanded leaf with no supplier as missing (red) and a supplied leaf as satisfied", () => {
   const report = buildRegistryReport({

@@ -236,6 +236,17 @@ silently — cheap to avoid, annoying to debug after the fact.
   correctly hides it either way. (This is why the same flag can need `NULL` for a
   badge yet work as `0` for a `showWhenField` button.)
 
+### The top nav has a single source of truth — edit `pages/_nav.json`
+
+The `nav` node (the top-bar item list, including the **Tasks** live open-tasks
+count badge) is **not** authored per page. It lives once in `pages/_nav.json` and
+is materialised into every `pages/*.page.json` by `scripts/sync-nav.ts`. To change
+a nav item or badge, edit `pages/_nav.json` then run **`npm run sync:nav`** — never
+hand-edit the `nav` node in a page file. `scripts/sync-nav.test.ts` (run under
+`npm test`) fails if any page's nav node drifts from the canonical source, and
+`npm run sync:nav:check` is the CI-friendly verify. This is the "no drift surfaces"
+rule applied to the nav that was previously copy-pasted across every page.
+
 ## The poller owns liveness/reconciliation
 
 `main.ts` runs a **self-scheduling** poll loop (`pollOnce` in `app/service.ts`),

@@ -17,6 +17,8 @@
 //   - implementation.senior / .junior / .reviewer — the build crew (reviewer is red/blue).
 //   - ci.runner       — the CI runner.
 //   - decide          — the bare decision role.
+//   - senior          — the bare seniority-rank role the deployed fleet agent job types (`senior:*`)
+//                       derive onto (issue #323); rank-gated (weight≥4), cognition-agnostic.
 //
 // Capability (cognition / weight / family / host) is an ENROLMENT attribute, never a routing token
 // (ADR 0056 invariant 3): each role's `requires` gate — not the token — decides WHO may fill it.
@@ -127,6 +129,22 @@ export const CREW_VOCAB: VocabDocument = deepFreeze({
       roles: {
         decide: {
           requires: ["cognition=decide"],
+          weight: 5,
+          seats: 1,
+        },
+      },
+    },
+    // The deployed fleet agent tasks are colon-form job types `senior:<task>` (`senior:feature`,
+    // `senior:retro`, `senior:rebase`, …). The `senior` prefix is a SENIORITY rank, not a cognition —
+    // one senior worker serves every `senior:*` task — so it maps to a single bare `senior` routing
+    // role gated purely on rank (weight≥4), cognition-agnostic. Any suitably-senior enrolled worker
+    // resolves it, so `app/agentic/vocab/job-types.ts`'s `senior:<task>` → `senior` derivation always
+    // lands on live supply (issue #323). Deliberately NOT one role per task: a per-task list here
+    // would duplicate the deployed models (issue #323 acceptance §3 — derivation over duplication).
+    senior: {
+      roles: {
+        senior: {
+          requires: ["weight>=4"],
           weight: 5,
           seats: 1,
         },

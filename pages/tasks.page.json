@@ -31,7 +31,15 @@
           },
           {
             "label": "Tasks",
-            "page": "tasks"
+            "page": "tasks",
+            "badge": {
+              "source": "app",
+              "table": "user_tasks",
+              "filter": [],
+              "tone": "danger",
+              "refreshMs": 5000,
+              "hideWhenZero": true
+            }
           },
           {
             "label": "Cockpit",
@@ -41,7 +49,8 @@
             "label": "Board",
             "page": "board"
           }
-        ]
+        ],
+        "sticky": true
       }
     },
     {
@@ -84,8 +93,12 @@
         },
         "columns": [
           {
-            "field": "subject_key",
-            "header": "Feature"
+            "field": "subject_title",
+            "template": "{{subject_title}}",
+            "header": "Item",
+            "subtitleField": "subject_key",
+            "truncate": true,
+            "linkField": "subject_url"
           },
           {
             "field": "subject_url",
@@ -101,10 +114,27 @@
           },
           {
             "field": "updated_at",
-            "header": "Updated"
+            "header": "Updated",
+            "format": "datetime"
           }
         ],
         "rowKey": "user_task_key",
+        "rowActions": [
+          {
+            "label": "Abandon",
+            "confirm": "Abandon this escalated task? The run gives up on it (no PR).",
+            "showWhenField": "user_task_key",
+            "action": {
+              "path": "/app/api/actions/complete-user-task",
+              "body": {
+                "userTaskKey": "{{row.user_task_key}}",
+                "variables": {
+                  "resolution": "abandon"
+                }
+              }
+            }
+          }
+        ],
         "detail": {
           "linkField": "subject_url",
           "fields": [
@@ -112,7 +142,26 @@
               "field": "question",
               "label": "Escalation question"
             }
-          ]
+          ],
+          "form": {
+            "showWhenField": "user_task_key",
+            "title": "Answer escalation",
+            "promptField": "question",
+            "inputKey": "answer",
+            "inputLabel": "Guidance for the implementation agent",
+            "submitLabel": "Answer & re-dispatch",
+            "action": {
+              "path": "/app/api/actions/complete-user-task",
+              "successLabel": "Answered — the agent will resume",
+              "body": {
+                "userTaskKey": "{{row.user_task_key}}",
+                "variables": {
+                  "resolution": "answer",
+                  "answer": "{{form.answer}}"
+                }
+              }
+            }
+          }
         },
         "refreshMs": 5000
       }
@@ -141,8 +190,12 @@
         },
         "columns": [
           {
-            "field": "subject_key",
-            "header": "Epic"
+            "field": "subject_title",
+            "template": "{{subject_title}}",
+            "header": "Item",
+            "subtitleField": "subject_key",
+            "truncate": true,
+            "linkField": "subject_url"
           },
           {
             "field": "question",
@@ -162,10 +215,27 @@
           },
           {
             "field": "updated_at",
-            "header": "Updated"
+            "header": "Updated",
+            "format": "datetime"
           }
         ],
         "rowKey": "user_task_key",
+        "rowActions": [
+          {
+            "label": "Proceed",
+            "confirm": "Proceed with the current plan as-is? It is dispatched unchanged.",
+            "showWhenField": "user_task_key",
+            "action": {
+              "path": "/app/api/actions/complete-user-task",
+              "body": {
+                "userTaskKey": "{{row.user_task_key}}",
+                "variables": {
+                  "directive": "proceed"
+                }
+              }
+            }
+          }
+        ],
         "detail": {
           "linkField": "subject_url",
           "fields": [
@@ -173,7 +243,26 @@
               "field": "question",
               "label": "Review findings"
             }
-          ]
+          ],
+          "form": {
+            "showWhenField": "user_task_key",
+            "title": "Revise — send the plan back to the planner",
+            "promptField": "question",
+            "inputKey": "notes",
+            "inputLabel": "Revision guidance for the planner",
+            "submitLabel": "Revise & re-plan",
+            "action": {
+              "path": "/app/api/actions/complete-user-task",
+              "successLabel": "Sent back — the planner will revise",
+              "body": {
+                "userTaskKey": "{{row.user_task_key}}",
+                "variables": {
+                  "directive": "revise",
+                  "notes": "{{form.notes}}"
+                }
+              }
+            }
+          }
         },
         "refreshMs": 5000
       }
@@ -202,8 +291,12 @@
         },
         "columns": [
           {
-            "field": "subject_key",
-            "header": "Epic"
+            "field": "subject_title",
+            "template": "{{subject_title}}",
+            "header": "Item",
+            "subtitleField": "subject_key",
+            "truncate": true,
+            "linkField": "subject_url"
           },
           {
             "field": "question",
@@ -223,10 +316,55 @@
           },
           {
             "field": "updated_at",
-            "header": "Updated"
+            "header": "Updated",
+            "format": "datetime"
           }
         ],
         "rowKey": "user_task_key",
+        "rowActions": [
+          {
+            "label": "Proceed",
+            "confirm": "Accept the red trial merge and continue?",
+            "showWhenField": "user_task_key",
+            "action": {
+              "path": "/app/api/actions/complete-user-task",
+              "body": {
+                "userTaskKey": "{{row.user_task_key}}",
+                "variables": {
+                  "action": "proceed"
+                }
+              }
+            }
+          },
+          {
+            "label": "Rebase",
+            "confirm": "Re-run the trial merge?",
+            "showWhenField": "user_task_key",
+            "action": {
+              "path": "/app/api/actions/complete-user-task",
+              "body": {
+                "userTaskKey": "{{row.user_task_key}}",
+                "variables": {
+                  "action": "rebase"
+                }
+              }
+            }
+          },
+          {
+            "label": "Abandon",
+            "confirm": "Stop and finalize the plan?",
+            "showWhenField": "user_task_key",
+            "action": {
+              "path": "/app/api/actions/complete-user-task",
+              "body": {
+                "userTaskKey": "{{row.user_task_key}}",
+                "variables": {
+                  "action": "abandon"
+                }
+              }
+            }
+          }
+        ],
         "detail": {
           "linkField": "subject_url",
           "fields": [
@@ -264,8 +402,12 @@
         },
         "columns": [
           {
-            "field": "subject_key",
-            "header": "PR"
+            "field": "subject_title",
+            "template": "{{subject_title}}",
+            "header": "Item",
+            "subtitleField": "subject_key",
+            "truncate": true,
+            "linkField": "subject_url"
           },
           {
             "field": "kind_label",
@@ -285,7 +427,8 @@
           },
           {
             "field": "updated_at",
-            "header": "Updated"
+            "header": "Updated",
+            "format": "datetime"
           }
         ],
         "rowKey": "user_task_key",
@@ -343,8 +486,12 @@
         },
         "columns": [
           {
-            "field": "subject_key",
-            "header": "Feature"
+            "field": "subject_title",
+            "template": "{{subject_title}}",
+            "header": "Item",
+            "subtitleField": "subject_key",
+            "truncate": true,
+            "linkField": "subject_url"
           },
           {
             "field": "question",
@@ -364,7 +511,8 @@
           },
           {
             "field": "updated_at",
-            "header": "Updated"
+            "header": "Updated",
+            "format": "datetime"
           }
         ],
         "rowKey": "user_task_key",
@@ -375,7 +523,23 @@
               "field": "question",
               "label": "Disposition"
             }
-          ]
+          ],
+          "form": {
+            "showWhenField": "user_task_key",
+            "title": "Acknowledge blocked run",
+            "promptField": "question",
+            "inputKey": "note",
+            "inputLabel": "Disposition note (what you did / why)",
+            "submitLabel": "Acknowledge & close",
+            "action": {
+              "path": "/app/api/actions/acknowledge-blocked",
+              "successLabel": "Acknowledged — the run will close",
+              "body": {
+                "userTaskKey": "{{row.user_task_key}}",
+                "note": "{{form.note}}"
+              }
+            }
+          }
         },
         "refreshMs": 5000
       }

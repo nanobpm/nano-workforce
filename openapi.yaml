@@ -845,6 +845,176 @@ components:
         alreadyRunning:
           type: boolean
           description: True when a non-terminal feature run for this issue already exists; no new instance was started.
+    EpicSetStart:
+      description: >-
+        The set/batch admission request body (issue #292, slice S2). Submits a SET of epics plus the
+        inter-epic dependency edges between them. `epics` is admitted all-or-nothing through the same
+        `admitPlan` gate as the single-issue door; `deps` declares that a `consumer` epic waits for a
+        `producer` epic's published `{ package, capabilityRef }` capability. Every edge must connect
+        two epics named in `epics`, and the edge set must be an acyclic DAG — otherwise the whole set
+        is rejected with a 4xx and nothing is persisted.
+      type: object
+      additionalProperties: false
+      required:
+        - epics
+      properties:
+        epics:
+          type: array
+          minItems: 1
+          description: The epics to admit as one set. Each is admitted through the `admitPlan` gate.
+          items:
+            $ref: "#/components/schemas/EpicSetMember"
+        deps:
+          type: array
+          description: >-
+            The inter-epic dependency edges. Each declares `consumer` waits for `producer` to publish
+            the `{ package, capabilityRef }` capability. Both endpoints must name epics in `epics`.
+            Omit or pass `[]` for a set of independent (root) epics.
+          items:
+            $ref: "#/components/schemas/EpicSetDep"
+    EpicSetMember:
+      description: >-
+        One epic in a submitted set. Names the target issue by EXACTLY ONE of `issue`
+        (`owner/repo#123`) or `url` (a bare issue URL), plus a REQUIRED `baseBranch` and the optional
+        admission acknowledgements — the same per-epic admission inputs as `PlanStart`.
+      oneOf:
+        - $ref: "#/components/schemas/EpicSetMemberByIssue"
+        - $ref: "#/components/schemas/EpicSetMemberByUrl"
+    EpicSetMemberByIssue:
+      type: object
+      additionalProperties: false
+      required:
+        - issue
+        - baseBranch
+      properties:
+        issue:
+          type: string
+          description: "Issue reference: owner/repo#123."
+        baseBranch:
+          type: string
+          minLength: 1
+          maxLength: 255
+          pattern: '\S'
+          description: >-
+            REQUIRED integration branch this epic branches off and opens its PRs against, admitted
+            through the same ADR 0003 policy as the single-issue door. See `PlanStartByIssue.baseBranch`.
+        allowSharedBase:
+          type: boolean
+          description: Opt in to sharing a custom integration base with another active epic. See `PlanStartByIssue.allowSharedBase`.
+        confirmDefaultBase:
+          type: boolean
+          description: Acknowledge that `baseBranch` names the repository default branch. See `PlanStartByIssue.confirmDefaultBase`.
+    EpicSetMemberByUrl:
+      type: object
+      additionalProperties: false
+      required:
+        - url
+        - baseBranch
+      properties:
+        url:
+          type: string
+          description: A bare issue URL, when no `owner/repo#123` reference is supplied.
+        baseBranch:
+          type: string
+          minLength: 1
+          maxLength: 255
+          pattern: '\S'
+          description: REQUIRED integration branch this epic branches off. See `EpicSetMemberByIssue.baseBranch`.
+        allowSharedBase:
+          type: boolean
+          description: Share a custom integration base with another active epic. See `PlanStartByIssue.allowSharedBase`.
+        confirmDefaultBase:
+          type: boolean
+          description: Acknowledge landing on the default branch. See `PlanStartByIssue.confirmDefaultBase`.
+    EpicSetDep:
+      description: >-
+        One inter-epic dependency edge: the `consumer` epic waits for the `producer` epic to publish
+        the `{ package, capabilityRef }` capability. `consumer`/`producer` are epic references
+        (`owner/repo#123` or an issue URL) that MUST both appear in the set's `epics`.
+      type: object
+      additionalProperties: false
+      required:
+        - consumer
+        - producer
+        - package
+        - capabilityRef
+      properties:
+        consumer:
+          type: string
+          description: The dependent epic (waits). An `owner/repo#123` reference or issue URL in the set.
+        producer:
+          type: string
+          description: The producer epic it waits for. An `owner/repo#123` reference or issue URL in the set.
+        package:
+          type: string
+          minLength: 1
+          description: The producer epic's published package name — the capability probe's target (S3).
+        capabilityRef:
+          type: string
+          minLength: 1
+          description: The producer epic's issue handle, used to resolve which published pkg@version first carries the capability (S3).
+    StartEpicSetResult:
+      description: The result of a successful set admission + lowering (issue #292, slice S3) — the epics admitted, the roots started immediately, the dependents started behind their leading capability readiness-gate, and the inter-epic edges materialized into `plan_deps`.
+      type: object
+      required:
+        - epics
+        - roots
+        - dependents
+        - edges
+      properties:
+        epics:
+          type: array
+          description: Every epic admitted, with its normalized base branch.
+          items:
+            type: object
+            required:
+              - planKey
+              - baseBranch
+            properties:
+              planKey:
+                type: string
+              baseBranch:
+                type: string
+        roots:
+          type: array
+          description: The plan keys of epics with NO inbound edge — the roots started immediately (fan out right away).
+          items:
+            type: string
+        dependents:
+          type: array
+          description: The epics with ≥1 inbound edge — started behind a leading capability readiness-gate that holds wave 0 until every listed producer publishes its capability.
+          items:
+            type: object
+            required:
+              - planKey
+              - producers
+            properties:
+              planKey:
+                type: string
+              producers:
+                type: array
+                description: The producer plan keys whose capabilities this dependent waits for (ALL must be green before it fans out).
+                items:
+                  type: string
+        edges:
+          type: array
+          description: The inter-epic edges materialized into the durable `plan_deps` graph (endpoints resolved to plan keys).
+          items:
+            type: object
+            required:
+              - consumer
+              - producer
+              - package
+              - capabilityRef
+            properties:
+              consumer:
+                type: string
+              producer:
+                type: string
+              package:
+                type: string
+              capabilityRef:
+                type: string
     ConvergenceStart:
       description: The start-convergence request body. Names the target PR by EXACTLY ONE of `pr`
         (an `owner/repo#123` reference) or `url` (a bare PR URL) — never both, never neither — with
@@ -1620,6 +1790,47 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorBody"
+  /actions/start/epic-set:
+    post:
+      operationId: startEpicSet
+      summary: Admit a SET of epics plus their inter-epic dependency edges in one all-or-nothing call (issue #292).
+      description: >-
+        The set/batch admission door (slice S2). Validates the WHOLE submission before persisting
+        anything: each epic passes the same `admitPlan` gate as the single-issue door, every edge must
+        connect two epics in the submitted set, and the edge set must be an acyclic DAG. A malformed
+        set fails as one clean 4xx at the offending epic/edge with nothing half-started — no edge is
+        persisted. On success the admitted epics and validated edges are staged FK-free into
+        `admitted_epics` / `admitted_plan_deps`; materializing them into `plans` / `plan_deps` and
+        scheduling/lowering (starting roots, seeding the capability readiness-gate, version binding)
+        is a later slice (S3).
+        Idempotent on the set: re-submitting the identical set records no duplicate edge.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EpicSetStart"
+      responses:
+        "202":
+          description: The whole set validated; every epic was admitted and every edge staged FK-free (in `admitted_plan_deps`) for S3 to materialize.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StartEpicSetResult"
+        "400":
+          description: >-
+            The set is malformed — an unparseable epic/edge reference, a rejected base branch, an edge
+            naming an epic outside the set, or a dependency cycle.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+        "409":
+          description: An epic's base branch is already in use by another active epic (shared-base guard).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
   /actions/start/feature:
     post:
       operationId: startFeature
@@ -1894,6 +2105,57 @@ paths:
                 $ref: "#/components/schemas/MessageResult"
         "409":
           description: The feature run is not terminal, so it cannot be ticked off yet.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResult"
+  /actions/acknowledge-epic:
+    post:
+      operationId: acknowledgeEpic
+      summary: "Dismiss a RESOLVED epic (issue #298). Stamps `acknowledged_at` on the `plans` row so
+        the gateway recomputes its `list_bucket` to 'history' (and `ack_open` to 0), dropping the
+        resolved epic out of the Active epic list into History. The epic twin of acknowledge-done, but
+        a resolved epic is not parked at a user task, so this completes no user task and only writes the
+        row. Keyed on the epic's `plan_key`. Rejects (409) an epic that is not yet resolved (still
+        `planning`/`dispatched`, or `done` but still `converging`), so a converging epic stays visible
+        in Active. Idempotent-safe (re-acknowledging keeps it in History)."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+                - plan_key
+              properties:
+                plan_key:
+                  type: string
+                  minLength: 1
+                  description: The epic's key (plans.plan_key, `<owner>/<repo>#<n>`).
+      responses:
+        "200":
+          description: The resolved epic was acknowledged and moved to History. Applies to any
+            resolved epic — whether all slices merged (`delivery=landed`) or it resolved-not-landed
+            (`delivery=null`), not only landed epics.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResult"
+        "400":
+          description: A required field (plan_key) was missing or invalid.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResult"
+        "404":
+          description: No epic matches the plan_key.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResult"
+        "409":
+          description: The epic is not yet resolved (still planning/dispatched, or converging), so it cannot be dismissed yet.
           content:
             application/json:
               schema:

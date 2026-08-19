@@ -1,6 +1,6 @@
 {
   "name": "@nanobpm/nano-workforce",
-  "version": "0.88.0",
+  "version": "0.97.0",
   "description": "Nano Workforce — an Agent Graph Orchestration application for Agentic SDLC: durable BPMN processes that coordinate a graph of AI agents across the software delivery lifecycle.",
   "type": "module",
   "main": "main.ts",
@@ -43,6 +43,8 @@
     "gen:check": "urban gen --check",
     "layout": "node --experimental-strip-types scripts/layout-bpmn.ts",
     "layout:check": "node --experimental-strip-types scripts/layout-bpmn.ts --check",
+    "sync:nav": "node --experimental-strip-types scripts/sync-nav.ts",
+    "sync:nav:check": "node --experimental-strip-types scripts/sync-nav.ts --check",
     "dev": "urban dev",
     "pretest": "urban gen",
     "test": "node --experimental-strip-types --test",
@@ -53,7 +55,7 @@
   },
   "dependencies": {
     "@nanobpm/agentic": "^0.1.0",
-    "@nanobpm/urban": "^0.55.0"
+    "@nanobpm/urban": "^0.61.0"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.11",

@@ -22,11 +22,13 @@ import {
   UnresolvableCapabilityRefError,
 } from "./capabilityNeed.ts";
 import { deriveDelivery, TERMINAL_STATUSES } from "./delivery.ts";
-import { backfillFeatureStages, deriveFeatureBlockedPatch, deriveFeatureDelivery, deriveFeatureEscalationPatch, FEATURE_BLOCKED_ELEMENT, FEATURE_ESCALATION_ELEMENT, FEATURE_RUN_STATUSES, type FeatureRun, type FeatureRunStatus, featureRuns } from "./feature.ts";
+import { backfillFeatureStages, deriveFeatureBlockedPatch, deriveFeatureDelivery, deriveFeatureEscalationPatch, FEATURE_BLOCKED_ELEMENT, FEATURE_ESCALATION_ELEMENT, FEATURE_RUN_STATUSES, type FeatureRun, type FeatureRunStatus, featureEscalations, featureRuns } from "./feature.ts";
 import {
   classifyMergeability,
   coalesceTitle,
   ensureFreshHeadRun,
+  ensurePromotionPr,
+  fetchDefaultBranch,
   fetchPrHead,
   fetchPrMeta,
   fetchPrReviews,
@@ -41,12 +43,23 @@ import { pollLineage } from "./lineage.ts";
 import { mergeLanes, readExclusions } from "./mergeExclusion.ts";
 import { freshHeadRunAction, headRunPresenceCount, loadMergeProtocol } from "./mergeProtocol.ts";
 import { type PrLaneDecision, planPrLane, taskDependencyDepths } from "./mergeTrain.ts";
-import { capabilityGates, planReviews, plans, planTaskDeps, planTaskNeeds, planTasks } from "./plan.ts";
+import {
+  backfillPlanBuckets,
+  capabilityGates,
+  inboundPlanDeps,
+  planReviews,
+  plans,
+  planTaskDeps,
+  planTaskNeeds,
+  planTasks,
+} from "./plan.ts";
+import { derivePromotionState, isPromotable, promotionPrBody, promotionPrTitle } from "./promotion.ts";
 import { defaultProbeExec, type ProbeExec, probeOnce, type ReadinessProbe, readinessTimeout } from "./readiness.ts";
 import { clampNudgeMinutes, reviewWaitTimeout } from "./reviewWait.ts";
 import { trialMergeAudits } from "./trialMerge.ts";
 import {
   buildUserTaskRow,
+  latestFeatureEscalationQuestion,
   latestOpenEscalationQuestion,
   latestPlanReviewFindings,
   latestTrialMergeQuestion,
@@ -59,6 +72,7 @@ import {
   type UserTaskRow,
   userTasks,
 } from "./userTasks.ts";
+import { deriveWaitGate } from "./waitGate.ts";
 import { waveMergeTargets } from "./waves.ts";
 
 /** The BPMN process that drives review convergence (`resources/processes/convergence-loop.bpmn`). */
@@ -1367,7 +1381,7 @@ function capabilityGateTimeout(env: Record<string, string | undefined>): string 
 
 /** Capability-edge reconcile pass (issue #289). The host half of the "consumer readiness edge":
  * plan-fanout's per-task fan-out parks at the `wait-caps-resolved` message barrier for any task that
- * declared cross-repo capability `needs` (041_plan_task_needs.sql). Here we reconcile, on EVERY pass
+ * declared cross-repo capability `needs` (049_plan_task_needs.sql). Here we reconcile, on EVERY pass
  * and idempotently, each such parked task against the external fact "has every one of its needed
  * capabilities shipped as a published `pkg@version`?", publishing `caps-resolved` (correlated on the
  * per-task barrier key) with the late-bound resolved-dependencies brief to release the agent whenever
@@ -1583,6 +1597,125 @@ export async function pollDelivery(data: DataLayer) {
   }
 }
 
+/** Idempotent read-model pass (issue #292 slice S4): project each DEPENDENT epic's inter-epic gate
+ * state onto its `plans` row so the epic index/detail views can show — as flat columns — which
+ * producer/package a parked dependent is blocked on, its poll cadence + escalation deadline, and the
+ * bound `pkg@version` once green. Mirrors `pollDelivery`: joins each plan against its inbound
+ * `plan_deps` edges (the S1 read API) and stamps the pure `deriveWaitGate` (app/waitGate.ts) result,
+ * writing only when the projection actually changes so a steady-state pass is a no-op. Read-only over
+ * the state S1–S3 produce — it NEVER touches admission, scheduling, or `plan.status`.
+ *
+ * A ROOT epic (no inbound edge) derives `{ null, null }` — no wait-gate; any stale projection left by
+ * a prior edge (e.g. an edge later removed) is cleared defensively so the read model never keeps a
+ * phantom gate. */
+export async function pollWaitGate(data: DataLayer) {
+  for (const plan of await plans(data).all()) {
+    try {
+      const edges = await inboundPlanDeps(data, plan.plan_key);
+      const { wait_gate, wait_gate_label } = deriveWaitGate(edges, {
+        status: plan.status,
+        current_wave: plan.current_wave,
+        bound_artifacts: plan.bound_artifacts,
+        created_at: plan.created_at,
+      });
+      if (plan.wait_gate !== wait_gate || plan.wait_gate_label !== wait_gate_label) {
+        await plans(data).update(plan.plan_key, {
+          wait_gate,
+          wait_gate_label,
+          updated_at: now(),
+        });
+      }
+    } catch (err) {
+      console.error(`[poller] wait-gate ${plan.plan_key}: ${err}`);
+    }
+  }
+}
+
+/** Idempotent promotion pass (issue #299): open — and then track — the `epic/* → <default>`
+ * promotion PR for every epic that has LANDED on a custom integration branch. This is the missing
+ * counterpart to `ensureBaseBranch`: that creates the `epic/*` branch slices merge into; this
+ * delivers the fully-landed branch to the default branch. Runs AFTER `pollDelivery` so it reads the
+ * freshly-projected `delivery = landed` signal.
+ *
+ * Per promotable plan (`isPromotable`: `delivery = landed` AND base is `epic/*`):
+ *   • No promotion PR yet → open ONE `epic/* → <default>` PR (idempotent against a remote head-branch
+ *     lookup, so a crash between GitHub-create and the `promotion_pr` write can't duplicate it),
+ *     record `promotion_pr`, mark `promotion_state = open`, and enroll it into the convergence + merge
+ *     loop via `submitPr` (a real PR that must go green + converge before it merges — never an
+ *     auto-merge). If the PR can't be opened this pass (no default branch resolvable, no transport),
+ *     leave it at `promotion_state = ready` and retry next pass.
+ *   • Promotion PR already recorded → project `promotion_state` from its live status
+ *     (`merged → promoted`, else `open`); if its `pull_requests` row is absent (a prior `submitPr`
+ *     failed / DB desync) re-enroll it (idempotent).
+ *
+ * A `main`-based epic (base is not `epic/*`) is never promotable — its slices already landed on the
+ * default branch, so there is nothing to promote. Best-effort + per-plan isolated. */
+export async function pollPromotion(data: DataLayer, engine: EngineClient, token: string) {
+  // Preload every PR status once per pass (mirrors pollDelivery — avoids an N+1 `prs(data).get`).
+  const statusByPrKey = new Map<string, string>();
+  for (const pr of await prs(data).all()) statusByPrKey.set(pr.pr_key, pr.status);
+  for (const plan of await plans(data).all()) {
+    if (!isPromotable(plan)) continue;
+    const base = plan.base_branch;
+    if (!base) continue; // narrowed by isPromotable, but keep the type-checker honest
+    try {
+      // Already opened → project state from the promotion PR's live status, and re-enroll it if its
+      // convergence row went missing (a prior submit failed, or the app/engine store desynced).
+      if (plan.promotion_pr) {
+        const prStatus = statusByPrKey.get(plan.promotion_pr) ?? null;
+        const nextState = derivePromotionState(true, prStatus === "merged");
+        if (plan.promotion_state !== nextState) {
+          await plans(data).update(plan.plan_key, { promotion_state: nextState, updated_at: now() });
+        }
+        if (prStatus === null) {
+          const parsed = parsePr(plan.promotion_pr);
+          if (parsed) await submitPr(data, engine, parsed);
+        }
+        continue;
+      }
+      // Not opened yet: this epic is ready to promote. Resolve the target (default) branch; without
+      // it we can't open the PR this pass, so surface `ready` and retry.
+      const target = await fetchDefaultBranch(plan.repo, token);
+      if (!target || target === base) {
+        // `target === base` is a defensive guard (an `epic/*` base can't be the default), but never
+        // open a branch-into-itself PR. Either way, mark ready and retry.
+        if (plan.promotion_state !== "ready") {
+          await plans(data).update(plan.plan_key, { promotion_state: "ready", updated_at: now() });
+        }
+        continue;
+      }
+      const tasks = await planTasks(data).find({ plan_key: plan.plan_key });
+      const slicePrKeys = tasks.map((t) => t.pr_key).filter((k): k is string => !!k);
+      const epicTitle = coalesceTitle(plan.title, plan.plan_key);
+      const title = promotionPrTitle(base, target, epicTitle);
+      const body = promotionPrBody(base, target, plan.plan_key, slicePrKeys);
+      const result = await ensurePromotionPr(plan.repo, base, target, title, body, token);
+      if (!result) {
+        // No transport this pass — surface ready-to-promote and retry.
+        if (plan.promotion_state !== "ready") {
+          await plans(data).update(plan.plan_key, { promotion_state: "ready", updated_at: now() });
+        }
+        continue;
+      }
+      const promotionPrKey = `${plan.repo}#${result.number}`;
+      // Persist the idempotency key + state BEFORE enrolling, so a submit failure can never lead a
+      // later pass to open a second PR (it will see `promotion_pr` set and only re-enroll).
+      await plans(data).update(plan.plan_key, {
+        promotion_pr: promotionPrKey,
+        promotion_state: "open",
+        updated_at: now(),
+      });
+      const parsed = parsePr(promotionPrKey);
+      if (parsed) await submitPr(data, engine, parsed);
+      console.log(
+        `[poller] promotion PR ${result.created ? "opened" : "reused"} ${promotionPrKey} (${base} -> ${target})`,
+      );
+    } catch (err) {
+      console.error(`[poller] promotion ${plan.plan_key}: ${err}`);
+    }
+  }
+}
+
 /** Reconcile each in-flight FEATURE run against its handed-off PR (fix: Feature history stuck at
  * `converging`). A feature run ends its own process with `status = converging` and its PR's live
  * outcome (merged / converged / abandoned) thereafter lives only on the `pull_requests` row keyed
@@ -1646,7 +1779,7 @@ export async function pollFeatureEscalations(data: DataLayer, engine: EngineClie
   for (const run of candidates) {
     if (!run.process_key) continue;
     try {
-      const tasks = await engine.searchUserTasks({ processInstanceKey: run.process_key });
+      const tasks = await engine.openUserTasks({ processInstanceKey: run.process_key });
       const task = tasks.find((t) => t.elementId === FEATURE_ESCALATION_ELEMENT);
       const parked = task ? { userTaskKey: task.userTaskKey } : null;
       const patch = deriveFeatureEscalationPatch(run, parked);
@@ -1680,7 +1813,7 @@ export async function pollFeatureBlocked(data: DataLayer, engine: EngineClient) 
   for (const run of await featureRuns(data).find({ status: "awaiting_operator" })) {
     if (!run.process_key) continue;
     try {
-      const tasks = await engine.searchUserTasks({ processInstanceKey: run.process_key });
+      const tasks = await engine.openUserTasks({ processInstanceKey: run.process_key });
       const task = tasks.find((t) => t.elementId === FEATURE_BLOCKED_ELEMENT);
       const parked = task ? { userTaskKey: task.userTaskKey } : null;
       const patch = deriveFeatureBlockedPatch(run, parked);
@@ -1767,6 +1900,13 @@ export async function pollUserTasks(data: DataLayer, engine: EngineClient) {
       if (featureSeen.has(run.feature_key)) continue;
       featureSeen.add(run.feature_key);
       if (run.escalation_user_task_key) {
+        // Source the question from the canonical append-only `feature_escalations` audit log (issue
+        // #305) — the surviving table `record-feature-escalation` writes — falling back to the legacy
+        // denormalised `feature_runs.escalation_question` while both coexist (expand phase). This is the
+        // feature analogue of the plan-review/trial-merge/PR-loop question enrichment below, and lets the
+        // denormalised column be dropped in the contract phase without the Tasks grid losing the text.
+        const question = latestFeatureEscalationQuestion(await featureEscalations(data).find({ feature_key: run.feature_key })) ??
+          run.escalation_question;
         push(
           buildUserTaskRow(
             {
@@ -1774,8 +1914,9 @@ export async function pollUserTasks(data: DataLayer, engine: EngineClient) {
               elementId: FEATURE_ESCALATION_ELEMENT,
               subjectType: "feature",
               subjectKey: run.feature_key,
+              subjectTitle: run.title,
               subjectUrl: run.issue_url,
-              question: run.escalation_question,
+              question,
               processKey: run.process_key,
             },
             at,
@@ -1790,6 +1931,7 @@ export async function pollUserTasks(data: DataLayer, engine: EngineClient) {
               elementId: FEATURE_BLOCKED_ELEMENT,
               subjectType: "feature",
               subjectKey: run.feature_key,
+              subjectTitle: run.title,
               subjectUrl: run.issue_url,
               question: run.delivery_label,
               processKey: run.process_key,
@@ -1813,7 +1955,7 @@ export async function pollUserTasks(data: DataLayer, engine: EngineClient) {
       planSeen.add(plan.plan_key);
       let tasks: { userTaskKey: string; elementId?: string }[];
       try {
-        tasks = await engine.searchUserTasks({ processInstanceKey: plan.process_key });
+        tasks = await engine.openUserTasks({ processInstanceKey: plan.process_key });
       } catch (err) {
         console.error(`[poller] user tasks (plan ${plan.plan_key}): ${err}`);
         continue;
@@ -1828,6 +1970,7 @@ export async function pollUserTasks(data: DataLayer, engine: EngineClient) {
                 elementId: PLAN_REVIEW_ELEMENT,
                 subjectType: "plan",
                 subjectKey: plan.plan_key,
+                subjectTitle: plan.title,
                 subjectUrl: plan.issue_url,
                 question,
                 processKey: plan.process_key,
@@ -1844,6 +1987,7 @@ export async function pollUserTasks(data: DataLayer, engine: EngineClient) {
                 elementId: TRIAL_MERGE_ELEMENT,
                 subjectType: "plan",
                 subjectKey: plan.plan_key,
+                subjectTitle: plan.title,
                 subjectUrl: plan.issue_url,
                 question,
                 processKey: plan.process_key,
@@ -1868,7 +2012,7 @@ export async function pollUserTasks(data: DataLayer, engine: EngineClient) {
       prSeen.add(pr.pr_key);
       let tasks: { userTaskKey: string; elementId?: string }[];
       try {
-        tasks = await engine.searchUserTasks({ processInstanceKey: pr.process_key });
+        tasks = await engine.openUserTasks({ processInstanceKey: pr.process_key });
       } catch (err) {
         console.error(`[poller] user tasks (pr ${pr.pr_key}): ${err}`);
         continue;
@@ -1883,6 +2027,7 @@ export async function pollUserTasks(data: DataLayer, engine: EngineClient) {
               elementId: t.elementId,
               subjectType: "pr",
               subjectKey: pr.pr_key,
+              subjectTitle: pr.title,
               subjectUrl: pr.url,
               question,
               processKey: pr.process_key,
@@ -1916,6 +2061,11 @@ export async function pollUserTasks(data: DataLayer, engine: EngineClient) {
  * on every poll. */
 let featureStagesBackfilled = false;
 
+/** One-shot guard so the epic-bucket backfill (`backfillPlanBuckets`, #298) runs at most once per
+ * process, on the first `pollOnce` — re-projecting pre-migration-042 `plans` rows whose
+ * `list_bucket` is still NULL. The gateway keeps every future write fresh; idempotent regardless. */
+let planBucketsBackfilled = false;
+
 export async function pollOnce(
   data: DataLayer,
   engine: EngineClient,
@@ -1932,9 +2082,18 @@ export async function pollOnce(
     await backfillFeatureStages(data);
     featureStagesBackfilled = true;
   }
+  // One-shot: re-project any pre-#298 `plans` rows whose `list_bucket` is still NULL, so a legacy
+  // epic buckets correctly into Active/History from the first pass. Guard armed only after success so
+  // a transient failure retries next pass (mirrors the feature-stage backfill above).
+  if (!planBucketsBackfilled) {
+    await backfillPlanBuckets(data);
+    planBucketsBackfilled = true;
+  }
   await pollReviews(data, engine, token);
   await pollMerges(data, engine, token);
   await pollDelivery(data);
+  await pollWaitGate(data);
+  await pollPromotion(data, engine, token);
   await pollFeatureDelivery(data);
   await pollLineage(data);
   await pollFeatureEscalations(data, engine);

@@ -18,7 +18,7 @@
 // tasks visible; a completed task's row is removed on the next pass when the engine no longer reports
 // it open.
 import type { DataLayer } from "@nanobpm/urban";
-import { FEATURE_BLOCKED_ELEMENT, FEATURE_ESCALATION_ELEMENT } from "./feature.ts";
+import { FEATURE_BLOCKED_ELEMENT, FEATURE_ESCALATION_ELEMENT, type FeatureEscalationRow } from "./feature.ts";
 import type { PlanReview } from "./plan.ts";
 import type { TrialMergeAuditRow } from "./trialMerge.ts";
 
@@ -51,6 +51,10 @@ export interface UserTaskRow {
   kind_label: string;
   subject_type: string;
   subject_key: string;
+  /** The subject's human-readable title (`feature_runs`/`plans`/`pull_requests`.`title`), derived by
+   *  `pollUserTasks` from the subject row keyed on `subject_key` and coalesced to `subject_key` at
+   *  build time so the title-led grids never render a blank primary line (issue #308). */
+  subject_title: string;
   subject_url: string | null;
   question: string | null;
   process_key: string | null;
@@ -78,6 +82,10 @@ export interface UserTaskContext {
   elementId: string;
   subjectType: "feature" | "plan" | "pr";
   subjectKey: string;
+  /** The subject's human-readable title from its own row (`feature_runs`/`plans`/`pull_requests`.
+   *  `title`). Optional/blank tolerated — `buildUserTaskRow` coalesces it to `subjectKey` so the
+   *  projected `subject_title` is never blank. */
+  subjectTitle?: string | null;
   subjectUrl?: string | null;
   question?: string | null;
   processKey?: string | null;
@@ -93,12 +101,14 @@ export function buildUserTaskRow(ctx: UserTaskContext, at: string = now()): User
   const kindLabel = USER_TASK_KIND_LABELS[ctx.elementId];
   if (!userTaskKey || !subjectKey || !kindLabel) return null;
   const question = typeof ctx.question === "string" && ctx.question.trim() ? ctx.question.trim() : null;
+  const subjectTitle = typeof ctx.subjectTitle === "string" && ctx.subjectTitle.trim() ? ctx.subjectTitle.trim() : subjectKey;
   return {
     user_task_key: userTaskKey,
     element_id: ctx.elementId,
     kind_label: kindLabel,
     subject_type: ctx.subjectType,
     subject_key: subjectKey,
+    subject_title: subjectTitle,
     subject_url: ctx.subjectUrl ?? null,
     question,
     process_key: ctx.processKey ?? null,
@@ -124,6 +134,7 @@ function sameRow(a: UserTaskRow, b: UserTaskRow): boolean {
     a.kind_label === b.kind_label &&
     a.subject_type === b.subject_type &&
     a.subject_key === b.subject_key &&
+    a.subject_title === b.subject_title &&
     a.subject_url === b.subject_url &&
     a.question === b.question &&
     a.process_key === b.process_key
@@ -218,6 +229,20 @@ export function latestOpenEscalationQuestion(rows: readonly PrEscalationRow[]): 
   let latest: PrEscalationRow | undefined;
   for (const r of rows) {
     if (r.status !== "open") continue;
+    if (!latest || r.id > latest.id) latest = r;
+  }
+  return latest?.question ?? null;
+}
+
+/** Pure: the question for the still-open `feature-escalation`, sourced from the append-only
+ *  `feature_escalations` audit log (migration 048) — the feature analogue of `latestOpenEscalationQuestion`.
+ *  `record-feature-escalation` appends one row per escalation entry, so the newest row (highest `id`) is
+ *  the live question the operator is being asked; a run that escalated, was answered, then re-escalated
+ *  with a fresh question is covered because the later entry has the higher `id`. `null` when the feature
+ *  has no recorded escalation (the poller then falls back to the legacy `feature_runs` column). */
+export function latestFeatureEscalationQuestion(rows: readonly FeatureEscalationRow[]): string | null {
+  let latest: FeatureEscalationRow | undefined;
+  for (const r of rows) {
     if (!latest || r.id > latest.id) latest = r;
   }
   return latest?.question ?? null;

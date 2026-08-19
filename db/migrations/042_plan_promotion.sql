@@ -1,0 +1,31 @@
+-- 042_plan_promotion.sql — issue #299: automate the epic integration-branch → default-branch
+-- promotion PR once an epic LANDS on its custom `epic/*` integration branch.
+--
+-- Today an epic that targets a custom `epic/*` integration branch fans slices out that PR *into*
+-- that branch; once every slice merges (`plans.delivery = landed`, projected by 029), the epic is
+-- delivered on the integration branch but NOTHING opens the final `epic/* → <default>` promotion
+-- PR — the operator has to notice, find the branch, and raise it by hand. This migration adds the
+-- durable read/idempotency surface the poller's new `pollPromotion` pass needs to open (and then
+-- track) exactly one promotion PR per landed epic, reusing the same convergence + merge protocol as
+-- every other PR:
+--
+--   • promotion_pr    — the `owner/repo#N` key of the promotion PR the poller opened for this epic,
+--                       or NULL until one exists. This is the PRIMARY idempotency key: a pass that
+--                       finds it set never opens a second PR (the poller also reconciles against a
+--                       remote head-branch lookup, so a crash between GitHub-create and this write
+--                       can never duplicate the PR either).
+--   • promotion_state — the epic-card progression for the landed→delivered arc (issue #298's
+--                       "keep landed epics visible until acknowledged"): one of
+--                         'ready'    — landed on an `epic/*` base, promotion PR not yet opened.
+--                         'open'     — the promotion PR is open and converging toward merge.
+--                         'promoted' — the promotion PR merged; the epic is delivered on the
+--                                      default branch.
+--                       NULL until the epic first becomes promotable (grandfathers pre-#299 rows
+--                       and every `main`-based epic, which has nothing to promote).
+--
+-- Additive/derived only: no change to the plan lifecycle (`status`) — both columns are projected
+-- idempotently by the poller, mirroring the `delivery` / `delivery_label` read-model columns (029).
+-- Numbered after the current highest prefix on origin/main (041); the runner wraps each file in its
+-- own transaction, so this file must NOT contain BEGIN/COMMIT.
+ALTER TABLE plans ADD COLUMN promotion_pr TEXT;
+ALTER TABLE plans ADD COLUMN promotion_state TEXT;

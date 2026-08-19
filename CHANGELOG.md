@@ -1,3 +1,85 @@
+# [0.97.0](https://github.com/nanobpm/nano-workforce/compare/v0.96.1...v0.97.0) (2026-08-19)
+
+
+### Features
+
+* **nav:** live open-tasks count badge on the Tasks nav item ([#306](https://github.com/nanobpm/nano-workforce/issues/306)) ([#330](https://github.com/nanobpm/nano-workforce/issues/330)) ([10aa55a](https://github.com/nanobpm/nano-workforce/commit/10aa55af9a3d5c60f13391f9e17361b6b33ac653)), closes [nano-ide#338](https://github.com/nano-ide/issues/338) [nano-ide#342](https://github.com/nano-ide/issues/342)
+
+## [0.96.1](https://github.com/nanobpm/nano-workforce/compare/v0.96.0...v0.96.1) (2026-08-19)
+
+
+### Bug Fixes
+
+* **pages:** redesign the Epics table to a lean 6-column list ([#327](https://github.com/nanobpm/nano-workforce/issues/327)) ([#328](https://github.com/nanobpm/nano-workforce/issues/328)) ([b5842b3](https://github.com/nanobpm/nano-workforce/commit/b5842b33c89abb2db0aa6161fdddf32293452771)), closes [#87](https://github.com/nanobpm/nano-workforce/issues/87)
+
+# [0.96.0](https://github.com/nanobpm/nano-workforce/compare/v0.95.0...v0.96.0) (2026-08-19)
+
+
+### Features
+
+* **escalations:** consolidate on native user_tasks — expand half (issue [#305](https://github.com/nanobpm/nano-workforce/issues/305)) ([#310](https://github.com/nanobpm/nano-workforce/issues/310)) ([fc5f4d4](https://github.com/nanobpm/nano-workforce/commit/fc5f4d4680223d0c7ca4572a7f883ce4257a26a5)), closes [nano-ide#333](https://github.com/nano-ide/issues/333)
+
+# [0.95.0](https://github.com/nanobpm/nano-workforce/compare/v0.94.0...v0.95.0) (2026-08-19)
+
+
+### Features
+
+* **pages:** render "Updated" columns in the viewer's local time ([#302](https://github.com/nanobpm/nano-workforce/issues/302)) ([a73504d](https://github.com/nanobpm/nano-workforce/commit/a73504d6d6ebc968f21fa0f49eebf72774aa4b51)), closes [nano-ide#327](https://github.com/nano-ide/issues/327) [nano-ide#329](https://github.com/nano-ide/issues/329) [#301](https://github.com/nanobpm/nano-workforce/issues/301) [nano-ide#329](https://github.com/nano-ide/issues/329)
+
+# [0.94.0](https://github.com/nanobpm/nano-workforce/compare/v0.93.0...v0.94.0) (2026-08-19)
+
+
+### Features
+
+* **pages:** feature-runs current stage links to the process instance ([#316](https://github.com/nanobpm/nano-workforce/issues/316)) ([4984f13](https://github.com/nanobpm/nano-workforce/commit/4984f13c1a3bd101499763731843ee4807bec49e)), closes [#315](https://github.com/nanobpm/nano-workforce/issues/315) [nano-ide#347](https://github.com/nano-ide/issues/347) [nanobpm/nano-ide#348](https://github.com/nanobpm/nano-ide/issues/348) [#311](https://github.com/nanobpm/nano-workforce/issues/311) [#307](https://github.com/nanobpm/nano-workforce/issues/307)
+
+# [0.93.0](https://github.com/nanobpm/nano-workforce/compare/v0.92.0...v0.93.0) (2026-08-19)
+
+
+### Features
+
+* enforce scope-integrity guards in the review-convergence loop ([#314](https://github.com/nanobpm/nano-workforce/issues/314)) ([0a2a012](https://github.com/nanobpm/nano-workforce/commit/0a2a012b5d11e129de27633f1ef8508bc0fb457b)), closes [#631](https://github.com/nanobpm/nano-workforce/issues/631) [#863](https://github.com/nanobpm/nano-workforce/issues/863) [#872](https://github.com/nanobpm/nano-workforce/issues/872) [#N](https://github.com/nanobpm/nano-workforce/issues/N) [#N](https://github.com/nanobpm/nano-workforce/issues/N) [#N](https://github.com/nanobpm/nano-workforce/issues/N) [#313](https://github.com/nanobpm/nano-workforce/issues/313) [#N](https://github.com/nanobpm/nano-workforce/issues/N) [owner/repo#N](https://github.com/owner/repo/issues/N)
+
+# [0.92.0](https://github.com/nanobpm/nano-workforce/compare/v0.91.0...v0.92.0) (2026-08-19)
+
+
+### Bug Fixes
+
+* **e2e:** polyfill EngineClient.openUserTasks in the testkit shim ([#309](https://github.com/nanobpm/nano-workforce/issues/309)) ([#312](https://github.com/nanobpm/nano-workforce/issues/312)) ([22609d5](https://github.com/nanobpm/nano-workforce/commit/22609d57789d09a1062cf8388b37a76ef293d4f0)), closes [#297](https://github.com/nanobpm/nano-workforce/issues/297) [#294](https://github.com/nanobpm/nano-workforce/issues/294)
+
+
+### Features
+
+* **epics:** bucket epics on delivery, not raw status, with a dismiss affordance ([#303](https://github.com/nanobpm/nano-workforce/issues/303)) ([4f9bd1a](https://github.com/nanobpm/nano-workforce/commit/4f9bd1a6d2853ffeacbdd6b744d9dd4efffba0ea)), closes [#298](https://github.com/nanobpm/nano-workforce/issues/298) [#298](https://github.com/nanobpm/nano-workforce/issues/298)
+
+# [0.91.0](https://github.com/nanobpm/nano-workforce/compare/v0.90.0...v0.91.0) (2026-08-19)
+
+
+### Features
+
+* **tasks:** show subject title with repo/issue# as subtitle ([#308](https://github.com/nanobpm/nano-workforce/issues/308)) ([#311](https://github.com/nanobpm/nano-workforce/issues/311)) ([5771b38](https://github.com/nanobpm/nano-workforce/commit/5771b38abc33f4f88329d69c808214dfd42f5113))
+
+# [0.90.0](https://github.com/nanobpm/nano-workforce/compare/v0.89.0...v0.90.0) (2026-08-19)
+
+
+### Features
+
+* **convergence:** surface epic / cross-slice lineage on the PR-row detail ([#307](https://github.com/nanobpm/nano-workforce/issues/307)) ([7010b88](https://github.com/nanobpm/nano-workforce/commit/7010b88889529aec173c552bab2a1e7b881ba9da)), closes [nanobpm/nano-workforce#304](https://github.com/nanobpm/nano-workforce/issues/304)
+
+# [0.89.0](https://github.com/nanobpm/nano-workforce/compare/v0.88.1...v0.89.0) (2026-08-19)
+
+
+### Features
+
+* auto-open the epic integration-branch → default-branch promotion PR on landing ([#299](https://github.com/nanobpm/nano-workforce/issues/299)) ([#300](https://github.com/nanobpm/nano-workforce/issues/300)) ([24a8854](https://github.com/nanobpm/nano-workforce/commit/24a885484ae69bd654edd4d05fa198561e2db5dd))
+
+## [0.88.1](https://github.com/nanobpm/nano-workforce/compare/v0.88.0...v0.88.1) (2026-08-18)
+
+
+### Bug Fixes
+
+* scope user-task pollers to open tasks so they can't latch a COMPLETED task ([#297](https://github.com/nanobpm/nano-workforce/issues/297)) ([131a796](https://github.com/nanobpm/nano-workforce/commit/131a796dfaed8f9b2eb25526f6583b86b8d7b0df)), closes [#294](https://github.com/nanobpm/nano-workforce/issues/294)
+
 # [0.88.0](https://github.com/nanobpm/nano-workforce/compare/v0.87.0...v0.88.0) (2026-08-18)
 
 

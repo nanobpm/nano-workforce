@@ -11,6 +11,7 @@ import {
   buildUserTaskRow,
   PLAN_REVIEW_ELEMENT,
   PR_WAIT_ANSWER_ELEMENT,
+  latestFeatureEscalationQuestion,
   latestOpenEscalationQuestion,
   latestPlanReviewFindings,
   latestTrialMergeQuestion,
@@ -41,6 +42,7 @@ test("buildUserTaskRow: a plan-review task becomes a labelled row with its findi
     kind_label: "Plan review",
     subject_type: "plan",
     subject_key: "o/r#1",
+    subject_title: "o/r#1",
     subject_url: "https://github.com/o/r/issues/1",
     question: "cap reached: revise scope",
     process_key: "pk-1",
@@ -80,6 +82,28 @@ test("buildUserTaskRow: a blank userTaskKey or subjectKey yields null", () => {
   );
 });
 
+test("buildUserTaskRow: subject_title carries the subject title, trimmed, and coalesces to subject_key when absent/blank (issue #308)", () => {
+  const titled = buildUserTaskRow(
+    {
+      userTaskKey: "ut-t1",
+      elementId: PLAN_REVIEW_ELEMENT,
+      subjectType: "plan",
+      subjectKey: "o/r#1",
+      subjectTitle: "  Add the widget  ",
+    },
+    AT,
+  );
+  assertEquals(titled?.subject_title, "Add the widget");
+
+  for (const subjectTitle of [undefined, null, "   "]) {
+    const row = buildUserTaskRow(
+      { userTaskKey: "ut-t2", elementId: PLAN_REVIEW_ELEMENT, subjectType: "plan", subjectKey: "o/r#2", subjectTitle },
+      AT,
+    );
+    assertEquals(row?.subject_title, "o/r#2");
+  }
+});
+
 function row(key: string, extra: Partial<UserTaskRow> = {}): UserTaskRow {
   return {
     user_task_key: key,
@@ -87,6 +111,7 @@ function row(key: string, extra: Partial<UserTaskRow> = {}): UserTaskRow {
     kind_label: "Plan review",
     subject_type: "plan",
     subject_key: "o/r#1",
+    subject_title: "o/r#1",
     subject_url: null,
     question: null,
     process_key: null,
@@ -205,4 +230,17 @@ test("latestOpenEscalationQuestion: picks the newest OPEN row (highest id), not 
 test("latestOpenEscalationQuestion: null when there is no open escalation", () => {
   assertEquals(latestOpenEscalationQuestion([esc({ id: 1, status: "answered" })]), null);
   assertEquals(latestOpenEscalationQuestion([]), null);
+});
+
+test("latestFeatureEscalationQuestion: picks the newest audit row (highest id), not a positional [0]", () => {
+  const rows = [
+    { id: 3, feature_key: "o/r#1", question: "stale", created_at: "t0", job_key: "j0" },
+    { id: 8, feature_key: "o/r#1", question: "newest", created_at: "t1", job_key: "j1" },
+    { id: 5, feature_key: "o/r#1", question: "middle", created_at: "t2", job_key: "j2" },
+  ];
+  assertEquals(latestFeatureEscalationQuestion(rows), "newest");
+});
+
+test("latestFeatureEscalationQuestion: null when the feature has no recorded escalation", () => {
+  assertEquals(latestFeatureEscalationQuestion([]), null);
 });
