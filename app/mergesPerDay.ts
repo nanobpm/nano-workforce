@@ -114,7 +114,9 @@ const mergesAudit = (data: DataLayer) => data.table<MergeAuditRow>("merges", "id
  * practice, but a purge/rewrite of the audit must not leave a phantom). */
 export async function pollMergesPerDay(data: DataLayer): Promise<void> {
   try {
-    const audit = await mergesAudit(data).all();
+    // Only `outcome === "merged"` rows contribute to the aggregate, so filter at the read rather than
+    // scanning queued/blocked rows as the audit grows (deriveMergesPerDay ignores non-merged rows too).
+    const audit = await mergesAudit(data).find({ outcome: "merged" });
     const want = deriveMergesPerDay(audit);
     const wantByDay = new Map(want.map((d) => [d.day, d]));
 

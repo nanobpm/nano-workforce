@@ -20,9 +20,9 @@
 -- running total; `bar` is a precomputed proportional block-character bar so the declarative `prose`
 -- renderer can draw a horizontal bar per day with no chart node type.
 --
--- Forward-only, additive (expand): a new derived read table + index. The runner wraps each file in
--- its own transaction, so this file must NOT contain BEGIN/COMMIT. Numbered after the current highest
--- prefix (050).
+-- Forward-only, additive (expand): a new derived read table. The runner wraps each file in its own
+-- transaction, so this file must NOT contain BEGIN/COMMIT. Numbered after the current highest prefix
+-- (050). `day` is the PRIMARY KEY, which SQLite already indexes, so no extra index is needed.
 CREATE TABLE IF NOT EXISTS merges_per_day (
   day        TEXT PRIMARY KEY,             -- calendar day (date(at), ISO YYYY-MM-DD)
   merged     INTEGER NOT NULL DEFAULT 0,   -- COUNT(DISTINCT pr_key) merged that day
@@ -30,5 +30,3 @@ CREATE TABLE IF NOT EXISTS merges_per_day (
   bar        TEXT NOT NULL DEFAULT '',     -- proportional block-character bar for the prose chart
   updated_at TEXT NOT NULL
 );
-
-CREATE INDEX IF NOT EXISTS idx_merges_per_day_day ON merges_per_day(day);
