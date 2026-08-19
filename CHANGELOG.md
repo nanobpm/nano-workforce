@@ -1,3 +1,10 @@
+# [0.101.0](https://github.com/nanobpm/nano-workforce/compare/v0.100.0...v0.101.0) (2026-08-19)
+
+
+### Features
+
+* **world:** durable world-restore — c8ctl working-tree reconstruction + effect fence ([#324](https://github.com/nanobpm/nano-workforce/issues/324)) ([#337](https://github.com/nanobpm/nano-workforce/issues/337)) ([d2f7655](https://github.com/nanobpm/nano-workforce/commit/d2f76557027eddeed062208ebaeb8136f7b9b922)), closes [#nextSeqOn](https://github.com/nanobpm/nano-workforce/issues/nextSeqOn) [#nextSeqOn](https://github.com/nanobpm/nano-workforce/issues/nextSeqOn) [#nextSeqOn](https://github.com/nanobpm/nano-workforce/issues/nextSeqOn) [#appendEffect](https://github.com/nanobpm/nano-workforce/issues/appendEffect) [#isFenceCollision](https://github.com/nanobpm/nano-workforce/issues/isFenceCollision) [#appendEffect](https://github.com/nanobpm/nano-workforce/issues/appendEffect) [#reconcileApplied](https://github.com/nanobpm/nano-workforce/issues/reconcileApplied) [#nextSeqOn](https://github.com/nanobpm/nano-workforce/issues/nextSeqOn)
+
 # [0.100.0](https://github.com/nanobpm/nano-workforce/compare/v0.99.1...v0.100.0) (2026-08-19)
 
 
