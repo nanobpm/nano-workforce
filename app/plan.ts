@@ -14,7 +14,13 @@ import { blackboardUrl, mintBlackboardToken, renderCoordinationBrief } from "./b
 import { deriveEpicBucket, epicIsAcknowledgeable } from "./delivery.ts";
 import { EPIC_PHASE } from "./epicPhase.ts";
 import { DEFAULT_ESCALATION_SLA_TIMEOUT, escalationSlaTimeout } from "./escalationSla.ts";
-import { coalesceTitle, ensureBaseBranch, fetchDefaultBranch, fetchIssueTitle } from "./github.ts";
+import {
+  BaseBranchMustExistError,
+  coalesceTitle,
+  ensureBaseBranch,
+  fetchDefaultBranch,
+  fetchIssueTitle,
+} from "./github.ts";
 import { clearExclusions } from "./mergeExclusion.ts";
 import { clearTaskDeltas } from "./taskDelta.ts";
 
@@ -265,18 +271,25 @@ export const planDeps = (data: DataLayer) => data.table<PlanDep>("plan_deps", "p
 /** The fields an admission caller supplies for one inter-epic edge; `created_at` is stamped here. */
 export type PlanDepInput = Omit<PlanDep, "created_at">;
 
-/** Record one inter-epic dependency edge, enforcing the schema's two invariants at the app layer too
- * (the durable table backstops both, but the in-memory test data layer does not): an epic may not
- * depend on itself, and a consumer→producer edge is recorded at most once. A duplicate re-submission
- * is a no-op that returns the existing row rather than throwing, so batch admission (S2) stays
- * idempotent; a self-edge is a programming/validation error and throws. */
-export async function recordPlanDep(data: DataLayer, edge: PlanDepInput): Promise<PlanDep> {
+/** The record-gateway shape both the durable `plan_deps` table and its FK-free admission-staging
+ * twin `admitted_plan_deps` expose. Both hold the identical {@link PlanDep} row, so the idempotent
+ * edge-insert below is written once against this shape and reused for both. */
+type PlanDepTable = ReturnType<typeof planDeps>;
+
+/** Insert one inter-epic edge into `table` idempotently, enforcing the schema's two invariants at
+ * the app layer too (the durable table backstops both, but the in-memory test data layer does not):
+ * an epic may not depend on itself, and a consumer→producer edge is recorded at most once. A
+ * duplicate re-submission is a no-op that returns the existing row rather than throwing, so batch
+ * admission (S2) stays idempotent; a self-edge is a programming/validation error and throws. `label`
+ * only names the offending table in the self-edge error. */
+async function insertEdgeIdempotent(
+  table: PlanDepTable,
+  label: string,
+  edge: PlanDepInput,
+): Promise<PlanDep> {
   if (edge.plan_key === edge.depends_on_plan_key) {
-    throw new Error(
-      `plan_deps: self-edge rejected — epic ${edge.plan_key} cannot depend on itself`,
-    );
+    throw new Error(`${label}: self-edge rejected — epic ${edge.plan_key} cannot depend on itself`);
   }
-  const table = planDeps(data);
   const match = { plan_key: edge.plan_key, depends_on_plan_key: edge.depends_on_plan_key };
   const existing = (await table.find(match))[0];
   if (existing) return existing;
@@ -294,6 +307,71 @@ export async function recordPlanDep(data: DataLayer, edge: PlanDepInput): Promis
     if (raced) return raced;
     throw err;
   }
+}
+
+/** Record one inter-epic dependency edge into the durable `plan_deps` graph. Idempotent on the
+ * consumer→producer pair; a self-edge throws. NOTE: `plan_deps.plan_key` foreign-keys to an admitted
+ * `plans` row, so this is written by slice S3 (planner lowering), NOT by the S2 admission door —
+ * S2 stages edges FK-free via {@link recordAdmittedPlanDep} instead. */
+export function recordPlanDep(data: DataLayer, edge: PlanDepInput): Promise<PlanDep> {
+  return insertEdgeIdempotent(planDeps(data), "plan_deps", edge);
+}
+
+/** One STAGED admitted epic (issue #292 slice S2, db/migrations/045_epic_set_admission_staging.sql):
+ * the FK-free record the set/batch admission door persists per admitted epic so a crash between
+ * admission and lowering does not lose the set. It carries exactly what slice S3 (lowering) needs to
+ * MATERIALIZE the durable `plans` row — repo, issue number/url, and the normalized integration base
+ * branch admitPlan resolved. Keyed on `plan_key`, one staged row per epic (idempotent re-submit). */
+export interface AdmittedEpic {
+  plan_key: string;
+  repo: string;
+  issue_number: number;
+  issue_url: string;
+  base_branch: string;
+  created_at: string;
+}
+export const admittedEpics = (data: DataLayer) =>
+  data.table<AdmittedEpic>("admitted_epics", "plan_key");
+
+/** The FK-free staging twin of `plan_deps` (db/migrations/045_epic_set_admission_staging.sql): the
+ * validated inter-epic edges the S2 admission door stages before any `plans` row exists. Same row
+ * shape as {@link PlanDep}; slice S3 reads it to materialize the durable `plan_deps` edges. */
+export const admittedPlanDeps = (data: DataLayer) =>
+  data.table<PlanDep>("admitted_plan_deps", "plan_key");
+
+/** The fields an admission caller supplies for one staged admitted epic; `created_at` is stamped
+ * here (mirrors {@link PlanDepInput}). */
+export type AdmittedEpicInput = Omit<AdmittedEpic, "created_at">;
+
+/** Stage one admitted epic (issue #292 slice S2). Idempotent on `plan_key`: a re-submitted set that
+ * re-admits the same epic is a no-op returning the existing staged row, so the whole set door stays
+ * idempotent (mirroring {@link recordAdmittedPlanDep}). */
+export async function recordAdmittedEpic(
+  data: DataLayer,
+  epic: AdmittedEpicInput,
+): Promise<AdmittedEpic> {
+  const table = admittedEpics(data);
+  const existing = await table.get(epic.plan_key);
+  if (existing) return existing;
+  const row: AdmittedEpic = { ...epic, created_at: now() };
+  try {
+    await table.insert(row);
+    return row;
+  } catch (err) {
+    // Concurrent re-admission of the same epic races on the PRIMARY KEY (plan_key); honour the
+    // idempotent no-op contract by returning the winning row rather than surfacing the collision.
+    const raced = await table.get(epic.plan_key);
+    if (raced) return raced;
+    throw err;
+  }
+}
+
+/** Stage one validated inter-epic edge (issue #292 slice S2) into the FK-free `admitted_plan_deps`
+ * table. Idempotent on the consumer→producer pair; a self-edge throws. This is the S2 door's
+ * persistence for edges — it does NOT touch `plan_deps` (whose FK requires a `plans` row S2 has not
+ * created); slice S3 materializes the durable edge from this staging. */
+export function recordAdmittedPlanDep(data: DataLayer, edge: PlanDepInput): Promise<PlanDep> {
+  return insertEdgeIdempotent(admittedPlanDeps(data), "admitted_plan_deps", edge);
 }
 
 /** All INBOUND edges for `planKey` — i.e. every producer epic this dependent waits on. Empty for a
@@ -574,6 +652,225 @@ export async function admitPlan(
   }
 
   return base;
+}
+
+/** Map an error thrown by {@link admitPlan} to the HTTP status + message the admission-door
+ * operations return at the edge, or `null` when the error is not an admission decision and must be
+ * re-raised (a genuine 500). Shared by the single-issue door (`startPlanFanout`) and the set/batch
+ * door (`startEpicSet`, issue #292 S2) so both map an epic's admission failure identically — a base
+ * rule reject is a 400, the shared-base conflict a 409. Keeping this in ONE place stops the two doors
+ * drifting on which admission failure maps to which status. */
+export function admitPlanErrorResponse(err: unknown): { status: number; error: string } | null {
+  if (err instanceof MissingBaseBranchError) {
+    return {
+      status: 400,
+      error: "baseBranch is required (name the integration branch, e.g. epic/agent-protocol)",
+    };
+  }
+  if (err instanceof InvalidBaseBranchError) {
+    return {
+      status: 400,
+      error: "invalid baseBranch (must be a plausible git branch name, e.g. epic/agent-protocol)",
+    };
+  }
+  if (err instanceof BaseBranchMustExistError) {
+    return {
+      status: 400,
+      error:
+        `baseBranch "${err.branch}" does not exist and is not an epic/* branch, so it is not ` +
+        `auto-created — create it first, or use the epic/* convention`,
+    };
+  }
+  if (err instanceof DefaultBaseNotConfirmedError) {
+    return {
+      status: 400,
+      error:
+        `baseBranch "${err.branch}" is the repository default branch — every task would land ` +
+        `directly on it with no integration branch. Re-submit with confirmDefaultBase: true to proceed`,
+    };
+  }
+  if (err instanceof SharedBaseError) {
+    return {
+      status: 409,
+      error:
+        `baseBranch "${err.branch}" is already in use by another active epic. Re-submit with ` +
+        `allowSharedBase: true to stack on it, or name a distinct epic/* branch`,
+    };
+  }
+  return null;
+}
+
+// ── Set/batch admission (issue #292, slice S2) ───────────────────────────────
+// The set-admission door (`operations/startEpicSet.ts`) admits a WHOLE set of epics plus the
+// inter-epic dependency edges between them in one all-or-nothing call. The pure validation below
+// (reference integrity + DAG check) runs BEFORE any `admitPlan` side effect, so a malformed set is a
+// clean 4xx with nothing half-started (no base branch created, no edge persisted). The door's only
+// durable write is staging the admitted epics + validated edges FK-free into `admitted_epics` /
+// `admitted_plan_deps`; materializing them into `plans` / `plan_deps` and scheduling/lowering
+// (starting roots, seeding the capability readiness-gate, version binding) is slice S3.
+
+/** One inter-epic dependency edge as SUBMITTED to the set door: the `consumer` epic waits for the
+ * `producer` epic to publish the `{ package, capabilityRef }` capability. `consumer`/`producer` are
+ * epic references (`owner/repo#N` or an issue URL); the door resolves them to plan keys. This type
+ * documents the wire contract only — the actual `deps[]` arrives untyped, so {@link validateEpicSet}
+ * validates each entry against this shape at runtime rather than trusting the type. */
+export interface EpicSetDepInput {
+  consumer: string;
+  producer: string;
+  package: string;
+  capabilityRef: string;
+}
+
+/** A validated inter-epic edge — both endpoints resolved to plan keys, ready to persist as a
+ * {@link PlanDep} (`plan_key = consumer`, `depends_on_plan_key = producer`). */
+export interface ResolvedEpicSetDep {
+  consumer: string;
+  producer: string;
+  package: string;
+  capabilityRef: string;
+}
+
+/** A set-admission validation failure that carries the HTTP status the door returns at the edge
+ * (always a 4xx — a malformed set is the caller's error, not a server fault). */
+export class EpicSetValidationError extends Error {
+  readonly status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "EpicSetValidationError";
+    this.status = status;
+  }
+}
+
+/** Narrow an untyped value to a plain object so its fields can be read as `unknown`. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+/** Pure, side-effect-free validation of a submitted epic set's SHAPE and DAG — run BEFORE any
+ * `admitPlan` call so a cycle or dangling edge is rejected with nothing half-started. Given the
+ * submitted set's plan keys (already parsed, in submission order) and the raw edges, it:
+ *   • rejects an empty set;
+ *   • rejects a duplicate epic in the set;
+ *   • parses each edge endpoint and rejects an unparseable/self/dangling edge (an endpoint not in
+ *     the submitted set);
+ *   • rejects a blank `package`/`capabilityRef`;
+ *   • rejects a cycle in the consumer→producer graph, naming the edge that closes it.
+ * Returns the edges with both endpoints resolved to plan keys. Throws {@link EpicSetValidationError}
+ * (status 400) at the first offending input. Idempotent-friendly: a duplicate EDGE (same
+ * consumer→producer submitted twice) is collapsed, not rejected, so a retried set validates.
+ *
+ * `deps` is accepted as `unknown[]` because it arrives straight from an untyped request body
+ * (`startEpicSet` forwards `body.deps` verbatim). Every entry's shape is therefore validated
+ * defensively here — a non-object entry (`null`, `{}`), or a non-string endpoint / `package` /
+ * `capabilityRef`, maps to a clean {@link EpicSetValidationError} (400), never an uncaught
+ * TypeError (500). */
+export function validateEpicSet(planKeys: string[], deps: readonly unknown[]): ResolvedEpicSetDep[] {
+  if (planKeys.length === 0) {
+    throw new EpicSetValidationError(400, "epic set is empty — submit at least one epic");
+  }
+  const inSet = new Set<string>();
+  for (const key of planKeys) {
+    if (inSet.has(key)) {
+      throw new EpicSetValidationError(400, `epic ${key} appears more than once in the submitted set`);
+    }
+    inSet.add(key);
+  }
+
+  const resolveEndpoint = (ref: string, role: "consumer" | "producer"): string => {
+    // Trim like the epic-member path (`parseIssue(ref.trim())` in startEpicSet) so an otherwise-valid
+    // padded endpoint (" owner/repo#1 ") from an untyped JSON payload is not rejected as unparseable.
+    const parsed = parseIssue(ref.trim());
+    if (!parsed) {
+      throw new EpicSetValidationError(
+        400,
+        `dependency ${role} "${ref}" could not be parsed (use owner/repo#123 or an issue URL)`,
+      );
+    }
+    if (!inSet.has(parsed.planKey)) {
+      throw new EpicSetValidationError(
+        400,
+        `dependency ${role} ${parsed.planKey} is not one of the submitted epics — every edge must ` +
+          `connect two epics in the set`,
+      );
+    }
+    return parsed.planKey;
+  };
+
+  const resolved: ResolvedEpicSetDep[] = [];
+  const seenEdges = new Set<string>();
+  // consumer plan key → set of producer plan keys it depends on (for the DAG / cycle check).
+  const adjacency = new Map<string, Set<string>>();
+  for (const rawDep of deps) {
+    if (!isRecord(rawDep)) {
+      throw new EpicSetValidationError(
+        400,
+        "each dependency must be an object with consumer, producer, package and capabilityRef fields",
+      );
+    }
+    if (typeof rawDep.consumer !== "string" || typeof rawDep.producer !== "string") {
+      throw new EpicSetValidationError(
+        400,
+        "each dependency needs string consumer and producer endpoints (owner/repo#123 or an issue URL)",
+      );
+    }
+    const consumer = resolveEndpoint(rawDep.consumer, "consumer");
+    const producer = resolveEndpoint(rawDep.producer, "producer");
+    if (consumer === producer) {
+      throw new EpicSetValidationError(400, `epic ${consumer} cannot depend on itself`);
+    }
+    const pkg = (typeof rawDep.package === "string" ? rawDep.package : "").trim();
+    const capabilityRef = (typeof rawDep.capabilityRef === "string" ? rawDep.capabilityRef : "").trim();
+    if (pkg.length === 0) {
+      throw new EpicSetValidationError(
+        400,
+        `dependency ${consumer} → ${producer} is missing a package (the producer's published package)`,
+      );
+    }
+    if (capabilityRef.length === 0) {
+      throw new EpicSetValidationError(
+        400,
+        `dependency ${consumer} → ${producer} is missing a capabilityRef (the producer's issue handle)`,
+      );
+    }
+    const edgeId = `${consumer}\u0000${producer}`;
+    if (seenEdges.has(edgeId)) continue; // duplicate edge in one submission → collapse (idempotent)
+    seenEdges.add(edgeId);
+    resolved.push({ consumer, producer, package: pkg, capabilityRef });
+    const producers = adjacency.get(consumer) ?? new Set<string>();
+    producers.add(producer);
+    adjacency.set(consumer, producers);
+  }
+
+  assertAcyclic(adjacency);
+  return resolved;
+}
+
+/** Depth-first cycle check over the consumer→producer graph. Throws {@link EpicSetValidationError}
+ * (400) naming an edge on the cycle the moment one is found — the "reject at the offending edge"
+ * guarantee. A pure in-memory walk (no I/O), so it runs before any admission side effect. */
+function assertAcyclic(adjacency: Map<string, Set<string>>): void {
+  const VISITING = 1;
+  const DONE = 2;
+  const state = new Map<string, number>();
+  const visit = (node: string, stack: string[]): void => {
+    state.set(node, VISITING);
+    stack.push(node);
+    for (const next of adjacency.get(node) ?? []) {
+      const s = state.get(next);
+      if (s === VISITING) {
+        throw new EpicSetValidationError(
+          400,
+          `dependency cycle detected: ${[...stack, next].join(" → ")} — the edge set must be a DAG`,
+        );
+      }
+      if (s !== DONE) visit(next, stack);
+    }
+    stack.pop();
+    state.set(node, DONE);
+  };
+  for (const node of adjacency.keys()) {
+    if (state.get(node) !== DONE) visit(node, []);
+  }
 }
 
 /** Register a plan row (if new) and start the plan-fanout process. Idempotent on
