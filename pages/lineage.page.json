@@ -79,7 +79,7 @@
             "link": { "kind": "processExplorer", "keyField": "process_key" }
           },
           { "field": "pr_count", "header": "PRs", "width": "5rem" },
-          { "field": "updated_at", "header": "Updated", "width": "9rem" }
+          { "field": "updated_at", "header": "Updated", "width": "9rem", "format": "datetime" }
         ],
         "detail": {
           "linkField": "issue_url",
@@ -103,7 +103,7 @@
                 { "field": "status", "header": "Status", "link": { "kind": "processExplorer", "keyField": "process_key" } },
                 { "field": "current_round", "header": "Round" },
                 { "field": "outcome", "header": "Outcome", "truncate": true },
-                { "field": "updated_at", "header": "Updated", "width": "9rem" }
+                { "field": "updated_at", "header": "Updated", "width": "9rem", "format": "datetime" }
               ],
               "detail": {
                 "linkField": "url",

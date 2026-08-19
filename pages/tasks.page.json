@@ -105,7 +105,8 @@
           },
           {
             "field": "updated_at",
-            "header": "Updated"
+            "header": "Updated",
+            "format": "datetime"
           }
         ],
         "rowKey": "user_task_key",
@@ -170,7 +171,8 @@
           },
           {
             "field": "updated_at",
-            "header": "Updated"
+            "header": "Updated",
+            "format": "datetime"
           }
         ],
         "rowKey": "user_task_key",
@@ -235,7 +237,8 @@
           },
           {
             "field": "updated_at",
-            "header": "Updated"
+            "header": "Updated",
+            "format": "datetime"
           }
         ],
         "rowKey": "user_task_key",
@@ -301,7 +304,8 @@
           },
           {
             "field": "updated_at",
-            "header": "Updated"
+            "header": "Updated",
+            "format": "datetime"
           }
         ],
         "rowKey": "user_task_key",
@@ -384,7 +388,8 @@
           },
           {
             "field": "updated_at",
-            "header": "Updated"
+            "header": "Updated",
+            "format": "datetime"
           }
         ],
         "rowKey": "user_task_key",
