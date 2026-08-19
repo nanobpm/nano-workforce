@@ -1,3 +1,10 @@
+# [0.103.0](https://github.com/nanobpm/nano-workforce/compare/v0.102.1...v0.103.0) (2026-08-19)
+
+
+### Features
+
+* **feature:** intake-time readiness gate for single-issue runs ([#295](https://github.com/nanobpm/nano-workforce/issues/295)) ([#349](https://github.com/nanobpm/nano-workforce/issues/349)) ([09b519b](https://github.com/nanobpm/nano-workforce/commit/09b519be9ff21c8821b3ec3e0687541710be718b)), closes [owner/repo#N](https://github.com/owner/repo/issues/N)
+
 ## [0.102.1](https://github.com/nanobpm/nano-workforce/compare/v0.102.0...v0.102.1) (2026-08-19)
 
 
