@@ -406,3 +406,38 @@ test("recordCheckpoint re-recording an applied effect as pending never un-applie
   });
   assertEquals(await fence.isApplied("c-1"), true, "a later pending re-record never un-applies (fence is monotone)");
 });
+
+test("effectTail breaks a duplicate seq tie by autoincrement id — deterministic even if the DB returns rows unordered", async () => {
+  const { data, db } = memWorldData();
+  // The seq allocator (`#nextSeqOn`) is a racy read-max-plus-one and the schema has no
+  // UNIQUE(pr_key, checkpoint_offset, seq), so two concurrent writers CAN land the same seq at one
+  // offset. `find` gives NO order guarantee either, so a sort on seq alone leaves a seq-tie in whatever
+  // (arbitrary) order the engine returned. Simulate the durable collision (two seq-1 rows, distinct
+  // ids) AND an adversarial engine that returns them in reverse-id order; the tail must still fall back
+  // to the monotonic `id` so replay/audit order is stable — the earlier-inserted (lower-id) row first.
+  const now = new Date().toISOString();
+  const insert = db.prepare(
+    "INSERT INTO world_effects (pr_key, checkpoint_offset, seq, kind, idempotency_key, description, applied, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+  );
+  insert.run(PR, 0, 0, "push", "sha-a", null, 1, now);
+  insert.run(PR, 0, 1, "pr-comment", "c-first", null, 1, now);
+  insert.run(PR, 0, 1, "merge", "m-second", null, 1, now);
+  // Decorate the effects Table's `find` to return rows in reverse order, modelling an engine that does
+  // not return in insertion order — so a stable seq-only sort would surface the WRONG tie order.
+  const realTable = (data as unknown as { table: (n: string, pk?: string) => Record<string, unknown> }).table.bind(data);
+  (data as unknown as { table: (n: string, pk?: string) => Record<string, unknown> }).table = (n: string, pk?: string) => {
+    const t = realTable(n, pk);
+    if (n === "world_effects") {
+      const realFind = (t.find as (q: unknown) => Promise<unknown[]>).bind(t);
+      t.find = async (q: unknown) => (await realFind(q)).slice().reverse();
+    }
+    return t;
+  };
+  const store = new WorldStore(data);
+  const tail = await store.effectTail(PR, 0);
+  assertEquals(
+    tail.map((e) => e.idempotencyKey),
+    ["sha-a", "c-first", "m-second"],
+    "the seq-1 tie is broken by ascending id — the earlier-inserted row replays first, regardless of return order",
+  );
+});

@@ -259,11 +259,15 @@ export class WorldStore {
   }
 
   /** The effect tail recorded at a checkpoint offset, in `seq` order — the sequence the restore path
-   * fence-replays after checking the working tree out to that checkpoint's SHA. */
+   * fence-replays after checking the working tree out to that checkpoint's SHA. `seq` is the intended
+   * order, but it is allocated by a racy read-max-plus-one (`#nextSeqOn`) and the schema has no
+   * `UNIQUE(pr_key, checkpoint_offset, seq)`, so two concurrent inserts at one offset CAN land the same
+   * `seq`. The monotonic autoincrement `id` breaks that tie so the tail is deterministic (a stable
+   * insertion order) even under a `seq` collision — never a non-deterministic replay/audit order. */
   async effectTail(prKey: string, offset: number): Promise<Effect[]> {
     const rows = await this.#effects().find({ pr_key: prKey, checkpoint_offset: offset });
     return rows
-      .sort((a, b) => a.seq - b.seq)
+      .sort((a, b) => a.seq - b.seq || a.id - b.id)
       .map((r) => ({
         kind: r.kind,
         idempotencyKey: r.idempotency_key,
