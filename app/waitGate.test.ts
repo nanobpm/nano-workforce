@@ -152,3 +152,25 @@ test("humanizeMs renders compact human spans", () => {
   assertEquals(humanizeMs(30 * 60 * 1000), "30m");
   assertEquals(humanizeMs(0), "0s");
 });
+
+test("the waiting label reflects the exponential backoff cadence, not a flat interval", () => {
+  const got = deriveWaitGate([edge("o/r#2", "o/r#1", "@scope/api")], plan(), { nowMs: T0_MS + 1000 });
+  assertEquals(got.wait_gate, "waiting");
+  assert(
+    got.wait_gate_label!.includes("(exponential backoff)"),
+    "names the default exponential backoff so 'every N' can't imply a fixed cadence",
+  );
+});
+
+test("the waiting label is stable regardless of inbound edge order (no idempotent-poll churn)", () => {
+  const a = edge("o/r#9", "o/r#1", "@p/one");
+  const b = edge("o/r#9", "o/r#2", "@p/two");
+  const c = edge("o/r#9", "o/r#3", "@p/three");
+  const forward = deriveWaitGate([a, b, c], plan(), { nowMs: T0_MS + 1000 });
+  const shuffled = deriveWaitGate([c, a, b], plan(), { nowMs: T0_MS + 1000 });
+  assertEquals(shuffled.wait_gate_label, forward.wait_gate_label, "order-independent label");
+});
+
+test("parseBoundArtifacts drops whitespace-only entries, not just empty strings", () => {
+  assertEquals(parseBoundArtifacts('["@a/b@1.0.0", "   ", "\\t"]'), ["@a/b@1.0.0"]);
+});

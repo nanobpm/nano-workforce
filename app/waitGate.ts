@@ -75,7 +75,7 @@ export function parseBoundArtifacts(raw: string | null | undefined): string[] {
   try {
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    return parsed.filter((v): v is string => typeof v === "string" && v.length > 0);
+    return parsed.filter((v): v is string => typeof v === "string" && v.trim().length > 0);
   } catch {
     return [];
   }
@@ -145,18 +145,34 @@ export function deriveWaitGate(
     return { wait_gate: "ready", wait_gate_label: `ready${detail}` };
   }
 
-  // Not green. Derive the gate's own bounded timeout from the edge (the same probe S3 lowers) so the
-  // projected deadline matches the engine timer. Every edge yields the same default budget; take the
-  // max defensively in case a future edge overrides it.
+  // Not green. Order the edges deterministically before deriving anything display-facing: the poller
+  // re-runs this derivation every pass, and `plan_deps.find` gives no ordering guarantee, so an
+  // unstable order would rewrite the same label (and `updated_at`) pass after pass. Sort by producer
+  // then package so the clause, probe list and cadence are stable across passes.
+  const orderedEdges = [...edges].sort(
+    (a, b) =>
+      a.depends_on_plan_key.localeCompare(b.depends_on_plan_key) ||
+      a.package.localeCompare(b.package),
+  );
+  // Derive the gate's own bounded timeout from the edge (the same probe S3 lowers) so the projected
+  // deadline matches the engine timer. Every edge yields the same default budget; take the max
+  // defensively in case a future edge overrides it.
   const env = opts.env;
   const nowMs = opts.nowMs ?? Date.now();
-  const probes = edges.map(capabilityProbeForEdge);
-  const timeoutMs = Math.max(...probes.map((p) => readinessTimeoutMs(p, env)));
-  const everyMs = Math.min(...probes.map((p) => normalizePoll(p.poll).everyMs));
+  const polls = orderedEdges.map(capabilityProbeForEdge).map((p) => ({
+    ...normalizePoll(p.poll),
+    timeoutMs: readinessTimeoutMs(p, env),
+  }));
+  const timeoutMs = Math.max(...polls.map((p) => p.timeoutMs));
+  const everyMs = Math.min(...polls.map((p) => p.everyMs));
+  // The probe cadence is not a fixed interval unless every probe uses `fixed` backoff — the default
+  // is exponential, so a flat "every N" would misrepresent the schedule. Reflect the real shape so the
+  // operator label can't claim a cadence the gate doesn't keep.
+  const exponential = polls.some((p) => p.backoff === "exponential");
   const startMs = Date.parse(plan.created_at);
   const deadlineMs = Number.isFinite(startMs) ? startMs + timeoutMs : NaN;
 
-  const clause = waitingOnClause(edges);
+  const clause = waitingOnClause(orderedEdges);
 
   // A terminal FAILED epic that never went green, or one whose bounded timeout has elapsed, has
   // effectively escalated — surface it so the operator sees a blocked epic rather than a silent stall.
@@ -171,8 +187,13 @@ export function deriveWaitGate(
   const deadline = Number.isFinite(deadlineMs)
     ? ` · escalates by ${new Date(deadlineMs).toISOString()}`
     : "";
+  // `re-checks every N` for a fixed cadence; for the default exponential ramp N is only the FIRST
+  // interval, so say so rather than implying a flat cadence the gate never keeps.
+  const cadence = exponential
+    ? `re-checks every ${humanizeMs(everyMs)}+ (exponential backoff)`
+    : `re-checks every ${humanizeMs(everyMs)}`;
   return {
     wait_gate: "waiting",
-    wait_gate_label: `waiting on ${clause} · re-checks every ${humanizeMs(everyMs)}${deadline}`,
+    wait_gate_label: `waiting on ${clause} · ${cadence}${deadline}`,
   };
 }

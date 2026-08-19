@@ -69,7 +69,7 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
   // unchanged. Filter the MI output to non-blank strings (a probe may publish without a bind),
   // mirroring the `resolvedArtifacts[item != null]` filter the implement-task prompt uses.
   const boundArtifacts = Array.isArray(job.variables.resolvedArtifacts)
-    ? job.variables.resolvedArtifacts.filter((v): v is string => typeof v === "string" && v.length > 0)
+    ? job.variables.resolvedArtifacts.filter((v): v is string => typeof v === "string" && v.trim().length > 0)
     : [];
   try {
     await plans(app.data).update(planKey, {

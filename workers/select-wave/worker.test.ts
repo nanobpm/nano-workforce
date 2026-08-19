@@ -93,8 +93,9 @@ test("select-wave captures the preflight's resolvedArtifacts onto plans.bound_ar
       variables: {
         planKey: "owner/repo#63",
         currentWave: 0,
-        // MI output collection: one entry per producer probe; null/blank entries are filtered out.
-        resolvedArtifacts: ["@scope/api@1.4.0", null, "", "@scope/core@2.0.0"],
+        // MI output collection: one entry per producer probe; null/empty/whitespace-only entries
+        // are filtered out (a probe may publish without a bind).
+        resolvedArtifacts: ["@scope/api@1.4.0", null, "", "   ", "@scope/core@2.0.0"],
       },
       elementId: "select-wave",
     } as any,
