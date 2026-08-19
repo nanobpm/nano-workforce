@@ -400,7 +400,23 @@
               "field": "question",
               "label": "Disposition"
             }
-          ]
+          ],
+          "form": {
+            "showWhenField": "user_task_key",
+            "title": "Acknowledge blocked run",
+            "promptField": "question",
+            "inputKey": "note",
+            "inputLabel": "Disposition note (what you did / why)",
+            "submitLabel": "Acknowledge & close",
+            "action": {
+              "path": "/app/api/actions/acknowledge-blocked",
+              "successLabel": "Acknowledged — the run will close",
+              "body": {
+                "userTaskKey": "{{row.user_task_key}}",
+                "note": "{{form.note}}"
+              }
+            }
+          }
         },
         "refreshMs": 5000
       }
