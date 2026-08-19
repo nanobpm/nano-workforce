@@ -1,3 +1,10 @@
+# [0.102.0](https://github.com/nanobpm/nano-workforce/compare/v0.101.1...v0.102.0) (2026-08-19)
+
+
+### Features
+
+* **console:** merged-per-day burn-down/throughput chart ([#345](https://github.com/nanobpm/nano-workforce/issues/345)) ([d4b27a9](https://github.com/nanobpm/nano-workforce/commit/d4b27a9cad36217db7c8ffc49ef26e0f31fb688e)), closes [#344](https://github.com/nanobpm/nano-workforce/issues/344) [#290](https://github.com/nanobpm/nano-workforce/issues/290) [#337](https://github.com/nanobpm/nano-workforce/issues/337) [#339](https://github.com/nanobpm/nano-workforce/issues/339) [#340](https://github.com/nanobpm/nano-workforce/issues/340) [#338](https://github.com/nanobpm/nano-workforce/issues/338)
+
 ## [0.101.1](https://github.com/nanobpm/nano-workforce/compare/v0.101.0...v0.101.1) (2026-08-19)
 
 

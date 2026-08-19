@@ -1,6 +1,6 @@
 {
   "name": "@nanobpm/nano-workforce",
-  "version": "0.101.1",
+  "version": "0.102.0",
   "description": "Nano Workforce — an Agent Graph Orchestration application for Agentic SDLC: durable BPMN processes that coordinate a graph of AI agents across the software delivery lifecycle.",
   "type": "module",
   "main": "main.ts",
