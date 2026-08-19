@@ -1,3 +1,10 @@
+# [0.100.0](https://github.com/nanobpm/nano-workforce/compare/v0.99.1...v0.100.0) (2026-08-19)
+
+
+### Features
+
+* retire interim feature-run escalation/blocked surface ([#339](https://github.com/nanobpm/nano-workforce/issues/339)) ([525d0f7](https://github.com/nanobpm/nano-workforce/commit/525d0f7a7f9661f640899e4bdf1b32052cff4ed9)), closes [#305](https://github.com/nanobpm/nano-workforce/issues/305) [#310](https://github.com/nanobpm/nano-workforce/issues/310) [#332](https://github.com/nanobpm/nano-workforce/issues/332) [#332](https://github.com/nanobpm/nano-workforce/issues/332)
+
 ## [0.99.1](https://github.com/nanobpm/nano-workforce/compare/v0.99.0...v0.99.1) (2026-08-19)
 
 
