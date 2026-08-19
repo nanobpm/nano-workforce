@@ -6,6 +6,7 @@
 // (`senior:conformance` then `senior:retro`) map these onto their `appendPrompt`, so each reflects
 // on real material rather than re-deriving it.
 import type { AppJobHandler } from "@nanobpm/urban";
+import { readBlackboard } from "../../app/blackboard.ts";
 import { gatherConformance, renderConformanceBrief } from "../../app/conformance.ts";
 import { gatherRetro, renderRetroBrief } from "../../app/retro.ts";
 import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
@@ -21,8 +22,11 @@ interface Out extends Record<string, unknown> {
 
 const handler: AppJobHandler<In, Out> = async (job, app) => {
   const planKey = job.variables.planKey;
-  const digest = await gatherRetro(app.data, planKey);
-  const conformance = await gatherConformance(app.data, planKey);
+  // Both gatherRetro and gatherConformance need the plan's blackboard; scan it once here and share
+  // the snapshot so a retro run does a single blackboard read, not one per gatherer.
+  const entries = await readBlackboard(app.data, planKey);
+  const digest = await gatherRetro(app.data, planKey, entries);
+  const conformance = await gatherConformance(app.data, planKey, entries);
   app.log.info(
     `retro-gather: ${planKey} — ${digest.counts.learnings} learnings, ${digest.counts.deltas} deltas, ${conformance.deliveredPrs.length} delivered PR(s)`,
   );

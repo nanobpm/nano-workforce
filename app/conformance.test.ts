@@ -101,6 +101,17 @@ test("gatherConformance: sorts slices by task_index", async () => {
   assertEquals(d.slices.map((s) => s.taskId), ["t1", "t2", "t3"]);
 });
 
+test("gatherConformance: uses pre-fetched blackboard entries instead of re-scanning", async () => {
+  const { data, stores } = memData();
+  seedPlan(stores);
+  seedTask(stores, { id: 1, task_index: 0, task_id: "t1", status: "skipped", pr_key: null });
+  // A scope-change lives in the store, but the caller passes an EMPTY pre-fetched snapshot — the
+  // function must honour what it was handed and not re-read the store.
+  await appendEntry(data, PLAN, { author_task: "t1", kind: "scope-change", body: "should be ignored" });
+  const d = await gatherConformance(data, PLAN, []);
+  assertEquals(d.scopeChanges.length, 0);
+});
+
 test("hasDeliveredImplementation: true iff at least one PR landed", async () => {
   const { data, stores } = memData();
   seedPlan(stores);

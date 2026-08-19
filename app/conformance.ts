@@ -15,7 +15,7 @@
 // Data access goes through the record gateway (`data.table`), never hand-written SQL — matching
 // app/retro.ts, app/plan.ts, and app/blackboard.ts.
 import type { DataLayer } from "@nanobpm/urban";
-import { isUniqueViolation, readBlackboard } from "./blackboard.ts";
+import { type BlackboardEntry, isUniqueViolation, readBlackboard } from "./blackboard.ts";
 import { TERMINAL_STATUSES } from "./delivery.ts";
 import { planTasks } from "./plan.ts";
 
@@ -77,10 +77,15 @@ export interface ConformanceDigest {
 
 /** Assemble the conformance material for a plan: the spec (issue + each slice's `prompt`), the set
  * of PRs that actually landed (so the agent examines the real implementation), and the scope
- * deviations raised during implementation. Reads only — no writes. */
+ * deviations raised during implementation. Reads only — no writes.
+ *
+ * `entries` lets a caller that has already scanned the blackboard for this plan (e.g.
+ * `pr.retro-gather`, which also runs {@link gatherRetro}) pass those entries in so the plan is
+ * scanned once, not once per gatherer — see workers/retro-gather. Omitted, it reads them itself. */
 export async function gatherConformance(
   data: DataLayer,
   planKey: string,
+  entries?: BlackboardEntry[],
 ): Promise<ConformanceDigest> {
   const plan = await plansTbl(data).get(planKey);
   const tasks = (await planTasks(data).find({ plan_key: planKey }))
@@ -102,7 +107,7 @@ export async function gatherConformance(
     });
   }
 
-  const scopeChanges = (await readBlackboard(data, planKey))
+  const scopeChanges = (entries ?? (await readBlackboard(data, planKey)))
     .filter((e) => e.kind === "scope-change")
     .map((e) => ({ author_task: e.author_task, body: e.body, created_at: e.created_at }));
 

@@ -166,6 +166,17 @@ test("gatherRetro: separates learnings from notes and folds in deltas", async ()
   assertEquals(d.repo, "acme/widgets");
 });
 
+test("gatherRetro: uses pre-fetched blackboard entries instead of re-scanning", async () => {
+  const { data, stores } = memData();
+  seedPlan(stores);
+  // A learning lives in the store, but the caller passes an EMPTY pre-fetched snapshot — gatherRetro
+  // must honour what it was handed and not re-read the store.
+  await appendEntry(data, PLAN, { author_task: "t1", kind: "learning", body: "should be ignored" });
+  const d = await gatherRetro(data, PLAN, []);
+  assertEquals(d.counts.learnings, 0);
+  assertEquals(d.notes.length, 0);
+});
+
 test("gatherRetro: folds in the plan-review trace and task-outcome shape", async () => {
   const { data, stores } = memData();
   seedPlan(stores);
