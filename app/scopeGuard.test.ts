@@ -116,6 +116,18 @@ test("hasDeferralMarker: detects a ## Scope heading and deferral phrases; ignore
   assert(!hasDeferralMarker("Implements everything. Closes #1."), "clean prose does not defer");
 });
 
+test("hasDeferralMarker: a bare 'remain*' without deferral context is not a deferral", () => {
+  // "all done" phrasing must not be read as a scope deferral (Copilot advisory,
+  // app/scopeGuard.ts:48): a full-scope PR that merely reports nothing outstanding
+  // would otherwise be blocked from converging.
+  assert(!hasDeferralMarker("No issues remain.\n\nCloses #123"), "'No issues remain' is not a deferral");
+  assert(!hasDeferralMarker("All checks remain green."), "'remain green' is not a deferral");
+  assert(!hasDeferralMarker("No failing tests remaining. Closes #7"), "'remaining' alone is not a deferral");
+  // ...but a remainder mention near genuine deferral context still defers.
+  assert(hasDeferralMarker("The remaining scope is tracked separately."), "'remaining' near 'scope' defers");
+  assert(hasDeferralMarker("Remaining work is a follow-up."), "'remaining' near 'follow-up' defers");
+});
+
 test("hasFollowupIssueRef: only an explicit tracking marker + issue ref counts", () => {
   assert(hasFollowupIssueRef("Deferred-to: #872"), "Deferred-to marker");
   assert(hasFollowupIssueRef("Tracked-in: owner/repo#872"), "cross-repo tracking marker");

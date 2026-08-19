@@ -42,10 +42,28 @@ const CLOSING_KEYWORD =
   /\b(close[sd]?|fix(?:e[sd])?|resolve[sd]?)[\s:]+(?:https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/issues\/\d+|(?:[\w.-]+\/[\w.-]+)?#\d+)/gi;
 
 // A body DEFERS scope when it carries a `## Scope` (any heading level) section OR names a deferral in
-// prose. "remains"/"remainder" are included because the incident's honest deferral read
-// "…remain the deferred refinement".
+// prose. A bare `remain*`/`remainder` is deliberately NOT enough on its own — normal "all done"
+// phrasing ("No issues remain.", "no failing tests remaining") uses it without deferring any scope,
+// and flagging that would block a full-scope PR from converging. A remainder mention only defers when
+// a deferral-context term (scope / follow-up / later / to-do / tracking) sits near it; the incident's
+// honest deferral read "…remain the deferred refinement", which the explicit `defer*` branch catches.
 const DEFERRAL_HEADING = /^#{1,6}\s+scope\b/im;
-const DEFERRAL_PHRASE = /\bdefer(?:s|red|ral|ring)?\b|\bout[- ]of[- ]scope\b|\bremain(?:s|der|ing)?\b/i;
+const DEFERRAL_PHRASE = /\bdefer(?:s|red|ral|ring)?\b|\bout[- ]of[- ]scope\b/i;
+const REMAINDER_WORD = /\bremain(?:s|der|ing)?\b/gi;
+const REMAINDER_CONTEXT = /\b(?:scope|follow[- ]?ups?|later|to[- ]?dos?|track(?:s|ed|ing)?|next[- ]steps?)\b/i;
+const REMAINDER_WINDOW = 48;
+
+// Whether any `remain*` mention sits within a short window of a deferral-context term.
+function remainderDefersScope(text: string): boolean {
+  for (const m of text.matchAll(REMAINDER_WORD)) {
+    const idx = m.index ?? 0;
+    const window = text.slice(Math.max(0, idx - REMAINDER_WINDOW), idx + m[0].length + REMAINDER_WINDOW);
+    if (REMAINDER_CONTEXT.test(window)) {
+      return true;
+    }
+  }
+  return false;
+}
 
 // A FILED follow-up issue link for the deferred remainder: an explicit tracking marker followed by
 // an issue ref. This is the machine-checkable contract feature.md asks split slices to emit.
@@ -70,7 +88,7 @@ export function findClosingKeywordRefs(body: string | null | undefined): string[
 /** Whether the body defers part of its scope (a `## Scope` section or a deferral phrase). */
 export function hasDeferralMarker(body: string | null | undefined): boolean {
   const text = body ?? "";
-  return DEFERRAL_HEADING.test(text) || DEFERRAL_PHRASE.test(text);
+  return DEFERRAL_HEADING.test(text) || DEFERRAL_PHRASE.test(text) || remainderDefersScope(text);
 }
 
 /** Whether the body links a filed follow-up issue for the deferred remainder. */
