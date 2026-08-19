@@ -25,6 +25,7 @@ import {
   parseProbe,
   probeBudgetMs,
   probeOnce,
+  READINESS_READY_MESSAGE,
   type ReadinessProbe,
   redactTarget,
 } from "../../app/readiness.ts";
@@ -36,8 +37,11 @@ import type { WorkerInputs, WorkerOutputs } from "../../nano-generated/worker-io
 type In = WorkerInputs["pr.readiness-probe"];
 type Out = WorkerOutputs["pr.readiness-probe"];
 
-/** The message the gate's event-based gateway correlates on `=gateKey` to release the wait. */
-export const READINESS_READY_MESSAGE = "readiness-ready";
+/** The message the gate's event-based gateway correlates on `=gateKey` to release the wait.
+ * Re-exported from the canonical source (`app/readiness.ts`) so the worker and every out-of-band
+ * publisher (the review-ready poller, #259) share ONE message name — no drift-prone local twin.
+ * Re-exports the binding already imported above rather than re-referencing the module. */
+export { READINESS_READY_MESSAGE };
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 

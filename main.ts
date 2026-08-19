@@ -9,7 +9,8 @@
 //     control endpoints plus the webhook operations under `/app/api/hooks/*` (ADR 0059).
 //
 // The only thing that isn't declarative is the review-ready poller: it does arbitrary GitHub
-// polling and then correlates a `review-ready` message. A cron trigger can only fire an engine
+// polling and then correlates the canonical `readiness-ready` wait-gate message (#259). A cron
+// trigger can only fire an engine
 // start/message action, not this custom I/O glue, so it stays app-side here — driving the same
 // engine client the runtime uses, over `app.data`.
 //
@@ -89,7 +90,7 @@ if (httpServer instanceof Server) {
 }
 
 // Review-ready poller. Self-scheduling (not setInterval) so a slow GitHub call can never
-// overlap two passes (which could double-signal `review-ready`); the next pass is scheduled
+// overlap two passes (which could double-signal `readiness-ready`); the next pass is scheduled
 // only after the previous one settles.
 let shuttingDown = false;
 let pollTimer: ReturnType<typeof setTimeout> | null = null;

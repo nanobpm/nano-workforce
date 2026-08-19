@@ -5,7 +5,7 @@
 //
 // Two knobs govern the review-wait watchdog:
 //   • the *timeout* — an ISO-8601 duration handed to the process's `wait-review-timeout` timer
-//     catch (the far side of the event-based-gateway race against `review-ready`). If no fresh
+//     catch (the far side of the event-based-gateway race against `readiness-ready`). If no fresh
 //     review arrives within it, the loop escalates to a human instead of hanging forever.
 //   • the *nudge cooldown* — how long the poller waits between automatic Copilot re-requests for
 //     one waiting PR, so a re-request that Copilot dismisses is retried without hammering the API.

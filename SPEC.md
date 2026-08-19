@@ -29,7 +29,7 @@ surface are proposed and open for adjustment.
           submit (form / webhook)
                      │
                      ▼
-            ┌───────────────────┐        review-ready (msg)      ┌──────────┐
+            ┌───────────────────┐      readiness-ready (msg)     ┌──────────┐
             │  convergence-loop │◀───────────────────────────────│  poller  │
             │      (BPMN)       │                                 └────┬─────┘
             └─────────┬─────────┘◀───────────────┐                    │ polls
@@ -48,8 +48,10 @@ surface are proposed and open for adjustment.
   agent worker slots and job timeouts are never held hostage to Copilot's reply
   latency.
 - **Poller**: an in-app background loop that watches waiting PRs and publishes
-  the `review-ready` message when a new review lands (no GitHub webhook needed;
-  works behind NAT).
+  the canonical `readiness-ready` wait-gate message (ADR 0001 §2) when a new
+  review lands — the "out-of-band poller-correlated shape" the review-ready wait
+  is re-expressed on (#259), so there is one "wait for the world" mechanism (no
+  GitHub webhook needed; works behind NAT).
 
 ## 3. Repository layout
 
@@ -100,7 +102,7 @@ known at submit time, carried as a process variable and stored on the DB row.
 │      ├── converged  → [Mark converged] → (end: converged)
 │      │
 │      ├── addressed  → [Record round] → <event-based gateway: review ready or timeout?>
-│      │                     ├── review-ready (msg catch, key = prKey) → round++ ─────┐
+│      │                     ├── readiness-ready (msg catch, key = prKey) → round++ ─┐
 │      │                     └── =reviewWaitTimeout (timer catch)                     │
 │      │                          → [Escalate: review stalled] (blocked)              │
 │      │                          → [Wait: wait-answer userTask] ─────────────────────┤
@@ -127,8 +129,9 @@ Guard: before each Review round, if round > MAX_ROUNDS → force an escalation
 ```
 
 Notes:
-- On `addressed`, the loop parks at an **event-based gateway** that races a
-  `review-ready` message (correlated by the poller when a fresh review lands)
+- On `addressed`, the loop parks at an **event-based gateway** that races the
+  canonical `readiness-ready` wait-gate message (ADR 0001 §2; correlated by the
+  poller when a fresh review lands)
   against a `=reviewWaitTimeout` timer (seeded at submit from
   `NANO_PR_REVIEW_WAIT_TIMEOUT`, default `PT20M`). Whichever fires first
   withdraws the other — the message arm advances `round`, the timer arm escalates
@@ -136,7 +139,8 @@ Notes:
   hanging forever. Because `persist-round` already recorded this `round` as
   `addressed` before the gateway, the timer arm opens the escalation **without
   re-recording the round** (it passes `recordRound=false`), so a single round is
-  never logged as both `addressed` and `blocked`. This replaced a bare
+  never logged as both `addressed` and `blocked`. This wait is re-expressed on the
+  ONE `ReadinessProbe` wait-gate primitive (#258, ADR 0001 §2); it replaced a bare
   `review-ready` catch that could hang
   indefinitely: Copilot won't re-review a round with no new commit and routinely
   dismisses a re-request, so with no timeout a review that never arrives wedged
@@ -210,7 +214,7 @@ Consequences the prompt (`resources/prompts/review-round.md`) encodes:
 | message | correlationKey | published by | payload |
 |---|---|---|---|
 | `pr-submitted` | — (start) | submit route/webhook | `{repo, prNumber, prUrl, prKey}` |
-| `review-ready` | `prKey` | **poller** | `{reviewId, reviewState, submittedAt}` |
+| `readiness-ready` | `prKey` | **poller** | `{ready, detail?}` (ADR 0001 §2 wait-gate; the review-ready wait, re-expressed on the ReadinessProbe gate — #259) |
 | `deps-cleared` | `prKey` | **poller** (merge) | — (all `Depends-on` PRs merged) |
 | `merge-ready` | `prKey` | **poller** (merge) | `{mergeState}` (`ready` \| `conflict` \| `blocked`); when `blocked`, also `{failingChecks, failingChecksList}` for the `senior:fix-ci` branch |
 | `merge-landed` | `prKey` | **poller** (merge) | — (queued PR merged, or merged out-of-band) |
@@ -368,8 +372,8 @@ An in-app loop (interval `NANO_PR_POLL_MS`, default 60s):
 1. `SELECT pr_key, repo, number, waiting_since, last_review_id, last_nudge_at FROM pull_requests WHERE status = 'waiting_review'`.
 2. For each, GET the PR's reviews from GitHub; find the newest review submitted
    after `waiting_since` with id > `last_review_id`.
-3. If found → publish `review-ready` (key = `pr_key`, `{reviewId, ...}`) and set
-   `last_review_id`.
+3. If found → publish the canonical `readiness-ready` wait-gate message (key =
+   `pr_key`, `{ready, detail}`) and set `last_review_id`.
 4. If **not** found → ensure a review is in flight: unless Copilot is already a
    pending reviewer, **re-request** it (REST `requested_reviewers`, exact login
    `copilot-pull-request-reviewer[bot]`) and record `last_nudge_at`. This is
@@ -377,7 +381,7 @@ An in-app loop (interval `NANO_PR_POLL_MS`, default 60s):
    so a re-request Copilot dismisses is retried without hammering the API. A repo
    where Copilot isn't an assignable reviewer (HTTP 422) is left to the process's
    review-wait timer (§4). This closes the stall where Copilot won't spontaneously
-   re-review and silently dismisses a re-request, so no `review-ready` ever fires.
+   re-review and silently dismisses a re-request, so no `readiness-ready` ever fires.
 
 Requires a GitHub token (`GITHUB_TOKEN`) or the host `gh` CLI. One cheap API call
 per waiting PR per interval (plus at most one reviewer-state check + re-request per
@@ -644,7 +648,7 @@ but encode incompatible decisions about a shared contract** — a genuine design
   `baseRef`) that let large monorepos provision within the clone timeout (#287); the
   harness is PR-agnostic and provisions from that envelope. The worker stays a pure
   provisioner.
-- **review-ready via GitHub webhook** — same message, swappable faster trigger,
+- **readiness-ready via GitHub webhook** — same `readiness-ready` message, swappable faster trigger,
   when the app is publicly reachable. Deferred (poller-only for v1).
 - **Supervised vs external worker** — the agent runs as an external
   `c8ctl nano work` daemon by default; a supervised in-server mode is possible
