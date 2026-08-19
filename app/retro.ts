@@ -314,9 +314,11 @@ export async function maybeStartRetro(
     // The retro digest can be empty (no learnings/deltas/notes, cleanly-approved plan) yet the epic
     // still shipped real code — in which case conformance has something to verify even though the
     // lessons agent has nothing to distil. So run whenever there is EITHER reflection material OR
-    // landed implementation to audit; only truly skip when there is neither.
-    const conformance = await gatherConformance(data, planKey);
-    if (isDigestEmpty(digest) && !hasDeliveredImplementation(conformance)) {
+    // landed implementation to audit; only truly skip when there is neither. Conformance is gathered
+    // lazily (only when the digest is empty): a non-empty digest starts the retro regardless, so we
+    // avoid the extra DB reads (tasks + PR status lookups + blackboard scan) on every terminal-PR
+    // event where they'd be discarded.
+    if (isDigestEmpty(digest) && !hasDeliveredImplementation(await gatherConformance(data, planKey))) {
       if (!(await claimRetroStart(data, planKey))) return { started: false, planKey, reason: "already-started" };
       // Nothing to reflect on and nothing shipped to verify — stamp anyway so we don't re-check on
       // every future terminal PR of a (now settled) plan, and record a skipped retro for visibility.

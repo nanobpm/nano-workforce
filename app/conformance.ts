@@ -16,14 +16,17 @@
 // app/retro.ts, app/plan.ts, and app/blackboard.ts.
 import type { DataLayer } from "@nanobpm/urban";
 import { isUniqueViolation, readBlackboard } from "./blackboard.ts";
+import { TERMINAL_STATUSES } from "./delivery.ts";
 import { planTasks } from "./plan.ts";
 
 const now = () => new Date().toISOString();
 
 /** A slice PR "landed" — its implementation is really in the tree and worth examining — when its
  * PR reached a terminal state that isn't `abandoned`. In auto-merge mode that terminal is `merged`;
- * in review-only mode it is `converged` (app/delivery.ts TERMINAL_STATUSES minus `abandoned`). */
-const LANDED_PR_STATUSES = new Set(["merged", "converged"]);
+ * in review-only mode it is `converged`. Derived from app/delivery.ts TERMINAL_STATUSES (the single
+ * source of truth for PR-terminal states) minus `abandoned`, so conformance and retro can't drift
+ * about what counts as landed. */
+const LANDED_PR_STATUSES = new Set(TERMINAL_STATUSES.filter((s) => s !== "abandoned"));
 
 interface PlanRow extends Record<string, unknown> {
   plan_key: string;
