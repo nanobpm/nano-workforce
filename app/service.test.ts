@@ -503,6 +503,22 @@ test("repoEnvelopeVars emits nothing for a malformed repo (not owner/repo)", () 
   }
 });
 
+test("repoEnvelopeVars emits commitSha only for a well-formed 40-hex SHA (world-restore, #324)", () => {
+  const sha = "77ee0993cc6ad4493da0f7551212ef16722135db";
+  const env = (repoEnvelopeVars("owner/repo", "feat/x", "main", sha) as any)["io.nanobpm.agentTask"];
+  assertEquals(env.repository.commitSha, sha, "a valid 40-hex SHA is threaded through as the exact checkout target");
+  // A non-SHA ref, an abbreviated SHA, or a whitespace-tainted value is dropped (no `commitSha` key):
+  // it is forwarded to the harness as an EXACT checkout target, so a bad value could reconstruct to a
+  // moved branch tip or fail provisioning. Omission degrades to the pre-#324 head-branch-tip clone.
+  for (const bad of ["main", "feat/x", "77ee099", `${sha} `, ` ${sha}`, `${sha}\n`, "z".repeat(40), `${sha}0`, ""]) {
+    const r = (repoEnvelopeVars("owner/repo", "feat/x", "main", bad) as any)["io.nanobpm.agentTask"].repository;
+    assertEquals("commitSha" in r, false, `expected no commitSha for "${JSON.stringify(bad)}"`);
+  }
+  // Omitted entirely when there is no checkpoint SHA at all (the common first-activation case).
+  const none = (repoEnvelopeVars("owner/repo", "feat/x", "main") as any)["io.nanobpm.agentTask"].repository;
+  assertEquals("commitSha" in none, false);
+});
+
 // `parsePr` is total on any input: it is called unguarded from several workers (progress-check,
 // persist-round, persist-escalation, record-dependency) with a process variable that a regression
 // — or an older in-flight instance — could carry as a non-string. `.trim()` on a non-string throws,
