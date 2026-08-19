@@ -1,3 +1,10 @@
+# [0.89.0](https://github.com/nanobpm/nano-workforce/compare/v0.88.1...v0.89.0) (2026-08-19)
+
+
+### Features
+
+* auto-open the epic integration-branch → default-branch promotion PR on landing ([#299](https://github.com/nanobpm/nano-workforce/issues/299)) ([#300](https://github.com/nanobpm/nano-workforce/issues/300)) ([24a8854](https://github.com/nanobpm/nano-workforce/commit/24a885484ae69bd654edd4d05fa198561e2db5dd))
+
 ## [0.88.1](https://github.com/nanobpm/nano-workforce/compare/v0.88.0...v0.88.1) (2026-08-18)
 
 
