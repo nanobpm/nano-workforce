@@ -73,6 +73,9 @@ const handler: AppJobHandler<In> = async (job, app) => {
     (asBool(job.variables.hasDeviations) ||
       slicesReduced > 0 || slicesNotVerified > 0 || deviationsUnraised > 0);
 
+  // Track this retro instance on the conformance row so `pollUserTasks` can find the escalation ack
+  // task, but only mark it `reviewing` when there IS something to escalate — a clean run settles
+  // straight to `reviewed` and never enters the inbox scan (migration 053).
   await recordConformance(app.data, planKey, {
     status,
     commentUrl: filed ? commentUrl : null,
@@ -84,12 +87,17 @@ const handler: AppJobHandler<In> = async (job, app) => {
     hasDeviations,
     summary,
     report,
+    processKey: job.processInstanceKey ?? null,
+    reviewStatus: hasDeviations ? "reviewing" : "reviewed",
   });
 
   app.log.info(
     `conformance-record: ${planKey} — status=${status} deviations=${hasDeviations ? "yes" : "no"}`,
   );
-  return {};
+  // Return the ground-truth `hasDeviations` as a process variable so the `gw-deviations` gateway
+  // routes to the human ack task (retro.bpmn) — overriding the agent's hoisted flag with the value
+  // reconciled against the recorded counts above.
+  return { hasDeviations };
 };
 
 export default handler;

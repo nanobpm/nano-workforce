@@ -67,6 +67,20 @@
         }
       },
       "pollMs": 5000
+    },
+    {
+      "table": "plan_conformance",
+      "keyField": "process_key",
+      "statusField": "review_status",
+      "activeStatuses": [
+        "reviewing"
+      ],
+      "onTerminated": {
+        "set": {
+          "review_status": "reviewed"
+        }
+      },
+      "pollMs": 5000
     }
   ],
   "workers": [
@@ -165,6 +179,10 @@
     {
       "taskType": "pr.conformance-record",
       "handler": "workers/conformance-record/worker.ts"
+    },
+    {
+      "taskType": "pr.conformance-ack",
+      "handler": "workers/conformance-ack/worker.ts"
     },
     {
       "taskType": "pr.progress-check",

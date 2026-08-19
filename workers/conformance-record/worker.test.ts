@@ -36,8 +36,9 @@ function fakeApp() {
 
 test("conformance-record: persists a filed conformance from hoisted result vars", async () => {
   const { app, stores } = fakeApp();
-  await handler(
+  const out = await handler(
     {
+      processInstanceKey: "retro-inst-5",
       variables: {
         planKey: "o/r#5",
         status: "filed",
@@ -66,6 +67,11 @@ test("conformance-record: persists a filed conformance from hoisted result vars"
   assertEquals(row.deviations_unraised, 1);
   assertEquals(row.has_deviations, 1);
   assertEquals(row.report, "the full conformance report");
+  // Tracks the retro instance and enters the inbox scan (issue #216) — a deviation escalates.
+  assertEquals(row.process_key, "retro-inst-5");
+  assertEquals(row.review_status, "reviewing");
+  // The gateway routes off the returned ground-truth flag, not the agent's hoisted var.
+  assertEquals(out, { hasDeviations: true });
 });
 
 test("conformance-record: derives has_deviations from ground truth even when the agent flag is absent", async () => {
@@ -80,12 +86,15 @@ test("conformance-record: derives has_deviations from ground truth even when the
 
 test("conformance-record: a clean epic records has_deviations = 0", async () => {
   const { app, stores } = fakeApp();
-  await handler(
-    { variables: { planKey: "o/r#7", status: "filed", commentUrl: "https://x/7#c", slicesMet: 3, hasDeviations: false } } as any,
+  const out = await handler(
+    { processInstanceKey: "retro-inst-7", variables: { planKey: "o/r#7", status: "filed", commentUrl: "https://x/7#c", slicesMet: 3, hasDeviations: false } } as any,
     app as any,
   );
   assertEquals(stores.plan_conformance[0].has_deviations, 0);
   assertEquals(stores.plan_conformance[0].slices_met, 3);
+  // No deviation → settles straight to `reviewed`, never entering the inbox scan.
+  assertEquals(stores.plan_conformance[0].review_status, "reviewed");
+  assertEquals(out, { hasDeviations: false });
 });
 
 test("conformance-record: coerces filed without a comment URL to skipped", async () => {

@@ -21,6 +21,14 @@ import { planTasks } from "./plan.ts";
 
 const now = () => new Date().toISOString();
 
+/** The BPMN `elementId` of the conformance escalation user task (retro.bpmn). The inbox reconciler
+ * (`pollUserTasks`) and the human completer (`HUMAN_COMPLETABLE_ELEMENTS`) key off this. */
+export const CONFORMANCE_ESCALATION_ELEMENT = "conformance-escalation";
+
+/** The `review_status` a `plan_conformance` row carries while its escalation ack task is OPEN — the
+ * only status `pollUserTasks` scans (migration 053). Every settled run is `reviewed`. */
+export const CONFORMANCE_REVIEWING_STATUS = "reviewing";
+
 /** A slice PR "landed" — its implementation is really in the tree and worth examining — when its
  * PR reached a terminal state that isn't `abandoned`. In auto-merge mode that terminal is `merged`;
  * in review-only mode it is `converged`. Derived from app/delivery.ts TERMINAL_STATUSES (the single
@@ -49,6 +57,30 @@ async function isLanded(data: DataLayer, prKey: string | null | undefined): Prom
 }
 const conformanceTbl = (data: DataLayer) =>
   data.table<{ plan_key: string } & Record<string, unknown>>("plan_conformance", "plan_key");
+
+/** A `plan_conformance` row viewed as a retro-run tracking record, for the inbox reconciler. */
+export interface ConformanceReviewRow extends Record<string, unknown> {
+  plan_key: string;
+  process_key: string | null;
+  review_status: string;
+  summary: string | null;
+}
+
+const conformanceReviewsTbl = (data: DataLayer) =>
+  data.table<ConformanceReviewRow>("plan_conformance", "plan_key");
+
+/** The conformance runs whose escalation ack task is still open (`review_status = 'reviewing'`) —
+ * the set `pollUserTasks` scans for an open `conformance-escalation` user task. */
+export async function activeConformanceReviews(data: DataLayer): Promise<ConformanceReviewRow[]> {
+  return await conformanceReviewsTbl(data).find({ review_status: CONFORMANCE_REVIEWING_STATUS });
+}
+
+/** The escalation question shown in the inbox row: the agent's conformance summary (which names the
+ * reduced / not-verified items and the unraised deviations). Best-effort — NULL when none recorded. */
+export function conformanceEscalationQuestion(row: { summary?: unknown } | undefined): string | null {
+  const s = row?.summary;
+  return typeof s === "string" && s.trim() ? s.trim() : null;
+}
 
 /** One item of the spec the agent must verify against the code: the slice's planner-supplied
  * `prompt` (its acceptance brief), where it landed, and whether it landed at all. */
@@ -205,6 +237,12 @@ export interface ConformanceInput {
   hasDeviations?: boolean;
   summary?: string | null;
   report?: string | null;
+  /** The retro process instance this conformance ran in — the tracking key `pollUserTasks` reads to
+   * find an open escalation user task (migration 053). */
+  processKey?: string | null;
+  /** Escalation lifecycle: `reviewing` while the ack task is open (poller scans these), else
+   * `reviewed`. Defaults to `reviewed` — only an escalation flips it to `reviewing`. */
+  reviewStatus?: "reviewing" | "reviewed";
 }
 
 /** Upsert a plan's conformance row (idempotent on plan_key, so a job retry overwrites in place).
@@ -229,6 +267,8 @@ export async function recordConformance(
     has_deviations: input.hasDeviations ? 1 : 0,
     summary: input.summary ?? null,
     report: input.report ?? null,
+    process_key: input.processKey ?? null,
+    review_status: input.reviewStatus ?? "reviewed",
     updated_at: ts,
   };
   try {
@@ -237,4 +277,26 @@ export async function recordConformance(
     if (!isUniqueViolation(err)) throw err;
     await conformanceTbl(data).update(planKey, fields);
   }
+}
+
+/** Settle a conformance run's escalation once the operator acknowledges it: flip `review_status` to
+ * `reviewed` so `pollUserTasks` stops scanning it (its inbox row is already gone once the ack task
+ * closes) and stamp the disposition note into `summary` for the audit trail. Needed because the
+ * `retro` instance COMPLETES normally after the ack — `instanceTracking.onTerminated` only fires on a
+ * TERMINATED (crashed) instance, never a completed one, so nothing else would clear `reviewing`. */
+export async function acknowledgeConformance(
+  data: DataLayer,
+  planKey: string,
+  note?: string | null,
+): Promise<void> {
+  const trimmed = typeof note === "string" && note.trim() ? note.trim() : null;
+  const existing = await conformanceTbl(data).get(planKey);
+  if (!existing) return;
+  const prior = typeof existing.summary === "string" ? existing.summary : null;
+  const summary = trimmed ? (prior ? `${prior}\n\nOperator ack: ${trimmed}` : `Operator ack: ${trimmed}`) : prior;
+  await conformanceTbl(data).update(planKey, {
+    review_status: "reviewed",
+    summary,
+    updated_at: now(),
+  });
 }

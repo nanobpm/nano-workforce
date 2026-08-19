@@ -153,7 +153,7 @@ capability):
 | `fix-ci` | `senior:fix-ci` | `merge-loop` | Green a `blocked` PR's failing checks |
 | `rebase` | `senior:rebase` | `merge-loop` | Rebase a conflicting PR up to date with its base |
 | `retro` | `senior:retro` | `retro` | Synthesize a finished epic's learnings and promote the recurring ones |
-| `conformance` | `senior:conformance` | `retro` | Examine a finished epic's implementation against its spec; report met/deviations on the issue |
+| `conformance` | `senior:conformance` | `retro` | Examine a finished epic's implementation against its spec; report met/deviations on the issue, and escalate an unmet/undisclosed deviation to the Tasks inbox as a non-blocking ack |
 
 - `--command 'copilot -p - --allow-all-tools'` starts the Copilot CLI reading its
   prompt from **stdin** (`-p -`). The harness pipes the whole job JSON (prompt +

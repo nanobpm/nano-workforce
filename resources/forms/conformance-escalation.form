@@ -1,0 +1,17 @@
+{
+  "id": "conformance-escalation",
+  "schemaVersion": 18,
+  "type": "default",
+  "components": [
+    {
+      "type": "text",
+      "text": "The spec-conformance review found this epic did **not** cleanly meet its spec — a slice was reduced or could not be verified against the code, or a deviation was made that nobody raised during implementation. The delivery already landed, so this is a **non-blocking** follow-up: review the report on the epic issue, decide any remediation, then acknowledge to close it.",
+      "label": "Conformance review"
+    },
+    {
+      "type": "textarea",
+      "key": "note",
+      "label": "Disposition note (what you decided / follow-up — recorded on the review)"
+    }
+  ]
+}

@@ -61,7 +61,32 @@
         </zeebe:properties>
       </bpmn:extensionElements>
       <bpmn:incoming>f_toRecordConformance</bpmn:incoming>
-      <bpmn:outgoing>f_toSynthesize</bpmn:outgoing>
+      <bpmn:outgoing>f_toDeviationsGw</bpmn:outgoing>
+    </bpmn:serviceTask>
+    <bpmn:exclusiveGateway id="gw-deviations" name="deviations?" default="f_noDeviations">
+      <bpmn:incoming>f_toDeviationsGw</bpmn:incoming>
+      <bpmn:outgoing>f_deviations</bpmn:outgoing>
+      <bpmn:outgoing>f_noDeviations</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:userTask id="conformance-escalation" name="Conformance review (human)">
+      <bpmn:extensionElements>
+        <zeebe:formDefinition formId="conformance-escalation" />
+        <zeebe:userTask />
+        <zeebe:assignmentDefinition candidateGroups="operators" />
+      </bpmn:extensionElements>
+      <bpmn:incoming>f_deviations</bpmn:incoming>
+      <bpmn:outgoing>f_toConformanceAck</bpmn:outgoing>
+    </bpmn:userTask>
+    <bpmn:serviceTask id="record-conformance-ack" name="Record acknowledgement">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="pr.conformance-ack" />
+        <zeebe:ioMapping>
+          <zeebe:input source="=planKey" target="planKey" />
+          <zeebe:input source="=if (is defined(note)) then note else null" target="note" />
+        </zeebe:ioMapping>
+      </bpmn:extensionElements>
+      <bpmn:incoming>f_toConformanceAck</bpmn:incoming>
+      <bpmn:outgoing>f_ackToSynthesize</bpmn:outgoing>
     </bpmn:serviceTask>
     <bpmn:serviceTask id="synthesize" name="Synthesize &#38; promote (agent)">
       <bpmn:extensionElements>
@@ -73,7 +98,8 @@
           <zeebe:input source="=retroDigest" target="appendPrompt" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
-      <bpmn:incoming>f_toSynthesize</bpmn:incoming>
+      <bpmn:incoming>f_noDeviations</bpmn:incoming>
+      <bpmn:incoming>f_ackToSynthesize</bpmn:incoming>
       <bpmn:outgoing>f_toRecord</bpmn:outgoing>
     </bpmn:serviceTask>
     <bpmn:serviceTask id="record" name="Record retro">
@@ -92,7 +118,13 @@
     <bpmn:sequenceFlow id="f_start" sourceRef="Start" targetRef="gather" />
     <bpmn:sequenceFlow id="f_toConformance" sourceRef="gather" targetRef="conformance" />
     <bpmn:sequenceFlow id="f_toRecordConformance" sourceRef="conformance" targetRef="record-conformance" />
-    <bpmn:sequenceFlow id="f_toSynthesize" sourceRef="record-conformance" targetRef="synthesize" />
+    <bpmn:sequenceFlow id="f_toDeviationsGw" sourceRef="record-conformance" targetRef="gw-deviations" />
+    <bpmn:sequenceFlow id="f_deviations" name="deviations" sourceRef="gw-deviations" targetRef="conformance-escalation">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=hasDeviations = true</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="f_noDeviations" sourceRef="gw-deviations" targetRef="synthesize" />
+    <bpmn:sequenceFlow id="f_toConformanceAck" sourceRef="conformance-escalation" targetRef="record-conformance-ack" />
+    <bpmn:sequenceFlow id="f_ackToSynthesize" sourceRef="record-conformance-ack" targetRef="synthesize" />
     <bpmn:sequenceFlow id="f_toRecord" sourceRef="synthesize" targetRef="record" />
     <bpmn:sequenceFlow id="f_toEnd" sourceRef="record" targetRef="End" />
   </bpmn:process>
@@ -113,16 +145,28 @@
       <bpmndi:BPMNShape id="BPMNShape_record-conformance" bpmnElement="record-conformance">
         <dc:Bounds x="616" y="80" width="100" height="80" />
       </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_gw-deviations" bpmnElement="gw-deviations" isMarkerVisible="true">
+        <dc:Bounds x="776" y="95" width="50" height="50" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="770" y="65" width="62" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_conformance-escalation" bpmnElement="conformance-escalation">
+        <dc:Bounds x="751" y="240" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_record-conformance-ack" bpmnElement="record-conformance-ack">
+        <dc:Bounds x="911" y="240" width="100" height="80" />
+      </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_synthesize" bpmnElement="synthesize">
-        <dc:Bounds x="816" y="80" width="100" height="80" />
+        <dc:Bounds x="1056" y="80" width="100" height="80" />
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_record" bpmnElement="record">
-        <dc:Bounds x="1016" y="80" width="100" height="80" />
+        <dc:Bounds x="1256" y="80" width="100" height="80" />
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_End" bpmnElement="End">
-        <dc:Bounds x="1216" y="102" width="36" height="36" />
+        <dc:Bounds x="1456" y="102" width="36" height="36" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="1194" y="143" width="80" height="14" />
+          <dc:Bounds x="1434" y="143" width="80" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
       <bpmndi:BPMNEdge id="BPMNEdge_f_start" bpmnElement="f_start">
@@ -137,17 +181,34 @@
         <di:waypoint x="516" y="120" />
         <di:waypoint x="616" y="120" />
       </bpmndi:BPMNEdge>
-      <bpmndi:BPMNEdge id="BPMNEdge_f_toSynthesize" bpmnElement="f_toSynthesize">
+      <bpmndi:BPMNEdge id="BPMNEdge_f_toDeviationsGw" bpmnElement="f_toDeviationsGw">
         <di:waypoint x="716" y="120" />
-        <di:waypoint x="816" y="120" />
+        <di:waypoint x="776" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_f_noDeviations" bpmnElement="f_noDeviations">
+        <di:waypoint x="826" y="120" />
+        <di:waypoint x="1056" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_f_deviations" bpmnElement="f_deviations">
+        <di:waypoint x="801" y="145" />
+        <di:waypoint x="801" y="240" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_f_toConformanceAck" bpmnElement="f_toConformanceAck">
+        <di:waypoint x="851" y="280" />
+        <di:waypoint x="911" y="280" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_f_ackToSynthesize" bpmnElement="f_ackToSynthesize">
+        <di:waypoint x="1011" y="280" />
+        <di:waypoint x="1106" y="280" />
+        <di:waypoint x="1106" y="160" />
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_toRecord" bpmnElement="f_toRecord">
-        <di:waypoint x="916" y="120" />
-        <di:waypoint x="1016" y="120" />
+        <di:waypoint x="1156" y="120" />
+        <di:waypoint x="1256" y="120" />
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_toEnd" bpmnElement="f_toEnd">
-        <di:waypoint x="1116" y="120" />
-        <di:waypoint x="1216" y="120" />
+        <di:waypoint x="1356" y="120" />
+        <di:waypoint x="1456" y="120" />
       </bpmndi:BPMNEdge>
     </bpmndi:BPMNPlane>
   </bpmndi:BPMNDiagram>

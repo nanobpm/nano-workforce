@@ -229,6 +229,34 @@ test("feature-blocked is HUMAN-completable but NOT agent-completable (issue #332
   assertEquals(completed[0].variables, { note: "reassigned to a human" });
 });
 
+test("conformance-escalation is HUMAN-completable but NOT agent-completable (issue #216)", async () => {
+  // The retro conformance ack mirrors feature-blocked: a HUMAN operator retires it via
+  // `completeEscalationAsHuman`, but it stays OUTSIDE the agent surface (`ESCALATION_TASK_ELEMENTS`) —
+  // an agent must never acknowledge a conformance review on a human's behalf.
+  const stores = { task_completions: { rows: [] as any[], key: "id" } };
+  const data = memData(stores);
+  const { engine, completed } = fakeEngine([{ userTaskKey: "ut-c", elementId: "conformance-escalation" }]);
+
+  const asAgent = await completeEscalationAsAgent(data, engine, {
+    userTaskKey: "ut-c",
+    agentId: "bot",
+    variables: { note: "n" },
+  });
+  assertEquals(asAgent.ok, false, "the agent completer refuses conformance-escalation");
+  assertEquals(asAgent.reason, "not a completable task");
+  assertEquals(completed.length, 0);
+
+  const asHuman = await completeEscalationAsHuman(data, engine, {
+    userTaskKey: "ut-c",
+    operatorId: "alice",
+    variables: { note: "filed follow-up" },
+  });
+  assertEquals(asHuman.ok, true, "the human completer retires conformance-escalation");
+  assertEquals(asHuman.elementId, "conformance-escalation");
+  assertEquals(completed.length, 1);
+  assertEquals(completed[0].variables, { note: "filed follow-up" });
+});
+
 test("human completer refuses a non-escalation user task and is a no-op for an unknown key", async () => {
   const stores = { task_completions: { rows: [] as any[], key: "id" } };
   const data = memData(stores);

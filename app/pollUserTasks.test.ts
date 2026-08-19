@@ -182,8 +182,7 @@ test("pollUserTasks: sources the feature-escalation question from the feature_es
   assertEquals(byKey["ut-feat"].question, "latest ask");
 });
 
-test("pollUserTasks: projects a blocked feature run (feature-blocked) with the delivery_label as its question (issue #332)", async () => {
-  // A blocked run parks on the native `feature-blocked` operator task at the non-terminal
+test("pollUserTasks: projects a blocked feature run (feature-blocked) with the delivery_label as its question (issue #332)", async () => {  // A blocked run parks on the native `feature-blocked` operator task at the non-terminal
   // `awaiting_operator` status. The poller reads it from the engine directly (no denormalised pointer)
   // and projects it onto the Tasks inbox, sourcing the display text from the run's `delivery_label`.
   const { data, stores } = memData({
@@ -207,6 +206,43 @@ test("pollUserTasks: projects a blocked feature run (feature-blocked) with the d
   assertEquals(byKey["ut-blocked"].element_id, "feature-blocked");
   assertEquals(byKey["ut-blocked"].subject_type, "feature");
   assertEquals(byKey["ut-blocked"].question, "agent gave up: no PR");
+});
+
+test("pollUserTasks: projects a conformance-escalation ack (issue #216) keyed to the epic, question from summary", async () => {
+  // The advisory `retro` process parks on a native `conformance-escalation` user task when the
+  // spec-conformance audit found the epic did not cleanly meet its spec. retro is not a delivery
+  // aggregate, so its instance is tracked on `plan_conformance` (review_status = 'reviewing'); the
+  // poller scans those rows, reads the open ack task from the engine, and projects it under the epic
+  // (plan) subject with the audit `summary` as its question. A settled ('reviewed') row is skipped.
+  const { data, stores } = memData({
+    plan_conformance: [
+      {
+        plan_key: "o/r#70",
+        process_key: "cp-70",
+        review_status: "reviewing",
+        summary: "slice 2 reduced; auth cache never verified",
+      },
+      { plan_key: "o/r#71", process_key: "cp-71", review_status: "reviewed", summary: "all clean" },
+    ],
+    plans: [
+      { plan_key: "o/r#70", status: "done", issue_url: "https://github.com/o/r/issues/70", title: "Ship the cache" },
+    ],
+  });
+  const engine = fakeEngine({
+    "cp-70": [{ userTaskKey: "ut-conf", elementId: "conformance-escalation" }],
+    "cp-71": [{ userTaskKey: "ut-conf-settled", elementId: "conformance-escalation" }],
+  });
+
+  await pollUserTasks(data, engine);
+
+  const byKey = Object.fromEntries((stores.user_tasks ?? []).map((r) => [r.user_task_key, r]));
+  assertEquals(Object.keys(byKey), ["ut-conf"]);
+  assertEquals(byKey["ut-conf"].element_id, "conformance-escalation");
+  assertEquals(byKey["ut-conf"].kind_label, "Conformance review");
+  assertEquals(byKey["ut-conf"].subject_type, "plan");
+  assertEquals(byKey["ut-conf"].subject_key, "o/r#70");
+  assertEquals(byKey["ut-conf"].subject_title, "Ship the cache");
+  assertEquals(byKey["ut-conf"].question, "slice 2 reduced; auth cache never verified");
 });
 
 test("pollUserTasks: removes a row once its task is no longer open (completed / out-of-band)", async () => {
