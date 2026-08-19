@@ -10,8 +10,9 @@
 -- Columns (all maintained by the `plans` gateway — app/plan.ts — from the pure `deriveEpicBucket` /
 -- `epicIsAcknowledgeable` helpers in app/delivery.ts on every write, never hand-derived in SQL, the
 -- page, or a poller):
---   • acknowledged_at — NULL until an operator dismisses a fully-LANDED epic (acknowledge-epic). The
---                       twin of feature_runs.acknowledged_at (039).
+--   • acknowledged_at — NULL until an operator dismisses a RESOLVED epic (acknowledge-epic) — landed
+--                       or resolved-not-landed (`delivery=null`); only still-`converging` epics are
+--                       rejected. The twin of feature_runs.acknowledged_at (039).
 --   • list_bucket     — 'active' | 'history': deriveEpicBucket(status, delivery, acknowledged_at).
 --                       Active = live epics (planning/dispatched) + `done` epics not yet acknowledged
 --                       (still converging, landed-but-unpromoted, or resolved-not-landed); History =

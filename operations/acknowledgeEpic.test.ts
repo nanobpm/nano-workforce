@@ -1,8 +1,9 @@
 // Tests for the POST /app/api/actions/acknowledge-epic operation `acknowledgeEpic` (issue #298).
-// The nwf UI's "Dismiss" affordance for a fully-LANDED epic: it stamps `acknowledged_at` via the
-// plans gateway, which recomputes `list_bucket` to 'history' (and `ack_open` to 0), dropping the
-// landed epic from Active into History. Unlike acknowledge-blocked it completes NO user task (a
-// landed epic is not parked). The epic twin of acknowledge-done.
+// The nwf UI's "Dismiss" affordance for a RESOLVED epic — landed (`delivery=landed`) or
+// resolved-not-landed (`delivery=null`); only still-`converging` epics are rejected. It stamps
+// `acknowledged_at` via the plans gateway, which recomputes `list_bucket` to 'history' (and
+// `ack_open` to 0), dropping the resolved epic from Active into History. Unlike acknowledge-blocked
+// it completes NO user task (a resolved epic is not parked). The epic twin of acknowledge-done.
 import { test } from "node:test";
 import { assertEquals } from "#test-assert";
 import type { AppApi } from "@nanobpm/urban";
