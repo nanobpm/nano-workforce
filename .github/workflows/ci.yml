@@ -16,6 +16,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # Full history + tags: the migration immutability gate (check:migrations) diffs against the
+          # merge-base with origin/main, and the upgrade smoke test materialises the previous release
+          # tag's migration set — both need history a shallow clone doesn't have (issue #357).
+          fetch-depth: 0
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
