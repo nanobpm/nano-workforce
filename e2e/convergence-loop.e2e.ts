@@ -21,7 +21,7 @@ import { dirname, join, resolve } from "node:path";
 import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { after, before, describe, test } from "node:test";
-import { bootTestApp, type TestApp } from "@nanobpm/urban-testkit";
+import { assertThatResponse, bootTestApp, type TestApp } from "@nanobpm/urban-testkit";
 
 // The app root is this repo's root (one level up from `e2e/`) — where nano.app.json + openapi.yaml
 // + db/migrations + resources/processes live.
@@ -124,8 +124,7 @@ describe("nano-workforce e2e (urban-testkit pilot)", () => {
       query: { token },
       body: { author_task: "t1", kind: "note", body: "hello from the pilot" },
     });
-    assert.equal(appended.status, 201, "append returns 201 Created");
-    assert.equal(appended.body.inserted, true, "entry was inserted");
+    assertThatResponse(appended).hasStatus(201).hasJson({ inserted: true });
     assert.ok(Number.isFinite(appended.body.id), "append returns a numeric entry id");
 
     // GET it back via `readBlackboard` — the entry the POST just wrote must be visible.
@@ -133,7 +132,7 @@ describe("nano-workforce e2e (urban-testkit pilot)", () => {
       "readBlackboard",
       { query: { token } },
     );
-    assert.equal(read.status, 200, "read returns 200 OK");
+    assertThatResponse(read).hasStatus(200);
     assert.equal(read.body.planKey, planKey, "read is scoped to the seeded plan");
     assert.equal(read.body.entries.length, 1, "exactly the one appended entry is returned");
     assert.equal(read.body.entries[0].body, "hello from the pilot", "round-tripped body matches");
@@ -141,7 +140,7 @@ describe("nano-workforce e2e (urban-testkit pilot)", () => {
 
     // An unknown token is a 404 (never leaks which plans exist).
     const unknown = await api.call("readBlackboard", { query: { token: "nope" } });
-    assert.equal(unknown.status, 404, "an unknown token is a 404, not a leak");
+    assertThatResponse(unknown).hasStatus(404);
   });
 
   test("starts the convergence loop and reconciles its tracking row when terminated", async () => {
@@ -155,8 +154,7 @@ describe("nano-workforce e2e (urban-testkit pilot)", () => {
     const started = await api.call<{ prKey: string }>("startConvergenceLoop", {
       body: { pr: prKey, convergeOnly: true },
     });
-    assert.equal(started.status, 202, "start returns 202 Accepted");
-    assert.equal(started.body.prKey, prKey, "the response echoes the parsed PR key");
+    assertThatResponse(started).hasStatus(202).hasJson({ prKey });
 
     // The operation registered the PR aggregate (instanceTracking table) and started a real engine
     // instance — synchronously, before any worker ran (we never settled).

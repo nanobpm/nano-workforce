@@ -24,7 +24,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { after, before, describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { bootTestApp, type TestApp } from "@nanobpm/urban-testkit";
+import { assertThatResponse, bootTestApp, type TestApp } from "@nanobpm/urban-testkit";
 
 const APP_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const DB_DIR = mkdtempSync(join(tmpdir(), "nwf-u7-"));
@@ -163,7 +163,7 @@ describe("retire escalation subsystem (U7 — destructive contract phase)", () =
     const started = await api.call<{ prKey: string }>("startConvergenceLoop", {
       body: { pr: prKey, convergeOnly: true },
     });
-    assert.equal(started.status, 202, "start returns 202 Accepted");
+    assertThatResponse(started).hasStatus(202);
 
     const prs = app.db.table<{ pr_key: string; status: string; process_key: string | null }>(
       "pull_requests",
@@ -182,7 +182,7 @@ describe("retire escalation subsystem (U7 — destructive contract phase)", () =
       path: "/tasks/api/tasks",
       query: { processInstanceKey },
     });
-    assert.equal(listed.status, 200, "the taskInbox surface serves the task list");
+    assertThatResponse(listed).hasStatus(200);
     assert.equal(listed.body.length, 1, "exactly one escalation userTask is open");
     const task = listed.body[0];
     assert.equal(task.elementId, "wait-answer", "the open task is the review-loop escalation userTask");
@@ -205,8 +205,7 @@ describe("retire escalation subsystem (U7 — destructive contract phase)", () =
       path: "/tasks/api/complete",
       body: JSON.stringify({ userTaskKey: task.userTaskKey, variables: { answer } }),
     });
-    assert.equal(completed.status, 200, "the completion route accepts the typed submission");
-    assert.equal(completed.body.ok, true, "the userTask was completed");
+    assertThatResponse(completed).hasStatus(200).hasJson({ ok: true });
 
     // The answer resumed the loop and reached the resumed review round (drained-old path).
     await app.settle();

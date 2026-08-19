@@ -23,7 +23,7 @@ import { dirname, join, resolve } from "node:path";
 import { after, before, describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import type { EngineJob } from "@nanobpm/urban/runtime";
-import { bootTestApp, type TestApp } from "@nanobpm/urban-testkit";
+import { assertThatResponse, bootTestApp, type TestApp } from "@nanobpm/urban-testkit";
 import { admitGithubState, installAdmitGithub } from "./support/github-admit.ts";
 
 const APP_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -93,7 +93,7 @@ describe("plan-fanout escalation SLA + assignment (U5)", () => {
       }
       const planKey = "owner/repo#1";
       const started = await app.api?.call("startPlanFanout", { body: { issue: planKey, baseBranch: "epic/e2e" } });
-      assert.equal(started?.status, 202, "startPlanFanout accepted the issue");
+      assertThatResponse(started!).hasStatus(202);
       await app.settle();
       const plan = await app.db
         .table<{ plan_key: string; process_key: string | null }>("plans", "plan_key")

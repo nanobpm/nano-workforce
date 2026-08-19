@@ -20,7 +20,7 @@ import { dirname, join, resolve } from "node:path";
 import { after, before, describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import type { EngineJob } from "@nanobpm/urban/runtime";
-import { bootTestApp, type TestApp } from "@nanobpm/urban-testkit";
+import { assertThatDb, assertThatResponse, bootTestApp, type TestApp } from "@nanobpm/urban-testkit";
 import { admitGithubState, installAdmitGithub } from "./support/github-admit.ts";
 
 const APP_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -91,7 +91,7 @@ describe("plan-fanout escalations (U2 — task + plan-review + trial-merge → u
       }
       const planKey = "owner/repo#1";
       const started = await app.api?.call("startPlanFanout", { body: { issue: planKey, baseBranch: "epic/e2e" } });
-      assert.equal(started?.status, 202, "startPlanFanout accepted the issue");
+      assertThatResponse(started!).hasStatus(202);
       await app.settle();
       const plan = await app.db
         .table<{ plan_key: string; process_key: string | null }>("plans", "plan_key")
@@ -225,17 +225,8 @@ describe("plan-fanout escalations (U2 — task + plan-review + trial-merge → u
         // The user task bumped `planReviewEpoch`; record-plan-review derived the fresh epoch and
         // reset the round budget — proving the epoch is computed from completed plan-review tasks
         // across rounds (epoch 0's rounds, then a fresh epoch 1 round 0 after the human revise).
-        const reviews = await app.db
-          .table<{ plan_key: string; epoch: number; round: number }>("plan_reviews", "plan_key")
-          .find({ plan_key: planKey });
-        assert.ok(
-          reviews.some((r) => r.epoch === 0),
-          "the first review epoch (0) was recorded",
-        );
-        assert.ok(
-          reviews.some((r) => r.epoch === 1 && r.round === 0),
-          `a fresh epoch 1 round 0 was recorded after revise (epochs: ${reviews.map((r) => `${r.epoch}.${r.round}`).join(", ")})`,
-        );
+        await assertThatDb(app).table("plan_reviews").hasRow({ plan_key: planKey, epoch: 0 });
+        await assertThatDb(app).table("plan_reviews").hasRow({ plan_key: planKey, epoch: 1, round: 0 });
       },
     );
   });
@@ -329,10 +320,7 @@ describe("plan-fanout escalations (U2 — task + plan-review + trial-merge → u
         },
       },
       async ({ app, planKey, processKey }) => {
-        const needRows = await app.db
-          .table<{ plan_key: string; task_id: string; capability_ref: string }>("plan_task_needs", "plan_key")
-          .find({ plan_key: planKey });
-        assert.ok(needRows.length > 0, "the task's capability need was persisted");
+        await assertThatDb(app).table("plan_task_needs").hasRow({ plan_key: planKey });
         // The fan-out must have reached the barrier gateway's needs branch, NOT the no-needs shortcut,
         // and must be parked at `wait-caps-resolved` (the feature agent has NOT run yet).
         const parked = takenFlows(app);

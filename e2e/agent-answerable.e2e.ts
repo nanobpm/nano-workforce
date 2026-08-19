@@ -23,9 +23,8 @@ import { dirname, join, resolve } from "node:path";
 import { after, before, describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import type { EngineJob } from "@nanobpm/urban/runtime";
-import { bootTestApp, type TestApp } from "@nanobpm/urban-testkit";
+import { assertThatResponse, bootTestApp, type TestApp } from "@nanobpm/urban-testkit";
 import { admitGithubState, installAdmitGithub } from "./support/github-admit.ts";
-import { asEngineClient } from "./support/engine-client.ts";
 import {
   completeEscalationAsAgent,
   latestCompletion,
@@ -97,7 +96,7 @@ describe("agent-answerable escalations (U6 — same form, agent completer, attri
       }
       const planKey = "owner/repo#1";
       const started = await app.api?.call("startPlanFanout", { body: { issue: planKey, baseBranch: "epic/e2e" } });
-      assert.equal(started?.status, 202, "startPlanFanout accepted the issue");
+      assertThatResponse(started!).hasStatus(202);
       await app.settle();
       const plan = await app.db
         .table<{ plan_key: string; process_key: string | null }>("plans", "plan_key")
@@ -139,7 +138,7 @@ describe("agent-answerable escalations (U6 — same form, agent completer, attri
 
         // Complete AS AN AGENT through the host-side completer — the same typed `{resolution, answer}`
         // a human submits through the inbox, only the caller differs.
-        const r = await completeEscalationAsAgent(app.db, asEngineClient(app.engine), {
+        const r = await completeEscalationAsAgent(app.db, app.engine, {
           userTaskKey: task.userTaskKey,
           agentId: "senior:answer-bot",
           variables: { resolution: "answer", answer: "use v2" },

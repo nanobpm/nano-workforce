@@ -28,7 +28,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { after, before, describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { bootTestApp, type TestApp } from "@nanobpm/urban-testkit";
+import { assertThatInstance, assertThatResponse, bootTestApp, byKey, type TestApp } from "@nanobpm/urban-testkit";
 
 // The app root is this repo's root (one level up from `e2e/`) — where nano.app.json + the
 // resources/processes + resources/forms it deploys live.
@@ -106,7 +106,7 @@ describe("nano-workforce user-task spine (U0 keystone)", () => {
       path: "/tasks/api/tasks",
       query: { processInstanceKey },
     });
-    assert.equal(listed.status, 200, "the taskInbox surface serves the task list");
+    assertThatResponse(listed).hasStatus(200);
     assert.equal(listed.body.length, 1, "exactly the one spine userTask is open");
     const task = listed.body[0];
     assert.equal(task.elementId, "decide", "the open task is the spine's `decide` userTask");
@@ -120,8 +120,7 @@ describe("nano-workforce user-task spine (U0 keystone)", () => {
       path: "/tasks/api/complete",
       body: JSON.stringify({ userTaskKey: task.userTaskKey, variables: { decision: "approve" } }),
     });
-    assert.equal(completed.status, 200, "the completion route accepts the typed form submission");
-    assert.equal(completed.body.ok, true, "the userTask was completed");
+    assertThatResponse(completed).hasStatus(200).hasJson({ ok: true });
 
     // The typed variable resumed the token through the decision gateway: `decision = "approve"`
     // satisfied the FEEL condition, so the token took the approve flow (NOT the default reject flow).
@@ -139,11 +138,7 @@ describe("nano-workforce user-task spine (U0 keystone)", () => {
 
     // The token advanced start → userTask → gateway → end: the process resumes and reaches COMPLETED,
     // with no open task left behind.
-    const instances = await app.engine.searchProcessInstances({
-      processInstanceKeys: [processInstanceKey],
-    });
-    assert.equal(instances.length, 1, "the spine instance is still resolvable");
-    assert.equal(instances[0].state, "COMPLETED", "the process resumed and completed");
+    assertThatInstance(app, byKey(processInstanceKey)).hasCompleted();
 
     const remaining = await app.callRoute<InboxTask[]>({
       method: "GET",
