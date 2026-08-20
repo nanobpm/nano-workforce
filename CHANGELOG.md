@@ -1,3 +1,10 @@
+# [0.113.0](https://github.com/nanobpm/nano-workforce/compare/v0.112.0...v0.113.0) (2026-08-20)
+
+
+### Features
+
+* **delivery-graph:** `human` node as a scheduled user task that emits a typed fact (ADR 0005 S3) ([#389](https://github.com/nanobpm/nano-workforce/issues/389)) ([2266f9c](https://github.com/nanobpm/nano-workforce/commit/2266f9c36f194a7b1bfa995925968353131040e4)), closes [#378](https://github.com/nanobpm/nano-workforce/issues/378)
+
 # [0.112.0](https://github.com/nanobpm/nano-workforce/compare/v0.111.1...v0.112.0) (2026-08-20)
 
 
