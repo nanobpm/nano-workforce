@@ -2181,15 +2181,24 @@ export async function pollUserTasks(data: DataLayer, engine: EngineClient) {
   // the canonical `USER_TASK_KIND_LABELS` registry, not a hardcoded {plan-review, trial-merge} whitelist
   // (issue #358). plan-fanout embeds each wave slice as a multi-instance `implement` subprocess, so a
   // slice that escalates parks its `feature-escalation` user task on the PLAN-ROOT instance — which the
-  // feature scan (walking only `feature_runs`) never sees. A whitelist here silently dropped it (the
-  // instance-19153 orphan); projecting the whole registry keyed to the epic (plan) subject means any
-  // user-task element that lands on a plan instance is surfaced, and a new escalation kind can never
-  // regress into invisibility. The display `question` is enriched per-kind from the audit log each kind
-  // records (plan-review findings / trial-merge summary / the `feature_escalations` row the plan-fanout
-  // escalate arm writes, keyed by `plan_key`); a kind with no plan-side source projects with a null
-  // question. Dedupe by `plan_key` across the status queries (mirroring the feature-run scan above): a
-  // plan whose status transitions mid-pass could otherwise match twice and push duplicate `desired` rows
-  // for one `user_task_key`.
+  // feature scan (walking only `feature_runs`) never sees. Projecting the whole registry keyed to the
+  // epic (plan) subject means any user-task element that lands on a TRACKED, in-flight plan instance is
+  // surfaced, and a new escalation kind can never regress into invisibility. The display `question` is
+  // enriched per-kind from the audit log each kind records (plan-review findings / trial-merge summary /
+  // the `feature_escalations` row the plan-fanout escalate arm writes, keyed by `plan_key`); a kind with
+  // no plan-side source projects with a null question. Dedupe by `plan_key` across the status queries
+  // (mirroring the feature-run scan above): a plan whose status transitions mid-pass could otherwise
+  // match twice and push duplicate `desired` rows for one `user_task_key`.
+  //
+  // NB (still-open #358): this scan is still SUBJECT-TRACKING-GATED — it walks only `plans` rows in an
+  // active status. An escalation parked on an UNTRACKED / orphaned plan instance (no `plans` row, or a
+  // `plans` row already flipped terminal while the engine subprocess stays parked — the reported
+  // instance-19153 case) is therefore still NOT surfaced here. Closing that requires the engine-first
+  // sweep #358's acceptance criteria describe (list an open task iff the ENGINE reports it open,
+  // regardless of subject tracking), which in turn needs a seam capability the current `EngineClient`
+  // does not expose: `openUserTasks()` returns `UserTaskSummary` WITHOUT a `processInstanceKey`, and
+  // `searchProcessInstances` cannot enumerate active instances by process definition, so a globally-swept
+  // open task cannot be mapped back to its (untracked) subject instance for enrichment. Tracked in #358.
   const planSeen = new Set<string>();
   for (const status of PLAN_ACTIVE_STATUSES) {
     for (const plan of await plans(data).find({ status })) {
@@ -2204,7 +2213,7 @@ export async function pollUserTasks(data: DataLayer, engine: EngineClient) {
         continue;
       }
       for (const t of tasks) {
-        if (!t.elementId || !(t.elementId in USER_TASK_KIND_LABELS)) continue;
+        if (!t.elementId || !Object.hasOwn(USER_TASK_KIND_LABELS, t.elementId)) continue;
         let question: string | null = null;
         if (t.elementId === PLAN_REVIEW_ELEMENT) {
           question = latestPlanReviewFindings(await planReviews(data).find({ plan_key: plan.plan_key }));
