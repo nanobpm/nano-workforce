@@ -20,6 +20,7 @@ import {
 import type { RegisteredWorker } from "@nanobpm/agentic/vocab";
 import type { Logger } from "@nanobpm/urban";
 import type { RegistryReport as WireRegistryReport } from "../../../nano-generated/api-io.d.ts";
+import { resolveEngineAddress } from "../../enginePreflight.ts";
 import { envVar } from "../../version.ts";
 import { currentPresenceRegistry } from "../families/presence.family.ts";
 import { CREW_VOCAB_VERSION, crewResolver } from "./crew-vocab.ts";
@@ -40,17 +41,14 @@ export interface RegistryReport extends DemandSupplyReport {
 }
 
 /**
- * Derive the engine's C8 v2 REST base the demand reader targets — the same precedence/derivation
- * `main.ts` uses: an explicit `CAMUNDA_REST_ADDRESS` wins, else it is derived from `NANOBPMN_BASE_URL`
- * (+ `/v2`), defaulting to `http://localhost:8080/v2`. Read through the declared env schema (ADR 0004).
- * (This reader additionally strips trailing slashes off an explicit `CAMUNDA_REST_ADDRESS`, which
- * `main.ts` does not, so the derived base is well-formed regardless of a trailing `/`.)
+ * Derive the engine's C8 v2 REST base the demand reader targets. Delegates to
+ * the canonical {@link resolveEngineAddress} (the single source of truth shared
+ * with `main.ts`) so the precedence — explicit `CAMUNDA_REST_ADDRESS` wins, else
+ * `NANOBPMN_BASE_URL` (+ `/v2`), defaulting to `http://localhost:8080/v2` — lives
+ * in one place and cannot drift between call sites.
  */
 export function engineRestAddress(): string {
-  const explicit = envVar("CAMUNDA_REST_ADDRESS")?.replace(/\/+$/, "");
-  if (explicit) return explicit;
-  const base = (envVar("NANOBPMN_BASE_URL") ?? "http://localhost:8080").replace(/\/+$/, "");
-  return `${base}/v2`;
+  return resolveEngineAddress().restAddress;
 }
 
 /** The live supply rows (`{ instance, capability }`) from the H1 presence registry, or none when unmounted. */

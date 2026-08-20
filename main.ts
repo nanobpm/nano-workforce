@@ -20,6 +20,7 @@
 import { Server } from "node:http";
 import { createNanoSdkEngineClient, runFromEnv, selectHost } from "@nanobpm/urban";
 import { type AgenticChannelHandle, mountAgenticChannel } from "./app/agentic/channel.ts";
+import { announceEngine, resolveEngineAddress } from "./app/enginePreflight.ts";
 import { MAX_ROUNDS, pollOnce } from "./app/service.ts";
 import { envVar } from "./app/version.ts";
 
@@ -29,12 +30,18 @@ const GITHUB_TOKEN = process.env.GITHUB_TOKEN ?? "";
 
 const host = selectHost();
 
-// One engine client, shared by the runtime (surfaces/actions/workers) and the poller. Honour
-// the app's documented NANOBPMN_BASE_URL as well as the runtime's CAMUNDA_REST_ADDRESS.
-const restAddress = process.env.CAMUNDA_REST_ADDRESS ??
-  `${(process.env.NANOBPMN_BASE_URL ?? "http://localhost:8080").replace(/\/+$/, "")}/v2`;
+// One engine client, shared by the runtime (surfaces/actions/workers) and the poller. The address
+// resolution (CAMUNDA_REST_ADDRESS wins, else NANOBPMN_BASE_URL + /v2, else localhost:8080) is the
+// canonical `resolveEngineAddress`, shared with the demand reader. A non-rejecting startup preflight
+// then echoes the resolved address and announces which engine answered (nano-workforce#391) so a
+// misconfigured address is obvious at boot rather than as a cryptic mid-run engine error.
+const engineAddress = resolveEngineAddress();
+await announceEngine(engineAddress, {
+  info: (msg) => host.log("info", msg),
+  warn: (msg) => host.log("warn", msg),
+}, { token: process.env.CAMUNDA_TOKEN });
 const engine = await createNanoSdkEngineClient({
-  restAddress,
+  restAddress: engineAddress.restAddress,
   token: process.env.CAMUNDA_TOKEN,
   transport: process.env.CAMUNDA_TRANSPORT ?? "auto",
   log: host.log,
@@ -96,7 +103,7 @@ let shuttingDown = false;
 let pollTimer: ReturnType<typeof setTimeout> | null = null;
 async function pollLoop(): Promise<void> {
   try {
-    if (app.data) await pollOnce(app.data, engine, GITHUB_TOKEN, { restAddress, token: process.env.CAMUNDA_TOKEN });
+    if (app.data) await pollOnce(app.data, engine, GITHUB_TOKEN, { restAddress: engineAddress.restAddress, token: process.env.CAMUNDA_TOKEN });
   } catch (err) {
     console.error("poll error:", err);
   }
