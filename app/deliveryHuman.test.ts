@@ -195,6 +195,19 @@ test("bindHumanEmits: an ill-typed artifact/version/url/number/boolean each erro
   assertStringIncludes(bindHumanEmits([{ name: "b", type: "boolean" }], { b: "maybe" }).errors[0], "boolean");
 });
 
+test("bindHumanEmits: an artifact with an ill-formed version segment errors", () => {
+  // A well-formed `pkg@version` shape but a version segment that is not a valid version must reject —
+  // the version segment validates the same way a bare `version` fact does (#263, shared VERSION_PATTERN).
+  assertStringIncludes(
+    bindHumanEmits([artifact("a")], { a: "@nanobpm/urban@not-a-version" }).errors[0],
+    "pkg@version",
+  );
+  assertEquals(bindHumanEmits([artifact("a")], { a: "@nanobpm/urban@not-a-version" }).facts.length, 0);
+  // A valid digit-led (optionally `v`-prefixed) version segment still passes.
+  assertEquals(bindHumanEmits([artifact("a")], { a: "@nanobpm/urban@0.54.0" }).facts[0].value, "@nanobpm/urban@0.54.0");
+  assertEquals(bindHumanEmits([artifact("a")], { a: "pkg@v2.0.0-rc.1" }).facts[0].value, "pkg@v2.0.0-rc.1");
+});
+
 test("bindHumanEmits: number/boolean/url coerce to canonical string serialisations", () => {
   assertEquals(bindHumanEmits([{ name: "n", type: "number" }], { n: "42" }).facts[0].value, "42");
   assertEquals(bindHumanEmits([{ name: "b", type: "boolean" }], { b: true }).facts[0].value, "true");

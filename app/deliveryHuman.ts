@@ -225,10 +225,16 @@ export function needsAgentFormRouter(node: Pick<DeliveryNodeHuman, "emits" | "hu
  *  captures `value`; the publish form captures `resolvedArtifact`. */
 const CANONICAL_VALUE_KEYS = ["resolvedArtifact", "value"] as const;
 
+/** The ONE accepted shape of a bare version string (an optional `v` then a digit-led `[\w.+-]` run,
+ *  e.g. `1.4.0`, `v2.0.0-rc.1`). The single source of truth shared by the `version` fact type AND the
+ *  version segment of an `artifact` handle — so a `pkg@version` artifact validates its version the
+ *  same way a bare `version` does, with no second notion of "valid version" to drift. */
+const VERSION_PATTERN = /^v?\d[\w.+-]*$/;
+
 /** Coerce + validate one raw form value against a declared fact type, returning the canonical string
  *  serialisation or an error message. Typed so a bind is validated, not stringly (Decision 3/4): an
- *  `artifact` must be `pkg@version`, a `version` a bare version, a `url` a parseable location, a
- *  `number` finite, a `boolean` a real boolean. */
+ *  `artifact` must be `pkg@version` (with a well-formed version segment), a `version` a bare version, a
+ *  `url` a parseable location, a `number` finite, a `boolean` a real boolean. */
 function coerceFactValue(type: DeliveryFactType, raw: unknown): { value: string } | { error: string } {
   switch (type) {
     case "string": {
@@ -246,7 +252,7 @@ function coerceFactValue(type: DeliveryFactType, raw: unknown): { value: string 
       return { error: 'expected a boolean (true/false)' };
     }
     case "version": {
-      if (typeof raw !== "string" || !/^v?\d[\w.+-]*$/.test(raw.trim())) {
+      if (typeof raw !== "string" || !VERSION_PATTERN.test(raw.trim())) {
         return { error: "expected a version string (e.g. 1.4.0)" };
       }
       return { value: raw.trim() };
@@ -256,7 +262,7 @@ function coerceFactValue(type: DeliveryFactType, raw: unknown): { value: string 
       const at = raw.trim().lastIndexOf("@");
       const name = raw.trim().slice(0, at);
       const version = raw.trim().slice(at + 1);
-      if (at <= 0 || name.length === 0 || version.length === 0) {
+      if (at <= 0 || name.length === 0 || version.length === 0 || !VERSION_PATTERN.test(version)) {
         return { error: "expected a pkg@version artifact handle (e.g. @nanobpm/urban@0.54.0)" };
       }
       return { value: raw.trim() };
