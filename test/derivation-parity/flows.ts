@@ -15,7 +15,7 @@
 //     golden edit and never relaxed acceptance:
 //
 //     (1) MULTI top-level start/end (spine-demo, readiness-gate, feature,
-//         merge-loop, plan-fanout). `@nanobpm/workflow` derives EXACTLY
+//         merge-loop, plan-fanout, delivery-human). `@nanobpm/workflow` derives EXACTLY
 //         ONE `<bpmn:startEvent id="Start">` + ONE `<bpmn:endEvent id="End">`,
 //         converging every dangler into that single end (see `Compiler.compile`
 //         in the package's `declarative.ts`). Needs a terminal/explicit-end

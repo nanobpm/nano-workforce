@@ -67,7 +67,7 @@ test("every corpus model is either ported or has a documented blocker", () => {
 
 // The blockers are not guesses — prove each against the goldens themselves.
 //
-// CLASS 1 — five goldens have MORE THAN ONE top-level start and/or end event,
+// CLASS 1 — six goldens have MORE THAN ONE top-level start and/or end event,
 // which the published `@nanobpm/workflow@0.12.0` compiler (a single
 // `<startEvent id="Start">` + single `<endEvent id="End">`) cannot derive.
 test("class-1 blocked goldens genuinely have multiple top-level start/end events", () => {

@@ -8,7 +8,7 @@
       <bpmn:extensionElements>
         <zeebe:formDefinition formId="delivery-human-generic" />
         <zeebe:userTask />
-        <zeebe:assignmentDefinition candidateGroups="operators" assignee="=escalationAssignee" />
+        <zeebe:assignmentDefinition candidateGroups="operators" assignee="=if (is defined(escalationAssignee) and escalationAssignee != null and trim(string(escalationAssignee)) != &#34;&#34;) then escalationAssignee else null" />
         <zeebe:ioMapping>
           <zeebe:output source="=&#34;completed&#34;" target="humanOutcome" />
           <zeebe:output source="=if (is defined(value)) then value else null" target="humanEmitValue" />
