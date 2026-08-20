@@ -57,20 +57,25 @@ const BAR_FULL = "█";
  *  `date(at, 'localtime')` (issue #361). The `merges.at` audit value is a UTC ISO string, but the
  *  Velocity page is read by an operator in their own timezone, so bucketing on the UTC date split a
  *  single local day across two rows (a late-evening merge west of UTC, or an early-morning one east
- *  of it, landed on the wrong day). We derive the day from the LOCAL calendar fields of a parsed
- *  `Date` instead, which follows the host process's zone (Node reads `process.env.TZ`, so a remote
- *  deployment can pin the operator's zone via `TZ`; a co-located console — the default `npm start`
- *  on `localhost` — is already the browser's zone). Any value that does not parse to a real instant
- *  (a malformed / non-ISO row) falls back to the whole trimmed string so it still groups
- *  deterministically rather than throwing. */
-function dayOf(at: string): string {
+ *  of it, landed on the wrong day). We derive the day in the target `timeZone` via
+ *  `Intl.DateTimeFormat` — an explicit, side-effect-free zone rather than one mutated through the
+ *  process-global `process.env.TZ`. When `timeZone` is omitted the formatter uses the host's
+ *  resolved zone (so a remote deployment can still pin the operator's zone via `TZ`, and a
+ *  co-located console — the default `npm start` on `localhost` — is already the browser's zone). Any
+ *  value that does not parse to a real instant (a malformed / non-ISO row) falls back to the whole
+ *  trimmed string so it still groups deterministically rather than throwing. */
+function dayOf(at: string, timeZone?: string): string {
   const s = String(at).trim();
   const d = new Date(s);
   if (Number.isNaN(d.getTime())) return s;
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(d);
+  const field = (type: string) => parts.find((p) => p.type === type)?.value ?? "";
+  return `${field("year")}-${field("month")}-${field("day")}`;
 }
 
 /** Render a proportional bar: `merged` glyphs scaled against the busiest day's `max`, min one glyph
@@ -83,17 +88,20 @@ function barFor(merged: number, max: number): string {
 
 /** PURE aggregate: merge audit rows → one ordered `MergeDay` per calendar day (ascending).
  *
- * Only `outcome === "merged"` rows count; `queued`/`blocked` attempts are ignored. Within a day a
- * `pr_key` is counted once (`COUNT(DISTINCT pr_key)`), so duplicate `merged` audit rows — an
- * `already-merged` short-circuit or a retry — do not double-count. `cumulative` is the running total
- * across days (burn-up); `bar` is scaled against the busiest day so the chart is comparable. */
-export function deriveMergesPerDay(rows: readonly MergeAuditRow[]): MergeDay[] {
+ * Days are bucketed in `timeZone` (an IANA zone, e.g. `America/New_York`); omit it to use the host's
+ * resolved zone — the production default, matching SQLite `date(at, 'localtime')` for the operator's
+ * console (issue #361). Only `outcome === "merged"` rows count; `queued`/`blocked` attempts are
+ * ignored. Within a day a `pr_key` is counted once (`COUNT(DISTINCT pr_key)`), so duplicate `merged`
+ * audit rows — an `already-merged` short-circuit or a retry — do not double-count. `cumulative` is
+ * the running total across days (burn-up); `bar` is scaled against the busiest day so the chart is
+ * comparable. */
+export function deriveMergesPerDay(rows: readonly MergeAuditRow[], timeZone?: string): MergeDay[] {
   // day -> set of distinct merged pr_keys that day.
   const prKeysByDay = new Map<string, Set<string>>();
   for (const r of rows) {
     if (r.outcome !== "merged") continue;
     if (r.pr_key == null || r.at == null) continue;
-    const day = dayOf(r.at);
+    const day = dayOf(r.at, timeZone);
     let set = prKeysByDay.get(day);
     if (!set) {
       set = new Set<string>();
@@ -128,13 +136,14 @@ const mergesAudit = (data: DataLayer) => data.table<MergeAuditRow>("merges", "id
  * it onto the `merges_per_day` read table the Velocity page reads. Additive/derived only — never
  * touches `merges`. Upserts a day only when its projection actually changes (so a steady-state pass is
  * a no-op) and prunes any stale day row that no longer derives (defensive — days are append-only in
- * practice, but a purge/rewrite of the audit must not leave a phantom). */
-export async function pollMergesPerDay(data: DataLayer): Promise<void> {
+ * practice, but a purge/rewrite of the audit must not leave a phantom). Buckets in `timeZone` (an
+ * IANA zone) when given; the production caller omits it to use the host's resolved zone. */
+export async function pollMergesPerDay(data: DataLayer, timeZone?: string): Promise<void> {
   try {
     // Only `outcome === "merged"` rows contribute to the aggregate, so filter at the read rather than
     // scanning queued/blocked rows as the audit grows (deriveMergesPerDay ignores non-merged rows too).
     const audit = await mergesAudit(data).find({ outcome: "merged" });
-    const want = deriveMergesPerDay(audit);
+    const want = deriveMergesPerDay(audit, timeZone);
     const wantByDay = new Map(want.map((d) => [d.day, d]));
 
     const existing = await mergesPerDay(data).all();
