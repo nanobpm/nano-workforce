@@ -1,0 +1,23 @@
+-- Bind a scope-integrity escalation to the reviewed commit so a human answer can override it
+-- (issue #395). The review-convergence scope-integrity gate (`workers/converge-gate`) raises a
+-- human question ("this partial delivery closes a broader-scoped parent") but then re-derives the
+-- block from scratch off the PR body every round, ignoring the recorded `answer` — so answering
+-- the escalation re-enters the loop, the gate re-blocks identically, and the operator is trapped in
+-- an infinite escalation with no human-override door. The only escape was mangling the PR body into
+-- a non-closing ref, i.e. changing the PR to what the machine wants rather than answering it.
+--
+-- The fix gives the gate a real override door: an escalation now records the PR HEAD sha it was
+-- raised against (`head_sha`) and whether it was a scope-integrity block (`scope_block`). When the
+-- gate would re-block on scope, it consults the answered escalation for THIS PR at the SAME HEAD:
+-- a human answer bound to the reviewed commit is honoured as an explicit override (audited), and
+-- the gate is satisfied. Binding to the HEAD sha is deliberate — a later push (a new HEAD)
+-- legitimately re-opens the gate rather than silently carrying the override forward, and if the
+-- human instead asked for a real split the agent pushes a fix (new HEAD) so the stale override
+-- never applies. This categorically kills the infinite-escalation loop on an unchanged HEAD.
+--
+-- Both columns are nullable/defaulted (expand phase, additive). Only the scope-integrity arm
+-- (`persist-escalation-blockedcomments`) populates them; every other escalation arm leaves them
+-- NULL/0 and is unaffected. Numbered after the current highest prefix (055); the runner wraps each
+-- file in its own transaction, so this file must NOT contain BEGIN/COMMIT.
+ALTER TABLE escalations ADD COLUMN head_sha TEXT;
+ALTER TABLE escalations ADD COLUMN scope_block INTEGER NOT NULL DEFAULT 0;

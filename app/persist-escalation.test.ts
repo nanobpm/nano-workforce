@@ -212,3 +212,36 @@ test("a control-flow arm with a blank question opens nothing so gw-escalated re-
   assertEquals(inserts.escalations.length, 0, "no dead escalation is fabricated");
   assertEquals(updates.pull_requests?.length ?? 0, 0, "the PR is never flipped to escalated");
 });
+
+// The scope-integrity arm (persist-escalation-blockedcomments) binds the escalation to the reviewed
+// commit (issue #395): it stamps `head_sha` and marks `scope_block` so the converge-gate can honour
+// a same-HEAD human answer as an override instead of re-deriving the block and re-escalating forever.
+test("persist-escalation binds a scope-integrity escalation to the reviewed HEAD (head_sha + scope_block)", async () => {
+  const { app, inserts } = fakeApp();
+  const job = {
+    variables: {
+      prKey: "o/r#5",
+      round: 2,
+      status: "blocked",
+      question: "Scope integrity blocked: ...",
+      recordRound: false,
+      headSha: "HEAD1",
+      scopeBlock: true,
+    },
+  };
+  await handler(job as any, app as any);
+  assertEquals(inserts.escalations.length, 1);
+  assertEquals((inserts.escalations[0] as any).head_sha, "HEAD1", "the escalation carries the reviewed commit");
+  assertEquals((inserts.escalations[0] as any).scope_block, 1, "flagged as a scope-integrity block");
+});
+
+// Every other escalation arm (agent verdict, no-progress, max-rounds, stalled) omits the scope
+// binding: head_sha stays absent and scope_block defaults to 0, so the override door opens ONLY for
+// the block a human can actually answer.
+test("persist-escalation: a non-scope escalation records no HEAD binding and scope_block 0", async () => {
+  const { app, inserts } = fakeApp();
+  const job = { variables: { prKey: "o/r#1", round: 3, status: "blocked", question: "max rounds" } };
+  await handler(job as any, app as any);
+  assertEquals((inserts.escalations[0] as any).head_sha, undefined, "no reviewed HEAD to bind");
+  assertEquals((inserts.escalations[0] as any).scope_block, 0, "not a scope-integrity block");
+});

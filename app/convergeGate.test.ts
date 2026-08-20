@@ -218,11 +218,14 @@ async function makeUnderTest(deps: {
   readThreads: (repo: string, n: number) => Promise<ReviewThread[] | null>;
   readReviewBody: (repo: string, n: number) => Promise<string | null>;
   readPrBody?: (repo: string, n: number) => Promise<string | null>;
+  readHeadSha?: (repo: string, n: number) => Promise<string | null>;
 }) {
   const { makeHandler } = await import("../workers/converge-gate/worker.ts");
   // Default the scope-guard PR-body read to a verified-empty description so the comment-gate tests
-  // below exercise only the review-comment dimension; scope-guard tests pass an explicit body.
-  return makeHandler({ readPrBody: async () => "", ...deps });
+  // below exercise only the review-comment dimension; scope-guard tests pass an explicit body. The
+  // HEAD read defaults to null (unreadable) so a scope block stays blocked unless a test opts into
+  // the #395 override door with an explicit HEAD — see workers/converge-gate/worker.test.ts.
+  return makeHandler({ readPrBody: async () => "", readHeadSha: async () => null, ...deps });
 }
 
 test("converge-gate: a clean PR is allowed to converge", async () => {

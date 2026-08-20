@@ -129,3 +129,37 @@ export function evaluateScopeGuard(input: ScopeGuardInput): ScopeGuardResult {
     scopeBlockReason: `Scope integrity blocked: ${reasons.join("; ")}.`,
   };
 }
+
+// A recorded human answer to a scope-integrity escalation, bound to the PR HEAD it was raised
+// against (issue #395). This is the override door the deterministic scope gate lacked: without it,
+// the gate re-derives `scopeBlocked` from the PR body every round and re-escalates the identical
+// question, so a legitimate human override ("this fully delivers the issue — keep the closing
+// keyword") is unresolvable through the escalation the loop itself opens (infinite loop).
+export interface ScopeEscalationAnswer {
+  /** The escalation row id, for the audit trail. */
+  escalationId?: number;
+  /** The PR HEAD sha this scope escalation was raised against (`escalations.head_sha`). */
+  headSha: string | null | undefined;
+  /** The operator's recorded answer/rationale (`escalations.answer`), surfaced in the audit. */
+  answer: string | null | undefined;
+}
+
+/** Decide whether a recorded human answer overrides the scope-integrity block for the commit
+ * currently under review. The override is honoured ONLY when the human answered a scope-integrity
+ * escalation that was raised against the SAME HEAD sha now being checked — binding the override to
+ * the reviewed commit so a later push (a different HEAD) re-opens the gate instead of silently
+ * carrying the override forward. Pure and total: a missing/blank current HEAD or a missing/blank
+ * recorded HEAD never matches, so an unverifiable HEAD fails closed (no override) rather than
+ * waving the gate through. The answer TEXT is not parsed for intent: on an unchanged HEAD the human
+ * completing the escalation IS the explicit approval (had they wanted a real fix, the servicing
+ * agent would have pushed a new commit, moving the HEAD and side-stepping this override). */
+export function isScopeOverridden(
+  currentHeadSha: string | null | undefined,
+  answered: ScopeEscalationAnswer | null | undefined,
+): boolean {
+  if (!answered) return false;
+  const current = typeof currentHeadSha === "string" ? currentHeadSha.trim() : "";
+  const recorded = typeof answered.headSha === "string" ? answered.headSha.trim() : "";
+  if (current === "" || recorded === "") return false;
+  return current === recorded;
+}

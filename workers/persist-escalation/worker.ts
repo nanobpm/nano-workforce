@@ -50,7 +50,7 @@ function workerOf(vars: Record<string, unknown>): string | undefined {
 }
 
 const handler: AppJobHandler<In> = async (job, app) => {
-  const { prKey, round, summary, repo, prNumber, prUrl, abandonUrl } = job.variables;
+  const { prKey, round, summary, repo, prNumber, prUrl, abandonUrl, headSha, scopeBlock } = job.variables;
   // `status` drives the escalation kind (control flow); a blank/absent status is an
   // unclassified escalation -> a question needing input. `question` is returned as a
   // process variable below so the downstream `wait-answer` userTask + `pr-escalation.form`
@@ -116,6 +116,13 @@ const handler: AppJobHandler<In> = async (job, app) => {
     worker,
     status: "open",
     asked_at: now,
+    // Bind a scope-integrity escalation to the reviewed commit (issue #395) so the converge-gate
+    // can honour a human answer as an override for THIS HEAD instead of re-deriving the block from
+    // the PR body and re-escalating forever. Only the scope-integrity arm passes these; every other
+    // arm leaves them absent (→ head_sha NULL, scope_block DEFAULT 0), so the override door opens
+    // exclusively for the block the human can actually answer.
+    head_sha: headSha,
+    scope_block: scopeBlock === true ? 1 : 0,
   });
   await app.data.table("pull_requests", "pr_key").update(prKey, {
     status: "escalated",
