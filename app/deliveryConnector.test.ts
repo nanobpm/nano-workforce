@@ -8,7 +8,7 @@
 //   • distinct keys each deliver once,
 //   • the graph-derived key falls back to `<processInstanceKey>:<elementId>` when no author key is set.
 import { test } from "node:test";
-import { assert, assertEquals } from "#test-assert";
+import { assert, assertEquals, assertRejects } from "#test-assert";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -90,5 +90,36 @@ test("distinct dedupe keys each deliver once", async () => {
     assertEquals(b.connectorOutcome, "delivered");
     const rows = await deliveryConnectorDispatches(app.db).find({});
     assertEquals(rows.length, 2);
+  });
+});
+
+test("a dedupe key reused with a DIFFERENT target fails closed (never delivers/reports against the wrong destination)", async () => {
+  await withApp(async (app) => {
+    const ledger = deliveryConnectorDispatches(app.db);
+    // A DELIVERED row would otherwise short-circuit to `deduped` and report the ORIGINAL target's detail.
+    const first = await dispatchConnector(app.db, { dedupeKey: "reused", target: "slack" }, "2025-01-01T00:00:00.000Z");
+    assertEquals(first.connectorOutcome, "delivered");
+    await assertRejects(
+      () => dispatchConnector(app.db, { dedupeKey: "reused", target: "pagerduty" }, "2025-01-01T01:00:00.000Z"),
+      Error,
+      "different target",
+    );
+
+    // A still-CLAIMED (crashed mid-flight) row would otherwise RESUME — against the wrong target.
+    await ledger.insert({ dedupe_key: "claimed-reused", target: "slack", outcome: "claimed", detail: null, dispatched_at: "2025-01-01T00:00:00.000Z" });
+    await assertRejects(
+      () => dispatchConnector(app.db, { dedupeKey: "claimed-reused", target: "pagerduty" }, "2025-01-01T01:00:00.000Z"),
+      Error,
+      "different target",
+    );
+
+    // The mismatch must not have mutated either ledger row.
+    const slackRows = await ledger.find({ target: "slack" });
+    assertEquals(slackRows.length, 2, "both original-target rows are intact — no wrong-target write");
+
+    // Re-dispatching each with its ORIGINAL target still dedupes/resumes normally.
+    const replay = await dispatchConnector(app.db, { dedupeKey: "reused", target: "slack" }, "2025-01-01T02:00:00.000Z");
+    assertEquals(replay.connectorOutcome, "deduped");
+    assertEquals(replay.connectorDetail, first.connectorDetail);
   });
 });

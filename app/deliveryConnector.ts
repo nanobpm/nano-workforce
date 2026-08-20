@@ -109,7 +109,11 @@ export interface ConnectorDispatchResult extends Record<string, unknown> {
  * case — its winner is actively delivering right now, so it stays `deduped`; if that winner then dies,
  * the recovery is this same resume path on a later redelivery.) The STUB action is idempotent, so a
  * resume is free; a real transport later slots a resumable `applied` reconcile in — as the world-store
- * ledger does — to make the resume itself at-most-once, without changing this contract. */
+ * ledger does — to make the resume itself at-most-once, without changing this contract.
+ *
+ * Target drift (fail closed). The ledger keys only by `dedupeKey`; a key reused with a DIFFERENT
+ * `target` than its recorded row is a contract violation (a legitimate redelivery always repeats the
+ * same target), so this throws rather than deliver/resume/report against the wrong destination. */
 export async function dispatchConnector(
   data: DataLayer,
   input: { dedupeKey: string; target: string; payload?: Record<string, unknown> | null; boundFacts?: readonly BoundFact[] | null },
@@ -117,6 +121,18 @@ export async function dispatchConnector(
 ): Promise<ConnectorDispatchResult> {
   const ledger = deliveryConnectorDispatches(data);
   const existing = await ledger.findOne({ dedupe_key: input.dedupeKey });
+  if (existing && existing.target !== input.target) {
+    // FAIL CLOSED on target drift. The ledger keys only by `dedupeKey`; if the same key is ever reused
+    // (accidentally or maliciously) with a DIFFERENT target, both the `delivered` short-circuit and the
+    // `claimed` resume below would act on / report the recorded row — delivering to, or attributing the
+    // outcome of, the WRONG destination and leaving the persisted `target` describing neither action.
+    // Refuse rather than corrupt the at-most-once ledger; a legitimate redelivery always carries the
+    // same target for a given key.
+    throw new Error(
+      `connector dedupe key "${input.dedupeKey}" reused with a different target ` +
+        `(ledger="${existing.target}", input="${input.target}") — refusing to dispatch`,
+    );
+  }
   if (existing?.outcome === OUTCOME_DELIVERED) {
     return { connectorOutcome: "deduped", connectorDedupeKey: input.dedupeKey, connectorDetail: existing.detail ?? "" };
   }
@@ -146,6 +162,14 @@ export async function dispatchConnector(
     // outcome, and NEVER perform the action (the winner is the one that acts).
     if (!isUniqueConstraintFence(err)) throw err;
     const won = await ledger.findOne({ dedupe_key: input.dedupeKey });
+    if (won && won.target !== input.target) {
+      // Same target-drift anomaly as above, surfaced via a concurrent racer that won the claim with a
+      // different target — fail closed rather than report the wrong destination's outcome as ours.
+      throw new Error(
+        `connector dedupe key "${input.dedupeKey}" reused with a different target ` +
+          `(ledger="${won.target}", input="${input.target}") — refusing to dispatch`,
+      );
+    }
     return { connectorOutcome: "deduped", connectorDedupeKey: input.dedupeKey, connectorDetail: won?.detail ?? "" };
   }
   // We alone won the claim — perform the side effect exactly once and record its outcome on our row.
