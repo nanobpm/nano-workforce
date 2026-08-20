@@ -85,6 +85,8 @@ import {
   prEscalations,
   reconcileUserTasks,
   TRIAL_MERGE_ELEMENT,
+  USER_TASK_KIND_LABELS,
+  type UserTaskContext,
   type UserTaskRow,
   userTasks,
 } from "./userTasks.ts";
@@ -2101,215 +2103,228 @@ function toFeatureRunStatus(status: string): FeatureRunStatus {
 export const FEATURE_ACTIVE_STATUSES: readonly FeatureRunStatus[] =
   activeStatusesFor("feature_runs").map(toFeatureRunStatus);
 
+/** The subset of a Camunda-8 `/v2/user-tasks/search` result item this app reads for the engine-first
+ * sweep. `userTaskKey` is the completable key; `elementId` is the BPMN element (the escalation kind);
+ * `processInstanceKey` is the instance the task parks on (the raw REST surface carries it — the typed
+ * `EngineClient.openUserTasks` seam deliberately omits it from `UserTaskSummary`); `state` is the task
+ * lifecycle (`CREATED` while open/answerable). Keys are stringified defensively (the wire may send
+ * either a JSON number or string). */
+interface UserTaskSearchItem {
+  userTaskKey?: string | number;
+  elementId?: string;
+  processInstanceKey?: string | number;
+  state?: string;
+}
+
+/** One discovered open escalation user task, normalised for projection. */
+interface OpenUserTask {
+  userTaskKey: string;
+  elementId: string;
+  processInstanceKey: string;
+}
+
+/** Engine-first sweep (issue #358): read EVERY open (`CREATED`) native user task from the engine over
+ * the raw Camunda-8 `/v2/user-tasks/search` surface (the same raw-REST search surface
+ * `pollIncidents`/`pollJobActivation`/`pollWaveGates` use) and keep those whose `elementId` is a
+ * surfaced escalation kind (`USER_TASK_KIND_LABELS`). This is the authoritative "what is open" set —
+ * a task is discovered IFF the ENGINE reports it open, regardless of whether any tracked subject row
+ * references its instance — so an escalation on an untracked/orphaned instance (the reported 19153
+ * case) is surfaced too. Pages defensively so a large open set is never silently truncated to the
+ * first page; best-effort transport (a failed page projects what was gathered and retries next pass).
+ * Deduped by `userTaskKey` so a page overlap can't double-project one task. */
+async function sweepOpenEscalationTasks(base: string, headers: Record<string, string>): Promise<OpenUserTask[]> {
+  const out: OpenUserTask[] = [];
+  const seen = new Set<string>();
+  const limit = 100;
+  let from = 0;
+  for (let guard = 0; guard < 1000; guard++) {
+    let items: UserTaskSearchItem[];
+    try {
+      const res = await fetch(`${base}/user-tasks/search`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ filter: { state: "CREATED" }, page: { from, limit } }),
+      });
+      if (!res.ok) break; // engine unhappy → project what we have, retry next pass
+      // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+      const body = (await res.json()) as { items?: UserTaskSearchItem[] };
+      items = body.items ?? [];
+    } catch (err) {
+      console.error(`[poller] user-task sweep: ${err}`);
+      break;
+    }
+    for (const it of items) {
+      // Re-filter state defensively in case the wire filter is ignored — only OPEN (`CREATED`) tasks are
+      // answerable, so a lagging COMPLETED/CANCELED read must never surface a dead affordance (#294).
+      if (typeof it.state === "string" && it.state.toUpperCase() !== "CREATED") continue;
+      const elementId = typeof it.elementId === "string" ? it.elementId : undefined;
+      if (!elementId || !Object.hasOwn(USER_TASK_KIND_LABELS, elementId)) continue;
+      const userTaskKey = it.userTaskKey == null ? "" : String(it.userTaskKey);
+      if (!userTaskKey || seen.has(userTaskKey)) continue;
+      seen.add(userTaskKey);
+      out.push({ userTaskKey, elementId, processInstanceKey: it.processInstanceKey == null ? "" : String(it.processInstanceKey) });
+    }
+    if (items.length < limit) break; // last page
+    from += items.length;
+  }
+  return out;
+}
+
 /** Reconcile the unified Tasks-inbox read-model (`user_tasks`) against the engine's currently-open
- * native user-task escalations (issue #236). The Tasks page lists EVERY open escalation awaiting a
- * human decision — the feature kinds (`feature-escalation` / `feature-blocked`) plus the epic/PR kinds
- * (`plan-review-decision`, `trial-merge-decision`, `wait-answer`) — that otherwise had no app-side
- * pointer, so the pages could not drive their completion. For each in-flight feature / plan / PR it
- * reads the instance's open user tasks and projects one `user_tasks` row per escalation, enriching the
- * display `question` from the audit tables each kind already records. `reconcileUserTasks` then diffs
- * the desired open set against the persisted rows so a completed task's row is deleted (answered here,
- * via the task inbox, or out-of-band) and `showCount` reflects live pending work. Best-effort +
- * idempotent — per-instance failures are isolated so one bad instance never stalls the pass. */
-export async function pollUserTasks(data: DataLayer, engine: EngineClient) {
+ * native user-task escalations (issues #236, #358). The Tasks page lists EVERY open escalation awaiting
+ * a human decision — the feature kinds (`feature-escalation` / `feature-blocked`), the epic/PR kinds
+ * (`plan-review-decision`, `trial-merge-decision`, `wait-answer` / `wait-merge-answer`), and the
+ * conformance ack (`conformance-escalation`) — that otherwise had no app-side pointer, so the pages
+ * could not drive their completion.
+ *
+ * The source of truth for WHICH escalations are open is the ENGINE, not the tracked subject set (#358):
+ *   • When the raw-REST surface is available (`engineRest`, always supplied in production), an
+ *     engine-first sweep (`sweepOpenEscalationTasks`) lists every open escalation the engine reports —
+ *     tracked OR orphaned — so a task on an untracked/orphaned instance (the reported 19153 case) is
+ *     surfaced and answerable, not stranded invisible.
+ *   • Subject rows only ENRICH (they never gate): `subjectByInstance` maps the task's
+ *     `processInstanceKey` to its feature/plan/PR/conformance subject for `subject_title` / `subject_url`
+ *     / `question`. A task whose instance no subject row references falls back to a stable non-blank
+ *     subject (the instance key) and a null question, so it still renders.
+ *
+ * Without `engineRest` (unit tests / a degraded no-REST host) it falls back to the typed-seam
+ * per-active-subject scan: the `openUserTasks` seam carries no `processInstanceKey`, so a task can only
+ * be reached THROUGH a tracked subject whose instance key we already hold — hence that path is
+ * tracked-only. Both paths feed the SAME `project`/`contextFor` enrichment derivation, so a tracked task
+ * projects identically however it was discovered; only DISCOVERY differs by capability (no duplicate
+ * enrichment). `reconcileUserTasks` then diffs the desired open set against the persisted rows so a
+ * completed task's row is deleted (answered here, via the task inbox, or out-of-band) and `showCount`
+ * reflects live pending work. Best-effort + idempotent — per-instance failures are isolated so one bad
+ * instance never stalls the pass. */
+export async function pollUserTasks(
+  data: DataLayer,
+  engine: EngineClient,
+  engineRest?: { restAddress: string; token?: string },
+) {
   const at = now();
-  const desired: UserTaskRow[] = [];
-  const push = (row: UserTaskRow | null) => {
-    if (row) desired.push(row);
-  };
 
-  // Feature-run escalations / blocked runs — read each in-flight feature run's open user tasks directly
-  // from the engine (issue #332: the denormalised `feature_runs.escalation_user_task_key` /
-  // `blocked_user_task_key` pointers were dropped in the contract phase, so this now reads the live
-  // task exactly as the plan/PR scans below do — one canonical read, no denormalised mirror). Dedupe by
-  // `feature_key` across the status queries so a run whose status transitions mid-pass is not processed
-  // twice.
-  const featureSeen = new Set<string>();
-  for (const status of FEATURE_ACTIVE_STATUSES) {
-    for (const run of await featureRuns(data).find({ status })) {
-      if (!run.process_key) continue;
-      if (featureSeen.has(run.feature_key)) continue;
-      featureSeen.add(run.feature_key);
-      let tasks: { userTaskKey: string; elementId?: string }[];
-      try {
-        tasks = await engine.openUserTasks({ processInstanceKey: run.process_key });
-      } catch (err) {
-        console.error(`[poller] user tasks (feature ${run.feature_key}): ${err}`);
-        continue;
-      }
-      for (const t of tasks) {
-        if (t.elementId === FEATURE_ESCALATION_ELEMENT) {
-          // Source the question from the canonical append-only `feature_escalations` audit log (issue
-          // #305) — the surviving table `record-feature-escalation` writes — the feature analogue of the
-          // plan-review/trial-merge/PR-loop question enrichment below.
-          const question = latestFeatureEscalationQuestion(await featureEscalations(data).find({ feature_key: run.feature_key }));
-          push(
-            buildUserTaskRow(
-              {
-                userTaskKey: t.userTaskKey,
-                elementId: FEATURE_ESCALATION_ELEMENT,
-                subjectType: "feature",
-                subjectKey: run.feature_key,
-                subjectTitle: run.title,
-                subjectUrl: run.issue_url,
-                question,
-                processKey: run.process_key,
-              },
-              at,
-            ),
-          );
-        } else if (t.elementId === FEATURE_BLOCKED_ELEMENT) {
-          push(
-            buildUserTaskRow(
-              {
-                userTaskKey: t.userTaskKey,
-                elementId: FEATURE_BLOCKED_ELEMENT,
-                subjectType: "feature",
-                subjectKey: run.feature_key,
-                subjectTitle: run.title,
-                subjectUrl: run.issue_url,
-                question: run.delivery_label,
-                processKey: run.process_key,
-              },
-              at,
-            ),
-          );
-        }
-      }
+  // ── Enrichment: subject descriptors keyed by the ENGINE process-instance the task parks on ────────
+  // Built from EVERY subject row (regardless of status), so a task on a subject whose row already went
+  // terminal is still enriched from it. `activeConformanceReviews` carries the retro instance + audit
+  // summary for the `conformance-escalation` ack (its instance is tracked on `plan_conformance`, not a
+  // delivery aggregate).
+  interface Subject {
+    type: "feature" | "plan" | "pr";
+    key: string;
+    title?: string | null;
+    url?: string | null;
+    deliveryLabel?: string | null;
+    conformanceSummary?: string | null;
+  }
+  const subjectByInstance = new Map<string, Subject>();
+  for (const run of await featureRuns(data).all()) {
+    if (run.process_key) {
+      subjectByInstance.set(run.process_key, { type: "feature", key: run.feature_key, title: run.title, url: run.issue_url, deliveryLabel: run.delivery_label });
     }
   }
-
-  // Plan escalations (`plan-review-decision` / `trial-merge-decision`) — read each in-flight plan's
-  // open user tasks and pair them with the open audit row's question/findings. Dedupe by `plan_key`
-  // across the status queries (mirroring the feature-run scan above): a plan whose status transitions
-  // mid-pass could otherwise match twice and push duplicate `desired` rows for one `user_task_key`.
-  const planSeen = new Set<string>();
-  for (const status of PLAN_ACTIVE_STATUSES) {
-    for (const plan of await plans(data).find({ status })) {
-      if (!plan.process_key) continue;
-      if (planSeen.has(plan.plan_key)) continue;
-      planSeen.add(plan.plan_key);
-      let tasks: { userTaskKey: string; elementId?: string }[];
-      try {
-        tasks = await engine.openUserTasks({ processInstanceKey: plan.process_key });
-      } catch (err) {
-        console.error(`[poller] user tasks (plan ${plan.plan_key}): ${err}`);
-        continue;
-      }
-      for (const t of tasks) {
-        if (t.elementId === PLAN_REVIEW_ELEMENT) {
-          const question = latestPlanReviewFindings(await planReviews(data).find({ plan_key: plan.plan_key }));
-          push(
-            buildUserTaskRow(
-              {
-                userTaskKey: t.userTaskKey,
-                elementId: PLAN_REVIEW_ELEMENT,
-                subjectType: "plan",
-                subjectKey: plan.plan_key,
-                subjectTitle: plan.title,
-                subjectUrl: plan.issue_url,
-                question,
-                processKey: plan.process_key,
-              },
-              at,
-            ),
-          );
-        } else if (t.elementId === TRIAL_MERGE_ELEMENT) {
-          const question = latestTrialMergeQuestion(await trialMergeAudits(data, plan.plan_key));
-          push(
-            buildUserTaskRow(
-              {
-                userTaskKey: t.userTaskKey,
-                elementId: TRIAL_MERGE_ELEMENT,
-                subjectType: "plan",
-                subjectKey: plan.plan_key,
-                subjectTitle: plan.title,
-                subjectUrl: plan.issue_url,
-                question,
-                processKey: plan.process_key,
-              },
-              at,
-            ),
-          );
-        }
-      }
-    }
+  for (const plan of await plans(data).all()) {
+    if (plan.process_key) subjectByInstance.set(plan.process_key, { type: "plan", key: plan.plan_key, title: plan.title, url: plan.issue_url });
   }
-
-  // PR review-loop escalations (`wait-answer`) — read each in-flight PR's open user tasks and pair the
-  // escalation with the open audit row's question. Dedupe by `pr_key` across the status queries (as the
-  // feature-run / plan scans do): a PR whose status transitions mid-pass could otherwise be processed
-  // twice and push duplicate `desired` rows for one `user_task_key`.
-  const prSeen = new Set<string>();
-  for (const status of PR_ACTIVE_STATUSES) {
-    for (const pr of await prs(data).find({ status })) {
-      if (!pr.process_key) continue;
-      if (prSeen.has(pr.pr_key)) continue;
-      prSeen.add(pr.pr_key);
-      let tasks: { userTaskKey: string; elementId?: string }[];
-      try {
-        tasks = await engine.openUserTasks({ processInstanceKey: pr.process_key });
-      } catch (err) {
-        console.error(`[poller] user tasks (pr ${pr.pr_key}): ${err}`);
-        continue;
-      }
-      for (const t of tasks) {
-        if (t.elementId !== PR_WAIT_ANSWER_ELEMENT && t.elementId !== PR_WAIT_MERGE_ANSWER_ELEMENT) continue;
-        const question = latestOpenEscalationQuestion(await prEscalations(data).find({ pr_key: pr.pr_key, status: "open" }));
-        push(
-          buildUserTaskRow(
-            {
-              userTaskKey: t.userTaskKey,
-              elementId: t.elementId,
-              subjectType: "pr",
-              subjectKey: pr.pr_key,
-              subjectTitle: pr.title,
-              subjectUrl: pr.url,
-              question,
-              processKey: pr.process_key,
-            },
-            at,
-          ),
-        );
-      }
-    }
+  for (const pr of await prs(data).all()) {
+    if (pr.process_key) subjectByInstance.set(pr.process_key, { type: "pr", key: pr.pr_key, title: pr.title, url: pr.url });
   }
-
-  // Conformance-review acks (`conformance-escalation`) — the advisory `retro` process parks on a
-  // human ack when the spec-conformance audit finds the epic did NOT cleanly meet its spec (issue
-  // #216). retro is not one of the delivery aggregates above, so its instance is tracked on
-  // `plan_conformance` (migration 054): scan each row still `reviewing`, read its open ack task, and
-  // project it keyed to the epic (plan) subject, sourcing the question from the audit's `summary`.
   for (const review of await activeConformanceReviews(data)) {
     if (!review.process_key) continue;
-    let tasks: { userTaskKey: string; elementId?: string }[];
-    try {
-      tasks = await engine.openUserTasks({ processInstanceKey: review.process_key });
-    } catch (err) {
-      console.error(`[poller] user tasks (conformance ${review.plan_key}): ${err}`);
-      continue;
-    }
     const plan = await plans(data).get(review.plan_key);
-    for (const t of tasks) {
-      if (t.elementId !== CONFORMANCE_ESCALATION_ELEMENT) continue;
-      push(
-        buildUserTaskRow(
-          {
-            userTaskKey: t.userTaskKey,
-            elementId: CONFORMANCE_ESCALATION_ELEMENT,
-            subjectType: "plan",
-            subjectKey: review.plan_key,
-            subjectTitle: plan?.title ?? null,
-            subjectUrl: plan?.issue_url ?? null,
-            question: conformanceEscalationQuestion(review),
-            processKey: review.process_key,
-          },
-          at,
-        ),
-      );
-    }
+    subjectByInstance.set(review.process_key, { type: "plan", key: review.plan_key, title: plan?.title ?? null, url: plan?.issue_url ?? null, conformanceSummary: review.summary });
   }
 
+  // Per-element subject type for an ORPHANED task (no subject row) — the kind implies its aggregate even
+  // when tracking is lost, so the fallback row still buckets correctly on the page.
+  const DEFAULT_SUBJECT_TYPE: Readonly<Record<string, "feature" | "plan" | "pr">> = {
+    [FEATURE_ESCALATION_ELEMENT]: "feature",
+    [FEATURE_BLOCKED_ELEMENT]: "feature",
+    [PLAN_REVIEW_ELEMENT]: "plan",
+    [TRIAL_MERGE_ELEMENT]: "plan",
+    [CONFORMANCE_ESCALATION_ELEMENT]: "plan",
+    [PR_WAIT_ANSWER_ELEMENT]: "pr",
+    [PR_WAIT_MERGE_ANSWER_ELEMENT]: "pr",
+  };
+
+  // The SINGLE enrichment derivation both discovery paths feed: resolve one open escalation task (by
+  // element + the instance it parks on) into its desired-row context, enriching from its subject row
+  // when the instance is tracked or a per-kind fallback when it is orphaned. Returns `null` for a
+  // non-escalation element (the leak guard) so an arbitrary internal user task can never reach the inbox.
+  const contextFor = async (elementId: string, userTaskKey: string, processInstanceKey: string): Promise<UserTaskContext | null> => {
+    if (!Object.hasOwn(USER_TASK_KIND_LABELS, elementId)) return null;
+    const subj = subjectByInstance.get(processInstanceKey);
+    const subjectType = subj?.type ?? DEFAULT_SUBJECT_TYPE[elementId] ?? "plan";
+    const subjectKey = subj?.key ?? processInstanceKey;
+    let question: string | null = null;
+    switch (elementId) {
+      case FEATURE_ESCALATION_ELEMENT:
+        // The escalate arm writes the synthesised question to `feature_escalations` keyed by the subject
+        // (a standalone slice's `feature_key`, or the epic's `plan_key` for a plan-embedded slice, which
+        // has no standalone `feature_runs` row) — the same key `subjectKey` resolves to for either subject.
+        question = latestFeatureEscalationQuestion(await featureEscalations(data).find({ feature_key: subjectKey }));
+        break;
+      case FEATURE_BLOCKED_ELEMENT:
+        question = subj?.deliveryLabel ?? null;
+        break;
+      case PLAN_REVIEW_ELEMENT:
+        question = latestPlanReviewFindings(await planReviews(data).find({ plan_key: subjectKey }));
+        break;
+      case TRIAL_MERGE_ELEMENT:
+        question = latestTrialMergeQuestion(await trialMergeAudits(data, subjectKey));
+        break;
+      case PR_WAIT_ANSWER_ELEMENT:
+      case PR_WAIT_MERGE_ANSWER_ELEMENT:
+        question = latestOpenEscalationQuestion(await prEscalations(data).find({ pr_key: subjectKey, status: "open" }));
+        break;
+      case CONFORMANCE_ESCALATION_ELEMENT:
+        question = conformanceEscalationQuestion(subj ? { summary: subj.conformanceSummary } : undefined);
+        break;
+    }
+    return { userTaskKey, elementId, subjectType, subjectKey, subjectTitle: subj?.title ?? null, subjectUrl: subj?.url ?? null, question, processKey: processInstanceKey };
+  };
+
+  // Desired set, deduped by completable key (a task is open at most once; guard a page overlap / a
+  // subject seen under two statuses mid-pass).
+  const desiredByKey = new Map<string, UserTaskRow>();
+  const project = async (elementId: string | undefined, userTaskKey: string, processInstanceKey: string) => {
+    if (!elementId) return;
+    const rowKey = userTaskKey.trim();
+    if (!rowKey || desiredByKey.has(rowKey)) return;
+    const ctx = await contextFor(elementId, userTaskKey, processInstanceKey);
+    if (!ctx) return;
+    const row = buildUserTaskRow(ctx, at);
+    if (row) desiredByKey.set(rowKey, row);
+  };
+
+  if (engineRest) {
+    const base = engineRest.restAddress.replace(/\/+$/, "");
+    const headers: Record<string, string> = { "content-type": "application/json" };
+    if (engineRest.token) headers.authorization = `Bearer ${engineRest.token}`;
+    for (const t of await sweepOpenEscalationTasks(base, headers)) {
+      await project(t.elementId, t.userTaskKey, t.processInstanceKey);
+    }
+  } else {
+    // Reduced-capability fallback (no raw-REST surface): typed-seam per-active-subject scan, tracked-only.
+    const seen = new Set<string>();
+    const scanInstance = async (processKey: string | null | undefined) => {
+      if (!processKey || seen.has(processKey)) return;
+      seen.add(processKey);
+      let tasks: { userTaskKey: string; elementId?: string }[];
+      try {
+        tasks = await engine.openUserTasks({ processInstanceKey: processKey });
+      } catch (err) {
+        console.error(`[poller] user tasks (${processKey}): ${err}`);
+        return;
+      }
+      for (const t of tasks) await project(t.elementId, t.userTaskKey, processKey);
+    };
+    for (const status of FEATURE_ACTIVE_STATUSES) for (const run of await featureRuns(data).find({ status })) await scanInstance(run.process_key);
+    for (const status of PLAN_ACTIVE_STATUSES) for (const plan of await plans(data).find({ status })) await scanInstance(plan.process_key);
+    for (const status of PR_ACTIVE_STATUSES) for (const pr of await prs(data).find({ status })) await scanInstance(pr.process_key);
+    for (const review of await activeConformanceReviews(data)) await scanInstance(review.process_key);
+  }
+
+  const desired = [...desiredByKey.values()];
   const persisted = await userTasks(data).all();
   const { inserts, updates, deletes } = reconcileUserTasks(persisted, desired);
   for (const row of inserts) await userTasks(data).insert(row);
@@ -2368,7 +2383,7 @@ export async function pollOnce(
   await pollFeatureDelivery(data);
   await pollLineage(data);
   await pollMergesPerDay(data);
-  await pollUserTasks(data, engine);
+  await pollUserTasks(data, engine, engineRest);
   if (engineRest) {
     const base = engineRest.restAddress.replace(/\/+$/, "");
     const headers: Record<string, string> = { "content-type": "application/json" };

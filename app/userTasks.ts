@@ -95,13 +95,20 @@ export interface UserTaskContext {
 
 /** Pure: turn one resolved open escalation task into its desired read-model row, or `null` when the
  *  element is not one of the surfaced escalation kinds (so a non-escalation user task is never listed)
- *  or the required keys are blank. `created_at`/`updated_at` default to now for a fresh row; the
- *  reconcile preserves the original `created_at` on an update. */
+ *  or the completable key is blank. `created_at`/`updated_at` default to now for a fresh row; the
+ *  reconcile preserves the original `created_at` on an update.
+ *
+ *  Engine-first sweep (#358): a KNOWN-kind escalation is NOT dropped when no tracked subject row
+ *  resolved a subject key for it (an orphaned/untracked instance — the reported 19153 case). The
+ *  subject key falls back to a stable, non-blank value — the instance (`processKey`) if known, else the
+ *  completable `userTaskKey` — so the row still renders and stays answerable. The blank-`userTaskKey`
+ *  and unknown-kind guards below remain (the `USER_TASK_KIND_LABELS` gate keeps arbitrary internal user
+ *  tasks out of the inbox). */
 export function buildUserTaskRow(ctx: UserTaskContext, at: string = now()): UserTaskRow | null {
   const userTaskKey = ctx.userTaskKey.trim();
-  const subjectKey = ctx.subjectKey.trim();
   const kindLabel = USER_TASK_KIND_LABELS[ctx.elementId];
-  if (!userTaskKey || !subjectKey || !kindLabel) return null;
+  if (!userTaskKey || !kindLabel) return null;
+  const subjectKey = ctx.subjectKey.trim() || (ctx.processKey ?? "").trim() || userTaskKey;
   const question = typeof ctx.question === "string" && ctx.question.trim() ? ctx.question.trim() : null;
   const subjectTitle = typeof ctx.subjectTitle === "string" && ctx.subjectTitle.trim() ? ctx.subjectTitle.trim() : subjectKey;
   return {

@@ -85,10 +85,11 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
 
   // The tasks with a concurrently-open PR in THIS wave — the set the D2 conflict-scan runs over
   // (cross-wave pairs are moot: the wave barrier merges earlier waves before later ones start).
-  // This includes both `opened` PRs (also handed off below) AND `escalated` tasks' work-preserving
-  // DRAFT PRs (feature.md): a draft's changed files can still overlap a sibling's, so omitting it
-  // would silently under-approximate the merge-exclusion graph (the scan is a deliberate
-  // over-approximation). Escalated drafts are scanned but NEVER handed off (not ready for review).
+  // This includes both `opened` PRs (also handed off below) AND any RETAINED work-preserving DRAFT
+  // PR — an `escalated` task's draft (feature.md) and the no-result path's retained draft (#360). A
+  // draft's changed files can still overlap a sibling's, so omitting it would silently
+  // under-approximate the merge-exclusion graph (the scan is a deliberate over-approximation).
+  // Retained drafts are scanned but NEVER handed off (not ready for review).
   const openedThisWave: { taskId: string; repo: string; number: number | string }[] = [];
   const readyHeadsThisWave: { repo: string; number: number | string }[] = [];
 
@@ -102,21 +103,51 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
       : "blocked";
     const summary = str(res.summary);
     const prRef = str(res.pr);
-    // Only trust a PR ref when the agent reports it actually opened one.
+    // Only trust a PR ref as HANDOFF-ready when the agent reports it actually opened one.
     const parsed = status === "opened" && prRef ? parsePr(prRef) : null;
     // A keyless "opened" is effectively blocked: downstream waves gate on `opened` meaning
     // "this dependency has an opened PR", so an "opened" with no usable PR key must NOT satisfy
     // a dependant (it would let dependents run with a phantom, un-mergeable dependency).
     const effectiveStatus = status === "opened" && !parsed ? "blocked" : status;
+    // Issue #360 — a result that isn't a clean, machine-readable terminal (`opened`/`blocked`/
+    // `skipped`): a missing status, or an `escalated` that fell through the answer loop to abandon.
+    // This is the fail-closed path, and it must stop LOSING information:
+    //   (2) never discard a PR the agent demonstrably opened — persist its key on the row even for a
+    //       non-`opened` status so the work is recoverable from the UI, not just SQLite. It is NOT
+    //       handed off (only `parsed`/`opened` is, below) — a non-`opened` PR is not review-ready, so
+    //       it is retained on `draft_pr_key` (the escalation work-preserving column, surfaced as
+    //       "Draft PR" on the epic-detail page) and DELIBERATELY kept OUT of `pr_key`: `pollDelivery`
+    //       and the promotion rollup join every non-null `plan_tasks.pr_key` as a handed-off slice PR,
+    //       so an un-enrolled key there reads as MISSING → in-flight, wedging an otherwise-done epic
+    //       permanently "converging"/Active and blocking promotion (Copilot review, #360).
+    //   (3) synthesise a reason so a blocked slice is never blank on the epic-detail Summary, the way
+    //       record-trial-merge does for its own no-machine-readable-result case.
+    const unreadable = !rawStatus || !isWaveResultStatus(rawStatus);
+    const retainedPr = parsed ?? (prRef ? parsePr(prRef) : null);
+    // Distinguish a slice that reported NO status at all from one that reported a status which simply
+    // isn't a clean terminal (e.g. `escalated` that fell through the answer loop to operator Abandon /
+    // SLA auto-abandon — the subprocess ends without rewriting `status`). The latter DID return a
+    // machine-readable result, so the generic "no result" reason would misreport it.
+    const noResultSummary = !rawStatus
+      ? "The implementation agent returned no machine-readable result"
+      : `The implementation agent did not return a clean terminal result (reported status "${rawStatus}"), so the slice was treated as blocked`;
+    const effectiveSummary = summary ?? (unreadable ? noResultSummary : undefined);
 
     const row = byTaskId.get(taskId);
     if (row) {
       const patch: Partial<PlanTask> = { status: effectiveStatus, updated_at: ts };
-      if (summary !== undefined) patch.summary = summary;
+      if (effectiveSummary !== undefined) patch.summary = effectiveSummary;
       if (parsed?.prKey) {
+        // Handed-off/opened PR — the delivery-bearing key `pollDelivery`/promotion join on.
         patch.pr_key = parsed.prKey;
         // Keep the in-memory row current so a same-wave dependant (rare) sees the PR key.
         row.pr_key = parsed.prKey;
+      } else if (retainedPr?.prKey) {
+        // A PR the agent demonstrably opened but that was NOT handed off (blocked / escalated /
+        // keyless-"opened"): preserve it as a draft ref so the work stays recoverable from the UI,
+        // but keep it out of `pr_key` so it never wedges the delivery rollup (see comment above).
+        patch.draft_pr_key = retainedPr.prKey;
+        row.draft_pr_key = retainedPr.prKey;
       }
       await taskTable.update(row.id, patch);
     }
@@ -162,11 +193,13 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
     }
 
     // Include this task's PR in the D2 conflict-scan set when it is concurrently open in the wave:
-    // an `opened` PR (also handed off below), OR an `escalated` task's work-preserving DRAFT PR
-    // (feature.md — `status: "escalated"` may carry the draft `pr` it opened to preserve work).
-    // The draft's changed files can overlap a sibling's, so scanning it keeps the merge-exclusion
-    // graph a conservative over-approximation instead of silently missing those overlaps.
-    const scanPr = parsed ?? (rawStatus === "escalated" && prRef ? parsePr(prRef) : null);
+    // an `opened` PR (also handed off below), OR ANY retained work-preserving DRAFT PR — an
+    // `escalated` task's draft (feature.md — `status: "escalated"` may carry the draft `pr` it
+    // opened) AND the no-result path's retained draft (#360, `retainedPr` → `draft_pr_key`). Any
+    // such draft's changed files can overlap a sibling's, so scanning every retained PR (not just
+    // `opened`/`escalated`) keeps the merge-exclusion graph a conservative over-approximation
+    // instead of silently missing those overlaps.
+    const scanPr = retainedPr;
     if (scanPr) {
       openedThisWave.push({ taskId, repo: scanPr.repo, number: scanPr.number });
     }
