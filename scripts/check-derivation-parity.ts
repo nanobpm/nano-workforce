@@ -116,37 +116,42 @@ async function main(): Promise<void> {
   const errors: string[] = [];
   const engine = await createWasmEngineClient();
 
-  await proveOracleFiresRed(engine, errors);
-
   let ported = 0;
   let deployed = 0;
   let parked = 0;
 
-  for (const port of PORTS) {
-    if (port.flow) {
-      ported++;
-      const golden = goldenPath(port.model);
-      try {
-        assertDerivationParity(port.flow, golden);
-      } catch (e) {
-        errors.push(`  ${port.model}: STRUCTURAL DRIFT vs golden — ${errMsg(e)}`);
-        continue; // a model that doesn't derive its golden can't be trusted to deploy meaningfully
-      }
-      try {
-        await deployDerived(engine, port.model, port.flow);
-        deployed++;
-      } catch (e) {
-        errors.push(`  ${port.model}: DEPLOY REJECTED by wasm engine — ${errMsg(e)}`);
-      }
-    } else {
-      parked++;
-      if (!port.blockedReason || port.blockedReason.length === 0) {
-        errors.push(
-          `  ${port.model}: neither ported (no flow) nor documented (no blockedReason) — every ` +
-            `corpus model must derive its golden or carry a precise blocker.`,
-        );
+  try {
+    await proveOracleFiresRed(engine, errors);
+
+    for (const port of PORTS) {
+      if (port.flow) {
+        ported++;
+        const golden = goldenPath(port.model);
+        try {
+          assertDerivationParity(port.flow, golden);
+        } catch (e) {
+          errors.push(`  ${port.model}: STRUCTURAL DRIFT vs golden — ${errMsg(e)}`);
+          continue; // a model that doesn't derive its golden can't be trusted to deploy meaningfully
+        }
+        try {
+          await deployDerived(engine, port.model, port.flow);
+          deployed++;
+        } catch (e) {
+          errors.push(`  ${port.model}: DEPLOY REJECTED by wasm engine — ${errMsg(e)}`);
+        }
+      } else {
+        parked++;
+        if (!port.blockedReason || port.blockedReason.trim().length === 0) {
+          errors.push(
+            `  ${port.model}: neither ported (no flow) nor documented (no blockedReason) — every ` +
+              `corpus model must derive its golden or carry a precise blocker.`,
+          );
+        }
       }
     }
+  } finally {
+    // Release the underlying WASM engine resources so repeated runs (local / CI matrix) don't leak.
+    await engine.close();
   }
 
   if (errors.length > 0) {
