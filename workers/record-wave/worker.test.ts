@@ -279,7 +279,8 @@ test("record-wave runs trial merge for non-queue repos with populated heads", as
 // A slice that returns no machine-readable result is still coerced to terminal `blocked` here (the
 // escalation/answer decision already happened in the `implement` subprocess, before this aggregator).
 // But the aggregator must no longer LOSE information when it fails closed: it must (2) retain any PR the
-// agent demonstrably opened so the work is recoverable from the UI, and (3) synthesise a reason so the
+// agent demonstrably opened so the work is recoverable from the UI (on `draft_pr_key`, NOT `pr_key` —
+// a non-handed-off key on `pr_key` would wedge the delivery rollup), and (3) synthesise a reason so the
 // epic-detail Summary is never blank. Before #360 both were dropped (`pr_key = NULL`, `summary = NULL`).
 test("record-wave retains the PR and synthesises a summary for a no-result slice (issue #360)", async () => {
   const rows: Row[] = [{ id: 1, plan_key: "owner/repo#64", task_id: "scaffold", status: "pending", wave: 0 }];
@@ -302,8 +303,11 @@ test("record-wave retains the PR and synthesises a summary for a no-result slice
   const row = rows[0] as unknown as Record<string, unknown>;
   // Still fail-closed to `blocked` (we never assume the un-reported PR is mergeable) …
   assertEquals(row.status, "blocked");
-  // … but the PR the agent opened is retained on the row (recoverable from the UI) …
-  assertEquals(row.pr_key, "owner/repo#84");
+  // … the PR the agent opened is retained on the DRAFT ref (recoverable from the UI as "Draft PR") …
+  assertEquals(row.draft_pr_key, "owner/repo#84");
+  // … but NOT on `pr_key`: a non-handed-off key there would read as a handed-off slice PR in
+  // `pollDelivery`/promotion rollups (MISSING → in-flight), wedging the epic "converging" forever.
+  assertEquals(row.pr_key ?? null, null);
   // … and the reason is no longer blank.
   assertEquals(typeof row.summary, "string");
   assertEquals((row.summary as string).length > 0, true);
@@ -338,6 +342,37 @@ test("record-wave synthesises an accurate reason for an escalated-then-abandoned
   assertEquals(summary.includes("no machine-readable result"), false);
   // … and must name the status it actually reported.
   assertEquals(summary.includes("escalated"), true);
+});
+
+// The twin invariant of the retention fix: a genuinely HANDED-OFF (`opened` with a usable key) slice
+// must still persist its PR on `pr_key` (the delivery-bearing column `pollDelivery`/promotion join on)
+// and NOT on the draft ref — otherwise a landed slice would never count toward epic delivery.
+test("record-wave persists a handed-off opened slice's PR on pr_key, not draft_pr_key (issue #360)", async () => {
+  const restore = installGithubStub("gh-merge");
+  try {
+    const rows: Row[] = [{ id: 1, plan_key: "owner/repo#64", task_id: "scaffold", status: "pending", wave: 0 }];
+    const { app } = fakeApp(rows);
+
+    await handler(
+      {
+        variables: {
+          planKey: "owner/repo#64",
+          currentWave: 0,
+          waveCount: 1,
+          waveTasks: [{ id: "scaffold" }],
+          waveResults: [{ status: "opened", pr: "owner/repo#84" }],
+        },
+      } as any,
+      app,
+    );
+
+    const row = rows[0] as unknown as Record<string, unknown>;
+    assertEquals(row.status, "opened");
+    assertEquals(row.pr_key, "owner/repo#84");
+    assertEquals(row.draft_pr_key ?? null, null);
+  } finally {
+    restore();
+  }
 });
 
 test("record-wave preserves the agent's own summary rather than overwriting it (issue #360)", async () => {

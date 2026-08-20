@@ -113,7 +113,12 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
     // This is the fail-closed path, and it must stop LOSING information:
     //   (2) never discard a PR the agent demonstrably opened — persist its key on the row even for a
     //       non-`opened` status so the work is recoverable from the UI, not just SQLite. It is NOT
-    //       handed off (only `parsed`/`opened` is, below) — a non-`opened` PR is not review-ready.
+    //       handed off (only `parsed`/`opened` is, below) — a non-`opened` PR is not review-ready, so
+    //       it is retained on `draft_pr_key` (the escalation work-preserving column, surfaced as
+    //       "Draft PR" on the epic-detail page) and DELIBERATELY kept OUT of `pr_key`: `pollDelivery`
+    //       and the promotion rollup join every non-null `plan_tasks.pr_key` as a handed-off slice PR,
+    //       so an un-enrolled key there reads as MISSING → in-flight, wedging an otherwise-done epic
+    //       permanently "converging"/Active and blocking promotion (Copilot review, #360).
     //   (3) synthesise a reason so a blocked slice is never blank on the epic-detail Summary, the way
     //       record-trial-merge does for its own no-machine-readable-result case.
     const unreadable = !rawStatus || !isWaveResultStatus(rawStatus);
@@ -131,10 +136,17 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
     if (row) {
       const patch: Partial<PlanTask> = { status: effectiveStatus, updated_at: ts };
       if (effectiveSummary !== undefined) patch.summary = effectiveSummary;
-      if (retainedPr?.prKey) {
-        patch.pr_key = retainedPr.prKey;
+      if (parsed?.prKey) {
+        // Handed-off/opened PR — the delivery-bearing key `pollDelivery`/promotion join on.
+        patch.pr_key = parsed.prKey;
         // Keep the in-memory row current so a same-wave dependant (rare) sees the PR key.
-        row.pr_key = retainedPr.prKey;
+        row.pr_key = parsed.prKey;
+      } else if (retainedPr?.prKey) {
+        // A PR the agent demonstrably opened but that was NOT handed off (blocked / escalated /
+        // keyless-"opened"): preserve it as a draft ref so the work stays recoverable from the UI,
+        // but keep it out of `pr_key` so it never wedges the delivery rollup (see comment above).
+        patch.draft_pr_key = retainedPr.prKey;
+        row.draft_pr_key = retainedPr.prKey;
       }
       await taskTable.update(row.id, patch);
     }
