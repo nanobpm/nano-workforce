@@ -121,3 +121,28 @@ Then, on a resumed run here:
 
 No golden `.bpmn` file may be edited to force a match — the derivation must
 reproduce the checked-in golden.
+
+## CI regression guard (S6, nano-ide#321)
+
+The unit suite above (run under `npm test`) does the DERIVE + structural DIFF for
+every ported model. The **final regression guard** adds the third leg — DEPLOY —
+and wires the whole corpus into CI as its own job:
+
+    npm run check:derivation-parity        # scripts/check-derivation-parity.ts
+
+For every model it derives the BPMN from its `defineFlow` port, structurally
+diffs it against the checked-in golden via the **same** S0 harness
+(`normalize` / `assertDerivationParity` — never reimplemented), and **deploys the
+derived model to the in-process `@nanobpm/engine-wasm` engine**
+(`@nanobpm/urban-testkit`), asserting the engine accepts it. Any structural drift
+**or** deploy rejection fails the build. Parked models must each carry a
+documented `blockedReason`, so the corpus can never silently lose coverage; a
+parked model flips into the full derive → diff → deploy loop automatically the
+moment its `flow` lands — no change to the gate.
+
+Because the corpus is (currently) fully parked, the gate runs a **self-proving
+canary** first: it proves a faithful derivation deploys and diffs green, a
+drifted derivation is caught by the diff, and a corrupted model is rejected by
+the engine — so the oracle's red path can never rot into a vacuous green. The
+guard runs on every PR/push as the `derivation-parity` job in
+`.github/workflows/ci.yml`.
