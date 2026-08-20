@@ -37,3 +37,7 @@ test("falls back to a localhost default when the Host header is absent", () => {
 test("tolerates a leading slash on the mount suffix", () => {
   assertEquals(resolveApiBase(req({ host: "h" }, "/app/api/agent"), "/agent"), "http://h/app/api");
 });
+
+test("strips multiple trailing slashes after the mount suffix", () => {
+  assertEquals(resolveApiBase(req({ host: "h" }, "/app/api/agent/skill///"), "agent/skill"), "http://h/app/api");
+});

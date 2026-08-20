@@ -22,7 +22,7 @@ export function resolveApiBase(req: { path: string; headers: Headers }, mountSuf
   const host = (req.headers.get("x-forwarded-host") ?? req.headers.get("host") ?? "").split(",")[0].trim();
   // The op is mounted at "<base>/<mountSuffix>"; strip the trailing segments to recover the base path.
   const suffix = mountSuffix.replace(/^\/+/, "").replace(/\/+$/, "");
-  const stripRe = new RegExp(`/${suffix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/?$`);
+  const stripRe = new RegExp(`/${suffix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/*$`);
   const basePath = req.path.replace(stripRe, "") || "/app/api";
   return host ? `${proto}://${host}${basePath}` : `http://localhost:3000${basePath}`;
 }
