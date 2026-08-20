@@ -273,6 +273,36 @@ Migrations live in `db/migrations/*.sql` and are **auto-applied on boot** from
   prefix while `main` keeps advancing, so the branch-local "next" number collides
   on merge. Two files must never share a prefix; `npm run check:migrations`
   (a CI gate) enforces this and fails the build on any new duplicate.
+- **A merged migration is IMMUTABLE — never rename, delete, or edit it.** The
+  runtime keys the `_urban_migrations` ledger by *filename*, so a renamed file is
+  a *new* migration to the runner: it re-runs its DDL against an already-migrated
+  DB and aborts boot (`duplicate column …`); a deleted file desyncs the ledger
+  from the schema; an edited file silently no-ops on every existing install (the
+  name is already recorded) while diverging fresh ones. To change a merged
+  migration's effect, add a NEW migration. `npm run check:migrations` also gates
+  this — it diffs `db/migrations/` against the merge-base with `origin/main` and
+  fails on any rename/delete/edit — and the upgrade smoke test
+  (`app/migration-upgrade-smoke.test.ts`) materialises the previous release's
+  migration set and upgrades it to the current set, catching non-idempotent DDL a
+  fresh-DB CI never exercises (issue #357). Both need history: CI checks out with
+  `fetch-depth: 0`.
+
+### Healing an install wedged by a renamed migration
+
+If a live node fails to boot with `migration "NNN_…sql" failed and was rolled
+back … duplicate column` because a migration was renamed *before* the immutability
+gate existed (e.g. `043_user_tasks_subject_title.sql` → `046_…`, issue #357),
+reconcile its ledger — this makes **no schema change**, only aliases the old
+ledger row to the new filename, and is safe to re-run:
+
+```bash
+npm run heal:migrations -- /path/to/the/app.sqlite   # then restart the node
+```
+
+The known renames live in `RENAMED_MIGRATIONS` (`app/migrationHeal.ts`), the
+single source of truth the heal script and its tests share. This list only heals
+the pre-gate past — the immutability gate above prevents any new entry from ever
+being needed.
 
 ## Runtime & CI gates
 
@@ -286,7 +316,7 @@ npm run typecheck                                     # tsc --noEmit (Node)
 npm run check                                         # urban check (manifest validation)
 npm run layout:check                                  # BPMN diagram freshness (no drift)
 npm run check:prompts                                 # agent-prompt linkedResource resolution
-npm run check:migrations                              # migration prefixes (no collisions)
+npm run check:migrations                              # migration prefixes + immutability (no rename/delete/edit of a merged migration)
 npm run check:contracts                               # contract registry (no synonyms / undeclared env keys)
 npm test                                              # unit tests (node --test)
 ```
