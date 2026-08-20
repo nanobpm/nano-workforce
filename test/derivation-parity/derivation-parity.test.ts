@@ -85,44 +85,13 @@ test("class-1 blocked goldens genuinely have multiple top-level start/end events
   }
 
   // The two single-start/single-end goldens (retro, convergence-loop) clear
-  // class 1; retro is class-3 blocked (a general service-task ioMapping),
-  // convergence-loop is class-2 blocked — both below.
+  // class 1; retro is a GREEN whole-model parity port (it runs through
+  // `assertDerivationParity` above), convergence-loop is class-2 blocked (below).
   for (const model of ["retro", "convergence-loop"]) {
     const xml = readFileSync(goldenPath(model), "utf8");
     assertEquals(countTag(xml, "startEvent"), 1, `${model} should have one start event`);
     assertEquals(countTag(xml, "endEvent"), 1, `${model} should have one end event`);
   }
-});
-
-// CLASS 3 — retro clears classes 1 & 2 (single start/end, structured topology)
-// but its golden carries a service task with a GENERAL <zeebe:ioMapping> — inputs
-// whose target is NOT `appendPrompt` — which @nanobpm/workflow@0.12.0's `task`
-// builder cannot emit (it only produces an ioMapping via a `prompt.append`, i.e.
-// a lone `appendPrompt` input). Prove both halves: the golden needs it, and the
-// stock builder cannot produce it (awaits nano-ide#405).
-test("retro golden needs a general service-task ioMapping the stock builder cannot emit", () => {
-  const xml = readFileSync(goldenPath("retro"), "utf8");
-  // (a) The golden has a service task carrying an ioMapping input to a non-prompt
-  //     target (`record-conformance-ack`: =planKey→planKey, note→note).
-  assert(
-    /target="planKey"/.test(xml) && /target="note"/.test(xml),
-    "retro golden should carry general ioMapping inputs (planKey, note) on record-conformance-ack",
-  );
-  // (b) The stock `task` builder only ever emits `appendPrompt` as an ioMapping
-  //     target — never a general input like `note` — so the golden is not
-  //     derivable until the upstream `io` construct lands.
-  const probe = defineFlow("io-probe", (w) => {
-    w.task("agent", {
-      jobType: "senior:retro",
-      prompt: { resourceId: "retro.md", bindingType: "latest", append: "=retroDigest" },
-    });
-  });
-  const derived = declarativeToBpmn(probe);
-  assert(/target="appendPrompt"/.test(derived), "prompt.append should emit an appendPrompt ioMapping input");
-  assert(
-    !/target="note"/.test(derived) && !/target="planKey"/.test(derived),
-    "the stock task builder cannot emit a general (non-appendPrompt) ioMapping input",
-  );
 });
 
 // CLASS 2 — convergence-loop has a single start/end (clears class 1) but an

@@ -26,7 +26,7 @@ behind an upstream construct, and do **not** relax to node-surface parity_:
 
 | Model              | Top-level start/end | Status |
 | ------------------ | ------------------- | ------ |
-| `retro`            | 1 / 1               | ⛔ parked — class 3 (general service-task ioMapping) |
+| `retro`            | 1 / 1               | ✅ green — whole-model parity |
 | `convergence-loop` | 1 / 1               | ⛔ parked — class 2 (arbitrary graph) |
 | `spine-demo`       | 1 / 2               | ⛔ parked — class 1 (multi start/end) |
 | `readiness-gate`   | 1 / 5               | ⛔ parked — class 1 (multi start/end) |
@@ -34,13 +34,17 @@ behind an upstream construct, and do **not** relax to node-surface parity_:
 | `merge-loop`       | 1 / 2               | ⛔ parked — class 1 (multi start/end) |
 | `plan-fanout`      | 3 / 3               | ⛔ parked — class 1 (multi start/end) |
 
-`retro` was a green full-parity port — a linear single-start/single-end agent
-pipeline — until the conformance work (#355/#356) added a conformance-escalation
-subgraph to its golden, which introduced a service task carrying a general
-`<zeebe:ioMapping>` the stock `task` builder cannot emit (class 3). All seven
-goldens are now parked, across **three** distinct blocker classes, each awaiting
-an upstream `@nanobpm/workflow` (nano-ide) construct + re-release (never a golden
-edit, never relaxed acceptance).
+`retro` is a green whole-model parity port — a single-start/single-end agent
+pipeline (gather → conformance → record-conformance) with a `deviations?`
+conformance-escalation subgraph (#355/#356) and a shared synthesize → record
+tail. Its `record-conformance-ack` service task carries a general
+`<zeebe:ioMapping>` that the stock `task` builder could not emit until
+`@nanobpm/workflow@0.13.0` landed the general service-task `io` construct
+(nano-ide#405); every other element was always expressible (`w.task`+prompt,
+`w.branch`, `w.human`, envelopes). The remaining six goldens are parked across
+**two** distinct blocker classes, each awaiting an upstream `@nanobpm/workflow`
+(nano-ide) construct + re-release (never a golden edit, never relaxed
+acceptance).
 
 ## The blockers
 
@@ -83,24 +87,6 @@ pinned by a diagnostic in `derivation-parity.test.ts`:
 The fix is an **arbitrary-graph / explicit-join (named-target)** builder upstream
 in `@nanobpm/workflow` — a **superset** of the class-1 gap.
 
-### Class 3 — general service-task ioMapping (`retro`)
-
-`retro` clears classes 1 and 2 (single start/end, structured topology), but its
-golden's `record-conformance-ack` service task carries a **general**
-`<zeebe:ioMapping>` — inputs `=planKey`→`planKey` and
-`=if (is defined(note)) then note else null`→`note`. `@nanobpm/workflow@0.12.0`'s
-`task` builder only emits an ioMapping as a side effect of a `prompt.append` (a
-single `appendPrompt` input); there is no way to declare arbitrary input/output
-mappings on a service task. Every other element of the golden IS expressible
-(`w.task`+prompt, `w.branch` for the `deviations?` gateway, `w.human` for the
-`conformance-escalation` userTask, envelopes) — this one service-task ioMapping
-is the sole gap. The `retro golden needs a general service-task ioMapping the
-stock builder cannot emit` diagnostic pins both halves (the golden needs it; the
-stock builder cannot produce it).
-
-The fix is a general `io: { input?, output? }` on the external `task`/`run`
-builder upstream in `@nanobpm/workflow` (**nano-ide#405**).
-
 ## Resuming this slice
 
 The follow-up upstream slices (opened in **nanobpm/nano-ide** per decision path
@@ -108,8 +94,11 @@ The follow-up upstream slices (opened in **nanobpm/nano-ide** per decision path
 
 - a terminal / explicit-end (+ multi-start) construct (unblocks class 1), **and**
 - an arbitrary-graph / explicit-join (named-target) builder (unblocks class 2 —
-  `convergence-loop`), **and**
-- a general service-task `io` mapping (unblocks class 3 — `retro`; nano-ide#405).
+  `convergence-loop`).
+
+(The class-3 general service-task `io` mapping has already landed —
+`@nanobpm/workflow@0.13.0`, nano-ide#405 — unparking `retro` to whole-model
+parity.)
 
 Then, on a resumed run here:
 
@@ -140,7 +129,7 @@ documented `blockedReason`, so the corpus can never silently lose coverage; a
 parked model flips into the full derive → diff → deploy loop automatically the
 moment its `flow` lands — no change to the gate.
 
-Because the corpus is (currently) fully parked, the gate runs a **self-proving
+Because most of the corpus is (currently) parked, the gate runs a **self-proving
 canary** first: it proves a faithful derivation deploys and diffs green, a
 drifted derivation is caught by the diff, and a corrupted model is rejected by
 the engine — so the oracle's red path can never rot into a vacuous green. The
