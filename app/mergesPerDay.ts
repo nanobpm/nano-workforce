@@ -64,9 +64,21 @@ const BAR_FULL = "█";
  *  co-located console — the default `npm start` on `localhost` — is already the browser's zone). An
  *  invalid/unknown IANA `timeZone` falls back to the host-resolved zone (rather than throwing a
  *  `RangeError` that would wedge `deriveMergesPerDay`/`pollMergesPerDay`), so bucketing stays
- *  deterministic. Any value that does not parse to a real instant (a malformed / non-ISO row) falls
- *  back to the whole trimmed string so it still groups deterministically rather than throwing. */
+ *  deterministic. Any value that is not an UNAMBIGUOUS ISO instant — one carrying an explicit
+ *  timezone designator (`Z` or a `±HH:MM`/`±HHMM` offset) — falls back to the whole trimmed string so
+ *  it still groups deterministically. This deliberately excludes partially-formed values a bare
+ *  `new Date(s)` would still parse but *ambiguously*: a date-only `"2026-01-01"` is read as UTC
+ *  midnight while an offset-less `"2026-01-01T12:00:00"` is read in the host's local zone — so
+ *  bucketing them would be runtime/timezone-dependent, the very drift this read model exists to avoid.
+ *  Production `merges.at` values are always `new Date().toISOString()` (UTC, `Z`-suffixed), so only a
+ *  malformed audit row ever takes the fallback. */
 const dayFormatters = new Map<string, Intl.DateTimeFormat>();
+
+/** An unambiguous ISO-8601 instant: a full `YYYY-MM-DDTHH:MM[:SS[.sss]]` carrying an explicit zone
+ *  designator (`Z`, or a `±HH:MM`/`±HHMM` offset). Only these parse to a timezone-independent instant;
+ *  anything else (date-only, offset-less datetime, free text) buckets ambiguously, so `dayOf` treats
+ *  it as a non-instant and groups on the trimmed string instead. */
+const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})$/;
 
 /** A cached `en-CA` day formatter for `timeZone`, falling back to the host-resolved zone when the
  *  zone is invalid/unknown (an invalid IANA string makes `Intl.DateTimeFormat` throw a `RangeError`).
@@ -92,11 +104,21 @@ function dayFormatter(timeZone?: string): Intl.DateTimeFormat {
 
 function dayOf(at: string, timeZone?: string): string {
   const s = String(at).trim();
+  // Only bucket unambiguous ISO instants (explicit `Z`/offset). A partially-formed value a bare
+  // `new Date(s)` would still parse — a date-only or offset-less datetime — buckets differently per
+  // runtime/timezone, so group it deterministically on the trimmed string instead.
+  if (!ISO_INSTANT.test(s)) return s;
   const d = new Date(s);
   if (Number.isNaN(d.getTime())) return s;
   const parts = dayFormatter(timeZone).formatToParts(d);
   const field = (type: string) => parts.find((p) => p.type === type)?.value ?? "";
-  return `${field("year")}-${field("month")}-${field("day")}`;
+  const year = field("year");
+  const month = field("month");
+  const day = field("day");
+  // Guard against a formatter that somehow omits a field — never emit a `"--"`-shaped key; fall back
+  // to the trimmed string so the row still groups deterministically.
+  if (!year || !month || !day) return s;
+  return `${year}-${month}-${day}`;
 }
 
 /** Render a proportional bar: `merged` glyphs scaled against the busiest day's `max`, min one glyph

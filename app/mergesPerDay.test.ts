@@ -187,6 +187,24 @@ test("non-ISO / malformed `at` still groups deterministically without throwing",
   assertEquals(days[0].merged, 2);
 });
 
+test("ambiguous partially-formed `at` (date-only / offset-less) buckets on the trimmed string, not a runtime-dependent day", () => {
+  // `new Date("2026-01-01")` parses as UTC midnight while `new Date("2026-01-01T12:00:00")` parses in
+  // the host's local zone — bucketing either would be runtime/timezone-dependent, the exact drift this
+  // read model exists to avoid. Neither carries an explicit `Z`/offset, so both must fall back to the
+  // trimmed string and group deterministically regardless of the viewer's `timeZone`.
+  const rows: MergeAuditRow[] = [
+    { pr_key: "o/r#1", outcome: "merged", at: "2026-01-01" },
+    { pr_key: "o/r#2", outcome: "merged", at: "2026-01-01T12:00:00" },
+  ];
+  for (const zone of ["UTC", "America/New_York", "Pacific/Kiritimati"]) {
+    const days = deriveMergesPerDay(rows, zone);
+    assertEquals(days.map((d) => [d.day, d.merged]), [
+      ["2026-01-01", 1],
+      ["2026-01-01T12:00:00", 1],
+    ]);
+  }
+});
+
 test("an invalid IANA timeZone falls back to the host zone instead of throwing (issue #361)", () => {
   // A bogus zone would make `Intl.DateTimeFormat` throw a `RangeError`; bucketing must stay
   // deterministic and not wedge `deriveMergesPerDay`/`pollMergesPerDay`.
