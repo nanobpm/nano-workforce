@@ -85,10 +85,11 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
 
   // The tasks with a concurrently-open PR in THIS wave — the set the D2 conflict-scan runs over
   // (cross-wave pairs are moot: the wave barrier merges earlier waves before later ones start).
-  // This includes both `opened` PRs (also handed off below) AND `escalated` tasks' work-preserving
-  // DRAFT PRs (feature.md): a draft's changed files can still overlap a sibling's, so omitting it
-  // would silently under-approximate the merge-exclusion graph (the scan is a deliberate
-  // over-approximation). Escalated drafts are scanned but NEVER handed off (not ready for review).
+  // This includes both `opened` PRs (also handed off below) AND any RETAINED work-preserving DRAFT
+  // PR — an `escalated` task's draft (feature.md) and the no-result path's retained draft (#360). A
+  // draft's changed files can still overlap a sibling's, so omitting it would silently
+  // under-approximate the merge-exclusion graph (the scan is a deliberate over-approximation).
+  // Retained drafts are scanned but NEVER handed off (not ready for review).
   const openedThisWave: { taskId: string; repo: string; number: number | string }[] = [];
   const readyHeadsThisWave: { repo: string; number: number | string }[] = [];
 
@@ -192,11 +193,13 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
     }
 
     // Include this task's PR in the D2 conflict-scan set when it is concurrently open in the wave:
-    // an `opened` PR (also handed off below), OR an `escalated` task's work-preserving DRAFT PR
-    // (feature.md — `status: "escalated"` may carry the draft `pr` it opened to preserve work).
-    // The draft's changed files can overlap a sibling's, so scanning it keeps the merge-exclusion
-    // graph a conservative over-approximation instead of silently missing those overlaps.
-    const scanPr = parsed ?? (rawStatus === "escalated" && prRef ? parsePr(prRef) : null);
+    // an `opened` PR (also handed off below), OR ANY retained work-preserving DRAFT PR — an
+    // `escalated` task's draft (feature.md — `status: "escalated"` may carry the draft `pr` it
+    // opened) AND the no-result path's retained draft (#360, `retainedPr` → `draft_pr_key`). Any
+    // such draft's changed files can overlap a sibling's, so scanning every retained PR (not just
+    // `opened`/`escalated`) keeps the merge-exclusion graph a conservative over-approximation
+    // instead of silently missing those overlaps.
+    const scanPr = retainedPr;
     if (scanPr) {
       openedThisWave.push({ taskId, repo: scanPr.repo, number: scanPr.number });
     }

@@ -397,3 +397,61 @@ test("record-wave preserves the agent's own summary rather than overwriting it (
   // A genuine, machine-readable `blocked` with its own summary is left untouched — no synthesis.
   assertEquals(row.summary, "upstream API not ready");
 });
+
+// The D2 conflict-scan (issue #58) is a deliberate over-approximation of the merge-exclusion graph:
+// a slice whose PR is retained (as a work-preserving DRAFT, NOT handed off) can still touch files a
+// sibling's PR touches, so omitting it would silently under-approximate the exclusions. The no-result
+// path (#360) newly retains such a draft PR (`retainedPr` → `draft_pr_key`), so it MUST be scanned too —
+// exactly like an `escalated` draft already is. This locks the scan set to every retained draft, not
+// only `opened`/`escalated` ones (Copilot advisory, record-wave/worker.ts:126).
+test("record-wave includes a no-result slice's retained draft PR in the D2 conflict scan (Copilot advisory, #360)", async () => {
+  const oldToken = process.env["GITHUB_TOKEN"];
+  const oldTransport = process.env["NANO_PR_GITHUB_TRANSPORT"];
+  const oldFetch = globalThis.fetch;
+  process.env["GITHUB_TOKEN"] = "test-token";
+  process.env["NANO_PR_GITHUB_TRANSPORT"] = "token";
+  globalThis.fetch = ((input: string | URL | Request) => {
+    const url = String(input);
+    // Both the handed-off `opened` PR and the retained no-result draft touch the SAME file, so the
+    // scan must derive exactly one exclusion edge between them — but only if BOTH are scanned.
+    if (url.includes("/files")) {
+      return Promise.resolve(new Response(JSON.stringify([{ filename: "src/shared.ts" }])));
+    }
+    return Promise.resolve(new Response("not found", { status: 404 }));
+  }) as typeof fetch;
+  try {
+    const rows: Row[] = [
+      { id: 1, plan_key: "owner/repo#64", task_id: "a", status: "pending", wave: 0 },
+      { id: 2, plan_key: "owner/repo#64", task_id: "b", status: "pending", wave: 0 },
+    ];
+    const { app } = fakeApp(rows);
+    const stores = (app.data as any).table("plan_merge_exclusions", "id");
+
+    await handler(
+      {
+        variables: {
+          planKey: "owner/repo#64",
+          currentWave: 0,
+          waveCount: 1,
+          waveTasks: [{ id: "a" }, { id: "b" }],
+          // `a` handed off an opened PR; `b` returned NO machine-readable status but DID open a PR
+          // (retained as a draft). Both touch src/shared.ts, so they merge-exclude each other.
+          waveResults: [
+            { status: "opened", pr: "owner/repo#101" },
+            { pr: "owner/repo#102" },
+          ],
+        },
+      } as any,
+      app,
+    );
+
+    const edges = await stores.find({});
+    assertEquals(edges.length, 1, "the no-result draft PR must be scanned, yielding one exclusion edge");
+  } finally {
+    if (oldToken == null) delete process.env["GITHUB_TOKEN"];
+    else process.env["GITHUB_TOKEN"] = oldToken;
+    if (oldTransport == null) delete process.env["NANO_PR_GITHUB_TRANSPORT"];
+    else process.env["NANO_PR_GITHUB_TRANSPORT"] = oldTransport;
+    globalThis.fetch = oldFetch;
+  }
+});
