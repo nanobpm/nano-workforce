@@ -821,6 +821,38 @@ components:
         instructions:
           type: string
           description: The full operator guide as markdown.
+    AgentSkill:
+      type: object
+      description: The portable Nano Workforce operator skill (SKILL.md) — a thin bootstrap an agent
+        runtime loads on demand. It resolves which instance to drive and then fetches the live
+        operator guide. The `skill` markdown has any embedded example keyed to this instance's
+        `baseUrl`.
+      additionalProperties: false
+      required:
+        - format
+        - appVersion
+        - generatedAt
+        - baseUrl
+        - skill
+      properties:
+        format:
+          type: string
+          description: The `skill` media format. Always "markdown".
+          enum:
+            - markdown
+        appVersion:
+          type: string
+          nullable: true
+          description: The running app version this skill was served from (null when unreadable).
+        generatedAt:
+          type: string
+          description: When this response was rendered (ISO-8601).
+        baseUrl:
+          type: string
+          description: The app control-API base the skill was fetched from (e.g. https://host/app/api).
+        skill:
+          type: string
+          description: The full operator skill (SKILL.md) as markdown, including its YAML frontmatter.
     SubmitResult:
       type: object
       required:
@@ -1855,6 +1887,28 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AgentInstructions"
+        "401":
+          description: Missing/invalid shared secret (only when NANO_PR_WEBHOOK_SECRET is set).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+  /agent/skill:
+    get:
+      operationId: getAgentSkill
+      summary: The portable operator skill (markdown SKILL.md) an agent runtime loads on demand — a
+        thin bootstrap that resolves which instance to drive, then fetches the live operator guide
+        (GET /agent). Surfaced from the Overview tab's "Agent Instructions" prompt.
+      security:
+        - hookSecret: []
+        - {}
+      responses:
+        "200":
+          description: The operator skill, with any example keyed to this instance.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentSkill"
         "401":
           description: Missing/invalid shared secret (only when NANO_PR_WEBHOOK_SECRET is set).
           content:

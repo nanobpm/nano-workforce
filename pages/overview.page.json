@@ -71,6 +71,20 @@
       }
     },
     {
+      "type": "button",
+      "id": "agent-instructions",
+      "props": {
+        "label": "\ud83e\udd16 Agent Instructions",
+        "variant": "ghost",
+        "modal": {
+          "title": "Point your agent at Nano Workforce",
+          "description": "Copy this prompt and paste it into your coding agent (Copilot, Claude, etc.). It tells the agent to load this workforce's operator skill from this instance, then help you drive and debug it.",
+          "copyLabel": "Copy prompt",
+          "copyText": "Load the Nano Workforce operator skill from this running instance and then help me drive and debug my workforce \u2014 a durable orchestration app that drives pull requests to review convergence against an automated reviewer, merges them, and can take a whole issue and plan \u2192 implement \u2192 converge it across a fleet of coding agents.\n\nThis is the instance to operate; its control-API base is {{appBase}}app/api. Fetch the skill and follow it (the response is JSON with a `skill` markdown field):\n\n    curl -sS {{appBase}}app/api/agent/skill\n\nIf this instance is secured with a shared secret (NANO_PR_WEBHOOK_SECRET), add its value as an x-hook-secret header, otherwise the request returns 401:\n\n    curl -sS -H \"x-hook-secret: <secret>\" {{appBase}}app/api/agent/skill\n\nThe skill is a thin bootstrap: it has you fetch this instance's live operator guide (at {{appBase}}app/api/agent) and then drive the workforce \u2014 submit PRs and epics for convergence, answer escalations, and debug stuck processes. If you find a bug or a stuck process, the guide explains how to raise an issue or a PR against nanobpm/nano-workforce."
+        }
+      }
+    },
+    {
       "type": "dataGrid",
       "id": "overview-prs",
       "props": {
