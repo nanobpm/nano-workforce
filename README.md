@@ -449,8 +449,10 @@ self-hosted [Renovate](https://docs.renovatebot.com/) runner:
 `workflow_dispatch`), opens update PRs, and — per [`renovate.json`](renovate.json) — merges
 non-major `@nanobpm/*` bumps once CI is green while leaving majors for a human.
 
-It requires a repository secret **`RENOVATE_TOKEN`**: a Personal Access Token with `repo`
-scope (or a fine-grained PAT with *Contents* + *Pull requests: read & write*). A PAT is
+It requires a repository secret **`RENOVATE_TOKEN`**: a Personal Access Token with `repo` +
+`workflow` scope (or a fine-grained PAT with *Contents: read & write*, *Pull requests: read &
+write*, *Issues: read & write* — the Dependency Dashboard is a GitHub Issue — and *Workflows:
+read & write*, so Renovate can update files under `.github/workflows`). A PAT is
 mandatory rather than the built-in `GITHUB_TOKEN` because PRs opened by `GITHUB_TOKEN` do not
 trigger `on: pull_request` CI — so the "merge when green" gate would never fire. Set it via
 `gh secret set RENOVATE_TOKEN --repo nanobpm/nano-workforce` (or repo → Settings → Secrets →
