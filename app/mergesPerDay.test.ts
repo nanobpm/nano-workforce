@@ -12,6 +12,24 @@ import { assert, assertEquals } from "#test-assert";
 import type { DataLayer } from "@nanobpm/urban";
 import { deriveMergesPerDay, type MergeAuditRow, pollMergesPerDay } from "./mergesPerDay.ts";
 
+// The bucketing is now LOCAL-calendar-day (issue #361: use the viewer's timezone, not UTC). The
+// derivation reads `process.env.TZ` through `Date`, so pin it to UTC here to keep the existing
+// UTC-based assertions below deterministic on any CI machine, and flip it explicitly in the
+// timezone-specific tests. Node re-reads `process.env.TZ` on each new `Date`, so a per-test
+// override takes effect immediately and is restored in a `finally`.
+process.env.TZ = "UTC";
+
+/** Run `fn` with `process.env.TZ` temporarily pinned to `tz`, restoring it afterwards. */
+function withTz<T>(tz: string, fn: () => T): T {
+  const prev = process.env.TZ;
+  process.env.TZ = tz;
+  try {
+    return fn();
+  } finally {
+    process.env.TZ = prev;
+  }
+}
+
 // A tiny in-memory record gateway (all/find/insert/update/delete), mirroring the fake-app style used
 // across the app tests (see app/delivery.test.ts), enough to exercise the `pollMergesPerDay`
 // projection.
@@ -131,6 +149,50 @@ test("bar scales against the busiest day: full for the max, non-empty for a lone
 
 test("empty audit yields no days", () => {
   assertEquals(deriveMergesPerDay([]), []);
+});
+
+test("buckets by the viewer's LOCAL calendar day, not UTC (issue #361)", () => {
+  // 02:00Z on Jan 1 is still Dec 31 in a west-of-UTC zone (America/New_York, UTC-5).
+  withTz("America/New_York", () => {
+    const days = deriveMergesPerDay([merged("o/r#1", "2026-01-01T02:00:00Z")]);
+    assertEquals(
+      days.map((d) => d.day),
+      ["2025-12-31"],
+    );
+  });
+  // 23:00Z on Jan 1 is already Jan 2 in an east-of-UTC zone (Pacific/Kiritimati, UTC+14).
+  withTz("Pacific/Kiritimati", () => {
+    const days = deriveMergesPerDay([merged("o/r#1", "2026-01-01T23:00:00Z")]);
+    assertEquals(
+      days.map((d) => d.day),
+      ["2026-01-02"],
+    );
+  });
+});
+
+test("two merges either side of local midnight land on the same local day (issue #361)", () => {
+  // In UTC these are two different UTC days; in America/New_York (UTC-5) both are Jan 1 evening,
+  // so a local-time bucketing counts them together on 2026-01-01.
+  withTz("America/New_York", () => {
+    const days = deriveMergesPerDay([
+      merged("o/r#1", "2026-01-01T18:00:00Z"), // 13:00 local, Jan 1
+      merged("o/r#2", "2026-01-02T04:00:00Z"), // 23:00 local, Jan 1
+    ]);
+    assertEquals(
+      days.map((d) => [d.day, d.merged]),
+      [["2026-01-01", 2]],
+    );
+  });
+});
+
+test("non-ISO / malformed `at` still groups deterministically without throwing", () => {
+  const days = deriveMergesPerDay([
+    { pr_key: "o/r#1", outcome: "merged", at: "not-a-timestamp" },
+    { pr_key: "o/r#2", outcome: "merged", at: "not-a-timestamp" },
+  ]);
+  assertEquals(days.length, 1);
+  assertEquals(days[0].day, "not-a-timestamp");
+  assertEquals(days[0].merged, 2);
 });
 
 test("pollMergesPerDay projects the aggregate onto merges_per_day", async () => {

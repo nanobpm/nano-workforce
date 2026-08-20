@@ -7,10 +7,12 @@
 // set is not exhaustive), `at` = ISO timestamp. Only `outcome = 'merged'` rows feed this aggregate,
 // so merged-per-day is
 // fully DERIVABLE from that audit trail with NO new write-path bookkeeping (AGENTS.md: "Derivation
-// over duplication"). The canonical aggregate is the one in the issue:
+// over duplication"). The `at` audit value is UTC, but the day is bucketed in the viewer's LOCAL
+// timezone (issue #361) so an operator sees merges on the calendar day they happened locally, not
+// shifted across a UTC midnight. The canonical aggregate is the one in the issue, in local time:
 //
-//   SELECT date(at) AS day, COUNT(DISTINCT pr_key) AS merged
-//   FROM merges WHERE outcome = 'merged' GROUP BY date(at);
+//   SELECT date(at, 'localtime') AS day, COUNT(DISTINCT pr_key) AS merged
+//   FROM merges WHERE outcome = 'merged' GROUP BY date(at, 'localtime');
 //
 // Two halves, mirroring the `deriveDelivery`/`pollDelivery` and `deriveLineage`/`pollLineage`
 // convention:
@@ -37,7 +39,7 @@ export interface MergeAuditRow {
 
 /** One projected calendar day of merge throughput. */
 export interface MergeDay {
-  /** Calendar day, ISO `YYYY-MM-DD` (SQLite `date(at)`). */
+  /** Local calendar day, ISO `YYYY-MM-DD` (SQLite `date(at, 'localtime')` — issue #361). */
   day: string;
   /** Distinct PRs merged that day (`COUNT(DISTINCT pr_key)`). */
   merged: number;
@@ -51,12 +53,24 @@ export interface MergeDay {
 const BAR_WIDTH = 30;
 const BAR_FULL = "█";
 
-/** The calendar day of an ISO timestamp — the JS twin of SQLite `date(at)`. A well-formed `merges.at`
- *  is an ISO string, so the first 10 chars are `YYYY-MM-DD`; fall back to the whole trimmed value for
- *  any non-ISO shape so a malformed row still groups deterministically rather than throwing. */
+/** The **local** calendar day of an ISO timestamp — the viewer's-timezone twin of SQLite
+ *  `date(at, 'localtime')` (issue #361). The `merges.at` audit value is a UTC ISO string, but the
+ *  Velocity page is read by an operator in their own timezone, so bucketing on the UTC date split a
+ *  single local day across two rows (a late-evening merge west of UTC, or an early-morning one east
+ *  of it, landed on the wrong day). We derive the day from the LOCAL calendar fields of a parsed
+ *  `Date` instead, which follows the host process's zone (Node reads `process.env.TZ`, so a remote
+ *  deployment can pin the operator's zone via `TZ`; a co-located console — the default `npm start`
+ *  on `localhost` — is already the browser's zone). Any value that does not parse to a real instant
+ *  (a malformed / non-ISO row) falls back to the whole trimmed string so it still groups
+ *  deterministically rather than throwing. */
 function dayOf(at: string): string {
   const s = String(at).trim();
-  return /^\d{4}-\d{2}-\d{2}/.test(s) ? s.slice(0, 10) : s;
+  const d = new Date(s);
+  if (Number.isNaN(d.getTime())) return s;
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
 }
 
 /** Render a proportional bar: `merged` glyphs scaled against the busiest day's `max`, min one glyph
