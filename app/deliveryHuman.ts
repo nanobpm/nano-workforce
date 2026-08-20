@@ -134,18 +134,20 @@ export function normalizeEmits(node: Pick<DeliveryNodeHuman, "emits">): Delivery
 /** Derive a human node's CATEGORY from its typed emits (Decision 4, step 2), or `null` when no bespoke
  *  category form applies:
  *   - `ack` — the node emits NOTHING (a "click done" acknowledgement).
- *   - `publish` — the node emits EXACTLY ONE `artifact`/`version` fact (the manual-publish-hands-a-
- *     version-forward case), which the bespoke publish form captures as a `resolvedArtifact`.
- *   - `null` — a single scalar/url fact (the generic fallback captures it), OR two-or-more facts (no
- *     bespoke or generic single-value form can hold them → the agent-router territory).
+ *   - `publish` — the node emits EXACTLY ONE `artifact` fact (a `pkg@version` handle — the manual-
+ *     publish-hands-a-version-forward case), which the bespoke publish form captures as a
+ *     `resolvedArtifact`. A lone `version` (a BARE version, e.g. `1.4.0`) does NOT map here: the
+ *     publish form captures a `pkg@version` into `resolvedArtifact`, which fails `version` coercion in
+ *     {@link bindHumanEmits} — so a single `version` falls through to the generic single-value form
+ *     (which captures a bare `value`, validated against the `version` type).
+ *   - `null` — a single non-artifact scalar/url/version fact (the generic fallback captures it), OR
+ *     two-or-more facts (no bespoke or generic single-value form can hold them → the agent-router
+ *     territory).
  *  Kept coarse ON PURPOSE: bespoke category forms are a deterministic convenience, not an open
  *  taxonomy; anything they don't cover falls through to the generic fallback or the gated router. */
 export function deriveHumanCategory(emits: readonly DeliveryFact[]): HumanNodeCategory | null {
   if (emits.length === 0) return "ack";
-  if (emits.length === 1) {
-    const t = emits[0].type;
-    if (t === "artifact" || t === "version") return "publish";
-  }
+  if (emits.length === 1 && emits[0].type === "artifact") return "publish";
   return null;
 }
 

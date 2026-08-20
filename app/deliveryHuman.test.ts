@@ -49,13 +49,20 @@ test("resolveHumanForm: no emits selects the ack (click-done) category form", ()
   assertEquals(r.formKey, HUMAN_ACK_FORM);
 });
 
-test("resolveHumanForm: a single artifact/version emit selects the publish category form", () => {
-  for (const fact of [artifact(), version()]) {
-    const r = resolveHumanForm({ emits: [fact], human: {} });
-    assertEquals(r.source, "category");
-    assertEquals(r.category, "publish");
-    assertEquals(r.formKey, HUMAN_PUBLISH_FORM);
-  }
+test("resolveHumanForm: a single artifact emit selects the publish category form", () => {
+  const r = resolveHumanForm({ emits: [artifact()], human: {} });
+  assertEquals(r.source, "category");
+  assertEquals(r.category, "publish");
+  assertEquals(r.formKey, HUMAN_PUBLISH_FORM);
+});
+
+test("resolveHumanForm: a single bare-version emit falls through to the generic form", () => {
+  // The publish form captures a pkg@version `resolvedArtifact`, which fails `version` validation in
+  // bindHumanEmits — so a lone `version` must use the generic single-value form, not publish.
+  const r = resolveHumanForm({ emits: [version()], human: {} });
+  assertEquals(r.source, "generic");
+  assertEquals(r.formKey, GENERIC_HUMAN_FORM);
+  assertEquals(r.category, null);
 });
 
 test("resolveHumanForm: a single non-artifact scalar emit falls through to the generic form", () => {
@@ -63,6 +70,22 @@ test("resolveHumanForm: a single non-artifact scalar emit falls through to the g
   assertEquals(r.source, "generic");
   assertEquals(r.formKey, GENERIC_HUMAN_FORM);
   assertEquals(r.category, null);
+});
+
+test("regression: a single version resolves to a form whose capture key binds against `version`", () => {
+  // Guards the class: the resolved form's canonical capture key must produce a value that coerces
+  // against the emitted fact's type. The publish form captures `resolvedArtifact` (pkg@version),
+  // which FAILS `version` coercion — so a lone version must route to the generic `value` form.
+  const emit = version("publishedVersion");
+  const r = resolveHumanForm({ emits: [emit], human: {} });
+  assertEquals(r.formKey, GENERIC_HUMAN_FORM);
+  // Generic form's `value` capture binds cleanly against the version fact.
+  assertEquals(bindHumanEmits([emit], { value: "1.4.0" }).errors, []);
+  // Whereas the publish form's `resolvedArtifact` (a pkg@version) would NOT — the mismatch avoided.
+  assert(
+    bindHumanEmits([emit], { resolvedArtifact: "@nanobpm/urban@0.54.0" }).errors.length > 0,
+    "a pkg@version resolvedArtifact must not satisfy a bare-version emit",
+  );
 });
 
 test("resolveHumanForm: two-plus heterogeneous emits with no form gate the agent-router (null form)", () => {
@@ -79,10 +102,12 @@ test("resolveHumanForm: an explicit form suppresses the agent-router even with m
   assert(!needsAgentFormRouter(node), "an explicit form must pre-empt the router");
 });
 
-test("deriveHumanCategory: ack for empty, publish for one artifact/version, null otherwise", () => {
+test("deriveHumanCategory: ack for empty, publish for one artifact, null for a lone version/scalar", () => {
   assertEquals(deriveHumanCategory([]), "ack");
   assertEquals(deriveHumanCategory([artifact()]), "publish");
-  assertEquals(deriveHumanCategory([version()]), "publish");
+  // A lone bare `version` is NOT publish — the publish form captures a pkg@version resolvedArtifact,
+  // which fails `version` coercion; it falls through to the generic single-value form.
+  assertEquals(deriveHumanCategory([version()]), null);
   assertEquals(deriveHumanCategory([str("x")]), null);
   assertEquals(deriveHumanCategory([artifact(), version()]), null);
 });
