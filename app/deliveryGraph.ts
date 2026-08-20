@@ -19,8 +19,6 @@
 // Every error carries a JSON-path-qualified `path` (`nodes[2].kind`, `edges[1].from`, …) so the
 // caller can point the author straight at the offending input.
 
-import type { DeliveryGraph } from "../nano-generated/api-io.d.ts";
-
 /** The CLOSED node-kind allowlist (ADR 0005 Decision 2) — the trust boundary. Extensible only by a
  * deliberate ADR/PR (add the openapi variant + a case here), never by a graph author. Kept as the
  * single source of truth for "which kinds are legal" so the validator and any future compiler agree. */
@@ -95,14 +93,25 @@ const CONFIG_KEY: Record<DeliveryNodeKind, string> = {
  * disambiguated by the node set rather than by naive splitting: (1) if the WHOLE string is a node id
  * it is a bare completion-fact reference (`nodeId`, no fact); (2) else split at the LAST dot and, if
  * the prefix is a node id, it is a qualified `<nodeId>.<fact>` reference; (3) else it is dangling —
- * return the whole string as the (unresolvable) node id so the caller reports it against `from`. */
-function resolveFrom(from: string, nodeIds: ReadonlySet<string>): { nodeId: string; fact?: string } {
-  if (nodeIds.has(from)) return { nodeId: from };
+ * return the whole string as the (unresolvable) node id so the caller reports it against `from`.
+ * When BOTH interpretations resolve — the whole string is a node id AND its last-dot prefix is a
+ * node that emits the suffix as a fact — the reference is genuinely ambiguous; surface it via
+ * `ambiguousWith` so the caller rejects it (`bad-from`) rather than silently choosing the whole-node
+ * reading and producing an unintended DAG. */
+function resolveFrom(
+  from: string,
+  nodeFacts: ReadonlyMap<string, ReadonlySet<string>>,
+): { nodeId: string; fact?: string; ambiguousWith?: { nodeId: string; fact: string } } {
   const dot = from.lastIndexOf(".");
-  if (dot > 0 && dot < from.length - 1) {
-    const nodeId = from.slice(0, dot);
-    if (nodeIds.has(nodeId)) return { nodeId, fact: from.slice(dot + 1) };
+  const split =
+    dot > 0 && dot < from.length - 1 ? { prefix: from.slice(0, dot), suffix: from.slice(dot + 1) } : undefined;
+  if (nodeFacts.has(from)) {
+    if (split !== undefined && nodeFacts.get(split.prefix)?.has(split.suffix)) {
+      return { nodeId: from, ambiguousWith: { nodeId: split.prefix, fact: split.suffix } };
+    }
+    return { nodeId: from };
   }
+  if (split !== undefined && nodeFacts.has(split.prefix)) return { nodeId: split.prefix, fact: split.suffix };
   return { nodeId: from };
 }
 
@@ -116,7 +125,7 @@ function resolveFrom(from: string, nodeIds: ReadonlySet<string>): { nodeId: stri
  * Run this BEFORE any compile/deploy so a cycle, dangling edge, unknown kind, or unresolvable fact
  * reference is rejected with nothing started.
  */
-export function validateDeliveryGraph(graph: DeliveryGraph | unknown): DeliveryGraphError[] {
+export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
   const errors: DeliveryGraphError[] = [];
 
   if (!isRecord(graph) || !Array.isArray(graph.nodes)) {
@@ -246,7 +255,6 @@ export function validateDeliveryGraph(graph: DeliveryGraph | unknown): DeliveryG
       code: "dangling-edge",
     });
   }
-  const nodeIds: ReadonlySet<string> = new Set(nodeFacts.keys());
   // consumer (`to`) → set of upstream node ids (`from`'s node) — the dependency direction.
   const adjacency = new Map<string, Set<string>>();
   edges.forEach((rawEdge, i) => {
@@ -275,7 +283,17 @@ export function validateDeliveryGraph(graph: DeliveryGraph | unknown): DeliveryG
       });
     }
 
-    const { nodeId, fact } = resolveFrom(from, nodeIds);
+    const { nodeId, fact, ambiguousWith } = resolveFrom(from, nodeFacts);
+    if (ambiguousWith !== undefined) {
+      errors.push({
+        path: `${path}.from`,
+        message:
+          `edge \`from\` "${from}" is ambiguous — it names both node "${from}" (a completion ` +
+          `dependency) and fact "${ambiguousWith.fact}" of node "${ambiguousWith.nodeId}"; rename ` +
+          "a node id or choose a different fact to disambiguate",
+        code: "bad-from",
+      });
+    }
     const upstreamFacts = nodeFacts.get(nodeId);
     if (upstreamFacts === undefined) {
       errors.push({

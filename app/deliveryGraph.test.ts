@@ -142,6 +142,20 @@ test("a node id containing dots resolves as a whole node, not a fact split", () 
   assertEquals(errors, []);
 });
 
+test("bad-from: an edge that resolves as both a whole node id and a `<node>.<fact>` reference is rejected as ambiguous", () => {
+  const errors = validateDeliveryGraph({
+    nodes: [
+      { id: "a.b", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "c", type: "version" }] },
+      { id: "a.b.c", kind: "agent", agent: { jobType: "j" } },
+      { id: "d", kind: "agent", agent: { jobType: "j" } },
+    ],
+    edges: [{ from: "a.b.c", to: "d" }],
+  });
+  const err = hasCode(errors, "bad-from");
+  assertEquals(err.path, "edges[0].from");
+  assert(err.message.includes("ambiguous"), "message should call out the ambiguity");
+});
+
 test("cycle: a self-edge is rejected", () => {
   const errors = validateDeliveryGraph({
     nodes: [{ id: "a", kind: "agent", agent: { jobType: "j" } }],
