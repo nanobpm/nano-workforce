@@ -40,23 +40,56 @@ import {
   resolveDeliveryFrom,
   validateDeliveryGraph,
 } from "./deliveryGraph.ts";
+import { DELIVERY_HUMAN_ELEMENT, GENERIC_HUMAN_FORM } from "./deliveryHuman.ts";
 
-/** The engine-native sub-process each non-human node kind delegates to (Decision 2 — the graph
- * SCHEDULES, it does not re-implement execution). `wait` reuses the REAL `readiness-gate` process
- * (`resources/processes/readiness-gate.bpmn`); `agent`/`connector` target forward-declared bodies
- * that slice S4 binds to their concrete implementations. `human` has NO called element — it compiles
- * to a native user task, not a call activity. Kept as the single source of truth so the compiler and
- * the resolved-preview agree on the target. */
-const CALLED_ELEMENT: Record<Exclude<DeliveryNode["kind"], "human">, string> = {
-  agent: "delivery-node-agent",
-  wait: "readiness-gate",
-  connector: "delivery-node-connector",
+/** The engine-native BODY every node kind delegates to (Decision 2 — the graph SCHEDULES, it does not
+ * re-implement execution). Each node compiles to an EMBEDDED `bpmn:subProcess` (call activities are a
+ * no-op on the pinned WASM engine — the child is never instantiated — so, like the rest of the
+ * codebase, `plan-fanout`'s `readiness-preflight` included, delegation is an inlined subProcess that
+ * shares the parent variable scope). The inner task delegates to a real, already-registered worker /
+ * user-task body:
+ *   • `agent`     → the `senior:*` job the node names (the implementation-task body).
+ *   • `wait`      → the `pr.readiness-probe` service task (the reusable ReadinessProbe poll gate; the
+ *                   `pr` kind is S2). Polling its own target is what makes an unrelated upstream event
+ *                   unable to falsely resolve the wait (#274/S2 concurrency-correctness).
+ *   • `human`     → the S3 scheduled user-task + generic form + SLA (`delivery-human-task__<el>`,
+ *                   recognised by the `isDeliveryHumanElement` convention so it routes through the ONE
+ *                   canonical completer and the Tasks inbox).
+ *   • `connector` → the `pr.delivery-connector` dedupe stub (forward-declared; real I/O deferred per
+ *                   the ADR non-goals — but a real, idempotent node).
+ * Kept as the single source of truth so the compiler, the resolved-preview and the runner agree on
+ * the delegation target each node names. */
+const DELEGATE_TASK_TYPE: Record<Exclude<DeliveryNode["kind"], "agent" | "human">, string> = {
+  wait: "pr.readiness-probe",
+  connector: "pr.delivery-connector",
 };
+
+/** The BPMN `bpmn:process` id of the compiled one-shot definition (S1). Stable across compiles of the
+ * same graph — the pure S1 preview always emits this base id. The S4 runner (`deliveryRunner.ts`)
+ * derives a CONTENT-ADDRESSED deploy id from it (`delivery-graph-<sha>`), so re-deploying the same
+ * graph is idempotent and stale definitions are GC-identifiable; exported here as the single source of
+ * truth so the runner never hardcodes the literal it substitutes. */
+export const DELIVERY_GRAPH_PROCESS_ID = "delivery-graph";
+
+/** The BPMN element id a `human` node's inlined user task carries. One user task per human node (the
+ * compiled one-shot inlines each), so the id is per-node (`delivery-human-task__<element>`) — the
+ * `isDeliveryHumanElement` convention (single source of truth in `deliveryHuman.ts`) is what keeps it
+ * recognised by `ESCALATION_TASK_ELEMENTS` / the Tasks inbox despite the per-node suffix. */
+function humanTaskElement(element: string): string {
+  return `${DELIVERY_HUMAN_ELEMENT}__${element}`;
+}
+
+/** The BPMN element id a service node's bounded-timeout escalation user task carries — same
+ * human-completable convention as a human node, so a stalled `agent`/`wait`/`connector` escalates onto
+ * the Tasks inbox and is answerable by a human OR an agent (ADR 0046). */
+function escalationTaskElement(element: string): string {
+  return `${DELIVERY_HUMAN_ELEMENT}__${element}__esc`;
+}
 
 /** A never-reached exhaustiveness guard: `compileNode`'s `switch` covers every allowlisted kind, so
  * the closed union narrows to `never` here. If a future kind is added to the vocabulary without a
  * compiler arm, `tsc` flags this call — the compile-time half of the trust bound. */
-function assertNever(value: never, context: string): never {
+export function assertNever(value: never, context: string): never {
   throw new Error(`${context}: unreachable — non-allowlisted delivery node kind ${JSON.stringify(value)}`);
 }
 
@@ -68,6 +101,20 @@ function escapeXml(value: string): string {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&apos;");
+}
+
+/** Render a `name=value` XML attribute, choosing the delimiter so FEEL string literals survive the
+ * WASM engine's deploy path. That path does NOT decode `&#34;`/`&quot;` entities before FEEL parsing,
+ * so a FEEL expression containing a string literal MUST use a SINGLE-QUOTE attribute delimiter with
+ * literal double-quotes inside (verified empirically — an entity-escaped `"` silently yields no value,
+ * not an incident). When the value has no `"`, the ordinary double-quote form (with full entity
+ * escaping) is used. Deterministic. */
+function attr(name: string, value: string): string {
+  if (value.includes('"')) {
+    const inner = value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/'/g, "&apos;");
+    return `${name}='${inner}'`;
+  }
+  return `${name}="${escapeXml(value)}"`;
 }
 
 /** Escape a string for use inside a mermaid quoted label. Mermaid uses `#` HTML-entity escapes; a
@@ -89,6 +136,36 @@ function byCodeUnit(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
 
+/** The engine variable a producer node's OUTPUT mapping reads to publish a declared emitted `fact`
+ * (S4 late-binding). Each node kind's real body exposes the observed value under a canonical name:
+ *   • `wait` (readiness-gate) — a `mergedSha` fact reads the merge oid; an `artifact` fact reads the
+ *     `resolvedArtifact` bind (mirroring the `capability`/`pr` probe binds); anything else reads the
+ *     probe's `detail`.
+ *   • `human` (delivery-human) — an `artifact` fact reads `humanEmitArtifact`; anything else reads
+ *     `humanEmitValue` (the generic typed-emit form's captured value).
+ *   • `agent`/`connector` — the body's job worker returns the value under the fact's own name.
+ * Deterministic and total over the closed kind set. */
+function factSourceVar(kind: DeliveryNode["kind"], fact: DeliveryFact): string {
+  switch (kind) {
+    case "wait":
+      return fact.name === "mergedSha" ? "mergedSha" : fact.type === "artifact" ? "resolvedArtifact" : "detail";
+    case "human":
+      return fact.type === "artifact" ? "humanEmitArtifact" : "humanEmitValue";
+    case "agent":
+    case "connector":
+      return fact.name;
+    default:
+      return assertNever(kind, "factSourceVar");
+  }
+}
+
+/** A FEEL string literal (raw, with literal double-quotes). XML-attribute escaping and delimiter
+ * choice are handled by `attr` at emit time — do NOT pre-escape here, or the quote is hidden from
+ * `attr`'s single-quote-delimiter heuristic and gets double-encoded. */
+function feelStr(value: string): string {
+  return JSON.stringify(value);
+}
+
 /** One sequence flow in the compiled process — `source`/`target` are element ids, `name` an optional
  * (fact) label. */
 interface Flow {
@@ -96,6 +173,15 @@ interface Flow {
   source: string;
   target: string;
   name?: string;
+}
+
+/** One late-binding input a consumer node receives (S4): the producer node's business id, the
+ * referenced emitted fact name, and the flat parent variable (`<producerElement>_<fact>`) the
+ * producer's output mapping publishes the observed value into. */
+interface BoundInput {
+  fromNode: string;
+  fact: string;
+  producerElement: string;
 }
 
 /** A compiled node's structural fixtures: its own BPMN `element` id, and — when it has >1 downstream
@@ -250,7 +336,24 @@ export function compileDeliveryGraph(graph: unknown): CompileDeliveryGraphResult
   }
   const numberedFlows: Flow[] = flows.map((f, i) => ({ id: `f${i}`, ...f }));
 
-  const bpmn = renderBpmn(typed, wirings, numberedFlows, startForkGateway, endJoinGateway);
+  // Per-consumer late-binding inputs (S4): for every FACT-QUALIFIED edge, the consumer node receives
+  // the producer's emitted fact as a `boundFacts` list entry (`{from,name,value}`), threaded from the
+  // flat `<producerElement>_<fact>` variable the producer's output mapping publishes. Grouped by the
+  // consumer's element id and sorted (producer element, then fact) for determinism.
+  const boundInputsByElement = new Map<string, BoundInput[]>();
+  for (const edge of resolvedEdges) {
+    if (edge.fromFact === undefined) continue;
+    const consumerEl = mustGet(elementById, edge.to);
+    const producerEl = mustGet(elementById, edge.fromNode);
+    const list = boundInputsByElement.get(consumerEl) ?? [];
+    list.push({ fromNode: edge.fromNode, fact: edge.fromFact, producerElement: producerEl });
+    boundInputsByElement.set(consumerEl, list);
+  }
+  for (const list of boundInputsByElement.values()) {
+    list.sort((a, b) => byCodeUnit(a.producerElement, b.producerElement) || byCodeUnit(a.fact, b.fact));
+  }
+
+  const bpmn = renderBpmn(typed, wirings, numberedFlows, startForkGateway, endJoinGateway, boundInputsByElement);
   const diagram = renderMermaid(typed, wirings, resolvedEdges, elementById);
   const resolved = buildResolved(typed, wirings, resolvedEdges, producersById);
   const humanNodes = buildHumanNodes(nodes);
@@ -280,11 +383,31 @@ function buildResolved(
       element: w.element,
       emits: normaliseEmits(w.node),
       dependsOn: [...(producersById.get(w.node.id) ?? [])],
+      calledElement: delegateTarget(w.node, w.element),
     };
-    return w.node.kind === "human" ? base : { ...base, calledElement: CALLED_ELEMENT[w.node.kind] };
+    return base;
   });
   const resolved: CompileDeliveryGraphResult["resolved"] = { nodes, edges: [...edges] };
   return graph.name !== undefined ? { name: graph.name, ...resolved } : resolved;
+}
+
+/** The engine-native delegation target a node's inlined subProcess drives — its job `taskType`
+ * (`agent` → the named `senior:*` job; `wait` → `pr.readiness-probe`; `connector` →
+ * `pr.delivery-connector`) or, for a `human` node, its per-node user-task element id. Surfaced on the
+ * resolved preview so a co-designing agent sees exactly which worker/user-task each node fans out to.
+ * Deterministic and total over the closed kind set. */
+function delegateTarget(node: DeliveryNode, element: string): string {
+  switch (node.kind) {
+    case "agent":
+      return node.agent.jobType;
+    case "human":
+      return humanTaskElement(element);
+    case "wait":
+    case "connector":
+      return DELEGATE_TASK_TYPE[node.kind];
+    default:
+      return assertNever(node, "delegateTarget");
+  }
 }
 
 /** Extract the human STOP-points (sorted by id) — where the graph pauses for a person/agent, with the
@@ -334,6 +457,7 @@ function renderBpmn(
   flows: readonly Flow[],
   startForkGateway: string | undefined,
   endJoinGateway: string | undefined,
+  boundInputsByElement: ReadonlyMap<string, BoundInput[]>,
 ): string {
   // Precompute incoming/outgoing flow-id maps once (single pass over flows) so BPMN rendering stays
   // linear in the number of flows instead of O(elements * flows) from repeated full-array filtering.
@@ -359,10 +483,11 @@ function renderBpmn(
   lines.push(
     '<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" ' +
       'xmlns:zeebe="http://camunda.org/schema/zeebe/1.0" ' +
+      'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" ' +
       'id="Definitions_delivery_graph" targetNamespace="http://nanobpm.io/nano-workforce">',
   );
   const processName = graph.name ?? "Delivery graph";
-  lines.push(`  <bpmn:process id="delivery-graph" name="${escapeXml(processName)}" isExecutable="true">`);
+  lines.push(`  <bpmn:process id="${DELIVERY_GRAPH_PROCESS_ID}" name="${escapeXml(processName)}" isExecutable="true">`);
 
   // Start event.
   lines.push('    <bpmn:startEvent id="Start" name="Graph opened">');
@@ -385,7 +510,7 @@ function renderBpmn(
       lines.push(refs("outgoing", outgoing(w.joinGateway)));
       lines.push("    </bpmn:parallelGateway>");
     }
-    lines.push(renderNodeElement(w, incoming(w.element), outgoing(w.element)));
+    lines.push(renderNodeElement(w, incoming(w.element), outgoing(w.element), boundInputsByElement.get(w.element) ?? []));
     if (w.forkGateway) {
       lines.push(`    <bpmn:parallelGateway id="${w.forkGateway}" name="fan out of ${escapeXml(w.node.id)}">`);
       lines.push(refs("incoming", incoming(w.forkGateway)));
@@ -419,45 +544,266 @@ function renderBpmn(
   return `${lines.filter((l) => l.length > 0).join("\n")}\n`;
 }
 
-/** Render one node's BPMN element — a `callActivity` delegating to its engine-native body for
- * `agent`/`wait`/`connector` (Decision 2), or a native `userTask` for `human`. The `switch` is
- * EXHAUSTIVE over the closed kind union (the compile-time trust bound): a non-allowlisted kind cannot
- * be instantiated. */
-function renderNodeElement(w: NodeWiring, incoming: readonly string[], outgoing: readonly string[]): string {
+/** Render one node as an EMBEDDED `bpmn:subProcess` — the engine-native delegation unit (Decision 2).
+ * Call activities are a no-op on the pinned WASM engine (the child is never instantiated), so — like
+ * `plan-fanout`'s `readiness-preflight` — every node inlines a subProcess that shares the parent
+ * variable scope. A single outer in/out keeps the compiler's fan-out/fan-in topology clean; the
+ * subProcess's own `zeebe:ioMapping` (a) seeds the body its config from `nodeInputs.<element>` (runner-
+ * set), (b) threads late-binding `boundFacts` from upstream producers' emitted-fact variables, and (c)
+ * publishes this node's declared emits into flat `<element>_<fact>` variables a downstream consumer
+ * binds. Every node is bounded (a timeout escalates onto a human-completable user task) and resumable
+ * (engine-persisted). The `switch` is EXHAUSTIVE over the closed kind union — the compile-time trust
+ * bound. */
+function renderNodeElement(
+  w: NodeWiring,
+  incoming: readonly string[],
+  outgoing: readonly string[],
+  boundInputs: readonly BoundInput[],
+): string {
+  const el = w.element;
+  const name = escapeXml(`${w.node.kind}: ${w.node.id}`);
+  const flowRefs = [
+    ...incoming.map((id) => `      <bpmn:incoming>${id}</bpmn:incoming>`),
+    ...outgoing.map((id) => `      <bpmn:outgoing>${id}</bpmn:outgoing>`),
+  ];
+  const io = ioMappingLines(w, boundInputs);
+  const inner = innerBodyLines(w);
+  const lines = [
+    `    <bpmn:subProcess id="${el}" name="${name}">`,
+    ...flowRefs,
+    "      <bpmn:extensionElements>",
+    ...io,
+    "      </bpmn:extensionElements>",
+    ...inner,
+    "    </bpmn:subProcess>",
+  ];
+  return lines.join("\n");
+}
+
+/** The subProcess `<zeebe:ioMapping>` lines (8-space indented, inside `extensionElements`). Inputs
+ * pull the body's config from `nodeInputs.<element>` (runner-seeded) plus any late-binding
+ * `boundFacts`; outputs publish the node's declared emits into flat `<element>_<fact>` variables.
+ * Deterministic — fixed input/output order, positional fact targets. FEEL sources go through `attr`
+ * (single-quote delimiter) so embedded string literals survive the engine's deploy path. */
+function ioMappingLines(w: NodeWiring, boundInputs: readonly BoundInput[]): string[] {
+  const el = w.element;
   const node = w.node;
-  const name = escapeXml(`${node.kind}: ${node.id}`);
-  const flowRefs =
-    incoming.map((id) => `      <bpmn:incoming>${id}</bpmn:incoming>`).join("\n") +
-    (incoming.length > 0 && outgoing.length > 0 ? "\n" : "") +
-    outgoing.map((id) => `      <bpmn:outgoing>${id}</bpmn:outgoing>`).join("\n");
-  const body = flowRefs.length > 0 ? `\n${flowRefs}\n    ` : "";
+  const inputs: { source: string; target: string }[] = [];
+  const outputs: { source: string; target: string }[] = [];
+  const cfg = (field: string): string => `=nodeInputs.${el}.${field}`;
+  const guarded = (src: string): string => `=if (is defined(${src})) then ${src} else null`;
 
   switch (node.kind) {
     case "agent":
+      inputs.push({ source: cfg("jobType"), target: "jobType" });
+      inputs.push({ source: cfg("appendPrompt"), target: "appendPrompt" });
+      inputs.push({ source: cfg("timeout"), target: "nodeTimeout" });
+      break;
     case "wait":
-    case "connector": {
-      const called = CALLED_ELEMENT[node.kind];
-      return (
-        `    <bpmn:callActivity id="${w.element}" name="${name}">\n` +
-        `      <bpmn:extensionElements>\n` +
-        `        <zeebe:calledElement processId="${called}" propagateAllChildVariables="false" />\n` +
-        `      </bpmn:extensionElements>${body ? "" : "\n"}` +
-        (body ? body : "") +
-        `</bpmn:callActivity>`
-      );
-    }
+      inputs.push({ source: cfg("gateKey"), target: "gateKey" });
+      inputs.push({ source: cfg("probe"), target: "probe" });
+      inputs.push({ source: cfg("probeTimeout"), target: "probeTimeout" });
+      break;
     case "human":
-      return (
-        `    <bpmn:userTask id="${w.element}" name="${name}">\n` +
-        `      <bpmn:extensionElements>\n` +
-        `        <zeebe:userTask />\n` +
-        `      </bpmn:extensionElements>${body ? "" : "\n"}` +
-        (body ? body : "") +
-        `</bpmn:userTask>`
-      );
+      inputs.push({ source: cfg("escalationSlaTimeout"), target: "escalationSlaTimeout" });
+      inputs.push({ source: cfg("escalationAssignee"), target: "escalationAssignee" });
+      break;
+    case "connector":
+      inputs.push({ source: cfg("target"), target: "target" });
+      inputs.push({ source: cfg("dedupeKey"), target: "dedupeKey" });
+      inputs.push({ source: cfg("payload"), target: "payload" });
+      inputs.push({ source: cfg("timeout"), target: "nodeTimeout" });
+      break;
     default:
-      return assertNever(node, "renderNodeElement");
+      return assertNever(node, "ioMappingLines");
   }
+
+  // Late-binding: a deterministic FEEL list literal of the upstream producers' emitted facts, keyed
+  // exactly as the edge references them (`<producerNode>.<fact>`), read from the flat parent variable
+  // each producer publishes. Guarded so an as-yet-unobserved fact threads as null, not a FEEL error.
+  if (boundInputs.length > 0) {
+    const entries = boundInputs.map((b) => {
+      const varName = `${b.producerElement}_${b.fact}`;
+      return `{from: ${feelStr(b.fromNode)}, name: ${feelStr(b.fact)}, value: if (is defined(${varName})) then ${varName} else null}`;
+    });
+    inputs.push({ source: `=[${entries.join(", ")}]`, target: "boundFacts" });
+  }
+
+  // Outputs: publish each declared emit into `<element>_<fact>` for a downstream consumer to bind.
+  for (const fact of normaliseEmits(node)) {
+    outputs.push({ source: guarded(factSourceVar(node.kind, fact)), target: `${el}_${fact.name}` });
+  }
+
+  const lines: string[] = ["        <zeebe:ioMapping>"];
+  for (const i of inputs) lines.push(`          <zeebe:input ${attr("source", i.source)} target="${i.target}" />`);
+  for (const o of outputs) lines.push(`          <zeebe:output ${attr("source", o.source)} target="${o.target}" />`);
+  lines.push("        </zeebe:ioMapping>");
+  return lines;
+}
+
+/** The inner flow of a node's subProcess (6-space indented). `agent`/`connector` delegate to a job
+ * worker; `wait` polls the ReadinessProbe gate (blocking until its target is observed ready — polling
+ * its OWN target is what makes an unrelated upstream event unable to falsely resolve it); `human` is
+ * the S3 scheduled user-task + generic form + SLA. Each is a single-entry / single-exit subgraph with
+ * a bounded timeout that escalates onto a human-completable user task (or, for `human`, records an
+ * escalated outcome). */
+function innerBodyLines(w: NodeWiring): string[] {
+  const el = w.element;
+  const node = w.node;
+  switch (node.kind) {
+    case "agent":
+      return serviceBodyLines(el, node.id, attr("type", node.agent.jobType), []);
+    case "connector":
+      return serviceBodyLines(el, node.id, `type="${DELEGATE_TASK_TYPE.connector}"`, []);
+    case "wait":
+      return waitBodyLines(el, node.id);
+    case "human":
+      return humanBodyLines(el, node.id);
+    default:
+      return assertNever(node, "innerBodyLines");
+  }
+}
+
+/** `agent`/`connector` body: `start → serviceTask → end`, with a bounded `=nodeTimeout` boundary that
+ * escalates the stalled node onto a human-completable user task. `taskDefAttr` is the pre-rendered
+ * `type="…"` attribute; `taskProps` are optional `<zeebe:property>` envelope lines. */
+function serviceBodyLines(el: string, nodeId: string, taskDefAttr: string, taskProps: readonly string[]): string[] {
+  const esc = escalationTaskElement(el);
+  const taskExt =
+    taskProps.length > 0
+      ? [
+          "        <bpmn:extensionElements>",
+          `          <zeebe:taskDefinition ${taskDefAttr} />`,
+          "          <zeebe:properties>",
+          ...taskProps,
+          "          </zeebe:properties>",
+          "        </bpmn:extensionElements>",
+        ]
+      : [
+          "        <bpmn:extensionElements>",
+          `          <zeebe:taskDefinition ${taskDefAttr} />`,
+          "        </bpmn:extensionElements>",
+        ];
+  return [
+    `      <bpmn:startEvent id="${el}_start"><bpmn:outgoing>${el}_i0</bpmn:outgoing></bpmn:startEvent>`,
+    `      <bpmn:serviceTask id="${el}_task" name="${escapeXml(nodeId)}">`,
+    ...taskExt,
+    `        <bpmn:incoming>${el}_i0</bpmn:incoming>`,
+    `        <bpmn:outgoing>${el}_i1</bpmn:outgoing>`,
+    "      </bpmn:serviceTask>",
+    `      <bpmn:boundaryEvent id="${el}_be" name="Node timed out" attachedToRef="${el}_task">`,
+    `        <bpmn:outgoing>${el}_i2</bpmn:outgoing>`,
+    `        <bpmn:timerEventDefinition id="${el}_ted"><bpmn:timeDuration xsi:type="bpmn:tFormalExpression">=nodeTimeout</bpmn:timeDuration></bpmn:timerEventDefinition>`,
+    "      </bpmn:boundaryEvent>",
+    ...escalationTaskLines(esc, nodeId, [`${el}_i2`], `${el}_i3`),
+    `      <bpmn:endEvent id="${el}_end"><bpmn:incoming>${el}_i1</bpmn:incoming><bpmn:incoming>${el}_i3</bpmn:incoming></bpmn:endEvent>`,
+    flow(`${el}_i0`, `${el}_start`, `${el}_task`),
+    flow(`${el}_i1`, `${el}_task`, `${el}_end`),
+    flow(`${el}_i2`, `${el}_be`, esc),
+    flow(`${el}_i3`, esc, `${el}_end`),
+  ];
+}
+
+/** `wait` body: `start → pr.readiness-probe (poll) → ready? → end`, escalating on not-ready or on the
+ * `=probeTimeout` engine bound. The probe polls its OWN target, so an unrelated upstream event can
+ * never flip it to ready (#274/S2 concurrency-correctness); the `pr` kind (S2) binds `mergedSha`. */
+function waitBodyLines(el: string, nodeId: string): string[] {
+  const esc = escalationTaskElement(el);
+  return [
+    `      <bpmn:startEvent id="${el}_start"><bpmn:outgoing>${el}_i0</bpmn:outgoing></bpmn:startEvent>`,
+    `      <bpmn:serviceTask id="${el}_task" name="Probe readiness: ${escapeXml(nodeId)}">`,
+    "        <bpmn:extensionElements>",
+    `          <zeebe:taskDefinition type="${DELEGATE_TASK_TYPE.wait}" />`,
+    "          <zeebe:properties>",
+    '            <zeebe:property name="io.nanobpm.dataEnvelope.in" value="ReadinessProbeIn" />',
+    '            <zeebe:property name="io.nanobpm.dataEnvelope.out" value="ReadinessProbeOut" />',
+    "          </zeebe:properties>",
+    "        </bpmn:extensionElements>",
+    `        <bpmn:incoming>${el}_i0</bpmn:incoming>`,
+    `        <bpmn:outgoing>${el}_i1</bpmn:outgoing>`,
+    "      </bpmn:serviceTask>",
+    `      <bpmn:boundaryEvent id="${el}_be" name="Gate timed out" attachedToRef="${el}_task">`,
+    `        <bpmn:outgoing>${el}_i2</bpmn:outgoing>`,
+    `        <bpmn:timerEventDefinition id="${el}_ted"><bpmn:timeDuration xsi:type="bpmn:tFormalExpression">=probeTimeout</bpmn:timeDuration></bpmn:timerEventDefinition>`,
+    "      </bpmn:boundaryEvent>",
+    `      <bpmn:exclusiveGateway id="${el}_gw" name="ready?" default="${el}_i4">`,
+    `        <bpmn:incoming>${el}_i1</bpmn:incoming>`,
+    `        <bpmn:outgoing>${el}_i3</bpmn:outgoing>`,
+    `        <bpmn:outgoing>${el}_i4</bpmn:outgoing>`,
+    "      </bpmn:exclusiveGateway>",
+    ...escalationTaskLines(esc, nodeId, [`${el}_i2`, `${el}_i4`], `${el}_i5`),
+    `      <bpmn:endEvent id="${el}_end"><bpmn:incoming>${el}_i3</bpmn:incoming><bpmn:incoming>${el}_i5</bpmn:incoming></bpmn:endEvent>`,
+    flow(`${el}_i0`, `${el}_start`, `${el}_task`),
+    flow(`${el}_i1`, `${el}_task`, `${el}_gw`),
+    flow(`${el}_i2`, `${el}_be`, esc),
+    `      <bpmn:sequenceFlow id="${el}_i3" name="ready" sourceRef="${el}_gw" targetRef="${el}_end"><bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=ready = true</bpmn:conditionExpression></bpmn:sequenceFlow>`,
+    `      <bpmn:sequenceFlow id="${el}_i4" name="not ready" sourceRef="${el}_gw" targetRef="${esc}" />`,
+    flow(`${el}_i5`, esc, `${el}_end`),
+  ];
+}
+
+/** `human` body: the S3 scheduled user-task (`delivery-human-task__<el>`) + generic form + assignment
+ * + SLA. On completion the form's captured typed value is output (`humanEmitValue`/`humanEmitArtifact`
+ * — the subProcess ioMapping then publishes it as the node's fact); on SLA expiry the node records an
+ * `escalated` outcome and settles (bounded — the graph cannot silently wedge). Mirrors the standalone
+ * `delivery-human.bpmn` shape, reusing the S3 form + emit-var contract (`deliveryHuman.ts`). */
+function humanBodyLines(el: string, nodeId: string): string[] {
+  const task = humanTaskElement(el);
+  const assignee =
+    '=if (is defined(escalationAssignee) and escalationAssignee != null and trim(string(escalationAssignee)) != "") then escalationAssignee else null';
+  return [
+    `      <bpmn:startEvent id="${el}_start"><bpmn:outgoing>${el}_i0</bpmn:outgoing></bpmn:startEvent>`,
+    `      <bpmn:userTask id="${task}" name="Delivery: human step — ${escapeXml(nodeId)}">`,
+    "        <bpmn:extensionElements>",
+    `          <zeebe:formDefinition formId="${GENERIC_HUMAN_FORM}" />`,
+    "          <zeebe:userTask />",
+    `          <zeebe:assignmentDefinition candidateGroups="operators" ${attr("assignee", assignee)} />`,
+    "          <zeebe:ioMapping>",
+    `            <zeebe:output ${attr("source", '="completed"')} target="humanOutcome" />`,
+    `            <zeebe:output ${attr("source", "=if (is defined(value)) then value else null")} target="humanEmitValue" />`,
+    `            <zeebe:output ${attr("source", "=if (is defined(resolvedArtifact)) then resolvedArtifact else null")} target="humanEmitArtifact" />`,
+    `            <zeebe:output ${attr("source", "=if (is defined(note)) then note else null")} target="humanNote" />`,
+    "          </zeebe:ioMapping>",
+    "        </bpmn:extensionElements>",
+    `        <bpmn:incoming>${el}_i0</bpmn:incoming>`,
+    `        <bpmn:outgoing>${el}_i1</bpmn:outgoing>`,
+    "      </bpmn:userTask>",
+    `      <bpmn:boundaryEvent id="${el}_sla" name="SLA elapsed" attachedToRef="${task}">`,
+    `        <bpmn:outgoing>${el}_i2</bpmn:outgoing>`,
+    `        <bpmn:timerEventDefinition id="${el}_ted"><bpmn:timeDuration xsi:type="bpmn:tFormalExpression">=escalationSlaTimeout</bpmn:timeDuration></bpmn:timerEventDefinition>`,
+    "      </bpmn:boundaryEvent>",
+    `      <bpmn:endEvent id="${el}_end"><bpmn:incoming>${el}_i1</bpmn:incoming></bpmn:endEvent>`,
+    `      <bpmn:endEvent id="${el}_escEnd" name="Escalated">`,
+    "        <bpmn:extensionElements>",
+    `          <zeebe:ioMapping><zeebe:input ${attr("source", '="escalated"')} target="humanOutcome" /></zeebe:ioMapping>`,
+    "        </bpmn:extensionElements>",
+    `        <bpmn:incoming>${el}_i2</bpmn:incoming>`,
+    "      </bpmn:endEvent>",
+    flow(`${el}_i0`, `${el}_start`, task),
+    flow(`${el}_i1`, task, `${el}_end`),
+    flow(`${el}_i2`, `${el}_sla`, `${el}_escEnd`),
+  ];
+}
+
+/** A bounded node's escalation user task — a human-completable stop (`isDeliveryHumanElement`
+ * convention) that a human OR an agent (ADR 0046) answers to unstick a stalled node. */
+function escalationTaskLines(esc: string, nodeId: string, incoming: readonly string[], outgoing: string): string[] {
+  return [
+    `      <bpmn:userTask id="${esc}" name="Escalate: ${escapeXml(nodeId)}">`,
+    "        <bpmn:extensionElements>",
+    `          <zeebe:formDefinition formId="${GENERIC_HUMAN_FORM}" />`,
+    "          <zeebe:userTask />",
+    '          <zeebe:assignmentDefinition candidateGroups="operators" />',
+    "        </bpmn:extensionElements>",
+    ...incoming.map((id) => `        <bpmn:incoming>${id}</bpmn:incoming>`),
+    `        <bpmn:outgoing>${outgoing}</bpmn:outgoing>`,
+    "      </bpmn:userTask>",
+  ];
+}
+
+/** A plain `<bpmn:sequenceFlow>` (6-space indented). */
+function flow(id: string, source: string, target: string): string {
+  return `      <bpmn:sequenceFlow id="${id}" sourceRef="${source}" targetRef="${target}" />`;
 }
 
 /** Render a human-readable mermaid `flowchart` of the resolved graph — one node per box labelled

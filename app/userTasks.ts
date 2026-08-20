@@ -19,7 +19,7 @@
 // it open.
 import type { DataLayer } from "@nanobpm/urban";
 import { CONFORMANCE_ESCALATION_ELEMENT } from "./conformance.ts";
-import { DELIVERY_HUMAN_ELEMENT } from "./deliveryHuman.ts";
+import { DELIVERY_HUMAN_ELEMENT, isDeliveryHumanElement } from "./deliveryHuman.ts";
 import { FEATURE_BLOCKED_ELEMENT, FEATURE_ESCALATION_ELEMENT, type FeatureEscalationRow } from "./feature.ts";
 import type { PlanReview } from "./plan.ts";
 import type { TrialMergeAuditRow } from "./trialMerge.ts";
@@ -80,6 +80,16 @@ export const USER_TASK_KIND_LABELS: Readonly<Record<string, string>> = {
   [DELIVERY_HUMAN_ELEMENT]: "Delivery: human step",
 };
 
+/** The Tasks-inbox label for an open user-task `elementId`, or `undefined` when the element is not a
+ *  surfaced kind (so an arbitrary internal user task is never listed). Exact table lookup PLUS the
+ *  delivery-human convention: the S4 compiler inlines each `human` node (and each service node's
+ *  bounded-timeout escalation twin) with a per-node id `delivery-human-task__<el>[__esc]`, which a bare
+ *  table lookup would miss — matched through the single-source-of-truth `isDeliveryHumanElement`
+ *  predicate so every inlined human/escalation task surfaces under the one delivery-human label. */
+export function userTaskKindLabel(elementId: string): string | undefined {
+  return USER_TASK_KIND_LABELS[elementId] ?? (isDeliveryHumanElement(elementId) ? USER_TASK_KIND_LABELS[DELIVERY_HUMAN_ELEMENT] : undefined);
+}
+
 /** The denormalised context the poller has resolved for an open escalation user task. */
 export interface UserTaskContext {
   userTaskKey: string;
@@ -108,7 +118,7 @@ export interface UserTaskContext {
  *  tasks out of the inbox). */
 export function buildUserTaskRow(ctx: UserTaskContext, at: string = now()): UserTaskRow | null {
   const userTaskKey = ctx.userTaskKey.trim();
-  const kindLabel = USER_TASK_KIND_LABELS[ctx.elementId];
+  const kindLabel = userTaskKindLabel(ctx.elementId);
   if (!userTaskKey || !kindLabel) return null;
   const subjectKey = ctx.subjectKey.trim() || (ctx.processKey ?? "").trim() || userTaskKey;
   const question = typeof ctx.question === "string" && ctx.question.trim() ? ctx.question.trim() : null;
