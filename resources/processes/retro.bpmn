@@ -146,27 +146,27 @@
         <dc:Bounds x="616" y="80" width="100" height="80" />
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_gw-deviations" bpmnElement="gw-deviations" isMarkerVisible="true">
-        <dc:Bounds x="776" y="95" width="50" height="50" />
+        <dc:Bounds x="816" y="95" width="50" height="50" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="770" y="65" width="62" height="14" />
+          <dc:Bounds x="801" y="76" width="81" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_conformance-escalation" bpmnElement="conformance-escalation">
-        <dc:Bounds x="751" y="240" width="100" height="80" />
+        <dc:Bounds x="966" y="240" width="100" height="80" />
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_record-conformance-ack" bpmnElement="record-conformance-ack">
-        <dc:Bounds x="911" y="240" width="100" height="80" />
+        <dc:Bounds x="1166" y="240" width="100" height="80" />
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_synthesize" bpmnElement="synthesize">
-        <dc:Bounds x="1056" y="80" width="100" height="80" />
+        <dc:Bounds x="1366" y="80" width="100" height="80" />
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_record" bpmnElement="record">
-        <dc:Bounds x="1256" y="80" width="100" height="80" />
+        <dc:Bounds x="1566" y="80" width="100" height="80" />
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_End" bpmnElement="End">
-        <dc:Bounds x="1456" y="102" width="36" height="36" />
+        <dc:Bounds x="1766" y="102" width="36" height="36" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="1434" y="143" width="80" height="14" />
+          <dc:Bounds x="1744" y="143" width="80" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
       <bpmndi:BPMNEdge id="BPMNEdge_f_start" bpmnElement="f_start">
@@ -183,32 +183,36 @@
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_toDeviationsGw" bpmnElement="f_toDeviationsGw">
         <di:waypoint x="716" y="120" />
-        <di:waypoint x="776" y="120" />
+        <di:waypoint x="816" y="120" />
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_noDeviations" bpmnElement="f_noDeviations">
-        <di:waypoint x="826" y="120" />
-        <di:waypoint x="1056" y="120" />
-      </bpmndi:BPMNEdge>
-      <bpmndi:BPMNEdge id="BPMNEdge_f_deviations" bpmnElement="f_deviations">
-        <di:waypoint x="801" y="145" />
-        <di:waypoint x="801" y="240" />
-      </bpmndi:BPMNEdge>
-      <bpmndi:BPMNEdge id="BPMNEdge_f_toConformanceAck" bpmnElement="f_toConformanceAck">
-        <di:waypoint x="851" y="280" />
-        <di:waypoint x="911" y="280" />
-      </bpmndi:BPMNEdge>
-      <bpmndi:BPMNEdge id="BPMNEdge_f_ackToSynthesize" bpmnElement="f_ackToSynthesize">
-        <di:waypoint x="1011" y="280" />
-        <di:waypoint x="1106" y="280" />
-        <di:waypoint x="1106" y="160" />
+        <di:waypoint x="866" y="120" />
+        <di:waypoint x="1366" y="120" />
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_toRecord" bpmnElement="f_toRecord">
-        <di:waypoint x="1156" y="120" />
-        <di:waypoint x="1256" y="120" />
+        <di:waypoint x="1466" y="120" />
+        <di:waypoint x="1566" y="120" />
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_toEnd" bpmnElement="f_toEnd">
-        <di:waypoint x="1356" y="120" />
-        <di:waypoint x="1456" y="120" />
+        <di:waypoint x="1666" y="120" />
+        <di:waypoint x="1766" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_f_deviations" bpmnElement="f_deviations">
+        <di:waypoint x="841" y="145" />
+        <di:waypoint x="841" y="280" />
+        <di:waypoint x="966" y="280" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="846" y="206" width="74" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_f_toConformanceAck" bpmnElement="f_toConformanceAck">
+        <di:waypoint x="1066" y="280" />
+        <di:waypoint x="1166" y="280" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_f_ackToSynthesize" bpmnElement="f_ackToSynthesize">
+        <di:waypoint x="1266" y="280" />
+        <di:waypoint x="1416" y="280" />
+        <di:waypoint x="1416" y="160" />
       </bpmndi:BPMNEdge>
     </bpmndi:BPMNPlane>
   </bpmndi:BPMNDiagram>
