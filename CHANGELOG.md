@@ -1,3 +1,10 @@
+## [0.106.3](https://github.com/nanobpm/nano-workforce/compare/v0.106.2...v0.106.3) (2026-08-20)
+
+
+### Bug Fixes
+
+* **models:** regenerate stale retro.bpmn DI ([#365](https://github.com/nanobpm/nano-workforce/issues/365)) ([5619ee5](https://github.com/nanobpm/nano-workforce/commit/5619ee5805fb788ae5deebeb75bb0aa11f9c478d)), closes [355/#356](https://github.com/nanobpm/nano-workforce/issues/356)
+
 ## [0.106.2](https://github.com/nanobpm/nano-workforce/compare/v0.106.1...v0.106.2) (2026-08-20)
 
 
