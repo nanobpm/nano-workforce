@@ -1,3 +1,10 @@
+## [0.114.1](https://github.com/nanobpm/nano-workforce/compare/v0.114.0...v0.114.1) (2026-08-20)
+
+
+### Bug Fixes
+
+* **convergence-loop:** give the scope-integrity gate a human-override door ([#395](https://github.com/nanobpm/nano-workforce/issues/395)) ([#401](https://github.com/nanobpm/nano-workforce/issues/401)) ([23f8354](https://github.com/nanobpm/nano-workforce/commit/23f83541c57b3474b36a92baa1d88bdd6535df9b))
+
 # [0.114.0](https://github.com/nanobpm/nano-workforce/compare/v0.113.0...v0.114.0) (2026-08-20)
 
 
