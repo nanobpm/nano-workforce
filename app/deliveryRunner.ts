@@ -128,7 +128,12 @@ export async function runDeliveryGraph(
     processDefinitionId,
     variables: { nodeInputs },
   });
-  return { ok: true, handle: { processDefinitionId, bpmn, nodeInputs, processInstanceKey } };
+  // The engine can yield a numeric key; `DeliveryRunHandle.processInstanceKey` is typed `string` and
+  // downstream consumers expect a string — coerce (codebase-wide `String(...)` pattern, e.g. app/plan.ts).
+  return {
+    ok: true,
+    handle: { processDefinitionId, bpmn, nodeInputs, processInstanceKey: String(processInstanceKey) },
+  };
 }
 
 /** Rewrite the compiled BPMN's base `bpmn:process` id to the content-addressed deploy id. The base id

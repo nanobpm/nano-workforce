@@ -36,6 +36,8 @@ test("connectorDedupeKey: author key wins; else derives <processInstanceKey>:<el
   assertEquals(connectorDedupeKey({ dedupeKey: "  ", processInstanceKey: "pi9", elementId: "n3" }), "pi9:n3");
   assertEquals(connectorDedupeKey({ dedupeKey: null }), null);
   assertEquals(connectorDedupeKey({ processInstanceKey: "pi9" }), null);
+  // The engine can return a NUMERIC processInstanceKey — it must still derive a key, not fail closed.
+  assertEquals(connectorDedupeKey({ processInstanceKey: 12345, elementId: "n3" }), "12345:n3");
 });
 
 test("first dispatch delivers exactly once; a redelivery on the same key dedupes and never re-acts", async () => {

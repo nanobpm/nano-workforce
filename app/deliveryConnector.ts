@@ -62,12 +62,14 @@ export interface BoundFact {
  * un-dedupable and MUST NOT perform the side effect (fail closed rather than double-fire). */
 export function connectorDedupeKey(input: {
   dedupeKey?: string | null;
-  processInstanceKey?: string | null;
+  processInstanceKey?: string | number | null;
   elementId?: string | null;
 }): string | null {
   const authored = typeof input.dedupeKey === "string" ? input.dedupeKey.trim() : "";
   if (authored) return authored;
-  const pik = typeof input.processInstanceKey === "string" ? input.processInstanceKey.trim() : "";
+  // The engine can hand back a NUMERIC processInstanceKey — coerce (codebase-wide `String(...)` pattern)
+  // so a connector node without an authored dedupeKey stays dedupable instead of failing closed.
+  const pik = input.processInstanceKey == null ? "" : String(input.processInstanceKey).trim();
   const el = typeof input.elementId === "string" ? input.elementId.trim() : "";
   if (pik && el) return `${pik}:${el}`;
   return null;

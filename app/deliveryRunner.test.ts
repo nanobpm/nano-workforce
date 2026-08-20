@@ -11,7 +11,7 @@
 // proven end-to-end in `e2e/delivery-graph.e2e.ts`.
 import { test } from "node:test";
 import { assert, assertEquals } from "#test-assert";
-import { prepareDeliveryGraph } from "./deliveryRunner.ts";
+import { prepareDeliveryGraph, runDeliveryGraph } from "./deliveryRunner.ts";
 import type { DeliveryGraph } from "../nano-generated/api-io.d.ts";
 
 const GRAPH: DeliveryGraph = {
@@ -96,4 +96,16 @@ test("a malformed graph returns the S1 compile errors and prepares nothing", () 
   const r = prepareDeliveryGraph({ nodes: [{ id: "a", kind: "agent", agent: { jobType: "j" } }], edges: [{ from: "a", to: "ghost" }] } as unknown as DeliveryGraph);
   assert(!r.ok, "a dangling edge fails to prepare");
   assert(r.errors.some((e) => e.path === "edges[0].to"), `expected a dangling-edge error, got ${JSON.stringify(r.errors)}`);
+});
+
+test("runDeliveryGraph coerces a numeric engine processInstanceKey to a string handle", async () => {
+  // The engine can yield a NUMERIC key; the handle is typed `string` and downstream expects a string.
+  const engine = {
+    deployResources: async () => [],
+    createInstance: async () => ({ processInstanceKey: 987654321 as unknown as string }),
+  };
+  const r = await runDeliveryGraph(engine, GRAPH);
+  assert(r.ok, `expected ok:true, got ${JSON.stringify(r)}`);
+  assertEquals(r.handle.processInstanceKey, "987654321");
+  assertEquals(typeof r.handle.processInstanceKey, "string");
 });
