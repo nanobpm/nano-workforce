@@ -80,7 +80,7 @@ test("merge-protocol: only a `ui` land method is decision-required; the rest are
   }
 });
 
-// --- task (plan-fanout w_gw "escalated?") ---
+// --- task (plan-fanout w_gw "clean terminal?" — the implement-stage escalation net, #360) ---
 
 test("task: status=escalated with an answerable question is decision-required; blank is none", () => {
   assertEquals(classifyEscalation({ kind: "task", question: "which approach?" }), "decision-required");

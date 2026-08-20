@@ -131,6 +131,36 @@ test("pollUserTasks: projects feature / plan-review / trial-merge / PR-wait esca
   assertEquals(byKey["ut-pr"].subject_title, "Resolve the reviews");
 });
 
+test("pollUserTasks: projects a feature-escalation that lands on a plan-fanout plan instance (issue #358)", async () => {
+  // plan-fanout embeds each wave slice as a multi-instance `implement` subprocess, so a slice that
+  // escalates parks on the `feature-escalation` user task on the PLAN-ROOT process instance — never on
+  // a standalone `feature_runs` instance. The feature scan above only walks `feature_runs`, so before
+  // #358 the plan scan's hardcoded {plan-review, trial-merge} whitelist silently dropped it and the
+  // escalation was invisible in the Tasks inbox (the instance-19153 orphan). The plan scan must project
+  // EVERY open user-task element in the canonical registry, keyed to the epic (plan) subject, sourcing
+  // the question from the `feature_escalations` audit log the escalate arm writes (keyed by plan_key).
+  const { data, stores } = memData({
+    plans: [
+      { plan_key: "o/r#64", status: "dispatched", process_key: "pp-64", issue_url: "https://github.com/o/r/issues/64", title: "Learn BPMN scaffold" },
+    ],
+    feature_escalations: [
+      { id: 1, feature_key: "o/r#64", question: "the agent returned no machine-readable result — enrol the PR?", created_at: "2025-01-01T00:00:00.000Z", job_key: "j1" },
+    ],
+  });
+  const engine = fakeEngine({ "pp-64": [{ userTaskKey: "ut-embedded-feat", elementId: "feature-escalation" }] });
+
+  await pollUserTasks(data, engine);
+
+  const byKey = Object.fromEntries((stores.user_tasks ?? []).map((r) => [r.user_task_key, r]));
+  assertEquals(Object.keys(byKey), ["ut-embedded-feat"]);
+  assertEquals(byKey["ut-embedded-feat"].element_id, "feature-escalation");
+  assertEquals(byKey["ut-embedded-feat"].kind_label, "Feature escalation");
+  assertEquals(byKey["ut-embedded-feat"].subject_type, "plan");
+  assertEquals(byKey["ut-embedded-feat"].subject_key, "o/r#64");
+  assertEquals(byKey["ut-embedded-feat"].subject_title, "Learn BPMN scaffold");
+  assertEquals(byKey["ut-embedded-feat"].question, "the agent returned no machine-readable result — enrol the PR?");
+});
+
 test("pollUserTasks: projects a merge-loop wait-merge-answer escalation into user_tasks as \"PR merge\"", async () => {
   // During the merge phase a PR's process_key points at its merge-loop instance; the merge escalation
   // parks on a native `wait-merge-answer` userTask (#256) and writes the SAME `escalations` row the

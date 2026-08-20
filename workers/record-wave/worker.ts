@@ -102,21 +102,33 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
       : "blocked";
     const summary = str(res.summary);
     const prRef = str(res.pr);
-    // Only trust a PR ref when the agent reports it actually opened one.
+    // Only trust a PR ref as HANDOFF-ready when the agent reports it actually opened one.
     const parsed = status === "opened" && prRef ? parsePr(prRef) : null;
     // A keyless "opened" is effectively blocked: downstream waves gate on `opened` meaning
     // "this dependency has an opened PR", so an "opened" with no usable PR key must NOT satisfy
     // a dependant (it would let dependents run with a phantom, un-mergeable dependency).
     const effectiveStatus = status === "opened" && !parsed ? "blocked" : status;
+    // Issue #360 — a result that isn't a clean, machine-readable terminal (`opened`/`blocked`/
+    // `skipped`): a missing status, or an `escalated` that fell through the answer loop to abandon.
+    // This is the fail-closed path, and it must stop LOSING information:
+    //   (2) never discard a PR the agent demonstrably opened — persist its key on the row even for a
+    //       non-`opened` status so the work is recoverable from the UI, not just SQLite. It is NOT
+    //       handed off (only `parsed`/`opened` is, below) — a non-`opened` PR is not review-ready.
+    //   (3) synthesise a reason so a blocked slice is never blank on the epic-detail Summary, the way
+    //       record-trial-merge does for its own no-machine-readable-result case.
+    const unreadable = !rawStatus || !isWaveResultStatus(rawStatus);
+    const retainedPr = parsed ?? (prRef ? parsePr(prRef) : null);
+    const effectiveSummary = summary ??
+      (unreadable ? "The implementation agent returned no machine-readable result" : undefined);
 
     const row = byTaskId.get(taskId);
     if (row) {
       const patch: Partial<PlanTask> = { status: effectiveStatus, updated_at: ts };
-      if (summary !== undefined) patch.summary = summary;
-      if (parsed?.prKey) {
-        patch.pr_key = parsed.prKey;
+      if (effectiveSummary !== undefined) patch.summary = effectiveSummary;
+      if (retainedPr?.prKey) {
+        patch.pr_key = retainedPr.prKey;
         // Keep the in-memory row current so a same-wave dependant (rare) sees the PR key.
-        row.pr_key = parsed.prKey;
+        row.pr_key = retainedPr.prKey;
       }
       await taskTable.update(row.id, patch);
     }

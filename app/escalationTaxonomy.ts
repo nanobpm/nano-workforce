@@ -39,8 +39,10 @@ export type EscalationKind =
   | "dead-end-base"
   // `mergeProtocol` (app/mergeProtocol.ts) — the repo's declared land method.
   | "merge-protocol"
-  // plan-fanout `w_gw` "escalated?" gateway — an implementation agent reported
-  // `status = "escalated"` with a question.
+  // plan-fanout `w_gw` "clean terminal?" gateway — the implement-stage escalation net (issue #360).
+  // Any non-clean-terminal slice outcome routes through the `record-wave-escalation` worker, which
+  // classifies with this kind: the agent's own answerable question passes through, and a no-machine-
+  // readable result (or a blank-question `escalated`) is synthesised into an answerable one.
   | "task";
 
 /** Everything the classifier may need from any raise site. Each field is consumed only by the

@@ -85,6 +85,7 @@ import {
   prEscalations,
   reconcileUserTasks,
   TRIAL_MERGE_ELEMENT,
+  USER_TASK_KIND_LABELS,
   type UserTaskRow,
   userTasks,
 } from "./userTasks.ts";
@@ -2176,10 +2177,19 @@ export async function pollUserTasks(data: DataLayer, engine: EngineClient) {
     }
   }
 
-  // Plan escalations (`plan-review-decision` / `trial-merge-decision`) — read each in-flight plan's
-  // open user tasks and pair them with the open audit row's question/findings. Dedupe by `plan_key`
-  // across the status queries (mirroring the feature-run scan above): a plan whose status transitions
-  // mid-pass could otherwise match twice and push duplicate `desired` rows for one `user_task_key`.
+  // Plan-instance escalations — read each in-flight plan's open user tasks and project EVERY element in
+  // the canonical `USER_TASK_KIND_LABELS` registry, not a hardcoded {plan-review, trial-merge} whitelist
+  // (issue #358). plan-fanout embeds each wave slice as a multi-instance `implement` subprocess, so a
+  // slice that escalates parks its `feature-escalation` user task on the PLAN-ROOT instance — which the
+  // feature scan (walking only `feature_runs`) never sees. A whitelist here silently dropped it (the
+  // instance-19153 orphan); projecting the whole registry keyed to the epic (plan) subject means any
+  // user-task element that lands on a plan instance is surfaced, and a new escalation kind can never
+  // regress into invisibility. The display `question` is enriched per-kind from the audit log each kind
+  // records (plan-review findings / trial-merge summary / the `feature_escalations` row the plan-fanout
+  // escalate arm writes, keyed by `plan_key`); a kind with no plan-side source projects with a null
+  // question. Dedupe by `plan_key` across the status queries (mirroring the feature-run scan above): a
+  // plan whose status transitions mid-pass could otherwise match twice and push duplicate `desired` rows
+  // for one `user_task_key`.
   const planSeen = new Set<string>();
   for (const status of PLAN_ACTIVE_STATUSES) {
     for (const plan of await plans(data).find({ status })) {
@@ -2194,41 +2204,32 @@ export async function pollUserTasks(data: DataLayer, engine: EngineClient) {
         continue;
       }
       for (const t of tasks) {
+        if (!t.elementId || !(t.elementId in USER_TASK_KIND_LABELS)) continue;
+        let question: string | null = null;
         if (t.elementId === PLAN_REVIEW_ELEMENT) {
-          const question = latestPlanReviewFindings(await planReviews(data).find({ plan_key: plan.plan_key }));
-          push(
-            buildUserTaskRow(
-              {
-                userTaskKey: t.userTaskKey,
-                elementId: PLAN_REVIEW_ELEMENT,
-                subjectType: "plan",
-                subjectKey: plan.plan_key,
-                subjectTitle: plan.title,
-                subjectUrl: plan.issue_url,
-                question,
-                processKey: plan.process_key,
-              },
-              at,
-            ),
-          );
+          question = latestPlanReviewFindings(await planReviews(data).find({ plan_key: plan.plan_key }));
         } else if (t.elementId === TRIAL_MERGE_ELEMENT) {
-          const question = latestTrialMergeQuestion(await trialMergeAudits(data, plan.plan_key));
-          push(
-            buildUserTaskRow(
-              {
-                userTaskKey: t.userTaskKey,
-                elementId: TRIAL_MERGE_ELEMENT,
-                subjectType: "plan",
-                subjectKey: plan.plan_key,
-                subjectTitle: plan.title,
-                subjectUrl: plan.issue_url,
-                question,
-                processKey: plan.process_key,
-              },
-              at,
-            ),
-          );
+          question = latestTrialMergeQuestion(await trialMergeAudits(data, plan.plan_key));
+        } else if (t.elementId === FEATURE_ESCALATION_ELEMENT) {
+          // A plan-embedded slice's escalate arm writes its synthesised question to `feature_escalations`
+          // keyed by `plan_key` (the epic has no standalone `feature_runs` row for the embedded slice).
+          question = latestFeatureEscalationQuestion(await featureEscalations(data).find({ feature_key: plan.plan_key }));
         }
+        push(
+          buildUserTaskRow(
+            {
+              userTaskKey: t.userTaskKey,
+              elementId: t.elementId,
+              subjectType: "plan",
+              subjectKey: plan.plan_key,
+              subjectTitle: plan.title,
+              subjectUrl: plan.issue_url,
+              question,
+              processKey: plan.process_key,
+            },
+            at,
+          ),
+        );
       }
     }
   }

@@ -274,3 +274,60 @@ test("record-wave runs trial merge for non-queue repos with populated heads", as
     restore();
   }
 });
+
+// ── Fail-closed forensics (issue #360) ─────────────────────────────────────────────────────────────
+// A slice that returns no machine-readable result is still coerced to terminal `blocked` here (the
+// escalation/answer decision already happened in the `implement` subprocess, before this aggregator).
+// But the aggregator must no longer LOSE information when it fails closed: it must (2) retain any PR the
+// agent demonstrably opened so the work is recoverable from the UI, and (3) synthesise a reason so the
+// epic-detail Summary is never blank. Before #360 both were dropped (`pr_key = NULL`, `summary = NULL`).
+test("record-wave retains the PR and synthesises a summary for a no-result slice (issue #360)", async () => {
+  const rows: Row[] = [{ id: 1, plan_key: "owner/repo#64", task_id: "scaffold", status: "pending", wave: 0 }];
+  const { app } = fakeApp(rows);
+
+  await handler(
+    {
+      variables: {
+        planKey: "owner/repo#64",
+        currentWave: 0,
+        waveCount: 1,
+        waveTasks: [{ id: "scaffold" }],
+        // No `status` — the agent finished without a machine-readable result — but it DID open a PR.
+        waveResults: [{ pr: "owner/repo#84" }],
+      },
+    } as any,
+    app,
+  );
+
+  const row = rows[0] as unknown as Record<string, unknown>;
+  // Still fail-closed to `blocked` (we never assume the un-reported PR is mergeable) …
+  assertEquals(row.status, "blocked");
+  // … but the PR the agent opened is retained on the row (recoverable from the UI) …
+  assertEquals(row.pr_key, "owner/repo#84");
+  // … and the reason is no longer blank.
+  assertEquals(typeof row.summary, "string");
+  assertEquals((row.summary as string).length > 0, true);
+});
+
+test("record-wave preserves the agent's own summary rather than overwriting it (issue #360)", async () => {
+  const rows: Row[] = [{ id: 1, plan_key: "owner/repo#64", task_id: "scaffold", status: "pending", wave: 0 }];
+  const { app } = fakeApp(rows);
+
+  await handler(
+    {
+      variables: {
+        planKey: "owner/repo#64",
+        currentWave: 0,
+        waveCount: 1,
+        waveTasks: [{ id: "scaffold" }],
+        waveResults: [{ status: "blocked", summary: "upstream API not ready" }],
+      },
+    } as any,
+    app,
+  );
+
+  const row = rows[0] as unknown as Record<string, unknown>;
+  assertEquals(row.status, "blocked");
+  // A genuine, machine-readable `blocked` with its own summary is left untouched — no synthesis.
+  assertEquals(row.summary, "upstream API not ready");
+});
