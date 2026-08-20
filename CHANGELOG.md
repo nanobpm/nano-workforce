@@ -1,3 +1,10 @@
+# [0.107.0](https://github.com/nanobpm/nano-workforce/compare/v0.106.3...v0.107.0) (2026-08-20)
+
+
+### Features
+
+* port nwf models to defineFlow (S5, [#320](https://github.com/nanobpm/nano-workforce/issues/320)) ([#353](https://github.com/nanobpm/nano-workforce/issues/353)) ([c0b2d9d](https://github.com/nanobpm/nano-workforce/commit/c0b2d9ddea4f5c56159f011ca70203aa3f3c91fe)), closes [nanobpm/nano-ide#314](https://github.com/nanobpm/nano-ide/issues/314) [355/#356](https://github.com/nanobpm/nano-workforce/issues/356) [nano-ide#405](https://github.com/nano-ide/issues/405)
+
 ## [0.106.3](https://github.com/nanobpm/nano-workforce/compare/v0.106.2...v0.106.3) (2026-08-20)
 
 
