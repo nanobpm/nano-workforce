@@ -1,3 +1,10 @@
+# [0.106.0](https://github.com/nanobpm/nano-workforce/compare/v0.105.0...v0.106.0) (2026-08-20)
+
+
+### Features
+
+* escalate unmet/undisclosed conformance deviations to the Tasks inbox ([#356](https://github.com/nanobpm/nano-workforce/issues/356)) ([5ad24bc](https://github.com/nanobpm/nano-workforce/commit/5ad24bcadf833934804973a25fd96f4eb4d28a84)), closes [#354](https://github.com/nanobpm/nano-workforce/issues/354) [#354](https://github.com/nanobpm/nano-workforce/issues/354)
+
 # [0.105.0](https://github.com/nanobpm/nano-workforce/compare/v0.104.0...v0.105.0) (2026-08-19)
 
 
