@@ -6,8 +6,9 @@
 //   • DETERMINISM (same JSON → byte-identical bpmn/diagram/resolved — the core trust property),
 //   • rejection of every malformed class (unknown-kind / dangling / bad-from / cycle) as ok:false
 //     with path-qualified errors forwarded verbatim from the validator,
-//   • the trust bound — only allowlisted kinds are instantiated (callActivity/userTask, allowlisted
-//     calledElement targets; a non-allowlisted kind never reaches compilation),
+//   • the trust bound — every node inlines an embedded subProcess whose inner body delegates to an
+//     allowlisted engine-native worker (serviceTask `type`) or user task (human); no scriptTask/
+//     callActivity ever appears (call activities are a no-op on the pinned WASM engine, ADR 0005 S4),
 //   • fan-in / fan-out / multi-root / multi-leaf → explicit parallel gateways,
 //   • humanNodes[] and sideEffects[] extraction.
 import { test } from "node:test";
@@ -82,16 +83,35 @@ test("determinism: the same JSON always yields byte-identical bpmn/diagram/resol
   assertEquals(c.diagram, a.diagram);
 });
 
-test("trust bound: only allowlisted kinds are instantiated — no other BPMN activity type appears", () => {
+test("trust bound: every node inlines an embedded subProcess delegating to an allowlisted body — no other activity type", () => {
   const r = compileOk(RELEASE_RUNBOOK);
-  // Every node compiles to a callActivity (agent/wait/connector) or a userTask (human) — nothing else.
-  assertEquals((r.bpmn.match(/<bpmn:callActivity /g) ?? []).length, 3);
-  assertEquals((r.bpmn.match(/<bpmn:userTask /g) ?? []).length, 1);
+  // Each of the 4 nodes compiles to an EMBEDDED subProcess (call activities are a no-op on the pinned
+  // WASM engine, so delegation is an inlined subProcess sharing the parent scope — never a callActivity).
+  assertEquals((r.bpmn.match(/<bpmn:callActivity/g) ?? []).length, 0);
+  assertEquals((r.bpmn.match(/<bpmn:subProcess /g) ?? []).length, 4);
   assert(!r.bpmn.includes("<bpmn:scriptTask"), "no script task is ever emitted");
-  assert(!r.bpmn.includes("<bpmn:serviceTask"), "no bespoke service task is ever emitted");
-  // Every call activity delegates to an allowlisted engine-native body.
-  const called = [...r.bpmn.matchAll(/processId="([^"]+)"/g)].map((m) => m[1]);
-  assertEquals(new Set(called), new Set(["delivery-node-agent", "readiness-gate", "delivery-node-connector"]));
+  // Each node's inner body delegates to an allowlisted engine-native body: a `serviceTask` typed to a
+  // worker (agent → its `senior:*` job; wait → `pr.readiness-probe`; connector → `pr.delivery-connector`)
+  // or a `userTask` (human). Collect the service delegation targets.
+  const types = new Set([...r.bpmn.matchAll(/<zeebe:taskDefinition type="([^"]+)"/g)].map((m) => m[1]));
+  assert(types.has("senior:feature"), "agent delegates to its named job type");
+  assert(types.has("pr.readiness-probe"), "wait delegates to the readiness-probe gate");
+  assert(types.has("pr.delivery-connector"), "connector delegates to the connector worker");
+  // The human node inlines the S3 user-task body under the per-node convention id, and the bounded
+  // service nodes inline a human-completable escalation userTask under the same convention.
+  assert(/<bpmn:userTask id="delivery-human-task__n\d+"/.test(r.bpmn), "human node inlines its per-node user task");
+  assert(/<bpmn:userTask id="delivery-human-task__n\d+__esc"/.test(r.bpmn), "a bounded node inlines an escalation user task");
+});
+
+test("late-binding: a fact-qualified edge threads a boundFacts input into the consumer subProcess", () => {
+  const r = compileOk(RELEASE_RUNBOOK);
+  // `publish.resolvedArtifact -> consume`: the connector subProcess receives the human's emitted fact as
+  // a boundFacts list entry, read from the flat `<producerElement>_<fact>` variable the producer publishes.
+  // FEEL string literals must use single-quote XML-attribute delimiters (the engine deploy path drops
+  // `&quot;`-encoded quotes silently), so the boundFacts source is single-quoted with literal quotes.
+  assert(r.bpmn.includes("target=\"boundFacts\""), "the consumer receives a boundFacts input");
+  const boundInput = /<zeebe:input source='=\[\{from: "publish"[^']*\}\]' target="boundFacts"/.test(r.bpmn);
+  assert(boundInput, `boundFacts is a single-quoted FEEL list literal, got: ${r.bpmn.match(/source='[^']*' target="boundFacts"/)?.[0] ?? r.bpmn.match(/source="[^"]*" target="boundFacts"/)?.[0]}`);
 });
 
 test("rejects unknown kind (by construction) with a path-qualified error, nothing compiled", () => {
@@ -223,10 +243,12 @@ test("resolved edges carry the resolved fromNode and the referenced fact", () =>
   assertEquals(plainEdge?.fromFact, undefined);
 });
 
-test("BPMN is structurally coherent: one start, one end, every flow endpoint declared", () => {
+test("BPMN is structurally coherent: one process start, one process end, every flow endpoint declared", () => {
   const r = compileOk(RELEASE_RUNBOOK);
-  assertEquals((r.bpmn.match(/<bpmn:startEvent /g) ?? []).length, 1);
-  assertEquals((r.bpmn.match(/<bpmn:endEvent /g) ?? []).length, 1);
+  // The TOP-LEVEL process has exactly one Start and one End (each inlined subProcess has its OWN
+  // start/end events, so a raw `<bpmn:startEvent>` count is not the process boundary — the fixed ids are).
+  assertEquals((r.bpmn.match(/ id="Start"/g) ?? []).length, 1);
+  assertEquals((r.bpmn.match(/ id="End"/g) ?? []).length, 1);
   // Every sequenceFlow source/target id is declared as an element id in the document.
   const declaredIds = new Set([...r.bpmn.matchAll(/ id="([^"]+)"/g)].map((m) => m[1]));
   for (const m of r.bpmn.matchAll(/sourceRef="([^"]+)" targetRef="([^"]+)"/g)) {

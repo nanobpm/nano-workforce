@@ -41,6 +41,19 @@ import { DELIVERY_FACT_TYPES, type DeliveryFactType, FACT_NAME_MAX_LENGTH, FACT_
  *  and in `USER_TASK_KIND_LABELS` (`app/userTasks.ts`) so it surfaces on the Tasks inbox. */
 export const DELIVERY_HUMAN_ELEMENT = "delivery-human-task";
 
+/** True for any user-task element id a delivery-graph `human` node schedules. The S3 static body
+ *  (`delivery-human.bpmn`) uses the bare `delivery-human-task` id, but the S4 compiler INLINES the
+ *  human body once per node into the one-shot process (embedded sub-processes — call activities are a
+ *  no-op on the pinned WASM engine, so a single shared static instance is not reusable), giving each a
+ *  UNIQUE convention id `delivery-human-task__<element>` (and its bounded-timeout escalation twin
+ *  `delivery-human-task__<element>__esc`). Exact-membership routing on the bare id would drop these, so
+ *  every surface that recognises a delivery human task (completion routing in `agentCompletion.ts`, the
+ *  Tasks-inbox label in `userTasks.ts`) matches through THIS one predicate — the single source of truth
+ *  for the id convention, so the compiler's id form and the routers can never drift apart. */
+export function isDeliveryHumanElement(elementId: string): boolean {
+  return elementId === DELIVERY_HUMAN_ELEMENT || elementId.startsWith(`${DELIVERY_HUMAN_ELEMENT}__`);
+}
+
 /** The GENERIC fallback form (Decision 4, step 3): captures ONE typed value into the node's single
  *  declared emitted fact, so a human node with no explicit/category form can STILL emit downstream. */
 export const GENERIC_HUMAN_FORM = "delivery-human-generic";

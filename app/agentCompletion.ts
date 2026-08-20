@@ -23,7 +23,7 @@
 import { readFileSync } from "node:fs";
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { CONFORMANCE_ESCALATION_ELEMENT } from "./conformance.ts";
-import { DELIVERY_HUMAN_ELEMENT } from "./deliveryHuman.ts";
+import { DELIVERY_HUMAN_ELEMENT, isDeliveryHumanElement } from "./deliveryHuman.ts";
 
 const now = () => new Date().toISOString();
 
@@ -320,10 +320,22 @@ async function resolveEscalationTask(
   const open = await engine.openUserTasks();
   const match = open.find((t) => t.userTaskKey === userTaskKey);
   if (!match) return { ok: false, reason: "no open completable task" };
-  if (!match.elementId || !allowed.has(match.elementId)) {
+  if (!match.elementId || !isCompletableElement(match.elementId, allowed)) {
     return { ok: false, reason: "not a completable task" };
   }
   return { ok: true, elementId: match.elementId };
+}
+
+/** Whether an open task's `elementId` is completable through the given `allowed` surface. Exact-set
+ *  membership PLUS the delivery-human convention: any surface that admits the bare `DELIVERY_HUMAN_ELEMENT`
+ *  (both `ESCALATION_TASK_ELEMENTS` and `HUMAN_COMPLETABLE_ELEMENTS` do) also admits the per-node inlined
+ *  human tasks and their bounded-timeout escalation twins (`delivery-human-task__<el>[__esc]`) the S4
+ *  compiler emits — matched through the single-source-of-truth `isDeliveryHumanElement` predicate so the
+ *  routing can never drift from the compiler's id form (a human node is answerable by a human OR an
+ *  agent, ADR 0046). */
+function isCompletableElement(elementId: string, allowed: ReadonlySet<string>): boolean {
+  if (allowed.has(elementId)) return true;
+  return allowed.has(DELIVERY_HUMAN_ELEMENT) && isDeliveryHumanElement(elementId);
 }
 
 /** Complete an escalation user task AS AN AGENT (ADR 0046). Resolves the parked task by its key,

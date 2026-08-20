@@ -199,6 +199,10 @@
     {
       "taskType": "pr.readiness-probe",
       "handler": "workers/readiness-probe/worker.ts"
+    },
+    {
+      "taskType": "pr.delivery-connector",
+      "handler": "workers/delivery-connector/worker.ts"
     }
   ],
   "externalTaskTypes": [
