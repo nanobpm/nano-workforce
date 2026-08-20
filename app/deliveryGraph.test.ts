@@ -277,6 +277,28 @@ test("a non-array `edges` is rejected as a shape error (`invalid-edges`), not si
   assertEquals(err.path, "edges");
 });
 
+test("a non-object edge entry is a shape error (`invalid-edges`), not `dangling-edge`", () => {
+  const errors = validateDeliveryGraph({
+    nodes: [{ id: "a", kind: "agent", agent: { jobType: "j" } }],
+    edges: ["nope"],
+  });
+  const err = hasCode(errors, "invalid-edges");
+  assertEquals(err.path, "edges[0]");
+});
+
+test("an edge missing string `from`/`to` is a shape error (`invalid-edges`), not `dangling-edge`", () => {
+  const errors = validateDeliveryGraph({
+    nodes: [{ id: "a", kind: "agent", agent: { jobType: "j" } }],
+    edges: [{ from: "", to: 3 }],
+  });
+  const fromErr = hasCode(errors, "invalid-edges");
+  assertEquals(fromErr.path, "edges[0].from");
+  assert(
+    errors.some((e) => e.code === "invalid-edges" && e.path === "edges[0].to"),
+    "expected the missing `to` to also be an invalid-edges shape error",
+  );
+});
+
 test("invalid-id: a node id violating the openapi id pattern is rejected so downstream id use stays safe", () => {
   const errors = validateDeliveryGraph({
     nodes: [{ id: "1 bad id", kind: "agent", agent: { jobType: "j" } }],

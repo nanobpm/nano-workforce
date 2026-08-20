@@ -347,17 +347,20 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
   const adjacency = new Map<string, Set<string>>();
   edges.forEach((rawEdge, i) => {
     const path = `edges[${i}]`;
+    // A non-object entry or a missing/empty `from`/`to` is an edge *shape* error, not an
+    // endpoint-resolution failure — so it carries `invalid-edges` (like the non-array `edges` case
+    // above), reserving `dangling-edge` for a well-formed endpoint that names no node/fact.
     if (!isRecord(rawEdge)) {
-      errors.push({ path, message: "each edge must be an object with `from` and `to`", code: "dangling-edge" });
+      errors.push({ path, message: "each edge must be an object with `from` and `to`", code: "invalid-edges" });
       return;
     }
     const from = rawEdge.from;
     const to = rawEdge.to;
     if (typeof from !== "string" || from.length === 0) {
-      errors.push({ path: `${path}.from`, message: "edge is missing a string `from`", code: "dangling-edge" });
+      errors.push({ path: `${path}.from`, message: "edge is missing a string `from`", code: "invalid-edges" });
     }
     if (typeof to !== "string" || to.length === 0) {
-      errors.push({ path: `${path}.to`, message: "edge is missing a string `to`", code: "dangling-edge" });
+      errors.push({ path: `${path}.to`, message: "edge is missing a string `to`", code: "invalid-edges" });
     }
     if (typeof from !== "string" || typeof to !== "string" || from.length === 0 || to.length === 0) {
       return;
