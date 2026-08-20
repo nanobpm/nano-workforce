@@ -1,3 +1,10 @@
+## [0.107.1](https://github.com/nanobpm/nano-workforce/compare/v0.107.0...v0.107.1) (2026-08-20)
+
+
+### Bug Fixes
+
+* **merge-loop:** converge PRs merged/closed out-of-band at every merge-stage wait ([#370](https://github.com/nanobpm/nano-workforce/issues/370)) ([c673c82](https://github.com/nanobpm/nano-workforce/commit/c673c823b6ed5dde5710c4cb677f7c6f01ae59de)), closes [nanobpm/nano-workforce#368](https://github.com/nanobpm/nano-workforce/issues/368)
+
 # [0.107.0](https://github.com/nanobpm/nano-workforce/compare/v0.106.3...v0.107.0) (2026-08-20)
 
 
