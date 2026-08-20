@@ -1,3 +1,10 @@
+## [0.111.1](https://github.com/nanobpm/nano-workforce/compare/v0.111.0...v0.111.1) (2026-08-20)
+
+
+### Bug Fixes
+
+* **merge:** gate red declared-required checks in classifyMergeability ([#393](https://github.com/nanobpm/nano-workforce/issues/393)) ([f40412a](https://github.com/nanobpm/nano-workforce/commit/f40412a07a51f3274a30274f266a099e3036741a)), closes [#392](https://github.com/nanobpm/nano-workforce/issues/392) [#348](https://github.com/nanobpm/nano-workforce/issues/348)
+
 # [0.111.0](https://github.com/nanobpm/nano-workforce/compare/v0.110.0...v0.111.0) (2026-08-20)
 
 
