@@ -118,8 +118,14 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
     //       record-trial-merge does for its own no-machine-readable-result case.
     const unreadable = !rawStatus || !isWaveResultStatus(rawStatus);
     const retainedPr = parsed ?? (prRef ? parsePr(prRef) : null);
-    const effectiveSummary = summary ??
-      (unreadable ? "The implementation agent returned no machine-readable result" : undefined);
+    // Distinguish a slice that reported NO status at all from one that reported a status which simply
+    // isn't a clean terminal (e.g. `escalated` that fell through the answer loop to operator Abandon /
+    // SLA auto-abandon — the subprocess ends without rewriting `status`). The latter DID return a
+    // machine-readable result, so the generic "no result" reason would misreport it.
+    const noResultSummary = !rawStatus
+      ? "The implementation agent returned no machine-readable result"
+      : `The implementation agent did not return a clean terminal result (reported status "${rawStatus}"), so the slice was treated as blocked`;
+    const effectiveSummary = summary ?? (unreadable ? noResultSummary : undefined);
 
     const row = byTaskId.get(taskId);
     if (row) {

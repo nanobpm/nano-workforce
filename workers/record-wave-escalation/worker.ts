@@ -40,7 +40,7 @@ const str = (v: unknown): string | undefined =>
 // analogue of record-trial-merge's synthesised trial-merge question. It names the recoverable work (a
 // PR may exist on the slice's branch) and the two answers the `w_gw_answer` gateway routes on.
 const NO_RESULT_QUESTION =
-  'The implementation agent finished without a machine-readable result (no status was reported), so we cannot tell whether the slice succeeded. It may still have opened a PR (check for a branch targeting the epic base). Answer with guidance to re-run the slice — or answer exactly "abandon" to skip it and continue the epic.';
+  'The implementation agent finished without a machine-readable result (no status was reported), so we cannot tell whether the slice succeeded. It may still have opened a PR (check for a branch targeting the epic base). Choose "Answer" and give guidance to re-run the slice — or choose "Abandon" to skip it and continue the epic.';
 
 const handler: AppJobHandler<In, Out> = async (job, app) => {
   const planKey = job.variables.planKey;

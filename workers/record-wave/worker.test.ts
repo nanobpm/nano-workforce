@@ -309,6 +309,37 @@ test("record-wave retains the PR and synthesises a summary for a no-result slice
   assertEquals((row.summary as string).length > 0, true);
 });
 
+// A slice that DID return a machine-readable status which simply isn't a clean terminal (e.g. an
+// `escalated` slice the operator abandoned, or an SLA auto-abandon — the `implement` subprocess ends
+// without rewriting `status`) must not be misreported as "returned no machine-readable result": it did.
+test("record-wave synthesises an accurate reason for an escalated-then-abandoned slice, not the no-result reason (Copilot advisory, #360)", async () => {
+  const rows: Row[] = [{ id: 1, plan_key: "owner/repo#64", task_id: "scaffold", status: "pending", wave: 0 }];
+  const { app } = fakeApp(rows);
+
+  await handler(
+    {
+      variables: {
+        planKey: "owner/repo#64",
+        currentWave: 0,
+        waveCount: 1,
+        waveTasks: [{ id: "scaffold" }],
+        // The slice escalated; the operator abandoned it, so the subprocess ended with status "escalated".
+        waveResults: [{ status: "escalated" }],
+      },
+    } as any,
+    app,
+  );
+
+  const row = rows[0] as unknown as Record<string, unknown>;
+  assertEquals(row.status, "blocked");
+  const summary = row.summary as string;
+  assertEquals(typeof summary, "string");
+  // Must NOT claim a slice that returned a machine-readable status returned none …
+  assertEquals(summary.includes("no machine-readable result"), false);
+  // … and must name the status it actually reported.
+  assertEquals(summary.includes("escalated"), true);
+});
+
 test("record-wave preserves the agent's own summary rather than overwriting it (issue #360)", async () => {
   const rows: Row[] = [{ id: 1, plan_key: "owner/repo#64", task_id: "scaffold", status: "pending", wave: 0 }];
   const { app } = fakeApp(rows);
