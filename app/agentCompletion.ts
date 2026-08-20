@@ -22,6 +22,7 @@
 
 import { readFileSync } from "node:fs";
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
+import { CONFORMANCE_ESCALATION_ELEMENT } from "./conformance.ts";
 
 const now = () => new Date().toISOString();
 
@@ -79,13 +80,23 @@ export const ESCALATION_TASK_ELEMENTS: ReadonlySet<string> = new Set([
  *  `acknowledge-blocked` door onto the one canonical `complete-user-task` door). */
 export const FEATURE_BLOCKED_TASK_ELEMENT = "feature-blocked";
 
+/** The `conformance-escalation` operator user-task element id (retro.bpmn) — the native ack a retro
+ *  run parks on when the spec-conformance audit finds the epic did NOT cleanly meet its spec (a
+ *  reduced / not-verified slice, or an unraised deviation). Like `feature-blocked` it is a human-only
+ *  acknowledgement (never agent-answerable), so it lives OUTSIDE `ESCALATION_TASK_ELEMENTS` and only
+ *  the HUMAN completer accepts it (issue #216). Re-exported from the canonical
+ *  `CONFORMANCE_ESCALATION_ELEMENT` (app/conformance.ts) — one source of truth, no drift surface. */
+export const CONFORMANCE_ESCALATION_TASK_ELEMENT = CONFORMANCE_ESCALATION_ELEMENT;
+
 /** The user-task `elementId`s a HUMAN operator may complete from the Tasks inbox via the one canonical
  *  `complete-user-task` door: every agent-answerable escalation PLUS the human-only `feature-blocked`
- *  acknowledgement. The AGENT completer stays scoped to `ESCALATION_TASK_ELEMENTS` (no `feature-blocked`),
- *  so widening the human surface never lets an agent retire a blocked run. */
+ *  and `conformance-escalation` acknowledgements. The AGENT completer stays scoped to
+ *  `ESCALATION_TASK_ELEMENTS` (neither ack), so widening the human surface never lets an agent retire
+ *  a blocked run or a conformance review. */
 export const HUMAN_COMPLETABLE_ELEMENTS: ReadonlySet<string> = new Set([
   ...ESCALATION_TASK_ELEMENTS,
   FEATURE_BLOCKED_TASK_ELEMENT,
+  CONFORMANCE_ESCALATION_TASK_ELEMENT,
 ]);
 
 /** Each escalation `elementId` → the `.form` whose contract governs its completion variables (the
@@ -98,6 +109,7 @@ const ESCALATION_FORM_BY_ELEMENT: Readonly<Record<string, string>> = {
   "wait-answer": "pr-escalation",
   "wait-merge-answer": "pr-escalation",
   "feature-blocked": "feature-blocked",
+  [CONFORMANCE_ESCALATION_TASK_ELEMENT]: "conformance-escalation",
 };
 
 /** A field's `conditional.hide` rule, parsed from the FEEL subset the `.form` files use

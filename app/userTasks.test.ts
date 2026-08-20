@@ -5,6 +5,7 @@
 // These are the pure source of truth the poller projects.
 import { test } from "node:test";
 import { assert, assertEquals } from "#test-assert";
+import { CONFORMANCE_ESCALATION_ELEMENT } from "./conformance.ts";
 import type { PlanReview } from "./plan.ts";
 import type { TrialMergeAuditRow } from "./trialMerge.ts";
 import {
@@ -61,6 +62,25 @@ test("buildUserTaskRow: a blank question / missing url normalises to null", () =
   assertEquals(row?.subject_url, null);
   assertEquals(row?.process_key, null);
   assertEquals(row?.kind_label, "Trial merge");
+});
+
+test("buildUserTaskRow: a conformance-escalation projects the 'Conformance review' label (issue #216)", () => {
+  const row = buildUserTaskRow(
+    {
+      userTaskKey: "ut-c",
+      elementId: CONFORMANCE_ESCALATION_ELEMENT,
+      subjectType: "plan",
+      subjectKey: "o/r#7",
+      subjectTitle: "Ship the cache",
+      question: "slice 2 reduced",
+    },
+    AT,
+  );
+  assert(row !== null);
+  assertEquals(row?.element_id, "conformance-escalation");
+  assertEquals(row?.kind_label, "Conformance review");
+  assertEquals(row?.subject_type, "plan");
+  assertEquals(row?.question, "slice 2 reduced");
 });
 
 test("buildUserTaskRow: an unknown (non-escalation) element yields null — no arbitrary user task leaks", () => {

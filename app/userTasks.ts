@@ -18,6 +18,7 @@
 // tasks visible; a completed task's row is removed on the next pass when the engine no longer reports
 // it open.
 import type { DataLayer } from "@nanobpm/urban";
+import { CONFORMANCE_ESCALATION_ELEMENT } from "./conformance.ts";
 import { FEATURE_BLOCKED_ELEMENT, FEATURE_ESCALATION_ELEMENT, type FeatureEscalationRow } from "./feature.ts";
 import type { PlanReview } from "./plan.ts";
 import type { TrialMergeAuditRow } from "./trialMerge.ts";
@@ -74,6 +75,7 @@ export const USER_TASK_KIND_LABELS: Readonly<Record<string, string>> = {
   [TRIAL_MERGE_ELEMENT]: "Trial merge",
   [PR_WAIT_ANSWER_ELEMENT]: "PR review",
   [PR_WAIT_MERGE_ANSWER_ELEMENT]: "PR merge",
+  [CONFORMANCE_ESCALATION_ELEMENT]: "Conformance review",
 };
 
 /** The denormalised context the poller has resolved for an open escalation user task. */

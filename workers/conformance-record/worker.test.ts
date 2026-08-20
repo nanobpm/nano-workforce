@@ -1,5 +1,5 @@
 import { test } from "node:test";
-import { assertEquals } from "#test-assert";
+import { assertEquals, assertRejects } from "#test-assert";
 import { noopLog } from "../../test/log.ts";
 import handler from "./worker.ts";
 
@@ -36,8 +36,9 @@ function fakeApp() {
 
 test("conformance-record: persists a filed conformance from hoisted result vars", async () => {
   const { app, stores } = fakeApp();
-  await handler(
+  const out = await handler(
     {
+      processInstanceKey: "retro-inst-5",
       variables: {
         planKey: "o/r#5",
         status: "filed",
@@ -66,12 +67,17 @@ test("conformance-record: persists a filed conformance from hoisted result vars"
   assertEquals(row.deviations_unraised, 1);
   assertEquals(row.has_deviations, 1);
   assertEquals(row.report, "the full conformance report");
+  // Tracks the retro instance and enters the inbox scan (issue #216) — a deviation escalates.
+  assertEquals(row.process_key, "retro-inst-5");
+  assertEquals(row.review_status, "reviewing");
+  // The gateway routes off the returned ground-truth flag, not the agent's hoisted var.
+  assertEquals(out, { hasDeviations: true });
 });
 
 test("conformance-record: derives has_deviations from ground truth even when the agent flag is absent", async () => {
   const { app, stores } = fakeApp();
   await handler(
-    { variables: { planKey: "o/r#6", status: "filed", commentUrl: "https://x/6#c", slicesNotVerified: 1 } } as any,
+    { processInstanceKey: "retro-inst-6", variables: { planKey: "o/r#6", status: "filed", commentUrl: "https://x/6#c", slicesNotVerified: 1 } } as any,
     app as any,
   );
   // The agent didn't set hasDeviations, but a not-verified item means the epic didn't cleanly meet spec.
@@ -80,12 +86,15 @@ test("conformance-record: derives has_deviations from ground truth even when the
 
 test("conformance-record: a clean epic records has_deviations = 0", async () => {
   const { app, stores } = fakeApp();
-  await handler(
-    { variables: { planKey: "o/r#7", status: "filed", commentUrl: "https://x/7#c", slicesMet: 3, hasDeviations: false } } as any,
+  const out = await handler(
+    { processInstanceKey: "retro-inst-7", variables: { planKey: "o/r#7", status: "filed", commentUrl: "https://x/7#c", slicesMet: 3, hasDeviations: false } } as any,
     app as any,
   );
   assertEquals(stores.plan_conformance[0].has_deviations, 0);
   assertEquals(stores.plan_conformance[0].slices_met, 3);
+  // No deviation → settles straight to `reviewed`, never entering the inbox scan.
+  assertEquals(stores.plan_conformance[0].review_status, "reviewed");
+  assertEquals(out, { hasDeviations: false });
 });
 
 test("conformance-record: coerces filed without a comment URL to skipped", async () => {
@@ -139,6 +148,7 @@ test("conformance-record: coerces string-encoded numeric counts hoisted by the a
   // These must be parsed, not silently coerced to 0 (which would wrongly clear the verdict).
   await handler(
     {
+      processInstanceKey: "retro-inst-12",
       variables: {
         planKey: "o/r#12",
         status: "filed",
@@ -167,6 +177,7 @@ test("conformance-record: honours a string-encoded hasDeviations flag", async ()
   // string "true" must still record a deviation — a stringified boolean can't silently be dropped.
   await handler(
     {
+      processInstanceKey: "retro-inst-13",
       variables: {
         planKey: "o/r#13",
         status: "filed",
@@ -196,4 +207,35 @@ test("conformance-record: defaults to skipped when the agent reported nothing", 
     app as any,
   );
   assertEquals(stores.plan_conformance[0].status, "skipped");
+});
+
+test("conformance-record: coerces a numeric processInstanceKey to a string (TEXT process_key never drifts)", async () => {
+  const { app, stores } = fakeApp();
+  await handler(
+    { processInstanceKey: 220592130 as any, variables: { planKey: "o/r#11", status: "filed", commentUrl: "https://x/11#c", slicesNotVerified: 1 } } as any,
+    app as any,
+  );
+  const row = stores.plan_conformance[0];
+  assertEquals(row.process_key, "220592130");
+  assertEquals(typeof row.process_key, "string");
+  assertEquals(row.review_status, "reviewing");
+});
+
+test("conformance-record: fails (not a silent, untrackable escalation) when there is no processKey but there are deviations", async () => {
+  const { app, stores } = fakeApp();
+  // No `processInstanceKey` + deviations: the handler would otherwise return `hasDeviations:true`
+  // (routing retro to `conformance-escalation`) while the row is `reviewed`/`process_key=null`, an
+  // ack `pollUserTasks` can never surface nor `onTerminated` clear — an invisible, wedged escalation.
+  // Fail loudly instead so the run retries/alerts rather than encoding that silent state.
+  await assertRejects(
+    () =>
+      handler(
+        { variables: { planKey: "o/r#12", status: "filed", commentUrl: "https://x/12#c", slicesNotVerified: 1, hasDeviations: true } } as any,
+        app as any,
+      ),
+    Error,
+    "no processInstanceKey",
+  );
+  // Nothing was persisted: the throw precedes the write, so no untrackable row is left behind.
+  assertEquals(stores.plan_conformance.length, 0);
 });

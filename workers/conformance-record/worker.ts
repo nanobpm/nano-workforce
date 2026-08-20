@@ -73,6 +73,28 @@ const handler: AppJobHandler<In> = async (job, app) => {
     (asBool(job.variables.hasDeviations) ||
       slicesReduced > 0 || slicesNotVerified > 0 || deviationsUnraised > 0);
 
+  // Track this retro instance on the conformance row so `pollUserTasks` can find the escalation ack
+  // task, but only mark it `reviewing` when there IS something to escalate — a clean run settles
+  // straight to `reviewed` and never enters the inbox scan (migration 054). Coerce the instance key
+  // to a string (the engine can hand back a numeric key) so `plan_conformance.process_key` (TEXT)
+  // never drifts to a number and break the string-filter reads in `pollUserTasks`/`openUserTasks` —
+  // the same `String(...)` coercion app/service.ts applies when it stamps `process_key`.
+  const processKey = job.processInstanceKey != null ? String(job.processInstanceKey) : null;
+
+  // Invariant: an escalation must be trackable. If we found deviations to escalate but have no
+  // process key to key the `reviewing` row off, the `hasDeviations` return below would still route
+  // retro to the `conformance-escalation` user task — yet `pollUserTasks` can never surface that ack
+  // (it skips rows without `process_key`) nor can the `onTerminated` binding ever clear it, so the
+  // escalation wedges forever, invisible to any human. Rather than record that silent, unreachable
+  // state, fail loudly so the run retries/alerts. `job.processInstanceKey` is always present for an
+  // activated job, so this only fires on a genuine engine-contract violation.
+  if (hasDeviations && processKey == null) {
+    throw new Error(
+      `conformance-record: ${planKey} has deviations to escalate but no processInstanceKey to track ` +
+        "the escalation — refusing to route to an untrackable conformance-escalation ack task",
+    );
+  }
+
   await recordConformance(app.data, planKey, {
     status,
     commentUrl: filed ? commentUrl : null,
@@ -84,12 +106,22 @@ const handler: AppJobHandler<In> = async (job, app) => {
     hasDeviations,
     summary,
     report,
+    processKey,
+    // Only enter the `reviewing` inbox scan when we actually have a `processKey` to key off — a
+    // null key can never be found by `pollUserTasks` (it skips rows without `process_key`) nor
+    // cleared by the `instanceTracking` `onTerminated` binding, so a `reviewing` row with no key
+    // would wedge forever. The invariant guard above already rejected `hasDeviations` with a null
+    // key, so `reviewing` here always carries a non-null `processKey`.
+    reviewStatus: hasDeviations ? "reviewing" : "reviewed",
   });
 
   app.log.info(
     `conformance-record: ${planKey} — status=${status} deviations=${hasDeviations ? "yes" : "no"}`,
   );
-  return {};
+  // Return the ground-truth `hasDeviations` as a process variable so the `gw-deviations` gateway
+  // routes to the human ack task (retro.bpmn) — overriding the agent's hoisted flag with the value
+  // reconciled against the recorded counts above.
+  return { hasDeviations };
 };
 
 export default handler;

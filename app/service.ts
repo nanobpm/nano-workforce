@@ -21,6 +21,11 @@ import {
   renderResolvedDepsBrief,
   UnresolvableCapabilityRefError,
 } from "./capabilityNeed.ts";
+import {
+  activeConformanceReviews,
+  CONFORMANCE_ESCALATION_ELEMENT,
+  conformanceEscalationQuestion,
+} from "./conformance.ts";
 import { isUniqueConstraintFence } from "./dbFence.ts";
 import { deriveDelivery, TERMINAL_STATUSES } from "./delivery.ts";
 import { fleetSupportsDurableResume } from "./durableResume.ts";
@@ -2196,6 +2201,41 @@ export async function pollUserTasks(data: DataLayer, engine: EngineClient) {
           ),
         );
       }
+    }
+  }
+
+  // Conformance-review acks (`conformance-escalation`) — the advisory `retro` process parks on a
+  // human ack when the spec-conformance audit finds the epic did NOT cleanly meet its spec (issue
+  // #216). retro is not one of the delivery aggregates above, so its instance is tracked on
+  // `plan_conformance` (migration 054): scan each row still `reviewing`, read its open ack task, and
+  // project it keyed to the epic (plan) subject, sourcing the question from the audit's `summary`.
+  for (const review of await activeConformanceReviews(data)) {
+    if (!review.process_key) continue;
+    let tasks: { userTaskKey: string; elementId?: string }[];
+    try {
+      tasks = await engine.openUserTasks({ processInstanceKey: review.process_key });
+    } catch (err) {
+      console.error(`[poller] user tasks (conformance ${review.plan_key}): ${err}`);
+      continue;
+    }
+    const plan = await plans(data).get(review.plan_key);
+    for (const t of tasks) {
+      if (t.elementId !== CONFORMANCE_ESCALATION_ELEMENT) continue;
+      push(
+        buildUserTaskRow(
+          {
+            userTaskKey: t.userTaskKey,
+            elementId: CONFORMANCE_ESCALATION_ELEMENT,
+            subjectType: "plan",
+            subjectKey: review.plan_key,
+            subjectTitle: plan?.title ?? null,
+            subjectUrl: plan?.issue_url ?? null,
+            question: conformanceEscalationQuestion(review),
+            processKey: review.process_key,
+          },
+          at,
+        ),
+      );
     }
   }
 

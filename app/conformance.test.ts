@@ -1,10 +1,12 @@
 // Unit tests for the spec-conformance review stage (app/conformance.ts, 052_plan_conformance.sql).
 import { test } from "node:test";
-import { assert, assertEquals, assertStringIncludes } from "#test-assert";
+import { assert, assertEquals, assertRejects, assertStringIncludes } from "#test-assert";
 import type { DataLayer } from "@nanobpm/urban";
 import { memBlackboardSource } from "../test/blackboardDb.ts";
 import { appendEntry } from "./blackboard.ts";
 import {
+  acknowledgeConformance,
+  activeConformanceReviews,
   gatherConformance,
   hasDeliveredImplementation,
   hasDeliveredImplementationForPlan,
@@ -217,4 +219,95 @@ test("recordConformance: rethrows a non-unique (FOREIGN KEY) constraint error in
   }
   assert(threw, "the FK error must propagate");
   assertEquals(updated, false, "must not silently fall back to update on a non-unique error");
+});
+
+test("recordConformance: persists the retro instance key and the escalation review_status (issue #216)", async () => {
+  const { data, stores } = memData();
+  await recordConformance(data, PLAN, {
+    status: "filed",
+    commentUrl: "https://x/7#c",
+    hasDeviations: true,
+    summary: "slice 2 reduced",
+    processKey: "retro-inst-7",
+    reviewStatus: "reviewing",
+  });
+  const row = stores["plan_conformance"][0];
+  assertEquals(row.process_key, "retro-inst-7");
+  assertEquals(row.review_status, "reviewing");
+
+  // Absent tracking fields default: no processKey, and a settled `reviewed`.
+  await recordConformance(data, "acme/widgets#8", { status: "skipped" });
+  const clean = stores["plan_conformance"].find((r) => r.plan_key === "acme/widgets#8");
+  assertEquals(clean.process_key, null);
+  assertEquals(clean.review_status, "reviewed");
+});
+
+test("recordConformance: rejects an untrackable `reviewing` row with a null processKey (invariant guard)", async () => {
+  const { data, stores } = memData();
+  // A `reviewing` row with no `process_key` is unreachable: `pollUserTasks` skips rows without a
+  // key and the `instanceTracking` binding keys off `process_key`, so it would strand the review
+  // forever. The API must refuse to persist that state, not just the worker call site.
+  await assertRejects(
+    () =>
+      recordConformance(data, PLAN, {
+        status: "filed",
+        hasDeviations: true,
+        reviewStatus: "reviewing",
+      }),
+    Error,
+    "untrackable",
+  );
+  assertEquals(stores["plan_conformance"] ?? [], []);
+});
+
+test("activeConformanceReviews: returns only the rows still `reviewing`", async () => {
+  const { data, stores } = memData();
+  stores["plan_conformance"] = [
+    { plan_key: "a/b#1", process_key: "p1", review_status: "reviewing", summary: "s1" },
+    { plan_key: "a/b#2", process_key: "p2", review_status: "reviewed", summary: "s2" },
+  ];
+  const active = await activeConformanceReviews(data);
+  assertEquals(active.map((r) => r.plan_key), ["a/b#1"]);
+});
+
+test("acknowledgeConformance: settles the row at reviewed and folds the note into the summary", async () => {
+  const { data, stores } = memData();
+  stores["plan_conformance"] = [
+    { plan_key: PLAN, process_key: "p1", review_status: "reviewing", summary: "slice 2 reduced" },
+  ];
+  await acknowledgeConformance(data, PLAN, "filed follow-up #9");
+  const row = stores["plan_conformance"][0];
+  assertEquals(row.review_status, "reviewed");
+  assertEquals(row.summary, "slice 2 reduced\n\nOperator ack: filed follow-up #9");
+});
+
+test("acknowledgeConformance: fails loudly when the plan_conformance row is missing", async () => {
+  const { data } = memData();
+  await assertRejects(
+    () => acknowledgeConformance(data, PLAN, "filed follow-up #9"),
+    Error,
+    PLAN,
+  );
+});
+
+test("acknowledgeConformance: is idempotent — a retry after settling does not re-append the note", async () => {
+  const { data, stores } = memData();
+  stores["plan_conformance"] = [
+    { plan_key: PLAN, process_key: "p1", review_status: "reviewing", summary: "slice 2 reduced" },
+  ];
+  await acknowledgeConformance(data, PLAN, "filed follow-up #9");
+  await acknowledgeConformance(data, PLAN, "filed follow-up #9");
+  const row = stores["plan_conformance"][0];
+  assertEquals(row.review_status, "reviewed");
+  assertEquals(row.summary, "slice 2 reduced\n\nOperator ack: filed follow-up #9");
+});
+
+test("acknowledgeConformance: a blank note settles the row without changing the summary", async () => {
+  const { data, stores } = memData();
+  stores["plan_conformance"] = [
+    { plan_key: PLAN, process_key: "p1", review_status: "reviewing", summary: "auth cache unverified" },
+  ];
+  await acknowledgeConformance(data, PLAN, "  ");
+  assertEquals(stores["plan_conformance"][0].review_status, "reviewed");
+  assertEquals(stores["plan_conformance"][0].summary, "auth cache unverified");
 });
