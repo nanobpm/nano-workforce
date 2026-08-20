@@ -200,6 +200,29 @@ test("missing-config: a non-human node without its per-kind config is rejected",
   assertEquals(err.path, "nodes[0].wait");
 });
 
+test("missing-required-field: an agent node whose `agent` config omits `jobType` is rejected", () => {
+  const errors = validateDeliveryGraph({ nodes: [{ id: "a", kind: "agent", agent: {} }] });
+  const err = hasCode(errors, "missing-required-field");
+  assertEquals(err.path, "nodes[0].agent.jobType");
+});
+
+test("missing-required-field: a wait node whose probe omits `kind`/`target` is rejected per field", () => {
+  const errors = validateDeliveryGraph({ nodes: [{ id: "a", kind: "wait", wait: {} }] });
+  hasCode(errors, "missing-required-field");
+  assertEquals(
+    errors.filter((e) => e.code === "missing-required-field").map((e) => e.path).sort(),
+    ["nodes[0].wait.kind", "nodes[0].wait.target"],
+  );
+});
+
+test("missing-required-field: a connector node whose config has an empty `target` is rejected", () => {
+  const errors = validateDeliveryGraph({
+    nodes: [{ id: "a", kind: "connector", connector: { target: "" } }],
+  });
+  const err = hasCode(errors, "missing-required-field");
+  assertEquals(err.path, "nodes[0].connector.target");
+});
+
 test("a human node may omit its config (generic-fallback resolution lands in S3)", () => {
   assertEquals(validateDeliveryGraph({ nodes: [{ id: "done", kind: "human" }] }), []);
 });

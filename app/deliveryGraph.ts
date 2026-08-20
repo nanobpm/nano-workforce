@@ -45,6 +45,7 @@ export type DeliveryGraphErrorCode =
   | "duplicate-id"
   | "unknown-kind"
   | "missing-config"
+  | "missing-required-field"
   | "duplicate-fact"
   | "invalid-fact-name"
   | "invalid-fact-type"
@@ -108,6 +109,24 @@ const CONFIG_KEY: Record<DeliveryNodeKind, string> = {
   wait: "wait",
   human: "human",
   connector: "connector",
+};
+
+/** The REQUIRED non-empty-string fields inside each kind's per-kind config object, mirroring the
+ * `required` lists in openapi (`DeliveryNodeAgent.agent.jobType`, the `ReadinessProbe.kind`/`target`
+ * a `wait` reuses, `DeliveryNodeConnector.connector.target`). Re-enforced here INDEPENDENTLY of the
+ * OpenAPI shape gate so that, when that gate is bypassed (a direct delegate call, a test, a future
+ * internal use), a config object present-but-missing its required fields (e.g. `{ kind:"agent",
+ * agent:{} }`) is rejected with an actionable error rather than passing semantic validation and
+ * crashing a downstream compiler/runner that assumes those fields exist. `human` has no required
+ * config field (its config is optional). Kept as the single source of truth so this list and openapi
+ * agree. NOTE: field PRESENCE + non-emptiness is enforced here, not the `ReadinessProbe.kind` enum —
+ * that enum evolves per slice (S2 adds `pr`), so enumerating it here would drift; the enum stays
+ * owned by the shape gate / `app/readiness.ts`. */
+const REQUIRED_CONFIG_FIELDS: Record<DeliveryNodeKind, readonly string[]> = {
+  agent: ["jobType"],
+  wait: ["kind", "target"],
+  human: [],
+  connector: ["target"],
 };
 
 /** Resolve an edge `from` endpoint against the known node set. A node id MAY itself contain dots (the
@@ -212,12 +231,28 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
       });
     } else if (kind !== "human") {
       // Every kind but `human` REQUIRES its per-kind config object.
-      if (!isRecord(rawNode[CONFIG_KEY[kind]])) {
+      const configKey = CONFIG_KEY[kind];
+      const config = rawNode[configKey];
+      if (!isRecord(config)) {
         errors.push({
-          path: `${path}.${CONFIG_KEY[kind]}`,
-          message: `${kind} node is missing its required \`${CONFIG_KEY[kind]}\` config`,
+          path: `${path}.${configKey}`,
+          message: `${kind} node is missing its required \`${configKey}\` config`,
           code: "missing-config",
         });
+      } else {
+        // The config object is present — re-enforce the fields openapi marks REQUIRED (a bypassed
+        // shape gate could otherwise let `{ kind:"agent", agent:{} }` through and crash a downstream
+        // compiler/runner that trusts those fields exist).
+        for (const field of REQUIRED_CONFIG_FIELDS[kind]) {
+          const value = config[field];
+          if (typeof value !== "string" || value.length === 0) {
+            errors.push({
+              path: `${path}.${configKey}.${field}`,
+              message: `${kind} node's \`${configKey}.${field}\` is required and must be a non-empty string`,
+              code: "missing-required-field",
+            });
+          }
+        }
       }
     } else if (rawNode.human !== undefined && !isRecord(rawNode.human)) {
       // `human` config is OPTIONAL (formKey/prompt both resolve to a generic fallback in S3), but
