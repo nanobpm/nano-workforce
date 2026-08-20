@@ -113,9 +113,10 @@ const ESCALATION_FORM_BY_ELEMENT: Readonly<Record<string, string>> = {
   "feature-blocked": "feature-blocked",
   [CONFORMANCE_ESCALATION_TASK_ELEMENT]: "conformance-escalation",
   // NOTE: the delivery-graph `human` node (`DELIVERY_HUMAN_ELEMENT`, ADR 0005 S3) is intentionally
-  // ABSENT here. Unlike the fixed-form escalations above, ONE `delivery-human-task` element renders
-  // DIFFERENT forms per node (explicit → category → generic → agent-router, `app/deliveryHuman.ts`
-  // `resolveHumanForm`), so a single static required-field contract cannot fit it. Its typed-emit
+  // ABSENT here. Unlike the fixed-form escalations above, ONE `delivery-human-task` element is DESIGNED
+  // to render DIFFERENT forms per node (explicit → category → generic → agent-router, `app/deliveryHuman.ts`
+  // `resolveHumanForm`) — the S4 runner selects one at activation; this S3 slice deploys the generic
+  // form as the static default. Either way a single static required-field contract cannot fit it. Its typed-emit
   // contract is enforced instead by `bindHumanEmits` against the node's declared `emits[]` (binds are
   // validated, not stringly — Decision 3/4), so `validateEscalationVariables` leaves it unenforced
   // (returns `null`) and the completer accepts the captured form variables for the emit binder to type.
