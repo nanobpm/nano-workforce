@@ -20,7 +20,8 @@ import { join, resolve } from "node:path";
 import { after, before, describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { bootTestApp, type TestApp } from "@nanobpm/urban-testkit";
-import { deliveryConnectorDispatches, dispatchConnector } from "../app/deliveryConnector.ts";
+import { connectorDedupeKey, deliveryConnectorDispatches, dispatchConnector } from "../app/deliveryConnector.ts";
+import { readConnectorInput } from "../workers/delivery-connector/worker.ts";
 import { runDeliveryGraph } from "../app/deliveryRunner.ts";
 import type { DeliveryGraph } from "../nano-generated/api-io.d.ts";
 
@@ -72,21 +73,34 @@ describe("delivery-graph runner — engine-native execution (S4)", () => {
     });
     // Wrap the REAL connector job path so we can observe the late-bound facts it received. The worker
     // itself is registered from the manifest; here we register a same-type observer stub for the e2e.
+    // Mirror the REAL worker's normalization — `readConnectorInput` (trim+require `target`, coerce a
+    // wrong-shaped payload/boundFacts) and `connectorDedupeKey` (derive the effective key from the
+    // author key OR the engine identity `processInstanceKey:elementId`, fail closed if neither) — so
+    // this observer exercises the same fail-closed/derivation behavior the production worker does and
+    // a regression in that surface can't hide behind a `String(... ?? "")` coercion.
     await app.engine.registerWorker(
       "pr.delivery-connector",
       async (job) => {
-        connectorBoundFacts = (job.variables as Record<string, unknown>).boundFacts;
+        const vars = job.variables as Record<string, unknown>;
+        connectorBoundFacts = vars.boundFacts;
+        const { target, payload, boundFacts } = readConnectorInput(
+          vars as Parameters<typeof readConnectorInput>[0],
+        );
+        const dedupeKey = connectorDedupeKey({
+          dedupeKey: (vars.dedupeKey as string | null | undefined) ?? null,
+          processInstanceKey: job.processInstanceKey ?? null,
+          elementId: job.elementId ?? null,
+        });
+        if (!dedupeKey) {
+          throw new Error("delivery-connector: no dedupe key (author-supplied or graph-derived) available");
+        }
         return await dispatchConnector(
           app.db,
-          {
-            dedupeKey: String((job.variables as Record<string, unknown>).dedupeKey ?? ""),
-            target: String((job.variables as Record<string, unknown>).target ?? ""),
-            boundFacts: (job.variables as Record<string, unknown>).boundFacts as never,
-          },
+          { dedupeKey, target, payload, boundFacts },
           new Date().toISOString(),
         );
       },
-      { fetchVariables: ["boundFacts", "target", "dedupeKey"] },
+      { fetchVariables: ["boundFacts", "target", "dedupeKey", "payload"] },
     );
 
     const graph: DeliveryGraph = {
