@@ -235,6 +235,38 @@ test("BPMN is structurally coherent: one start, one end, every flow endpoint dec
   }
 });
 
+test("duplicate fact-qualified edges between the same node pair collapse to ONE sequence flow", () => {
+  // `src` emits two facts, both feeding `b` (`src.x -> b` and `src.y -> b`). Adjacency is de-duped by
+  // node id, so no fork/join gateway is inserted — the producer wires straight to the consumer. The
+  // compiler must therefore collapse the two edges into a SINGLE sequenceFlow so `b` is not scheduled
+  // twice (multiple outgoing flows without a diverging gateway is invalid/double-executing BPMN).
+  const r = compileOk({
+    nodes: [
+      {
+        id: "src",
+        kind: "wait",
+        wait: { kind: "pr", target: "owner/repo#1", match: { prState: "merged" } },
+        emits: [
+          { name: "x", type: "string" },
+          { name: "y", type: "string" },
+        ],
+      },
+      { id: "b", kind: "agent", agent: { jobType: "j" } },
+    ],
+    edges: [
+      { from: "src.x", to: "b" },
+      { from: "src.y", to: "b" },
+    ],
+  });
+  // src ("src") sorts after b? No: "b" < "src" → b is n0, src is n1. src has one consumer (b, deduped)
+  // so no fork; b has one producer (src, deduped) so no join. The single collapsed edge is src → b.
+  const flows = [...r.bpmn.matchAll(/sourceRef="([^"]+)" targetRef="([^"]+)"/g)];
+  const srcToB = flows.filter(([, s, t]) => s === "n1" && t === "n0");
+  assertEquals(srcToB.length, 1, `expected exactly one src→b flow, got ${JSON.stringify(srcToB.map((m) => m[0]))}`);
+  // No parallel gateway is introduced for this de-duplicated pair.
+  assert(!r.bpmn.includes("<bpmn:parallelGateway"), "no gateway for a single de-duplicated producer/consumer pair");
+});
+
 test("a non-object / empty body is a clean ok:false, never a throw", () => {
   assert(!compileDeliveryGraph(undefined).ok);
   assert(!compileDeliveryGraph(null).ok);

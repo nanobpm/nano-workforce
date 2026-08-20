@@ -217,12 +217,27 @@ export function compileDeliveryGraph(graph: unknown): CompileDeliveryGraphResult
   for (const w of wirings) if (w.forkGateway) flows.push({ source: w.element, target: w.forkGateway });
   // 3. Structural join flows (join gateway → node).
   for (const w of wirings) if (w.joinGateway) flows.push({ source: w.joinGateway, target: w.element });
-  // 4. Edge flows: producer.exit → consumer.entry, labelled with the referenced fact when qualified.
+  // 4. Edge flows: producer.exit → consumer.entry, labelled with the referenced fact(s) when
+  //    qualified. Collapse edges sharing the same (fromNode → to) endpoints into ONE sequence flow:
+  //    `producersById`/`consumersById` (hence the fork/join gateways) are de-duplicated by node id, so
+  //    two fact-qualified edges between the same pair (e.g. `a.x -> b` and `a.y -> b`) would otherwise
+  //    emit parallel flows between endpoints with no diverging gateway — invalid BPMN that schedules
+  //    the consumer more than once. `resolvedEdges` is already sorted by (to, fromNode, fromFact), so
+  //    same-endpoint edges are contiguous and their fact labels accumulate in deterministic order.
+  const collapsedEdges: { fromNode: string; to: string; facts: string[] }[] = [];
   for (const edge of resolvedEdges) {
+    const last = collapsedEdges[collapsedEdges.length - 1];
+    if (last && last.fromNode === edge.fromNode && last.to === edge.to) {
+      if (edge.fromFact !== undefined && !last.facts.includes(edge.fromFact)) last.facts.push(edge.fromFact);
+    } else {
+      collapsedEdges.push({ fromNode: edge.fromNode, to: edge.to, facts: edge.fromFact !== undefined ? [edge.fromFact] : [] });
+    }
+  }
+  for (const edge of collapsedEdges) {
     const producer = mustGet(wiringById, edge.fromNode);
     const consumer = mustGet(wiringById, edge.to);
     const flow: Omit<Flow, "id"> = { source: producer.exit, target: consumer.entry };
-    flows.push(edge.fromFact !== undefined ? { ...flow, name: edge.fromFact } : flow);
+    flows.push(edge.facts.length > 0 ? { ...flow, name: edge.facts.join(", ") } : flow);
   }
   // 5. Leaf(s) → End.
   if (leaves.length === 1) {
