@@ -217,15 +217,9 @@ test("pickLatestCopilotReviewBody: FAILS CLOSED (null) when the reviews read was
 async function makeUnderTest(deps: {
   readThreads: (repo: string, n: number) => Promise<ReviewThread[] | null>;
   readReviewBody: (repo: string, n: number) => Promise<string | null>;
-  readPrBody?: (repo: string, n: number) => Promise<string | null>;
-  readHeadSha?: (repo: string, n: number) => Promise<string | null>;
 }) {
   const { makeHandler } = await import("../workers/converge-gate/worker.ts");
-  // Default the scope-guard PR-body read to a verified-empty description so the comment-gate tests
-  // below exercise only the review-comment dimension; scope-guard tests pass an explicit body. The
-  // HEAD read defaults to null (unreadable) so a scope block stays blocked unless a test opts into
-  // the #395 override door with an explicit HEAD — see workers/converge-gate/worker.test.ts.
-  return makeHandler({ readPrBody: async () => "", readHeadSha: async () => null, ...deps });
+  return makeHandler(deps);
 }
 
 test("converge-gate: a clean PR is allowed to converge", async () => {
@@ -348,82 +342,6 @@ test("converge-gate: resolves repo/prNumber from the prKey when the vars are abs
   assertEquals(seen, ["o/r", 7]);
 });
 
-// ── The scope-integrity guard through the worker (#313) ─────────────────────
-
-test("converge-gate: a partial delivery that Closes a broader-scoped parent blocks convergence", async () => {
-  const handler = await makeUnderTest({
-    readThreads: async () => [],
-    readReviewBody: async () => "",
-    readPrBody: async () =>
-      "Delivers the nested ad-hoc half.\n\n## Scope\nEmbedded SUB_PROCESS tools remain the deferred refinement.\n\nCloses #631",
-  });
-  const out = await handler({ variables: { prKey: "o/r#1", repo: "o/r", prNumber: 1 } } as any, {} as any);
-  assertEquals(out.convergeBlocked, true);
-  assertStringIncludes(out.convergeBlockReason ?? "", "Scope integrity blocked");
-  assertStringIncludes(out.convergeBlockReason ?? "", "#631");
-});
-
-test("converge-gate: a deferral with a filed follow-up issue and a non-closing ref converges", async () => {
-  const handler = await makeUnderTest({
-    readThreads: async () => [],
-    readReviewBody: async () => "",
-    readPrBody: async () =>
-      "Delivers the nested ad-hoc half.\n\n## Scope\nEmbedded SUB_PROCESS tools are deferred.\nTracked-in: #872\n\nRefs #631",
-  });
-  const out = await handler({ variables: { prKey: "o/r#1", repo: "o/r", prNumber: 1 } } as any, {} as any);
-  assertEquals(out, { convergeBlocked: false, convergeBlockReason: "" });
-});
-
-test("converge-gate: a full-scope Closes PR with no deferral prose converges", async () => {
-  const handler = await makeUnderTest({
-    readThreads: async () => [],
-    readReviewBody: async () => "",
-    readPrBody: async () => "Implements the feature end to end.\n\nCloses #313",
-  });
-  const out = await handler({ variables: { prKey: "o/r#1", repo: "o/r", prNumber: 1 } } as any, {} as any);
-  assertEquals(out, { convergeBlocked: false, convergeBlockReason: "" });
-});
-
-test("converge-gate: a scope block and a comment block are reported together", async () => {
-  const handler = await makeUnderTest({
-    readThreads: async () => [{ isResolved: false, path: "a.ts", bodies: ["please fix"] }],
-    readReviewBody: async () => "",
-    readPrBody: async () => "Ships one half.\n\nDeferred: the rest.\n\nCloses #631",
-  });
-  const out = await handler({ variables: { prKey: "o/r#1", repo: "o/r", prNumber: 1 } } as any, {} as any);
-  assertEquals(out.convergeBlocked, true);
-  assertStringIncludes(out.convergeBlockReason ?? "", "unresolved review thread");
-  assertStringIncludes(out.convergeBlockReason ?? "", "Scope integrity blocked");
-});
-
-test("converge-gate: FAILS CLOSED when the PR-body read returns null (no transport)", async () => {
-  const handler = await makeUnderTest({
-    readThreads: async () => [{ isResolved: true, path: "a.ts", bodies: ["ok"] }],
-    readReviewBody: async () => "",
-    readPrBody: async () => null,
-  });
-  const out = await handler({ variables: { prKey: "o/r#1", repo: "o/r", prNumber: 1 } } as any, {} as any);
-  assertEquals(out.convergeBlocked, true);
-  assertStringIncludes(out.convergeBlockReason ?? "", "could not read the PR description");
-});
-
-test("converge-gate: FAILS CLOSED with the SCOPE reason when the PR-body read throws", async () => {
-  // A transport failure while reading/parsing the PR body is a scope-integrity read failure, not a
-  // review-comment verification failure: it must surface BLOCK_UNVERIFIABLE_BODY, not the generic
-  // review-comment BLOCK_UNVERIFIABLE — otherwise the human escalation is pointed at review threads
-  // when the real problem is the PR description could not be read.
-  const handler = await makeUnderTest({
-    readThreads: async () => [{ isResolved: true, path: "a.ts", bodies: ["ok"] }],
-    readReviewBody: async () => "",
-    readPrBody: async () => {
-      throw new Error("boom");
-    },
-  });
-  const out = await handler({ variables: { prKey: "o/r#1", repo: "o/r", prNumber: 1 } } as any, {} as any);
-  assertEquals(out.convergeBlocked, true);
-  assertStringIncludes(out.convergeBlockReason ?? "", "could not read the PR description");
-});
-
 // ── Structural guard over the committed BPMN (no engine) ─────────────────────
 
 const bpmn = readFileSync("resources/processes/convergence-loop.bpmn", "utf8");
@@ -460,14 +378,60 @@ test("gw-converge-gate blocks on an explicit convergeBlocked = true condition", 
   assertStringIncludes(f, "convergeBlocked = true");
 });
 
-test("gw-converge-gate default arm finalizes with no condition", () => {
+test("gw-converge-gate default arm routes to the scope classifier (not straight to finalize)", () => {
   const gw = flat.match(/<bpmn:exclusiveGateway\b[^>]*\bid="gw-converge-gate"[^>]*>/);
   assert(gw, "gw-converge-gate gateway missing");
   assertStringIncludes(gw[0], 'default="f_convergeOk"');
   const ok = flowElement("f_convergeOk");
   assert(ok, "f_convergeOk flow missing");
+  assertStringIncludes(ok, 'targetRef="classify-scope"');
+  assert(!/conditionExpression/.test(ok), "the default arm must carry no conditionExpression");
+});
+
+// ── The scope classifier (agent task) replaces the deterministic scope regex ──
+
+test("classify-scope is an agent task servicing senior:scope-classify with a linked prompt", () => {
+  const task = flat.match(/<bpmn:serviceTask\b[^>]*\bid="classify-scope"[^>]*>.*?<\/bpmn:serviceTask>/);
+  assert(task, "classify-scope service task missing");
+  assertStringIncludes(task[0], 'type="senior:scope-classify"');
+  assertStringIncludes(task[0], 'resourceId="scope-classify.md"');
+  assertStringIncludes(task[0], 'linkName="prompt"');
+  // It reads the human's prior answer so it can honour an override (the #395 loop-defect fix).
+  assertStringIncludes(task[0], 'target="answer"');
+});
+
+test("classify-scope feeds gw-scope-gate, which blocks on scopeBlocked = true", () => {
+  const toGate = flowElement("f_toScopeGate");
+  assert(toGate, "f_toScopeGate flow missing");
+  assertStringIncludes(toGate, 'sourceRef="classify-scope"');
+  assertStringIncludes(toGate, 'targetRef="gw-scope-gate"');
+  const blocked = flowElement("f_scopeBlocked");
+  assert(blocked, "f_scopeBlocked flow missing");
+  assertStringIncludes(blocked, 'targetRef="persist-escalation-scope"');
+  assertStringIncludes(blocked, "scopeBlocked = true");
+});
+
+test("gw-scope-gate default arm finalizes (scope ok → persist-converged)", () => {
+  const gw = flat.match(/<bpmn:exclusiveGateway\b[^>]*\bid="gw-scope-gate"[^>]*>/);
+  assert(gw, "gw-scope-gate gateway missing");
+  assertStringIncludes(gw[0], 'default="f_scopeOk"');
+  const ok = flowElement("f_scopeOk");
+  assert(ok, "f_scopeOk flow missing");
   assertStringIncludes(ok, 'targetRef="persist-converged"');
   assert(!/conditionExpression/.test(ok), "the default arm must carry no conditionExpression");
+});
+
+test("the scope escalation routes through gw-escalated with the classifier's specific reason", () => {
+  const f = flowElement("f_scopeEscGate");
+  assert(f, "f_scopeEscGate flow missing");
+  assertStringIncludes(f, 'sourceRef="persist-escalation-scope"');
+  assertStringIncludes(f, 'targetRef="gw-escalated"');
+  const task = flat.match(/<bpmn:serviceTask\b[^>]*\bid="persist-escalation-scope"[^>]*>.*?<\/bpmn:serviceTask>/);
+  assert(task, "persist-escalation-scope task missing");
+  assertStringIncludes(task[0], 'type="pr.persist-escalation"');
+  assertStringIncludes(task[0], 'target="question"');
+  // The human sees the classifier's specific finding, not a generic boilerplate reason.
+  assertStringIncludes(task[0], "scopeBlockReason");
 });
 
 test("the blocked-comments escalation routes through gw-escalated toward an answerable wait-answer", () => {

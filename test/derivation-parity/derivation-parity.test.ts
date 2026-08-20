@@ -122,8 +122,8 @@ test("convergence-loop golden has arbitrary-graph features the structured builde
   assertEquals(between("review-round", "serviceTask", "incoming"), 3, "review-round should merge 3 flows on the task itself");
   // (b) a single exclusive gateway forks FOUR heterogeneous-condition out-edges.
   assertEquals(between("gw-status", "exclusiveGateway", "outgoing"), 4, "gw-status should be a 4-way exclusive gateway");
-  // (c) a single exclusive gateway is at once a 5-way merge and a 2-way split.
-  assertEquals(between("gw-escalated", "exclusiveGateway", "incoming"), 5, "gw-escalated should merge 5 flows");
+  // (c) a single exclusive gateway is at once a 6-way merge and a 2-way split.
+  assertEquals(between("gw-escalated", "exclusiveGateway", "incoming"), 6, "gw-escalated should merge 6 flows");
   assertEquals(between("gw-escalated", "exclusiveGateway", "outgoing"), 2, "gw-escalated should also split 2 ways");
 });
 
