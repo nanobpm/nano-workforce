@@ -1014,6 +1014,87 @@ async function mirrorTaskStatusForPr(data: DataLayer, prKey: string, status: "op
   }
 }
 
+/** The escape message a merge-stage durable wait must publish when its PR has gone terminal
+ * (merged/closed) OUT-OF-BAND — i.e. someone landed or closed it on GitHub while the process was
+ * parked, so the wait's own declared trigger (deps clearing, a mergeable verdict, a lane release, a
+ * queue landing) may never fire. Each wait subscribes to a DIFFERENT message, so the escape MUST be
+ * the one its parked catch actually correlates to (publishing any other name is dropped by the
+ * engine and re-wedges the PR in the transient `merging` status). All roads lead to the same proven
+ * terminal path — `attempt-merge`'s idempotent already-merged / closed short-circuits (#368):
+ *   • waiting_deps  → parked at `wait-deps`, subscribes ONLY `deps-cleared`. Deps are moot once the
+ *     PR itself landed, so clear them regardless of liveness; `deps-cleared` → `arm-merge` →
+ *     `wait-mergeable`, where block 2 (below) reads the terminal state and drives merged→mark-merged
+ *     / closed→abandon. This is the gap the incident hit — `wait-deps` had NO self-merged escape.
+ *   • waiting_merge / waiting_lane → both parked at `wait-mergeable` (waiting_lane is an app-internal
+ *     hold that leaves the process on `wait-mergeable`), which subscribes `merge-ready`. Route a
+ *     `ready` verdict through `gw-mergeable → attempt-merge`, whose short-circuits complete/abandon.
+ *   • queued → parked at `wait-landed`, subscribes `merge-landed` (→ mark-merged) and `merge-evicted`
+ *     (→ arm-merge). A merged queue PR lands (`merge-landed`); a closed-unmerged one can NEVER land,
+ *     so publishing `merge-landed` would falsely mark it merged — re-arm via `merge-evicted` instead
+ *     and let block 2 abandon it on the next pass. */
+function outOfBandEscapeMessage(
+  status: string,
+  liveness: "merged" | "closed",
+  prKey: string,
+): Parameters<EngineClient["publishMessage"]>[0] {
+  switch (status) {
+    case "waiting_deps":
+      return { name: "deps-cleared", correlationKey: prKey, variables: {} };
+    case "waiting_merge":
+    case "waiting_lane":
+      return {
+        name: "merge-ready",
+        correlationKey: prKey,
+        variables: { mergeState: "ready", failingChecks: 0, failingChecksList: "" },
+      };
+    case "queued":
+      return liveness === "merged"
+        ? { name: "merge-landed", correlationKey: prKey, variables: {} }
+        : { name: "merge-evicted", correlationKey: prKey, variables: {} };
+    default:
+      // Unreachable: only the four merge-stage durable waits call this. Fail loud rather than
+      // mis-route a message the parked catch can't correlate (which would silently re-wedge the PR).
+      throw new Error(`outOfBandEscapeMessage: unexpected merge-stage status ${JSON.stringify(status)}`);
+  }
+}
+
+/** ONE shared out-of-band terminal pre-check for EVERY merge-stage durable wait (#368). A PR parked
+ * at any durable GitHub wait can be merged or closed out-of-band; without a per-branch check on the
+ * PR's OWN state, a wait that keys only off its declared trigger (e.g. `waiting_deps`' declared
+ * deps) strands its instance forever — ACTIVE, no incident, no timer boundary. `waiting_merge`
+ * already guarded this; centralising the check here closes the whole class so no merge stage can
+ * silently wedge on an out-of-band terminal transition.
+ *
+ * Reads the PR's live state (reusing an already-fetched `st` when the caller has one, e.g. block 2)
+ * and, if terminal, publishes the escape message its parked catch subscribes to via
+ * {@link flipToMergingThenPublish} — flipping to the transient `merging` so a slow pass can't
+ * double-signal, reverting on a failed publish. Returns `true` when it advanced the PR (the caller
+ * must `continue`), `false` when the PR is still live / unreadable and the caller should run its
+ * normal per-status logic. Conservative: an unreadable (`null`) or ambiguous (`unknown`/open) state
+ * never resolves terminal, so a false negative only costs a retry while dropping a live PR is
+ * impossible. */
+async function advanceIfTerminalOutOfBand(
+  data: DataLayer,
+  engine: EngineClient,
+  pr: { repo: string; number: number | string; pr_key: string; status: string },
+  token: string,
+  st?: PrState | null,
+): Promise<boolean> {
+  const state = st !== undefined ? st : await fetchPrState(pr.repo, pr.number, token);
+  const liveness = classifyPrLiveness(state);
+  if (liveness !== "merged" && liveness !== "closed") return false;
+  const fromStatus = pr.status; // capture before flip: flipToMergingThenPublish mutates it to `merging`
+  await flipToMergingThenPublish(
+    data,
+    engine,
+    pr.pr_key,
+    fromStatus,
+    outOfBandEscapeMessage(fromStatus, liveness, pr.pr_key),
+  );
+  console.log(`[poller] out-of-band ${liveness} (${fromStatus}) -> ${pr.pr_key}`);
+  return true;
+}
+
 /** Merge-stage poll pass (SPEC §11). Four durable waits, each keyed off the PR's `status`, are
  * advanced by correlating a message — mirroring the review-ready pattern so the process owns
  * the wait and this glue only signals when a GitHub condition is met:
@@ -1023,12 +1104,20 @@ async function mirrorTaskStatusForPr(data: DataLayer, prKey: string, status: "op
  *   • queued        → the queued PR landed → `merge-landed`; or it conflicts (DIRTY) → `merge-evicted`
  * On publish we flip status to the transient `merging` (which no branch scans) so a slow pass
  * can't double-signal, exactly as `pollReviews` flips to `converging`; `flipToMergingThenPublish`
- * reverts the flip if the publish fails so a failed handoff can't wedge the PR. */
-async function pollMerges(data: DataLayer, engine: EngineClient, token: string) {
+ * reverts the flip if the publish fails so a failed handoff can't wedge the PR.
+ *
+ * EVERY branch first runs {@link advanceIfTerminalOutOfBand} — one shared "is this PR already
+ * terminal (merged/closed) out-of-band?" pre-check — so no merge stage can silently strand when a PR
+ * is landed/closed outside the loop (the `waiting_deps` self-merged wedge, #368). */
+export async function pollMerges(data: DataLayer, engine: EngineClient, token: string) {
   // 1) Dependencies merged?
   for (const pr of await prs(data).find({ status: "waiting_deps" })) {
     const prKey = pr.pr_key;
     try {
+      // Out-of-band terminal FIRST: a PR merged/closed outside the loop while parked at `wait-deps`
+      // must converge even if its declared deps never clear (the #368 wedge). `wait-deps` subscribes
+      // only `deps-cleared`, so the shared pre-check publishes exactly that.
+      if (await advanceIfTerminalOutOfBand(data, engine, pr, token)) continue;
       const depRows = await deps(data).find({ pr_key: prKey });
       let allMerged = true;
       for (const d of depRows) {
@@ -1055,38 +1144,12 @@ async function pollMerges(data: DataLayer, engine: EngineClient, token: string) 
     try {
       const st = await fetchPrState(repo, number, token);
       if (st === null) continue; // no transport → skip this PR (others may still advance)
-      const liveness = classifyPrLiveness(st);
-      if (liveness === "merged") {
-        // Landed out-of-band (a maintainer clicked Merge, a mergify queue merged it, etc.). The
-        // instance is parked at `wait-mergeable`, which subscribes to `merge-ready` — NOT
-        // `merge-landed` (that catch, `wait-landed`, only exists later, after we enqueue). Publishing
-        // `merge-landed` here has no subscription to correlate to, so the engine drops it and the PR
-        // wedges forever in the transient `merging` status (which no poller branch re-scans).
-        // Publish `merge-ready` with a `ready` verdict instead: it routes through `gw-mergeable` to
-        // `attempt-merge`, whose idempotent already-merged check completes the loop (`mark-merged`).
-        await flipToMergingThenPublish(data, engine, prKey, "waiting_merge", {
-          name: "merge-ready",
-          correlationKey: prKey,
-          variables: { mergeState: "ready", failingChecks: 0, failingChecksList: "" },
-        });
-        console.log(`[poller] already merged -> ${prKey}`);
-        continue;
-      }
-      if (liveness === "closed") {
-        // Closed on GitHub WITHOUT merging (e.g. superseded by a newer PR — #350). The PR can never
-        // land, so it must NOT be classified as blocked/conflict and escalated (that orphans the
-        // process on a dead PR, #342). Route it through the same canonical `merge-ready` → `ready` →
-        // `attempt-merge` path as the merged case; the merge worker's closed short-circuit records a
-        // terminal `abandoned` audit row and drives the loop down its terminate/abandon end event.
-        // One canonical abandon implementation lives in the worker — the poller only routes to it.
-        await flipToMergingThenPublish(data, engine, prKey, "waiting_merge", {
-          name: "merge-ready",
-          correlationKey: prKey,
-          variables: { mergeState: "ready", failingChecks: 0, failingChecksList: "" },
-        });
-        console.log(`[poller] closed without merging -> ${prKey}`);
-        continue;
-      }
+      // Out-of-band terminal (merged/closed) → the shared pre-check publishes `merge-ready {ready}`,
+      // routing through `gw-mergeable → attempt-merge` whose idempotent already-merged check completes
+      // the loop (`mark-merged`) and whose closed short-circuit abandons a PR closed without merging
+      // (#342/#350). Reuse the `st` we just read so we don't double-fetch. This is the proven terminal
+      // path the whole class (#368) now shares.
+      if (await advanceIfTerminalOutOfBand(data, engine, pr, token, st)) continue;
       const verdict = classifyMergeability(st);
       if (verdict === "waiting") {
         // Frugal-CI remedy (#43): when the repo publishes a merge protocol that wants a fresh
@@ -1145,6 +1208,10 @@ async function pollMerges(data: DataLayer, engine: EngineClient, token: string) 
   for (const pr of await prs(data).find({ status: "waiting_lane" })) {
     const prKey = pr.pr_key;
     try {
+      // Out-of-band terminal FIRST: a lane-held PR merged/closed outside the loop must converge even
+      // if its lane predecessor never releases the hold. waiting_lane leaves the process parked at
+      // `wait-mergeable`, so the shared pre-check publishes `merge-ready {ready}` (→ attempt-merge).
+      if (await advanceIfTerminalOutOfBand(data, engine, pr, token)) continue;
       const lane = await mergeLaneDecisionForPr(data, prKey);
       if (lane?.isHeld) continue;
       await prs(data).update(prKey, { status: "waiting_merge", updated_at: now() });
@@ -1172,15 +1239,16 @@ async function pollMerges(data: DataLayer, engine: EngineClient, token: string) 
     try {
       const st = await fetchPrState(repo, number, token);
       if (st === null) continue; // no transport → skip this PR (others may still advance)
-      const verdict = queuedVerdict(st);
-      if (verdict === "landed") {
-        await flipToMergingThenPublish(data, engine, prKey, "queued", {
-          name: "merge-landed",
-          correlationKey: prKey,
-          variables: {},
-        });
-        console.log(`[poller] queued PR landed -> ${prKey}`);
-      } else if (verdict === "evicted") {
+      // Out-of-band terminal FIRST (reusing `st`): a queued PR merged out-of-band lands
+      // (`merge-landed` → mark-merged); one CLOSED out-of-band without merging can never land, so the
+      // pre-check re-arms it (`merge-evicted` → arm-merge) and block 2 abandons it — a closed queued
+      // PR would otherwise wedge, since `queuedVerdict` calls a non-DIRTY closed PR merely "waiting"
+      // (#368). The DIRTY-while-open eviction below still handles a live-but-conflicted queue drop.
+      if (await advanceIfTerminalOutOfBand(data, engine, pr, token, st)) continue;
+      // Terminal states (merged/closed) are handled by the shared pre-check above; here the PR is
+      // still open, so the only remaining reason to leave `wait-landed` is a live queue DROP — a real
+      // merge CONFLICT (`DIRTY`). `queuedVerdict` stays the canonical classifier for that.
+      if (queuedVerdict(st) === "evicted") {
         await flipToMergingThenPublish(data, engine, prKey, "queued", {
           name: "merge-evicted",
           correlationKey: prKey,
