@@ -211,6 +211,10 @@ test("bindHumanEmits: an artifact with an ill-formed version segment errors", ()
 test("bindHumanEmits: number/boolean/url coerce to canonical string serialisations", () => {
   assertEquals(bindHumanEmits([{ name: "n", type: "number" }], { n: "42" }).facts[0].value, "42");
   assertEquals(bindHumanEmits([{ name: "b", type: "boolean" }], { b: true }).facts[0].value, "true");
+  // A string boolean is trimmed before validating (like version/artifact/url), so a generic textfield
+  // capture with surrounding whitespace still binds to the canonical serialisation.
+  assertEquals(bindHumanEmits([{ name: "b", type: "boolean" }], { b: " true " }).facts[0].value, "true");
+  assertEquals(bindHumanEmits([{ name: "b", type: "boolean" }], { b: "false " }).facts[0].value, "false");
   assertEquals(
     bindHumanEmits([{ name: "u", type: "url" }], { u: "https://x.test/p" }).facts[0].value,
     "https://x.test/p",

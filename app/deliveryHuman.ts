@@ -248,8 +248,11 @@ function coerceFactValue(type: DeliveryFactType, raw: unknown): { value: string 
     }
     case "boolean": {
       if (typeof raw === "boolean") return { value: String(raw) };
-      if (raw === "true" || raw === "false") return { value: raw };
-      return { error: 'expected a boolean (true/false)' };
+      // Trim before validating, mirroring the other string-like types (version/artifact/url) so a
+      // boolean captured via the generic textfield (e.g. " true ") is not needlessly brittle.
+      const trimmed = typeof raw === "string" ? raw.trim() : raw;
+      if (trimmed === "true" || trimmed === "false") return { value: trimmed };
+      return { error: "expected a boolean (true/false)" };
     }
     case "version": {
       if (typeof raw !== "string" || !VERSION_PATTERN.test(raw.trim())) {
