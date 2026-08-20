@@ -29,6 +29,11 @@
       <bpmn:incoming>f_done</bpmn:incoming>
     </bpmn:endEvent>
     <bpmn:endEvent id="human-escalated" name="Human step timed out (escalated)">
+      <bpmn:extensionElements>
+        <zeebe:ioMapping>
+          <zeebe:input source="=&#34;escalated&#34;" target="humanOutcome" />
+        </zeebe:ioMapping>
+      </bpmn:extensionElements>
       <bpmn:incoming>f_sla</bpmn:incoming>
     </bpmn:endEvent>
     <bpmn:sequenceFlow id="f_start" sourceRef="Start" targetRef="delivery-human-task" />

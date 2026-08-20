@@ -242,6 +242,27 @@ test("BPMN: the human node is a native SLA-bounded userTask backed by the generi
   assertStringIncludes(boundary![0], "<bpmn:timerEventDefinition", "the SLA arm must be a timer");
 });
 
+test("BPMN: humanOutcome is set on BOTH the completion and the SLA-timeout path", () => {
+  // Symmetry with readiness-gate.bpmn's `gateOutcome`: a caller reading process variables must be
+  // able to distinguish a completed human step from one the SLA timer escalated. The userTask sets
+  // "completed" on the normal path; the timeout end event must set "escalated" — otherwise the
+  // escalation path ends with humanOutcome unset and the two outcomes are indistinguishable.
+  assertStringIncludes(
+    flat,
+    '<zeebe:output source="=&#34;completed&#34;" target="humanOutcome" />',
+    "the completion path must set humanOutcome=completed",
+  );
+  const escalated = flat.match(
+    /<bpmn:endEvent\b[^>]*\bid="human-escalated"[\s\S]*?<\/bpmn:endEvent>/,
+  );
+  assert(escalated, "the SLA-timeout end event human-escalated must exist");
+  assertStringIncludes(
+    escalated![0],
+    '<zeebe:input source="=&#34;escalated&#34;" target="humanOutcome" />',
+    "the SLA-timeout path must set humanOutcome=escalated",
+  );
+});
+
 test("drift guard: the human element is completer-answerable and surfaces on the inbox", () => {
   // The canonical completer refuses any user task outside ESCALATION_TASK_ELEMENTS, so a model that
   // parks on delivery-human-task while the code doesn't accept it would deploy but be unanswerable
