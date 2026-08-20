@@ -13,7 +13,7 @@
 // scope to implement the sweeper — the naming is what enables it). The base id the compiler emits
 // (`DELIVERY_GRAPH_PROCESS_ID`) is the single substitution target, so the runner never hardcodes it.
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { EngineClient } from "@nanobpm/urban";
 import type { DeliveryGraph, DeliveryNode } from "../nano-generated/api-io.d.ts";
 import { assertNever, compileDeliveryGraph, DELIVERY_GRAPH_PROCESS_ID } from "./deliveryGraphCompiler.ts";
@@ -33,7 +33,10 @@ export interface DeliveryRunTimeouts {
 
 export interface DeliveryRunOptions extends DeliveryRunTimeouts {
   /** A per-run token that scopes each `wait` node's gate key (`<runKey>:<element>`) so two concurrent
-   * runs of the same graph never share a gate correlation. Defaults to a random token. */
+   * runs of the same graph never share a gate correlation. Defaults to a fresh random per-run token
+   * (`randomUUID()`) — NOT the graph digest, which every run of an identical graph would share and so
+   * cross-correlate. Pass an explicit `runKey` only when you need a reproducible/externally-owned gate
+   * scope. */
   runKey?: string;
 }
 
@@ -75,9 +78,13 @@ export type RunDeliveryResult =
   | { ok: false; errors: { path: string; message: string }[] };
 
 /** Compile a graph and prepare it for deployment WITHOUT touching the engine: content-address its id,
- * rewrite the base process id, and build the `nodeInputs` seed. Pure and deterministic — the same graph
- * yields the same prepared definition (id included), which is what makes redeploy idempotent. Returns
- * the S1 compile errors verbatim for a malformed graph. */
+ * rewrite the base process id, and build the `nodeInputs` seed. The deployable DEFINITION (the
+ * content-addressed `processDefinitionId` and the `bpmn`) is deterministic — the same graph yields the
+ * same id, which is what makes redeploy idempotent — because the gate scope lives in `nodeInputs`
+ * (runtime instance variables), not in the BPMN. The default `runKey` is a fresh random per-run token,
+ * so each call's `wait` `gateKey`s differ (two concurrent runs of the same graph never cross-correlate);
+ * pass an explicit `runKey` for a reproducible seed. Returns the S1 compile errors verbatim for a
+ * malformed graph. */
 export function prepareDeliveryGraph(graph: DeliveryGraph, options: DeliveryRunOptions = {}): PrepareDeliveryResult {
   const compiled = compileDeliveryGraph(graph);
   if (!compiled.ok) return { ok: false, errors: compiled.errors };
@@ -86,7 +93,7 @@ export function prepareDeliveryGraph(graph: DeliveryGraph, options: DeliveryRunO
   const processDefinitionId = `${DELIVERY_GRAPH_PROCESS_ID}-${digest}`;
   const bpmn = rewriteProcessId(compiled.bpmn, processDefinitionId);
 
-  const runKey = options.runKey?.trim() || digest;
+  const runKey = options.runKey?.trim() || randomUUID();
   const timeouts = {
     nodeTimeout: options.nodeTimeout ?? DEFAULTS.nodeTimeout,
     probeTimeout: options.probeTimeout ?? DEFAULTS.probeTimeout,

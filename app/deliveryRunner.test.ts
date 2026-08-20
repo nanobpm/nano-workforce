@@ -73,6 +73,25 @@ test("nodeInputs seeds the exact per-kind fields each node's subProcess ioMappin
   assertEquals(connector, { target: "npm:install", dedupeKey: "consume-1", payload: null, timeout: "PT10M" });
 });
 
+test("wait gateKeys default to a fresh per-run token so concurrent runs of one graph never cross-correlate", () => {
+  const gateKeyOf = (p: ReturnType<typeof prepareOk>) =>
+    (Object.values(p.nodeInputs).find((v) => "gateKey" in v) as { gateKey?: string } | undefined)?.gateKey;
+
+  const a = prepareOk(GRAPH);
+  const b = prepareOk(GRAPH);
+  assert(gateKeyOf(a) && gateKeyOf(b), "each run seeds a wait gateKey");
+  assert(gateKeyOf(a) !== gateKeyOf(b), "two runs of the same graph get DISTINCT default gate scopes");
+  // The gate key must NOT be derived from the (shared) content digest — that is the bug this guards.
+  assert(!gateKeyOf(a)?.startsWith(a.processDefinitionId.slice(-12)), "default gateKey is not the graph digest");
+  // The deployable definition (id + bpmn) stays deterministic regardless of the per-run gate scope.
+  assertEquals(a.processDefinitionId, b.processDefinitionId);
+  assertEquals(a.bpmn, b.bpmn);
+
+  // An explicit runKey is honoured verbatim (reproducible seed).
+  const seeded = prepareOk(GRAPH, { runKey: "run-7" });
+  assertEquals(gateKeyOf(seeded), "run-7:n3");
+});
+
 test("a malformed graph returns the S1 compile errors and prepares nothing", () => {
   const r = prepareDeliveryGraph({ nodes: [{ id: "a", kind: "agent", agent: { jobType: "j" } }], edges: [{ from: "a", to: "ghost" }] } as unknown as DeliveryGraph);
   assert(!r.ok, "a dangling edge fails to prepare");

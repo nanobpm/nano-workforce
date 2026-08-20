@@ -16,10 +16,20 @@
 import type { DataLayer } from "@nanobpm/urban";
 import { isUniqueConstraintFence } from "./dbFence.ts";
 
-/** The engine `taskType` a compiled `connector` node's inlined subProcess delegates to. Single source
- * of truth shared by the compiler's delegation map (`DELEGATE_TASK_TYPE.connector`), the worker
- * registration (`nano.app.json`), and any test that stubs the worker — so they can never drift. */
+/** The engine `taskType` a compiled `connector` node's inlined subProcess delegates to. The canonical
+ * source the compiler's delegation map (`DELEGATE_TASK_TYPE.connector` imports and uses this constant),
+ * so the compiled BPMN's task type is DERIVED here, not re-typed. The worker registration
+ * (`nano.app.json`) and the compiler tests pin the same literal by value — a manifest is JSON and a
+ * value assertion cannot import a TS const — so they read as verification of this constant, not a
+ * parallel source of truth. */
 export const DELIVERY_CONNECTOR_TASK_TYPE = "pr.delivery-connector";
+
+/** The connector ledger's two-step claim lifecycle. `claimed` — the row was fenced but the action has
+ * not yet been recorded as done (an in-flight or crashed attempt, which `dispatchConnector` RESUMES);
+ * `delivered` — the action completed and the row is terminally deduped. Named constants so the claim,
+ * the resume check, and the delivered short-circuit can never drift on a bare string. */
+export const OUTCOME_CLAIMED = "claimed";
+export const OUTCOME_DELIVERED = "delivered";
 
 /** One durable dispatch-claim row — the at-most-once ledger entry a connector writes before it acts. */
 export interface DeliveryConnectorDispatchRow extends Record<string, unknown> {
@@ -86,12 +96,18 @@ export interface ConnectorDispatchResult extends Record<string, unknown> {
 /** Dispatch a connector action AT-MOST-ONCE against its dedupe key. CLAIMS the ledger row FIRST (the
  * UNIQUE fence is the atomic gate that elects exactly one winner), and ONLY the claim winner performs
  * the forward-declared action — so an at-least-once redelivery, or a concurrent racer, can never
- * double-fire the side effect. A redelivery whose key is already claimed — observed by the fast-path
- * `findOne` OR the fence collision a concurrent claimer raced us to — returns `deduped` WITHOUT acting.
- * The winner records the action's outcome by updating its own claim row, so a later `deduped` replay
- * reports the ORIGINAL detail. (For the STUB action this two-step claim→act→record is already the full
- * durable envelope; a real transport later slots a resumable `applied` reconcile in, as the world-store
- * ledger does, without changing this contract.) */
+ * double-fire a SETTLED side effect. A redelivery whose key is already recorded `delivered` returns
+ * `deduped` WITHOUT acting, reporting the ORIGINAL detail.
+ *
+ * Resumability (the crash window). A claim is a two-step `claimed`→act→`delivered`. If a worker dies
+ * AFTER claiming but BEFORE recording delivery, the action never completed — so a redelivery that finds
+ * a still-`claimed` (not yet `delivered`) row must RESUME it: perform the action and record delivery,
+ * rather than treating the un-acted claim as `deduped` and wedging the node on a side effect that never
+ * fires. Only a `delivered` row is terminally deduped. (The concurrent-race loser below is a distinct
+ * case — its winner is actively delivering right now, so it stays `deduped`; if that winner then dies,
+ * the recovery is this same resume path on a later redelivery.) The STUB action is idempotent, so a
+ * resume is free; a real transport later slots a resumable `applied` reconcile in — as the world-store
+ * ledger does — to make the resume itself at-most-once, without changing this contract. */
 export async function dispatchConnector(
   data: DataLayer,
   input: { dedupeKey: string; target: string; payload?: Record<string, unknown> | null; boundFacts?: readonly BoundFact[] | null },
@@ -99,15 +115,26 @@ export async function dispatchConnector(
 ): Promise<ConnectorDispatchResult> {
   const ledger = deliveryConnectorDispatches(data);
   const existing = await ledger.findOne({ dedupe_key: input.dedupeKey });
-  if (existing) {
+  if (existing?.outcome === OUTCOME_DELIVERED) {
     return { connectorOutcome: "deduped", connectorDedupeKey: input.dedupeKey, connectorDetail: existing.detail ?? "" };
+  }
+  if (existing && existing.id !== undefined) {
+    // A prior attempt CLAIMED the key but crashed before recording delivery — the action never
+    // completed. Resume it on the existing row rather than dedupe forever on an un-acted claim.
+    const { detail } = performConnectorAction({
+      target: input.target,
+      payload: input.payload ?? null,
+      boundFacts: input.boundFacts ?? [],
+    });
+    await ledger.update(existing.id, { outcome: OUTCOME_DELIVERED, detail });
+    return { connectorOutcome: "delivered", connectorDedupeKey: input.dedupeKey, connectorDetail: detail };
   }
   let claimId: number | bigint;
   try {
     claimId = await ledger.insert({
       dedupe_key: input.dedupeKey,
       target: input.target,
-      outcome: "claimed",
+      outcome: OUTCOME_CLAIMED,
       detail: null,
       dispatched_at: at,
     });
@@ -125,6 +152,6 @@ export async function dispatchConnector(
     payload: input.payload ?? null,
     boundFacts: input.boundFacts ?? [],
   });
-  await ledger.update(claimId, { outcome: "delivered", detail });
+  await ledger.update(claimId, { outcome: OUTCOME_DELIVERED, detail });
   return { connectorOutcome: "delivered", connectorDedupeKey: input.dedupeKey, connectorDetail: detail };
 }

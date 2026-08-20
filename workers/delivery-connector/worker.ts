@@ -25,8 +25,41 @@ interface In extends Record<string, unknown> {
   boundFacts?: BoundFact[] | null;
 }
 
+/** A plain (non-array, non-null) object — the only shape a connector `payload` may take. */
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+/** Validate + normalise the untyped job variables into the shape the connector surface accepts. Job
+ * variables are untyped at runtime, so a misconfigured node (or a hand-seeded instance) could hand us a
+ * blank `target`, a scalar `payload`, or a non-array `boundFacts`. Fail CLOSED on a blank `target` (a
+ * connector with no destination is meaningless and would write a junk ledger row); coerce a wrong-shaped
+ * `payload`/`boundFacts` to `null` (they are optional) and surface the coercion via `warnings` so the
+ * caller can log it rather than silently pass garbage into the I/O surface. */
+export function readConnectorInput(vars: In): {
+  target: string;
+  payload: Record<string, unknown> | null;
+  boundFacts: BoundFact[] | null;
+  warnings: string[];
+} {
+  const target = typeof vars.target === "string" ? vars.target.trim() : "";
+  if (!target) throw new Error("delivery-connector: 'target' is required (blank connector target)");
+  const warnings: string[] = [];
+  let payload: Record<string, unknown> | null = null;
+  if (vars.payload != null) {
+    if (isPlainObject(vars.payload)) payload = vars.payload;
+    else warnings.push("payload is not a plain object — coerced to null");
+  }
+  let boundFacts: BoundFact[] | null = null;
+  if (vars.boundFacts != null) {
+    if (Array.isArray(vars.boundFacts)) boundFacts = vars.boundFacts;
+    else warnings.push("boundFacts is not an array — coerced to null");
+  }
+  return { target, payload, boundFacts, warnings };
+}
+
 const handler: AppJobHandler<In, ConnectorDispatchResult> = async (job, app) => {
-  const target = typeof job.variables.target === "string" ? job.variables.target : "";
+  const { target, payload, boundFacts, warnings } = readConnectorInput(job.variables);
   const dedupeKey = connectorDedupeKey({
     dedupeKey: job.variables.dedupeKey ?? null,
     processInstanceKey: job.processInstanceKey ?? null,
@@ -37,9 +70,10 @@ const handler: AppJobHandler<In, ConnectorDispatchResult> = async (job, app) => 
     // perform a side effect we could not make idempotent (never double-fire).
     throw new Error("delivery-connector: no dedupe key (author-supplied or graph-derived) available");
   }
+  for (const w of warnings) app.log.info("delivery-connector: input coerced", { target, dedupeKey, warning: w });
   const result = await dispatchConnector(
     app.data,
-    { dedupeKey, target, payload: job.variables.payload ?? null, boundFacts: job.variables.boundFacts ?? null },
+    { dedupeKey, target, payload, boundFacts },
     new Date().toISOString(),
   );
   app.log.info("delivery-connector", { target, dedupeKey, outcome: result.connectorOutcome });

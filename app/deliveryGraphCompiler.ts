@@ -34,6 +34,7 @@ import type {
   ResolvedDeliveryEdge,
   ResolvedDeliveryNode,
 } from "../nano-generated/api-io.d.ts";
+import { DELIVERY_CONNECTOR_TASK_TYPE } from "./deliveryConnector.ts";
 import {
   type DeliveryGraphError,
   deliveryNodeFacts,
@@ -61,7 +62,7 @@ import { DELIVERY_HUMAN_ELEMENT, GENERIC_HUMAN_FORM } from "./deliveryHuman.ts";
  * the delegation target each node names. */
 const DELEGATE_TASK_TYPE: Record<Exclude<DeliveryNode["kind"], "agent" | "human">, string> = {
   wait: "pr.readiness-probe",
-  connector: "pr.delivery-connector",
+  connector: DELIVERY_CONNECTOR_TASK_TYPE,
 };
 
 /** The BPMN `bpmn:process` id of the compiled one-shot definition (S1). Stable across compiles of the

@@ -57,6 +57,29 @@ test("first dispatch delivers exactly once; a redelivery on the same key dedupes
   });
 });
 
+test("a redelivery of a CLAIMED-but-not-delivered row RESUMES the action (never wedges on a permanent dedupe)", async () => {
+  await withApp(async (app) => {
+    const ledger = deliveryConnectorDispatches(app.db);
+    // Simulate a worker that crashed AFTER claiming the key but BEFORE recording delivery: a lone
+    // `claimed` row whose action never fired.
+    await ledger.insert({ dedupe_key: "wedged-1", target: "slack", outcome: "claimed", detail: null, dispatched_at: "2025-01-01T00:00:00.000Z" });
+
+    // A redelivery must RESUME (perform the action + record delivery), not report `deduped` forever.
+    const resumed = await dispatchConnector(app.db, { dedupeKey: "wedged-1", target: "slack" }, "2025-01-01T01:00:00.000Z");
+    assertEquals(resumed.connectorOutcome, "delivered");
+    assert(resumed.connectorDetail.length > 0, "the resumed dispatch carries an action detail");
+
+    const rows = await ledger.find({ dedupe_key: "wedged-1" });
+    assertEquals(rows.length, 1, "resume records on the existing row — no duplicate ledger entry");
+    assertEquals(rows[0].outcome, "delivered");
+
+    // And a subsequent redelivery of the now-DELIVERED row terminally dedupes.
+    const replay = await dispatchConnector(app.db, { dedupeKey: "wedged-1", target: "slack" }, "2025-01-01T02:00:00.000Z");
+    assertEquals(replay.connectorOutcome, "deduped");
+    assertEquals(replay.connectorDetail, resumed.connectorDetail);
+  });
+});
+
 test("distinct dedupe keys each deliver once", async () => {
   await withApp(async (app) => {
     const a = await dispatchConnector(app.db, { dedupeKey: "a", target: "t" }, "2025-01-01T00:00:00.000Z");
