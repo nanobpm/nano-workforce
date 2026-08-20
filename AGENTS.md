@@ -211,6 +211,16 @@ Two different `nano:dataEnvelope` uses have different rules — don't conflate t
   deriving a worker's array inputs from the model this way over a hand-typed
   `interface In`; don't "fix" a modelled `list="true"` array back to a joined
   scalar.
+- **`io.nanobpm.dataEnvelope.in` projects its declared fields from PROCESS
+  (parent) scope, not from task-local `<zeebe:ioMapping>` inputs.** At runtime the
+  WASM engine populates each declared envelope field by name from the process
+  variables in scope — a `<zeebe:ioMapping>` input that produces a *new* name with
+  no process-variable backing is **not** picked up, so the field arrives **blank**
+  (e.g. `pr.readiness-probe` once incidented on an empty `gateKey`). Existing tasks
+  like `ensure-base-branch` only work because `repo`/`baseBranch` happen to already
+  be process variables. When you add an envelope field a task must read, **seed it
+  as a real process variable at plan start** (e.g. in `startPlan`) rather than
+  relying on `ioMapping` to synthesise it.
 
 ## Urban page runtime: rendering primitives are not JS-truthy
 
