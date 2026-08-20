@@ -116,7 +116,7 @@ is the degenerate "wait for the upstream node's completion fact."
 ### 4. Human nodes are first-class scheduled user tasks that can *emit* a typed fact
 
 A `human` node is ADR 0002's user-task+form machinery promoted from **exception** (something broke) to
-**scheduled node** (a planned stop). It surfaces *"now do X"* on the `taskInbox`/cockpit, blocks its
+**scheduled node** (a planned stop). It surfaces *"now do X"* on the app's own **Tasks** page/inbox, blocks its
 dependents, is **answerable by a human or an agent** (ADR 0046), and is **SLA-bounded** so it nags and
 cannot silently wedge the graph.
 
@@ -160,9 +160,11 @@ shared JSON contract means either can be swapped in later without touching the a
 
 ### 7. Submission is propose → preview → approve → dispatch, idempotent, over the self-describing endpoint
 
-Graphs are submitted exactly as epics are today — `POST /app/api/actions/start/delivery-graph` with the
-JSON body, discovered via the agent guide (which already documents `POST /actions/start/plan-fanout`
-and `POST /actions/complete-user-task`). Three ways in, **one validated contract**: agent-ergonomic
+Graphs are submitted exactly as epics are today — via a **new (proposed)** `POST
+/actions/start/delivery-graph` endpoint (paths are relative to the agent guide's `__BASE__` prefix,
+matching the guide's style) with the JSON body, discovered via the agent guide (which already
+documents `POST /actions/start/plan-fanout` and `POST /actions/complete-user-task`). This endpoint
+does not yet exist in `openapi.yaml` — it is introduced by this Proposed ADR. Three ways in, **one validated contract**: agent-ergonomic
 (co-design → POST), raw REST, and a **UI JSON-paste fallback**. Because these graphs *merge PRs and
 publish packages*, submission **defaults to propose-preview-approve** — the resolved graph (what it will
 do, where it stops for humans) is rendered and a human approves before dispatch; that approval is itself
