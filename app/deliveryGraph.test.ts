@@ -262,6 +262,14 @@ test("a `human` node whose `human` config is not an object is rejected, path-qua
   assertEquals(err.path, "nodes[0].human");
 });
 
+test("invalid-fact-name: an emitted fact name containing a dot is rejected so qualified `from` stays unambiguous", () => {
+  const errors = validateDeliveryGraph({
+    nodes: [{ id: "a", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "sha.short", type: "string" }] }],
+  });
+  const err = hasCode(errors, "invalid-fact-name");
+  assertEquals(err.path, "nodes[0].emits[0].name");
+});
+
 test("invalid-fact-type: an emitted fact with a type outside the allowlist is rejected, path-qualified", () => {
   const errors = validateDeliveryGraph({
     nodes: [

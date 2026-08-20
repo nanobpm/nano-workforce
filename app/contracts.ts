@@ -382,7 +382,7 @@ export const WIRE_CONTRACTS = {
     semantics:
       "The agent-authored delivery graph (ADR 0005, slice S0) — the SINGLE agent-facing artifact for a heterogeneous, partly-human, cross-repo delivery runbook, crossing the ingest boundary as DATA (a JSON DAG, never an executable artifact). Declared in openapi.yaml as `DeliveryGraph`; ingest validates the SHAPE there and the SEMANTICS (acyclicity, edge integrity, fact resolution) in the pure `validateDeliveryGraph` (`app/deliveryGraph.ts`). Nodes each name a `kind` from a CLOSED allowlist (`agent`/`wait`/`human`/`connector` — Decision 1/2, the trust boundary) plus their typed `emits[]`; edges name DISCOVERED facts (Decision 3) — `from` is a bare `<nodeId>` or a qualified `<nodeId>.<fact>`. Later slices (compiler/dispatch/execution) build on this ONE shape — consume it, do not re-declare a synonym.",
     shape:
-      '{ name?: string, nodes: Array<{ id: string, kind: "agent"|"wait"|"human"|"connector", emits?: Array<{ name: string, type: "string"|"number"|"boolean"|"artifact"|"version"|"url", description?: string }> }>, edges?: Array<{ from: string, to: string }> }',
+      '{ name?: string, nodes: Array<{ id: string, kind: "agent"|"wait"|"human"|"connector", emits?: Array<{ name: string, type: "string"|"number"|"boolean"|"artifact"|"version"|"url", description?: string }>, agent?: { jobType: string, prompt?: string }, wait?: ReadinessProbe, human?: { formKey?: string, prompt?: string }, connector?: { target: string, dedupeKey?: string, payload?: object } }>, edges?: Array<{ from: string, to: string }> }',
   },
 } as const satisfies Record<string, WireContract>;
 

@@ -45,6 +45,7 @@ export type DeliveryGraphErrorCode =
   | "unknown-kind"
   | "missing-config"
   | "duplicate-fact"
+  | "invalid-fact-name"
   | "invalid-fact-type"
   | "dangling-edge"
   | "bad-from"
@@ -79,6 +80,15 @@ function isDeliveryFactType(type: unknown): type is DeliveryFactType {
   for (const t of DELIVERY_FACT_TYPES) if (t === type) return true;
   return false;
 }
+
+/** A fact `name` must be a bare identifier (no dots) — mirrors openapi's `DeliveryFact.name`
+ * `^[A-Za-z_][A-Za-z0-9_]*$`. `resolveFrom` RELIES on fact names being dot-free (a node id MAY
+ * contain dots) to disambiguate a qualified edge `from`, so the semantic validator re-enforces the
+ * pattern INDEPENDENTLY of the OpenAPI shape gate: if that gate is bypassed (a direct delegate call,
+ * a test, a future internal use), a dotted fact name could otherwise make `<nodeId>.<fact>` resolution
+ * ambiguous and quietly build the wrong DAG — undermining the trust boundary this validator exists to
+ * hold. */
+const FACT_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 /** The per-kind config key a node of the given kind must carry (`agent` → `agent`, etc.). */
 const CONFIG_KEY: Record<DeliveryNodeKind, string> = {
@@ -220,6 +230,19 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
               path: `${path}.emits[${j}].name`,
               message: `duplicate emitted fact "${rawFact.name}" on node "${String(id)}"`,
               code: "duplicate-fact",
+            });
+            return;
+          }
+          if (!FACT_NAME_PATTERN.test(rawFact.name)) {
+            // A fact name must be a dot-free identifier (openapi's `DeliveryFact.name` pattern) so a
+            // qualified edge `from` "<nodeId>.<fact>" resolves unambiguously — enforced here too, in
+            // case the OpenAPI shape gate is bypassed.
+            errors.push({
+              path: `${path}.emits[${j}].name`,
+              message:
+                `emitted fact name "${rawFact.name}" must be a bare identifier ` +
+                "(`^[A-Za-z_][A-Za-z0-9_]*$`, no dots) so qualified edge `from` references stay unambiguous",
+              code: "invalid-fact-name",
             });
             return;
           }
