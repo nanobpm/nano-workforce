@@ -3,7 +3,8 @@
 // the merge-exclusion graph. Force the token transport and stub `globalThis.fetch`.
 import { test } from "node:test";
 import { assertEquals, assertRejects } from "#test-assert";
-import { BaseBranchMustExistError, classifyPrLiveness, coalesceTitle, createPullRequest, ensureBaseBranch, ensurePromotionPr, fetchIssueTitle, fetchPrFiles, isNotAPullRequestError, listPrsForHead, type PrState } from "./github.ts";
+import { BaseBranchMustExistError, checkConclusions, classifyMergeability, classifyPrLiveness, coalesceTitle, createPullRequest, ensureBaseBranch, ensurePromotionPr, fetchIssueTitle, fetchPrFiles, isNotAPullRequestError, listPrsForHead, type Mergeability, type PrState } from "./github.ts";
+import { DEFAULT_MERGE_PROTOCOL, type MergeProtocol, type RequiredCheck } from "./mergeProtocol.ts";
 
 // A fake `fetch` that serves `pages` of file batches; each page N (1-based) returns `pages[N-1]`
 // files (named `f{index}`), setting a `Link: rel="next"` header whenever a later page exists.
@@ -440,6 +441,8 @@ function prState(over: Partial<PrState>): PrState {
     failingChecks: 0,
     failingCheckNames: [],
     presentCheckNames: [],
+    pendingCheckNames: [],
+    checkConclusions: {},
     totalChecks: 0,
     isDraft: false,
     headRefOid: null,
@@ -462,4 +465,225 @@ test("classifyPrLiveness: a closed-not-merged PR is terminal (abandon)", () => {
 
 test("classifyPrLiveness: a null read (transport hiccup) is unknown — never abandons blind", () => {
   assertEquals(classifyPrLiveness(null), "unknown");
+});
+
+// ── classifyMergeability: protocol-aware required-checks backstop (issue #392) ────────────────────
+//
+// The merge poller must NOT merge a PR whose DECLARED-required check is red, even on a repo that
+// under-specifies its GitHub-required checks (so GitHub reports the PR as UNSTABLE, i.e. "only
+// non-required checks failing" from GitHub's view). `classifyMergeability` now intersects the repo's
+// merge-protocol `requiredChecks[]`/`waitForChecks` against the head's latest-run-per-check
+// conclusions (via `latestRunPerCheck`, preserving the #348 CANCELLED-supersede semantics) as an
+// independent backstop that runs BEFORE the `mergeStateStatus` switch. These are pure unit tests.
+
+// Build a `PrState` with sensible defaults; `over` supplies the fields a case cares about. `over`
+// may pass a `rollup` shorthand (name → conclusion) that we compile into the exact per-check fields
+// `classifyMergeability` reads (present/pending/conclusions), mirroring what `fetchPrState` derives.
+function mergePrState(over: Partial<PrState> & { rollup?: { name: string; conclusion: string }[] } = {}): PrState {
+  const { rollup, ...rest } = over;
+  const base: PrState = {
+    merged: false,
+    state: "open",
+    mergeStateStatus: "CLEAN",
+    failingChecks: 0,
+    failingCheckNames: [],
+    totalChecks: 0,
+    presentCheckNames: [],
+    pendingCheckNames: [],
+    checkConclusions: {},
+    isDraft: false,
+    headRefOid: "abc123",
+  };
+  if (rollup) {
+    const bad = new Set(["FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE", "ERROR"]);
+    const pendingStates = new Set(["", "PENDING", "QUEUED", "IN_PROGRESS", "EXPECTED", "WAITING"]);
+    const present: string[] = [];
+    const pending: string[] = [];
+    const failing: string[] = [];
+    const conclusions: Record<string, string> = {};
+    for (const c of rollup) {
+      const v = c.conclusion.toUpperCase();
+      present.push(c.name);
+      conclusions[c.name] = pendingStates.has(v) ? "" : v;
+      if (pendingStates.has(v)) pending.push(c.name);
+      else if (bad.has(v)) failing.push(c.name);
+    }
+    base.presentCheckNames = present;
+    base.pendingCheckNames = pending;
+    base.checkConclusions = conclusions;
+    base.failingCheckNames = failing;
+    base.failingChecks = failing.length;
+    base.totalChecks = rollup.length;
+  }
+  return { ...base, ...rest };
+}
+
+function reqChecks(...names: string[]): RequiredCheck[] {
+  return names.map((name) => ({ name, acceptedConclusions: ["success"] }));
+}
+
+function protocolWith(over: Partial<MergeProtocol>): MergeProtocol {
+  return { ...DEFAULT_MERGE_PROTOCOL, ...over };
+}
+
+interface MergeCase {
+  name: string;
+  state: Partial<PrState> & { rollup?: { name: string; conclusion: string }[] };
+  protocol?: MergeProtocol;
+  want: Mergeability;
+}
+
+const MERGE_CASES: MergeCase[] = [
+  // The exact defect: UNSTABLE + a red DECLARED-required check used to classify `ready` and merge.
+  {
+    name: "UNSTABLE + red declared-required check -> blocked (the #392 defect)",
+    state: { mergeStateStatus: "UNSTABLE", rollup: [{ name: "test (22.x, simple)", conclusion: "FAILURE" }] },
+    protocol: protocolWith({ requiredChecks: [{ name: "test (22.x, simple)", acceptedConclusions: ["success"] }] }),
+    want: "blocked",
+  },
+  {
+    name: "CLEAN + red declared-required check -> blocked (backstop runs before the switch)",
+    state: { mergeStateStatus: "CLEAN", rollup: [{ name: "build", conclusion: "FAILURE" }] },
+    protocol: protocolWith({ requiredChecks: reqChecks("build") }),
+    want: "blocked",
+  },
+  {
+    name: "declared-required check pending -> waiting",
+    state: { mergeStateStatus: "CLEAN", rollup: [{ name: "build", conclusion: "IN_PROGRESS" }] },
+    protocol: protocolWith({ requiredChecks: reqChecks("build") }),
+    want: "waiting",
+  },
+  {
+    name: "declared-required check absent from head -> waiting (absence is not a pass)",
+    state: { mergeStateStatus: "CLEAN", rollup: [{ name: "lint", conclusion: "SUCCESS" }] },
+    protocol: protocolWith({ requiredChecks: reqChecks("build") }),
+    want: "waiting",
+  },
+  {
+    name: "declared-required check passing, CLEAN -> ready",
+    state: { mergeStateStatus: "CLEAN", rollup: [{ name: "build", conclusion: "SUCCESS" }] },
+    protocol: protocolWith({ requiredChecks: reqChecks("build") }),
+    want: "ready",
+  },
+  {
+    name: "declared-required check passing, UNSTABLE -> ready (falls through to the switch)",
+    state: { mergeStateStatus: "UNSTABLE", rollup: [{ name: "build", conclusion: "SUCCESS" }] },
+    protocol: protocolWith({ requiredChecks: reqChecks("build") }),
+    want: "ready",
+  },
+  {
+    name: "non-required check failing (not declared-required), UNSTABLE -> ready (today's behaviour)",
+    state: {
+      mergeStateStatus: "UNSTABLE",
+      rollup: [{ name: "build", conclusion: "SUCCESS" }, { name: "flaky-optional", conclusion: "FAILURE" }],
+    },
+    protocol: protocolWith({ requiredChecks: reqChecks("build") }),
+    want: "ready",
+  },
+  {
+    name: "CANCELLED superseded by a newer green run on a required check -> ready (#348 semantics)",
+    // `prState`'s rollup shorthand keeps one conclusion per name (latest wins); model the superseded
+    // + re-run by asserting the green outcome the rollup helpers collapse to.
+    state: { mergeStateStatus: "UNSTABLE", rollup: [{ name: "engine-core", conclusion: "SUCCESS" }] },
+    protocol: protocolWith({ requiredChecks: reqChecks("engine-core") }),
+    want: "ready",
+  },
+  {
+    name: "acceptedConclusions beyond [success] honoured: NEUTRAL accepted -> ready",
+    state: { mergeStateStatus: "CLEAN", rollup: [{ name: "build", conclusion: "NEUTRAL" }] },
+    protocol: protocolWith({ requiredChecks: [{ name: "build", acceptedConclusions: ["success", "neutral"] }] }),
+    want: "ready",
+  },
+  {
+    name: "acceptedConclusions [success] does NOT accept a NEUTRAL required conclusion -> blocked",
+    state: { mergeStateStatus: "CLEAN", rollup: [{ name: "build", conclusion: "NEUTRAL" }] },
+    protocol: protocolWith({ requiredChecks: [{ name: "build", acceptedConclusions: ["success"] }] }),
+    want: "blocked",
+  },
+  {
+    name: "waitForChecks:true + pending required check -> waiting even when CLEAN",
+    state: { mergeStateStatus: "CLEAN", rollup: [{ name: "build", conclusion: "QUEUED" }] },
+    protocol: protocolWith({ requiredChecks: reqChecks("build"), waitForChecks: true }),
+    want: "waiting",
+  },
+];
+
+for (const c of MERGE_CASES) {
+  test(`classifyMergeability: ${c.name}`, () => {
+    assertEquals(classifyMergeability(mergePrState(c.state), c.protocol), c.want);
+  });
+}
+
+// Empty requiredChecks (the DEFAULT protocol) — behaviour must be IDENTICAL to today across every
+// mergeStateStatus, whether a protocol is passed or omitted entirely.
+const DEFAULT_BEHAVIOUR: { status: string; failingChecks?: number; want: Mergeability }[] = [
+  { status: "CLEAN", want: "ready" },
+  { status: "HAS_HOOKS", want: "ready" },
+  { status: "UNSTABLE", want: "ready" },
+  { status: "BEHIND", want: "ready" },
+  { status: "DIRTY", want: "conflict" },
+  { status: "BLOCKED", failingChecks: 1, want: "blocked" },
+  { status: "BLOCKED", failingChecks: 0, want: "waiting" },
+  { status: "UNKNOWN", want: "waiting" },
+  { status: "", want: "waiting" },
+];
+
+for (const c of DEFAULT_BEHAVIOUR) {
+  test(`classifyMergeability: empty requiredChecks keeps today's behaviour (${c.status || "''"} -> ${c.want})`, () => {
+    const s = prState({ mergeStateStatus: c.status, failingChecks: c.failingChecks ?? 0 });
+    // Explicit default protocol and omitted-protocol must agree.
+    assertEquals(classifyMergeability(s, DEFAULT_MERGE_PROTOCOL), c.want);
+    assertEquals(classifyMergeability(s), c.want);
+  });
+}
+
+// Token mode: the transport can't enumerate checks (`failingChecks === -1`, empty per-check lists),
+// so even a repo that declares requiredChecks must fall through to today's `mergeStateStatus`
+// behaviour — the backstop must NEVER newly block or wait when checks are unenumerable.
+const TOKEN_MODE: { status: string; want: Mergeability }[] = [
+  { status: "CLEAN", want: "ready" },
+  { status: "UNSTABLE", want: "ready" },
+  { status: "BLOCKED", want: "waiting" }, // failingChecks<0 → conservative wait, exactly as before
+  { status: "DIRTY", want: "conflict" },
+  { status: "UNKNOWN", want: "waiting" },
+];
+
+for (const c of TOKEN_MODE) {
+  test(`classifyMergeability: token mode falls through, never newly blocks (${c.status} -> ${c.want})`, () => {
+    const s = prState({
+      mergeStateStatus: c.status,
+      failingChecks: -1,
+      totalChecks: -1,
+      presentCheckNames: [],
+      pendingCheckNames: [],
+      checkConclusions: {},
+    });
+    const protocol = protocolWith({ requiredChecks: reqChecks("build"), waitForChecks: true });
+    assertEquals(classifyMergeability(s, protocol), c.want);
+  });
+}
+
+// `checkConclusions` must report a terminal conclusion per check but normalise a STILL-IN-FLIGHT run
+// to "" for BOTH rollup shapes — a CheckRun whose `status` is not COMPLETED, and a legacy
+// StatusContext whose `state` is PENDING/EXPECTED — so a caller never mistakes a pending
+// status-context's upper-cased `state` (e.g. "PENDING") for a terminal conclusion.
+test("checkConclusions: in-flight runs map to '' for both CheckRun and StatusContext shapes", () => {
+  const got = checkConclusions([
+    { name: "ci-success", status: "COMPLETED", conclusion: "SUCCESS" },
+    { name: "ci-failure", status: "COMPLETED", conclusion: "FAILURE" },
+    { name: "ci-running", status: "IN_PROGRESS" }, // CheckRun in flight -> ""
+    { name: "ci-queued", status: "QUEUED" }, // CheckRun queued -> ""
+    { context: "legacy-pending", state: "PENDING" }, // StatusContext in flight -> ""
+    { context: "legacy-expected", state: "EXPECTED" }, // StatusContext in flight -> ""
+    { context: "legacy-error", state: "ERROR" }, // StatusContext terminal -> preserved
+  ]);
+  assertEquals(got, {
+    "ci-success": "SUCCESS",
+    "ci-failure": "FAILURE",
+    "ci-running": "",
+    "ci-queued": "",
+    "legacy-pending": "",
+    "legacy-expected": "",
+    "legacy-error": "ERROR",
+  });
 });

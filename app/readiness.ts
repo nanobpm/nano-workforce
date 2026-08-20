@@ -18,7 +18,7 @@
 // any credential is read at execution time from the typed env-contract (`credentialEnv` names a
 // declared {@link EnvKey}; ADR 0004 pinned decision 2) and is redacted from every log line.
 import { isEnvKey, readEnv, readEnvOr } from "./contracts.ts";
-import { allCheckNames, classifyMergeability, failingCheckNames, type PrState, pendingCheckNames } from "./github.ts";
+import { allCheckNames, checkConclusions, classifyMergeability, failingCheckNames, type PrState, pendingCheckNames } from "./github.ts";
 import { isoDuration, isoDurationToMs } from "./reviewWait.ts";
 
 /** The built-in readiness sources. `command` is the escape hatch that subsumes the long tail
@@ -565,6 +565,8 @@ export function parsePrView(payload: unknown): PrObservation {
     failingCheckNames: names,
     totalChecks: rollup.length,
     presentCheckNames: allCheckNames(rollup),
+    pendingCheckNames: pending,
+    checkConclusions: checkConclusions(rollup),
     isDraft: j.isDraft === true,
     headRefOid: str(j.headRefOid).trim() || null,
     mergedSha,
