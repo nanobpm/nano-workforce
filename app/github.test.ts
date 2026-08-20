@@ -3,7 +3,7 @@
 // the merge-exclusion graph. Force the token transport and stub `globalThis.fetch`.
 import { test } from "node:test";
 import { assertEquals, assertRejects } from "#test-assert";
-import { BaseBranchMustExistError, classifyMergeability, classifyPrLiveness, coalesceTitle, createPullRequest, ensureBaseBranch, ensurePromotionPr, fetchIssueTitle, fetchPrFiles, isNotAPullRequestError, listPrsForHead, type Mergeability, type PrState } from "./github.ts";
+import { BaseBranchMustExistError, checkConclusions, classifyMergeability, classifyPrLiveness, coalesceTitle, createPullRequest, ensureBaseBranch, ensurePromotionPr, fetchIssueTitle, fetchPrFiles, isNotAPullRequestError, listPrsForHead, type Mergeability, type PrState } from "./github.ts";
 import { DEFAULT_MERGE_PROTOCOL, type MergeProtocol, type RequiredCheck } from "./mergeProtocol.ts";
 
 // A fake `fetch` that serves `pages` of file batches; each page N (1-based) returns `pages[N-1]`
@@ -662,3 +662,28 @@ for (const c of TOKEN_MODE) {
     assertEquals(classifyMergeability(s, protocol), c.want);
   });
 }
+
+// `checkConclusions` must report a terminal conclusion per check but normalise a STILL-IN-FLIGHT run
+// to "" for BOTH rollup shapes — a CheckRun whose `status` is not COMPLETED, and a legacy
+// StatusContext whose `state` is PENDING/EXPECTED — so a caller never mistakes a pending
+// status-context's upper-cased `state` (e.g. "PENDING") for a terminal conclusion.
+test("checkConclusions: in-flight runs map to '' for both CheckRun and StatusContext shapes", () => {
+  const got = checkConclusions([
+    { name: "ci-success", status: "COMPLETED", conclusion: "SUCCESS" },
+    { name: "ci-failure", status: "COMPLETED", conclusion: "FAILURE" },
+    { name: "ci-running", status: "IN_PROGRESS" }, // CheckRun in flight -> ""
+    { name: "ci-queued", status: "QUEUED" }, // CheckRun queued -> ""
+    { context: "legacy-pending", state: "PENDING" }, // StatusContext in flight -> ""
+    { context: "legacy-expected", state: "EXPECTED" }, // StatusContext in flight -> ""
+    { context: "legacy-error", state: "ERROR" }, // StatusContext terminal -> preserved
+  ]);
+  assertEquals(got, {
+    "ci-success": "SUCCESS",
+    "ci-failure": "FAILURE",
+    "ci-running": "",
+    "ci-queued": "",
+    "legacy-pending": "",
+    "legacy-expected": "",
+    "legacy-error": "ERROR",
+  });
+});
