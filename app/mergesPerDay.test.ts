@@ -187,6 +187,18 @@ test("non-ISO / malformed `at` still groups deterministically without throwing",
   assertEquals(days[0].merged, 2);
 });
 
+test("an invalid IANA timeZone falls back to the host zone instead of throwing (issue #361)", () => {
+  // A bogus zone would make `Intl.DateTimeFormat` throw a `RangeError`; bucketing must stay
+  // deterministic and not wedge `deriveMergesPerDay`/`pollMergesPerDay`.
+  const days = deriveMergesPerDay(
+    [merged("o/r#1", "2026-01-01T12:00:00Z")],
+    "Not/AZone",
+  );
+  assertEquals(days.length, 1);
+  assertEquals(days[0].merged, 1);
+  assert(/^\d{4}-\d{2}-\d{2}$/.test(days[0].day));
+});
+
 test("pollMergesPerDay projects the aggregate onto merges_per_day", async () => {
   const { data, stores } = memData();
   stores.merges = [

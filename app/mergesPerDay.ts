@@ -61,19 +61,40 @@ const BAR_FULL = "█";
  *  `Intl.DateTimeFormat` — an explicit, side-effect-free zone rather than one mutated through the
  *  process-global `process.env.TZ`. When `timeZone` is omitted the formatter uses the host's
  *  resolved zone (so a remote deployment can still pin the operator's zone via `TZ`, and a
- *  co-located console — the default `npm start` on `localhost` — is already the browser's zone). Any
- *  value that does not parse to a real instant (a malformed / non-ISO row) falls back to the whole
- *  trimmed string so it still groups deterministically rather than throwing. */
+ *  co-located console — the default `npm start` on `localhost` — is already the browser's zone). An
+ *  invalid/unknown IANA `timeZone` falls back to the host-resolved zone (rather than throwing a
+ *  `RangeError` that would wedge `deriveMergesPerDay`/`pollMergesPerDay`), so bucketing stays
+ *  deterministic. Any value that does not parse to a real instant (a malformed / non-ISO row) falls
+ *  back to the whole trimmed string so it still groups deterministically rather than throwing. */
+const dayFormatters = new Map<string, Intl.DateTimeFormat>();
+
+/** A cached `en-CA` day formatter for `timeZone`, falling back to the host-resolved zone when the
+ *  zone is invalid/unknown (an invalid IANA string makes `Intl.DateTimeFormat` throw a `RangeError`).
+ *  Keyed so an invalid zone is only probed once. */
+function dayFormatter(timeZone?: string): Intl.DateTimeFormat {
+  const key = timeZone ?? "";
+  const cached = dayFormatters.get(key);
+  if (cached) return cached;
+  const opts: Intl.DateTimeFormatOptions = {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  };
+  let fmt: Intl.DateTimeFormat;
+  try {
+    fmt = new Intl.DateTimeFormat("en-CA", { ...opts, timeZone });
+  } catch {
+    fmt = new Intl.DateTimeFormat("en-CA", opts);
+  }
+  dayFormatters.set(key, fmt);
+  return fmt;
+}
+
 function dayOf(at: string, timeZone?: string): string {
   const s = String(at).trim();
   const d = new Date(s);
   if (Number.isNaN(d.getTime())) return s;
-  const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).formatToParts(d);
+  const parts = dayFormatter(timeZone).formatToParts(d);
   const field = (type: string) => parts.find((p) => p.type === type)?.value ?? "";
   return `${field("year")}-${field("month")}-${field("day")}`;
 }
