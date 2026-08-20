@@ -375,6 +375,15 @@ export const WIRE_CONTRACTS = {
       "The mind/world checkpoint JOIN shape (issue #324, ADR 0062 Slice 4/5, the WORLD half). At each push the app derives ONE `{commitSha, effectLedger}` and records it in the durable world store (`world_checkpoints`/`world_effects`) AND passes the SAME object to the mind's `session.checkpoint(commitSha, effectLedger)` (Slice 1, `@nanobpm/agentic/session`), so mind + world commit at the SAME per-PR monotonic offset — closing the divergence failure (harness thinks it hasn't pushed but the push landed, or vice-versa). `effectLedger` entries carry a fence idempotency key (push→commit SHA, PR comment→comment id, `gh merge`→merge key); on a re-lease `restoreWorld` inverts the push (`git fetch && git checkout <commitSha>`) then fence-replays the tail so an already-applied effect is skipped, not repeated. Consume this ONE shape from app/world — do not re-declare a synonym.",
     shape: '{ commitSha: string, effectLedger: Array<{ kind: "push"|"pr-comment"|"merge", idempotencyKey: string, description?: string }> }',
   },
+  DeliveryGraph: {
+    category: "wire",
+    name: "DeliveryGraph",
+    owner: "app/deliveryGraph.ts",
+    semantics:
+      "The agent-authored delivery graph (ADR 0005, slice S0) — the SINGLE agent-facing artifact for a heterogeneous, partly-human, cross-repo delivery runbook, crossing the ingest boundary as DATA (a JSON DAG, never an executable artifact). Declared in openapi.yaml as `DeliveryGraph`; ingest validates the SHAPE there and the SEMANTICS (acyclicity, edge integrity, fact resolution) in the pure `validateDeliveryGraph` (`app/deliveryGraph.ts`). Nodes each name a `kind` from a CLOSED allowlist (`agent`/`wait`/`human`/`connector` — Decision 1/2, the trust boundary) plus their typed `emits[]`; edges name DISCOVERED facts (Decision 3) — `from` is a bare `<nodeId>` or a qualified `<nodeId>.<fact>`. Later slices (compiler/dispatch/execution) build on this ONE shape — consume it, do not re-declare a synonym.",
+    shape:
+      '{ name?: string, nodes: Array<{ id: string, kind: "agent"|"wait"|"human"|"connector", emits?: Array<{ name: string, type: "string"|"number"|"boolean"|"artifact"|"version"|"url", description?: string }> }>, edges?: Array<{ from: string, to: string }> }',
+  },
 } as const satisfies Record<string, WireContract>;
 
 export const TYPE_CONTRACTS = {
