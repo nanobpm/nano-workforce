@@ -18,7 +18,7 @@
 // any credential is read at execution time from the typed env-contract (`credentialEnv` names a
 // declared {@link EnvKey}; ADR 0004 pinned decision 2) and is redacted from every log line.
 import { isEnvKey, readEnv, readEnvOr } from "./contracts.ts";
-import { allCheckNames, classifyMergeability, failingCheckNames, type PrState } from "./github.ts";
+import { allCheckNames, classifyMergeability, failingCheckNames, type PrState, pendingCheckNames } from "./github.ts";
 import { isoDuration, isoDurationToMs } from "./reviewWait.ts";
 
 /** The built-in readiness sources. `command` is the escape hatch that subsumes the long tail
@@ -539,6 +539,9 @@ export function githubReleasesCommand(repo: string): string {
 export interface PrObservation extends PrState {
   /** The merge commit oid once landed (`gh pr view --json mergeCommit`), else null. */
   readonly mergedSha: string | null;
+  /** Count of head checks still in flight (queued/in progress), so a `checks-green` gate never
+   * reports green while a run hasn't concluded. Derived via `pendingCheckNames`. */
+  readonly pendingChecks: number;
 }
 
 /** Parse a raw `gh pr view --json state,mergedAt,mergeStateStatus,statusCheckRollup,isDraft,headRefOid,mergeCommit`
@@ -550,6 +553,7 @@ export function parsePrView(payload: unknown): PrObservation {
   const j = isRecord(payload) ? payload : {};
   const rollup = Array.isArray(j.statusCheckRollup) ? j.statusCheckRollup : [];
   const names = failingCheckNames(rollup);
+  const pending = pendingCheckNames(rollup);
   const merged = str(j.state).toUpperCase() === "MERGED" || str(j.mergedAt).trim() !== "";
   const mergeCommit = isRecord(j.mergeCommit) ? j.mergeCommit : undefined;
   const mergedSha = mergeCommit && str(mergeCommit.oid).trim() !== "" ? str(mergeCommit.oid).trim() : null;
@@ -564,6 +568,7 @@ export function parsePrView(payload: unknown): PrObservation {
     isDraft: j.isDraft === true,
     headRefOid: str(j.headRefOid).trim() || null,
     mergedSha,
+    pendingChecks: pending.length,
   };
 }
 
@@ -592,15 +597,21 @@ export function matchPr(match: ProbeMatch | undefined, pr: PrObservation): Probe
       return { ready, detail: `pr mergeability ${m}` };
     }
     case "checks-green": {
-      // Required checks green: at least one head run exists and none are failing. `failingChecks < 0`
-      // is token mode (checks unenumerable) — stay conservative (not ready), never falsely green.
-      const ready = pr.failingChecks === 0 && pr.totalChecks > 0;
+      // Required checks green: at least one head run exists, none failing, AND none still in flight.
+      // A queued/in-progress run has no failing conclusion, so counting only `failingChecks` would
+      // report green while checks are still running — `pendingChecks` closes that gap. `failingChecks
+      // < 0` is token mode (checks unenumerable) — stay conservative (not ready), never falsely green.
+      const ready = pr.failingChecks === 0 && pr.pendingChecks === 0 && pr.totalChecks > 0;
       const detail =
         pr.totalChecks < 0
           ? "pr checks unenumerable (not ready)"
           : pr.totalChecks === 0
             ? "pr no checks yet"
-            : `pr checks ${ready ? "green" : `${pr.failingChecks} failing`}`;
+            : pr.failingChecks > 0
+              ? `pr checks ${pr.failingChecks} failing`
+              : pr.pendingChecks > 0
+                ? `pr checks ${pr.pendingChecks} pending`
+                : "pr checks green";
       return { ready, detail };
     }
   }
@@ -608,10 +619,13 @@ export function matchPr(match: ProbeMatch | undefined, pr: PrObservation): Probe
 
 /** Split an `owner/repo#123` PR reference into its repo + numeric PR number, or `null` when it
  * carries no numeric id (so `parseProbe` can reject a never-resolvable target loudly). The `#`
- * separator is canonical (an `owner/repo#N` PR handle); a trailing `@N` is also tolerated. */
+ * separator is the canonical — and only — PR handle: an `@N` form is deliberately NOT accepted, as
+ * `owner/repo@<ref>` is the repo-ref syntax used elsewhere (`parseRepoRef`), so a numeric `@N` there
+ * would ambiguously mis-parse a git ref as a PR number. Matches the OpenAPI contract + `parseProbe`
+ * error, both of which document `owner/repo#N` only. */
 export function parsePrTarget(target: string): { repo: string; number: string } | null {
   const t = target.trim();
-  const m = t.match(/^(.+?)[#@](\d+)$/);
+  const m = t.match(/^(.+?)#(\d+)$/);
   if (!m) return null;
   const repo = m[1].trim();
   if (repo === "") return null;

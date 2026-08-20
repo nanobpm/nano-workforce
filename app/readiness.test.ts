@@ -417,6 +417,7 @@ function prObs(over: Partial<PrObservation> = {}): PrObservation {
     isDraft: false,
     headRefOid: "abc123",
     mergedSha: null,
+    pendingChecks: 0,
     ...over,
   };
 }
@@ -443,10 +444,12 @@ test("matchPr: prState 'mergeable' reuses classifyMergeability (CLEAN is ready, 
   assert(!matchPr({ prState: "mergeable" }, prObs({ mergeStateStatus: "BLOCKED", failingChecks: 1 })).ready);
 });
 
-test("matchPr: prState 'checks-green' needs a present, non-failing head run", () => {
+test("matchPr: prState 'checks-green' needs a present, non-failing, non-pending head run", () => {
   assert(matchPr({ prState: "checks-green" }, prObs({ totalChecks: 2, failingChecks: 0 })).ready);
   assert(!matchPr({ prState: "checks-green" }, prObs({ totalChecks: 2, failingChecks: 1 })).ready);
   assert(!matchPr({ prState: "checks-green" }, prObs({ totalChecks: 0, failingChecks: 0 })).ready);
+  // A run still queued/in-progress (no failing conclusion yet) must NOT read as green.
+  assert(!matchPr({ prState: "checks-green" }, prObs({ totalChecks: 2, failingChecks: 0, pendingChecks: 1 })).ready);
   // token mode (checks unenumerable, totalChecks < 0) stays conservative — never falsely green.
   assert(!matchPr({ prState: "checks-green" }, prObs({ totalChecks: -1, failingChecks: -1 })).ready);
 });
@@ -475,6 +478,19 @@ test("parsePrView: reduces a gh pr view payload and collapses the check rollup",
   assertEquals(obs.mergeStateStatus, "CLEAN");
   assertEquals(obs.totalChecks, 2);
   assertEquals(obs.failingCheckNames, ["lint"]);
+});
+
+test("parsePrView: an in-flight run is counted as pending (so checks-green stays not-green)", () => {
+  const obs = parsePrView({
+    state: "OPEN",
+    statusCheckRollup: [
+      { name: "build", status: "COMPLETED", conclusion: "SUCCESS" },
+      { name: "e2e", status: "IN_PROGRESS" },
+    ],
+  });
+  assertEquals(obs.failingChecks, 0);
+  assertEquals(obs.pendingChecks, 1);
+  assert(!matchPr({ prState: "checks-green" }, obs).ready);
 });
 
 test("parsePrView: a merged PR carries its merge commit oid", () => {
@@ -508,9 +524,10 @@ test("probeOnce pr: a failed gh pr view call is not-ready (never throws)", async
   assert(!res.ready);
 });
 
-test("parsePrTarget: parses owner/repo#N and owner/repo@N, rejects a bare repo", () => {
+test("parsePrTarget: parses owner/repo#N, rejects @N and a bare repo", () => {
   assertEquals(parsePrTarget("o/r#12"), { repo: "o/r", number: "12" });
-  assertEquals(parsePrTarget("o/r@34"), { repo: "o/r", number: "34" });
+  // `@N` is deliberately NOT a PR handle — it's the repo-ref syntax, so it must not parse as a PR.
+  assertEquals(parsePrTarget("o/r@34"), null);
   assertEquals(parsePrTarget("o/r"), null);
 });
 

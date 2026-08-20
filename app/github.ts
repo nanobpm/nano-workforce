@@ -597,6 +597,28 @@ export function failingCheckNames(rollup: RollupEntry[]): string[] {
   return names;
 }
 
+/** Names of checks that are still in flight — queued or in progress, i.e. NOT yet complete and not a
+ * hard failure. Covers the CheckRun shape (`status` QUEUED/IN_PROGRESS/PENDING/WAITING/… anything but
+ * COMPLETED) and the legacy StatusContext shape (`state` PENDING/EXPECTED). Derived over the newest
+ * run per check (`latestRunPerCheck`) like {@link failingCheckNames}, so a superseded run doesn't
+ * linger as pending. A `checks-green` gate MUST count these so it never reports green while a run has
+ * not yet concluded (a pending run has no failing conclusion, so it would otherwise slip through). */
+export function pendingCheckNames(rollup: RollupEntry[]): string[] {
+  const names: string[] = [];
+  for (const c of latestRunPerCheck(rollup)) {
+    const status = (c.status || "").toUpperCase();
+    if (status !== "") {
+      // CheckRun: anything other than COMPLETED is still running/queued.
+      if (status !== "COMPLETED") names.push(checkKey(c));
+    } else {
+      // Legacy StatusContext: PENDING/EXPECTED are not-yet-concluded.
+      const state = (c.state || "").toUpperCase();
+      if (state === "PENDING" || state === "EXPECTED") names.push(checkKey(c));
+    }
+  }
+  return names;
+}
+
 /** Names of every head check present, regardless of state. Covers both the CheckRun shape
  * (`name`/`workflowName`) and the legacy StatusContext shape (`context`). Used to test whether a
  * repo's *required* checks are present on the head — so an unrelated always-on check (e.g.
