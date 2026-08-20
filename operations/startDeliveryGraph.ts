@@ -26,7 +26,6 @@ import {
   buildDeliveryGraphRunRow,
   buildHumanLabels,
   computeRunKey,
-  DELIVERY_GRAPH_TERMINAL_STATUSES,
   DELIVERY_PHASE,
   deliveryGraphRuns,
   isDeliveryGraphApproved,
@@ -69,11 +68,12 @@ export default defineOperation("startDeliveryGraph", async ({ body }, app) => {
   const runs = deliveryGraphRuns(app.data);
 
   // 3) Idempotency short-circuit — a re-POST onto a run that is still in flight does NOT double-launch.
-  //    Mirrors `startPlan`: only a NON-terminal run short-circuits (a completed/failed run may re-run).
-  //    A `running` run returns `alreadyRunning`; an `awaiting-approval` run falls through to the
-  //    approval gate below (this POST may now carry the token).
+  //    Only a `running` run short-circuits (`running` is neither terminal nor a parked-gate status): it
+  //    returns `alreadyRunning`. A terminal (`done`/`failed`/`abandoned`) run may re-run, and an
+  //    `awaiting-approval` run falls through to the approval gate below (this POST may now carry the
+  //    token). Mirrors `startPlan`.
   const existing = await runs.get(runKey);
-  if (existing && existing.status === "running" && !DELIVERY_GRAPH_TERMINAL_STATUSES.includes(existing.status)) {
+  if (existing && existing.status === "running") {
     app.log.info("start-delivery-graph short-circuit: already running", { runKey });
     // Report the ACTUALLY-running run's persisted metadata, not this request's. If a caller reused the
     // same `idempotencyKey` for a different graph, `digest`/`sideEffecting` derived from THIS submission

@@ -11,8 +11,10 @@
 --     (mirrors `startPlan`'s `alreadyRunning`). The UNIQUE PK is the durable at-most-once fence.
 --   • status — the run lifecycle: `awaiting-approval` (a side-effecting graph parked at the approval
 --     gate — no instance started yet), `running` (dispatched to the engine), `done` (the instance
---     COMPLETED), `failed` (the instance TERMINATED), `abandoned` (instance-tracking reconciled a
---     vanished instance). `awaiting-approval`/`running` are the ACTIVE (in-flight) statuses shown in
+--     COMPLETED), `failed` (the instance TERMINATED, or instance-tracking reconciled a vanished
+--     running instance — nano.app.json's `delivery_graph_runs` binding maps `onTerminated` to
+--     `failed`), `abandoned` (a reserved terminal status in the lifecycle union, not currently
+--     produced by the reconciler). `awaiting-approval`/`running` are the ACTIVE (in-flight) statuses shown in
 --     the cockpit's active grid; only `running` is engine-instance-backed and thus instance-tracked
 --     (nano.app.json keys off process_key), while `awaiting-approval` has no instance (process_key
 --     NULL) and is display-only. The terminal three drop out of the cockpit's active grid.

@@ -31,7 +31,7 @@ export interface DeliveryGraphRun {
   process_key: string | null;
   process_definition_id: string | null;
   digest: string;
-  status: string;
+  status: DeliveryGraphRunStatus;
   side_effecting: number;
   node_count: number;
   human_node_count: number;
