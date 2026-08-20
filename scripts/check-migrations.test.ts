@@ -6,7 +6,7 @@
 // with origin/main; here we drive its diff classifier directly with representative
 // `git diff --find-renames --name-status` output so each violation shape is pinned.
 import test from "node:test";
-import { immutabilityErrorsFromDiff } from "./check-migrations.ts";
+import { collisionErrorsFromFiles, immutabilityErrorsFromDiff } from "./check-migrations.ts";
 import { assert, assertEquals } from "#test-assert";
 
 test("a rename of a merged migration is a violation", () => {
@@ -55,4 +55,42 @@ test("mixed changes report every violation but ignore the addition", () => {
   assert(errors.some((e) => /EDITED/.test(e)));
   assert(errors.some((e) => /DELETED/.test(e)));
   assert(errors.some((e) => /RENAMED/.test(e)));
+});
+
+// Merge-skew regression coverage (issue #366).
+//
+// The failure class this pins: two PRs each pass `check:migrations` on their OWN head, but their
+// COMBINATION on `main` after both squash-merge violates the prefix-collision invariant — because
+// neither branch's green CI ever saw the other's file. The 052 collision (#351 + #355, hotfixed in
+// #359) was exactly this. Driving the pure collision detector with each branch's tree AND their union
+// demonstrates that only the post-merge state trips the gate, which is why the gate must re-run on
+// the prospective merged commit (merge_queue) / on push to `main`, not just PR heads.
+test("merge skew: two individually-clean branches whose union collides IS caught", () => {
+  const mainTree = ["050_capability_gates.sql", "051_merges_per_day.sql"];
+  // Each branch independently picks the same "next free" prefix (060) without seeing its sibling.
+  const branchA = [...mainTree, "060_plan_conformance.sql"];
+  const branchB = [...mainTree, "060_worker_durable_resume.sql"];
+
+  // On its own head, each branch is clean — this is why both PRs go green in isolation.
+  assertEquals(collisionErrorsFromFiles(branchA), [], "branch A alone has no colliding prefix");
+  assertEquals(collisionErrorsFromFiles(branchB), [], "branch B alone has no colliding prefix");
+
+  // The post-merge tree on `main` (git merges both files cleanly — the names don't textually
+  // conflict) now shares slot 060. The gate, re-run on that merged state, catches it.
+  const mergedOnMain = [...new Set([...branchA, ...branchB])].sort();
+  const errors = collisionErrorsFromFiles(mergedOnMain);
+  assertEquals(errors.length, 1, "the merged tree has exactly one colliding prefix");
+  assert(/prefix 060/.test(errors[0]));
+  assert(/060_plan_conformance.sql/.test(errors[0]));
+  assert(/060_worker_durable_resume.sql/.test(errors[0]));
+});
+
+test("collision detector flags a non-NNN shape and grandfathers historical dupes", () => {
+  assert(collisionErrorsFromFiles(["nope.sql"]).some((e) => /required NNN_name.sql shape/.test(e)));
+  // Grandfathered historical collisions (already applied forward-only) must stay exempt.
+  assertEquals(
+    collisionErrorsFromFiles(["052_plan_conformance.sql", "052_worker_durable_resume.sql"]),
+    [],
+    "grandfathered prefix 052 is not a new violation",
+  );
 });

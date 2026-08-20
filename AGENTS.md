@@ -272,7 +272,13 @@ Migrations live in `db/migrations/*.sql` and are **auto-applied on boot** from
   Check `origin/main`, not your branch point — a fan-out epic branch forks at one
   prefix while `main` keeps advancing, so the branch-local "next" number collides
   on merge. Two files must never share a prefix; `npm run check:migrations`
-  (a CI gate) enforces this and fails the build on any new duplicate.
+  (a CI gate) enforces this and fails the build on any new duplicate. Because a
+  prefix collision only exists in the *union* of two branches, this gate — like
+  `layout:check` and the generated-artifact `--check`s — is also re-run on the
+  merge queue's **prospective merged commit** and on **push to `main`** by
+  `.github/workflows/invariants.yml` (issue #366), so a merge-skew collision is
+  blocked at merge time or fails a `main`-scoped build within minutes rather than
+  first surfacing on an unrelated open PR.
 - **A merged migration is IMMUTABLE — never rename, delete, or edit it.** The
   runtime keys the `_urban_migrations` ledger by *filename*, so a renamed file is
   a *new* migration to the runner: it re-runs its DDL against an already-migrated
