@@ -81,6 +81,14 @@ function normaliseEmits(node: DeliveryNode): DeliveryFact[] {
   return Array.isArray(node.emits) ? node.emits.map((f) => ({ ...f })) : [];
 }
 
+/** Locale-independent, byte-stable string ordering: compares by UTF-16 code unit, so the sort is
+ * identical across host locales (unlike `localeCompare`, whose collation varies by runtime locale for
+ * non-ASCII ids). This keeps the compiler's "byte-identical across environments" determinism guarantee
+ * strict. Returns -1 / 0 / 1. */
+function byCodeUnit(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
 /** One sequence flow in the compiled process — `source`/`target` are element ids, `name` an optional
  * (fact) label. */
 interface Flow {
@@ -130,7 +138,7 @@ export function compileDeliveryGraph(graph: unknown): CompileDeliveryGraphResult
   // safe to narrow to the typed contract. Every field below is well-formed by construction.
   // biome-ignore lint/plugin: validated external body narrowed to its contract after validateDeliveryGraph
   const typed = graph as DeliveryGraph;
-  const nodes = [...typed.nodes].sort((a, b) => a.id.localeCompare(b.id));
+  const nodes = [...typed.nodes].sort((a, b) => byCodeUnit(a.id, b.id));
   const edges = Array.isArray(typed.edges) ? typed.edges : [];
 
   // Resolve every edge's `from` endpoint against the SAME node/fact map the validator checked (shared
@@ -144,9 +152,9 @@ export function compileDeliveryGraph(graph: unknown): CompileDeliveryGraphResult
     })
     .sort(
       (a, b) =>
-        a.to.localeCompare(b.to) ||
-        a.fromNode.localeCompare(b.fromNode) ||
-        (a.fromFact ?? "").localeCompare(b.fromFact ?? ""),
+        byCodeUnit(a.to, b.to) ||
+        byCodeUnit(a.fromNode, b.fromNode) ||
+        byCodeUnit(a.fromFact ?? "", b.fromFact ?? ""),
     );
 
   // Per-node producer/consumer adjacency (by node id), each sorted + de-duplicated for determinism.
@@ -160,8 +168,8 @@ export function compileDeliveryGraph(graph: unknown): CompileDeliveryGraphResult
     pushUnique(producersById.get(edge.to), edge.fromNode);
     pushUnique(consumersById.get(edge.fromNode), edge.to);
   }
-  for (const list of producersById.values()) list.sort((a, b) => a.localeCompare(b));
-  for (const list of consumersById.values()) list.sort((a, b) => a.localeCompare(b));
+  for (const list of producersById.values()) list.sort(byCodeUnit);
+  for (const list of consumersById.values()) list.sort(byCodeUnit);
 
   // Assign the deterministic BPMN element id per node (`n0`, `n1`, … in sorted order) plus the
   // fork/join gateway ids (`gwf<i>` / `gwj<i>`) any fan-out/fan-in node needs.
@@ -312,10 +320,22 @@ function renderBpmn(
   startForkGateway: string | undefined,
   endJoinGateway: string | undefined,
 ): string {
-  const incoming = (elementId: string): string[] =>
-    flows.filter((f) => f.target === elementId).map((f) => f.id);
-  const outgoing = (elementId: string): string[] =>
-    flows.filter((f) => f.source === elementId).map((f) => f.id);
+  // Precompute incoming/outgoing flow-id maps once (single pass over flows) so BPMN rendering stays
+  // linear in the number of flows instead of O(elements * flows) from repeated full-array filtering.
+  // Insertion order is preserved, matching the previous per-element filter order.
+  const incomingById = new Map<string, string[]>();
+  const outgoingById = new Map<string, string[]>();
+  const appendTo = (map: Map<string, string[]>, key: string, id: string): void => {
+    const list = map.get(key);
+    if (list) list.push(id);
+    else map.set(key, [id]);
+  };
+  for (const f of flows) {
+    appendTo(incomingById, f.target, f.id);
+    appendTo(outgoingById, f.source, f.id);
+  }
+  const incoming = (elementId: string): string[] => incomingById.get(elementId) ?? [];
+  const outgoing = (elementId: string): string[] => outgoingById.get(elementId) ?? [];
   const refs = (tag: string, ids: readonly string[]): string =>
     ids.map((id) => `      <bpmn:${tag}>${id}</bpmn:${tag}>`).join("\n");
 
