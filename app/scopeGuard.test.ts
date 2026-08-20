@@ -172,7 +172,7 @@ test("collectDeferralEvidence: clips a very long section and de-dupes repeats", 
   const long = `## Scope\n${"x".repeat(400)}`;
   const ev = collectDeferralEvidence(long);
   assertEquals(ev.length, 1);
-  assert(ev[0].length <= 161, "snippet is clipped to the max length + ellipsis");
+  assert(ev[0].length <= 160, "snippet is clipped to the max length (ellipsis included)");
   assertStringIncludes(ev[0], "…");
 });
 
