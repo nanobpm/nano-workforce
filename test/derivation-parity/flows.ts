@@ -9,7 +9,7 @@
 // the structurally-derivable goldens at full whole-model parity, park the rest
 // pending an upstream construct, and do NOT relax to node-surface parity):
 //
-//   • `retro` is a GREEN whole-model parity port (see below). The remaining six
+//   • `retro` is a GREEN whole-model parity port (see below). The remaining seven
 //     goldens are `blockedReason`-parked, in TWO distinct classes, each awaiting
 //     an upstream `@nanobpm/workflow` (nano-ide) construct + re-release — never a
 //     golden edit and never relaxed acceptance:
@@ -146,7 +146,7 @@ const MULTI_START_END_BLOCK =
   "cannot reproduce. Awaits an upstream terminal/explicit-end (+ multi-start) " +
   "construct in @nanobpm/workflow (nano-ide).";
 
-/** All seven ports, keyed by model, in the epic's stated authoring order. */
+/** All ports, keyed by model, in the epic's stated authoring order. */
 export const PORTS: readonly PortEntry[] = [
   { model: "retro", flow: retroFlow },
   {
@@ -182,5 +182,9 @@ export const PORTS: readonly PortEntry[] = [
   {
     model: "plan-fanout",
     blockedReason: `${MULTI_START_END_BLOCK} (plan-fanout: 3 starts, 3 ends)`,
+  },
+  {
+    model: "delivery-human",
+    blockedReason: `${MULTI_START_END_BLOCK} (delivery-human: 1 start, 2 ends)`,
   },
 ];

@@ -1,0 +1,28 @@
+{
+  "id": "delivery-human-publish",
+  "schemaVersion": 18,
+  "type": "default",
+  "components": [
+    {
+      "type": "textarea",
+      "key": "prompt",
+      "label": "Now do this (manual publish)",
+      "description": "The manual step no automation can cross — e.g. an OTP publish + OIDC trusted-publishing setup. Complete it once the artifact is published.",
+      "readonly": true
+    },
+    {
+      "type": "textfield",
+      "key": "resolvedArtifact",
+      "label": "Resolved artifact (pkg@version)",
+      "description": "The exact published handle to hand forward, e.g. @nanobpm/urban@0.54.0. A downstream capability/npm/pr edge binds and pins this.",
+      "validate": {
+        "required": true
+      }
+    },
+    {
+      "type": "textarea",
+      "key": "note",
+      "label": "Note (optional)"
+    }
+  ]
+}

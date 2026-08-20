@@ -23,6 +23,7 @@
 import { readFileSync } from "node:fs";
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { CONFORMANCE_ESCALATION_ELEMENT } from "./conformance.ts";
+import { DELIVERY_HUMAN_ELEMENT } from "./deliveryHuman.ts";
 
 const now = () => new Date().toISOString();
 
@@ -70,6 +71,7 @@ export const ESCALATION_TASK_ELEMENTS: ReadonlySet<string> = new Set([
   "trial-merge-decision",
   "wait-answer", // PR review-loop escalation (convergence-loop.bpmn, U3)
   "wait-merge-answer", // PR merge-loop escalation (merge-loop.bpmn) — same native user-task path (#256)
+  DELIVERY_HUMAN_ELEMENT, // delivery-graph `human` node (ADR 0005 S3) — a scheduled user task, answerable by a human OR an agent (ADR 0046)
 ]);
 
 /** The `feature-blocked` operator user-task element id (feature.bpmn) — the native wait a run parks on
@@ -110,6 +112,13 @@ const ESCALATION_FORM_BY_ELEMENT: Readonly<Record<string, string>> = {
   "wait-merge-answer": "pr-escalation",
   "feature-blocked": "feature-blocked",
   [CONFORMANCE_ESCALATION_TASK_ELEMENT]: "conformance-escalation",
+  // NOTE: the delivery-graph `human` node (`DELIVERY_HUMAN_ELEMENT`, ADR 0005 S3) is intentionally
+  // ABSENT here. Unlike the fixed-form escalations above, ONE `delivery-human-task` element renders
+  // DIFFERENT forms per node (explicit → category → generic → agent-router, `app/deliveryHuman.ts`
+  // `resolveHumanForm`), so a single static required-field contract cannot fit it. Its typed-emit
+  // contract is enforced instead by `bindHumanEmits` against the node's declared `emits[]` (binds are
+  // validated, not stringly — Decision 3/4), so `validateEscalationVariables` leaves it unenforced
+  // (returns `null`) and the completer accepts the captured form variables for the emit binder to type.
 };
 
 /** A field's `conditional.hide` rule, parsed from the FEEL subset the `.form` files use

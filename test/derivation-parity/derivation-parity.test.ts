@@ -50,11 +50,12 @@ test("every corpus model is either ported or has a documented blocker", () => {
     "convergence-loop",
     "merge-loop",
     "plan-fanout",
+    "delivery-human",
   ];
   assertEquals(
     PORTS.map((p) => p.model),
     expected,
-    "PORTS must cover all seven goldens in the epic's authoring order",
+    "PORTS must cover all eight goldens in the epic's authoring order",
   );
   for (const port of PORTS) {
     assert(
@@ -73,7 +74,14 @@ test("class-1 blocked goldens genuinely have multiple top-level start/end events
   const countTag = (xml: string, tag: string): number =>
     (xml.match(new RegExp(`<bpmn:${tag}\\b`, "g")) ?? []).length;
 
-  const multiStartEndBlocked = new Set(["spine-demo", "readiness-gate", "feature", "merge-loop", "plan-fanout"]);
+  const multiStartEndBlocked = new Set([
+    "spine-demo",
+    "readiness-gate",
+    "feature",
+    "merge-loop",
+    "plan-fanout",
+    "delivery-human",
+  ]);
   for (const model of multiStartEndBlocked) {
     const xml = readFileSync(goldenPath(model), "utf8");
     const starts = countTag(xml, "startEvent");
