@@ -87,6 +87,12 @@ describe("nano-workforce PR review-loop escalation (U4 userTask)", () => {
       capturedAnswer = (job.variables as Record<string, unknown>).answer;
       return { status: "converged", summary: "resolved after the human answer" };
     });
+    // `senior:scope-classify` is likewise an externalTaskType (no app worker): the converged round
+    // routes through it before finalizing. Stub it as "scope delivered" so the happy path reaches
+    // persist-converged rather than parking on an unserviced agent job.
+    await app.engine.registerWorker("senior:scope-classify", () => {
+      return { scopeBlocked: false, scopeBlockReason: "" };
+    });
   });
 
   after(async () => {

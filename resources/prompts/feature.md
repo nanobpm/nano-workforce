@@ -86,26 +86,28 @@ against the wrong base will not be merged into the epic.
 
 ## Closing keywords vs. scope splits — don't close a broader-scoped parent
 
-The convergence loop runs a deterministic **scope-integrity gate** on your PR
-before it can merge (`workers/converge-gate` → `app/scopeGuard.ts`). It exists
-because a parity slice was once silently under-delivered: an agent shipped one
-half, documented the deferred remainder honestly in a `## Scope` section, yet
-still `Closes #N`'d the broader parent and filed **no** follow-up. The issue read
-as done, `gh issue list` showed nothing outstanding, and a downstream consumer was
-blocked on exactly the deferred half. Two rules keep that from recurring — the
-gate **blocks and escalates to a human** if you break either:
+The convergence loop runs a **scope-integrity classifier** on your PR before it
+can merge (the `senior:scope-classify` agent, prompt
+`resources/prompts/scope-classify.md`). It exists because a parity slice was once
+silently under-delivered: an agent shipped one half, documented the deferred
+remainder honestly in a `## Scope` section, yet still `Closes #N`'d the broader
+parent and filed **no** follow-up. The issue read as done, `gh issue list` showed
+nothing outstanding, and a downstream consumer was blocked on exactly the
+deferred half. The classifier reads each closing-keyword issue's acceptance
+criteria and **blocks and escalates to a human** only on a *genuine* untracked
+under-delivery — not on the mere presence of the word "deferred". Two rules keep
+you on the right side of it:
 
 1. **A `Closes/Fixes/Resolves #N` closing keyword means you delivered #N's FULL
    stated scope.** If you split scope — shipping only part and deferring the rest
    — do **not** close-keyword the parent. Use a non-closing ref instead
    (`Refs #N` / `Part of #N`) and **leave #N open** (or convert #N into a
-   tracking/umbrella issue for the remainder). The gate flags any PR that both
-   closes #N and also contains deferral prose (a `## Scope` section, "deferred",
-   "out of scope").
+   tracking/umbrella issue for the remainder). The classifier flags a PR that
+   closes #N while leaving part of #N's stated scope undelivered and untracked.
 2. **A deferred remainder must be a FILED, tracked issue — never just prose.** If
    your PR defers part of its scope, **file a follow-up issue for each deferred
-   item** and link it in the PR body with an explicit tracking marker the gate can
-   see: `Deferred-to: #N`, `Tracked-in: #N`, or `Follow-up: #N`. A deferral that
+   item** and link it in the PR body with an explicit tracking marker the classifier
+   can see: `Deferred-to: #N`, `Tracked-in: #N`, or `Follow-up: #N`. A deferral that
    lives only in commit/PR/ADR text is an invisible, unclaimable drift surface.
 
 So: deliver the whole thing → `Closes #N`. Split it → `Refs #N`, file the
