@@ -17,21 +17,51 @@ instance's URLs and matched to its deployed version. Your job is to fetch that
 guide and follow it — never to work from a cached copy, which drifts across
 versions and instances.
 
-## 1. Establish the instance base URL
+## 1. Confirm which instance you are driving — always
 
-The app control API is mounted at `/app/api`. Resolve the base in this order:
+A user typically runs **several** Nano Workforce instances — e.g. a local dev copy,
+one on the LAN (`http://merlin.local:3000/app/api`), and a public tunnel
+(an ngrok URL) when off the LAN. Every action here is **side-effecting** —
+submitting work, answering escalations, merging PRs — so targeting the wrong
+instance is a real mistake, not a harmless one. **Never silently default to a
+base URL.**
 
-1. `$NANO_WORKFORCE_URL` if the user/environment has set it (accept it as-is;
-   append `/app/api` only if it is a bare origin).
-2. The URL the user names when they ask you to operate their workforce.
-3. Local dev default: `http://localhost:3000/app/api` (port is `PR_REVIEW_PORT`,
-   default `3000`).
+### Sources of candidate instances
 
-If none resolves, ask the user for the base URL — do not guess a remote host.
+Gather candidates from, in order:
 
-```bash
-BASE="${NANO_WORKFORCE_URL:-http://localhost:3000/app/api}"
-```
+1. **A named-instance registry** the user maintains — first of these that exists:
+   `$NANO_WORKFORCE_INSTANCES` (JSON object of `name → base URL`), or
+   `~/.config/nano-workforce/instances.json` (same shape). Example:
+
+   ```json
+   { "local": "http://localhost:3000/app/api",
+     "merlin": "http://merlin.local:3000/app/api",
+     "remote": "https://<subdomain>.ngrok.app/app/api" }
+   ```
+
+2. `$NANO_WORKFORCE_URL`, if set (a single default; accept as-is, append `/app/api`
+   only if it is a bare origin).
+3. Any URL the user names in the conversation.
+4. Local fallback: `http://localhost:3000/app/api` (port `PR_REVIEW_PORT`, default `3000`).
+
+### Choosing
+
+- If the user **named an instance** (by name from the registry, or by URL), use it.
+- Otherwise, **probe the candidates for reachability** and ask the user which to
+  use, offering the candidates as choices and marking which are live. Reachability
+  disambiguates the common case — off the LAN, `merlin.local` won't resolve, so the
+  tunnel instance is the live one:
+
+  ```bash
+  # For each candidate base, a fast liveness + identity check:
+  curl -sS --max-time 3 \
+    ${NANO_PR_WEBHOOK_SECRET:+-H "x-hook-secret: $NANO_PR_WEBHOOK_SECRET"} \
+    "$BASE/version" | jq '{appVersion, gitSha, uptimeSeconds}'
+  ```
+
+- Only skip the question when exactly **one** candidate exists and is reachable —
+  and even then, **name the instance you're about to drive** before acting.
 
 Some instances guard the agent endpoints with a shared secret. If the user has
 `$NANO_PR_WEBHOOK_SECRET` set, send it as `x-hook-secret` on every request below.
@@ -85,6 +115,8 @@ submit or unstick anything.
 - **Discover, don't declare.** Prefer the live guide and live `/status` over any
   assumption baked into this file. If this skill and the guide disagree, the guide
   wins.
+- **Confirm the target instance.** Never run a side-effecting call against an
+  assumed base URL. Know — and when ambiguous, ask — which instance you're driving.
 - **Preview before dispatch.** For delivery graphs and any bulk action, use the
   pure preview/validate path first and show the user the plan before the
   side-effecting start call.
