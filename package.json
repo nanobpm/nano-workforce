@@ -41,6 +41,8 @@
     "heal:migrations": "node --experimental-strip-types scripts/heal-migration-ledger.ts",
     "check:contracts": "node --experimental-strip-types scripts/check-contracts.ts",
     "reconcile:contracts": "node --experimental-strip-types scripts/reconcile-contracts.ts",
+    "precheck:derivation-parity": "urban gen",
+    "check:derivation-parity": "node --experimental-strip-types scripts/check-derivation-parity.ts",
     "gen": "urban gen",
     "gen:check": "urban gen --check",
     "layout": "node --experimental-strip-types scripts/layout-bpmn.ts",

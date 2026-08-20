@@ -77,3 +77,30 @@ jobs:
       - name: E2E (urban-testkit)
         run: npm run e2e
 
+  # FINAL regression guard for epic nano-ide#314 (S6, #321): the compounding oracle that keeps the
+  # code-first (`defineFlow`) and model-first (`.bpmn`) representations of the nano-workforce corpus
+  # in lockstep. For every model it DERIVES the BPMN from its defineFlow port, structurally DIFFS it
+  # against the checked-in golden via the S0 harness (@nanobpm/workflow/test-support), and DEPLOYS
+  # the derived model to the in-process @nanobpm/engine-wasm engine — failing on any structural drift
+  # OR deploy rejection. Parked models (awaiting an upstream construct) must each carry a documented
+  # blocker, and a self-proving canary asserts the oracle's red path genuinely fires so the gate can
+  # never rot into a vacuous green while the corpus is parked. Hermetic (in-process wasm engine, no
+  # sockets), so it runs on every PR/push as its own job.
+  derivation-parity:
+    name: derivation parity (nwf corpus regression guard)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Derive + diff + deploy the full nwf corpus
+        run: npm run check:derivation-parity
+
