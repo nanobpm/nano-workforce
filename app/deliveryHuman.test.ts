@@ -240,6 +240,13 @@ test("renderHumanEmitBrief: empty for no facts; pins each name→value otherwise
   assertStringIncludes(brief, "`resolvedArtifact` (artifact) → `@nanobpm/urban@0.54.0`");
 });
 
+test("renderHumanEmitBrief: neutralises backticks/newlines in a value so the inline-code span can't break or inject", () => {
+  const { facts } = bindHumanEmits([str("note")], { note: "a`b\nc" });
+  const brief = renderHumanEmitBrief(facts);
+  assertStringIncludes(brief, "`note` (string) → `a'b c`");
+  assert(!brief.includes("a`b"), "raw backtick must not survive into the inline-code span");
+});
+
 // ── Cross-layer / structural guards ──────────────────────────────────────────────────────────────
 
 const bpmn = readFileSync("resources/processes/delivery-human.bpmn", "utf8");

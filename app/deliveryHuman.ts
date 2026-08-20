@@ -337,6 +337,15 @@ export function humanEmitBind(nodeId: string, facts: readonly BoundFact[]): Reco
   return bind;
 }
 
+/** Neutralise a human-submitted value before it is embedded in a Markdown inline-code span in the
+ *  brief. A raw backtick would terminate the span (corrupting the brief and letting free-form form
+ *  text inject unintended prompt content into the downstream agent's prompt), and a newline would
+ *  break the span; collapse both. Display-only — the authoritative value published downstream via
+ *  {@link humanEmitBind} is untouched, so the pinned contract is unaffected. */
+function inlineCodeSafe(value: string): string {
+  return value.replace(/`/g, "'").replace(/\r?\n/g, " ");
+}
+
 /** Render the "human-emitted facts" brief appended to a downstream node's prompt once a human node
  *  completes and hands its typed facts forward (#289 §3), mirroring `renderResolvedDepsBrief`. It pins
  *  each `name → value` the human declared + captured so a downstream agent/edge consumes EXACTLY that
@@ -355,7 +364,7 @@ export function renderHumanEmitBrief(facts: readonly BoundFact[]): string {
     "do NOT re-derive, float, or re-request them:",
     "",
   ];
-  for (const fact of facts) lines.push(`- \`${fact.name}\` (${fact.type}) → \`${fact.value}\``);
+  for (const fact of facts) lines.push(`- \`${fact.name}\` (${fact.type}) → \`${inlineCodeSafe(fact.value)}\``);
   lines.push("");
   lines.push("These are the contract the human handed forward; a different value is a different run.");
   return lines.join("\n");
