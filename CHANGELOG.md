@@ -1,3 +1,10 @@
+# [0.112.0](https://github.com/nanobpm/nano-workforce/compare/v0.111.1...v0.112.0) (2026-08-20)
+
+
+### Features
+
+* **plan-fanout:** implement-stage escalation net + Tasks-inbox projection ([#358](https://github.com/nanobpm/nano-workforce/issues/358), [#360](https://github.com/nanobpm/nano-workforce/issues/360)) ([#387](https://github.com/nanobpm/nano-workforce/issues/387)) ([c884074](https://github.com/nanobpm/nano-workforce/commit/c884074ca9266d5a17c44d3a1286bb667b43a73a))
+
 ## [0.111.1](https://github.com/nanobpm/nano-workforce/compare/v0.111.0...v0.111.1) (2026-08-20)
 
 
