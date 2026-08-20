@@ -301,6 +301,14 @@ test("invalid-fact-name: an emitted fact name containing a dot is rejected so qu
   assertEquals(err.path, "nodes[0].emits[0].name");
 });
 
+test("invalid-fact-name: an emitted fact name over the openapi 128-char cap is rejected so a length-trusting consumer can't be overrun", () => {
+  const errors = validateDeliveryGraph({
+    nodes: [{ id: "a", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "f".repeat(129), type: "string" }] }],
+  });
+  const err = hasCode(errors, "invalid-fact-name");
+  assertEquals(err.path, "nodes[0].emits[0].name");
+});
+
 test("invalid-fact-type: an emitted fact with a type outside the allowlist is rejected, path-qualified", () => {
   const errors = validateDeliveryGraph({
     nodes: [

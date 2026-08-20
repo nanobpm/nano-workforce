@@ -92,6 +92,7 @@ function isDeliveryFactType(type: unknown): type is DeliveryFactType {
  * ambiguous and quietly build the wrong DAG — undermining the trust boundary this validator exists to
  * hold. */
 const FACT_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const FACT_NAME_MAX_LENGTH = 128;
 
 /** A node `id` must match openapi's `DeliveryNodeCommon.id` `^[A-Za-z_][A-Za-z0-9_.-]*$` and stay
  * within its 128-char cap. Re-enforced here INDEPENDENTLY of the OpenAPI shape gate because later
@@ -293,15 +294,17 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
             });
             return;
           }
-          if (!FACT_NAME_PATTERN.test(rawFact.name)) {
-            // A fact name must be a dot-free identifier (openapi's `DeliveryFact.name` pattern) so a
-            // qualified edge `from` "<nodeId>.<fact>" resolves unambiguously — enforced here too, in
-            // case the OpenAPI shape gate is bypassed.
+          if (rawFact.name.length > FACT_NAME_MAX_LENGTH || !FACT_NAME_PATTERN.test(rawFact.name)) {
+            // A fact name must be a dot-free identifier within openapi's 128-char cap (openapi's
+            // `DeliveryFact.name` `pattern` + `maxLength`) so a qualified edge `from`
+            // "<nodeId>.<fact>" resolves unambiguously and a later step trusting the cap can't be
+            // overrun — enforced here too, in case the OpenAPI shape gate is bypassed.
             errors.push({
               path: `${path}.emits[${j}].name`,
               message:
                 `emitted fact name "${rawFact.name}" must be a bare identifier ` +
-                "(`^[A-Za-z_][A-Za-z0-9_]*$`, no dots) so qualified edge `from` references stay unambiguous",
+                "(`^[A-Za-z_][A-Za-z0-9_]*$`, no dots) of " +
+                `\u2264 ${FACT_NAME_MAX_LENGTH} chars so qualified edge \`from\` references stay unambiguous`,
               code: "invalid-fact-name",
             });
             return;
