@@ -252,7 +252,7 @@ active epic already targets the same custom base. See
 |---|---|---|
 | `PR_REVIEW_PORT` | `3000` | app HTTP port |
 | `NANO_APP_DB_URL` | `file:./app.db` | sqlite datasource |
-| `NANOBPMN_BASE_URL` | `http://localhost:8080` | engine base URL (or set `CAMUNDA_REST_ADDRESS` to the `/v2` REST address directly) |
+| `NANOBPMN_BASE_URL` | `http://localhost:8080` | engine base URL (or set `CAMUNDA_REST_ADDRESS` to the `/v2` REST address directly). See [Engine address & the startup preflight](#engine-address--the-startup-preflight) |
 | `GITHUB_TOKEN` | — | token for the review poller / merge (or use the host `gh` CLI) |
 | `NANO_PR_GITHUB_TRANSPORT` | `auto` | how the poller reads GitHub: `gh` (host CLI), `token` (`GITHUB_TOKEN` over HTTP), or `auto` |
 | `NANO_PR_POLL_MS` | `60000` | review-ready poll interval |
@@ -266,6 +266,47 @@ active epic already targets the same custom base. See
 | `NANO_PR_REVIEW_NUDGE_MINUTES` | `5` | cooldown between the poller's automatic reviewer re-request nudges for one waiting PR (clamped 1–1440) |
 | `NANO_WORKFORCE_BASE_URL` | `http://localhost:3000` | externally-reachable base URL for the capability hooks (`/app/api/hooks/*`). Must resolve from **wherever the agent runs** — set it to the app's LAN address (or console-proxy URL) for a remote fleet. See [Fleet networking](#fleet-networking-remote-workers) |
 | `NANO_AGENTIC_SECRET` | — | enables **secure mode** for the agentic visibility channel (`/agentic`): every peer must present the **same** `NANO_AGENTIC_SECRET` value (set the identical env var on the server and every worker box — Tab A → Slot A). Unset = on-by-default **LOCAL mode** — the well-known token is honoured from **any origin** (open on the trusted LAN, matching the engine's posture); exposure is governed by the server bind address, not a shared secret. Also accepts `NANO_PR_WEBHOOK_SECRET` |
+
+### Engine address & the startup preflight
+
+The app talks to one engine over the Camunda 8 REST API. The REST address is
+resolved with a fixed precedence — set **one** of:
+
+1. **`CAMUNDA_REST_ADDRESS`** — used verbatim (it already points at the `/v2`
+   REST address, e.g. `http://engine.example:8080/v2`). **Wins** if set.
+2. **`NANOBPMN_BASE_URL`** — the engine *base*; the app appends `/v2`
+   (e.g. `http://localhost:7000` → `http://localhost:7000/v2`).
+3. Neither set → the base defaults to **`http://localhost:8080`**.
+
+At boot the app **echoes the resolved address and which input it came from**,
+then probes `/v2/topology` and announces **which engine answered** — so a
+misconfigured address is obvious immediately instead of surfacing later as a
+cryptic mid-run engine error:
+
+```
+Engine address: http://localhost:8080/v2 (from default (http://localhost:8080))
+Engine: Nano engine (nanobpmn v0.114.1) — Falcon streaming at /falcon at http://localhost:8080/v2.
+```
+
+The preflight is **informational, never a gate** — Nano Workforce runs against a
+stock **Camunda 8** cluster too, so a non-Nano engine is announced
+(`Engine: Camunda 8 (gateway v8.x) — REST only …`), not rejected. If nothing
+answers, it logs a `warn` (`could not reach … features will fail to start until
+the engine is reachable`) and boot continues.
+
+> **Watch the port when launched from a console.** A console-launched app can
+> default `NANOBPMN_BASE_URL` to `http://localhost:8080`. If **another Camunda 8**
+> is already on `:8080`, the app will talk to *that* engine (it works — C8 is
+> supported), which may not be the engine you intended. Check the startup
+> `Engine:` line; to target a Nano engine on a different port, set
+> `NANOBPMN_BASE_URL` (or `CAMUNDA_REST_ADDRESS`) explicitly.
+>
+> When the app *can't* work against the reached engine you'll see a job/instance
+> decode error at first feature start — `MalformedFrameError` / `MalformedJobError`
+> (Falcon) or the Camunda REST client's own `4xx` (older versions surfaced
+> `engine response missing processInstanceKey/key`). The startup `Engine:` line
+> tells you which engine you actually reached, before any such error.
+
 
 ### Fleet networking (remote workers)
 
