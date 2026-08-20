@@ -21,17 +21,22 @@ import {
   matchGithubCheck,
   matchHttp,
   matchNpm,
+  matchPr,
   msToIsoDuration,
   newestPublishedVersion,
   nextDelay,
   normalizePoll,
   parseProbe,
+  parsePrTarget,
+  parsePrView,
   parseReleases,
   parseReleasesTarget,
   parseRepoRef,
   probeBudgetMs,
   probeOnce,
   type ProbeExec,
+  type PrObservation,
+  prViewCommand,
   readinessTimeout,
   readinessTimeoutMs,
   redactString,
@@ -373,6 +378,144 @@ test("probeOnce github-check: a failed gh api call is not-ready (never throws)",
   const exec = stubExec({ command: { code: 1, stdout: "", stderr: "not found" } });
   const res = await probeOnce(parseProbe({ kind: "github-check", target: "o/r@main" }), exec, {});
   assert(!res.ready);
+});
+
+// ── parseProbe: pr kind (ADR 0005 §2 — owner/repo#N target + validated prState) ──────────────────
+test("parseProbe: accepts an owner/repo#N pr probe and defaults onTimeout to escalate (timeout → escalate)", () => {
+  const p = parseProbe({ kind: "pr", target: "nanobpm/nano-workforce#377" });
+  assertEquals(p.kind, "pr");
+  assertEquals(p.onTimeout, "escalate");
+});
+
+test("parseProbe: a pr probe whose target carries no numeric PR id throws (never resolvable)", () => {
+  assertThrows(() => parseProbe({ kind: "pr", target: "nanobpm/nano-workforce" }), Error, "owner/repo#<number>");
+});
+
+test("parseProbe: a pr probe with an unknown match.prState throws (mistyped state fails loudly)", () => {
+  assertThrows(
+    () => parseProbe({ kind: "pr", target: "o/r#1", match: { prState: "landed" } }),
+    Error,
+    "invalid match.prState",
+  );
+});
+
+test("parseProbe: a valid pr probe round-trips its prState", () => {
+  const p = parseProbe({ kind: "pr", target: "o/r#12", match: { prState: "mergeable" } });
+  assertEquals(p.match?.prState, "mergeable");
+});
+
+// ── matchPr (pure — operates on an already-fetched PR observation) ────────────────────────────────
+function prObs(over: Partial<PrObservation> = {}): PrObservation {
+  return {
+    merged: false,
+    state: "open",
+    mergeStateStatus: "UNKNOWN",
+    failingChecks: 0,
+    failingCheckNames: [],
+    totalChecks: 0,
+    presentCheckNames: [],
+    isDraft: false,
+    headRefOid: "abc123",
+    mergedSha: null,
+    ...over,
+  };
+}
+
+test("matchPr: prState 'ready' is the draft→ready transition (a non-draft PR is ready)", () => {
+  assert(!matchPr({ prState: "ready" }, prObs({ isDraft: true })).ready);
+  assert(matchPr({ prState: "ready" }, prObs({ isDraft: false })).ready);
+});
+
+test("matchPr: prState 'merged' waits for the merge and binds mergedSha (mirrors resolvedArtifact)", () => {
+  assert(!matchPr({ prState: "merged" }, prObs({ merged: false })).ready);
+  const res = matchPr({ prState: "merged" }, prObs({ merged: true, state: "merged", mergedSha: "deadbeef" }));
+  assert(res.ready);
+  assertEquals(res.bind?.mergedSha, "deadbeef");
+});
+
+test("matchPr: 'merged' is the default when no prState is declared", () => {
+  assert(!matchPr(undefined, prObs({ merged: false })).ready);
+  assert(matchPr(undefined, prObs({ merged: true, state: "merged" })).ready);
+});
+
+test("matchPr: prState 'mergeable' reuses classifyMergeability (CLEAN is ready, BLOCKED is not)", () => {
+  assert(matchPr({ prState: "mergeable" }, prObs({ mergeStateStatus: "CLEAN" })).ready);
+  assert(!matchPr({ prState: "mergeable" }, prObs({ mergeStateStatus: "BLOCKED", failingChecks: 1 })).ready);
+});
+
+test("matchPr: prState 'checks-green' needs a present, non-failing head run", () => {
+  assert(matchPr({ prState: "checks-green" }, prObs({ totalChecks: 2, failingChecks: 0 })).ready);
+  assert(!matchPr({ prState: "checks-green" }, prObs({ totalChecks: 2, failingChecks: 1 })).ready);
+  assert(!matchPr({ prState: "checks-green" }, prObs({ totalChecks: 0, failingChecks: 0 })).ready);
+  // token mode (checks unenumerable, totalChecks < 0) stays conservative — never falsely green.
+  assert(!matchPr({ prState: "checks-green" }, prObs({ totalChecks: -1, failingChecks: -1 })).ready);
+});
+
+test("matchPr: a not-yet-satisfied state is not-ready — the bounded gate keeps waiting → timeout escalates", () => {
+  // Every un-reached state resolves to ready:false, which is exactly what the engine timer arm bounds
+  // (onTimeout defaults to 'escalate'): a PR that never lands is never falsely resolved.
+  assert(!matchPr({ prState: "merged" }, prObs({ merged: false })).ready);
+  assert(!matchPr({ prState: "ready" }, prObs({ isDraft: true })).ready);
+  assert(!matchPr({ prState: "checks-green" }, prObs({ totalChecks: 1, failingChecks: 1 })).ready);
+});
+
+// ── parsePrView + probeOnce pr dispatch (injected exec — no I/O) ─────────────────────────────────
+test("parsePrView: reduces a gh pr view payload and collapses the check rollup", () => {
+  const obs = parsePrView({
+    state: "OPEN",
+    mergeStateStatus: "clean",
+    isDraft: false,
+    headRefOid: "sha1",
+    statusCheckRollup: [
+      { name: "build", status: "COMPLETED", conclusion: "SUCCESS" },
+      { name: "lint", status: "COMPLETED", conclusion: "FAILURE" },
+    ],
+  });
+  assertEquals(obs.merged, false);
+  assertEquals(obs.mergeStateStatus, "CLEAN");
+  assertEquals(obs.totalChecks, 2);
+  assertEquals(obs.failingCheckNames, ["lint"]);
+});
+
+test("parsePrView: a merged PR carries its merge commit oid", () => {
+  const obs = parsePrView({ state: "MERGED", mergedAt: "2026-08-20T00:00:00Z", mergeCommit: { oid: "cafe" } });
+  assertEquals(obs.merged, true);
+  assertEquals(obs.state, "merged");
+  assertEquals(obs.mergedSha, "cafe");
+});
+
+test("parsePrView: a garbled payload degrades to an all-open, no-checks observation (never throws)", () => {
+  const obs = parsePrView(null);
+  assertEquals(obs.merged, false);
+  assertEquals(obs.totalChecks, 0);
+});
+
+test("probeOnce pr: builds a quoted `gh pr view` command and matches merged, binding mergedSha", async () => {
+  const cap: { cmd?: string } = {};
+  const exec = stubExec({
+    command: { code: 0, stdout: JSON.stringify({ state: "MERGED", mergeCommit: { oid: "abc" } }), stderr: "" },
+    capture: cap,
+  });
+  const res = await probeOnce(parseProbe({ kind: "pr", target: "nanobpm/nano-workforce#377" }), exec, {});
+  assert(res.ready);
+  assertEquals(res.bind?.mergedSha, "abc");
+  assertStringIncludes(cap.cmd ?? "", "gh pr view '377' --repo 'nanobpm/nano-workforce'");
+});
+
+test("probeOnce pr: a failed gh pr view call is not-ready (never throws)", async () => {
+  const exec = stubExec({ command: { code: 1, stdout: "", stderr: "no pr" } });
+  const res = await probeOnce(parseProbe({ kind: "pr", target: "o/r#1" }), exec, {});
+  assert(!res.ready);
+});
+
+test("parsePrTarget: parses owner/repo#N and owner/repo@N, rejects a bare repo", () => {
+  assertEquals(parsePrTarget("o/r#12"), { repo: "o/r", number: "12" });
+  assertEquals(parsePrTarget("o/r@34"), { repo: "o/r", number: "34" });
+  assertEquals(parsePrTarget("o/r"), null);
+});
+
+test("prViewCommand: single-quote-escapes its args", () => {
+  assertStringIncludes(prViewCommand("o/r", "9"), "gh pr view '9' --repo 'o/r'");
 });
 
 // ── backoff + poll normalisation ──────────────────────────────────────────────────────────────

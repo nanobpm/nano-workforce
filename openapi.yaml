@@ -1185,12 +1185,12 @@ components:
       properties:
         kind:
           type: string
-          enum: [http, command, npm, github-check, capability]
-          description: The readiness source. `command` is the escape hatch; `capability` resolves a cross-repo published-artifact edge.
+          enum: [http, command, npm, github-check, capability, pr]
+          description: The readiness source. `command` is the escape hatch; `capability` resolves a cross-repo published-artifact edge; `pr` watches an in-flight PR's merge state (ADR 0005 §2).
         target:
           type: string
           minLength: 1
-          description: The kind-specific target (a URL, a shell command, a `pkg@version`, an `owner/repo@ref`, or `github-releases:owner/repo`).
+          description: The kind-specific target (a URL, a shell command, a `pkg@version`, an `owner/repo@ref`, `github-releases:owner/repo`, or an `owner/repo#123` PR reference for the `pr` kind).
         onTimeout:
           type: string
           enum: [escalate, fail, continue]
@@ -1213,6 +1213,7 @@ components:
             capabilityRef: { type: string, description: "capability: the upstream issue/PR handle the resolved version must carry." }
             package: { type: string, description: "capability: the package whose releases are scanned for provenance." }
             verifyCommand: { type: string, description: "capability: optional empirical verifier run once at the gate boundary." }
+            prState: { type: string, enum: [ready, merged, mergeable, checks-green], description: "pr: the declared PR state to wait for (default merged)." }
         poll:
           type: object
           additionalProperties: false
