@@ -41,12 +41,14 @@ export type DeliveryFactType = (typeof DELIVERY_FACT_TYPES)[number];
 export type DeliveryGraphErrorCode =
   | "empty-graph"
   | "missing-id"
+  | "invalid-id"
   | "duplicate-id"
   | "unknown-kind"
   | "missing-config"
   | "duplicate-fact"
   | "invalid-fact-name"
   | "invalid-fact-type"
+  | "invalid-edges"
   | "dangling-edge"
   | "bad-from"
   | "self-edge"
@@ -89,6 +91,16 @@ function isDeliveryFactType(type: unknown): type is DeliveryFactType {
  * ambiguous and quietly build the wrong DAG — undermining the trust boundary this validator exists to
  * hold. */
 const FACT_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/** A node `id` must match openapi's `DeliveryNodeCommon.id` `^[A-Za-z_][A-Za-z0-9_.-]*$` and stay
+ * within its 128-char cap. Re-enforced here INDEPENDENTLY of the OpenAPI shape gate because later
+ * compile/render steps trust these ids: an id with whitespace, a leading digit, or an over-long value
+ * could otherwise pass semantic validation (a bypassed shape gate — a direct delegate call, a test)
+ * and then break id-based compilation/rendering downstream. Unlike a fact name, an id MAY contain
+ * dots/hyphens — `resolveFrom` splits a qualified `from` on the LAST dot, so a dotted id stays
+ * resolvable while dot-free fact names keep `<nodeId>.<fact>` unambiguous. */
+const NODE_ID_PATTERN = /^[A-Za-z_][A-Za-z0-9_.-]*$/;
+const NODE_ID_MAX_LENGTH = 128;
 
 /** The per-kind config key a node of the given kind must carry (`agent` → `agent`, etc.). */
 const CONFIG_KEY: Record<DeliveryNodeKind, string> = {
@@ -168,12 +180,25 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
     const id = rawNode.id;
     if (typeof id !== "string" || id.length === 0) {
       errors.push({ path: `${path}.id`, message: "node is missing a string `id`", code: "missing-id" });
-    } else if (nodeFacts.has(id)) {
-      errors.push({
-        path: `${path}.id`,
-        message: `duplicate node id "${id}" — every node id must be unique in the graph`,
-        code: "duplicate-id",
-      });
+    } else {
+      if (id.length > NODE_ID_MAX_LENGTH || !NODE_ID_PATTERN.test(id)) {
+        // Mirror openapi's `DeliveryNodeCommon.id` pattern/length so an invalid id can't slip past a
+        // bypassed shape gate and break id-based compilation/rendering in a later slice.
+        errors.push({
+          path: `${path}.id`,
+          message:
+            `node id "${id}" must be a bare identifier (\`^[A-Za-z_][A-Za-z0-9_.-]*$\`, ` +
+            `\u2264 ${NODE_ID_MAX_LENGTH} chars) so downstream id-based compilation stays safe`,
+          code: "invalid-id",
+        });
+      }
+      if (nodeFacts.has(id)) {
+        errors.push({
+          path: `${path}.id`,
+          message: `duplicate node id "${id}" — every node id must be unique in the graph`,
+          code: "duplicate-id",
+        });
+      }
     }
 
     const kind = rawNode.kind;
@@ -271,11 +296,13 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
   const edges: readonly unknown[] = Array.isArray(graph.edges) ? graph.edges : [];
   if (graph.edges !== undefined && !Array.isArray(graph.edges)) {
     // A non-array `edges` must not be silently treated as "no edges" — that would let a malformed
-    // body pass semantic validation when the OpenAPI shape validator is bypassed.
+    // body pass semantic validation when the OpenAPI shape validator is bypassed. This is a
+    // shape/type error (not an endpoint-resolution failure), so it carries `invalid-edges` — callers
+    // branching on error codes must distinguish "edges isn't a list" from a genuine dangling endpoint.
     errors.push({
       path: "edges",
       message: "`edges`, when present, must be an array of `{ from, to }` dependency edges",
-      code: "dangling-edge",
+      code: "invalid-edges",
     });
   }
   // consumer (`to`) → set of upstream node ids (`from`'s node) — the dependency direction.

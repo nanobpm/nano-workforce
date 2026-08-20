@@ -245,13 +245,21 @@ test("a graph with no edges (independent roots) is valid", () => {
   );
 });
 
-test("a non-array `edges` is rejected, not silently treated as no edges", () => {
+test("a non-array `edges` is rejected as a shape error (`invalid-edges`), not silently treated as no edges", () => {
   const errors = validateDeliveryGraph({
     nodes: [{ id: "a", kind: "agent", agent: { jobType: "j" } }],
     edges: "nope",
   });
-  const err = hasCode(errors, "dangling-edge");
+  const err = hasCode(errors, "invalid-edges");
   assertEquals(err.path, "edges");
+});
+
+test("invalid-id: a node id violating the openapi id pattern is rejected so downstream id use stays safe", () => {
+  const errors = validateDeliveryGraph({
+    nodes: [{ id: "1 bad id", kind: "agent", agent: { jobType: "j" } }],
+  });
+  const err = hasCode(errors, "invalid-id");
+  assertEquals(err.path, "nodes[0].id");
 });
 
 test("a `human` node whose `human` config is not an object is rejected, path-qualified", () => {
