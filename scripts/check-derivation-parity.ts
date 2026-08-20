@@ -15,19 +15,20 @@
 //
 // Any structural drift (b) OR deploy rejection (c) fails the build.
 //
-// PARKED MODELS ARE ACCOUNTED FOR, NOT IGNORED. The corpus is currently fully parked behind
-// upstream `@nanobpm/workflow` constructs (see test/derivation-parity/flows.ts for the three blocker
-// classes). Each parked model must carry a documented `blockedReason`; a model that is neither
-// ported nor documented fails this gate, so the corpus can never silently lose coverage. As each
-// parked model flips to a real `flow` upstream, it is automatically pulled into the full
-// derive → diff → deploy loop here with NO change to this script.
+// PARKED MODELS ARE ACCOUNTED FOR, NOT IGNORED. `retro` is a green whole-model parity port; the
+// remaining corpus is parked behind upstream `@nanobpm/workflow` constructs (see
+// test/derivation-parity/flows.ts for the two blocker classes). Each parked model must carry a
+// documented `blockedReason`; a model that is neither ported nor documented fails this gate, so the
+// corpus can never silently lose coverage. As each parked model flips to a real `flow` upstream, it
+// is automatically pulled into the full derive → diff → deploy loop here with NO change to this
+// script.
 //
-// SELF-PROVING CANARY. Because the corpus is (today) all-parked, a gate that merely iterated it
-// would be a vacuous green — it could rot without anyone noticing. So before touching the corpus we
-// run a CANARY that proves the oracle's RED path genuinely fires: a faithful derived flow deploys
-// green and diffs green, a drifted derivation is CAUGHT by the diff, and a corrupted model is
-// REJECTED by the engine. If any red path fails to fire (the diff misses drift, or the engine
-// accepts garbage), the gate fails — the oracle must be able to say no.
+// SELF-PROVING CANARY. To keep the gate honest even while most of the corpus is parked, a gate that
+// merely iterated it could be a near-vacuous green — it could rot without anyone noticing. So before
+// touching the corpus we run a CANARY that proves the oracle's RED path genuinely fires: a faithful
+// derived flow deploys green and diffs green, a drifted derivation is CAUGHT by the diff, and a
+// corrupted model is REJECTED by the engine. If any red path fails to fire (the diff misses drift,
+// or the engine accepts garbage), the gate fails — the oracle must be able to say no.
 
 import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";

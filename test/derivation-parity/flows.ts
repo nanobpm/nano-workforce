@@ -9,12 +9,13 @@
 // the structurally-derivable goldens at full whole-model parity, park the rest
 // pending an upstream construct, and do NOT relax to node-surface parity):
 //
-//   • All seven goldens are currently `blockedReason`-parked, in THREE distinct
-//     classes, each awaiting an upstream `@nanobpm/workflow` (nano-ide) construct
-//     + re-release — never a golden edit and never relaxed acceptance:
+//   • `retro` is a GREEN whole-model parity port (see below). The remaining six
+//     goldens are `blockedReason`-parked, in TWO distinct classes, each awaiting
+//     an upstream `@nanobpm/workflow` (nano-ide) construct + re-release — never a
+//     golden edit and never relaxed acceptance:
 //
 //     (1) MULTI top-level start/end (spine-demo, readiness-gate, feature,
-//         merge-loop, plan-fanout). `@nanobpm/workflow@0.12.0` derives EXACTLY
+//         merge-loop, plan-fanout). `@nanobpm/workflow` derives EXACTLY
 //         ONE `<bpmn:startEvent id="Start">` + ONE `<bpmn:endEvent id="End">`,
 //         converging every dangler into that single end (see `Compiler.compile`
 //         in the package's `declarative.ts`). Needs a terminal/explicit-end
@@ -34,23 +35,10 @@
 //         arbitrary-graph / explicit-join (named-target) builder — a SUPERSET of
 //         the class-(1) gap.
 //
-//     (3) GENERAL service-task ioMapping (retro). retro WAS a green full-parity
-//         port (a linear gather → synthesize → record agent pipeline) until the
-//         conformance work (nano-workforce #355/#356) added a conformance-
-//         escalation subgraph to its golden. Every new element ports with the
-//         stock builder (`w.branch` for the `deviations?` gateway, `w.human` for
-//         the `conformance-escalation` userTask, `w.task`+prompt/envelopes for
-//         the service tasks) EXCEPT `record-conformance-ack`: a service task with
-//         a general <zeebe:ioMapping> (inputs `=planKey`→planKey and
-//         `=if (is defined(note)) then note else null`→note). @nanobpm/workflow@
-//         0.12.0's `task` builder only emits an ioMapping via a `prompt.append`
-//         (a single `appendPrompt` input), so this task is not derivable. Needs a
-//         general `io` on the task/run builder upstream (nano-ide#405).
-//
 // A resumed run flips any parked model to a real `flow` once the corresponding
-// upstream construct lands and `@nanobpm/workflow` is bumped past 0.12.0.
+// upstream construct lands and `@nanobpm/workflow` is bumped to carry it.
 
-import type { DeclarativeFlow } from "@nanobpm/workflow";
+import { type DeclarativeFlow, defineFlow, envelope } from "@nanobpm/workflow";
 
 /** One model's port entry: the golden basename plus EITHER the derived flow
  *  (when it can be reproduced) OR the reason it is blocked — never both and never
@@ -72,38 +60,87 @@ export type PortEntry =
       readonly blockedReason: string;
     };
 
-// ── retro (PARKED — class 3) ─────────────────────────────────────────────────
-// retro WAS a green full-parity port — a linear gather → synthesize → record
-// agent pipeline. The conformance work (nano-workforce #355/#356) then added a
-// conformance-escalation subgraph to the golden: a `deviations?` exclusive
-// gateway, a `conformance-escalation` userTask, and `senior:conformance` /
-// `pr.conformance-record` / `pr.conformance-ack` service tasks. All of those ARE
-// expressible with the stock builder (`w.branch`, `w.human`, `w.task`+prompt,
-// envelopes) EXCEPT `record-conformance-ack`: it carries a general
+// ── retro (GREEN — whole-model parity) ───────────────────────────────────────
+// retro is a single-start/single-end model: a linear gather → conformance →
+// record-conformance agent pipeline, a `deviations?` exclusive gateway guarding a
+// conformance-escalation subgraph (nano-workforce #355/#356), then a shared
+// synthesize → record tail. Every element ports with the stock builder:
+// `w.task`+envelopes for the data-envelope service tasks, `w.task`+prompt for the
+// two agent tasks (`senior:conformance`, `senior:retro`), `w.branch` for the
+// `deviations?` gateway, `w.human` for the `conformance-escalation` userTask, and
+// — since @nanobpm/workflow@0.13.0 landed the general service-task `io` construct
+// (nano-ide#405) — `w.task`+`io` for `record-conformance-ack`'s general
 // <zeebe:ioMapping> (inputs `=planKey`→planKey and
-// `=if (is defined(note)) then note else null`→note), which
-// @nanobpm/workflow@0.12.0's `task` builder cannot emit — it only produces an
-// ioMapping via a `prompt.append` (a single `appendPrompt` input). So retro
-// regresses to a parked model pending the upstream construct: a general `io` on
-// the external `task`/`run` builder (nano-ide#405). It flips back to a green
-// port once that lands and @nanobpm/workflow is bumped past 0.12.0.
+// `=if (is defined(note)) then note else null`→note).
 
-const RETRO_IO_BLOCK =
-  "blocked (general service-task ioMapping): retro's golden gained a " +
-  "conformance-escalation subgraph whose `record-conformance-ack` service task " +
-  "carries a general <zeebe:ioMapping> (inputs =planKey→planKey and " +
-  "=if (is defined(note)) then note else null→note). @nanobpm/workflow@0.12.0's " +
-  "`task` builder only emits an ioMapping via a `prompt.append` (a single " +
-  "appendPrompt input), so this task is not derivable. Every other element of " +
-  "the golden IS expressible (w.task+prompt, w.branch, w.human, envelopes). " +
-  "Awaits a general `io` on the task/run builder upstream in @nanobpm/workflow " +
-  "(nano-ide#405).";
+/** The typed data envelopes retro's non-agent service tasks lift into the model
+ *  (`nano:shape` + `io.nanobpm.dataEnvelope.in`), matching the golden's shapes. */
+const RetroGatherIn = envelope("RetroGatherIn", { planKey: "string" });
+const RetroRecordIn = envelope("RetroRecordIn", {
+  planKey: "string",
+  retroLearnings: { type: "integer", optional: true },
+  status: { type: "string", optional: true },
+  pr: { type: "string", optional: true },
+  summary: { type: "string", optional: true },
+});
+const ConformanceRecordIn = envelope("ConformanceRecordIn", {
+  planKey: "string",
+  status: { type: "string", optional: true },
+  commentUrl: { type: "string", optional: true },
+  slicesMet: { type: "integer", optional: true },
+  slicesReduced: { type: "integer", optional: true },
+  slicesNotVerified: { type: "integer", optional: true },
+  deviationsRaised: { type: "integer", optional: true },
+  deviationsUnraised: { type: "integer", optional: true },
+  hasDeviations: { type: "boolean", optional: true },
+  summary: { type: "string", optional: true },
+});
+
+/** The code-first port of `resources/processes/retro.bpmn`. */
+const retroFlow: DeclarativeFlow = defineFlow(
+  "retro",
+  {
+    gather: { in: RetroGatherIn },
+    "record-conformance": { in: ConformanceRecordIn },
+    record: { in: RetroRecordIn },
+  },
+  (w) => {
+    w.task("gather", { jobType: "pr.retro-gather" });
+    w.task("conformance", {
+      jobType: "senior:conformance",
+      prompt: { resourceId: "conformance.md", bindingType: "latest", append: "=conformanceDigest" },
+    });
+    w.task("record-conformance", { jobType: "pr.conformance-record" });
+    w.branch("hasDeviations = true", {
+      then: (b) => {
+        b.human("conformance-escalation", {
+          form: "conformance-escalation",
+          candidateGroups: "operators",
+        });
+        b.task("record-conformance-ack", {
+          jobType: "pr.conformance-ack",
+          io: {
+            input: [
+              { source: "=planKey", target: "planKey" },
+              { source: "=if (is defined(note)) then note else null", target: "note" },
+            ],
+          },
+        });
+      },
+    });
+    w.task("synthesize", {
+      jobType: "senior:retro",
+      prompt: { resourceId: "retro.md", bindingType: "latest", append: "=retroDigest" },
+    });
+    w.task("record", { jobType: "pr.retro-record" });
+  },
+);
 
 /** The single-top-level-end/start compiler limitation, reused as the
  *  `blockedReason` for every golden that has more than one top-level start
  *  and/or end event. */
 const MULTI_START_END_BLOCK =
-  "blocked: @nanobpm/workflow@0.12.0 derives a single top-level start/end and " +
+  "blocked: the published @nanobpm/workflow compiler derives a single top-level start/end and " +
   "converges all danglers into one <endEvent id=\"End\">; this golden has " +
   "multiple top-level start and/or end events, which the published compiler " +
   "cannot reproduce. Awaits an upstream terminal/explicit-end (+ multi-start) " +
@@ -111,7 +148,7 @@ const MULTI_START_END_BLOCK =
 
 /** All seven ports, keyed by model, in the epic's stated authoring order. */
 export const PORTS: readonly PortEntry[] = [
-  { model: "retro", blockedReason: RETRO_IO_BLOCK },
+  { model: "retro", flow: retroFlow },
   {
     model: "spine-demo",
     blockedReason: `${MULTI_START_END_BLOCK} (spine-demo: 1 start, 2 ends)`,
@@ -128,7 +165,7 @@ export const PORTS: readonly PortEntry[] = [
     model: "convergence-loop",
     blockedReason:
       "blocked (arbitrary control-flow graph): single top-level start/end, but " +
-      "its topology is not expressible with @nanobpm/workflow@0.12.0's " +
+      "its topology is not expressible with the published @nanobpm/workflow's " +
       "structured-only builder (loop/switch/branch). Proven in the test suite: " +
       "the loop head `review-round` is a serviceTask that merges 3 back-edges " +
       "directly (in=3), but loop() always inserts an exclusive-gateway head " +
