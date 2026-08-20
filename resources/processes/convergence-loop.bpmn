@@ -86,11 +86,11 @@
           <nano:extend name="prUrl" type="string" />
           <nano:extend name="repo" type="string" />
           <nano:extend name="prNumber" type="integer" />
-          <nano:extend name="answer" type="string" optional="true" />
+          <nano:extend name="scopeAnswer" type="string" optional="true" />
         </nano:shape>
         <nano:shape id="PrScopeClassifyOut" name="Scope classifier — verdict">
           <nano:extend name="scopeBlocked" type="boolean" />
-          <nano:extend name="scopeBlockReason" type="string" optional="true" />
+          <nano:extend name="scopeBlockReason" type="string" />
         </nano:shape>
       </nano:shapes>
     </bpmn:extensionElements>
@@ -110,6 +110,7 @@
         <zeebe:ioMapping>
           <zeebe:input source="=(if (abandonBrief = null) then &#34;&#34; else abandonBrief)" target="appendPrompt" />
           <zeebe:output source="=null" target="answer" />
+          <zeebe:output source="=false" target="scopePending" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_start</bpmn:incoming>
@@ -268,6 +269,7 @@
         <zeebe:ioMapping>
           <zeebe:input source="=prKey" target="prKey" />
           <zeebe:input source="=answer" target="answer" />
+          <zeebe:output source="=(if scopePending = true then answer else scopeAnswer)" target="scopeAnswer" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_answerRecord</bpmn:incoming>
@@ -326,7 +328,7 @@
           <zeebe:property name="io.nanobpm.dataEnvelope.out" value="PrScopeClassifyOut" />
         </zeebe:properties>
         <zeebe:ioMapping>
-          <zeebe:output source="=null" target="answer" />
+          <zeebe:output source="=null" target="scopeAnswer" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_convergeOk</bpmn:incoming>
@@ -348,6 +350,7 @@
           <zeebe:input source="=&#34;blocked&#34;" target="status" />
           <zeebe:input source="=false" target="recordRound" />
           <zeebe:input source="=scopeBlockReason" target="question" />
+          <zeebe:output source="=true" target="scopePending" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_scopeBlocked</bpmn:incoming>

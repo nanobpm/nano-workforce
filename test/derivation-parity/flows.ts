@@ -171,7 +171,7 @@ export const PORTS: readonly PortEntry[] = [
       "directly (in=3), but loop() always inserts an exclusive-gateway head " +
       "(task stays in=1); `gw-status` is one gateway with 4 heterogeneous-" +
       "condition out-edges (no switch/branch emits that); `gw-escalated` is one " +
-      "gateway that is at once a 5-way merge and a 2-way split. Awaits an " +
+      "gateway that is at once a 6-way merge and a 2-way split. Awaits an " +
       "arbitrary-graph / explicit-join (named-target) builder upstream in " +
       "@nanobpm/workflow (nano-ide) — a superset of the multi-start/end gap.",
   },

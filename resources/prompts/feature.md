@@ -106,8 +106,8 @@ you on the right side of it:
    closes #N while leaving part of #N's stated scope undelivered and untracked.
 2. **A deferred remainder must be a FILED, tracked issue — never just prose.** If
    your PR defers part of its scope, **file a follow-up issue for each deferred
-   item** and link it in the PR body with an explicit tracking marker the gate can
-   see: `Deferred-to: #N`, `Tracked-in: #N`, or `Follow-up: #N`. A deferral that
+   item** and link it in the PR body with an explicit tracking marker the classifier
+   can see: `Deferred-to: #N`, `Tracked-in: #N`, or `Follow-up: #N`. A deferral that
    lives only in commit/PR/ADR text is an invisible, unclaimable drift surface.
 
 So: deliver the whole thing → `Closes #N`. Split it → `Refs #N`, file the

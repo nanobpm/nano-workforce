@@ -91,7 +91,7 @@ describe("nano-workforce PR review-loop escalation (U4 userTask)", () => {
     // routes through it before finalizing. Stub it as "scope delivered" so the happy path reaches
     // persist-converged rather than parking on an unserviced agent job.
     await app.engine.registerWorker("senior:scope-classify", () => {
-      return { scopeBlocked: false };
+      return { scopeBlocked: false, scopeBlockReason: "" };
     });
   });
 

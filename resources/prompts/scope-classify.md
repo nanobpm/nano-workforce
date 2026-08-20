@@ -33,7 +33,7 @@ present". That lost work is what you must catch.
 | `prUrl`    | canonical PR URL                                                    |
 | `repo`     | `owner/name`                                                        |
 | `prNumber` | PR number                                                           |
-| `answer`   | present only when resuming from a scope escalation you raised — a human's decision |
+| `scopeAnswer` | present only when resuming from a scope escalation you raised — a human's decision |
 | `prompt`   | this document                                                       |
 
 ## Abort if the run was cancelled
@@ -83,7 +83,7 @@ result.
      (e.g. a PR that changes scope tooling) without the PR itself deferring a closed
      issue's scope.
 
-5. **Honor a human decision.** If `answer` is present, a human already ruled on a
+5. **Honor a human decision.** If `scopeAnswer` is present, a human already ruled on a
    scope escalation you raised. Treat their decision as authoritative: unless the PR
    *now* clearly still under-delivers a closed issue with an untracked remainder (e.g.
    they told you to proceed but the closing keyword and gap are both still there and

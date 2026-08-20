@@ -396,8 +396,54 @@ test("classify-scope is an agent task servicing senior:scope-classify with a lin
   assertStringIncludes(task[0], 'type="senior:scope-classify"');
   assertStringIncludes(task[0], 'resourceId="scope-classify.md"');
   assertStringIncludes(task[0], 'linkName="prompt"');
-  // It reads the human's prior answer so it can honour an override (the #395 loop-defect fix).
-  assertStringIncludes(task[0], 'target="answer"');
+  // After honouring (or ignoring) the human's scope answer, it clears the one-shot
+  // scopeAnswer so a later round does not re-honour a stale decision.
+  assertStringIncludes(task[0], 'source="=null" target="scopeAnswer"');
+});
+
+// ── The scope-answer plumbing (#395 loop-defect fix) ─────────────────────────
+// review-round clears `answer` on every round, so a human's scope answer cannot reach
+// the downstream classify-scope via `answer`. A dedicated `scopeAnswer` variable, gated
+// by a `scopePending` marker, carries the decision across the review round without being
+// confused with answers to other escalation kinds.
+
+test("PrScopeClassifyIn feeds the classifier the surviving scopeAnswer, not the cleared answer", () => {
+  const shape = flat.match(/<nano:shape\b[^>]*\bid="PrScopeClassifyIn"[^>]*>.*?<\/nano:shape>/);
+  assert(shape, "PrScopeClassifyIn envelope missing");
+  assertStringIncludes(shape[0], 'name="scopeAnswer"');
+  assert(!/name="answer"/.test(shape[0]), "classifier must read scopeAnswer, not the shared answer");
+});
+
+test("PrScopeClassifyOut.scopeBlockReason is required (always emitted, empty when not blocked)", () => {
+  const shape = flat.match(/<nano:shape\b[^>]*\bid="PrScopeClassifyOut"[^>]*>.*?<\/nano:shape>/);
+  assert(shape, "PrScopeClassifyOut envelope missing");
+  assert(
+    /name="scopeBlockReason"(?![^>]*optional)/.test(shape[0]),
+    "scopeBlockReason must not be optional — the wire contract requires it always present",
+  );
+});
+
+test("persist-escalation-scope marks the open escalation as scope-kind (scopePending = true)", () => {
+  const task = flat.match(/<bpmn:serviceTask\b[^>]*\bid="persist-escalation-scope"[^>]*>.*?<\/bpmn:serviceTask>/);
+  assert(task, "persist-escalation-scope task missing");
+  assertStringIncludes(task[0], 'source="=true" target="scopePending"');
+});
+
+test("record-answer captures a scope answer into scopeAnswer only while scopePending", () => {
+  const task = flat.match(/<bpmn:serviceTask\b[^>]*\bid="record-answer"[^>]*>.*?<\/bpmn:serviceTask>/);
+  assert(task, "record-answer task missing");
+  // Capture is gated on scopePending so an answer to a *different* escalation is not
+  // mis-read as a scope override; otherwise scopeAnswer is preserved.
+  assertStringIncludes(
+    task[0],
+    'source="=(if scopePending = true then answer else scopeAnswer)" target="scopeAnswer"',
+  );
+});
+
+test("review-round resets the scopePending marker after record-answer has consumed it", () => {
+  const task = flat.match(/<bpmn:serviceTask\b[^>]*\bid="review-round"[^>]*>.*?<\/bpmn:serviceTask>/);
+  assert(task, "review-round task missing");
+  assertStringIncludes(task[0], 'source="=false" target="scopePending"');
 });
 
 test("classify-scope feeds gw-scope-gate, which blocks on scopeBlocked = true", () => {
