@@ -1,3 +1,10 @@
+## [0.107.2](https://github.com/nanobpm/nano-workforce/compare/v0.107.1...v0.107.2) (2026-08-20)
+
+
+### Bug Fixes
+
+* **ci:** close the merge-skew failure class — re-check whole-repo invariants on the post-merge state ([#367](https://github.com/nanobpm/nano-workforce/issues/367)) ([62f5214](https://github.com/nanobpm/nano-workforce/commit/62f5214961cdb82a708d7cc08acecbf5eecf25ed)), closes [#359](https://github.com/nanobpm/nano-workforce/issues/359) [#365](https://github.com/nanobpm/nano-workforce/issues/365) [#366](https://github.com/nanobpm/nano-workforce/issues/366)
+
 ## [0.107.1](https://github.com/nanobpm/nano-workforce/compare/v0.107.0...v0.107.1) (2026-08-20)
 
 
