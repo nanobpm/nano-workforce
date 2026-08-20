@@ -1498,6 +1498,221 @@ components:
           type: string
           minLength: 1
           description: The dependent node's id — proceeds once `from` is observed.
+    DeliveryCompileError:
+      description: >-
+        One semantic-validation or compile failure, path-qualified at the offending input
+        (`nodes[2].kind`, `edges[1].from`, …). Mirrors a `validateDeliveryGraph` (`app/deliveryGraph.ts`)
+        error stripped to the wire pair `{ path, message }` (the stable `code` stays server-side).
+      type: object
+      additionalProperties: false
+      required:
+        - path
+        - message
+      properties:
+        path:
+          type: string
+          description: JSON-path pointer at the offending node/edge/fact.
+        message:
+          type: string
+          description: Human-actionable description of the failure.
+    ResolvedDeliveryNode:
+      description: >-
+        A normalised node in the compiled graph (ADR 0005 slice S1) — its `id`, `kind`, the
+        deterministic BPMN `element` id it compiled to, the engine-native `calledElement` body it
+        delegates to (Decision 2 — absent for a `human` user task), its typed `emits[]`, and the
+        upstream node ids it `dependsOn` (sorted).
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - kind
+        - element
+        - emits
+        - dependsOn
+      properties:
+        id:
+          type: string
+          description: The author's node id (unique across the graph).
+        kind:
+          type: string
+          enum: [agent, wait, human, connector]
+          description: The node's kind from the closed allowlist (the trust boundary).
+        element:
+          type: string
+          description: The deterministic BPMN element id this node compiled to (e.g. `n0`).
+        calledElement:
+          type: string
+          description: >-
+            The engine-native sub-process/call-activity target this node delegates to (Decision 2).
+            Absent for a `human` node (a native user task, not a call activity).
+        emits:
+          type: array
+          items:
+            $ref: "#/components/schemas/DeliveryFact"
+          description: The node's typed emitted facts (empty when it emits nothing).
+        dependsOn:
+          type: array
+          items:
+            type: string
+          description: The ids of the upstream nodes this node depends on, sorted for determinism.
+    ResolvedDeliveryEdge:
+      description: >-
+        A resolved dependency edge — the author's `from`/`to` plus the resolved upstream `fromNode`
+        and, when the `from` was qualified (`<nodeId>.<fact>`), the referenced `fromFact`.
+      type: object
+      additionalProperties: false
+      required:
+        - from
+        - to
+        - fromNode
+      properties:
+        from:
+          type: string
+          description: The author's `from` endpoint verbatim (`<nodeId>` or `<nodeId>.<fact>`).
+        to:
+          type: string
+          description: The dependent node's id.
+        fromNode:
+          type: string
+          description: The resolved upstream node id.
+        fromFact:
+          type: string
+          description: The referenced emitted fact, when the edge `from` was qualified.
+    ResolvedDeliveryGraph:
+      description: >-
+        The normalised graph the compiler resolved from the input (ADR 0005 slice S1) — nodes and
+        edges sorted deterministically so the same JSON always yields the same preview.
+      type: object
+      additionalProperties: false
+      required:
+        - nodes
+        - edges
+      properties:
+        name:
+          type: string
+          description: The graph's optional human-readable label, echoed from the input.
+        nodes:
+          type: array
+          items:
+            $ref: "#/components/schemas/ResolvedDeliveryNode"
+          description: The normalised nodes, sorted by id.
+        edges:
+          type: array
+          items:
+            $ref: "#/components/schemas/ResolvedDeliveryEdge"
+          description: The resolved edges, sorted deterministically.
+    DeliveryHumanStop:
+      description: >-
+        A `human` node extracted for the preview — a point where the graph STOPS for a person (or an
+        agent answering on their behalf). Carries the instruction, the optional attached form, and the
+        typed facts the node will emit on completion.
+      type: object
+      additionalProperties: false
+      required:
+        - nodeId
+        - emits
+      properties:
+        nodeId:
+          type: string
+          description: The human node's id.
+        prompt:
+          type: string
+          description: The instruction shown to the human/agent ("now do X"), when declared.
+        formKey:
+          type: string
+          description: The explicitly-attached form key, when declared.
+        emits:
+          type: array
+          items:
+            $ref: "#/components/schemas/DeliveryFact"
+          description: The typed facts this human node will hand forward (empty for a "click done" stop).
+    DeliverySideEffect:
+      description: >-
+        A side-effecting action the compiled graph WILL perform (ADR 0005 slice S1 preview) — an
+        `agent` job run or a `connector` outbound action. Read-only `wait` gates and `human` stops are
+        NOT side effects (they are surfaced separately). Lets a human see "what it will do" before
+        approving (Decision 7).
+      type: object
+      additionalProperties: false
+      required:
+        - nodeId
+        - kind
+        - description
+      properties:
+        nodeId:
+          type: string
+          description: The id of the node that performs the side effect.
+        kind:
+          type: string
+          enum: [agent, connector]
+          description: The side-effecting node kind.
+        description:
+          type: string
+          description: Human-readable summary of the effect (e.g. "runs agent job `senior:feature`").
+        dedupeKey:
+          type: string
+          description: The connector's idempotency key, when declared (at-least-once safety, Decision 7).
+    CompileDeliveryGraphResult:
+      description: >-
+        A successful compile (ADR 0005 slice S1) — the PURE, side-effect-free preview a co-designing
+        agent iterates against. Carries the compiled one-shot `bpmn` (compile-to-native artifact), a
+        human-readable `diagram` (mermaid), the `resolved` normalised graph, and the extracted
+        `humanNodes[]` (where it stops for a person) and `sideEffects[]` (what it will do). NOTHING is
+        deployed — `compile` and `start` are separate doors (Decision 5/7).
+      type: object
+      additionalProperties: false
+      required:
+        - ok
+        - diagram
+        - bpmn
+        - resolved
+        - humanNodes
+        - sideEffects
+      properties:
+        ok:
+          type: boolean
+          enum: [true]
+          description: Discriminant — `true` for a successful compile.
+        diagram:
+          type: string
+          description: A human-readable mermaid `flowchart` of the resolved graph.
+        bpmn:
+          type: string
+          description: >-
+            The compiled one-shot BPMN process definition (compile-to-native). Deterministic — the same
+            input graph always produces byte-identical XML. Not deployed here (S4 owns deployment).
+        resolved:
+          $ref: "#/components/schemas/ResolvedDeliveryGraph"
+        humanNodes:
+          type: array
+          items:
+            $ref: "#/components/schemas/DeliveryHumanStop"
+          description: The human stop-points, sorted by node id.
+        sideEffects:
+          type: array
+          items:
+            $ref: "#/components/schemas/DeliverySideEffect"
+          description: The side-effecting actions the graph will perform, sorted by node id.
+    CompileDeliveryGraphErrors:
+      description: >-
+        A rejected compile (ADR 0005 slice S1) — the graph failed shape or semantic validation. Every
+        error is path-qualified so the co-designing agent can fix the exact offending input and
+        re-compile. Nothing was compiled or deployed.
+      type: object
+      additionalProperties: false
+      required:
+        - ok
+        - errors
+      properties:
+        ok:
+          type: boolean
+          enum: [false]
+          description: Discriminant — `false` for a rejected compile.
+        errors:
+          type: array
+          items:
+            $ref: "#/components/schemas/DeliveryCompileError"
+          description: The path-qualified validation/compile failures (at least one).
     FeatureStart:
       description: The start-feature request body — a SINGLE-issue feature run. Names the target issue
         by EXACTLY ONE of `issue` (an `owner/repo#123` reference) or `url` (a bare issue URL), plus a
@@ -2247,6 +2462,39 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorBody"
+  /actions/compile-delivery-graph:
+    post:
+      operationId: compileDeliveryGraph
+      summary: Validate + compile a delivery graph into a preview (PURE — never deploys). (ADR 0005 slice S1)
+      description: >-
+        The fast, safe inner loop of the delivery-graph workflow (ADR 0005 Decision 5/6). Given an
+        agent-authored `DeliveryGraph` (the closed `agent`/`wait`/`human`/`connector` node vocabulary —
+        the trust boundary), it runs the pure `validateDeliveryGraph` semantic check and then the
+        deterministic, human-written compiler, returning a preview: the compiled one-shot BPMN
+        (compile-to-native), a mermaid diagram, the resolved/normalised graph, and the extracted human
+        stop-points and side effects. It is PURE and side-effect-free — it validates and compiles but
+        NEVER deploys or dispatches, so an agent can call it repeatedly while iterating. Deployment is a
+        separate door (`startDeliveryGraph`, a later slice) — there is deliberately no `dryRun` flag on
+        the start door (Decision 5/7). A malformed graph is a 400 carrying path-qualified errors.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeliveryGraph"
+      responses:
+        "200":
+          description: The graph validated and compiled — the pure preview (nothing deployed).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CompileDeliveryGraphResult"
+        "400":
+          description: The graph failed shape or semantic validation — path-qualified errors, nothing compiled.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CompileDeliveryGraphErrors"
   /actions/start/feature:
     post:
       operationId: startFeature

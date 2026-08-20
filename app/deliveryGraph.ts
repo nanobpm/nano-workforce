@@ -461,3 +461,49 @@ function collectCycle(adjacency: Map<string, Set<string>>, errors: DeliveryGraph
     if (state.get(node) !== DONE) visit(node, []);
   }
 }
+
+/** Build the `nodeId → declared-fact-names` map for a graph that has ALREADY passed
+ * {@link validateDeliveryGraph} (every id/emit is well-formed by then). This is the same map the
+ * validator builds internally for edge resolution; exported so a downstream consumer (the S1
+ * compiler) derives it from ONE canonical place rather than re-deriving — and thus resolves edge
+ * `from` endpoints identically (no drift). Nodes without a valid string id, and duplicate ids, are
+ * skipped exactly as the validator does (first id wins). */
+export function deliveryNodeFacts(graph: DeliveryGraphLike): Map<string, Set<string>> {
+  const nodeFacts = new Map<string, Set<string>>();
+  const nodes = Array.isArray(graph.nodes) ? graph.nodes : [];
+  for (const rawNode of nodes) {
+    if (!isRecord(rawNode)) continue;
+    const id = rawNode.id;
+    if (typeof id !== "string" || id.length === 0 || nodeFacts.has(id)) continue;
+    const facts = new Set<string>();
+    if (Array.isArray(rawNode.emits)) {
+      for (const rawFact of rawNode.emits) {
+        if (isRecord(rawFact) && typeof rawFact.name === "string" && rawFact.name.length > 0) {
+          facts.add(rawFact.name);
+        }
+      }
+    }
+    nodeFacts.set(id, facts);
+  }
+  return nodeFacts;
+}
+
+/** The minimal read surface {@link deliveryNodeFacts} / {@link resolveDeliveryFrom} need — a graph
+ * with a `nodes` array. Kept structural so both the untyped request body and the generated
+ * `DeliveryGraph` type satisfy it. */
+export interface DeliveryGraphLike {
+  readonly nodes?: unknown;
+}
+
+/** Resolve an edge `from` endpoint (`<nodeId>` or `<nodeId>.<fact>`) against a graph's node/fact map,
+ * for a graph that has ALREADY passed {@link validateDeliveryGraph} (so the reference is known
+ * resolvable and unambiguous). Returns the upstream `nodeId` and, when the `from` was qualified, the
+ * referenced `fact`. Shares the exact disambiguation rule the validator uses (a node id may contain
+ * dots; a fact name cannot), so the compiler builds the SAME DAG the validator checked — no drift. */
+export function resolveDeliveryFrom(
+  from: string,
+  nodeFacts: ReadonlyMap<string, ReadonlySet<string>>,
+): { nodeId: string; fact?: string } {
+  const { nodeId, fact } = resolveFrom(from, nodeFacts);
+  return fact !== undefined ? { nodeId, fact } : { nodeId };
+}

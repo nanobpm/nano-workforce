@@ -1,0 +1,243 @@
+// Unit coverage for the deterministic delivery-graph compiler `compileDeliveryGraph` (ADR 0005,
+// slice S1). The compiler is the TRUSTED inner loop: it validates (via S0's `validateDeliveryGraph`),
+// compiles to a native BPMN artifact, and renders a preview — with ZERO side effects. These tests
+// exercise, directly and with no HTTP:
+//   • the happy path (a fully-worked release runbook → ok:true with every preview field),
+//   • DETERMINISM (same JSON → byte-identical bpmn/diagram/resolved — the core trust property),
+//   • rejection of every malformed class (unknown-kind / dangling / bad-from / cycle) as ok:false
+//     with path-qualified errors forwarded verbatim from the validator,
+//   • the trust bound — only allowlisted kinds are instantiated (callActivity/userTask, allowlisted
+//     calledElement targets; a non-allowlisted kind never reaches compilation),
+//   • fan-in / fan-out / multi-root / multi-leaf → explicit parallel gateways,
+//   • humanNodes[] and sideEffects[] extraction.
+import { test } from "node:test";
+import { assert, assertEquals } from "#test-assert";
+import { compileDeliveryGraph } from "./deliveryGraphCompiler.ts";
+
+/** Compile and assert success, returning the narrowed ok-result. */
+function compileOk(graph: unknown) {
+  const r = compileDeliveryGraph(graph);
+  assert(r.ok, `expected ok:true, got ${JSON.stringify(r)}`);
+  return r;
+}
+
+/** Compile and assert failure, returning the errors. */
+function compileFail(graph: unknown) {
+  const r = compileDeliveryGraph(graph);
+  assert(!r.ok, `expected ok:false, got ${JSON.stringify(r)}`);
+  return r.errors;
+}
+
+// The ADR's motivating case: an agent merges PR #B, a `pr` wait node watches it merge and emits
+// `mergedSha`, a human does the manual OTP publish emitting `resolvedArtifact`, and a connector
+// consumes the published artifact.
+const RELEASE_RUNBOOK = {
+  name: "release runbook",
+  nodes: [
+    { id: "open-b", kind: "agent", agent: { jobType: "senior:feature", prompt: "un-draft + merge #B" } },
+    {
+      id: "watch-b",
+      kind: "wait",
+      wait: { kind: "pr", target: "owner/repo#42", match: { prState: "merged" } },
+      emits: [{ name: "mergedSha", type: "string" }],
+    },
+    {
+      id: "publish",
+      kind: "human",
+      human: { prompt: "run the manual OTP publish", formKey: "publish-form" },
+      emits: [{ name: "resolvedArtifact", type: "artifact" }],
+    },
+    { id: "consume", kind: "connector", connector: { target: "npm:install", dedupeKey: "consume-1" } },
+  ],
+  edges: [
+    { from: "open-b", to: "watch-b" },
+    { from: "watch-b.mergedSha", to: "publish" },
+    { from: "publish.resolvedArtifact", to: "consume" },
+  ],
+};
+
+test("happy path: a well-formed graph compiles to a full preview with no side effects", () => {
+  const r = compileOk(RELEASE_RUNBOOK);
+  assertEquals(r.ok, true);
+  assert(r.bpmn.includes("<bpmn:process id=\"delivery-graph\""), "bpmn carries the compiled process");
+  assert(r.diagram.startsWith("flowchart TD"), "diagram is a mermaid flowchart");
+  assertEquals(r.resolved.name, "release runbook");
+  assertEquals(r.resolved.nodes.length, 4);
+  assertEquals(r.resolved.edges.length, 3);
+  assertEquals(r.humanNodes.length, 1);
+  // agent + connector are side-effecting; wait + human are not.
+  assertEquals(r.sideEffects.length, 2);
+});
+
+test("determinism: the same JSON always yields byte-identical bpmn/diagram/resolved", () => {
+  const a = compileOk(RELEASE_RUNBOOK);
+  const b = compileOk(RELEASE_RUNBOOK);
+  assertEquals(a.bpmn, b.bpmn);
+  assertEquals(a.diagram, b.diagram);
+  assertEquals(JSON.stringify(a.resolved), JSON.stringify(b.resolved));
+  // Node ORDER in the input must not change the artifact (nodes are sorted by id).
+  const shuffled = { ...RELEASE_RUNBOOK, nodes: [...RELEASE_RUNBOOK.nodes].reverse() };
+  const c = compileOk(shuffled);
+  assertEquals(c.bpmn, a.bpmn);
+  assertEquals(c.diagram, a.diagram);
+});
+
+test("trust bound: only allowlisted kinds are instantiated — no other BPMN activity type appears", () => {
+  const r = compileOk(RELEASE_RUNBOOK);
+  // Every node compiles to a callActivity (agent/wait/connector) or a userTask (human) — nothing else.
+  assertEquals((r.bpmn.match(/<bpmn:callActivity /g) ?? []).length, 3);
+  assertEquals((r.bpmn.match(/<bpmn:userTask /g) ?? []).length, 1);
+  assert(!r.bpmn.includes("<bpmn:scriptTask"), "no script task is ever emitted");
+  assert(!r.bpmn.includes("<bpmn:serviceTask"), "no bespoke service task is ever emitted");
+  // Every call activity delegates to an allowlisted engine-native body.
+  const called = [...r.bpmn.matchAll(/processId="([^"]+)"/g)].map((m) => m[1]);
+  assertEquals(new Set(called), new Set(["delivery-node-agent", "readiness-gate", "delivery-node-connector"]));
+});
+
+test("rejects unknown kind (by construction) with a path-qualified error, nothing compiled", () => {
+  const errors = compileFail({
+    nodes: [{ id: "x", kind: "deploy", deploy: { target: "prod" } }],
+  });
+  const e = errors.find((err) => err.path === "nodes[0].kind");
+  assert(e !== undefined, `expected a nodes[0].kind error, got ${JSON.stringify(errors)}`);
+  assert(e.message.length > 0);
+});
+
+test("rejects a dependency cycle with a path-qualified error", () => {
+  const errors = compileFail({
+    nodes: [
+      { id: "a", kind: "agent", agent: { jobType: "j" } },
+      { id: "b", kind: "agent", agent: { jobType: "j" } },
+    ],
+    edges: [
+      { from: "a", to: "b" },
+      { from: "b", to: "a" },
+    ],
+  });
+  assert(errors.some((e) => /cycle/i.test(e.message)), `expected a cycle error, got ${JSON.stringify(errors)}`);
+});
+
+test("rejects a dangling edge and a bad fact reference, each path-qualified", () => {
+  const dangling = compileFail({
+    nodes: [{ id: "a", kind: "agent", agent: { jobType: "j" } }],
+    edges: [{ from: "a", to: "ghost" }],
+  });
+  assert(dangling.some((e) => e.path === "edges[0].to"));
+
+  const badFrom = compileFail({
+    nodes: [
+      { id: "a", kind: "wait", wait: { kind: "http", target: "u" }, emits: [{ name: "x", type: "string" }] },
+      { id: "b", kind: "agent", agent: { jobType: "j" } },
+    ],
+    edges: [{ from: "a.nope", to: "b" }],
+  });
+  assert(badFrom.some((e) => e.path === "edges[0].from"));
+});
+
+test("fan-in: a node with two producers gets a parallel JOIN gateway", () => {
+  const r = compileOk({
+    nodes: [
+      { id: "a", kind: "agent", agent: { jobType: "j" } },
+      { id: "b", kind: "agent", agent: { jobType: "j" } },
+      { id: "c", kind: "agent", agent: { jobType: "j" } },
+    ],
+    edges: [
+      { from: "a", to: "c" },
+      { from: "b", to: "c" },
+    ],
+  });
+  assert(r.bpmn.includes("<bpmn:parallelGateway"), "a join gateway is emitted");
+  const cNode = r.resolved.nodes.find((n) => n.id === "c");
+  assertEquals(cNode?.dependsOn, ["a", "b"]);
+});
+
+test("fan-out: a node with two consumers gets a parallel FORK gateway", () => {
+  const r = compileOk({
+    nodes: [
+      { id: "a", kind: "agent", agent: { jobType: "j" } },
+      { id: "b", kind: "agent", agent: { jobType: "j" } },
+      { id: "c", kind: "agent", agent: { jobType: "j" } },
+    ],
+    edges: [
+      { from: "a", to: "b" },
+      { from: "a", to: "c" },
+    ],
+  });
+  assert(r.bpmn.includes('name="fan out of a"'), "a fork gateway for node a is emitted");
+});
+
+test("multiple roots fork from Start and multiple leaves join into End", () => {
+  const r = compileOk({
+    nodes: [
+      { id: "r1", kind: "agent", agent: { jobType: "j" } },
+      { id: "r2", kind: "agent", agent: { jobType: "j" } },
+    ],
+    edges: [],
+  });
+  assert(r.bpmn.includes('id="gwf_start"'), "a start fork gateway for multiple roots");
+  assert(r.bpmn.includes('id="gwj_end"'), "an end join gateway for multiple leaves");
+});
+
+test("humanNodes: extracts prompt/formKey/emits; a click-done node emits nothing", () => {
+  const r = compileOk({
+    nodes: [
+      {
+        id: "publish",
+        kind: "human",
+        human: { prompt: "OTP publish", formKey: "f1" },
+        emits: [{ name: "resolvedArtifact", type: "artifact" }],
+      },
+      { id: "ack", kind: "human" },
+    ],
+    edges: [{ from: "publish", to: "ack" }],
+  });
+  const publish = r.humanNodes.find((h) => h.nodeId === "publish");
+  assertEquals(publish?.prompt, "OTP publish");
+  assertEquals(publish?.formKey, "f1");
+  assertEquals(publish?.emits.length, 1);
+  const ack = r.humanNodes.find((h) => h.nodeId === "ack");
+  assertEquals(ack?.emits.length, 0);
+  assertEquals(ack?.prompt, undefined);
+});
+
+test("sideEffects: agent + connector only; connector carries its dedupeKey", () => {
+  const r = compileOk(RELEASE_RUNBOOK);
+  const agent = r.sideEffects.find((s) => s.nodeId === "open-b");
+  assertEquals(agent?.kind, "agent");
+  assert(agent?.description.includes("senior:feature"));
+  const connector = r.sideEffects.find((s) => s.nodeId === "consume");
+  assertEquals(connector?.kind, "connector");
+  assertEquals(connector?.dedupeKey, "consume-1");
+  // The wait + human nodes are NOT side effects.
+  assert(!r.sideEffects.some((s) => s.nodeId === "watch-b"));
+  assert(!r.sideEffects.some((s) => s.nodeId === "publish"));
+});
+
+test("resolved edges carry the resolved fromNode and the referenced fact", () => {
+  const r = compileOk(RELEASE_RUNBOOK);
+  const factEdge = r.resolved.edges.find((e) => e.from === "watch-b.mergedSha");
+  assertEquals(factEdge?.fromNode, "watch-b");
+  assertEquals(factEdge?.fromFact, "mergedSha");
+  const plainEdge = r.resolved.edges.find((e) => e.from === "open-b");
+  assertEquals(plainEdge?.fromNode, "open-b");
+  assertEquals(plainEdge?.fromFact, undefined);
+});
+
+test("BPMN is structurally coherent: one start, one end, every flow endpoint declared", () => {
+  const r = compileOk(RELEASE_RUNBOOK);
+  assertEquals((r.bpmn.match(/<bpmn:startEvent /g) ?? []).length, 1);
+  assertEquals((r.bpmn.match(/<bpmn:endEvent /g) ?? []).length, 1);
+  // Every sequenceFlow source/target id is declared as an element id in the document.
+  const declaredIds = new Set([...r.bpmn.matchAll(/ id="([^"]+)"/g)].map((m) => m[1]));
+  for (const m of r.bpmn.matchAll(/sourceRef="([^"]+)" targetRef="([^"]+)"/g)) {
+    assert(declaredIds.has(m[1]), `sourceRef ${m[1]} is declared`);
+    assert(declaredIds.has(m[2]), `targetRef ${m[2]} is declared`);
+  }
+});
+
+test("a non-object / empty body is a clean ok:false, never a throw", () => {
+  assert(!compileDeliveryGraph(undefined).ok);
+  assert(!compileDeliveryGraph(null).ok);
+  assert(!compileDeliveryGraph({}).ok);
+  assert(!compileDeliveryGraph({ nodes: [] }).ok);
+});
