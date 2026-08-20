@@ -1,3 +1,10 @@
+# [0.111.0](https://github.com/nanobpm/nano-workforce/compare/v0.110.0...v0.111.0) (2026-08-20)
+
+
+### Features
+
+* **readiness:** add pr/merge-state ReadinessProbe kind (ADR 0005 S2) ([#385](https://github.com/nanobpm/nano-workforce/issues/385)) ([860e031](https://github.com/nanobpm/nano-workforce/commit/860e03134b428c73426621acb14ccd9a3ab94149)), closes [#258](https://github.com/nanobpm/nano-workforce/issues/258) [owner/repo#N](https://github.com/owner/repo/issues/N) [#377](https://github.com/nanobpm/nano-workforce/issues/377) [owner/repo#N](https://github.com/owner/repo/issues/N)
+
 # [0.110.0](https://github.com/nanobpm/nano-workforce/compare/v0.109.0...v0.110.0) (2026-08-20)
 
 
