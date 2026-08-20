@@ -414,6 +414,8 @@ function prObs(over: Partial<PrObservation> = {}): PrObservation {
     failingCheckNames: [],
     totalChecks: 0,
     presentCheckNames: [],
+    pendingCheckNames: [],
+    checkConclusions: {},
     isDraft: false,
     headRefOid: "abc123",
     mergedSha: null,

@@ -11,6 +11,11 @@
 // The poller is app-side host glue (main.ts), so host-specific subprocess I/O is allowed here.
 // Cross-runtime: runs under Node (`node:child_process`).
 
+// Type-only import (erased at runtime, so no runtime cycle with mergeProtocol.ts, which imports
+// `fetchRepoFile` from here): `classifyMergeability` reads a repo's declared required checks to gate
+// a merge independently of GitHub branch protection.
+import type { MergeProtocol } from "./mergeProtocol.ts";
+
 /** A GitHub pull-request review, narrowed to the fields the poller needs. */
 export interface GhReview {
   id: number;
@@ -502,6 +507,17 @@ export interface PrState {
    * unrelated always-on check (e.g. Mergify's "Merge Queue") must not read as "the required run
    * already happened". */
   presentCheckNames: string[];
+  /** Names of every head check still in flight (queued/in progress, not yet concluded and not a hard
+  * failure), derived over the newest run per check (`pendingCheckNames`). Empty in token mode (the
+  * REST fallback can't enumerate checks). Lets `classifyMergeability` hold a merge when a
+  * declared-required check has not yet concluded, without re-deriving conclusions by hand. */
+  pendingCheckNames: string[];
+  /** The newest concluded conclusion per head check (name → uppercase conclusion, e.g. `SUCCESS` /
+  * `FAILURE` / `NEUTRAL` / `SKIPPED`), derived over `latestRunPerCheck` so a `CANCELLED` run
+  * superseded by a newer green run on the same head reports the green result (#348). A still-pending
+  * run maps to `""` (it has no conclusion yet — use `pendingCheckNames`). Empty in token mode. Lets
+  * `classifyMergeability` honour a required check's `acceptedConclusions` precisely. */
+  checkConclusions: Record<string, string>;
   /** Whether the PR is a draft (a fresh head run is produced by marking it ready, not reopen). */
   isDraft: boolean;
   /** Current head commit. Used to scope one-shot merge-protocol nudges to a landing attempt. */
@@ -633,6 +649,21 @@ export function allCheckNames(rollup: RollupEntry[]): string[] {
   return names;
 }
 
+/** The ground-truth conclusion of each head check, keyed by check name, derived over the **newest run
+ * per check** (`latestRunPerCheck`) so a `CANCELLED` run superseded by a newer green run on the
+ * identical head SHA reports the green result, not the stale cancellation (issue #348). The value is
+ * the run's `conclusion` (CheckRun) or `state` (legacy StatusContext), upper-cased; a still-in-flight
+ * run that has not concluded maps to `""` (it has no conclusion — `pendingCheckNames` tracks those).
+ * Lets `classifyMergeability` intersect a repo's declared `requiredChecks` against actual head
+ * conclusions and honour each check's `acceptedConclusions` without re-deriving per-run state. */
+export function checkConclusions(rollup: RollupEntry[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const c of latestRunPerCheck(rollup)) {
+    out[checkKey(c)] = (c.conclusion || c.state || "").toUpperCase();
+  }
+  return out;
+}
+
 /** True when `err` is GitHub reporting that a ref which parsed as `owner/repo#N` is not a pull
  * request — either it's an issue (issues and PRs share GitHub's number space, so an issue number
  * is indistinguishable from a PR number by shape alone) or the number does not exist. Both
@@ -682,6 +713,8 @@ export async function fetchPrState(
       failingCheckNames: names,
       totalChecks: rollup.length,
       presentCheckNames: allCheckNames(rollup),
+      pendingCheckNames: pendingCheckNames(rollup),
+      checkConclusions: checkConclusions(rollup),
       isDraft: !!j.isDraft,
       headRefOid: j.headRefOid ?? null,
     };
@@ -713,6 +746,8 @@ export async function fetchPrState(
     failingCheckNames: [], // …and the CI-fix agent gets no per-check list in token mode
     totalChecks: -1, // …and the fresh-head-run remedy stays conservative (never reopens blind)
     presentCheckNames: [], // …can't enumerate checks in token mode → no required-check presence signal
+    pendingCheckNames: [], // …no per-check pending signal either → classifier degrades to today's switch
+    checkConclusions: {}, // …no per-check conclusions → protocol-aware gate falls through in token mode
     isDraft: !!j.draft,
     headRefOid: j.head?.sha ?? null,
   };
@@ -915,11 +950,68 @@ export async function baseBranchLanded(
  * verdict; `waiting` means re-poll later. */
 export type Mergeability = "ready" | "waiting" | "conflict" | "blocked";
 
-export function classifyMergeability(s: PrState): Mergeability {
+/** Intersect a repo's declared `requiredChecks` against the head's actual per-check conclusions —
+ * an INDEPENDENT backstop that runs BEFORE the `mergeStateStatus` switch, so nwf never merges a red
+ * required check even on a repo that has NOT wired that check as a GitHub-required status check
+ * (issue #392). Returns:
+ *   • `"blocked"` — a declared-required check is present, concluded, and its conclusion is NOT in that
+ *      check's `acceptedConclusions` (a hard failure like `FAILURE`, or any other unaccepted terminal
+ *      conclusion) → route to fix-ci, do not merge.
+ *   • `"waiting"` — a declared-required check is still pending, or absent from the head entirely
+ *      (not-yet-run counts as pending, NOT as pass). This also enforces `waitForChecks`: a required
+ *      check that has not concluded is never mergeable.
+ *   • `"pass"` — every declared-required check is present and its conclusion accepted → fall through to
+ *      today's `mergeStateStatus` logic (GitHub branch protection stays the primary gate).
+ * Degrades safely: with no declared `requiredChecks`, or in token mode where checks can't be
+ * enumerated (`failingChecks < 0`, so the per-check lists are empty), it returns `"pass"` and never
+ * newly blocks or waits — repos keep exactly today's behaviour. */
+function requiredChecksVerdict(s: PrState, protocol?: MergeProtocol): "blocked" | "waiting" | "pass" {
+  const required = protocol?.requiredChecks ?? [];
+  if (required.length === 0) return "pass";
+  // Token mode: the transport can't enumerate checks (`failingChecks === -1`), so the per-check lists
+  // are empty and absence is indistinguishable from not-yet-run. Do NOT newly block/wait — fall
+  // through to today's `mergeStateStatus` behaviour. (A real gh-mode head with no checks yet reports
+  // `failingChecks === 0`, so absence there is correctly treated as not-yet-run below.)
+  if (s.failingChecks < 0) return "pass";
+  const present = new Set(s.presentCheckNames);
+  const pending = new Set(s.pendingCheckNames);
+  let anyBlocked = false;
+  let anyPending = false;
+  for (const rc of required) {
+    // Absent from the head, or still in flight → not-yet-run → wait (never treat absence as pass).
+    if (!present.has(rc.name) || pending.has(rc.name)) {
+      anyPending = true;
+      continue;
+    }
+    const conclusion = (s.checkConclusions[rc.name] ?? "").toUpperCase();
+    if (conclusion === "") {
+      // Present but no terminal conclusion yet (and not flagged pending) — treat conservatively as
+      // not-yet-concluded rather than as a pass.
+      anyPending = true;
+      continue;
+    }
+    const accepted = rc.acceptedConclusions.map((a) => a.toUpperCase());
+    if (accepted.includes(conclusion)) continue; // satisfied
+    anyBlocked = true; // present, concluded, NOT accepted → a red required check
+  }
+  // A failing required check outranks a pending one: it needs fix-ci now, not more waiting.
+  if (anyBlocked) return "blocked";
+  if (anyPending) return "waiting";
+  return "pass";
+}
+
+export function classifyMergeability(s: PrState, protocol?: MergeProtocol): Mergeability {
+  // Protocol-aware backstop FIRST (issue #392): honour the repo's declared `requiredChecks` /
+  // `waitForChecks` against the actual head rollup, so an `UNSTABLE` PR with a red DECLARED-required
+  // check is no longer blindly `ready`. This never weakens GitHub branch protection (the switch
+  // below still gates) — it only tightens merges on repos that under-specify their required checks.
+  const gate = requiredChecksVerdict(s, protocol);
+  if (gate === "blocked") return "blocked";
+  if (gate === "waiting") return "waiting";
   switch (s.mergeStateStatus) {
     case "CLEAN":
     case "HAS_HOOKS":
-    case "UNSTABLE": // only non-required checks failing — still mergeable
+    case "UNSTABLE": // only non-required checks failing — still mergeable (no DECLARED-required red)
     case "BEHIND": // out of date; a queue rebases, a direct merge is still allowed
       return "ready";
     case "DIRTY":

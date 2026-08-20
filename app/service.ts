@@ -1150,7 +1150,11 @@ export async function pollMerges(data: DataLayer, engine: EngineClient, token: s
       // (#342/#350). Reuse the `st` we just read so we don't double-fetch. This is the proven terminal
       // path the whole class (#368) now shares.
       if (await advanceIfTerminalOutOfBand(data, engine, pr, token, st)) continue;
-      const verdict = classifyMergeability(st);
+      // Load the repo's merge protocol ONCE per PR iteration and pass it into the classifier so the
+      // protocol-aware backstop (#392) can gate a red DECLARED-required check even when GitHub reports
+      // the PR as UNSTABLE. The same handle is reused by the frugal-CI fresh-head-run branch below.
+      const protocol = await loadMergeProtocol(repo, token).catch(() => null);
+      const verdict = classifyMergeability(st, protocol ?? undefined);
       if (verdict === "waiting") {
         // Frugal-CI remedy (#43): when the repo publishes a merge protocol that wants a fresh
         // head run and the PR has NO required head run yet, review has converged but the last push
@@ -1161,7 +1165,6 @@ export async function pollMerges(data: DataLayer, engine: EngineClient, token: s
         // `pull_request` run once per head (mark ready / close+reopen); rebases change
         // `headRefOid`, so downstream merge-train PRs get a new nudge after every post-rebase
         // landing attempt.
-        const protocol = await loadMergeProtocol(repo, token).catch(() => null);
         if (protocol) {
           const action = freshHeadRunAction(protocol, verdict, headRunPresenceCount(protocol, st), st.isDraft, {
             headRefOid: st.headRefOid,
