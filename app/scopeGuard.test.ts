@@ -10,6 +10,7 @@
 import { test } from "node:test";
 import { assert, assertEquals, assertStringIncludes } from "#test-assert";
 import {
+  collectDeferralEvidence,
   evaluateScopeGuard,
   findClosingKeywordRefs,
   hasDeferralMarker,
@@ -144,4 +145,46 @@ test("hasFollowupIssueRef: only an explicit tracking marker + issue ref counts",
     hasFollowupIssueRef("Follow-up issue: https://github.com/nanobpm/nano-workforce/issues/900"),
     "Follow-up marker with a full issue URL",
   );
+});
+
+// ── Actionable evidence: quote WHAT the gate read as deferred ────────────────
+
+test("collectDeferralEvidence: quotes the ## Scope section text (not just the heading)", () => {
+  const body = "Ships the core.\n\n## Scope\nThe poll→inbox integration belongs to S4/S5.\n\n## Tests\ngreen";
+  const ev = collectDeferralEvidence(body);
+  assert(ev.length > 0, "a Scope section yields evidence");
+  assertStringIncludes(ev[0], "poll→inbox integration belongs to S4/S5");
+  assert(!ev[0].includes("## Tests"), "evidence stops at the next heading");
+});
+
+test("collectDeferralEvidence: quotes the exact defer* clause (e.g. an ADR non-goal)", () => {
+  const ev = collectDeferralEvidence("connector is a real stub — real I/O deferred per ADR non-goals.");
+  assertEquals(ev.length, 1);
+  assertStringIncludes(ev[0], "real I/O deferred per ADR non-goals");
+});
+
+test("collectDeferralEvidence: a clean full-scope body yields no evidence", () => {
+  assertEquals(collectDeferralEvidence("Implements the feature end to end.\n\nCloses #313"), []);
+  assertEquals(collectDeferralEvidence(null), []);
+});
+
+test("collectDeferralEvidence: clips a very long section and de-dupes repeats", () => {
+  const long = `## Scope\n${"x".repeat(400)}`;
+  const ev = collectDeferralEvidence(long);
+  assertEquals(ev.length, 1);
+  assert(ev[0].length <= 161, "snippet is clipped to the max length + ellipsis");
+  assertStringIncludes(ev[0], "…");
+});
+
+test("evaluateScopeGuard: the block reason quotes the specific deferred text", () => {
+  const r = evaluateScopeGuard({
+    prBody: "Delivers S3.\n\n## Scope\nThe poll→inbox integration belongs to S4/S5.\n\nCloses #378",
+  });
+  assert(r.scopeBlocked);
+  // still names the closing-keyword issue and the two guards…
+  assertStringIncludes(r.scopeBlockReason, "#378");
+  assertStringIncludes(r.scopeBlockReason, "must not close a broader-scoped issue");
+  // …and now ALSO quotes what it read as deferred, so the human sees the actual text.
+  assertStringIncludes(r.scopeBlockReason, "The deferral the gate read in the PR body:");
+  assertStringIncludes(r.scopeBlockReason, "poll→inbox integration belongs to S4/S5");
 });

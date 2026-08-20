@@ -99,6 +99,66 @@ export function hasFollowupIssueRef(body: string | null | undefined): boolean {
   return FOLLOWUP_MARKER.test(body ?? "");
 }
 
+// How many deferral snippets to quote back, and how long each may be. The escalation `question` is
+// read by a human, so keep it a short, scannable pointer at the offending text — not the whole body.
+const MAX_EVIDENCE = 3;
+const SNIPPET_MAX = 160;
+
+/** Collapse whitespace and clip a snippet so a quoted-back deferral stays a scannable pointer. */
+function clipSnippet(raw: string): string {
+  const one = raw.replace(/\s+/g, " ").trim();
+  return one.length > SNIPPET_MAX ? `${one.slice(0, SNIPPET_MAX - 1).trimEnd()}…` : one;
+}
+
+/**
+ * The exact PR-body text the deferral detection fired on — a `## Scope` section, a `defer*` /
+ * `out-of-scope` clause, and/or a remainder-in-context sentence — clipped, whitespace-collapsed and
+ * de-duplicated. This is what turns "this PR defers part of its scope" (which the author cannot act
+ * on) into a pointer at the specific words the gate read, so the author can either reword a false
+ * trigger (e.g. an ADR non-goal that merely says "deferred") or file+link a tracker for real
+ * deferred scope. Empty when the body does not defer.
+ */
+export function collectDeferralEvidence(body: string | null | undefined): string[] {
+  const text = body ?? "";
+  const found: string[] = [];
+  const seen = new Set<string>();
+  const push = (raw: string) => {
+    const s = clipSnippet(raw);
+    const key = s.toLowerCase();
+    if (s && !seen.has(key)) {
+      seen.add(key);
+      found.push(s);
+    }
+  };
+
+  // 1) A `## Scope` heading — quote the heading plus its section body up to the next heading, since
+  //    that section is where the deferred items are enumerated.
+  const heading = DEFERRAL_HEADING.exec(text);
+  if (heading) {
+    const rest = text.slice(heading.index + heading[0].length);
+    const nextHeading = rest.search(/\n#{1,6}\s/);
+    push(heading[0] + (nextHeading === -1 ? rest : rest.slice(0, nextHeading)));
+  }
+
+  // 2) A `defer*` / `out-of-scope` clause — quote the line that carries it.
+  for (const re of [/[^\n]*\bdefer(?:s|red|ral|ring)?\b[^\n]*/i, /[^\n]*\bout[- ]of[- ]scope\b[^\n]*/i]) {
+    const m = re.exec(text);
+    if (m) push(m[0]);
+  }
+
+  // 3) A remainder mention that sits in a deferral context — quote its window (mirrors the detector).
+  for (const m of text.matchAll(REMAINDER_WORD)) {
+    const idx = m.index ?? 0;
+    const window = text.slice(Math.max(0, idx - REMAINDER_WINDOW), idx + m[0].length + REMAINDER_WINDOW);
+    if (REMAINDER_CONTEXT.test(window)) {
+      push(window);
+      break;
+    }
+  }
+
+  return found.slice(0, MAX_EVIDENCE);
+}
+
 /** Decide whether a PR's scope framing is safe to converge/merge. Pure; the worker feeds it the
  * live PR body and fails CLOSED (blocks) when that body cannot be read. */
 export function evaluateScopeGuard(input: ScopeGuardInput): ScopeGuardResult {
@@ -124,8 +184,17 @@ export function evaluateScopeGuard(input: ScopeGuardInput): ScopeGuardResult {
   if (reasons.length === 0) {
     return { scopeBlocked: false, scopeBlockReason: "" };
   }
+  // Quote the exact text the deferral detection fired on, so the escalation says WHAT reads as
+  // deferred (not just "part of its scope"). This lets the reader tell a real partial delivery from
+  // a false trigger (an ADR non-goal that merely says "deferred") at a glance, and it names the
+  // section to reword or file a tracker for.
+  const evidence = collectDeferralEvidence(body);
+  const evidenceSentence =
+    evidence.length > 0
+      ? ` The deferral the gate read in the PR body: ${evidence.map((e) => `"${e}"`).join("; ")}.`
+      : "";
   return {
     scopeBlocked: true,
-    scopeBlockReason: `Scope integrity blocked: ${reasons.join("; ")}.`,
+    scopeBlockReason: `Scope integrity blocked: ${reasons.join("; ")}.${evidenceSentence}`,
   };
 }
