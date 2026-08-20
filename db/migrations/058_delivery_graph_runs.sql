@@ -12,8 +12,10 @@
 --   • status — the run lifecycle: `awaiting-approval` (a side-effecting graph parked at the approval
 --     gate — no instance started yet), `running` (dispatched to the engine), `done` (the instance
 --     COMPLETED), `failed` (the instance TERMINATED), `abandoned` (instance-tracking reconciled a
---     vanished instance). `awaiting-approval`/`running` are the ACTIVE statuses (see nano.app.json
---     instanceTracking); the terminal three drop out of the cockpit's active grid.
+--     vanished instance). `awaiting-approval`/`running` are the ACTIVE (in-flight) statuses shown in
+--     the cockpit's active grid; only `running` is engine-instance-backed and thus instance-tracked
+--     (nano.app.json keys off process_key), while `awaiting-approval` has no instance (process_key
+--     NULL) and is display-only. The terminal three drop out of the cockpit's active grid.
 --   • digest — the content-addressed approval token: a side-effecting graph dispatches only when the
 --     caller presents `approvalToken == digest`. Persisted so a resumed/second POST can re-derive and
 --     re-check it without recompiling out of band.

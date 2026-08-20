@@ -13,7 +13,7 @@ import startDeliveryGraph from "./startDeliveryGraph.ts";
 // ── in-memory app (data + engine) ────────────────────────────────────────────
 // A generic table over an array (the DataLayer surface the run aggregate uses: get/find/insert/update)
 // plus a fake engine recording each deploy + start so an accept path can assert exactly-once launch.
-function makeApp() {
+function makeApp(opts: { failCreate?: boolean } = {}) {
   const tables = new Map<string, Record<string, unknown>[]>();
   const started: { processDefinitionId: string; variables?: Record<string, unknown> }[] = [];
   const deployed: unknown[][] = [];
@@ -28,6 +28,12 @@ function makeApp() {
       find: (q: Record<string, unknown>) =>
         Promise.resolve(rows.filter((r) => Object.entries(q).every(([f, v]) => r[f] === v))),
       insert: (r: Record<string, unknown>) => {
+        // Faithful to the durable table's PRIMARY KEY: a duplicate-key insert is rejected with the
+        // SQLite fence message `isUniqueConstraintFence` classifies, so the door's claim-before-launch
+        // fence is exercised the same way it is against the real store.
+        if (rows.some((existing) => existing[key] === r[key])) {
+          return Promise.reject(new Error(`UNIQUE constraint failed: ${name}.${key}`));
+        }
         rows.push(r);
         return Promise.resolve(r);
       },
@@ -52,6 +58,7 @@ function makeApp() {
       },
       createInstance: (req: { processDefinitionId: string; variables?: Record<string, unknown> }) => {
         started.push(req);
+        if (opts.failCreate) return Promise.reject(new Error("engine unavailable"));
         return Promise.resolve({ processInstanceKey: "PI-1" });
       },
     },
@@ -175,4 +182,41 @@ test("a caller idempotencyKey scopes the run — the same key short-circuits, a 
   assertEquals(other.body.status, "running");
   assertEquals(other.body.runKey, "run-2");
   assertEquals(started.length, 2); // a distinct key is a distinct run
+});
+
+test("two SIMULTANEOUS submits of the same graph launch it exactly ONCE — the loser hits the run_key fence and short-circuits, no double side effect", async () => {
+  const { app, started, runs } = makeApp();
+  // Fire both before awaiting either: both read `existing === null`, then race to claim the run_key.
+  // The claim-before-launch fence means the loser's insert collides on the PK and it NEVER launches.
+  const [a, b] = (await Promise.all([
+    startDeliveryGraph(input({ graph: HUMAN_ONLY }), app),
+    startDeliveryGraph(input({ graph: HUMAN_ONLY }), app),
+  ])) as { status: number; body: { ok: boolean; status: string; alreadyRunning: boolean } }[];
+  assertEquals(a.status, 202);
+  assertEquals(b.status, 202);
+  assertEquals(a.body.ok, true);
+  assertEquals(b.body.ok, true);
+  // Exactly ONE launch and ONE durable row — no double-dispatch of side effects, no duplicate row.
+  assertEquals(started.length, 1);
+  assertEquals(runs().length, 1);
+  assertEquals(runs()[0]?.["status"], "running");
+  // Exactly one racer is the short-circuited loser (alreadyRunning); the other is the fresh winner.
+  assertEquals([a, b].filter((r) => r.body.alreadyRunning === true).length, 1);
+});
+
+test("a launch failure rolls the claimed run to `failed` — no stranded null-process_key `running` row", async () => {
+  const { app, started, runs } = makeApp({ failCreate: true });
+  let threw = false;
+  try {
+    await startDeliveryGraph(input({ graph: HUMAN_ONLY }), app);
+  } catch {
+    threw = true; // a thrown engine error propagates (framework maps it to a 500) — but only after rollback
+  }
+  assertEquals(threw, true);
+  assertEquals(started.length, 1); // the launch was attempted once
+  // The claim was written, then rolled back to a TERMINAL `failed` — the reconciler/poller skip null-
+  // key rows, so leaving it `running` would strand it forever; `failed` lets it drop out cleanly.
+  assertEquals(runs().length, 1);
+  assertEquals(runs()[0]?.["status"], "failed");
+  assertEquals(runs()[0]?.["process_key"], null);
 });

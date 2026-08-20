@@ -56,7 +56,11 @@ export const DELIVERY_GRAPH_RUN_STATUSES = [
 export type DeliveryGraphRunStatus = typeof DELIVERY_GRAPH_RUN_STATUSES[number];
 
 /** The ACTIVE statuses — a run in one of these is still in flight and shows in the cockpit's active
- * grid; mirrored declaratively by the `delivery_graph_runs` instanceTracking binding (nano.app.json). */
+ * grid (`pages/overview.page.json`'s "Active Delivery Graphs" filter). Note this is the DISPLAY set,
+ * broader than the instanceTracking binding: only `running` is backed by a live engine instance
+ * (non-null `process_key`), so ONLY `running` is instance-tracked (nano.app.json). A parked
+ * `awaiting-approval` run has no instance (`process_key` NULL) — it is shown here but not reconciled
+ * by the `process_key`-keyed reconciler. */
 export const DELIVERY_GRAPH_ACTIVE_STATUSES: readonly DeliveryGraphRunStatus[] = [
   "awaiting-approval",
   "running",

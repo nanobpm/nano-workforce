@@ -19,6 +19,7 @@
 //     a re-POST of the same graph short-circuits an already-running run instead of double-launching —
 //     mirroring `startPlan`'s `alreadyRunning`.
 
+import { isUniqueConstraintFence } from "../app/dbFence.ts";
 import { validateDeliveryGraph } from "../app/deliveryGraph.ts";
 import { compileDeliveryGraph } from "../app/deliveryGraphCompiler.ts";
 import {
@@ -104,8 +105,16 @@ export default defineOperation("startDeliveryGraph", async ({ body }, app) => {
     if (existing) {
       const { run_key, created_at, ...patch } = row;
       await runs.update(runKey, patch);
-    } else {
+      return;
+    }
+    try {
       await runs.insert(row);
+    } catch (err) {
+      // A concurrent submit won the `run_key` PK fence between our `get()` and this `insert` — collapse
+      // onto the winner's row (idempotent) instead of surfacing the collision as a 500.
+      if (!isUniqueConstraintFence(err)) throw err;
+      const { run_key, created_at, ...patch } = row;
+      await runs.update(runKey, patch);
     }
   };
 
@@ -129,23 +138,76 @@ export default defineOperation("startDeliveryGraph", async ({ body }, app) => {
     };
   }
 
-  // 5) Launch — deploy + start the compiled definition via the S4 runner. `runKey` scopes the run's
-  //    wait-gate keys so two runs of the same graph never cross-correlate. The graph is already
-  //    validated + compiled, so a runner error here is unexpected → surface it as a 400.
-  const launched = await runDeliveryGraph(app.engine, graph, { runKey });
+  // 5) Claim the run durably BEFORE the side effect — mirrors `startPlan`, which writes the `plans`
+  //    row before `engine.createInstance`. Writing first makes the launch AT-MOST-ONCE under concurrent
+  //    submits: a racing POST that loses the `run_key` PK fence never reaches `runDeliveryGraph`, so a
+  //    graph's side effects launch once, not twice; the loser re-reads the winner's row and short-circuits
+  //    as `alreadyRunning` instead of double-launching and then 500-ing on the PK collision. The claimed
+  //    row carries no `process_key` yet — like a freshly-inserted `planning` plan it is a transient active
+  //    row that `pollDeliveryGraphPhase` and the instanceTracking reconciler skip until the instance key
+  //    lands (both ignore null-key rows).
+  const claim = buildDeliveryGraphRunRow({ ...rowBase, status: "running", phase: DELIVERY_PHASE.RUNNING, processKey: null });
+  if (existing) {
+    const { run_key, created_at, ...patch } = claim;
+    await runs.update(runKey, patch);
+  } else {
+    try {
+      await runs.insert(claim);
+    } catch (err) {
+      if (!isUniqueConstraintFence(err)) throw err;
+      const won = await runs.get(runKey);
+      app.log.info("start-delivery-graph short-circuit: launch claim raced a concurrent submit", { runKey });
+      return {
+        status: 202,
+        body: {
+          ok: true,
+          status: "running",
+          runKey,
+          digest,
+          sideEffecting,
+          alreadyRunning: true,
+          processInstanceKey: won?.process_key ?? undefined,
+          processDefinitionId: won?.process_definition_id ?? undefined,
+        },
+      };
+    }
+  }
+
+  // 6) Launch — deploy + start the compiled definition via the S4 runner. `runKey` scopes the run's
+  //    wait-gate keys so two runs of the same graph never cross-correlate. On ANY launch failure (a
+  //    thrown engine error OR the runner's `ok:false`) flip the claimed row to `failed` so no null-
+  //    process_key `running` row is ever stranded — the reconciler and poller both skip null-key rows,
+  //    so a stranded claim would otherwise never terminate — then surface the error.
+  const markClaimFailed = async () => {
+    const failed = buildDeliveryGraphRunRow({ ...rowBase, status: "failed", phase: DELIVERY_PHASE.FAILED, processKey: null });
+    const { run_key, created_at, ...patch } = failed;
+    await runs.update(runKey, patch);
+  };
+  let launched: Awaited<ReturnType<typeof runDeliveryGraph>>;
+  try {
+    launched = await runDeliveryGraph(app.engine, graph, { runKey });
+  } catch (err) {
+    await markClaimFailed();
+    app.log.error("start-delivery-graph launch threw", { runKey });
+    throw err;
+  }
   if (!launched.ok) {
+    await markClaimFailed();
     app.log.error("start-delivery-graph launch failed", { runKey, count: launched.errors.length });
     return { status: 400, body: { ok: false, errors: launched.errors } };
   }
-  await upsert(
-    buildDeliveryGraphRunRow({
+  // 7) Stamp the started instance key onto the claimed row.
+  {
+    const running = buildDeliveryGraphRunRow({
       ...rowBase,
       status: "running",
       phase: DELIVERY_PHASE.RUNNING,
       processKey: launched.handle.processInstanceKey,
       processDefinitionId: launched.handle.processDefinitionId,
-    }),
-  );
+    });
+    const { run_key, created_at, ...patch } = running;
+    await runs.update(runKey, patch);
+  }
   app.log.info("delivery graph dispatched", { runKey, processInstanceKey: launched.handle.processInstanceKey });
   return {
     status: 202,

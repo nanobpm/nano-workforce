@@ -87,7 +87,6 @@
       "keyField": "process_key",
       "statusField": "status",
       "activeStatuses": [
-        "awaiting-approval",
         "running"
       ],
       "onTerminated": {
