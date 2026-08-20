@@ -208,3 +208,15 @@ test("evaluateScopeGuard: the block reason quotes the specific deferred text", (
   assertStringIncludes(r.scopeBlockReason, "The deferral the gate read in the PR body:");
   assertStringIncludes(r.scopeBlockReason, "poll→inbox integration belongs to S4/S5");
 });
+
+test("evaluateScopeGuard: wraps evidence in curly quotes so embedded ASCII quotes stay unambiguous", () => {
+  const r = evaluateScopeGuard({
+    prBody: 'Delivers S3.\n\n## Scope\nThe "poll→inbox" integration belongs to S4/S5.\n\nCloses #378',
+  });
+  assert(r.scopeBlocked);
+  // Snippets are delimited by Unicode curly quotes (U+201C/U+201D), not ASCII `"`, so a body that
+  // itself contains `"` doesn't make the snippet boundaries ambiguous.
+  assertStringIncludes(r.scopeBlockReason, "\u201c");
+  assertStringIncludes(r.scopeBlockReason, "\u201d");
+  assertStringIncludes(r.scopeBlockReason, 'The "poll→inbox" integration belongs to S4/S5');
+});

@@ -189,9 +189,12 @@ export function evaluateScopeGuard(input: ScopeGuardInput): ScopeGuardResult {
   // a false trigger (an ADR non-goal that merely says "deferred") at a glance, and it names the
   // section to reword or file a tracker for.
   const evidence = collectDeferralEvidence(body);
+  // Wrap each snippet in Unicode curly quotes rather than ASCII `"`: a PR body can legitimately
+  // contain `"` characters, and re-using that same delimiter would make it ambiguous where each
+  // quoted snippet starts and ends. Curly quotes don't collide with ordinary PR prose.
   const evidenceSentence =
     evidence.length > 0
-      ? ` The deferral the gate read in the PR body: ${evidence.map((e) => `"${e}"`).join("; ")}.`
+      ? ` The deferral the gate read in the PR body: ${evidence.map((e) => `\u201c${e}\u201d`).join("; ")}.`
       : "";
   return {
     scopeBlocked: true,
