@@ -358,3 +358,181 @@ test("pollUserTasks: an instance whose only task is COMPLETED surfaces no row", 
 
   assertEquals(stores.user_tasks ?? [], []);
 });
+
+// ── Engine-first sweep (issue #358) ────────────────────────────────────────────────────────────────
+// When the raw-REST surface is available (production always supplies it), the projection's source of
+// truth for WHICH escalations are open is the ENGINE, not the tracked subject set: every open escalation
+// the engine reports is surfaced — even on an instance NO tracked subject row references (an
+// orphaned/untracked instance, the reported 19153 case) — enriched by a subject row when one exists and
+// by a per-kind fallback when it does not. These drive the sweep over a stubbed Camunda-8
+// `/v2/user-tasks/search`, the raw surface that (unlike the typed `openUserTasks` seam) carries each
+// task's `processInstanceKey`.
+
+/** A single task as the raw Camunda-8 `/v2/user-tasks/search` reports it — carries `processInstanceKey`
+ *  (the typed seam omits it) so the sweep can map a task back to its subject for enrichment. */
+type RawTask = { userTaskKey: string; elementId?: string; processInstanceKey?: string; state?: string };
+
+/** Stub `globalThis.fetch` so `pollUserTasks`' engine-first sweep reads its open tasks from `tasks`.
+ *  Honours the `page.from`/`page.limit` pagination the sweep drives, and 404s any other path so a stray
+ *  call is loud. Returns a restore fn. */
+function stubUserTaskSearch(tasks: RawTask[]): () => void {
+  const orig = globalThis.fetch;
+  // biome-ignore lint/suspicious/noExplicitAny: minimal fetch double for the raw-REST search surface
+  globalThis.fetch = (async (url: string | URL, init?: any) => {
+    const u = String(url);
+    if (!u.endsWith("/user-tasks/search")) return new Response("not found", { status: 404 });
+    const body = JSON.parse(init?.body ?? "{}");
+    const from: number = body?.page?.from ?? 0;
+    const limit: number = body?.page?.limit ?? 100;
+    return new Response(JSON.stringify({ items: tasks.slice(from, from + limit) }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  }) as typeof fetch;
+  return () => {
+    globalThis.fetch = orig;
+  };
+}
+
+const REST = { restAddress: "http://engine.test/v2" };
+
+test("pollUserTasks (engine-first): surfaces an escalation on an UNTRACKED/orphaned instance — the 19153 case (issue #358)", async () => {
+  // No `feature_runs`/`plans`/`pull_requests` row references instance 19153, yet the engine reports its
+  // `feature-escalation` (key 27337) open. Before #358 the subject-tracking-gated scan dropped it and the
+  // operator could never see nor answer it. The engine-first sweep surfaces it, keyed to a stable
+  // non-blank fallback subject (the instance) so the row renders and stays answerable.
+  const { data, stores } = memData({});
+  const restore = stubUserTaskSearch([
+    { userTaskKey: "27337", elementId: "feature-escalation", processInstanceKey: "19153", state: "CREATED" },
+  ]);
+  try {
+    await pollUserTasks(data, fakeEngine({}), REST);
+  } finally {
+    restore();
+  }
+
+  const byKey = Object.fromEntries((stores.user_tasks ?? []).map((r) => [r.user_task_key, r]));
+  assertEquals(Object.keys(byKey), ["27337"]);
+  assertEquals(byKey["27337"].element_id, "feature-escalation");
+  assertEquals(byKey["27337"].kind_label, "Feature escalation");
+  assertEquals(byKey["27337"].subject_type, "feature");
+  assertEquals(byKey["27337"].subject_key, "19153"); // fallback to the instance — non-blank so it renders
+  assertEquals(byKey["27337"].subject_title, "19153");
+  assertEquals(byKey["27337"].question, null); // no tracked audit source for an orphan → null, still listed
+});
+
+test("pollUserTasks (engine-first): orphaned plan-review and PR-wait escalations are surfaced too (issue #358)", async () => {
+  // Same failure class across aggregates: a `plan-review-decision` with no `plans` row and a `wait-answer`
+  // with no `pull_requests` row are each surfaced, bucketed to the aggregate their kind implies.
+  const { data, stores } = memData({});
+  const restore = stubUserTaskSearch([
+    { userTaskKey: "ut-orphan-plan", elementId: "plan-review-decision", processInstanceKey: "pi-1", state: "CREATED" },
+    { userTaskKey: "ut-orphan-pr", elementId: "wait-answer", processInstanceKey: "pi-2", state: "CREATED" },
+  ]);
+  try {
+    await pollUserTasks(data, fakeEngine({}), REST);
+  } finally {
+    restore();
+  }
+
+  const byKey = Object.fromEntries((stores.user_tasks ?? []).map((r) => [r.user_task_key, r]));
+  assertEquals(Object.keys(byKey).sort(), ["ut-orphan-plan", "ut-orphan-pr"]);
+  assertEquals(byKey["ut-orphan-plan"].subject_type, "plan");
+  assertEquals(byKey["ut-orphan-plan"].subject_key, "pi-1");
+  assertEquals(byKey["ut-orphan-pr"].subject_type, "pr");
+  assertEquals(byKey["ut-orphan-pr"].kind_label, "PR review");
+});
+
+test("pollUserTasks (engine-first): a TRACKED task is still fully enriched from its subject row (no regression)", async () => {
+  // Enrich, don't gate: when a subject row DOES reference the task's instance, title/url/question come
+  // from it exactly as the per-subject scan produced — the sweep maps by `processInstanceKey`.
+  const { data, stores } = memData({
+    feature_runs: [
+      { feature_key: "o/r#10", status: "escalated", process_key: "fp-10", issue_url: "https://github.com/o/r/issues/10", title: "Add the framework selector", delivery_label: null },
+    ],
+    feature_escalations: [
+      { id: 1, feature_key: "o/r#10", question: "which framework?", created_at: "2025-01-01T00:00:00.000Z", job_key: "j1" },
+    ],
+    plans: [
+      { plan_key: "o/r#20", status: "dispatched", process_key: "pp-20", issue_url: "https://github.com/o/r/issues/20", title: "Broaden the epic scope" },
+    ],
+    plan_reviews: [
+      { plan_key: "o/r#20", epoch: 0, round: 1, approved: 0, findings: "scope too broad", created_at: "2025-01-02T00:00:00.000Z" },
+    ],
+  });
+  const restore = stubUserTaskSearch([
+    { userTaskKey: "ut-feat", elementId: "feature-escalation", processInstanceKey: "fp-10", state: "CREATED" },
+    { userTaskKey: "ut-plan", elementId: "plan-review-decision", processInstanceKey: "pp-20", state: "CREATED" },
+  ]);
+  try {
+    await pollUserTasks(data, fakeEngine({}), REST);
+  } finally {
+    restore();
+  }
+
+  const byKey = Object.fromEntries((stores.user_tasks ?? []).map((r) => [r.user_task_key, r]));
+  assertEquals(Object.keys(byKey).sort(), ["ut-feat", "ut-plan"]);
+  assertEquals(byKey["ut-feat"].subject_key, "o/r#10");
+  assertEquals(byKey["ut-feat"].subject_title, "Add the framework selector");
+  assertEquals(byKey["ut-feat"].question, "which framework?");
+  assertEquals(byKey["ut-plan"].subject_title, "Broaden the epic scope");
+  assertEquals(byKey["ut-plan"].question, "scope too broad");
+});
+
+test("pollUserTasks (engine-first): never leaks a non-escalation element nor a non-CREATED task", async () => {
+  // The `USER_TASK_KIND_LABELS` gate keeps an arbitrary internal user task out of the inbox, and the
+  // defensive state re-filter drops a lagging COMPLETED/CANCELED read (a dead affordance, #294) even if
+  // the wire `state` filter is ignored.
+  const { data, stores } = memData({});
+  const restore = stubUserTaskSearch([
+    { userTaskKey: "ut-internal", elementId: "some-internal-task", processInstanceKey: "pi-9", state: "CREATED" },
+    { userTaskKey: "ut-done", elementId: "feature-escalation", processInstanceKey: "pi-8", state: "COMPLETED" },
+    { userTaskKey: "ut-live", elementId: "feature-escalation", processInstanceKey: "pi-7", state: "CREATED" },
+  ]);
+  try {
+    await pollUserTasks(data, fakeEngine({}), REST);
+  } finally {
+    restore();
+  }
+
+  const keys = (stores.user_tasks ?? []).map((r) => r.user_task_key);
+  assertEquals(keys, ["ut-live"]);
+});
+
+test("pollUserTasks (engine-first): an answered task (no longer open) is deleted on the next pass", async () => {
+  // Feed the engine-derived desired set to the unchanged reconcile: a persisted row whose task the engine
+  // no longer reports open is deleted, so `showCount` tracks live work — identical to the scan path.
+  const { data, stores } = memData({
+    user_tasks: [
+      { user_task_key: "ut-gone", element_id: "wait-answer", kind_label: "PR review", subject_type: "pr", subject_key: "o/r#30", subject_url: null, question: null, process_key: "rp-30", created_at: "2025-01-01T00:00:00.000Z", updated_at: "2025-01-01T00:00:00.000Z" },
+    ],
+  });
+  const restore = stubUserTaskSearch([]); // engine reports nothing open
+  try {
+    await pollUserTasks(data, fakeEngine({}), REST);
+  } finally {
+    restore();
+  }
+
+  assertEquals(stores.user_tasks, []);
+});
+
+test("pollUserTasks (engine-first): pages through a large open set (no first-page truncation)", async () => {
+  // Open escalations are normally few, but the sweep must page defensively so a large set is not silently
+  // truncated to the first page. 150 open escalations across a 100-item page size → all 150 projected.
+  const { data, stores } = memData({});
+  const tasks: RawTask[] = Array.from({ length: 150 }, (_, i) => ({
+    userTaskKey: `ut-${i}`,
+    elementId: "feature-escalation",
+    processInstanceKey: `pi-${i}`,
+    state: "CREATED",
+  }));
+  const restore = stubUserTaskSearch(tasks);
+  try {
+    await pollUserTasks(data, fakeEngine({}), REST);
+  } finally {
+    restore();
+  }
+
+  assertEquals((stores.user_tasks ?? []).length, 150);
+});

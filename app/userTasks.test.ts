@@ -91,13 +91,31 @@ test("buildUserTaskRow: an unknown (non-escalation) element yields null — no a
   assertEquals(row, null);
 });
 
-test("buildUserTaskRow: a blank userTaskKey or subjectKey yields null", () => {
+test("buildUserTaskRow: a blank userTaskKey yields null; a known kind with a blank subject key still builds (issue #358)", () => {
+  // The completable key is load-bearing (the page completes THROUGH it), so a blank one is still null.
   assertEquals(
     buildUserTaskRow({ userTaskKey: "  ", elementId: PR_WAIT_ANSWER_ELEMENT, subjectType: "pr", subjectKey: "o/r#4" }, AT),
     null,
   );
+  // But a KNOWN-kind escalation with no resolved subject (orphaned/untracked instance) is NO LONGER
+  // dropped — it falls back to a stable, non-blank subject: the instance (`processKey`) when known…
+  const orphaned = buildUserTaskRow(
+    { userTaskKey: "ut-4", elementId: PR_WAIT_ANSWER_ELEMENT, subjectType: "pr", subjectKey: " ", processKey: "pik-4" },
+    AT,
+  );
+  assert(orphaned !== null);
+  assertEquals(orphaned?.subject_key, "pik-4");
+  assertEquals(orphaned?.subject_title, "pik-4");
+  assertEquals(orphaned?.kind_label, "PR review");
+  // …else the completable key itself, so a row always renders.
+  const noInstance = buildUserTaskRow(
+    { userTaskKey: "ut-5", elementId: PR_WAIT_ANSWER_ELEMENT, subjectType: "pr", subjectKey: "" },
+    AT,
+  );
+  assertEquals(noInstance?.subject_key, "ut-5");
+  // The leak guard still holds: an unknown element is null regardless of subject fallback.
   assertEquals(
-    buildUserTaskRow({ userTaskKey: "ut-4", elementId: PR_WAIT_ANSWER_ELEMENT, subjectType: "pr", subjectKey: " " }, AT),
+    buildUserTaskRow({ userTaskKey: "ut-6", elementId: "some-internal-task", subjectType: "plan", subjectKey: "", processKey: "pik-6" }, AT),
     null,
   );
 });
