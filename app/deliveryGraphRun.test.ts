@@ -1,19 +1,88 @@
-// Unit coverage for the pure decision helpers of the S5 dispatch-door aggregate (ADR 0005 Decision 7)
-// — the idempotency key, the approval gate, the parked human-label map, and the derived parked-node
-// phase. All engine/DB-free, so they prove the door's decisions in isolation; the integration test
-// (operations/startDeliveryGraph.integration.test.ts) proves the COMPOSED behaviour at the edge.
+// Unit coverage for the S5 dispatch-door aggregate (ADR 0005 Decision 7) — the pure decision helpers
+// (the idempotency key, the approval gate, the parked human-label map, the derived parked-node phase),
+// plus the durable at-most-once launch-claim fence (`claimRunForLaunch`) exercised against the real
+// provisioned SQLite data layer so its actual `status <> 'running'` compare-and-swap SQL is validated,
+// not just modelled. The integration test (operations/startDeliveryGraph.integration.test.ts) proves
+// the COMPOSED behaviour at the edge.
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { assertEquals } from "#test-assert";
+import type { DataLayer } from "@nanobpm/urban";
+import { bootTestApp } from "@nanobpm/urban-testkit";
 import { compileDeliveryGraph } from "./deliveryGraphCompiler.ts";
 import {
+  buildDeliveryGraphRunRow,
   buildHumanLabels,
+  claimRunForLaunch,
   computeRunKey,
   deriveDeliveryPhase,
   DELIVERY_PHASE,
+  deliveryGraphRuns,
   humanTaskElementId,
   isDeliveryGraphApproved,
   parseHumanLabels,
 } from "./deliveryGraphRun.ts";
+
+const APP_ROOT = resolve(import.meta.dirname, "..");
+
+/** Boot an app purely for its provisioned data layer (migration 058 applied), run `fn`, tear down. */
+async function withData(fn: (data: DataLayer) => Promise<void>): Promise<void> {
+  const dir = mkdtempSync(join(tmpdir(), "nwf-dgrun-"));
+  const app = await bootTestApp(APP_ROOT, { env: { NANO_APP_DB_URL: `file:${join(dir, "app.db")}` } });
+  try {
+    await fn(app.db);
+  } finally {
+    await app.stop?.();
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+const claimRow = (status: "awaiting-approval" | "running") =>
+  buildDeliveryGraphRunRow({
+    runKey: "rk",
+    digest: "d",
+    status,
+    sideEffecting: true,
+    nodeCount: 1,
+    humanNodeCount: 0,
+    sideEffectCount: 1,
+    title: "t",
+    phase: status === "running" ? DELIVERY_PHASE.RUNNING : DELIVERY_PHASE.AWAITING_APPROVAL,
+    processKey: null,
+  });
+
+test("claimRunForLaunch: an empty slot is won by INSERT; a second racer that also read empty loses the run_key PK fence", async () => {
+  await withData(async (data) => {
+    const claim = claimRow("running");
+    assertEquals(await claimRunForLaunch(data, false, claim), true); // inserted the claim → this caller launches
+    assertEquals(await claimRunForLaunch(data, false, claim), false); // the row now exists → PK fence, no second launch
+    assertEquals((await deliveryGraphRuns(data).get("rk"))?.status, "running");
+  });
+});
+
+test("claimRunForLaunch: a parked awaiting-approval row is claimed by ONE compare-and-swap — a second approved racer loses the `status <> 'running'` guard, so a graph launches at most once", async () => {
+  await withData(async (data) => {
+    const runs = deliveryGraphRuns(data);
+    await runs.insert(claimRow("awaiting-approval")); // a prior unapproved POST parked this run
+    const claim = claimRow("running");
+    assertEquals(await claimRunForLaunch(data, true, claim), true); // CAS flips awaiting-approval → running
+    assertEquals(await claimRunForLaunch(data, true, claim), false); // already running → guard blocks the double-launch
+    assertEquals((await runs.get("rk"))?.status, "running");
+  });
+});
+
+test("claimRunForLaunch: a TERMINAL row re-runs — the CAS flips it to running, and a concurrent re-run racer loses the guard", async () => {
+  await withData(async (data) => {
+    const runs = deliveryGraphRuns(data);
+    await runs.insert({ ...claimRow("running"), status: "failed" }); // a completed/terminal prior run
+    const claim = claimRow("running");
+    assertEquals(await claimRunForLaunch(data, true, claim), true); // re-run: failed <> running → flips
+    assertEquals(await claimRunForLaunch(data, true, claim), false); // now running → no second launch
+    assertEquals((await runs.get("rk"))?.status, "running");
+  });
+});
 
 // ── computeRunKey ─────────────────────────────────────────────────────────────
 test("computeRunKey: a non-blank caller key wins; a blank/absent key falls back to the digest", () => {

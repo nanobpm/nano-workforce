@@ -24,7 +24,9 @@
 --   • phase / phase_node_id — the derived, display-only "where is it parked" projection the poller
 --     (`pollDeliveryGraphPhase`) recomputes from the running instance's open user tasks (generalising
 --     the epic_phase derived-phase machinery): e.g. "Parked on human node: manual OTP publish" vs a
---     bare "Running". NULL until the first projection / for a parked (not-yet-started) run.
+--     bare "Running". The door seeds `phase` at write time — `Awaiting approval` for a parked
+--     (awaiting-approval) row, `Running` at dispatch — and the poller then refines it from engine truth
+--     for a running instance; `phase_node_id` is NULL until the poller projects a parked human node.
 --
 -- process_key is the started instance key (NULL while `awaiting-approval`); the counts are the
 -- compiled graph's shape (nodes / human stop-points / side effects), stamped at dispatch so the grid

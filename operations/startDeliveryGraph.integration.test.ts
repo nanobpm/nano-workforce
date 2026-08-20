@@ -50,7 +50,33 @@ function makeApp(opts: { failCreate?: boolean } = {}) {
     };
   };
   const app = {
-    data: { table },
+    data: {
+      table,
+      // Faithful model of the ONE raw statement the door issues via the DataSource gateway: the
+      // launch-claim compare-and-swap `UPDATE delivery_graph_runs SET status=?,updated_at=? WHERE
+      // run_key=? AND status <> 'running'`. Applied synchronously — the guard check and the flip happen
+      // with no intervening await, exactly as SQLite runs the single statement — so the parked→running
+      // claim race is exercised here the same way it fences against the real store.
+      open: () => ({
+        exec: (_sql: string, params: unknown[]) =>
+          // Defer the guard-and-flip to a microtask, faithfully modelling the real async DataSource:
+          // the flip is NOT visible synchronously at call time, so a concurrently-scheduled delegate
+          // can still read the row as parked and reach its OWN claim — the exact interleave that made
+          // the unfenced `update` double-launch. The `status <> 'running'` guard then lets only the
+          // first flip win (`changed: 1`); the loser matches zero rows (`changed: 0`).
+          Promise.resolve().then(() => {
+            const [status, updated_at, run_key] = params as [string, string, string];
+            const rows = tables.get("delivery_graph_runs") ?? [];
+            const row = rows.find((r) => r["run_key"] === run_key);
+            if (row && row["status"] !== "running") {
+              row["status"] = status;
+              row["updated_at"] = updated_at;
+              return { changed: 1 };
+            }
+            return { changed: 0 };
+          }),
+      }),
+    },
     engine: {
       deployResources: (res: unknown[]) => {
         deployed.push(res);
@@ -197,6 +223,29 @@ test("two SIMULTANEOUS submits of the same graph launch it exactly ONCE — the 
   assertEquals(a.body.ok, true);
   assertEquals(b.body.ok, true);
   // Exactly ONE launch and ONE durable row — no double-dispatch of side effects, no duplicate row.
+  assertEquals(started.length, 1);
+  assertEquals(runs().length, 1);
+  assertEquals(runs()[0]?.["status"], "running");
+  // Exactly one racer is the short-circuited loser (alreadyRunning); the other is the fresh winner.
+  assertEquals([a, b].filter((r) => r.body.alreadyRunning === true).length, 1);
+});
+
+test("two SIMULTANEOUS APPROVED re-submits of an already-PARKED graph launch it exactly ONCE — the parked→running claim is a compare-and-swap, not an unfenced update", async () => {
+  const { app, started, runs } = makeApp();
+  // Park the side-effecting graph first (unapproved), then grab its approval token.
+  const parked = (await startDeliveryGraph(input({ graph: SIDE_EFFECTING }), app)) as { body: { approvalToken: string } };
+  const token = parked.body.approvalToken;
+  assertEquals(runs()[0]?.["status"], "awaiting-approval");
+  // Fire two APPROVED submits before awaiting either: both read `existing` as the SAME parked row.
+  // Without a fence on the parked→running transition both would `update` then both launch. The
+  // compare-and-swap (`WHERE status <> 'running'`) lets exactly one flip the row and launch.
+  const [a, b] = (await Promise.all([
+    startDeliveryGraph(input({ graph: SIDE_EFFECTING, approvalToken: token }), app),
+    startDeliveryGraph(input({ graph: SIDE_EFFECTING, approvalToken: token }), app),
+  ])) as { status: number; body: { ok: boolean; status: string; alreadyRunning: boolean } }[];
+  assertEquals(a.status, 202);
+  assertEquals(b.status, 202);
+  // Exactly ONE launch of the side-effecting graph and still ONE durable row (no double-dispatch).
   assertEquals(started.length, 1);
   assertEquals(runs().length, 1);
   assertEquals(runs()[0]?.["status"], "running");

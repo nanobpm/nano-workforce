@@ -21,6 +21,7 @@
 
 import type { DataLayer, ProcessInstanceState } from "@nanobpm/urban";
 import type { CompileDeliveryGraphResult } from "../nano-generated/api-io.d.ts";
+import { isUniqueConstraintFence } from "./dbFence.ts";
 import { DELIVERY_HUMAN_ELEMENT, isDeliveryHumanElement } from "./deliveryHuman.ts";
 
 const now = () => new Date().toISOString();
@@ -86,6 +87,44 @@ export const DELIVERY_PHASE = {
 /** The `delivery_graph_runs` aggregate accessor — the durable run store keyed by `run_key`. */
 export const deliveryGraphRuns = (data: DataLayer) =>
   data.table<DeliveryGraphRun>("delivery_graph_runs", "run_key");
+
+/** Atomically claim a run for LAUNCH — the at-most-once dispatch fence. Returns `true` iff THIS caller
+ * won the claim and must proceed to `runDeliveryGraph`; `false` iff a concurrent submit already claimed
+ * it (the caller must short-circuit as `alreadyRunning` instead of double-launching). Two fences, one
+ * per starting state, so dispatch is at-most-once from EITHER — the `run_key` PK guards a first launch
+ * and a compare-and-swap on `status` guards a relaunch off a persisted row:
+ *   • no row yet (`existing` null) → INSERT the claim, fenced by the `run_key` PRIMARY KEY: a racing
+ *     loser hits `UNIQUE constraint failed` and returns `false`.
+ *   • a persisted NON-running row (a parked `awaiting-approval` row now being approved, or a terminal
+ *     row being re-run) → a single guarded UPDATE (`SET status='running' … WHERE status <> 'running'`).
+ *     It is ONE statement, so the check-and-flip is atomic even across the delegate's `await` points:
+ *     of two concurrent approved re-submits that both read the same parked row, exactly one flips it
+ *     (`changed === 1`) and the other matches zero rows (`changed === 0`). This closes the double-launch
+ *     hole the PK fence alone left open — an `update`-on-existing path has no unique collision to lose,
+ *     so without this guard both racers would `update` then both launch. The winner writes the run's
+ *     full metadata afterwards (safe: it is now the sole caller past the fence). */
+export async function claimRunForLaunch(
+  data: DataLayer,
+  existing: boolean,
+  claim: DeliveryGraphRun,
+): Promise<boolean> {
+  if (!existing) {
+    try {
+      await deliveryGraphRuns(data).insert(claim);
+      return true;
+    } catch (err) {
+      if (!isUniqueConstraintFence(err)) throw err;
+      return false;
+    }
+  }
+  const res = await data
+    .open()
+    .exec(
+      `UPDATE "delivery_graph_runs" SET "status" = ?, "updated_at" = ? WHERE "run_key" = ? AND "status" <> 'running'`,
+      [claim.status, claim.updated_at, claim.run_key],
+    );
+  return res.changed === 1;
+}
 
 /** The idempotency key for a submitted graph: a caller-supplied `idempotencyKey` (trimmed) when
  * present and non-blank, else the graph's content `digest`. So two POSTs of the SAME graph (no

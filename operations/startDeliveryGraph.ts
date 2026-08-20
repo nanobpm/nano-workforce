@@ -25,6 +25,7 @@ import { compileDeliveryGraph } from "../app/deliveryGraphCompiler.ts";
 import {
   buildDeliveryGraphRunRow,
   buildHumanLabels,
+  claimRunForLaunch,
   computeRunKey,
   DELIVERY_PHASE,
   deliveryGraphRuns,
@@ -142,40 +143,41 @@ export default defineOperation("startDeliveryGraph", async ({ body }, app) => {
   }
 
   // 5) Claim the run durably BEFORE the side effect — mirrors `startPlan`, which writes the `plans`
-  //    row before `engine.createInstance`. Writing first makes the launch AT-MOST-ONCE under concurrent
-  //    submits: a racing POST that loses the `run_key` PK fence never reaches `runDeliveryGraph`, so a
-  //    graph's side effects launch once, not twice; the loser re-reads the winner's row and short-circuits
-  //    as `alreadyRunning` instead of double-launching and then 500-ing on the PK collision. The claimed
-  //    row carries no `process_key` yet — like a freshly-inserted `planning` plan it is a transient active
-  //    row that `pollDeliveryGraphPhase` and the instanceTracking reconciler skip until the instance key
-  //    lands (both ignore null-key rows).
+  //    row before `engine.createInstance`. `claimRunForLaunch` makes the launch AT-MOST-ONCE under
+  //    concurrent submits from EITHER starting state: a first launch is fenced by the `run_key` PK
+  //    (a racing insert loses the unique constraint), and a relaunch off a persisted row (an approved
+  //    parked row, or a re-run terminal row) is fenced by an atomic compare-and-swap that flips the
+  //    row to `running` only if it is not already `running`. The loser never reaches `runDeliveryGraph`
+  //    — it re-reads the winner's row and short-circuits as `alreadyRunning` instead of double-launching
+  //    a graph's side effects. The claimed row carries no `process_key` yet — like a freshly-inserted
+  //    `planning` plan it is a transient active row that `pollDeliveryGraphPhase` and the instanceTracking
+  //    reconciler skip until the instance key lands (both ignore null-key rows).
   const claim = buildDeliveryGraphRunRow({ ...rowBase, status: "running", phase: DELIVERY_PHASE.RUNNING, processKey: null });
+  const wonClaim = await claimRunForLaunch(app.data, Boolean(existing), claim);
+  if (!wonClaim) {
+    const won = await runs.get(runKey);
+    app.log.info("start-delivery-graph short-circuit: launch claim raced a concurrent submit", { runKey });
+    // Echo the winner row's persisted metadata (falling back to this request's only if the row
+    // somehow can't be re-read) so a reused idempotencyKey never reports the wrong run's digest.
+    return {
+      status: 202,
+      body: {
+        ok: true,
+        status: "running",
+        runKey,
+        digest: won?.digest ?? digest,
+        sideEffecting: won ? won.side_effecting === 1 : sideEffecting,
+        alreadyRunning: true,
+        processInstanceKey: won?.process_key ?? undefined,
+        processDefinitionId: won?.process_definition_id ?? undefined,
+      },
+    };
+  }
+  // Won the claim. For a relaunch off a persisted row the guarded CAS flipped only `status`; write the
+  // run's full metadata now — we are the sole caller past the fence, so this update cannot race.
   if (existing) {
     const { run_key, created_at, ...patch } = claim;
     await runs.update(runKey, patch);
-  } else {
-    try {
-      await runs.insert(claim);
-    } catch (err) {
-      if (!isUniqueConstraintFence(err)) throw err;
-      const won = await runs.get(runKey);
-      app.log.info("start-delivery-graph short-circuit: launch claim raced a concurrent submit", { runKey });
-      // Echo the winner row's persisted metadata (falling back to this request's only if the row
-      // somehow can't be re-read) so a reused idempotencyKey never reports the wrong run's digest.
-      return {
-        status: 202,
-        body: {
-          ok: true,
-          status: "running",
-          runKey,
-          digest: won?.digest ?? digest,
-          sideEffecting: won ? won.side_effecting === 1 : sideEffecting,
-          alreadyRunning: true,
-          processInstanceKey: won?.process_key ?? undefined,
-          processDefinitionId: won?.process_definition_id ?? undefined,
-        },
-      };
-    }
   }
 
   // 6) Launch — deploy + start the compiled definition via the S4 runner. `runKey` scopes the run's
