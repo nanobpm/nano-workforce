@@ -18,14 +18,28 @@
 // any credential is read at execution time from the typed env-contract (`credentialEnv` names a
 // declared {@link EnvKey}; ADR 0004 pinned decision 2) and is redacted from every log line.
 import { isEnvKey, readEnv, readEnvOr } from "./contracts.ts";
+import { allCheckNames, classifyMergeability, failingCheckNames, type PrState, pendingCheckNames } from "./github.ts";
 import { isoDuration, isoDurationToMs } from "./reviewWait.ts";
 
 /** The built-in readiness sources. `command` is the escape hatch that subsumes the long tail
  * (`gh`, `curl`, `docker manifest inspect`, a custom probe) — adding a first-class kind later is
  * an additive matcher, not a schema change. `capability` is the first such additive kind (#274):
  * it resolves "which published version first carries capability C?" from the publish-provenance
- * substrate and binds the discovered `pkg@version` back through the gate (see {@link matchCapability}). */
-export type ProbeKind = "http" | "command" | "npm" | "github-check" | "capability";
+ * substrate and binds the discovered `pkg@version` back through the gate (see {@link matchCapability}).
+ * `pr` (ADR 0005 §2) is the merge-state kind: it lifts the PR-liveness/mergeability READ out of the
+ * merge loop (`app/mergeProtocol.ts` / `app/github.ts`) into a first-class probe so "watch an
+ * in-flight PR reach a declared state" is a graph edge, not logic buried in the merge-loop node
+ * body — the ACTION (landing the PR) stays in that node body; this kind only OBSERVES. */
+export type ProbeKind = "http" | "command" | "npm" | "github-check" | "capability" | "pr";
+
+/** The declared PR state a `pr` probe waits for (ADR 0005 §2). Each is a discovered fact about an
+ * in-flight PR, read from its live GitHub state and evaluated by {@link matchPr}:
+ *   • `ready`        — the PR is out of draft (the draft→ready transition is observable).
+ *   • `merged`       — the PR has landed; binds `mergedSha` (the merge commit) as an output.
+ *   • `mergeable`    — GitHub reports the PR as landable now ({@link classifyMergeability} `ready`:
+ *                      CLEAN/HAS_HOOKS/UNSTABLE/BEHIND — required review + checks satisfied).
+ *   • `checks-green` — every head check run is complete with none failing (required checks green). */
+export type PrCondition = "ready" | "merged" | "mergeable" | "checks-green";
 
 /** What the gate does when the bounded wait times out (the engine timer arm fires). */
 export type OnTimeout = "escalate" | "fail" | "continue";
@@ -33,9 +47,10 @@ export type OnTimeout = "escalate" | "fail" | "continue";
 /** Backoff policy between poll attempts. */
 export type Backoff = "fixed" | "exponential";
 
-const PROBE_KINDS: readonly ProbeKind[] = ["http", "command", "npm", "github-check", "capability"];
+const PROBE_KINDS: readonly ProbeKind[] = ["http", "command", "npm", "github-check", "capability", "pr"];
 const ON_TIMEOUTS: readonly OnTimeout[] = ["escalate", "fail", "continue"];
 const BACKOFFS: readonly Backoff[] = ["fixed", "exponential"];
+const PR_CONDITIONS: readonly PrCondition[] = ["ready", "merged", "mergeable", "checks-green"];
 
 /** The per-kind readiness predicate. Every field is optional; each kind reads only the ones it
  * understands and applies a sensible default when a field is absent (see the matchers below). */
@@ -66,6 +81,9 @@ export interface ProbeMatch {
    * unset, the capability edge is deterministic-only. The resolved `pkg@version` and bare version
    * are exposed to the command as `RESOLVED_ARTIFACT` / `RESOLVED_VERSION`. */
   readonly verifyCommand?: string;
+  /** pr: the declared PR state the probe waits for (default `merged`). One of {@link PrCondition} —
+   * `ready` (out of draft), `merged`, `mergeable`, or `checks-green`. */
+  readonly prState?: PrCondition;
 }
 
 /** The poll cadence: how often to re-probe, how long to keep trying, and the backoff shape. */
@@ -207,6 +225,13 @@ export function parseProbe(raw: unknown): ReadinessProbe {
       throw new Error("readiness probe (capability): 'match.package' is required (provenance is per-package scoped)");
     }
   }
+  // A pr edge whose target names no numeric PR id can never resolve — fail loudly at parse (mirroring
+  // the capability ref guard) rather than surface it as a timeout much later. `owner/repo#123`.
+  if (kind === "pr" && !parsePrTarget(target)) {
+    throw new Error(
+      `readiness probe (pr): 'target' ('${target}') must be an 'owner/repo#<number>' PR reference (e.g. 'nanobpm/nano-workforce#377')`,
+    );
+  }
   const poll = isRecord(raw.poll) ? parsePoll(raw.poll) : undefined;
   const credentialEnv = str(raw.credentialEnv).trim() || undefined;
   if (credentialEnv !== undefined && !isEnvKey(credentialEnv)) {
@@ -259,7 +284,25 @@ function parseMatch(raw: Record<string, unknown>): ProbeMatch {
     capabilityRef: str(raw.capabilityRef).trim() || undefined,
     package: str(raw.package).trim() || undefined,
     verifyCommand: str(raw.verifyCommand).trim() || undefined,
+    prState: parsePrCondition(raw.prState),
   };
+}
+
+/** Narrow a raw `match.prState` to a {@link PrCondition}, throwing on a non-empty unknown value so a
+ * mistyped state (`"landed"` for `"merged"`) fails loudly at parse rather than waiting forever. An
+ * absent/blank value yields undefined — `matchPr` then applies the `merged` default. */
+function parsePrCondition(raw: unknown): PrCondition | undefined {
+  const s = str(raw).trim();
+  if (s === "") return undefined;
+  if (!isPrCondition(s)) {
+    throw new Error(`readiness probe (pr): invalid match.prState '${s}' (expected one of ${PR_CONDITIONS.join(", ")})`);
+  }
+  return s;
+}
+
+function isPrCondition(v: string): v is PrCondition {
+  for (const c of PR_CONDITIONS) if (c === v) return true;
+  return false;
 }
 
 function parsePoll(raw: Record<string, unknown>): ProbePoll {
@@ -485,6 +528,116 @@ export function githubReleasesCommand(repo: string): string {
   return `gh api --paginate --slurp ${shellQuote(`repos/${repo}/releases?per_page=100`)} -H ${shellQuote("Accept: application/vnd.github+json")}`;
 }
 
+// ── PR / merge-state probe (ADR 0005 §2 — lift the merge-loop READ into a first-class probe) ─────
+
+/** A live PR observation, reduced to the fields {@link matchPr} reads. It extends the shared
+ * {@link PrState} (so `classifyMergeability` and the merge loop's liveness vocabulary are reused
+ * verbatim, never re-derived) and adds `mergedSha`, the merge commit oid a `merged` match binds
+ * downstream. Kept separate from I/O — {@link parsePrView} builds it from an already-fetched
+ * `gh pr view --json …` payload — so the matcher stays pure/unit-testable, exactly like
+ * {@link GithubRelease}. */
+export interface PrObservation extends PrState {
+  /** The merge commit oid once landed (`gh pr view --json mergeCommit`), else null. */
+  readonly mergedSha: string | null;
+  /** Count of head checks still in flight (queued/in progress), so a `checks-green` gate never
+   * reports green while a run hasn't concluded. Derived via `pendingCheckNames`. */
+  readonly pendingChecks: number;
+}
+
+/** Parse a raw `gh pr view --json state,mergedAt,mergeStateStatus,statusCheckRollup,isDraft,headRefOid,mergeCommit`
+ * payload (already JSON-decoded) into a {@link PrObservation}. Reuses the SAME check-rollup readers
+ * as `fetchPrState` (`failingCheckNames`/`allCheckNames`) so a superseded/cancelled run is collapsed
+ * identically. Tolerant: a malformed/empty payload yields an all-open, no-checks observation, so a
+ * transient read degrades to "not ready" (keep waiting), never a throw. */
+export function parsePrView(payload: unknown): PrObservation {
+  const j = isRecord(payload) ? payload : {};
+  const rollup = Array.isArray(j.statusCheckRollup) ? j.statusCheckRollup : [];
+  const names = failingCheckNames(rollup);
+  const pending = pendingCheckNames(rollup);
+  const merged = str(j.state).toUpperCase() === "MERGED" || str(j.mergedAt).trim() !== "";
+  const mergeCommit = isRecord(j.mergeCommit) ? j.mergeCommit : undefined;
+  const mergedSha = mergeCommit && str(mergeCommit.oid).trim() !== "" ? str(mergeCommit.oid).trim() : null;
+  return {
+    merged,
+    state: merged ? "merged" : str(j.state).toUpperCase() === "CLOSED" ? "closed" : "open",
+    mergeStateStatus: (str(j.mergeStateStatus) || "UNKNOWN").toUpperCase(),
+    failingChecks: names.length,
+    failingCheckNames: names,
+    totalChecks: rollup.length,
+    presentCheckNames: allCheckNames(rollup),
+    isDraft: j.isDraft === true,
+    headRefOid: str(j.headRefOid).trim() || null,
+    mergedSha,
+    pendingChecks: pending.length,
+  };
+}
+
+/** pr readiness (ADR 0005 §2): does the observed PR satisfy the declared `match.prState`
+ * (default `merged`)? PURE — it operates on an already-fetched {@link PrObservation} and NEVER
+ * throws, so a transient/garbled read is simply "not ready yet". A `merged` match binds the merge
+ * commit as `{ mergedSha }` (mirroring the `capability` kind's `resolvedArtifact` bind) so a
+ * downstream edge can pin the exact landed commit. The merge ACTION stays in the merge-loop node
+ * body — this kind only OBSERVES. */
+export function matchPr(match: ProbeMatch | undefined, pr: PrObservation): ProbeResult {
+  const want: PrCondition = match?.prState ?? "merged";
+  switch (want) {
+    case "ready": {
+      // draft→ready: a non-draft PR (already-merged PRs are non-draft too, so they also satisfy it).
+      const ready = !pr.isDraft;
+      return { ready, detail: `pr ${ready ? "ready (not draft)" : "still draft"}` };
+    }
+    case "merged": {
+      if (!pr.merged) return { ready: false, detail: "pr not merged yet" };
+      const bind = pr.mergedSha ? { mergedSha: pr.mergedSha } : undefined;
+      return { ready: true, detail: `pr merged${pr.mergedSha ? ` (${pr.mergedSha})` : ""}`, bind };
+    }
+    case "mergeable": {
+      const m = classifyMergeability(pr);
+      const ready = m === "ready";
+      return { ready, detail: `pr mergeability ${m}` };
+    }
+    case "checks-green": {
+      // Required checks green: at least one head run exists, none failing, AND none still in flight.
+      // A queued/in-progress run has no failing conclusion, so counting only `failingChecks` would
+      // report green while checks are still running — `pendingChecks` closes that gap. `failingChecks
+      // < 0` is token mode (checks unenumerable) — stay conservative (not ready), never falsely green.
+      const ready = pr.failingChecks === 0 && pr.pendingChecks === 0 && pr.totalChecks > 0;
+      const detail =
+        pr.totalChecks < 0
+          ? "pr checks unenumerable (not ready)"
+          : pr.totalChecks === 0
+            ? "pr no checks yet"
+            : pr.failingChecks > 0
+              ? `pr checks ${pr.failingChecks} failing`
+              : pr.pendingChecks > 0
+                ? `pr checks ${pr.pendingChecks} pending`
+                : "pr checks green";
+      return { ready, detail };
+    }
+  }
+}
+
+/** Split an `owner/repo#123` PR reference into its repo + numeric PR number, or `null` when it
+ * carries no numeric id (so `parseProbe` can reject a never-resolvable target loudly). The `#`
+ * separator is the canonical — and only — PR handle: an `@N` form is deliberately NOT accepted, as
+ * `owner/repo@<ref>` is the repo-ref syntax used elsewhere (`parseRepoRef`), so a numeric `@N` there
+ * would ambiguously mis-parse a git ref as a PR number. Matches the OpenAPI contract + `parseProbe`
+ * error, both of which document `owner/repo#N` only. */
+export function parsePrTarget(target: string): { repo: string; number: string } | null {
+  const t = target.trim();
+  const m = t.match(/^(.+?)#(\d+)$/);
+  if (!m) return null;
+  const repo = m[1].trim();
+  if (repo === "") return null;
+  return { repo, number: m[2] };
+}
+
+/** Build the `gh pr view` command that reads a PR's merge-state fields. `gh` reads its token from the
+ * ambient env (like `github-check`/`capability`) — no `credentialEnv`. */
+export function prViewCommand(repo: string, number: string): string {
+  return `gh pr view ${shellQuote(number)} --repo ${shellQuote(repo)} --json ${shellQuote("state,mergedAt,mergeStateStatus,statusCheckRollup,isDraft,headRefOid,mergeCommit")}`;
+}
+
 
 // ── Single probe attempt (does I/O via the injected {@link ProbeExec}) ──────────────────────────
 
@@ -519,6 +672,13 @@ export async function probeOnce(
       const out = await exec.run(githubReleasesCommand(repo), env);
       if (out.code !== 0) return { ready: false, detail: "capability: gh api failed (not ready)" };
       return matchCapability(probe.match, parseReleases(parseJson(out.stdout)));
+    }
+    case "pr": {
+      const ref = parsePrTarget(probe.target);
+      if (!ref) return { ready: false, detail: "pr: unparseable target (not ready)" };
+      const out = await exec.run(prViewCommand(ref.repo, ref.number), env);
+      if (out.code !== 0) return { ready: false, detail: "pr: gh pr view failed (not ready)" };
+      return matchPr(probe.match, parsePrView(parseJson(out.stdout)));
     }
   }
 }
