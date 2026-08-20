@@ -88,20 +88,34 @@ export interface PreflightLog {
  * failure into a `warn` and never throws, so a slow or absent engine cannot
  * block boot. A missing engine is a `warn` (features will fail to start until
  * it is reachable), not a fatal error.
+ *
+ * `opts.token` (the same `CAMUNDA_TOKEN` the engine client uses) is sent as a
+ * bearer credential so a secured cluster does not answer the probe with a
+ * misleading 401/403 while the real client is correctly configured.
  */
 export async function announceEngine(
   addr: EngineAddress,
   log: PreflightLog,
-  fetchImpl: typeof fetch = fetch,
+  opts: { token?: string; fetchImpl?: typeof fetch } = {},
 ): Promise<void> {
+  const fetchImpl = opts.fetchImpl ?? fetch;
   log.info(`Engine address: ${addr.restAddress} (from ${addr.source})`);
   const url = `${addr.restAddress.replace(/\/+$/, "")}/topology`;
+  const headers: Record<string, string> = { accept: "application/json" };
+  if (opts.token) headers.authorization = `Bearer ${opts.token}`;
   try {
-    const res = await fetchImpl(url, {
-      headers: { accept: "application/json" },
-      signal: AbortSignal.timeout(3000),
-    });
+    const res = await fetchImpl(url, { headers, signal: AbortSignal.timeout(3000) });
     if (!res.ok) {
+      if (res.status === 401 || res.status === 403) {
+        // The engine is reachable but rejected the probe's credentials — the
+        // real client may still work (it authenticates independently), so this
+        // is an auth hint, not an "unreachable" warning.
+        log.warn(
+          `Engine preflight: ${url} returned HTTP ${res.status} (authentication). ` +
+            `If the engine requires a token, set CAMUNDA_TOKEN — the engine client uses it independently.`,
+        );
+        return;
+      }
       log.warn(
         `Engine preflight: ${url} returned HTTP ${res.status}. ` +
           `Check CAMUNDA_REST_ADDRESS / NANOBPMN_BASE_URL — features will fail to start until the engine is reachable.`,

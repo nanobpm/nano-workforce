@@ -292,7 +292,9 @@ The preflight is **informational, never a gate** — Nano Workforce runs against
 stock **Camunda 8** cluster too, so a non-Nano engine is announced
 (`Engine: Camunda 8 (gateway v8.x) — REST only …`), not rejected. If nothing
 answers, it logs a `warn` (`could not reach … features will fail to start until
-the engine is reachable`) and boot continues.
+the engine is reachable`) and boot continues. On a **secured** cluster the probe
+sends `CAMUNDA_TOKEN` as a bearer credential; a `401/403` is reported as an auth
+hint (check `CAMUNDA_TOKEN`), not as an unreachable engine.
 
 > **Watch the port when launched from a console.** A console-launched app can
 > default `NANOBPMN_BASE_URL` to `http://localhost:8080`. If **another Camunda 8**

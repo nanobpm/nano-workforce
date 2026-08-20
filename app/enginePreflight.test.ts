@@ -64,10 +64,12 @@ const okResponse = (body: TopologyProbe) =>
 test("announceEngine logs the resolved address + a Nano identity line", async () => {
   const { log, info, warn } = capture();
   let probed = "";
-  await announceEngine(ADDR, log, ((url: string) => {
-    probed = url;
-    return Promise.resolve(okResponse({ nano: { engine: "nanobpmn", version: "1.2.3", falconPath: "/falcon" } }));
-  }) as unknown as typeof fetch);
+  await announceEngine(ADDR, log, {
+    fetchImpl: ((url: string) => {
+      probed = url;
+      return Promise.resolve(okResponse({ nano: { engine: "nanobpmn", version: "1.2.3", falconPath: "/falcon" } }));
+    }) as unknown as typeof fetch,
+  });
   assertEquals(probed, "http://localhost:8080/v2/topology");
   assert(info.some((l) => l.includes("Engine address: http://localhost:8080/v2 (from default")), "echoes address+source");
   assert(info.some((l) => l.includes("Nano engine (nanobpmn v1.2.3)")), "announces the Nano engine");
@@ -76,20 +78,45 @@ test("announceEngine logs the resolved address + a Nano identity line", async ()
 
 test("announceEngine announces Camunda 8 without rejecting", async () => {
   const { log, info, warn } = capture();
-  await announceEngine(ADDR, log, (() => Promise.resolve(okResponse({ gatewayVersion: "8.6.0" }))) as unknown as typeof fetch);
+  await announceEngine(ADDR, log, {
+    fetchImpl: (() => Promise.resolve(okResponse({ gatewayVersion: "8.6.0" }))) as unknown as typeof fetch,
+  });
   assert(info.some((l) => l.includes("Camunda 8")), "announces Camunda 8");
   assertEquals(warn, []);
+});
+
+test("announceEngine sends CAMUNDA_TOKEN as a bearer credential on the probe", async () => {
+  const { log } = capture();
+  let sentAuth: string | undefined;
+  await announceEngine(ADDR, log, {
+    token: "secret-token",
+    fetchImpl: ((_url: string, init: { headers: Record<string, string> }) => {
+      sentAuth = init.headers.authorization;
+      return Promise.resolve(okResponse({ nano: { engine: "nanobpmn" } }));
+    }) as unknown as typeof fetch,
+  });
+  assertEquals(sentAuth, "Bearer secret-token");
+});
+
+test("announceEngine treats 401/403 as an auth hint, not an unreachable warning", async () => {
+  const { log, warn } = capture();
+  const res = { ok: false, status: 401, json: () => Promise.reject(new Error("unused")) } as unknown as Response;
+  await announceEngine(ADDR, log, { fetchImpl: (() => Promise.resolve(res)) as unknown as typeof fetch });
+  assert(warn.some((l) => l.includes("HTTP 401") && l.includes("CAMUNDA_TOKEN")), "points at the token, not unreachability");
+  assert(!warn.some((l) => l.includes("could not reach")), "does not claim the engine is unreachable");
 });
 
 test("announceEngine warns (does not throw) on a non-200 response", async () => {
   const { log, warn } = capture();
   const res = { ok: false, status: 503, json: () => Promise.reject(new Error("unused")) } as unknown as Response;
-  await announceEngine(ADDR, log, (() => Promise.resolve(res)) as unknown as typeof fetch);
+  await announceEngine(ADDR, log, { fetchImpl: (() => Promise.resolve(res)) as unknown as typeof fetch });
   assert(warn.some((l) => l.includes("HTTP 503")), "warns with the status code");
 });
 
 test("announceEngine warns (does not throw) when the engine is unreachable", async () => {
   const { log, warn } = capture();
-  await announceEngine(ADDR, log, (() => Promise.reject(new Error("ECONNREFUSED"))) as unknown as typeof fetch);
+  await announceEngine(ADDR, log, {
+    fetchImpl: (() => Promise.reject(new Error("ECONNREFUSED"))) as unknown as typeof fetch,
+  });
   assert(warn.some((l) => l.includes("could not reach") && l.includes("ECONNREFUSED")), "warns with the reason");
 });

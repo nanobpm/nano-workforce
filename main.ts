@@ -39,7 +39,7 @@ const engineAddress = resolveEngineAddress();
 await announceEngine(engineAddress, {
   info: (msg) => host.log("info", msg),
   warn: (msg) => host.log("warn", msg),
-});
+}, { token: process.env.CAMUNDA_TOKEN });
 const engine = await createNanoSdkEngineClient({
   restAddress: engineAddress.restAddress,
   token: process.env.CAMUNDA_TOKEN,
