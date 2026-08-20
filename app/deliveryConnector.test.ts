@@ -12,10 +12,54 @@ import { assert, assertEquals, assertRejects } from "#test-assert";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import type { DataLayer } from "@nanobpm/urban";
 import { bootTestApp, type TestApp } from "@nanobpm/urban-testkit";
-import { connectorDedupeKey, deliveryConnectorDispatches, dispatchConnector } from "./deliveryConnector.ts";
+import {
+  connectorDedupeKey,
+  type DeliveryConnectorDispatchRow,
+  deliveryConnectorDispatches,
+  dispatchConnector,
+} from "./deliveryConnector.ts";
 
 const APP_ROOT = resolve(import.meta.dirname, "..");
+
+/** A minimal in-memory ledger that deterministically drives the concurrent-race fence-LOSER path.
+ * The winning claim `seed` is already present, so the caller's INSERT hits the UNIQUE fence; `missFirstFindOne`
+ * makes the caller's PRE-insert `findOne` miss it (the classic findOne→insert race window), so `dispatchConnector`
+ * falls into its catch branch and rediscovers the winning row there. Returns the live `rows` for assertions. */
+function racingLedgerData(
+  seed: DeliveryConnectorDispatchRow,
+  opts: { missFirstFindOne: boolean },
+): { data: DataLayer; rows: DeliveryConnectorDispatchRow[] } {
+  const rows: DeliveryConnectorDispatchRow[] = [{ ...seed, id: 1 }];
+  let nextId = 2;
+  let firstFindOne = opts.missFirstFindOne;
+  const table = {
+    async findOne(where: Record<string, unknown> = {}) {
+      if (firstFindOne) {
+        firstFindOne = false;
+        return undefined;
+      }
+      return rows.find((r) => Object.entries(where).every(([k, v]) => r[k] === v));
+    },
+    async insert(row: DeliveryConnectorDispatchRow) {
+      if (rows.some((r) => r.dedupe_key === row.dedupe_key)) {
+        throw new Error("UNIQUE constraint failed: delivery_connector_dispatches.dedupe_key");
+      }
+      const id = nextId++;
+      rows.push({ ...row, id });
+      return id;
+    },
+    async update(id: number, patch: Partial<DeliveryConnectorDispatchRow>) {
+      const r = rows.find((x) => x.id === id);
+      if (r) Object.assign(r, patch);
+    },
+    async find(where: Record<string, unknown> = {}) {
+      return rows.filter((r) => Object.entries(where).every(([k, v]) => r[k] === v));
+    },
+  };
+  return { data: { table: () => table } as any as DataLayer, rows };
+}
 
 /** Boot an app purely for its provisioned data layer (migration 055 applied), run `fn`, tear down. */
 async function withApp(fn: (app: TestApp) => Promise<void>): Promise<void> {
@@ -80,6 +124,52 @@ test("a redelivery of a CLAIMED-but-not-delivered row RESUMES the action (never 
     assertEquals(replay.connectorOutcome, "deduped");
     assertEquals(replay.connectorDetail, resumed.connectorDetail);
   });
+});
+
+test("the concurrent-race fence LOSER RESUMES a still-CLAIMED winning row (never dedupes on an un-acted claim)", async () => {
+  // The winner CLAIMED the key (row present) but has NOT yet recorded delivery. The loser races: its
+  // pre-insert lookup misses (the findOne→insert window), its INSERT hits the UNIQUE fence, and in the
+  // catch it rediscovers the winner's STILL-`claimed` row. If the loser deduped and completed the job
+  // here, the engine — having taken the loser's ack — would never redeliver, so a winner that then
+  // crashed would strand the side effect FOREVER. The loser must RESUME the claimed row instead.
+  const { data, rows } = racingLedgerData(
+    { dedupe_key: "race", target: "slack", outcome: "claimed", detail: null, dispatched_at: "2025-01-01T00:00:00.000Z" },
+    { missFirstFindOne: true },
+  );
+  const out = await dispatchConnector(data, { dedupeKey: "race", target: "slack" }, "2025-01-01T01:00:00.000Z");
+  assertEquals(out.connectorOutcome, "delivered");
+  assert(out.connectorDetail.length > 0, "the resumed dispatch carries an action detail");
+  const settled = rows.filter((r) => r.dedupe_key === "race");
+  assertEquals(settled.length, 1, "resume records on the winning row — no duplicate ledger entry");
+  assertEquals(settled[0].outcome, "delivered");
+});
+
+test("the fence LOSER still DEDUPES a DELIVERED winning row (reports its detail, never re-acts)", async () => {
+  const { data, rows } = racingLedgerData(
+    { dedupe_key: "race2", target: "slack", outcome: "delivered", detail: "winner-detail", dispatched_at: "2025-01-01T00:00:00.000Z" },
+    { missFirstFindOne: true },
+  );
+  const out = await dispatchConnector(data, { dedupeKey: "race2", target: "slack" }, "2025-01-01T01:00:00.000Z");
+  assertEquals(out.connectorOutcome, "deduped");
+  assertEquals(out.connectorDetail, "winner-detail");
+  assertEquals(rows.filter((r) => r.dedupe_key === "race2").length, 1, "no re-act, no duplicate row");
+  assertEquals(rows.find((r) => r.dedupe_key === "race2")?.outcome, "delivered");
+});
+
+test("the fence LOSER fails closed when the winning row carries a DIFFERENT target", async () => {
+  const { data, rows } = racingLedgerData(
+    { dedupe_key: "race3", target: "slack", outcome: "claimed", detail: null, dispatched_at: "2025-01-01T00:00:00.000Z" },
+    { missFirstFindOne: true },
+  );
+  await assertRejects(
+    () => dispatchConnector(data, { dedupeKey: "race3", target: "pagerduty" }, "2025-01-01T01:00:00.000Z"),
+    Error,
+    "different target",
+  );
+  // The mismatch must not have mutated the winning row (still an un-acted claim on its original target).
+  const row = rows.find((r) => r.dedupe_key === "race3");
+  assertEquals(row?.target, "slack");
+  assertEquals(row?.outcome, "claimed");
 });
 
 test("distinct dedupe keys each deliver once", async () => {
