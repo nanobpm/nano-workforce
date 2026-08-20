@@ -189,11 +189,24 @@ test("collectDeferralEvidence: clips a very long section to the max length", () 
 });
 
 test("collectDeferralEvidence: de-dupes identical snippets from overlapping match paths", () => {
-  // A single line carries BOTH a `defer*` and an `out-of-scope` marker, so both step-2 regexes
-  // match the same whole line and clip to the same snippet — the Set must collapse them to one.
+  // A single line carries BOTH a `defer*` and an `out-of-scope` marker; the derived line matcher
+  // captures the whole line once, so even across match paths it clips to the same snippet — the Set
+  // must collapse them to one.
   const ev = collectDeferralEvidence("Real I/O is deferred and out-of-scope for now.");
   assertEquals(ev.length, 1, "the two overlapping matches de-dupe to a single snippet");
   assertStringIncludes(ev[0], "Real I/O is deferred and out-of-scope");
+});
+
+test("collectDeferralEvidence: quotes every deferral phrase the detector accepts (no drift)", () => {
+  // The step-2 line matcher is derived from DEFERRAL_PHRASE, so any phrase hasDeferralMarker() fires
+  // on must also be quotable back. Guard the whole detector phrase set, not just one instance, so a
+  // future regex tweak that the evidence quoter fails to mirror is caught here.
+  for (const phrase of ["deferred", "defers", "deferral", "deferring", "out-of-scope", "out of scope"]) {
+    assert(hasDeferralMarker(`This part is ${phrase}.`), `detector fires on '${phrase}'`);
+    const ev = collectDeferralEvidence(`This part is ${phrase}.`);
+    assertEquals(ev.length, 1, `evidence quotes the line carrying '${phrase}'`);
+    assertStringIncludes(ev[0], phrase);
+  }
 });
 
 test("evaluateScopeGuard: the block reason quotes the specific deferred text", () => {

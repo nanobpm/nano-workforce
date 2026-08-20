@@ -49,6 +49,11 @@ const CLOSING_KEYWORD =
 // honest deferral read "…remain the deferred refinement", which the explicit `defer*` branch catches.
 const DEFERRAL_HEADING = /^#{1,6}\s+scope\b/im;
 const DEFERRAL_PHRASE = /\bdefer(?:s|red|ral|ring)?\b|\bout[- ]of[- ]scope\b/i;
+// The whole line carrying a deferral phrase, DERIVED from DEFERRAL_PHRASE so the evidence quoter can
+// never drift from the detector: the same phrase set that makes hasDeferralMarker() fire is what
+// selects the line to quote back. `g` so every deferral-bearing line is captured (deduped/capped by
+// collectDeferralEvidence), not just the first.
+const DEFERRAL_PHRASE_LINE = new RegExp(`[^\\n]*(?:${DEFERRAL_PHRASE.source})[^\\n]*`, "gi");
 const REMAINDER_WORD = /\bremain(?:s|der|ing)?\b/gi;
 const REMAINDER_CONTEXT = /\b(?:scope|follow[- ]?ups?|later|to[- ]?dos?|track(?:s|ed|ing)?|next[- ]steps?)\b/i;
 const REMAINDER_WINDOW = 48;
@@ -140,10 +145,11 @@ export function collectDeferralEvidence(body: string | null | undefined): string
     push(heading[0] + (nextHeading === -1 ? rest : rest.slice(0, nextHeading)));
   }
 
-  // 2) A `defer*` / `out-of-scope` clause — quote the line that carries it.
-  for (const re of [/[^\n]*\bdefer(?:s|red|ral|ring)?\b[^\n]*/i, /[^\n]*\bout[- ]of[- ]scope\b[^\n]*/i]) {
-    const m = re.exec(text);
-    if (m) push(m[0]);
+  // 2) A `defer*` / `out-of-scope` clause — quote each line that carries one. The line matcher is
+  //    DERIVED from DEFERRAL_PHRASE (the detector's own phrase set), so a future phrase tweak cannot
+  //    leave hasDeferralMarker() firing on a marker this step then fails to find and quote.
+  for (const m of text.matchAll(DEFERRAL_PHRASE_LINE)) {
+    push(m[0]);
   }
 
   // 3) A remainder mention that sits in a deferral context — quote its window (mirrors the detector).
