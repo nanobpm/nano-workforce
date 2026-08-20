@@ -6,6 +6,7 @@
 import { test } from "node:test";
 import { assert, assertEquals } from "#test-assert";
 import { CONFORMANCE_ESCALATION_ELEMENT } from "./conformance.ts";
+import { DELIVERY_HUMAN_ELEMENT } from "./deliveryHuman.ts";
 import type { PlanReview } from "./plan.ts";
 import type { TrialMergeAuditRow } from "./trialMerge.ts";
 import {
@@ -19,6 +20,7 @@ import {
   type PrEscalationRow,
   reconcileUserTasks,
   TRIAL_MERGE_ELEMENT,
+  userTaskKindLabel,
   type UserTaskRow,
 } from "./userTasks.ts";
 
@@ -89,6 +91,40 @@ test("buildUserTaskRow: an unknown (non-escalation) element yields null — no a
     AT,
   );
   assertEquals(row, null);
+});
+
+test("userTaskKindLabel/buildUserTaskRow: an INLINED delivery-human element surfaces under one label; a non-matching internal task is dropped (app/userTasks.ts:122)", () => {
+  // The S4 compiler inlines each `human` node (and its bounded-timeout escalation twin) with a
+  // per-node id `delivery-human-task__<el>[__esc]`, which a bare `USER_TASK_KIND_LABELS` lookup would
+  // miss — so the delivery-human convention MUST be recognised through `isDeliveryHumanElement`.
+  const LABEL = "Delivery: human step";
+  // The bare static body id and both inlined conventions resolve to the one delivery-human label…
+  assertEquals(userTaskKindLabel(DELIVERY_HUMAN_ELEMENT), LABEL);
+  assertEquals(userTaskKindLabel(`${DELIVERY_HUMAN_ELEMENT}__ship-it`), LABEL);
+  assertEquals(userTaskKindLabel(`${DELIVERY_HUMAN_ELEMENT}__ship-it__esc`), LABEL);
+  // …while a non-matching internal task (a near-miss that is NOT the delivery-human prefix) is not a
+  // surfaced kind, so it never leaks into the inbox.
+  assertEquals(userTaskKindLabel("delivery-human-taskish"), undefined);
+  assertEquals(userTaskKindLabel("some-internal-task"), undefined);
+
+  // And end-to-end through the row builder: an inlined delivery-human task projects a labelled row…
+  const inlined = buildUserTaskRow(
+    { userTaskKey: "ut-dh", elementId: `${DELIVERY_HUMAN_ELEMENT}__ship-it`, subjectType: "delivery", subjectKey: "graph-1", question: "approve the release?" },
+    AT,
+  );
+  assert(inlined !== null);
+  assertEquals(inlined?.element_id, `${DELIVERY_HUMAN_ELEMENT}__ship-it`);
+  assertEquals(inlined?.kind_label, LABEL);
+  assertEquals(inlined?.subject_type, "delivery");
+  assertEquals(inlined?.question, "approve the release?");
+  // …whereas a non-matching internal task still yields null (the leak guard holds for the near-miss).
+  assertEquals(
+    buildUserTaskRow(
+      { userTaskKey: "ut-dh2", elementId: "delivery-human-taskish", subjectType: "delivery", subjectKey: "graph-1" },
+      AT,
+    ),
+    null,
+  );
 });
 
 test("buildUserTaskRow: a blank userTaskKey yields null; a known kind with a blank subject key still builds (issue #358)", () => {
