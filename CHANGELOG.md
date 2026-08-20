@@ -1,3 +1,10 @@
+# [0.115.0](https://github.com/nanobpm/nano-workforce/compare/v0.114.1...v0.115.0) (2026-08-20)
+
+
+### Features
+
+* **engine:** startup preflight + canonical engine address resolution ([#391](https://github.com/nanobpm/nano-workforce/issues/391)) ([#404](https://github.com/nanobpm/nano-workforce/issues/404)) ([16fcb71](https://github.com/nanobpm/nano-workforce/commit/16fcb711f190341f03fd84914fa66c1ee704b78c)), closes [Magikcraft/nano-bpm#940](https://github.com/Magikcraft/nano-bpm/issues/940)
+
 ## [0.114.1](https://github.com/nanobpm/nano-workforce/compare/v0.114.0...v0.114.1) (2026-08-20)
 
 
