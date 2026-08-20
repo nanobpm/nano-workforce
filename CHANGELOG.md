@@ -1,3 +1,10 @@
+## [0.106.1](https://github.com/nanobpm/nano-workforce/compare/v0.106.0...v0.106.1) (2026-08-20)
+
+
+### Bug Fixes
+
+* **migrations:** gate migration immutability + add upgrade smoke test ([#357](https://github.com/nanobpm/nano-workforce/issues/357)) ([#359](https://github.com/nanobpm/nano-workforce/issues/359)) ([7f7c6a6](https://github.com/nanobpm/nano-workforce/commit/7f7c6a6c59dac33602441c729dca897b3b23fabc)), closes [#311](https://github.com/nanobpm/nano-workforce/issues/311) [#316](https://github.com/nanobpm/nano-workforce/issues/316) [#351](https://github.com/nanobpm/nano-workforce/issues/351) [#355](https://github.com/nanobpm/nano-workforce/issues/355)
+
 # [0.106.0](https://github.com/nanobpm/nano-workforce/compare/v0.105.0...v0.106.0) (2026-08-20)
 
 
