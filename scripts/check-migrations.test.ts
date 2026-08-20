@@ -64,7 +64,7 @@ test("mixed changes report every violation but ignore the addition", () => {
 // neither branch's green CI ever saw the other's file. The 052 collision (#351 + #355, hotfixed in
 // #359) was exactly this. Driving the pure collision detector with each branch's tree AND their union
 // demonstrates that only the post-merge state trips the gate, which is why the gate must re-run on
-// the prospective merged commit (merge_queue) / on push to `main`, not just PR heads.
+// the prospective merged commit (merge_group) / on push to `main`, not just PR heads.
 test("merge skew: two individually-clean branches whose union collides IS caught", () => {
   const mainTree = ["050_capability_gates.sql", "051_merges_per_day.sql"];
   // Each branch independently picks the same "next free" prefix (060) without seeing its sibling.
