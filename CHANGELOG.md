@@ -1,3 +1,10 @@
+# [0.108.0](https://github.com/nanobpm/nano-workforce/compare/v0.107.2...v0.108.0) (2026-08-20)
+
+
+### Features
+
+* **derivation-parity:** un-park retro to full whole-model parity ([#372](https://github.com/nanobpm/nano-workforce/issues/372)) ([1320838](https://github.com/nanobpm/nano-workforce/commit/1320838251646258ec2151a547ed2b5573ce1168)), closes [nano-ide#405](https://github.com/nano-ide/issues/405) [355/#356](https://github.com/nanobpm/nano-workforce/issues/356) [#371](https://github.com/nanobpm/nano-workforce/issues/371)
+
 ## [0.107.2](https://github.com/nanobpm/nano-workforce/compare/v0.107.1...v0.107.2) (2026-08-20)
 
 
