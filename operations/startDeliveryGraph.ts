@@ -75,14 +75,17 @@ export default defineOperation("startDeliveryGraph", async ({ body }, app) => {
   const existing = await runs.get(runKey);
   if (existing && existing.status === "running" && !DELIVERY_GRAPH_TERMINAL_STATUSES.includes(existing.status)) {
     app.log.info("start-delivery-graph short-circuit: already running", { runKey });
+    // Report the ACTUALLY-running run's persisted metadata, not this request's. If a caller reused the
+    // same `idempotencyKey` for a different graph, `digest`/`sideEffecting` derived from THIS submission
+    // would mislabel the run that is really in flight — echo the winner row instead.
     return {
       status: 202,
       body: {
         ok: true,
         status: "running",
         runKey,
-        digest,
-        sideEffecting,
+        digest: existing.digest,
+        sideEffecting: existing.side_effecting === 1,
         alreadyRunning: true,
         processInstanceKey: existing.process_key ?? undefined,
         processDefinitionId: existing.process_definition_id ?? undefined,
@@ -157,14 +160,16 @@ export default defineOperation("startDeliveryGraph", async ({ body }, app) => {
       if (!isUniqueConstraintFence(err)) throw err;
       const won = await runs.get(runKey);
       app.log.info("start-delivery-graph short-circuit: launch claim raced a concurrent submit", { runKey });
+      // Echo the winner row's persisted metadata (falling back to this request's only if the row
+      // somehow can't be re-read) so a reused idempotencyKey never reports the wrong run's digest.
       return {
         status: 202,
         body: {
           ok: true,
           status: "running",
           runKey,
-          digest,
-          sideEffecting,
+          digest: won?.digest ?? digest,
+          sideEffecting: won ? won.side_effecting === 1 : sideEffecting,
           alreadyRunning: true,
           processInstanceKey: won?.process_key ?? undefined,
           processDefinitionId: won?.process_definition_id ?? undefined,

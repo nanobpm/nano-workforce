@@ -12,6 +12,7 @@ import { TERMINAL_STATUSES } from "./delivery.ts";
 import { PLAN_TERMINAL_STATUSES } from "./plan.ts";
 import { FEATURE_TERMINAL_STATUSES } from "./feature.ts";
 import { CONFORMANCE_REVIEWING_STATUS } from "./conformance.ts";
+import { DELIVERY_GRAPH_TERMINAL_STATUSES } from "./deliveryGraphRun.ts";
 
 interface Binding {
   table: string;
@@ -139,5 +140,36 @@ test("instanceTracking: plan_conformance onTerminated status is not active", asy
   assert(
     typeof settled === "string" && !b.activeStatuses?.includes(settled),
     `onTerminated review_status "${String(settled)}" must not be listed active`,
+  );
+});
+
+// The delivery_graph_runs binding tracks ONLY the engine-instance-backed status. Unlike PR/plan/
+// feature bindings, its active set is DELIBERATELY narrower than the code's DISPLAY active set
+// (DELIVERY_GRAPH_ACTIVE_STATUSES = awaiting-approval + running): a parked `awaiting-approval` run
+// has a null `process_key`, so the `process_key`-keyed reconciler cannot track it. Tie the manifest
+// to that invariant so a future change can't silently (a) list a terminal status active — the
+// reconciler would clobber a settled run — or (b) add `awaiting-approval`, which would make the
+// reconciler flip every parked run to `failed` on its next pass (a null key never matches a live
+// instance → "vanished" → onTerminated).
+test("instanceTracking: delivery_graph_runs activeStatuses excludes every terminal status", async () => {
+  const b = bindingFor(await bindings(), "delivery_graph_runs");
+  for (const terminal of DELIVERY_GRAPH_TERMINAL_STATUSES) {
+    assert(!b.activeStatuses?.includes(terminal), `terminal status "${terminal}" must not be active`);
+  }
+});
+
+test("instanceTracking: delivery_graph_runs activeStatuses is exactly the instance-backed status (running)", async () => {
+  const b = bindingFor(await bindings(), "delivery_graph_runs");
+  assertEquals([...(b.activeStatuses ?? [])].sort(), ["running"]);
+  // A parked run has no engine instance (process_key NULL) — it must NOT be reconciled by this binding.
+  assert(!b.activeStatuses?.includes("awaiting-approval"), "awaiting-approval (null process_key) must not be instance-tracked");
+});
+
+test("instanceTracking: delivery_graph_runs onTerminated status is not active", async () => {
+  const b = bindingFor(await bindings(), "delivery_graph_runs");
+  const settled = b.onTerminated.set.status;
+  assert(
+    typeof settled === "string" && !b.activeStatuses?.includes(settled),
+    `onTerminated status "${String(settled)}" must not be listed active`,
   );
 });

@@ -220,3 +220,23 @@ test("a launch failure rolls the claimed run to `failed` — no stranded null-pr
   assertEquals(runs()[0]?.["status"], "failed");
   assertEquals(runs()[0]?.["process_key"], null);
 });
+
+test("a reused idempotencyKey short-circuits with the RUNNING run's persisted digest/sideEffecting — not the new submission's", async () => {
+  const { app, started } = makeApp();
+  // Launch a human-only (non-side-effecting) run under an explicit key.
+  const first = (await startDeliveryGraph(input({ graph: HUMAN_ONLY, idempotencyKey: "shared" }), app)) as {
+    body: { digest: string; sideEffecting: boolean };
+  };
+  assertEquals(first.body.sideEffecting, false);
+  // Re-POST the SAME key with a DIFFERENT (side-effecting) graph. The response must describe the run
+  // that is actually running — the human-only one — not this mismatched submission.
+  const second = (await startDeliveryGraph(input({ graph: SIDE_EFFECTING, idempotencyKey: "shared" }), app)) as {
+    status: number;
+    body: { alreadyRunning: boolean; digest: string; sideEffecting: boolean };
+  };
+  assertEquals(second.status, 202);
+  assertEquals(second.body.alreadyRunning, true);
+  assertEquals(second.body.sideEffecting, false); // the RUNNING run's value, not the side-effecting resubmit's
+  assertEquals(second.body.digest, first.body.digest);
+  assertEquals(started.length, 1); // still one launch
+});
