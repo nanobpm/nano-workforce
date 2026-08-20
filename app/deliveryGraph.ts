@@ -91,8 +91,8 @@ function isDeliveryFactType(type: unknown): type is DeliveryFactType {
  * a test, a future internal use), a dotted fact name could otherwise make `<nodeId>.<fact>` resolution
  * ambiguous and quietly build the wrong DAG — undermining the trust boundary this validator exists to
  * hold. */
-const FACT_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
-const FACT_NAME_MAX_LENGTH = 128;
+export const FACT_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+export const FACT_NAME_MAX_LENGTH = 128;
 
 /** A node `id` must match openapi's `DeliveryNodeCommon.id` `^[A-Za-z_][A-Za-z0-9_.-]*$` and stay
  * within its 128-char cap. Re-enforced here INDEPENDENTLY of the OpenAPI shape gate because later

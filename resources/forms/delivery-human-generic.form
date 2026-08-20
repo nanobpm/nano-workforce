@@ -1,0 +1,28 @@
+{
+  "id": "delivery-human-generic",
+  "schemaVersion": 18,
+  "type": "default",
+  "components": [
+    {
+      "type": "textarea",
+      "key": "prompt",
+      "label": "Now do this",
+      "description": "The scheduled human step this delivery graph is waiting on.",
+      "readonly": true
+    },
+    {
+      "type": "textfield",
+      "key": "value",
+      "label": "Emitted value",
+      "description": "The typed value this step hands forward to its downstream dependents. Validated against the node's declared emitted fact.",
+      "validate": {
+        "required": true
+      }
+    },
+    {
+      "type": "textarea",
+      "key": "note",
+      "label": "Note (optional)"
+    }
+  ]
+}

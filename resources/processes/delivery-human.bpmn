@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI" xmlns:dc="http://www.omg.org/spec/DD/20100524/DC" xmlns:di="http://www.omg.org/spec/DD/20100524/DI" xmlns:zeebe="http://camunda.org/schema/zeebe/1.0" id="Definitions_nano_workforce_delivery_human" targetNamespace="http://nanobpm.io/nano-workforce">
+  <bpmn:process id="delivery-human" name="Delivery graph — human node (scheduled user task)" isExecutable="true">
+    <bpmn:startEvent id="Start" name="Human node scheduled">
+      <bpmn:outgoing>f_start</bpmn:outgoing>
+    </bpmn:startEvent>
+    <bpmn:userTask id="delivery-human-task" name="Delivery: human step (now do X)">
+      <bpmn:extensionElements>
+        <zeebe:formDefinition formId="delivery-human-generic" />
+        <zeebe:userTask />
+        <zeebe:assignmentDefinition candidateGroups="operators" assignee="=if (is defined(escalationAssignee) and escalationAssignee != null and trim(string(escalationAssignee)) != &#34;&#34;) then escalationAssignee else null" />
+        <zeebe:ioMapping>
+          <zeebe:output source="=&#34;completed&#34;" target="humanOutcome" />
+          <zeebe:output source="=if (is defined(value)) then value else null" target="humanEmitValue" />
+          <zeebe:output source="=if (is defined(resolvedArtifact)) then resolvedArtifact else null" target="humanEmitArtifact" />
+          <zeebe:output source="=if (is defined(note)) then note else null" target="humanNote" />
+        </zeebe:ioMapping>
+      </bpmn:extensionElements>
+      <bpmn:incoming>f_start</bpmn:incoming>
+      <bpmn:outgoing>f_done</bpmn:outgoing>
+    </bpmn:userTask>
+    <bpmn:boundaryEvent id="be_delivery_human_sla" name="SLA elapsed" attachedToRef="delivery-human-task">
+      <bpmn:outgoing>f_sla</bpmn:outgoing>
+      <bpmn:timerEventDefinition id="ted_delivery_human_sla">
+        <bpmn:timeDuration xsi:type="bpmn:tFormalExpression">=escalationSlaTimeout</bpmn:timeDuration>
+      </bpmn:timerEventDefinition>
+    </bpmn:boundaryEvent>
+    <bpmn:endEvent id="human-done" name="Human step done (fact emitted)">
+      <bpmn:incoming>f_done</bpmn:incoming>
+    </bpmn:endEvent>
+    <bpmn:endEvent id="human-escalated" name="Human step timed out (escalated)">
+      <bpmn:extensionElements>
+        <zeebe:ioMapping>
+          <zeebe:input source="=&#34;escalated&#34;" target="humanOutcome" />
+        </zeebe:ioMapping>
+      </bpmn:extensionElements>
+      <bpmn:incoming>f_sla</bpmn:incoming>
+    </bpmn:endEvent>
+    <bpmn:sequenceFlow id="f_start" sourceRef="Start" targetRef="delivery-human-task" />
+    <bpmn:sequenceFlow id="f_done" sourceRef="delivery-human-task" targetRef="human-done" />
+    <bpmn:sequenceFlow id="f_sla" sourceRef="be_delivery_human_sla" targetRef="human-escalated" />
+  </bpmn:process>
+  <bpmndi:BPMNDiagram id="BPMNDiagram_delivery-human">
+    <bpmndi:BPMNPlane id="BPMNPlane_delivery-human" bpmnElement="delivery-human">
+      <bpmndi:BPMNShape id="BPMNShape_Start" bpmnElement="Start">
+        <dc:Bounds x="80" y="102" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="60" y="143" width="76" height="28" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_delivery-human-task" bpmnElement="delivery-human-task">
+        <dc:Bounds x="216" y="80" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_human-done" bpmnElement="human-done">
+        <dc:Bounds x="416" y="102" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="396" y="143" width="76" height="42" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_human-escalated" bpmnElement="human-escalated">
+        <dc:Bounds x="416" y="262" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="394" y="303" width="81" height="42" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_be_delivery_human_sla" bpmnElement="be_delivery_human_sla">
+        <dc:Bounds x="248" y="142" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="164" y="183" width="84" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNEdge id="BPMNEdge_f_start" bpmnElement="f_start">
+        <di:waypoint x="116" y="120" />
+        <di:waypoint x="216" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_f_done" bpmnElement="f_done">
+        <di:waypoint x="316" y="120" />
+        <di:waypoint x="416" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_f_sla" bpmnElement="f_sla">
+        <di:waypoint x="266" y="178" />
+        <di:waypoint x="266" y="280" />
+        <di:waypoint x="416" y="280" />
+      </bpmndi:BPMNEdge>
+    </bpmndi:BPMNPlane>
+  </bpmndi:BPMNDiagram>
+</bpmn:definitions>

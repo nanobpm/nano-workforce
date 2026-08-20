@@ -1,0 +1,19 @@
+{
+  "id": "delivery-human-ack",
+  "schemaVersion": 18,
+  "type": "default",
+  "components": [
+    {
+      "type": "textarea",
+      "key": "prompt",
+      "label": "Now do this",
+      "description": "The scheduled human step this delivery graph is waiting on. Complete it once done — this node emits nothing (the degenerate click-done case) and simply unblocks its dependents.",
+      "readonly": true
+    },
+    {
+      "type": "textarea",
+      "key": "note",
+      "label": "Note (optional)"
+    }
+  ]
+}

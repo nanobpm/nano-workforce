@@ -19,6 +19,7 @@
 // it open.
 import type { DataLayer } from "@nanobpm/urban";
 import { CONFORMANCE_ESCALATION_ELEMENT } from "./conformance.ts";
+import { DELIVERY_HUMAN_ELEMENT } from "./deliveryHuman.ts";
 import { FEATURE_BLOCKED_ELEMENT, FEATURE_ESCALATION_ELEMENT, type FeatureEscalationRow } from "./feature.ts";
 import type { PlanReview } from "./plan.ts";
 import type { TrialMergeAuditRow } from "./trialMerge.ts";
@@ -76,13 +77,14 @@ export const USER_TASK_KIND_LABELS: Readonly<Record<string, string>> = {
   [PR_WAIT_ANSWER_ELEMENT]: "PR review",
   [PR_WAIT_MERGE_ANSWER_ELEMENT]: "PR merge",
   [CONFORMANCE_ESCALATION_ELEMENT]: "Conformance review",
+  [DELIVERY_HUMAN_ELEMENT]: "Delivery: human step",
 };
 
 /** The denormalised context the poller has resolved for an open escalation user task. */
 export interface UserTaskContext {
   userTaskKey: string;
   elementId: string;
-  subjectType: "feature" | "plan" | "pr";
+  subjectType: "feature" | "plan" | "pr" | "delivery";
   subjectKey: string;
   /** The subject's human-readable title from its own row (`feature_runs`/`plans`/`pull_requests`.
    *  `title`). Optional/blank tolerated — `buildUserTaskRow` coalesces it to `subjectKey` so the
