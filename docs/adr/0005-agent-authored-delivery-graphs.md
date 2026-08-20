@@ -168,7 +168,8 @@ publish packages*, submission **defaults to propose-preview-approve** — the re
 do, where it stops for humans) is rendered and a human approves before dispatch; that approval is itself
 just the first human node. Submission carries an **idempotency key** so a re-POST cannot double-launch,
 and every **side-effecting node (`connector`, merge, publish) carries a dedupe key** and tolerates
-at-least-once execution (mirroring `scripts/publish.mjs`'s "skip already-published" discipline) so a
+at-least-once execution (mirroring the release workflow's `npx semantic-release`
+"skip already-published" discipline — `.github/workflows/release.yml`) so a
 resume cannot double-fire.
 
 ## Consequences
