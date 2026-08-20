@@ -1,3 +1,10 @@
+## [0.106.2](https://github.com/nanobpm/nano-workforce/compare/v0.106.1...v0.106.2) (2026-08-20)
+
+
+### Bug Fixes
+
+* **velocity:** bucket burn-up by local timezone, not UTC ([#361](https://github.com/nanobpm/nano-workforce/issues/361)) ([#362](https://github.com/nanobpm/nano-workforce/issues/362)) ([84d842a](https://github.com/nanobpm/nano-workforce/commit/84d842ad443fba8a0c399bdd5f4fca466da4a21c))
+
 ## [0.106.1](https://github.com/nanobpm/nano-workforce/compare/v0.106.0...v0.106.1) (2026-08-20)
 
 
