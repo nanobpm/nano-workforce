@@ -1,3 +1,10 @@
+# [0.116.0](https://github.com/nanobpm/nano-workforce/compare/v0.115.0...v0.116.0) (2026-08-20)
+
+
+### Features
+
+* replace deterministic scope regex with a scope-integrity agent classifier ([#403](https://github.com/nanobpm/nano-workforce/issues/403)) ([588b869](https://github.com/nanobpm/nano-workforce/commit/588b8699ea738ff0772f23d68bc051e8ff417d49)), closes [#395](https://github.com/nanobpm/nano-workforce/issues/395) [#395](https://github.com/nanobpm/nano-workforce/issues/395) [#395](https://github.com/nanobpm/nano-workforce/issues/395) [398/#399](https://github.com/nanobpm/nano-workforce/issues/399) [#395](https://github.com/nanobpm/nano-workforce/issues/395) [#395](https://github.com/nanobpm/nano-workforce/issues/395) [#395](https://github.com/nanobpm/nano-workforce/issues/395)
+
 # [0.115.0](https://github.com/nanobpm/nano-workforce/compare/v0.114.1...v0.115.0) (2026-08-20)
 
 
