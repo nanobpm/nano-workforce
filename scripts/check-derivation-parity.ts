@@ -29,7 +29,7 @@
 // REJECTED by the engine. If any red path fails to fire (the diff misses drift, or the engine
 // accepts garbage), the gate fails — the oracle must be able to say no.
 
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -40,7 +40,8 @@ import { assertDerivationParity } from "@nanobpm/workflow/test-support";
 import { PORTS } from "../test/derivation-parity/flows.ts";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const goldenPath = (model: string): string => join(REPO_ROOT, "resources", "processes", `${model}.bpmn`);
+const PROCESSES_DIR = join(REPO_ROOT, "resources", "processes");
+const goldenPath = (model: string): string => join(PROCESSES_DIR, `${model}.bpmn`);
 
 type WasmEngine = Awaited<ReturnType<typeof createWasmEngineClient>>;
 
@@ -112,6 +113,49 @@ async function proveOracleFiresRed(engine: WasmEngine, errors: string[]): Promis
   }
 }
 
+/** Assert PORTS covers EXACTLY the checked-in goldens under
+ *  `resources/processes/*.bpmn`. Without this the guard's "full corpus" claim is
+ *  unproven: a newly-added golden with no PORTS entry would be silently skipped
+ *  (eroding coverage while still reporting OK), and a stale PORTS entry for a
+ *  deleted golden would iterate a model that no longer exists. Both directions
+ *  fail the gate. */
+function assertPortsCoverGoldens(errors: string[]): void {
+  const goldens = readdirSync(PROCESSES_DIR)
+    .filter((f) => f.endsWith(".bpmn"))
+    .map((f) => f.slice(0, -".bpmn".length));
+  const ported = PORTS.map((p) => p.model);
+
+  const missing = goldens.filter((g) => !ported.includes(g)).sort();
+  if (missing.length > 0) {
+    errors.push(
+      `  PORTS is missing ${missing.length} checked-in golden(s) under resources/processes ` +
+        `(${missing.join(", ")}) — add a derived flow or a documented blockedReason so the ` +
+        `"full corpus" guard can't silently skip them.`,
+    );
+  }
+
+  const orphaned = ported.filter((m) => !goldens.includes(m)).sort();
+  if (orphaned.length > 0) {
+    errors.push(
+      `  PORTS references ${orphaned.length} model(s) with no golden under resources/processes ` +
+        `(${orphaned.join(", ")}) — remove the stale entry or restore its golden.`,
+    );
+  }
+
+  const seen = new Set<string>();
+  const duplicated = new Set<string>();
+  for (const m of ported) {
+    if (seen.has(m)) duplicated.add(m);
+    seen.add(m);
+  }
+  if (duplicated.size > 0) {
+    errors.push(
+      `  PORTS has duplicate entries for ${duplicated.size} model(s) (${[...duplicated].sort().join(", ")}) — ` +
+        `each golden must appear exactly once.`,
+    );
+  }
+}
+
 async function main(): Promise<void> {
   const errors: string[] = [];
   const engine = await createWasmEngineClient();
@@ -121,6 +165,7 @@ async function main(): Promise<void> {
   let parked = 0;
 
   try {
+    assertPortsCoverGoldens(errors);
     await proveOracleFiresRed(engine, errors);
 
     for (const port of PORTS) {
