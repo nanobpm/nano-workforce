@@ -1221,6 +1221,249 @@ components:
             everyMs: { type: integer, description: Interval between poll attempts (ms). }
             timeoutMs: { type: integer, description: Bounded budget (ms) before the gate escalates. }
             backoff: { type: string, enum: [fixed, exponential], description: Backoff shape between attempts. }
+    DeliveryGraph:
+      description: >-
+        An agent-authored delivery graph (ADR 0005) — the SINGLE agent-facing artifact for a
+        heterogeneous, partly-human, cross-repo delivery runbook. It is DATA, never an executable
+        artifact: a JSON DAG whose nodes each name a `kind` from a CLOSED allowlist
+        (`agent`/`wait`/`human`/`connector` — Decision 1/2, the trust boundary) and whose `edges`
+        name DISCOVERED facts (Decision 3). Ingest validates the SHAPE here and the SEMANTICS
+        (acyclicity, edge integrity, fact resolution) in the pure `validateDeliveryGraph`
+        (`app/deliveryGraph.ts`). This slice (S0) defines the vocabulary + validation surface ONLY —
+        no compiler, dispatch, or execution (those land in later slices).
+      type: object
+      additionalProperties: false
+      required:
+        - nodes
+      properties:
+        name:
+          type: string
+          maxLength: 255
+          description: OPTIONAL human-readable label for the graph (shown in the rendered preview).
+        nodes:
+          type: array
+          minItems: 1
+          maxItems: 256
+          items:
+            $ref: "#/components/schemas/DeliveryNode"
+          description: >-
+            The graph's nodes. Each carries a unique `id` and a `kind` from the closed allowlist,
+            plus its per-kind config and its typed `emits[]` declaration. Node ids must be unique
+            across the graph (enforced by `validateDeliveryGraph`).
+        edges:
+          type: array
+          maxItems: 1024
+          items:
+            $ref: "#/components/schemas/DeliveryEdge"
+          description: >-
+            The dependency edges — the graph's discovered-fact topology (Decision 3). Each edge means
+            "`to` proceeds once fact `from` about the upstream node is observable". `from` is either a
+            bare `<nodeId>` (the degenerate "wait for the upstream node's completion" fact) or a
+            qualified `<nodeId>.<fact>` referencing one of that node's declared `emits`. Omit/`[]` for
+            a set of independent (root) nodes. The edge set must be a DAG.
+    DeliveryNode:
+      description: >-
+        One node in a delivery graph. A discriminated union on `kind` over the CLOSED allowlist; the
+        matching per-kind config object (`agent`/`wait`/`human`/`connector`) is REQUIRED and names the
+        engine-native body the node delegates to (Decision 2 — the graph schedules, it does not
+        re-implement execution).
+      oneOf:
+        - $ref: "#/components/schemas/DeliveryNodeAgent"
+        - $ref: "#/components/schemas/DeliveryNodeWait"
+        - $ref: "#/components/schemas/DeliveryNodeHuman"
+        - $ref: "#/components/schemas/DeliveryNodeConnector"
+      discriminator:
+        propertyName: kind
+        mapping:
+          agent: "#/components/schemas/DeliveryNodeAgent"
+          wait: "#/components/schemas/DeliveryNodeWait"
+          human: "#/components/schemas/DeliveryNodeHuman"
+          connector: "#/components/schemas/DeliveryNodeConnector"
+    DeliveryFact:
+      description: >-
+        A typed output a node declares it will EMIT (ADR 0005 Decision 3/4 — emitted-fact typing).
+        A downstream edge references it as `from: "<nodeId>.<fact>"`, so a bind is validated against
+        this declaration, not stringly. A "click done" human node or a pass-through node declares no
+        facts (`emits` absent/empty) — the degenerate no-emit case.
+      type: object
+      additionalProperties: false
+      required:
+        - name
+        - type
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: '^[A-Za-z_][A-Za-z0-9_]*$'
+          description: The fact's identifier, referenced downstream as `<nodeId>.<name>`. Must be unique within the node.
+        type:
+          type: string
+          enum: [string, number, boolean, artifact, version, url]
+          description: >-
+            The fact's declared type. `artifact` is a `pkg@version` handle, `version` a bare version
+            string, `url` a location — mirrors the values `capability`/`pr` probes late-bind.
+        description:
+          type: string
+          maxLength: 512
+          description: OPTIONAL human note describing what the fact carries.
+    DeliveryNodeCommon:
+      type: object
+      properties:
+        id:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: '^[A-Za-z_][A-Za-z0-9_.-]*$'
+          description: The node's identifier, unique within the graph and referenced by edges.
+        emits:
+          type: array
+          maxItems: 32
+          items:
+            $ref: "#/components/schemas/DeliveryFact"
+          description: >-
+            The typed facts this node hands forward when it completes (Decision 3/4). Absent/empty for
+            a node that emits nothing. Downstream edges bind these via `from: "<nodeId>.<fact>"`.
+    DeliveryNodeAgent:
+      description: >-
+        An `agent` node — a worker executes an agent job type (the existing fan-out body). Bounded
+        (timeout → escalate) and resumable like every node.
+      allOf:
+        - $ref: "#/components/schemas/DeliveryNodeCommon"
+        - type: object
+          additionalProperties: false
+          required:
+            - id
+            - kind
+            - agent
+          properties:
+            id: { type: string }
+            kind: { type: string, enum: [agent] }
+            emits: { type: array, items: { $ref: "#/components/schemas/DeliveryFact" } }
+            agent:
+              type: object
+              additionalProperties: false
+              required:
+                - jobType
+              properties:
+                jobType:
+                  type: string
+                  minLength: 1
+                  description: The agent job type a worker executes for this node (e.g. `senior:feature`).
+                prompt:
+                  type: string
+                  maxLength: 20000
+                  description: OPTIONAL steering prompt appended to the node's job brief.
+    DeliveryNodeWait:
+      description: >-
+        A `wait` node — a durable `ReadinessProbe` (ADR 0001 §2) watching an external fact. Reuses the
+        existing `ReadinessProbe` shape verbatim (Decision 3 — never a second wait loop); the `pr`
+        merge-state kind is added to that shape by slice S2 and flows in here automatically.
+      allOf:
+        - $ref: "#/components/schemas/DeliveryNodeCommon"
+        - type: object
+          additionalProperties: false
+          required:
+            - id
+            - kind
+            - wait
+          properties:
+            id: { type: string }
+            kind: { type: string, enum: [wait] }
+            emits: { type: array, items: { $ref: "#/components/schemas/DeliveryFact" } }
+            wait:
+              $ref: "#/components/schemas/ReadinessProbe"
+    DeliveryNodeHuman:
+      description: >-
+        A `human` node — a scheduled user task + form (ADR 0002 machinery promoted from exception to
+        node, Decision 4). Surfaces "now do X" on the Tasks inbox, blocks dependents, is answerable by
+        a human OR an agent, is SLA-bounded, and can EMIT a typed fact its form captures.
+      allOf:
+        - $ref: "#/components/schemas/DeliveryNodeCommon"
+        - type: object
+          additionalProperties: false
+          required:
+            - id
+            - kind
+          properties:
+            id: { type: string }
+            kind: { type: string, enum: [human] }
+            emits: { type: array, items: { $ref: "#/components/schemas/DeliveryFact" } }
+            human:
+              type: object
+              additionalProperties: false
+              description: >-
+                OPTIONAL human-node config. `formKey` explicitly attaches a form (else a form is
+                selected by node category, else a generic emit-capturing fallback — resolved in S3).
+                The node's typed output is declared via the node-level `emits[]`.
+              properties:
+                formKey:
+                  type: string
+                  minLength: 1
+                  description: OPTIONAL explicit form to attach at authoring time (specific-else-generic resolution, S3).
+                prompt:
+                  type: string
+                  maxLength: 20000
+                  description: OPTIONAL instruction shown to the human/agent completing the task ("now do X").
+    DeliveryNodeConnector:
+      description: >-
+        A `connector` node — an automated, side-effecting outbound action (the connector I/O surface).
+        Side-effecting, so it carries a `dedupeKey` and tolerates at-least-once execution. The
+        `payload` schema is a minimal forward-declared stub in this slice (ADR 0005 non-goal — the
+        concrete connector I/O lands later).
+      allOf:
+        - $ref: "#/components/schemas/DeliveryNodeCommon"
+        - type: object
+          additionalProperties: false
+          required:
+            - id
+            - kind
+            - connector
+          properties:
+            id: { type: string }
+            kind: { type: string, enum: [connector] }
+            emits: { type: array, items: { $ref: "#/components/schemas/DeliveryFact" } }
+            connector:
+              type: object
+              additionalProperties: false
+              required:
+                - target
+              properties:
+                target:
+                  type: string
+                  minLength: 1
+                  description: The connector action target (forward-declared — the concrete scheme lands in a later slice).
+                dedupeKey:
+                  type: string
+                  minLength: 1
+                  description: >-
+                    OPTIONAL idempotency key so an at-least-once resume cannot double-fire this
+                    side-effecting node (ADR 0005 Decision 7). Author-supplied or graph-derived.
+                payload:
+                  type: object
+                  additionalProperties: true
+                  description: Minimal forward-declared payload stub — the concrete connector payload schema is deferred (ADR non-goal).
+    DeliveryEdge:
+      description: >-
+        A dependency edge — "`to` proceeds once fact `from` is observable" (ADR 0005 Decision 3).
+        `from` is either a bare `<nodeId>` (wait for the upstream node's completion fact) or a
+        qualified `<nodeId>.<fact>` referencing a declared `emits` fact of that node. Both endpoints
+        must resolve to a node in the graph, the referenced fact must be declared, and the whole edge
+        set must be a DAG — all enforced by `validateDeliveryGraph`.
+      type: object
+      additionalProperties: false
+      required:
+        - from
+        - to
+      properties:
+        from:
+          type: string
+          minLength: 1
+          description: The upstream endpoint — `<nodeId>` (completion) or `<nodeId>.<fact>` (a declared emitted fact).
+        to:
+          type: string
+          minLength: 1
+          description: The dependent node's id — proceeds once `from` is observed.
     FeatureStart:
       description: The start-feature request body — a SINGLE-issue feature run. Names the target issue
         by EXACTLY ONE of `issue` (an `owner/repo#123` reference) or `url` (a bare issue URL), plus a
