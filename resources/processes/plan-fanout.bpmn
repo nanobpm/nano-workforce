@@ -380,7 +380,7 @@
         <bpmn:incoming>w_answerLoop</bpmn:incoming>
         <bpmn:outgoing>w_toGw</bpmn:outgoing>
       </bpmn:serviceTask>
-      <bpmn:exclusiveGateway id="w_gw" name="clean terminal?" default="w_done">
+      <bpmn:exclusiveGateway id="w_gw" name="clean terminal?" default="w_escalate">
         <bpmn:incoming>w_toGw</bpmn:incoming>
         <bpmn:outgoing>w_escalate</bpmn:outgoing>
         <bpmn:outgoing>w_done</bpmn:outgoing>
@@ -435,11 +435,11 @@
       <bpmn:sequenceFlow id="w_noNeeds" name="none" sourceRef="w_gw_needs" targetRef="implement-task" />
       <bpmn:sequenceFlow id="w_capsResolved" sourceRef="wait-caps-resolved" targetRef="implement-task" />
       <bpmn:sequenceFlow id="w_toGw" sourceRef="implement-task" targetRef="w_gw" />
-      <bpmn:sequenceFlow id="w_escalate" name="not clean" sourceRef="w_gw" targetRef="record-wave-escalation">
-        <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=not(status = "opened" or status = "blocked" or status = "skipped")</bpmn:conditionExpression>
-      </bpmn:sequenceFlow>
+      <bpmn:sequenceFlow id="w_escalate" name="not clean" sourceRef="w_gw" targetRef="record-wave-escalation" />
       <bpmn:sequenceFlow id="w_toEscalationTask" sourceRef="record-wave-escalation" targetRef="feature-escalation" />
-      <bpmn:sequenceFlow id="w_done" name="done" sourceRef="w_gw" targetRef="w_end" />
+      <bpmn:sequenceFlow id="w_done" name="done" sourceRef="w_gw" targetRef="w_end">
+        <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=status = "opened" or status = "blocked" or status = "skipped"</bpmn:conditionExpression>
+      </bpmn:sequenceFlow>
       <bpmn:sequenceFlow id="w_toAnswerGw" sourceRef="feature-escalation" targetRef="w_gw_answer" />
       <bpmn:sequenceFlow id="w_answerLoop" name="answer" sourceRef="w_gw_answer" targetRef="implement-task">
         <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=resolution = "answer"</bpmn:conditionExpression>
@@ -962,7 +962,7 @@
       <bpmndi:BPMNShape id="BPMNShape_w_gw_needs" bpmnElement="w_gw_needs" isMarkerVisible="true">
         <dc:Bounds x="2642" y="135" width="50" height="50" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="2570" y="190" width="74" height="28" />
+          <dc:Bounds x="2630" y="102" width="74" height="28" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_w_gw_caps" bpmnElement="w_gw_caps" isMarkerVisible="true">
@@ -989,19 +989,19 @@
       <bpmndi:BPMNShape id="BPMNShape_w_gw" bpmnElement="w_gw" isMarkerVisible="true">
         <dc:Bounds x="3278" y="135" width="50" height="50" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="3228" y="190" width="70" height="28" />
+          <dc:Bounds x="3268" y="102" width="70" height="28" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_record-wave-escalation" bpmnElement="record-wave-escalation">
-        <dc:Bounds x="3428" y="280" width="100" height="80" />
+        <dc:Bounds x="3428" y="120" width="100" height="80" />
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_feature-escalation" bpmnElement="feature-escalation">
-        <dc:Bounds x="3628" y="280" width="100" height="80" />
+        <dc:Bounds x="3628" y="120" width="100" height="80" />
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_w_gw_answer" bpmnElement="w_gw_answer" isMarkerVisible="true">
-        <dc:Bounds x="3828" y="295" width="50" height="50" />
+        <dc:Bounds x="3828" y="135" width="50" height="50" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="3825" y="276" width="56" height="14" />
+          <dc:Bounds x="3825" y="116" width="56" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_w_end" bpmnElement="w_end">
@@ -1011,9 +1011,9 @@
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_be_feature_sla" bpmnElement="be_feature_sla">
-        <dc:Bounds x="3660" y="342" width="36" height="36" />
+        <dc:Bounds x="3660" y="182" width="36" height="36" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="3636" y="423" width="84" height="14" />
+          <dc:Bounds x="3636" y="263" width="84" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
       <bpmndi:BPMNEdge id="BPMNEdge_w_toCapsPrepare" bpmnElement="w_toCapsPrepare">
@@ -1035,11 +1035,26 @@
         <di:waypoint x="3178" y="160" />
         <di:waypoint x="3278" y="160" />
       </bpmndi:BPMNEdge>
-      <bpmndi:BPMNEdge id="BPMNEdge_w_done" bpmnElement="w_done">
+      <bpmndi:BPMNEdge id="BPMNEdge_w_escalate" bpmnElement="w_escalate">
         <di:waypoint x="3328" y="160" />
+        <di:waypoint x="3428" y="160" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="3346" y="168" width="64" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_w_toEscalationTask" bpmnElement="w_toEscalationTask">
+        <di:waypoint x="3528" y="160" />
+        <di:waypoint x="3628" y="160" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_w_toAnswerGw" bpmnElement="w_toAnswerGw">
+        <di:waypoint x="3728" y="160" />
+        <di:waypoint x="3828" y="160" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_w_abandon" bpmnElement="w_abandon">
+        <di:waypoint x="3878" y="160" />
         <di:waypoint x="3978" y="160" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="3637" y="138" width="32" height="14" />
+          <dc:Bounds x="3902" y="168" width="53" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_w_capsToWait" bpmnElement="w_capsToWait">
@@ -1050,14 +1065,6 @@
         <di:waypoint x="2978" y="320" />
         <di:waypoint x="3128" y="320" />
         <di:waypoint x="3128" y="200" />
-      </bpmndi:BPMNEdge>
-      <bpmndi:BPMNEdge id="BPMNEdge_w_abandon" bpmnElement="w_abandon">
-        <di:waypoint x="3878" y="320" />
-        <di:waypoint x="3996" y="320" />
-        <di:waypoint x="3996" y="178" />
-        <bpmndi:BPMNLabel>
-          <dc:Bounds x="3911" y="298" width="53" height="14" />
-        </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_w_toWaitCaps" bpmnElement="w_toWaitCaps">
         <di:waypoint x="2667" y="185" />
@@ -1072,48 +1079,41 @@
         <di:waypoint x="2817" y="480" />
         <di:waypoint x="2942" y="480" />
       </bpmndi:BPMNEdge>
-      <bpmndi:BPMNEdge id="BPMNEdge_w_escalate" bpmnElement="w_escalate">
-        <di:waypoint x="3303" y="185" />
-        <di:waypoint x="3303" y="320" />
-        <di:waypoint x="3428" y="320" />
-        <bpmndi:BPMNLabel>
-          <dc:Bounds x="3308" y="246" width="64" height="14" />
-        </bpmndi:BPMNLabel>
-      </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_w_capsTimeout" bpmnElement="w_capsTimeout">
-        <di:waypoint x="2942" y="480" />
-        <di:waypoint x="2286" y="480" />
-        <di:waypoint x="2286" y="100" />
+        <di:waypoint x="2978" y="480" />
+        <di:waypoint x="4034" y="480" />
+        <di:waypoint x="4034" y="100" />
         <di:waypoint x="3678" y="100" />
-        <di:waypoint x="3678" y="280" />
+        <di:waypoint x="3678" y="120" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="2291" y="283" width="63" height="14" />
+          <dc:Bounds x="3966" y="283" width="63" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
-      <bpmndi:BPMNEdge id="BPMNEdge_w_toEscalationTask" bpmnElement="w_toEscalationTask">
-        <di:waypoint x="3528" y="320" />
-        <di:waypoint x="3628" y="320" />
-      </bpmndi:BPMNEdge>
-      <bpmndi:BPMNEdge id="BPMNEdge_w_toAnswerGw" bpmnElement="w_toAnswerGw">
-        <di:waypoint x="3728" y="320" />
-        <di:waypoint x="3828" y="320" />
-      </bpmndi:BPMNEdge>
-      <bpmndi:BPMNEdge id="BPMNEdge_w_sla" bpmnElement="w_sla">
-        <di:waypoint x="3678" y="378" />
-        <di:waypoint x="3678" y="398" />
-        <di:waypoint x="3996" y="398" />
+      <bpmndi:BPMNEdge id="BPMNEdge_w_done" bpmnElement="w_done">
+        <di:waypoint x="3303" y="185" />
+        <di:waypoint x="3303" y="240" />
+        <di:waypoint x="3996" y="240" />
         <di:waypoint x="3996" y="178" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="3753" y="365" width="88" height="28" />
+          <dc:Bounds x="3909" y="218" width="32" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_w_sla" bpmnElement="w_sla">
+        <di:waypoint x="3678" y="218" />
+        <di:waypoint x="3678" y="238" />
+        <di:waypoint x="3996" y="238" />
+        <di:waypoint x="3996" y="178" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="3753" y="205" width="88" height="28" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_w_answerLoop" bpmnElement="w_answerLoop">
-        <di:waypoint x="3853" y="345" />
-        <di:waypoint x="3853" y="400" />
-        <di:waypoint x="3128" y="400" />
+        <di:waypoint x="3853" y="185" />
+        <di:waypoint x="3853" y="240" />
+        <di:waypoint x="3128" y="240" />
         <di:waypoint x="3128" y="200" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="3466" y="378" width="49" height="14" />
+          <dc:Bounds x="3191" y="218" width="49" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
     </bpmndi:BPMNPlane>
