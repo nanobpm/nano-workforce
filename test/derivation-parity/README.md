@@ -26,7 +26,7 @@ behind an upstream construct, and do **not** relax to node-surface parity_:
 
 | Model              | Top-level start/end | Status |
 | ------------------ | ------------------- | ------ |
-| `retro`            | 1 / 1               | ✅ ported — green whole-model parity |
+| `retro`            | 1 / 1               | ⛔ parked — class 3 (general service-task ioMapping) |
 | `convergence-loop` | 1 / 1               | ⛔ parked — class 2 (arbitrary graph) |
 | `spine-demo`       | 1 / 2               | ⛔ parked — class 1 (multi start/end) |
 | `readiness-gate`   | 1 / 5               | ⛔ parked — class 1 (multi start/end) |
@@ -34,11 +34,13 @@ behind an upstream construct, and do **not** relax to node-surface parity_:
 | `merge-loop`       | 1 / 2               | ⛔ parked — class 1 (multi start/end) |
 | `plan-fanout`      | 3 / 3               | ⛔ parked — class 1 (multi start/end) |
 
-`retro` — a linear single-start/single-end agent pipeline — is fully ported and
-green under `assertDerivationParity`, giving the parity harness real green
-coverage on `main`. The other six are parked in **two** distinct blocker classes,
-each awaiting an upstream `@nanobpm/workflow` (nano-ide) construct + re-release
-(never a golden edit, never relaxed acceptance).
+`retro` was a green full-parity port — a linear single-start/single-end agent
+pipeline — until the conformance work (#355/#356) added a conformance-escalation
+subgraph to its golden, which introduced a service task carrying a general
+`<zeebe:ioMapping>` the stock `task` builder cannot emit (class 3). All seven
+goldens are now parked, across **three** distinct blocker classes, each awaiting
+an upstream `@nanobpm/workflow` (nano-ide) construct + re-release (never a golden
+edit, never relaxed acceptance).
 
 ## The blockers
 
@@ -81,14 +83,33 @@ pinned by a diagnostic in `derivation-parity.test.ts`:
 The fix is an **arbitrary-graph / explicit-join (named-target)** builder upstream
 in `@nanobpm/workflow` — a **superset** of the class-1 gap.
 
+### Class 3 — general service-task ioMapping (`retro`)
+
+`retro` clears classes 1 and 2 (single start/end, structured topology), but its
+golden's `record-conformance-ack` service task carries a **general**
+`<zeebe:ioMapping>` — inputs `=planKey`→`planKey` and
+`=if (is defined(note)) then note else null`→`note`. `@nanobpm/workflow@0.12.0`'s
+`task` builder only emits an ioMapping as a side effect of a `prompt.append` (a
+single `appendPrompt` input); there is no way to declare arbitrary input/output
+mappings on a service task. Every other element of the golden IS expressible
+(`w.task`+prompt, `w.branch` for the `deviations?` gateway, `w.human` for the
+`conformance-escalation` userTask, envelopes) — this one service-task ioMapping
+is the sole gap. The `retro golden needs a general service-task ioMapping the
+stock builder cannot emit` diagnostic pins both halves (the golden needs it; the
+stock builder cannot produce it).
+
+The fix is a general `io: { input?, output? }` on the external `task`/`run`
+builder upstream in `@nanobpm/workflow` (**nano-ide#405**).
+
 ## Resuming this slice
 
-The follow-up upstream slice (opened in **nanobpm/nano-ide** per decision path
+The follow-up upstream slices (opened in **nanobpm/nano-ide** per decision path
 (a)) must add:
 
 - a terminal / explicit-end (+ multi-start) construct (unblocks class 1), **and**
 - an arbitrary-graph / explicit-join (named-target) builder (unblocks class 2 —
-  `convergence-loop`).
+  `convergence-loop`), **and**
+- a general service-task `io` mapping (unblocks class 3 — `retro`; nano-ide#405).
 
 Then, on a resumed run here:
 

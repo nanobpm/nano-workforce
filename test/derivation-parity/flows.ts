@@ -6,16 +6,12 @@
 // proving the code-first and model-first representations agree.
 //
 // STATUS (per the human decision on the nano-ide#320 escalation — (c)+(a): land
-// the structurally-derivable goldens NOW at full whole-model parity, park the
-// rest pending an upstream construct, and do NOT relax to node-surface parity):
+// the structurally-derivable goldens at full whole-model parity, park the rest
+// pending an upstream construct, and do NOT relax to node-surface parity):
 //
-//   • retro — PORTED and green under full `assertDerivationParity`. A linear
-//     single-start/single-end agent pipeline that the structured `defineFlow`
-//     compiler reproduces exactly.
-//
-//   • The other six are `blockedReason`-parked, in TWO distinct classes, each
-//     awaiting an upstream `@nanobpm/workflow` (nano-ide) construct + re-release
-//     — never a golden edit and never relaxed acceptance:
+//   • All seven goldens are currently `blockedReason`-parked, in THREE distinct
+//     classes, each awaiting an upstream `@nanobpm/workflow` (nano-ide) construct
+//     + re-release — never a golden edit and never relaxed acceptance:
 //
 //     (1) MULTI top-level start/end (spine-demo, readiness-gate, feature,
 //         merge-loop, plan-fanout). `@nanobpm/workflow@0.12.0` derives EXACTLY
@@ -38,10 +34,22 @@
 //         arbitrary-graph / explicit-join (named-target) builder — a SUPERSET of
 //         the class-(1) gap.
 //
+//     (3) GENERAL service-task ioMapping (retro). retro WAS a green full-parity
+//         port (a linear gather → synthesize → record agent pipeline) until the
+//         conformance work (nano-workforce #355/#356) added a conformance-
+//         escalation subgraph to its golden. Every new element ports with the
+//         stock builder (`w.branch` for the `deviations?` gateway, `w.human` for
+//         the `conformance-escalation` userTask, `w.task`+prompt/envelopes for
+//         the service tasks) EXCEPT `record-conformance-ack`: a service task with
+//         a general <zeebe:ioMapping> (inputs `=planKey`→planKey and
+//         `=if (is defined(note)) then note else null`→note). @nanobpm/workflow@
+//         0.12.0's `task` builder only emits an ioMapping via a `prompt.append`
+//         (a single `appendPrompt` input), so this task is not derivable. Needs a
+//         general `io` on the task/run builder upstream (nano-ide#405).
+//
 // A resumed run flips any parked model to a real `flow` once the corresponding
 // upstream construct lands and `@nanobpm/workflow` is bumped past 0.12.0.
 
-import { defineFlow, envelope } from "@nanobpm/workflow";
 import type { DeclarativeFlow } from "@nanobpm/workflow";
 
 /** One model's port entry: the golden basename plus EITHER the derived flow
@@ -64,36 +72,32 @@ export type PortEntry =
       readonly blockedReason: string;
     };
 
-// ── retro ────────────────────────────────────────────────────────────────────
-// A linear agent pipeline (single start, single end): gather → synthesize
-// (agent, prompt-bound) → record. Exercises the S4 agent linked-resource prompt
-// binding (`w.task(..., { prompt })`) and typed data envelopes lifted to the
-// per-task `io.nanobpm.dataEnvelope.in` properties.
+// ── retro (PARKED — class 3) ─────────────────────────────────────────────────
+// retro WAS a green full-parity port — a linear gather → synthesize → record
+// agent pipeline. The conformance work (nano-workforce #355/#356) then added a
+// conformance-escalation subgraph to the golden: a `deviations?` exclusive
+// gateway, a `conformance-escalation` userTask, and `senior:conformance` /
+// `pr.conformance-record` / `pr.conformance-ack` service tasks. All of those ARE
+// expressible with the stock builder (`w.branch`, `w.human`, `w.task`+prompt,
+// envelopes) EXCEPT `record-conformance-ack`: it carries a general
+// <zeebe:ioMapping> (inputs `=planKey`→planKey and
+// `=if (is defined(note)) then note else null`→note), which
+// @nanobpm/workflow@0.12.0's `task` builder cannot emit — it only produces an
+// ioMapping via a `prompt.append` (a single `appendPrompt` input). So retro
+// regresses to a parked model pending the upstream construct: a general `io` on
+// the external `task`/`run` builder (nano-ide#405). It flips back to a green
+// port once that lands and @nanobpm/workflow is bumped past 0.12.0.
 
-const RetroGatherIn = envelope("RetroGatherIn", { planKey: "string" });
-const RetroRecordIn = envelope("RetroRecordIn", {
-  planKey: "string",
-  retroLearnings: { type: "integer", optional: true },
-  status: { type: "string", optional: true },
-  pr: { type: "string", optional: true },
-  summary: { type: "string", optional: true },
-});
-
-const retro = defineFlow(
-  "retro",
-  {
-    gather: { in: RetroGatherIn },
-    record: { in: RetroRecordIn },
-  },
-  (w) => {
-    w.task("gather", { jobType: "pr.retro-gather" });
-    w.task("synthesize", {
-      jobType: "senior:retro",
-      prompt: { resourceId: "retro.md", bindingType: "latest", append: "=retroDigest" },
-    });
-    w.task("record", { jobType: "pr.retro-record" });
-  },
-);
+const RETRO_IO_BLOCK =
+  "blocked (general service-task ioMapping): retro's golden gained a " +
+  "conformance-escalation subgraph whose `record-conformance-ack` service task " +
+  "carries a general <zeebe:ioMapping> (inputs =planKey→planKey and " +
+  "=if (is defined(note)) then note else null→note). @nanobpm/workflow@0.12.0's " +
+  "`task` builder only emits an ioMapping via a `prompt.append` (a single " +
+  "appendPrompt input), so this task is not derivable. Every other element of " +
+  "the golden IS expressible (w.task+prompt, w.branch, w.human, envelopes). " +
+  "Awaits a general `io` on the task/run builder upstream in @nanobpm/workflow " +
+  "(nano-ide#405).";
 
 /** The single-top-level-end/start compiler limitation, reused as the
  *  `blockedReason` for every golden that has more than one top-level start
@@ -107,7 +111,7 @@ const MULTI_START_END_BLOCK =
 
 /** All seven ports, keyed by model, in the epic's stated authoring order. */
 export const PORTS: readonly PortEntry[] = [
-  { model: "retro", flow: retro },
+  { model: "retro", blockedReason: RETRO_IO_BLOCK },
   {
     model: "spine-demo",
     blockedReason: `${MULTI_START_END_BLOCK} (spine-demo: 1 start, 2 ends)`,
