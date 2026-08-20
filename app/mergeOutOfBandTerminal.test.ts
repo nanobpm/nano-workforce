@@ -12,7 +12,7 @@
 // transition. Each wait subscribes to a DIFFERENT catch, so the pre-check must publish the escape
 // message THAT wait correlates to; this test asserts the class over every (status × merged/closed).
 import { test } from "node:test";
-import { assert, assertEquals } from "#test-assert";
+import { assertEquals } from "#test-assert";
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { pollMerges } from "./service.ts";
 
