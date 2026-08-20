@@ -10,12 +10,12 @@ name: Whole-repo invariants (merge-skew guard)
 # and poisoned the next unrelated PR to touch the same job.
 #
 # This lean workflow re-asserts those whole-repo invariants where the merge actually happens:
-#   - `merge_queue`  — the queue's PROSPECTIVE merged commit, so a skew is blocked BEFORE it lands.
+#   - `merge_group`  — the queue's PROSPECTIVE merged commit, so a skew is blocked BEFORE it lands.
 #   - `push: [main]` — a fast backstop that fails a `main`-scoped build within minutes if something
 #                      slipped through, instead of first surfacing on an unrelated open PR.
 #   - `schedule`     — a daily catch-all for any skew introduced by a merge that bypassed the queue.
 on:
-  merge_queue:
+  merge_group:
   push:
     branches: [main]
   schedule:
