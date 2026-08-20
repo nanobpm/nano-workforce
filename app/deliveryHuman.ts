@@ -31,7 +31,7 @@
 //      (`humanEmitBind`, mirroring the probe `bind`) so a downstream `capability`/`npm`/`pr` edge
 //      binds and pins exactly the value the human handed forward.
 import type { DeliveryFact, DeliveryNodeHuman } from "../nano-generated/api-io.d.ts";
-import { DELIVERY_FACT_TYPES, type DeliveryFactType } from "./deliveryGraph.ts";
+import { DELIVERY_FACT_TYPES, type DeliveryFactType, FACT_NAME_MAX_LENGTH, FACT_NAME_PATTERN } from "./deliveryGraph.ts";
 
 /** The single BPMN `bpmn:userTask` element id every `human` delivery-graph node schedules its work
  *  as (`resources/processes/delivery-human.bpmn`). One reusable engine-native body, instantiated once
@@ -113,19 +113,26 @@ function isDeliveryFactType(value: unknown): value is DeliveryFactType {
 }
 
 /** Normalise a human node's `emits[]` to the well-formed, typed declarations, dropping anything the
- *  S0 validator would already have rejected (a non-record entry, a blank name, an unknown type) so the
- *  pure form/emit logic never trips on a malformed declaration — the graph is validated upstream by
- *  `validateDeliveryGraph`, this is defence in depth. */
+ *  S0 validator would already have rejected (a non-record entry, a blank name, a name that is not a
+ *  dot-free identifier within the 128-char cap, a duplicate name, or an unknown type) so the pure
+ *  form/emit logic never trips on a malformed declaration — the graph is validated upstream by
+ *  `validateDeliveryGraph`, this is defence in depth. Fact-name pattern/length are the SAME canonical
+ *  constants the validator enforces (`FACT_NAME_PATTERN`/`FACT_NAME_MAX_LENGTH`), so a dotted /
+ *  over-long / duplicate name can't slip through here and make `<nodeId>.<fact>` binding ambiguous. */
 export function normalizeEmits(node: Pick<DeliveryNodeHuman, "emits">): DeliveryFact[] {
   const raw = node.emits;
   if (!Array.isArray(raw)) return [];
   const facts: DeliveryFact[] = [];
+  const seen = new Set<string>();
   for (const entry of raw) {
     if (!isRecord(entry)) continue;
     const name = entry.name;
     const type = entry.type;
     if (typeof name !== "string" || name.length === 0) continue;
+    if (name.length > FACT_NAME_MAX_LENGTH || !FACT_NAME_PATTERN.test(name)) continue;
+    if (seen.has(name)) continue;
     if (!isDeliveryFactType(type)) continue;
+    seen.add(name);
     facts.push({ name, type, ...(typeof entry.description === "string" ? { description: entry.description } : {}) });
   }
   return facts;

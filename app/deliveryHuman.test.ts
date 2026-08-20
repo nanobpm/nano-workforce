@@ -125,6 +125,27 @@ test("normalizeEmits: drops malformed declarations (non-record, blank name, unkn
   assertEquals(out[0].name, "good");
 });
 
+test("normalizeEmits: drops names the S0 validator would reject (dotted/non-identifier, over-long, duplicate)", () => {
+  const emits = [
+    str("good"),
+    { name: "dotted.name", type: "string" }, // fails FACT_NAME_PATTERN (would make <nodeId>.<fact> ambiguous)
+    { name: "1leading", type: "string" }, // leading digit — not a bare identifier
+    { name: "has space", type: "string" }, // whitespace — not an identifier
+    { name: `${"x".repeat(129)}`, type: "string" }, // exceeds FACT_NAME_MAX_LENGTH (128)
+    { name: "good", type: "version" }, // duplicate name — first (string) wins, this is dropped
+  ] as unknown as DeliveryFact[];
+  const out = normalizeEmits({ emits });
+  assertEquals(out.length, 1);
+  assertEquals(out[0].name, "good");
+  assertEquals(out[0].type, "string");
+});
+
+test("normalizeEmits: a name at exactly the 128-char cap is kept", () => {
+  const emits = [{ name: "x".repeat(128), type: "string" }] as unknown as DeliveryFact[];
+  const out = normalizeEmits({ emits });
+  assertEquals(out.length, 1);
+});
+
 // ── Typed emit binding ─────────────────────────────────────────────────────────────────────────
 
 test("bindHumanEmits: a no-emit node yields no facts and no errors regardless of captured form", () => {
