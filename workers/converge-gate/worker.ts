@@ -104,12 +104,15 @@ async function findScopeOverride(
   headSha: string,
 ): Promise<ScopeEscalationAnswer | null> {
   try {
+    // `scope_block` is a first-class column (persist-escalation writes it as 0/1), so filter on it
+    // in the query rather than reading every answered escalation and filtering in memory — a PR with
+    // many answered non-scope escalations no longer loads them all just to discard them.
     const rows = await app.data.table<EscalationRow>("escalations", "id").find({
       pr_key: prKey,
       status: "answered",
+      scope_block: 1,
     });
     const scoped = rows
-      .filter((r) => r.scope_block === 1 || r.scope_block === true)
       .map((r) => ({ escalationId: Number(r.id), headSha: r.head_sha ?? null, answer: r.answer ?? null }))
       .sort((a, b) => (b.escalationId ?? 0) - (a.escalationId ?? 0));
     for (const candidate of scoped) {
@@ -210,7 +213,11 @@ export function makeHandler(deps: {
             prKey: escPrKey,
             headSha,
             escalationId: override.escalationId ?? null,
-            answer: override.answer,
+            // The human answer is free-form operator input — never log it verbatim (it can carry
+            // sensitive content into application logs). Record only stable identifiers plus a
+            // minimal presence/length signal for debugging.
+            hasAnswer: override.answer != null && override.answer !== "",
+            answerLength: override.answer?.length ?? 0,
           });
           scopeReason = "";
           scopeBlocked = false;
