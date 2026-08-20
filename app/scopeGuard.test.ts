@@ -168,12 +168,32 @@ test("collectDeferralEvidence: a clean full-scope body yields no evidence", () =
   assertEquals(collectDeferralEvidence(null), []);
 });
 
-test("collectDeferralEvidence: clips a very long section and de-dupes repeats", () => {
+test("collectDeferralEvidence: quotes an out-of-scope clause with no ## Scope heading", () => {
+  const ev = collectDeferralEvidence("Ships the API. The metrics dashboard is out-of-scope for this PR.");
+  assertEquals(ev.length, 1);
+  assertStringIncludes(ev[0], "metrics dashboard is out-of-scope");
+});
+
+test("collectDeferralEvidence: quotes a remainder-in-context window (no heading, no defer* clause)", () => {
+  const ev = collectDeferralEvidence("Lands the parser. Edge-case handling remains as follow-up work.");
+  assertEquals(ev.length, 1);
+  assertStringIncludes(ev[0], "remains as follow-up");
+});
+
+test("collectDeferralEvidence: clips a very long section to the max length", () => {
   const long = `## Scope\n${"x".repeat(400)}`;
   const ev = collectDeferralEvidence(long);
   assertEquals(ev.length, 1);
   assert(ev[0].length <= 160, "snippet is clipped to the max length (ellipsis included)");
   assertStringIncludes(ev[0], "…");
+});
+
+test("collectDeferralEvidence: de-dupes identical snippets from overlapping match paths", () => {
+  // A single line carries BOTH a `defer*` and an `out-of-scope` marker, so both step-2 regexes
+  // match the same whole line and clip to the same snippet — the Set must collapse them to one.
+  const ev = collectDeferralEvidence("Real I/O is deferred and out-of-scope for now.");
+  assertEquals(ev.length, 1, "the two overlapping matches de-dupe to a single snippet");
+  assertStringIncludes(ev[0], "Real I/O is deferred and out-of-scope");
 });
 
 test("evaluateScopeGuard: the block reason quotes the specific deferred text", () => {
