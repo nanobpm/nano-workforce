@@ -14,6 +14,7 @@ import {
   findClosingKeywordRefs,
   hasDeferralMarker,
   hasFollowupIssueRef,
+  isScopeOverridden,
 } from "./scopeGuard.ts";
 
 // ── The canonical router ────────────────────────────────────────────────────
@@ -144,4 +145,41 @@ test("hasFollowupIssueRef: only an explicit tracking marker + issue ref counts",
     hasFollowupIssueRef("Follow-up issue: https://github.com/nanobpm/nano-workforce/issues/900"),
     "Follow-up marker with a full issue URL",
   );
+});
+
+// ── The human-override door (#395) ──────────────────────────────────────────
+// The scope-integrity gate re-derives `scopeBlocked` from the PR body every round, so answering
+// its escalation used to re-block identically (an infinite loop). An answer bound to the SAME
+// reviewed HEAD is now honoured as an explicit override; a different HEAD (a new push) is not.
+
+test("isScopeOverridden: an answer bound to the same HEAD overrides the block", () => {
+  assert(
+    isScopeOverridden("abc123", { escalationId: 7, headSha: "abc123", answer: "Full delivery — keep Closes." }),
+    "same-HEAD answered escalation is an override",
+  );
+});
+
+test("isScopeOverridden: an answer for a DIFFERENT HEAD does not override (a new push re-opens)", () => {
+  assert(
+    !isScopeOverridden("newHEAD", { escalationId: 7, headSha: "oldHEAD", answer: "Full delivery." }),
+    "an override never carries across a new push",
+  );
+});
+
+test("isScopeOverridden: no recorded answer is never an override", () => {
+  assertEquals(isScopeOverridden("abc123", null), false);
+  assertEquals(isScopeOverridden("abc123", undefined), false);
+});
+
+test("isScopeOverridden: a missing/blank HEAD on either side fails closed (no override)", () => {
+  assertEquals(isScopeOverridden(null, { headSha: "abc123", answer: "x" }), false, "unreadable current HEAD");
+  assertEquals(isScopeOverridden("", { headSha: "abc123", answer: "x" }), false, "blank current HEAD");
+  assertEquals(isScopeOverridden("abc123", { headSha: null, answer: "x" }), false, "unrecorded escalation HEAD");
+  assertEquals(isScopeOverridden("abc123", { headSha: "  ", answer: "x" }), false, "blank escalation HEAD");
+});
+
+test("isScopeOverridden: the answer text is not parsed for intent — presence at the HEAD is the signal", () => {
+  // On an unchanged HEAD, the operator completing the escalation IS the explicit approval: had they
+  // wanted a real split, the servicing agent would have pushed a fix, moving the HEAD.
+  assert(isScopeOverridden("abc123", { headSha: "abc123", answer: null }), "a null answer at the HEAD still overrides");
 });

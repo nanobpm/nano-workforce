@@ -19,6 +19,15 @@
 // This is the enforcement backstop for the Magikcraft/nano-bpm#631 → PR #863 (`Closes #631`, `##
 // Scope` deferral, no follow-up → re-filed by hand as #872) failure class. See app/scopeGuard.ts.
 //
+// The scope-integrity block also carries a HUMAN-OVERRIDE door (#395): before it re-blocks, it
+// reads the commit now under review and consults the `escalations` answer bound to that SAME HEAD.
+// An operator who answered the scope question for this exact commit ("this fully delivers the issue
+// — keep the closing keyword") has explicitly overridden it, so the gate honours that answer
+// (audited) instead of re-deriving `scopeBlocked` from the PR body and re-escalating the identical
+// question forever. Binding to the HEAD sha keeps the override from carrying across a new push, and
+// (via `PrConvergeGateOut.headSha`/`scopeBlocked`) lets `persist-escalation-blockedcomments` stamp
+// the escalation with the reviewed commit so the door can open on the next round.
+//
 // It FAILS CLOSED: if the live GitHub state cannot be read, it blocks (escalates) rather than
 // letting an unverifiable "converged" through — the opposite of the no-progress guard, because a
 // merge-gating check must escalate-on-uncertainty so #770 cannot recur.
@@ -26,13 +35,14 @@ import type { AppJobHandler } from "@nanobpm/urban";
 import { type ConvergeGateResult, evaluateConvergeGate } from "../../app/convergeGate.ts";
 import {
   fetchLatestCopilotReviewBody,
+  fetchPrHead,
   fetchPrMeta,
   fetchReviewThreads,
   parseAckedAdvisories,
   parseSuppressedAdvisories,
   type ReviewThread,
 } from "../../app/github.ts";
-import { evaluateScopeGuard } from "../../app/scopeGuard.ts";
+import { evaluateScopeGuard, isScopeOverridden, type ScopeEscalationAnswer } from "../../app/scopeGuard.ts";
 import { parsePr } from "../../app/service.ts";
 import type { WorkerInputs, WorkerOutputs } from "../../nano-generated/worker-io.d.ts";
 
@@ -50,6 +60,9 @@ export type ReviewBodyReader = (repo: string, prNumber: number) => Promise<strin
 // Reads the PR's own description body. `null` = no usable transport (unverifiable → fail closed);
 // `""` = transport usable but the PR has an empty description (verified: nothing to scope-check).
 export type PrBodyReader = (repo: string, prNumber: number) => Promise<string | null>;
+// Reads the PR's current HEAD sha (the commit under review). `null` = unreadable/no transport — the
+// scope override cannot be verified or bound to a commit, so the gate keeps blocking (fail closed).
+export type HeadShaReader = (repo: string, prNumber: number) => Promise<string | null>;
 
 const defaultReadThreads: ThreadsReader = (repo, prNumber) =>
   fetchReviewThreads(repo, prNumber, process.env.GITHUB_TOKEN ?? "");
@@ -59,6 +72,10 @@ const defaultReadPrBody: PrBodyReader = async (repo, prNumber) => {
   const meta = await fetchPrMeta(repo, prNumber, process.env.GITHUB_TOKEN ?? "");
   return meta ? meta.body : null;
 };
+const defaultReadHeadSha: HeadShaReader = async (repo, prNumber) => {
+  const head = await fetchPrHead(repo, prNumber, process.env.GITHUB_TOKEN ?? "");
+  return head ? head.headSha : null;
+};
 
 const BLOCK_UNVERIFIABLE =
   "Convergence blocked: could not verify the PR's review comments against GitHub. A human must confirm every Copilot review thread is resolved and every suppressed advisory acknowledged before this PR converges (reply to resume the loop).";
@@ -66,14 +83,53 @@ const BLOCK_UNVERIFIABLE =
 const BLOCK_UNVERIFIABLE_BODY =
   "Convergence blocked: could not read the PR description from GitHub to verify scope integrity. A human must confirm this PR does not close a broader-scoped parent with an untracked deferred remainder before it converges (reply to resume the loop).";
 
+// An `escalations` row as this worker reads it back when looking for a recorded human override.
+interface EscalationRow extends Record<string, unknown> {
+  id: number;
+  head_sha: string | null;
+  answer: string | null;
+  scope_block: number | boolean | null;
+}
+
+// Find the newest ANSWERED scope-integrity escalation for this PR whose recorded HEAD matches the
+// commit now under review (issue #395). This is the human-override door: `persist-escalation` binds
+// a scope block to the HEAD it was raised against, `answer-escalation` marks the row `answered`, and
+// here we honour that answer for the SAME HEAD so the gate stops re-deriving `scopeBlocked` from the
+// PR body and re-escalating the identical question forever. Newest-first so a re-escalated-then-
+// answered duplicate resolves to the operator's latest reply. Returns `null` on any read failure —
+// the caller then keeps the block (fail closed), never fabricates an override.
+async function findScopeOverride(
+  app: Parameters<AppJobHandler<In, Out>>[1],
+  prKey: string,
+  headSha: string,
+): Promise<ScopeEscalationAnswer | null> {
+  try {
+    const rows = await app.data.table<EscalationRow>("escalations", "id").find({
+      pr_key: prKey,
+      status: "answered",
+    });
+    const scoped = rows
+      .filter((r) => r.scope_block === 1 || r.scope_block === true)
+      .map((r) => ({ escalationId: Number(r.id), headSha: r.head_sha ?? null, answer: r.answer ?? null }))
+      .sort((a, b) => (b.escalationId ?? 0) - (a.escalationId ?? 0));
+    for (const candidate of scoped) {
+      if (isScopeOverridden(headSha, candidate)) return candidate;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 /** Build the handler with injectable GitHub readers. The default export binds the real readers;
  * tests inject stubs. Fails CLOSED — any unreadable/errored state blocks convergence. */
 export function makeHandler(deps: {
   readThreads: ThreadsReader;
   readReviewBody: ReviewBodyReader;
   readPrBody: PrBodyReader;
+  readHeadSha: HeadShaReader;
 }): AppJobHandler<In, Out> {
-  return async (job) => {
+  return async (job, app) => {
     const { prKey, repo, prNumber } = job.variables;
     // `parsePr` is total on any input (fails closed to `null` on a missing/non-string prKey), so
     // pass it straight through — a malformed prKey degrades to the fail-closed target check below.
@@ -83,6 +139,9 @@ export function makeHandler(deps: {
     if (!ghRepo || typeof ghNumber !== "number") {
       return { convergeBlocked: true, convergeBlockReason: BLOCK_UNVERIFIABLE };
     }
+    // The canonical escalations key. Prefer the carried prKey; fall back to the parsed identity so
+    // the override lookup still keys off `owner/repo#N` when only repo/prNumber survived.
+    const escPrKey = typeof prKey === "string" && prKey !== "" ? prKey : `${ghRepo}#${ghNumber}`;
 
     let result: ConvergeGateResult;
     let scopeReason: string;
@@ -127,13 +186,54 @@ export function makeHandler(deps: {
       return { convergeBlocked: true, convergeBlockReason: BLOCK_UNVERIFIABLE_BODY };
     }
 
+    // The human-override door for the scope-integrity block (issue #395). When the deterministic
+    // scope guard would re-block, read the commit now under review and consult the recorded
+    // escalation answer bound to that SAME HEAD: an operator who answered the scope question for
+    // this exact commit has explicitly overridden it ("this fully delivers the issue — keep the
+    // closing keyword"), so honour it (audited) instead of re-deriving the block from the body and
+    // re-escalating forever. Binding to the HEAD sha keeps the override from carrying across a new
+    // push (a different HEAD legitimately re-opens the gate); and if the human instead asked for a
+    // real split, the servicing agent pushes a fix — moving the HEAD so this stale override never
+    // fires. This is what turns the infinite escalation loop into a resolvable one.
+    let headSha: string | null = null;
+    let scopeBlocked = scopeReason !== "";
+    if (scopeBlocked) {
+      try {
+        headSha = await deps.readHeadSha(ghRepo, ghNumber);
+      } catch {
+        headSha = null;
+      }
+      if (headSha) {
+        const override = await findScopeOverride(app, escPrKey, headSha);
+        if (override) {
+          app.log.info("converge-gate: scope-integrity block overridden by human answer", {
+            prKey: escPrKey,
+            headSha,
+            escalationId: override.escalationId ?? null,
+            answer: override.answer,
+          });
+          scopeReason = "";
+          scopeBlocked = false;
+        }
+      }
+    }
+
     // Both guards gate the same handoff to the merge loop: block if EITHER the review-comment gate
     // or the scope-integrity gate blocks, joining their reasons so the human sees every cause.
     const reason = [result.convergeBlockReason, scopeReason].filter((r) => r !== "").join(" ");
-    return {
-      convergeBlocked: result.convergeBlocked || scopeReason !== "",
+    const out: Out = {
+      convergeBlocked: result.convergeBlocked || scopeBlocked,
       convergeBlockReason: reason,
     };
+    // Surface the reviewed HEAD and the scope-block flag ONLY when scope actually blocks — the
+    // `persist-escalation-blockedcomments` arm (which runs only on a blocked gate) binds the
+    // escalation to this commit with them, opening the override door on the next round. A clean
+    // converge keeps its original `{ convergeBlocked, convergeBlockReason }` shape.
+    if (scopeBlocked) {
+      out.scopeBlocked = true;
+      out.headSha = headSha ?? undefined;
+    }
+    return out;
   };
 }
 
@@ -141,5 +241,6 @@ const handler = makeHandler({
   readThreads: defaultReadThreads,
   readReviewBody: defaultReadReviewBody,
   readPrBody: defaultReadPrBody,
+  readHeadSha: defaultReadHeadSha,
 });
 export default handler;

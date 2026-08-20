@@ -50,6 +50,8 @@
         <nano:shape id="PrConvergeGateOut" name="Converge gate — result">
           <nano:extend name="convergeBlocked" type="boolean" />
           <nano:extend name="convergeBlockReason" type="string" optional="true" />
+          <nano:extend name="headSha" type="string" optional="true" />
+          <nano:extend name="scopeBlocked" type="boolean" optional="true" />
         </nano:shape>
         <nano:shape id="EscalationIn" name="Record escalation — input">
           <nano:extend name="prKey" type="string" />
@@ -62,6 +64,8 @@
           <nano:extend name="prNumber" type="integer" optional="true" />
           <nano:extend name="prUrl" type="string" optional="true" />
           <nano:extend name="abandonUrl" type="string" optional="true" />
+          <nano:extend name="headSha" type="string" optional="true" />
+          <nano:extend name="scopeBlock" type="boolean" optional="true" />
         </nano:shape>
         <nano:shape id="EscalationOut" name="Record escalation — result">
           <nano:extend name="escalationId" type="integer" optional="true" />
@@ -299,6 +303,8 @@
           <zeebe:input source="=&#34;blocked&#34;" target="status" />
           <zeebe:input source="=false" target="recordRound" />
           <zeebe:input source="=convergeBlockReason" target="question" />
+          <zeebe:input source="=headSha" target="headSha" />
+          <zeebe:input source="=scopeBlocked" target="scopeBlock" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_convergeBlocked</bpmn:incoming>
