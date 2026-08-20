@@ -24,6 +24,7 @@ import {
   isDeliveryGraphApproved,
   parseHumanLabels,
 } from "./deliveryGraphRun.ts";
+import { pollDeliveryGraphPhase } from "./service.ts";
 
 const APP_ROOT = resolve(import.meta.dirname, "..");
 
@@ -81,6 +82,21 @@ test("claimRunForLaunch: a TERMINAL row re-runs — the CAS flips it to running,
     assertEquals(await claimRunForLaunch(data, true, claim), true); // re-run: failed <> running → flips
     assertEquals(await claimRunForLaunch(data, true, claim), false); // now running → no second launch
     assertEquals((await runs.get("rk"))?.status, "running");
+  });
+});
+
+// ── pollDeliveryGraphPhase: engine-key coercion ───────────────────────────────
+test("pollDeliveryGraphPhase: a numeric engine processInstanceKey still matches the string process_key, so a COMPLETED instance reconciles to done", async () => {
+  await withData(async (data) => {
+    const runs = deliveryGraphRuns(data);
+    await runs.insert({ ...claimRow("running"), process_key: "12345" });
+    // The engine can yield a NUMERIC key; the poller compares against the string process_key.
+    const engine = {
+      searchProcessInstances: async () => [{ processInstanceKey: 12345, state: "COMPLETED" }],
+      searchUserTasks: async () => [],
+    };
+    await pollDeliveryGraphPhase(data, engine as never);
+    assertEquals((await runs.get("rk"))?.status, "done");
   });
 });
 

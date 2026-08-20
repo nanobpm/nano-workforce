@@ -2218,7 +2218,7 @@ export async function pollDeliveryGraphPhase(
         engine.searchProcessInstances({ processInstanceKeys: [processKey] }),
         engine.searchUserTasks({ processInstanceKey: processKey, state: "CREATED" }),
       ]);
-      const state = snapshots.find((s) => s.processInstanceKey === processKey)?.state ?? null;
+      const state = snapshots.find((s) => String(s.processInstanceKey) === processKey)?.state ?? null;
       const projection = deriveDeliveryPhase(state, tasks, parseHumanLabels(run.human_labels));
       if (run.status !== projection.status || run.phase !== projection.phase || run.phase_node_id !== projection.phase_node_id) {
         await deliveryGraphRuns(data).update(run.run_key, {
