@@ -230,3 +230,45 @@ test("a graph with no edges (independent roots) is valid", () => {
     [],
   );
 });
+
+test("a non-array `edges` is rejected, not silently treated as no edges", () => {
+  const errors = validateDeliveryGraph({
+    nodes: [{ id: "a", kind: "agent", agent: { jobType: "j" } }],
+    edges: "nope",
+  });
+  const err = hasCode(errors, "dangling-edge");
+  assertEquals(err.path, "edges");
+});
+
+test("a `human` node whose `human` config is not an object is rejected, path-qualified", () => {
+  const errors = validateDeliveryGraph({
+    nodes: [{ id: "done", kind: "human", human: "just do it" }],
+  });
+  const err = hasCode(errors, "missing-config");
+  assertEquals(err.path, "nodes[0].human");
+});
+
+test("invalid-fact-type: an emitted fact with a type outside the allowlist is rejected, path-qualified", () => {
+  const errors = validateDeliveryGraph({
+    nodes: [
+      {
+        id: "a",
+        kind: "agent",
+        agent: { jobType: "j" },
+        emits: [{ name: "sha", type: "bogus" }],
+      },
+    ],
+  });
+  const err = hasCode(errors, "invalid-fact-type");
+  assertEquals(err.path, "nodes[0].emits[0].type");
+});
+
+test("invalid-fact-type: an emitted fact missing its `type` is rejected", () => {
+  const errors = validateDeliveryGraph({
+    nodes: [
+      { id: "a", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "sha" }] },
+    ],
+  });
+  const err = hasCode(errors, "invalid-fact-type");
+  assertEquals(err.path, "nodes[0].emits[0].type");
+});

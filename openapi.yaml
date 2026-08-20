@@ -1264,9 +1264,10 @@ components:
     DeliveryNode:
       description: >-
         One node in a delivery graph. A discriminated union on `kind` over the CLOSED allowlist; the
-        matching per-kind config object (`agent`/`wait`/`human`/`connector`) is REQUIRED and names the
+        matching per-kind config object (`agent`/`wait`/`connector`) is REQUIRED and names the
         engine-native body the node delegates to (Decision 2 — the graph schedules, it does not
-        re-implement execution).
+        re-implement execution). The `human` config is the sole exception — it is OPTIONAL (a bare
+        `human` node resolves to a generic emit-capturing form fallback in S3).
       oneOf:
         - $ref: "#/components/schemas/DeliveryNodeAgent"
         - $ref: "#/components/schemas/DeliveryNodeWait"

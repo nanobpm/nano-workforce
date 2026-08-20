@@ -29,6 +29,15 @@ export const DELIVERY_NODE_KINDS = ["agent", "wait", "human", "connector"] as co
 /** A node's `kind`, narrowed to the closed allowlist. */
 export type DeliveryNodeKind = (typeof DELIVERY_NODE_KINDS)[number];
 
+/** The CLOSED emitted-fact type allowlist (ADR 0005 Decision 3/4) — mirrors the `DeliveryFact.type`
+ * enum in `openapi.yaml`. Kept as the single source of truth so the semantic validator rejects an
+ * untyped/unknown fact type even when the OpenAPI shape validator is bypassed (a directly-invoked
+ * delegate), since later compilation/execution steps rely on this allowlist. */
+export const DELIVERY_FACT_TYPES = ["string", "number", "boolean", "artifact", "version", "url"] as const;
+
+/** An emitted fact's declared `type`, narrowed to the closed allowlist. */
+export type DeliveryFactType = (typeof DELIVERY_FACT_TYPES)[number];
+
 /** A machine-readable classification of a semantic failure, so a caller can branch on the error
  * class (unknown-kind / dangling / cycle / bad-`from`) without string-matching the message. */
 export type DeliveryGraphErrorCode =
@@ -38,6 +47,7 @@ export type DeliveryGraphErrorCode =
   | "unknown-kind"
   | "missing-config"
   | "duplicate-fact"
+  | "invalid-fact-type"
   | "dangling-edge"
   | "bad-from"
   | "self-edge"
@@ -62,6 +72,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function isDeliveryNodeKind(kind: unknown): kind is DeliveryNodeKind {
   if (typeof kind !== "string") return false;
   for (const k of DELIVERY_NODE_KINDS) if (k === kind) return true;
+  return false;
+}
+
+/** True when `type` is a member of the closed emitted-fact type allowlist. */
+function isDeliveryFactType(type: unknown): type is DeliveryFactType {
+  if (typeof type !== "string") return false;
+  for (const t of DELIVERY_FACT_TYPES) if (t === type) return true;
   return false;
 }
 
@@ -93,9 +110,11 @@ function resolveFrom(from: string, nodeIds: ReadonlySet<string>): { nodeId: stri
  * Pure, side-effect-free SEMANTIC validation of a delivery graph (ADR 0005 slice S0). Accepts the
  * graph as `unknown` because it arrives from an untyped request body — every field is read
  * defensively, so a malformed input maps to a clean {@link DeliveryGraphError} (never an uncaught
- * TypeError). Returns EVERY error found (empty array ⇒ the graph is semantically valid), each
- * path-qualified. Run this BEFORE any compile/deploy so a cycle, dangling edge, unknown kind, or
- * unresolvable fact reference is rejected with nothing started.
+ * TypeError). Returns every error found (empty array ⇒ the graph is semantically valid), each
+ * path-qualified — one entry per offending node/edge/fact, except cycle detection, which reports at
+ * most ONE cycle per call to keep the output actionable (fix it and re-validate to surface the next).
+ * Run this BEFORE any compile/deploy so a cycle, dangling edge, unknown kind, or unresolvable fact
+ * reference is rejected with nothing started.
  */
 export function validateDeliveryGraph(graph: DeliveryGraph | unknown): DeliveryGraphError[] {
   const errors: DeliveryGraphError[] = [];
@@ -147,12 +166,22 @@ export function validateDeliveryGraph(graph: DeliveryGraph | unknown): DeliveryG
           `${DELIVERY_NODE_KINDS.join(", ")} (the closed vocabulary is the trust boundary)`,
         code: "unknown-kind",
       });
-    } else if (!isRecord(rawNode[CONFIG_KEY[kind]]) && kind !== "human") {
-      // Every kind but `human` REQUIRES its per-kind config object; `human` config is optional
-      // (formKey/prompt both resolve to a generic fallback in S3).
+    } else if (kind !== "human") {
+      // Every kind but `human` REQUIRES its per-kind config object.
+      if (!isRecord(rawNode[CONFIG_KEY[kind]])) {
+        errors.push({
+          path: `${path}.${CONFIG_KEY[kind]}`,
+          message: `${kind} node is missing its required \`${CONFIG_KEY[kind]}\` config`,
+          code: "missing-config",
+        });
+      }
+    } else if (rawNode.human !== undefined && !isRecord(rawNode.human)) {
+      // `human` config is OPTIONAL (formKey/prompt both resolve to a generic fallback in S3), but
+      // when PRESENT it must be a plain object so later slices can safely read `human.formKey` /
+      // `human.prompt` — a string/array/null `human` would crash them downstream.
       errors.push({
-        path: `${path}.${CONFIG_KEY[kind]}`,
-        message: `${kind} node is missing its required \`${CONFIG_KEY[kind]}\` config`,
+        path: `${path}.human`,
+        message: "`human` config, when present, must be an object",
         code: "missing-config",
       });
     }
@@ -185,6 +214,17 @@ export function validateDeliveryGraph(graph: DeliveryGraph | unknown): DeliveryG
             });
             return;
           }
+          if (!isDeliveryFactType(rawFact.type)) {
+            // emits are TYPED (Decision 3/4). An invalid/missing `type` must be rejected even when the
+            // OpenAPI shape validator is bypassed, or a later step reading the type allowlist breaks.
+            errors.push({
+              path: `${path}.emits[${j}].type`,
+              message:
+                `emitted fact "${rawFact.name}" has an invalid \`type\` — must be one of ` +
+                `${DELIVERY_FACT_TYPES.join(", ")}`,
+              code: "invalid-fact-type",
+            });
+          }
           facts.add(rawFact.name);
         });
       }
@@ -196,7 +236,16 @@ export function validateDeliveryGraph(graph: DeliveryGraph | unknown): DeliveryG
 
   // Pass 2: edges. Resolve each endpoint against the node set and each qualified `from` against the
   // upstream node's declared facts, and build the adjacency for the cycle check.
-  const edges = Array.isArray(graph.edges) ? graph.edges : [];
+  const edges: readonly unknown[] = Array.isArray(graph.edges) ? graph.edges : [];
+  if (graph.edges !== undefined && !Array.isArray(graph.edges)) {
+    // A non-array `edges` must not be silently treated as "no edges" — that would let a malformed
+    // body pass semantic validation when the OpenAPI shape validator is bypassed.
+    errors.push({
+      path: "edges",
+      message: "`edges`, when present, must be an array of `{ from, to }` dependency edges",
+      code: "dangling-edge",
+    });
+  }
   const nodeIds: ReadonlySet<string> = new Set(nodeFacts.keys());
   // consumer (`to`) → set of upstream node ids (`from`'s node) — the dependency direction.
   const adjacency = new Map<string, Set<string>>();
