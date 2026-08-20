@@ -1,3 +1,10 @@
+# [0.109.0](https://github.com/nanobpm/nano-workforce/compare/v0.108.0...v0.109.0) (2026-08-20)
+
+
+### Features
+
+* **skill:** add nano-workforce operator bootstrap skill ([#382](https://github.com/nanobpm/nano-workforce/issues/382)) ([ef6701f](https://github.com/nanobpm/nano-workforce/commit/ef6701f4df76bcfc762ddec20d745bf5edd0ec1b))
+
 # [0.108.0](https://github.com/nanobpm/nano-workforce/compare/v0.107.2...v0.108.0) (2026-08-20)
 
 
