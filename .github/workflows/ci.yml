@@ -5,6 +5,12 @@ on:
     branches: [main]
   push:
     branches: [main]
+  # Merge-skew guard (issue #366): also run the required gates against the merge queue's
+  # PROSPECTIVE merged commit (GitHub Actions `merge_group` event). Several gates assert a whole-repo invariant (migration prefixes,
+  # BPMN DI freshness, committed generated artifacts) that two PRs can each satisfy in isolation yet
+  # violate once BOTH land on `main`. Validating the speculative merge commit the queue builds — not
+  # the stale PR head — blocks such a merge categorically instead of letting it poison the next PR.
+  merge_group:
 
 permissions:
   contents: read

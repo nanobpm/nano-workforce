@@ -1,0 +1,72 @@
+name: Whole-repo invariants (merge-skew guard)
+
+# Closes the merge-skew failure class (issue #366).
+#
+# Several gates assert a GLOBAL invariant / checked-in DERIVED artifact — `derived == f(sources)` —
+# but the main CI only ever verifies them against a PR's OWN head. Two PRs can each pass in isolation
+# and still break the invariant once BOTH squash-merge, because `main`'s `derived` is then
+# `f(sources_A ∪ sources_B)`, which neither branch's green CI ever saw (the 052 migration collision,
+# #359; the stale `retro.bpmn` DI, #365). Nothing re-checked `main`, so the breakage landed silently
+# and poisoned the next unrelated PR to touch the same job.
+#
+# This lean workflow re-asserts those whole-repo invariants where the merge actually happens:
+#   - `merge_group`  — the queue's PROSPECTIVE merged commit, so a skew is blocked BEFORE it lands.
+#   - `push: [main]` — a fast backstop that fails a `main`-scoped build within minutes if something
+#                      slipped through, instead of first surfacing on an unrelated open PR.
+#   - `schedule`     — a daily catch-all for any skew introduced by a merge that bypassed the queue.
+on:
+  merge_group:
+  push:
+    branches: [main]
+  schedule:
+    # 06:00 UTC daily — cheap catch-all backstop.
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  invariants:
+    name: whole-repo invariants
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Full history: the migration immutability gate diffs against the merge-base with
+          # origin/main, and the layout gate needs the whole tree — neither works on a shallow clone.
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Prefix-collision (+ immutability): two branches that each took "the next" free migration
+      # prefix collide once merged. Re-run on the merged/`main` tree so the collision can't hide.
+      - name: Check migration prefixes (no collisions)
+        run: npm run check:migrations
+
+      # BPMN DI freshness: a merged semantic model can carry flows whose DI was regenerated on neither
+      # branch. Regenerate the DI over the merged model and fail if any committed diagram is stale.
+      - name: Check BPMN diagram freshness (layout)
+        run: npm run layout:check
+
+      # Generated-artifact freshness (`urban gen --check`): landscape.gen.html, JSON Schemas / OpenAPI,
+      # the processos grammar (ir.gbnf) and friends are `derived == f(sources)` — re-derive over the
+      # merged sources and fail if a committed artifact drifted.
+      - name: Check generated artifacts (urban gen --check)
+        run: npm run gen:check
+
+      # Navigation index is another checked-in derived artifact; re-assert it on the merged tree too.
+      - name: Check navigation index freshness
+        run: npm run sync:nav:check
+
+      # Backstop: catch ANY other committed generated file that the merged sources render stale, even
+      # one without its own `--check` script above. A clean tree is the whole-repo invariant.
+      - name: No stale committed artifacts on the merged tree
+        run: git diff --exit-code

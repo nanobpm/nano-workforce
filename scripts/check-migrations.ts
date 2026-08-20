@@ -150,11 +150,13 @@ function checkImmutability(errors: string[]): boolean {
   return true;
 }
 
-function main(): void {
-  const files = readdirSync(MIGRATIONS_DIR)
-    .filter((f) => f.endsWith(".sql"))
-    .sort();
-
+/** Classify a migration file listing into shape + prefix-collision errors. Pure over the file list
+ *  so the MERGE-SKEW scenario can be pinned in a test: two individually-clean branches each pass this
+ *  over their OWN tree, but the gate must fail over the UNION that lands on `main` after both merge
+ *  (issue #366). This is exactly why the gate has to re-run on the post-merge state — neither branch's
+ *  green CI ever saw the other's prefix. Grandfathered historical collisions stay exempt. Exported
+ *  for unit coverage. */
+export function collisionErrorsFromFiles(files: readonly string[]): string[] {
   const errors: string[] = [];
   const byPrefix = new Map<string, string[]>();
 
@@ -175,12 +177,22 @@ function main(): void {
   for (const [prefix, group] of byPrefix) {
     if (group.length > 1 && !GRANDFATHERED_DUPES.has(prefix)) {
       errors.push(
-        `  prefix ${prefix} is used by ${group.length} files: ${group.join(", ")} — ` +
+        `  prefix ${prefix} is used by ${group.length} files: ${[...group].sort().join(", ")} — ` +
           `two migrations cannot share an apply-order slot. Renumber the newer one to the next ` +
           `free prefix (check origin/main, not your branch point).`,
       );
     }
   }
+
+  return errors;
+}
+
+function main(): void {
+  const files = readdirSync(MIGRATIONS_DIR)
+    .filter((f) => f.endsWith(".sql"))
+    .sort();
+
+  const errors: string[] = collisionErrorsFromFiles(files);
 
   const immutabilityChecked = checkImmutability(errors);
 
