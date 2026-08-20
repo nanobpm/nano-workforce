@@ -1,3 +1,10 @@
+# [0.114.0](https://github.com/nanobpm/nano-workforce/compare/v0.113.0...v0.114.0) (2026-08-20)
+
+
+### Features
+
+* **delivery-graphs:** integration runner deploys a compiled delivery graph as an engine-native process ([#397](https://github.com/nanobpm/nano-workforce/issues/397)) ([4ae2394](https://github.com/nanobpm/nano-workforce/commit/4ae239412194bfd346cde3213b15d17fad487bbc)), closes [#379](https://github.com/nanobpm/nano-workforce/issues/379)
+
 # [0.113.0](https://github.com/nanobpm/nano-workforce/compare/v0.112.0...v0.113.0) (2026-08-20)
 
 
