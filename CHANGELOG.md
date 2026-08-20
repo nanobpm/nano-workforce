@@ -1,3 +1,10 @@
+# [0.110.0](https://github.com/nanobpm/nano-workforce/compare/v0.109.0...v0.110.0) (2026-08-20)
+
+
+### Features
+
+* DeliveryGraph JSON contract + pure validator (ADR 0005 S0) ([#384](https://github.com/nanobpm/nano-workforce/issues/384)) ([ae85e1a](https://github.com/nanobpm/nano-workforce/commit/ae85e1af220844f961f6161d4f676aa289d86693)), closes [#375](https://github.com/nanobpm/nano-workforce/issues/375) [#227](https://github.com/nanobpm/nano-workforce/issues/227)
+
 # [0.109.0](https://github.com/nanobpm/nano-workforce/compare/v0.108.0...v0.109.0) (2026-08-20)
 
 
