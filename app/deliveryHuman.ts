@@ -239,7 +239,9 @@ function coerceFactValue(type: DeliveryFactType, raw: unknown): { value: string 
   switch (type) {
     case "string": {
       if (typeof raw !== "string" || raw.trim() === "") return { error: "expected a non-empty string" };
-      return { value: raw };
+      // Return the trimmed value, mirroring the other string-like types (version/artifact/url) so the
+      // canonical serialisation does not depend on incidental surrounding whitespace.
+      return { value: raw.trim() };
     }
     case "number": {
       const n = typeof raw === "number" ? raw : typeof raw === "string" && raw.trim() !== "" ? Number(raw) : Number.NaN;

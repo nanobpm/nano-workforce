@@ -219,6 +219,9 @@ test("bindHumanEmits: number/boolean/url coerce to canonical string serialisatio
     bindHumanEmits([{ name: "u", type: "url" }], { u: "https://x.test/p" }).facts[0].value,
     "https://x.test/p",
   );
+  // A string fact is trimmed before returning (like version/artifact/url), so the canonical
+  // serialisation does not depend on incidental surrounding whitespace.
+  assertEquals(bindHumanEmits([{ name: "s", type: "string" }], { s: " foo " }).facts[0].value, "foo");
 });
 
 // ── Late-binding surfaces (#289) ─────────────────────────────────────────────────────────────────
