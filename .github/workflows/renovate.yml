@@ -1,0 +1,72 @@
+name: Renovate
+
+# Self-hosted Renovate (issue #406). renovate.json declares the policy — auto-merge
+# non-major @nanobpm/* updates once CI is green, majors need a human — but nothing was
+# ever running it, so the config sat dormant and nwf stayed pinned to old @nanobpm/urban.
+# This workflow IS the runner: on a schedule (and on demand) it opens update PRs and, on a
+# later pass once the PR's CI is green, merges the automerge ones itself. We self-host via
+# GitHub Actions rather than the Mend hosted app so the whole capability is in-repo and
+# reproducible, with no external app-install state to drift.
+on:
+  schedule:
+    # Every 3 hours. Renovate needs to run periodically not just to DISCOVER new versions,
+    # but to COME BACK and merge automerge PRs: renovate.json sets platformAutomerge:false
+    # (main is unprotected, so GitHub-native auto-merge is unavailable), which means Renovate
+    # performs the merge itself on a subsequent run once the PR's branch status is green.
+    # A few-hourly cadence keeps that merge latency low without burning Actions minutes.
+    - cron: "0 */3 * * *"
+  # On-demand runs for immediate pickup (e.g. right after a new urban publishes) and for
+  # debugging with a raised log level.
+  workflow_dispatch:
+    inputs:
+      logLevel:
+        description: "Renovate log level"
+        default: "info"
+        type: choice
+        options:
+          - debug
+          - info
+          - warn
+  # Re-run whenever the policy or this runner itself changes, so config edits take effect
+  # without waiting for the next scheduled tick.
+  push:
+    branches: [main]
+    paths:
+      - renovate.json
+      - .github/workflows/renovate.yml
+
+# Renovate authenticates with RENOVATE_TOKEN (a PAT) for all git/PR/merge operations, so the
+# job's GITHUB_TOKEN needs no elevated scope.
+permissions:
+  contents: read
+
+# Never let two Renovate passes run concurrently — overlapping runs race on the same branches
+# and can double-open PRs. cancel-in-progress:false lets an in-flight pass (which may be mid-merge)
+# finish rather than being killed by a newer trigger.
+concurrency:
+  group: renovate
+  cancel-in-progress: false
+
+jobs:
+  renovate:
+    name: renovate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Renovate
+        uses: renovatebot/github-action@v46.2.2
+        with:
+          # A Personal Access Token (repo scope), NOT the default GITHUB_TOKEN. This is required,
+          # not a preference: PRs opened by GITHUB_TOKEN do not trigger `on: pull_request`, so CI
+          # would never run on them and the green-gated automerge in renovate.json could never fire.
+          # A PAT-authored PR triggers CI normally, which is what makes "merge when green" work.
+          token: ${{ secrets.RENOVATE_TOKEN }}
+        env:
+          # Only ever operate on this repo (no org-wide autodiscovery).
+          RENOVATE_REPOSITORIES: ${{ github.repository }}
+          RENOVATE_AUTODISCOVER: "false"
+          # Renovate reads the repo's own renovate.json as its config automatically once it
+          # clones the repo above — no global configurationFile needed.
+          LOG_LEVEL: ${{ inputs.logLevel || 'info' }}
