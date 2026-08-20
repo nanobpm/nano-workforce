@@ -189,6 +189,40 @@
           ]
         }
       }
+    },
+    {
+      "type": "dataGrid",
+      "id": "overview-delivery-graphs",
+      "props": {
+        "title": "Active Delivery Graphs",
+        "collapsible": true,
+        "defaultCollapsed": false,
+        "showCount": true,
+        "rowKey": "run_key",
+        "refreshMs": 5000,
+        "data": {
+          "kind": "datasource",
+          "source": "app",
+          "table": "delivery_graph_runs",
+          "orderBy": { "field": "updated_at", "dir": "desc" },
+          "filter": [{ "field": "status", "in": ["awaiting-approval", "running"] }]
+        },
+        "columns": [
+          { "field": "title", "template": "{{title}}", "header": "Item", "subtitleField": "run_key", "truncate": true, "width": "30%" },
+          { "field": "status", "header": "Status", "link": { "kind": "processExplorer", "keyField": "process_key" } },
+          { "field": "phase", "header": "Phase", "truncate": true, "width": "28%" },
+          { "field": "updated_at", "header": "Updated", "width": "9rem", "format": "datetime" }
+        ],
+        "detail": {
+          "fields": [
+            { "field": "process_definition_id", "label": "Definition" },
+            { "field": "digest", "label": "Digest" },
+            { "field": "node_count", "label": "Nodes" },
+            { "field": "human_node_count", "label": "Human nodes" },
+            { "field": "side_effect_count", "label": "Side effects" }
+          ]
+        }
+      }
     }
   ]
 }

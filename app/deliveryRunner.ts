@@ -18,6 +18,14 @@ import type { EngineClient } from "@nanobpm/urban";
 import type { DeliveryGraph, DeliveryNode } from "../nano-generated/api-io.d.ts";
 import { assertNever, compileDeliveryGraph, DELIVERY_GRAPH_PROCESS_ID } from "./deliveryGraphCompiler.ts";
 
+/** The content digest of a compiled graph — `sha256(bpmn)[:12]` — the single source of truth for the
+ * content-addressed deploy id (`delivery-graph-<digest>`) AND the S5 dispatch door's approval token /
+ * default idempotency key. Both the runner (deploy id) and `operations/startDeliveryGraph` (approval +
+ * dedupe key) derive from THIS one function so the two can never drift on how a graph is addressed. */
+export function deliveryGraphDigest(bpmn: string): string {
+  return createHash("sha256").update(bpmn).digest("hex").slice(0, 12);
+}
+
 /** The bounded-timeout / SLA envelope every node inherits (Decision: bounded → escalate). ISO-8601
  * durations. Defaults are conservative; a caller (the S5 door) may tighten them per run. */
 export interface DeliveryRunTimeouts {
@@ -89,7 +97,7 @@ export function prepareDeliveryGraph(graph: DeliveryGraph, options: DeliveryRunO
   const compiled = compileDeliveryGraph(graph);
   if (!compiled.ok) return { ok: false, errors: compiled.errors };
 
-  const digest = createHash("sha256").update(compiled.bpmn).digest("hex").slice(0, 12);
+  const digest = deliveryGraphDigest(compiled.bpmn);
   const processDefinitionId = `${DELIVERY_GRAPH_PROCESS_ID}-${digest}`;
   const bpmn = rewriteProcessId(compiled.bpmn, processDefinitionId);
 

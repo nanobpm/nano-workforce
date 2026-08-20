@@ -28,6 +28,7 @@ import {
 } from "./conformance.ts";
 import { isUniqueConstraintFence } from "./dbFence.ts";
 import { deriveDelivery, TERMINAL_STATUSES } from "./delivery.ts";
+import { deliveryGraphRuns, deriveDeliveryPhase, parseHumanLabels } from "./deliveryGraphRun.ts";
 import { fleetSupportsDurableResume } from "./durableResume.ts";
 import { backfillFeatureStages, deriveFeatureDelivery, FEATURE_BLOCKED_ELEMENT, FEATURE_ESCALATION_ELEMENT, FEATURE_RUN_STATUSES, type FeatureRunStatus, featureEscalations, featureRuns } from "./feature.ts";
 import {
@@ -2196,6 +2197,43 @@ async function sweepOpenEscalationTasks(base: string, headers: Record<string, st
  * completed task's row is deleted (answered here, via the task inbox, or out-of-band) and `showCount`
  * reflects live pending work. Best-effort + idempotent — per-instance failures are isolated so one bad
  * instance never stalls the pass. */
+/** Poll pass (ADR 0005 slice S5): reconcile each RUNNING delivery-graph run's derived phase from
+ * engine truth, and complete it when its instance ends. A delivery graph is a DYNAMIC compiled
+ * process with no happy-path host worker, so — unlike `plans`/`feature_runs`, whose spine workers
+ * write their own terminal row — this pass owns both the parked-node projection AND the COMPLETED→done
+ * transition (instanceTracking's `onTerminated` edge reconciles only TERMINATED, never COMPLETED, so
+ * a graph that ends normally would otherwise stay `running` forever). Generalises the `epic_phase`
+ * derived-phase machinery to a graph whose element ids aren't known ahead of time: the parked-node
+ * label is derived from the run row's stamped `human_labels` + the instance's OPEN user tasks. Scoped
+ * to `running` rows (an `awaiting-approval` run has no instance yet), so it stays O(in-flight). */
+export async function pollDeliveryGraphPhase(
+  data: DataLayer,
+  engine: Pick<EngineClient, "searchProcessInstances" | "searchUserTasks">,
+) {
+  for (const run of await deliveryGraphRuns(data).find({ status: "running" })) {
+    if (!run.process_key) continue;
+    const processKey = run.process_key;
+    try {
+      const [snapshots, tasks] = await Promise.all([
+        engine.searchProcessInstances({ processInstanceKeys: [processKey] }),
+        engine.searchUserTasks({ processInstanceKey: processKey, state: "CREATED" }),
+      ]);
+      const state = snapshots.find((s) => s.processInstanceKey === processKey)?.state ?? null;
+      const projection = deriveDeliveryPhase(state, tasks, parseHumanLabels(run.human_labels));
+      if (run.status !== projection.status || run.phase !== projection.phase || run.phase_node_id !== projection.phase_node_id) {
+        await deliveryGraphRuns(data).update(run.run_key, {
+          status: projection.status,
+          phase: projection.phase,
+          phase_node_id: projection.phase_node_id,
+          updated_at: now(),
+        });
+      }
+    } catch (err) {
+      console.error(`[poller] delivery graph ${run.run_key}: ${err}`);
+    }
+  }
+}
+
 export async function pollUserTasks(
   data: DataLayer,
   engine: EngineClient,
@@ -2384,6 +2422,7 @@ export async function pollOnce(
   await pollLineage(data);
   await pollMergesPerDay(data);
   await pollUserTasks(data, engine, engineRest);
+  await pollDeliveryGraphPhase(data, engine);
   if (engineRest) {
     const base = engineRest.restAddress.replace(/\/+$/, "");
     const headers: Record<string, string> = { "content-type": "application/json" };
