@@ -55,12 +55,16 @@ test("the guide documents the delivery-graph surface (ADR 0005)", async () => {
   // The two doors, with their exact action paths.
   assert(md.includes("compile-delivery-graph"), "documents the pure compile door");
   assert(md.includes("start/delivery-graph"), "documents the gated dispatch door");
-  // The closed node vocabulary + the fact-edge syntax.
-  assert(
-    md.includes("agent") && md.includes("wait") && md.includes("human") && md.includes("connector"),
-    "documents the closed node vocabulary",
-  );
-  assert(md.includes('from: "<node') || md.includes("<nodeId>.<fact>"), "documents the fact-edge syntax");
+  // The closed node vocabulary: assert the exact config snippet for each of the four kinds,
+  // so the test fails if §9's node-kind table is removed or reworded — not merely if the bare
+  // words "agent"/"wait"/"human"/"connector" appear anywhere else in the guide.
+  assert(md.includes("agent: { jobType, prompt? }"), "documents the agent node config");
+  assert(md.includes("wait: <ReadinessProbe>"), "documents the wait node config");
+  assert(md.includes("human?: { formKey?, prompt? }"), "documents the human node config");
+  assert(md.includes("connector: { target, dedupeKey?, payload? }"), "documents the connector node config");
+  // The fact-edge syntax: an edge is `{ from, to }` and `from` may be a qualified `<nodeId>.<fact>`.
+  assert(md.includes("each edge is `{ from, to }`"), "documents the edge shape");
+  assert(md.includes("qualified `<nodeId>.<fact>`"), "documents the qualified fact-edge syntax");
   // The approval gate + idempotency of the start door.
   assert(md.includes("approvalToken"), "documents the approval gate");
   assert(md.includes("idempotencyKey"), "documents idempotency");

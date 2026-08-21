@@ -401,8 +401,8 @@ BPMN/prompt file you believe is responsible (§6).
 
 The two workflows above (§1 convergence-loop, §2 plan-fanout) are each specialised to
 **one** node shape ("an agent implements a slice → opens a PR"). Real delivery is often a
-**heterogeneous, cross-repo, partly-human graph** — e.g. *merge PR #A → un-draft+merge
-PR #B → a human does a manual OTP publish → PR #C consumes the just-published version*. A
+**heterogeneous, cross-repo, partly-human graph** — e.g. *merge PR #101 → un-draft+merge
+PR #202 → a human does a manual OTP publish → PR #303 consumes the just-published version*. A
 **delivery graph** ([ADR 0005](https://github.com/nanobpm/nano-workforce/blob/main/docs/adr/0005-agent-authored-delivery-graphs.md))
 lets you compose exactly that as **data** and hand it to a generic runner.
 
@@ -430,7 +430,7 @@ layer schedules, it does not re-implement execution):
 | kind | config | what it does | may `emits`? |
 |---|---|---|---|
 | `agent` | `agent: { jobType, prompt? }` | a worker runs an agent job type (the fan-out body). **Side-effecting.** | yes |
-| `wait` | `wait: <ReadinessProbe>` | a durable, bounded readiness probe — `kind ∈ http\|command\|npm\|github-check\|capability\|pr`. Read-only. | yes (binds observed facts) |
+| `wait` | `wait: <ReadinessProbe>` | a durable, bounded readiness probe — kind ∈ `http`, `command`, `npm`, `github-check`, `capability`, `pr`. Read-only. | yes (binds observed facts) |
 | `human` | `human?: { formKey?, prompt? }` | a scheduled user task + form (the Tasks inbox, §3). Blocks dependents, SLA-bounded, answerable by a human **or** an agent. | yes |
 | `connector` | `connector: { target, dedupeKey?, payload? }` | an automated, side-effecting outbound action. Carries a `dedupeKey` (at-least-once safe). *(payload is a forward-declared stub.)* | yes |
 
@@ -514,26 +514,26 @@ emits the node's typed fact, which downstream edges bind.
 
 ### 9.3 Worked example — the cross-repo human-in-the-loop release
 
-*Merge PR #A (repo 1) → un-draft+merge PR #B (repo 2) → a **human** runs the manual OTP
-publish and records the version → open+merge PR #C (repo 3) consuming that version.* The
+*Merge PR #101 (repo 1) → un-draft+merge PR #202 (repo 2) → a **human** runs the manual OTP
+publish and records the version → open+merge PR #303 (repo 3) consuming that version.* The
 `human` node **emits** a typed `version` fact, and the downstream `from:
-"manual-publish.publishedVersion"` edge binds it into the PR-#C path:
+"manual-publish.publishedVersion"` edge binds it into the PR-#303 path:
 
 ```json
 {
-  "name": "cross-repo release: merge #A → un-draft+merge #B → manual OTP publish → consume in #C",
+  "name": "cross-repo release: merge #101 → un-draft+merge #202 → manual OTP publish → consume in #303",
   "nodes": [
     { "id": "merge-a", "kind": "wait",
-      "wait": { "kind": "pr", "target": "acme/repo-1#A", "match": { "prState": "merged" }, "onTimeout": "escalate" } },
+      "wait": { "kind": "pr", "target": "acme/repo-1#101", "match": { "prState": "merged" }, "onTimeout": "escalate" } },
     { "id": "undraft-merge-b", "kind": "agent",
-      "agent": { "jobType": "senior:merge", "prompt": "Take draft PR acme/repo-2#B out of draft and merge it once its required checks are green." } },
+      "agent": { "jobType": "senior:merge", "prompt": "Take draft PR acme/repo-2#202 out of draft and merge it once its required checks are green." } },
     { "id": "manual-publish", "kind": "human",
       "human": { "prompt": "Run the manual OTP-authenticated `npm publish` for @acme/widget and set up OIDC trusted publishing. Record the exact published version." },
       "emits": [ { "name": "publishedVersion", "type": "version", "description": "The version just published to npm." } ] },
     { "id": "open-pr-c", "kind": "agent",
-      "agent": { "jobType": "senior:feature", "prompt": "Bump @acme/widget to the published version in acme/repo-3 and open PR #C." } },
+      "agent": { "jobType": "senior:feature", "prompt": "Bump @acme/widget to the published version in acme/repo-3 and open PR #303." } },
     { "id": "merge-c", "kind": "wait",
-      "wait": { "kind": "pr", "target": "acme/repo-3#C", "match": { "prState": "merged" }, "onTimeout": "escalate" } }
+      "wait": { "kind": "pr", "target": "acme/repo-3#303", "match": { "prState": "merged" }, "onTimeout": "escalate" } }
   ],
   "edges": [
     { "from": "merge-a", "to": "undraft-merge-b" },
@@ -563,7 +563,7 @@ then runs to `manual-publish`, parks it on the Tasks inbox (`now do X`), and —
 (or agent) completes it with the `publishedVersion` — binds that fact into `open-pr-c` and
 carries on to `merge-c`.
 
-To swap the manual PR-#C path for a **capability** edge instead of a raw `pr` watch, make
+To swap the manual PR-#303 path for a **capability** edge instead of a raw `pr` watch, make
 the consumer a `wait` node with `kind: "capability"` (resolving *which published
 `pkg@version` first carries the change*) fed by the same `manual-publish.publishedVersion`
 fact — the fact-edge syntax is identical.
