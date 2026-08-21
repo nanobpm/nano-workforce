@@ -327,6 +327,27 @@ test("H6 correlation write-side: an unpersisted stream completion releases its j
   service.teardown();
 });
 
+test("H6 correlation write-side: a late produce after completion does not resurrect the released correlation", () => {
+  const registry = new ConnectionRegistry();
+  const correlation = new CorrelationRegistry();
+  const byConnection = new Map([["prod", "worker-R"]]);
+  const { service, hub } = mkCorrelatedService(registry, undefined, correlation, byConnection);
+  const p = connect("prod", registry);
+  hub.handler?.(produce(jobStream("kR"), 1, "x"), p.conn);
+  assertEquals(correlation.jobKeysFor("worker-R"), ["kR"]);
+
+  // Job end completes the stream and releases the correlation.
+  service.completeStream(jobStream("kR"));
+  assertEquals(correlation.count(), 0, "completion releases the job");
+
+  // A late `produce` frame for the same, still-live producer must NOT re-link/re-own the completed
+  // stream — otherwise it resurrects a jobKey after it was released.
+  hub.handler?.(produce(jobStream("kR"), 1, "late"), p.conn);
+  assertEquals(correlation.count(), 0, "a late produce does not resurrect a completed stream");
+  assertEquals(correlation.jobKeysFor("worker-R"), [], "released jobKey stays released after a late produce");
+  service.teardown();
+});
+
 test("H6 correlation write-side: a producer disconnect releases its job correlation even unpersisted", () => {
   const registry = new ConnectionRegistry();
   const correlation = new CorrelationRegistry();

@@ -329,6 +329,10 @@ export class RelayTranscriptService {
     const stream = readProp(frame.payload, "stream");
     if (typeof stream !== "string" || stream === "") return;
     const state = this.#stateFor(stream);
+    // A completed stream is terminal: a late `produce` frame (e.g. arriving after job-end
+    // completion released the correlation) must not re-own or re-link it — doing so would
+    // resurrect a jobKey after it was released. Ignore ownership updates once completed.
+    if (state.completed) return;
     state.producer = conn.id;
     this.#link(stream, conn.id, state);
   }
