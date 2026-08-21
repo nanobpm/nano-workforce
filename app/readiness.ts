@@ -783,8 +783,9 @@ export function readinessTimeout(
  * loops in `feature.bpmn`/`plan-fanout.bpmn`) read `=probePollEvery`, re-activating the now single-shot
  * `pr.readiness-probe` once per interval. Derived here so whoever seeds a gate derives the cadence from
  * ONE place (mirroring {@link readinessTimeout} for the bound), and worker/engine can never drift.
- * `msToIsoDuration` floors at one whole second so the timer never rounds to an immediately-refiring
- * zero-length duration (which would reintroduce a busy-spin — the very defect Option A removes). */
+ * `msToIsoDuration` rounds up (via `Math.ceil`) to a whole second, with a one-second minimum, so the
+ * timer never rounds to an immediately-refiring zero-length duration (which would reintroduce a
+ * busy-spin — the very defect Option A removes). */
 export function readinessPollEvery(
   probe: ReadinessProbe,
   env: Record<string, string | undefined> = process.env,
