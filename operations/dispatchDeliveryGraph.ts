@@ -17,7 +17,7 @@
 import { compileDeliveryGraph } from "../app/deliveryGraphCompiler.ts";
 import { parseDeliveryGraphText } from "../app/deliveryGraphText.ts";
 import { deliveryGraphDigest } from "../app/deliveryRunner.ts";
-import type { DeliveryGraphTextResult } from "../nano-generated/api-io.d.ts";
+import type { DeliveryCompileError, DeliveryGraphTextResult } from "../nano-generated/api-io.d.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
 import startDeliveryGraph from "./startDeliveryGraph.ts";
 
@@ -83,11 +83,30 @@ export default defineOperation("dispatchDeliveryGraph", async (input, app) => {
   if (typeof resBody.approvalToken === "string") outBody.approvalToken = resBody.approvalToken;
   if (typeof resBody.message === "string") outBody.message = resBody.message;
 
+  // Carry through the start door's path-qualified validation/compile `errors` so callers/UI keep the
+  // structured detail (not just the summary banner). Narrow each entry to the wire pair — no assertions.
+  if (Array.isArray(resBody.errors)) {
+    const errors: DeliveryCompileError[] = [];
+    for (const e of resBody.errors) {
+      if (
+        typeof e === "object" &&
+        e !== null &&
+        "path" in e &&
+        "message" in e &&
+        typeof e.path === "string" &&
+        typeof e.message === "string"
+      ) {
+        errors.push({ path: e.path, message: e.message });
+      }
+    }
+    if (errors.length > 0) outBody.errors = errors;
+  }
+
   // Surface a human error banner for the page on a refusal (parked-at-approval / validation).
   if (status >= 400 && typeof outBody.error !== "string") {
     if (typeof resBody.error === "string") outBody.error = resBody.error;
     else if (typeof resBody.message === "string") outBody.error = resBody.message;
-    else if (Array.isArray(resBody.errors)) outBody.error = `graph failed validation: ${resBody.errors.length} error(s)`;
+    else if (outBody.errors !== undefined) outBody.error = `graph failed validation: ${outBody.errors.length} error(s)`;
     else outBody.error = "dispatch was refused";
   }
   return { status, body: outBody };

@@ -149,3 +149,18 @@ test("dispatch-delivery-graph: re-dispatch of a running graph short-circuits (al
   assertEquals(res.body.alreadyRunning, true);
   assertEquals(started.length, 1);
 });
+
+test("dispatch-delivery-graph: a graph that fails validation → 400 carries the start door's structured `errors` array, not just a summary banner", async () => {
+  const { app, started } = makeApp();
+  const res = await call(app, { graphJson: JSON.stringify({ name: "empty", nodes: [] }) });
+  assertEquals(res.status, 400);
+  assertEquals(res.body.ok, false);
+  // The structured, path-qualified errors from startDeliveryGraph must survive the adapter's re-shape.
+  assert(Array.isArray(res.body.errors) && res.body.errors.length > 0);
+  for (const e of res.body.errors) {
+    assert(typeof e.path === "string" && typeof e.message === "string");
+  }
+  // And the human banner is still derived from those errors.
+  assert(typeof res.body.error === "string" && res.body.error.length > 0);
+  assertEquals(started.length, 0);
+});
