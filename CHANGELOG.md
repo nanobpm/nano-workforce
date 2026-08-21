@@ -1,3 +1,10 @@
+# [0.118.0](https://github.com/nanobpm/nano-workforce/compare/v0.117.0...v0.118.0) (2026-08-21)
+
+
+### Features
+
+* **delivery-graphs:** human-facing Delivery Graphs UI surface ([#386](https://github.com/nanobpm/nano-workforce/issues/386)) ([#418](https://github.com/nanobpm/nano-workforce/issues/418)) ([3e5877d](https://github.com/nanobpm/nano-workforce/commit/3e5877d2e9f7dc4c7d7934b556e4eefd93685f0f)), closes [#405](https://github.com/nanobpm/nano-workforce/issues/405) [#397](https://github.com/nanobpm/nano-workforce/issues/397) [#374](https://github.com/nanobpm/nano-workforce/issues/374)
+
 # [0.117.0](https://github.com/nanobpm/nano-workforce/compare/v0.116.0...v0.117.0) (2026-08-21)
 
 
