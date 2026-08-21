@@ -46,11 +46,16 @@ jobs:
           # These must ALL be `success` on the release commit before we ship. Keep
           # in lock-step with the `main` ruleset's required status checks.
           required=("typecheck + test (Node)" "whole-repo invariants")
-          runs="$(gh api "repos/$REPO/commits/$SHA/check-runs" --paginate \
-                    --jq '.check_runs[] | [.name, (.conclusion // "pending")] | @tsv')"
+          # Dedupe to ONE row per check name — the latest run (max .id) — so re-runs
+          # can't leave us reading a stale conclusion. `--slurp` merges all pages
+          # into a single array first, so `group_by` sees every run for the SHA
+          # (a name split across pages would otherwise be grouped per-page).
+          runs="$(gh api "repos/$REPO/commits/$SHA/check-runs?per_page=100" --paginate --slurp \
+                    --jq '[.[].check_runs[]] | group_by(.name) | map(max_by(.id))
+                          | .[] | [.name, (.conclusion // "pending")] | @tsv')"
           should=true
           for name in "${required[@]}"; do
-            concl="$(printf '%s\n' "$runs" | awk -F'\t' -v n="$name" '$1==n{print $2}' | tail -1)"
+            concl="$(printf '%s\n' "$runs" | awk -F'\t' -v n="$name" '$1==n{print $2}')"
             echo "gate: '$name' = ${concl:-missing}"
             [ "${concl:-missing}" = "success" ] || should=false
           done
