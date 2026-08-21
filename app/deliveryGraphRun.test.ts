@@ -86,6 +86,29 @@ test("claimRunForLaunch: a TERMINAL row re-runs — the CAS flips it to running,
   });
 });
 
+test("claimRunForLaunch: re-running a terminal row clears the PRIOR instance key in the SAME atomic flip — a claimed `running` row is never visible pointing at a stale process_key", async () => {
+  await withData(async (data) => {
+    const runs = deliveryGraphRuns(data);
+    // A terminal prior run still carrying its old instance key + parked-node projection.
+    await runs.insert({
+      ...claimRow("running"),
+      status: "failed",
+      process_key: "OLD-PI",
+      process_definition_id: "OLD-DEF",
+      phase: "Parked on human node: publish",
+      phase_node_id: "delivery-human-task__n1",
+    });
+    // The fresh launch claim carries no instance key yet (processKey: null).
+    assertEquals(await claimRunForLaunch(data, true, claimRow("running")), true);
+    const row = await runs.get("rk");
+    assertEquals(row?.status, "running");
+    assertEquals(row?.process_key, null); // stale key cleared atomically with the flip — not left as "OLD-PI"
+    assertEquals(row?.process_definition_id, null);
+    assertEquals(row?.phase_node_id, null);
+    assertEquals(row?.phase, DELIVERY_PHASE.RUNNING);
+  });
+});
+
 // ── pollDeliveryGraphPhase: engine-key coercion ───────────────────────────────
 test("pollDeliveryGraphPhase: a numeric engine processInstanceKey still matches the string process_key, so a COMPLETED instance reconciles to done", async () => {
   await withData(async (data) => {

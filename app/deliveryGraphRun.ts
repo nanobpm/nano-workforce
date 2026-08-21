@@ -102,7 +102,15 @@ export const deliveryGraphRuns = (data: DataLayer) =>
  *     (`changed === 1`) and the other matches zero rows (`changed === 0`). This closes the double-launch
  *     hole the PK fence alone left open — an `update`-on-existing path has no unique collision to lose,
  *     so without this guard both racers would `update` then both launch. The winner writes the run's
- *     full metadata afterwards (safe: it is now the sole caller past the fence). */
+ *     full metadata afterwards (safe: it is now the sole caller past the fence).
+ *
+ * The CAS also CLEARS the instance-bound columns (`process_key`, `process_definition_id`, `phase`,
+ * `phase_node_id`) to the fresh claim's values IN THE SAME statement. A re-run off a terminal row (or
+ * any persisted row) still carries the PRIOR run's `process_key`; flipping `status` alone would make
+ * the row briefly visible as `running` while still pointing at the OLD instance key, so the
+ * `process_key`-keyed instance-tracking reconciler / poller could act on (and mis-reconcile against)
+ * the stale instance before the winner's follow-up metadata write lands. Clearing them atomically with
+ * the flip means a claimed `running` row can never be observed with a stale instance key. */
 export async function claimRunForLaunch(
   data: DataLayer,
   existing: boolean,
@@ -120,8 +128,16 @@ export async function claimRunForLaunch(
   const res = await data
     .open()
     .exec(
-      `UPDATE "delivery_graph_runs" SET "status" = ?, "updated_at" = ? WHERE "run_key" = ? AND "status" <> 'running'`,
-      [claim.status, claim.updated_at, claim.run_key],
+      `UPDATE "delivery_graph_runs" SET "status" = ?, "process_key" = ?, "process_definition_id" = ?, "phase" = ?, "phase_node_id" = ?, "updated_at" = ? WHERE "run_key" = ? AND "status" <> 'running'`,
+      [
+        claim.status,
+        claim.process_key,
+        claim.process_definition_id,
+        claim.phase,
+        claim.phase_node_id,
+        claim.updated_at,
+        claim.run_key,
+      ],
     );
   return res.changed === 1;
 }
