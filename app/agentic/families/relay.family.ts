@@ -380,7 +380,11 @@ export class RelayTranscriptService {
       state.linked = false;
     } catch (err) {
       // Advisory — never throws into the frame handler. Swallow a throwing injectable correlation and
-      // keep `state.linked` so a subsequent unlink pass can retry releasing the correlation.
+      // leave `state.linked` true so the flag honestly records that the release did NOT happen (rather
+      // than falsely clearing it). Note there is no automatic retry once the stream completes:
+      // `completeStream` sets `state.completed` and clears `state.producer`, so `#reconcile` no longer
+      // revisits it and `teardown` skips already-completed streams. A retry only occurs on the
+      // dead-producer path, where `#reconcile` re-invokes `#unlink` on a still-uncompleted stream.
       this.#log.warn("agentic relay correlation release failed — leaving stream linked", {
         stream,
         jobKey,
