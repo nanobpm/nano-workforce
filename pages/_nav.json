@@ -10,6 +10,7 @@
       { "label": "Convergence", "page": "home" },
       { "label": "Epics", "page": "epic" },
       { "label": "Feature", "page": "feature" },
+      { "label": "Delivery Graphs", "page": "delivery-graphs" },
       {
         "label": "Tasks",
         "page": "tasks",

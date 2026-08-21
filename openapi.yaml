@@ -1515,6 +1515,107 @@ components:
         message:
           type: string
           description: Human-actionable description of the failure.
+    DeliveryGraphTextSubmit:
+      description: >-
+        The human-facing UI JSON-paste PREVIEW request (issue #386). The Delivery Graphs page's text
+        field cannot submit a structured object, so the operator's pasted delivery-graph is carried as
+        a raw JSON STRING (`graphJson`), parsed server-side and handed to the SAME pure
+        `compileDeliveryGraph` compiler the agent-facing door uses. No parallel compile path.
+      type: object
+      additionalProperties: false
+      required:
+        - graphJson
+      properties:
+        graphJson:
+          type: string
+          description: The pasted delivery-graph JSON (a serialised `DeliveryGraph`), parsed server-side.
+    DeliveryGraphTextDispatch:
+      description: >-
+        The human-facing UI JSON-paste DISPATCH request (issue #386). Carries the pasted delivery-graph
+        as a raw JSON STRING plus the operator's explicit `approve` flag and optional idempotency key;
+        parsed server-side and delegated to the ONE gated, idempotent `startDeliveryGraph` contract —
+        there is NO parallel dispatch path.
+      type: object
+      additionalProperties: false
+      required:
+        - graphJson
+      properties:
+        graphJson:
+          type: string
+          description: The pasted delivery-graph JSON (a serialised `DeliveryGraph`), parsed server-side.
+        approve:
+          type: boolean
+          description: >-
+            The operator's approval OF the previewed graph. When true, the door derives the graph's
+            content digest and presents it as the `approvalToken`, so a side-effecting graph the
+            operator reviewed dispatches; when false/absent a side-effecting graph is parked at approval.
+        idempotencyKey:
+          type: string
+          maxLength: 255
+          description: OPTIONAL idempotency key forwarded to `startDeliveryGraph`. Blank/whitespace is treated as absent.
+    DeliveryGraphTextResult:
+      description: >-
+        The UI JSON-paste ingress outcome (issue #386) — a single shape covering the PREVIEW summary,
+        the DISPATCH outcome, and any parse/validation error. `ok` discriminates success; a failure
+        carries a human `error` (and, for a compile failure, path-qualified `errors`).
+      type: object
+      additionalProperties: false
+      required:
+        - ok
+      properties:
+        ok:
+          type: boolean
+          description: True on a successful preview/dispatch; false on a parse/validation failure or an approval park.
+        error:
+          type: string
+          description: A human-readable failure message (surfaced by the page's action banner).
+        errors:
+          type: array
+          items:
+            $ref: "#/components/schemas/DeliveryCompileError"
+          description: Path-qualified validation/compile failures, when the pasted graph was malformed.
+        status:
+          type: string
+          description: The dispatch run's lifecycle position (`running` / `awaiting-approval`), when dispatched.
+        runKey:
+          type: string
+          description: The dispatch run's idempotency key, when dispatched.
+        digest:
+          type: string
+          description: The graph's content digest — the approval token to dispatch a side-effecting graph.
+        sideEffecting:
+          type: boolean
+          description: Whether the graph has any side-effecting (`agent`/`connector`) node.
+        alreadyRunning:
+          type: boolean
+          description: True when a dispatch short-circuited onto an already-running run.
+        processInstanceKey:
+          type: string
+          description: The started engine instance key, when dispatched.
+        processDefinitionId:
+          type: string
+          description: The started process definition id, when dispatched.
+        approvalToken:
+          type: string
+          description: The approval token to re-submit with, when a side-effecting graph was parked pending approval.
+        message:
+          type: string
+          description: Additional detail from the dispatch door (e.g. the approval-park explanation).
+        title:
+          type: string
+          description: The graph's human-readable name, echoed on a successful preview.
+        nodeCount:
+          type: integer
+          description: The compiled graph's node count (preview).
+        humanNodeCount:
+          type: integer
+          description: The compiled graph's human stop-point count (preview).
+        sideEffectCount:
+          type: integer
+          description: The compiled graph's side-effecting node count (preview).
+        diagram:
+          type: string
+          description: The mermaid flowchart of the compiled graph (preview).
     ResolvedDeliveryNode:
       description: >-
         A normalised node in the compiled graph (ADR 0005 slice S1) — its `id`, `kind`, the
@@ -2615,6 +2716,71 @@ paths:
                 oneOf:
                   - $ref: "#/components/schemas/CompileDeliveryGraphErrors"
                   - $ref: "#/components/schemas/StartDeliveryGraphResult"
+  /actions/delivery-graph/preview:
+    post:
+      operationId: previewDeliveryGraph
+      summary: UI JSON-paste PREVIEW — parse a pasted delivery-graph JSON string and compile it (PURE). (ADR 0005 S1 / #386)
+      description: >-
+        The human-facing UI JSON-paste PREVIEW ingress (issue #386). The Delivery Graphs page's
+        "Preview" action posts the operator's pasted JSON as a STRING; this door parses it and runs the
+        SAME pure `compileDeliveryGraph` compiler the agent-facing door uses, returning a compact
+        summary (the content `digest` = the approval token, node/human/side-effect counts, the mermaid
+        `diagram`). It is PURE and side-effect-free — nothing is deployed or dispatched. A blank/invalid
+        JSON string, or a graph that fails validation, is a 400 carrying a human `error` (and
+        path-qualified `errors` for a compile failure).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeliveryGraphTextSubmit"
+      responses:
+        "200":
+          description: The pasted graph parsed, validated and compiled — the pure preview summary.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeliveryGraphTextResult"
+        "400":
+          description: The pasted text was not valid JSON, or the graph failed validation/compilation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeliveryGraphTextResult"
+  /actions/delivery-graph/dispatch:
+    post:
+      operationId: dispatchDeliveryGraph
+      summary: UI JSON-paste DISPATCH — parse a pasted delivery-graph JSON string and dispatch it via startDeliveryGraph (gated, idempotent). (ADR 0005 S5 / #386)
+      description: >-
+        The human-facing UI JSON-paste DISPATCH ingress (issue #386). The Delivery Graphs page's
+        "Dispatch" action posts the operator's pasted JSON as a STRING plus an explicit `approve` flag;
+        this door parses it and delegates to the SAME gated, idempotent `startDeliveryGraph` contract —
+        there is NO parallel dispatch path. When `approve` is true the door derives the graph's content
+        digest and presents it as the approval token, so a side-effecting graph the operator reviewed in
+        the preview dispatches; without `approve` a side-effecting graph is PARKED at approval (visible
+        in the in-flight grid) and a non-side-effecting graph dispatches straight away. Idempotent on
+        `idempotencyKey` (else the content digest).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeliveryGraphTextDispatch"
+      responses:
+        "202":
+          description: The graph dispatched (or a re-submit short-circuited an already-running run).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeliveryGraphTextResult"
+        "400":
+          description: >-
+            The pasted text was not valid JSON, the graph failed validation, or a side-effecting graph
+            was parked pending approval (the body carries the `approvalToken` / `error` to act on).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeliveryGraphTextResult"
   /actions/start/feature:
     post:
       operationId: startFeature
