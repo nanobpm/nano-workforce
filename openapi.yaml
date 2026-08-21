@@ -1713,6 +1713,85 @@ components:
           items:
             $ref: "#/components/schemas/DeliveryCompileError"
           description: The path-qualified validation/compile failures (at least one).
+    DeliveryGraphStart:
+      description: >-
+        The `startDeliveryGraph` request body (ADR 0005 slice S5) — the ONE gated dispatch door that
+        turns an agent-authored `DeliveryGraph` into a RUNNING engine-native process. This is the OUTER
+        action, distinct from S1's pure `compileDeliveryGraph`: there is deliberately no `dryRun` flag
+        (Decision 5/7) — compile and start are separate operations. The door re-validates (S0), compiles
+        (S1), and launches the S4 runner. Three ingress paths — an agent-ergonomic POST, a raw REST call,
+        and a UI JSON-paste — all hit this ONE contract.
+      type: object
+      additionalProperties: false
+      required:
+        - graph
+      properties:
+        graph:
+          $ref: "#/components/schemas/DeliveryGraph"
+        approvalToken:
+          type: string
+          description: >-
+            The approval OF the rendered preview (Decision 7). Because a delivery graph merges PRs and
+            publishes packages, a graph with any SIDE-EFFECTING node (`agent`/`connector`) dispatches
+            ONLY when the caller presents the graph's content-addressed approval token (returned as
+            `approvalToken` on a prior unapproved submit's `awaiting-approval` response). A graph with
+            no side effects (only `wait`/`human` nodes) needs none and dispatches straight away.
+        idempotencyKey:
+          type: string
+          maxLength: 255
+          description: >-
+            OPTIONAL caller-supplied idempotency key. A re-POST with the SAME key (or, when omitted, the
+            SAME graph — the default key is the graph's content digest) does NOT double-launch: an
+            in-flight run short-circuits with `alreadyRunning: true`. Blank/whitespace is treated as
+            absent.
+    StartDeliveryGraphResult:
+      description: >-
+        The `startDeliveryGraph` outcome. `status` is the run's lifecycle position: `running` (the graph
+        dispatched — or was already running, see `alreadyRunning`) or `awaiting-approval` (a
+        side-effecting graph was submitted without a valid `approvalToken` — it is PARKED, visible in the
+        cockpit, and refused pending approval; re-POST with the returned `approvalToken` to dispatch).
+      type: object
+      additionalProperties: false
+      required:
+        - ok
+        - status
+        - runKey
+        - digest
+        - sideEffecting
+      properties:
+        ok:
+          type: boolean
+          description: True when the graph dispatched (or was already running); false when parked at approval.
+        status:
+          type: string
+          enum: [running, awaiting-approval]
+          description: The run's lifecycle position after this call.
+        runKey:
+          type: string
+          description: The idempotency key the run is stored under (the caller key, else the content digest).
+        digest:
+          type: string
+          description: The graph's content digest — the content-address of the compiled definition.
+        sideEffecting:
+          type: boolean
+          description: Whether the graph has any side-effecting (`agent`/`connector`) node — i.e. whether approval is required.
+        alreadyRunning:
+          type: boolean
+          description: True when a re-submit short-circuited onto an already-running run (no second launch).
+        processInstanceKey:
+          type: string
+          description: The started engine instance key. Present when `status` is `running`; absent while parked at approval.
+        processDefinitionId:
+          type: string
+          description: The content-addressed deployed process id (`delivery-graph-<digest>`). Present when dispatched.
+        approvalToken:
+          type: string
+          description: >-
+            The token to present as `approvalToken` on a re-POST to dispatch this exact graph. Present
+            when `status` is `awaiting-approval` (equals `digest`).
+        message:
+          type: string
+          description: A human-readable summary of the outcome (e.g. the approval-required reason).
     FeatureStart:
       description: The start-feature request body — a SINGLE-issue feature run. Names the target issue
         by EXACTLY ONE of `issue` (an `owner/repo#123` reference) or `url` (a bare issue URL), plus a
@@ -2495,6 +2574,47 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/CompileDeliveryGraphErrors"
+  /actions/start/delivery-graph:
+    post:
+      operationId: startDeliveryGraph
+      summary: Validate + compile + DISPATCH a delivery graph as a running engine-native process (gated, idempotent). (ADR 0005 slice S5)
+      description: >-
+        The delivery-graph DISPATCH door (ADR 0005 Decision 7) — the single gated OUTER action that
+        turns an agent-authored `DeliveryGraph` into a RUNNING engine-native process. Distinct from S1's
+        pure `compileDeliveryGraph`: compile and start are SEPARATE operations (Decision 5/7), so there
+        is deliberately no `dryRun` flag. The door re-validates the graph (`validateDeliveryGraph`, S0),
+        compiles it (`compileDeliveryGraph`, S1), and LAUNCHES the S4 runner (`runDeliveryGraph`).
+        Because these graphs merge PRs and publish packages, dispatch is GATED: a graph with any
+        side-effecting (`agent`/`connector`) node must present the content-addressed `approvalToken` of
+        its rendered preview, else it is PARKED at approval (a 400 carrying the token, plus a visible
+        `awaiting-approval` run in the cockpit) rather than dispatched. Idempotent: a re-POST of the same
+        graph (or the same `idempotencyKey`) short-circuits an already-running run instead of
+        double-launching. Three ingress paths — an agent-ergonomic POST, a raw REST call, and a UI
+        JSON-paste — all hit this ONE contract.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeliveryGraphStart"
+      responses:
+        "202":
+          description: The graph dispatched (or a re-submit short-circuited an already-running run).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StartDeliveryGraphResult"
+        "400":
+          description: >-
+            The graph failed validation/compilation (path-qualified errors), OR a side-effecting graph
+            was submitted without a valid approval token — it is refused and PARKED at approval (the
+            body carries the `approvalToken` to re-submit with).
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/CompileDeliveryGraphErrors"
+                  - $ref: "#/components/schemas/StartDeliveryGraphResult"
   /actions/start/feature:
     post:
       operationId: startFeature

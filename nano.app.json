@@ -81,6 +81,20 @@
         }
       },
       "pollMs": 5000
+    },
+    {
+      "table": "delivery_graph_runs",
+      "keyField": "process_key",
+      "statusField": "status",
+      "activeStatuses": [
+        "running"
+      ],
+      "onTerminated": {
+        "set": {
+          "status": "failed"
+        }
+      },
+      "pollMs": 5000
     }
   ],
   "workers": [
