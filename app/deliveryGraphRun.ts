@@ -126,6 +126,53 @@ export async function claimRunForLaunch(
   return res.changed === 1;
 }
 
+/** Persist a PARKED (non-launch) run row — the approval-gate write for an unapproved side-effecting
+ * graph — WITHOUT ever clobbering a concurrently-launched `running` claim. Two concurrent submits of
+ * one graph (same `run_key`) can race an APPROVED launch (which inserts/flips a `running` claim via
+ * `claimRunForLaunch`) against an UNAPPROVED park: a blind insert-or-update would let the park
+ * overwrite that `running` claim back to `awaiting-approval` and null its `process_key`, breaking the
+ * at-most-once dispatch fence and letting a later re-submit double-launch the graph's side effects.
+ * So mirror the launch fence exactly — a first write is the `run_key` PK insert; on a unique
+ * collision (a concurrent submit already wrote the row) OR when a row already exists, re-apply via a
+ * single atomic guarded UPDATE `… WHERE status <> 'running'`. One statement, so the check-and-write
+ * is atomic even across the delegate's `await` points: a racing `running` claim matches zero rows and
+ * survives untouched, while a still-parked or terminal row is idempotently (re-)parked. */
+export async function parkRunFencedAgainstLaunch(
+  data: DataLayer,
+  existing: boolean,
+  row: DeliveryGraphRun,
+): Promise<void> {
+  if (!existing) {
+    try {
+      await deliveryGraphRuns(data).insert(row);
+      return;
+    } catch (err) {
+      if (!isUniqueConstraintFence(err)) throw err;
+    }
+  }
+  await data
+    .open()
+    .exec(
+      `UPDATE "delivery_graph_runs" SET "process_key" = ?, "process_definition_id" = ?, "digest" = ?, "status" = ?, "side_effecting" = ?, "node_count" = ?, "human_node_count" = ?, "side_effect_count" = ?, "title" = ?, "phase" = ?, "phase_node_id" = ?, "human_labels" = ?, "updated_at" = ? WHERE "run_key" = ? AND "status" <> 'running'`,
+      [
+        row.process_key,
+        row.process_definition_id,
+        row.digest,
+        row.status,
+        row.side_effecting,
+        row.node_count,
+        row.human_node_count,
+        row.side_effect_count,
+        row.title,
+        row.phase,
+        row.phase_node_id,
+        row.human_labels,
+        row.updated_at,
+        row.run_key,
+      ],
+    );
+}
+
 /** The idempotency key for a submitted graph: a caller-supplied `idempotencyKey` (trimmed) when
  * present and non-blank, else the graph's content `digest`. So two POSTs of the SAME graph (no
  * explicit key) collapse onto one run, and a caller can force a fresh run with an explicit key. */

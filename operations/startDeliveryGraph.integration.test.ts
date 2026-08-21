@@ -52,25 +52,26 @@ function makeApp(opts: { failCreate?: boolean } = {}) {
   const app = {
     data: {
       table,
-      // Faithful model of the ONE raw statement the door issues via the DataSource gateway: the
-      // launch-claim compare-and-swap `UPDATE delivery_graph_runs SET status=?,updated_at=? WHERE
-      // run_key=? AND status <> 'running'`. Applied synchronously — the guard check and the flip happen
-      // with no intervening await, exactly as SQLite runs the single statement — so the parked→running
-      // claim race is exercised here the same way it fences against the real store.
+      // Faithful model of the guarded raw UPDATEs the door issues via the DataSource gateway, BOTH of
+      // which fence on `WHERE "run_key" = ? AND "status" <> 'running'`: the launch-claim compare-and-swap
+      // (`SET status=?,updated_at=?`) and the approval-park write (`SET process_key=?,…,updated_at=?`).
+      // Columns are parsed from the SQL so either statement is applied faithfully. Deferred to a microtask
+      // to model the real async DataSource — the guard-and-write is NOT visible synchronously at call
+      // time, so a concurrently-scheduled delegate can still read the row pre-flip and reach its OWN
+      // claim/park (the exact interleave that made the unfenced writes double-launch / clobber a claim).
+      // The single `status <> 'running'` guard then lets only the first writer win: a launched `running`
+      // row is never flipped back, and a losing claim matches zero rows (`changed: 0`).
       open: () => ({
-        exec: (_sql: string, params: unknown[]) =>
-          // Defer the guard-and-flip to a microtask, faithfully modelling the real async DataSource:
-          // the flip is NOT visible synchronously at call time, so a concurrently-scheduled delegate
-          // can still read the row as parked and reach its OWN claim — the exact interleave that made
-          // the unfenced `update` double-launch. The `status <> 'running'` guard then lets only the
-          // first flip win (`changed: 1`); the loser matches zero rows (`changed: 0`).
+        exec: (sql: string, params: unknown[]) =>
           Promise.resolve().then(() => {
-            const [status, updated_at, run_key] = params as [string, string, string];
+            // `"col" = ?` matches every SET assignment plus the WHERE `"run_key" = ?` (the `<> 'running'`
+            // guard uses `<>`, not `=`, so it is excluded); the last param is therefore the run_key.
+            const cols = [...sql.matchAll(/"(\w+)"\s*=\s*\?/g)].map((m) => m[1]);
+            const runKey = params[params.length - 1];
             const rows = tables.get("delivery_graph_runs") ?? [];
-            const row = rows.find((r) => r["run_key"] === run_key);
+            const row = rows.find((r) => r["run_key"] === runKey);
             if (row && row["status"] !== "running") {
-              row["status"] = status;
-              row["updated_at"] = updated_at;
+              for (let i = 0; i < cols.length - 1; i++) row[cols[i]] = params[i];
               return { changed: 1 };
             }
             return { changed: 0 };
@@ -251,6 +252,30 @@ test("two SIMULTANEOUS APPROVED re-submits of an already-PARKED graph launch it 
   assertEquals(runs()[0]?.["status"], "running");
   // Exactly one racer is the short-circuited loser (alreadyRunning); the other is the fresh winner.
   assertEquals([a, b].filter((r) => r.body.alreadyRunning === true).length, 1);
+});
+
+test("an APPROVED launch racing a concurrent UNAPPROVED re-submit of an already-PARKED graph is NOT clobbered — the park write is fenced `WHERE status <> 'running'`, so the launched claim (and its process_key) survives", async () => {
+  const { app, started, runs } = makeApp();
+  // Park the side-effecting graph first (unapproved) + grab its token — both racers read THIS row.
+  const parked = (await startDeliveryGraph(input({ graph: SIDE_EFFECTING }), app)) as { body: { approvalToken: string } };
+  const token = parked.body.approvalToken;
+  assertEquals(runs()[0]?.["status"], "awaiting-approval");
+  // Fire an APPROVED submit (which claims → running → launches) SIMULTANEOUSLY with another UNAPPROVED
+  // submit (which re-parks). Both read `existing` as the parked row. A blind park `update` would flip
+  // the launched `running` claim back to `awaiting-approval` and null its process_key — breaking the
+  // at-most-once fence. The guarded park write refuses to touch a `running` row instead.
+  const [approved, unapproved] = (await Promise.all([
+    startDeliveryGraph(input({ graph: SIDE_EFFECTING, approvalToken: token }), app),
+    startDeliveryGraph(input({ graph: SIDE_EFFECTING }), app),
+  ])) as { status: number; body: { status: string } }[];
+  assertEquals(approved.status, 202);
+  assertEquals(approved.body.status, "running"); // the approved submit dispatched
+  assertEquals(unapproved.status, 400); // the unapproved submit is refused (needs approval)
+  // Exactly ONE launch and ONE durable row, still `running` with its instance key — NOT clobbered.
+  assertEquals(started.length, 1);
+  assertEquals(runs().length, 1);
+  assertEquals(runs()[0]?.["status"], "running");
+  assertEquals(runs()[0]?.["process_key"], "PI-1");
 });
 
 test("a launch failure rolls the claimed run to `failed` — no stranded null-process_key `running` row", async () => {

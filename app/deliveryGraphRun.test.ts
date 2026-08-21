@@ -22,6 +22,7 @@ import {
   deliveryGraphRuns,
   humanTaskElementId,
   isDeliveryGraphApproved,
+  parkRunFencedAgainstLaunch,
   parseHumanLabels,
 } from "./deliveryGraphRun.ts";
 import { pollDeliveryGraphPhase } from "./service.ts";
@@ -97,6 +98,36 @@ test("pollDeliveryGraphPhase: a numeric engine processInstanceKey still matches 
     };
     await pollDeliveryGraphPhase(data, engine as never);
     assertEquals((await runs.get("rk"))?.status, "done");
+  });
+});
+
+// ── parkRunFencedAgainstLaunch: the approval-park write never clobbers a launched claim ────────────
+test("parkRunFencedAgainstLaunch: an approval-park write onto a launched `running` claim is a no-op — the at-most-once dispatch fence survives (no clobber back to awaiting-approval, no nulled process_key)", async () => {
+  await withData(async (data) => {
+    const runs = deliveryGraphRuns(data);
+    // A concurrent APPROVED submit already launched: the row is `running` with a live instance key.
+    await runs.insert({ ...claimRow("running"), process_key: "PI-1" });
+    // A racing UNAPPROVED submit that read the pre-launch row now tries to (re-)park it. The guarded
+    // write must refuse to overwrite the launched claim — otherwise a later re-submit double-launches.
+    await parkRunFencedAgainstLaunch(data, true, claimRow("awaiting-approval"));
+    const row = await runs.get("rk");
+    assertEquals(row?.status, "running"); // NOT clobbered back to awaiting-approval
+    assertEquals(row?.process_key, "PI-1"); // instance key preserved
+  });
+});
+
+test("parkRunFencedAgainstLaunch: a first park INSERTs the row; a park onto a still-parked row idempotently re-parks it (metadata refreshed, status stays awaiting-approval)", async () => {
+  await withData(async (data) => {
+    const runs = deliveryGraphRuns(data);
+    // First unapproved submit: no row yet → INSERT.
+    await parkRunFencedAgainstLaunch(data, false, claimRow("awaiting-approval"));
+    assertEquals((await runs.get("rk"))?.status, "awaiting-approval");
+    // A second unapproved submit onto the existing parked row: guarded UPDATE re-parks it (status is
+    // not `running`, so it applies) without duplicating the row.
+    await parkRunFencedAgainstLaunch(data, true, { ...claimRow("awaiting-approval"), digest: "d2" });
+    const row = await runs.get("rk");
+    assertEquals(row?.status, "awaiting-approval");
+    assertEquals(row?.digest, "d2");
   });
 });
 

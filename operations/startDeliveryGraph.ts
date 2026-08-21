@@ -19,7 +19,6 @@
 //     a re-POST of the same graph short-circuits an already-running run instead of double-launching —
 //     mirroring `startPlan`'s `alreadyRunning`.
 
-import { isUniqueConstraintFence } from "../app/dbFence.ts";
 import { validateDeliveryGraph } from "../app/deliveryGraph.ts";
 import { compileDeliveryGraph } from "../app/deliveryGraphCompiler.ts";
 import {
@@ -30,6 +29,7 @@ import {
   DELIVERY_PHASE,
   deliveryGraphRuns,
   isDeliveryGraphApproved,
+  parkRunFencedAgainstLaunch,
 } from "../app/deliveryGraphRun.ts";
 import { deliveryGraphDigest, runDeliveryGraph } from "../app/deliveryRunner.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
@@ -105,28 +105,18 @@ export default defineOperation("startDeliveryGraph", async ({ body }, app) => {
     humanLabels: buildHumanLabels(compiled),
     createdAt: existing?.created_at,
   };
-  const upsert = async (row: ReturnType<typeof buildDeliveryGraphRunRow>) => {
-    if (existing) {
-      const { run_key, created_at, ...patch } = row;
-      await runs.update(runKey, patch);
-      return;
-    }
-    try {
-      await runs.insert(row);
-    } catch (err) {
-      // A concurrent submit won the `run_key` PK fence between our `get()` and this `insert` — collapse
-      // onto the winner's row (idempotent) instead of surfacing the collision as a 500.
-      if (!isUniqueConstraintFence(err)) throw err;
-      const { run_key, created_at, ...patch } = row;
-      await runs.update(runKey, patch);
-    }
-  };
 
   // 4) Approval gate (Decision 7) — a side-effecting graph without a valid approval token is REFUSED
   //    (400) and PARKED as an `awaiting-approval` run so it is visible in the cockpit; the response
   //    carries the token to re-submit with. A non-side-effecting graph passes straight through.
   if (!isDeliveryGraphApproved(sideEffecting, approvalToken, digest)) {
-    await upsert(buildDeliveryGraphRunRow({ ...rowBase, status: "awaiting-approval", phase: DELIVERY_PHASE.AWAITING_APPROVAL, processKey: null }));
+    // Park through the launch fence — never overwrite a concurrently-launched `running` claim (a
+    // racing approved submit) back to `awaiting-approval`, which would break at-most-once dispatch.
+    await parkRunFencedAgainstLaunch(
+      app.data,
+      Boolean(existing),
+      buildDeliveryGraphRunRow({ ...rowBase, status: "awaiting-approval", phase: DELIVERY_PHASE.AWAITING_APPROVAL, processKey: null }),
+    );
     app.log.info("start-delivery-graph parked: awaiting approval", { runKey, sideEffects: compiled.sideEffects.length });
     return {
       status: 400,
