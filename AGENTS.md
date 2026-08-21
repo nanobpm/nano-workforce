@@ -191,6 +191,28 @@ instead of rediscovering them:
   on the production nano engine, which updates the nearest scope, but it keeps
   per-child isolation in the testkit). Only vars read by an in-subprocess gateway
   need this — output-only vars (e.g. `summary`, `pr`) are fine.
+- **Call activities don't execute — deliver node bodies as embedded
+  `subProcess`.** A `<bpmn:callActivity>` / `<zeebe:calledElement>` is a **no-op
+  passthrough** on the pinned WASM testkit: the called child is never
+  instantiated (no child instance, no jobs fire), and even when forced, child
+  variables never propagate back (output mappings evaluate in the **parent**
+  scope, `propagateAllChildVariables` is ignored, MI `outputElement` harvests
+  `null`). Author node bodies as **embedded `<bpmn:subProcess>`** — they execute
+  and share the parent variable scope — as the rest of the codebase already does
+  (plan-fanout readiness-preflight, the delivery-graph compiler). Because the
+  Rust/unit tests can pass while the WASM path silently drops the child, **verify
+  end-to-end on the WASM `TestEngine`**, not just the unit suite.
+- **FEEL string literals break silently when XML-entity-escaped.** The WASM
+  deploy path does **not** decode `&quot;` / `&#34;` before FEEL parsing, so a
+  `source="=&#34;X&#34;"` evaluates to nothing — the variable is silently unset,
+  with no incident raised. Emit raw `JSON.stringify(value)` (literal
+  double-quotes) and delimit the XML attribute with **single quotes** so the
+  inner quote survives, e.g. `source='=[{from: "a", value: x}]'`. Confirmed to
+  fix both `ioMapping` inputs/outputs and FEEL context/list literals.
+- **The testkit `WasmEngineClient` has no `openUserTasks`.** `bootTestApp`'s
+  client implements only `searchUserTasks`. In a poller/e2e driven under the
+  testkit, use `engine.searchUserTasks({ processInstanceKey, state: "CREATED" })`
+  — semantically identical to `openUserTasks` and works in both testkit and prod.
 
 ## Data envelopes: message payloads are scalar-only; worker I/O shapes support arrays
 
