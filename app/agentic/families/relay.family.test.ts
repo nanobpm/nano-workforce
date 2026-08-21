@@ -19,7 +19,9 @@ import { RELAY_FAMILY } from "@nanobpm/agentic/relay";
 import { type SqliteDb, TRANSCRIPT_SCHEMA_SQL } from "@nanobpm/agentic/transcript";
 import { assert, assertEquals } from "#test-assert";
 import { noopLog } from "../../../test/log.ts";
+import { CorrelationRegistry, jobStream } from "../correlation.ts";
 import {
+  type CorrelationLink,
   createRelayFamily,
   currentRelayTranscriptService,
   family as relayFamily,
@@ -128,6 +130,25 @@ function mkService(registry: ConnectionRegistry, db: SqliteDb | undefined): {
 } {
   const hub = capturingHub();
   const service = new RelayTranscriptService({ hub, registry, db, log: noopLog() });
+  return { service, hub };
+}
+
+/** Build a service with the H6 correlation write-side wired (a real registry + a connection→instance map). */
+function mkCorrelatedService(
+  registry: ConnectionRegistry,
+  db: SqliteDb | undefined,
+  correlation: CorrelationRegistry,
+  byConnection: Map<string, string>,
+): { service: RelayTranscriptService; hub: CapturingHub } {
+  const hub = capturingHub();
+  const service = new RelayTranscriptService({
+    hub,
+    registry,
+    db,
+    log: noopLog(),
+    correlation: () => correlation,
+    instanceForConnection: (id) => byConnection.get(id),
+  });
   return { service, hub };
 }
 
@@ -259,6 +280,212 @@ test("retention: a disconnected producer auto-completes its ephemeral stream on 
   const meta = service.transcriptOf("job-2");
   assertEquals(meta?.status, "completed");
   assertEquals(service.reattach("job-2", 0)?.entries.length, 2);
+  service.teardown();
+});
+
+test("H6 correlation write-side: a produce on job:<k> links instance→[k]; stream completion releases it", () => {
+  const registry = new ConnectionRegistry();
+  const correlation = new CorrelationRegistry();
+  const byConnection = new Map([["prod", "worker-A"]]);
+  const { service, hub } = mkCorrelatedService(registry, memoryDb(), correlation, byConnection);
+  const p = connect("prod", registry);
+
+  // The first `produce` for a job-scoped stream links the producing worker instance → jobKey, from
+  // data already crossing the wire (jobKey decoded from the stream id; instance from the connection).
+  hub.handler?.(produce(jobStream("k1"), 1, "chunk"), p.conn);
+  assertEquals(correlation.jobKeysFor("worker-A"), ["k1"], "instance → [jobKey] is now linked");
+  assertEquals(correlation.resolve("k1")?.stream, jobStream("k1"), "context carries the job-scoped stream");
+  assertEquals(correlation.count(), 1);
+
+  // Job end (stream completion) releases the correlation, so the worker's supply row clears it.
+  service.completeStream(jobStream("k1"));
+  assertEquals(correlation.jobKeysFor("worker-A"), [], "completion releases the job");
+  assertEquals(correlation.resolve("k1"), undefined);
+  assertEquals(correlation.count(), 0);
+  service.teardown();
+});
+
+test("H6 correlation write-side: an unpersisted stream completion releases its job correlation and stops reconcile retrying", () => {
+  const registry = new ConnectionRegistry();
+  const correlation = new CorrelationRegistry();
+  const byConnection = new Map([["prod", "worker-U"]]);
+  // No DataLayer → the relay runs unpersisted. A direct completeStream (job end, not a disconnect)
+  // must still transition in-memory state: unlink correlation, mark ephemeral completed, drop the
+  // producer — otherwise #reconcile keeps re-completing the stream on every subsequent frame.
+  const { service, hub } = mkCorrelatedService(registry, undefined, correlation, byConnection);
+  const p = connect("prod", registry);
+  hub.handler?.(produce(jobStream("kU"), 1, "x"), p.conn);
+  assertEquals(correlation.jobKeysFor("worker-U"), ["kU"]);
+
+  service.completeStream(jobStream("kU"));
+  assertEquals(correlation.jobKeysFor("worker-U"), [], "unpersisted completion releases the job");
+  assertEquals(correlation.count(), 0);
+
+  // The producer is still live, but the stream is now completed: a later frame's #reconcile must not
+  // re-link or otherwise resurrect the released correlation.
+  hub.handler?.(grant(0), p.conn);
+  assertEquals(correlation.count(), 0, "completed stream stays released; reconcile does not retry");
+  service.teardown();
+});
+
+test("H6 correlation write-side: a late produce after completion does not resurrect the released correlation", () => {
+  const registry = new ConnectionRegistry();
+  const correlation = new CorrelationRegistry();
+  const byConnection = new Map([["prod", "worker-R"]]);
+  const { service, hub } = mkCorrelatedService(registry, undefined, correlation, byConnection);
+  const p = connect("prod", registry);
+  hub.handler?.(produce(jobStream("kR"), 1, "x"), p.conn);
+  assertEquals(correlation.jobKeysFor("worker-R"), ["kR"]);
+
+  // Job end completes the stream and releases the correlation.
+  service.completeStream(jobStream("kR"));
+  assertEquals(correlation.count(), 0, "completion releases the job");
+
+  // A late `produce` frame for the same, still-live producer must NOT re-link/re-own the completed
+  // stream — otherwise it resurrects a jobKey after it was released.
+  hub.handler?.(produce(jobStream("kR"), 1, "late"), p.conn);
+  assertEquals(correlation.count(), 0, "a late produce does not resurrect a completed stream");
+  assertEquals(correlation.jobKeysFor("worker-R"), [], "released jobKey stays released after a late produce");
+  service.teardown();
+});
+
+/**
+ * A {@link CorrelationLink} wrapper that delegates to a real registry but can be flipped to throw on
+ * `link()`/`releaseJob()`, exercising the advisory-resilience contract: `#link`/`#unlink` are
+ * documented "never throws into the frame handler", so a throwing injectable correlation must not
+ * take down the relay frame handler, and the stream must stay retryable.
+ */
+function throwingCorrelation(inner: CorrelationRegistry): {
+  correlation: CorrelationLink;
+  failLink: (on: boolean) => void;
+  failRelease: (on: boolean) => void;
+} {
+  let linkFails = false;
+  let releaseFails = false;
+  return {
+    correlation: {
+      link: (instance, jobKey, context) => {
+        if (linkFails) throw new Error("correlation.link boom");
+        inner.link(instance, jobKey, context);
+      },
+      releaseJob: (jobKey) => {
+        if (releaseFails) throw new Error("correlation.releaseJob boom");
+        inner.releaseJob(jobKey);
+      },
+    },
+    failLink: (on) => {
+      linkFails = on;
+    },
+    failRelease: (on) => {
+      releaseFails = on;
+    },
+  };
+}
+
+test("H6 correlation write-side: a throwing correlation.link() never escapes the frame handler and leaves the stream retryable", () => {
+  const registry = new ConnectionRegistry();
+  const inner = new CorrelationRegistry();
+  const { correlation, failLink } = throwingCorrelation(inner);
+  const byConnection = new Map([["prod", "worker-L"]]);
+  const hub = capturingHub();
+  const service = new RelayTranscriptService({
+    hub,
+    registry,
+    db: undefined,
+    log: noopLog(),
+    correlation: () => correlation,
+    instanceForConnection: (id) => byConnection.get(id),
+  });
+  const p = connect("prod", registry);
+
+  // The first `produce` links — but the injected correlation throws. It must be swallowed (advisory),
+  // so the frame handler does not throw and the stream is left UNLINKED so a later produce retries.
+  failLink(true);
+  hub.handler?.(produce(jobStream("kL"), 1, "x"), p.conn);
+  assertEquals(inner.count(), 0, "a throwing link is swallowed and records no correlation");
+
+  // A later produce (link now succeeds) retries the link — proving the stream was left unlinked.
+  failLink(false);
+  hub.handler?.(produce(jobStream("kL"), 1, "y"), p.conn);
+  assertEquals(inner.jobKeysFor("worker-L"), ["kL"], "the link retries and succeeds on a later frame");
+  assertEquals(inner.count(), 1);
+  service.teardown();
+});
+
+test("H6 correlation write-side: a throwing correlation.releaseJob() never escapes the frame handler; completion still finalizes", () => {
+  const registry = new ConnectionRegistry();
+  const inner = new CorrelationRegistry();
+  const { correlation, failRelease } = throwingCorrelation(inner);
+  const byConnection = new Map([["prod", "worker-X"]]);
+  const hub = capturingHub();
+  const service = new RelayTranscriptService({
+    hub,
+    registry,
+    db: undefined,
+    log: noopLog(),
+    correlation: () => correlation,
+    instanceForConnection: (id) => byConnection.get(id),
+  });
+  const p = connect("prod", registry);
+  hub.handler?.(produce(jobStream("kX"), 1, "x"), p.conn);
+  assertEquals(inner.jobKeysFor("worker-X"), ["kX"]);
+
+  // A producer disconnect drives #reconcile → #unlink, but releaseJob throws. The advisory contract
+  // is "never throws into the frame handler": the throw must be swallowed so the reconcile pass (and
+  // the completion it drives) do not bubble out and take down unrelated streams' relay processing.
+  failRelease(true);
+  registry.remove("prod");
+  const other = connect("cons", registry);
+  hub.handler?.(grant(0), other.conn); // must NOT throw despite releaseJob throwing
+
+  // The stream still finalizes (terminal) so #reconcile does not thrash it every frame, and a later
+  // frame's reconcile is a clean no-op rather than a repeated crash.
+  hub.handler?.(produce(jobStream("kX"), 2, "late"), p.conn);
+  assertEquals(
+    inner.jobKeysFor("worker-X"),
+    ["kX"],
+    "a swallowed release leaves the correlation held (linked), never a crash",
+  );
+  service.teardown();
+});
+
+test("H6 correlation write-side: a producer disconnect releases its job correlation even unpersisted", () => {
+  const registry = new ConnectionRegistry();
+  const correlation = new CorrelationRegistry();
+  const byConnection = new Map([["prod", "worker-B"]]);
+  // No DataLayer → the relay runs unpersisted; correlation release must still fire (store-independent).
+  const { service, hub } = mkCorrelatedService(registry, undefined, correlation, byConnection);
+  const p = connect("prod", registry);
+  hub.handler?.(produce(jobStream("k2"), 1, "x"), p.conn);
+  assertEquals(correlation.jobKeysFor("worker-B"), ["k2"]);
+
+  // Producer drops; a subsequent frame from any live connection reconciles the dead producer.
+  registry.remove("prod");
+  const other = connect("cons", registry);
+  hub.handler?.(grant(0), other.conn);
+  assertEquals(correlation.jobKeysFor("worker-B"), [], "disconnect releases the job");
+  assertEquals(correlation.count(), 0);
+  service.teardown();
+});
+
+test("H6 correlation write-side: non-job streams are never linked; a link retries until the instance resolves", () => {
+  const registry = new ConnectionRegistry();
+  const correlation = new CorrelationRegistry();
+  const byConnection = new Map<string, string>();
+  const { service, hub } = mkCorrelatedService(registry, memoryDb(), correlation, byConnection);
+  const p = connect("prod", registry);
+
+  // A plain (non-`job:`) stream carries no jobKey → never correlated.
+  hub.handler?.(produce("plain-stream", 1, "x"), p.conn);
+  assertEquals(correlation.count(), 0, "non-job streams are not linked");
+
+  // A job stream whose producer's presence instance is not yet known does not link — but a later
+  // frame (after the register lands) retries and links, closing the register/produce race.
+  hub.handler?.(produce(jobStream("k3"), 1, "a"), p.conn);
+  assertEquals(correlation.count(), 0, "no presence instance yet → not linked");
+  byConnection.set("prod", "worker-C");
+  hub.handler?.(produce(jobStream("k3"), 1, "b"), p.conn);
+  assertEquals(correlation.jobKeysFor("worker-C"), ["k3"], "retried link succeeds once the instance resolves");
   service.teardown();
 });
 

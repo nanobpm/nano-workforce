@@ -33,7 +33,9 @@ import {
   type TranscriptStream,
 } from "@nanobpm/agentic/transcript";
 import type { Logger } from "@nanobpm/urban";
+import { currentCorrelation, type JobContext, jobKeyOfStream } from "../correlation.ts";
 import type { AgenticContext, AgenticFamily } from "../registry.ts";
+import { currentPresenceRegistry } from "./presence.family.ts";
 
 /** The stable family name this slice registers under the seam (distinct from the wire family key). */
 export const RELAY_FAMILY_NAME = "relay";
@@ -81,6 +83,22 @@ interface StreamState {
   producer?: string;
   /** Set once an ephemeral stream has been flushed & completed (so it is not re-completed). */
   completed: boolean;
+  /**
+   * Set once a `job:<jobKey>` stream has been linked into the correlation registry (H6, #149), so
+   * the link is attempted at most once per stream. It stays `false` while the producer's presence
+   * instance is not yet resolvable (a register/produce race), so a later `produce` frame retries.
+   */
+  linked: boolean;
+}
+
+/**
+ * The minimal correlation write-side the relay slice drives (H6, #149): link a producing worker
+ * instance to the jobKey it is relaying, and release it when the job's stream ends. Structural so
+ * the service depends on a shape, not the whole {@link CorrelationRegistry}.
+ */
+export interface CorrelationLink {
+  link(instance: string, jobKey: string, context?: JobContext): void;
+  releaseJob(jobKey: string): void;
 }
 
 export interface RelayTranscriptServiceOptions {
@@ -104,6 +122,21 @@ export interface RelayTranscriptServiceOptions {
    * against a bare source too (and is harmless when the migration already ran).
    */
   readonly ensureSchema?: boolean;
+  /**
+   * The correlation write-side seam (H6, #149). When present, a first `produce` frame for a
+   * `job:<jobKey>` stream links the producing worker instance → jobKey here, and the stream's
+   * completion / producer disconnect releases it. Defaults to the process-wide correlation registry
+   * ({@link currentCorrelation}); absent (`() => undefined`) → no linking (advisory, never an error).
+   */
+  readonly correlation?: () => CorrelationLink | undefined;
+  /**
+   * Resolve the presence instance that owns a connection — the connection → instance join the
+   * correlation write-side needs to attribute a `produce` frame's jobKey. When omitted,
+   * `RelayTranscriptService` defaults it to `() => undefined` (no linking); the family factory
+   * {@link createRelayFamily} is what wires it to the mounted presence registry's resolver
+   * ({@link currentPresenceRegistry}). A resolver returning undefined → no linking (advisory).
+   */
+  readonly instanceForConnection?: (connectionId: string) => string | undefined;
 }
 
 /** The minimal per-connection surface the relay handler receives from the hub (a {@link RelayHub} `RelayConnection`). */
@@ -128,10 +161,16 @@ export class RelayTranscriptService {
   readonly #registry: ConnectionRegistry;
   readonly #log: Logger;
   readonly #streams = new Map<string, StreamState>();
+  /** The correlation write-side accessor (H6, #149) — resolved per call so a late family mount wins. */
+  readonly #correlation: () => CorrelationLink | undefined;
+  /** The connection → producing-instance resolver (H6, #149). */
+  readonly #instanceForConnection: (connectionId: string) => string | undefined;
 
   constructor(options: RelayTranscriptServiceOptions) {
     this.#registry = options.registry;
     this.#log = options.log;
+    this.#correlation = options.correlation ?? currentCorrelation;
+    this.#instanceForConnection = options.instanceForConnection ?? (() => undefined);
     // Persistence is advisory: a store that can't be constructed or whose schema can't be applied
     // (locked/permission-denied/unavailable SQLite) must NOT fail the family mount — fall back to
     // running the relay unpersisted rather than tearing down the whole agentic channel.
@@ -191,23 +230,31 @@ export class RelayTranscriptService {
    * re-completing already-persisted offsets is a no-op. Returns the number of newly-persisted chunks.
    */
   completeStream(stream: string): number {
-    if (!this.store) return 0;
     const state = this.#stateFor(stream);
     const source = this.relay.ring(stream) ?? EMPTY_SOURCE;
-    let flushed: number;
-    try {
-      flushed = this.store.flush(stream, source, state.lifecycle);
-    } catch (err) {
-      // Persistence is advisory: a flush failure must not bubble into the hub's frame handler and
-      // take down unrelated streams. Log and leave the stream uncompleted so a later pass retries.
-      this.#log.warn("agentic relay stream flush failed — leaving stream uncompleted", {
-        stream,
-        lifecycle: state.lifecycle,
-        err: String(err),
-      });
-      return 0;
+    let flushed = 0;
+    // Persistence is advisory: with no store there is nothing to flush, but the in-memory lifecycle
+    // must still transition (mark completed, unlink correlation, drop producer) so an unpersisted
+    // ephemeral stream completes exactly once and #reconcile does not keep retrying it every frame.
+    if (this.store) {
+      try {
+        flushed = this.store.flush(stream, source, state.lifecycle);
+      } catch (err) {
+        // A flush failure must not bubble into the hub's frame handler and take down unrelated
+        // streams. Log and leave the stream uncompleted so a later pass retries.
+        this.#log.warn("agentic relay stream flush failed — leaving stream uncompleted", {
+          stream,
+          lifecycle: state.lifecycle,
+          err: String(err),
+        });
+        return 0;
+      }
     }
-    if (state.lifecycle === "ephemeral") state.completed = true;
+    if (state.lifecycle === "ephemeral") {
+      state.completed = true;
+      // Job end: release the jobKey ⇄ instance correlation so the worker's supply row clears it.
+      this.#unlink(stream, state);
+    }
     // Drop producer ownership so a later reconcile does not re-flush a completed stream.
     state.producer = undefined;
     this.#log.info("agentic relay stream flushed", {
@@ -283,19 +330,83 @@ export class RelayTranscriptService {
     if (readProp(frame.payload, "op") !== "produce") return;
     const stream = readProp(frame.payload, "stream");
     if (typeof stream !== "string" || stream === "") return;
-    this.#stateFor(stream).producer = conn.id;
+    const state = this.#stateFor(stream);
+    // A completed stream is terminal: a late `produce` frame (e.g. arriving after job-end
+    // completion released the correlation) must not re-own or re-link it — doing so would
+    // resurrect a jobKey after it was released. Ignore ownership updates once completed.
+    if (state.completed) return;
+    state.producer = conn.id;
+    this.#link(stream, conn.id, state);
+  }
+
+  /**
+   * H6 write-side (#149): on the first `produce` for a `job:<jobKey>` stream, link the producing
+   * worker instance → jobKey in the correlation registry, from data already crossing the wire (the
+   * jobKey is decoded from the stream id; the instance is resolved from the producing connection).
+   * That lights up the worker's `jobKeys` in the supply feed and repoints its drill stream at the
+   * jobKey-scoped relay stream. Idempotent per stream; retries on a later frame while the producer's
+   * presence instance is not yet resolvable (a register/produce race). Advisory — never throws into
+   * the frame handler.
+   */
+  #link(stream: string, connectionId: string, state: StreamState): void {
+    if (state.linked) return;
+    const jobKey = jobKeyOfStream(stream);
+    if (jobKey === undefined) return;
+    const instance = this.#instanceForConnection(connectionId);
+    if (instance === undefined || instance === "") return;
+    const correlation = this.#correlation();
+    if (!correlation) return;
+    try {
+      correlation.link(instance, jobKey);
+      state.linked = true;
+    } catch (err) {
+      // Advisory — never throws into the frame handler. Swallow a throwing injectable correlation and
+      // leave the stream UNLINKED so a later `produce` retries the link.
+      this.#log.warn("agentic relay correlation link failed — leaving stream unlinked", {
+        stream,
+        jobKey,
+        err: String(err),
+      });
+    }
+  }
+
+  /** H6 write-side (#149): release a `job:<jobKey>` stream's correlation on completion / disconnect. */
+  #unlink(stream: string, state: StreamState): void {
+    if (!state.linked) return;
+    const jobKey = jobKeyOfStream(stream);
+    if (jobKey === undefined) return;
+    try {
+      this.#correlation()?.releaseJob(jobKey);
+      state.linked = false;
+    } catch (err) {
+      // Advisory — never throws into the frame handler. Swallow a throwing injectable correlation and
+      // leave `state.linked` true so the flag honestly records that the release did NOT happen (rather
+      // than falsely clearing it). Note there is no automatic retry once the stream completes:
+      // `completeStream` sets `state.completed` and clears `state.producer`, so `#reconcile` no longer
+      // revisits it and `teardown` skips already-completed streams. A retry only occurs on the
+      // dead-producer path, where `#reconcile` re-invokes `#unlink` on a still-uncompleted stream.
+      this.#log.warn("agentic relay correlation release failed — leaving stream linked", {
+        stream,
+        jobKey,
+        err: String(err),
+      });
+    }
   }
 
   /**
    * Flush + complete every ephemeral stream whose producer connection is no longer live (the S1
-   * registry dropped it on close or liveness timeout). Lazy, like the relay hub's own dead-subscriber
-   * prune: it runs on each inbound frame, and shutdown covers the quiescent tail via {@link teardown}.
+   * registry dropped it on close or liveness timeout), and release its job correlation (H6, #149).
+   * Lazy, like the relay hub's own dead-subscriber prune: it runs on each inbound frame, and shutdown
+   * covers the quiescent tail via {@link teardown}. The correlation release is store-independent (it
+   * runs even for an unpersisted relay), so a dropped worker's `jobKeys` always clear.
    */
   #reconcile(): void {
     for (const [stream, state] of this.#streams) {
-      if (state.completed || state.lifecycle !== "ephemeral") continue;
       if (state.producer !== undefined && !this.#registry.has(state.producer)) {
-        this.completeStream(stream);
+        // Producer connection gone → the job it was relaying ended: release its correlation.
+        this.#unlink(stream, state);
+        // ...and flush+complete an ephemeral, not-yet-completed transcript exactly as before.
+        if (!state.completed && state.lifecycle === "ephemeral") this.completeStream(stream);
       }
     }
   }
@@ -303,7 +414,7 @@ export class RelayTranscriptService {
   #stateFor(stream: string): StreamState {
     let state = this.#streams.get(stream);
     if (state === undefined) {
-      state = { lifecycle: "ephemeral", completed: false };
+      state = { lifecycle: "ephemeral", completed: false, linked: false };
       this.#streams.set(stream, state);
     }
     return state;
@@ -344,6 +455,12 @@ export function createRelayFamily(options: {
         relay: options.relay,
         transcript: options.transcript,
         ensureSchema: options.ensureSchema,
+        // H6 write-side (#149): resolve the producing connection's presence instance from the live
+        // presence registry, and link/release against the process-wide correlation registry. Both
+        // are read per call, so this works regardless of family mount order (relay may mount before
+        // presence/correlation). Absent registries → no linking, still advisory-correct.
+        instanceForConnection: (connectionId) => currentPresenceRegistry()?.instanceForConnection(connectionId),
+        correlation: currentCorrelation,
       });
       setCurrentRelayTranscriptService(service);
 
