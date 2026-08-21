@@ -126,6 +126,18 @@ test("registeredWorkers: returns the canonical {instance, capability} supply row
   ]);
 });
 
+test("instanceForConnection: resolves the worker instance owning a connection (H6 write-side seam)", () => {
+  const store = createPresenceStore(memSqlite());
+  store.ensureSchema();
+  store.register({ instance: "w1", connectionId: "c1", identity: "leaf", capability: {} });
+  store.register({ instance: "w2", connectionId: "c2", identity: "leaf", capability: {} });
+  const registry = new PresenceRegistry(store, () => new Set(["c1", "c2"]));
+  assertEquals(registry.instanceForConnection("c1"), "w1");
+  assertEquals(registry.instanceForConnection("c2"), "w2");
+  assertEquals(registry.instanceForConnection("nope"), undefined, "unknown connection → undefined");
+  assertEquals(registry.instanceForConnection(""), undefined, "empty connection → undefined");
+});
+
 test("reconcile: removes rows whose connection the hub has closed, keeps live ones", () => {
   const store = createPresenceStore(memSqlite());
   store.ensureSchema();

@@ -134,6 +134,21 @@ export class PresenceRegistry {
   }
 
   /**
+   * The worker instance registered on a given connection, or undefined when none is. This is the
+   * connection → instance resolver the relay/correlation slice (H6, #149) uses to attribute a
+   * `produce` frame for a `job:<jobKey>` stream to the presence instance owning the producing
+   * connection — the one fact the relay holds (the connection id) turned into the join key the
+   * correlation registry needs. An empty connection id (or an unknown one) resolves to undefined.
+   */
+  instanceForConnection(connectionId: string): string | undefined {
+    if (connectionId === "") return undefined;
+    for (const row of this.#store.list()) {
+      if (row.connectionId === connectionId) return row.instance;
+    }
+    return undefined;
+  }
+
+  /**
    * Eagerly drop presence rows whose connection the hub has already closed (a disconnect the hub's
    * single close listener removed from its in-memory registry). Rows also age out on the presence
    * TTL via {@link PresenceStore.sweep}; this is the eager disconnect path. Returns the removed
