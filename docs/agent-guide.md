@@ -394,3 +394,176 @@ When you find a genuine bug or a missing capability in the orchestration itself
 When describing the bug, include the concrete evidence you gathered here: the
 `prKey`, the engine `processKey`, the parked element / incident message (§5), and the
 BPMN/prompt file you believe is responsible (§6).
+
+---
+
+## 9. Author and run a delivery graph (ADR 0005)
+
+The two workflows above (§1 convergence-loop, §2 plan-fanout) are each specialised to
+**one** node shape ("an agent implements a slice → opens a PR"). Real delivery is often a
+**heterogeneous, cross-repo, partly-human graph** — e.g. *merge PR #101 → un-draft+merge
+PR #202 → a human does a manual OTP publish → PR #303 consumes the just-published version*. A
+**delivery graph** ([ADR 0005](https://github.com/nanobpm/nano-workforce/blob/main/docs/adr/0005-agent-authored-delivery-graphs.md))
+lets you compose exactly that as **data** and hand it to a generic runner.
+
+You author the graph as **JSON — never BPMN or code** (Decision 1: the agent must never
+author the executable artifact; the closed node vocabulary is the trust boundary). Two
+doors take that JSON: a **pure `compile`** door you hammer while drafting, and a **gated
+`start`** door that dispatches it.
+
+### 9.1 The `DeliveryGraph` shape
+
+A `DeliveryGraph` is a JSON **DAG**: `{ name?, nodes[], edges[] }`.
+
+- **`nodes[]`** — each node has a unique `id`, a `kind` from the **closed allowlist**
+  (`agent` | `wait` | `human` | `connector`), the matching per-kind config, and an
+  optional typed `emits[]` declaration (the facts it hands forward).
+- **`edges[]`** — each edge is `{ from, to }` meaning *"`to` proceeds once fact `from` is
+  observable"* (Decision 3 — edges are **discovered facts**, not declared values). `from`
+  is either a bare **`<nodeId>`** (the degenerate "wait for the upstream node's
+  completion" fact) or a **qualified `<nodeId>.<fact>`** referencing one of that node's
+  declared `emits`. The whole edge set must be a DAG. Omit / `[]` for independent roots.
+
+**The four node kinds** (each delegates to an existing engine-native body — the graph
+layer schedules, it does not re-implement execution):
+
+| kind | config | what it does | may `emits`? |
+|---|---|---|---|
+| `agent` | `agent: { jobType, prompt? }` | a worker runs an agent job type (the fan-out body). **Side-effecting.** | yes |
+| `wait` | `wait: <ReadinessProbe>` | a durable, bounded readiness probe — kind ∈ `http`, `command`, `npm`, `github-check`, `capability`, `pr`. Read-only. | yes (binds observed facts) |
+| `human` | `human?: { formKey?, prompt? }` | a scheduled user task + form (the Tasks inbox, §3). Blocks dependents, SLA-bounded, answerable by a human **or** an agent. | yes |
+| `connector` | `connector: { target, dedupeKey?, payload? }` | an automated, side-effecting outbound action. Carries a `dedupeKey` (at-least-once safe). *(payload is a forward-declared stub.)* | yes |
+
+A **`wait` node's `wait` is a `ReadinessProbe` verbatim** (the same shape feature-run
+intake uses): `{ kind, target, onTimeout?, match?, poll? }`. The **`pr` kind** watches an
+in-flight PR — `target: "owner/repo#123"`, `match.prState ∈ ready|merged|mergeable|checks-green`
+(default `merged`) — and on a merged match binds `mergedSha` as an output fact.
+
+A **typed fact** (`emits[]` entry) is `{ name, type, description? }` where
+`type ∈ string|number|boolean|artifact|version|url` (`artifact` = a `pkg@version` handle,
+`version` = a bare version). `name` matches `^[A-Za-z_][A-Za-z0-9_]*$` and is referenced
+downstream as `<nodeId>.<name>`. A "click done" human node or a pass-through node declares
+no facts.
+
+### 9.2 The agent loop: draft → compile → fix → approve → start
+
+```
+GET __BASE__/agent           # ← you are reading it; learn the vocabulary + endpoints
+   └─ draft a DeliveryGraph JSON
+        └─ POST __BASE__/actions/compile-delivery-graph   # PURE — validate + preview, repeat freely
+             ├─ 400 { ok:false, errors:[{path,message}] } → fix the exact offending input, recompile
+             └─ 200 { ok:true, diagram, bpmn, resolved, humanNodes, sideEffects } → review the preview
+                  └─ POST __BASE__/actions/start/delivery-graph   # GATED dispatch
+                       ├─ 400 awaiting-approval (has side effects) → re-POST with approvalToken
+                       └─ 202 running → track it like a plan (§5)
+```
+
+**Compile (pure preview — never deploys).** The fast inner loop. It runs the semantic
+validator and the deterministic compiler and returns a preview with **zero side effects**,
+so call it as often as you like:
+
+```bash
+curl -sS -X POST __BASE__/actions/compile-delivery-graph \
+  -H 'content-type: application/json' \
+  -d @graph.json | jq
+```
+
+- `200 { ok:true, diagram, bpmn, resolved, humanNodes, sideEffects }` — `diagram` is a
+  mermaid `flowchart` of the resolved graph; `bpmn` is the compiled one-shot definition
+  (deterministic — same JSON → byte-identical XML, **not** deployed here); `resolved` is
+  the normalised graph; `humanNodes[]` are the stop-points where it waits for a person;
+  `sideEffects[]` are the `agent`/`connector` actions it **will** perform (what a human
+  approves).
+- `400 { ok:false, errors:[{ path, message }] }` — every error path-qualified
+  (`nodes[2].kind`, `edges[1].from`, …) for unknown kind, dangling edge, a cycle, or an
+  unresolvable `from` fact. Fix and recompile.
+
+**Start (gated dispatch — the OUTER action).** `compile` and `start` are **separate**
+operations — there is deliberately **no `dryRun` flag** on start (Decision 5/7). The door
+re-validates, re-compiles, then launches the runner:
+
+```bash
+# First submit — a graph with side effects is refused and PARKED for approval:
+curl -sS -X POST __BASE__/actions/start/delivery-graph \
+  -H 'content-type: application/json' \
+  -d '{ "graph": { … } }' | jq
+# → 400 { ok:false, status:"awaiting-approval", runKey, digest, sideEffecting:true,
+#          approvalToken:"<digest>", message:"graph has N side-effecting node(s); re-submit with approvalToken" }
+
+# Approve by re-submitting with the token (== the digest) you were handed:
+curl -sS -X POST __BASE__/actions/start/delivery-graph \
+  -H 'content-type: application/json' \
+  -d '{ "graph": { … }, "approvalToken": "<digest>" }' | jq
+# → 202 { ok:true, status:"running", runKey, digest, sideEffecting:true,
+#          alreadyRunning:false, processInstanceKey, processDefinitionId:"delivery-graph-<digest>" }
+```
+
+The request body is `{ graph, approvalToken?, idempotencyKey? }`:
+
+| field | type | meaning |
+|---|---|---|
+| `graph` | `DeliveryGraph` | the JSON graph. Required. |
+| `approvalToken` | string | the approval **of the rendered preview** (Decision 7). A graph with any **side-effecting** (`agent`/`connector`) node — one that merges PRs / publishes — dispatches **only** when you present its content-addressed token (the `digest`, returned on the first unapproved submit). A graph with **only** `wait`/`human` nodes needs none and dispatches straight away. |
+| `idempotencyKey` | string | optional. A re-POST with the same key (or, when omitted, the same graph — the default key is the content digest) does **not** double-launch: an in-flight run short-circuits with `alreadyRunning: true`. |
+
+The running graph registers as a run aggregate, so its current phase / parked node shows
+in the cockpit's **Active Delivery Graphs** grid (e.g. *"parked on human node: manual OTP
+publish"*). Track it like a plan (§5) via its `processInstanceKey`. A `human` node parks
+on the **Tasks** inbox and is answered exactly as an escalation is (§3) — its completion
+emits any declared facts, which downstream edges bind.
+
+### 9.3 Worked example — the cross-repo human-in-the-loop release
+
+*Merge PR #101 (repo 1) → un-draft+merge PR #202 (repo 2) → a **human** runs the manual OTP
+publish and records the version → open+merge PR #303 (repo 3) consuming that version.* The
+`human` node **emits** a typed `version` fact, and the downstream `from:
+"manual-publish.publishedVersion"` edge binds it into the PR-#303 path:
+
+```json
+{
+  "name": "cross-repo release: merge #101 → un-draft+merge #202 → manual OTP publish → consume in #303",
+  "nodes": [
+    { "id": "merge-a", "kind": "wait",
+      "wait": { "kind": "pr", "target": "acme/repo-1#101", "match": { "prState": "merged" }, "onTimeout": "escalate" } },
+    { "id": "undraft-merge-b", "kind": "agent",
+      "agent": { "jobType": "senior:merge", "prompt": "Take draft PR acme/repo-2#202 out of draft and merge it once its required checks are green." } },
+    { "id": "manual-publish", "kind": "human",
+      "human": { "prompt": "Run the manual OTP-authenticated `npm publish` for @acme/widget and set up OIDC trusted publishing. Record the exact published version." },
+      "emits": [ { "name": "publishedVersion", "type": "version", "description": "The version just published to npm." } ] },
+    { "id": "open-pr-c", "kind": "agent",
+      "agent": { "jobType": "senior:feature", "prompt": "Bump @acme/widget to the published version in acme/repo-3 and open PR #303." } },
+    { "id": "merge-c", "kind": "wait",
+      "wait": { "kind": "pr", "target": "acme/repo-3#303", "match": { "prState": "merged" }, "onTimeout": "escalate" } }
+  ],
+  "edges": [
+    { "from": "merge-a", "to": "undraft-merge-b" },
+    { "from": "undraft-merge-b", "to": "manual-publish" },
+    { "from": "manual-publish.publishedVersion", "to": "open-pr-c" },
+    { "from": "open-pr-c", "to": "merge-c" }
+  ]
+}
+```
+
+`compile` returns this preview (abridged):
+
+```
+diagram (mermaid flowchart):
+  n4["agent: undraft-merge-b"] --> n0["human: manual-publish"]
+  n0 -- "publishedVersion" --> n3["agent: open-pr-c"]
+  n1["wait: merge-a"] --> n4
+  n3 --> n2["wait: merge-c"]
+
+humanNodes: [ { nodeId: "manual-publish", emits: [ { name: "publishedVersion", type: "version" } ], … } ]
+sideEffects: [ { nodeId: "open-pr-c", kind: "agent", … }, { nodeId: "undraft-merge-b", kind: "agent", … } ]
+```
+
+Two side-effecting `agent` nodes ⇒ `start` **requires approval**: the first submit returns
+`awaiting-approval` with an `approvalToken`; re-submit carrying it to dispatch. The graph
+then runs to `manual-publish`, parks it on the Tasks inbox (`now do X`), and — once a human
+(or agent) completes it with the `publishedVersion` — binds that fact into `open-pr-c` and
+carries on to `merge-c`.
+
+To swap the manual PR-#303 path for a **capability** edge instead of a raw `pr` watch, make
+the consumer a `wait` node with `kind: "capability"` (resolving *which published
+`pkg@version` first carries the change*) fed by the same `manual-publish.publishedVersion`
+fact — the fact-edge syntax is identical.
