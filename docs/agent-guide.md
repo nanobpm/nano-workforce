@@ -434,7 +434,7 @@ layer schedules, it does not re-implement execution):
 | `human` | `human?: { formKey?, prompt? }` | a scheduled user task + form (the Tasks inbox, §3). Blocks dependents, SLA-bounded, answerable by a human **or** an agent. | yes |
 | `connector` | `connector: { target, dedupeKey?, payload? }` | an automated, side-effecting outbound action. Carries a `dedupeKey` (at-least-once safe). *(payload is a forward-declared stub.)* | yes |
 
-A **`wait` node's `wait` is a `ReadinessProbe` verbatim** (§ the same shape feature-run
+A **`wait` node's `wait` is a `ReadinessProbe` verbatim** (the same shape feature-run
 intake uses): `{ kind, target, onTimeout?, match?, poll? }`. The **`pr` kind** watches an
 in-flight PR — `target: "owner/repo#123"`, `match.prState ∈ ready|merged|mergeable|checks-green`
 (default `merged`) — and on a merged match binds `mergedSha` as an output fact.
@@ -510,7 +510,7 @@ The running graph registers as a run aggregate, so its current phase / parked no
 in the cockpit's **Active Delivery Graphs** grid (e.g. *"parked on human node: manual OTP
 publish"*). Track it like a plan (§5) via its `processInstanceKey`. A `human` node parks
 on the **Tasks** inbox and is answered exactly as an escalation is (§3) — its completion
-emits the node's typed fact, which downstream edges bind.
+emits any declared facts, which downstream edges bind.
 
 ### 9.3 Worked example — the cross-repo human-in-the-loop release
 
