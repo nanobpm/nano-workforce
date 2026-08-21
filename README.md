@@ -246,6 +246,27 @@ active epic already targets the same custom base. See
 
 ---
 
+## Delivery graphs
+
+Beyond a single PR (review convergence) and an epic (plan → fan-out), Nano Workforce can
+run an **arbitrary, heterogeneous, cross-repo, partly-human delivery graph** — e.g.
+*merge PR #A → un-draft+merge PR #B → a human runs a manual OTP publish → PR #C consumes
+the just-published version*. You author the graph as **JSON over a closed node vocabulary**
+(`agent` | `wait` | `human` | `connector`) — never BPMN or code — whose edges are
+**discovered facts** (`from: "<node>.<fact>"`). A deterministic compiler turns it into an
+engine-native process; a human approves the rendered preview before any side effect runs.
+
+Two doors: a **pure** `POST /app/api/actions/compile-delivery-graph` (validate + preview,
+side-effect-free — hammer it while drafting) and a **gated, idempotent**
+`POST /app/api/actions/start/delivery-graph` (approve → dispatch).
+
+The agent guide served at `GET /app/api/agent` documents the full vocabulary, both
+operation contracts, and a complete worked example — see §9 there, or point your coding
+agent at that URL to author, compile, and submit a graph unaided. See
+[ADR 0005](docs/adr/0005-agent-authored-delivery-graphs.md) for the design and rationale.
+
+---
+
 ## Configuration
 
 | env | default | purpose |

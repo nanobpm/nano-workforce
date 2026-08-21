@@ -50,6 +50,24 @@ test("the guide covers every capability the endpoint promises", async () => {
   assert(md.includes("nanobpm/nano-workforce"), "covers raising issues/PRs against the repo");
 });
 
+test("the guide documents the delivery-graph surface (ADR 0005)", async () => {
+  const md = ((await handler(input(), app)) as any).body.instructions as string;
+  // The two doors, with their exact action paths.
+  assert(md.includes("compile-delivery-graph"), "documents the pure compile door");
+  assert(md.includes("start/delivery-graph"), "documents the gated dispatch door");
+  // The closed node vocabulary + the fact-edge syntax.
+  assert(
+    md.includes("agent") && md.includes("wait") && md.includes("human") && md.includes("connector"),
+    "documents the closed node vocabulary",
+  );
+  assert(md.includes('from: "<node') || md.includes("<nodeId>.<fact>"), "documents the fact-edge syntax");
+  // The approval gate + idempotency of the start door.
+  assert(md.includes("approvalToken"), "documents the approval gate");
+  assert(md.includes("idempotencyKey"), "documents idempotency");
+  // The worked example: a human emit node handing a version to a downstream edge.
+  assert(md.includes("manual-publish.publishedVersion"), "includes the worked example's human-emit fact edge");
+});
+
 test("examples are keyed to the request's control-API base and leave no placeholders", async () => {
   const forwarded = input({ host: "wf.example.com", "x-forwarded-proto": "https" });
   const md = ((await handler(forwarded, app)) as any).body.instructions as string;
