@@ -93,6 +93,16 @@ describe("nano-workforce PR review-loop escalation (U4 userTask)", () => {
     await app.engine.registerWorker("senior:scope-classify", () => {
       return { scopeBlocked: false, scopeBlockReason: "" };
     });
+    // The converged round also runs the deterministic `pr.converge-gate` app worker, which FAILS
+    // CLOSED without a live GitHub transport (sealed here). This e2e isolates the review-escalation
+    // round-trip — the gate is exercised by `app/convergeGate.test.ts` + the worker integration
+    // test — so stub it as "converged cleanly" so the resumed round finalizes rather than parking
+    // on a second, converge-gate escalation. (Before engine-wasm 0.7.2, a blocked gate's escalation
+    // *question* silently blanked through ioMapping and was suppressed as a non-escalation, hiding
+    // this second escalation; the IO_MAPPING_ERROR fix now renders it, so it must be stubbed out.)
+    await app.engine.registerWorker("pr.converge-gate", () => {
+      return { convergeBlocked: false, convergeBlockReason: "" };
+    });
   });
 
   after(async () => {

@@ -88,6 +88,19 @@ describe("retire escalation subsystem (U7 — destructive contract phase)", () =
       capturedAnswer = (job.variables as Record<string, unknown>).answer;
       return { status: "converged", summary: "resolved after the human answer" };
     });
+    // The converged round runs the deterministic `pr.converge-gate` app worker (and then
+    // `senior:scope-classify`), both of which FAIL CLOSED / park without a live transport (sealed
+    // here). This e2e isolates the escalation round-trip — the gate/classifier have their own tests
+    // — so stub both as "converged cleanly" so the resumed round finalizes rather than parking on a
+    // second escalation. (Before engine-wasm 0.7.2, a blocked gate's escalation *question* silently
+    // blanked through ioMapping and was suppressed as a non-escalation, hiding this; the
+    // IO_MAPPING_ERROR fix now renders it, so it must be stubbed out.)
+    await app.engine.registerWorker("pr.converge-gate", () => {
+      return { convergeBlocked: false, convergeBlockReason: "" };
+    });
+    await app.engine.registerWorker("senior:scope-classify", () => {
+      return { scopeBlocked: false, scopeBlockReason: "" };
+    });
   });
 
   after(async () => {
