@@ -131,8 +131,10 @@ export interface RelayTranscriptServiceOptions {
   readonly correlation?: () => CorrelationLink | undefined;
   /**
    * Resolve the presence instance that owns a connection — the connection → instance join the
-   * correlation write-side needs to attribute a `produce` frame's jobKey. Defaults to the mounted
-   * presence registry's resolver; absent (returns undefined) → no linking.
+   * correlation write-side needs to attribute a `produce` frame's jobKey. When omitted,
+   * `RelayTranscriptService` defaults it to `() => undefined` (no linking); the family factory
+   * {@link createRelayFamily} is what wires it to the mounted presence registry's resolver
+   * ({@link currentPresenceRegistry}). A resolver returning undefined → no linking (advisory).
    */
   readonly instanceForConnection?: (connectionId: string) => string | undefined;
 }
