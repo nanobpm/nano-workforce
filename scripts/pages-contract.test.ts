@@ -282,6 +282,9 @@ test("issue #205: overview is the landing page and first nav item", async () => 
     },
     plans: { field: "list_bucket", in: ["active"] },
     feature_runs: { field: "status", in: ["running", "escalated", "awaiting_operator"] },
+    // The 4th dispatch surface (issue #386) — active delivery graphs. Both in-flight statuses
+    // (`awaiting-approval` parked at the gate, `running` dispatched) show here.
+    delivery_graph_runs: { field: "status", in: ["awaiting-approval", "running"] },
   };
   const grids = (overview.nodes ?? []).filter((n: Json) => n.type === "dataGrid");
   for (const [table, { field, in: values }] of Object.entries(expected)) {
@@ -298,3 +301,67 @@ test("issue #205: overview is the landing page and first nav item", async () => 
   }
 });
 
+
+test("issue #386: the human-facing Delivery Graphs surface is wired (nav tab, page, detail, overview)", async () => {
+  // 1) A `Delivery Graphs` nav tab in the single-source nav, pointing at the delivery-graphs page.
+  const nav = JSON.parse(readFileSync(`${ROOT}pages/_nav.json`, "utf8"));
+  const tab = (nav.props?.items ?? []).find(
+    (i: Json) => i.page === "delivery-graphs" && i.label === "Delivery Graphs",
+  );
+  assert(tab, "pages/_nav.json must carry a `Delivery Graphs` nav tab → the delivery-graphs page");
+
+  // 2) The Submit page exists with a Preview (compile) action and a Dispatch (start) action, plus an
+  //    in-flight grid over the delivery_graph_runs aggregate that links to the per-graph detail page.
+  const page = JSON.parse(readFileSync(`${ROOT}pages/delivery-graphs.page.json`, "utf8"));
+  const forms = (page.nodes ?? []).filter((n: Json) => n.type === "actionForm");
+  const preview = forms.find((f: Json) => f.props?.action?.path === "/app/api/actions/delivery-graph/preview");
+  const dispatch = forms.find((f: Json) => f.props?.action?.path === "/app/api/actions/delivery-graph/dispatch");
+  assert(preview, "delivery-graphs page must have a Preview form posting to /app/api/actions/delivery-graph/preview");
+  assert(dispatch, "delivery-graphs page must have a Dispatch form posting to /app/api/actions/delivery-graph/dispatch");
+  // Both forms take the pasted graph JSON; Dispatch also carries the explicit approve gate.
+  assert(
+    (preview.props?.fields ?? []).some((fl: Json) => fl.key === "graphJson"),
+    "the Preview form must have a graphJson paste field",
+  );
+  assert(
+    (dispatch.props?.fields ?? []).some((fl: Json) => fl.key === "graphJson") &&
+      (dispatch.props?.fields ?? []).some((fl: Json) => fl.key === "approve"),
+    "the Dispatch form must have a graphJson paste field and an approve gate",
+  );
+  const grid = (page.nodes ?? []).find(
+    (n: Json) => n.type === "dataGrid" && n.props?.data?.table === "delivery_graph_runs",
+  );
+  assert(grid, "delivery-graphs page must have an in-flight grid over delivery_graph_runs");
+  const linkCol = (grid.props?.columns ?? []).find((c: Json) => c.link?.page === "delivery-graph-detail");
+  assert(
+    linkCol && linkCol.link?.keyField === "run_key",
+    "the in-flight grid must link a column to delivery-graph-detail by run_key",
+  );
+
+  // 3) The per-graph detail page reads the run aggregate scoped to the route param (run_key).
+  const detail = JSON.parse(readFileSync(`${ROOT}pages/delivery-graph-detail.page.json`, "utf8"));
+  const runGrid = (detail.nodes ?? []).find(
+    (n: Json) => n.type === "dataGrid" && n.props?.data?.table === "delivery_graph_runs",
+  );
+  assert(runGrid, "delivery-graph-detail must bind a grid to delivery_graph_runs");
+  assert(
+    (runGrid.props?.data?.filter ?? []).some((fl: Json) => fl.field === "run_key" && fl.eqParam === true),
+    "delivery-graph-detail must scope its run grid to the route param (run_key eqParam)",
+  );
+
+  // 4) The Overview no longer claims only three surfaces, and its 4th section links to the detail page.
+  const overview = JSON.parse(readFileSync(`${ROOT}pages/overview.page.json`, "utf8"));
+  const subtitle = (overview.nodes ?? []).find((n: Json) => n.id === "subtitle");
+  assert(
+    typeof subtitle?.props?.text === "string" && !subtitle.props.text.includes("three dispatch surfaces"),
+    "overview subtitle must no longer say 'three dispatch surfaces' (a delivery graph is a 4th)",
+  );
+  const ovGrid = (overview.nodes ?? []).find(
+    (n: Json) => n.type === "dataGrid" && n.props?.data?.table === "delivery_graph_runs",
+  );
+  const ovLink = (ovGrid?.props?.columns ?? []).find((c: Json) => c.link?.page === "delivery-graph-detail");
+  assert(
+    ovLink && ovLink.link?.keyField === "run_key",
+    "overview delivery-graphs section must link its item to delivery-graph-detail by run_key",
+  );
+});

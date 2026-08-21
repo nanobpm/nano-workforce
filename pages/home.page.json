@@ -30,6 +30,10 @@
             "page": "feature"
           },
           {
+            "label": "Delivery Graphs",
+            "page": "delivery-graphs"
+          },
+          {
             "label": "Tasks",
             "page": "tasks",
             "badge": {

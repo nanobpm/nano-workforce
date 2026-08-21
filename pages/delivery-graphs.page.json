@@ -1,0 +1,153 @@
+{
+  "schemaVersion": "1.0",
+  "title": "Delivery Graphs",
+  "nodes": [
+    {
+      "type": "nav",
+      "id": "nav",
+      "props": {
+        "variant": "bar",
+        "title": "Nano Workforce",
+        "items": [
+          {
+            "label": "Overview",
+            "page": "overview"
+          },
+          {
+            "label": "Lineage",
+            "page": "lineage"
+          },
+          {
+            "label": "Convergence",
+            "page": "home"
+          },
+          {
+            "label": "Epics",
+            "page": "epic"
+          },
+          {
+            "label": "Feature",
+            "page": "feature"
+          },
+          {
+            "label": "Delivery Graphs",
+            "page": "delivery-graphs"
+          },
+          {
+            "label": "Tasks",
+            "page": "tasks",
+            "badge": {
+              "source": "app",
+              "table": "user_tasks",
+              "filter": [],
+              "tone": "danger",
+              "refreshMs": 5000,
+              "hideWhenZero": true
+            }
+          },
+          {
+            "label": "Cockpit",
+            "page": "cockpit"
+          },
+          {
+            "label": "Board",
+            "page": "board"
+          },
+          {
+            "label": "Velocity",
+            "page": "velocity"
+          }
+        ],
+        "sticky": true
+      }
+    },
+    {
+      "type": "text",
+      "id": "title",
+      "props": { "text": "Delivery Graphs", "variant": "heading" }
+    },
+    {
+      "type": "text",
+      "id": "subtitle",
+      "props": {
+        "text": "The human front door for delivery graphs (ADR 0005). Paste an agent-authored delivery-graph JSON, Preview it (a pure compile \u2014 nothing is dispatched) to see it validates and read its content digest, then Dispatch it. A graph with any side-effecting node (it merges PRs / publishes packages) dispatches only when you tick Approve; without approval it is parked in the in-flight grid below for review. Preview and Dispatch are thin UIs over the same compileDeliveryGraph / startDeliveryGraph doors \u2014 there is no parallel submit path.",
+        "variant": "sub"
+      }
+    },
+    {
+      "type": "actionForm",
+      "id": "delivery-graph-preview",
+      "props": {
+        "title": "1 \u00b7 Preview (compile \u2014 pure, nothing is dispatched)",
+        "submitLabel": "Preview",
+        "action": {
+          "path": "/app/api/actions/delivery-graph/preview",
+          "body": "{{form}}",
+          "successLabel": "\u2713 Valid \u2014 the graph compiled. Nothing was dispatched. Review its shape in the in-flight grid, then Dispatch it below."
+        },
+        "fields": [
+          { "key": "graphJson", "label": "Delivery-graph JSON \u2014 paste the agent-authored DeliveryGraph (nodes/edges). Preview validates + compiles it without dispatching.", "type": "text", "required": true, "requiredMessage": "Paste a delivery-graph JSON to preview" }
+        ]
+      }
+    },
+    {
+      "type": "actionForm",
+      "id": "delivery-graph-dispatch",
+      "props": {
+        "title": "2 \u00b7 Dispatch (start \u2014 gated, idempotent)",
+        "submitLabel": "Dispatch",
+        "action": {
+          "path": "/app/api/actions/delivery-graph/dispatch",
+          "body": "{{form}}",
+          "successLabel": "\u2713 Dispatched \u2014 watch it advance in the in-flight grid below."
+        },
+        "fields": [
+          { "key": "graphJson", "label": "Delivery-graph JSON \u2014 paste the same DeliveryGraph you previewed.", "type": "text", "required": true, "requiredMessage": "Paste the delivery-graph JSON to dispatch" },
+          { "key": "approve", "label": "Approve \u2014 I reviewed the preview and approve dispatching this graph's side effects (required for any agent/connector node)", "type": "checkbox" },
+          { "key": "idempotencyKey", "label": "Idempotency key (optional) \u2014 a re-dispatch with the same key (or, blank, the same graph) will not double-launch an in-flight run", "type": "text" }
+        ]
+      }
+    },
+    {
+      "type": "dataGrid",
+      "id": "delivery-graphs-inflight",
+      "props": {
+        "title": "In-flight delivery graphs",
+        "collapsible": true,
+        "defaultCollapsed": false,
+        "showCount": true,
+        "rowKey": "run_key",
+        "refreshMs": 5000,
+        "empty": "No delivery graphs in flight. Preview and Dispatch one above.",
+        "data": {
+          "kind": "datasource",
+          "source": "app",
+          "table": "delivery_graph_runs",
+          "orderBy": { "field": "updated_at", "dir": "desc" },
+          "filter": [{ "field": "status", "in": ["awaiting-approval", "running"] }]
+        },
+        "tabs": [
+          { "label": "In-flight", "filter": [{ "field": "status", "in": ["awaiting-approval", "running"] }] },
+          { "label": "History", "filter": [{ "field": "status", "in": ["done", "failed", "abandoned"] }] },
+          { "label": "All", "filter": [] }
+        ],
+        "columns": [
+          { "field": "title", "template": "{{title}}", "header": "Graph", "subtitleField": "run_key", "truncate": true, "width": "28%", "link": { "kind": "page", "page": "delivery-graph-detail", "keyField": "run_key" } },
+          { "field": "status", "header": "Status", "link": { "kind": "processExplorer", "keyField": "process_key" } },
+          { "field": "phase", "header": "Phase", "truncate": true, "width": "26%" },
+          { "field": "node_count", "header": "Nodes" },
+          { "field": "human_node_count", "header": "Human" },
+          { "field": "side_effect_count", "header": "Side effects" },
+          { "field": "updated_at", "header": "Updated", "width": "9rem", "format": "datetime" }
+        ],
+        "detail": {
+          "fields": [
+            { "field": "process_definition_id", "label": "Definition" },
+            { "field": "digest", "label": "Digest (approval token)" },
+            { "field": "phase_node_id", "label": "Parked node" }
+          ]
+        }
+      }
+    }
+  ]
+}

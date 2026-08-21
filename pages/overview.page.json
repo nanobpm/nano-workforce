@@ -30,6 +30,10 @@
             "page": "feature"
           },
           {
+            "label": "Delivery Graphs",
+            "page": "delivery-graphs"
+          },
+          {
             "label": "Tasks",
             "page": "tasks",
             "badge": {
@@ -66,7 +70,7 @@
       "type": "text",
       "id": "subtitle",
       "props": {
-        "text": "Everything currently in flight across the three dispatch surfaces \u2014 PR convergences, Epics, and Feature runs. Each section lists only its active items, remembers whether you collapsed it, and shows a live count in its header. Follow any row to its detail page.",
+        "text": "Everything currently in flight across the four dispatch surfaces \u2014 PR convergences, Epics, Feature runs, and Delivery Graphs. Each section lists only its active items, remembers whether you collapsed it, and shows a live count in its header. Follow any row to its detail page.",
         "variant": "sub"
       }
     },
@@ -208,7 +212,7 @@
           "filter": [{ "field": "status", "in": ["awaiting-approval", "running"] }]
         },
         "columns": [
-          { "field": "title", "template": "{{title}}", "header": "Item", "subtitleField": "run_key", "truncate": true, "width": "30%" },
+          { "field": "title", "template": "{{title}}", "header": "Item", "subtitleField": "run_key", "truncate": true, "width": "30%", "link": { "kind": "page", "page": "delivery-graph-detail", "keyField": "run_key" } },
           { "field": "status", "header": "Status", "link": { "kind": "processExplorer", "keyField": "process_key" } },
           { "field": "phase", "header": "Phase", "truncate": true, "width": "28%" },
           { "field": "updated_at", "header": "Updated", "width": "9rem", "format": "datetime" }
