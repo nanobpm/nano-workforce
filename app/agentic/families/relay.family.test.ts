@@ -304,6 +304,29 @@ test("H6 correlation write-side: a produce on job:<k> links instance→[k]; stre
   service.teardown();
 });
 
+test("H6 correlation write-side: an unpersisted stream completion releases its job correlation and stops reconcile retrying", () => {
+  const registry = new ConnectionRegistry();
+  const correlation = new CorrelationRegistry();
+  const byConnection = new Map([["prod", "worker-U"]]);
+  // No DataLayer → the relay runs unpersisted. A direct completeStream (job end, not a disconnect)
+  // must still transition in-memory state: unlink correlation, mark ephemeral completed, drop the
+  // producer — otherwise #reconcile keeps re-completing the stream on every subsequent frame.
+  const { service, hub } = mkCorrelatedService(registry, undefined, correlation, byConnection);
+  const p = connect("prod", registry);
+  hub.handler?.(produce(jobStream("kU"), 1, "x"), p.conn);
+  assertEquals(correlation.jobKeysFor("worker-U"), ["kU"]);
+
+  service.completeStream(jobStream("kU"));
+  assertEquals(correlation.jobKeysFor("worker-U"), [], "unpersisted completion releases the job");
+  assertEquals(correlation.count(), 0);
+
+  // The producer is still live, but the stream is now completed: a later frame's #reconcile must not
+  // re-link or otherwise resurrect the released correlation.
+  hub.handler?.(grant(0), p.conn);
+  assertEquals(correlation.count(), 0, "completed stream stays released; reconcile does not retry");
+  service.teardown();
+});
+
 test("H6 correlation write-side: a producer disconnect releases its job correlation even unpersisted", () => {
   const registry = new ConnectionRegistry();
   const correlation = new CorrelationRegistry();

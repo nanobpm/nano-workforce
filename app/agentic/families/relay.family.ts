@@ -228,21 +228,25 @@ export class RelayTranscriptService {
    * re-completing already-persisted offsets is a no-op. Returns the number of newly-persisted chunks.
    */
   completeStream(stream: string): number {
-    if (!this.store) return 0;
     const state = this.#stateFor(stream);
     const source = this.relay.ring(stream) ?? EMPTY_SOURCE;
-    let flushed: number;
-    try {
-      flushed = this.store.flush(stream, source, state.lifecycle);
-    } catch (err) {
-      // Persistence is advisory: a flush failure must not bubble into the hub's frame handler and
-      // take down unrelated streams. Log and leave the stream uncompleted so a later pass retries.
-      this.#log.warn("agentic relay stream flush failed — leaving stream uncompleted", {
-        stream,
-        lifecycle: state.lifecycle,
-        err: String(err),
-      });
-      return 0;
+    let flushed = 0;
+    // Persistence is advisory: with no store there is nothing to flush, but the in-memory lifecycle
+    // must still transition (mark completed, unlink correlation, drop producer) so an unpersisted
+    // ephemeral stream completes exactly once and #reconcile does not keep retrying it every frame.
+    if (this.store) {
+      try {
+        flushed = this.store.flush(stream, source, state.lifecycle);
+      } catch (err) {
+        // A flush failure must not bubble into the hub's frame handler and take down unrelated
+        // streams. Log and leave the stream uncompleted so a later pass retries.
+        this.#log.warn("agentic relay stream flush failed — leaving stream uncompleted", {
+          stream,
+          lifecycle: state.lifecycle,
+          err: String(err),
+        });
+        return 0;
+      }
     }
     if (state.lifecycle === "ephemeral") {
       state.completed = true;
