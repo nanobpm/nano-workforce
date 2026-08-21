@@ -21,6 +21,7 @@ import { assert, assertEquals } from "#test-assert";
 import { noopLog } from "../../../test/log.ts";
 import { CorrelationRegistry, jobStream } from "../correlation.ts";
 import {
+  type CorrelationLink,
   createRelayFamily,
   currentRelayTranscriptService,
   family as relayFamily,
@@ -345,6 +346,106 @@ test("H6 correlation write-side: a late produce after completion does not resurr
   hub.handler?.(produce(jobStream("kR"), 1, "late"), p.conn);
   assertEquals(correlation.count(), 0, "a late produce does not resurrect a completed stream");
   assertEquals(correlation.jobKeysFor("worker-R"), [], "released jobKey stays released after a late produce");
+  service.teardown();
+});
+
+/**
+ * A {@link CorrelationLink} wrapper that delegates to a real registry but can be flipped to throw on
+ * `link()`/`releaseJob()`, exercising the advisory-resilience contract: `#link`/`#unlink` are
+ * documented "never throws into the frame handler", so a throwing injectable correlation must not
+ * take down the relay frame handler, and the stream must stay retryable.
+ */
+function throwingCorrelation(inner: CorrelationRegistry): {
+  correlation: CorrelationLink;
+  failLink: (on: boolean) => void;
+  failRelease: (on: boolean) => void;
+} {
+  let linkFails = false;
+  let releaseFails = false;
+  return {
+    correlation: {
+      link: (instance, jobKey, context) => {
+        if (linkFails) throw new Error("correlation.link boom");
+        inner.link(instance, jobKey, context);
+      },
+      releaseJob: (jobKey) => {
+        if (releaseFails) throw new Error("correlation.releaseJob boom");
+        inner.releaseJob(jobKey);
+      },
+    },
+    failLink: (on) => {
+      linkFails = on;
+    },
+    failRelease: (on) => {
+      releaseFails = on;
+    },
+  };
+}
+
+test("H6 correlation write-side: a throwing correlation.link() never escapes the frame handler and leaves the stream retryable", () => {
+  const registry = new ConnectionRegistry();
+  const inner = new CorrelationRegistry();
+  const { correlation, failLink } = throwingCorrelation(inner);
+  const byConnection = new Map([["prod", "worker-L"]]);
+  const hub = capturingHub();
+  const service = new RelayTranscriptService({
+    hub,
+    registry,
+    db: undefined,
+    log: noopLog(),
+    correlation: () => correlation,
+    instanceForConnection: (id) => byConnection.get(id),
+  });
+  const p = connect("prod", registry);
+
+  // The first `produce` links — but the injected correlation throws. It must be swallowed (advisory),
+  // so the frame handler does not throw and the stream is left UNLINKED so a later produce retries.
+  failLink(true);
+  hub.handler?.(produce(jobStream("kL"), 1, "x"), p.conn);
+  assertEquals(inner.count(), 0, "a throwing link is swallowed and records no correlation");
+
+  // A later produce (link now succeeds) retries the link — proving the stream was left unlinked.
+  failLink(false);
+  hub.handler?.(produce(jobStream("kL"), 1, "y"), p.conn);
+  assertEquals(inner.jobKeysFor("worker-L"), ["kL"], "the link retries and succeeds on a later frame");
+  assertEquals(inner.count(), 1);
+  service.teardown();
+});
+
+test("H6 correlation write-side: a throwing correlation.releaseJob() never escapes the frame handler; completion still finalizes", () => {
+  const registry = new ConnectionRegistry();
+  const inner = new CorrelationRegistry();
+  const { correlation, failRelease } = throwingCorrelation(inner);
+  const byConnection = new Map([["prod", "worker-X"]]);
+  const hub = capturingHub();
+  const service = new RelayTranscriptService({
+    hub,
+    registry,
+    db: undefined,
+    log: noopLog(),
+    correlation: () => correlation,
+    instanceForConnection: (id) => byConnection.get(id),
+  });
+  const p = connect("prod", registry);
+  hub.handler?.(produce(jobStream("kX"), 1, "x"), p.conn);
+  assertEquals(inner.jobKeysFor("worker-X"), ["kX"]);
+
+  // A producer disconnect drives #reconcile → #unlink, but releaseJob throws. The advisory contract
+  // is "never throws into the frame handler": the throw must be swallowed so the reconcile pass (and
+  // the completion it drives) do not bubble out and take down unrelated streams' relay processing.
+  failRelease(true);
+  registry.remove("prod");
+  const other = connect("cons", registry);
+  hub.handler?.(grant(0), other.conn); // must NOT throw despite releaseJob throwing
+
+  // The stream still finalizes (terminal) so #reconcile does not thrash it every frame, and a later
+  // frame's reconcile is a clean no-op rather than a repeated crash.
+  hub.handler?.(produce(jobStream("kX"), 2, "late"), p.conn);
+  assertEquals(
+    inner.jobKeysFor("worker-X"),
+    ["kX"],
+    "a swallowed release leaves the correlation held (linked), never a crash",
+  );
   service.teardown();
 });
 

@@ -354,8 +354,18 @@ export class RelayTranscriptService {
     if (instance === undefined || instance === "") return;
     const correlation = this.#correlation();
     if (!correlation) return;
-    correlation.link(instance, jobKey);
-    state.linked = true;
+    try {
+      correlation.link(instance, jobKey);
+      state.linked = true;
+    } catch (err) {
+      // Advisory — never throws into the frame handler. Swallow a throwing injectable correlation and
+      // leave the stream UNLINKED so a later `produce` retries the link.
+      this.#log.warn("agentic relay correlation link failed — leaving stream unlinked", {
+        stream,
+        jobKey,
+        err: String(err),
+      });
+    }
   }
 
   /** H6 write-side (#149): release a `job:<jobKey>` stream's correlation on completion / disconnect. */
@@ -363,8 +373,18 @@ export class RelayTranscriptService {
     if (!state.linked) return;
     const jobKey = jobKeyOfStream(stream);
     if (jobKey === undefined) return;
-    this.#correlation()?.releaseJob(jobKey);
-    state.linked = false;
+    try {
+      this.#correlation()?.releaseJob(jobKey);
+      state.linked = false;
+    } catch (err) {
+      // Advisory — never throws into the frame handler. Swallow a throwing injectable correlation and
+      // keep `state.linked` so a subsequent unlink pass can retry releasing the correlation.
+      this.#log.warn("agentic relay correlation release failed — leaving stream linked", {
+        stream,
+        jobKey,
+        err: String(err),
+      });
+    }
   }
 
   /**
