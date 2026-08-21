@@ -1,3 +1,11 @@
+## [0.118.1](https://github.com/nanobpm/nano-workforce/compare/v0.118.0...v0.118.1) (2026-08-21)
+
+
+### Bug Fixes
+
+* **ci:** gate releases on green CI and drop perma-red gen:check ([#424](https://github.com/nanobpm/nano-workforce/issues/424)) ([a57746b](https://github.com/nanobpm/nano-workforce/commit/a57746bafa264bf480eb8053cc2e133aa450f8b7))
+* **release:** use jq -s to slurp check-runs; gh --slurp rejects --jq ([#425](https://github.com/nanobpm/nano-workforce/issues/425)) ([d5c3fce](https://github.com/nanobpm/nano-workforce/commit/d5c3fce2652f0b275a5d71d6c8e45e47c403a289))
+
 # [0.118.0](https://github.com/nanobpm/nano-workforce/compare/v0.117.0...v0.118.0) (2026-08-21)
 
 
