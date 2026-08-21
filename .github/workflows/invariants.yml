@@ -56,11 +56,14 @@ jobs:
       - name: Check BPMN diagram freshness (layout)
         run: npm run layout:check
 
-      # Generated-artifact freshness (`urban gen --check`): landscape.gen.html, JSON Schemas / OpenAPI,
-      # the processos grammar (ir.gbnf) and friends are `derived == f(sources)` — re-derive over the
-      # merged sources and fail if a committed artifact drifted.
-      - name: Check generated artifacts (urban gen --check)
-        run: npm run gen:check
+      # NOTE: there is deliberately NO `urban gen --check` (`gen:check`) step here. In THIS repo the
+      # only `urban gen` output is `nano-generated/`, which is GIT-IGNORED (since the initial commit)
+      # and regenerated at build time via `pretypecheck`/`pretest` (`=> urban gen`). It is never a
+      # committed artifact, so there is nothing to freshness-check — on a clean checkout `urban gen
+      # --check` only reports it "missing" and fails every run (#423). Because it is regenerated from
+      # the MERGED sources on every typecheck/test, it cannot merge-skew; merged-tree correctness of
+      # the generated code is already covered by the `typecheck + test (Node)` job, which runs
+      # `urban gen` then compiles on the `merge_group`/`push` commit. Do not re-add `gen:check` here.
 
       # Navigation index is another checked-in derived artifact; re-assert it on the merged tree too.
       - name: Check navigation index freshness
