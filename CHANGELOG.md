@@ -1,3 +1,10 @@
+# [0.117.0](https://github.com/nanobpm/nano-workforce/compare/v0.116.0...v0.117.0) (2026-08-21)
+
+
+### Features
+
+* **delivery-graph:** gated startDeliveryGraph dispatch door (ADR 0005 S5) ([#405](https://github.com/nanobpm/nano-workforce/issues/405)) ([dc7c78e](https://github.com/nanobpm/nano-workforce/commit/dc7c78e03ef1a3a8cfb70e4e51b721a4419c8962)), closes [#380](https://github.com/nanobpm/nano-workforce/issues/380)
+
 # [0.116.0](https://github.com/nanobpm/nano-workforce/compare/v0.115.0...v0.116.0) (2026-08-20)
 
 
