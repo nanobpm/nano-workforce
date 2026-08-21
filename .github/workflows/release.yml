@@ -1,24 +1,66 @@
 name: Release
 
 on:
-  push:
-    branches: [main]
+  # Gate releases on green CI: run only AFTER the required workflows finish, and
+  # only release when EVERY required check is `success` for that commit (#423).
+  # A release must never ship from a red `main`.
+  workflow_run:
+    workflows: ["CI", "Whole-repo invariants (merge-skew guard)"]
+    types: [completed]
 
 # Prevent overlapping releases from racing on the same branch.
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-main
   cancel-in-progress: false
 
 permissions:
   contents: read
 
 jobs:
+  # Whichever gating workflow finishes LAST (successfully) re-triggers this and
+  # finds every required check green → releases. An earlier trigger, while a
+  # sibling gate is still pending, resolves to `should_release=false` (neutral —
+  # no release, no failure). If any required check fails, no trigger ever sees an
+  # all-green commit, so nothing releases.
+  gate:
+    name: release gate
+    runs-on: ubuntu-latest
+    if: >-
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.conclusion == 'success'
+    permissions:
+      checks: read
+      contents: read
+    outputs:
+      should_release: ${{ steps.gate.outputs.should_release }}
+    steps:
+      - name: Require every required check green for this commit
+        id: gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # These must ALL be `success` on the release commit before we ship. Keep
+          # in lock-step with the `main` ruleset's required status checks.
+          required=("typecheck + test (Node)" "whole-repo invariants")
+          runs="$(gh api "repos/$REPO/commits/$SHA/check-runs" --paginate \
+                    --jq '.check_runs[] | [.name, (.conclusion // "pending")] | @tsv')"
+          should=true
+          for name in "${required[@]}"; do
+            concl="$(printf '%s\n' "$runs" | awk -F'\t' -v n="$name" '$1==n{print $2}' | tail -1)"
+            echo "gate: '$name' = ${concl:-missing}"
+            [ "${concl:-missing}" = "success" ] || should=false
+          done
+          echo "should_release=$should" >> "$GITHUB_OUTPUT"
+
   release:
     name: semantic-release
+    needs: gate
+    if: needs.gate.outputs.should_release == 'true'
     runs-on: ubuntu-latest
-    # `[skip ci]` on the release commit already prevents a re-trigger, but guard
-    # against loops from any automated release commit as well.
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
     permissions:
       contents: write # create tags, GitHub Releases, push CHANGELOG/version bump
       issues: write # comment on released issues
@@ -28,6 +70,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.workflow_run.head_sha }} # release the exact gated commit
           fetch-depth: 0 # semantic-release needs full history + tags
           persist-credentials: true # let @semantic-release/git push the release commit
 
