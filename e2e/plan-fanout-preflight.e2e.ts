@@ -65,6 +65,7 @@ function planVars(overrides: Record<string, unknown>): Record<string, unknown> {
     waveCount: 1,
     readinessProbes: null,
     probeTimeout: null,
+    probePollEvery: null,
     gateKey: null,
     resolvedArtifacts: null,
     ...overrides,
@@ -116,6 +117,7 @@ describe("plan-fanout inter-epic capability preflight (plan-fanout.bpmn, issue #
             },
           ],
           probeTimeout: "PT30M",
+          probePollEvery: "PT15S",
           gateKey: "preflight:owner/repo#2",
         }),
       });

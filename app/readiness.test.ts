@@ -37,6 +37,7 @@ import {
   type ProbeExec,
   type PrObservation,
   prViewCommand,
+  readinessPollEvery,
   readinessTimeout,
   readinessTimeoutMs,
   redactString,
@@ -583,6 +584,14 @@ test("readinessTimeoutMs: the ms twin of readinessTimeout — same precedence, n
     readinessTimeoutMs(parseProbe({ kind: "http", target: "x" }), { NANO_READINESS_POLL_TIMEOUT: "PT2H" }),
     7_200_000,
   );
+});
+
+
+test("readinessPollEvery: derives the engine retry cadence from descriptor/env/default with clamp", () => {
+  assertEquals(readinessPollEvery(parseProbe({ kind: "http", target: "x", poll: { everyMs: 1500 } }), {}), "PT2S");
+  assertEquals(readinessPollEvery(parseProbe({ kind: "http", target: "x" }), { NANO_READINESS_POLL_EVERY_MS: "2500" }), "PT3S");
+  assertEquals(readinessPollEvery(parseProbe({ kind: "http", target: "x", poll: { everyMs: MAX_EVERY_MS + 1 } }), {}), msToIsoDuration(MAX_EVERY_MS));
+  assertEquals(readinessPollEvery(parseProbe({ kind: "http", target: "x" }), { NANO_READINESS_POLL_EVERY_MS: "bad" }), msToIsoDuration(DEFAULT_EVERY_MS));
 });
 
 test("probeBudgetMs: prefers the seeded probeTimeout (the gate timer's bound), falling back to the env twin", () => {

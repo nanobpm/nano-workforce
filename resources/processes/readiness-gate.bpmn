@@ -40,6 +40,8 @@
         <nano:shape id="ReadinessProbeIn" name="Readiness probe — input">
           <nano:extend name="gateKey" type="string" />
           <nano:extend name="probeTimeout" type="string" />
+          <nano:extend name="probePollEvery" type="string" />
+          <nano:extend name="lastAttempt" type="boolean" optional="true" />
           <nano:extend name="onTimeout" type="string" optional="true" />
           <nano:reference name="probe" ref="ReadinessProbe" />
         </nano:shape>
@@ -65,26 +67,70 @@
       <bpmn:outgoing>f_toProbe</bpmn:outgoing>
       <bpmn:outgoing>f_toGate</bpmn:outgoing>
     </bpmn:parallelGateway>
-    <bpmn:serviceTask id="probe" name="Probe readiness (poll)">
+    <bpmn:subProcess id="probe-loop" name="Probe readiness loop">
+      <bpmn:incoming>f_toProbe</bpmn:incoming>
+      <bpmn:outgoing>f_probed</bpmn:outgoing>
+      <bpmn:startEvent id="probe-loop-start" name="Start probe loop">
+        <bpmn:outgoing>pl_toProbe</bpmn:outgoing>
+      </bpmn:startEvent>
+      <bpmn:serviceTask id="probe" name="Probe readiness">
+        <bpmn:extensionElements>
+          <zeebe:taskDefinition type="pr.readiness-probe" />
+          <zeebe:properties>
+            <zeebe:property name="io.nanobpm.dataEnvelope.in" value="ReadinessProbeIn" />
+            <zeebe:property name="io.nanobpm.dataEnvelope.out" value="ReadinessProbeOut" />
+          </zeebe:properties>
+        </bpmn:extensionElements>
+        <bpmn:incoming>pl_toProbe</bpmn:incoming>
+        <bpmn:incoming>pl_pollBack</bpmn:incoming>
+        <bpmn:outgoing>pl_probed</bpmn:outgoing>
+      </bpmn:serviceTask>
+      <bpmn:exclusiveGateway id="probe-ready-gw" name="ready?" default="pl_notReady">
+        <bpmn:incoming>pl_probed</bpmn:incoming>
+        <bpmn:outgoing>pl_ready</bpmn:outgoing>
+        <bpmn:outgoing>pl_notReady</bpmn:outgoing>
+      </bpmn:exclusiveGateway>
+      <bpmn:intermediateCatchEvent id="wait-poll" name="Wait poll interval">
+        <bpmn:incoming>pl_notReady</bpmn:incoming>
+        <bpmn:outgoing>pl_pollBack</bpmn:outgoing>
+        <bpmn:timerEventDefinition id="ted_probePollEvery">
+          <bpmn:timeDuration xsi:type="bpmn:tFormalExpression">=probePollEvery</bpmn:timeDuration>
+        </bpmn:timerEventDefinition>
+      </bpmn:intermediateCatchEvent>
+      <bpmn:endEvent id="probe-loop-end" name="Probe ready">
+        <bpmn:incoming>pl_ready</bpmn:incoming>
+      </bpmn:endEvent>
+      <bpmn:sequenceFlow id="pl_toProbe" sourceRef="probe-loop-start" targetRef="probe" />
+      <bpmn:sequenceFlow id="pl_probed" sourceRef="probe" targetRef="probe-ready-gw" />
+      <bpmn:sequenceFlow id="pl_ready" name="ready" sourceRef="probe-ready-gw" targetRef="probe-loop-end">
+        <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=ready = true</bpmn:conditionExpression>
+      </bpmn:sequenceFlow>
+      <bpmn:sequenceFlow id="pl_notReady" name="not ready" sourceRef="probe-ready-gw" targetRef="wait-poll" />
+      <bpmn:sequenceFlow id="pl_pollBack" sourceRef="wait-poll" targetRef="probe" />
+    </bpmn:subProcess>
+    <bpmn:boundaryEvent id="probe-timeout" name="Gate timed out" attachedToRef="probe-loop">
+      <bpmn:outgoing>f_probeTimeout</bpmn:outgoing>
+      <bpmn:timerEventDefinition id="ted_probeTimeout">
+        <bpmn:timeDuration xsi:type="bpmn:tFormalExpression">=probeTimeout</bpmn:timeDuration>
+      </bpmn:timerEventDefinition>
+    </bpmn:boundaryEvent>
+    <bpmn:serviceTask id="probe-last-attempt" name="Probe readiness (last attempt)">
       <bpmn:extensionElements>
         <zeebe:taskDefinition type="pr.readiness-probe" />
         <zeebe:properties>
           <zeebe:property name="io.nanobpm.dataEnvelope.in" value="ReadinessProbeIn" />
           <zeebe:property name="io.nanobpm.dataEnvelope.out" value="ReadinessProbeOut" />
         </zeebe:properties>
+        <zeebe:ioMapping>
+          <zeebe:input source="=true" target="lastAttempt" />
+        </zeebe:ioMapping>
       </bpmn:extensionElements>
-      <bpmn:incoming>f_toProbe</bpmn:incoming>
-      <bpmn:outgoing>f_probed</bpmn:outgoing>
+      <bpmn:incoming>f_probeTimeout</bpmn:incoming>
+      <bpmn:outgoing>f_lastAttemptDone</bpmn:outgoing>
     </bpmn:serviceTask>
-    <bpmn:boundaryEvent id="probe-timeout" name="Gate timed out" attachedToRef="probe">
-      <bpmn:outgoing>f_probeTimeout</bpmn:outgoing>
-      <bpmn:timerEventDefinition id="ted_probeTimeout">
-        <bpmn:timeDuration xsi:type="bpmn:tFormalExpression">=probeTimeout</bpmn:timeDuration>
-      </bpmn:timerEventDefinition>
-    </bpmn:boundaryEvent>
     <bpmn:endEvent id="probe-done" name="Probe settled">
       <bpmn:incoming>f_probed</bpmn:incoming>
-      <bpmn:incoming>f_probeTimeout</bpmn:incoming>
+      <bpmn:incoming>f_lastAttemptDone</bpmn:incoming>
     </bpmn:endEvent>
     <bpmn:eventBasedGateway id="gw-gate" name="ready or timeout?">
       <bpmn:incoming>f_toGate</bpmn:incoming>
@@ -157,10 +203,11 @@
       <bpmn:incoming>f_continue</bpmn:incoming>
     </bpmn:endEvent>
     <bpmn:sequenceFlow id="f_start" sourceRef="Start" targetRef="fork" />
-    <bpmn:sequenceFlow id="f_toProbe" sourceRef="fork" targetRef="probe" />
+    <bpmn:sequenceFlow id="f_toProbe" sourceRef="fork" targetRef="probe-loop" />
     <bpmn:sequenceFlow id="f_toGate" sourceRef="fork" targetRef="gw-gate" />
-    <bpmn:sequenceFlow id="f_probed" sourceRef="probe" targetRef="probe-done" />
-    <bpmn:sequenceFlow id="f_probeTimeout" sourceRef="probe-timeout" targetRef="probe-done" />
+    <bpmn:sequenceFlow id="f_probed" sourceRef="probe-loop" targetRef="probe-done" />
+    <bpmn:sequenceFlow id="f_probeTimeout" sourceRef="probe-timeout" targetRef="probe-last-attempt" />
+    <bpmn:sequenceFlow id="f_lastAttemptDone" sourceRef="probe-last-attempt" targetRef="probe-done" />
     <bpmn:sequenceFlow id="f_toReady" sourceRef="gw-gate" targetRef="wait-ready" />
     <bpmn:sequenceFlow id="f_toTimeout" sourceRef="gw-gate" targetRef="wait-timeout" />
     <bpmn:sequenceFlow id="f_ready" sourceRef="wait-ready" targetRef="gate-ready" />
@@ -192,13 +239,31 @@
           <dc:Bounds x="202" y="62" width="78" height="28" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_probe-loop" bpmnElement="probe-loop" isExpanded="true">
+        <dc:Bounds x="960" y="40" width="520" height="220" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_probe-loop-start" bpmnElement="probe-loop-start">
+        <dc:Bounds x="990" y="132" width="36" height="36" />
+      </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_probe" bpmnElement="probe">
-        <dc:Bounds x="1288" y="80" width="100" height="80" />
+        <dc:Bounds x="1070" y="110" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_probe-ready-gw" bpmnElement="probe-ready-gw" isMarkerVisible="true">
+        <dc:Bounds x="1210" y="125" width="50" height="50" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_wait-poll" bpmnElement="wait-poll">
+        <dc:Bounds x="1300" y="192" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_probe-loop-end" bpmnElement="probe-loop-end">
+        <dc:Bounds x="1394" y="132" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_probe-last-attempt" bpmnElement="probe-last-attempt">
+        <dc:Bounds x="1510" y="80" width="100" height="80" />
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_probe-done" bpmnElement="probe-done">
-        <dc:Bounds x="1488" y="102" width="36" height="36" />
+        <dc:Bounds x="1650" y="102" width="36" height="36" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="1480" y="69" width="53" height="28" />
+          <dc:Bounds x="1642" y="69" width="53" height="28" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_gw-gate" bpmnElement="gw-gate" isMarkerVisible="true">
@@ -259,9 +324,9 @@
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_probe-timeout" bpmnElement="probe-timeout">
-        <dc:Bounds x="1320" y="142" width="36" height="36" />
+        <dc:Bounds x="1202" y="242" width="36" height="36" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="1300" y="203" width="76" height="28" />
+          <dc:Bounds x="1182" y="303" width="76" height="28" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
       <bpmndi:BPMNEdge id="BPMNEdge_f_start" bpmnElement="f_start">
@@ -270,11 +335,34 @@
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_toProbe" bpmnElement="f_toProbe">
         <di:waypoint x="266" y="120" />
-        <di:waypoint x="1288" y="120" />
+        <di:waypoint x="960" y="120" />
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_probed" bpmnElement="f_probed">
-        <di:waypoint x="1388" y="120" />
-        <di:waypoint x="1488" y="120" />
+        <di:waypoint x="1480" y="120" />
+        <di:waypoint x="1650" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_pl_toProbe" bpmnElement="pl_toProbe">
+        <di:waypoint x="1026" y="150" />
+        <di:waypoint x="1070" y="150" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_pl_probed" bpmnElement="pl_probed">
+        <di:waypoint x="1170" y="150" />
+        <di:waypoint x="1210" y="150" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_pl_ready" bpmnElement="pl_ready">
+        <di:waypoint x="1260" y="150" />
+        <di:waypoint x="1394" y="150" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_pl_notReady" bpmnElement="pl_notReady">
+        <di:waypoint x="1235" y="175" />
+        <di:waypoint x="1235" y="210" />
+        <di:waypoint x="1300" y="210" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_pl_pollBack" bpmnElement="pl_pollBack">
+        <di:waypoint x="1318" y="228" />
+        <di:waypoint x="1318" y="250" />
+        <di:waypoint x="1120" y="250" />
+        <di:waypoint x="1120" y="190" />
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_toReady" bpmnElement="f_toReady">
         <di:waypoint x="416" y="280" />
@@ -341,10 +429,14 @@
         <di:waypoint x="652" y="440" />
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_probeTimeout" bpmnElement="f_probeTimeout">
-        <di:waypoint x="1338" y="178" />
-        <di:waypoint x="1338" y="198" />
-        <di:waypoint x="1506" y="198" />
-        <di:waypoint x="1506" y="138" />
+        <di:waypoint x="1220" y="278" />
+        <di:waypoint x="1220" y="320" />
+        <di:waypoint x="1560" y="320" />
+        <di:waypoint x="1560" y="160" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_f_lastAttemptDone" bpmnElement="f_lastAttemptDone">
+        <di:waypoint x="1610" y="120" />
+        <di:waypoint x="1650" y="120" />
       </bpmndi:BPMNEdge>
     </bpmndi:BPMNPlane>
   </bpmndi:BPMNDiagram>

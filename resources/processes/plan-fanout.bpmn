@@ -132,23 +132,75 @@
       <bpmn:startEvent id="pf_start" name="Awaiting capability">
         <bpmn:outgoing>pf_toProbe</bpmn:outgoing>
       </bpmn:startEvent>
-      <bpmn:serviceTask id="preflight-probe" name="Probe capability (poll)">
+      <bpmn:subProcess id="preflight-probe-loop" name="Probe capability loop">
+        <bpmn:extensionElements>
+          <zeebe:ioMapping>
+            <zeebe:output source="=ready" target="ready" />
+            <zeebe:output source="=if (is defined(detail)) then detail else null" target="detail" />
+            <zeebe:output source="=if (is defined(resolvedArtifact)) then resolvedArtifact else null" target="resolvedArtifact" />
+            <zeebe:output source="=if (is defined(mergedSha)) then mergedSha else null" target="mergedSha" />
+          </zeebe:ioMapping>
+        </bpmn:extensionElements>
+        <bpmn:incoming>pf_toProbe</bpmn:incoming>
+        <bpmn:outgoing>pf_probed</bpmn:outgoing>
+        <bpmn:startEvent id="pf_loop_start" name="Start probe loop">
+          <bpmn:outgoing>pf_loop_toProbe</bpmn:outgoing>
+        </bpmn:startEvent>
+        <bpmn:serviceTask id="preflight-probe" name="Probe capability">
+          <bpmn:extensionElements>
+            <zeebe:taskDefinition type="pr.readiness-probe" />
+            <zeebe:properties>
+              <zeebe:property name="io.nanobpm.dataEnvelope.in" value="ReadinessProbeIn" />
+              <zeebe:property name="io.nanobpm.dataEnvelope.out" value="ReadinessProbeOut" />
+            </zeebe:properties>
+          </bpmn:extensionElements>
+          <bpmn:incoming>pf_loop_toProbe</bpmn:incoming>
+          <bpmn:incoming>pf_pollBack</bpmn:incoming>
+          <bpmn:outgoing>pf_loop_probed</bpmn:outgoing>
+        </bpmn:serviceTask>
+        <bpmn:exclusiveGateway id="pf_loop_gw" name="ready?" default="pf_notReady">
+          <bpmn:incoming>pf_loop_probed</bpmn:incoming>
+          <bpmn:outgoing>pf_loop_ready</bpmn:outgoing>
+          <bpmn:outgoing>pf_notReady</bpmn:outgoing>
+        </bpmn:exclusiveGateway>
+        <bpmn:intermediateCatchEvent id="pf_wait_poll" name="Wait poll interval">
+          <bpmn:incoming>pf_notReady</bpmn:incoming>
+          <bpmn:outgoing>pf_pollBack</bpmn:outgoing>
+          <bpmn:timerEventDefinition id="ted_pf_probe_poll">
+            <bpmn:timeDuration xsi:type="bpmn:tFormalExpression">=probePollEvery</bpmn:timeDuration>
+          </bpmn:timerEventDefinition>
+        </bpmn:intermediateCatchEvent>
+        <bpmn:endEvent id="pf_loop_end" name="Probe ready">
+          <bpmn:incoming>pf_loop_ready</bpmn:incoming>
+        </bpmn:endEvent>
+        <bpmn:sequenceFlow id="pf_loop_toProbe" sourceRef="pf_loop_start" targetRef="preflight-probe" />
+        <bpmn:sequenceFlow id="pf_loop_probed" sourceRef="preflight-probe" targetRef="pf_loop_gw" />
+        <bpmn:sequenceFlow id="pf_loop_ready" name="ready" sourceRef="pf_loop_gw" targetRef="pf_loop_end">
+          <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=ready = true</bpmn:conditionExpression>
+        </bpmn:sequenceFlow>
+        <bpmn:sequenceFlow id="pf_notReady" name="not ready" sourceRef="pf_loop_gw" targetRef="pf_wait_poll" />
+        <bpmn:sequenceFlow id="pf_pollBack" sourceRef="pf_wait_poll" targetRef="preflight-probe" />
+      </bpmn:subProcess>
+      <bpmn:boundaryEvent id="be_pf_probe_timeout" name="Probe timed out" attachedToRef="preflight-probe-loop">
+        <bpmn:outgoing>pf_probeTimedOut</bpmn:outgoing>
+        <bpmn:timerEventDefinition id="ted_pf_probe_timeout">
+          <bpmn:timeDuration xsi:type="bpmn:tFormalExpression">=probeTimeout</bpmn:timeDuration>
+        </bpmn:timerEventDefinition>
+      </bpmn:boundaryEvent>
+      <bpmn:serviceTask id="preflight-probe-last-attempt" name="Probe capability (last attempt)">
         <bpmn:extensionElements>
           <zeebe:taskDefinition type="pr.readiness-probe" />
           <zeebe:properties>
             <zeebe:property name="io.nanobpm.dataEnvelope.in" value="ReadinessProbeIn" />
             <zeebe:property name="io.nanobpm.dataEnvelope.out" value="ReadinessProbeOut" />
           </zeebe:properties>
+          <zeebe:ioMapping>
+            <zeebe:input source="=true" target="lastAttempt" />
+          </zeebe:ioMapping>
         </bpmn:extensionElements>
-        <bpmn:incoming>pf_toProbe</bpmn:incoming>
-        <bpmn:outgoing>pf_probed</bpmn:outgoing>
+        <bpmn:incoming>pf_probeTimedOut</bpmn:incoming>
+        <bpmn:outgoing>pf_lastAttemptDone</bpmn:outgoing>
       </bpmn:serviceTask>
-      <bpmn:boundaryEvent id="be_pf_probe_timeout" name="Probe timed out" attachedToRef="preflight-probe">
-        <bpmn:outgoing>pf_probeTimedOut</bpmn:outgoing>
-        <bpmn:timerEventDefinition id="ted_pf_probe_timeout">
-          <bpmn:timeDuration xsi:type="bpmn:tFormalExpression">=probeTimeout</bpmn:timeDuration>
-        </bpmn:timerEventDefinition>
-      </bpmn:boundaryEvent>
       <bpmn:exclusiveGateway id="pf_gw" name="capability ready?" default="pf_escalate">
         <bpmn:incoming>pf_probed</bpmn:incoming>
         <bpmn:outgoing>pf_ready</bpmn:outgoing>
@@ -161,7 +213,6 @@
           <zeebe:assignmentDefinition candidateGroups="operators" />
         </bpmn:extensionElements>
         <bpmn:incoming>pf_escalate</bpmn:incoming>
-        <bpmn:incoming>pf_probeTimedOut</bpmn:incoming>
         <bpmn:outgoing>pf_toResolution</bpmn:outgoing>
       </bpmn:userTask>
       <bpmn:boundaryEvent id="be_pf_sla" name="SLA elapsed" attachedToRef="readiness-escalation-pf">
@@ -181,13 +232,14 @@
         <bpmn:incoming>pf_abandon</bpmn:incoming>
         <bpmn:incoming>pf_sla</bpmn:incoming>
       </bpmn:endEvent>
-      <bpmn:sequenceFlow id="pf_toProbe" sourceRef="pf_start" targetRef="preflight-probe" />
-      <bpmn:sequenceFlow id="pf_probed" sourceRef="preflight-probe" targetRef="pf_gw" />
+      <bpmn:sequenceFlow id="pf_toProbe" sourceRef="pf_start" targetRef="preflight-probe-loop" />
+      <bpmn:sequenceFlow id="pf_probed" sourceRef="preflight-probe-loop" targetRef="pf_gw" />
       <bpmn:sequenceFlow id="pf_ready" name="ready" sourceRef="pf_gw" targetRef="pf_end">
         <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=ready = true</bpmn:conditionExpression>
       </bpmn:sequenceFlow>
       <bpmn:sequenceFlow id="pf_escalate" name="stalled" sourceRef="pf_gw" targetRef="readiness-escalation-pf" />
-      <bpmn:sequenceFlow id="pf_probeTimedOut" name="timed out" sourceRef="be_pf_probe_timeout" targetRef="readiness-escalation-pf" />
+      <bpmn:sequenceFlow id="pf_probeTimedOut" name="timed out" sourceRef="be_pf_probe_timeout" targetRef="preflight-probe-last-attempt" />
+      <bpmn:sequenceFlow id="pf_lastAttemptDone" sourceRef="preflight-probe-last-attempt" targetRef="pf_gw" />
       <bpmn:sequenceFlow id="pf_toResolution" sourceRef="readiness-escalation-pf" targetRef="pf_gw_res" />
       <bpmn:sequenceFlow id="pf_proceed" name="acknowledge" sourceRef="pf_gw_res" targetRef="pf_end" />
       <bpmn:sequenceFlow id="pf_abandon" name="abandon" sourceRef="pf_gw_res" targetRef="pf_end">
@@ -1126,64 +1178,105 @@
           <dc:Bounds x="61" y="143" width="74" height="28" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_preflight-probe-loop" bpmnElement="preflight-probe-loop" isExpanded="true">
+        <dc:Bounds x="170" y="40" width="520" height="220" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_pf_loop_start" bpmnElement="pf_loop_start">
+        <dc:Bounds x="200" y="132" width="36" height="36" />
+      </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_preflight-probe" bpmnElement="preflight-probe">
-        <dc:Bounds x="216" y="80" width="100" height="80" />
+        <dc:Bounds x="280" y="110" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_pf_loop_gw" bpmnElement="pf_loop_gw" isMarkerVisible="true">
+        <dc:Bounds x="420" y="125" width="50" height="50" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_pf_wait_poll" bpmnElement="pf_wait_poll">
+        <dc:Bounds x="510" y="192" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_pf_loop_end" bpmnElement="pf_loop_end">
+        <dc:Bounds x="604" y="132" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_preflight-probe-last-attempt" bpmnElement="preflight-probe-last-attempt">
+        <dc:Bounds x="700" y="80" width="100" height="80" />
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_pf_gw" bpmnElement="pf_gw" isMarkerVisible="true">
-        <dc:Bounds x="416" y="95" width="50" height="50" />
+        <dc:Bounds x="850" y="95" width="50" height="50" />
         <bpmndi:BPMNLabel>
           <dc:Bounds x="344" y="150" width="74" height="28" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_readiness-escalation-pf" bpmnElement="readiness-escalation-pf">
-        <dc:Bounds x="566" y="80" width="100" height="80" />
+        <dc:Bounds x="1000" y="80" width="100" height="80" />
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_pf_gw_res" bpmnElement="pf_gw_res" isMarkerVisible="true">
-        <dc:Bounds x="766" y="95" width="50" height="50" />
+        <dc:Bounds x="1200" y="95" width="50" height="50" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="751" y="76" width="81" height="14" />
+          <dc:Bounds x="1185" y="76" width="81" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_pf_end" bpmnElement="pf_end">
-        <dc:Bounds x="916" y="102" width="36" height="36" />
+        <dc:Bounds x="1350" y="102" width="36" height="36" />
         <bpmndi:BPMNLabel>
           <dc:Bounds x="896" y="69" width="76" height="28" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_be_pf_probe_timeout" bpmnElement="be_pf_probe_timeout">
-        <dc:Bounds x="248" y="142" width="36" height="36" />
+        <dc:Bounds x="410" y="242" width="36" height="36" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="225" y="203" width="83" height="28" />
+          <dc:Bounds x="387" y="303" width="83" height="28" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_be_pf_sla" bpmnElement="be_pf_sla">
-        <dc:Bounds x="598" y="142" width="36" height="36" />
+        <dc:Bounds x="1032" y="142" width="36" height="36" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="574" y="223" width="84" height="14" />
+          <dc:Bounds x="1008" y="223" width="84" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
       <bpmndi:BPMNEdge id="BPMNEdge_pf_toProbe" bpmnElement="pf_toProbe">
         <di:waypoint x="116" y="120" />
-        <di:waypoint x="216" y="120" />
+        <di:waypoint x="170" y="120" />
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_pf_probed" bpmnElement="pf_probed">
-        <di:waypoint x="316" y="120" />
-        <di:waypoint x="416" y="120" />
+        <di:waypoint x="690" y="120" />
+        <di:waypoint x="850" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_pf_loop_toProbe" bpmnElement="pf_loop_toProbe">
+        <di:waypoint x="236" y="150" />
+        <di:waypoint x="280" y="150" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_pf_loop_probed" bpmnElement="pf_loop_probed">
+        <di:waypoint x="380" y="150" />
+        <di:waypoint x="420" y="150" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_pf_loop_ready" bpmnElement="pf_loop_ready">
+        <di:waypoint x="470" y="150" />
+        <di:waypoint x="604" y="150" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_pf_notReady" bpmnElement="pf_notReady">
+        <di:waypoint x="445" y="175" />
+        <di:waypoint x="445" y="210" />
+        <di:waypoint x="510" y="210" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_pf_pollBack" bpmnElement="pf_pollBack">
+        <di:waypoint x="528" y="228" />
+        <di:waypoint x="528" y="250" />
+        <di:waypoint x="330" y="250" />
+        <di:waypoint x="330" y="190" />
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_pf_escalate" bpmnElement="pf_escalate">
-        <di:waypoint x="466" y="120" />
-        <di:waypoint x="566" y="120" />
+        <di:waypoint x="900" y="120" />
+        <di:waypoint x="1000" y="120" />
         <bpmndi:BPMNLabel>
           <dc:Bounds x="480" y="98" width="53" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_pf_toResolution" bpmnElement="pf_toResolution">
-        <di:waypoint x="666" y="120" />
-        <di:waypoint x="766" y="120" />
+        <di:waypoint x="1100" y="120" />
+        <di:waypoint x="1200" y="120" />
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_pf_proceed" bpmnElement="pf_proceed">
-        <di:waypoint x="816" y="120" />
-        <di:waypoint x="916" y="120" />
+        <di:waypoint x="1250" y="120" />
+        <di:waypoint x="1350" y="120" />
         <bpmndi:BPMNLabel>
           <dc:Bounds x="824" y="128" width="84" height="14" />
         </bpmndi:BPMNLabel>
@@ -1198,23 +1291,24 @@
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_pf_abandon" bpmnElement="pf_abandon">
-        <di:waypoint x="816" y="120" />
-        <di:waypoint x="916" y="120" />
+        <di:waypoint x="1250" y="120" />
+        <di:waypoint x="1350" y="120" />
         <bpmndi:BPMNLabel>
           <dc:Bounds x="840" y="158" width="53" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_pf_probeTimedOut" bpmnElement="pf_probeTimedOut">
-        <di:waypoint x="266" y="178" />
-        <di:waypoint x="266" y="198" />
-        <di:waypoint x="336" y="198" />
-        <di:waypoint x="336" y="82" />
-        <di:waypoint x="546" y="82" />
-        <di:waypoint x="546" y="120" />
-        <di:waypoint x="566" y="120" />
+        <di:waypoint x="428" y="278" />
+        <di:waypoint x="428" y="320" />
+        <di:waypoint x="750" y="320" />
+        <di:waypoint x="750" y="160" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="341" y="93" width="67" height="14" />
+          <dc:Bounds x="560" y="298" width="48" height="14" />
         </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_pf_lastAttemptDone" bpmnElement="pf_lastAttemptDone">
+        <di:waypoint x="800" y="120" />
+        <di:waypoint x="850" y="120" />
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_pf_sla" bpmnElement="pf_sla">
         <di:waypoint x="616" y="178" />

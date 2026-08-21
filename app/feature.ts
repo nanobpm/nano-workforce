@@ -29,6 +29,7 @@ import { deriveListBucket, deriveStage } from "./stage.ts";
 export interface FeatureReadinessOptions {
   readonly probes?: ReadinessProbe[];
   readonly probeTimeout?: string | null;
+  readonly probePollEvery?: string | null;
 }
 
 /** The BPMN process this module drives (resources/processes/feature.bpmn). */
@@ -367,6 +368,13 @@ export async function startFeature(
         "a non-blank bound. Derive it via parseFeatureReadiness before starting a gated feature.",
     );
   }
+  if (readinessProbes && (readiness.probePollEvery ?? "").trim() === "") {
+    throw new Error(
+      `startFeature(${parsed.planKey}): ${readinessProbes.length} readiness probe(s) seeded without a ` +
+        "probePollEvery — the preflight retry timers (=probePollEvery) require a non-blank cadence. " +
+        "Derive it via parseFeatureReadiness before starting a gated feature.",
+    );
+  }
   // Operator free-text steering for the implementation agent (issue #172 follow-on): blank/absent →
   // null so the implement task's `appendPrompt` FEEL (`customInstructions = null`) skips the block
   // rather than appending an empty "Operator custom instructions" heading.
@@ -487,6 +495,7 @@ export async function startFeature(
       // gate-less run still resolves the variable in that FEEL instead of raising an incident.
       readinessProbes,
       probeTimeout: readinessProbes ? (readiness.probeTimeout ?? null) : null,
+      probePollEvery: readinessProbes ? (readiness.probePollEvery ?? null) : null,
       gateKey: readinessProbes ? `feature-readiness:${parsed.planKey}` : null,
       resolvedArtifacts: null,
     },

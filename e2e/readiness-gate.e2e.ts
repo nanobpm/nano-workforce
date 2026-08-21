@@ -18,14 +18,14 @@
 // The probes are deterministic shell builtins (`true`/`false`) so the flow is hermetic — no
 // network, no GitHub. GitHub transport is still forced offline to match the sibling e2es.
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { after, before, describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { bootTestApp, type TestApp } from "@nanobpm/urban-testkit";
 
 const APP_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+let dbSeq = 0;
 
 const GITHUB_ENV_OVERRIDES: Record<string, string> = {
   NANO_PR_GITHUB_TRANSPORT: "token",
@@ -49,7 +49,8 @@ function takenFlows(app: TestApp): string[] {
 // Each scenario boots its own app so `takenSequenceFlows` (engine-global + cumulative) reflects
 // exactly one instance's history.
 async function boot(): Promise<{ app: TestApp; dbDir: string }> {
-  const dbDir = mkdtempSync(join(tmpdir(), "nwf-readiness-"));
+  const dbDir = join(APP_ROOT, ".test-artifacts", `nwf-readiness-${process.pid}-${dbSeq++}`);
+  mkdirSync(dbDir, { recursive: true });
   const app = await bootTestApp(APP_ROOT, { env: { NANO_APP_DB_URL: `file:${join(dbDir, "app.db")}` } });
   return { app, dbDir };
 }
@@ -79,6 +80,7 @@ describe("nano-workforce artifact-readiness wait-gate (readiness-gate.bpmn)", ()
           probe: { kind: "command", target: "true", poll: { everyMs: 5, timeoutMs: 5000, backoff: "fixed" } },
           // A long engine timer that must NOT fire — readiness wins the race first.
           probeTimeout: "PT30M",
+          probePollEvery: "PT15S",
           onTimeout: "escalate",
         },
       });
@@ -90,8 +92,8 @@ describe("nano-workforce artifact-readiness wait-gate (readiness-gate.bpmn)", ()
         `the gate released on the readiness signal (flows: ${flows.join(", ")})`,
       );
       assert.ok(
-        flows.includes("probe->probe-done"),
-        "the probe branch settled after publishing the readiness signal",
+        flows.includes("probe-loop->probe-done"),
+        "the probe loop branch settled after publishing the readiness signal",
       );
       // The gate never timed out — no escalation userTask exists.
       const tasks = await app.engine.searchUserTasks({});
@@ -115,15 +117,16 @@ describe("nano-workforce artifact-readiness wait-gate (readiness-gate.bpmn)", ()
           gateKey: "gate-timeout-1",
           // `false` is never ready; a tiny local budget makes the worker exhaust fast (real time),
           // leaving the ENGINE timer as the authoritative bound.
-          probe: { kind: "command", target: "false", poll: { everyMs: 5, timeoutMs: 40, backoff: "fixed" } },
+          probe: { kind: "command", target: "false", poll: { everyMs: 15_000, timeoutMs: 60_000, backoff: "fixed" } },
           probeTimeout: "PT1M",
+          probePollEvery: "PT15S",
           onTimeout: "escalate",
         },
       });
       await app.settle();
 
-      // The wait has NOT hung and has NOT yet escalated: the probe branch settled not-ready, and the
-      // gate is parked on the timer catch — no escalation userTask before the timer's duration.
+      // The wait has NOT hung and has NOT yet escalated: the first single-shot probe returned not-ready,
+      // and the retry cadence is parked on the engine-owned poll timer.
       const beforeTimer = await app.engine.searchUserTasks({ processInstanceKey });
       assert.equal(
         beforeTimer.filter((t) => t.elementId === "readiness-escalation").length,
@@ -133,9 +136,18 @@ describe("nano-workforce artifact-readiness wait-gate (readiness-gate.bpmn)", ()
       const beforeFlows = takenFlows(app);
       assert.ok(!beforeFlows.includes("wait-ready->gate-ready"), "a never-green probe never releases as ready");
 
-      // Advancing past the engine timer is the ONLY thing that ends the wait — proving the bound is
-      // engine-owned. The token races off the timer catch onto the escalation userTask.
-      await app.advanceTime(61_000);
+      await app.advanceTime(15_000);
+      const afterPoll = takenFlows(app);
+      assert.ok(afterPoll.includes("wait-poll->probe"), "the engine timer, not a worker sleep loop, schedules the next probe");
+      assert.equal(
+        (await app.engine.searchUserTasks({ processInstanceKey })).filter((t) => t.elementId === "readiness-escalation").length,
+        0,
+        "one poll interval only re-probes; it does not consume the timeout",
+      );
+
+      // Advancing past the engine timer is the ONLY thing that ends the wait. The timeout arm routes
+      // through one last empirical probe before the event-based gateway timer opens escalation.
+      await app.advanceTime(46_000);
 
       const afterFlows = takenFlows(app);
       assert.ok(
@@ -171,6 +183,7 @@ describe("nano-workforce artifact-readiness wait-gate (readiness-gate.bpmn)", ()
           gateKey: "gate-abandon-1",
           probe: { kind: "command", target: "false", poll: { everyMs: 5, timeoutMs: 40, backoff: "fixed" } },
           probeTimeout: "PT1M",
+          probePollEvery: "PT15S",
           onTimeout: "escalate",
         },
       });
@@ -209,6 +222,7 @@ describe("nano-workforce artifact-readiness wait-gate (readiness-gate.bpmn)", ()
           gateKey: "gate-continue-1",
           probe: { kind: "command", target: "false", poll: { everyMs: 5, timeoutMs: 40, backoff: "fixed" } },
           probeTimeout: "PT1M",
+          probePollEvery: "PT15S",
           onTimeout: "continue",
         },
       });
@@ -236,6 +250,7 @@ describe("nano-workforce artifact-readiness wait-gate (readiness-gate.bpmn)", ()
           // Neither probe.onTimeout nor a top-level onTimeout is declared.
           probe: { kind: "command", target: "false", poll: { everyMs: 5, timeoutMs: 40, backoff: "fixed" } },
           probeTimeout: "PT1M",
+          probePollEvery: "PT15S",
         },
       });
       await app.settle();
@@ -266,6 +281,7 @@ describe("nano-workforce artifact-readiness wait-gate (readiness-gate.bpmn)", ()
           // The descriptor asks to continue; a stale top-level onTimeout says escalate. probe wins.
           probe: { kind: "command", target: "false", onTimeout: "continue", poll: { everyMs: 5, timeoutMs: 40, backoff: "fixed" } },
           probeTimeout: "PT1M",
+          probePollEvery: "PT15S",
           onTimeout: "escalate",
         },
       });

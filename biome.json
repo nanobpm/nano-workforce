@@ -137,5 +137,28 @@
   ],
   "formatter": {
     "enabled": false
-  }
+  },
+  "overrides": [
+    {
+      "includes": [
+        "workers/readiness-probe/**"
+      ],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedGlobals": {
+              "level": "error",
+              "options": {
+                "deniedGlobals": {
+                  "setTimeout": "Use engine BPMN timers; readiness-probe must be single-shot.",
+                  "setInterval": "Use engine BPMN timers; readiness-probe must be single-shot.",
+                  "Date": "Use engine BPMN timers; readiness-probe must not read wall-clock time."
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
 }

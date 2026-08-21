@@ -964,6 +964,7 @@ function assertAcyclic(adjacency: Map<string, Set<string>>): void {
 export interface StartPlanOptions {
   readinessProbes?: ReadinessProbe[];
   probeTimeout?: string;
+  probePollEvery?: string;
 }
 
 /** Register a plan row (if new) and start the plan-fanout process. Idempotent on
@@ -986,6 +987,13 @@ export async function startPlan(
       `startPlan(${parsed.planKey}): ${probes.length} readiness probe(s) seeded without a probeTimeout — ` +
         "the preflight escalation timers (=probeTimeout) and pr.readiness-probe both require a non-blank " +
         "bound. Derive it via readinessTimeout (see planLowering) before starting a gated dependent.",
+    );
+  }
+  if (probes && (opts.probePollEvery ?? "").trim() === "") {
+    throw new Error(
+      `startPlan(${parsed.planKey}): ${probes.length} readiness probe(s) seeded without a probePollEvery — ` +
+        "the preflight retry timers (=probePollEvery) require a non-blank cadence. Derive it via " +
+        "readinessPollEvery (see planLowering) before starting a gated dependent.",
     );
   }
   const table = plans(data);
@@ -1108,6 +1116,7 @@ export async function startPlan(
       // the variable in that FEEL expression instead of raising an incident.
       readinessProbes: probes,
       probeTimeout: opts.probeTimeout ?? null,
+      probePollEvery: opts.probePollEvery ?? null,
       // The preflight probe worker (`pr.readiness-probe`) requires a non-blank `gateKey` correlation
       // key (it publishes `readiness-ready` on it). The typed `ReadinessProbeIn` envelope projects it
       // from THIS process scope (not task-local ioMapping), so it is seeded here — one per dependent

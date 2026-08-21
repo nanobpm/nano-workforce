@@ -36,6 +36,7 @@ export interface CapabilityNeed {
 export interface ReadinessProbeInput {
   readonly gateKey: string;
   readonly probeTimeout: string;
+  readonly probePollEvery: string;
   readonly onTimeout?: OnTimeout;
   readonly probe: ReadinessProbe;
 }
@@ -152,7 +153,7 @@ export function capabilityTaskBarrierKey(planKey: string, taskId: string): strin
  * the handle names no releases source. */
 export function capabilityNeedToProbeInput(
   need: CapabilityNeed,
-  opts: { planKey: string; taskId: string; probeTimeout: string },
+  opts: { planKey: string; taskId: string; probeTimeout: string; probePollEvery: string },
 ): ReadinessProbeInput {
   const repo = capabilityReleasesRepo(need.capabilityRef);
   if (!repo) throw new UnresolvableCapabilityRefError(need.capabilityRef);
@@ -170,6 +171,7 @@ export function capabilityNeedToProbeInput(
   return {
     gateKey: capabilityGateKey(opts.planKey, opts.taskId, need.capabilityRef, need.package),
     probeTimeout: opts.probeTimeout,
+    probePollEvery: opts.probePollEvery,
     onTimeout: "escalate",
     probe,
   };

@@ -64,6 +64,7 @@ test("nodeInputs seeds the exact per-kind fields each node's subProcess ioMappin
   const wait = byField((v) => "gateKey" in v);
   assertEquals(wait?.gateKey, "run-7:n3");
   assertEquals(wait?.probeTimeout, "PT20M");
+  assertEquals(wait?.probePollEvery, "PT15S");
   assert(wait?.probe && typeof wait.probe === "object", "the wait node carries its ReadinessProbe descriptor");
 
   const human = byField((v) => "escalationSlaTimeout" in v);
