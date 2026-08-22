@@ -4,12 +4,13 @@
 // resolved-not-landed) directly from the Epic / Overview pages so it drops out of the Active epic list
 // into History. It is the epic twin of `acknowledgeDone` (the feature-run tick-off) — a resolved epic
 // is NOT parked at a user task, so this op completes no user task and touches no engine/ledger: it
-// simply stamps `acknowledged_at` on the `plans` row via the plans gateway.
+// simply stamps `acknowledged_at` on the `plans` row.
 //
-// The gateway (app/plan.ts) recomputes `list_bucket`/`ack_open` on that write — a landed, now-
-// acknowledged epic flips `list_bucket` to 'history' and `ack_open` to 0 — so this op NEVER hand-sets
-// a derived projection. Keyed on the row's `plan_key`. Idempotent-safe: re-acknowledging re-stamps
-// the timestamp and keeps the row in History.
+// `list_bucket`/`ack_open` are DERIVED by the `plan_read_model` VIEW (074, issue #439) from
+// `status` + `acknowledged_at` + the derived `plan_delivery` signal — a landed, now-acknowledged epic
+// reads `list_bucket` = 'history' and `ack_open` = 0 — so this op NEVER writes a derived projection.
+// Keyed on the row's `plan_key`. Idempotent-safe: re-acknowledging re-stamps the timestamp and keeps
+// the row in History.
 //
 // It rejects (409) an epic that is NOT yet resolved — i.e. anything the `epicIsAcknowledgeable`
 // guard refuses: a non-`done` status (`planning`/`dispatched`), or `done` but still `converging`. A
@@ -56,9 +57,9 @@ export default defineOperation("acknowledgeEpic", async ({ body }, app) => {
     return { status: 409, body: { ok: false, error: "epic is not resolved" } };
   }
 
-  // Stamp the dismissal. The gateway recomputes `list_bucket` (→ 'history') and `ack_open` (→ 0) from
-  // the merged row, so we never hand-set them here. Idempotent: re-acknowledging re-stamps and stays
-  // in History.
+  // Stamp the dismissal. `list_bucket` (→ 'history') and `ack_open` (→ 0) are derived by the
+  // `plan_read_model` VIEW from the resolved, now-acknowledged row, so we never hand-set them here.
+  // Idempotent: re-acknowledging re-stamps and stays in History.
   const now = new Date().toISOString();
   await table.update(planKey, { acknowledged_at: now, updated_at: now });
 

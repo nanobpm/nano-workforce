@@ -109,10 +109,11 @@ async function pollLoop(): Promise<void> {
   }
   if (!shuttingDown) pollTimer = setTimeout(() => void pollLoop(), POLL_MS);
 }
-// Run the first pass immediately at boot (not after POLL_MS) so the one-shot feature-stage backfill
-// runs before the UI is relied upon — the Feature Runs grid/tabs filter on the stored `list_bucket`
-// projection, which is NULL on legacy rows until `backfillFeatureStages()` runs inside `pollOnce()`.
-// Deferring the first pass would leave those rows missing from Active/History for up to POLL_MS.
+// Run the first pass immediately at boot (not after POLL_MS) so the read-model pollers (delivery,
+// wait-gate, promotion, lineage) reconcile before the UI is relied upon rather than after up to
+// POLL_MS. The Feature Runs grid/tabs now filter the `feature_read_model` VIEW's derived `stage`/
+// `list_bucket` (issue #439), computed from each row's own `status`, so no boot-time backfill of a
+// stored projection is required.
 if (app.data) void pollLoop();
 
 async function drainAndExit(): Promise<void> {

@@ -19,7 +19,7 @@ import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { assert, assertEquals } from "#test-assert";
-import { deriveDelivery } from "./delivery.ts";
+import { deriveDelivery, deriveEpicBucket, epicIsAcknowledgeable } from "./delivery.ts";
 
 const MIG = (name: string) => readFileSync(fileURLToPath(new URL(`../db/migrations/${name}`, import.meta.url)), "utf8");
 const PAGE = (name: string) => JSON.parse(readFileSync(fileURLToPath(new URL(`../pages/${name}`, import.meta.url)), "utf8"));
@@ -34,7 +34,7 @@ function viewDb(): DatabaseSync {
        plan_key TEXT PRIMARY KEY, repo TEXT, issue_number INTEGER, issue_url TEXT, title TEXT,
        status TEXT, task_count INTEGER, process_key TEXT, outcome TEXT, created_at TEXT,
        updated_at TEXT, epic_phase TEXT, base_branch TEXT, wait_gate_label TEXT, bound_artifacts TEXT,
-       promotion_pr TEXT, promotion_state TEXT, list_bucket TEXT, ack_open INTEGER);
+       promotion_pr TEXT, promotion_state TEXT, acknowledged_at TEXT, list_bucket TEXT, ack_open INTEGER);
      CREATE TABLE plan_tasks (
        id INTEGER PRIMARY KEY, plan_key TEXT, task_index INTEGER, task_id TEXT, title TEXT,
        prompt TEXT, status TEXT, pr_key TEXT, summary TEXT, created_at TEXT, updated_at TEXT,
@@ -44,6 +44,9 @@ function viewDb(): DatabaseSync {
   db.exec(MIG("059_plan_wave_summary.sql"));
   db.exec(MIG("060_plan_wave_rollup.sql"));
   db.exec(MIG("061_plan_delivery_rollup.sql"));
+  // 074 redefines plan_read_model to DERIVE list_bucket/ack_open from status + acknowledged_at + the
+  // derived plan_delivery signal (issue #439), instead of reading the denormalised base columns.
+  db.exec(MIG("074_plan_read_model_derive_bucket.sql"));
   return db;
 }
 
@@ -66,10 +69,16 @@ const MISSING_PR_STATUS = "missing";
 // Insert a plan plus its tasks (and each task's PR, if any). PR keys are derived so the test rows
 // stay terse. Returns the flat `pull_requests.status` list `deriveDelivery` consumes (only tasks
 // that opened a PR), so the delivery assertions can cross-check the view against it.
-function addPlan(db: DatabaseSync, plan_key: string, status: string, tasks: SampleTask[]): string[] {
+function addPlan(
+  db: DatabaseSync,
+  plan_key: string,
+  status: string,
+  tasks: SampleTask[],
+  opts: { acknowledged_at?: string | null } = {},
+): string[] {
   db.prepare(
-    "INSERT INTO plans (plan_key, repo, issue_number, issue_url, status, task_count, updated_at, list_bucket) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-  ).run(plan_key, "o/r", 1, `https://gh/${plan_key}`, status, tasks.length, "2026-01-01T00:00:00Z", "active");
+    "INSERT INTO plans (plan_key, repo, issue_number, issue_url, status, task_count, updated_at, acknowledged_at, list_bucket) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  ).run(plan_key, "o/r", 1, `https://gh/${plan_key}`, status, tasks.length, "2026-01-01T00:00:00Z", opts.acknowledged_at ?? null, "active");
   const prStatuses: string[] = [];
   tasks.forEach((t, i) => {
     const prKey = t.pr || t.danglingPr ? `${plan_key}::pr${i}` : null;
@@ -104,6 +113,16 @@ function counts(db: DatabaseSync, plan_key: string): { prs_opened: number; prs_m
   const r = db
     .prepare("SELECT prs_opened, prs_merged, prs_in_flight FROM plan_delivery_counts WHERE plan_key = ?")
     .get(plan_key) as { prs_opened: number; prs_merged: number; prs_in_flight: number };
+  return { ...r };
+}
+
+// The derived Active/History bucket flags the epics pages bind — read straight off `plan_read_model`
+// (074), plus the delivery signal the derivation folds in, so the assertions can cross-check the
+// VIEW against the pure `deriveEpicBucket` / `epicIsAcknowledgeable` oracles.
+function bucket(db: DatabaseSync, plan_key: string): { list_bucket: unknown; ack_open: unknown; delivery: string | null } {
+  const r = db
+    .prepare("SELECT list_bucket, ack_open, delivery FROM plan_read_model WHERE plan_key = ?")
+    .get(plan_key) as { list_bucket: unknown; ack_open: unknown; delivery: string | null };
   return { ...r };
 }
 
@@ -259,4 +278,92 @@ test("the operator pages read the derived plan_read_model VIEW for the wave/deli
   assertEquals(byId("epic-plan").props.data.table, "plan_read_model");
   assert(/\{\{\s*wave_label\s*\}\}/.test(byId("wave-banner").props.header), "the banner surfaces wave_label");
   assertEquals(byId("wave-banner").props.body, "delivery_label", "the banner body is the delivery_label");
+
+  // Epic INDEX page (epic.page.json) — the standalone Epics grid must also read the derived VIEW, not
+  // the raw `plans` table. `plans` stays a valid schema table, so a regression here (reverting the
+  // binding) would leave every OTHER test green while the index silently resumed reading stale
+  // list_bucket/ack_open; this pins it (suppressed advisory epic.page.json — issue #439).
+  const epicIndex = PAGE("epic.page.json");
+  const epicPlans = (epicIndex.nodes ?? []).find((n: { id: string }) => n.id === "epic-plans");
+  assert(epicPlans, "epic index must keep the Epics grid");
+  assertEquals(epicPlans.props.data.table, "plan_read_model");
+});
+
+test("plan_read_model DERIVES list_bucket / ack_open from status + delivery + acknowledged_at, matching deriveEpicBucket / epicIsAcknowledgeable (issue #439)", () => {
+  const db = viewDb();
+  // done, still converging (a slice in flight): Active, Dismiss suppressed — never ticked off mid-flight.
+  const converging = addPlan(db, "o/r#conv", "done", [
+    { status: "opened", wave: 0, pr: { status: "merged" } },
+    { status: "opened", wave: 1, pr: { status: "converging" } },
+  ]);
+  // done, fully landed, unacknowledged: Active with Dismiss OPEN (ack_open=1).
+  const landed = addPlan(db, "o/r#land", "done", [
+    { status: "opened", wave: 0, pr: { status: "merged" } },
+    { status: "opened", wave: 0, pr: { status: "merged" } },
+  ]);
+  // done, landed AND acknowledged: History, Dismiss closed.
+  const acked = addPlan(
+    db,
+    "o/r#ack",
+    "done",
+    [{ status: "opened", wave: 0, pr: { status: "merged" } }],
+    { acknowledged_at: "2026-02-02T00:00:00Z" },
+  );
+  // resolved-not-landed (one abandoned), unacknowledged: delivery null → acknowledgeable, Active + Dismiss.
+  const resolved = addPlan(db, "o/r#res", "done", [
+    { status: "opened", wave: 0, pr: { status: "merged" } },
+    { status: "opened", wave: 0, pr: { status: "abandoned" } },
+  ]);
+  // live (dispatched) epic: Active, not acknowledgeable.
+  const live = addPlan(db, "o/r#live", "dispatched", [{ status: "opened", wave: 0, pr: { status: "converging" } }]);
+
+  for (const [plan_key, status, prStatuses, ackAt] of [
+    ["o/r#conv", "done", converging, null],
+    ["o/r#land", "done", landed, null],
+    ["o/r#ack", "done", acked, "2026-02-02T00:00:00Z"],
+    ["o/r#res", "done", resolved, null],
+    ["o/r#live", "dispatched", live, null],
+  ] as const) {
+    const b = bucket(db, plan_key);
+    const expectedDelivery = deriveDelivery(status, prStatuses).delivery;
+    assertEquals(b.delivery, expectedDelivery, `${plan_key}: delivery`);
+    // Cross-check the VIEW against the pure helpers — the SAME oracle the acknowledge-epic op guards on.
+    assertEquals(
+      b.list_bucket,
+      deriveEpicBucket(status, expectedDelivery, ackAt),
+      `${plan_key}: list_bucket must equal deriveEpicBucket`,
+    );
+    const expectedAckOpen = epicIsAcknowledgeable(status, expectedDelivery) && ackAt === null ? 1 : 0;
+    assertEquals(b.ack_open, expectedAckOpen, `${plan_key}: ack_open must equal epicIsAcknowledgeable`);
+  }
+
+  // Pin the human-visible outcomes so a derivation drift can't hide behind the cross-check.
+  assertEquals(bucket(db, "o/r#conv"), { list_bucket: "active", ack_open: 0, delivery: "converging" });
+  assertEquals(bucket(db, "o/r#land"), { list_bucket: "active", ack_open: 1, delivery: "landed" });
+  assertEquals(bucket(db, "o/r#ack"), { list_bucket: "history", ack_open: 0, delivery: "landed" });
+  assertEquals(bucket(db, "o/r#res"), { list_bucket: "active", ack_open: 1, delivery: null });
+  assertEquals(bucket(db, "o/r#live"), { list_bucket: "active", ack_open: 0, delivery: null });
+});
+
+test("RED/GREEN GUARD: a RAW-datasource plans.status write (the instanceTracking reconciler bypass) leaves plan_read_model's bucket CONSISTENT", () => {
+  // Reproduce the framework `instanceTracking` reconciler class of bug: on a terminated process
+  // instance it writes `{status:"abandoned"}` to `plans` through the RAW datasource — bypassing the
+  // (now retired) projecting `plans` gateway. Under the OLD write-time projection the stored
+  // `list_bucket`/`ack_open` would freeze at their pre-terminal values; because they are now a VIEW
+  // over `status`, the read model stays correct with no write-path for any writer to leave stale.
+  const db = viewDb();
+  // A live epic mid-flight — Active, its (stale) stored projection says active/converging.
+  addPlan(db, "o/r#kill", "dispatched", [{ status: "opened", wave: 0, pr: { status: "converging" } }]);
+  assertEquals(bucket(db, "o/r#kill").list_bucket, "active");
+
+  // The reconciler flips status terminal via the RAW table — NOT the gateway. (Simulated with a raw
+  // UPDATE, exactly what the raw datasource emits.) It touches neither list_bucket nor ack_open.
+  db.prepare("UPDATE plans SET status = 'abandoned' WHERE plan_key = ?").run("o/r#kill");
+
+  // `abandoned` is a terminal non-`done` status: History, never acknowledgeable — matches the oracle.
+  const b = bucket(db, "o/r#kill");
+  assertEquals(b.list_bucket, deriveEpicBucket("abandoned", b.delivery, null), "list_bucket tracks status via the VIEW");
+  assertEquals(b.list_bucket, "history", "an abandoned epic is filed under History, not wedged in Active");
+  assertEquals(b.ack_open, epicIsAcknowledgeable("abandoned", b.delivery) ? 1 : 0);
+  assertEquals(b.ack_open, 0, "no phantom Dismiss on a reconciler-cancelled epic");
 });

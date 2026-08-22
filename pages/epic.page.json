@@ -99,7 +99,7 @@
         "data": {
           "kind": "datasource",
           "source": "app",
-          "table": "plans",
+          "table": "plan_read_model",
           "orderBy": { "field": "updated_at", "dir": "desc" },
           "filter": [{ "field": "list_bucket", "in": ["active"] }]
         },

@@ -1,24 +1,27 @@
 // Tests for the POST /app/api/actions/acknowledge-epic operation `acknowledgeEpic` (issue #298).
 // The nwf UI's "Dismiss" affordance for a RESOLVED epic — landed (delivery=landed) or
 // resolved-not-landed (delivery=null); only still-`converging` epics are rejected. It stamps
-// `acknowledged_at` via the plans gateway, which recomputes `list_bucket` to 'history' (and
-// `ack_open` to 0), dropping the resolved epic from Active into History. Unlike acknowledge-blocked
-// it completes NO user task (a resolved epic is not parked). The epic twin of acknowledge-done.
+// `acknowledged_at`, which the `plan_read_model` VIEW (074, issue #439) derives into `list_bucket` =
+// 'history' and `ack_open` = 0, dropping the resolved epic from Active into History. Unlike
+// acknowledge-blocked it completes NO user task (a resolved epic is not parked). The epic twin of
+// acknowledge-done.
 //
 // Since epic #412 retired the stored `plans.delivery` column, the op derives the delivery signal at
 // READ TIME (`derivePlanDelivery` → the pure `deriveDelivery`) by joining the epic's slice
 // `plan_tasks.pr_key` → `pull_requests.status`. So these tests seed `plan_tasks` + `pull_requests`
-// (not a `plans.delivery` column) to model a landed / converging / resolved-not-landed epic.
+// (not a `plans.delivery` column) to model a landed / converging / resolved-not-landed epic. Because
+// `list_bucket`/`ack_open` are now a VIEW (no stored column), the tests assert the operation's real
+// write — the `acknowledged_at` stamp and the 200/409 gate — and cross-check the resulting bucket
+// through the pure `deriveEpicBucket` / `epicIsAcknowledgeable` oracles the VIEW mirrors.
 import { test } from "node:test";
 import { assertEquals } from "#test-assert";
 import type { AppApi } from "@nanobpm/urban";
-import { plans } from "../app/plan.ts";
+import { deriveEpicBucket, epicIsAcknowledgeable } from "../app/delivery.ts";
 import { noopLog } from "../test/log.ts";
 import handler from "./acknowledgeEpic.ts";
 
-// An in-memory data layer wired through the REAL plans gateway proxy, so the test exercises the
-// gateway's list_bucket/ack_open projection exactly as production does. `extra` seeds the join
-// surfaces (`plan_tasks` / `pull_requests`) the read-time delivery derivation reads.
+// An in-memory data layer wired through the `plans` gateway (now a plain record table). `extra` seeds
+// the join surfaces (`plan_tasks` / `pull_requests`) the read-time delivery derivation reads.
 function memApp(
   seed: any[],
   extra: Record<string, any[]> = {},
@@ -59,13 +62,7 @@ async function call(app: AppApi, body: unknown) {
   return (await handler({ req: {} as any, params: {}, query: {}, body } as any, app)) as any;
 }
 
-/** Fire a projecting gateway write (re-writing `status`) so `list_bucket`/`ack_open` reflect the
- *  delivery-free gateway projection, mirroring the last real write before the op runs. */
-async function project(app: AppApi, key: string, status: string) {
-  await plans(app.data).update(key, { status });
-}
-
-test("acknowledge-epic: stamps acknowledged_at and flips list_bucket to 'history' on a landed epic", async () => {
+test("acknowledge-epic: stamps acknowledged_at and (via the VIEW) buckets a landed epic into History", async () => {
   const { app, rows } = memApp(
     [{ plan_key: "o/r#1", status: "done", acknowledged_at: null }],
     {
@@ -73,17 +70,17 @@ test("acknowledge-epic: stamps acknowledged_at and flips list_bucket to 'history
       pull_requests: [{ pr_key: "o/r#100", status: "merged" }], // landed
     },
   );
-  await project(app, "o/r#1", "done");
-  assertEquals(rows[0].list_bucket, "active");
-  assertEquals(rows[0].ack_open, 1);
+  // Before dismissal a landed-but-unacknowledged epic reads as Active with Dismiss open through the VIEW.
+  assertEquals(deriveEpicBucket("done", "landed", rows[0].acknowledged_at), "active");
+  assertEquals(epicIsAcknowledgeable("done", "landed"), true);
 
   const res = await call(app, { plan_key: "o/r#1" });
 
   assertEquals(res.status, 200);
   assertEquals(res.body.ok, true);
   assertEquals(typeof rows[0].acknowledged_at, "string");
-  assertEquals(rows[0].list_bucket, "history");
-  assertEquals(rows[0].ack_open, 0);
+  // The op's only write is the stamp; the VIEW derives 'history' + ack_open 0 from the acknowledged row.
+  assertEquals(deriveEpicBucket("done", "landed", rows[0].acknowledged_at), "history");
 });
 
 test("acknowledge-epic: a still-converging epic is rejected (409) and stays Active", async () => {
@@ -100,15 +97,14 @@ test("acknowledge-epic: a still-converging epic is rejected (409) and stays Acti
       ],
     },
   );
-  await project(app, "o/r#2", "done");
 
   const res = await call(app, { plan_key: "o/r#2" });
 
   assertEquals(res.status, 409);
   assertEquals(res.body.ok, false);
-  // Untouched: no premature acknowledged_at, still Active.
+  // Untouched: no premature acknowledged_at; still Active through the VIEW (converging → active).
   assertEquals(rows[0].acknowledged_at, null);
-  assertEquals(rows[0].list_bucket, "active");
+  assertEquals(deriveEpicBucket("done", "converging", rows[0].acknowledged_at), "active");
 });
 
 test("acknowledge-epic: a resolved-not-landed epic (delivery=null) is accepted (200) and flips to History", async () => {
@@ -125,17 +121,15 @@ test("acknowledge-epic: a resolved-not-landed epic (delivery=null) is accepted (
       ],
     },
   );
-  await project(app, "o/r#2b", "done");
-  assertEquals(rows[0].list_bucket, "active");
-  assertEquals(rows[0].ack_open, 1);
+  assertEquals(deriveEpicBucket("done", null, rows[0].acknowledged_at), "active");
+  assertEquals(epicIsAcknowledgeable("done", null), true);
 
   const res = await call(app, { plan_key: "o/r#2b" });
 
   assertEquals(res.status, 200);
   assertEquals(res.body.ok, true);
   assertEquals(typeof rows[0].acknowledged_at, "string");
-  assertEquals(rows[0].list_bucket, "history");
-  assertEquals(rows[0].ack_open, 0);
+  assertEquals(deriveEpicBucket("done", null, rows[0].acknowledged_at), "history");
 });
 
 test("acknowledge-epic: a live (dispatched) epic is rejected (409)", async () => {
@@ -164,15 +158,14 @@ test("acknowledge-epic: idempotent — re-acknowledging a landed epic keeps it i
       pull_requests: [{ pr_key: "o/r#500", status: "merged" }], // landed
     },
   );
-  await project(app, "o/r#5", "done");
 
   assertEquals((await call(app, { plan_key: "o/r#5" })).status, 200);
   const firstStamp = rows[0].acknowledged_at;
-  assertEquals(rows[0].list_bucket, "history");
+  assertEquals(deriveEpicBucket("done", "landed", rows[0].acknowledged_at), "history");
 
   const res2 = await call(app, { plan_key: "o/r#5" });
   assertEquals(res2.status, 200);
-  assertEquals(rows[0].list_bucket, "history");
+  assertEquals(deriveEpicBucket("done", "landed", rows[0].acknowledged_at), "history");
   // Re-stamped (a fresh timestamp) but still resolved.
   assertEquals(typeof rows[0].acknowledged_at, "string");
   void firstStamp;

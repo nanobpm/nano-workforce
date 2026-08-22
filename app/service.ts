@@ -27,11 +27,11 @@ import {
   conformanceEscalationQuestion,
 } from "./conformance.ts";
 import { isUniqueConstraintFence } from "./dbFence.ts";
-import { deriveDelivery, deriveEpicBucket, epicIsAcknowledgeable, TERMINAL_STATUSES } from "./delivery.ts";
+import { deriveDelivery, TERMINAL_STATUSES } from "./delivery.ts";
 import { deliveryGraphRuns, deriveDeliveryPhase, parseHumanLabels } from "./deliveryGraphRun.ts";
 import { isDeliveryHumanElement } from "./deliveryHuman.ts";
 import { fleetSupportsDurableResume } from "./durableResume.ts";
-import { backfillFeatureStages, deriveFeatureDelivery, FEATURE_BLOCKED_ELEMENT, FEATURE_ESCALATION_ELEMENT, FEATURE_RUN_STATUSES, type FeatureRunStatus, featureEscalations, featureRuns } from "./feature.ts";
+import { deriveFeatureDelivery, FEATURE_BLOCKED_ELEMENT, FEATURE_ESCALATION_ELEMENT, FEATURE_RUN_STATUSES, type FeatureRunStatus, featureEscalations, featureRuns } from "./feature.ts";
 import {
   classifyMergeability,
   classifyPrLiveness,
@@ -54,7 +54,6 @@ import { mergeLanes, readExclusions } from "./mergeExclusion.ts";
 import { freshHeadRunAction, headRunPresenceCount, loadMergeProtocol } from "./mergeProtocol.ts";
 import { type PrLaneDecision, planPrLane, taskDependencyDepths } from "./mergeTrain.ts";
 import {
-  backfillPlanBuckets,
   capabilityGates,
   inboundPlanDeps,
   type Plan,
@@ -1895,46 +1894,6 @@ export async function derivePlanDelivery(
   return deriveDelivery(plan.status, prStatuses).delivery;
 }
 
-/** Idempotent read-model pass (epic #412 — successor to the retired `pollDelivery`): keep each
- * epic's Active/History `list_bucket` + `ack_open` tick-off flags fresh now that the `plans.delivery`
- * column is gone. The `plans` gateway projects both at write time, but with `delivery` treated as
- * UNKNOWN (null) — provably correct for `list_bucket`, but it cannot clear `ack_open` while a `done`
- * epic is still CONVERGING (its slices not all merged). This pass supplies the delivery-aware
- * correction: it recomputes `delivery` at read time via {@link derivePlanDelivery} and re-derives
- * `list_bucket`/`ack_open` from the pure `deriveEpicBucket`/`epicIsAcknowledgeable` helpers, writing
- * the result via the RAW `plans` table so the gateway's delivery-free reprojection can't clobber the
- * corrected value. Writes only when the projection actually changes, so a steady-state pass is a
- * no-op. Never touches `plan.status` — additive/derived only. */
-export async function pollPlanBucket(data: DataLayer) {
-  // Preload every PR status once per pass into a pr_key→status map (avoids an N+1 `prs(data).get`).
-  const statusByPrKey = new Map<string, string>();
-  for (const pr of await prs(data).all()) statusByPrKey.set(pr.pr_key, pr.status);
-  // Write through the RAW table, NOT the `plans` gateway: the gateway reprojects `list_bucket`/
-  // `ack_open` with `delivery=null` (it can't see the read-time signal), which would undo the
-  // delivery-aware `ack_open` correction below. This pass is the authoritative writer of the
-  // delivery-aware bucket flags.
-  const plansTable = data.table<Plan>("plans", "plan_key");
-  for (const plan of await plans(data).all()) {
-    try {
-      const delivery = await derivePlanDelivery(data, plan, statusByPrKey);
-      const listBucket = deriveEpicBucket(plan.status, delivery, plan.acknowledged_at ?? null);
-      const ackOpen =
-        epicIsAcknowledgeable(plan.status, delivery) && (plan.acknowledged_at ?? null) === null
-          ? 1
-          : 0;
-      if (plan.list_bucket !== listBucket || plan.ack_open !== ackOpen) {
-        await plansTable.update(plan.plan_key, {
-          list_bucket: listBucket,
-          ack_open: ackOpen,
-          updated_at: now(),
-        });
-      }
-    } catch (err) {
-      console.error(`[poller] plan-bucket ${plan.plan_key}: ${err}`);
-    }
-  }
-}
-
 /** Idempotent read-model pass (issue #292 slice S4): project each DEPENDENT epic's inter-epic gate
  * state onto its `plans` row so the epic index/detail views can show — as flat columns — which
  * producer/package a parked dependent is blocked on, its poll cadence + escalation deadline, and the
@@ -2442,42 +2401,14 @@ export async function pollUserTasks(
  * The wave-merge barrier is now level-triggered and probes the engine's message-subscription state
  * over the same raw-REST search surface, so it runs only when `engineRest` is supplied (as in
  * production — `main.ts` always passes it). */
-/** One-shot guard so the feature-stage backfill (`backfillFeatureStages`) runs at most once per
- * process, on the first `pollOnce`. Idempotent regardless, but there is no need to re-scan every row
- * on every poll. */
-let featureStagesBackfilled = false;
-
-/** One-shot guard so the epic-bucket backfill (`backfillPlanBuckets`, #298) runs at most once per
- * process, on the first `pollOnce` — re-projecting pre-migration-042 `plans` rows whose
- * `list_bucket` is still NULL. The gateway keeps every future write fresh; idempotent regardless. */
-let planBucketsBackfilled = false;
-
 export async function pollOnce(
   data: DataLayer,
   engine: EngineClient,
   token: string,
   engineRest?: { restAddress: string; token?: string },
 ) {
-  // One-shot: re-project any pre-#254 feature_runs rows whose pipeline columns are still NULL. The
-  // gateway keeps every future write fresh, so this only needs to run once per process and is safe to
-  // re-run (it re-derives from each row's own stored fields).
-  if (!featureStagesBackfilled) {
-    // Only arm the one-shot guard AFTER a successful backfill: setting it first would swallow a
-    // transient failure (e.g. a DB blip) and leave legacy rows unprojected forever, since every later
-    // pass would skip. On a throw the guard stays false and the next `pollOnce` retries.
-    await backfillFeatureStages(data);
-    featureStagesBackfilled = true;
-  }
-  // One-shot: re-project any pre-#298 `plans` rows whose `list_bucket` is still NULL, so a legacy
-  // epic buckets correctly into Active/History from the first pass. Guard armed only after success so
-  // a transient failure retries next pass (mirrors the feature-stage backfill above).
-  if (!planBucketsBackfilled) {
-    await backfillPlanBuckets(data);
-    planBucketsBackfilled = true;
-  }
   await pollReviews(data, engine, token);
   await pollMerges(data, engine, token);
-  await pollPlanBucket(data);
   await pollWaitGate(data);
   await pollPromotion(data, engine, token);
   await pollFeatureDelivery(data);
