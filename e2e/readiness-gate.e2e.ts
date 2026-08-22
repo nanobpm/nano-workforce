@@ -23,6 +23,25 @@ import { dirname, join, resolve } from "node:path";
 import { after, before, describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { bootTestApp, type TestApp } from "@nanobpm/urban-testkit";
+import type { CommandResult, ProbeExec } from "../app/readiness.ts";
+import { __setProbeExecForTest } from "../workers/readiness-probe/worker.ts";
+
+// A synchronous, in-memory ProbeExec so the probe resolves WITHIN the testkit's virtual-clock drain
+// fixpoint instead of spawning a REAL subprocess (real-time work `settle()` cannot deterministically
+// await — issue #450). It maps the hermetic shell builtins these scenarios use to a deterministic
+// `CommandResult` — `true` → exit 0 (green), `false` → exit 1 (never green) — mirroring the real
+// commands' semantics exactly, but with zero real time. `httpGet` throws: these gate-flow scenarios
+// use only `command` probes, so any HTTP call would be an unintended real-network escape.
+const deterministicExec: ProbeExec = {
+  run(command: string): Promise<CommandResult> {
+    const cmd = command.trim();
+    const code = cmd === "true" ? 0 : cmd === "false" ? 1 : 127;
+    return Promise.resolve({ code, stdout: "", stderr: "" });
+  },
+  httpGet(): Promise<never> {
+    return Promise.reject(new Error(`readiness-gate e2e: unexpected real HTTP probe (command probes only)`));
+  },
+};
 
 const APP_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 let dbSeq = 0;
@@ -61,6 +80,9 @@ describe("nano-workforce artifact-readiness wait-gate (readiness-gate.bpmn)", ()
       savedEnv.set(k, process.env[k]);
       process.env[k] = v;
     }
+    // Inject the deterministic exec so the probe never spawns a real subprocess under the virtual
+    // clock (issue #450). Scenario-agnostic: it maps each scenario's command by string.
+    __setProbeExecForTest(deterministicExec);
   });
 
   after(() => {
@@ -68,6 +90,8 @@ describe("nano-workforce artifact-readiness wait-gate (readiness-gate.bpmn)", ()
       if (v === undefined) delete process.env[k];
       else process.env[k] = v;
     }
+    // Restore production exec — the seam must never outlive this suite.
+    __setProbeExecForTest(undefined);
   });
 
   test("READY: a green probe publishes readiness-ready and the gate releases through wait-ready → gate-ready", async () => {

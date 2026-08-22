@@ -103,10 +103,33 @@ export function readGateVars(vars: { gateKey?: unknown; probeTimeout?: unknown }
   return { gateKey, probeTimeout };
 }
 
+// ── Deterministic-exec test seam (issue #450) ───────────────────────────────────────────────────
+// The probe's I/O runs through {@link defaultProbeExec} — a REAL `node:child_process` subprocess (for
+// `command` probes) / `fetch` (for `http`). A real subprocess is real-time async work that spans
+// multiple macrotasks, which the urban-testkit's *virtual-clock* `settle()`/`drain()` fixpoint cannot
+// deterministically await: it can return before the probe publishes `readiness-ready`, so a gate-flow
+// e2e races the subprocess (the same fire-and-forget-across-teardown hazard behind the testkit
+// use-after-free, nano-ide#446). An e2e under the virtual clock injects a synchronous, in-memory
+// `ProbeExec` here so the probe resolves *within* the drain fixpoint — no real spawn, no wall-clock
+// race — while production leaves the override unset and uses `defaultProbeExec()`. Deliberately a
+// process-scoped seam (not urban worker DI, which `bootTestApp` does not expose per-worker); the e2e
+// sets it before creating instances and clears it in teardown so it can never leak into production.
+let probeExecOverride: ProbeExec | undefined;
+
+/** Test-only seam: inject a deterministic {@link ProbeExec} for e2es driven by the virtual clock, or
+ *  pass `undefined` to restore the production {@link defaultProbeExec}. Never called in production. */
+export function __setProbeExecForTest(exec: ProbeExec | undefined): void {
+  probeExecOverride = exec;
+}
+
+function resolveProbeExec(): ProbeExec {
+  return probeExecOverride ?? defaultProbeExec();
+}
+
 const handler: AppJobHandler<In, Out> = async (job, app) => {
   const probe = parseProbe(job.variables.probe);
   const { gateKey } = readGateVars(job.variables);
-  const exec = defaultProbeExec();
+  const exec = resolveProbeExec();
   const result = await probeSingleShot({
     probe,
     exec,
