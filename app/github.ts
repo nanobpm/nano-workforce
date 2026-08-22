@@ -954,9 +954,11 @@ export async function baseBranchLanded(
 }
 
 /** A settled landability verdict, or `waiting` when GitHub hasn't determined it yet (or is
- * still running checks / awaiting review). The poller only advances the process on a settled
- * verdict; `waiting` means re-poll later. */
-export type Mergeability = "ready" | "waiting" | "conflict" | "blocked";
+ * still running checks / awaiting review). `draft` is a settled *not-landable* verdict: a draft PR
+ * can never be merged (GitHub refuses it outright), regardless of its checks — so it outranks every
+ * other signal and carries its own actionable remedy (mark it ready). The poller only advances the
+ * process on a settled verdict; `waiting` means re-poll later. */
+export type Mergeability = "ready" | "waiting" | "conflict" | "blocked" | "draft";
 
 /** Intersect a repo's declared `requiredChecks` against the head's actual per-check conclusions —
  * an INDEPENDENT backstop that runs BEFORE the `mergeStateStatus` switch, so nwf never merges a red
@@ -1009,6 +1011,13 @@ function requiredChecksVerdict(s: PrState, protocol?: MergeProtocol): "blocked" 
 }
 
 export function classifyMergeability(s: PrState, protocol?: MergeProtocol): Mergeability {
+  // A draft PR is NEVER landable — GitHub refuses the merge outright, whatever its checks say — so
+  // draft outranks every other signal (issue #454). Surface it as a first-class verdict rather than
+  // letting a green draft read as `CLEAN` → `"ready"` → an attempted merge that GitHub blocks with an
+  // opaque "the merge did not land (blocked)" escalation. The remedy is always the same: mark it
+  // ready. The poller self-heals this (mark-ready) when the repo's protocol wants a fresh head run,
+  // else escalates with an actionable message.
+  if (s.isDraft) return "draft";
   // Protocol-aware backstop FIRST (issue #392): honour the repo's declared `requiredChecks`
   // against the actual head rollup, so an `UNSTABLE` PR with a red DECLARED-required
   // check is no longer blindly `ready`. This never weakens GitHub branch protection (the switch
