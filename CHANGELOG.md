@@ -1,3 +1,11 @@
+## [0.120.2](https://github.com/nanobpm/nano-workforce/compare/v0.120.1...v0.120.2) (2026-08-22)
+
+
+### Bug Fixes
+
+* **delivery-graph:** attach DI to compiled BPMN via layoutBpmn ([#440](https://github.com/nanobpm/nano-workforce/issues/440)) ([#444](https://github.com/nanobpm/nano-workforce/issues/444)) ([ed87208](https://github.com/nanobpm/nano-workforce/commit/ed87208e3c4d941a88a36ec5cad6c2661e15d587)), closes [#34](https://github.com/nanobpm/nano-workforce/issues/34)
+* **tasks:** surface delivery-graph human gates in the Tasks inbox ([#442](https://github.com/nanobpm/nano-workforce/issues/442)) ([#443](https://github.com/nanobpm/nano-workforce/issues/443)) ([a550e77](https://github.com/nanobpm/nano-workforce/commit/a550e7730fe496f34e1a1017fb84d448a2840f15))
+
 ## [0.120.1](https://github.com/nanobpm/nano-workforce/compare/v0.120.0...v0.120.1) (2026-08-22)
 
 
