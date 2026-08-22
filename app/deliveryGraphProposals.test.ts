@@ -103,13 +103,32 @@ test("stageProposal: stages a proposal that getStagedProposal then returns as li
   });
 });
 
-test("stageProposal: a re-stage of identical bytes is idempotent — one row, created_at (TTL anchor) preserved", async () => {
+test("stageProposal: a re-stage of an identical, STILL-LIVE digest is idempotent — one row, created_at (TTL anchor) preserved", async () => {
   await withData(async (data) => {
-    await stageProposal(data, row({ createdAt: "2024-01-01T00:00:00.000Z" }));
+    const firstStage = new Date().toISOString(); // live: expires_at is in the future
+    await stageProposal(data, row({ createdAt: firstStage }));
     await stageProposal(data, row({ createdAt: "2030-01-01T00:00:00.000Z" })); // a later re-stage
     const rows = await deliveryGraphProposals(data).all();
     assertEquals(rows.length, 1);
-    assertEquals(rows[0].created_at, "2024-01-01T00:00:00.000Z"); // first stage wins the TTL anchor
+    assertEquals(rows[0].created_at, firstStage); // first (live) stage wins the TTL anchor
+  });
+});
+
+test("stageProposal: a re-stage of an EXPIRED digest RE-ANCHORS the TTL so it is dispatchable again", async () => {
+  await withData(async (data) => {
+    // First stage long ago so its TTL has already elapsed (expires_at is in the past).
+    await stageProposal(data, row({ createdAt: "2024-01-01T00:00:00.000Z" }));
+    assertEquals(await getStagedProposal(data, "d1"), null); // aged out — not dispatchable
+
+    await stageProposal(data, row({ createdAt: "2030-01-01T00:00:00.000Z" })); // re-propose the same bytes
+    const rows = await deliveryGraphProposals(data).all();
+    assertEquals(rows.length, 1);
+    // The stale created_at must NOT be reused (that would keep expires_at in the past); the re-stage
+    // re-anchors the TTL to now, so the re-proposed digest is genuinely live and dispatchable again.
+    assert(!isProposalExpired(rows[0].expires_at), "re-staged expired proposal must have a future TTL");
+    const live = await getStagedProposal(data, "d1");
+    assert(live, "a re-staged (previously expired) proposal is dispatchable again");
+    assertEquals(live?.status, "staged");
   });
 });
 

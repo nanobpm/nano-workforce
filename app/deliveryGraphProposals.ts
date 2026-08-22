@@ -115,7 +115,8 @@ export function buildProposalPreview(compiled: CompileDeliveryGraphResult): Deli
 
 /** Build the durable proposal row for a compiled graph at stage time. `graph` is the original
  * `DeliveryGraph` JSON (serialised) the cockpit dispatch action re-runs; `createdAt` is preserved
- * across an idempotent re-stage so the TTL is anchored to the first stage. */
+ * across an idempotent re-stage of a still-live proposal so the TTL stays anchored to the first stage
+ * (omit it — defaulting to now — to re-anchor the TTL when re-staging an already-expired digest). */
 export function buildProposalRow(input: {
   digest: string;
   logicalKey: string;
@@ -148,8 +149,10 @@ export function buildProposalRow(input: {
 }
 
 /** Persist a compiled graph as a `staged` proposal and SUPERSEDE any prior staged proposal for the
- * same logical graph. Idempotent on `digest` (a re-stage of identical bytes refreshes `updated_at`
- * but preserves `created_at`, so the TTL is anchored to the first stage). After the upsert, every
+* same logical graph. Idempotent on `digest` (a re-stage of an identical, still-live digest refreshes
+* `updated_at` but preserves `created_at`, so the TTL stays anchored to the first stage; a re-stage of
+* a digest that has already aged out re-anchors the TTL to now so it is dispatchable again). After the
+* upsert, every
  * OTHER `staged` proposal sharing this `logical_key` is flipped to `superseded` — so the cockpit shows
  * exactly one live proposal per logical graph (the latest digest the operator would dispatch). */
 export async function stageProposal(data: DataLayer, row: DeliveryGraphProposal): Promise<DeliveryGraphProposal> {
@@ -166,9 +169,13 @@ export async function stageProposal(data: DataLayer, row: DeliveryGraphProposal)
         humanNodeCount: row.human_node_count,
         sideEffectCount: row.side_effect_count,
         sideEffecting: row.side_effecting === 1,
-        // Re-stage: preserve the original stage time so the TTL is anchored to the first stage, and
-        // re-`staged` the row (a superseded/dispatched digest that is re-proposed is live again).
-        createdAt: existing.created_at,
+        // Re-stage: if the existing row is STILL LIVE, preserve its original stage time so the TTL
+        // stays anchored to the first stage. But if it has already aged out of its TTL (or was
+        // dispatched/superseded long ago), reusing the stale `created_at` would yield a past
+        // `expires_at`, leaving the "re-staged" row immediately non-dispatchable (`getStagedProposal`
+        // rejects it as expired) while the preview claims it is staged. In that case re-anchor the TTL
+        // to now (omit `createdAt`) so a re-proposed digest is genuinely live again.
+        createdAt: isProposalExpired(existing.expires_at) ? undefined : existing.created_at,
       })
     : row;
   if (existing) {
