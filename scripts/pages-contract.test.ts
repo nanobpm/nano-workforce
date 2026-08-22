@@ -323,12 +323,14 @@ test("issue #205: overview is the landing page and first nav item", async () => 
   // EPIC surface buckets on the DERIVED `list_bucket` (issue #298) — NOT raw `status` — so a `done`
   // epic still converging, or landed-but-unpromoted, does not vanish from the in-flight Epics section
   // the instant `status=done`. Guarding the field here is the regression guard for that defect class.
+  // The epic surface binds the derived `plan_read_model` VIEW (epic #412 — the single source of truth
+  // for the wave/delivery projections it also renders), not the raw `plans` table.
   const expected: Record<string, { field: string; in: string[] }> = {
     pull_requests: {
       field: "status",
       in: ["converging", "waiting_review", "escalated", "waiting_deps", "waiting_merge", "queued", "merging"],
     },
-    plans: { field: "list_bucket", in: ["active"] },
+    plan_read_model: { field: "list_bucket", in: ["active"] },
     feature_runs: { field: "status", in: ["running", "escalated", "awaiting_operator"] },
     // The 4th dispatch surface (issue #386) — active delivery graphs. Both in-flight statuses
     // (`awaiting-approval` parked at the gate, `running` dispatched) show here.
