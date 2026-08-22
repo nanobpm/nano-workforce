@@ -9,6 +9,7 @@
 import { test } from "node:test";
 import { assertEquals, assertRejects } from "#test-assert";
 import { BpmnError } from "@nanobpm/urban";
+import { deriveEpicBucket } from "../../app/delivery.ts";
 import { noopLog } from "../../test/log.ts";
 import handler from "./worker.ts";
 import type { PlanTaskStatus } from "../../app/plan.ts";
@@ -77,8 +78,9 @@ test("no opened PRs (empty plan) hard-fails with NO_WORK_DISPATCHED", async () =
   const plan = app._plans.at(-1) as Record<string, unknown>;
   assertEquals(plan.status, "failed");
   assertEquals(plan.outcome, "no work dispatched — the planner produced no tasks");
-  // The gateway projects the bucket: a failed epic settles to History (no tick-off needed).
-  assertEquals(plan.list_bucket, "history");
+  // `list_bucket` is derived by the `plan_read_model` VIEW (066): a failed epic reads as History
+  // (no tick-off needed). Cross-checked against the pure `deriveEpicBucket` oracle the VIEW mirrors.
+  assertEquals(deriveEpicBucket(plan.status as string, null, plan.acknowledged_at as string | null), "history");
 });
 
 test("tasks present but none opened (all skipped/blocked) hard-fails", async () => {
@@ -102,6 +104,7 @@ test("at least one opened PR finalizes cleanly (no throw)", async () => {
   const plan = app._plans.at(-1) as Record<string, unknown>;
   assertEquals(plan.status, "done");
   assertEquals(plan.outcome, "1 PR(s) dispatched to convergence");
-  // A just-`done` epic (delivery not yet projected) stays in Active — it must not vanish (#298).
-  assertEquals(plan.list_bucket, "active");
+  // A just-`done` epic (delivery not yet converging, unacknowledged) reads as Active through the VIEW —
+  // it must not vanish (#298). Cross-checked against the pure `deriveEpicBucket` oracle.
+  assertEquals(deriveEpicBucket(plan.status as string, null, plan.acknowledged_at as string | null), "active");
 });

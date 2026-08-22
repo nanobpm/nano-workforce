@@ -12,7 +12,6 @@
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { blackboardUrl, mintBlackboardToken, renderCoordinationBrief } from "./blackboard.ts";
 import { capsWaitTimeout, DEFAULT_CAPS_WAIT_TIMEOUT } from "./capsWait.ts";
-import { deriveEpicBucket, epicIsAcknowledgeable } from "./delivery.ts";
 import { EPIC_PHASE } from "./epicPhase.ts";
 import { DEFAULT_ESCALATION_SLA_TIMEOUT, escalationSlaTimeout } from "./escalationSla.ts";
 import {
@@ -93,8 +92,9 @@ export interface Plan {
   // #412): `delivery` / `delivery_label` are now a DERIVED SQL VIEW (`plan_delivery` /
   // `plan_read_model`, 061), computed from the SAME pure `deriveDelivery`/`TERMINAL_STATUSES`
   // (app/delivery.ts). The pages read them off the view; the pollers that still need the signal
-  // (`pollPlanBucket` for list_bucket/ack_open, `pollPromotion` for `isPromotable`) recompute it at
-  // read time via `deriveDelivery`. There is no stored column and no write-path any more.
+  // (`pollPromotion` for `isPromotable`) recompute it at
+  // read time via `deriveDelivery`, as does the `plan_read_model` VIEW's bucket derivation (066).
+  // There is no stored column and no write-path any more.
   // Derived epic domain phase (038_plan_epic_phase.sql, #261): the epic's own lifecycle phase —
   // Planning / Reviewing / Implementing (wave n/t) / Trial merging / Finalizing / Dispatched —
   // projected at write time from plan-fanout.bpmn's named activities (app/epicPhase.ts), so the epic
@@ -112,16 +112,18 @@ export interface Plan {
   //                       which has nothing to promote). Display-only; projected by the poller.
   promotion_pr: string | null;
   promotion_state: string | null;
-  // Active/History partition + operator tick-off (044_plan_list_bucket.sql, #298). Derived,
-  // write-time-projected by the `plans` gateway (below) from the pure `deriveEpicBucket` /
-  // `epicIsAcknowledgeable` helpers (app/delivery.ts) — never written by the plan lifecycle or a
-  // poller directly. Bucket epics on the derived `delivery` rollup, not raw `status`, so a `done`
-  // epic still converging — or landed-but-unpromoted — does not vanish from Active.
+  // Active/History partition + operator tick-off (044_plan_list_bucket.sql, #298). RETIRED as a
+  // write-time projection (issue #439): `list_bucket`/`ack_open` are now DERIVED by the
+  // `plan_read_model` VIEW (066) from `status`, `acknowledged_at`, and the derived `plan_delivery`
+  // signal — mirroring the pure `deriveEpicBucket` / `epicIsAcknowledgeable` (app/delivery.ts). The
+  // Epics pages bind the VIEW, never these base columns, so a raw-datasource `status` write (the
+  // `instanceTracking` reconciler) can no longer leave them stale, and the delivery-aware
+  // `pollPlanBucket` correction is retired (the VIEW sees the live signal). The base columns survive
+  // (expand/contract — a later migration drops them) but are no longer written or read.
   //   • acknowledged_at — NULL until an operator dismisses a resolved `done` epic (acknowledge-epic).
-  //   • list_bucket     — 'active' | 'history': the page tabs filter on this flat column.
-  //   • ack_open        — 1 | 0: 1 iff a resolved (`done`, not converging) but unacknowledged epic,
-  //                       gating the Dismiss button's `showWhenField`. NULL only on pre-#298 rows
-  //                       until `backfillPlanBuckets`.
+  //                       Still written; the sole live input the derivation reads off the row.
+  //   • list_bucket     — 'active' | 'history': VESTIGIAL base column; the pages filter the VIEW's.
+  //   • ack_open        — 1 | 0: VESTIGIAL base column; the pages gate Dismiss on the VIEW's.
   acknowledged_at: string | null;
   list_bucket: string | null;
   ack_open: number | null;
@@ -182,91 +184,19 @@ export const PLAN_TASK_STATUSES = [
 ] as const;
 export type PlanTaskStatus = typeof PLAN_TASK_STATUSES[number];
 
-export const plans = (data: DataLayer) => {
-  const table = data.table<Plan>("plans", "plan_key");
-  return new Proxy(table, {
-    get(target, prop) {
-      if (prop === "insert") {
-        return (row: Partial<Plan>) => target.insert({ ...row, ...projectPlanBucket(row) });
-      }
-      if (prop === "update") {
-        return async (id: unknown, patch: Partial<Plan>) => {
-          // Only re-read + reproject when the patch changes a projection input (status /
-          // acknowledged_at) or writes a derived column directly. A projection-irrelevant patch (e.g.
-          // an `updated_at`-only write — including the direct `data.table` writes in
-          // e.g. `app/retro.ts` that stamp `retro_started_at`) leaves the stored projection correct, so
-          // skip the extra `get` roundtrip and delegate straight. Any bucket-relevant write
-          // (status/acknowledged_at or a derived column) MUST go through this gateway to stay
-          // reprojected.
-          if (!patchAffectsPlanProjection(patch)) return target.update(id, patch);
-          const existing = await target.get(id);
-          const merged: Partial<Plan> = { ...existing, ...patch };
-          return target.update(id, { ...patch, ...projectPlanBucket(merged) });
-        };
-      }
-      // Delegate every other method straight through. Bind functions to the real target so the
-      // gateway's private class fields resolve — a Proxy `this` would not carry them.
-      const value = Reflect.get(target, prop, target);
-      return typeof value === "function" ? value.bind(target) : value;
-    },
-  });
-};
-
-/** The `plans` fields the bucket projection READS: a patch touching none of these (and none it
- * writes) cannot change `list_bucket`/`ack_open`, so the gateway skips the read-back+reproject. Kept
- * adjacent to {@link projectPlanBucket} so the two stay in lockstep. */
-const PLAN_PROJECTION_INPUT_KEYS: readonly (keyof Plan)[] = ["status", "acknowledged_at"];
-
-/** The `plans` fields the bucket projection WRITES. Included in the reproject trigger so a caller who
- * writes a derived column directly (e.g. `list_bucket`/`ack_open`) can never bypass derivation: the
- * gateway re-reads, recomputes, and OVERRIDES the raw value with the canonical derived one. */
-const PLAN_PROJECTION_OUTPUT_KEYS: readonly (keyof Plan)[] = ["list_bucket", "ack_open"];
-
-/** True when a patch changes at least one field the bucket projection derives from OR one it writes —
- * i.e. the projection must be recomputed (mirrors feature.ts `patchAffectsProjection`). */
-function patchAffectsPlanProjection(patch: Partial<Plan>): boolean {
-  return (
-    PLAN_PROJECTION_INPUT_KEYS.some((k) => k in patch) ||
-    PLAN_PROJECTION_OUTPUT_KEYS.some((k) => k in patch)
-  );
-}
-
-/** Compute the write-time bucket projection columns for a merged `plans` row. Centralised so the
- * gateway is the ONE place `deriveEpicBucket` / `epicIsAcknowledgeable` are applied — the page, SQL,
- * pollers and workers never re-derive the mapping (AGENTS.md "derivation over duplication").
+/** The `plans` record gateway (keyed on `plan_key`) — a plain record table.
  *
- * The `delivery` signal was retired as a stored column (epic #412), so the write-time projection can
- * no longer read it — it derives the bucket with `delivery` treated as UNKNOWN (null). This is
- * provably safe for `list_bucket`: `deriveEpicBucket` returns the same bucket with `delivery=null` as
- * with the real signal for every reachable `(status, acknowledged_at)` state. `ack_open` is only a
- * *candidate* here (any unacknowledged `done` epic); the delivery-aware correction — clearing it
- * while an epic is still `converging` — is applied at read time by `pollPlanBucket` (app/service.ts),
- * which recomputes `delivery` via `deriveDelivery`. */
-function projectPlanBucket(row: Partial<Plan>): Partial<Plan> {
-  if (!row.status) return {};
-  return {
-    list_bucket: deriveEpicBucket(row.status, null, row.acknowledged_at ?? null),
-    ack_open:
-      epicIsAcknowledgeable(row.status, null) && (row.acknowledged_at ?? null) === null ? 1 : 0,
-  };
-}
-
-/** Re-project every `plans` row through the gateway so rows written before migration 042 (whose
- * `list_bucket`/`ack_open` are NULL) get a correct Active/History bucket. Idempotent and safe to
- * re-run: it re-derives from each row's own stored fields, so a second pass is a no-op. Runs once at
- * boot (pollOnce) — the gateway keeps every future write fresh, so this only needs to catch legacy
- * rows. Returns the count actually stamped. Mirrors `backfillFeatureStages` (app/feature.ts). */
-export async function backfillPlanBuckets(data: DataLayer): Promise<number> {
-  const table = plans(data);
-  let stamped = 0;
-  for (const row of await table.all()) {
-    // Only touch rows the projection has never reached — a legacy row whose `list_bucket` is NULL.
-    if (row.list_bucket != null) continue;
-    await table.update(row.plan_key, projectPlanBucket(row));
-    stamped++;
-  }
-  return stamped;
-}
+ * The epic-bucket projection (`list_bucket`/`ack_open`) is NO LONGER a write-time projection here
+ * (issue #439): it is DERIVED by the `plan_read_model` VIEW (066) from each row's own `status` /
+ * `acknowledged_at` and the derived `plan_delivery` signal, mirroring `deriveEpicBucket` /
+ * `epicIsAcknowledgeable` (app/delivery.ts). The Epics pages bind the VIEW, never this table's stored
+ * derived columns. Removing the write-time projection closes the drift the framework
+ * `instanceTracking` reconciler opened (a raw-datasource `{status:"abandoned"}` write on a terminated
+ * instance bypassed the projecting gateway and froze the bucket) AND retires the read-time
+ * `pollPlanBucket` correction: the VIEW sees the live delivery signal, so a still-converging epic never
+ * offers Dismiss without a poller pass. The pure helpers stay the acknowledge-epic guard and the VIEW's
+ * test oracle (app/plansReadModel.test.ts). */
+export const plans = (data: DataLayer) => data.table<Plan>("plans", "plan_key");
 export const planTasks = (data: DataLayer) => data.table<PlanTask>("plan_tasks", "id");
 
 /** One dependency edge in the plan DAG (issue #20): `task_id` waits for `depends_on_task_id`.

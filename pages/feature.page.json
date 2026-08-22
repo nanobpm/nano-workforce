@@ -102,7 +102,7 @@
         "data": {
           "kind": "datasource",
           "source": "app",
-          "table": "feature_runs",
+          "table": "feature_read_model",
           "orderBy": { "field": "updated_at", "dir": "desc" },
           "filter": [{ "field": "list_bucket", "in": ["active"] }]
         },
