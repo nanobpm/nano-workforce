@@ -257,9 +257,9 @@ the just-published version*. You author the graph as **JSON over a closed node v
 engine-native process; a human previews the staged proposal and dispatches it from the
 cockpit before any side effect runs.
 
-Two doors — and the second is **operator-only** (issue #460): a `POST
-/app/api/actions/compile-delivery-graph` on the agent surface that validates + previews the
-graph and **stages** it as a proposal (the agent surface ends there — no run key or token
+Two doors — and the second is **operator-only** (issue #460): a
+`POST /app/api/actions/compile-delivery-graph` on the agent surface that validates + previews
+the graph and **stages** it as a proposal (the agent surface ends there — no run key or token
 comes back), and a `POST /app/api/actions/delivery-graph/dispatch` the **cockpit** uses to
 dispatch a staged proposal by its content `digest` (idempotent, at-most-once). There is no
 agent `start` door to replay — the human clicking Dispatch in the cockpit is the approval.
