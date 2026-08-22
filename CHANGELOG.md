@@ -1,3 +1,12 @@
+## [0.123.2](https://github.com/nanobpm/nano-workforce/compare/v0.123.1...v0.123.2) (2026-08-22)
+
+
+### Bug Fixes
+
+* **merge:** make draft PRs a first-class not-landable verdict ([#454](https://github.com/nanobpm/nano-workforce/issues/454)) ([#455](https://github.com/nanobpm/nano-workforce/issues/455)) ([d684086](https://github.com/nanobpm/nano-workforce/commit/d684086748c840fe6a77fd7d86c5cdecbf8bfe2a))
+* **read-model:** derive feature attention badge from open user tasks, not sticky status ([#458](https://github.com/nanobpm/nano-workforce/issues/458)) ([496971d](https://github.com/nanobpm/nano-workforce/commit/496971dba95f19857d659e5a9d7fa56085d932fa)), closes [#439](https://github.com/nanobpm/nano-workforce/issues/439) [#448](https://github.com/nanobpm/nano-workforce/issues/448) [#422](https://github.com/nanobpm/nano-workforce/issues/422) [#422](https://github.com/nanobpm/nano-workforce/issues/422)
+* **tasks:** scan running delivery-graph runs in the typed-seam fallback so human gates surface without raw-REST ([#457](https://github.com/nanobpm/nano-workforce/issues/457)) ([9e82d37](https://github.com/nanobpm/nano-workforce/commit/9e82d37a101d532de447c6ca0bf64bd3d9a3bee7)), closes [#443](https://github.com/nanobpm/nano-workforce/issues/443) [#442](https://github.com/nanobpm/nano-workforce/issues/442)
+
 ## [0.123.1](https://github.com/nanobpm/nano-workforce/compare/v0.123.0...v0.123.1) (2026-08-22)
 
 
