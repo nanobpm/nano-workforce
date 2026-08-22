@@ -1,3 +1,10 @@
+## [0.120.1](https://github.com/nanobpm/nano-workforce/compare/v0.120.0...v0.120.1) (2026-08-22)
+
+
+### Bug Fixes
+
+* **readiness:** make pr.readiness-probe single-shot; engine owns retry cadence ([#428](https://github.com/nanobpm/nano-workforce/issues/428)) ([#429](https://github.com/nanobpm/nano-workforce/issues/429)) ([07db031](https://github.com/nanobpm/nano-workforce/commit/07db031f0d5e3f63ff47ffa51583bdef3012a2ab))
+
 # [0.120.0](https://github.com/nanobpm/nano-workforce/compare/v0.119.0...v0.120.0) (2026-08-22)
 
 
