@@ -62,3 +62,13 @@ test("#441: dispatch implements the gated awaiting-approval → approve two-step
   assert(/awaiting-approval/.test(MOUNT_JS), "mount.js must recognise the awaiting-approval park from the dispatch door");
   assert(/approve/.test(MOUNT_JS), "mount.js must re-submit with approve on the operator's confirm");
 });
+
+test("#441: approval binds to the frozen previewed graph, not the live (editable) textarea", () => {
+  // The server derives the approval digest from whatever body it receives, so an operator who edits
+  // the textarea after parking would silently approve+dispatch a DIFFERENT graph than the one
+  // previewed. mount.js must (a) capture the exact graph at park time and dispatch THAT on confirm,
+  // and (b) lock the compose inputs while approval is pending so they can't drift.
+  assert(/frozen/.test(MOUNT_JS), "doDispatch must thread the frozen (park-time) graph into the approve re-submit");
+  assert(/lockCompose/.test(MOUNT_JS), "mount.js must lock the compose inputs while a graph is parked awaiting approval");
+  assert(/readOnly/.test(MOUNT_JS), "lockCompose must make the graph/idempotency inputs read-only while approval is pending");
+});

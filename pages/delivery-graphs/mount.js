@@ -213,6 +213,17 @@ export function mountDeliveryGraphs(host, config = {}) {
     dispatchBtn.disabled = on;
   }
 
+  // While a side-effecting graph is parked awaiting approval, LOCK the compose inputs so the operator
+  // cannot edit `graphJson`/idempotency key out from under the token they are about to approve — the
+  // approval must bind to the exact graph that was previewed and parked (the server derives the
+  // approval digest from whatever body it receives, so an edited textarea would silently approve a
+  // DIFFERENT graph). `doApprove` dispatches the FROZEN graph captured at park time, not the live field.
+  function lockCompose(on) {
+    jsonEl.readOnly = on;
+    idemEl.readOnly = on;
+    exampleBtn.disabled = on;
+  }
+
   /** POST a JSON body to a door and return { status, body } (never throws on an HTTP error). */
   async function post(url, payload) {
     const res = await fetch(url, { method: "POST", headers: headers(), body: JSON.stringify(payload) });
@@ -236,6 +247,7 @@ export function mountDeliveryGraphs(host, config = {}) {
 
   async function doPreview() {
     approvalEl.innerHTML = "";
+    lockCompose(false);
     if (graphJson().trim() === "") {
       setStatus("Paste a delivery-graph JSON to preview.", "err");
       return;
@@ -259,8 +271,10 @@ export function mountDeliveryGraphs(host, config = {}) {
     }
   }
 
-  /** Show the approval confirmation panel for a side-effecting graph parked awaiting-approval. */
-  function showApproval(parked) {
+  /** Show the approval confirmation panel for a side-effecting graph parked awaiting-approval. The
+   * `frozen` graph/idempotency key are the EXACT values that produced this park — on confirm we
+   * dispatch those, never the (now-locked) live fields, so approval binds to the previewed graph. */
+  function showApproval(parked, frozen) {
     approvalEl.innerHTML = `<section class="card card-warn">
       <h2>Approval required</h2>
       <p class="warn">${esc(parked.message || "This graph performs side effects and needs explicit approval to dispatch.")}</p>
@@ -272,34 +286,41 @@ export function mountDeliveryGraphs(host, config = {}) {
     </section>`;
     approvalEl.querySelector("#dg-cancel").addEventListener("click", () => {
       approvalEl.innerHTML = "";
+      lockCompose(false);
       setStatus("Dispatch cancelled — the graph was not approved.", "");
     });
-    approvalEl.querySelector("#dg-approve").addEventListener("click", () => doDispatch(true));
+    approvalEl.querySelector("#dg-approve").addEventListener("click", () => doDispatch(true, frozen));
   }
 
-  async function doDispatch(approve) {
-    if (graphJson().trim() === "") {
+  async function doDispatch(approve, frozen) {
+    // On approve, dispatch the graph FROZEN at park time; otherwise read the live compose fields.
+    const graph = frozen ? frozen.graphJson : graphJson();
+    if (graph.trim() === "") {
       setStatus("Paste a delivery-graph JSON to dispatch.", "err");
       return;
     }
     busy(true);
     setStatus(approve ? "Approving & dispatching…" : "Dispatching…");
     try {
-      const payload = { graphJson: graphJson(), approve: approve === true };
-      const idem = idempotencyKey();
+      const payload = { graphJson: graph, approve: approve === true };
+      const idem = frozen ? frozen.idempotencyKey : idempotencyKey();
       if (idem !== undefined) payload.idempotencyKey = idem;
       const { status, body } = await post(dispatchUrl, payload);
       if (status === 202 && body.ok) {
         approvalEl.innerHTML = "";
+        lockCompose(false);
         outputEl.innerHTML = renderDispatched(body);
         setStatus("\u2713 Dispatched.", "ok");
       } else if (status === 400 && body.status === "awaiting-approval") {
-        // The gated two-step: a side-effecting graph parked at approval. Surface the confirm panel;
-        // the operator's confirm re-submits with approve=true → 202 running.
-        showApproval(body);
+        // The gated two-step: a side-effecting graph parked at approval. Freeze the exact graph +
+        // idempotency key that parked and lock the compose inputs, then surface the confirm panel; the
+        // operator's confirm re-submits THAT frozen graph with approve=true → 202 running.
+        lockCompose(true);
+        showApproval(body, { graphJson: graph, idempotencyKey: idem });
         setStatus("Approval required before this side-effecting graph can dispatch.", "warn");
       } else {
         approvalEl.innerHTML = "";
+        lockCompose(false);
         outputEl.innerHTML = renderErrors(body.error, body.errors);
         setStatus("Dispatch refused — fix the errors and try again.", "err");
       }
