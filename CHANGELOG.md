@@ -1,3 +1,10 @@
+# [0.119.0](https://github.com/nanobpm/nano-workforce/compare/v0.118.2...v0.119.0) (2026-08-22)
+
+
+### Features
+
+* **epic-detail:** wave visualization + task→representation links ([#411](https://github.com/nanobpm/nano-workforce/issues/411)) ([#434](https://github.com/nanobpm/nano-workforce/issues/434)) ([cff11fe](https://github.com/nanobpm/nano-workforce/commit/cff11febc30c1fbe08ea385ef5cf36fae0ff2fe7)), closes [nano-ide#424](https://github.com/nano-ide/issues/424)
+
 ## [0.118.2](https://github.com/nanobpm/nano-workforce/compare/v0.118.1...v0.118.2) (2026-08-21)
 
 
