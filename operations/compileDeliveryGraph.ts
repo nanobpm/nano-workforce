@@ -20,7 +20,7 @@ export default defineOperation("compileDeliveryGraph", async ({ body }, app) => 
   // the SEMANTIC checks (acyclicity, edge integrity, fact resolution) the schema cannot express. A
   // directly-invoked delegate could still pass `undefined` — the compiler reads its input as
   // `unknown` and maps that to a clean `ok:false`, never a 500.
-  const result = compileDeliveryGraph(body);
+  const result = await compileDeliveryGraph(body);
   if (!result.ok) {
     app.log.warn("compile-delivery-graph rejected", { errors: result.errors.length });
     return { status: 400, body: result };

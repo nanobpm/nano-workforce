@@ -16,15 +16,15 @@ import { assert, assertEquals } from "#test-assert";
 import { compileDeliveryGraph } from "./deliveryGraphCompiler.ts";
 
 /** Compile and assert success, returning the narrowed ok-result. */
-function compileOk(graph: unknown) {
-  const r = compileDeliveryGraph(graph);
+async function compileOk(graph: unknown) {
+  const r = await compileDeliveryGraph(graph);
   assert(r.ok, `expected ok:true, got ${JSON.stringify(r)}`);
   return r;
 }
 
 /** Compile and assert failure, returning the errors. */
-function compileFail(graph: unknown) {
-  const r = compileDeliveryGraph(graph);
+async function compileFail(graph: unknown) {
+  const r = await compileDeliveryGraph(graph);
   assert(!r.ok, `expected ok:false, got ${JSON.stringify(r)}`);
   return r.errors;
 }
@@ -57,8 +57,8 @@ const RELEASE_RUNBOOK = {
   ],
 };
 
-test("happy path: a well-formed graph compiles to a full preview with no side effects", () => {
-  const r = compileOk(RELEASE_RUNBOOK);
+test("happy path: a well-formed graph compiles to a full preview with no side effects", async () => {
+  const r = await compileOk(RELEASE_RUNBOOK);
   assertEquals(r.ok, true);
   assert(r.bpmn.includes("<bpmn:process id=\"delivery-graph\""), "bpmn carries the compiled process");
   assert(r.diagram.startsWith("flowchart TD"), "diagram is a mermaid flowchart");
@@ -70,21 +70,21 @@ test("happy path: a well-formed graph compiles to a full preview with no side ef
   assertEquals(r.sideEffects.length, 2);
 });
 
-test("determinism: the same JSON always yields byte-identical bpmn/diagram/resolved", () => {
-  const a = compileOk(RELEASE_RUNBOOK);
-  const b = compileOk(RELEASE_RUNBOOK);
+test("determinism: the same JSON always yields byte-identical bpmn/diagram/resolved", async () => {
+  const a = await compileOk(RELEASE_RUNBOOK);
+  const b = await compileOk(RELEASE_RUNBOOK);
   assertEquals(a.bpmn, b.bpmn);
   assertEquals(a.diagram, b.diagram);
   assertEquals(JSON.stringify(a.resolved), JSON.stringify(b.resolved));
   // Node ORDER in the input must not change the artifact (nodes are sorted by id).
   const shuffled = { ...RELEASE_RUNBOOK, nodes: [...RELEASE_RUNBOOK.nodes].reverse() };
-  const c = compileOk(shuffled);
+  const c = await compileOk(shuffled);
   assertEquals(c.bpmn, a.bpmn);
   assertEquals(c.diagram, a.diagram);
 });
 
-test("trust bound: every node inlines an embedded subProcess delegating to an allowlisted body — no other activity type", () => {
-  const r = compileOk(RELEASE_RUNBOOK);
+test("trust bound: every node inlines an embedded subProcess delegating to an allowlisted body — no other activity type", async () => {
+  const r = await compileOk(RELEASE_RUNBOOK);
   // Each of the 4 nodes compiles to an EMBEDDED subProcess; wait adds one nested retry-loop subProcess (call activities are a no-op on the pinned
   // WASM engine, so delegation is an inlined subProcess sharing the parent scope — never a callActivity).
   assertEquals((r.bpmn.match(/<bpmn:callActivity/g) ?? []).length, 0);
@@ -103,8 +103,8 @@ test("trust bound: every node inlines an embedded subProcess delegating to an al
   assert(/<bpmn:userTask id="delivery-human-task__n\d+__esc"/.test(r.bpmn), "a bounded node inlines an escalation user task");
 });
 
-test("late-binding: a fact-qualified edge threads a boundFacts input into the consumer subProcess", () => {
-  const r = compileOk(RELEASE_RUNBOOK);
+test("late-binding: a fact-qualified edge threads a boundFacts input into the consumer subProcess", async () => {
+  const r = await compileOk(RELEASE_RUNBOOK);
   // `publish.resolvedArtifact -> consume`: the connector subProcess receives the human's emitted fact as
   // a boundFacts list entry, read from the flat `<producerElement>_<fact>` variable the producer publishes.
   // FEEL string literals must use single-quote XML-attribute delimiters (the engine deploy path drops
@@ -114,8 +114,8 @@ test("late-binding: a fact-qualified edge threads a boundFacts input into the co
   assert(boundInput, `boundFacts is a single-quoted FEEL list literal, got: ${r.bpmn.match(/source='[^']*' target="boundFacts"/)?.[0] ?? r.bpmn.match(/source="[^"]*" target="boundFacts"/)?.[0]}`);
 });
 
-test("rejects unknown kind (by construction) with a path-qualified error, nothing compiled", () => {
-  const errors = compileFail({
+test("rejects unknown kind (by construction) with a path-qualified error, nothing compiled", async () => {
+  const errors = await compileFail({
     nodes: [{ id: "x", kind: "deploy", deploy: { target: "prod" } }],
   });
   const e = errors.find((err) => err.path === "nodes[0].kind");
@@ -123,8 +123,8 @@ test("rejects unknown kind (by construction) with a path-qualified error, nothin
   assert(e.message.length > 0);
 });
 
-test("rejects a dependency cycle with a path-qualified error", () => {
-  const errors = compileFail({
+test("rejects a dependency cycle with a path-qualified error", async () => {
+  const errors = await compileFail({
     nodes: [
       { id: "a", kind: "agent", agent: { jobType: "j" } },
       { id: "b", kind: "agent", agent: { jobType: "j" } },
@@ -137,14 +137,14 @@ test("rejects a dependency cycle with a path-qualified error", () => {
   assert(errors.some((e) => /cycle/i.test(e.message)), `expected a cycle error, got ${JSON.stringify(errors)}`);
 });
 
-test("rejects a dangling edge and a bad fact reference, each path-qualified", () => {
-  const dangling = compileFail({
+test("rejects a dangling edge and a bad fact reference, each path-qualified", async () => {
+  const dangling = await compileFail({
     nodes: [{ id: "a", kind: "agent", agent: { jobType: "j" } }],
     edges: [{ from: "a", to: "ghost" }],
   });
   assert(dangling.some((e) => e.path === "edges[0].to"));
 
-  const badFrom = compileFail({
+  const badFrom = await compileFail({
     nodes: [
       { id: "a", kind: "wait", wait: { kind: "http", target: "u" }, emits: [{ name: "x", type: "string" }] },
       { id: "b", kind: "agent", agent: { jobType: "j" } },
@@ -154,8 +154,8 @@ test("rejects a dangling edge and a bad fact reference, each path-qualified", ()
   assert(badFrom.some((e) => e.path === "edges[0].from"));
 });
 
-test("fan-in: a node with two producers gets a parallel JOIN gateway", () => {
-  const r = compileOk({
+test("fan-in: a node with two producers gets a parallel JOIN gateway", async () => {
+  const r = await compileOk({
     nodes: [
       { id: "a", kind: "agent", agent: { jobType: "j" } },
       { id: "b", kind: "agent", agent: { jobType: "j" } },
@@ -171,8 +171,8 @@ test("fan-in: a node with two producers gets a parallel JOIN gateway", () => {
   assertEquals(cNode?.dependsOn, ["a", "b"]);
 });
 
-test("fan-out: a node with two consumers gets a parallel FORK gateway", () => {
-  const r = compileOk({
+test("fan-out: a node with two consumers gets a parallel FORK gateway", async () => {
+  const r = await compileOk({
     nodes: [
       { id: "a", kind: "agent", agent: { jobType: "j" } },
       { id: "b", kind: "agent", agent: { jobType: "j" } },
@@ -186,8 +186,8 @@ test("fan-out: a node with two consumers gets a parallel FORK gateway", () => {
   assert(r.bpmn.includes('name="fan out of a"'), "a fork gateway for node a is emitted");
 });
 
-test("multiple roots fork from Start and multiple leaves join into End", () => {
-  const r = compileOk({
+test("multiple roots fork from Start and multiple leaves join into End", async () => {
+  const r = await compileOk({
     nodes: [
       { id: "r1", kind: "agent", agent: { jobType: "j" } },
       { id: "r2", kind: "agent", agent: { jobType: "j" } },
@@ -198,8 +198,8 @@ test("multiple roots fork from Start and multiple leaves join into End", () => {
   assert(r.bpmn.includes('id="gwj_end"'), "an end join gateway for multiple leaves");
 });
 
-test("humanNodes: extracts prompt/formKey/emits; a click-done node emits nothing", () => {
-  const r = compileOk({
+test("humanNodes: extracts prompt/formKey/emits; a click-done node emits nothing", async () => {
+  const r = await compileOk({
     nodes: [
       {
         id: "publish",
@@ -220,8 +220,8 @@ test("humanNodes: extracts prompt/formKey/emits; a click-done node emits nothing
   assertEquals(ack?.prompt, undefined);
 });
 
-test("sideEffects: agent + connector only; connector carries its dedupeKey", () => {
-  const r = compileOk(RELEASE_RUNBOOK);
+test("sideEffects: agent + connector only; connector carries its dedupeKey", async () => {
+  const r = await compileOk(RELEASE_RUNBOOK);
   const agent = r.sideEffects.find((s) => s.nodeId === "open-b");
   assertEquals(agent?.kind, "agent");
   assert(agent?.description.includes("senior:feature"));
@@ -233,8 +233,8 @@ test("sideEffects: agent + connector only; connector carries its dedupeKey", () 
   assert(!r.sideEffects.some((s) => s.nodeId === "publish"));
 });
 
-test("resolved edges carry the resolved fromNode and the referenced fact", () => {
-  const r = compileOk(RELEASE_RUNBOOK);
+test("resolved edges carry the resolved fromNode and the referenced fact", async () => {
+  const r = await compileOk(RELEASE_RUNBOOK);
   const factEdge = r.resolved.edges.find((e) => e.from === "watch-b.mergedSha");
   assertEquals(factEdge?.fromNode, "watch-b");
   assertEquals(factEdge?.fromFact, "mergedSha");
@@ -243,8 +243,8 @@ test("resolved edges carry the resolved fromNode and the referenced fact", () =>
   assertEquals(plainEdge?.fromFact, undefined);
 });
 
-test("BPMN is structurally coherent: one process start, one process end, every flow endpoint declared", () => {
-  const r = compileOk(RELEASE_RUNBOOK);
+test("BPMN is structurally coherent: one process start, one process end, every flow endpoint declared", async () => {
+  const r = await compileOk(RELEASE_RUNBOOK);
   // The TOP-LEVEL process has exactly one Start and one End (each inlined subProcess has its OWN
   // start/end events, so a raw `<bpmn:startEvent>` count is not the process boundary — the fixed ids are).
   assertEquals((r.bpmn.match(/ id="Start"/g) ?? []).length, 1);
@@ -257,12 +257,12 @@ test("BPMN is structurally coherent: one process start, one process end, every f
   }
 });
 
-test("duplicate fact-qualified edges between the same node pair collapse to ONE sequence flow", () => {
+test("duplicate fact-qualified edges between the same node pair collapse to ONE sequence flow", async () => {
   // `src` emits two facts, both feeding `b` (`src.x -> b` and `src.y -> b`). Adjacency is de-duped by
   // node id, so no fork/join gateway is inserted — the producer wires straight to the consumer. The
   // compiler must therefore collapse the two edges into a SINGLE sequenceFlow so `b` is not scheduled
   // twice (multiple outgoing flows without a diverging gateway is invalid/double-executing BPMN).
-  const r = compileOk({
+  const r = await compileOk({
     nodes: [
       {
         id: "src",
@@ -289,9 +289,37 @@ test("duplicate fact-qualified edges between the same node pair collapse to ONE 
   assert(!r.bpmn.includes("<bpmn:parallelGateway"), "no gateway for a single de-duplicated producer/consumer pair");
 });
 
-test("a non-object / empty body is a clean ok:false, never a throw", () => {
-  assert(!compileDeliveryGraph(undefined).ok);
-  assert(!compileDeliveryGraph(null).ok);
-  assert(!compileDeliveryGraph({}).ok);
-  assert(!compileDeliveryGraph({ nodes: [] }).ok);
+test("a non-object / empty body is a clean ok:false, never a throw", async () => {
+  assert(!(await compileDeliveryGraph(undefined)).ok);
+  assert(!(await compileDeliveryGraph(null)).ok);
+  assert(!(await compileDeliveryGraph({})).ok);
+  assert(!(await compileDeliveryGraph({ nodes: [] })).ok);
+});
+
+test("DI (#440): the compiled bpmn carries an auto-laid-out bpmndi:BPMNDiagram — a shape per element, an edge per flow", async () => {
+  // The delivery-graph compiler is the ONE BPMN generated at runtime; every AUTHORED process gets DI
+  // from `npm run layout` (`layoutBpmn`), and before #440 this generated one skipped that pass and
+  // shipped DI-less — a compiled/running graph rendered positionless in the process explorer. The
+  // compiler now runs the SAME `layoutBpmn` autolayout, so the preview `bpmn` (what actually deploys)
+  // carries diagram interchange. This RED/GREEN guard fails on the old DI-less output.
+  const r = await compileOk(RELEASE_RUNBOOK);
+  assert(r.bpmn.includes("<bpmndi:BPMNDiagram"), "compiled bpmn carries a bpmndi:BPMNDiagram");
+  assert(r.bpmn.includes("<bpmndi:BPMNPlane"), "the diagram has a plane");
+  // The top-level plane references the compiled process, so the process explorer can render it.
+  assert(r.bpmn.includes('bpmnElement="delivery-graph"'), "the top-level plane binds to the process id");
+  // A shape per BPMN element and an edge per sequence flow — the same "N shapes + M edges" accounting
+  // `scripts/layout-bpmn.ts` reports. Every declared sequenceFlow gets a BPMNEdge.
+  const shapes = (r.bpmn.match(/<bpmndi:BPMNShape\b/g) ?? []).length;
+  const edges = (r.bpmn.match(/<bpmndi:BPMNEdge\b/g) ?? []).length;
+  const flows = (r.bpmn.match(/<bpmn:sequenceFlow\b/g) ?? []).length;
+  assert(shapes > 0, "at least one BPMNShape is drawn");
+  assertEquals(edges, flows, "every sequence flow gets exactly one BPMNEdge");
+});
+
+test("DI (#440) is deterministic: identical JSON yields byte-identical laid-out bpmn", async () => {
+  // `layoutBpmn` (bpmn-auto-layout) is deterministic given identical semantic input, so adding the
+  // diagram must not break the compiler's "same JSON → byte-identical XML" trust property.
+  const a = await compileOk(RELEASE_RUNBOOK);
+  const b = await compileOk(RELEASE_RUNBOOK);
+  assertEquals(a.bpmn, b.bpmn);
 });

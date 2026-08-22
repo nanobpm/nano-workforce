@@ -56,7 +56,7 @@ export default defineOperation("startDeliveryGraph", async ({ body }, app) => {
 
   // 2) Compile via S1. This yields the deterministic BPMN (→ the content digest / approval token) plus
   //    the graph's shape: its side effects (whether approval is required), human stops, and node count.
-  const compiled = compileDeliveryGraph(graph);
+  const compiled = await compileDeliveryGraph(graph);
   if (!compiled.ok) {
     app.log.warn("start-delivery-graph rejected: compile", { count: compiled.errors.length });
     return { status: 400, body: { ok: false, errors: compiled.errors } };
