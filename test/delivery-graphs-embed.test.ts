@@ -52,15 +52,25 @@ for (const name of ["previewUrl", "dispatchUrl"] as const) {
 
 test("#441: the preview render consumes every compile facet the door returns", () => {
   // The whole point of the issue: the preview data (diagram / humanNodes / sideEffects / errors) is
-  // rich but was consumed by nothing. Assert the renderer touches each facet.
-  for (const facet of ["diagram", "humanNodes", "sideEffects", "errors"]) {
-    assert(new RegExp(`\\b${facet}\\b`).test(MOUNT_JS), `mount.js must render the preview's \`${facet}\``);
+  // rich but was consumed by nothing. Assert the renderer touches each facet at a CONCRETE call site
+  // (not a bare word, which a comment/string could satisfy) so a renderer that stops reading a field
+  // fails this guard.
+  const facetUse: Record<string, RegExp> = {
+    diagram: /esc\(result\.diagram\)/,
+    humanNodes: /renderHumanNodes\(result\.humanNodes\)/,
+    sideEffects: /renderSideEffects\(result\.sideEffects\)/,
+    errors: /renderErrors\(body\.error,\s*body\.errors\)/,
+  };
+  for (const [facet, re] of Object.entries(facetUse)) {
+    assert(re.test(MOUNT_JS), `mount.js must render the preview's \`${facet}\` via ${re.source}`);
   }
 });
 
 test("#441: dispatch implements the gated awaiting-approval → approve two-step", () => {
-  assert(/awaiting-approval/.test(MOUNT_JS), "mount.js must recognise the awaiting-approval park from the dispatch door");
-  assert(/approve/.test(MOUNT_JS), "mount.js must re-submit with approve on the operator's confirm");
+  // Structural, not substring: pin the actual park-recognition branch and the approve re-submit call
+  // site, so a comment mentioning "approve" can't satisfy the guard.
+  assert(/body\.status === "awaiting-approval"/.test(MOUNT_JS), "mount.js must branch on the awaiting-approval park from the dispatch door");
+  assert(/doDispatch\(true/.test(MOUNT_JS), "mount.js must re-submit with approve (doDispatch(true, …)) on the operator's confirm");
 });
 
 test("#441: approval binds to the frozen previewed graph, not the live (editable) textarea", () => {
@@ -68,7 +78,8 @@ test("#441: approval binds to the frozen previewed graph, not the live (editable
   // the textarea after parking would silently approve+dispatch a DIFFERENT graph than the one
   // previewed. mount.js must (a) capture the exact graph at park time and dispatch THAT on confirm,
   // and (b) lock the compose inputs while approval is pending so they can't drift.
-  assert(/frozen/.test(MOUNT_JS), "doDispatch must thread the frozen (park-time) graph into the approve re-submit");
-  assert(/lockCompose/.test(MOUNT_JS), "mount.js must lock the compose inputs while a graph is parked awaiting approval");
-  assert(/readOnly/.test(MOUNT_JS), "lockCompose must make the graph/idempotency inputs read-only while approval is pending");
+  // Structural assertions (concrete call sites), not bare-word substrings a comment could satisfy:
+  assert(/const graph = frozen \? frozen\.graphJson : graphJson\(\)/.test(MOUNT_JS), "doDispatch must dispatch the frozen (park-time) graph, not the live textarea");
+  assert(/lockCompose\(true\)/.test(MOUNT_JS), "mount.js must lock the compose inputs (lockCompose(true)) while a graph is parked awaiting approval");
+  assert(/jsonEl\.readOnly = on/.test(MOUNT_JS), "lockCompose must make the graph input read-only while approval is pending");
 });

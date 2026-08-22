@@ -20,6 +20,12 @@
 const DEFAULT_PREVIEW_URL = "app/api/actions/delivery-graph/preview";
 const DEFAULT_DISPATCH_URL = "app/api/actions/delivery-graph/dispatch";
 
+// A bounded timeout for every door request. Without it a hung preview/dispatch endpoint leaves the
+// fetch promise pending forever, so the busy() lock never clears and the UI is stranded (buttons
+// disabled, status stuck) with no way to retry. On timeout the AbortController rejects the fetch,
+// which surfaces as an error banner and re-enables the controls via the callers' finally blocks.
+const REQUEST_TIMEOUT_MS = 30000;
+
 const EXAMPLE_GRAPH = JSON.stringify(
   {
     name: "example-runbook",
@@ -224,16 +230,28 @@ export function mountDeliveryGraphs(host, config = {}) {
     exampleBtn.disabled = on;
   }
 
-  /** POST a JSON body to a door and return { status, body } (never throws on an HTTP error). */
+  /** POST a JSON body to a door and return { status, body } (never throws on an HTTP error). Rejects
+   * (AbortError) if the request outlives REQUEST_TIMEOUT_MS so a hung door can't wedge the busy lock. */
   async function post(url, payload) {
-    const res = await fetch(url, { method: "POST", headers: headers(), body: JSON.stringify(payload) });
-    let body = {};
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
     try {
-      body = await res.json();
-    } catch (_e) {
-      body = {};
+      const res = await fetch(url, {
+        method: "POST",
+        headers: headers(),
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+      let body = {};
+      try {
+        body = await res.json();
+      } catch (_e) {
+        body = {};
+      }
+      return { status: res.status, body };
+    } finally {
+      clearTimeout(timer);
     }
-    return { status: res.status, body };
   }
 
   function graphJson() {
