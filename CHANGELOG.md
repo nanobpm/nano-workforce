@@ -1,3 +1,10 @@
+# [0.122.0](https://github.com/nanobpm/nano-workforce/compare/v0.121.0...v0.122.0) (2026-08-22)
+
+
+### Features
+
+* retire worker-maintained projection write-paths for SQL VIEWs ([#412](https://github.com/nanobpm/nano-workforce/issues/412)) ([#446](https://github.com/nanobpm/nano-workforce/issues/446)) ([d3ac2d9](https://github.com/nanobpm/nano-workforce/commit/d3ac2d91dee8180f83f22bdcb04a167e83b3bde5)), closes [436/#437](https://github.com/nanobpm/nano-workforce/issues/437) [#438](https://github.com/nanobpm/nano-workforce/issues/438) [#436](https://github.com/nanobpm/nano-workforce/issues/436) [#437](https://github.com/nanobpm/nano-workforce/issues/437)
+
 # [0.121.0](https://github.com/nanobpm/nano-workforce/compare/v0.120.2...v0.121.0) (2026-08-22)
 
 
