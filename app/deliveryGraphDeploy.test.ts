@@ -88,7 +88,7 @@ test("deploy+advance: a well-formed graph deploys through the real engine and ev
     // human node's user task deployed and is completable, not just that the instance ended.
     assertEquals(humanTasks.length, 1, `expected exactly one human user task, saw ${JSON.stringify(humanTasks)}`);
     assert(
-      /^delivery-human-task__[^_]/.test(humanTasks[0]) && !humanTasks[0].endsWith("__esc"),
+      humanTasks[0].startsWith("delivery-human-task__") && !humanTasks[0].endsWith("__esc"),
       `expected a human node task, saw ${humanTasks[0]}`,
     );
   } finally {
@@ -150,7 +150,7 @@ test("deploy+advance: a stalled service node escalates on its node-timeout bound
       `the escalation task must have been driven, saw ${JSON.stringify(completed)}`,
     );
     assert(
-      completed.some((id) => /^delivery-human-task__[^_]/.test(id) && !id.endsWith("__esc")),
+      completed.some((id) => id.startsWith("delivery-human-task__") && !id.endsWith("__esc")),
       `the downstream human task must have been driven, saw ${JSON.stringify(completed)}`,
     );
   } finally {
