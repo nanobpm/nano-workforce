@@ -340,11 +340,12 @@ const lineageThreads = (data: DataLayer) =>
 const lineageThreadView = (data: DataLayer) =>
   data.table<LineageThreadRow>("lineage_thread_view", "root_request_key");
 
-/** All lineage threads as the Lineage page reads them — off the `lineage_thread_view` VIEW, with
- *  the same active-frontier-first, then-by-key stable order as {@link listLineage}. Additive: this
- *  reads the derived view rather than recomputing via {@link collectThreads}, so it reflects the
- *  identity columns' single source of truth (origin joins) while the frontier columns come through
- *  from the still-poller-written `lineage_threads`. */
+/** All lineage threads off the same `lineage_thread_view` VIEW the Lineage page binds, in this
+ *  module's own active-frontier-first, then-by-key stable order (matching {@link listLineage}) —
+ *  NOT the page datasource's `orderBy: updated_at desc` + tab-specific `active` filter, which the
+ *  page applies on top of this table. Additive: this reads the derived view rather than recomputing
+ *  via {@link collectThreads}, so it reflects the identity columns' single source of truth (origin
+ *  joins) while the frontier columns come through from the still-poller-written `lineage_threads`. */
 export async function listLineageView(data: DataLayer): Promise<LineageThreadRow[]> {
   const rows = await lineageThreadView(data).all();
   return rows.sort(
