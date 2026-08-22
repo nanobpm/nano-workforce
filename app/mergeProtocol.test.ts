@@ -114,6 +114,28 @@ test("freshHeadRunAction: fires in the frugal-CI stuck state (no run + waiting)"
   assertEquals(freshHeadRunAction(NANO, "waiting", 0, true), "ready");
 });
 
+test("freshHeadRunAction: a 'draft' verdict self-heals like waiting (issue #454)", () => {
+  // The merge poller now classifies a draft PR as the distinct "draft" verdict (not "waiting"),
+  // so guard that the fresh-head-run self-heal accepts it directly. A draft is always isDraft=true.
+  assertEquals(freshHeadRunAction(NANO, "draft", 0, true), "ready"); // no run yet → mark ready (un-drafts + runs)
+  assertEquals(freshHeadRunAction(NANO, "draft", 1, true), null); // required run already present → wait
+  assertEquals(freshHeadRunAction(NANO, "draft", -1, true), null); // token mode (unknown) → conservative
+  // fires once per landing-attempt head, then not again until the head changes (post-rebase)
+  assertEquals(
+    freshHeadRunAction(NANO, "draft", 0, true, { headRefOid: "h1", lastActionHeadRefOid: null }),
+    "ready",
+  );
+  assertEquals(
+    freshHeadRunAction(NANO, "draft", 0, true, { headRefOid: "h1", lastActionHeadRefOid: "h1" }),
+    null,
+  );
+  // reopen-only protocol: a draft still marks ready (reopen can't un-draft)
+  const reopenOnly = parseMergeProtocol({ freshHeadRun: "reopen", land: { method: "gh-merge" } });
+  assertEquals(freshHeadRunAction(reopenOnly, "draft", 0, true), "reopen");
+  // none protocol → no self-heal for a draft either
+  assertEquals(freshHeadRunAction(DEFAULT_MERGE_PROTOCOL, "draft", 0, true), null);
+});
+
 test("freshHeadRunAction: fires once per landing-attempt head, then re-fires after rebase", () => {
   assertEquals(
     freshHeadRunAction(NANO, "waiting", 0, false, { headRefOid: "h1", lastActionHeadRefOid: null }),

@@ -51,7 +51,12 @@ import {
 } from "./github.ts";
 import { pollLineage } from "./lineage.ts";
 import { mergeLanes, readExclusions } from "./mergeExclusion.ts";
-import { freshHeadRunAction, headRunPresenceCount, loadMergeProtocol } from "./mergeProtocol.ts";
+import {
+  freshHeadRunAction,
+  headRunPresenceCount,
+  loadMergeProtocol,
+  type MergeProtocol,
+} from "./mergeProtocol.ts";
 import { type PrLaneDecision, planPrLane, taskDependencyDepths } from "./mergeTrain.ts";
 import {
   capabilityGates,
@@ -1099,6 +1104,35 @@ async function advanceIfTerminalOutOfBand(
   return true;
 }
 
+/** Frugal-CI fresh-head-run self-heal, shared by the `"waiting"` and `"draft"` merge verdicts
+ * (issue #454). Both verdicts feed the same {@link freshHeadRunAction} decision — when the repo's
+ * merge protocol wants a fresh head run and this head has not been nudged yet, produce one
+ * (mark-ready / reopen) and record the head so we fire at most once per landing attempt. Returns
+ * `true` when an action was taken (the caller should re-poll), `false` when no self-heal applies.
+ * One implementation so the two verdicts can never drift (attempt de-dupe, persistence, logging). */
+async function maybeEnsureFreshHeadRun(
+  data: DataLayer,
+  repo: string,
+  number: number,
+  prKey: string,
+  protocol: MergeProtocol,
+  verdict: "ready" | "waiting" | "conflict" | "blocked" | "draft",
+  st: PrState,
+  pr: PullRequest,
+): Promise<boolean> {
+  const action = freshHeadRunAction(protocol, verdict, headRunPresenceCount(protocol, st), st.isDraft, {
+    headRefOid: st.headRefOid,
+    lastActionHeadRefOid: pr.fresh_head_run_head,
+  });
+  if (!action) return false;
+  const ok = await ensureFreshHeadRun(repo, number, action).catch(() => false);
+  if (ok && st.headRefOid) {
+    await prs(data).update(prKey, { fresh_head_run_head: st.headRefOid, updated_at: now() });
+  }
+  console.log(`[poller] ${verdict} -> fresh head run (${action}) ${ok ? "requested" : "skipped"} -> ${prKey}`);
+  return true;
+}
+
 /** Merge-stage poll pass (SPEC §11). Four durable waits, each keyed off the PR's `status`, are
  * advanced by correlating a message — mirroring the review-ready pattern so the process owns
  * the wait and this glue only signals when a GitHub condition is met:
@@ -1166,16 +1200,7 @@ export async function pollMerges(data: DataLayer, engine: EngineClient, token: s
         // then re-poll; (2) otherwise escalate with an ACTIONABLE "mark it ready" message, instead of
         // attempting the merge and surfacing GitHub's opaque "blocked" refusal.
         if (protocol) {
-          const action = freshHeadRunAction(protocol, verdict, headRunPresenceCount(protocol, st), st.isDraft, {
-            headRefOid: st.headRefOid,
-            lastActionHeadRefOid: pr.fresh_head_run_head,
-          });
-          if (action) {
-            const ok = await ensureFreshHeadRun(repo, number, action).catch(() => false);
-            if (ok && st.headRefOid) {
-              await prs(data).update(prKey, { fresh_head_run_head: st.headRefOid, updated_at: now() });
-            }
-            console.log(`[poller] draft -> fresh head run (${action}) ${ok ? "requested" : "skipped"} -> ${prKey}`);
+          if (await maybeEnsureFreshHeadRun(data, repo, number, prKey, protocol, verdict, st, pr)) {
             continue; // re-poll: the mark-ready both un-drafts the PR and produces the required run
           }
         }
@@ -1203,17 +1228,7 @@ export async function pollMerges(data: DataLayer, engine: EngineClient, token: s
         // `headRefOid`, so downstream merge-train PRs get a new nudge after every post-rebase
         // landing attempt.
         if (protocol) {
-          const action = freshHeadRunAction(protocol, verdict, headRunPresenceCount(protocol, st), st.isDraft, {
-            headRefOid: st.headRefOid,
-            lastActionHeadRefOid: pr.fresh_head_run_head,
-          });
-          if (action) {
-            const ok = await ensureFreshHeadRun(repo, number, action).catch(() => false);
-            if (ok && st.headRefOid) {
-              await prs(data).update(prKey, { fresh_head_run_head: st.headRefOid, updated_at: now() });
-            }
-            console.log(`[poller] fresh head run (${action}) ${ok ? "requested" : "skipped"} -> ${prKey}`);
-          }
+          await maybeEnsureFreshHeadRun(data, repo, number, prKey, protocol, verdict, st, pr);
         }
         continue; // GitHub still computing / checks pending
       }
