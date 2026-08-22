@@ -85,7 +85,7 @@
         "data": {
           "kind": "datasource",
           "source": "app",
-          "table": "merges_per_day",
+          "table": "merges_per_day_view",
           "orderBy": { "field": "day", "dir": "asc" }
         },
         "header": "{{day}} \u00b7 {{merged}} merged \u00b7 \u03a3 {{cumulative}}",
