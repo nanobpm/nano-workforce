@@ -45,7 +45,7 @@ const MATRIX_GRAPH: DeliveryGraph = {
 /** The generic completion payload for a delivery user task. Satisfies BOTH the `human` node's output
  *  ioMapping (`value` → `humanEmitValue`, `resolvedArtifact` → `humanEmitArtifact`, `note` →
  *  `humanNote`) and the escalation task's generic form (`value` required, `note`). */
-const HUMAN_PAYLOAD = { value: "done", note: "ok", resolvedArtifact: { uri: "pkg:demo@1.0.0" } };
+const HUMAN_PAYLOAD = { value: "done", note: "ok", resolvedArtifact: "@nanobpm/demo@1.0.0" };
 
 /** Upper bound on drive rounds — a terminal graph settles in a handful; the cap turns a wiring bug
  *  (a node that never advances) into a loud failure instead of a hang. */
