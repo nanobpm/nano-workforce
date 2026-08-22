@@ -1,3 +1,10 @@
+## [0.123.1](https://github.com/nanobpm/nano-workforce/compare/v0.123.0...v0.123.1) (2026-08-22)
+
+
+### Bug Fixes
+
+* **readiness:** inject deterministic exec in readiness-gate e2e ([#450](https://github.com/nanobpm/nano-workforce/issues/450)) ([#452](https://github.com/nanobpm/nano-workforce/issues/452)) ([5597d2a](https://github.com/nanobpm/nano-workforce/commit/5597d2aaacf361677fcc54ef277d05345eff8446)), closes [nano-ide#446](https://github.com/nano-ide/issues/446)
+
 # [0.123.0](https://github.com/nanobpm/nano-workforce/compare/v0.122.0...v0.123.0) (2026-08-22)
 
 
