@@ -2717,7 +2717,9 @@ paths:
         is NOT part of the agent surface: the agent compile door returns no digest-as-dispatch-handle
         (only a navigational preview), so an agent cannot reach a run through the documented surface.
         Idempotent: a re-dispatch of an already-running run short-circuits with `alreadyRunning` instead
-        of double-launching. An unknown/expired/superseded/already-dispatched digest is a 400.
+        of double-launching. An unknown/expired/superseded/already-dispatched digest is a 400. If the
+        supplied `idempotencyKey` is already bound to a DIFFERENT running graph, the door refuses with a
+        409 and leaves the proposal staged (it was never launched).
       requestBody:
         required: true
         content:
@@ -2735,6 +2737,15 @@ paths:
           description: >-
             The digest was missing, or named no live staged proposal (unknown / expired / superseded /
             already dispatched), or the stored graph failed to compile (the body carries a human `error`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeliveryGraphTextResult"
+        "409":
+          description: >-
+            The supplied `idempotencyKey` is already bound to a DIFFERENT running delivery graph, so this
+            proposal's graph was NOT launched and the staged proposal was left untouched (not marked
+            dispatched). Retry with a fresh `idempotencyKey` (or none). The body carries a human `error`.
           content:
             application/json:
               schema:
