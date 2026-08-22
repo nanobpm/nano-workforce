@@ -23,6 +23,7 @@
 // parallel gateways for genuine fan-out (>1 downstream) and fan-in (>1 upstream). This slice targets
 // the WIRING/SHAPE — the concrete node bodies land in S4.
 
+import { layoutBpmn } from "@nanobpm/urban";
 import type {
   CompileDeliveryGraphErrors,
   CompileDeliveryGraphResult,
@@ -212,8 +213,17 @@ function mustGet<K, V>(map: ReadonlyMap<K, V>, key: K): V {
  * `{ ok:false, errors }` (each error path-qualified) for a malformed one. NEVER deploys, dispatches,
  * or mutates anything — safe to call repeatedly. Deterministic: identical input JSON yields
  * byte-identical output.
+ *
+ * ASYNC because the final step attaches DIAGRAM INTERCHANGE (`bpmndi:BPMNDiagram`) via the toolkit
+ * autolayout (`layoutBpmn` — `bpmn-auto-layout`), the SAME pass every AUTHORED process gets from
+ * `npm run layout` (`scripts/layout-bpmn.ts`). This is the one BPMN in the system generated at
+ * runtime, so without this it was the only one shipping DI-less — unrenderable in the process
+ * explorer (#440). `layoutBpmn` is itself deterministic given identical semantic input, so
+ * "same JSON → byte-identical XML" still holds with the diagram included.
  */
-export function compileDeliveryGraph(graph: unknown): CompileDeliveryGraphResult | CompileDeliveryGraphErrors {
+export async function compileDeliveryGraph(
+  graph: unknown,
+): Promise<CompileDeliveryGraphResult | CompileDeliveryGraphErrors> {
   const validationErrors: DeliveryGraphError[] = validateDeliveryGraph(graph);
   if (validationErrors.length > 0) {
     // Forward every semantic failure verbatim as a wire `{ path, message }` (the stable `code` stays
@@ -354,13 +364,53 @@ export function compileDeliveryGraph(graph: unknown): CompileDeliveryGraphResult
     list.sort((a, b) => byCodeUnit(a.producerElement, b.producerElement) || byCodeUnit(a.fact, b.fact));
   }
 
-  const bpmn = renderBpmn(typed, wirings, numberedFlows, startForkGateway, endJoinGateway, boundInputsByElement);
+  const semanticBpmn = renderBpmn(typed, wirings, numberedFlows, startForkGateway, endJoinGateway, boundInputsByElement);
+  const bpmn = await layoutDeliveryDiagram(semanticBpmn);
   const diagram = renderMermaid(typed, wirings, resolvedEdges, elementById);
   const resolved = buildResolved(typed, wirings, resolvedEdges, producersById);
   const humanNodes = buildHumanNodes(nodes);
   const sideEffects = buildSideEffects(nodes);
 
   return { ok: true, diagram, bpmn, resolved, humanNodes, sideEffects };
+}
+
+/** Attach diagram interchange (`bpmndi:BPMNDiagram`) to the semantic-only compiled BPMN via the
+ * toolkit autolayout — the SAME `layoutBpmn` (`bpmn-auto-layout`) pass `npm run layout` runs over
+ * every authored process (`scripts/layout-bpmn.ts`), so there is ONE layout source, not two. Without
+ * it, a compiled/running delivery graph rendered positionless in the process explorer (#440).
+ *
+ * We do NOT return `layoutBpmn`'s serialized output directly: its moddle round-trip re-serializes the
+ * semantic model, and in doing so normalizes attribute quoting — a single-quote-delimited attribute
+ * with literal double-quotes inside becomes a double-quoted attribute with `&#34;` entities. The
+ * compiler deliberately emits FEEL string literals (`boundFacts`) with SINGLE-quote delimiters because
+ * the WASM engine deploy path does NOT decode those entities before FEEL parsing (see `attr`), so a
+ * round-trip would silently blank every late-bound fact. Instead we keep the compiler's carefully
+ * encoded semantic XML BYTE-FOR-BYTE and graft only the computed `<bpmndi:BPMNDiagram>` block(s) onto
+ * it — the diagram references element ids `layoutBpmn` leaves untouched, so the graft is sound.
+ *
+ * `bpmn-auto-layout` is a real runtime dependency of `@nanobpm/urban` (which re-exports `layoutBpmn`),
+ * but the toolkit no-ops layout (semantic model unchanged, no DI) when it is somehow absent. That
+ * silent no-op is exactly the DI-less bug this fixes, so we FAIL LOUD if the pass produced no diagram.
+ * Deterministic given identical input, preserving the compiler's "same JSON → byte-identical XML". */
+async function layoutDeliveryDiagram(semanticBpmn: string): Promise<string> {
+  const laidOut = await layoutBpmn(semanticBpmn);
+  const start = laidOut.indexOf("<bpmndi:BPMNDiagram");
+  const endTag = "</bpmndi:BPMNDiagram>";
+  const end = laidOut.lastIndexOf(endTag);
+  if (start === -1 || end === -1) {
+    throw new Error(
+      "compileDeliveryGraph: layoutBpmn produced no bpmndi:BPMNDiagram — the `bpmn-auto-layout` " +
+        "toolkit peer is missing, so the compiled graph would deploy DI-less and render positionless " +
+        "in the process explorer (#440). Ensure `bpmn-auto-layout` is installed as a runtime dependency.",
+    );
+  }
+  const diagram = laidOut.slice(start, end + endTag.length);
+  const closing = "</bpmn:definitions>";
+  const insertAt = semanticBpmn.lastIndexOf(closing);
+  if (insertAt === -1) {
+    throw new Error("compileDeliveryGraph: compiled BPMN has no </bpmn:definitions> to graft DI into");
+  }
+  return `${semanticBpmn.slice(0, insertAt)}  ${diagram}\n${semanticBpmn.slice(insertAt)}`;
 }
 
 /** Push `value` into `list` (may be undefined for a dangling target, already reported by the
@@ -485,6 +535,9 @@ function renderBpmn(
     '<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" ' +
       'xmlns:zeebe="http://camunda.org/schema/zeebe/1.0" ' +
       'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" ' +
+      'xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI" ' +
+      'xmlns:dc="http://www.omg.org/spec/DD/20100524/DC" ' +
+      'xmlns:di="http://www.omg.org/spec/DD/20100524/DI" ' +
       'id="Definitions_delivery_graph" targetNamespace="http://nanobpm.io/nano-workforce">',
   );
   const processName = graph.name ?? "Delivery graph";

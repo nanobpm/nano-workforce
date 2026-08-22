@@ -179,7 +179,7 @@ test("isDeliveryGraphApproved: a side-effecting graph dispatches ONLY with the m
 });
 
 // ── buildHumanLabels / parseHumanLabels ───────────────────────────────────────
-test("buildHumanLabels: maps each human node's compiled user-task element id → its instruction label", () => {
+test("buildHumanLabels: maps each human node's compiled user-task element id → its instruction label", async () => {
   const graph = {
     nodes: [
       { id: "open-b", kind: "agent", agent: { jobType: "j" } },
@@ -188,7 +188,7 @@ test("buildHumanLabels: maps each human node's compiled user-task element id →
     ],
     edges: [{ from: "open-b", to: "publish" }, { from: "publish", to: "ack" }],
   };
-  const compiled = compileDeliveryGraph(graph);
+  const compiled = await compileDeliveryGraph(graph);
   assertEquals(compiled.ok, true);
   if (!compiled.ok) return;
   const labels = buildHumanLabels(compiled);

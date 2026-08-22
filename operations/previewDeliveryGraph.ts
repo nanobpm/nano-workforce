@@ -22,7 +22,7 @@ export default defineOperation("previewDeliveryGraph", async ({ body }, app) => 
     app.log.warn("preview-delivery-graph rejected: parse", { message: parsed.error });
     return { status: 400, body: { ok: false, error: parsed.error } };
   }
-  const compiled = compileDeliveryGraph(parsed.graph);
+  const compiled = await compileDeliveryGraph(parsed.graph);
   if (!compiled.ok) {
     app.log.warn("preview-delivery-graph rejected: compile", { errors: compiled.errors.length });
     return {

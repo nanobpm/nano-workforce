@@ -97,8 +97,11 @@ export type RunDeliveryResult =
  * so each call's `wait` `gateKey`s differ (two concurrent runs of the same graph never cross-correlate);
  * pass an explicit `runKey` for a reproducible seed. Returns the S1 compile errors verbatim for a
  * malformed graph. */
-export function prepareDeliveryGraph(graph: DeliveryGraph, options: DeliveryRunOptions = {}): PrepareDeliveryResult {
-  const compiled = compileDeliveryGraph(graph);
+export async function prepareDeliveryGraph(
+  graph: DeliveryGraph,
+  options: DeliveryRunOptions = {},
+): Promise<PrepareDeliveryResult> {
+  const compiled = await compileDeliveryGraph(graph);
   if (!compiled.ok) return { ok: false, errors: compiled.errors };
 
   const digest = deliveryGraphDigest(compiled.bpmn);
@@ -132,7 +135,7 @@ export async function runDeliveryGraph(
   graph: DeliveryGraph,
   options: DeliveryRunOptions = {},
 ): Promise<RunDeliveryResult> {
-  const prep = prepareDeliveryGraph(graph, options);
+  const prep = await prepareDeliveryGraph(graph, options);
   if (!prep.ok) return prep;
   const { processDefinitionId, bpmn, nodeInputs } = prep.prepared;
 
@@ -150,10 +153,16 @@ export async function runDeliveryGraph(
 }
 
 /** Rewrite the compiled BPMN's base `bpmn:process` id to the content-addressed deploy id. The base id
- * appears exactly once — as the process element's `id` attribute (element ids are `n<i>`/`gw*`/`Start`/
- * `End`, never the process id) — so a single targeted replacement is unambiguous. */
+ * appears exactly once as the process element's `id` attribute (element ids are `n<i>`/`gw*`/`Start`/
+ * `End`, never the process id), and once more as the top-level `bpmndi:BPMNPlane`'s `bpmnElement`
+ * reference back to that process (the diagram interchange the compiler now attaches, #440). Both must
+ * move together, otherwise the deployed definition carries a DANGLING plane reference and renders
+ * positionless — the very bug DI was added to fix. Nested sub-process planes reference `n<i>` element
+ * ids, which are untouched. */
 function rewriteProcessId(bpmn: string, processDefinitionId: string): string {
-  return bpmn.replace(`id="${DELIVERY_GRAPH_PROCESS_ID}"`, `id="${processDefinitionId}"`);
+  return bpmn
+    .replace(`id="${DELIVERY_GRAPH_PROCESS_ID}"`, `id="${processDefinitionId}"`)
+    .replace(`bpmnElement="${DELIVERY_GRAPH_PROCESS_ID}"`, `bpmnElement="${processDefinitionId}"`);
 }
 
 /** Build the `nodeInputs.<element>` seed for one node, per its kind — the exact fields the compiled

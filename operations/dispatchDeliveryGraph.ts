@@ -37,7 +37,7 @@ export default defineOperation("dispatchDeliveryGraph", async (input, app) => {
   // dispatches. A compile failure here surfaces as a clean 400 rather than reaching the start door.
   let approvalToken: string | undefined;
   if (approve) {
-    const compiled = compileDeliveryGraph(parsed.graph);
+    const compiled = await compileDeliveryGraph(parsed.graph);
     if (!compiled.ok) {
       app.log.warn("dispatch-delivery-graph rejected: compile", { errors: compiled.errors.length });
       return {

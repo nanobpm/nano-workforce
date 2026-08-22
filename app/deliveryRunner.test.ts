@@ -29,31 +29,42 @@ const GRAPH: DeliveryGraph = {
   ],
 };
 
-function prepareOk(graph: DeliveryGraph, options = {}) {
-  const r = prepareDeliveryGraph(graph, options);
+async function prepareOk(graph: DeliveryGraph, options = {}) {
+  const r = await prepareDeliveryGraph(graph, options);
   assert(r.ok, `expected ok:true, got ${JSON.stringify(r)}`);
   return r.prepared;
 }
 
-test("content-addressed id: deterministic for the same graph, content-sensitive across graphs", () => {
-  const a = prepareOk(GRAPH);
-  const b = prepareOk(GRAPH);
+test("content-addressed id: deterministic for the same graph, content-sensitive across graphs", async () => {
+  const a = await prepareOk(GRAPH);
+  const b = await prepareOk(GRAPH);
   assert(/^delivery-graph-[0-9a-f]{12}$/.test(a.processDefinitionId), `id is content-addressed, got ${a.processDefinitionId}`);
   assertEquals(a.processDefinitionId, b.processDefinitionId);
 
   // A structurally different graph gets a DIFFERENT id (no collision / no accidental redeploy-as-same).
-  const other = prepareOk({ ...GRAPH, nodes: [...GRAPH.nodes, { id: "extra", kind: "agent", agent: { jobType: "senior:feature" } }], edges: [...GRAPH.edges, { from: "consume", to: "extra" }] });
+  const other = await prepareOk({ ...GRAPH, nodes: [...GRAPH.nodes, { id: "extra", kind: "agent", agent: { jobType: "senior:feature" } }], edges: [...GRAPH.edges, { from: "consume", to: "extra" }] });
   assert(other.processDefinitionId !== a.processDefinitionId, "a different graph yields a different id");
 });
 
-test("the deployable BPMN rewrites the base process id to the content-addressed deploy id", () => {
-  const p = prepareOk(GRAPH);
+test("the deployable BPMN rewrites the base process id to the content-addressed deploy id", async () => {
+  const p = await prepareOk(GRAPH);
   assert(p.bpmn.includes(`<bpmn:process id="${p.processDefinitionId}"`), "process id is the content-addressed id");
   assert(!p.bpmn.includes('<bpmn:process id="delivery-graph"'), "the base id no longer appears as the process id");
 });
 
-test("nodeInputs seeds the exact per-kind fields each node's subProcess ioMapping reads", () => {
-  const p = prepareOk(GRAPH, { nodeTimeout: "PT10M", probeTimeout: "PT20M", escalationSlaTimeout: "PT2H", escalationAssignee: "alice", runKey: "run-7" });
+test("DI (#440): the deployable definition carries diagram interchange bound to the rewritten process id", async () => {
+  // The DEPLOYED definition (not just the compile preview) must render in the process explorer, so it
+  // carries the auto-laid-out `bpmndi:BPMNDiagram`. The top-level plane's `bpmnElement` reference is
+  // rewritten in lock-step with the process id, otherwise the deployed diagram would dangle and render
+  // positionless — the exact bug #440 fixes.
+  const p = await prepareOk(GRAPH);
+  assert(p.bpmn.includes("<bpmndi:BPMNDiagram"), "deployable bpmn carries a diagram");
+  assert(p.bpmn.includes(`bpmnElement="${p.processDefinitionId}"`), "the plane binds to the content-addressed id");
+  assert(!p.bpmn.includes('bpmnElement="delivery-graph"'), "no dangling reference to the base process id remains");
+});
+
+test("nodeInputs seeds the exact per-kind fields each node's subProcess ioMapping reads", async () => {
+  const p = await prepareOk(GRAPH, { nodeTimeout: "PT10M", probeTimeout: "PT20M", escalationSlaTimeout: "PT2H", escalationAssignee: "alice", runKey: "run-7" });
   // Element ids are positional by sorted node id: consume, open-b, publish, watch-b → n0..n3.
   const inputs = p.nodeInputs;
   const byField = (pred: (v: Record<string, unknown>) => boolean) => Object.values(inputs).find((v) => pred(v as Record<string, unknown>)) as Record<string, unknown> | undefined;
@@ -74,12 +85,12 @@ test("nodeInputs seeds the exact per-kind fields each node's subProcess ioMappin
   assertEquals(connector, { target: "npm:install", dedupeKey: "consume-1", payload: null, timeout: "PT10M" });
 });
 
-test("wait gateKeys default to a fresh per-run token so concurrent runs of one graph never cross-correlate", () => {
-  const gateKeyOf = (p: ReturnType<typeof prepareOk>) =>
+test("wait gateKeys default to a fresh per-run token so concurrent runs of one graph never cross-correlate", async () => {
+  const gateKeyOf = (p: Awaited<ReturnType<typeof prepareOk>>) =>
     (Object.values(p.nodeInputs).find((v) => "gateKey" in v) as { gateKey?: string } | undefined)?.gateKey;
 
-  const a = prepareOk(GRAPH);
-  const b = prepareOk(GRAPH);
+  const a = await prepareOk(GRAPH);
+  const b = await prepareOk(GRAPH);
   assert(gateKeyOf(a) && gateKeyOf(b), "each run seeds a wait gateKey");
   assert(gateKeyOf(a) !== gateKeyOf(b), "two runs of the same graph get DISTINCT default gate scopes");
   // The gate key must NOT be derived from the (shared) content digest — that is the bug this guards.
@@ -89,12 +100,12 @@ test("wait gateKeys default to a fresh per-run token so concurrent runs of one g
   assertEquals(a.bpmn, b.bpmn);
 
   // An explicit runKey is honoured verbatim (reproducible seed).
-  const seeded = prepareOk(GRAPH, { runKey: "run-7" });
+  const seeded = await prepareOk(GRAPH, { runKey: "run-7" });
   assertEquals(gateKeyOf(seeded), "run-7:n3");
 });
 
-test("a malformed graph returns the S1 compile errors and prepares nothing", () => {
-  const r = prepareDeliveryGraph({ nodes: [{ id: "a", kind: "agent", agent: { jobType: "j" } }], edges: [{ from: "a", to: "ghost" }] } as unknown as DeliveryGraph);
+test("a malformed graph returns the S1 compile errors and prepares nothing", async () => {
+  const r = await prepareDeliveryGraph({ nodes: [{ id: "a", kind: "agent", agent: { jobType: "j" } }], edges: [{ from: "a", to: "ghost" }] } as unknown as DeliveryGraph);
   assert(!r.ok, "a dangling edge fails to prepare");
   assert(r.errors.some((e) => e.path === "edges[0].to"), `expected a dangling-edge error, got ${JSON.stringify(r.errors)}`);
 });

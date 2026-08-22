@@ -29,6 +29,9 @@ test("compile-delivery-graph: a well-formed graph → 200 with the pure preview"
   assertEquals(res.status, 200);
   assertEquals(res.body.ok, true);
   assert(typeof res.body.bpmn === "string" && res.body.bpmn.length > 0);
+  // The compile preview must show what actually deploys — including the auto-laid-out diagram
+  // interchange (#440), so the process explorer can render the previewed graph.
+  assert(res.body.bpmn.includes("<bpmndi:BPMNDiagram"), "the previewed bpmn carries diagram interchange");
   assert(typeof res.body.diagram === "string" && res.body.diagram.length > 0);
   assertEquals(res.body.resolved.nodes.length, 2);
   assertEquals(res.body.humanNodes.length, 1);
