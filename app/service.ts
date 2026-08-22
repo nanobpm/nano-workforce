@@ -183,7 +183,7 @@ export const MERGE_ADMIN = ["1", "true", "on", "yes"].includes(
 
 const now = () => new Date().toISOString();
 
-interface PullRequest {
+export interface PullRequest {
   pr_key: string;
   repo: string;
   number: number;
@@ -1108,9 +1108,14 @@ async function advanceIfTerminalOutOfBand(
  * (issue #454). Both verdicts feed the same {@link freshHeadRunAction} decision — when the repo's
  * merge protocol wants a fresh head run and this head has not been nudged yet, produce one
  * (mark-ready / reopen) and record the head so we fire at most once per landing attempt. Returns
- * `true` when an action was taken (the caller should re-poll), `false` when no self-heal applies.
- * One implementation so the two verdicts can never drift (attempt de-dupe, persistence, logging). */
-async function maybeEnsureFreshHeadRun(
+ * `true` only when the self-heal was **actually applied** (the caller should re-poll); returns
+ * `false` when no self-heal applies **or** the action was selected but failed (`ok === false`, e.g.
+ * missing permission / repo policy) — so a caller that gates escalation on this (the `"draft"`
+ * branch) falls through to the actionable escalation instead of `continue`-looping forever on a
+ * self-heal that can never succeed. One implementation so the two verdicts can never drift (attempt
+ * de-dupe, persistence, logging). `ensure` is injectable for tests; production uses the real
+ * {@link ensureFreshHeadRun}. */
+export async function maybeEnsureFreshHeadRun(
   data: DataLayer,
   repo: string,
   number: number,
@@ -1119,18 +1124,19 @@ async function maybeEnsureFreshHeadRun(
   verdict: "ready" | "waiting" | "conflict" | "blocked" | "draft",
   st: PrState,
   pr: PullRequest,
+  ensure: typeof ensureFreshHeadRun = ensureFreshHeadRun,
 ): Promise<boolean> {
   const action = freshHeadRunAction(protocol, verdict, headRunPresenceCount(protocol, st), st.isDraft, {
     headRefOid: st.headRefOid,
     lastActionHeadRefOid: pr.fresh_head_run_head,
   });
   if (!action) return false;
-  const ok = await ensureFreshHeadRun(repo, number, action).catch(() => false);
+  const ok = await ensure(repo, number, action).catch(() => false);
   if (ok && st.headRefOid) {
     await prs(data).update(prKey, { fresh_head_run_head: st.headRefOid, updated_at: now() });
   }
   console.log(`[poller] ${verdict} -> fresh head run (${action}) ${ok ? "requested" : "skipped"} -> ${prKey}`);
-  return true;
+  return ok;
 }
 
 /** Merge-stage poll pass (SPEC §11). Four durable waits, each keyed off the PR's `status`, are
@@ -1197,14 +1203,16 @@ export async function pollMerges(data: DataLayer, engine: EngineClient, token: s
         // A draft PR is never landable — GitHub refuses the merge outright (issue #454). Two remedies,
         // in order: (1) self-heal — when the repo's merge protocol wants a fresh head run, mark the PR
         // ready ourselves (the frugal-CI path), which both un-drafts it and produces the required run,
-        // then re-poll; (2) otherwise escalate with an ACTIONABLE "mark it ready" message, instead of
-        // attempting the merge and surfacing GitHub's opaque "blocked" refusal.
+        // then re-poll; (2) otherwise — no self-heal applies, OR the self-heal was attempted but could
+        // not be performed (e.g. missing permission / repo policy) — escalate with an ACTIONABLE
+        // "mark it ready" message, instead of `continue`-looping forever on a self-heal that can never
+        // succeed or surfacing GitHub's opaque "blocked" refusal.
         if (protocol) {
           if (await maybeEnsureFreshHeadRun(data, repo, number, prKey, protocol, verdict, st, pr)) {
             continue; // re-poll: the mark-ready both un-drafts the PR and produces the required run
           }
         }
-        // No protocol-driven self-heal available → escalate so a human marks it ready.
+        // No applicable (or successful) protocol-driven self-heal → escalate so a human marks it ready.
         await flipToMergingThenPublish(data, engine, prKey, "waiting_merge", {
           name: "merge-ready",
           correlationKey: prKey,
