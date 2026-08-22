@@ -1201,12 +1201,15 @@ export async function pollMerges(data: DataLayer, engine: EngineClient, token: s
       const verdict = classifyMergeability(st, protocol ?? undefined);
       if (verdict === "draft") {
         // A draft PR is never landable — GitHub refuses the merge outright (issue #454). Two remedies,
-        // in order: (1) self-heal — when the repo's merge protocol wants a fresh head run, mark the PR
-        // ready ourselves (the frugal-CI path), which both un-drafts it and produces the required run,
-        // then re-poll; (2) otherwise — no self-heal applies, OR the self-heal was attempted but could
-        // not be performed (e.g. missing permission / repo policy) — escalate with an ACTIONABLE
-        // "mark it ready" message, instead of `continue`-looping forever on a self-heal that can never
-        // succeed or surfacing GitHub's opaque "blocked" refusal.
+        // in order: (1) self-heal — when the repo's merge protocol has a mark-ready capability
+        // (`freshHeadRun: "ready"`/`"ready-or-reopen"`), mark the PR ready ourselves (the frugal-CI
+        // path), which both un-drafts it and produces the required run, then re-poll; a `"reopen"`-only
+        // protocol has NO mark-ready capability, so `freshHeadRunAction` returns null for a draft (a
+        // reopen can't un-draft) and this falls straight through to (2). (2) otherwise — no self-heal
+        // applies, OR the self-heal was attempted but could not be performed (e.g. missing permission /
+        // repo policy) — escalate with an ACTIONABLE "mark it ready" message, instead of
+        // `continue`-looping forever on a self-heal that can never succeed or surfacing GitHub's opaque
+        // "blocked" refusal.
         if (protocol) {
           if (await maybeEnsureFreshHeadRun(data, repo, number, prKey, protocol, verdict, st, pr)) {
             continue; // re-poll: the mark-ready both un-drafts the PR and produces the required run

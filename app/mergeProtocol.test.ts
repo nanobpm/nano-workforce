@@ -129,10 +129,12 @@ test("freshHeadRunAction: a 'draft' verdict self-heals like waiting (issue #454)
     freshHeadRunAction(NANO, "draft", 0, true, { headRefOid: "h1", lastActionHeadRefOid: "h1" }),
     null,
   );
-  // reopen-only protocol: a draft yields "reopen" (this protocol has no mark-ready capability, so
-  // it can't un-draft the PR — the poller then falls through to escalation)
+  // reopen-only protocol: a draft yields NULL, not "reopen". Reopening (close+reopen) does NOT
+  // un-draft a PR, so a "reopen" self-heal can never resolve the draft-merge failure — it only
+  // emits noisy close/reopen events and delays the actionable escalation by a round (issue #454).
+  // With no mark-ready capability there is no valid draft self-heal, so escalate immediately.
   const reopenOnly = parseMergeProtocol({ freshHeadRun: "reopen", land: { method: "gh-merge" } });
-  assertEquals(freshHeadRunAction(reopenOnly, "draft", 0, true), "reopen");
+  assertEquals(freshHeadRunAction(reopenOnly, "draft", 0, true), null);
   // none protocol → no self-heal for a draft either
   assertEquals(freshHeadRunAction(DEFAULT_MERGE_PROTOCOL, "draft", 0, true), null);
 });

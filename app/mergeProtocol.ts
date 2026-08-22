@@ -243,8 +243,11 @@ export function headRunPresenceCount(
  * for the fresh post-rebase head. A genuinely-failing check (`blocked`) is left to the fix-ci arm,
  * a conflict (`conflict`) to the rebase arm (#42). A `draft` verdict (issue #454) is treated like
  * `waiting` here so the `freshHeadRun: "ready"`/`"ready-or-reopen"` self-heal still marks a draft
- * ready (which both un-drafts it and produces the required run); when no self-heal applies the poller
- * escalates instead. */
+ * ready (which both un-drafts it and produces the required run). But a `"reopen"` action is
+ * **never** returned for a draft: reopening (close+reopen) does not un-draft a PR, so it can never
+ * resolve the draft-merge failure — it only emits noisy close/reopen events and delays the poller's
+ * actionable escalation. When no mark-ready self-heal applies to a draft, this returns `null` and the
+ * poller escalates immediately. */
 export function freshHeadRunAction(
   protocol: MergeProtocol,
   verdict: "ready" | "waiting" | "conflict" | "blocked" | "draft",
@@ -260,7 +263,7 @@ export function freshHeadRunAction(
     case "ready":
       return isDraft ? "ready" : null;
     case "reopen":
-      return "reopen";
+      return isDraft ? null : "reopen";
     case "ready-or-reopen":
       return isDraft ? "ready" : "reopen";
     default:
