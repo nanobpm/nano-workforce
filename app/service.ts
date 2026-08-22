@@ -29,6 +29,7 @@ import {
 import { isUniqueConstraintFence } from "./dbFence.ts";
 import { deriveDelivery, TERMINAL_STATUSES } from "./delivery.ts";
 import { deliveryGraphRuns, deriveDeliveryPhase, parseHumanLabels } from "./deliveryGraphRun.ts";
+import { isDeliveryHumanElement } from "./deliveryHuman.ts";
 import { fleetSupportsDurableResume } from "./durableResume.ts";
 import { backfillFeatureStages, deriveFeatureDelivery, FEATURE_BLOCKED_ELEMENT, FEATURE_ESCALATION_ELEMENT, FEATURE_RUN_STATUSES, type FeatureRunStatus, featureEscalations, featureRuns } from "./feature.ts";
 import {
@@ -87,9 +88,9 @@ import {
   prEscalations,
   reconcileUserTasks,
   TRIAL_MERGE_ELEMENT,
-  USER_TASK_KIND_LABELS,
   type UserTaskContext,
   type UserTaskRow,
+  userTaskKindLabel,
   userTasks,
 } from "./userTasks.ts";
 import { deriveWaitGate } from "./waitGate.ts";
@@ -2166,7 +2167,7 @@ async function sweepOpenEscalationTasks(base: string, headers: Record<string, st
       // answerable, so a lagging COMPLETED/CANCELED read must never surface a dead affordance (#294).
       if (typeof it.state === "string" && it.state.toUpperCase() !== "CREATED") continue;
       const elementId = typeof it.elementId === "string" ? it.elementId : undefined;
-      if (!elementId || !Object.hasOwn(USER_TASK_KIND_LABELS, elementId)) continue;
+      if (!elementId || userTaskKindLabel(elementId) === undefined) continue;
       const userTaskKey = it.userTaskKey == null ? "" : String(it.userTaskKey);
       if (!userTaskKey || seen.has(userTaskKey)) continue;
       seen.add(userTaskKey);
@@ -2254,7 +2255,7 @@ export async function pollUserTasks(
   // summary for the `conformance-escalation` ack (its instance is tracked on `plan_conformance`, not a
   // delivery aggregate).
   interface Subject {
-    type: "feature" | "plan" | "pr";
+    type: "feature" | "plan" | "pr" | "delivery";
     key: string;
     title?: string | null;
     url?: string | null;
@@ -2278,6 +2279,13 @@ export async function pollUserTasks(
     const plan = await plans(data).get(review.plan_key);
     subjectByInstance.set(review.process_key, { type: "plan", key: review.plan_key, title: plan?.title ?? null, url: plan?.issue_url ?? null, conformanceSummary: review.summary });
   }
+  // A delivery-graph `human` node parks on its run's engine instance; enrich from the run row so the
+  // Tasks inbox shows the graph's title (its `run_key` as the stable subject key), mirroring the
+  // feature/plan/pr enrichment. The row's inlined `delivery-human-task__<node>` id is recognised by
+  // the shared `userTaskKindLabel` predicate, and buckets as `delivery` (below).
+  for (const run of await deliveryGraphRuns(data).all()) {
+    if (run.process_key) subjectByInstance.set(run.process_key, { type: "delivery", key: run.run_key, title: run.title, url: null });
+  }
 
   // Per-element subject type for an ORPHANED task (no subject row) — the kind implies its aggregate even
   // when tracking is lost, so the fallback row still buckets correctly on the page.
@@ -2296,9 +2304,12 @@ export async function pollUserTasks(
   // when the instance is tracked or a per-kind fallback when it is orphaned. Returns `null` for a
   // non-escalation element (the leak guard) so an arbitrary internal user task can never reach the inbox.
   const contextFor = async (elementId: string, userTaskKey: string, processInstanceKey: string): Promise<UserTaskContext | null> => {
-    if (!Object.hasOwn(USER_TASK_KIND_LABELS, elementId)) return null;
+    if (userTaskKindLabel(elementId) === undefined) return null;
     const subj = subjectByInstance.get(processInstanceKey);
-    const subjectType = subj?.type ?? DEFAULT_SUBJECT_TYPE[elementId] ?? "plan";
+    // Orphaned-task fallback: the kind implies its aggregate even when no subject row references the
+    // instance. A delivery-human node's id is inlined (`delivery-human-task__<node>`), so its bucket is
+    // derived from the predicate rather than the static per-element table.
+    const subjectType = subj?.type ?? DEFAULT_SUBJECT_TYPE[elementId] ?? (isDeliveryHumanElement(elementId) ? "delivery" : "plan");
     const subjectKey = subj?.key ?? processInstanceKey;
     let question: string | null = null;
     switch (elementId) {
