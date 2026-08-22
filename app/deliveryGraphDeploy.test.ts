@@ -72,7 +72,8 @@ test("deploy+advance: a well-formed graph deploys through the real engine and ev
     for (let round = 0; round < MAX_ROUNDS; round++) {
       await engine.drain();
       const [pi] = await engine.searchProcessInstances({ processInstanceKeys: [key] });
-      state = pi?.state ?? "?";
+      assert(pi, `no process instance snapshot for ${key} — searchProcessInstances returned empty`);
+      state = pi.state ?? "?";
       if (state === "COMPLETED" || state === "TERMINATED") break;
       const open = await engine.searchUserTasks({ processInstanceKey: key, state: "CREATED" });
       assert(open.length > 0, `instance is ${state} with no open user task — a service node never advanced`);
@@ -134,7 +135,8 @@ test("deploy+advance: a stalled service node escalates on its node-timeout bound
     for (let round = 0; round < MAX_ROUNDS; round++) {
       await engine.drain();
       const [pi] = await engine.searchProcessInstances({ processInstanceKeys: [key] });
-      state = pi?.state ?? "?";
+      assert(pi, `no process instance snapshot for ${key} — searchProcessInstances returned empty`);
+      state = pi.state ?? "?";
       if (state === "COMPLETED" || state === "TERMINATED") break;
       const tasks = await engine.searchUserTasks({ processInstanceKey: key, state: "CREATED" });
       assert(tasks.length > 0, `instance is ${state} with no open task after escalation — a node never advanced`);
