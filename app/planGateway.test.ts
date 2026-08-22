@@ -7,7 +7,8 @@
 // Since epic #412 retired the stored `plans.delivery` column, the gateway projects with `delivery`
 // treated as UNKNOWN (null): `list_bucket` is provably identical to the delivery-aware value for
 // every reachable state, and `ack_open` becomes a *candidate* (any unacknowledged `done` epic) that
-// the `pollPlanBucket` read-model pass (app/delivery.test.ts) corrects with the read-time signal.
+// the `pollPlanBucket` read-model pass (implemented in app/service.ts, tested in app/delivery.test.ts)
+// corrects with the read-time signal.
 import { test } from "node:test";
 import { assert, assertEquals } from "#test-assert";
 import type { DataLayer } from "@nanobpm/urban";

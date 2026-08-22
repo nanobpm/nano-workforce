@@ -1873,23 +1873,23 @@ const MISSING_PR_STATUS = "missing";
  * rather than reading a denormalised column. Non-`done` plans short-circuit to `null` (the view's
  * behaviour) without the per-plan task join. `statusByPrKey` is an optional once-per-pass PR-status
  * map (the pollers preload it to avoid an N+1); when omitted (a one-off caller like the
- * acknowledge-epic op) it is loaded on demand. */
+ * acknowledge-epic op) it loads only THIS plan's slice PRs on demand — never the whole table. */
 export async function derivePlanDelivery(
   data: DataLayer,
   plan: Plan,
   statusByPrKey?: Map<string, string>,
 ): Promise<string | null> {
   if (plan.status !== "done") return null;
-  let byPrKey = statusByPrKey;
-  if (!byPrKey) {
-    byPrKey = new Map<string, string>();
-    for (const pr of await prs(data).all()) byPrKey.set(pr.pr_key, pr.status);
-  }
   const tasks = await planTasks(data).find({ plan_key: plan.plan_key });
   const prStatuses: string[] = [];
   for (const t of tasks) {
     if (!t.pr_key) continue;
-    prStatuses.push(byPrKey.get(t.pr_key) ?? MISSING_PR_STATUS);
+    let status = statusByPrKey?.get(t.pr_key);
+    if (status === undefined && !statusByPrKey) {
+      // On-demand caller: fetch just this slice's PR row rather than loading the whole table.
+      status = (await prs(data).get(t.pr_key))?.status;
+    }
+    prStatuses.push(status ?? MISSING_PR_STATUS);
   }
   return deriveDelivery(plan.status, prStatuses).delivery;
 }
@@ -1946,6 +1946,16 @@ export async function pollPlanBucket(data: DataLayer) {
  * a prior edge (e.g. an edge later removed) is cleared defensively so the read model never keeps a
  * phantom gate. */
 export async function pollWaitGate(data: DataLayer) {
+  // Preload every plan_tasks row once per pass and group by plan_key, so deriving each plan's
+  // fanned-out signal below is a map lookup rather than a per-plan `planTasks(data).find` (avoids
+  // an N+1 that would double this pass's DB work alongside the per-plan `inboundPlanDeps` lookup).
+  const wavesByPlanKey = new Map<string, number[]>();
+  for (const t of await planTasks(data).all()) {
+    if (t.wave == null) continue;
+    const list = wavesByPlanKey.get(t.plan_key) ?? [];
+    list.push(t.wave);
+    wavesByPlanKey.set(t.plan_key, list);
+  }
   for (const plan of await plans(data).all()) {
     try {
       const edges = await inboundPlanDeps(data, plan.plan_key);
@@ -1955,8 +1965,7 @@ export async function pollWaitGate(data: DataLayer) {
       // surfaced here — the epic index/detail read the display `current_wave` off the
       // `plan_wave_label`/`plan_read_model` VIEWs — so any non-null (the frontier's min wave) is
       // faithful for the gate's "has this epic ever fanned out?" test.
-      const tasks = await planTasks(data).find({ plan_key: plan.plan_key });
-      const assignedWaves = tasks.map((t) => t.wave).filter((w): w is number => w != null);
+      const assignedWaves = wavesByPlanKey.get(plan.plan_key) ?? [];
       const current_wave = assignedWaves.length > 0 ? Math.min(...assignedWaves) : null;
       const { wait_gate, wait_gate_label } = deriveWaitGate(edges, {
         status: plan.status,

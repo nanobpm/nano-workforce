@@ -87,7 +87,7 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
       updated_at: ts,
     });
   } catch (err) {
-    app.log.error(`select-wave: projecting epic phase failed for ${planKey}`, {
+    app.log.error(`select-wave: projecting plan row (epic phase / bound artifacts) failed for ${planKey}`, {
       err: String(err),
     });
   }
