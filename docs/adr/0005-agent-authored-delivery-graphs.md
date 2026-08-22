@@ -160,6 +160,11 @@ shared JSON contract means either can be swapped in later without touching the a
 
 ### 7. Submission is propose → preview → approve → dispatch, idempotent, over the self-describing endpoint
 
+> **Superseded — see the *Amendment (issue #460)* at the end of this section.** The `POST
+> /actions/start/delivery-graph` agent endpoint described in the following paragraph was **never
+> shipped and has been removed**; the agent surface ends at propose → compile → stage and dispatch is
+> operator-only. The paragraph below is retained as the original (Proposed) decision record.
+
 Graphs are submitted exactly as epics are today — via a **new (proposed)** `POST
 /actions/start/delivery-graph` endpoint (paths are relative to the agent guide's `__BASE__` prefix,
 matching the guide's style) with the JSON body, discovered via the agent guide (which already
@@ -173,6 +178,19 @@ and every **side-effecting node (`connector`, merge, publish) carries a dedupe k
 at-least-once execution (mirroring the release workflow's `npx semantic-release`
 "skip already-published" discipline — `.github/workflows/release.yml`) so a
 resume cannot double-fire.
+
+> **Amendment (issue #460): dispatch is operator-only.** As implemented, the "approve → dispatch"
+> half of this decision is **not** an agent endpoint. The agent surface ends at **propose → compile →
+> stage**: the `POST /actions/compile-delivery-graph` door validates + previews the graph and, on
+> success, **stages** it as a proposal (a durable `delivery_graph_proposals` row, content-addressed by
+> `digest`, superseded per logical graph + TTL-bounded), returning only a preview + a navigational
+> `reviewUrl` — no run key, token, or PIK. A **human dispatches** the staged proposal from the cockpit's
+> Delivery Graphs page (`POST /actions/delivery-graph/dispatch` by `digest`, an operator route). The
+> originally-proposed agent `POST /actions/start/delivery-graph` door — where the same caller was handed
+> a content-addressed `approvalToken` to re-submit with — was **removed**: that "approval" was a
+> **replayable** digest returned to the approver, so any holder of the API credential self-approved.
+> Dispatch-by-absence (there is no agent start door) closes that hole categorically; the idempotent
+> at-most-once launch fence is retained on the operator dispatch path.
 
 ## Consequences
 

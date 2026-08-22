@@ -28,6 +28,7 @@ import {
 } from "./conformance.ts";
 import { isUniqueConstraintFence } from "./dbFence.ts";
 import { deriveDelivery, TERMINAL_STATUSES } from "./delivery.ts";
+import { sweepExpiredProposals } from "./deliveryGraphProposals.ts";
 import { deliveryGraphRuns, deriveDeliveryPhase, parseHumanLabels } from "./deliveryGraphRun.ts";
 import { isDeliveryHumanElement } from "./deliveryHuman.ts";
 import { fleetSupportsDurableResume } from "./durableResume.ts";
@@ -2304,6 +2305,19 @@ export async function pollDeliveryGraphPhase(
   }
 }
 
+/** Poll pass (ADR 0005 Decision 7): age out staged delivery-graph proposals whose TTL has elapsed by
+ * flipping them to `expired`, so they drop out of the cockpit's staged grid rather than lingering there
+ * only to fail dispatch. The grid filters purely on `status = 'staged'` (its datasource cannot express an
+ * `expires_at > now` comparison), so this reconciliation sweep is what realises the proposal TTL. It is
+ * data-only and idempotent — a proposal already terminal is left untouched. */
+export async function pollDeliveryProposals(data: DataLayer) {
+  try {
+    await sweepExpiredProposals(data);
+  } catch (err) {
+    console.error(`[poller] delivery graph proposals sweep: ${err}`);
+  }
+}
+
 export async function pollUserTasks(
   data: DataLayer,
   engine: EngineClient,
@@ -2479,6 +2493,7 @@ export async function pollOnce(
   await pollLineage(data);
   await pollUserTasks(data, engine, engineRest);
   await pollDeliveryGraphPhase(data, engine);
+  await pollDeliveryProposals(data);
   if (engineRest) {
     const base = engineRest.restAddress.replace(/\/+$/, "");
     const headers: Record<string, string> = { "content-type": "application/json" };

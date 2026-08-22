@@ -1,17 +1,36 @@
-// Tests for the POST /app/api/actions/compile-delivery-graph operation `compileDeliveryGraph`
-// (ADR 0005 slice S1). The delegate is a thin, PURE mapping of the compiler's discriminated result
-// onto the HTTP status: a well-formed graph → 200 { ok:true, … preview }, a malformed one → 400
-// { ok:false, errors }. It touches no data layer and has zero side effects, so the same body compiled
-// twice returns the identical response (callable repeatedly). These tests assert that status mapping.
+// Tests for the POST /app/api/actions/compile-delivery-graph operation `compileDeliveryGraph` (ADR
+// 0005 Decision 7, issue #460). This is the END of the agent's surface: a well-formed graph compiles
+// and is PERSISTED as a `staged` proposal, and the response carries only a preview + a navigational
+// `reviewUrl` — never a run key, token, or process-instance key. A malformed graph is a 400 with
+// path-qualified errors and nothing is staged. The Red/Green guard here is that the response exposes
+// NO dispatch handle, closing the self-approval hole the old replayable `approvalToken` left open.
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { assert, assertEquals } from "#test-assert";
-import type { AppApi } from "@nanobpm/urban";
+import type { AppApi, DataLayer } from "@nanobpm/urban";
+import { bootTestApp } from "@nanobpm/urban-testkit";
+import { deliveryGraphProposals } from "../app/deliveryGraphProposals.ts";
 import { noopLog } from "../test/log.ts";
 import handler from "./compileDeliveryGraph.ts";
 
-const app = { log: noopLog() } as unknown as AppApi;
+const APP_ROOT = resolve(import.meta.dirname, "..");
 
-async function call(body: unknown) {
+/** Boot an app purely for its provisioned data layer (migration 075 applied), run `fn`, tear down. */
+async function withApp(fn: (app: AppApi, data: DataLayer) => Promise<void>): Promise<void> {
+  const dir = mkdtempSync(join(tmpdir(), "nwf-dgcompile-"));
+  const app = await bootTestApp(APP_ROOT, { env: { NANO_APP_DB_URL: `file:${join(dir, "app.db")}` } });
+  try {
+    const edge = { data: app.db, log: noopLog() } as unknown as AppApi;
+    await fn(edge, app.db);
+  } finally {
+    await app.stop?.();
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+async function call(app: AppApi, body: unknown) {
   return (await handler({ req: {} as any, params: {}, query: {}, body } as any, app)) as any;
 }
 
@@ -24,40 +43,84 @@ const GOOD = {
   edges: [{ from: "a", to: "b" }],
 };
 
-test("compile-delivery-graph: a well-formed graph → 200 with the pure preview", async () => {
-  const res = await call(GOOD);
-  assertEquals(res.status, 200);
-  assertEquals(res.body.ok, true);
-  assert(typeof res.body.bpmn === "string" && res.body.bpmn.length > 0);
-  // The compile preview must show what actually deploys — including the auto-laid-out diagram
-  // interchange (#440), so the process explorer can render the previewed graph.
-  assert(res.body.bpmn.includes("<bpmndi:BPMNDiagram"), "the previewed bpmn carries diagram interchange");
-  assert(typeof res.body.diagram === "string" && res.body.diagram.length > 0);
-  assertEquals(res.body.resolved.nodes.length, 2);
-  assertEquals(res.body.humanNodes.length, 1);
-});
-
-test("compile-delivery-graph: a malformed graph → 400 with path-qualified errors", async () => {
-  const res = await call({
-    nodes: [{ id: "a", kind: "agent", agent: { jobType: "j" } }],
-    edges: [{ from: "a", to: "ghost" }],
+test("compile-delivery-graph: a well-formed graph → 200 ready, staged as a proposal, with the preview", async () => {
+  await withApp(async (app, data) => {
+    const res = await call(app, GOOD);
+    assertEquals(res.status, 200);
+    assertEquals(res.body.status, "ready");
+    assert(typeof res.body.message === "string" && res.body.message.length > 0);
+    assert(typeof res.body.digest === "string" && res.body.digest.length > 0);
+    assert(typeof res.body.preview === "object" && res.body.preview !== null);
+    assert(typeof res.body.preview.diagram === "string" && res.body.preview.diagram.length > 0);
+    assertEquals(res.body.preview.humanNodes.length, 1);
+    // The compiled graph was persisted as a staged proposal keyed by its content digest.
+    const row = await deliveryGraphProposals(data).get(res.body.digest);
+    assert(row, "the compiled graph is staged for operator dispatch");
+    assertEquals(row?.status, "staged");
+    assertEquals(row?.logical_key, "runbook");
   });
-  assertEquals(res.status, 400);
-  assertEquals(res.body.ok, false);
-  assert(Array.isArray(res.body.errors) && res.body.errors.length > 0);
-  assert(res.body.errors.every((e: { path: string; message: string }) => typeof e.path === "string"));
 });
 
-test("compile-delivery-graph: is side-effect-free — repeated calls return identical responses", async () => {
-  const a = await call(GOOD);
-  const b = await call(GOOD);
-  assertEquals(a.status, b.status);
-  assertEquals(a.body.bpmn, b.body.bpmn);
-  assertEquals(JSON.stringify(a.body.resolved), JSON.stringify(b.body.resolved));
+// ── Red/Green: the agent surface hands back NO dispatch handle (issue #460) ────
+test("compile-delivery-graph: the response exposes NO dispatch handle — no runKey, token, or process key to replay", async () => {
+  await withApp(async (app) => {
+    const res = await call(app, GOOD);
+    assertEquals(res.status, 200);
+    // The self-approval hole is closed by ABSENCE: there is nothing in the response a caller can
+    // replay to start a run. A regression that re-adds any of these fields fails here (Red/Green).
+    assertEquals(res.body.runKey, undefined);
+    assertEquals(res.body.approvalToken, undefined);
+    assertEquals(res.body.processInstanceKey, undefined);
+    assertEquals(res.body.processDefinitionId, undefined);
+    assertEquals(res.body.alreadyRunning, undefined);
+    // `reviewUrl` is navigational only — it points at the cockpit page, not an API dispatch endpoint.
+    assert(typeof res.body.reviewUrl === "string");
+    assert(!/\/actions\/start\/delivery-graph/.test(res.body.reviewUrl), "reviewUrl is not a dispatch endpoint");
+  });
 });
 
-test("compile-delivery-graph: a missing/empty body → 400, never a 500", async () => {
-  const res = await call(undefined);
-  assertEquals(res.status, 400);
-  assertEquals(res.body.ok, false);
+test("compile-delivery-graph: re-compiling the same graph is idempotent — one staged proposal, TTL anchored to the first stage", async () => {
+  await withApp(async (app, data) => {
+    const first = await call(app, GOOD);
+    const firstRow = await deliveryGraphProposals(data).get(first.body.digest);
+    await new Promise((r) => setTimeout(r, 5));
+    const second = await call(app, GOOD);
+    assertEquals(second.body.digest, first.body.digest);
+    const rows = await deliveryGraphProposals(data).find({ digest: first.body.digest });
+    assertEquals(rows.length, 1);
+    assertEquals(rows[0].created_at, firstRow?.created_at); // TTL anchor preserved across re-stage
+  });
+});
+
+test("compile-delivery-graph: a changed graph with the same name SUPERSEDES the prior staged proposal", async () => {
+  await withApp(async (app, data) => {
+    const a = await call(app, GOOD);
+    const b = await call(app, { ...GOOD, nodes: [...GOOD.nodes, { id: "c", kind: "human", human: { prompt: "do Y" } }], edges: [...GOOD.edges, { from: "b", to: "c" }] });
+    assert(a.body.digest !== b.body.digest, "the changed graph has a new digest");
+    assertEquals((await deliveryGraphProposals(data).get(a.body.digest))?.status, "superseded");
+    assertEquals((await deliveryGraphProposals(data).get(b.body.digest))?.status, "staged");
+  });
+});
+
+test("compile-delivery-graph: a malformed graph → 400 with path-qualified errors, nothing staged", async () => {
+  await withApp(async (app, data) => {
+    const res = await call(app, {
+      nodes: [{ id: "a", kind: "agent", agent: { jobType: "j" } }],
+      edges: [{ from: "a", to: "ghost" }],
+    });
+    assertEquals(res.status, 400);
+    assertEquals(res.body.ok, false);
+    assert(Array.isArray(res.body.errors) && res.body.errors.length > 0);
+    assert(res.body.errors.every((e: { path: string; message: string }) => typeof e.path === "string"));
+    assertEquals((await deliveryGraphProposals(data).all()).length, 0);
+  });
+});
+
+test("compile-delivery-graph: a missing/empty body → 400, never a 500, nothing staged", async () => {
+  await withApp(async (app, data) => {
+    const res = await call(app, undefined);
+    assertEquals(res.status, 400);
+    assertEquals(res.body.ok, false);
+    assertEquals((await deliveryGraphProposals(data).all()).length, 0);
+  });
 });

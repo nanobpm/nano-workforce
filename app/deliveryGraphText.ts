@@ -1,9 +1,9 @@
 // app/deliveryGraphText.ts — the shared PARSE step for the human-facing UI JSON-paste ingress
 // (issue #386, ADR 0005). The Delivery Graphs page (`pages/delivery-graphs.page.json`) submits the
 // operator's pasted delivery-graph as a raw JSON STRING (`graphJson`) — the page's text field cannot
-// submit a structured object — so the preview/dispatch ingress operations parse it here before handing
-// the resulting object to the SAME pure `compileDeliveryGraph` compiler / gated `startDeliveryGraph`
-// door the agent-facing paths use. This is a UI text adapter, NOT a parallel compile/dispatch path.
+// submit a structured object — so the preview+stage ingress operation parses it here before handing
+// the resulting object to the SAME pure `compileDeliveryGraph` compiler the agent-facing compile door
+// uses. This is a UI text adapter, NOT a parallel compile path.
 //
 // PURE and I/O-free so it unit-tests in isolation. A blank field, non-JSON text, or a non-object JSON
 // value maps to a clean `{ ok:false, error }` the ingress surfaces as a 400 with a human banner —

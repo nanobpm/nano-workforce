@@ -52,9 +52,11 @@ test("the guide covers every capability the endpoint promises", async () => {
 
 test("the guide documents the delivery-graph surface (ADR 0005)", async () => {
   const md = ((await handler(input(), app)) as any).body.instructions as string;
-  // The two doors, with their exact action paths.
-  assert(md.includes("compile-delivery-graph"), "documents the pure compile door");
-  assert(md.includes("start/delivery-graph"), "documents the gated dispatch door");
+  // The agent surface: a single compile door that validates + previews + STAGES. There is NO agent
+  // start/dispatch door (issue #460) — dispatch is an operator action in the cockpit.
+  assert(md.includes("compile-delivery-graph"), "documents the compile+stage door");
+  assert(!md.includes("start/delivery-graph"), "does NOT expose an agent start/dispatch door (issue #460)");
+  assert(md.includes("propose → compile → stage"), "frames the agent surface as ending at stage");
   // The closed node vocabulary: assert the exact config snippet for each of the four kinds,
   // so the test fails if §9's node-kind table is removed or reworded — not merely if the bare
   // words "agent"/"wait"/"human"/"connector" appear anywhere else in the guide.
@@ -65,9 +67,11 @@ test("the guide documents the delivery-graph surface (ADR 0005)", async () => {
   // The fact-edge syntax: an edge is `{ from, to }` and `from` may be a qualified `<nodeId>.<fact>`.
   assert(md.includes("each edge is `{ from, to }`"), "documents the edge shape");
   assert(md.includes("qualified `<nodeId>.<fact>`"), "documents the qualified fact-edge syntax");
-  // The approval gate + idempotency of the start door.
-  assert(md.includes("approvalToken"), "documents the approval gate");
-  assert(md.includes("idempotencyKey"), "documents idempotency");
+  // Operator-only dispatch: the compile response carries a digest + navigational reviewUrl and the
+  // guide directs the agent to ask an operator to dispatch in the cockpit (no self-service replay).
+  assert(md.includes("reviewUrl"), "documents the navigational reviewUrl");
+  assert(md.includes("Dispatch is an operator action") || md.includes("Dispatch** in the cockpit"), "documents operator-only dispatch");
+  assert(!md.includes("approvalToken"), "the replayable approvalToken flow is gone (issue #460)");
   // The worked example: a human emit node handing a version to a downstream edge.
   assert(md.includes("manual-publish.publishedVersion"), "includes the worked example's human-emit fact edge");
 });
