@@ -1,3 +1,11 @@
+# [0.120.0](https://github.com/nanobpm/nano-workforce/compare/v0.119.0...v0.120.0) (2026-08-22)
+
+
+### Features
+
+* **lineage:** derive view-expressible lineage_threads columns via SQL VIEW ([#437](https://github.com/nanobpm/nano-workforce/issues/437)) ([f25c824](https://github.com/nanobpm/nano-workforce/commit/f25c824bf9c72c3757a58794065a5c86b208dbe0)), closes [nano-ide#424](https://github.com/nano-ide/issues/424) [nanobpm/nano-workforce#412](https://github.com/nanobpm/nano-workforce/issues/412)
+* **velocity:** back merged-per-day with a SQL VIEW, repoint Velocity page ([#412](https://github.com/nanobpm/nano-workforce/issues/412)) ([#436](https://github.com/nanobpm/nano-workforce/issues/436)) ([5be81e4](https://github.com/nanobpm/nano-workforce/commit/5be81e466f2593622ae837d6e63b00f0287c305d)), closes [nano-ide#424](https://github.com/nano-ide/issues/424) [#411](https://github.com/nanobpm/nano-workforce/issues/411) [#361](https://github.com/nanobpm/nano-workforce/issues/361)
+
 # [0.119.0](https://github.com/nanobpm/nano-workforce/compare/v0.118.2...v0.119.0) (2026-08-22)
 
 
