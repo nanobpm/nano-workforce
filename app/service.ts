@@ -2381,6 +2381,11 @@ export async function pollUserTasks(
     for (const status of PLAN_ACTIVE_STATUSES) for (const plan of await plans(data).find({ status })) await scanInstance(plan.process_key);
     for (const status of PR_ACTIVE_STATUSES) for (const pr of await prs(data).find({ status })) await scanInstance(pr.process_key);
     for (const review of await activeConformanceReviews(data)) await scanInstance(review.process_key);
+    // A delivery-graph `human` node parks on its RUNNING run's engine instance (an awaiting-approval run
+    // has no instance yet — mirrors `pollDeliveryGraphPhase`). Scan it too so the inlined
+    // `delivery-human-task__<node>` gate surfaces on this reduced-capability path exactly as it does on
+    // the engine-first sweep — otherwise the typed-seam host silently drops every delivery human gate.
+    for (const run of await deliveryGraphRuns(data).find({ status: "running" })) await scanInstance(run.process_key);
   }
 
   const desired = [...desiredByKey.values()];

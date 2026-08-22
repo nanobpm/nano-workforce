@@ -584,3 +584,30 @@ test("pollUserTasks (engine-first): a delivery-human task on an UNTRACKED run st
   assertEquals(byKey["35002"].subject_type, "delivery");
   assertEquals(byKey["35002"].subject_key, "dg-9"); // instance fallback — non-blank so it renders
 });
+
+test("pollUserTasks (typed-seam fallback): projects an inlined delivery-human task on a RUNNING run, bucketed `delivery` (issue #442)", async () => {
+  // The reduced-capability host (no raw-REST surface) discovers open tasks by scanning each active
+  // subject's instance through the typed `openUserTasks` seam. A delivery-graph `human` node parks on its
+  // RUNNING run's instance, so that instance MUST be scanned here too — else the inlined
+  // `delivery-human-task__<node>` gate is dropped on this path even though its leak guard would accept it.
+  // Guards the OTHER discovery path the engine-first sweep tests don't reach.
+  const { data, stores } = memData({
+    delivery_graph_runs: [
+      { run_key: "delivery-graph-403eb22e", process_key: "dg-1", status: "running", title: "release runbook" },
+      { run_key: "delivery-graph-pending", process_key: null, status: "awaiting-approval", title: "not launched yet" },
+    ],
+  });
+  const engine = fakeEngine({
+    "dg-1": [{ userTaskKey: "35002", elementId: "delivery-human-task__n1" }],
+  });
+
+  await pollUserTasks(data, engine); // no engineRest → typed-seam fallback
+
+  const byKey = Object.fromEntries((stores.user_tasks ?? []).map((r) => [r.user_task_key, r]));
+  assertEquals(Object.keys(byKey), ["35002"]);
+  assertEquals(byKey["35002"].element_id, "delivery-human-task__n1");
+  assertEquals(byKey["35002"].kind_label, "Delivery: human step");
+  assertEquals(byKey["35002"].subject_type, "delivery");
+  assertEquals(byKey["35002"].subject_key, "delivery-graph-403eb22e");
+  assertEquals(byKey["35002"].subject_title, "release runbook");
+});
