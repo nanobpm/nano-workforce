@@ -83,6 +83,51 @@
       }
     },
     {
+      "type": "prose",
+      "id": "wave-banner",
+      "props": {
+        "refreshMs": 5000,
+        "measure": 80,
+        "empty": "No plan recorded for this epic yet.",
+        "data": {
+          "kind": "datasource",
+          "source": "app",
+          "table": "plans",
+          "orderBy": { "field": "updated_at", "dir": "desc" },
+          "filter": [{ "field": "plan_key", "eqParam": true }]
+        },
+        "header": "Wave {{wave_label}} · {{epic_phase}}",
+        "body": "delivery_label"
+      }
+    },
+    {
+      "type": "dataGrid",
+      "id": "wave-summary",
+      "props": {
+        "title": "Wave progress",
+        "rowKey": "wave",
+        "refreshMs": 5000,
+        "empty": "No waves yet — this epic hasn't been levelized into waves.",
+        "data": {
+          "kind": "datasource",
+          "source": "app",
+          "table": "plan_wave_summary",
+          "orderBy": { "field": "wave", "dir": "asc" },
+          "filter": [{ "field": "plan_key", "eqParam": true }]
+        },
+        "columns": [
+          { "field": "wave", "header": "Wave" },
+          { "field": "bar", "header": "Progress", "width": "40%" },
+          { "field": "merged", "header": "Merged" },
+          { "field": "in_flight", "header": "In flight" },
+          { "field": "blocked", "header": "Blocked" },
+          { "field": "escalated", "header": "Escalated" },
+          { "field": "skipped", "header": "Skipped" },
+          { "field": "total", "header": "Total" }
+        ]
+      }
+    },
+    {
       "type": "dataGrid",
       "id": "epic-plan",
       "props": {
@@ -161,7 +206,7 @@
         "data": {
           "kind": "datasource",
           "source": "app",
-          "table": "plan_tasks",
+          "table": "plan_wave_tasks",
           "orderBy": { "field": "wave", "dir": "asc" },
           "filter": [
             { "field": "plan_key", "eqParam": true },
@@ -192,8 +237,8 @@
           { "field": "wave", "header": "Wave" },
           { "field": "task_id", "header": "Task" },
           { "field": "title", "header": "Title" },
-          { "field": "status", "header": "Status" },
-          { "field": "pr_key", "header": "PR" },
+          { "field": "status", "header": "Status", "link": { "kind": "processExplorer", "keyField": "process_key" } },
+          { "field": "pr_key", "header": "PR", "linkField": "pr_url" },
           { "field": "summary", "header": "Summary" },
           { "field": "updated_at", "header": "Updated", "format": "datetime" }
         ],

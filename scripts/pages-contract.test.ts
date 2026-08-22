@@ -49,6 +49,54 @@ function parseSchema(sql: string, schema: Map<string, Set<string>>): void {
     cols.add(m[2]);
     schema.set(m[1], cols);
   }
+  // CREATE VIEW [IF NOT EXISTS] <name> AS SELECT <select-list> FROM …
+  //
+  // A page datasource can bind a VIEW as well as a base table (nano-ide#424), so a view's OUTPUT
+  // columns must join the whitelist exactly like a table's. A view has no `PRAGMA`-visible column
+  // list in this static parse, so we read them off its SELECT projection: take the select-list up
+  // to the first top-level `FROM`, split it on top-level commas, and record each item's output name
+  // (its `AS <alias>`, or the trailing identifier of a bare `t.col` / `col`). This is why the
+  // repo's views (see 059_plan_wave_summary.sql) alias every projected column and avoid select-list
+  // subqueries — it keeps this purely-textual contract guard able to see their columns.
+  const viewRe = /CREATE\s+VIEW\s+(?:IF\s+NOT\s+EXISTS\s+)?["`]?(\w+)["`]?\s+AS\s+SELECT\s+/gi;
+  while ((m = viewRe.exec(sql)) !== null) {
+    const selectList = topLevelSelectList(sql, viewRe.lastIndex);
+    if (selectList === null) continue;
+    const cols = schema.get(m[1]) ?? new Set<string>();
+    for (const frag of splitTopLevel(selectList)) {
+      const col = viewColumnName(frag);
+      if (col) cols.add(col);
+    }
+    schema.set(m[1], cols);
+  }
+}
+
+// The select-list of a view: the text between `SELECT` (its end at `start`) and the first top-level
+// `FROM` keyword (one at paren depth 0 — a `FROM` inside a function/subquery doesn't end the list).
+function topLevelSelectList(s: string, start: number): string | null {
+  let depth = 0;
+  for (let i = start; i < s.length; i++) {
+    const c = s[i];
+    if (c === "(") depth++;
+    else if (c === ")") depth--;
+    else if (depth === 0 && (c === "F" || c === "f")) {
+      // whole-word FROM with a non-identifier char (or string start) on each side
+      if (/from/i.test(s.slice(i, i + 4)) && !/\w/.test(s[i - 1] ?? " ") && !/\w/.test(s[i + 4] ?? " ")) {
+        return s.slice(start, i);
+      }
+    }
+  }
+  return null;
+}
+
+// The output name of one select-list item: its `AS <alias>` if present, else the trailing
+// identifier of a bare `table.column` / `column` reference.
+function viewColumnName(frag: string): string | null {
+  const trimmed = frag.trim();
+  const asMatch = trimmed.match(/\bAS\s+["`]?(\w+)["`]?\s*$/i);
+  if (asMatch) return asMatch[1];
+  const bare = trimmed.match(/(\w+)\s*$/);
+  return bare ? bare[1] : null;
 }
 
 // Return the text inside the parentheses whose opener is at `openIdx`, honouring nesting.
