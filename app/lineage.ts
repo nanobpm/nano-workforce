@@ -330,6 +330,31 @@ export interface LineageThreadRow {
 const lineageThreads = (data: DataLayer) =>
   data.table<LineageThreadRow>("lineage_threads", "root_request_key");
 
+/** Read-only handle on the `lineage_thread_view` VIEW (migration 064) the Lineage page now binds.
+ *  Same shape as `LineageThreadRow`: the view PASSES THROUGH the procedural frontier columns from
+ *  `lineage_threads` (`stage`/`stage_label`/`process_key`/`pr_keys`/`pr_count`/`active`/timestamps)
+ *  and DERIVES the view-expressible identity columns (`kind`, `issue_url`, and an epic/feature
+ *  thread's `title`) from the `plans`/`feature_runs` origin joins — the single source of truth,
+ *  eliminating those columns' drift surface (epic #412). A self-rooted PR's `title` falls back to
+ *  the poller-written value, since it is a procedural representative-PR pick. */
+const lineageThreadView = (data: DataLayer) =>
+  data.table<LineageThreadRow>("lineage_thread_view", "root_request_key");
+
+/** All lineage threads off the same `lineage_thread_view` VIEW the Lineage page binds, in this
+ *  module's own active-frontier-first, then-by-key stable order (matching {@link listLineage}) —
+ *  NOT the page datasource's `orderBy: updated_at desc` + tab-specific `active` filter, which the
+ *  page applies on top of this table. Additive: this reads the derived view rather than recomputing
+ *  via {@link collectThreads}, so it reflects the identity columns' single source of truth (origin
+ *  joins) while the frontier columns come through from the still-poller-written `lineage_threads`. */
+export async function listLineageView(data: DataLayer): Promise<LineageThreadRow[]> {
+  const rows = await lineageThreadView(data).all();
+  return rows.sort(
+    (a, b) =>
+      Number(b.active) - Number(a.active) ||
+      a.root_request_key.localeCompare(b.root_request_key),
+  );
+}
+
 function toLineagePr(row: PrRow): LineagePr {
   return {
     prKey: row.pr_key,

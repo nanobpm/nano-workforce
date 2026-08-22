@@ -87,7 +87,7 @@
         "data": {
           "kind": "datasource",
           "source": "app",
-          "table": "lineage_threads",
+          "table": "lineage_thread_view",
           "orderBy": { "field": "updated_at", "dir": "desc" },
           "filter": [{ "field": "active", "in": [1] }]
         },
