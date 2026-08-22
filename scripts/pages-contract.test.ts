@@ -360,24 +360,16 @@ test("issue #386: the human-facing Delivery Graphs surface is wired (nav tab, pa
   );
   assert(tab, "pages/_nav.json must carry a `Delivery Graphs` nav tab → the delivery-graphs page");
 
-  // 2) The Submit page exists with a Preview (compile) action and a Dispatch (start) action, plus an
-  //    in-flight grid over the delivery_graph_runs aggregate that links to the per-graph detail page.
+  // 2) The page carries the compose → preview → dispatch App View (issue #441 — the rendered preview
+  //    that consumes the compile output), plus an in-flight grid over the delivery_graph_runs aggregate
+  //    that links to the per-graph detail page. The rich preview (mermaid diagram + humanNodes[] +
+  //    sideEffects[] + inline errors) can't render in a bare `actionForm` (its response is discarded),
+  //    so the surface is an `appView` embed over the SAME compile/dispatch doors.
   const page = JSON.parse(readFileSync(`${ROOT}pages/delivery-graphs.page.json`, "utf8"));
-  const forms = (page.nodes ?? []).filter((n: Json) => n.type === "actionForm");
-  const preview = forms.find((f: Json) => f.props?.action?.path === "/app/api/actions/delivery-graph/preview");
-  const dispatch = forms.find((f: Json) => f.props?.action?.path === "/app/api/actions/delivery-graph/dispatch");
-  assert(preview, "delivery-graphs page must have a Preview form posting to /app/api/actions/delivery-graph/preview");
-  assert(dispatch, "delivery-graphs page must have a Dispatch form posting to /app/api/actions/delivery-graph/dispatch");
-  // Both forms take the pasted graph JSON; Dispatch also carries the explicit approve gate.
-  assert(
-    (preview.props?.fields ?? []).some((fl: Json) => fl.key === "graphJson"),
-    "the Preview form must have a graphJson paste field",
+  const compose = (page.nodes ?? []).find(
+    (n: Json) => n.type === "appView" && typeof n.props?.embed === "string" && n.props.embed.includes("delivery-graphs/embed.html"),
   );
-  assert(
-    (dispatch.props?.fields ?? []).some((fl: Json) => fl.key === "graphJson") &&
-      (dispatch.props?.fields ?? []).some((fl: Json) => fl.key === "approve"),
-    "the Dispatch form must have a graphJson paste field and an approve gate",
-  );
+  assert(compose, "delivery-graphs page must have an appView embedding ./delivery-graphs/embed.html (the compose → preview → dispatch view, #441)");
   const grid = (page.nodes ?? []).find(
     (n: Json) => n.type === "dataGrid" && n.props?.data?.table === "delivery_graph_runs",
   );

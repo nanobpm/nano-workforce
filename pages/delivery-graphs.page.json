@@ -70,42 +70,18 @@
       "type": "text",
       "id": "subtitle",
       "props": {
-        "text": "The human front door for delivery graphs (ADR 0005). Paste an agent-authored delivery-graph JSON, Preview it (a pure compile \u2014 nothing is dispatched) to see it validates and read its content digest, then Dispatch it. A graph with any side-effecting node (it merges PRs / publishes packages) dispatches only when you tick Approve; without approval it is parked in the in-flight grid below for review. Preview and Dispatch are thin UIs over the same compileDeliveryGraph / startDeliveryGraph doors \u2014 there is no parallel submit path.",
+        "text": "The human front door for delivery graphs (ADR 0005). Compose an agent-authored delivery-graph JSON, Preview it (a pure compile \u2014 nothing is dispatched) to SEE the rendered plan \u2014 its mermaid diagram, the human stop-points where it parks on a person, and the side effects it will perform \u2014 and fix any path-qualified validation errors inline. Then Dispatch it: a graph with any side-effecting node (it merges PRs / publishes packages) parks for an explicit Approve & dispatch confirm of the rendered preview; a graph with only wait/human nodes dispatches straight away. The compose \u2192 preview \u2192 dispatch view is a thin UI over the same compileDeliveryGraph / startDeliveryGraph doors \u2014 there is no parallel submit path.",
         "variant": "sub"
       }
     },
     {
-      "type": "actionForm",
-      "id": "delivery-graph-preview",
+      "type": "appView",
+      "id": "delivery-graphs-compose",
       "props": {
-        "title": "1 \u00b7 Preview (compile \u2014 pure, nothing is dispatched)",
-        "submitLabel": "Preview",
-        "action": {
-          "path": "/app/api/actions/delivery-graph/preview",
-          "body": "{{form}}",
-          "successLabel": "\u2713 Valid \u2014 the graph compiled. Nothing was dispatched. Review its shape in the in-flight grid, then Dispatch it below."
-        },
-        "fields": [
-          { "key": "graphJson", "label": "Delivery-graph JSON \u2014 paste the agent-authored DeliveryGraph (nodes/edges). Preview validates + compiles it without dispatching.", "type": "text", "required": true, "requiredMessage": "Paste a delivery-graph JSON to preview" }
-        ]
-      }
-    },
-    {
-      "type": "actionForm",
-      "id": "delivery-graph-dispatch",
-      "props": {
-        "title": "2 \u00b7 Dispatch (start \u2014 gated, idempotent)",
-        "submitLabel": "Dispatch",
-        "action": {
-          "path": "/app/api/actions/delivery-graph/dispatch",
-          "body": "{{form}}",
-          "successLabel": "\u2713 Dispatched \u2014 watch it advance in the in-flight grid below."
-        },
-        "fields": [
-          { "key": "graphJson", "label": "Delivery-graph JSON \u2014 paste the same DeliveryGraph you previewed.", "type": "text", "required": true, "requiredMessage": "Paste the delivery-graph JSON to dispatch" },
-          { "key": "approve", "label": "Approve \u2014 I reviewed the preview and approve dispatching this graph's side effects (required for any agent/connector node)", "type": "checkbox" },
-          { "key": "idempotencyKey", "label": "Idempotency key (optional) \u2014 a re-dispatch with the same key (or, blank, the same graph) will not double-launch an in-flight run", "type": "text" }
-        ]
+        "title": "Compose \u2192 preview \u2192 dispatch",
+        "embed": "./delivery-graphs/embed.html",
+        "standalone": "./delivery-graphs/standalone.html",
+        "fill": true
       }
     },
     {

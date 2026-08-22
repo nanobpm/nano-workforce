@@ -35,6 +35,15 @@ test("preview-delivery-graph: a pasted well-formed graph → 200 summary with di
   assertEquals(res.body.sideEffecting, true);
   assert(typeof res.body.diagram === "string" && res.body.diagram.length > 0);
   assertEquals(res.body.title, "runbook");
+  // The FULL preview detail (#441) — the human stop-points and side-effecting actions the page
+  // renders, not just the counts. `a` is the side-effecting agent node; `b` is the human stop.
+  assert(Array.isArray(res.body.humanNodes) && res.body.humanNodes.length === 1);
+  assertEquals(res.body.humanNodes[0].nodeId, "b");
+  assertEquals(res.body.humanNodes[0].prompt, "do X");
+  assert(Array.isArray(res.body.sideEffects) && res.body.sideEffects.length === 1);
+  assertEquals(res.body.sideEffects[0].nodeId, "a");
+  assertEquals(res.body.sideEffects[0].kind, "agent");
+  assert(typeof res.body.sideEffects[0].description === "string" && res.body.sideEffects[0].description.length > 0);
 });
 
 test("preview-delivery-graph: is PURE — repeated previews return the identical digest", async () => {
