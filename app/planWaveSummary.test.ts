@@ -126,10 +126,12 @@ test("epic-detail projects the wave banner, the per-wave summary, and task→rep
   const page = JSON.parse(readFileSync(PAGE, "utf8"));
   const byId = (id: string) => page.nodes.find((n: { id: string }) => n.id === id);
 
-  // 1. The epic-level wave banner: a prose node reading wave_label + epic_phase off `plans`.
+  // 1. The epic-level wave banner: a prose node reading wave_label + epic_phase off the derived
+  //    `plan_read_model` VIEW (epic #412 — retiring the worker-maintained plans.wave_label column;
+  //    the banner now reads the single-source-of-truth view instead of the raw `plans` table).
   const banner = byId("wave-banner");
   assert(banner, "epic detail must show the epic-level wave banner");
-  assertEquals(banner.props.data.table, "plans");
+  assertEquals(banner.props.data.table, "plan_read_model");
   assert(
     banner.props.data.filter.some((f: { field: string; eqParam?: boolean }) => f.field === "plan_key" && f.eqParam),
     "the banner is scoped to this epic",
