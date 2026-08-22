@@ -18,8 +18,8 @@ one of the copy-pasted subprocesses),
 nano-bpm **ADR 0065** (reconciling read models / `defineReadModel` — the derivation mechanism S1 uses
 to collapse three bespoke status unions into one),
 nano-ide **#424** (datasource can read a SQL VIEW — the *data-level* unlock),
-engine-wasm **#416** (engine-wasm 0.4.0 → 0.7.2, which executes `callActivity` — the *process-level*
-unlock),
+nano-workforce **#416** (the PR bumping the testkit to engine-wasm 0.7.2, which executes `callActivity`
+— the *process-level* unlock),
 nano-workforce **#464** (the tracking issue with slices S1–S5),
 nano-workforce **#305** (consolidate escalations on native `user_tasks` — a natural sub-step of S1/S3).
 
@@ -37,11 +37,17 @@ VIEW, `instanceTracking` binding, and dispatch door:
 | **Epic** | `plans` + `plan_tasks` (mig. 004) | `resources/processes/plan-fanout.bpmn` | fan-out of slices → waves (N-node) |
 | **Delivery graph** | `delivery_graph_runs` (mig. 058) + compiled nodes | compiled BPMN (`app/deliveryGraphCompiler.ts`) | arbitrary DAG |
 
-All three are keyed by an issue/run key, carry their own status union, project a display read-model
-VIEW, and dispatch `senior:*` jobs; all three compile to BPMN and funnel downstream to the *same*
-`pull_requests` table (keyed by `pr_key`) — the convergence/merge loop, which they correctly do **not**
-duplicate. So the *downstream* half of the aggregate is already factored to a single source of truth;
-only the *upstream* "unit of work" half is triplicated.
+All three are keyed by an issue/run key and carry their own status union. Feature and epic each also
+project a dedicated display read-model VIEW; delivery-graph pages instead bind **directly** to
+`delivery_graph_runs` (`pages/delivery-graphs.page.json`, `pages/delivery-graph-detail.page.json`).
+Feature and epic execute through **hand-authored** BPMN (`feature.bpmn`, `plan-fanout.bpmn`) and
+dispatch hard-coded `senior:*` implementation jobs that funnel downstream to the *same* `pull_requests`
+table (keyed by `pr_key`) — the convergence/merge loop, which they correctly do **not** duplicate.
+Delivery graphs are the exception: only they are **compiled** to BPMN from JSON at runtime, they accept
+the submitted node kind and `agent.jobType` (including `wait`, `human`, and `connector` nodes), and
+`delivery_graph_runs` carries no `pr_key`, so a graph is not inherently PR-producing. So for the
+feature/epic implementation path the *downstream* half of the aggregate is already factored to a single
+source of truth; only the *upstream* "unit of work" half is triplicated.
 
 ADR 0005 already names this: "plan-fanout is an epic — a `RecordPlanTask[]` + `dependsOn[]` DAG with
 waves", "convergence-loop is one PR", and a feature is the degenerate one-node graph. The delivery
@@ -58,18 +64,23 @@ each encoding. Both have now been removed on `main`, which is why consolidation 
 rather than earlier.
 
 **Data — "the datasource can't read a SQL VIEW."** Because the read layer could not read a VIEW, every
-display projection had to be a physically **denormalized table**, hand-maintained alongside its source
-(migrations 022/029/051). That is what made a *shared* projection impossible: each representation grew
-its own projection table. **Unlocked by nano-ide#424** (the datasource can now read a VIEW) → the
-derived VIEWs in migrations 059–073, which cite #424 as the enabling change. **Live today.**
+*display projection* had to be a physically **denormalized table** — or denormalized columns
+hand-maintained on a source table (e.g. migrations 022/029 on `plans`) — rather than a VIEW derived
+from its source. That is what made a *shared* display projection impossible: each representation grew
+its own hand-maintained projection. (The delivery-unit source tables themselves —
+`feature_runs`/028, `plans`+`plan_tasks`/004, `delivery_graph_runs`/058 — are domain stores, not
+projection artifacts.) **Unlocked by nano-ide#424** (the datasource can now read a VIEW) → the derived
+read-model VIEWs added in migrations 059–062, 064, and 073, with 070–072 dropping the now-redundant
+denormalized columns/tables. **Live today.**
 
-**Process — "the pinned WASM engine no-ops `callActivity`."** `app/deliveryGraphCompiler.ts:42`
-records the constraint verbatim: `callActivity` is "a no-op on the pinned WASM engine (the child is
-never instantiated)", so the compiler — and every hand-written process — **inlines** the subprocess
-body instead of referencing it. The consequence is that the atomic *"agent-implement cell"*
-(`implement-task (senior:*) → "escalated?" gateway → record-escalation → user-task → SLA boundary →
-answer gateway`) is copy-pasted **four times**: `feature.bpmn`, the multi-instance `implement`
-subprocess in `plan-fanout.bpmn`, and re-emitted per node by the compiler. Sibling cells
+**Process — "the pinned WASM engine no-ops `callActivity`."** `app/deliveryGraphCompiler.ts:47-51`
+(and again at 604-607) records the constraint verbatim: `callActivity` is "a no-op on the pinned WASM
+engine (the child is never instantiated)", so the compiler — and every hand-written process —
+**inlines** the subprocess body instead of referencing it. The consequence is that the atomic
+*"agent-implement cell"* (`implement-task (senior:*) → "escalated?" gateway → record-escalation →
+user-task → SLA boundary → answer gateway`) exists as **two hand-authored copies** — `feature.bpmn` and
+the multi-instance `implement` subprocess in `plan-fanout.bpmn` — plus a **third generator** in the
+compiler that re-emits it once per graph node. Sibling cells
 (readiness-poll, human-escalation) duplicate the same way. **No `callActivity` exists in any diagram**
 because it did nothing. **Unlocked by #416** (engine-wasm 0.4.0 → **0.7.2**). engine-core executes
 `callActivity` by inline-expanding the called process at deploy (`engine-core/src/model.rs:1217/1255`).
@@ -96,10 +107,17 @@ a copy:
 - A `delivery_units` table is the single source of truth for "a unit of work." Feature = a 1-node
   unit; Epic = an N-node waved unit; DeliveryGraph = an arbitrary-DAG unit — a **shape**, not a
   separate table.
-- `feature_runs` / `plan_tasks` / `delivery_graph_runs` become **derived VIEWs / rows** over
-  `delivery_units` (using the nano-ide#424 VIEW capability), not independent tables.
+- `feature_runs` / `plans` + `plan_tasks` / `delivery_graph_runs` become **derived VIEWs / rows** over
+  `delivery_units` (using the nano-ide#424 VIEW capability), not independent tables. The epic case
+  covers **both** levels: the `plans` aggregate row (process key, status, title, lifecycle) becomes a
+  row/VIEW over `delivery_units`, and each `plan_tasks` slice becomes a node under it.
 - The three `instanceTracking` bindings and `senior:*` dispatch doors collapse toward one, keyed on
   the delivery unit.
+- **Identity.** `delivery_units` carries a stable `unit_id` plus `(unit_id, node_id)` for the N-node
+  cases. The legacy keys are not interchangeable — a feature run and an active epic may share one
+  `<owner>/<repo>#<N>` key (`app/feature.ts`), while delivery graphs key on a caller idempotency key or
+  content digest (`app/deliveryGraphRun.ts` `computeRunKey`) — so S2's compatibility VIEWs map each
+  legacy key onto the new identity, ensuring unrelated runs are never merged onto one row.
 
 ### 2. Process encoding — shared cells composed by `callActivity`
 
@@ -114,7 +132,11 @@ a copy:
 
 The three bespoke status unions collapse into **one derived union** via ADR 0065's `defineReadModel`,
 so a change to lifecycle semantics is made once and derived everywhere, not re-declared per
-representation.
+representation. These unions are **not** identical today — features use
+`running`/`escalated`/`awaiting_operator`/…, plans use `planning`/`dispatched`/`done`, and graphs use
+`running`/`done` with a reserved `awaiting-approval` (`app/feature.ts`, `app/plan.ts`,
+`app/deliveryGraphRun.ts`) — so S1 owns defining the canonical state set, the per-shape mapping and
+precedence, and the write/`instanceTracking` behavior, not merely projecting an existing value.
 
 ### 4. Preserve — the static-vs-adaptive execution axis (do NOT bundle it)
 
@@ -131,8 +153,13 @@ their topology is produced. Unifying that axis is explicitly out of scope here.
 - **Renderability + executability both improve.** One implement-cell process is one thing to keep
   deploy-valid and lay out, instead of four hand-maintained copies that can silently diverge (a graph
   can render and still fail deploy — the copies are exactly where that divergence hides).
-- **Migration is incremental and reversible.** The VIEWs preserve every current read shape while the
-  physical model consolidates underneath; each slice below is independently shippable and revertible.
+- **Migration is incremental and forward-only.** The VIEWs preserve every current read shape while the
+  physical model consolidates underneath, and each slice below is independently shippable. Consistent
+  with this repo's forward-only, expand-and-contract migration contract (see
+  `070_drop_plan_projection_columns.sql`, which treats dropping projection columns as a later contract
+  phase), a slice is **not** reverted by reverting the app: rolling back a writer-repointing or
+  table-to-VIEW slice requires a **separately designed recovery/compatibility migration**, not a plain
+  revert.
 - **Cost.** A backfill/migration for `delivery_units`; a one-time extraction of the shared cells; and
   the process slices are sequenced behind the (now-live) engine-wasm unlock. No behaviour change is
   intended — this is a representation consolidation, guarded by parity tests against the existing VIEWs
@@ -145,12 +172,20 @@ Each slice is independently shippable; the process slices (S4/S5) are sequenced 
 
 - **S0 · ADR** — this record.
 - **S1 · status lifecycle** — one derived status union via ADR 0065 `defineReadModel`, replacing the
-  three bespoke unions (subsumes #305's projection consolidation for escalations).
-- **S2 · `delivery_units` table** — the aggregate; backfill `feature_runs` / `plan_tasks` /
-  `delivery_graph_runs` as VIEWs/rows over it, guarded by read-model parity tests.
+  three bespoke unions. This **depends on and overlaps** #305 (consolidate escalations on native
+  `user_tasks`) but does not subsume it: #305 additionally retires the `feature_runs` escalation
+  columns and the bespoke completion doors and updates the escalation UI/forms, which remain #305's
+  scope (an adjacent sub-step of S1/S3 per #464).
+- **S2 · `delivery_units` table** — the aggregate. Because current code still **writes**
+  `feature_runs` / `plans` / `plan_tasks` / `delivery_graph_runs` directly (`app/feature.ts`,
+  `app/plan.ts`, `app/deliveryGraphRun.ts`) and a SQLite VIEW is read-only, follow expand/contract
+  **order**: (a) add `delivery_units` and dual-write it alongside the legacy tables; (b) backfill
+  existing/legacy rows; (c) repoint reads to VIEWs/rows derived from `delivery_units`, guarded by
+  read-model parity tests; (d) only then, in a later contract phase, retire the legacy write paths.
 - **S3 · collapse doors** — unify the three `instanceTracking` bindings + `senior:*` dispatch doors.
-- **S4 · `implement-cell.bpmn`** — extract the atomic cell; `feature.bpmn` + the `plan-fanout` MI body
-  compose it via `callActivity`.
+- **S4 · shared cells** — extract the atomic `implement-cell.bpmn` **and its sibling wait-gate and
+  human-escalation cells** (Decision §2) into standalone processes; `feature.bpmn` + the `plan-fanout`
+  MI body compose them via `callActivity`.
 - **S5 · compiler emits calls** — `deliveryGraphCompiler` references shared cells instead of inlining
   per-node copies.
 
