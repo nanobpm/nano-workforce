@@ -1,7 +1,7 @@
 // Tests for the POST /app/api/actions/acknowledge-epic operation `acknowledgeEpic` (issue #298).
 // The nwf UI's "Dismiss" affordance for a RESOLVED epic — landed (delivery=landed) or
 // resolved-not-landed (delivery=null); only still-`converging` epics are rejected. It stamps
-// `acknowledged_at`, which the `plan_read_model` VIEW (066, issue #439) derives into `list_bucket` =
+// `acknowledged_at`, which the `plan_read_model` VIEW (074, issue #439) derives into `list_bucket` =
 // 'history' and `ack_open` = 0, dropping the resolved epic from Active into History. Unlike
 // acknowledge-blocked it completes NO user task (a resolved epic is not parked). The epic twin of
 // acknowledge-done.

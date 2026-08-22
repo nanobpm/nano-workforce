@@ -1,6 +1,6 @@
 // Tests for the POST /app/api/actions/acknowledge-done operation `acknowledgeDone` (issue #254 §5).
 // The nwf UI's "tick off" affordance for a TERMINAL feature run: it stamps `acknowledged_at`, which
-// the `feature_read_model` VIEW (065, issue #439) derives into `list_bucket` = 'history', dropping the
+// the `feature_read_model` VIEW (073, issue #439) derives into `list_bucket` = 'history', dropping the
 // run from Active into History. Unlike acknowledgeBlocked it completes NO user task (a terminal run is
 // not parked). Since `list_bucket` is now a VIEW over `status`/`acknowledged_at` (no stored column),
 // these tests assert the operation's real write — the `acknowledged_at` stamp — and cross-check the

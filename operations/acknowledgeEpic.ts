@@ -6,7 +6,7 @@
 // is NOT parked at a user task, so this op completes no user task and touches no engine/ledger: it
 // simply stamps `acknowledged_at` on the `plans` row.
 //
-// `list_bucket`/`ack_open` are DERIVED by the `plan_read_model` VIEW (066, issue #439) from
+// `list_bucket`/`ack_open` are DERIVED by the `plan_read_model` VIEW (074, issue #439) from
 // `status` + `acknowledged_at` + the derived `plan_delivery` signal — a landed, now-acknowledged epic
 // reads `list_bucket` = 'history' and `ack_open` = 0 — so this op NEVER writes a derived projection.
 // Keyed on the row's `plan_key`. Idempotent-safe: re-acknowledging re-stamps the timestamp and keeps

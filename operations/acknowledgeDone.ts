@@ -6,7 +6,7 @@
 // simply stamps `acknowledged_at` on the row via the feature_runs gateway. It rejects (409) a run that
 // is not yet truly terminal, so it can never pre-seed the tick-off on a still-live run.
 //
-// The `list_bucket` partition is DERIVED by the `feature_read_model` VIEW (065, issue #439) from
+// The `list_bucket` partition is DERIVED by the `feature_read_model` VIEW (073, issue #439) from
 // `status` + `acknowledged_at` — a terminal row with `acknowledged_at` set reads as 'history' — so
 // this op NEVER writes `list_bucket` (or any projection): stamping `acknowledged_at` is the whole
 // contract. Keyed on the row's `feature_key`. Idempotent-safe: re-acknowledging simply re-stamps the
