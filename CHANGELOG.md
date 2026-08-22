@@ -1,3 +1,10 @@
+# [0.123.0](https://github.com/nanobpm/nano-workforce/compare/v0.122.0...v0.123.0) (2026-08-22)
+
+
+### Features
+
+* derive feature/epic display projections as SQL VIEWs ([#439](https://github.com/nanobpm/nano-workforce/issues/439)) ([#448](https://github.com/nanobpm/nano-workforce/issues/448)) ([5c79718](https://github.com/nanobpm/nano-workforce/commit/5c797184e65250afea1224bb6227d4cb7687ce8b)), closes [#412](https://github.com/nanobpm/nano-workforce/issues/412) [#412](https://github.com/nanobpm/nano-workforce/issues/412) [#412](https://github.com/nanobpm/nano-workforce/issues/412)
+
 # [0.122.0](https://github.com/nanobpm/nano-workforce/compare/v0.121.0...v0.122.0) (2026-08-22)
 
 
