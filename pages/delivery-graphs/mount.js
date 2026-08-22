@@ -1,29 +1,31 @@
-// pages/delivery-graphs/mount.js — the Delivery Graphs compose → preview → dispatch view (ADR 0005,
-// issue #441). The human front door for a delivery graph: author/paste a `DeliveryGraph` JSON,
-// PREVIEW it (a pure compile — nothing is dispatched) to SEE the rendered plan before approving it,
-// then DISPATCH it through the gated two-step.
+// pages/delivery-graphs/mount.js — the Delivery Graphs compose → preview → STAGE view (ADR 0005,
+// issues #441 + #460). The human front door for a delivery graph: author/paste a `DeliveryGraph` JSON
+// and PREVIEW it — a compile that renders the plan (mermaid `diagram`, the `humanNodes[]` stop-points,
+// the `sideEffects[]` a dispatch will perform) AND stages it as a proposal for dispatch.
+//
+// Dispatch is deliberately NOT here (issue #460): it is an OPERATOR action on the **Staged proposals**
+// grid on the same page (the Dispatch row-action, which posts the proposal's `digest`). Removing the
+// dispatch affordance from every agent-reachable seam closes the self-approval hole the old replayable
+// approval token (a content digest handed back to the same caller) left open — this view only ever
+// stages, never launches.
 //
 // A self-contained, dependency-free renderer in the SAME shape as the demand×supply board
 // (pages/board/mount.js) and the agent cockpit: the SAME module mounts embedded in the console (App
 // View) and standalone on a phone — only the host element and injected endpoint config differ. The app
-// has no browser build step, so this consumes the preview/dispatch doors straight off the wire.
+// has no browser build step, so this consumes the preview door straight off the wire.
 //
-// It is a THIN UI over the EXISTING doors — there is no parallel compile/dispatch path:
-//   • PREVIEW  → POST previewUrl  (previewDeliveryGraph)  — pure; renders the mermaid `diagram`, the
-//                `humanNodes[]` stop-points, the `sideEffects[]` the operator is asked to approve, and
-//                path-qualified validation `errors[]` inline for a 400 (the fix-and-recompile loop).
-//   • DISPATCH → POST dispatchUrl (dispatchDeliveryGraph → startDeliveryGraph) — the gated two-step:
-//                a side-effecting graph parks `awaiting-approval` (400 + `approvalToken`); the view
-//                shows the side-effect summary and, on confirm, re-submits with `approve` → 202
-//                running. A graph with only `wait`/`human` nodes dispatches without approval.
+// It is a THIN UI over the EXISTING door — there is no parallel compile/stage path:
+//   • PREVIEW & STAGE → POST previewUrl (previewDeliveryGraph) — renders the mermaid `diagram`, the
+//     `humanNodes[]` stop-points, the `sideEffects[]` a dispatch will perform, and path-qualified
+//     validation `errors[]` inline for a 400 (the fix-and-recompile loop); on success the compiled
+//     graph is STAGED as a proposal (an operator dispatches it from the Staged proposals grid below).
 
 const DEFAULT_PREVIEW_URL = "app/api/actions/delivery-graph/preview";
-const DEFAULT_DISPATCH_URL = "app/api/actions/delivery-graph/dispatch";
 
-// A bounded timeout for every door request. Without it a hung preview/dispatch endpoint leaves the
-// fetch promise pending forever, so the busy() lock never clears and the UI is stranded (buttons
-// disabled, status stuck) with no way to retry. On timeout the AbortController rejects the fetch,
-// which surfaces as an error banner and re-enables the controls via the callers' finally blocks.
+// A bounded timeout for every door request. Without it a hung preview endpoint leaves the fetch
+// promise pending forever, so the busy() lock never clears and the UI is stranded (buttons disabled,
+// status stuck) with no way to retry. On timeout the AbortController rejects the fetch, which surfaces
+// as an error banner and re-enables the controls via the callers' finally blocks.
 const REQUEST_TIMEOUT_MS = 30000;
 
 const EXAMPLE_GRAPH = JSON.stringify(
@@ -89,11 +91,11 @@ function renderHumanNodes(humanNodes) {
   </section>`;
 }
 
-/** Render the side-effects table — WHAT the graph will do (what approval authorises, Decision 7). */
+/** Render the side-effects table — WHAT the graph will do once an operator dispatches it (Decision 7). */
 function renderSideEffects(sideEffects) {
   const rows = Array.isArray(sideEffects) ? sideEffects : [];
   if (rows.length === 0) {
-    return '<section class="card"><h2>Side effects <span class="count">0</span></h2><p class="ok">No side effects — this graph has only <code>wait</code>/<code>human</code> nodes, so it dispatches without approval.</p></section>';
+    return '<section class="card"><h2>Side effects <span class="count">0</span></h2><p class="ok">No side effects — this graph has only <code>wait</code>/<code>human</code> nodes.</p></section>';
   }
   const body = rows
     .map(
@@ -107,7 +109,7 @@ function renderSideEffects(sideEffects) {
     .join("");
   return `<section class="card card-warn">
     <h2>Side effects <span class="count">${rows.length}</span></h2>
-    <p class="warn">These actions the graph WILL perform once dispatched — approving the preview authorises them.</p>
+    <p class="warn">These actions the graph WILL perform once an operator dispatches it — dispatching authorises them.</p>
     <table class="grid"><thead><tr><th>Node</th><th>Kind</th><th>Effect</th><th>Dedupe key</th></tr></thead><tbody>${body}</tbody></table>
   </section>`;
 }
@@ -123,15 +125,17 @@ function renderErrors(message, errors) {
   </section>`;
 }
 
-/** Render the successful preview: summary chips, the human/side-effect tables, and the mermaid source. */
+/** Render the successful preview: the staged banner, summary chips, the human/side-effect tables, and
+ * the mermaid source. Dispatch is NOT offered here — the operator dispatches the staged proposal from
+ * the Staged proposals grid below (issue #460). */
 function renderPreview(result) {
   const title = result.title ? `<code>${esc(result.title)}</code>` : '<span class="muted">(unnamed)</span>';
   const gate = result.sideEffecting
-    ? '<span class="pill pill-connector">requires approval</span>'
-    : '<span class="pill pill-wait">no approval needed</span>';
-  const summary = `<section class="card">
-    <h2>Preview ${gate}</h2>
-    <p class="muted">Pure compile — nothing was dispatched. Review the plan below, then Dispatch it.</p>
+    ? '<span class="pill pill-connector">side-effecting</span>'
+    : '<span class="pill pill-wait">no side effects</span>';
+  const summary = `<section class="card card-ok">
+    <h2>Staged ${gate}</h2>
+    <p class="ok">Compiled and staged as a proposal. Dispatch is an operator action — review it in the <b>Staged proposals</b> grid below and click <b>Dispatch</b> on the one you approve.</p>
     <div class="chips">
       <span class="chip">Graph ${title}</span>
       <span class="chip">Nodes <b>${esc(result.nodeCount)}</b></span>
@@ -148,26 +152,10 @@ function renderPreview(result) {
   return summary + renderSideEffects(result.sideEffects) + renderHumanNodes(result.humanNodes) + diagram;
 }
 
-/** Render the dispatch outcome banner (running / already-running). */
-function renderDispatched(result) {
-  const already = result.alreadyRunning
-    ? ' <span class="muted">(re-dispatch short-circuited onto the already-running run)</span>'
-    : "";
-  return `<section class="card card-ok">
-    <h2>Dispatched — ${esc(result.status || "running")}${already}</h2>
-    <p class="ok">Watch it advance in the in-flight grid below.</p>
-    <div class="chips">
-      ${result.runKey ? `<span class="chip">Run <code>${esc(result.runKey)}</code></span>` : ""}
-      ${result.processInstanceKey ? `<span class="chip">Instance <code>${esc(result.processInstanceKey)}</code></span>` : ""}
-      ${result.processDefinitionId ? `<span class="chip">Definition <code>${esc(result.processDefinitionId)}</code></span>` : ""}
-    </div>
-  </section>`;
-}
-
 /**
- * Mount the compose → preview → dispatch view into `host`.
+ * Mount the compose → preview → stage view into `host`.
  * @param {Element|null} host — the element to render into (or null → look up #delivery-graphs-root).
- * @param {{previewUrl?:string, dispatchUrl?:string, hookSecret?:string}} [config]
+ * @param {{previewUrl?:string, hookSecret?:string}} [config]
  */
 export function mountDeliveryGraphs(host, config = {}) {
   const isElement = host != null && host.nodeType === 1 && typeof host.innerHTML === "string";
@@ -175,7 +163,6 @@ export function mountDeliveryGraphs(host, config = {}) {
   if (!root) return () => {};
 
   const previewUrl = config.previewUrl ?? DEFAULT_PREVIEW_URL;
-  const dispatchUrl = config.dispatchUrl ?? DEFAULT_DISPATCH_URL;
   const headers = () => ({
     "content-type": "application/json",
     ...(config.hookSecret ? { "x-hook-secret": config.hookSecret } : {}),
@@ -188,25 +175,19 @@ export function mountDeliveryGraphs(host, config = {}) {
       <h2>1 · Compose</h2>
       <p class="muted">Paste or author a <code>DeliveryGraph</code> JSON (nodes/edges over the closed <code>agent</code>/<code>wait</code>/<code>human</code>/<code>connector</code> vocabulary).</p>
       <textarea id="dg-json" class="json" spellcheck="false" placeholder='{ "name": "…", "nodes": [ … ], "edges": [ … ] }'></textarea>
-      <label class="idem"><span>Idempotency key <span class="muted">(optional — a re-dispatch with the same key won't double-launch)</span></span><input id="dg-idem" class="input" type="text" placeholder="(optional)" /></label>
       <div class="actions">
-        <button id="dg-preview" class="btn btn-primary" type="button">Preview</button>
-        <button id="dg-dispatch" class="btn" type="button">Dispatch</button>
+        <button id="dg-preview" class="btn btn-primary" type="button">Preview &amp; stage</button>
         <button id="dg-example" class="btn btn-ghost" type="button">Load example</button>
         <span id="dg-status" class="status"></span>
       </div>
     </section>
-    <div id="dg-approval"></div>
     <div id="dg-output"></div>
   </div>`;
 
   const jsonEl = root.querySelector("#dg-json");
-  const idemEl = root.querySelector("#dg-idem");
   const statusEl = root.querySelector("#dg-status");
   const outputEl = root.querySelector("#dg-output");
-  const approvalEl = root.querySelector("#dg-approval");
   const previewBtn = root.querySelector("#dg-preview");
-  const dispatchBtn = root.querySelector("#dg-dispatch");
   const exampleBtn = root.querySelector("#dg-example");
 
   function setStatus(text, tone) {
@@ -216,17 +197,6 @@ export function mountDeliveryGraphs(host, config = {}) {
 
   function busy(on) {
     previewBtn.disabled = on;
-    dispatchBtn.disabled = on;
-  }
-
-  // While a side-effecting graph is parked awaiting approval, LOCK the compose inputs so the operator
-  // cannot edit `graphJson`/idempotency key out from under the token they are about to approve — the
-  // approval must bind to the exact graph that was previewed and parked (the server derives the
-  // approval digest from whatever body it receives, so an edited textarea would silently approve a
-  // DIFFERENT graph). `doApprove` dispatches the FROZEN graph captured at park time, not the live field.
-  function lockCompose(on) {
-    jsonEl.readOnly = on;
-    idemEl.readOnly = on;
     exampleBtn.disabled = on;
   }
 
@@ -258,25 +228,18 @@ export function mountDeliveryGraphs(host, config = {}) {
     return jsonEl.value;
   }
 
-  function idempotencyKey() {
-    const v = idemEl.value.trim();
-    return v === "" ? undefined : v;
-  }
-
   async function doPreview() {
-    approvalEl.innerHTML = "";
-    lockCompose(false);
     if (graphJson().trim() === "") {
       setStatus("Paste a delivery-graph JSON to preview.", "err");
       return;
     }
     busy(true);
-    setStatus("Compiling preview…");
+    setStatus("Compiling & staging…");
     try {
       const { status, body } = await post(previewUrl, { graphJson: graphJson() });
       if (status === 200 && body.ok) {
         outputEl.innerHTML = renderPreview(body);
-        setStatus("\u2713 Compiled — nothing was dispatched.", "ok");
+        setStatus("\u2713 Staged — dispatch it from the Staged proposals grid below.", "ok");
       } else {
         outputEl.innerHTML = renderErrors(body.error, body.errors);
         setStatus("Preview failed — fix the errors and re-preview.", "err");
@@ -289,74 +252,11 @@ export function mountDeliveryGraphs(host, config = {}) {
     }
   }
 
-  /** Show the approval confirmation panel for a side-effecting graph parked awaiting-approval. The
-   * `frozen` graph/idempotency key are the EXACT values that produced this park — on confirm we
-   * dispatch those, never the (now-locked) live fields, so approval binds to the previewed graph. */
-  function showApproval(parked, frozen) {
-    approvalEl.innerHTML = `<section class="card card-warn">
-      <h2>Approval required</h2>
-      <p class="warn">${esc(parked.message || "This graph performs side effects and needs explicit approval to dispatch.")}</p>
-      <p class="muted">Approval token <code>${esc(parked.approvalToken || parked.digest || "")}</code>. Approving confirms the side effects rendered in the preview above.</p>
-      <div class="actions">
-        <button id="dg-approve" class="btn btn-primary" type="button">Approve &amp; dispatch</button>
-        <button id="dg-cancel" class="btn btn-ghost" type="button">Cancel</button>
-      </div>
-    </section>`;
-    approvalEl.querySelector("#dg-cancel").addEventListener("click", () => {
-      approvalEl.innerHTML = "";
-      lockCompose(false);
-      setStatus("Dispatch cancelled — the graph was not approved.", "");
-    });
-    approvalEl.querySelector("#dg-approve").addEventListener("click", () => doDispatch(true, frozen));
-  }
-
-  async function doDispatch(approve, frozen) {
-    // On approve, dispatch the graph FROZEN at park time; otherwise read the live compose fields.
-    const graph = frozen ? frozen.graphJson : graphJson();
-    if (graph.trim() === "") {
-      setStatus("Paste a delivery-graph JSON to dispatch.", "err");
-      return;
-    }
-    busy(true);
-    setStatus(approve ? "Approving & dispatching…" : "Dispatching…");
-    try {
-      const payload = { graphJson: graph, approve: approve === true };
-      const idem = frozen ? frozen.idempotencyKey : idempotencyKey();
-      if (idem !== undefined) payload.idempotencyKey = idem;
-      const { status, body } = await post(dispatchUrl, payload);
-      if (status === 202 && body.ok) {
-        approvalEl.innerHTML = "";
-        lockCompose(false);
-        outputEl.innerHTML = renderDispatched(body);
-        setStatus("\u2713 Dispatched.", "ok");
-      } else if (status === 400 && body.status === "awaiting-approval") {
-        // The gated two-step: a side-effecting graph parked at approval. Freeze the exact graph +
-        // idempotency key that parked and lock the compose inputs, then surface the confirm panel; the
-        // operator's confirm re-submits THAT frozen graph with approve=true → 202 running.
-        lockCompose(true);
-        showApproval(body, { graphJson: graph, idempotencyKey: idem });
-        setStatus("Approval required before this side-effecting graph can dispatch.", "warn");
-      } else {
-        approvalEl.innerHTML = "";
-        lockCompose(false);
-        outputEl.innerHTML = renderErrors(body.error, body.errors);
-        setStatus("Dispatch refused — fix the errors and try again.", "err");
-      }
-    } catch (err) {
-      outputEl.innerHTML = renderErrors(err && err.message ? err.message : String(err), []);
-      setStatus("Dispatch request failed.", "err");
-    } finally {
-      busy(false);
-    }
-  }
-
   previewBtn.addEventListener("click", doPreview);
-  dispatchBtn.addEventListener("click", () => doDispatch(false));
   exampleBtn.addEventListener("click", () => {
     jsonEl.value = EXAMPLE_GRAPH;
-    approvalEl.innerHTML = "";
     outputEl.innerHTML = "";
-    setStatus("Example loaded — Preview it.", "");
+    setStatus("Example loaded — Preview & stage it.", "");
   });
 
   return () => {

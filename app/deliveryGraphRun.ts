@@ -1,23 +1,27 @@
-// app/deliveryGraphRun.ts — the `startDeliveryGraph` run AGGREGATE (ADR 0005 Decision 7, slice S5).
+// app/deliveryGraphRun.ts — the delivery-graph run AGGREGATE (ADR 0005 Decision 7).
 //
-// The dispatch door (`operations/startDeliveryGraph.ts`) turns an agent-authored `DeliveryGraph` into
-// a RUNNING engine-native process (via the S4 runner) — but because these graphs merge PRs and publish
-// packages, dispatch is GATED on an approval of the rendered preview and must be idempotent. This
-// module is the durable aggregate that makes both properties true and gives the cockpit a row to show
-// WHERE a run is parked:
+// The cockpit dispatch action (`app/deliveryGraphDispatch.ts`, invoked from `dispatchDeliveryGraph`)
+// turns a staged, agent-authored `DeliveryGraph` into a RUNNING engine-native process (via the S4
+// runner). Because these graphs merge PRs and publish packages, dispatch must be idempotent and
+// at-most-once. This module is the durable aggregate that makes that true and gives the cockpit a row
+// to show WHERE a run is:
 //
 //   • the idempotency fence — a run is keyed by `run_key` (a caller `idempotencyKey`, else the graph's
-//     content digest). A re-POST collapses onto the same row, so an in-flight run short-circuits
+//     content digest). A re-dispatch collapses onto the same row, so an in-flight run short-circuits
 //     instead of double-launching (mirrors `plans`' `alreadyRunning`).
-//   • the approval token — `digest` is the content-address a side-effecting graph must present as its
-//     `approvalToken` to dispatch. Persisted so a second POST re-derives + re-checks it.
+//   • the content digest — `digest` is the content-address of the compiled definition, persisted so
+//     the cockpit and reconcilers can relate a run to the proposal it came from.
 //   • the derived parked-node phase — `phase`/`phase_node_id` is the display-only "where is it parked"
 //     projection `pollDeliveryGraphPhase` recomputes from engine truth (the running instance's open
 //     user tasks), generalising the `epic_phase` derived-phase machinery to a DYNAMIC compiled process.
 //
-// The pure helpers here (`computeRunKey`, `isDeliveryGraphApproved`, `buildHumanLabels`,
-// `deriveDeliveryPhase`) are engine/DB-free so they unit-test in isolation; the door and the poller
-// supply the I/O.
+// The pure helpers here (`computeRunKey`, `buildHumanLabels`, `deriveDeliveryPhase`) are engine/DB-free
+// so they unit-test in isolation; the dispatch action and the poller supply the I/O.
+//
+// NOTE (issue #460): the `awaiting-approval` status remains a RESERVED member of the lifecycle union
+// (like `abandoned`) but is no longer produced — dispatch is now an operator action in the cockpit, so
+// there is no agent-facing approval gate to park a run at. The old replayable `approvalToken` and the
+// approval-park write were removed with the agent `start` door.
 
 import type { DataLayer, ProcessInstanceState } from "@nanobpm/urban";
 import type { CompileDeliveryGraphResult } from "../nano-generated/api-io.d.ts";
@@ -26,7 +30,7 @@ import { DELIVERY_HUMAN_ELEMENT, isDeliveryHumanElement } from "./deliveryHuman.
 
 const now = () => new Date().toISOString();
 
-/** One `startDeliveryGraph` run — the durable row. `side_effecting` is a SQLite boolean (0/1). */
+/** One delivery-graph run — the durable row. `side_effecting` is a SQLite boolean (0/1). */
 export interface DeliveryGraphRun {
   run_key: string;
   process_key: string | null;
@@ -45,8 +49,9 @@ export interface DeliveryGraphRun {
   updated_at: string;
 }
 
-/** The run lifecycle. `awaiting-approval` = a side-effecting graph parked at the approval gate (no
- * instance started); `running` = dispatched to the engine; `done`/`failed`/`abandoned` = terminal. */
+/** The run lifecycle. `awaiting-approval` is RESERVED but no longer produced (issue #460 moved dispatch
+ * to an operator action, so runs are only ever created at launch) — kept in the union to preserve the
+ * durable enum. `running` = dispatched to the engine; `done`/`failed`/`abandoned` = terminal. */
 export const DELIVERY_GRAPH_RUN_STATUSES = [
   "awaiting-approval",
   "running",
@@ -142,72 +147,12 @@ export async function claimRunForLaunch(
   return res.changed === 1;
 }
 
-/** Persist a PARKED (non-launch) run row — the approval-gate write for an unapproved side-effecting
- * graph — WITHOUT ever clobbering a concurrently-launched `running` claim. Two concurrent submits of
- * one graph (same `run_key`) can race an APPROVED launch (which inserts/flips a `running` claim via
- * `claimRunForLaunch`) against an UNAPPROVED park: a blind insert-or-update would let the park
- * overwrite that `running` claim back to `awaiting-approval` and null its `process_key`, breaking the
- * at-most-once dispatch fence and letting a later re-submit double-launch the graph's side effects.
- * So mirror the launch fence exactly — a first write is the `run_key` PK insert; on a unique
- * collision (a concurrent submit already wrote the row) OR when a row already exists, re-apply via a
- * single atomic guarded UPDATE `… WHERE status <> 'running'`. One statement, so the check-and-write
- * is atomic even across the delegate's `await` points: a racing `running` claim matches zero rows and
- * survives untouched, while a still-parked or terminal row is idempotently (re-)parked. */
-export async function parkRunFencedAgainstLaunch(
-  data: DataLayer,
-  existing: boolean,
-  row: DeliveryGraphRun,
-): Promise<void> {
-  if (!existing) {
-    try {
-      await deliveryGraphRuns(data).insert(row);
-      return;
-    } catch (err) {
-      if (!isUniqueConstraintFence(err)) throw err;
-    }
-  }
-  await data
-    .open()
-    .exec(
-      `UPDATE "delivery_graph_runs" SET "process_key" = ?, "process_definition_id" = ?, "digest" = ?, "status" = ?, "side_effecting" = ?, "node_count" = ?, "human_node_count" = ?, "side_effect_count" = ?, "title" = ?, "phase" = ?, "phase_node_id" = ?, "human_labels" = ?, "updated_at" = ? WHERE "run_key" = ? AND "status" <> 'running'`,
-      [
-        row.process_key,
-        row.process_definition_id,
-        row.digest,
-        row.status,
-        row.side_effecting,
-        row.node_count,
-        row.human_node_count,
-        row.side_effect_count,
-        row.title,
-        row.phase,
-        row.phase_node_id,
-        row.human_labels,
-        row.updated_at,
-        row.run_key,
-      ],
-    );
-}
-
 /** The idempotency key for a submitted graph: a caller-supplied `idempotencyKey` (trimmed) when
- * present and non-blank, else the graph's content `digest`. So two POSTs of the SAME graph (no
+ * present and non-blank, else the graph's content `digest`. So two dispatches of the SAME graph (no
  * explicit key) collapse onto one run, and a caller can force a fresh run with an explicit key. */
 export function computeRunKey(idempotencyKey: string | undefined | null, digest: string): string {
   const trimmed = typeof idempotencyKey === "string" ? idempotencyKey.trim() : "";
   return trimmed || digest;
-}
-
-/** The approval decision (Decision 7). A graph with NO side-effecting nodes (only `wait`/`human`)
- * needs no approval and dispatches straight away. A SIDE-EFFECTING graph dispatches only when the
- * caller presents `approvalToken == digest` — an approval OF the rendered preview, content-addressed
- * so it cannot be replayed against a different graph. */
-export function isDeliveryGraphApproved(
-  sideEffecting: boolean,
-  approvalToken: string | undefined | null,
-  digest: string,
-): boolean {
-  if (!sideEffecting) return true;
-  return typeof approvalToken === "string" && approvalToken.trim() === digest;
 }
 
 /** The compiled human-task element id for a node's compiled BPMN element (`delivery-human-task__n3`) —

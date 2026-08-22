@@ -407,9 +407,12 @@ PR #202 → a human does a manual OTP publish → PR #303 consumes the just-publ
 lets you compose exactly that as **data** and hand it to a generic runner.
 
 You author the graph as **JSON — never BPMN or code** (Decision 1: the agent must never
-author the executable artifact; the closed node vocabulary is the trust boundary). Two
-doors take that JSON: a **pure `compile`** door you hammer while drafting, and a **gated
-`start`** door that dispatches it.
+author the executable artifact; the closed node vocabulary is the trust boundary). Your
+surface ends at **propose → compile → stage**: a single `compile` door validates the JSON,
+renders a preview, and — when valid — **stages the compiled graph as a proposal** for a
+human. **Dispatch is an operator action in the cockpit, not an agent endpoint** (issue #460):
+there is deliberately no `start` door on the agent surface, so there is nothing an agent can
+call — or replay — to launch a run. A human previews the staged proposal and dispatches it.
 
 ### 9.1 The `DeliveryGraph` shape
 
@@ -445,22 +448,23 @@ A **typed fact** (`emits[]` entry) is `{ name, type, description? }` where
 downstream as `<nodeId>.<name>`. A "click done" human node or a pass-through node declares
 no facts.
 
-### 9.2 The agent loop: draft → compile → fix → approve → start
+### 9.2 The agent loop: draft → compile → stage → ask an operator to dispatch
 
 ```
 GET __BASE__/agent           # ← you are reading it; learn the vocabulary + endpoints
    └─ draft a DeliveryGraph JSON
-        └─ POST __BASE__/actions/compile-delivery-graph   # PURE — validate + preview, repeat freely
+        └─ POST __BASE__/actions/compile-delivery-graph   # validate + preview + STAGE
              ├─ 400 { ok:false, errors:[{path,message}] } → fix the exact offending input, recompile
-             └─ 200 { ok:true, diagram, bpmn, resolved, humanNodes, sideEffects } → review the preview
-                  └─ POST __BASE__/actions/start/delivery-graph   # GATED dispatch
-                       ├─ 400 awaiting-approval (has side effects) → re-POST with approvalToken
-                       └─ 202 running → track it like a plan (§5)
+             └─ 200 { status:"ready", message, digest, preview, reviewUrl }
+                  └─ ask the operator to preview + dispatch it in the cockpit (there is no start door)
 ```
 
-**Compile (pure preview — never deploys).** The fast inner loop. It runs the semantic
-validator and the deterministic compiler and returns a preview with **zero side effects**,
-so call it as often as you like:
+**Compile (validate + preview + stage).** The compile door runs the semantic validator and
+the deterministic compiler and, on success, **stages** the compiled graph as a proposal a
+human can dispatch — it does **not** deploy or run anything. Recompiling a graph you are
+still drafting is safe: a re-compile of the same graph is idempotent, and a changed graph
+with the same `name` supersedes the prior staged proposal, so the cockpit shows exactly one
+live proposal per graph.
 
 ```bash
 curl -sS -X POST __BASE__/actions/compile-delivery-graph \
@@ -468,49 +472,37 @@ curl -sS -X POST __BASE__/actions/compile-delivery-graph \
   -d @graph.json | jq
 ```
 
-- `200 { ok:true, diagram, bpmn, resolved, humanNodes, sideEffects }` — `diagram` is a
-  mermaid `flowchart` of the resolved graph; `bpmn` is the compiled one-shot definition
-  (deterministic — same JSON → byte-identical XML, **not** deployed here); `resolved` is
-  the normalised graph; `humanNodes[]` are the stop-points where it waits for a person;
-  `sideEffects[]` are the `agent`/`connector` actions it **will** perform (what a human
-  approves).
+- `200 { status:"ready", message, digest, preview, reviewUrl }` — the graph compiled and is
+  **staged for operator review**. `digest` is the content-address that NAMES the proposal (so
+  you can tell the operator exactly which one to dispatch); `preview` is `{ diagram,
+  sideEffects, humanNodes }` — `diagram` is a mermaid `flowchart` of the resolved graph,
+  `humanNodes[]` are the stop-points where it waits for a person, and `sideEffects[]` are the
+  `agent`/`connector` actions it **will** perform once an operator dispatches it; `reviewUrl`
+  is a **navigational** cockpit deep-link (a pointer only — **not** a dispatch handle). The
+  response carries **no run key, no token, and no process-instance key**: nothing you can
+  replay to start a run. Your role ends here — hand the operator the `digest` (or `reviewUrl`)
+  and ask them to preview and dispatch it.
 - `400 { ok:false, errors:[{ path, message }] }` — every error path-qualified
   (`nodes[2].kind`, `edges[1].from`, …) for unknown kind, dangling edge, a cycle, or an
-  unresolvable `from` fact. Fix and recompile.
+  unresolvable `from` fact. Fix and recompile; nothing is staged.
 
-**Start (gated dispatch — the OUTER action).** `compile` and `start` are **separate**
-operations — there is deliberately **no `dryRun` flag** on start (Decision 5/7). The door
-re-validates, re-compiles, then launches the runner:
+**Dispatch (operator-only — NOT on the agent surface).** There is deliberately no agent
+`start` endpoint (Decision 5/7, issue #460). Dispatch is a human action: an operator opens
+the **Delivery Graphs** page in the cockpit, reviews the staged proposal's rendered preview
+(its diagram, the human stop-points, and the side effects a dispatch authorises), and clicks
+**Dispatch** on the one they approve. The operator clicking Dispatch **is** the approval — it
+is content-addressed to the exact digest they previewed, so it cannot be a replay of some
+other graph. Once dispatched, the graph deploys + runs engine-natively and registers as a run
+aggregate, so its current phase / parked node shows in the cockpit's **Active Delivery
+Graphs** grid (e.g. *"parked on human node: manual OTP publish"*). A `human` node parks on the
+**Tasks** inbox and is answered exactly as an escalation is (§3) — its completion emits any
+declared facts, which downstream edges bind.
 
-```bash
-# First submit — a graph with side effects is refused and PARKED for approval:
-curl -sS -X POST __BASE__/actions/start/delivery-graph \
-  -H 'content-type: application/json' \
-  -d '{ "graph": { … } }' | jq
-# → 400 { ok:false, status:"awaiting-approval", runKey, digest, sideEffecting:true,
-#          approvalToken:"<digest>", message:"graph has N side-effecting node(s); re-submit with approvalToken" }
-
-# Approve by re-submitting with the token (== the digest) you were handed:
-curl -sS -X POST __BASE__/actions/start/delivery-graph \
-  -H 'content-type: application/json' \
-  -d '{ "graph": { … }, "approvalToken": "<digest>" }' | jq
-# → 202 { ok:true, status:"running", runKey, digest, sideEffecting:true,
-#          alreadyRunning:false, processInstanceKey, processDefinitionId:"delivery-graph-<digest>" }
-```
-
-The request body is `{ graph, approvalToken?, idempotencyKey? }`:
-
-| field | type | meaning |
-|---|---|---|
-| `graph` | `DeliveryGraph` | the JSON graph. Required. |
-| `approvalToken` | string | the approval **of the rendered preview** (Decision 7). A graph with any **side-effecting** (`agent`/`connector`) node — one that merges PRs / publishes — dispatches **only** when you present its content-addressed token (the `digest`, returned on the first unapproved submit). A graph with **only** `wait`/`human` nodes needs none and dispatches straight away. |
-| `idempotencyKey` | string | optional. A re-POST with the same key (or, when omitted, the same graph — the default key is the content digest) does **not** double-launch: an in-flight run short-circuits with `alreadyRunning: true`. |
-
-The running graph registers as a run aggregate, so its current phase / parked node shows
-in the cockpit's **Active Delivery Graphs** grid (e.g. *"parked on human node: manual OTP
-publish"*). Track it like a plan (§5) via its `processInstanceKey`. A `human` node parks
-on the **Tasks** inbox and is answered exactly as an escalation is (§3) — its completion
-emits any declared facts, which downstream edges bind.
+> **Why the split?** Making the compile door the end of the agent surface closes a
+> self-approval hole: the old flow handed the same caller a content-addressed approval token
+> to re-submit with, so any holder of the API credential approved its own graph. Removing the
+> dispatch affordance from the agent surface entirely (capability by absence) means there is
+> nothing to replay — the human in the cockpit is the only actor who can launch side effects.
 
 ### 9.3 Worked example — the cross-repo human-in-the-loop release
 
@@ -557,11 +549,11 @@ humanNodes: [ { nodeId: "manual-publish", emits: [ { name: "publishedVersion", t
 sideEffects: [ { nodeId: "open-pr-c", kind: "agent", … }, { nodeId: "undraft-merge-b", kind: "agent", … } ]
 ```
 
-Two side-effecting `agent` nodes ⇒ `start` **requires approval**: the first submit returns
-`awaiting-approval` with an `approvalToken`; re-submit carrying it to dispatch. The graph
-then runs to `manual-publish`, parks it on the Tasks inbox (`now do X`), and — once a human
-(or agent) completes it with the `publishedVersion` — binds that fact into `open-pr-c` and
-carries on to `merge-c`.
+Two side-effecting `agent` nodes ⇒ the compile door **stages** the proposal and hands you a
+`digest` + `reviewUrl`; ask an operator to preview and **Dispatch** it in the cockpit. Once
+they do, the graph runs to `manual-publish`, parks it on the Tasks inbox (`now do X`), and —
+once a human (or agent) completes it with the `publishedVersion` — binds that fact into
+`open-pr-c` and carries on to `merge-c`.
 
 To swap the manual PR-#303 path for a **capability** edge instead of a raw `pr` watch, make
 the consumer a `wait` node with `kind: "capability"` (resolving *which published

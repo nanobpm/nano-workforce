@@ -174,6 +174,19 @@ at-least-once execution (mirroring the release workflow's `npx semantic-release`
 "skip already-published" discipline — `.github/workflows/release.yml`) so a
 resume cannot double-fire.
 
+> **Amendment (issue #460): dispatch is operator-only.** As implemented, the "approve → dispatch"
+> half of this decision is **not** an agent endpoint. The agent surface ends at **propose → compile →
+> stage**: the `POST /actions/compile-delivery-graph` door validates + previews the graph and, on
+> success, **stages** it as a proposal (a durable `delivery_graph_proposals` row, content-addressed by
+> `digest`, superseded per logical graph + TTL-bounded), returning only a preview + a navigational
+> `reviewUrl` — no run key, token, or PIK. A **human dispatches** the staged proposal from the cockpit's
+> Delivery Graphs page (`POST /actions/delivery-graph/dispatch` by `digest`, an operator route). The
+> originally-proposed agent `POST /actions/start/delivery-graph` door — where the same caller was handed
+> a content-addressed `approvalToken` to re-submit with — was **removed**: that "approval" was a
+> **replayable** digest returned to the approver, so any holder of the API credential self-approved.
+> Dispatch-by-absence (there is no agent start door) closes that hole categorically; the idempotent
+> at-most-once launch fence is retained on the operator dispatch path.
+
 ## Consequences
 
 - nwf gains a **generic delivery-graph runner** that composes its existing primitives; the motivating

@@ -1529,35 +1529,30 @@ components:
         graphJson:
           type: string
           description: The pasted delivery-graph JSON (a serialised `DeliveryGraph`), parsed server-side.
-    DeliveryGraphTextDispatch:
+    DeliveryGraphDispatchRequest:
       description: >-
-        The human-facing UI JSON-paste DISPATCH request (issue #386). Carries the pasted delivery-graph
-        as a raw JSON STRING plus the operator's explicit `approve` flag and optional idempotency key;
-        parsed server-side and delegated to the ONE gated, idempotent `startDeliveryGraph` contract —
-        there is NO parallel dispatch path.
+        The OPERATOR dispatch request (ADR 0005 Decision 7, issue #460). The cockpit's staged-proposals
+        grid posts the content `digest` of the proposal the operator picked; the door loads that staged
+        proposal and launches the retained runner for its previewed graph. Dispatch is an operator
+        action — this request carries NO graph and NO token (the graph is already staged; the operator's
+        click is the approval).
       type: object
       additionalProperties: false
       required:
-        - graphJson
+        - digest
       properties:
-        graphJson:
+        digest:
           type: string
-          description: The pasted delivery-graph JSON (a serialised `DeliveryGraph`), parsed server-side.
-        approve:
-          type: boolean
-          description: >-
-            The operator's approval OF the previewed graph. When true, the door derives the graph's
-            content digest and presents it as the `approvalToken`, so a side-effecting graph the
-            operator reviewed dispatches; when false/absent a side-effecting graph is parked at approval.
+          description: The staged proposal's content digest (its primary key) — the proposal to dispatch.
         idempotencyKey:
           type: string
           maxLength: 255
-          description: OPTIONAL idempotency key forwarded to `startDeliveryGraph`. Blank/whitespace is treated as absent.
+          description: OPTIONAL idempotency key. A re-dispatch with the same key (or, when omitted, the same digest) does not double-launch. Blank/whitespace is treated as absent.
     DeliveryGraphTextResult:
       description: >-
-        The UI JSON-paste ingress outcome (issue #386) — a single shape covering the PREVIEW summary,
-        the DISPATCH outcome, and any parse/validation error. `ok` discriminates success; a failure
-        carries a human `error` (and, for a compile failure, path-qualified `errors`).
+        The UI JSON-paste ingress outcome (issue #460) — a single shape covering the PREVIEW+STAGE
+        summary, the OPERATOR DISPATCH outcome, and any parse/validation error. `ok` discriminates
+        success; a failure carries a human `error` (and, for a compile failure, path-qualified `errors`).
       type: object
       additionalProperties: false
       required:
@@ -1565,7 +1560,7 @@ components:
       properties:
         ok:
           type: boolean
-          description: True on a successful preview/dispatch; false on a parse/validation failure or an approval park.
+          description: True on a successful preview+stage / dispatch; false on a parse/validation/dispatch failure.
         error:
           type: string
           description: A human-readable failure message (surfaced by the page's action banner).
@@ -1576,13 +1571,13 @@ components:
           description: Path-qualified validation/compile failures, when the pasted graph was malformed.
         status:
           type: string
-          description: The dispatch run's lifecycle position (`running` / `awaiting-approval`), when dispatched.
+          description: The dispatch run's lifecycle position (`running`), when dispatched.
         runKey:
           type: string
           description: The dispatch run's idempotency key, when dispatched.
         digest:
           type: string
-          description: The graph's content digest — the approval token to dispatch a side-effecting graph.
+          description: The graph's content digest — the content-address of the staged proposal / dispatched run.
         sideEffecting:
           type: boolean
           description: Whether the graph has any side-effecting (`agent`/`connector`) node.
@@ -1595,12 +1590,15 @@ components:
         processDefinitionId:
           type: string
           description: The started process definition id, when dispatched.
-        approvalToken:
-          type: string
-          description: The approval token to re-submit with, when a side-effecting graph was parked pending approval.
         message:
           type: string
-          description: Additional detail from the dispatch door (e.g. the approval-park explanation).
+          description: Additional human-readable detail from the door (e.g. the staged/dispatched summary).
+        reviewUrl:
+          type: string
+          description: A navigational cockpit deep-link to the staged proposal (a pointer only — NOT a dispatch handle).
+        staged:
+          type: boolean
+          description: True when a valid preview persisted the compiled graph as a staged proposal (issue #460).
         title:
           type: string
           description: The graph's human-readable name, echoed on a successful preview.
@@ -1828,85 +1826,67 @@ components:
           items:
             $ref: "#/components/schemas/DeliveryCompileError"
           description: The path-qualified validation/compile failures (at least one).
-    DeliveryGraphStart:
+    DeliveryProposalPreview:
       description: >-
-        The `startDeliveryGraph` request body (ADR 0005 slice S5) — the ONE gated dispatch door that
-        turns an agent-authored `DeliveryGraph` into a RUNNING engine-native process. This is the OUTER
-        action, distinct from S1's pure `compileDeliveryGraph`: there is deliberately no `dryRun` flag
-        (Decision 5/7) — compile and start are separate operations. The door re-validates (S0), compiles
-        (S1), and launches the S4 runner. Three ingress paths — an agent-ergonomic POST, a raw REST call,
-        and a UI JSON-paste — all hit this ONE contract.
+        The operator-facing preview a staged proposal carries (ADR 0005 Decision 7, issue #460) — WHAT
+        the graph does. Carries the mermaid `diagram`, the `sideEffects[]` a dispatch authorises, and
+        the `humanNodes[]` where it parks on a person. It carries NO dispatch handle by construction —
+        a preview, not an affordance to start a run.
       type: object
       additionalProperties: false
       required:
-        - graph
+        - diagram
+        - sideEffects
+        - humanNodes
       properties:
-        graph:
-          $ref: "#/components/schemas/DeliveryGraph"
-        approvalToken:
+        diagram:
           type: string
-          description: >-
-            The approval OF the rendered preview (Decision 7). Because a delivery graph merges PRs and
-            publishes packages, a graph with any SIDE-EFFECTING node (`agent`/`connector`) dispatches
-            ONLY when the caller presents the graph's content-addressed approval token (returned as
-            `approvalToken` on a prior unapproved submit's `awaiting-approval` response). A graph with
-            no side effects (only `wait`/`human` nodes) needs none and dispatches straight away.
-        idempotencyKey:
-          type: string
-          maxLength: 255
-          description: >-
-            OPTIONAL caller-supplied idempotency key. A re-POST with the SAME key (or, when omitted, the
-            SAME graph — the default key is the graph's content digest) does NOT double-launch: an
-            in-flight run short-circuits with `alreadyRunning: true`. Blank/whitespace is treated as
-            absent.
-    StartDeliveryGraphResult:
+          description: A human-readable mermaid `flowchart` of the resolved graph.
+        sideEffects:
+          type: array
+          items:
+            $ref: "#/components/schemas/DeliverySideEffect"
+          description: The side-effecting actions the graph WILL perform once an operator dispatches it.
+        humanNodes:
+          type: array
+          items:
+            $ref: "#/components/schemas/DeliveryHumanStop"
+          description: The human stop-points where the graph parks on a person.
+    CompileDeliveryGraphStaged:
       description: >-
-        The `startDeliveryGraph` outcome. `status` is the run's lifecycle position: `running` (the graph
-        dispatched — or was already running, see `alreadyRunning`) or `awaiting-approval` (a
-        side-effecting graph was submitted without a valid `approvalToken` — it is PARKED, visible in the
-        cockpit, and refused pending approval; re-POST with the returned `approvalToken` to dispatch).
+        A successful agent-facing compile (ADR 0005 Decision 7, issue #460) — the graph validated and
+        compiled, and was persisted as a `staged` proposal for operator review. The response is
+        deliberately a PREVIEW plus a navigational pointer and NOTHING that can trigger a run: no run
+        key, no token, no process-instance key. This is capability-by-absence — the agent's surface ends
+        at propose → compile → stage; a HUMAN dispatches the staged proposal in the cockpit.
       type: object
       additionalProperties: false
       required:
-        - ok
         - status
-        - runKey
+        - message
         - digest
-        - sideEffecting
+        - preview
       properties:
-        ok:
-          type: boolean
-          description: True when the graph dispatched (or was already running); false when parked at approval.
         status:
           type: string
-          enum: [running, awaiting-approval]
-          description: The run's lifecycle position after this call.
-        runKey:
-          type: string
-          description: The idempotency key the run is stored under (the caller key, else the content digest).
-        digest:
-          type: string
-          description: The graph's content digest — the content-address of the compiled definition.
-        sideEffecting:
-          type: boolean
-          description: Whether the graph has any side-effecting (`agent`/`connector`) node — i.e. whether approval is required.
-        alreadyRunning:
-          type: boolean
-          description: True when a re-submit short-circuited onto an already-running run (no second launch).
-        processInstanceKey:
-          type: string
-          description: The started engine instance key. Present when `status` is `running`; absent while parked at approval.
-        processDefinitionId:
-          type: string
-          description: The content-addressed deployed process id (`delivery-graph-<digest>`). Present when dispatched.
-        approvalToken:
-          type: string
-          description: >-
-            The token to present as `approvalToken` on a re-POST to dispatch this exact graph. Present
-            when `status` is `awaiting-approval` (equals `digest`).
+          enum: [ready]
+          description: Discriminant — `ready` means the graph compiled and is staged for operator review.
         message:
           type: string
-          description: A human-readable summary of the outcome (e.g. the approval-required reason).
+          description: >-
+            A human-readable instruction telling the agent its role ends here — ask the operator to
+            preview and approve (or request modifications) in the cockpit; dispatch is an operator
+            action and there is no start endpoint.
+        digest:
+          type: string
+          description: The compiled graph's content digest — so the agent can NAME the proposal to the operator.
+        preview:
+          $ref: "#/components/schemas/DeliveryProposalPreview"
+        reviewUrl:
+          type: string
+          description: >-
+            A NAVIGATIONAL cockpit deep-link to the staged proposal (helps the agent hand the human a
+            link). It is a pointer only — NOT a dispatch handle; nothing in this response can start a run.
     FeatureStart:
       description: The start-feature request body — a SINGLE-issue feature run. Names the target issue
         by EXACTLY ONE of `issue` (an `owner/repo#123` reference) or `url` (a bare issue URL), plus a
@@ -2659,17 +2639,19 @@ paths:
   /actions/compile-delivery-graph:
     post:
       operationId: compileDeliveryGraph
-      summary: Validate + compile a delivery graph into a preview (PURE — never deploys). (ADR 0005 slice S1)
+      summary: Validate + compile a delivery graph and STAGE it for operator review (never dispatches). (ADR 0005 Decision 7 / #460)
       description: >-
-        The fast, safe inner loop of the delivery-graph workflow (ADR 0005 Decision 5/6). Given an
-        agent-authored `DeliveryGraph` (the closed `agent`/`wait`/`human`/`connector` node vocabulary —
-        the trust boundary), it runs the pure `validateDeliveryGraph` semantic check and then the
-        deterministic, human-written compiler, returning a preview: the compiled one-shot BPMN
-        (compile-to-native), a mermaid diagram, the resolved/normalised graph, and the extracted human
-        stop-points and side effects. It is PURE and side-effect-free — it validates and compiles but
-        NEVER deploys or dispatches, so an agent can call it repeatedly while iterating. Deployment is a
-        separate door (`startDeliveryGraph`, a later slice) — there is deliberately no `dryRun` flag on
-        the start door (Decision 5/7). A malformed graph is a 400 carrying path-qualified errors.
+        The agent-facing delivery-graph door — the END of the agent's surface (ADR 0005 Decision 7,
+        issue #460). Given an agent-authored `DeliveryGraph` (the closed
+        `agent`/`wait`/`human`/`connector` node vocabulary — the trust boundary), it runs the pure
+        `validateDeliveryGraph` semantic check and the deterministic, human-written compiler, and — when
+        the graph is valid — persists the compiled graph as a `staged` proposal (content-addressed by
+        its `digest`). It returns a PREVIEW and a navigational `reviewUrl` and NOTHING that can trigger a
+        run: no run key, no token, no process-instance key. Dispatch is an OPERATOR action performed in
+        the cockpit — there is no `start` endpoint. This is capability-by-absence: if the agent never
+        receives a dispatch handle, there is nothing to replay (closing the self-approval hole the old
+        replayable `approvalToken` left open). A malformed graph is a 400 carrying path-qualified errors;
+        nothing is staged.
       requestBody:
         required: true
         content:
@@ -2678,70 +2660,32 @@ paths:
               $ref: "#/components/schemas/DeliveryGraph"
       responses:
         "200":
-          description: The graph validated and compiled — the pure preview (nothing deployed).
+          description: The graph validated and compiled — it is STAGED for operator review; the response carries a preview and a navigational reviewUrl (no dispatch handle).
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/CompileDeliveryGraphResult"
+                $ref: "#/components/schemas/CompileDeliveryGraphStaged"
         "400":
-          description: The graph failed shape or semantic validation — path-qualified errors, nothing compiled.
+          description: The graph failed shape or semantic validation — path-qualified errors, nothing compiled or staged.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/CompileDeliveryGraphErrors"
-  /actions/start/delivery-graph:
-    post:
-      operationId: startDeliveryGraph
-      summary: Validate + compile + DISPATCH a delivery graph as a running engine-native process (gated, idempotent). (ADR 0005 slice S5)
-      description: >-
-        The delivery-graph DISPATCH door (ADR 0005 Decision 7) — the single gated OUTER action that
-        turns an agent-authored `DeliveryGraph` into a RUNNING engine-native process. Distinct from S1's
-        pure `compileDeliveryGraph`: compile and start are SEPARATE operations (Decision 5/7), so there
-        is deliberately no `dryRun` flag. The door re-validates the graph (`validateDeliveryGraph`, S0),
-        compiles it (`compileDeliveryGraph`, S1), and LAUNCHES the S4 runner (`runDeliveryGraph`).
-        Because these graphs merge PRs and publish packages, dispatch is GATED: a graph with any
-        side-effecting (`agent`/`connector`) node must present the content-addressed `approvalToken` of
-        its rendered preview, else it is PARKED at approval (a 400 carrying the token, plus a visible
-        `awaiting-approval` run in the cockpit) rather than dispatched. Idempotent: a re-POST of the same
-        graph (or the same `idempotencyKey`) short-circuits an already-running run instead of
-        double-launching. Three ingress paths — an agent-ergonomic POST, a raw REST call, and a UI
-        JSON-paste — all hit this ONE contract.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/DeliveryGraphStart"
-      responses:
-        "202":
-          description: The graph dispatched (or a re-submit short-circuited an already-running run).
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/StartDeliveryGraphResult"
-        "400":
-          description: >-
-            The graph failed validation/compilation (path-qualified errors), OR a side-effecting graph
-            was submitted without a valid approval token — it is refused and PARKED at approval (the
-            body carries the `approvalToken` to re-submit with).
-          content:
-            application/json:
-              schema:
-                oneOf:
-                  - $ref: "#/components/schemas/CompileDeliveryGraphErrors"
-                  - $ref: "#/components/schemas/StartDeliveryGraphResult"
   /actions/delivery-graph/preview:
     post:
       operationId: previewDeliveryGraph
-      summary: UI JSON-paste PREVIEW — parse a pasted delivery-graph JSON string and compile it (PURE). (ADR 0005 S1 / #386)
+      summary: UI JSON-paste PREVIEW+STAGE — parse a pasted delivery-graph JSON string, compile it and stage it for operator dispatch. (ADR 0005 Decision 7 / #460)
       description: >-
-        The human-facing UI JSON-paste PREVIEW ingress (issue #386). The Delivery Graphs page's
-        "Preview" action posts the operator's pasted JSON as a STRING; this door parses it and runs the
-        SAME pure `compileDeliveryGraph` compiler the agent-facing door uses, returning a compact
-        summary (the content `digest` = the approval token, node/human/side-effect counts, the mermaid
-        `diagram`). It is PURE and side-effect-free — nothing is deployed or dispatched. A blank/invalid
-        JSON string, or a graph that fails validation, is a 400 carrying a human `error` (and
-        path-qualified `errors` for a compile failure).
+        The human-facing UI JSON-paste PREVIEW+STAGE ingress. The Delivery Graphs page's "Preview &
+        stage" action posts the operator's pasted JSON as a STRING; this door parses it and runs the
+        SAME `compileDeliveryGraph` compiler the agent-facing door uses, and — like the agent compile
+        door (issue #460) — persists the compiled graph as a `staged` proposal (content-addressed by its
+        `digest`). It returns a compact preview summary (the `digest`, node/human/side-effect counts,
+        the mermaid `diagram`, the human stops and side effects) plus a navigational `reviewUrl`. It
+        never deploys or dispatches — dispatch is a separate operator action on the staged proposal
+        (the Dispatch button on the staged-proposals grid). A blank/invalid JSON string, or a graph that
+        fails validation, is a 400 carrying a human `error` (and path-qualified `errors` for a compile
+        failure); nothing is staged.
       requestBody:
         required: true
         content:
@@ -2750,7 +2694,7 @@ paths:
               $ref: "#/components/schemas/DeliveryGraphTextSubmit"
       responses:
         "200":
-          description: The pasted graph parsed, validated and compiled — the pure preview summary.
+          description: The pasted graph parsed, validated and compiled — staged for operator dispatch; the preview summary is returned.
           content:
             application/json:
               schema:
@@ -2764,33 +2708,33 @@ paths:
   /actions/delivery-graph/dispatch:
     post:
       operationId: dispatchDeliveryGraph
-      summary: UI JSON-paste DISPATCH — parse a pasted delivery-graph JSON string and dispatch it via startDeliveryGraph (gated, idempotent). (ADR 0005 S5 / #386)
+      summary: OPERATOR DISPATCH — launch a staged delivery-graph proposal by its digest (idempotent). (ADR 0005 Decision 7 / #460)
       description: >-
-        The human-facing UI JSON-paste DISPATCH ingress (issue #386). The Delivery Graphs page's
-        "Dispatch" action posts the operator's pasted JSON as a STRING plus an explicit `approve` flag;
-        this door parses it and delegates to the SAME gated, idempotent `startDeliveryGraph` contract —
-        there is NO parallel dispatch path. When `approve` is true the door derives the graph's content
-        digest and presents it as the approval token, so a side-effecting graph the operator reviewed in
-        the preview dispatches; without `approve` a side-effecting graph is PARKED at approval (visible
-        in the in-flight grid) and a non-side-effecting graph dispatches straight away. Idempotent on
-        `idempotencyKey` (else the content digest).
+        The OPERATOR-ONLY dispatch door (ADR 0005 Decision 7, issue #460). The cockpit's staged-proposals
+        grid posts the `digest` of the proposal the operator picked; this door loads that `staged`
+        proposal, runs the retained S4 runner for its previewed graph, and marks the proposal
+        `dispatched`. The operator clicking Dispatch IS the approval — there is no replayable token. It
+        is NOT part of the agent surface: the agent compile door returns no digest-as-dispatch-handle
+        (only a navigational preview), so an agent cannot reach a run through the documented surface.
+        Idempotent: a re-dispatch of an already-running run short-circuits with `alreadyRunning` instead
+        of double-launching. An unknown/expired/superseded/already-dispatched digest is a 400.
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/DeliveryGraphTextDispatch"
+              $ref: "#/components/schemas/DeliveryGraphDispatchRequest"
       responses:
         "202":
-          description: The graph dispatched (or a re-submit short-circuited an already-running run).
+          description: The staged proposal dispatched (or a re-dispatch short-circuited an already-running run).
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/DeliveryGraphTextResult"
         "400":
           description: >-
-            The pasted text was not valid JSON, the graph failed validation, or a side-effecting graph
-            was parked pending approval (the body carries the `approvalToken` / `error` to act on).
+            The digest was missing, or named no live staged proposal (unknown / expired / superseded /
+            already dispatched), or the stored graph failed to compile (the body carries a human `error`).
           content:
             application/json:
               schema:

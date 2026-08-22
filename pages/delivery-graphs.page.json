@@ -70,7 +70,7 @@
       "type": "text",
       "id": "subtitle",
       "props": {
-        "text": "The human front door for delivery graphs (ADR 0005). Compose an agent-authored delivery-graph JSON, Preview it (a pure compile \u2014 nothing is dispatched) to SEE the rendered plan \u2014 its mermaid diagram, the human stop-points where it parks on a person, and the side effects it will perform \u2014 and fix any path-qualified validation errors inline. Then Dispatch it: a graph with any side-effecting node (it merges PRs / publishes packages) parks for an explicit Approve & dispatch confirm of the rendered preview; a graph with only wait/human nodes dispatches straight away. The compose \u2192 preview \u2192 dispatch view is a thin UI over the same compileDeliveryGraph / startDeliveryGraph doors \u2014 there is no parallel submit path.",
+        "text": "The human front door for delivery graphs (ADR 0005). An agent composes a delivery-graph JSON and compiles it \u2014 a valid compile is STAGED here as a proposal (issue #460); the agent surface ends there and hands you a proposal to review. Paste a graph below to preview + stage it yourself: SEE the rendered plan \u2014 its mermaid diagram, the human stop-points where it parks on a person, and the side effects it will perform \u2014 and fix any path-qualified validation errors inline. Then DISPATCH is your call: the Staged proposals grid below lists every staged proposal (agent- or operator-composed); review its preview and click Dispatch on the one you approve \u2014 that click IS the approval, content-addressed to the exact graph you previewed. There is no agent dispatch endpoint to replay.",
         "variant": "sub"
       }
     },
@@ -78,10 +78,55 @@
       "type": "appView",
       "id": "delivery-graphs-compose",
       "props": {
-        "title": "Compose \u2192 preview \u2192 dispatch",
+        "title": "Compose \u2192 preview \u2192 stage",
         "embed": "./delivery-graphs/embed.html",
         "standalone": "./delivery-graphs/standalone.html",
         "fill": true
+      }
+    },
+    {
+      "type": "dataGrid",
+      "id": "delivery-graphs-staged",
+      "props": {
+        "title": "Staged proposals",
+        "collapsible": true,
+        "defaultCollapsed": false,
+        "showCount": true,
+        "rowKey": "digest",
+        "refreshMs": 5000,
+        "empty": "No staged proposals awaiting dispatch. Compile a graph (as an agent) or preview + stage one above, then Dispatch it here.",
+        "data": {
+          "kind": "datasource",
+          "source": "app",
+          "table": "delivery_graph_proposals",
+          "orderBy": { "field": "created_at", "dir": "desc" },
+          "filter": [{ "field": "status", "in": ["staged"] }]
+        },
+        "columns": [
+          { "field": "title", "template": "{{title}}", "header": "Graph", "subtitleField": "digest", "truncate": true, "width": "34%" },
+          { "field": "node_count", "header": "Nodes" },
+          { "field": "human_node_count", "header": "Human" },
+          { "field": "side_effect_count", "header": "Side effects" },
+          { "field": "created_at", "header": "Staged", "width": "9rem", "format": "datetime" },
+          { "field": "expires_at", "header": "Expires", "width": "9rem", "format": "datetime" }
+        ],
+        "rowActions": [
+          {
+            "label": "Dispatch",
+            "confirm": "Dispatch this staged delivery graph? This launches the graph engine-natively \u2014 any side-effecting node (it merges PRs / publishes packages) will run. Clicking Dispatch IS the approval, content-addressed to exactly the graph shown here.",
+            "action": {
+              "path": "/app/api/actions/delivery-graph/dispatch",
+              "body": { "digest": "{{row.digest}}" }
+            }
+          }
+        ],
+        "detail": {
+          "fields": [
+            { "field": "digest", "label": "Digest" },
+            { "field": "logical_key", "label": "Logical key" },
+            { "field": "side_effecting", "label": "Side-effecting" }
+          ]
+        }
       }
     },
     {
@@ -119,7 +164,7 @@
         "detail": {
           "fields": [
             { "field": "process_definition_id", "label": "Definition" },
-            { "field": "digest", "label": "Digest (approval token)" },
+            { "field": "digest", "label": "Digest" },
             { "field": "phase_node_id", "label": "Parked node" }
           ]
         }

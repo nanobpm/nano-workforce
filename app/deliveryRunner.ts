@@ -20,9 +20,10 @@ import { assertNever, compileDeliveryGraph, DELIVERY_GRAPH_PROCESS_ID } from "./
 import { DEFAULT_EVERY_MS, msToIsoDuration, parseProbe, readinessPollEvery } from "./readiness.ts";
 
 /** The content digest of a compiled graph — `sha256(bpmn)[:12]` — the single source of truth for the
- * content-addressed deploy id (`delivery-graph-<digest>`) AND the S5 dispatch door's approval token /
- * default idempotency key. Both the runner (deploy id) and `operations/startDeliveryGraph` (approval +
- * dedupe key) derive from THIS one function so the two can never drift on how a graph is addressed. */
+ * content-addressed deploy id (`delivery-graph-<digest>`) AND the dispatch fence's default idempotency
+ * key + the staged-proposal primary key. The runner (deploy id), `app/deliveryGraphDispatch` (dedupe
+ * key), and `app/deliveryGraphProposals` (proposal digest) all derive from THIS one function so they
+ * can never drift on how a graph is addressed. */
 export function deliveryGraphDigest(bpmn: string): string {
   return createHash("sha256").update(bpmn).digest("hex").slice(0, 12);
 }

@@ -1,166 +1,133 @@
 // Integration coverage for the POST /app/api/actions/delivery-graph/dispatch operation
-// `dispatchDeliveryGraph` (issue #386, ADR 0005 slice S5) — the human-facing UI JSON-paste DISPATCH
-// ingress. It parses the operator's pasted JSON STRING and DELEGATES to the SAME gated, idempotent
-// `startDeliveryGraph` handler (no parallel dispatch path), deriving the approval token from the graph
-// when the operator ticks `approve`. These tests drive the real delegate against an in-memory
-// app/data/engine (mirroring startDeliveryGraph.integration.test.ts) so the composed behaviour — parse
-// → approval-gate → launch — is proven, and assert the parse guards map to a 400 with a human error.
-import { test } from "node:test";
-import { assert, assertEquals } from "#test-assert";
-import type { AppApi } from "@nanobpm/urban";
-import { noopLog } from "../test/log.ts";
-import handler from "./dispatchDeliveryGraph.ts";
+// `dispatchDeliveryGraph` (ADR 0005 Decision 7, issue #460) — the OPERATOR-ONLY dispatch door. The
+// cockpit's staged-proposals grid posts the `digest` of the proposal the operator picked; this door
+// loads that live `staged` proposal, launches the retained S4 runner for its graph, and marks the
+// proposal `dispatched`. There is no replayable token — the operator clicking Dispatch IS the
+// approval, and the door is reachable only from the cockpit (the agent compile door returns no
+// dispatch handle). These tests drive the REAL door through `bootTestApp`'s api driver against the
+// WASM engine: compile-to-stage, then dispatch by digest, asserting the digest is resolved, an
+// unknown/consumed digest is refused, and the run launches engine-natively.
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { after, describe, test } from "node:test";
+import assert from "node:assert/strict";
+import { bootTestApp, type TestApp } from "@nanobpm/urban-testkit";
+import { deliveryGraphProposals } from "../app/deliveryGraphProposals.ts";
+import { deliveryGraphRuns } from "../app/deliveryGraphRun.ts";
 
-// A compact in-memory app: a generic table over an array (get/find/insert/update/delete) faithful to
-// the run aggregate's PRIMARY KEY fence, plus the guarded raw UPDATE the door issues and a fake engine.
-function makeApp() {
-  const tables = new Map<string, Record<string, unknown>[]>();
-  const started: { processDefinitionId: string }[] = [];
-  const table = (name: string, key: string) => {
-    const rows = tables.get(name) ?? (() => {
-      const fresh: Record<string, unknown>[] = [];
-      tables.set(name, fresh);
-      return fresh;
-    })();
-    return {
-      get: (k: unknown) => Promise.resolve(rows.find((r) => r[key] === k) ?? null),
-      find: (q: Record<string, unknown>) =>
-        Promise.resolve(rows.filter((r) => Object.entries(q).every(([f, v]) => r[f] === v))),
-      insert: (r: Record<string, unknown>) => {
-        if (rows.some((existing) => existing[key] === r[key])) {
-          return Promise.reject(new Error(`UNIQUE constraint failed: ${name}.${key}`));
-        }
-        rows.push(r);
-        return Promise.resolve(r);
-      },
-      update: (k: unknown, patch: Record<string, unknown>) => {
-        const row = rows.find((r) => r[key] === k);
-        if (row) Object.assign(row, patch);
-        return Promise.resolve(row);
-      },
-      delete: (k: unknown) => {
-        const i = rows.findIndex((r) => r[key] === k);
-        if (i >= 0) rows.splice(i, 1);
-        return Promise.resolve();
-      },
-    };
-  };
-  const app = {
-    data: {
-      table,
-      open: () => ({
-        exec: (sql: string, params: unknown[]) =>
-          Promise.resolve().then(() => {
-            const cols = [...sql.matchAll(/"(\w+)"\s*=\s*\?/g)].map((m) => m[1]);
-            const runKey = params[params.length - 1];
-            const rows = tables.get("delivery_graph_runs") ?? [];
-            const row = rows.find((r) => r["run_key"] === runKey);
-            if (row && row["status"] !== "running") {
-              for (let i = 0; i < cols.length - 1; i++) row[cols[i]] = params[i];
-              return { changed: 1 };
-            }
-            return { changed: 0 };
-          }),
-      }),
-    },
-    engine: {
-      deployResources: () => Promise.resolve([]),
-      createInstance: (req: { processDefinitionId: string }) => {
-        started.push(req);
-        return Promise.resolve({ processInstanceKey: "PI-1", processDefinitionId: req.processDefinitionId });
-      },
-    },
-    log: noopLog(),
-  } as unknown as AppApi;
-  return { app, started, runs: () => tables.get("delivery_graph_runs") ?? [] };
-}
+const APP_ROOT = resolve(import.meta.dirname, "..");
+const GITHUB_ENV: Record<string, string> = { NANO_PR_GITHUB_TRANSPORT: "token", GITHUB_TOKEN: "" };
 
-async function call(app: AppApi, body: unknown) {
-  return (await handler({ req: {} as any, params: {}, query: {}, body } as any, app)) as any;
-}
-
-const SIDE_EFFECTING = JSON.stringify({
+const HUMAN_ONLY = {
+  name: "manual gate",
+  nodes: [{ id: "ack", kind: "human", human: { prompt: "click done when the release is out" } }],
+};
+const SIDE_EFFECTING = {
   name: "release runbook",
   nodes: [
-    { id: "open-b", kind: "agent", agent: { jobType: "senior:feature", prompt: "un-draft + merge #B" } },
+    { id: "open-b", kind: "agent", agent: { jobType: "senior:demo", prompt: "un-draft + merge #B" } },
     { id: "publish", kind: "human", human: { prompt: "run the manual OTP publish" } },
   ],
   edges: [{ from: "open-b", to: "publish" }],
-});
-const HUMAN_ONLY = JSON.stringify({
-  name: "manual gate",
-  nodes: [{ id: "ack", kind: "human", human: { prompt: "click done when the release is out" } }],
-});
+};
 
-test("dispatch-delivery-graph: a non-JSON paste → 400 with a human error, nothing launched", async () => {
-  const { app, started } = makeApp();
-  const res = await call(app, { graphJson: "{ not json" });
-  assertEquals(res.status, 400);
-  assertEquals(res.body.ok, false);
-  assert(typeof res.body.error === "string" && res.body.error.includes("not valid JSON"));
-  assertEquals(started.length, 0);
-});
+describe("dispatchDeliveryGraph — operator dispatch by staged-proposal digest", () => {
+  const dirs: string[] = [];
+  const apps: TestApp[] = [];
+  after(async () => {
+    for (const app of apps) await app.stop?.();
+    for (const d of dirs) rmSync(d, { recursive: true, force: true });
+  });
+  const boot = async (): Promise<TestApp> => {
+    const d = mkdtempSync(join(tmpdir(), "nwf-dispatch-"));
+    dirs.push(d);
+    const app = await bootTestApp(APP_ROOT, { env: { ...GITHUB_ENV, NANO_APP_DB_URL: `file:${join(d, "app.db")}` } });
+    apps.push(app);
+    return app;
+  };
 
-test("dispatch-delivery-graph: a blank paste → 400, never a 500", async () => {
-  const { app } = makeApp();
-  const res = await call(app, { graphJson: "" });
-  assertEquals(res.status, 400);
-  assertEquals(res.body.ok, false);
-});
+  test("a missing/blank digest → 400 with a human error, nothing launched", async () => {
+    const app = await boot();
+    assert.ok(app.api);
+    const res = await app.api.call<{ ok: boolean; error?: string }>("dispatchDeliveryGraph", { body: { digest: "  " } });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.ok, false);
+    assert.ok(typeof res.body.error === "string" && res.body.error.length > 0);
+    assert.equal((await deliveryGraphRuns(app.db).all()).length, 0);
+  });
 
-test("dispatch-delivery-graph: a non-side-effecting graph dispatches straight away (202 running)", async () => {
-  const { app, started, runs } = makeApp();
-  const res = await call(app, { graphJson: HUMAN_ONLY });
-  assertEquals(res.status, 202);
-  assertEquals(res.body.ok, true);
-  assertEquals(res.body.status, "running");
-  assertEquals(started.length, 1);
-  assertEquals(runs()[0].status, "running");
-});
+  test("an unknown / never-staged digest → 400, nothing launched", async () => {
+    const app = await boot();
+    assert.ok(app.api);
+    const res = await app.api.call<{ ok: boolean; error?: string }>("dispatchDeliveryGraph", { body: { digest: "deadbeef0000" } });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.ok, false);
+    assert.ok(/no staged proposal/.test(res.body.error ?? ""));
+    assert.equal((await deliveryGraphRuns(app.db).all()).length, 0);
+  });
 
-test("dispatch-delivery-graph: a side-effecting graph WITHOUT approve is parked at approval (400), nothing launched", async () => {
-  const { app, started, runs } = makeApp();
-  const res = await call(app, { graphJson: SIDE_EFFECTING });
-  assertEquals(res.status, 400);
-  assertEquals(res.body.ok, false);
-  assertEquals(res.body.status, "awaiting-approval");
-  // The human banner is populated from the door's park message.
-  assert(typeof res.body.error === "string" && res.body.error.length > 0);
-  assertEquals(started.length, 0);
-  assertEquals(runs()[0].status, "awaiting-approval");
-});
+  test("a human-only graph: stage via compile, then dispatch by digest → 202 running; proposal marked dispatched", async () => {
+    const app = await boot();
+    assert.ok(app.api);
+    const api = app.api;
 
-test("dispatch-delivery-graph: a side-effecting graph WITH approve dispatches (202 running), token derived server-side", async () => {
-  const { app, started, runs } = makeApp();
-  const res = await call(app, { graphJson: SIDE_EFFECTING, approve: true });
-  assertEquals(res.status, 202);
-  assertEquals(res.body.ok, true);
-  assertEquals(res.body.status, "running");
-  assertEquals(res.body.sideEffecting, true);
-  assertEquals(started.length, 1);
-  assertEquals(runs()[0].status, "running");
-});
+    // Stage through the agent compile door — it returns only a preview + digest (no dispatch handle).
+    const staged = await api.call<{ status: string; digest: string }>("compileDeliveryGraph", { body: HUMAN_ONLY });
+    assert.equal(staged.status, 200);
+    assert.equal(staged.body.status, "ready");
+    const digest = staged.body.digest;
+    assert.equal((await deliveryGraphProposals(app.db).get(digest))?.status, "staged");
 
-test("dispatch-delivery-graph: re-dispatch of a running graph short-circuits (alreadyRunning), no second launch", async () => {
-  const { app, started } = makeApp();
-  await call(app, { graphJson: HUMAN_ONLY });
-  const res = await call(app, { graphJson: HUMAN_ONLY });
-  assertEquals(res.status, 202);
-  assertEquals(res.body.alreadyRunning, true);
-  assertEquals(started.length, 1);
-});
+    // The operator dispatches that digest.
+    const res = await api.call<{ ok: boolean; status: string; runKey: string; alreadyRunning?: boolean }>(
+      "dispatchDeliveryGraph",
+      { body: { digest } },
+    );
+    assert.equal(res.status, 202);
+    assert.equal(res.body.ok, true);
+    assert.equal(res.body.status, "running");
+    await app.settle();
+    const runs = await deliveryGraphRuns(app.db).all();
+    assert.equal(runs.length, 1);
+    assert.equal(runs[0].status, "running");
+    // The proposal drops out of the staged list — it is now dispatched.
+    assert.equal((await deliveryGraphProposals(app.db).get(digest))?.status, "dispatched");
+  });
 
-test("dispatch-delivery-graph: a graph that fails validation → 400 carries the start door's structured `errors` array, not just a summary banner", async () => {
-  const { app, started } = makeApp();
-  const res = await call(app, { graphJson: JSON.stringify({ name: "empty", nodes: [] }) });
-  assertEquals(res.status, 400);
-  assertEquals(res.body.ok, false);
-  // The structured, path-qualified errors from startDeliveryGraph must survive the adapter's re-shape.
-  assert(Array.isArray(res.body.errors) && res.body.errors.length > 0);
-  for (const e of res.body.errors) {
-    assert(typeof e.path === "string" && typeof e.message === "string");
-  }
-  // And the human banner is still derived from those errors.
-  assert(typeof res.body.error === "string" && res.body.error.length > 0);
-  assertEquals(started.length, 0);
+  test("a side-effecting graph dispatches the agent side effect once the operator picks its digest", async () => {
+    const app = await boot();
+    assert.ok(app.api);
+    const api = app.api;
+    let agentFired = 0;
+    await app.engine.registerWorker("senior:demo", async () => {
+      agentFired++;
+      return {};
+    });
+
+    const staged = await api.call<{ digest: string }>("compileDeliveryGraph", { body: SIDE_EFFECTING });
+    const res = await api.call<{ ok: boolean; status: string; sideEffecting: boolean }>("dispatchDeliveryGraph", {
+      body: { digest: staged.body.digest },
+    });
+    assert.equal(res.status, 202);
+    assert.equal(res.body.ok, true);
+    assert.equal(res.body.sideEffecting, true);
+    await app.settle();
+    assert.equal(agentFired, 1, "the side effect fired exactly once");
+    assert.equal((await deliveryGraphProposals(app.db).get(staged.body.digest))?.status, "dispatched");
+  });
+
+  test("re-dispatching an ALREADY-dispatched digest → 400 (the proposal is consumed; the run shows in the in-flight grid)", async () => {
+    const app = await boot();
+    assert.ok(app.api);
+    const api = app.api;
+    const staged = await api.call<{ digest: string }>("compileDeliveryGraph", { body: HUMAN_ONLY });
+    await api.call("dispatchDeliveryGraph", { body: { digest: staged.body.digest } });
+    await app.settle();
+    const again = await api.call<{ ok: boolean }>("dispatchDeliveryGraph", { body: { digest: staged.body.digest } });
+    assert.equal(again.status, 400);
+    assert.equal(again.body.ok, false);
+    // Still exactly one run — the consumed proposal cannot re-launch.
+    assert.equal((await deliveryGraphRuns(app.db).all()).length, 1);
+  });
 });
