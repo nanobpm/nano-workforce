@@ -130,4 +130,35 @@ describe("dispatchDeliveryGraph — operator dispatch by staged-proposal digest"
     // Still exactly one run — the consumed proposal cannot re-launch.
     assert.equal((await deliveryGraphRuns(app.db).all()).length, 1);
   });
+
+  test("an idempotencyKey already bound to a DIFFERENT running graph → 409; the proposal is NOT consumed and nothing new launches", async () => {
+    const app = await boot();
+    assert.ok(app.api);
+    const api = app.api;
+
+    // Stage two distinct graphs (different digests, different logical keys → neither supersedes).
+    const a = await api.call<{ digest: string }>("compileDeliveryGraph", { body: HUMAN_ONLY });
+    const b = await api.call<{ digest: string }>("compileDeliveryGraph", { body: SIDE_EFFECTING });
+    assert.notEqual(a.body.digest, b.body.digest);
+
+    // Dispatch graph A under a shared idempotencyKey — it launches and stays running (parks on a human).
+    const first = await api.call<{ ok: boolean; status: string }>("dispatchDeliveryGraph", {
+      body: { digest: a.body.digest, idempotencyKey: "shared-key" },
+    });
+    assert.equal(first.status, 202);
+    await app.settle();
+
+    // Dispatch graph B under the SAME idempotencyKey — it short-circuits onto A's run. B's graph was
+    // never launched, so B must NOT be consumed: refuse with 409 and leave B staged.
+    const second = await api.call<{ ok: boolean; error?: string }>("dispatchDeliveryGraph", {
+      body: { digest: b.body.digest, idempotencyKey: "shared-key" },
+    });
+    assert.equal(second.status, 409);
+    assert.equal(second.body.ok, false);
+    await app.settle();
+    // Proposal B is still staged (dispatchable) — it was never launched.
+    assert.equal((await deliveryGraphProposals(app.db).get(b.body.digest))?.status, "staged");
+    // Only A's single run exists — B did not launch anything.
+    assert.equal((await deliveryGraphRuns(app.db).all()).length, 1);
+  });
 });

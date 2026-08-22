@@ -35,9 +35,10 @@ export function proposalReviewUrl(digest: string, base: string = publicBaseUrl()
 }
 
 /** The proposal lifecycle. `staged` = awaiting operator review/dispatch; `superseded` = replaced by a
- * newer digest for the same logical graph; `dispatched` = the operator launched it (it drops out of
- * the cockpit's staged list). */
-export const DELIVERY_PROPOSAL_STATUSES = ["staged", "superseded", "dispatched"] as const;
+ * newer digest for the same logical graph; `dispatched` = the operator launched it; `expired` = it aged
+ * out of its TTL before an operator dispatched it. `superseded`/`dispatched`/`expired` all drop out of
+ * the cockpit's staged list (which filters to `status = 'staged'`). */
+export const DELIVERY_PROPOSAL_STATUSES = ["staged", "superseded", "dispatched", "expired"] as const;
 export type DeliveryProposalStatus = typeof DELIVERY_PROPOSAL_STATUSES[number];
 
 /** One staged delivery-graph proposal — the durable row keyed by content `digest`. `side_effecting`
@@ -205,4 +206,26 @@ export async function getStagedProposal(
  * staged list (the run then shows in the in-flight grid). */
 export async function markProposalDispatched(data: DataLayer, digest: string): Promise<void> {
   await deliveryGraphProposals(data).update(digest, { status: "dispatched", updated_at: now() });
+}
+
+/** Age out every `staged` proposal whose TTL has elapsed by flipping it to `expired`, so it drops out
+ * of the cockpit's staged grid (which filters to `status = 'staged'`). The grid's datasource filter can
+ * only express equality/set-membership — not an `expires_at > now` comparison — so an expired-but-still-
+ * `staged` row would otherwise linger in the list indefinitely, only to fail dispatch with "no live
+ * staged proposal". This reconciliation sweep (driven by the poller) is the single writer that realises
+ * the TTL, reusing the canonical `isProposalExpired` predicate so there is no second definition of
+ * "expired". Returns the number of proposals swept. Idempotent: a proposal already terminal (superseded/
+ * dispatched/expired) is left untouched. */
+export async function sweepExpiredProposals(data: DataLayer, at: Date = new Date()): Promise<number> {
+  const table = deliveryGraphProposals(data);
+  const staged = await table.find({ status: "staged" });
+  const ts = now();
+  let swept = 0;
+  for (const row of staged) {
+    if (isProposalExpired(row.expires_at, at)) {
+      await table.update(row.digest, { status: "expired", updated_at: ts });
+      swept++;
+    }
+  }
+  return swept;
 }

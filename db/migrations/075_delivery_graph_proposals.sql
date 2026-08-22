@@ -19,9 +19,12 @@
 --   • preview — the rendered preview JSON (`{ diagram, sideEffects, humanNodes }`) the cockpit shows,
 --     stamped at stage time so the list renders without recompiling.
 --   • status — `staged` (awaiting operator review), `superseded` (replaced by a newer digest for its
---     logical key), or `dispatched` (the operator launched it). Only non-expired `staged` rows show.
+--     logical key), `dispatched` (the operator launched it), or `expired` (aged out of its TTL before
+--     dispatch). Only `staged` rows show in the cockpit; the poller sweeps aged-out `staged` rows to
+--     `expired` (the grid's datasource filter is equality-only, so expiry is realised by that status
+--     flip, not an `expires_at > now` clause).
 --   • expires_at — the TTL horizon. Staged proposals age out of the cockpit list so a stale entry an
---     operator never dispatched does not linger; the cockpit filters to `expires_at` in the future.
+--     operator never dispatched does not linger; the poller flips an aged-out `staged` row to `expired`.
 CREATE TABLE IF NOT EXISTS delivery_graph_proposals (
   digest TEXT PRIMARY KEY,
   logical_key TEXT NOT NULL,

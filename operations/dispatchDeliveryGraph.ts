@@ -55,7 +55,25 @@ export default defineOperation("dispatchDeliveryGraph", async ({ body }, app) =>
     return { status: 400, body: outBody };
   }
 
-  // Retire the proposal from the staged list — the run now shows in the in-flight grid.
+  // Retire the proposal from the staged list — the run now shows in the in-flight grid. Guard against
+  // an `idempotencyKey` that short-circuits onto an ALREADY-running run of a DIFFERENT graph: in that
+  // case `dispatchDeliveryGraphRun` returns that other run's `digest`, so THIS proposal's graph was
+  // never launched. Consuming it then would mark a proposal `dispatched` that never ran. Only retire the
+  // proposal when the live run is genuinely this proposal's graph (`dispatched.digest === digest`).
+  if (dispatched.digest !== digest) {
+    app.log.warn("dispatch-delivery-graph refused: idempotencyKey bound to a different running graph", {
+      digest,
+      runDigest: dispatched.digest,
+      runKey: dispatched.runKey,
+    });
+    return {
+      status: 409,
+      body: {
+        ok: false,
+        error: `idempotencyKey is already bound to a different running delivery graph (digest ${dispatched.digest}); the staged proposal ${digest} was NOT dispatched — retry with a fresh idempotencyKey (or none)`,
+      },
+    };
+  }
   await markProposalDispatched(app.data, digest);
 
   const outBody: DeliveryGraphTextResult = {

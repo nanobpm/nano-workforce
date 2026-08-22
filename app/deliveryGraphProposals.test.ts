@@ -21,6 +21,7 @@ import {
   proposalLogicalKey,
   proposalReviewUrl,
   stageProposal,
+  sweepExpiredProposals,
 } from "./deliveryGraphProposals.ts";
 
 const APP_ROOT = resolve(import.meta.dirname, "..");
@@ -150,5 +151,31 @@ test("markProposalDispatched: a dispatched proposal is no longer live", async ()
     await markProposalDispatched(data, "d1");
     assertEquals((await deliveryGraphProposals(data).get("d1"))?.status, "dispatched");
     assertEquals(await getStagedProposal(data, "d1"), null);
+  });
+});
+
+test("sweepExpiredProposals: flips aged-out staged proposals to `expired` so they drop out of the cockpit grid", async () => {
+  await withData(async (data) => {
+    // Two staged proposals with different logical keys so neither supersedes the other.
+    await stageProposal(data, row({ digest: "d1", logicalKey: "a", createdAt: "2024-01-01T00:00:00.000Z" }));
+    await stageProposal(data, row({ digest: "d2", logicalKey: "b" }));
+    // Sweep from a time past d1's TTL horizon but before d2's.
+    const at = new Date(Date.parse("2024-01-01T00:00:00.000Z") + DELIVERY_PROPOSAL_TTL_MS + 1000);
+    const swept = await sweepExpiredProposals(data, at);
+    assertEquals(swept, 1);
+    assertEquals((await deliveryGraphProposals(data).get("d1"))?.status, "expired");
+    assertEquals((await deliveryGraphProposals(data).get("d2"))?.status, "staged");
+    // Idempotent: a re-sweep at the same instant flips nothing more.
+    assertEquals(await sweepExpiredProposals(data, at), 0);
+  });
+});
+
+test("sweepExpiredProposals: leaves superseded/dispatched proposals untouched (only `staged` is swept)", async () => {
+  await withData(async (data) => {
+    await stageProposal(data, row({ digest: "d1", createdAt: "2024-01-01T00:00:00.000Z" }));
+    await markProposalDispatched(data, "d1");
+    const at = new Date(Date.parse("2024-01-01T00:00:00.000Z") + DELIVERY_PROPOSAL_TTL_MS + 1000);
+    assertEquals(await sweepExpiredProposals(data, at), 0);
+    assertEquals((await deliveryGraphProposals(data).get("d1"))?.status, "dispatched");
   });
 });
