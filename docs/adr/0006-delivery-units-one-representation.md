@@ -28,8 +28,8 @@ nano-workforce **#305** (consolidate escalations on native `user_tasks` — a na
 ### One aggregate, encoded three times
 
 nano-workforce models the same real-world thing — **one agent takes one unit of work and drives it to
-one merged PR** — in three separate representations, each with its own table, status union, display
-VIEW, `instanceTracking` binding, and dispatch door:
+one merged PR** — in three separate representations, each with its own table, status union, operator
+read-surface, `instanceTracking` binding, and dispatch door:
 
 | Representation | Data | Process | Shape |
 |---|---|---|---|
@@ -70,8 +70,8 @@ from its source. That is what made a *shared* display projection impossible: eac
 its own hand-maintained projection. (The delivery-unit source tables themselves —
 `feature_runs`/028, `plans`+`plan_tasks`/004, `delivery_graph_runs`/058 — are domain stores, not
 projection artifacts.) **Unlocked by nano-ide#424** (the datasource can now read a VIEW) → the derived
-read-model VIEWs added in migrations 059–062, 064, and 073, with 070–072 dropping the now-redundant
-denormalized columns/tables. **Live today.**
+read-model VIEWs added in migrations 059–062, 064, and 073 (later refined by 074/075), with 070–072
+dropping the now-redundant denormalized columns/tables. **Live today.**
 
 **Process — "the pinned WASM engine no-ops `callActivity`."** `app/deliveryGraphCompiler.ts:47-51`
 (and again at 604-607) records the constraint verbatim: `callActivity` is "a no-op on the pinned WASM
@@ -85,7 +85,11 @@ compiler that re-emits it once per graph node. Sibling cells
 because it did nothing. **Unlocked by #416** (engine-wasm 0.4.0 → **0.7.2**). engine-core executes
 `callActivity` by inline-expanding the called process at deploy (`engine-core/src/model.rs:1217/1255`).
 **Verified live:** a `callActivity` parent+child model deployed through engine-wasm 0.7.2 runs to
-`COMPLETED`.
+`COMPLETED`. Caveat: #416 bumps only the **dev-only** `@nanobpm/urban-testkit`; the production
+`@nanobpm/urban` broker does not itself pin `engine-wasm`, so this verification proves the in-process
+testkit, not the broker/runtime that will execute future `callActivity` models. S4/S5 therefore also
+carry a **deployment-runtime prerequisite** — the deployed broker's `engine-core` must carry the same
+`callActivity` support — which green testkit CI does not by itself guarantee.
 
 ### The two constraints are the *same* constraint
 
@@ -98,9 +102,11 @@ half-consolidated; removing both is what makes a single representation reachable
 
 ## Decision
 
-Adopt a single internal aggregate — the **delivery unit** (*one agent → one unit of work → one PR*) —
-with **two encodings** of it, each of which now *references* the shared definition rather than inlining
-a copy:
+Adopt a single internal aggregate — the **delivery unit** — defined around its **nodes**: a node is one
+agent's unit of work whose terminal is *typically* one merged PR, though ADR 0005 `wait`/`human`/`connector`
+nodes and PR-less delivery graphs (`delivery_graph_runs` has no `pr_key`) make PR production **optional**.
+It has **two encodings**, each of which now *references* the shared definition rather than inlining
+a copy — expressed here as the **target** state:
 
 ### 1. Data encoding — one `delivery_unit` aggregate
 
@@ -123,9 +129,11 @@ a copy:
 
 - Extract the atomic *implement-cell* (and its sibling wait-gate and human-escalation cells) into
   standalone processes (`resources/processes/implement-cell.bpmn`, …).
-- Compose them by reference: **feature** = one `callActivity`; **epic** = the multi-instance
-  `implement` body is a `callActivity`; **delivery graph** = the compiler *emits* `callActivity`
-  references, not inlined subprocess copies.
+- Compose them by reference — replacing only the inlined *implement/escalation segment*, not the
+  surrounding orchestration: in **feature** (`feature.bpmn`) the readiness preflight, base-branch setup,
+  `record-feature`, and convergence handoff are retained; only the implement-cell segment becomes one
+  `callActivity`. **Epic** = the multi-instance `implement` body is a `callActivity`; **delivery graph**
+  = the compiler *emits* `callActivity` references, not inlined subprocess copies.
 - This is gated on the engine-wasm 0.7.2 unlock, which is now live on `main`.
 
 ### 3. Status lifecycle — one derived union
@@ -135,8 +143,11 @@ so a change to lifecycle semantics is made once and derived everywhere, not re-d
 representation. These unions are **not** identical today — features use
 `running`/`escalated`/`awaiting_operator`/…, plans use `planning`/`dispatched`/`done`, and graphs use
 `running`/`done` with a reserved `awaiting-approval` (`app/feature.ts`, `app/plan.ts`,
-`app/deliveryGraphRun.ts`) — so S1 owns defining the canonical state set, the per-shape mapping and
-precedence, and the write/`instanceTracking` behavior, not merely projecting an existing value.
+`app/deliveryGraphRun.ts`); §1 additionally makes each `plan_tasks` row a **node**, which carries its own
+`PlanTaskStatus` (`pending`/`waiting-for-lane`/…, `app/plan.ts`). So S1 owns defining the canonical
+**aggregate** state set *and* explicitly deciding whether **node** status is part of that union or a
+separate node contract — plus the per-shape mapping and precedence and the write/`instanceTracking`
+behavior — not merely projecting an existing value.
 
 ### 4. Preserve — the static-vs-adaptive execution axis (do NOT bundle it)
 
@@ -151,8 +162,9 @@ their topology is produced. Unifying that axis is explicitly out of scope here.
   status, a lifecycle rule, a step in the implement cell — is made once and derived into every
   representation, eliminating the three-way drift surface this project treats as a defect class.
 - **Renderability + executability both improve.** One implement-cell process is one thing to keep
-  deploy-valid and lay out, instead of four hand-maintained copies that can silently diverge (a graph
-  can render and still fail deploy — the copies are exactly where that divergence hides).
+  deploy-valid and lay out, instead of **two hand-authored copies plus a compiler generator** that can
+  silently diverge (a graph can render and still fail deploy — the copies are exactly where that
+  divergence hides).
 - **Migration is incremental and forward-only.** The VIEWs preserve every current read shape while the
   physical model consolidates underneath, and each slice below is independently shippable. Consistent
   with this repo's forward-only, expand-and-contract migration contract (see
@@ -178,10 +190,16 @@ Each slice is independently shippable; the process slices (S4/S5) are sequenced 
   scope (an adjacent sub-step of S1/S3 per #464).
 - **S2 · `delivery_units` table** — the aggregate. Because current code still **writes**
   `feature_runs` / `plans` / `plan_tasks` / `delivery_graph_runs` directly (`app/feature.ts`,
-  `app/plan.ts`, `app/deliveryGraphRun.ts`) and a SQLite VIEW is read-only, follow expand/contract
-  **order**: (a) add `delivery_units` and dual-write it alongside the legacy tables; (b) backfill
-  existing/legacy rows; (c) repoint reads to VIEWs/rows derived from `delivery_units`, guarded by
-  read-model parity tests; (d) only then, in a later contract phase, retire the legacy write paths.
+  `app/plan.ts`, `app/deliveryGraphRun.ts`) — **and** the framework's `instanceTracking` bindings in
+  `nano.app.json` write termination status to `feature_runs`, `plans`, and `delivery_graph_runs` — and a
+  SQLite VIEW is read-only, follow expand/contract **order**: (a) add `delivery_units` and dual-write it
+  alongside the legacy tables; (b) backfill existing/legacy rows; (c) repoint reads to VIEWs/rows derived
+  from `delivery_units`, guarded by read-model parity tests. The legacy tables stay **physical
+  (writable) through S2** — they must **not** become read-only VIEWs while any writer, including the
+  `instanceTracking` termination-reconciliation bindings, still targets them, or reconciliation fails
+  with no writable target left for S3 to move. (d) Only after **S3** has moved those `instanceTracking`
+  bindings and every other writer off the legacy tables does the table-to-VIEW contract phase retire the
+  legacy write paths.
 - **S3 · collapse doors** — unify the three `instanceTracking` bindings + `senior:*` dispatch doors.
 - **S4 · shared cells** — extract the atomic `implement-cell.bpmn` **and its sibling wait-gate and
   human-escalation cells** (Decision §2) into standalone processes; `feature.bpmn` + the `plan-fanout`
