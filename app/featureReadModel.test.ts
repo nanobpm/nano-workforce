@@ -26,6 +26,7 @@ import { FEATURE_RUN_STATUSES } from "./feature.ts";
 import { deriveListBucket, deriveStage } from "./stage.ts";
 
 const MIG = (name: string) => readFileSync(fileURLToPath(new URL(`../db/migrations/${name}`, import.meta.url)), "utf8");
+const PAGE = (name: string) => JSON.parse(readFileSync(fileURLToPath(new URL(`../pages/${name}`, import.meta.url)), "utf8"));
 
 // The base `feature_runs` shape the view reads (028 + 030's delivery_label + 035's title + 039's
 // acknowledged_at & the now-vestigial stored stage/… columns), plus migration 073. The stored derived
@@ -195,4 +196,15 @@ test("RED/GREEN GUARD: a RAW-datasource feature_runs.status write (the instanceT
   // Unacknowledged terminal → still Active (History only after the operator dismisses it).
   assertEquals(row.list_bucket, "active", "a just-cancelled run sits in Active until dismissed");
   assertEquals(row.list_bucket, deriveListBucket("abandoned", null));
+});
+
+test("the Feature page binds the derived feature_read_model VIEW (not the raw feature_runs table)", () => {
+  // `feature.page.json`'s runs grid is the ONLY thing making the UI consume the derived projection.
+  // `feature_runs` remains a valid schema table, so reverting this binding would leave every SQL-view
+  // test green while the display silently resumed reading the stale stored columns; pin it here
+  // (suppressed advisory feature.page.json — issue #439).
+  const page = PAGE("feature.page.json");
+  const runs = (page.nodes ?? []).find((n: { id: string }) => n.id === "feature-runs");
+  assert(runs, "feature page must keep the Feature runs grid");
+  assertEquals(runs.props.data.table, "feature_read_model");
 });

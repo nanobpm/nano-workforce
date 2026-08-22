@@ -278,6 +278,15 @@ test("the operator pages read the derived plan_read_model VIEW for the wave/deli
   assertEquals(byId("epic-plan").props.data.table, "plan_read_model");
   assert(/\{\{\s*wave_label\s*\}\}/.test(byId("wave-banner").props.header), "the banner surfaces wave_label");
   assertEquals(byId("wave-banner").props.body, "delivery_label", "the banner body is the delivery_label");
+
+  // Epic INDEX page (epic.page.json) — the standalone Epics grid must also read the derived VIEW, not
+  // the raw `plans` table. `plans` stays a valid schema table, so a regression here (reverting the
+  // binding) would leave every OTHER test green while the index silently resumed reading stale
+  // list_bucket/ack_open; this pins it (suppressed advisory epic.page.json — issue #439).
+  const epicIndex = PAGE("epic.page.json");
+  const epicPlans = (epicIndex.nodes ?? []).find((n: { id: string }) => n.id === "epic-plans");
+  assert(epicPlans, "epic index must keep the Epics grid");
+  assertEquals(epicPlans.props.data.table, "plan_read_model");
 });
 
 test("plan_read_model DERIVES list_bucket / ack_open from status + delivery + acknowledged_at, matching deriveEpicBucket / epicIsAcknowledgeable (issue #439)", () => {
