@@ -54,6 +54,12 @@ export default defineOperation("previewDeliveryGraph", async ({ body }, app) => 
       humanNodeCount: compiled.humanNodes.length,
       sideEffectCount: compiled.sideEffects.length,
       diagram: compiled.diagram,
+      // The FULL extracted preview detail (not just the counts): the human stop-points and the
+      // side-effecting actions the operator is being asked to approve (Decision 7). The Delivery
+      // Graphs page renders these lists so the operator sees WHERE it parks on a person and WHAT it
+      // will do before dispatching — the "preview before dispatch" principle made visible (#441).
+      humanNodes: compiled.humanNodes,
+      sideEffects: compiled.sideEffects,
     },
   };
 });

@@ -1616,6 +1616,20 @@ components:
         diagram:
           type: string
           description: The mermaid flowchart of the compiled graph (preview).
+        humanNodes:
+          type: array
+          items:
+            $ref: "#/components/schemas/DeliveryHumanStop"
+          description: >-
+            The human stop-points the compiled graph parks on (preview) — where it waits for a person
+            (or an agent answering on their behalf), rendered by the Delivery Graphs page (#441).
+        sideEffects:
+          type: array
+          items:
+            $ref: "#/components/schemas/DeliverySideEffect"
+          description: >-
+            The side-effecting (`agent`/`connector`) actions the compiled graph WILL perform (preview)
+            — what an approval authorises (Decision 7), rendered by the Delivery Graphs page (#441).
     ResolvedDeliveryNode:
       description: >-
         A normalised node in the compiled graph (ADR 0005 slice S1) — its `id`, `kind`, the

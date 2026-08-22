@@ -1,0 +1,273 @@
+:root {
+  color-scheme: dark;
+}
+
+.dg {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  color: #d7e0ea;
+  background: #0b0f14;
+  min-height: 100%;
+  box-sizing: border-box;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.dg .card {
+  background: #121821;
+  border: 1px solid #223042;
+  border-radius: 10px;
+  padding: 14px 16px;
+}
+
+.dg .card-warn {
+  border-color: rgba(210, 153, 34, 0.5);
+}
+
+.dg .card-err {
+  border-color: rgba(248, 81, 73, 0.5);
+}
+
+.dg .card-ok {
+  border-color: rgba(63, 185, 80, 0.5);
+}
+
+.dg h2 {
+  margin: 0 0 8px;
+  font-size: 15px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.dg p {
+  margin: 6px 0;
+  font-size: 13px;
+}
+
+.dg .json {
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 200px;
+  resize: vertical;
+  background: #0d141d;
+  color: #d7e0ea;
+  border: 1px solid #223042;
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.dg .idem {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 10px;
+  font-size: 12px;
+}
+
+.dg .input {
+  background: #0d141d;
+  color: #d7e0ea;
+  border: 1px solid #223042;
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 13px;
+}
+
+.dg .actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+  flex-wrap: wrap;
+}
+
+.dg .btn {
+  background: #1c2735;
+  color: #d7e0ea;
+  border: 1px solid #2b3a4e;
+  border-radius: 7px;
+  padding: 7px 16px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.dg .btn:hover {
+  background: #223042;
+}
+
+.dg .btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.dg .btn-primary {
+  background: #1f6feb;
+  border-color: #388bfd;
+  color: #fff;
+}
+
+.dg .btn-primary:hover {
+  background: #388bfd;
+}
+
+.dg .btn-ghost {
+  background: transparent;
+  border-color: #2b3a4e;
+  color: #8aa0b8;
+}
+
+.dg .status {
+  font-size: 12.5px;
+  color: #8aa0b8;
+}
+
+.dg .status-ok {
+  color: #56d364;
+}
+
+.dg .status-err {
+  color: #ff7b72;
+}
+
+.dg .status-warn {
+  color: #e3b341;
+}
+
+.dg .chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.dg .chip {
+  background: #0d141d;
+  border: 1px solid #223042;
+  border-radius: 999px;
+  padding: 3px 12px;
+  font-size: 12px;
+}
+
+.dg .count {
+  background: #0d141d;
+  border: 1px solid #223042;
+  border-radius: 999px;
+  padding: 0 9px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #8aa0b8;
+}
+
+.dg table.grid {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  margin-top: 4px;
+}
+
+.dg table.grid th,
+.dg table.grid td {
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid #1c2735;
+  vertical-align: top;
+}
+
+.dg table.grid th {
+  color: #8aa0b8;
+  font-weight: 500;
+}
+
+.dg .diagram {
+  background: #0d141d;
+  border: 1px solid #223042;
+  border-radius: 8px;
+  padding: 12px;
+  overflow-x: auto;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: #b9c6d6;
+  margin: 0;
+}
+
+.dg .errors {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  font-size: 13px;
+}
+
+.dg .errors li {
+  margin: 3px 0;
+}
+
+.dg code {
+  background: #0d141d;
+  border: 1px solid #223042;
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-size: 12px;
+}
+
+.dg .muted {
+  color: #6b7f95;
+}
+
+.dg .ok {
+  color: #56d364;
+}
+
+.dg .warn {
+  color: #e3b341;
+}
+
+.dg .red {
+  color: #ff7b72;
+}
+
+.dg .pill {
+  display: inline-block;
+  border-radius: 999px;
+  padding: 1px 9px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.dg .pill-agent {
+  background: rgba(31, 111, 235, 0.18);
+  color: #58a6ff;
+  border: 1px solid rgba(31, 111, 235, 0.4);
+}
+
+.dg .pill-connector {
+  background: rgba(210, 153, 34, 0.18);
+  color: #e3b341;
+  border: 1px solid rgba(210, 153, 34, 0.4);
+}
+
+.dg .pill-wait {
+  background: rgba(63, 185, 80, 0.18);
+  color: #56d364;
+  border: 1px solid rgba(63, 185, 80, 0.4);
+}
+
+.dg .pill-human {
+  background: rgba(163, 113, 247, 0.18);
+  color: #bc8cff;
+  border: 1px solid rgba(163, 113, 247, 0.4);
+}
+
+.dg .pill-unknown {
+  background: rgba(139, 148, 158, 0.18);
+  color: #8b949e;
+  border: 1px solid rgba(139, 148, 158, 0.4);
+}
