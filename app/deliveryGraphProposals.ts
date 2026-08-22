@@ -242,16 +242,27 @@ export async function markProposalExpired(data: DataLayer, digest: string): Prom
  * staged proposal". This reconciliation sweep (driven by the poller) is the single writer that realises
  * the TTL, reusing the canonical `isProposalExpired` predicate so there is no second definition of
  * "expired". Returns the number of proposals swept. Idempotent: a proposal already terminal (superseded/
- * dispatched/expired) is left untouched. */
+ * dispatched/expired) is left untouched.
+ *
+ * The expiry flip is a GUARDED UPDATE (`... WHERE digest=? AND status='staged'`), not a blind
+ * update-by-key. The initial `find()` and the per-row write are separate statements, so a proposal can
+ * be dispatched (or superseded) in the window between them; a blind `table.update(digest, …)` would
+ * clobber that newer terminal status back to `expired`, silently re-hiding a run the operator just
+ * launched. The `status='staged'` guard makes the write a no-op when the row has already moved on, and
+ * we count only rows that actually changed (`res.changed`) so the returned tally stays honest. */
 export async function sweepExpiredProposals(data: DataLayer, at: Date = new Date()): Promise<number> {
   const table = deliveryGraphProposals(data);
   const staged = await table.find({ status: "staged" });
   const ts = now();
+  const db = data.open();
   let swept = 0;
   for (const row of staged) {
     if (isProposalExpired(row.expires_at, at)) {
-      await table.update(row.digest, { status: "expired", updated_at: ts });
-      swept++;
+      const res = await db.exec(
+        `UPDATE "delivery_graph_proposals" SET "status" = 'expired', "updated_at" = ? WHERE "digest" = ? AND "status" = 'staged'`,
+        [ts, row.digest],
+      );
+      swept += res.changed;
     }
   }
   return swept;

@@ -220,3 +220,48 @@ test("sweepExpiredProposals: leaves superseded/dispatched proposals untouched (o
     assertEquals((await deliveryGraphProposals(data).get("d1"))?.status, "dispatched");
   });
 });
+
+test("sweepExpiredProposals: a dispatch racing between the read and the write is NOT clobbered back to `expired`", async () => {
+  await withData(async (data) => {
+    // One aged-out staged proposal — the sweep's `find()` will see it as `staged`.
+    await stageProposal(data, row({ digest: "d1", createdAt: "2024-01-01T00:00:00.000Z" }));
+    const at = new Date(Date.parse("2024-01-01T00:00:00.000Z") + DELIVERY_PROPOSAL_TTL_MS + 1000);
+
+    // Wrap the data layer so that, in the window between the sweep's `find()` and its per-row guarded
+    // `exec`, the operator dispatches the proposal (status: staged -> dispatched). A blind
+    // update-by-key would clobber that dispatch back to `expired`; the guarded UPDATE
+    // (`WHERE status='staged'`) must instead no-op and leave the row `dispatched`.
+    let raced = false;
+    const racyData = new Proxy(data, {
+      get(target, prop, receiver) {
+        if (prop === "open") {
+          return () => {
+            const src = target.open();
+            return new Proxy(src, {
+              get(s, p) {
+                if (p === "exec") {
+                  return async (sql: string, params?: unknown[]) => {
+                    if (!raced) {
+                      raced = true;
+                      await markProposalDispatched(data, "d1");
+                    }
+                    return s.exec(sql, params);
+                  };
+                }
+                const v = Reflect.get(s, p, s);
+                return typeof v === "function" ? v.bind(s) : v;
+              },
+            });
+          };
+        }
+        const v = Reflect.get(target, prop, target);
+        return typeof v === "function" ? v.bind(target) : v;
+      },
+    });
+
+    const swept = await sweepExpiredProposals(racyData as DataLayer, at);
+    assert(raced, "the racing dispatch should have fired");
+    assertEquals(swept, 0);
+    assertEquals((await deliveryGraphProposals(data).get("d1"))?.status, "dispatched");
+  });
+});
