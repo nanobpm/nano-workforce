@@ -34,7 +34,9 @@
 -- whether or not the flag is stale (a run back at `implement-task` IS implementing); only the attention
 -- badge was drifting, so only it moves to engine-truth derivation.
 --
--- Forward-only, non-additive to `feature_runs` (a VIEW redefinition): `DROP VIEW` then `CREATE VIEW`.
+-- Forward-only, non-additive to `feature_runs` (a VIEW redefinition): `DROP VIEW` then `CREATE VIEW`,
+-- plus one idempotent `CREATE INDEX IF NOT EXISTS` on `user_tasks` to front the correlated `attention`
+-- lookups (see the trailing index comment).
 -- 073 is a MERGED, IMMUTABLE migration — never edited; this is a NEW migration that supersedes its VIEW
 -- definition. `user_tasks` (034) already exists earlier in the chain, so the correlated subquery
 -- resolves. A single plain `CREATE VIEW … SELECT … FROM feature_runs fr` (the `user_tasks` lookups are
@@ -99,3 +101,13 @@ SELECT
     ELSE 'active'
   END) AS list_bucket
 FROM feature_runs fr;
+
+-- Supporting index for the correlated `attention` EXISTS lookups above. Each row of
+-- `feature_read_model` probes `user_tasks` by `(subject_type, subject_key, element_id)` (twice: once
+-- for `feature-blocked`, once for `feature-escalation`); the only prior index (034) is on
+-- `(element_id, updated_at)`, which does not front the equality on `subject_type`/`subject_key`, so a
+-- page reading many `feature_runs` rows would repeat a `user_tasks` scan per row. A composite index on
+-- the exact equality tuple turns each probe into an index seek. `IF NOT EXISTS` keeps the migration
+-- idempotent on any DB that already carries the index.
+CREATE INDEX IF NOT EXISTS idx_user_tasks_subject_element
+  ON user_tasks(subject_type, subject_key, element_id);
