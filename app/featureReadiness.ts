@@ -26,6 +26,7 @@ import {
   DEFAULT_READINESS_TIMEOUT,
   parseProbe,
   type ReadinessProbe,
+  readinessPollEvery,
   readinessTimeout,
 } from "./readiness.ts";
 import { isoDurationToMs } from "./reviewWait.ts";
@@ -47,6 +48,7 @@ export interface FeatureReadinessInput {
 export interface FeatureReadiness {
   readonly probes: ReadinessProbe[];
   readonly probeTimeout: string | null;
+  readonly probePollEvery: string | null;
 }
 
 function isNonEmptyString(v: unknown): v is string {
@@ -104,7 +106,7 @@ function desugarHandle(handle: string, consumerPackage: string | null): Readines
 }
 
 /** Parse + desugar a feature's optional intake readiness into the gate's `readinessProbes` +
- * `probeTimeout`. Accepts EITHER the full `readiness` descriptor list OR the `blockedOn` shorthand
+ * `probeTimeout`/`probePollEvery`. Accepts EITHER the full `readiness` descriptor list OR the `blockedOn` shorthand
  * (or both — they concatenate). Returns an empty probe set (gate skipped) when neither is present.
  *
  * Throws a descriptive error on a malformed descriptor (via {@link parseProbe}), a `blockedOn` entry
@@ -139,7 +141,7 @@ export function parseFeatureReadiness(
     }
   }
 
-  if (probes.length === 0) return { probes: [], probeTimeout: null };
+  if (probes.length === 0) return { probes: [], probeTimeout: null, probePollEvery: null };
 
   // One bound governs the whole preflight's escalation timers — the LONGEST of the probes' derived
   // timeouts (via the canonical `readinessTimeout`), so no probe is cut short. Mirrors the epic
@@ -147,5 +149,8 @@ export function parseFeatureReadiness(
   const probeTimeout = probes
     .map((p) => readinessTimeout(p, env))
     .reduce((a, b) => (isoDurationToMs(b, DEFAULT_READINESS_TIMEOUT) > isoDurationToMs(a, DEFAULT_READINESS_TIMEOUT) ? b : a));
-  return { probes, probeTimeout };
+  const probePollEvery = probes
+    .map((p) => readinessPollEvery(p, env))
+    .reduce((a, b) => (isoDurationToMs(b, DEFAULT_READINESS_TIMEOUT) < isoDurationToMs(a, DEFAULT_READINESS_TIMEOUT) ? b : a));
+  return { probes, probeTimeout, probePollEvery };
 }

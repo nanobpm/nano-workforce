@@ -776,6 +776,31 @@ export function readinessTimeout(
   return isoDuration(readEnvOr("NANO_READINESS_POLL_TIMEOUT", DEFAULT_READINESS_TIMEOUT, env), DEFAULT_READINESS_TIMEOUT);
 }
 
+/** The poll cadence (an ISO-8601 duration) seeded onto a readiness-gate instance as `probePollEvery`:
+ * the descriptor's `poll.everyMs` when present, else `NANO_READINESS_POLL_EVERY_MS`, else the built-in
+ * {@link DEFAULT_EVERY_MS}, clamped to {@link MAX_EVERY_MS}. Since Option A (#428), the engine — not the
+ * worker — owns the retry cadence: the `wait-poll` timers in `readiness-gate.bpmn` (and the preflight
+ * loops in `feature.bpmn`/`plan-fanout.bpmn`) read `=probePollEvery`, re-activating the now single-shot
+ * `pr.readiness-probe` once per interval. Derived here so whoever seeds a gate derives the cadence from
+ * ONE place (mirroring {@link readinessTimeout} for the bound), and worker/engine can never drift.
+ * `msToIsoDuration` rounds up (via `Math.ceil`) to a whole second, with a one-second minimum, so the
+ * timer never rounds to an immediately-refiring zero-length duration (which would reintroduce a
+ * busy-spin — the very defect Option A removes). */
+export function readinessPollEvery(
+  probe: ReadinessProbe,
+  env: Record<string, string | undefined> = process.env,
+): string {
+  const declared = probe.poll?.everyMs;
+  const ms =
+    typeof declared === "number" && declared >= 1
+      ? Math.min(Math.trunc(declared), MAX_EVERY_MS)
+      : (() => {
+          const envEvery = Number(readEnvOr("NANO_READINESS_POLL_EVERY_MS", String(DEFAULT_EVERY_MS), env));
+          return Number.isFinite(envEvery) && envEvery >= 1 ? Math.min(Math.trunc(envEvery), MAX_EVERY_MS) : DEFAULT_EVERY_MS;
+        })();
+  return msToIsoDuration(ms);
+}
+
 /** The effective gate budget in **milliseconds** — the ms twin of {@link readinessTimeout}, resolved
  * by the SAME precedence (descriptor `poll.timeoutMs`, else `NANO_READINESS_POLL_TIMEOUT`, else the
  * built-in default) and sharing its env key + default. The worker's local poll budget MUST use this

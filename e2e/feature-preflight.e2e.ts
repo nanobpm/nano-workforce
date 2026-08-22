@@ -77,6 +77,7 @@ function featureVars(overrides: Record<string, unknown>): Record<string, unknown
     customInstructions: null,
     readinessProbes: null,
     probeTimeout: null,
+    probePollEvery: null,
     gateKey: null,
     resolvedArtifacts: null,
     ...overrides,
@@ -129,6 +130,7 @@ describe("single-issue feature intake readiness gate (feature.bpmn, issue #295)"
             },
           ],
           probeTimeout: "PT30M",
+          probePollEvery: "PT15S",
           gateKey: "feature-readiness:owner/repo#7",
         }),
       });

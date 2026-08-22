@@ -35,7 +35,7 @@ import {
   recordPlanDep,
   startPlan,
 } from "./plan.ts";
-import { type ReadinessProbe, readinessTimeout } from "./readiness.ts";
+import { type ReadinessProbe, readinessPollEvery, readinessTimeout } from "./readiness.ts";
 
 /** Derive the `capability` readiness probe for ONE inbound inter-epic edge: it goes green when the
  * producer epic (`depends_on_plan_key`) has published a release of `package` whose provenance carries
@@ -64,6 +64,7 @@ export interface DependentGate {
   probes: ReadinessProbe[];
   producers: string[];
   probeTimeout: string;
+  probePollEvery: string;
 }
 
 /** The pure schedule derived from a validated set: the ROOTS to start immediately and the
@@ -104,7 +105,10 @@ export function deriveEpicSchedule(
     const probeTimeout = probes
       .map((p) => readinessTimeout(p, env))
       .reduce((a, b) => (isoLonger(a, b) ? a : b));
-    dependents.push({ planKey, probes, producers: edgesForKey.map((e) => e.depends_on_plan_key), probeTimeout });
+    const probePollEvery = probes
+      .map((p) => readinessPollEvery(p, env))
+      .reduce((a, b) => (isoLonger(a, b) ? b : a));
+    dependents.push({ planKey, probes, producers: edgesForKey.map((e) => e.depends_on_plan_key), probeTimeout, probePollEvery });
   }
   return { roots, dependents };
 }
@@ -161,6 +165,7 @@ export async function lowerAdmittedSet(
     await startPlan(data, engine, parsed, staged.base_branch, {
       readinessProbes: gate?.probes,
       probeTimeout: gate?.probeTimeout,
+      probePollEvery: gate?.probePollEvery,
     });
   }
 

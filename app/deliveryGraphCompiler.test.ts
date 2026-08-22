@@ -85,10 +85,10 @@ test("determinism: the same JSON always yields byte-identical bpmn/diagram/resol
 
 test("trust bound: every node inlines an embedded subProcess delegating to an allowlisted body — no other activity type", () => {
   const r = compileOk(RELEASE_RUNBOOK);
-  // Each of the 4 nodes compiles to an EMBEDDED subProcess (call activities are a no-op on the pinned
+  // Each of the 4 nodes compiles to an EMBEDDED subProcess; wait adds one nested retry-loop subProcess (call activities are a no-op on the pinned
   // WASM engine, so delegation is an inlined subProcess sharing the parent scope — never a callActivity).
   assertEquals((r.bpmn.match(/<bpmn:callActivity/g) ?? []).length, 0);
-  assertEquals((r.bpmn.match(/<bpmn:subProcess /g) ?? []).length, 4);
+  assertEquals((r.bpmn.match(/<bpmn:subProcess /g) ?? []).length, 5);
   assert(!r.bpmn.includes("<bpmn:scriptTask"), "no script task is ever emitted");
   // Each node's inner body delegates to an allowlisted engine-native body: a `serviceTask` typed to a
   // worker (agent → its `senior:*` job; wait → `pr.readiness-probe`; connector → `pr.delivery-connector`)

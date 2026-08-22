@@ -106,9 +106,11 @@ test("capabilityNeedToProbeInput: maps a need to the readiness-gate capability p
     planKey: "owner/repo#289",
     taskId: "issue-289",
     probeTimeout: "PT12H",
+    probePollEvery: "PT15S",
   });
   assertEquals(input.gateKey, "owner/repo#289:issue-289:nanobpm/nano-ide#274:@nanobpm/urban");
   assertEquals(input.probeTimeout, "PT12H");
+  assertEquals(input.probePollEvery, "PT15S");
   assertEquals(input.onTimeout, "escalate");
   assertEquals(input.probe.kind, "capability");
   assertEquals(input.probe.target, "github-releases:nanobpm/nano-ide");
@@ -121,7 +123,7 @@ test("capabilityNeedToProbeInput: maps a need to the readiness-gate capability p
 test("capabilityNeedToProbeInput: omits verifyCommand when the need has none", () => {
   const input = capabilityNeedToProbeInput(
     { capabilityRef: "nanobpm/nano-ide#274", package: "@nanobpm/urban" },
-    { planKey: "o/r#1", taskId: "t1", probeTimeout: "PT1H" },
+    { planKey: "o/r#1", taskId: "t1", probeTimeout: "PT1H", probePollEvery: "PT15S" },
   );
   assertEquals(input.probe.match?.verifyCommand, undefined);
 });
@@ -131,7 +133,7 @@ test("capabilityNeedToProbeInput: throws when the handle names no releases sourc
     () =>
       capabilityNeedToProbeInput(
         { capabilityRef: "#274", package: "@nanobpm/urban" },
-        { planKey: "o/r#1", taskId: "t1", probeTimeout: "PT1H" },
+        { planKey: "o/r#1", taskId: "t1", probeTimeout: "PT1H", probePollEvery: "PT15S" },
       ),
     UnresolvableCapabilityRefError,
     "names no owner/repo releases source",

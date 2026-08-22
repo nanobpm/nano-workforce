@@ -139,6 +139,7 @@ test("deriveEpicSchedule: a dependent with MULTIPLE inbound edges waits for ALL 
   assertEquals(dep.producers.sort(), ["o/r#1", "o/r#2"]);
   assertEquals(dep.probes.length, 2); // one probe per producer — must satisfy both to fan out
   assert(dep.probeTimeout.startsWith("PT") || dep.probeTimeout.startsWith("P"), "an ISO-8601 bound");
+  assert(dep.probePollEvery.startsWith("PT") || dep.probePollEvery.startsWith("P"), "an ISO-8601 cadence");
 });
 
 // ── lowerAdmittedSet ────────────────────────────────────────────────────────────────────────────
@@ -160,6 +161,7 @@ test("lowerAdmittedSet starts roots with no probe and dependents with their seed
   const depProbes = byKey.get("o/r#2")?.["readinessProbes"] as unknown[] | null;
   assert(Array.isArray(depProbes) && depProbes.length === 1, "dependent seeded with one capability probe");
   assert(byKey.get("o/r#2")?.["probeTimeout"] != null, "dependent seeded with a bounded timeout");
+  assert(byKey.get("o/r#2")?.["probePollEvery"] != null, "dependent seeded with a poll cadence");
 
   // Durable edge materialized (after the plans rows exist), and a plans row per epic.
   assertEquals((tables.get("plan_deps") ?? []).length, 1);

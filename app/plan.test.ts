@@ -350,7 +350,7 @@ test("startPlan fails fast when readiness probes are seeded without a probeTimeo
         engine,
         { repo: "owner/repo", number: 292, url: "https://github.com/owner/repo/issues/292", planKey: PLAN_KEY },
         "epic/gate-branch",
-        { readinessProbes: [probe] as any, probeTimeout: "   " },
+        { readinessProbes: [probe] as any, probeTimeout: "   ", probePollEvery: "PT15S" },
       ),
     Error,
     "probeTimeout",

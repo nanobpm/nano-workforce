@@ -70,6 +70,7 @@ import {
   probeOnce,
   READINESS_READY_MESSAGE,
   type ReadinessProbe,
+  readinessPollEvery,
   readinessTimeout,
 } from "./readiness.ts";
 import { clampNudgeMinutes, reviewWaitTimeout } from "./reviewWait.ts";
@@ -1688,6 +1689,10 @@ function capabilityGateTimeout(env: Record<string, string | undefined>): string 
   return readinessTimeout({ kind: "capability", target: "" } satisfies ReadinessProbe, env);
 }
 
+function capabilityGatePollEvery(env: Record<string, string | undefined>): string {
+  return readinessPollEvery({ kind: "capability", target: "" } satisfies ReadinessProbe, env);
+}
+
 /** Capability-edge reconcile pass (issue #289). The host half of the "consumer readiness edge":
  * plan-fanout's per-task fan-out parks at the `wait-caps-resolved` message barrier for any task that
  * declared cross-repo capability `needs` (049_plan_task_needs.sql). Here we reconcile, on EVERY pass
@@ -1721,6 +1726,7 @@ export async function pollCapabilityGatesImpl(
 ) {
   const gateTable = capabilityGates(data);
   const probeTimeout = capabilityGateTimeout(env);
+  const probePollEvery = capabilityGatePollEvery(env);
   for (const plan of await plans(data).all()) {
     const planKey = plan.plan_key;
     const processKey = plan.process_key;
@@ -1757,7 +1763,7 @@ export async function pollCapabilityGatesImpl(
           // need as unresolved (it can only clear once the handle is corrected on a re-plan).
           let probeInput: ReturnType<typeof capabilityNeedToProbeInput>;
           try {
-            probeInput = capabilityNeedToProbeInput(need, { planKey, taskId, probeTimeout });
+            probeInput = capabilityNeedToProbeInput(need, { planKey, taskId, probeTimeout, probePollEvery });
           } catch (err) {
             if (err instanceof UnresolvableCapabilityRefError) {
               if (!row) {
@@ -1808,6 +1814,7 @@ export async function pollCapabilityGatesImpl(
                 variables: {
                   gateKey: probeInput.gateKey,
                   probeTimeout: probeInput.probeTimeout,
+                  probePollEvery: probeInput.probePollEvery,
                   onTimeout: probeInput.onTimeout,
                   probe: probeInput.probe,
                 },

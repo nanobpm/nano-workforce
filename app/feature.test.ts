@@ -320,6 +320,7 @@ test("startFeature: no readiness ⇒ readinessProbes/probeTimeout/gateKey seeded
   const v = captured.variables;
   assertEquals(v.readinessProbes, null);
   assertEquals(v.probeTimeout, null);
+  assertEquals(v.probePollEvery, null);
   assertEquals(v.gateKey, null);
   assertEquals(v.resolvedArtifacts, null);
 });
@@ -348,11 +349,12 @@ test("startFeature: readiness probes seed the gate variables + a non-blank corre
     false,
     false,
     null,
-    { probes, probeTimeout: "PT30M" },
+    { probes, probeTimeout: "PT30M", probePollEvery: "PT15S" },
   );
   const v = captured.variables;
   assertEquals(v.readinessProbes, probes);
   assertEquals(v.probeTimeout, "PT30M");
+  assertEquals(v.probePollEvery, "PT15S");
   // The preflight probe worker requires a non-blank gateKey to publish readiness-ready on.
   assertEquals(v.gateKey, "feature-readiness:owner/repo#42");
   assertEquals(v.resolvedArtifacts, null);

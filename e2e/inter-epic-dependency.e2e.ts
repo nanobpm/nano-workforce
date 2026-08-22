@@ -66,6 +66,7 @@ function planVars(overrides: Record<string, unknown>): Record<string, unknown> {
     waveCount: 1,
     readinessProbes: null,
     probeTimeout: null,
+    probePollEvery: null,
     gateKey: null,
     resolvedArtifacts: null,
     ...overrides,
@@ -115,6 +116,7 @@ describe("inter-epic capability gate — adversarial (plan-fanout.bpmn, issue #2
         variables: planVars({
           readinessProbes: [redProbe()],
           probeTimeout: "PT2S",
+          probePollEvery: "PT1S",
           gateKey: "preflight:owner/repo#2",
         }),
       });
@@ -133,7 +135,8 @@ describe("inter-epic capability gate — adversarial (plan-fanout.bpmn, issue #2
         !flows.includes("readiness-preflight->ensure-base-branch"),
         "the gate HOLDS wave 0 — a parked dependent never reaches the fan-out head",
       );
-      // The token is parked on the escalation user task, not lost.
+      await app.advanceTime(2_100);
+      // The token is parked on the escalation user task after the engine-owned timeout, not lost.
       const tasks = (await app.engine.searchUserTasks({ processInstanceKey })).filter(
         (t) => t.elementId === "readiness-escalation-pf",
       );
@@ -153,10 +156,12 @@ describe("inter-epic capability gate — adversarial (plan-fanout.bpmn, issue #2
         variables: planVars({
           readinessProbes: [redProbe()],
           probeTimeout: "PT2S",
+          probePollEvery: "PT1S",
           gateKey: "preflight:owner/repo#2",
         }),
       });
       await app.settle();
+      await app.advanceTime(2_100);
 
       const escalations = (await app.engine.searchUserTasks({ processInstanceKey })).filter(
         (t) => t.elementId === "readiness-escalation-pf",
@@ -196,6 +201,7 @@ describe("inter-epic capability gate — adversarial (plan-fanout.bpmn, issue #2
         }),
       });
       await app.settle();
+      await app.advanceTime(2_100);
 
       // Parked on the escalation, no human acts. Before the SLA it has NOT proceeded.
       const before = takenFlows(app);

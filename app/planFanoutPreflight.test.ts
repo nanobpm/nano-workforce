@@ -48,21 +48,21 @@ test("the preflight is a multi-instance subprocess over =readinessProbes collect
 });
 
 test("the preflight reuses the pr.readiness-probe worker and the readiness-escalation form (no reinvention)", () => {
-  const sub = flat.match(/<bpmn:subProcess\b[^>]*\bid="readiness-preflight"[\s\S]*?<\/bpmn:subProcess>/)![0];
-  assertStringIncludes(sub, 'type="pr.readiness-probe"', "reuses the existing capability probe worker");
-  assertStringIncludes(sub, 'value="ReadinessProbeIn"', "feeds the shared probe input envelope");
-  assertStringIncludes(sub, 'value="ReadinessProbeOut"', "reads the shared probe output envelope");
-  assertStringIncludes(sub, 'formId="readiness-escalation"', "reuses the existing readiness escalation form");
+  assertStringIncludes(flat, 'type="pr.readiness-probe"', "reuses the existing capability probe worker");
+  assertStringIncludes(flat, 'value="ReadinessProbeIn"', "feeds the shared probe input envelope");
+  assertStringIncludes(flat, 'value="ReadinessProbeOut"', "reads the shared probe output envelope");
+  assertStringIncludes(flat, 'formId="readiness-escalation"', "reuses the existing readiness escalation form");
 });
 
 test("a never-green producer escalates (bounded) without wedging: probe timeout + SLA both settle the gate", () => {
-  const sub = flat.match(/<bpmn:subProcess\b[^>]*\bid="readiness-preflight"[\s\S]*?<\/bpmn:subProcess>/)![0];
-  // The probe carries an interrupting timeout bound (reuses the gate's =probeTimeout), and the human
-  // escalation carries the shared SLA bound — so a stuck producer can never wedge the dependent.
-  assertStringIncludes(sub, "=probeTimeout", "the probe is bounded by the reused =probeTimeout");
-  assertStringIncludes(sub, "=escalationSlaTimeout", "the escalation is bounded by the shared SLA");
-  assert(hasFlow("be_pf_probe_timeout", "readiness-escalation-pf"), "a timed-out probe routes to escalation");
-  assert(hasFlow("pf_gw", "readiness-escalation-pf"), "a not-ready probe routes to escalation");
+  // The probe loop carries an interrupting timeout bound (reuses the gate's =probeTimeout), and the
+  // human escalation carries the shared SLA bound — so a stuck producer can never wedge the dependent.
+  assertStringIncludes(flat, "=probeTimeout", "the probe loop is bounded by the reused =probeTimeout");
+  assertStringIncludes(flat, "=probePollEvery", "retry cadence is driven by the engine timer");
+  assertStringIncludes(flat, "=escalationSlaTimeout", "the escalation is bounded by the shared SLA");
+  assert(hasFlow("be_pf_probe_timeout", "preflight-probe-last-attempt"), "a timed-out loop routes to one last empirical probe");
+  assert(hasFlow("preflight-probe-last-attempt", "pf_gw"), "the last attempt can still take the ready path");
+  assert(hasFlow("pf_gw", "readiness-escalation-pf"), "a not-ready final probe routes to escalation");
   assert(hasFlow("be_pf_sla", "pf_end"), "an elapsed escalation SLA settles the preflight instead of wedging");
 });
 

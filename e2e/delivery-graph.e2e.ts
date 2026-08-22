@@ -172,7 +172,7 @@ describe("delivery-graph runner — engine-native execution (S4)", () => {
       ],
       edges: [],
     };
-    const run = await runDeliveryGraph(app.engine, graph, { probeTimeout: "PT2S", escalationSlaTimeout: "PT1H" });
+    const run = await runDeliveryGraph(app.engine, graph, { probeTimeout: "PT2S", probePollEvery: "PT1S", escalationSlaTimeout: "PT1H" });
     assert.ok(run.ok, `graph should deploy + run, got ${JSON.stringify(run)}`);
     await app.settle();
 
@@ -188,6 +188,7 @@ describe("delivery-graph runner — engine-native execution (S4)", () => {
     // wait is BOUNDED — its poll budget elapses and it escalates onto a human-completable task, parking
     // for a human rather than silently wedging or falsely resolving.
     assert.ok(!takenFlows(app).some((f) => f.endsWith("->End")), "the wait branch never falsely resolves to End");
+    await app.advanceTime(2_100);
     const esc = (await app.engine.searchUserTasks({ state: "CREATED" })).filter((t) => t.elementId?.endsWith("__esc"));
     assert.ok(
       esc.length >= 1,

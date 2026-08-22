@@ -17,6 +17,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { EngineClient } from "@nanobpm/urban";
 import type { DeliveryGraph, DeliveryNode } from "../nano-generated/api-io.d.ts";
 import { assertNever, compileDeliveryGraph, DELIVERY_GRAPH_PROCESS_ID } from "./deliveryGraphCompiler.ts";
+import { DEFAULT_EVERY_MS, msToIsoDuration, parseProbe, readinessPollEvery } from "./readiness.ts";
 
 /** The content digest of a compiled graph — `sha256(bpmn)[:12]` — the single source of truth for the
  * content-addressed deploy id (`delivery-graph-<digest>`) AND the S5 dispatch door's approval token /
@@ -35,6 +36,8 @@ export interface DeliveryRunTimeouts {
   probeTimeout?: string;
   /** `human` node SLA before it records an `escalated` outcome and settles. */
   escalationSlaTimeout?: string;
+  /** `wait` gate retry cadence owned by the engine. */
+  probePollEvery?: string;
   /** Optional explicit assignee for `human` nodes + escalation tasks (else candidate-group routed). */
   escalationAssignee?: string | null;
 }
@@ -51,6 +54,7 @@ export interface DeliveryRunOptions extends DeliveryRunTimeouts {
 const DEFAULTS: Required<Omit<DeliveryRunTimeouts, "escalationAssignee">> = {
   nodeTimeout: "PT30M",
   probeTimeout: "PT30M",
+  probePollEvery: msToIsoDuration(DEFAULT_EVERY_MS),
   escalationSlaTimeout: "P1D",
 };
 
@@ -59,7 +63,7 @@ const DEFAULTS: Required<Omit<DeliveryRunTimeouts, "escalationAssignee">> = {
  * silently seeds `null` into a node body), so both derive from the same node kinds. */
 type NodeInput =
   | { jobType: string; appendPrompt: string; timeout: string }
-  | { gateKey: string; probe: unknown; probeTimeout: string }
+  | { gateKey: string; probe: unknown; probeTimeout: string; probePollEvery: string }
   | { escalationSlaTimeout: string; escalationAssignee: string | null }
   | { target: string; dedupeKey: string | null; payload: Record<string, unknown> | null; timeout: string };
 
@@ -105,6 +109,7 @@ export function prepareDeliveryGraph(graph: DeliveryGraph, options: DeliveryRunO
   const timeouts = {
     nodeTimeout: options.nodeTimeout ?? DEFAULTS.nodeTimeout,
     probeTimeout: options.probeTimeout ?? DEFAULTS.probeTimeout,
+    probePollEvery: options.probePollEvery ?? DEFAULTS.probePollEvery,
     escalationSlaTimeout: options.escalationSlaTimeout ?? DEFAULTS.escalationSlaTimeout,
     escalationAssignee: options.escalationAssignee ?? null,
   };
@@ -155,13 +160,20 @@ function rewriteProcessId(bpmn: string, processDefinitionId: string): string {
  * subProcess ioMapping pulls. Total over the closed kind set. */
 function buildNodeInput(
   node: DeliveryNode,
-  ctx: { runKey: string; element: string; nodeTimeout: string; probeTimeout: string; escalationSlaTimeout: string; escalationAssignee: string | null },
+  ctx: { runKey: string; element: string; nodeTimeout: string; probeTimeout: string; probePollEvery: string; escalationSlaTimeout: string; escalationAssignee: string | null },
 ): NodeInput {
   switch (node.kind) {
     case "agent":
       return { jobType: node.agent.jobType, appendPrompt: node.agent.prompt ?? "", timeout: ctx.nodeTimeout };
-    case "wait":
-      return { gateKey: `${ctx.runKey}:${ctx.element}`, probe: node.wait, probeTimeout: ctx.probeTimeout };
+    case "wait": {
+      const probe = parseProbe(node.wait);
+      return {
+        gateKey: `${ctx.runKey}:${ctx.element}`,
+        probe: node.wait,
+        probeTimeout: ctx.probeTimeout,
+        probePollEvery: probe.poll?.everyMs ? readinessPollEvery(probe, {}) : ctx.probePollEvery,
+      };
+    }
     case "human":
       return { escalationSlaTimeout: ctx.escalationSlaTimeout, escalationAssignee: ctx.escalationAssignee };
     case "connector":

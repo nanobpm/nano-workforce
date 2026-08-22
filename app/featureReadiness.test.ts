@@ -9,12 +9,12 @@ import { test } from "node:test";
 import { assertEquals } from "#test-assert";
 import { parseFeatureReadiness } from "./featureReadiness.ts";
 
-const ENV = { NANO_READINESS_POLL_TIMEOUT: "PT30M" } as Record<string, string | undefined>;
+const ENV = { NANO_READINESS_POLL_TIMEOUT: "PT30M", NANO_READINESS_POLL_EVERY_MS: "15000" } as Record<string, string | undefined>;
 
 test("parseFeatureReadiness: no intake ⇒ empty probes, null bound (gate skipped)", () => {
-  assertEquals(parseFeatureReadiness(undefined, ENV), { probes: [], probeTimeout: null });
-  assertEquals(parseFeatureReadiness({}, ENV), { probes: [], probeTimeout: null });
-  assertEquals(parseFeatureReadiness({ readiness: [], blockedOn: [] }, ENV), { probes: [], probeTimeout: null });
+  assertEquals(parseFeatureReadiness(undefined, ENV), { probes: [], probeTimeout: null, probePollEvery: null });
+  assertEquals(parseFeatureReadiness({}, ENV), { probes: [], probeTimeout: null, probePollEvery: null });
+  assertEquals(parseFeatureReadiness({ readiness: [], blockedOn: [] }, ENV), { probes: [], probeTimeout: null, probePollEvery: null });
 });
 
 test("parseFeatureReadiness: blockedOn + consumerPackage ⇒ capability probes with derived bound", () => {
@@ -32,6 +32,7 @@ test("parseFeatureReadiness: blockedOn + consumerPackage ⇒ capability probes w
   assertEquals(out.probes[1].match?.capabilityRef, "nanobpm/nano-bpm#808");
   // Every derived probe shares the env default, so the bound is that default.
   assertEquals(out.probeTimeout, "PT30M");
+  assertEquals(out.probePollEvery, "PT15S");
 });
 
 test("parseFeatureReadiness: blockedOn without consumerPackage ⇒ command state probes (merged-is-enough)", () => {
@@ -43,6 +44,7 @@ test("parseFeatureReadiness: blockedOn without consumerPackage ⇒ command state
     onTimeout: "escalate",
   });
   assertEquals(out.probeTimeout, "PT30M");
+  assertEquals(out.probePollEvery, "PT15S");
 });
 
 test("parseFeatureReadiness: full readiness descriptors round-trip through parseProbe", () => {
@@ -82,6 +84,7 @@ test("parseFeatureReadiness: a longer per-probe budget wins the derived bound", 
     ENV,
   );
   assertEquals(out.probeTimeout, "PT3600S");
+  assertEquals(out.probePollEvery, "PT15S");
 });
 
 test("parseFeatureReadiness: a bare repo#N handle is rejected (cannot name a provenance repo)", () => {
