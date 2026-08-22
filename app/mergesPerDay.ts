@@ -14,23 +14,18 @@
 //   SELECT date(at, 'localtime') AS day, COUNT(DISTINCT pr_key) AS merged
 //   FROM merges WHERE outcome = 'merged' GROUP BY date(at, 'localtime');
 //
-// Two halves, mirroring the `deriveDelivery`/`pollDelivery` and `deriveLineage`/`pollLineage`
-// convention:
+// The `deriveMergesPerDay` PURE function (issue #344), formerly the derive-half of the
+// `deriveMergesPerDay`/`pollMergesPerDay` split. The merges-per-day read model is now a DERIVED SQL
+// VIEW (`merges_per_day_view`, 062) — the worker-maintained `merges_per_day` table and its
+// `pollMergesPerDay` write-path were RETIRED (epic #412). This pure derivation stays: it is the
+// single source of truth the view's SQL mirrors, and is still exercised by its unit tests +
+// the view's read-model guard.
 //   • `deriveMergesPerDay` — a PURE function: merge audit rows → one ordered `MergeDay` per calendar
 //     day (merged count, burn-up cumulative, a proportional bar string). No I/O, fully tested. Counts
 //     `COUNT(DISTINCT pr_key)` — a PR with several `merged` rows on one day (an `already-merged`
 //     short-circuit or retry) counts once — and ignores `queued`/`blocked` rows entirely.
-//   • `pollMergesPerDay` — the gateway glue: read the `merges` rows and project them onto the
-//     `merges_per_day` read table (051_merges_per_day.sql) the schema-driven Velocity page binds. A
-//     denormalised flat table because Urban's datasource cannot read a SQL VIEW (gateway.ts
-//     `schema()` whitelists `type='table'` only — same reason `lineage_threads`/`plans.delivery` are
-//     flat tables). Writes only when a day's projection actually changes, so a steady-state pass is a
-//     no-op.
-import type { DataLayer } from "@nanobpm/urban";
 
-const now = () => new Date().toISOString();
-
-/** The subset of a `merges` audit row (004_merge.sql) the projection reads. */
+/** The subset of a `merges` audit row (004_merge.sql) the derivation reads. */
 export interface MergeAuditRow {
   pr_key: string;
   outcome: string;
@@ -165,52 +160,4 @@ export function deriveMergesPerDay(rows: readonly MergeAuditRow[], timeZone?: st
     out.push({ day, merged, cumulative, bar: barFor(merged, max) });
   }
   return out;
-}
-
-/** The denormalised read-table row `pollMergesPerDay` projects, one per calendar day. */
-interface MergesPerDayRow extends MergeDay {
-  updated_at: string;
-}
-
-const mergesPerDay = (data: DataLayer) => data.table<MergesPerDayRow>("merges_per_day", "day");
-const mergesAudit = (data: DataLayer) => data.table<MergeAuditRow>("merges", "id");
-
-/** Idempotent read-model pass: recompute merged-per-day from the `merges` audit table and denormalise
- * it onto the `merges_per_day` read table the Velocity page reads. Additive/derived only — never
- * touches `merges`. Upserts a day only when its projection actually changes (so a steady-state pass is
- * a no-op) and prunes any stale day row that no longer derives (defensive — days are append-only in
- * practice, but a purge/rewrite of the audit must not leave a phantom). Buckets in `timeZone` (an
- * IANA zone) when given; the production caller omits it to use the host's resolved zone. */
-export async function pollMergesPerDay(data: DataLayer, timeZone?: string): Promise<void> {
-  try {
-    // Only `outcome === "merged"` rows contribute to the aggregate, so filter at the read rather than
-    // scanning queued/blocked rows as the audit grows (deriveMergesPerDay ignores non-merged rows too).
-    const audit = await mergesAudit(data).find({ outcome: "merged" });
-    const want = deriveMergesPerDay(audit, timeZone);
-    const wantByDay = new Map(want.map((d) => [d.day, d]));
-
-    const existing = await mergesPerDay(data).all();
-    const existingByDay = new Map(existing.map((r) => [r.day, r]));
-
-    for (const d of want) {
-      const cur = existingByDay.get(d.day);
-      if (!cur) {
-        await mergesPerDay(data).insert({ ...d, updated_at: now() });
-      } else if (cur.merged !== d.merged || cur.cumulative !== d.cumulative || cur.bar !== d.bar) {
-        await mergesPerDay(data).update(d.day, {
-          merged: d.merged,
-          cumulative: d.cumulative,
-          bar: d.bar,
-          updated_at: now(),
-        });
-      }
-    }
-
-    // Prune any projected day that no longer derives from the audit trail.
-    for (const r of existing) {
-      if (!wantByDay.has(r.day)) await mergesPerDay(data).delete(r.day);
-    }
-  } catch (err) {
-    console.error(`[poller] merges-per-day: ${err}`);
-  }
 }

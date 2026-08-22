@@ -207,20 +207,17 @@ test("pollLineage: projects feature, epic, and self-rooted threads onto lineage_
 
   const feat = threads.find((t) => t.root_request_key === "o/r#1");
   assert(feat, "feature thread present");
-  assertEquals(feat?.kind, "feature");
   assertEquals(feat?.stage, "converging");
   assertEquals(feat?.stage_label, "Converging (round 2)");
   assertEquals(feat?.active, 1);
   assertEquals(JSON.parse(feat?.pr_keys ?? "[]"), ["o/r#100"]);
 
   const epic = threads.find((t) => t.root_request_key === "o/r#2");
-  assertEquals(epic?.kind, "epic");
   assertEquals(epic?.stage, "converging");
   assertEquals(epic?.pr_count, 2);
   assertEquals(epic?.active, 1);
 
   const human = threads.find((t) => t.root_request_key === "o/r#300");
-  assertEquals(human?.kind, "pr");
   assertEquals(human?.stage, "merged");
   assertEquals(human?.active, 0);
 
@@ -257,7 +254,6 @@ test("pollLineage: a self-rooted PR row (root_request_key === pr_key) projects e
   const threads: LineageThreadRow[] = stores.lineage_threads;
   assertEquals(threads.length, 1, "one self-rooted thread");
   assertEquals(threads[0].root_request_key, "o/r#42", "thread key equals the PR row's root_request_key so the page join drills down");
-  assertEquals(threads[0].kind, "pr");
   assertEquals(JSON.parse(threads[0].pr_keys ?? "[]"), ["o/r#42"]);
   assertEquals(threads[0].pr_count, 1);
 });
@@ -286,7 +282,6 @@ test("pollLineage: an orphaned non-null root (origin row gone) keys the thread o
     "o/r#7",
     "thread key equals the stored root_request_key so the page join drills down, not the pr_key",
   );
-  assertEquals(threads[0].kind, "pr");
   assertEquals(JSON.parse(threads[0].pr_keys ?? "[]").sort(), ["o/r#71", "o/r#72"]);
   assertEquals(threads[0].pr_count, 2);
 });

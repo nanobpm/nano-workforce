@@ -311,7 +311,10 @@ interface PrRow {
 
 const prRows = (data: DataLayer) => data.table<PrRow>("pull_requests", "pr_key");
 
-/** The denormalised read-table row `pollLineage` projects, one per root. */
+/** The `lineage_thread_view` VIEW row (migration 064) — the read shape the Lineage page binds. The
+ *  view PASSES THROUGH the procedural frontier columns from `lineage_threads` and DERIVES the
+ *  view-expressible identity columns (`kind`, `issue_url`, and an epic/feature thread's `title`) from
+ *  the `plans`/`feature_runs` origin joins. */
 export interface LineageThreadRow {
   root_request_key: string;
   kind: string;
@@ -327,8 +330,27 @@ export interface LineageThreadRow {
   updated_at: string;
 }
 
+/** The denormalised BASE `lineage_threads` row `pollLineage` writes. The `kind` / `issue_url` columns
+ *  were RETIRED (epic #412): the `lineage_thread_view` VIEW (064) DERIVES both from the
+ *  `plans`/`feature_runs` origin joins, so the poller no longer denormalises them — this write shape
+ *  is `LineageThreadRow` minus those two view-derived columns. `title` stays: it is a procedural
+ *  representative-PR pick for a self-rooted PR thread (the view falls back to `lt.title` for `kind`
+ *  = 'pr'). */
+interface LineageThreadWriteRow {
+  root_request_key: string;
+  title: string | null;
+  stage: string;
+  stage_label: string | null;
+  process_key: string | null;
+  pr_keys: string | null;
+  pr_count: number;
+  active: number;
+  created_at: string;
+  updated_at: string;
+}
+
 const lineageThreads = (data: DataLayer) =>
-  data.table<LineageThreadRow>("lineage_threads", "root_request_key");
+  data.table<LineageThreadWriteRow>("lineage_threads", "root_request_key");
 
 /** Read-only handle on the `lineage_thread_view` VIEW (migration 064) the Lineage page now binds.
  *  Same shape as `LineageThreadRow`: the view PASSES THROUGH the procedural frontier columns from
@@ -537,9 +559,7 @@ export async function pollLineage(data: DataLayer): Promise<void> {
       const existing = await table.get(thread.rootRequestKey);
       if (
         existing &&
-        existing.kind === thread.kind &&
         existing.title === thread.title &&
-        existing.issue_url === thread.issueUrl &&
         existing.stage === thread.stage &&
         existing.stage_label === thread.stageLabel &&
         existing.process_key === thread.processKey &&
@@ -552,9 +572,7 @@ export async function pollLineage(data: DataLayer): Promise<void> {
       const ts = now();
       if (existing) {
         await table.update(thread.rootRequestKey, {
-          kind: thread.kind,
           title: thread.title,
-          issue_url: thread.issueUrl,
           stage: thread.stage,
           stage_label: thread.stageLabel,
           process_key: thread.processKey,
@@ -566,9 +584,7 @@ export async function pollLineage(data: DataLayer): Promise<void> {
       } else {
         await table.insert({
           root_request_key: thread.rootRequestKey,
-          kind: thread.kind,
           title: thread.title,
-          issue_url: thread.issueUrl,
           stage: thread.stage,
           stage_label: thread.stageLabel,
           process_key: thread.processKey,

@@ -74,18 +74,11 @@ export interface Plan {
   // Wave-merge barrier (007_wave_gate.sql): the wave index whose PRs the plan is currently
   // waiting to see MERGED before dispatching the next wave, or null when not parked at the barrier.
   gate_wave: number | null;
-  // Operator-visibility wave progress (022_plan_wave_progress.sql, #137): denormalised so the
-  // epics-index can show wave X/N at a glance. `wave_count` is the total waves (N); `current_wave`
-  // is the 0-based index of the wave the fleet is actively implementing (advanced by select-wave,
-  // pinned to wave_count-1 on completion). Display-only — never gates control flow. NULL until the
-  // plan is dispatched with tasks.
-  wave_count: number | null;
-  current_wave: number | null;
-  // Pre-formatted 1-based "X/N" progress string for the epics-index at-a-glance column
-  // (022_plan_wave_progress.sql, #137). The dataGrid has no per-cell templating (nano-ide#214),
-  // so this is projected alongside the numeric columns by the same worker writes. NULL until
-  // dispatched with tasks.
-  wave_label: string | null;
+  // Operator-visibility wave progress is now a DERIVED read model (epic #412): the `wave_count` /
+  // `current_wave` / `wave_label` columns (022_plan_wave_progress.sql) were RETIRED — the pages read
+  // them from the `plan_wave_label` / `plan_read_model` SQL VIEWs (060/061), and `pollWaitGate`
+  // derives "has the epic fanned out?" at read time from `plan_tasks`. There is no write-path and no
+  // stored column any more, so nothing on `plans` denormalises wave progress.
   // Per-plan capability token for the coordination blackboard (009_plan_blackboard.sql, #51).
   // Minted at plan start; baked into the blackboard URL handed to implementer agents. NULL for
   // plans created before the blackboard shipped.
@@ -96,13 +89,12 @@ export interface Plan {
   // admission); the column stays NULLABLE ONLY to grandfather pre-ADR-0003 / in-flight rows that
   // carry NULL — those must remain readable, so do NOT add a NOT NULL migration.
   base_branch: string | null;
-  // Derived epic delivery signal (029_plan_delivery.sql, #171): separates "fan-out dispatched to
-  // convergence" (status=done) from "all slice PRs actually merged". Recomputed idempotently by the
-  // poller's `pollDelivery` pass by joining each plan_tasks.pr_key → pull_requests.status — never
-  // written by the plan lifecycle. `delivery` is 'converging' | 'landed' | NULL (see deriveDelivery
-  // in app/service.ts); `delivery_label` is the human rollup for the epic detail view. Display-only.
-  delivery: string | null;
-  delivery_label: string | null;
+  // The derived epic delivery signal (029_plan_delivery.sql) was RETIRED as a stored column (epic
+  // #412): `delivery` / `delivery_label` are now a DERIVED SQL VIEW (`plan_delivery` /
+  // `plan_read_model`, 061), computed from the SAME pure `deriveDelivery`/`TERMINAL_STATUSES`
+  // (app/delivery.ts). The pages read them off the view; the pollers that still need the signal
+  // (`pollPlanBucket` for list_bucket/ack_open, `pollPromotion` for `isPromotable`) recompute it at
+  // read time via `deriveDelivery`. There is no stored column and no write-path any more.
   // Derived epic domain phase (038_plan_epic_phase.sql, #261): the epic's own lifecycle phase —
   // Planning / Reviewing / Implementing (wave n/t) / Trial merging / Finalizing / Dispatched —
   // projected at write time from plan-fanout.bpmn's named activities (app/epicPhase.ts), so the epic
@@ -199,12 +191,12 @@ export const plans = (data: DataLayer) => {
       }
       if (prop === "update") {
         return async (id: unknown, patch: Partial<Plan>) => {
-          // Only re-read + reproject when the patch changes a projection input (status / delivery /
+          // Only re-read + reproject when the patch changes a projection input (status /
           // acknowledged_at) or writes a derived column directly. A projection-irrelevant patch (e.g.
-          // an `updated_at`- or `wave_label`-only write — including the direct `data.table` writes in
+          // an `updated_at`-only write — including the direct `data.table` writes in
           // e.g. `app/retro.ts` that stamp `retro_started_at`) leaves the stored projection correct, so
           // skip the extra `get` roundtrip and delegate straight. Any bucket-relevant write
-          // (status/delivery/acknowledged_at or a derived column) MUST go through this gateway to stay
+          // (status/acknowledged_at or a derived column) MUST go through this gateway to stay
           // reprojected.
           if (!patchAffectsPlanProjection(patch)) return target.update(id, patch);
           const existing = await target.get(id);
@@ -223,7 +215,7 @@ export const plans = (data: DataLayer) => {
 /** The `plans` fields the bucket projection READS: a patch touching none of these (and none it
  * writes) cannot change `list_bucket`/`ack_open`, so the gateway skips the read-back+reproject. Kept
  * adjacent to {@link projectPlanBucket} so the two stay in lockstep. */
-const PLAN_PROJECTION_INPUT_KEYS: readonly (keyof Plan)[] = ["status", "delivery", "acknowledged_at"];
+const PLAN_PROJECTION_INPUT_KEYS: readonly (keyof Plan)[] = ["status", "acknowledged_at"];
 
 /** The `plans` fields the bucket projection WRITES. Included in the reproject trigger so a caller who
  * writes a derived column directly (e.g. `list_bucket`/`ack_open`) can never bypass derivation: the
@@ -241,15 +233,21 @@ function patchAffectsPlanProjection(patch: Partial<Plan>): boolean {
 
 /** Compute the write-time bucket projection columns for a merged `plans` row. Centralised so the
  * gateway is the ONE place `deriveEpicBucket` / `epicIsAcknowledgeable` are applied — the page, SQL,
- * pollers and workers never re-derive the mapping (AGENTS.md "derivation over duplication"). */
+ * pollers and workers never re-derive the mapping (AGENTS.md "derivation over duplication").
+ *
+ * The `delivery` signal was retired as a stored column (epic #412), so the write-time projection can
+ * no longer read it — it derives the bucket with `delivery` treated as UNKNOWN (null). This is
+ * provably safe for `list_bucket`: `deriveEpicBucket` returns the same bucket with `delivery=null` as
+ * with the real signal for every reachable `(status, acknowledged_at)` state. `ack_open` is only a
+ * *candidate* here (any unacknowledged `done` epic); the delivery-aware correction — clearing it
+ * while an epic is still `converging` — is applied at read time by `pollPlanBucket` (app/service.ts),
+ * which recomputes `delivery` via `deriveDelivery`. */
 function projectPlanBucket(row: Partial<Plan>): Partial<Plan> {
   if (!row.status) return {};
   return {
-    list_bucket: deriveEpicBucket(row.status, row.delivery ?? null, row.acknowledged_at ?? null),
+    list_bucket: deriveEpicBucket(row.status, null, row.acknowledged_at ?? null),
     ack_open:
-      epicIsAcknowledgeable(row.status, row.delivery ?? null) && (row.acknowledged_at ?? null) === null
-        ? 1
-        : 0,
+      epicIsAcknowledgeable(row.status, null) && (row.acknowledged_at ?? null) === null ? 1 : 0,
   };
 }
 

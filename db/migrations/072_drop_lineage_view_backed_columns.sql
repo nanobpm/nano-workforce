@@ -1,0 +1,23 @@
+-- Contract phase for the view-migrated `lineage_threads` identity columns (epic #412: retire
+-- worker-maintained denormalised projections in favour of SQL VIEWs).
+--
+-- 064_lineage_thread_view.sql introduced the `lineage_thread_view` VIEW the Lineage page now binds.
+-- The lineage audit (lineage-views-audit) split `lineage_threads`' columns into two groups:
+--   • VIEW-BACKED (fully derivable from the `plans`/`feature_runs` origin joins): `kind` and
+--     `issue_url`. The view DERIVES both — `kind` from which origin table the root matches, `issue_url`
+--     from that origin's `issue_url` (NULL for a self-rooted PR) — and NEVER reads `lt.kind` /
+--     `lt.issue_url`. `pollLineage` (app/lineage.ts) no longer writes them (this wave-1 cleanup).
+--   • PROCEDURAL (kept, still poller-written, still read by the view): `title` (a self-rooted PR's
+--     representative-PR pick), `stage`, `stage_label`, `process_key`, `pr_keys`, `pr_count`, `active`,
+--     `created_at`, `updated_at`. These are NOT dropped — the view passes them through from
+--     `lineage_threads`, and `pollLineage` remains their single writer.
+--
+-- So drop ONLY the two fully view-backed columns; the procedural remainder stays. Both dropped
+-- columns were nullable with no default and now have no writer or reader, and no index references
+-- them, so a plain `ALTER TABLE … DROP COLUMN` suffices. Because a procedural remainder survives, the
+-- `lineage_threads` table itself is NOT dropped.
+--
+-- Forward-only contract migration numbered in this task's disjoint 070-079 block. The runner wraps
+-- each file in its own transaction, so this file must NOT contain BEGIN/COMMIT.
+ALTER TABLE lineage_threads DROP COLUMN kind;
+ALTER TABLE lineage_threads DROP COLUMN issue_url;

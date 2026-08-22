@@ -59,7 +59,7 @@ function fakeApp() {
   return { app, plans, planTasks, planTaskNeeds };
 }
 
-test("record-plan initializes wave progress fields for a taskful plan", async () => {
+test("record-plan dispatches a taskful plan and levelizes its tasks (wave progress is now VIEW-derived)", async () => {
   const { app, plans } = fakeApp();
   await handler(
     {
@@ -74,22 +74,24 @@ test("record-plan initializes wave progress fields for a taskful plan", async ()
     app,
   );
   assertEquals(plans[0].status, "dispatched");
-  assertEquals(plans[0].wave_count, 2);
-  assertEquals(plans[0].current_wave, 0);
-  assertEquals(plans[0].wave_label, "1/2");
+  // Wave progress (wave_count/current_wave/wave_label) was retired as a stored projection (epic
+  // #412) — it is derived from `plan_tasks` by the plan_wave_label/plan_read_model VIEWs — so
+  // record-plan no longer writes it onto the plans row.
+  assertEquals(plans[0].wave_count, undefined);
+  assertEquals(plans[0].current_wave, undefined);
+  assertEquals(plans[0].wave_label, undefined);
 });
 
-test("record-plan leaves all three wave progress fields NULL for a taskless plan", async () => {
+test("record-plan marks a taskless plan done (no wave-progress columns written)", async () => {
   const { app, plans } = fakeApp();
   await handler(
     { variables: { planKey: "owner/repo#137", tasks: [], note: "planner emitted no tasks" } } as any,
     app,
   );
   assertEquals(plans[0].status, "done");
-  // No wave to implement => no misleading wave_count: 0 while current_wave/wave_label are NULL.
-  assertEquals(plans[0].wave_count, null);
-  assertEquals(plans[0].current_wave, null);
-  assertEquals(plans[0].wave_label, null);
+  assertEquals(plans[0].wave_count, undefined);
+  assertEquals(plans[0].current_wave, undefined);
+  assertEquals(plans[0].wave_label, undefined);
 });
 
 test("record-plan persists per-task capability needs into plan_task_needs (issue #289)", async () => {

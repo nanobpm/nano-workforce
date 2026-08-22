@@ -1,0 +1,21 @@
+-- Contract phase for the worker-maintained `merges_per_day` read table (epic #412: retire
+-- worker-maintained denormalised projections in favour of SQL VIEWs).
+--
+-- 051_merges_per_day.sql created the flat `merges_per_day` read table the Velocity page bound, kept
+-- fresh each poll pass by `pollMergesPerDay` (app/mergesPerDay.ts) projecting the pure
+-- `deriveMergesPerDay` over the `merges` audit trail. Wave-0 re-expressed that aggregate as the
+-- DERIVED `merges_per_day_view` VIEW (062) — computed directly from `merges` with the same
+-- `COUNT(DISTINCT pr_key)` / local-day bucketing — and repointed `pages/velocity.page.json` onto it.
+--
+-- This wave-1 cleanup deletes the `pollMergesPerDay` write-path and its base-table accessors. With no
+-- remaining writer or reader, the `merges_per_day` table is dead schema, so drop it. The pure
+-- `deriveMergesPerDay`/`barFor` helpers (app/mergesPerDay.ts) stay — they are the single source of
+-- truth the view's SQL mirrors and are still exercised by the view's read-model guard. The
+-- `merges_per_day_view` reads the `merges` audit table, NOT this dropped table, so the Velocity page
+-- is unaffected.
+--
+-- Forward-only contract migration numbered in this task's disjoint 070-079 block. The table has no
+-- remaining writer or reader and nothing references it by foreign key, so a plain `DROP TABLE`
+-- suffices. The runner wraps each file in its own transaction, so this file must NOT contain
+-- BEGIN/COMMIT.
+DROP TABLE merges_per_day;

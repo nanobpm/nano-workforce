@@ -1,16 +1,18 @@
 // Read-model derivation test for the epic delivery signal (issue #171). `deriveDelivery` is the
-// single source of truth for the denormalised `plans.delivery` / `plans.delivery_label` columns the
-// poller projects. It must cleanly distinguish an epic whose fan-out is `done` but whose slices are
-// still CONVERGING from one where every slice PR has LANDED, and count abandoned/converged PRs as
-// resolved-not-landed (never `landed`).
+// single source of truth the `plan_delivery` VIEW (061) encodes and the pollers derive at READ TIME
+// (epic #412 retired the stored `plans.delivery` / `plans.delivery_label` columns). It must cleanly
+// distinguish an epic whose fan-out is `done` but whose slices are still CONVERGING from one where
+// every slice PR has LANDED, and count abandoned/converged PRs as resolved-not-landed (never
+// `landed`). `pollPlanBucket` (app/service.ts) is the reader that applies the delivery-aware
+// `list_bucket`/`ack_open` correction from that signal.
 import { test } from "node:test";
 import { assert, assertEquals } from "#test-assert";
 import type { DataLayer } from "@nanobpm/urban";
 import { deriveDelivery, TERMINAL_STATUSES } from "./delivery.ts";
-import { pollDelivery } from "./service.ts";
+import { pollPlanBucket } from "./service.ts";
 
 // A tiny in-memory record gateway (all/find/update/insert), mirroring the fake-app style used
-// across the app tests (see app/taskDelta.test.ts), enough to exercise the `pollDelivery` projection.
+// across the app tests (see app/taskDelta.test.ts), enough to exercise the `pollPlanBucket` pass.
 function memData(): { data: DataLayer; stores: Record<string, any[]> } {
   const stores: Record<string, any[]> = {};
   function tbl(name: string, pk = "id") {
@@ -106,28 +108,32 @@ test("every non-terminal status counts as in flight", () => {
   }
 });
 
-test("pollDelivery: a dangling pr_key (missing PR row) counts as in-flight, never false-landed", async () => {
+test("pollPlanBucket: a still-converging done epic suppresses the Dismiss flag (ack_open=0) and stays Active", async () => {
   const { data, stores } = memData();
+  // A `done` epic the delivery-free gateway left as a Dismiss candidate (ack_open=1); pollPlanBucket
+  // derives `converging` at read time and clears it.
   stores.plans = [
-    { plan_key: "epic-1", status: "done", delivery: null, delivery_label: null },
+    { plan_key: "epic-1", status: "done", acknowledged_at: null, list_bucket: "active", ack_open: 1 },
   ];
   stores.plan_tasks = [
     { id: 1, plan_key: "epic-1", pr_key: "o/r#1" },
-    { id: 2, plan_key: "epic-1", pr_key: "o/r#2" }, // no matching pull_requests row (DB desync)
+    { id: 2, plan_key: "epic-1", pr_key: "o/r#2" },
   ];
-  stores.pull_requests = [{ pr_key: "o/r#1", status: "merged" }];
+  stores.pull_requests = [
+    { pr_key: "o/r#1", status: "merged" },
+    { pr_key: "o/r#2", status: "converging" },
+  ];
 
-  await pollDelivery(data);
+  await pollPlanBucket(data);
 
-  // Without the dangling PR being treated as in-flight, this would wrongly become `landed` (1/1).
-  assertEquals(stores.plans[0].delivery, "converging");
-  assertEquals(stores.plans[0].delivery_label, "1/2 slices merged, 1 converging");
+  assertEquals(stores.plans[0].list_bucket, "active");
+  assertEquals(stores.plans[0].ack_open, 0, "converging epic must not offer Dismiss");
 });
 
-test("pollDelivery: all slice PR rows present and merged -> landed", async () => {
+test("pollPlanBucket: a fully landed done epic opens the Dismiss flag (ack_open=1), still Active", async () => {
   const { data, stores } = memData();
   stores.plans = [
-    { plan_key: "epic-2", status: "done", delivery: null, delivery_label: null },
+    { plan_key: "epic-2", status: "done", acknowledged_at: null, list_bucket: "active", ack_open: 0 },
   ];
   stores.plan_tasks = [
     { id: 1, plan_key: "epic-2", pr_key: "o/r#10" },
@@ -138,38 +144,65 @@ test("pollDelivery: all slice PR rows present and merged -> landed", async () =>
     { pr_key: "o/r#11", status: "merged" },
   ];
 
-  await pollDelivery(data);
+  await pollPlanBucket(data);
 
-  assertEquals(stores.plans[0].delivery, "landed");
-  assertEquals(stores.plans[0].delivery_label, "2/2 slices merged");
+  assertEquals(stores.plans[0].list_bucket, "active");
+  assertEquals(stores.plans[0].ack_open, 1);
 });
 
-test("pollDelivery: a non-done plan is skipped and any stale projection is cleared", async () => {
+test("pollPlanBucket: a dangling pr_key keeps the epic converging (ack_open stays 0)", async () => {
   const { data, stores } = memData();
   stores.plans = [
-    // Regressed out of `done` while carrying a stale `converging` projection.
-    { plan_key: "epic-3", status: "in_progress", delivery: "converging", delivery_label: "1/2 slices merged, 1 converging" },
+    { plan_key: "epic-3", status: "done", acknowledged_at: null, list_bucket: "active", ack_open: 1 },
   ];
-  // A task join here would be wasted work for a non-done plan; assert it is never consulted.
-  let taskLookups = 0;
-  stores.plan_tasks = [{ id: 1, plan_key: "epic-3", pr_key: "o/r#20" }];
+  stores.plan_tasks = [
+    { id: 1, plan_key: "epic-3", pr_key: "o/r#1" },
+    { id: 2, plan_key: "epic-3", pr_key: "o/r#2" }, // no matching pull_requests row (DB desync)
+  ];
+  stores.pull_requests = [{ pr_key: "o/r#1", status: "merged" }];
+
+  await pollPlanBucket(data);
+
+  // Without the dangling PR counting as in-flight this would wrongly land → open Dismiss.
+  assertEquals(stores.plans[0].ack_open, 0);
+});
+
+test("pollPlanBucket: an acknowledged landed epic buckets to History", async () => {
+  const { data, stores } = memData();
+  stores.plans = [
+    {
+      plan_key: "epic-4",
+      status: "done",
+      acknowledged_at: "2024-01-01T00:00:00Z",
+      list_bucket: "active",
+      ack_open: 1,
+    },
+  ];
+  stores.plan_tasks = [{ id: 1, plan_key: "epic-4", pr_key: "o/r#20" }];
   stores.pull_requests = [{ pr_key: "o/r#20", status: "merged" }];
-  const origTable = (data as any).table.bind(data);
-  (data as any).table = (n: string, pk?: string) => {
-    const t = origTable(n, pk);
-    if (n === "plan_tasks") {
-      const origFind = t.find.bind(t);
-      t.find = async (where: any) => {
-        taskLookups++;
-        return origFind(where);
-      };
-    }
-    return t;
-  };
 
-  await pollDelivery(data);
+  await pollPlanBucket(data);
 
-  assertEquals(stores.plans[0].delivery, null);
-  assertEquals(stores.plans[0].delivery_label, null);
-  assertEquals(taskLookups, 0);
+  assertEquals(stores.plans[0].list_bucket, "history");
+  assertEquals(stores.plans[0].ack_open, 0);
+});
+
+test("pollPlanBucket: a steady-state pass rewrites nothing (idempotent)", async () => {
+  const { data, stores } = memData();
+  stores.plans = [
+    {
+      plan_key: "epic-5",
+      status: "done",
+      acknowledged_at: null,
+      list_bucket: "active",
+      ack_open: 1,
+      updated_at: "2020-01-01T00:00:00.000Z",
+    },
+  ];
+  stores.plan_tasks = [{ id: 1, plan_key: "epic-5", pr_key: "o/r#30" }];
+  stores.pull_requests = [{ pr_key: "o/r#30", status: "merged" }]; // landed → ack_open already 1
+
+  await pollPlanBucket(data);
+
+  assertEquals(stores.plans[0].updated_at, "2020-01-01T00:00:00.000Z", "no-op pass must not re-stamp");
 });
