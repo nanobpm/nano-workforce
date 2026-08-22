@@ -117,9 +117,14 @@ export function readGateVars(vars: { gateKey?: unknown; probeTimeout?: unknown }
 let probeExecOverride: ProbeExec | undefined;
 
 /** Test-only seam: inject a deterministic {@link ProbeExec} for e2es driven by the virtual clock, or
- *  pass `undefined` to restore the production {@link defaultProbeExec}. Never called in production. */
-export function __setProbeExecForTest(exec: ProbeExec | undefined): void {
+ *  pass `undefined` to restore the production {@link defaultProbeExec}. Never called in production.
+ *  Returns the PREVIOUS override so a caller can narrowly scope its change with `try/finally`
+ *  (restore the prior value rather than assuming production), keeping the seam safe even if the set
+ *  and clear are not lexically paired. */
+export function __setProbeExecForTest(exec: ProbeExec | undefined): ProbeExec | undefined {
+  const previous = probeExecOverride;
   probeExecOverride = exec;
+  return previous;
 }
 
 function resolveProbeExec(): ProbeExec {
