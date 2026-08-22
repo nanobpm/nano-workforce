@@ -1,3 +1,10 @@
+# [0.121.0](https://github.com/nanobpm/nano-workforce/compare/v0.120.2...v0.121.0) (2026-08-22)
+
+
+### Features
+
+* **delivery-graphs:** surface the compile preview in the console (compose → preview → dispatch) ([#445](https://github.com/nanobpm/nano-workforce/issues/445)) ([eb8bc7a](https://github.com/nanobpm/nano-workforce/commit/eb8bc7a609f894ddf83248bf356ab18864f63b62)), closes [#279](https://github.com/nanobpm/nano-workforce/issues/279) [#441](https://github.com/nanobpm/nano-workforce/issues/441)
+
 ## [0.120.2](https://github.com/nanobpm/nano-workforce/compare/v0.120.1...v0.120.2) (2026-08-22)
 
 
