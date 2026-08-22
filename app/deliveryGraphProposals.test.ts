@@ -153,6 +153,25 @@ test("stageProposal: proposals with DIFFERENT logical keys coexist — supersede
   });
 });
 
+test("stageProposal: an older concurrent stage does NOT clobber a NEWER staged proposal for the same logical key (ordered supersede — never zero live)", async () => {
+  await withData(async (data) => {
+    const table = deliveryGraphProposals(data);
+    // A NEWER stage (d2) has already committed its row for logical_key "runbook" — the winner of a
+    // concurrent double-stage, with a later `updated_at`. Its TTL is live (createdAt defaults to now).
+    const newer = row({ digest: "d2" });
+    newer.updated_at = "2999-01-01T00:00:00.000Z";
+    await table.insert(newer);
+    // Now the OLDER racer (d1) runs its supersede pass. It must supersede only rows OLDER than itself —
+    // NOT the newer d2. An unordered supersede-all would flip d2 too, leaving ZERO live proposals for
+    // the logical key (both superseded), so the cockpit would show nothing to dispatch.
+    await stageProposal(data, row({ digest: "d1" }));
+    assertEquals((await table.get("d2"))?.status, "staged", "the newer proposal must survive the older stage's supersede");
+    // At least one live proposal always remains for the logical key — never zero.
+    const stillStaged = (await table.all()).filter((r) => r.status === "staged");
+    assert(stillStaged.some((r) => r.digest === "d2"), "the globally-newest stage survives every racing supersede");
+  });
+});
+
 test("getStagedProposal: an EXPIRED staged proposal is not live", async () => {
   await withData(async (data) => {
     await stageProposal(data, row());

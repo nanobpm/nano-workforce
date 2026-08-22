@@ -154,7 +154,9 @@ export function buildProposalRow(input: {
 * a digest that has already aged out re-anchors the TTL to now so it is dispatchable again). After the
 * upsert, every
  * OTHER `staged` proposal sharing this `logical_key` is flipped to `superseded` — so the cockpit shows
- * exactly one live proposal per logical graph (the latest digest the operator would dispatch). */
+ * exactly one live proposal per logical graph (the latest digest the operator would dispatch). The
+ * supersede is ORDERED (older-than the just-written row, `digest`-tie-broken) so concurrent stages of
+ * two different digests can never clobber each other into ZERO live proposals — the newest survives. */
 export async function stageProposal(data: DataLayer, row: DeliveryGraphProposal): Promise<DeliveryGraphProposal> {
   const table = deliveryGraphProposals(data);
   const existing = await table.get(row.digest);
@@ -185,11 +187,17 @@ export async function stageProposal(data: DataLayer, row: DeliveryGraphProposal)
     await table.insert(toWrite);
   }
   // Supersede prior staged proposals for the same logical graph (different digest) in one statement.
+  // ORDER the supersede so an OLDER stage can never clobber a NEWER one: only flip rows that are
+  // strictly older than the row we just wrote, with a deterministic `digest` tie-breaker for the
+  // same-`updated_at` case. Without this ordering, two callers staging different digests for the same
+  // logical_key concurrently each supersede the other's row (upsert-then-supersede-all is a split
+  // read/modify/write), ending with BOTH `superseded` and ZERO live proposals for the logical key.
+  // Ordering guarantees the globally-newest stage always survives every racing supersede pass.
   await data
     .open()
     .exec(
-      `UPDATE "delivery_graph_proposals" SET "status" = 'superseded', "updated_at" = ? WHERE "logical_key" = ? AND "digest" <> ? AND "status" = 'staged'`,
-      [now(), row.logical_key, row.digest],
+      `UPDATE "delivery_graph_proposals" SET "status" = 'superseded', "updated_at" = ? WHERE "logical_key" = ? AND "digest" <> ? AND "status" = 'staged' AND ("updated_at" < ? OR ("updated_at" = ? AND "digest" < ?))`,
+      [now(), row.logical_key, row.digest, toWrite.updated_at, toWrite.updated_at, row.digest],
     );
   return toWrite;
 }
