@@ -12,11 +12,13 @@
 // `deriveMergesPerDay` (app/mergesPerDay.ts) is the pure function the retired `pollMergesPerDay`
 // write-path used, so it is the authoritative oracle for "what the table held". We assert the view
 // equals it over sample `merges` rows. Bucketing is local-calendar-day (issue #361 — the view uses
-// `date(at, 'localtime')`); to keep the SQLite `localtime` bucketing and the JS oracle in lockstep
-// deterministically, this file pins the process zone to UTC (node's test runner isolates each test
-// FILE in its own process, so this cannot leak into the timezone-specific assertions in
-// app/mergesPerDay.test.ts) and drives the oracle with the matching `"UTC"` zone.
-process.env.TZ = "UTC";
+// `date(at, 'localtime')`, which resolves against the host zone). To keep the SQLite `localtime`
+// bucketing and the JS oracle in lockstep WITHOUT mutating the process-global `process.env.TZ`
+// (which `node --test` runs concurrently across FILES, so a `TZ` flip could leak into the
+// timezone-specific assertions in app/mergesPerDay.test.ts), we drive the oracle with the SAME host
+// zone SQLite uses by omitting its `timeZone` argument — `deriveMergesPerDay(rows)` defaults to the
+// host zone. Both sides therefore bucket identically in any host zone, so no `day` string is
+// hard-coded.
 
 import { readFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
@@ -75,17 +77,8 @@ test("merges_per_day_view reproduces the retired projection exactly (count, burn
   ];
   seed(db, rows);
 
-  const expected = deriveMergesPerDay(rows, "UTC").map(
+  const expected = deriveMergesPerDay(rows).map(
     (d) => [d.day, d.merged, d.cumulative, d.bar] as [string, number, number, string],
-  );
-  // Sanity: the oracle itself is the previous behaviour (distinct count, burn-up, scaled bar).
-  assertEquals(
-    expected.map((e) => [e[0], e[1], e[2]]),
-    [
-      ["2026-01-01", 4, 4],
-      ["2026-01-02", 1, 5],
-      ["2026-01-03", 2, 7],
-    ],
   );
   assertEquals(view(db), expected);
 });
@@ -110,7 +103,7 @@ test("merges_per_day_view bar: full glyph run for the busiest day, min one glyph
     merged("o/r#3", "2026-01-01T03:00:00Z"),
     merged("o/r#4", "2026-01-01T04:00:00Z"),
     merged("o/r#5", "2026-01-02T01:00:00Z"),
-  ], "UTC").map((d) => [d.day, d.merged, d.cumulative, d.bar]));
+  ]).map((d) => [d.day, d.merged, d.cumulative, d.bar]));
 });
 
 test("merges_per_day_view is empty when no merges are recorded", () => {
@@ -120,37 +113,53 @@ test("merges_per_day_view is empty when no merges are recorded", () => {
 });
 
 test("merges_per_day_view buckets on the LOCAL calendar day, matching deriveMergesPerDay (issue #361)", () => {
-  // Under the pinned UTC process zone, `date(at, 'localtime')` == the UTC date, so two merges either
-  // side of UTC midnight are two days — exactly what the JS oracle produces for "UTC".
+  // The view's `date(at, 'localtime')` and the oracle's default zone both resolve against the host
+  // zone, so two merges either side of a local-day boundary bucket identically on both sides — no
+  // matter which host zone the suite runs under.
   const db = viewDb();
   const rows: MergeAuditRow[] = [
     merged("o/r#1", "2026-01-01T23:30:00Z"),
     merged("o/r#2", "2026-01-02T00:30:00Z"),
   ];
   seed(db, rows);
-  assertEquals(view(db), deriveMergesPerDay(rows, "UTC").map((d) => [d.day, d.merged, d.cumulative, d.bar]));
+  assertEquals(view(db), deriveMergesPerDay(rows).map((d) => [d.day, d.merged, d.cumulative, d.bar]));
 });
+
+// A tiny deterministic PRNG (mulberry32) so the property check runs the SAME audit rows every time —
+// non-determinism (`Math.random()`) would make a failure impossible to reproduce (see "no flaky
+// tests" in AGENTS.md). Seeded once with a fixed constant.
+function mulberry32(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
 
 test("merges_per_day_view reproduces the projection across many random audits (property check)", () => {
   const db = viewDb();
   const outcomes = ["merged", "merged", "merged", "queued", "blocked"];
+  const rand = mulberry32(0x9e3779b9); // fixed seed → the same 200 trials on every run.
   for (let trial = 0; trial < 200; trial++) {
     db.exec("DELETE FROM merges");
     const rows: MergeAuditRow[] = [];
-    const n = 1 + Math.floor(Math.random() * 40);
+    const n = 1 + Math.floor(rand() * 40);
     for (let i = 0; i < n; i++) {
-      const day = 1 + Math.floor(Math.random() * 9);
-      const hh = String(Math.floor(Math.random() * 24)).padStart(2, "0");
+      const day = 1 + Math.floor(rand() * 9);
+      const hh = String(Math.floor(rand() * 24)).padStart(2, "0");
       rows.push({
-        pr_key: `o/r#${1 + Math.floor(Math.random() * 12)}`,
-        outcome: outcomes[Math.floor(Math.random() * outcomes.length)],
+        pr_key: `o/r#${1 + Math.floor(rand() * 12)}`,
+        outcome: outcomes[Math.floor(rand() * outcomes.length)],
         at: `2026-01-0${day}T${hh}:00:00Z`,
       });
     }
     seed(db, rows);
     assertEquals(
       view(db),
-      deriveMergesPerDay(rows, "UTC").map((d) => [d.day, d.merged, d.cumulative, d.bar]),
+      deriveMergesPerDay(rows).map((d) => [d.day, d.merged, d.cumulative, d.bar]),
       `random trial ${trial} diverged from the projection`,
     );
   }
