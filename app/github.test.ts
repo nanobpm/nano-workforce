@@ -663,6 +663,40 @@ for (const c of TOKEN_MODE) {
   });
 }
 
+// ── Draft PRs are never landable (issue #454) ────────────────────────────────────────────────────
+//
+// A draft PR with green checks reports `mergeStateStatus: CLEAN`, so the old `mergeStateStatus`
+// switch classified it `"ready"` → the poller attempted the merge → GitHub refused it (draft) → a
+// misleading "the merge attempt did not land (result: blocked), investigate why GitHub refused"
+// escalation. A draft is *categorically* not landable regardless of checks, and the remedy is
+// always the same (mark it ready), so `isDraft` outranks every other signal and yields a
+// first-class `"draft"` verdict the model can escalate with an actionable message.
+test("classifyMergeability: a draft PR is never ready — even with green checks (issue #454)", () => {
+  // CLEAN + green rollup would be `"ready"` if `isDraft` were ignored.
+  assertEquals(classifyMergeability(mergePrState({ mergeStateStatus: "CLEAN", isDraft: true })), "draft");
+  assertEquals(
+    classifyMergeability(
+      mergePrState({ mergeStateStatus: "CLEAN", isDraft: true, rollup: [{ name: "build", conclusion: "SUCCESS" }] }),
+      protocolWith({ requiredChecks: reqChecks("build") }),
+    ),
+    "draft",
+  );
+});
+
+test("classifyMergeability: draft outranks every mergeStateStatus (issue #454)", () => {
+  for (const status of ["CLEAN", "HAS_HOOKS", "UNSTABLE", "BEHIND", "DIRTY", "BLOCKED", "UNKNOWN", ""]) {
+    assertEquals(
+      classifyMergeability(prState({ mergeStateStatus: status, isDraft: true })),
+      "draft",
+      `draft should outrank ${status || "''"}`,
+    );
+  }
+});
+
+test("classifyMergeability: a non-draft PR is unaffected (regression guard, issue #454)", () => {
+  assertEquals(classifyMergeability(prState({ mergeStateStatus: "CLEAN", isDraft: false })), "ready");
+});
+
 // `checkConclusions` must report a terminal conclusion per check but normalise a STILL-IN-FLIGHT run
 // to "" for BOTH rollup shapes — a CheckRun whose `status` is not COMPLETED, and a legacy
 // StatusContext whose `state` is PENDING/EXPECTED — so a caller never mistakes a pending

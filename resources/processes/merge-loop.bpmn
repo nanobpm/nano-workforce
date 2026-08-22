@@ -194,7 +194,7 @@
         </zeebe:properties>
         <zeebe:ioMapping>
           <zeebe:input source="=&#34;blocked&#34;" target="status" />
-          <zeebe:input source="=&#34;This PR is not mergeable (state: &#34; + mergeState + &#34;). Resolve the conflict or failing required check on the branch, then reply to retry.&#34;" target="question" />
+          <zeebe:input source="=if mergeState = &#34;draft&#34; then &#34;This PR is in draft and can&#39;t be merged. Mark it ready (gh pr ready), then reply to retry.&#34; else &#34;This PR is not mergeable (state: &#34; + mergeState + &#34;). Resolve the conflict or failing required check on the branch, then reply to retry.&#34;" target="question" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_m_mBlocked</bpmn:incoming>

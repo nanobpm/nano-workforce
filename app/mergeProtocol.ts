@@ -241,16 +241,19 @@ export function headRunPresenceCount(
  * same head already got its nudge, this returns `null`, so the poller never re-triggers inside one
  * landing attempt. A rebase changes `headRefOid`, so the decision is re-derived and can fire again
  * for the fresh post-rebase head. A genuinely-failing check (`blocked`) is left to the fix-ci arm,
- * a conflict (`conflict`) to the rebase arm (#42). */
+ * a conflict (`conflict`) to the rebase arm (#42). A `draft` verdict (issue #454) is treated like
+ * `waiting` here so the `freshHeadRun: "ready"`/`"ready-or-reopen"` self-heal still marks a draft
+ * ready (which both un-drafts it and produces the required run); when no self-heal applies the poller
+ * escalates instead. */
 export function freshHeadRunAction(
   protocol: MergeProtocol,
-  verdict: "ready" | "waiting" | "conflict" | "blocked",
+  verdict: "ready" | "waiting" | "conflict" | "blocked" | "draft",
   headRunCount: number,
   isDraft: boolean,
   attempt: FreshHeadRunAttempt = {},
 ): "ready" | "reopen" | null {
   if (protocol.freshHeadRun === "none") return null;
-  if (verdict !== "waiting") return null; // ready = go land; blocked/conflict = other arms
+  if (verdict !== "waiting" && verdict !== "draft") return null; // ready = go land; blocked/conflict = other arms
   if (headRunCount !== 0) return null; // required run already present (or unknown in token mode) → wait
   if (attempt.headRefOid && attempt.headRefOid === attempt.lastActionHeadRefOid) return null;
   switch (protocol.freshHeadRun) {

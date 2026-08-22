@@ -1159,6 +1159,39 @@ export async function pollMerges(data: DataLayer, engine: EngineClient, token: s
       // the PR as UNSTABLE. The same handle is reused by the frugal-CI fresh-head-run branch below.
       const protocol = await loadMergeProtocol(repo, token).catch(() => null);
       const verdict = classifyMergeability(st, protocol ?? undefined);
+      if (verdict === "draft") {
+        // A draft PR is never landable — GitHub refuses the merge outright (issue #454). Two remedies,
+        // in order: (1) self-heal — when the repo's merge protocol wants a fresh head run, mark the PR
+        // ready ourselves (the frugal-CI path), which both un-drafts it and produces the required run,
+        // then re-poll; (2) otherwise escalate with an ACTIONABLE "mark it ready" message, instead of
+        // attempting the merge and surfacing GitHub's opaque "blocked" refusal.
+        if (protocol) {
+          const action = freshHeadRunAction(protocol, verdict, headRunPresenceCount(protocol, st), st.isDraft, {
+            headRefOid: st.headRefOid,
+            lastActionHeadRefOid: pr.fresh_head_run_head,
+          });
+          if (action) {
+            const ok = await ensureFreshHeadRun(repo, number, action).catch(() => false);
+            if (ok && st.headRefOid) {
+              await prs(data).update(prKey, { fresh_head_run_head: st.headRefOid, updated_at: now() });
+            }
+            console.log(`[poller] draft -> fresh head run (${action}) ${ok ? "requested" : "skipped"} -> ${prKey}`);
+            continue; // re-poll: the mark-ready both un-drafts the PR and produces the required run
+          }
+        }
+        // No protocol-driven self-heal available → escalate so a human marks it ready.
+        await flipToMergingThenPublish(data, engine, prKey, "waiting_merge", {
+          name: "merge-ready",
+          correlationKey: prKey,
+          variables: {
+            mergeState: verdict, // "draft" → gw-mergeable default → merge-esc-conflict (draft-aware FEEL)
+            failingChecks: st.failingChecks,
+            failingChecksList: st.failingCheckNames.join("\n"),
+          },
+        });
+        console.log(`[poller] draft (no self-heal) -> escalate mark-ready -> ${prKey}`);
+        continue;
+      }
       if (verdict === "waiting") {
         // Frugal-CI remedy (#43): when the repo publishes a merge protocol that wants a fresh
         // head run and the PR has NO required head run yet, review has converged but the last push

@@ -155,3 +155,36 @@ test("regression: a question-less escalation can no longer park a dead wait-merg
     "merge-esc-attempt must NOT flow directly into wait-merge-answer (the #329 dead-wait defect)",
   );
 });
+
+// ── Draft PR escalation (issue #454) ─────────────────────────────────────────────────────────────
+//
+// A draft PR is never landable — `classifyMergeability` now yields a first-class `"draft"` verdict
+// (app/github.ts) that the poller (app/service.ts) publishes as `mergeState = "draft"`. It routes
+// through `gw-mergeable`'s default (`f_m_mBlocked → merge-esc-conflict`), so `merge-esc-conflict`'s
+// question must recognise `draft` and give the ACTIONABLE remedy (mark it ready) instead of the
+// generic "resolve the conflict or failing required check" text (which is the wrong remedy for a
+// draft), and — before this fix — instead of `merge-esc-attempt`'s misleading "the merge attempt did
+// not land (blocked), investigate why GitHub refused the merge".
+const escConflictRaw = flat.match(/<bpmn:serviceTask\b[^>]*\bid="merge-esc-conflict"[\s\S]*?<\/bpmn:serviceTask>/);
+const escConflict = escConflictRaw ? escConflictRaw[0].replace(/&#34;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, "&") : null;
+
+test("merge-esc-conflict gives a draft PR an actionable 'mark it ready' question (issue #454)", () => {
+  assert(escConflict, "merge-esc-conflict service task must exist");
+  const el = escConflict!;
+  // Branches on the draft verdict…
+  assertStringIncludes(el, 'mergeState = "draft"', "merge-esc-conflict must branch on the draft verdict");
+  // …with the actionable remedy (mark it ready), not the conflict/failing-check remedy.
+  assertStringIncludes(el, "draft and can't be merged", "the draft question must state the PR is in draft");
+  assertStringIncludes(el, "gh pr ready", "the draft question must tell the human to mark it ready");
+});
+
+test("merge-esc-conflict keeps the non-draft not-mergeable branch intact (regression guard, issue #454)", () => {
+  assert(escConflict, "merge-esc-conflict service task must exist");
+  const el = escConflict!;
+  // The original conflict/failing-check message must still be reachable for non-draft states.
+  assertStringIncludes(el, "This PR is not mergeable (state:", "the non-draft not-mergeable message must remain");
+  // The draft branch must precede the generic message so it isn't shadowed.
+  const draftIdx = el.indexOf('mergeState = "draft"');
+  const genericIdx = el.indexOf("This PR is not mergeable (state:");
+  assert(draftIdx !== -1 && genericIdx !== -1 && draftIdx < genericIdx, "the draft branch must be evaluated before the generic not-mergeable message");
+});
