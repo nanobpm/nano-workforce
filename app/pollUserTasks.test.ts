@@ -536,3 +536,51 @@ test("pollUserTasks (engine-first): pages through a large open set (no first-pag
 
   assertEquals((stores.user_tasks ?? []).length, 150);
 });
+test("pollUserTasks (engine-first): surfaces an inlined delivery-graph human task, enriched + bucketed as `delivery` (issue #442)", async () => {
+  // A delivery-graph `human` node is compiled (S4) as an INLINED user task with a per-node id
+  // `delivery-human-task__<node>` — the bare `delivery-human-task` never appears at runtime. The poller's
+  // leak guards must recognise it through the single-source-of-truth predicate (`userTaskKindLabel` /
+  // `isDeliveryHumanElement`), NOT exact `USER_TASK_KIND_LABELS` membership — else every delivery-graph
+  // human gate is silently dropped from the Tasks inbox and no operator can tick it off (merlin task 35002).
+  const { data, stores } = memData({
+    delivery_graph_runs: [
+      { run_key: "delivery-graph-403eb22e", process_key: "dg-1", status: "running", title: "release runbook" },
+    ],
+  });
+  const restore = stubUserTaskSearch([
+    { userTaskKey: "35002", elementId: "delivery-human-task__n1", processInstanceKey: "dg-1", state: "CREATED" },
+  ]);
+  try {
+    await pollUserTasks(data, fakeEngine({}), REST);
+  } finally {
+    restore();
+  }
+
+  const byKey = Object.fromEntries((stores.user_tasks ?? []).map((r) => [r.user_task_key, r]));
+  assertEquals(Object.keys(byKey), ["35002"]);
+  assertEquals(byKey["35002"].element_id, "delivery-human-task__n1");
+  assertEquals(byKey["35002"].kind_label, "Delivery: human step");
+  assertEquals(byKey["35002"].subject_type, "delivery");
+  assertEquals(byKey["35002"].subject_key, "delivery-graph-403eb22e");
+  assertEquals(byKey["35002"].subject_title, "release runbook");
+});
+
+test("pollUserTasks (engine-first): a delivery-human task on an UNTRACKED run still surfaces (bucketed `delivery`, instance fallback) (issue #442)", async () => {
+  // Even with no `delivery_graph_runs` row referencing the instance, the kind implies its aggregate, so
+  // the row renders and stays answerable — mirroring the orphaned-escalation guarantee (#358).
+  const { data, stores } = memData({});
+  const restore = stubUserTaskSearch([
+    { userTaskKey: "35002", elementId: "delivery-human-task__n1", processInstanceKey: "dg-9", state: "CREATED" },
+  ]);
+  try {
+    await pollUserTasks(data, fakeEngine({}), REST);
+  } finally {
+    restore();
+  }
+
+  const byKey = Object.fromEntries((stores.user_tasks ?? []).map((r) => [r.user_task_key, r]));
+  assertEquals(Object.keys(byKey), ["35002"]);
+  assertEquals(byKey["35002"].kind_label, "Delivery: human step");
+  assertEquals(byKey["35002"].subject_type, "delivery");
+  assertEquals(byKey["35002"].subject_key, "dg-9"); // instance fallback — non-blank so it renders
+});
