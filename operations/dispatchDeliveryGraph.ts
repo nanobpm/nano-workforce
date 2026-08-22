@@ -11,7 +11,7 @@
 // superseded / already-dispatched digest is a clean 400.
 
 import { dispatchDeliveryGraphRun } from "../app/deliveryGraphDispatch.ts";
-import { getStagedProposal, markProposalDispatched } from "../app/deliveryGraphProposals.ts";
+import { getStagedProposal, markProposalDispatched, markProposalExpired } from "../app/deliveryGraphProposals.ts";
 import type { DeliveryGraphTextResult } from "../nano-generated/api-io.d.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
 
@@ -41,6 +41,9 @@ export default defineOperation("dispatchDeliveryGraph", async ({ body }, app) =>
     graph = JSON.parse(proposal.graph);
   } catch (err) {
     app.log.error("dispatch-delivery-graph: stored graph is corrupt", { digest });
+    // Fail closed: a corrupt graph can never launch, so retire the proposal (→ `expired`) instead of
+    // leaving an undismissable `staged` row that fails every dispatch attempt the same way.
+    await markProposalExpired(app.data, digest);
     return { status: 400, body: { ok: false, error: `staged proposal ${digest} is corrupt: ${err instanceof Error ? err.message : String(err)}` } };
   }
 

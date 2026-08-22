@@ -161,4 +161,25 @@ describe("dispatchDeliveryGraph — operator dispatch by staged-proposal digest"
     // Only A's single run exists — B did not launch anything.
     assert.equal((await deliveryGraphRuns(app.db).all()).length, 1);
   });
+
+  test("a proposal whose stored graph is corrupt JSON → 400 AND the proposal is retired (expired), never lingering staged", async () => {
+    const app = await boot();
+    assert.ok(app.api);
+    const api = app.api;
+
+    // Stage a valid graph, then corrupt its stored `graph` payload directly (simulating on-disk
+    // corruption/tampering that passed stage-time validation).
+    const staged = await api.call<{ digest: string }>("compileDeliveryGraph", { body: HUMAN_ONLY });
+    const digest = staged.body.digest;
+    assert.equal((await deliveryGraphProposals(app.db).get(digest))?.status, "staged");
+    await deliveryGraphProposals(app.db).update(digest, { graph: "{not-json" });
+
+    const res = await api.call<{ ok: boolean; error?: string }>("dispatchDeliveryGraph", { body: { digest } });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.ok, false);
+    assert.ok(/corrupt/.test(res.body.error ?? ""));
+    // Fail closed: the corrupt proposal is retired, not left as an undismissable `staged` row.
+    assert.equal((await deliveryGraphProposals(app.db).get(digest))?.status, "expired");
+    assert.equal((await deliveryGraphRuns(app.db).all()).length, 0);
+  });
 });

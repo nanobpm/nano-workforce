@@ -223,6 +223,14 @@ export async function markProposalDispatched(data: DataLayer, digest: string): P
   await deliveryGraphProposals(data).update(digest, { status: "dispatched", updated_at: now() });
 }
 
+/** Retire a proposal by flipping it to `expired` — its `graph` payload is unusable (e.g. corrupt JSON
+ * detected at dispatch), so it can never launch. Reuses the terminal `expired` status the sweep already
+ * uses, so a fail-closed retirement drops the row out of the cockpit's staged grid instead of leaving an
+ * undismissable `staged` row that fails every dispatch attempt the same way. */
+export async function markProposalExpired(data: DataLayer, digest: string): Promise<void> {
+  await deliveryGraphProposals(data).update(digest, { status: "expired", updated_at: now() });
+}
+
 /** Age out every `staged` proposal whose TTL has elapsed by flipping it to `expired`, so it drops out
  * of the cockpit's staged grid (which filters to `status = 'staged'`). The grid's datasource filter can
  * only express equality/set-membership — not an `expires_at > now` comparison — so an expired-but-still-
