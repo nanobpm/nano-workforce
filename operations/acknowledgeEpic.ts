@@ -19,6 +19,7 @@
 
 import { epicIsAcknowledgeable } from "../app/delivery.ts";
 import { plans } from "../app/plan.ts";
+import { derivePlanDelivery } from "../app/service.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
 
 const str = (v: unknown): string => (typeof v === "string" ? v.trim() : "");
@@ -43,11 +44,14 @@ export default defineOperation("acknowledgeEpic", async ({ body }, app) => {
   // affordance. Acknowledging a live/converging epic would pre-seed `acknowledged_at`, so the moment
   // it later resolved `deriveEpicBucket` would drop it straight into History, skipping the operator
   // tick-off this op exists to require — and a converging epic must stay visible while its slices land.
-  if (!epicIsAcknowledgeable(plan.status, plan.delivery ?? null)) {
+  // The `plans.delivery` column was retired (epic #412), so derive the signal at read time from the
+  // slice PRs (the same pure `deriveDelivery` the `plan_delivery` VIEW encodes).
+  const delivery = await derivePlanDelivery(app.data, plan);
+  if (!epicIsAcknowledgeable(plan.status, delivery)) {
     app.log.warn("acknowledge-epic rejected: epic is not resolved", {
       planKey,
       status: plan.status,
-      delivery: plan.delivery ?? null,
+      delivery,
     });
     return { status: 409, body: { ok: false, error: "epic is not resolved" } };
   }

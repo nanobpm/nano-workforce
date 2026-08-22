@@ -78,17 +78,16 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
     : [];
   try {
     await plans(app.data).update(planKey, {
-      // Keep the three progress fields consistent: with no levelized rows (waveCount 0) there is
-      // no wave to implement, so current_wave is NULL too — never a stray index against NULL N.
-      current_wave: waveCount > 0 ? currentWave : null,
-      wave_count: waveCount > 0 ? waveCount : null,
-      wave_label: waveCount > 0 ? `${currentWave + 1}/${waveCount}` : null,
+      // Operator-visibility wave progress (current_wave / wave_count / wave_label) was RETIRED as a
+      // stored projection (epic #412) — it is now derived from `plan_tasks` by the `plan_wave_label`
+      // / `plan_read_model` VIEWs (060/061), so select-wave no longer denormalises it. This write
+      // still stamps the derived domain phase and the inter-epic gate's bound artifacts.
       ...(epicPhase ? { epic_phase: epicPhase } : {}),
       ...(boundArtifacts.length > 0 ? { bound_artifacts: JSON.stringify(boundArtifacts) } : {}),
       updated_at: ts,
     });
   } catch (err) {
-    app.log.error(`select-wave: projecting current_wave failed for ${planKey}`, {
+    app.log.error(`select-wave: projecting epic phase failed for ${planKey}`, {
       err: String(err),
     });
   }

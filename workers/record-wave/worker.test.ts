@@ -142,8 +142,9 @@ test("record-wave retries the same wave when a task is still pending", async () 
     trialMergeSkipReason: "wave-still-pending",
   });
   assertEquals((planUpdates[0].patch as Record<string, unknown>).gate_wave, 1);
-  // Retry keeps the projection on the same (still-pending) wave.
-  assertEquals((planUpdates[0].patch as Record<string, unknown>).current_wave, 1);
+  // Wave progress (current_wave/wave_label) was retired as a stored projection (epic #412) — derived
+  // from `plan_tasks` by the plan_wave_label VIEW — so record-wave no longer writes it.
+  assertEquals("current_wave" in (planUpdates[0].patch as Record<string, unknown>), false);
   // Domain-phase projection (#261): more waves remain, so the epic stays Implementing (wave n/t).
   assertEquals((planUpdates[0].patch as Record<string, unknown>).epic_phase, "Implementing (wave 2/2)");
 });
@@ -171,20 +172,21 @@ test("record-wave pins current_wave to the last index and clears gate_wave on th
     app,
   );
 
-  // Final wave (2 of 3): no successor wave — gate cleared, projection pinned to N-1 so the
-  // epics-index reads 3/3 rather than the one-past-the-end nextWave (3).
+  // Final wave (2 of 3): no successor wave — gate cleared. Wave progress (current_wave/wave_label)
+  // is no longer a stored column (epic #412; derived from `plan_tasks` by the plan_wave_label VIEW),
+  // so record-wave writes neither.
   assertEquals((planUpdates[0].patch as Record<string, unknown>).gate_wave, null);
-  assertEquals((planUpdates[0].patch as Record<string, unknown>).current_wave, 2);
-  assertEquals((planUpdates[0].patch as Record<string, unknown>).wave_label, "3/3");
+  assertEquals("current_wave" in (planUpdates[0].patch as Record<string, unknown>), false);
+  assertEquals("wave_label" in (planUpdates[0].patch as Record<string, unknown>), false);
   // Domain-phase projection (#261): the final wave landed with no successor and no trial merge, so
   // the epic enters Finalizing (record-results then advances to the Dispatched terminal).
   assertEquals((planUpdates[0].patch as Record<string, unknown>).epic_phase, "Finalizing");
 });
 
-test("record-wave keeps all wave-progress fields NULL for a taskless plan (waveCount 0)", async () => {
+test("record-wave writes no wave-progress columns for a taskless plan (waveCount 0)", async () => {
   // A taskless plan runs record-wave with waveCount 0 (the MI `implement` step completed
-  // immediately). All three progress fields must stay NULL together — never current_wave=0 against
-  // a NULL wave_label, which would clobber record-plan/select-wave's NULL projection.
+  // immediately). Wave progress was retired as a stored projection (epic #412), so record-wave never
+  // writes current_wave/wave_label regardless.
   const { app, planUpdates } = fakeApp([]);
 
   await handler(
@@ -201,8 +203,8 @@ test("record-wave keeps all wave-progress fields NULL for a taskless plan (waveC
   );
 
   const patch = planUpdates[0].patch as Record<string, unknown>;
-  assertEquals(patch.current_wave, null);
-  assertEquals(patch.wave_label, null);
+  assertEquals("current_wave" in patch, false);
+  assertEquals("wave_label" in patch, false);
 });
 
 test("record-wave skips trial merge for mergify-queue repos with 2+ heads", async () => {

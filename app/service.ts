@@ -27,7 +27,7 @@ import {
   conformanceEscalationQuestion,
 } from "./conformance.ts";
 import { isUniqueConstraintFence } from "./dbFence.ts";
-import { deriveDelivery, TERMINAL_STATUSES } from "./delivery.ts";
+import { deriveDelivery, deriveEpicBucket, epicIsAcknowledgeable, TERMINAL_STATUSES } from "./delivery.ts";
 import { deliveryGraphRuns, deriveDeliveryPhase, parseHumanLabels } from "./deliveryGraphRun.ts";
 import { fleetSupportsDurableResume } from "./durableResume.ts";
 import { backfillFeatureStages, deriveFeatureDelivery, FEATURE_BLOCKED_ELEMENT, FEATURE_ESCALATION_ELEMENT, FEATURE_RUN_STATUSES, type FeatureRunStatus, featureEscalations, featureRuns } from "./feature.ts";
@@ -51,19 +51,19 @@ import {
 import { pollLineage } from "./lineage.ts";
 import { mergeLanes, readExclusions } from "./mergeExclusion.ts";
 import { freshHeadRunAction, headRunPresenceCount, loadMergeProtocol } from "./mergeProtocol.ts";
-import { pollMergesPerDay } from "./mergesPerDay.ts";
 import { type PrLaneDecision, planPrLane, taskDependencyDepths } from "./mergeTrain.ts";
 import {
   backfillPlanBuckets,
   capabilityGates,
   inboundPlanDeps,
+  type Plan,
   planReviews,
   plans,
   planTaskDeps,
   planTaskNeeds,
   planTasks,
 } from "./plan.ts";
-import { derivePromotionState, isPromotable, promotionPrBody, promotionPrTitle } from "./promotion.ts";
+import { derivePromotionState, isEpicIntegrationBranch, isPromotable, promotionPrBody, promotionPrTitle } from "./promotion.ts";
 import {
   defaultProbeExec,
   type ProbeExec,
@@ -1861,54 +1861,75 @@ export async function pollCapabilityGatesImpl(
   }
 }
 
-/** Idempotent read-model pass: recompute each plan's derived `delivery` signal (issue #171) by
- * joining its slice tasks' `pr_key` → `pull_requests.status`, and denormalise it onto the `plans`
- * row so the epics overview / detail views can read it as a flat column (Urban's datasource can't
- * read a SQL VIEW). Never touches `plan.status` — additive/derived only. Writes only when the
- * projection actually changes, so a steady-state pass is a no-op. */
 /** Sentinel status fed to `deriveDelivery` for a `plan_tasks.pr_key` whose `pull_requests` row is
  * missing (DB desync). It is deliberately non-terminal and not `merged`, so a dangling PR counts as
  * in-flight — never a false-positive `landed` from a silently-dropped slice. */
 const MISSING_PR_STATUS = "missing";
 
-export async function pollDelivery(data: DataLayer) {
-  // Preload every PR status once per pass into a pr_key→status map (avoids the prior N+1
-  // `prs(data).get` per task; mirrors how `activePrs` reads `prs(data).all()` once).
+/** Recompute an epic's derived `delivery` signal at READ TIME (epic #412) from the SAME pure
+ * `deriveDelivery` the `plan_delivery` VIEW encodes — by joining each slice `plan_tasks.pr_key` →
+ * `pull_requests.status` (a dangling `pr_key` counts as in-flight, never false-`landed`). The
+ * `plans.delivery` column was RETIRED, so the pollers that still need the signal derive it here
+ * rather than reading a denormalised column. Non-`done` plans short-circuit to `null` (the view's
+ * behaviour) without the per-plan task join. `statusByPrKey` is an optional once-per-pass PR-status
+ * map (the pollers preload it to avoid an N+1); when omitted (a one-off caller like the
+ * acknowledge-epic op) it is loaded on demand. */
+export async function derivePlanDelivery(
+  data: DataLayer,
+  plan: Plan,
+  statusByPrKey?: Map<string, string>,
+): Promise<string | null> {
+  if (plan.status !== "done") return null;
+  let byPrKey = statusByPrKey;
+  if (!byPrKey) {
+    byPrKey = new Map<string, string>();
+    for (const pr of await prs(data).all()) byPrKey.set(pr.pr_key, pr.status);
+  }
+  const tasks = await planTasks(data).find({ plan_key: plan.plan_key });
+  const prStatuses: string[] = [];
+  for (const t of tasks) {
+    if (!t.pr_key) continue;
+    prStatuses.push(byPrKey.get(t.pr_key) ?? MISSING_PR_STATUS);
+  }
+  return deriveDelivery(plan.status, prStatuses).delivery;
+}
+
+/** Idempotent read-model pass (epic #412 — successor to the retired `pollDelivery`): keep each
+ * epic's Active/History `list_bucket` + `ack_open` tick-off flags fresh now that the `plans.delivery`
+ * column is gone. The `plans` gateway projects both at write time, but with `delivery` treated as
+ * UNKNOWN (null) — provably correct for `list_bucket`, but it cannot clear `ack_open` while a `done`
+ * epic is still CONVERGING (its slices not all merged). This pass supplies the delivery-aware
+ * correction: it recomputes `delivery` at read time via {@link derivePlanDelivery} and re-derives
+ * `list_bucket`/`ack_open` from the pure `deriveEpicBucket`/`epicIsAcknowledgeable` helpers, writing
+ * the result via the RAW `plans` table so the gateway's delivery-free reprojection can't clobber the
+ * corrected value. Writes only when the projection actually changes, so a steady-state pass is a
+ * no-op. Never touches `plan.status` — additive/derived only. */
+export async function pollPlanBucket(data: DataLayer) {
+  // Preload every PR status once per pass into a pr_key→status map (avoids an N+1 `prs(data).get`).
   const statusByPrKey = new Map<string, string>();
   for (const pr of await prs(data).all()) statusByPrKey.set(pr.pr_key, pr.status);
+  // Write through the RAW table, NOT the `plans` gateway: the gateway reprojects `list_bucket`/
+  // `ack_open` with `delivery=null` (it can't see the read-time signal), which would undo the
+  // delivery-aware `ack_open` correction below. This pass is the authoritative writer of the
+  // delivery-aware bucket flags.
+  const plansTable = data.table<Plan>("plans", "plan_key");
   for (const plan of await plans(data).all()) {
     try {
-      // `deriveDelivery` always yields `{null, null}` for a non-`done` plan, so skip the per-plan
-      // task join for those — but still clear any stale projection defensively (e.g. a plan that
-      // regressed out of `done`) so the read model never keeps a phantom `converging`/`landed`.
-      if (plan.status !== "done") {
-        if (plan.delivery !== null || plan.delivery_label !== null) {
-          await plans(data).update(plan.plan_key, {
-            delivery: null,
-            delivery_label: null,
-            updated_at: now(),
-          });
-        }
-        continue;
-      }
-      const tasks = await planTasks(data).find({ plan_key: plan.plan_key });
-      const prStatuses: string[] = [];
-      for (const t of tasks) {
-        if (!t.pr_key) continue;
-        // A dangling pr_key (row missing) is treated as in-flight, not dropped, so a DB desync
-        // can never wrongly promote an epic to `landed`.
-        prStatuses.push(statusByPrKey.get(t.pr_key) ?? MISSING_PR_STATUS);
-      }
-      const { delivery, label } = deriveDelivery(plan.status, prStatuses);
-      if (plan.delivery !== delivery || plan.delivery_label !== label) {
-        await plans(data).update(plan.plan_key, {
-          delivery,
-          delivery_label: label,
+      const delivery = await derivePlanDelivery(data, plan, statusByPrKey);
+      const listBucket = deriveEpicBucket(plan.status, delivery, plan.acknowledged_at ?? null);
+      const ackOpen =
+        epicIsAcknowledgeable(plan.status, delivery) && (plan.acknowledged_at ?? null) === null
+          ? 1
+          : 0;
+      if (plan.list_bucket !== listBucket || plan.ack_open !== ackOpen) {
+        await plansTable.update(plan.plan_key, {
+          list_bucket: listBucket,
+          ack_open: ackOpen,
           updated_at: now(),
         });
       }
     } catch (err) {
-      console.error(`[poller] delivery ${plan.plan_key}: ${err}`);
+      console.error(`[poller] plan-bucket ${plan.plan_key}: ${err}`);
     }
   }
 }
@@ -1928,9 +1949,18 @@ export async function pollWaitGate(data: DataLayer) {
   for (const plan of await plans(data).all()) {
     try {
       const edges = await inboundPlanDeps(data, plan.plan_key);
+      // `plans.current_wave` was retired (epic #412); `deriveWaitGate` only consumes its
+      // NULL-ness (proof the epic's fan-out began). Derive that at read time: an epic has fanned out
+      // iff it has ≥1 levelized `plan_tasks` row (a wave assigned). The value's magnitude is never
+      // surfaced here — the epic index/detail read the display `current_wave` off the
+      // `plan_wave_label`/`plan_read_model` VIEWs — so any non-null (the frontier's min wave) is
+      // faithful for the gate's "has this epic ever fanned out?" test.
+      const tasks = await planTasks(data).find({ plan_key: plan.plan_key });
+      const assignedWaves = tasks.map((t) => t.wave).filter((w): w is number => w != null);
+      const current_wave = assignedWaves.length > 0 ? Math.min(...assignedWaves) : null;
       const { wait_gate, wait_gate_label } = deriveWaitGate(edges, {
         status: plan.status,
-        current_wave: plan.current_wave,
+        current_wave,
         bound_artifacts: plan.bound_artifacts,
         created_at: plan.created_at,
       });
@@ -1950,8 +1980,8 @@ export async function pollWaitGate(data: DataLayer) {
 /** Idempotent promotion pass (issue #299): open — and then track — the `epic/* → <default>`
  * promotion PR for every epic that has LANDED on a custom integration branch. This is the missing
  * counterpart to `ensureBaseBranch`: that creates the `epic/*` branch slices merge into; this
- * delivers the fully-landed branch to the default branch. Runs AFTER `pollDelivery` so it reads the
- * freshly-projected `delivery = landed` signal.
+ * delivers the fully-landed branch to the default branch. Derives each epic's `delivery` signal at
+ * read time (epic #412 — the `plans.delivery` column was retired) via the same pure `deriveDelivery`.
  *
  * Per promotable plan (`isPromotable`: `delivery = landed` AND base is `epic/*`):
  *   • No promotion PR yet → open ONE `epic/* → <default>` PR (idempotent against a remote head-branch
@@ -1971,10 +2001,15 @@ export async function pollPromotion(data: DataLayer, engine: EngineClient, token
   const statusByPrKey = new Map<string, string>();
   for (const pr of await prs(data).all()) statusByPrKey.set(pr.pr_key, pr.status);
   for (const plan of await plans(data).all()) {
-    if (!isPromotable(plan)) continue;
     const base = plan.base_branch;
-    if (!base) continue; // narrowed by isPromotable, but keep the type-checker honest
+    // A non-`epic/*` base is never promotable — short-circuit before the per-plan delivery join.
+    if (!isEpicIntegrationBranch(base)) continue;
     try {
+      // `plans.delivery` was retired (epic #412) — derive the landed signal at READ TIME from the
+      // slice PRs (same pure `deriveDelivery` the `plan_delivery` VIEW encodes) instead of reading a
+      // denormalised column, then apply the pure `isPromotable` predicate.
+      const delivery = await derivePlanDelivery(data, plan, statusByPrKey);
+      if (!isPromotable({ delivery, base_branch: base })) continue;
       // Already opened → project state from the promotion PR's live status, and re-enroll it if its
       // convergence row went missing (a prior submit failed, or the app/engine store desynced).
       if (plan.promotion_pr) {
@@ -2422,12 +2457,11 @@ export async function pollOnce(
   }
   await pollReviews(data, engine, token);
   await pollMerges(data, engine, token);
-  await pollDelivery(data);
+  await pollPlanBucket(data);
   await pollWaitGate(data);
   await pollPromotion(data, engine, token);
   await pollFeatureDelivery(data);
   await pollLineage(data);
-  await pollMergesPerDay(data);
   await pollUserTasks(data, engine, engineRest);
   await pollDeliveryGraphPhase(data, engine);
   if (engineRest) {

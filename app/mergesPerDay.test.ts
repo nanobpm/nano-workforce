@@ -1,16 +1,14 @@
-// Read-model derivation + projection test for the merged-per-day throughput chart (issue #344).
+// Read-model derivation test for the merged-per-day throughput chart (issue #344).
 //
-// `deriveMergesPerDay` is the single source of truth behind the denormalised `merges_per_day` table
-// the Velocity page reads. It must: count DISTINCT PRs per calendar day (a PR with several `merged`
-// audit rows on one day — an `already-merged` short-circuit or a retry — counts once); ignore
-// `queued`/`blocked` attempts entirely; order days ascending; carry a running burn-up `cumulative`;
-// and scale each day's `bar` against the busiest day. `pollMergesPerDay` must project that onto the
-// read table idempotently — a steady-state re-run writes nothing, and a day dropped from the audit is
-// pruned.
+// `deriveMergesPerDay` is the single source of truth the `merges_per_day_view` VIEW (062) mirrors —
+// the worker-maintained `merges_per_day` table + its `pollMergesPerDay` write-path were RETIRED (epic
+// #412). It must: count DISTINCT PRs per calendar day (a PR with several `merged` audit rows on one
+// day — an `already-merged` short-circuit or a retry — counts once); ignore `queued`/`blocked`
+// attempts entirely; order days ascending; carry a running burn-up `cumulative`; and scale each day's
+// `bar` against the busiest day.
 import { test } from "node:test";
 import { assert, assertEquals } from "#test-assert";
-import type { DataLayer } from "@nanobpm/urban";
-import { deriveMergesPerDay, type MergeAuditRow, pollMergesPerDay } from "./mergesPerDay.ts";
+import { deriveMergesPerDay, type MergeAuditRow } from "./mergesPerDay.ts";
 
 // The bucketing is now LOCAL-calendar-day (issue #361: use the viewer's timezone, not UTC). The
 // derivation buckets in an explicit IANA `timeZone` argument (via `Intl.DateTimeFormat`), so these
@@ -18,49 +16,6 @@ import { deriveMergesPerDay, type MergeAuditRow, pollMergesPerDay } from "./merg
 // `node --test` runs concurrently across files, so an in-process `TZ` flip could leak into and
 // reorder unrelated date-handling tests. The UTC-based assertions pass `"UTC"`; the
 // timezone-specific ones pass the zone they exercise.
-
-// A tiny in-memory record gateway (all/find/insert/update/delete), mirroring the fake-app style used
-// across the app tests (see app/delivery.test.ts), enough to exercise the `pollMergesPerDay`
-// projection.
-function memData(): { data: DataLayer; stores: Record<string, any[]>; writes: () => number } {
-  const stores: Record<string, any[]> = {};
-  let writes = 0;
-  function tbl(name: string, pk = "id") {
-    const rows = (stores[name] ??= [] as any[]);
-    return {
-      async all() {
-        return rows.slice();
-      },
-      async get(id: any) {
-        return rows.find((r) => r[pk] === id);
-      },
-      async find(where: any = {}) {
-        return rows.filter((r) => Object.entries(where).every(([k, v]) => r[k] === v));
-      },
-      async insert(row: any) {
-        writes++;
-        rows.push({ ...row });
-        return row[pk];
-      },
-      async update(id: any, patch: any) {
-        writes++;
-        const r = rows.find((row) => row[pk] === id);
-        if (r) Object.assign(r, patch);
-        return 1;
-      },
-      async delete(id: any) {
-        const i = rows.findIndex((row) => row[pk] === id);
-        if (i >= 0) {
-          writes++;
-          rows.splice(i, 1);
-        }
-        return 1;
-      },
-    };
-  }
-  const data = { table: (n: string, pk?: string) => tbl(n, pk) } as any as DataLayer;
-  return { data, stores, writes: () => writes };
-}
 
 const merged = (pr_key: string, at: string): MergeAuditRow => ({ pr_key, outcome: "merged", at });
 
@@ -215,43 +170,4 @@ test("an invalid IANA timeZone falls back to the host zone instead of throwing (
   assertEquals(days.length, 1);
   assertEquals(days[0].merged, 1);
   assert(/^\d{4}-\d{2}-\d{2}$/.test(days[0].day));
-});
-
-test("pollMergesPerDay projects the aggregate onto merges_per_day", async () => {
-  const { data, stores } = memData();
-  stores.merges = [
-    { id: 1, pr_key: "o/r#1", outcome: "merged", at: "2026-01-01T09:00:00Z" },
-    { id: 2, pr_key: "o/r#1", outcome: "merged", at: "2026-01-01T09:05:00Z" }, // dup same day
-    { id: 3, pr_key: "o/r#2", outcome: "merged", at: "2026-01-02T09:00:00Z" },
-    { id: 4, pr_key: "o/r#3", outcome: "queued", at: "2026-01-02T09:10:00Z" }, // ignored
-  ];
-  await pollMergesPerDay(data, "UTC");
-  const rows = (stores.merges_per_day ?? []).slice().sort((x, y) => x.day.localeCompare(y.day));
-  assertEquals(rows.map((r) => [r.day, r.merged, r.cumulative]), [
-    ["2026-01-01", 1, 1],
-    ["2026-01-02", 1, 2],
-  ]);
-  for (const r of rows) assert(typeof r.updated_at === "string" && r.updated_at.length > 0);
-});
-
-test("pollMergesPerDay is idempotent — a steady-state re-run writes nothing", async () => {
-  const { data, stores, writes } = memData();
-  stores.merges = [{ id: 1, pr_key: "o/r#1", outcome: "merged", at: "2026-01-01T09:00:00Z" }];
-  await pollMergesPerDay(data, "UTC");
-  const afterFirst = writes();
-  assert(afterFirst > 0, "the first pass must project at least one row");
-  await pollMergesPerDay(data, "UTC");
-  assertEquals(writes(), afterFirst, "a steady-state re-run must not write");
-});
-
-test("pollMergesPerDay prunes a day that no longer derives from the audit", async () => {
-  const { data, stores } = memData();
-  stores.merges_per_day = [
-    { day: "2025-12-31", merged: 3, cumulative: 3, bar: "███", updated_at: "old" },
-  ];
-  stores.merges = [{ id: 1, pr_key: "o/r#1", outcome: "merged", at: "2026-01-01T09:00:00Z" }];
-  await pollMergesPerDay(data, "UTC");
-  const days = (stores.merges_per_day ?? []).map((r: any) => r.day);
-  assert(!days.includes("2025-12-31"), "a stale day must be pruned");
-  assert(days.includes("2026-01-01"), "the derived day must be present");
 });

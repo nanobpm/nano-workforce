@@ -77,11 +77,12 @@ test("select-wave projects the active wave onto plans.current_wave", async () =>
     fakeApp(rows, [], plans),
   );
   assertEquals((out as { waveTasks: unknown[] }).waveTasks.length, 1);
-  assertEquals(plans[0].current_wave, 1);
-  // wave_count is derived from the levelized rows (max wave + 1) and the 1-based "X/N" label
-  // is pre-formatted for the epics-index at-a-glance column.
-  assertEquals(plans[0].wave_count, 2);
-  assertEquals(plans[0].wave_label, "2/2");
+  // Wave progress (current_wave/wave_count/wave_label) was retired as a stored projection (epic
+  // #412) — it is derived from `plan_tasks` by the plan_wave_label VIEW — so select-wave no longer
+  // writes it (the seeded current_wave: 0 is left untouched).
+  assertEquals(plans[0].current_wave, 0);
+  assertEquals(plans[0].wave_count, undefined);
+  assertEquals(plans[0].wave_label, undefined);
   // Domain-phase projection (#261): dispatching the wave marks the epic Implementing (wave n/t),
   // derived from this worker's BPMN element id + the levelize records.
   assertEquals(plans[0].epic_phase, "Implementing (wave 2/2)");
@@ -124,17 +125,17 @@ test("select-wave leaves bound_artifacts untouched for a root epic (no resolvedA
   assertEquals(plans[0].bound_artifacts, undefined);
 });
 
-test("select-wave nulls all three progress fields when there are no levelized rows", async () => {
-  // No plan_tasks rows => waveCount 0. current_wave must be NULL too (not a stray index against a
-  // NULL wave_count/wave_label), matching the documented "NULL until dispatched with tasks".
+test("select-wave no longer writes wave-progress columns when there are no levelized rows", async () => {
+  // Wave progress was retired as a stored projection (epic #412; derived from `plan_tasks` by the
+  // plan_wave_label VIEW), so select-wave leaves the seeded current_wave untouched regardless.
   const plans: Record<string, unknown>[] = [{ plan_key: "owner/repo#63", current_wave: 5 }];
   await handler(
     { variables: { planKey: "owner/repo#63", currentWave: 0 } } as any,
     fakeApp([], [], plans),
   );
-  assertEquals(plans[0].current_wave, null);
-  assertEquals(plans[0].wave_count, null);
-  assertEquals(plans[0].wave_label, null);
+  assertEquals(plans[0].current_wave, 5);
+  assertEquals(plans[0].wave_count, undefined);
+  assertEquals(plans[0].wave_label, undefined);
 });
 
 test("select-wave leaves dependents pending behind a waiting-for-lane dependency", async () => {

@@ -1,9 +1,14 @@
 // Tests for the POST /app/api/actions/acknowledge-epic operation `acknowledgeEpic` (issue #298).
-// The nwf UI's "Dismiss" affordance for a RESOLVED epic — landed (`delivery=landed`) or
-// resolved-not-landed (`delivery=null`); only still-`converging` epics are rejected. It stamps
+// The nwf UI's "Dismiss" affordance for a RESOLVED epic — landed (delivery=landed) or
+// resolved-not-landed (delivery=null); only still-`converging` epics are rejected. It stamps
 // `acknowledged_at` via the plans gateway, which recomputes `list_bucket` to 'history' (and
 // `ack_open` to 0), dropping the resolved epic from Active into History. Unlike acknowledge-blocked
 // it completes NO user task (a resolved epic is not parked). The epic twin of acknowledge-done.
+//
+// Since epic #412 retired the stored `plans.delivery` column, the op derives the delivery signal at
+// READ TIME (`derivePlanDelivery` → the pure `deriveDelivery`) by joining the epic's slice
+// `plan_tasks.pr_key` → `pull_requests.status`. So these tests seed `plan_tasks` + `pull_requests`
+// (not a `plans.delivery` column) to model a landed / converging / resolved-not-landed epic.
 import { test } from "node:test";
 import { assertEquals } from "#test-assert";
 import type { AppApi } from "@nanobpm/urban";
@@ -12,9 +17,13 @@ import { noopLog } from "../test/log.ts";
 import handler from "./acknowledgeEpic.ts";
 
 // An in-memory data layer wired through the REAL plans gateway proxy, so the test exercises the
-// gateway's list_bucket/ack_open projection exactly as production does.
-function memApp(seed: any[]): { app: AppApi; rows: any[] } {
-  const stores: Record<string, any[]> = { plans: seed };
+// gateway's list_bucket/ack_open projection exactly as production does. `extra` seeds the join
+// surfaces (`plan_tasks` / `pull_requests`) the read-time delivery derivation reads.
+function memApp(
+  seed: any[],
+  extra: Record<string, any[]> = {},
+): { app: AppApi; rows: any[] } {
+  const stores: Record<string, any[]> = { plans: seed, ...extra };
   function tbl(name: string, pk = "id") {
     const rows = (stores[name] ??= [] as any[]);
     const match = (r: any, where: any) => Object.entries(where).every(([k, v]) => r[k] === v);
@@ -50,10 +59,21 @@ async function call(app: AppApi, body: unknown) {
   return (await handler({ req: {} as any, params: {}, query: {}, body } as any, app)) as any;
 }
 
+/** Fire a projecting gateway write (re-writing `status`) so `list_bucket`/`ack_open` reflect the
+ *  delivery-free gateway projection, mirroring the last real write before the op runs. */
+async function project(app: AppApi, key: string, status: string) {
+  await plans(app.data).update(key, { status });
+}
+
 test("acknowledge-epic: stamps acknowledged_at and flips list_bucket to 'history' on a landed epic", async () => {
-  const { app, rows } = memApp([{ plan_key: "o/r#1", status: "done", delivery: "landed", acknowledged_at: null }]);
-  // Seed the projection as the gateway would have on the last write (landed, unacknowledged → active).
-  await plans(app.data).update("o/r#1", { delivery: "landed" });
+  const { app, rows } = memApp(
+    [{ plan_key: "o/r#1", status: "done", acknowledged_at: null }],
+    {
+      plan_tasks: [{ id: 1, plan_key: "o/r#1", pr_key: "o/r#100" }],
+      pull_requests: [{ pr_key: "o/r#100", status: "merged" }], // landed
+    },
+  );
+  await project(app, "o/r#1", "done");
   assertEquals(rows[0].list_bucket, "active");
   assertEquals(rows[0].ack_open, 1);
 
@@ -67,8 +87,20 @@ test("acknowledge-epic: stamps acknowledged_at and flips list_bucket to 'history
 });
 
 test("acknowledge-epic: a still-converging epic is rejected (409) and stays Active", async () => {
-  const { app, rows } = memApp([{ plan_key: "o/r#2", status: "done", delivery: "converging", acknowledged_at: null }]);
-  await plans(app.data).update("o/r#2", { delivery: "converging" });
+  const { app, rows } = memApp(
+    [{ plan_key: "o/r#2", status: "done", acknowledged_at: null }],
+    {
+      plan_tasks: [
+        { id: 1, plan_key: "o/r#2", pr_key: "o/r#200" },
+        { id: 2, plan_key: "o/r#2", pr_key: "o/r#201" },
+      ],
+      pull_requests: [
+        { pr_key: "o/r#200", status: "merged" },
+        { pr_key: "o/r#201", status: "converging" }, // still in flight → converging
+      ],
+    },
+  );
+  await project(app, "o/r#2", "done");
 
   const res = await call(app, { plan_key: "o/r#2" });
 
@@ -80,9 +112,20 @@ test("acknowledge-epic: a still-converging epic is rejected (409) and stays Acti
 });
 
 test("acknowledge-epic: a resolved-not-landed epic (delivery=null) is accepted (200) and flips to History", async () => {
-  const { app, rows } = memApp([{ plan_key: "o/r#2b", status: "done", delivery: null, acknowledged_at: null }]);
-  // Seed the projection as the gateway would have on the last write (resolved-not-landed, unacknowledged → active).
-  await plans(app.data).update("o/r#2b", { delivery: null });
+  const { app, rows } = memApp(
+    [{ plan_key: "o/r#2b", status: "done", acknowledged_at: null }],
+    {
+      plan_tasks: [
+        { id: 1, plan_key: "o/r#2b", pr_key: "o/r#210" },
+        { id: 2, plan_key: "o/r#2b", pr_key: "o/r#211" },
+      ],
+      pull_requests: [
+        { pr_key: "o/r#210", status: "merged" },
+        { pr_key: "o/r#211", status: "abandoned" }, // all terminal, not all merged → delivery null
+      ],
+    },
+  );
+  await project(app, "o/r#2b", "done");
   assertEquals(rows[0].list_bucket, "active");
   assertEquals(rows[0].ack_open, 1);
 
@@ -96,7 +139,7 @@ test("acknowledge-epic: a resolved-not-landed epic (delivery=null) is accepted (
 });
 
 test("acknowledge-epic: a live (dispatched) epic is rejected (409)", async () => {
-  const { app } = memApp([{ plan_key: "o/r#3", status: "dispatched", delivery: null, acknowledged_at: null }]);
+  const { app } = memApp([{ plan_key: "o/r#3", status: "dispatched", acknowledged_at: null }]);
   const res = await call(app, { plan_key: "o/r#3" });
   assertEquals(res.status, 409);
 });
@@ -114,8 +157,14 @@ test("acknowledge-epic: no matching epic → 404", async () => {
 });
 
 test("acknowledge-epic: idempotent — re-acknowledging a landed epic keeps it in History", async () => {
-  const { app, rows } = memApp([{ plan_key: "o/r#5", status: "done", delivery: "landed", acknowledged_at: null }]);
-  await plans(app.data).update("o/r#5", { delivery: "landed" });
+  const { app, rows } = memApp(
+    [{ plan_key: "o/r#5", status: "done", acknowledged_at: null }],
+    {
+      plan_tasks: [{ id: 1, plan_key: "o/r#5", pr_key: "o/r#500" }],
+      pull_requests: [{ pr_key: "o/r#500", status: "merged" }], // landed
+    },
+  );
+  await project(app, "o/r#5", "done");
 
   assertEquals((await call(app, { plan_key: "o/r#5" })).status, 200);
   const firstStamp = rows[0].acknowledged_at;
