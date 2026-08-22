@@ -124,7 +124,9 @@
           "fields": [
             { "field": "digest", "label": "Digest" },
             { "field": "logical_key", "label": "Logical key" },
-            { "field": "side_effecting", "label": "Side-effecting" }
+            { "field": "side_effecting", "label": "Side-effecting" },
+            { "field": "preview", "label": "Preview (diagram, human stop-points, side effects)" },
+            { "field": "graph", "label": "Graph JSON (exact bytes to be dispatched)" }
           ]
         }
       }
