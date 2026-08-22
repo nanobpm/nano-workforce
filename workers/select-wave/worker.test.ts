@@ -67,20 +67,20 @@ async function selectWave(rows: Row[], deps: DepRow[]) {
   return out as { waveTasks: unknown[] };
 }
 
-test("select-wave projects the active wave onto plans.current_wave", async () => {
+test("select-wave dispatches the active wave without writing wave-progress columns", async () => {
   const rows: Row[] = [
     { id: 1, plan_key: "owner/repo#63", task_id: "a", title: "A", prompt: "do A", status: "pending", wave: 1 },
   ];
-  const plans: Record<string, unknown>[] = [{ plan_key: "owner/repo#63", current_wave: 0 }];
+  const plans: Record<string, unknown>[] = [{ plan_key: "owner/repo#63" }];
   const out = await handler(
     { variables: { planKey: "owner/repo#63", currentWave: 1 }, elementId: "select-wave" } as any,
     fakeApp(rows, [], plans),
   );
   assertEquals((out as { waveTasks: unknown[] }).waveTasks.length, 1);
   // Wave progress (current_wave/wave_count/wave_label) was retired as a stored projection (epic
-  // #412) — it is derived from `plan_tasks` by the plan_wave_label VIEW — so select-wave no longer
-  // writes it (the seeded current_wave: 0 is left untouched).
-  assertEquals(plans[0].current_wave, 0);
+  // #412; the columns are dropped by migration 070) — it is derived from `plan_tasks` by the
+  // plan_wave_label VIEW — so select-wave introduces no wave-progress field onto the plan row.
+  assertEquals(plans[0].current_wave, undefined);
   assertEquals(plans[0].wave_count, undefined);
   assertEquals(plans[0].wave_label, undefined);
   // Domain-phase projection (#261): dispatching the wave marks the epic Implementing (wave n/t),
@@ -125,15 +125,16 @@ test("select-wave leaves bound_artifacts untouched for a root epic (no resolvedA
   assertEquals(plans[0].bound_artifacts, undefined);
 });
 
-test("select-wave no longer writes wave-progress columns when there are no levelized rows", async () => {
-  // Wave progress was retired as a stored projection (epic #412; derived from `plan_tasks` by the
-  // plan_wave_label VIEW), so select-wave leaves the seeded current_wave untouched regardless.
-  const plans: Record<string, unknown>[] = [{ plan_key: "owner/repo#63", current_wave: 5 }];
+test("select-wave writes no wave-progress columns when there are no levelized rows", async () => {
+  // Wave progress was retired as a stored projection (epic #412; the columns are dropped by
+  // migration 070; it is derived from `plan_tasks` by the plan_wave_label VIEW), so select-wave
+  // introduces no wave-progress field onto the plan row.
+  const plans: Record<string, unknown>[] = [{ plan_key: "owner/repo#63" }];
   await handler(
     { variables: { planKey: "owner/repo#63", currentWave: 0 } } as any,
     fakeApp([], [], plans),
   );
-  assertEquals(plans[0].current_wave, 5);
+  assertEquals(plans[0].current_wave, undefined);
   assertEquals(plans[0].wave_count, undefined);
   assertEquals(plans[0].wave_label, undefined);
 });
