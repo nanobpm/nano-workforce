@@ -153,7 +153,7 @@ test("stageProposal: proposals with DIFFERENT logical keys coexist — supersede
   });
 });
 
-test("stageProposal: an older concurrent stage does NOT clobber a NEWER staged proposal for the same logical key (ordered supersede — never zero live)", async () => {
+test("stageProposal: reconciles to EXACTLY ONE live proposal — an older stage whose supersede pass runs AFTER a newer stage neither clobbers it (zero) nor coexists with it (two)", async () => {
   await withData(async (data) => {
     const table = deliveryGraphProposals(data);
     // A NEWER stage (d2) has already committed its row for logical_key "runbook" — the winner of a
@@ -161,14 +161,17 @@ test("stageProposal: an older concurrent stage does NOT clobber a NEWER staged p
     const newer = row({ digest: "d2" });
     newer.updated_at = "2999-01-01T00:00:00.000Z";
     await table.insert(newer);
-    // Now the OLDER racer (d1) runs its supersede pass. It must supersede only rows OLDER than itself —
-    // NOT the newer d2. An unordered supersede-all would flip d2 too, leaving ZERO live proposals for
-    // the logical key (both superseded), so the cockpit would show nothing to dispatch.
+    // Now the OLDER racer (d1) runs its supersede pass LAST. An "only-flip-rows-older-than-me" pass would
+    // leave BOTH d1 and d2 staged (it won't flip the newer d2, and d2's own pass ran before d1 existed);
+    // an unordered supersede-all would flip d2 too, leaving ZERO. Reconciling to the newest sibling must
+    // supersede d1 (it has a newer staged sibling d2) and keep exactly d2 live.
     await stageProposal(data, row({ digest: "d1" }));
     assertEquals((await table.get("d2"))?.status, "staged", "the newer proposal must survive the older stage's supersede");
-    // At least one live proposal always remains for the logical key — never zero.
-    const stillStaged = (await table.all()).filter((r) => r.status === "staged");
-    assert(stillStaged.some((r) => r.digest === "d2"), "the globally-newest stage survives every racing supersede");
+    assertEquals((await table.get("d1"))?.status, "superseded", "the older stage must supersede itself when a newer staged sibling exists");
+    // EXACTLY ONE live proposal remains for the logical key — never zero, never two.
+    const stillStaged = (await table.all()).filter((r) => r.status === "staged" && r.logical_key === "runbook");
+    assertEquals(stillStaged.length, 1, "exactly one live proposal per logical graph");
+    assertEquals(stillStaged[0]?.digest, "d2", "the globally-newest stage is the one that survives");
   });
 });
 

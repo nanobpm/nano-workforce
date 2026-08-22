@@ -155,8 +155,9 @@ export function buildProposalRow(input: {
 * upsert, every
  * OTHER `staged` proposal sharing this `logical_key` is flipped to `superseded` — so the cockpit shows
  * exactly one live proposal per logical graph (the latest digest the operator would dispatch). The
- * supersede is ORDERED (older-than the just-written row, `digest`-tie-broken) so concurrent stages of
- * two different digests can never clobber each other into ZERO live proposals — the newest survives. */
+ * supersede RECONCILES to the globally-newest staged row (`updated_at`, `digest`-tie-broken) rather than
+ * flipping only rows older than the just-written one, so concurrent stages of two different digests
+ * converge to EXACTLY ONE live proposal — never zero, and never two — regardless of arrival order. */
 export async function stageProposal(data: DataLayer, row: DeliveryGraphProposal): Promise<DeliveryGraphProposal> {
   const table = deliveryGraphProposals(data);
   const existing = await table.get(row.digest);
@@ -186,18 +187,21 @@ export async function stageProposal(data: DataLayer, row: DeliveryGraphProposal)
   } else {
     await table.insert(toWrite);
   }
-  // Supersede prior staged proposals for the same logical graph (different digest) in one statement.
-  // ORDER the supersede so an OLDER stage can never clobber a NEWER one: only flip rows that are
-  // strictly older than the row we just wrote, with a deterministic `digest` tie-breaker for the
-  // same-`updated_at` case. Without this ordering, two callers staging different digests for the same
-  // logical_key concurrently each supersede the other's row (upsert-then-supersede-all is a split
-  // read/modify/write), ending with BOTH `superseded` and ZERO live proposals for the logical key.
-  // Ordering guarantees the globally-newest stage always survives every racing supersede pass.
+  // Reconcile to EXACTLY ONE live proposal per logical graph: supersede every `staged` row for this
+  // `logical_key` that has a strictly-NEWER staged sibling (by `updated_at`, with a deterministic
+  // `digest` tie-breaker), leaving only the globally-newest live. This is ORDER-INDEPENDENT — it never
+  // references the just-written digest, so it converges to a single live row regardless of the
+  // interleaving of concurrent stages. A supersede pass keyed to "only flip rows older than the one *I*
+  // just wrote" leaves TWO live proposals when an OLDER stage's pass runs AFTER a newer stage already
+  // committed (the older pass won't flip the newer row, and the newer pass ran before the older row
+  // existed) — and an unordered supersede-all leaves ZERO. Anchoring on the newest staged sibling avoids
+  // both: the newest row is never superseded (no newer sibling), so it stays staged throughout the
+  // statement and every older row's `EXISTS` is satisfied by it. Idempotent: a no-op once one row remains.
   await data
     .open()
     .exec(
-      `UPDATE "delivery_graph_proposals" SET "status" = 'superseded', "updated_at" = ? WHERE "logical_key" = ? AND "digest" <> ? AND "status" = 'staged' AND ("updated_at" < ? OR ("updated_at" = ? AND "digest" < ?))`,
-      [now(), row.logical_key, row.digest, toWrite.updated_at, toWrite.updated_at, row.digest],
+      `UPDATE "delivery_graph_proposals" SET "status" = 'superseded', "updated_at" = ? WHERE "logical_key" = ? AND "status" = 'staged' AND EXISTS (SELECT 1 FROM "delivery_graph_proposals" AS "newer" WHERE "newer"."logical_key" = "delivery_graph_proposals"."logical_key" AND "newer"."status" = 'staged' AND ("newer"."updated_at" > "delivery_graph_proposals"."updated_at" OR ("newer"."updated_at" = "delivery_graph_proposals"."updated_at" AND "newer"."digest" > "delivery_graph_proposals"."digest")))`,
+      [now(), row.logical_key],
     );
   return toWrite;
 }
