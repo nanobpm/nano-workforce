@@ -3,7 +3,8 @@
 // run (Done ✓ / Done ✕) directly from the Feature / Overview pages so it drops out of the primary
 // Active list into History. It is the DONE twin of `acknowledgeBlocked` — but a terminal run is NOT
 // parked at a user task, so this op does NOT complete a user task and touches no engine/ledger: it
-// simply stamps `acknowledged_at` on the row via the feature_runs gateway. It rejects (409) a run that
+// simply stamps `acknowledged_at` on the row via the plain `feature_runs` record table (the projecting
+// gateway this PR retired). It rejects (409) a run that
 // is not yet truly terminal, so it can never pre-seed the tick-off on a still-live run.
 //
 // The `list_bucket` partition is DERIVED by the `feature_read_model` VIEW (073, issue #439) from
