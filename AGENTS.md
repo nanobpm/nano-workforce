@@ -59,6 +59,30 @@ Before starting planned work, check for an existing issue or PR. If one is
 already in progress, stop and flag it with a link. Otherwise create and claim an
 issue before writing code.
 
+### Decomposing a fleet: pre-partition shared surfaces, don't serialise at merge
+When an epic fans a wave of slices out across parallel branches, any surface that
+is **append-only** (migration prefixes) or **regenerated/rewritten wholesale** (a
+`.bpmn` diagram, a contiguous source region) collides only in the *union* of two
+branches: each PR is green alone, and the clash first surfaces on the 2nd/3rd
+merge — a combined state no single PR's CI ever exercised. Rebasing, blackboard
+notes, or a `dependsOn` edge added purely to order the landings are all
+**serialise-at-merge hacks**; the fix belongs at decomposition time:
+
+- **Give every shared surface exactly one owning task.** Two slices must never
+  both edit the same contiguous region (e.g. the `app/service.ts` poller loop and
+  its import block) or both regenerate the same `.bpmn` diagram. Coarsen them into
+  one task, or split so one task owns the surface while its siblings leave it
+  untouched for a later single-owner cleanup slice (their `dependsOn`).
+- **Pre-assign disjoint resource blocks up front.** For numbered, append-only
+  resources (migration prefixes) the planner hands each task an explicit,
+  non-overlapping block at plan time (e.g. `060-061` / `062-063` / `064-069`, with
+  a `070-079` cleanup block). Do **not** tell each agent to compute "the next free
+  prefix": in a *simultaneous* wave every sibling forks at the same commit, sees
+  the same highest prefix, and independently takes the same next number — so
+  "check `origin/main`" cannot save them (main hasn't advanced yet). This class has
+  recurred across epics (#142, the #049 triple, #412); `npm run check:migrations`
+  catches the duplicate mechanically, but only *after* the second migration lands.
+
 ## Shared contracts: one registry, one typed env schema (issue #227, ADR 0004)
 
 Parallel/sliced work keeps producing **two divergent representations of one contract** — an env-key
@@ -115,7 +139,8 @@ GENERATED, never hand-edited.**
   vs. the merged semantic model, so `layout:check` fails on a combined state that
   no single PR's CI ever exercised. When decomposing a fleet, coarsen the tasks
   that touch a shared process file into one; do **not** paper the collision over
-  with a `dependsOn` edge added purely to serialise otherwise-parallel work.
+  with a `dependsOn` edge added purely to serialise otherwise-parallel work. (This
+  is one instance of the general fan-out rule — see "Decomposing a fleet".)
 
 ## Deploy by convention: `resources/` (ADR 0062)
 
@@ -271,7 +296,11 @@ Migrations live in `db/migrations/*.sql` and are **auto-applied on boot** from
 - Number a new migration after the current highest prefix (they apply in order).
   Check `origin/main`, not your branch point — a fan-out epic branch forks at one
   prefix while `main` keeps advancing, so the branch-local "next" number collides
-  on merge. Two files must never share a prefix; `npm run check:migrations`
+  on merge. **This is not enough for a *simultaneous* fan-out wave**: sibling slices
+  that fork at the same commit all see the same highest prefix, so the planner must
+  pre-assign each a disjoint prefix block at decomposition time (see "Decomposing a
+  fleet"), not have each compute "the next free" number. Two files must never share
+  a prefix; `npm run check:migrations`
   (a CI gate) enforces this and fails the build on any new duplicate. Because a
   prefix collision only exists in the *union* of two branches, this gate — like
   `layout:check` and the generated-artifact `--check`s — is also re-run on the
