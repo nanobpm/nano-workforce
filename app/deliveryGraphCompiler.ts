@@ -399,9 +399,12 @@ async function layoutDeliveryDiagram(semanticBpmn: string): Promise<string> {
   const end = laidOut.lastIndexOf(endTag);
   if (start === -1 || end === -1) {
     throw new Error(
-      "compileDeliveryGraph: layoutBpmn produced no bpmndi:BPMNDiagram — the `bpmn-auto-layout` " +
-        "toolkit peer is missing, so the compiled graph would deploy DI-less and render positionless " +
-        "in the process explorer (#440). Ensure `bpmn-auto-layout` is installed as a runtime dependency.",
+      "compileDeliveryGraph: layoutBpmn produced no bpmndi:BPMNDiagram, so the compiled graph would " +
+        "deploy DI-less and render positionless in the process explorer (#440). This usually means the " +
+        "`bpmn-auto-layout` toolkit peer is missing (the toolkit then silently no-ops layout), but it " +
+        "can also indicate a change in `layoutBpmn` output (different namespace prefix/serialization) or " +
+        "an internal layout failure returning semantic-only XML. Ensure `bpmn-auto-layout` is installed " +
+        "as a runtime dependency and that `layoutBpmn` still emits a `<bpmndi:BPMNDiagram>` block.",
     );
   }
   const diagram = laidOut.slice(start, end + endTag.length);
