@@ -1550,8 +1550,9 @@ components:
           description: OPTIONAL idempotency key. A re-dispatch with the same key (or, when omitted, the same digest) does not double-launch. Blank/whitespace is treated as absent.
     DeliveryGraphTextResult:
       description: >-
-        The UI JSON-paste ingress outcome (issue #460) — a single shape covering the PREVIEW+STAGE
-        summary, the OPERATOR DISPATCH outcome, and any parse/validation error. `ok` discriminates
+        The delivery-graph text-ingress outcome (issue #460) — a single shape covering the JSON-paste
+        PREVIEW+STAGE summary, the by-`digest` OPERATOR DISPATCH outcome (dispatch takes only a staged
+        proposal's `digest`, not pasted JSON), and any parse/validation error. `ok` discriminates
         success; a failure carries a human `error` (and, for a compile failure, path-qualified `errors`).
       type: object
       additionalProperties: false
@@ -1568,7 +1569,7 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/DeliveryCompileError"
-          description: Path-qualified validation/compile failures, when the pasted graph was malformed.
+          description: Path-qualified validation/compile failures, when the submitted or staged graph was malformed.
         status:
           type: string
           description: The dispatch run's lifecycle position (`running`), when dispatched.

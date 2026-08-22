@@ -160,6 +160,11 @@ shared JSON contract means either can be swapped in later without touching the a
 
 ### 7. Submission is propose → preview → approve → dispatch, idempotent, over the self-describing endpoint
 
+> **Superseded — see the *Amendment (issue #460)* at the end of this section.** The `POST
+> /actions/start/delivery-graph` agent endpoint described in the following paragraph was **never
+> shipped and has been removed**; the agent surface ends at propose → compile → stage and dispatch is
+> operator-only. The paragraph below is retained as the original (Proposed) decision record.
+
 Graphs are submitted exactly as epics are today — via a **new (proposed)** `POST
 /actions/start/delivery-graph` endpoint (paths are relative to the agent guide's `__BASE__` prefix,
 matching the guide's style) with the JSON body, discovered via the agent guide (which already
