@@ -122,11 +122,14 @@ test("feature_read_model derives stage/stage_state/stage_skipped/attention EXACT
     for (const converge of [0, 1]) {
       for (const auto_merge of [0, 1]) {
         for (const pr_key of [null, `o/r#pr${i}`]) {
-          // The open-task dimension: for the two human-wait statuses, exercise BOTH task-present and
-          // task-absent (the #422 drift case = escalated/awaiting_operator with the task already gone).
-          for (const openTask of [false, true]) {
+          // The open-task dimension only matters for the two human-wait statuses (escalated/
+          // awaiting_operator), whose derivation reads open tasks — for them exercise BOTH
+          // task-present and task-absent (the #422 drift case = the task already gone). Every other
+          // status ignores open tasks (`el` is null, so no task is ever created), so iterating the
+          // dimension there would only duplicate identical cases; iterate [false] alone.
+          const el = status === "escalated" ? "feature-escalation" : status === "awaiting_operator" ? "feature-blocked" : null;
+          for (const openTask of el !== null ? [false, true] : [false]) {
             const key = `o/r#${i++}`;
-            const el = status === "escalated" ? "feature-escalation" : status === "awaiting_operator" ? "feature-blocked" : null;
             const hasTask = openTask && el !== null;
             cases.push({
               key,
