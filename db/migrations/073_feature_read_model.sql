@@ -30,7 +30,7 @@
 --
 -- Forward-only, additive (a new read model, no schema change to feature_runs). The runner wraps each
 -- file in its own transaction, so this file must NOT contain BEGIN/COMMIT. Numbered after the current
--- highest prefix (064).
+-- highest prefix (072 — the #412 wave-1 contract cleanup landed a disjoint 070-079 block).
 
 CREATE VIEW feature_read_model AS
 SELECT

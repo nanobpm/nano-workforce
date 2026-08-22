@@ -8,11 +8,11 @@
 // `deriveListBucket` (app/stage.ts). That "the gateway is the sole write path" invariant did NOT hold
 // for the framework `instanceTracking` reconciler, which writes `feature_runs.status` through the RAW
 // datasource on a terminated instance — bypassing the gateway and freezing the display columns.
-// 065_feature_read_model.sql retires the write-time projection: the derived columns are now a VIEW
+// 073_feature_read_model.sql retires the write-time projection: the derived columns are now a VIEW
 // over each row's own `status`/`pr_key`/`converge`/`auto_merge`/`acknowledged_at`, so there is no
 // stored column and no write-path for any writer to leave stale.
 //
-// This exercises the REAL SQLite view (065 applied to an in-memory DB, mirroring
+// This exercises the REAL SQLite view (073 applied to an in-memory DB, mirroring
 // app/plansReadModel.test.ts / app/mergesPerDayView.test.ts) and pins that its CASE expressions
 // reproduce `deriveStage` / `deriveListBucket` EXACTLY over the full status matrix — the SAME pure
 // helpers the acknowledge operations guard on — plus a RED/GREEN guard reproducing the reconciler
@@ -28,7 +28,7 @@ import { deriveListBucket, deriveStage } from "./stage.ts";
 const MIG = (name: string) => readFileSync(fileURLToPath(new URL(`../db/migrations/${name}`, import.meta.url)), "utf8");
 
 // The base `feature_runs` shape the view reads (028 + 030's delivery_label + 035's title + 039's
-// acknowledged_at & the now-vestigial stored stage/… columns), plus migration 065. The stored derived
+// acknowledged_at & the now-vestigial stored stage/… columns), plus migration 073. The stored derived
 // columns are present precisely so the tests can seed STALE values and prove the VIEW ignores them.
 function viewDb(): DatabaseSync {
   const db = new DatabaseSync(":memory:");
@@ -39,7 +39,7 @@ function viewDb(): DatabaseSync {
        outcome TEXT, delivery_label TEXT, acknowledged_at TEXT, created_at TEXT, updated_at TEXT,
        stage TEXT, stage_state TEXT, stage_skipped TEXT, attention TEXT, list_bucket TEXT);`,
   );
-  db.exec(MIG("065_feature_read_model.sql"));
+  db.exec(MIG("073_feature_read_model.sql"));
   return db;
 }
 

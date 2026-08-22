@@ -44,9 +44,9 @@ function viewDb(): DatabaseSync {
   db.exec(MIG("059_plan_wave_summary.sql"));
   db.exec(MIG("060_plan_wave_rollup.sql"));
   db.exec(MIG("061_plan_delivery_rollup.sql"));
-  // 066 redefines plan_read_model to DERIVE list_bucket/ack_open from status + acknowledged_at + the
+  // 074 redefines plan_read_model to DERIVE list_bucket/ack_open from status + acknowledged_at + the
   // derived plan_delivery signal (issue #439), instead of reading the denormalised base columns.
-  db.exec(MIG("066_plan_read_model_derive_bucket.sql"));
+  db.exec(MIG("074_plan_read_model_derive_bucket.sql"));
   return db;
 }
 
@@ -117,7 +117,7 @@ function counts(db: DatabaseSync, plan_key: string): { prs_opened: number; prs_m
 }
 
 // The derived Active/History bucket flags the epics pages bind — read straight off `plan_read_model`
-// (066), plus the delivery signal the derivation folds in, so the assertions can cross-check the
+// (074), plus the delivery signal the derivation folds in, so the assertions can cross-check the
 // VIEW against the pure `deriveEpicBucket` / `epicIsAcknowledgeable` oracles.
 function bucket(db: DatabaseSync, plan_key: string): { list_bucket: unknown; ack_open: unknown; delivery: string | null } {
   const r = db

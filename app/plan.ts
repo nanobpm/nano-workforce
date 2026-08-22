@@ -93,7 +93,7 @@ export interface Plan {
   // `plan_read_model`, 061), computed from the SAME pure `deriveDelivery`/`TERMINAL_STATUSES`
   // (app/delivery.ts). The pages read them off the view; the pollers that still need the signal
   // (`pollPromotion` for `isPromotable`) recompute it at
-  // read time via `deriveDelivery`, as does the `plan_read_model` VIEW's bucket derivation (066).
+  // read time via `deriveDelivery`, as does the `plan_read_model` VIEW's bucket derivation (074).
   // There is no stored column and no write-path any more.
   // Derived epic domain phase (038_plan_epic_phase.sql, #261): the epic's own lifecycle phase —
   // Planning / Reviewing / Implementing (wave n/t) / Trial merging / Finalizing / Dispatched —
@@ -114,7 +114,7 @@ export interface Plan {
   promotion_state: string | null;
   // Active/History partition + operator tick-off (044_plan_list_bucket.sql, #298). RETIRED as a
   // write-time projection (issue #439): `list_bucket`/`ack_open` are now DERIVED by the
-  // `plan_read_model` VIEW (066) from `status`, `acknowledged_at`, and the derived `plan_delivery`
+  // `plan_read_model` VIEW (074) from `status`, `acknowledged_at`, and the derived `plan_delivery`
   // signal — mirroring the pure `deriveEpicBucket` / `epicIsAcknowledgeable` (app/delivery.ts). The
   // Epics pages bind the VIEW, never these base columns, so a raw-datasource `status` write (the
   // `instanceTracking` reconciler) can no longer leave them stale, and the delivery-aware
@@ -187,7 +187,7 @@ export type PlanTaskStatus = typeof PLAN_TASK_STATUSES[number];
 /** The `plans` record gateway (keyed on `plan_key`) — a plain record table.
  *
  * The epic-bucket projection (`list_bucket`/`ack_open`) is NO LONGER a write-time projection here
- * (issue #439): it is DERIVED by the `plan_read_model` VIEW (066) from each row's own `status` /
+ * (issue #439): it is DERIVED by the `plan_read_model` VIEW (074) from each row's own `status` /
  * `acknowledged_at` and the derived `plan_delivery` signal, mirroring `deriveEpicBucket` /
  * `epicIsAcknowledgeable` (app/delivery.ts). The Epics pages bind the VIEW, never this table's stored
  * derived columns. Removing the write-time projection closes the drift the framework

@@ -5,7 +5,7 @@
 -- at WRITE TIME by the `plans()` gateway (app/plan.ts) from the pure `deriveEpicBucket` /
 -- `epicIsAcknowledgeable` (app/delivery.ts), with a read-time `pollPlanBucket` pass (app/service.ts)
 -- supplying the delivery-aware correction the delivery-free gateway could not. As with feature_runs
--- (065), that write path is bypassed by the framework `instanceTracking` reconciler, which writes
+-- (073), that write path is bypassed by the framework `instanceTracking` reconciler, which writes
 -- `plans.status` through the RAW datasource (`{status:"abandoned"}` on a terminated instance) —
 -- leaving `list_bucket`/`ack_open` frozen at their pre-terminal values, so a cancelled epic drifts the
 -- same way a cancelled feature run does.
@@ -31,7 +31,7 @@
 -- changed), so the pages↔schema contract guard and every page binding stay valid.
 --
 -- Forward-only. NO BEGIN/COMMIT — the runner wraps each file in its own transaction. Numbered after
--- 065.
+-- 073.
 
 DROP VIEW plan_read_model;
 

@@ -4,7 +4,7 @@
 // distinguish an epic whose fan-out is `done` but whose slices are still CONVERGING from one where
 // every slice PR has LANDED, and count abandoned/converged PRs as resolved-not-landed (never
 // `landed`). The delivery-aware `list_bucket`/`ack_open` bucket derivation now lives in the
-// `plan_read_model` VIEW (066), cross-checked against the pure helpers in app/plansReadModel.test.ts.
+// `plan_read_model` VIEW (074), cross-checked against the pure helpers in app/plansReadModel.test.ts.
 import { test } from "node:test";
 import { assert, assertEquals } from "#test-assert";
 import { deriveDelivery, TERMINAL_STATUSES } from "./delivery.ts";

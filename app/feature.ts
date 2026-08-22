@@ -68,23 +68,23 @@ export interface FeatureRun {
    * set on a terminal row, `list_bucket` flips from 'active' to 'history'. Projection surface. */
   acknowledged_at: string | null;
   /** RETIRED as a write-time projection (issue #439): the pipeline `stage` is now DERIVED by the
-   * `feature_read_model` VIEW (065) from `status`/`pr_key`/`converge`/`auto_merge`, mirroring
+   * `feature_read_model` VIEW (073) from `status`/`pr_key`/`converge`/`auto_merge`, mirroring
    * `deriveStage` (app/stage.ts). The Feature page binds the VIEW's `stage`, never this base column,
    * so a raw-datasource `status` write (the `instanceTracking` reconciler) can no longer leave it
    * stale. The base column survives (expand/contract — a later migration drops it) but is no longer
    * written or read; NULL on rows written after the projection was removed. */
   stage: string | null;
   /** RETIRED as a write-time projection (issue #439): `stage_state` is DERIVED by `feature_read_model`
-   * (065). See `stage`. The page binds the VIEW's `stateField`; this base column is vestigial. */
+   * (073). See `stage`. The page binds the VIEW's `stateField`; this base column is vestigial. */
   stage_state: string | null;
   /** RETIRED as a write-time projection (issue #439): `stage_skipped` is DERIVED by `feature_read_model`
-   * (065). See `stage`. The page binds the VIEW's `notInPathField`; this base column is vestigial. */
+   * (073). See `stage`. The page binds the VIEW's `notInPathField`; this base column is vestigial. */
   stage_skipped: string | null;
   /** RETIRED as a write-time projection (issue #439): `attention` is DERIVED by `feature_read_model`
-   * (065). See `stage`. The page binds the VIEW's `badgeField`; this base column is vestigial. */
+   * (073). See `stage`. The page binds the VIEW's `badgeField`; this base column is vestigial. */
   attention: string | null;
   /** RETIRED as a write-time projection (issue #439): the Active/History `list_bucket` ('active'|
-   * 'history', 'history' iff a terminal row is acknowledged) is DERIVED by `feature_read_model` (065)
+   * 'history', 'history' iff a terminal row is acknowledged) is DERIVED by `feature_read_model` (073)
    * from `status`/`acknowledged_at`, mirroring `deriveListBucket`. The page's tabs filter the VIEW's
    * `list_bucket`; this base column is vestigial. */
   list_bucket: string | null;
@@ -222,7 +222,7 @@ export const FEATURE_BLOCKED_ELEMENT = "feature-blocked";
  *
  * The pipeline projection (`stage`/`stage_state`/`stage_skipped`/`attention`/`list_bucket`) is NO
  * LONGER a write-time projection here (issue #439): it is a DERIVED SQL VIEW, `feature_read_model`
- * (065), computed from each row's own `status`/`pr_key`/`converge`/`auto_merge`/`acknowledged_at`. The
+ * (073), computed from each row's own `status`/`pr_key`/`converge`/`auto_merge`/`acknowledged_at`. The
  * Feature page binds the VIEW, never this table's stored derived columns. Removing the write-time
  * projection closes the drift the framework `instanceTracking` reconciler opened: it writes
  * `feature_runs.status` through the RAW datasource (`{status:"abandoned"}` on a terminated instance),
