@@ -18,7 +18,9 @@ import { assertEquals } from "#test-assert";
 const MIGRATION = fileURLToPath(new URL("../db/migrations/064_lineage_thread_view.sql", import.meta.url));
 
 /** A DB with the base shapes the view reads (`lineage_threads`, `plans`, `feature_runs`) plus the
- *  view applied. Only the columns the view touches are modelled. */
+ *  view applied. The `lineage_threads` schema also models `kind`/`issue_url`, which the view does
+ *  NOT read (it derives them from the `plans`/`feature_runs` origin joins) — they are kept here so
+ *  `addThread` can write exactly what `pollLineage` denormalises. */
 function viewDb(): DatabaseSync {
   const db = new DatabaseSync(":memory:");
   db.exec(
