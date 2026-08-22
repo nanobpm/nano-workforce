@@ -51,7 +51,17 @@ interface SampleTask {
   status: string;
   wave: number | null;
   pr?: { status: string };
+  // A slice that OPENED a PR (so `pr_key` is set and it counts toward `prs_opened`) but whose
+  // `pull_requests` row is ABSENT — a DB desync. Mirrors `pollDelivery`'s `MISSING_PR_STATUS`
+  // sentinel: the LEFT JOIN yields `status IS NULL`, which `plan_delivery_counts` treats as
+  // in-flight (non-terminal), so it can never wrongly promote an epic to `landed`.
+  danglingPr?: boolean;
 }
+
+// Sentinel mirroring `pollDelivery`'s `MISSING_PR_STATUS` — the status fed to `deriveDelivery` for a
+// `pr_key` with no `pull_requests` row. Any non-terminal string works (it's counted as in-flight); it
+// exists only to keep the `deriveDelivery` cross-check aligned with the view's `status IS NULL` branch.
+const MISSING_PR_STATUS = "missing";
 
 // Insert a plan plus its tasks (and each task's PR, if any). PR keys are derived so the test rows
 // stay terse. Returns the flat `pull_requests.status` list `deriveDelivery` consumes (only tasks
@@ -62,11 +72,15 @@ function addPlan(db: DatabaseSync, plan_key: string, status: string, tasks: Samp
   ).run(plan_key, "o/r", 1, `https://gh/${plan_key}`, status, tasks.length, "2026-01-01T00:00:00Z", "active");
   const prStatuses: string[] = [];
   tasks.forEach((t, i) => {
-    const prKey = t.pr ? `${plan_key}::pr${i}` : null;
+    const prKey = t.pr || t.danglingPr ? `${plan_key}::pr${i}` : null;
     db.prepare(
       "INSERT INTO plan_tasks (plan_key, task_index, task_id, status, pr_key, wave) VALUES (?, ?, ?, ?, ?, ?)",
     ).run(plan_key, i, `t${i}`, t.status, prKey, t.wave);
-    if (t.pr && prKey) {
+    if (t.danglingPr) {
+      // Opened a PR (pr_key set → counts toward prs_opened) but NO `pull_requests` row: the DB desync
+      // `pollDelivery` feeds to `deriveDelivery` as MISSING_PR_STATUS (in-flight).
+      prStatuses.push(MISSING_PR_STATUS);
+    } else if (t.pr && prKey) {
       db.prepare("INSERT INTO pull_requests (pr_key, url, status, process_key) VALUES (?, ?, ?, ?)").run(
         prKey,
         `https://gh/${prKey}`,
@@ -84,6 +98,13 @@ function delivery(db: DatabaseSync, plan_key: string): { delivery: unknown; deli
     delivery: unknown;
     delivery_label: unknown;
   };
+}
+
+function counts(db: DatabaseSync, plan_key: string): { prs_opened: number; prs_merged: number; prs_in_flight: number } {
+  const r = db
+    .prepare("SELECT prs_opened, prs_merged, prs_in_flight FROM plan_delivery_counts WHERE plan_key = ?")
+    .get(plan_key) as { prs_opened: number; prs_merged: number; prs_in_flight: number };
+  return { ...r };
 }
 
 function waveLabel(db: DatabaseSync, plan_key: string): Record<string, unknown> | undefined {
@@ -138,6 +159,36 @@ test("plan_delivery reproduces deriveDelivery exactly (converging / landed / not
   assertEquals(delivery(db, "o/r#1").delivery_label, "2/3 slices merged, 1 converging");
   assertEquals(delivery(db, "o/r#2").delivery_label, "2/2 slices merged");
   assertEquals(delivery(db, "o/r#4").delivery, null);
+});
+
+test("plan_delivery_counts pins the two subtle predicates: `converged` is terminal, a dangling pr_key is in-flight", () => {
+  const db = viewDb();
+  // `converged` is in TERMINAL_STATUSES (review-only mode): a `done` epic whose only remaining PR is
+  // `converged` (not `merged`) is resolved-not-landed. It must NOT count as in-flight — so delivery is
+  // NULL, never `converging`. This pins the hard-coded terminal set in the view's SQL against
+  // TERMINAL_STATUSES; drop `converged` from either and prs_in_flight becomes 1 here.
+  const conv = addPlan(db, "o/r#c", "done", [
+    { status: "opened", wave: 0, pr: { status: "merged" } },
+    { status: "opened", wave: 0, pr: { status: "converged" } },
+  ]);
+  assertEquals(counts(db, "o/r#c"), { prs_opened: 2, prs_merged: 1, prs_in_flight: 0 });
+  assertEquals(delivery(db, "o/r#c").delivery, null, "converged is terminal-not-merged → resolved, not landed");
+  assertEquals({ ...delivery(db, "o/r#c") }, { delivery: deriveDelivery("done", conv).delivery, delivery_label: deriveDelivery("done", conv).label });
+
+  // A dangling `pr_key` (task opened a PR but the `pull_requests` row is absent — the poller's
+  // MISSING_PR_STATUS desync). The LEFT JOIN yields `status IS NULL`, which the view's
+  // `p.status IS NULL OR …` branch counts as in-flight — so even though every OTHER PR merged, the
+  // epic stays `converging` and can never be wrongly promoted to `landed`.
+  const dangling = addPlan(db, "o/r#d", "done", [
+    { status: "opened", wave: 0, pr: { status: "merged" } },
+    { status: "opened", wave: 0, danglingPr: true },
+  ]);
+  assertEquals(counts(db, "o/r#d"), { prs_opened: 2, prs_merged: 1, prs_in_flight: 1 });
+  assertEquals(delivery(db, "o/r#d").delivery, "converging", "a dangling pr_key keeps the epic in flight (never landed)");
+  assertEquals({ ...delivery(db, "o/r#d") }, {
+    delivery: deriveDelivery("done", dangling).delivery,
+    delivery_label: deriveDelivery("done", dangling).label,
+  });
 });
 
 test("plan_wave_label reproduces the workers' wave_count / current_wave / wave_label projection", () => {
