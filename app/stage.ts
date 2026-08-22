@@ -43,6 +43,14 @@ export interface StageInput {
   pr_key?: string | null;
   converge?: number | boolean | null;
   auto_merge?: number | boolean | null;
+  /** Engine truth for the `attention` badge (issue #422): whether an OPEN native user task of each
+   * human-wait kind currently exists for this run, from the `user_tasks` inbox (`pollUserTasks`, the
+   * authoritative "who is waiting on a human" set). `attention` derives from THESE, never from the
+   * drift-prone `status` variable — so once an escalation is answered (its `user_tasks` row deleted)
+   * the badge clears immediately even while `status` still reads a stale `"escalated"`. Omitted/false
+   * ⇒ no open task ⇒ no badge. `feature_read_model` (075) mirrors this with correlated EXISTS lookups. */
+  hasOpenBlockedTask?: boolean | null;
+  hasOpenEscalationTask?: boolean | null;
 }
 
 /** The derived pipeline projection for one run. `skipped` is a space-separated set of stage keys not
@@ -91,11 +99,16 @@ export function deriveStage(run: StageInput): DerivedStage {
 
   // `attention`: a short badge for the active stage (the renderer colours it from `state`). This is how
   // a parked `awaiting_operator`/`escalated` run surfaces as attention WITHOUT altering its stage.
-  // Derived from `status` alone (issue #332): the parked-task pointers that used to source it were
-  // dropped with the denormalised escalation surface, and the authoritative "who is waiting on a human"
-  // list now lives on the `user_tasks` Tasks inbox. `awaiting_operator` (parked at `feature-blocked`)
-  // shows the blocked glyph; `escalated` (parked at `feature-escalation`) shows the ⚠ badge.
-  const attention = status === "awaiting_operator" ? "blocked" : status === "escalated" ? "⚠" : null;
+  // Derived from ENGINE TRUTH — the presence of an OPEN native user task (issue #422), NOT from the
+  // `status` variable. `status` is worker-written imperatively and goes stale on the answer-loop back
+  // into `implement-task` (the process does not reset it), so a run whose escalation was already
+  // ANSWERED still reads `status="escalated"` until its next job completes; sourcing the badge from
+  // that value made the read model lie (a resolved run flagged ⚠ on Overview). The authoritative
+  // "who is waiting on a human" set is the `user_tasks` inbox (`pollUserTasks`), which holds a row
+  // IFF the task is open and deletes it the moment it is answered — so a run shows the blocked glyph
+  // IFF an open `feature-blocked` task exists, and ⚠ IFF an open `feature-escalation` task exists.
+  // Once answered, the row is gone and the badge clears regardless of the stale `status`.
+  const attention = truthy(run.hasOpenBlockedTask) ? "blocked" : truthy(run.hasOpenEscalationTask) ? "⚠" : null;
 
   return { stage, state, skipped: skippedKeys.join(" "), attention };
 }

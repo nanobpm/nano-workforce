@@ -68,12 +68,26 @@ test("skipped: the three converge/auto_merge cases", () => {
   assertEquals(deriveStage(base({ status: "running", converge: 1, auto_merge: 1 })).skipped, "");
 });
 
-test("attention: derives from status alone (blocked, escalation, none)", () => {
-  // Issue #332 dropped the denormalised escalation pointer/question columns; `attention` is now a pure
-  // function of `status` — `awaiting_operator` (a parked blocked run) → "blocked", `escalated` → "⚠".
-  assertEquals(deriveStage(base({ status: "awaiting_operator" })).attention, "blocked");
-  assertEquals(deriveStage(base({ status: "escalated" })).attention, "⚠");
+test("attention: derives from OPEN user-task engine truth (blocked, escalation, none), NOT from status", () => {
+  // Issue #422: `attention` is a pure function of whether an OPEN native user task exists for the run
+  // (the `user_tasks` inbox — the authoritative "who is waiting on a human" set), never of the sticky
+  // `status` variable. An open `feature-blocked` task → "blocked"; an open `feature-escalation` task → "⚠".
+  assertEquals(deriveStage(base({ status: "awaiting_operator", hasOpenBlockedTask: true })).attention, "blocked");
+  assertEquals(deriveStage(base({ status: "escalated", hasOpenEscalationTask: true })).attention, "⚠");
   assertEquals(deriveStage(base({ status: "running" })).attention, null);
+});
+
+test("attention #422: an ANSWERED escalation (status still 'escalated' but NO open task) shows NO badge", () => {
+  // The answer-loop returns the token to `implement-task` with no status reset, so `status` reads a
+  // stale "escalated" while the escalation user task is already gone. Sourcing the badge from engine
+  // truth (no open task) clears the ⚠ — the drift the old `status`-derived badge produced.
+  assertEquals(deriveStage(base({ status: "escalated" })).attention, null);
+  assertEquals(deriveStage(base({ status: "escalated", hasOpenEscalationTask: false })).attention, null);
+  // And an escalated run WHOSE task is genuinely open still shows ⚠.
+  assertEquals(deriveStage(base({ status: "escalated", hasOpenEscalationTask: true })).attention, "⚠");
+  // Symmetrically for the blocked/operator wait.
+  assertEquals(deriveStage(base({ status: "awaiting_operator" })).attention, null);
+  assertEquals(deriveStage(base({ status: "awaiting_operator", hasOpenBlockedTask: true })).attention, "blocked");
 });
 
 // The three parked-status rows called out by the plan review.
@@ -89,8 +103,8 @@ test("escalated WITHOUT pr_key → Implementing / null", () => {
   assertEquals(d.state, null);
 });
 
-test("awaiting_operator WITHOUT pr_key → Implementing / null, attention 'blocked' when parked", () => {
-  const d = deriveStage(base({ status: "awaiting_operator", pr_key: null }));
+test("awaiting_operator WITHOUT pr_key → Implementing / null, attention 'blocked' when its task is open", () => {
+  const d = deriveStage(base({ status: "awaiting_operator", pr_key: null, hasOpenBlockedTask: true }));
   assertEquals(d.stage, "Implementing");
   assertEquals(d.state, null);
   assertEquals(d.attention, "blocked");

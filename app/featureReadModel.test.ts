@@ -10,13 +10,16 @@
 // datasource on a terminated instance — bypassing the gateway and freezing the display columns.
 // 073_feature_read_model.sql retires the write-time projection: the derived columns are now a VIEW
 // over each row's own `status`/`pr_key`/`converge`/`auto_merge`/`acknowledged_at`, so there is no
-// stored column and no write-path for any writer to leave stale.
+// stored column and no write-path for any writer to leave stale. 075_feature_read_model_attention_
+// from_user_tasks.sql then moves `attention` off the drift-prone `status` variable onto ENGINE TRUTH
+// — an OPEN `feature-blocked`/`feature-escalation` row in the `user_tasks` inbox (issue #422).
 //
-// This exercises the REAL SQLite view (073 applied to an in-memory DB, mirroring
+// This exercises the REAL SQLite view (073+075 applied to an in-memory DB, mirroring
 // app/plansReadModel.test.ts / app/mergesPerDayView.test.ts) and pins that its CASE expressions
-// reproduce `deriveStage` / `deriveListBucket` EXACTLY over the full status matrix — the SAME pure
-// helpers the acknowledge operations guard on — plus a RED/GREEN guard reproducing the reconciler
-// bypass: a RAW-datasource `status` write must leave the projection correct.
+// reproduce `deriveStage` / `deriveListBucket` EXACTLY over the full status × open-task matrix — the
+// SAME pure helpers the acknowledge operations guard on — plus RED/GREEN guards reproducing the
+// reconciler bypass (a RAW-datasource `status` write must leave the projection correct) and the #422
+// answered-escalation drift (a sticky `status='escalated'` with no open task must show no ⚠).
 import { readFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
@@ -40,8 +43,25 @@ function viewDb(): DatabaseSync {
        outcome TEXT, delivery_label TEXT, acknowledged_at TEXT, created_at TEXT, updated_at TEXT,
        stage TEXT, stage_state TEXT, stage_skipped TEXT, attention TEXT, list_bucket TEXT);`,
   );
+  // The `user_tasks` inbox (034_user_tasks_inbox.sql) — the engine-truth source the 075 VIEW derives
+  // `attention` from (a row IFF an escalation user task is OPEN). Minimal shape: the three columns the
+  // correlated EXISTS lookups read, plus its PK.
+  db.exec(
+    `CREATE TABLE user_tasks (
+       user_task_key TEXT PRIMARY KEY, element_id TEXT NOT NULL, subject_type TEXT NOT NULL,
+       subject_key TEXT NOT NULL);`,
+  );
   db.exec(MIG("073_feature_read_model.sql"));
+  db.exec(MIG("075_feature_read_model_attention_from_user_tasks.sql"));
   return db;
+}
+
+// Simulate `pollUserTasks` opening one native user task for a feature run: the presence of this row is
+// the engine truth the VIEW's `attention` derives from (its deletion = the task answered/closed).
+function openUserTask(db: DatabaseSync, feature_key: string, element_id: "feature-escalation" | "feature-blocked"): void {
+  db.prepare(
+    "INSERT INTO user_tasks (user_task_key, element_id, subject_type, subject_key) VALUES (?, ?, 'feature', ?)",
+  ).run(`${feature_key}:${element_id}`, element_id, feature_key);
 }
 
 interface SampleRun {
@@ -94,34 +114,51 @@ function projection(db: DatabaseSync, feature_key: string): Record<string, unkno
   return { ...r };
 }
 
-test("feature_read_model derives stage/stage_state/stage_skipped/attention EXACTLY like deriveStage, over every status × converge/auto_merge/pr_key combination", () => {
+test("feature_read_model derives stage/stage_state/stage_skipped/attention EXACTLY like deriveStage, over every status × converge/auto_merge/pr_key × open-task combination", () => {
   const db = viewDb();
-  const cases: Array<{ key: string; run: SampleRun }> = [];
+  const cases: Array<{ key: string; run: SampleRun; hasOpenBlockedTask: boolean; hasOpenEscalationTask: boolean }> = [];
   let i = 0;
   for (const status of FEATURE_RUN_STATUSES) {
     for (const converge of [0, 1]) {
       for (const auto_merge of [0, 1]) {
         for (const pr_key of [null, `o/r#pr${i}`]) {
-          const key = `o/r#${i++}`;
-          cases.push({ key, run: { status, converge, auto_merge, pr_key } });
-          addRun(db, key, { status, converge, auto_merge, pr_key });
+          // The open-task dimension only matters for the two human-wait statuses (escalated/
+          // awaiting_operator), whose derivation reads open tasks — for them exercise BOTH
+          // task-present and task-absent (the #422 drift case = the task already gone). Every other
+          // status ignores open tasks (`el` is null, so no task is ever created), so iterating the
+          // dimension there would only duplicate identical cases; iterate [false] alone.
+          const el = status === "escalated" ? "feature-escalation" : status === "awaiting_operator" ? "feature-blocked" : null;
+          for (const openTask of el !== null ? [false, true] : [false]) {
+            const key = `o/r#${i++}`;
+            const hasTask = openTask && el !== null;
+            cases.push({
+              key,
+              run: { status, converge, auto_merge, pr_key },
+              hasOpenBlockedTask: hasTask && el === "feature-blocked",
+              hasOpenEscalationTask: hasTask && el === "feature-escalation",
+            });
+            addRun(db, key, { status, converge, auto_merge, pr_key });
+            if (hasTask && el !== null) openUserTask(db, key, el);
+          }
         }
       }
     }
   }
 
-  for (const { key, run } of cases) {
+  for (const { key, run, hasOpenBlockedTask, hasOpenEscalationTask } of cases) {
     const oracle = deriveStage({
       status: run.status,
       pr_key: run.pr_key ?? null,
       converge: run.converge ?? 0,
       auto_merge: run.auto_merge ?? 0,
+      hasOpenBlockedTask,
+      hasOpenEscalationTask,
     });
     const row = projection(db, key);
     assertEquals(row.stage, oracle.stage, `${key} (status=${run.status}): stage`);
     assertEquals(row.stage_state, oracle.state, `${key} (status=${run.status}): stage_state`);
     assertEquals(row.stage_skipped, oracle.skipped, `${key} (status=${run.status}): stage_skipped`);
-    assertEquals(row.attention, oracle.attention, `${key} (status=${run.status}): attention`);
+    assertEquals(row.attention, oracle.attention, `${key} (status=${run.status}, openBlocked=${hasOpenBlockedTask}, openEsc=${hasOpenEscalationTask}): attention`);
   }
 });
 
@@ -160,6 +197,37 @@ test("feature_read_model IGNORES any stale STORED projection columns — it read
     attention: null,
     list_bucket: "history",
   });
+});
+
+test("RED/GREEN GUARD #422: an ANSWERED escalation (status sticky 'escalated', no open user task) shows NO ⚠; the badge tracks the OPEN task, not status", () => {
+  // The `feature` process answer-loop returns the token to `implement-task` without resetting the
+  // `status` variable, so a run whose escalation was already answered still reads `status="escalated"`
+  // until its next agent job completes (observed live on merlin: feature instance 31779). The OLD VIEW
+  // derived `attention` from that value and rendered a stale ⚠ on Overview. The badge now derives from
+  // engine truth — the presence of an OPEN `feature-escalation` user task (`pollUserTasks` deletes the
+  // row the moment it is answered) — so it clears immediately regardless of the stale status.
+  const db = viewDb();
+
+  // Answered escalation: status STILL 'escalated' (stale) + a stored ⚠ that lied, but NO open task.
+  addRun(db, "o/r#answered", { status: "escalated", stored: { attention: "⚠", stage: "Implementing" } });
+  const answered = projection(db, "o/r#answered");
+  assertEquals(answered.attention, null, "the stale ⚠ is gone once the escalation task is closed");
+  assertEquals(answered.stage, "Implementing", "the run is back implementing (stage unchanged, correct either way)");
+
+  // Genuinely-parked escalation: the SAME status, but its `feature-escalation` user task is OPEN → ⚠.
+  addRun(db, "o/r#parked", { status: "escalated" });
+  openUserTask(db, "o/r#parked", "feature-escalation");
+  assertEquals(projection(db, "o/r#parked").attention, "⚠", "an OPEN escalation task shows ⚠");
+
+  // Answering it (deleting the row — what `pollUserTasks` does) clears the badge with status untouched.
+  db.prepare("DELETE FROM user_tasks WHERE subject_key = ?").run("o/r#parked");
+  assertEquals(projection(db, "o/r#parked").attention, null, "closing the task clears ⚠ though status is still 'escalated'");
+
+  // Symmetric operator/blocked wait: 'blocked' glyph IFF an open `feature-blocked` task exists.
+  addRun(db, "o/r#stuck", { status: "awaiting_operator", stored: { attention: "blocked" } });
+  assertEquals(projection(db, "o/r#stuck").attention, null, "no open feature-blocked task → no glyph despite awaiting_operator");
+  openUserTask(db, "o/r#stuck", "feature-blocked");
+  assertEquals(projection(db, "o/r#stuck").attention, "blocked", "an OPEN feature-blocked task shows the blocked glyph");
 });
 
 test("RED/GREEN GUARD: a RAW-datasource feature_runs.status write (the instanceTracking reconciler bypass) leaves the projection CORRECT (stage=Done, terminal stage_state, attention=null, Dismiss renderable, still Active)", () => {
