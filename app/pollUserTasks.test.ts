@@ -55,7 +55,7 @@ function memData(seed: Record<string, any[]> = {}): { data: DataLayer; stores: R
 /** A single engine-reported user task in the fixture. `state` mirrors the engine lifecycle; it
  *  defaults to `"CREATED"` (the only open/answerable state) so existing fixtures read as live tasks.
  *  A looping instance holds multiple tasks for one element (COMPLETED from prior rounds + the live one). */
-type FakeTask = { userTaskKey: string; elementId?: string; state?: "CREATED" | "COMPLETED" | "CANCELED" };
+type FakeTask = { userTaskKey: string; elementId?: string; state?: "CREATED" | "COMPLETED" | "CANCELED"; formKey?: string };
 
 /** A fake engine whose user tasks are keyed by processInstanceKey (the only field the poller queries on
  *  for plan / PR instances). It models the real engine's two accessors from ONE fixture so a test
@@ -370,7 +370,7 @@ test("pollUserTasks: an instance whose only task is COMPLETED surfaces no row", 
 
 /** A single task as the raw Camunda-8 `/v2/user-tasks/search` reports it — carries `processInstanceKey`
  *  (the typed seam omits it) so the sweep can map a task back to its subject for enrichment. */
-type RawTask = { userTaskKey: string; elementId?: string; processInstanceKey?: string; state?: string };
+type RawTask = { userTaskKey: string; elementId?: string; processInstanceKey?: string; state?: string; formKey?: string | number | null };
 
 /** Stub `globalThis.fetch` so `pollUserTasks`' engine-first sweep reads its open tasks from `tasks`.
  *  Honours the `page.from`/`page.limit` pagination the sweep drives, and 404s any other path so a stray
@@ -610,4 +610,68 @@ test("pollUserTasks (typed-seam fallback): projects an inlined delivery-human ta
   assertEquals(byKey["35002"].subject_type, "delivery");
   assertEquals(byKey["35002"].subject_key, "delivery-graph-403eb22e");
   assertEquals(byKey["35002"].subject_title, "release runbook");
+});
+
+// ── form_key denormalisation (issue #461) ─────────────────────────────────────────────────────────
+// The collapsed Tasks page renders ONE `user_tasks` grid and completes each heterogeneous row via its
+// ENGINE-declared form (nano-ide#457). That needs the task's engine `formKey` denormalised onto the
+// row so the grid can resolve the deployed `.form` per row. The poller derives it in the SAME canonical
+// path it derives `kind_label`: read `formKey` from the `/v2/user-tasks/search` result, falling back to
+// `ESCALATION_FORM_BY_ELEMENT` for the fixed-form kinds the search omits it for.
+
+test("pollUserTasks (engine-first): a delivery-graph escalation row is present in the single list AND carries its engine form_key (issue #461)", async () => {
+  // The regressed case: an armed delivery-graph run escalated (a bounded service node's timeout twin,
+  // dynamic id `delivery-human-task__<node>__esc`) — counted by the `filter: []` badge but rendered by no
+  // allowlisted grid. Under the single grid it must (a) surface and (b) be completable via its engine form,
+  // so its `formKey` (reported by the engine on the task) is denormalised onto the row.
+  const { data, stores } = memData({
+    delivery_graph_runs: [
+      { run_key: "delivery-graph-407178305d01", process_key: "dg-1", status: "running", title: "ship the release" },
+    ],
+  });
+  const restore = stubUserTaskSearch([
+    { userTaskKey: "39354", elementId: "delivery-human-task__n1_task__esc", processInstanceKey: "dg-1", state: "CREATED", formKey: "form-esc-88" },
+  ]);
+  try {
+    await pollUserTasks(data, fakeEngine({}), REST);
+  } finally {
+    restore();
+  }
+
+  const byKey = Object.fromEntries((stores.user_tasks ?? []).map((r) => [r.user_task_key, r]));
+  assertEquals(Object.keys(byKey), ["39354"]); // present in the single list
+  assertEquals(byKey["39354"].element_id, "delivery-human-task__n1_task__esc");
+  assertEquals(byKey["39354"].kind_label, "Delivery: human step");
+  assertEquals(byKey["39354"].form_key, "form-esc-88"); // completable via its engine-declared form
+});
+
+test("pollUserTasks (engine-first): a fixed-kind escalation whose search omits formKey derives form_key from its .form linkage (issue #461)", async () => {
+  // Fallback: the raw search can omit `formKey` for a task; a fixed-form kind's `.form` linkage is a
+  // static single source of truth (`ESCALATION_FORM_BY_ELEMENT`), so the row is still completable.
+  const { data, stores } = memData({});
+  const restore = stubUserTaskSearch([
+    { userTaskKey: "ut-plan", elementId: "plan-review-decision", processInstanceKey: "pi-1", state: "CREATED" },
+  ]);
+  try {
+    await pollUserTasks(data, fakeEngine({}), REST);
+  } finally {
+    restore();
+  }
+
+  const byKey = Object.fromEntries((stores.user_tasks ?? []).map((r) => [r.user_task_key, r]));
+  assertEquals(byKey["ut-plan"].form_key, "plan-review-decision");
+});
+
+test("pollUserTasks (typed-seam fallback): denormalises the engine form_key from the typed openUserTasks seam (issue #461)", async () => {
+  const { data, stores } = memData({
+    plans: [{ plan_key: "o/r#20", status: "dispatched", process_key: "pp-20", issue_url: null, title: "epic" }],
+  });
+  const engine = fakeEngine({
+    "pp-20": [{ userTaskKey: "ut-plan", elementId: "plan-review-decision", formKey: "form-77" }],
+  });
+
+  await pollUserTasks(data, engine); // no engineRest → typed-seam fallback
+
+  const byKey = Object.fromEntries((stores.user_tasks ?? []).map((r) => [r.user_task_key, r]));
+  assertEquals(byKey["ut-plan"].form_key, "form-77");
 });
