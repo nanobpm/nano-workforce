@@ -388,6 +388,25 @@ already reddened `main`. Grouping is `ALLGREEN` (SQUASH merge), so any red entry
 invalidates the whole batch. `Conventional PR title` passes through on
 `merge_group` (the title was validated when the PR entered the queue).
 
+### Releases bypass the ruleset via a dedicated App (do not break this)
+
+The ruleset that protects `main` would also reject the **release** automation:
+`semantic-release` (`@semantic-release/git`) pushes the `chore(release): X
+[skip ci]` version/CHANGELOG commit and tags **directly** to `main`, which the
+`pull_request` / `merge_queue` / `required_status_checks` rules forbid.
+
+To allow exactly that push — and nothing else — the `main` ruleset lists a
+**dedicated release GitHub App** as an `Integration` **bypass actor**
+(`bypass_mode: always`). The `Release` workflow mints a short-lived token for
+that App (`actions/create-github-app-token`) and hands it to `semantic-release`;
+the job's own `GITHUB_TOKEN` is scoped to `contents: read` + `id-token: write`
+(OIDC npm publish) and is **not** a bypass actor.
+
+> ⚠️ **Coupling:** the default `GITHUB_TOKEN` cannot be a repo-level ruleset
+> bypass actor, so the release depends on the App bypass actor staying in the
+> ruleset. **Whenever you edit the `main` ruleset, keep the release App in
+> `bypass_actors`** — dropping it wedges every release (GH013 on the push).
+
 ## Distributed fleet: NANO_WORKFORCE_BASE_URL
 
 The abandon and blackboard hooks are how a **distributed worker fleet** calls back
