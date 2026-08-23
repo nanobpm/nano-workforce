@@ -445,7 +445,7 @@ export const MAX_PLAN_REVIEW_ROUNDS = positiveIntEnv("NANO_PLAN_REVIEW_ROUNDS", 
 
 /** A plan is "done" in exactly these states; everything else (planning, dispatched)
  * is in flight. The cancel guard and the active view key off this. */
-export const PLAN_TERMINAL_STATUSES: readonly string[] = ["done", "failed", "abandoned"];
+export const PLAN_TERMINAL_STATUSES = ["done", "failed", "abandoned"] as const;
 
 export interface ParsedIssue {
   repo: string;
@@ -591,7 +591,7 @@ export async function findActivePlansByBase(
   base: string,
 ): Promise<Plan[]> {
   const rows = await plans(data).find({ repo, base_branch: base });
-  return rows.filter((p) => !PLAN_TERMINAL_STATUSES.includes(p.status));
+  return rows.filter((p) => !PLAN_TERMINAL_STATUSES.some((s) => s === p.status));
 }
 
 /** Options gating the confirm-default (rule 3) and shared-base (rule 4) admission rules. Both
@@ -926,7 +926,7 @@ export async function startPlan(
   }
   const table = plans(data);
   const existing = await table.get(parsed.planKey);
-  if (existing && !PLAN_TERMINAL_STATUSES.includes(existing.status)) {
+  if (existing && !PLAN_TERMINAL_STATUSES.some((s) => s === existing.status)) {
     return { planKey: parsed.planKey, alreadyRunning: true };
   }
   const base = normalizeBaseBranch(baseBranch);

@@ -39,6 +39,17 @@ import { PLAN_TASK_STATUSES, PLAN_TERMINAL_STATUSES } from "./plan.ts";
 
 const CANONICAL = new Set<string>(DELIVERY_UNIT_STATUSES);
 
+// ── Type-level No-Drift guard (issue #464 review) ────────────────────────────────────────────────
+// `PLAN_STATUSES` is DERIVED from `EPIC_LIVE_STATUSES` (app/delivery.ts) + `PLAN_TERMINAL_STATUSES`
+// (app/plan.ts). If either source is declared as a widened `readonly string[]` instead of an `as const`
+// literal tuple, `(typeof PLAN_STATUSES)[number]` collapses to `string`, `PLAN_STATUS_TO_UNIT` degrades
+// to `Record<string, …>`, and the exhaustiveness guard silently evaporates — `tsc` would no longer fail
+// when the plan vocabulary gains a member without a canonical mapping. This assertion fails to COMPILE
+// if that widening ever returns (the `false` branch makes `true` unassignable).
+type _IsLiteralUnion<T extends string> = string extends T ? false : true;
+const _planStatusesAreLiteral: _IsLiteralUnion<(typeof PLAN_STATUSES)[number]> = true;
+void _planStatusesAreLiteral;
+
 // A `ParityDb` over node:sqlite's `DatabaseSync` for `assertReadModelParity` (which needs positional
 // exec/all/run, whereas `DatabaseSync` exposes query methods on prepared statements).
 function parityDb(db: DatabaseSync): ParityDb {

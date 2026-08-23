@@ -78,7 +78,7 @@ export function deriveDelivery(
 /** The `plan.status` values that mean the epic's fan-out lifecycle is still LIVE — the planner is
  * decomposing (`planning`) or the fleet is implementing (`dispatched`). Both are unambiguously
  * in-flight, so an epic in either status is always in the Active bucket regardless of `delivery`. */
-export const EPIC_LIVE_STATUSES: readonly string[] = ["planning", "dispatched"];
+export const EPIC_LIVE_STATUSES = ["planning", "dispatched"] as const;
 
 /** The Active/History partition for an EPIC (issue #298), the twin of feature runs'
  * `deriveListBucket` (app/stage.ts). It exists because an epic must NOT vanish from the Active list
@@ -108,7 +108,7 @@ export function deriveEpicBucket(
   delivery: string | null | undefined,
   acknowledgedAt: string | null | undefined,
 ): "active" | "history" {
-  if (EPIC_LIVE_STATUSES.includes(status)) return "active";
+  if (EPIC_LIVE_STATUSES.some((s) => s === status)) return "active";
   if (status === "done") {
     // A still-`converging` epic is Active regardless of any (stray) acknowledged_at — it is genuinely
     // working and is not acknowledgeable, so it can never be ticked off mid-flight (fail-closed).
