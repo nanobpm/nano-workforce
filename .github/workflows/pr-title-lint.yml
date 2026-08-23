@@ -1,9 +1,11 @@
 name: PR title lint
 
 # Squash-merge uses the PR title as the commit subject on `main`, and
-# semantic-release (Angular preset) only cuts a release for `feat:`/`fix:`/`perf:`.
-# A non-conventional title therefore lands on `main` and is silently skipped by
-# the release job — so gate the title against the Conventional Commits grammar.
+# semantic-release (conventionalcommits preset) cuts a release for
+# `feat:`/`fix:`/`perf:`/`refactor:`/`build:`/`revert:`/`docs:` (see
+# `.releaserc.json` releaseRules). A non-conventional title therefore lands on
+# `main` and is silently skipped by the release job — so gate the title against
+# the Conventional Commits grammar.
 on:
   pull_request:
     types: [opened, edited, synchronize, reopened]
