@@ -1,6 +1,6 @@
 // Tests for the cooperative abandon-check helpers (issue #76).
 import { test } from "node:test";
-import { assertEquals, assertNotEquals } from "#test-assert";
+import { assertEquals, assertNotEquals, assertRejects } from "#test-assert";
 import type { DataLayer } from "@nanobpm/urban";
 import { withTrackingViews } from "../test/trackingViews.ts";
 import {
@@ -106,4 +106,17 @@ test("abandonStatusForToken derives abandoned from the row status", async () => 
     abandoned: true,
   });
   assertEquals(await abandonStatusForToken(data, "nope"), undefined);
+});
+
+test("abandonStatusForToken fails CLOSED on a non-string derived status", async () => {
+  // A malformed/missing derived_status must never be reported as `abandoned:false`
+  // (that would let a cancelled run proceed with irreversible side effects). It throws
+  // instead, which the operation dispatcher maps to a 500 so the agent's `curl -f` aborts.
+  const data = memData();
+  await data.table("pull_requests", "pr_key").insert({
+    pr_key: "o/r#3",
+    abandon_token: "weird",
+    status: 123,
+  });
+  await assertRejects(() => abandonStatusForToken(data, "weird"), Error, "is not a string");
 });

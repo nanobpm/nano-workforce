@@ -106,7 +106,16 @@ export async function abandonStatusForToken(
     .findOne({ abandon_token: token });
   if (!row) return undefined;
   const rawStatus = row[target.statusColumn];
-  const status = typeof rawStatus === "string" ? rawStatus : "";
+  if (typeof rawStatus !== "string") {
+    // Fail CLOSED: a missing/non-string derived_status must never be reported as
+    // `abandoned:false`. The abort brief tells agents to proceed on a 200 with
+    // `abandoned:false`, so surfacing this as a thrown error (→ 500, which trips the
+    // agent's `curl -f` and aborts) is the safe direction for a cancelled run.
+    throw new Error(
+      `abandonStatusForToken: ${target.view}.${target.statusColumn} is not a string`,
+    );
+  }
+  const status = rawStatus;
   return { prKey: row.pr_key, status, abandoned: isAbandoned(status) };
 }
 
