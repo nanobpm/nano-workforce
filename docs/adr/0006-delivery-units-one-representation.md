@@ -20,7 +20,7 @@ to collapse three bespoke status unions into one),
 nano-ide **#424** (datasource can read a SQL VIEW — the *data-level* unlock),
 nano-workforce **#416** (the PR bumping the testkit to engine-wasm 0.7.2, which executes `callActivity`
 — the *process-level* unlock),
-nano-workforce **#464** (the tracking issue with slices S1–S5),
+nano-workforce **#464** (the tracking issue with slices S1–S6),
 nano-workforce **#305** (consolidate escalations on native `user_tasks` — a natural sub-step of S1/S3).
 
 ## Context
@@ -89,7 +89,7 @@ because it did nothing. **Unlocked by #416** (engine-wasm 0.4.0 → **0.7.2**). 
 **Verified live:** a `callActivity` parent+child model deployed through engine-wasm 0.7.2 runs to
 `COMPLETED`. Caveat: #416 bumps only the **dev-only** `@nanobpm/urban-testkit`; the production
 `@nanobpm/urban` broker does not itself pin `engine-wasm`, so this verification proves the in-process
-testkit, not the broker/runtime that will execute future `callActivity` models. S4/S5 therefore also
+testkit, not the broker/runtime that will execute future `callActivity` models. S4–S6 therefore also
 carry a **deployment-runtime prerequisite** — the deployed broker's `engine-core` must carry the same
 `callActivity` support — which green testkit CI does not by itself guarantee.
 
@@ -129,18 +129,52 @@ a copy — expressed here as the **target** state:
   content digest (`app/deliveryGraphRun.ts` `computeRunKey`) — so S2's compatibility VIEWs map each
   legacy key onto the new identity, ensuring unrelated runs are never merged onto one row.
 
-### 2. Process encoding — shared cells composed by `callActivity`
+### 2. Process encoding — **fine-grained** cells composed by `callActivity`
 
-- Extract the atomic *implement-cell* (and its sibling wait-gate and human-escalation cells) into
-  standalone processes (`resources/processes/implement-cell.bpmn`, …).
-- Compose them by reference — replacing only the inlined *implement/escalation segment*, not the
-  surrounding orchestration: in **feature** (`feature.bpmn`) the readiness preflight, base-branch setup,
-  `record-feature`, and convergence handoff are retained; only the implement-cell segment becomes one
-  `callActivity`. **Epic** = the multi-instance `implement` body is a `callActivity`; **delivery graph**
-  = the compiler *emits* `callActivity` references, not inlined subprocess copies.
+The primitive is a set of **small, single-purpose cells** — `implement-cell`, `converge-cell`,
+`merge-cell`, plus the sibling wait-gate and human-escalation cells — each a standalone process
+(`resources/processes/implement-cell.bpmn`, …), composed by reference and gated by edges. This is a
+deliberate choice of granularity **over** a single coarse whole-feature subprocess with opaque
+completion flags.
+
+- Compose by reference, replacing the inlined segments, not the surrounding orchestration: in
+  **feature** (`feature.bpmn`) the readiness preflight, base-branch setup, and `record-feature` remain;
+  the implement/escalation segment and the convergence/merge tail each become `callActivity`s. **Epic**
+  = the multi-instance `implement` body is a `callActivity`; **delivery graph** = the compiler *emits*
+  `callActivity` references, not inlined subprocess copies.
+- `feature` / `epic` are **derived macros** over the cells, not hand-written processes: a `feature`
+  expands to `implement → converge? → merge?`, so the cells stay the single source of truth and the
+  common case is still one node. (Same derivation discipline as the data encoding: compose by
+  reference, never inline a copy.)
+- **Why fine-grained, not coarse.** A coarse whole-feature `callActivity` with `converge?`/`merge?`
+  flags buries those steps *inside* the black box, so a graph can never insert a gate *between*
+  "converged" and "merged". Fine-grained cells let a graph converge features A **and** B, then hold and
+  land both behind a single `human`/`wait` fan-in — the integration-branch / gated-landing pattern.
+  `feature.bpmn` already separates `converge` (its `gw-converge` gateway) from `autoMerge`, so the seam
+  exists today; this promotes it to a **node boundary** the graph can wire (see §3).
 - This is gated on the engine-wasm 0.7.2 unlock, which is now live on `main`.
 
-### 3. Status lifecycle — one derived union
+### 3. Node completion policy — `converge` / `merge` are first-class cells, not smuggled state
+
+Today the "get to green, then land" tail lives in two places the delivery graph cannot reach: a gateway
+*inside* `feature.bpmn` (`gw-converge` + the `autoMerge` boolean on `ConvergeFeatureIn`), and — for a
+delivery-graph `agent` node — **free text in a prompt** (`{ jobType: "senior:feature", prompt: "un-draft
++ merge #B" }`), with the graph only *observing* the result via a downstream `wait` node that emits
+`mergedSha`. A graph therefore drives merge by asking an agent nicely, not structurally. Promote them to
+first-class, edge-gated cells:
+
+- **`converge`** = drive the PR through its review-convergence loop to green. **`merge`** = land it.
+  These are deliberately **separable phases** (`feature.bpmn` already splits `gw-converge` from
+  `autoMerge`), so a graph can stop at "green" and gate the landing behind any upstream node.
+- A `feature`/`epic` node's `converge?` / `merge?` selectors choose whether the derived macro (§2)
+  includes those cells; omitting `merge` and wiring an explicit `merge` cell downstream of a gate is the
+  advanced case.
+- **`merge` is two-level (ADR 0003 base-branch admission).** A unit's `merge` cell lands onto the
+  epic/graph **base branch**, never `main` directly; the graph's final merge-to-`main` is a *separate*
+  top-level step. `feature.bpmn`'s `autoMerge` is exactly this per-unit knob — do not collapse the two
+  levels.
+
+### 4. Status lifecycle — one derived union
 
 The three bespoke status unions collapse into **one derived union** via ADR 0065's `defineReadModel`,
 so a change to lifecycle semantics is made once and derived everywhere, not re-declared per
@@ -153,7 +187,7 @@ representation. These unions are **not** identical today — features use
 separate node contract — plus the per-shape mapping and precedence and the write/`instanceTracking`
 behavior — not merely projecting an existing value.
 
-### 4. Preserve — the static-vs-adaptive execution axis (do NOT bundle it)
+### 5. Preserve — the static-vs-adaptive execution axis (do NOT bundle it)
 
 This ADR consolidates the *representation*, not the *execution strategy*. ADR 0005's deliberate
 distinction stays intact: **plan-fanout remains adaptive** (agent-discovered slices, waves that adapt),
@@ -183,8 +217,8 @@ their topology is produced. Unifying that axis is explicitly out of scope here.
 
 ## Rollout (see #464 for the live checklist)
 
-Each slice is independently shippable; the process slices (S4/S5) are sequenced behind the engine-wasm
-0.7.2 unlock. The **dev-testkit** side of that unlock has landed (#416, verified in-process above); S4/S5
+Each slice is independently shippable; the process slices (S4–S6) are sequenced behind the engine-wasm
+0.7.2 unlock. The **dev-testkit** side of that unlock has landed (#416, verified in-process above); S4–S6
 additionally gate on the **deployed broker/runtime** carrying verified `callActivity` support (the
 deployment-runtime prerequisite noted above), not on #416 alone.
 
@@ -207,15 +241,20 @@ deployment-runtime prerequisite noted above), not on #416 alone.
   bindings and every other writer off the legacy tables does the table-to-VIEW contract phase retire the
   legacy write paths.
 - **S3 · collapse doors** — unify the three `instanceTracking` bindings + `senior:*` dispatch doors.
-- **S4 · shared cells** — extract the atomic `implement-cell.bpmn` **and its sibling wait-gate and
-  human-escalation cells** (Decision §2) into standalone processes; `feature.bpmn` + the `plan-fanout`
-  MI body compose them via `callActivity`.
-- **S5 · compiler emits calls** — `deliveryGraphCompiler` references shared cells instead of inlining
+- **S4 · fine-grained cells** — extract `implement-cell.bpmn`, `converge-cell.bpmn`, `merge-cell.bpmn`
+  **and the sibling wait-gate and human-escalation cells** (Decision §2) into standalone processes;
+  `feature.bpmn` + the `plan-fanout` MI body compose them via `callActivity`, with `feature`/`epic` as
+  derived macros over the cells.
+- **S5 · `converge?` / `merge?` as first-class node policy** — promote convergence + landing from the
+  `feature.bpmn` `gw-converge`/`autoMerge` gateway and the delivery-graph *prompt prose* into edge-gated
+  `converge`/`merge` cell nodes on the delivery vocabulary (Decision §3); honour ADR 0003 two-level
+  merge (unit → base branch; graph → `main`).
+- **S6 · compiler emits calls** — `deliveryGraphCompiler` references shared cells instead of inlining
   per-node copies.
 
 ## Non-goals / deferred
 
-- **Unifying the static-vs-adaptive execution axis** (see Decision §4) — preserved deliberately.
+- **Unifying the static-vs-adaptive execution axis** (see Decision §5) — preserved deliberately.
 - **Changing the downstream PR/convergence loop** — already single-sourced (`pull_requests`); untouched.
 - **Cross-repo/platform representation** — this ADR is nano-workforce-local; any platform-wide delivery
   aggregate would be a separate nano-bpm ADR.
