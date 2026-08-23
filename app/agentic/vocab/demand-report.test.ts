@@ -9,7 +9,12 @@ import { CREW_VOCAB_VERSION } from "./crew-vocab.ts";
 import { buildRegistryReport, engineRestAddress, toWireReport } from "./demand-report.ts";
 
 const NOW = new Date(0);
-const leaf = (taskType: string): TaskDefinitionLeaf => ({ taskType, process: "p", elementId: taskType });
+// A demanded taskDefinition leaf. `agentic` is the structural signal the engine reads from a task's
+// `linkName="prompt"` side-car (agentic package >=0.4): true for an external agent task (its type is a
+// routing token matched against crew supply), false for a deterministic in-process host job (bucketed
+// as nonAgentic, out of the demand×supply accounting). Defaults to an agent task since most demand
+// here is agentic; the host-job cases pass `false` explicitly.
+const leaf = (taskType: string, agentic = true): TaskDefinitionLeaf => ({ taskType, process: "p", elementId: taskType, agentic });
 
 const plannerFrontier: RegisteredWorker = { instance: "w-front", capability: { cognition: "planning", weight: 5, family: "frontier" } };
 const plannerKimi: RegisteredWorker = { instance: "w-kimi", capability: { cognition: "planning", weight: 5, family: "kimi" } };
@@ -41,11 +46,14 @@ test("an agent job type with no enrolled senior worker is flagged missing, not n
   assertEquals(report.status, "red");
 });
 
-test("ordinary host jobs (pr.*) are not colon-form and pass through the bridge untouched", () => {
-  const report = buildRegistryReport({ taskDefinitions: [leaf("pr.finalize")], workers: [], now: NOW });
-  const pr = report.networks.find((n) => n.network === "pr");
-  assert(pr !== undefined, "pr.finalize stays a pr-network routing token");
-  assert(pr.tokens.some((t) => t.token === "pr.finalize"));
+test("ordinary host jobs (pr.*) are non-agentic (no prompt link) and excluded from demand×supply", () => {
+  // A deterministic in-process host job carries no `linkName="prompt"` side-car, so the engine reports
+  // it agentic:false and the model buckets it as nonAgentic — off the agentic demand board, never a
+  // false RED. The colon-form bridge still leaves its dot-form type untouched (it is not `<rank>:<task>`).
+  const report = buildRegistryReport({ taskDefinitions: [leaf("pr.finalize", false)], workers: [], now: NOW });
+  assert(report.nonAgentic.includes("pr.finalize"), "pr.finalize is a non-agentic host job");
+  assert(!report.networks.some((n) => n.network === "pr"), "and is not counted as agentic pr-network demand");
+  assertEquals(report.missing, []);
 });
 
 test("flags a demanded leaf with no supplier as missing (red) and a supplied leaf as satisfied", () => {
@@ -68,10 +76,15 @@ test("flags a demanded leaf with no supplier as missing (red) and a supplied lea
   assertEquals(report.demandUnavailable, false);
 });
 
-test("a deployed type that is not a valid routing token is surfaced as nonAgentic, not missing", () => {
-  const report = buildRegistryReport({ taskDefinitions: [leaf("weird token!")], workers: [], now: NOW });
-  assert(report.nonAgentic.includes("weird token!"));
-  assertEquals(report.missing, []);
+test("an agentic leaf whose type resolves to no crew role is a missing (red) gap, not silently dropped", () => {
+  // Under the structural model, nonAgentic means "no prompt link", NOT "unparseable/unknown token": an
+  // agent task (agentic:true) demanding a rank no crew role serves is a real RED supply gap the board
+  // must surface. `principal:*` is a new rank with no crew role — the #323 bridge derives `principal`,
+  // which resolves to no supply and trips this regression guard rather than being swept into nonAgentic.
+  const report = buildRegistryReport({ taskDefinitions: [leaf("principal:feature")], workers: [], now: NOW });
+  assert(report.missing.includes("principal"), "an unsuppliable agent rank is missing, not nonAgentic");
+  assertEquals(report.nonAgentic, []);
+  assertEquals(report.status, "red");
 });
 
 test("the diversity SLO reads the correlated supply — green for distinct-family spar seats", () => {
