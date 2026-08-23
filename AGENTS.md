@@ -353,8 +353,10 @@ agents:
 - **DCO sign-off is enforced.** Every commit needs a `Signed-off-by` trailer —
   use `git commit -s` (or `git rebase --signoff`). A missing sign-off fails the
   DCO check.
-- **Conventional Commits.** `feat:`, `fix:`, `chore:`, `docs:`, `refactor:`,
-  `test:`, imperative mood. Review-comment fix-ups are `chore:`, not `fix:`.
+- **Conventional Commits.** `feat:`, `fix:`, `perf:`, `refactor:`, `build:`,
+  `revert:`, `docs:`, `chore:`, `ci:`, `test:`, `style:`, imperative mood — see the
+  next bullet for which of these trigger a release. Review-comment fix-ups are
+  `chore:`, not `fix:`.
 - **PR titles must be Conventional too — they become the release trigger.** PRs
   land on `main` via **squash merge**, so the **PR title is the commit subject**
   semantic-release analyses. `feat:` cuts a **minor**; `fix:`, `perf:`,
