@@ -104,6 +104,12 @@ async function startMergeLoop(opts: {
     if (responder === null) continue; // park the token (e.g. to let the SLA timer fire)
     const queue = Array.isArray(responder) ? [...responder] : null;
     await engine.registerWorker(jobType, (job) => {
+      // The escalation `question`/`status` are job-LOCAL input mappings on
+      // `merge-esc-*` (fed to `pr.persist-escalation`), so they never surface as
+      // instance variables — capture them off the job the worker sees instead.
+      if (jobType === "pr.persist-escalation") {
+        lastEscalationByEngine.set(engine, (job as { variables?: Record<string, unknown> }).variables ?? {});
+      }
       if (queue) return queue.length > 1 ? queue.shift()! : queue[0] ?? {};
       if (typeof responder === "function") return responder(job as { variables: Record<string, unknown> });
       return (responder as Output | undefined) ?? {};
@@ -139,9 +145,34 @@ function instanceVars(engine: WasmEngineClient): Record<string, unknown> {
   return snap.instances?.[0]?.variables ?? {};
 }
 
+/**
+ * The variables the `pr.persist-escalation` worker was last activated with, captured
+ * in `startMergeLoop`. The escalation `question`/`status` are job-local `zeebe:input`
+ * mappings on `merge-esc-*`, so they are only observable on the persist-escalation job
+ * — not as instance variables — this is the canonical read for the escalation payload.
+ */
+const lastEscalationByEngine = new WeakMap<WasmEngineClient, Record<string, unknown>>();
+function escalation(engine: WasmEngineClient): Record<string, unknown> {
+  return lastEscalationByEngine.get(engine) ?? {};
+}
+
 const engines: WasmEngineClient[] = [];
+
+/**
+ * urban-testkit's `assertThat*` DSL reads through a booted-app port: instance
+ * matchers use `app.snapshot()`, user-task matchers use
+ * `app.engine.{search,open}UserTasks`. These tests drive the WASM engine
+ * directly (no full app boot), so expose the client as its own read-model app:
+ * `snapshot()` is native, and `.engine` self-references so the task reads land
+ * on the same client.
+ */
+function asReadModelApp(engine: WasmEngineClient): WasmEngineClient {
+  (engine as unknown as { engine: WasmEngineClient }).engine = engine;
+  return engine;
+}
+
 async function boot(opts?: Parameters<typeof startMergeLoop>[0]): Promise<WasmEngineClient> {
-  const engine = await startMergeLoop(opts);
+  const engine = asReadModelApp(await startMergeLoop(opts));
   engines.push(engine);
   return engine;
 }
@@ -212,7 +243,7 @@ test("a retry that exhausts the budget escalates as a repeated race, not a gener
   await engine.publishMessage({ name: "merge-ready", correlationKey: "pr-1", variables: { mergeState: "ready" } });
   await assertThatUserTask(engine, { instance: byProcessId("merge-loop"), elementId: "wait-merge-answer" }).isCreated();
   assertThatInstance(engine, byProcessId("merge-loop")).hasCompletedElements("merge-esc-attempt");
-  assertStringIncludes(String(instanceVars(engine).question ?? ""), "retry budget", "the retry escalation must read as a repeated race");
+  assertStringIncludes(String(escalation(engine).question ?? ""), "retry budget", "the retry escalation must read as a repeated race");
 });
 
 // ---------------------------------------------------------------------------
@@ -272,7 +303,7 @@ test("a blocked CI verdict that already pushed escalates with a could-not-fix qu
   await driveToCiFix(engine);
   await assertThatUserTask(engine, { instance: byProcessId("merge-loop"), elementId: "wait-merge-answer" }).isCreated();
   assertThatInstance(engine, byProcessId("merge-loop")).hasCompletedElements("merge-esc-attempt");
-  assertStringIncludes(String(instanceVars(engine).question ?? ""), "CI-fix agent could not", "the question must name the could-not-fix trigger");
+  assertStringIncludes(String(escalation(engine).question ?? ""), "CI-fix agent could not", "the question must name the could-not-fix trigger");
 });
 
 test("a CI-fix that discovers a dependency records it and waits on the other PR", async () => {
@@ -299,7 +330,7 @@ test("the fix-ci agent SLA interrupts the sub-process and escalates", async () =
   await engine.advanceTime(AGENT_SLA_MS + 1);
   await assertThatUserTask(engine, { instance: byProcessId("merge-loop"), elementId: "wait-merge-answer" }).isCreated();
   assertThatInstance(engine, byProcessId("merge-loop")).hasCompletedElements("merge-esc-attempt");
-  assertStringIncludes(String(instanceVars(engine).question ?? ""), "time budget (SLA)", "the SLA escalation must name the SLA trigger");
+  assertStringIncludes(String(escalation(engine).question ?? ""), "time budget (SLA)", "the SLA escalation must name the SLA trigger");
 });
 
 // ---------------------------------------------------------------------------
@@ -326,7 +357,7 @@ test("a rebase that cannot resolve escalates with a conflict question", async ()
   await driveToRebase(engine);
   await assertThatUserTask(engine, { instance: byProcessId("merge-loop"), elementId: "wait-merge-answer" }).isCreated();
   assertThatInstance(engine, byProcessId("merge-loop")).hasCompletedElements("merge-esc-attempt");
-  assertStringIncludes(String(instanceVars(engine).question ?? ""), "rebase agent could not resolve", "the question must name the conflict trigger");
+  assertStringIncludes(String(escalation(engine).question ?? ""), "rebase agent could not resolve", "the question must name the conflict trigger");
 });
 
 test("a no-verdict rebase result reconciles from ground truth, not escalation (#134)", async () => {
@@ -387,17 +418,26 @@ test("a not-landable gate verdict gives a draft PR an actionable 'mark it ready'
   await engine.publishMessage({ name: "merge-ready", correlationKey: "pr-1", variables: { mergeState: "draft" } });
   await assertThatUserTask(engine, { instance: byProcessId("merge-loop"), elementId: "wait-merge-answer" }).isCreated();
   assertThatInstance(engine, byProcessId("merge-loop")).hasCompletedElements("merge-esc-conflict");
-  assertStringIncludes(String(instanceVars(engine).question ?? ""), "draft", "a draft PR must get a mark-it-ready question");
+  assertStringIncludes(String(escalation(engine).question ?? ""), "draft", "a draft PR must get a mark-it-ready question");
 });
 
 // ---------------------------------------------------------------------------
 // Terminate semantics — the refactor kept MergeAbandoned at the root
 // ---------------------------------------------------------------------------
 
-test("an abandoned merge terminates the whole instance (terminate stayed at the root)", async () => {
+test("an abandoned merge ends the whole instance via the root terminate, without merging", async () => {
   const engine = await boot({ responses: { "pr.merge": { mergeStatus: "abandoned" } } });
   await engine.publishMessage({ name: "deps-cleared", correlationKey: "pr-1" });
   await engine.publishMessage({ name: "merge-ready", correlationKey: "pr-1", variables: { mergeState: "ready" } });
-  assertThatInstance(engine, byProcessId("merge-loop")).isTerminated();
-  assert(!completedElementIds(engine).has("mark-merged"), "an abandoned PR must not mark-merged");
+  // `MergeAbandoned` is a terminate end event at the ROOT scope: it ends all tokens, so the whole
+  // instance finishes (BPMN: a terminate end event *completes* the instance — `Completed`, not a
+  // cancellation `Terminated`). Had it lived inside `SP_cifix`/`SP_rebase`, the terminate would end
+  // only that sub-process scope and the outer poller would re-arm, leaving the instance ACTIVE —
+  // so `hasCompleted()` (nothing left running) is exactly what proves the terminate stayed at root.
+  const done = completedElementIds(engine);
+  assert(done.has("MergeAbandoned"), "the abandon terminate end event must fire");
+  assert(!done.has("mark-merged"), "an abandoned PR must not mark-merged");
+  assertThatInstance(engine, byProcessId("merge-loop")).hasCompleted().hasCompletedElements("MergeAbandoned");
+  const open = await engine.searchUserTasks({});
+  assert(open.length === 0, "the root terminate must leave nothing running (no re-armed poller, no parked escalation)");
 });
