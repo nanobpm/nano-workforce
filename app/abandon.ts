@@ -101,11 +101,12 @@ export async function abandonStatusForToken(
   const target = trackingTargetFor("pull_requests");
   const row = await data
     .table<
-      { pr_key: string; abandon_token: string | null } & Record<string, string>
+      { pr_key: string; abandon_token: string | null } & Record<string, unknown>
     >(target.view, "pr_key")
     .findOne({ abandon_token: token });
   if (!row) return undefined;
-  const status = row[target.statusColumn];
+  const rawStatus = row[target.statusColumn];
+  const status = typeof rawStatus === "string" ? rawStatus : "";
   return { prKey: row.pr_key, status, abandoned: isAbandoned(status) };
 }
 

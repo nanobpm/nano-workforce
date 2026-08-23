@@ -28,10 +28,10 @@ export function withTrackingViews<F extends TableFn>(base: F): F {
     const inner = base(baseName, pk);
     const derivedColumn = trackingTargetFor(baseName).statusColumn;
     const statusField = baseStatusFieldFor(baseName);
-    // deno-lint-ignore no-explicit-any
+    // biome-ignore lint/suspicious/noExplicitAny: test-only projection over dynamic row shapes.
     const project = (row: any) =>
       row == null ? row : { ...row, [derivedColumn]: row[statusField] };
-    // deno-lint-ignore no-explicit-any
+    // biome-ignore lint/suspicious/noExplicitAny: test-only Proxy over a dynamic DataLayer table.
     return new Proxy(inner, {
       get(target: any, prop: string) {
         const value = target[prop];
