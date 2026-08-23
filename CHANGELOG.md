@@ -1,3 +1,16 @@
+# [0.124.0](https://github.com/nanobpm/nano-workforce/compare/v0.123.2...v0.124.0) (2026-08-23)
+
+
+### Bug Fixes
+
+* **cockpit:** anchor supply/transcript endpoints to import.meta.url so the shell finds the API ([#468](https://github.com/nanobpm/nano-workforce/issues/468)) ([4ff4b99](https://github.com/nanobpm/nano-workforce/commit/4ff4b99767b915902be19cdecd5973c1ce6efc4c)), closes [279/#280](https://github.com/nanobpm/nano-workforce/issues/280) [#467](https://github.com/nanobpm/nano-workforce/issues/467)
+* **migrations:** grandfather prefix 075 collision to unblock main + releases ([#471](https://github.com/nanobpm/nano-workforce/issues/471)) ([508194e](https://github.com/nanobpm/nano-workforce/commit/508194e7be0f58ba3f12d2b67d4d6212d243c609)), closes [#458](https://github.com/nanobpm/nano-workforce/issues/458) [460/#463](https://github.com/nanobpm/nano-workforce/issues/463) [#357](https://github.com/nanobpm/nano-workforce/issues/357) [#470](https://github.com/nanobpm/nano-workforce/issues/470)
+
+
+### Features
+
+* **delivery-graph:** make dispatch operator-only ([#460](https://github.com/nanobpm/nano-workforce/issues/460)) ([#463](https://github.com/nanobpm/nano-workforce/issues/463)) ([cd6d2b8](https://github.com/nanobpm/nano-workforce/commit/cd6d2b819b32c5c7daf047dbb6e077a26d4b09e6))
+
 ## [0.123.2](https://github.com/nanobpm/nano-workforce/compare/v0.123.1...v0.123.2) (2026-08-22)
 
 
