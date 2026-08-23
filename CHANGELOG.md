@@ -1,3 +1,10 @@
+# [0.129.0](https://github.com/nanobpm/nano-workforce/compare/v0.128.0...v0.129.0) (2026-08-23)
+
+
+### Features
+
+* adopt ADR-0065 derived instanceTracking read-models (urban 0.81.0) ([#489](https://github.com/nanobpm/nano-workforce/issues/489)) ([ce25501](https://github.com/nanobpm/nano-workforce/commit/ce255013b383eb4d593526c5f34e74aaab535d25)), closes [#318](https://github.com/nanobpm/nano-workforce/issues/318) [nano-workforce#422](https://github.com/nano-workforce/issues/422) [#76](https://github.com/nanobpm/nano-workforce/issues/76)
+
 # [0.128.0](https://github.com/nanobpm/nano-workforce/compare/v0.127.0...v0.128.0) (2026-08-23)
 
 
