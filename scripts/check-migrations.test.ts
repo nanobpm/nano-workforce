@@ -103,3 +103,25 @@ test("collision detector flags a non-NNN shape and grandfathers historical dupes
     "grandfathered prefix 075 is not a new violation",
   );
 });
+
+// The grandfather is keyed by the EXACT historical FILENAME set, not just the prefix (Copilot review,
+// #472): pardoning a prefix wholesale would let any future `075_*.sql` slip in unnoticed, defeating the
+// gate for that slot forever. A THIRD file taking a grandfathered prefix is a genuinely NEW collision
+// and must still fail — only the specific already-merged files are exempt.
+test("a NEW file joining a grandfathered prefix is still caught (exact-filename exemption)", () => {
+  // The two real, pardoned 075 files alone: exempt.
+  assertEquals(
+    collisionErrorsFromFiles(["075_delivery_graph_proposals.sql", "075_feature_read_model_attention_from_user_tasks.sql"]),
+    [],
+    "the exact historical 075 pair stays exempt",
+  );
+  // A third file at the same grandfathered prefix is NEW → must fail, naming the offender only.
+  const errors = collisionErrorsFromFiles([
+    "075_delivery_graph_proposals.sql",
+    "075_feature_read_model_attention_from_user_tasks.sql",
+    "075_someone_elses_next_free_prefix.sql",
+  ]);
+  assertEquals(errors.length, 1, "a new file on a grandfathered prefix is one violation");
+  assert(/prefix 075/.test(errors[0]));
+  assert(/075_someone_elses_next_free_prefix.sql is NEW/.test(errors[0]), "the NEW file is named as the offender");
+});
