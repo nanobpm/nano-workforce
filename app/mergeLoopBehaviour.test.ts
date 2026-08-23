@@ -64,8 +64,10 @@ const DEFAULT_RESPONSES: Record<string, Responder> = {
   "pr.persist-escalation": { escalated: true },
 };
 
-// Every FEEL expression in the model references these; start them defined (null)
-// so a missing-variable access can never raise a spurious incident in a test.
+// Every FEEL expression in the model references these; start them defined (null,
+// or a typed zero where the model compares/arithmetics the value, e.g.
+// `failingChecks > 0`) so a missing-variable access can never raise a spurious
+// incident in a test.
 const DEFAULT_VARS: Record<string, unknown> = {
   prKey: "pr-1",
   repo: "acme/app",
@@ -84,6 +86,7 @@ const DEFAULT_VARS: Record<string, unknown> = {
   mergeState: null,
   mergeStatus: null,
   ciBlockedReconciled: null,
+  failingChecks: 0,
 };
 
 /**
