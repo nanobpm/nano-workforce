@@ -14,7 +14,7 @@
 // duplicated view-naming logic (it defers to the app's SSOT resolvers in app/instanceTracking.ts).
 import { baseStatusFieldFor, baseTableForTrackingView, trackingTargetFor } from "../app/instanceTracking.ts";
 
-// deno-lint-ignore no-explicit-any
+// biome-ignore lint/suspicious/noExplicitAny: test-only fake `table` resolver over dynamic row shapes.
 type TableFn = (name: string, pk?: string) => any;
 
 /** Decorate a fake `table(name, pk)` resolver so it also serves every `<table>__tracking` derived
