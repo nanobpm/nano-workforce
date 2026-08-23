@@ -104,10 +104,12 @@ export function deriveStage(run: StageInput): DerivedStage {
   };
 }
 
-/** The Active/History partition label (§5), maintained at write time so the flat-DSL page tabs filter
- * on a stored `list_bucket` column with only `in` clauses. `history` iff the row is in a truly-terminal
- * status AND acknowledged; otherwise `active` (live runs + terminal-but-UNACKNOWLEDGED runs). Evaluated
- * from the same `featureReadModel` `list_bucket` derivation the VIEW compiles. */
+/** The Active/History partition label (§5): `history` iff the row is in a truly-terminal status AND
+ * acknowledged; otherwise `active` (live runs + terminal-but-UNACKNOWLEDGED runs). DERIVED on read from
+ * the ONE `featureReadModel` `list_bucket` declaration — the same AST the VIEW compiles (migration 076),
+ * NOT a write-time projection: the page's tabs filter the VIEW's derived `list_bucket`, and the stored
+ * `feature_runs.list_bucket` base column is vestigial (retired as a write projection, issue #439). This
+ * adapter is the TS lowering of that derivation, used off the write path (redispatch gating, tests). */
 export function deriveListBucket(status: string, acknowledgedAt: string | null | undefined): "active" | "history" {
   return evalDerived<"active" | "history">("list_bucket", { status, acknowledged_at: acknowledgedAt ?? null });
 }
