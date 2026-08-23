@@ -57,6 +57,10 @@ function workerRow(doc: DocumentLike, worker: SupplyWorkerView, options: RenderS
   const button = el(doc, "button", "cockpit-worker", worker.instance);
   button.setAttribute("type", "button");
   button.setAttribute("data-instance", worker.instance);
+  // The name button always carries `data-stream` — even for an idle (non-drillable) worker — matching
+  // the row's own `data-stream` and the browser mirror (`pages/cockpit/mount.js`). Only the inline
+  // drill affordance is gated by `drillable`; the stream identity of the worker is not.
+  button.setAttribute("data-stream", worker.stream);
   const onOpenWorker = options.onOpenWorker;
   const onDrill = options.onDrill;
   if (onOpenWorker !== undefined) {
@@ -73,7 +77,6 @@ function workerRow(doc: DocumentLike, worker: SupplyWorkerView, options: RenderS
     drill.setAttribute("type", "button");
     drill.setAttribute("data-instance", worker.instance);
     drill.setAttribute("data-stream", worker.stream);
-    button.setAttribute("data-stream", worker.stream);
     if (onDrill !== undefined) {
       drill.addEventListener("click", () => onDrill(worker.stream));
     }

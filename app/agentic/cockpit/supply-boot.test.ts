@@ -130,13 +130,15 @@ test("clicking a rendered worker drill button drills its stream", async () => {
   const r = rig();
   // Only a worker that currently holds a job renders an inline drill button (an idle worker's stream
   // has no producer — drilling it would blank). Give wk-a a job so its drill affordance is present.
-  const drillable = { instance: "wk-a", identity: "leaf-1", stream: "wk-a", family: "senior", host: "h1", jobKeys: ["j-a"], live: true, staleMs: 0 };
+  // A busy worker relays on the jobKey-scoped `job:<jobKey>` stream (the supply endpoint repoints its
+  // `stream` there — see supply-view.ts), so the fixture uses that scoped id, not the bare instance id.
+  const drillable = { instance: "wk-a", identity: "leaf-1", stream: "job:j-a", family: "senior", host: "h1", jobKeys: ["j-a"], live: true, staleMs: 0 };
   r.report = { count: 1, workers: [drillable], leaves: [{ token: "leaf-1", workers: [drillable] }] };
   const cockpit = bootSupplyCockpit(r.env);
   await cockpit.refresh();
-  const button = r.host.byClass("cockpit-worker-drill").find((b) => b.getAttribute("data-stream") === "wk-a");
+  const button = r.host.byClass("cockpit-worker-drill").find((b) => b.getAttribute("data-stream") === "job:j-a");
   button?.dispatch("click");
-  assert.equal(cockpit.currentStream, "wk-a");
+  assert.equal(cockpit.currentStream, "job:j-a");
   assert.equal(r.sockets.length, 1);
 });
 

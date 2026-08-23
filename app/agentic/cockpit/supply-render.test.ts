@@ -79,6 +79,10 @@ test("suppresses the inline drill button for an IDLE worker (no current job → 
     host.byClass("cockpit-worker").find((b) => b.getAttribute("data-instance") === "wk-b"),
     "the idle worker still has its name button (detail page remains reachable)",
   );
+  // The idle worker's name button carries `data-stream` unconditionally — same as the drillable
+  // worker and the browser mirror — even though its drill affordance is suppressed.
+  const idleName = host.byClass("cockpit-worker").find((b) => b.getAttribute("data-instance") === "wk-b");
+  assert.equal(idleName?.getAttribute("data-stream"), "wk-b", "idle worker's name button still carries data-stream");
 });
 
 test("does NOT render any demand matrix, missing-agent reds, or diversity light", () => {
