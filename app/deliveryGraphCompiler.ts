@@ -325,10 +325,22 @@ export async function compileDeliveryGraph(
   // fan-in that re-converges a split's branches is an exclusive merge. Derived from the ONE shared
   // `analyzeExclusiveTopology` the validator also uses, so gateway-type selection never drifts from the
   // parity the validator enforced. A lone `default: true` edge (no guarded sibling) always fires and is
-  // NOT a split — mirror the validator and key off the guarded `when` only.
+  // NOT a split; and a node whose guarded + `default` edges all converge on ONE downstream target has
+// no real fan-out either — mirror the validator: key off a guarded `when` fanning to >=2 DISTINCT
+// downstream targets only.
   const splitNodes = new Set<string>();
+  const guardedNodes = new Set<string>();
+  const branchTargetsByNode = new Map<string, Set<string>>();
   for (const edge of resolvedEdges) {
-    if (edge.when !== undefined && edge.default !== true) splitNodes.add(edge.fromNode);
+    const guarded = edge.when !== undefined && edge.default !== true;
+    if (!guarded && edge.default !== true) continue;
+    if (guarded) guardedNodes.add(edge.fromNode);
+    const targets = branchTargetsByNode.get(edge.fromNode) ?? new Set<string>();
+    targets.add(edge.to);
+    branchTargetsByNode.set(edge.fromNode, targets);
+  }
+  for (const node of guardedNodes) {
+    if ((branchTargetsByNode.get(node)?.size ?? 0) > 1) splitNodes.add(node);
   }
   const forwardAdj = new Map<string, string[]>();
   for (const node of nodes) forwardAdj.set(node.id, [...(consumersById.get(node.id) ?? [])]);

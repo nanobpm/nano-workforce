@@ -612,3 +612,25 @@ test("S7 default-only node is NOT an exclusive split — a lone `default: true` 
   });
   assertEquals(errors, []);
 });
+
+test("S7 single-target guarded fan-out is NOT an exclusive split — a node whose guarded + default edges all converge on ONE downstream node has no real fan-out and must not mark that node conditional", () => {
+  // `gate` has a guarded edge and a `default` edge that BOTH target `conv` — one distinct downstream
+  // node, so there is no structural fan-out: `conv` fires whenever `gate` does. Deriving `splitNodes`
+  // from "has a guarded edge" alone wrongly adds `gate` to the split set, marking `conv` conditional;
+  // then leaves {conv, indep} look like a mixed conditional/always-firing End sink and trip a false
+  // exclusive-merge-parity error. A split must fan to >=2 distinct targets to be exclusive.
+  const errors = validateDeliveryGraph({
+    nodes: [
+      { id: "gate", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "result", type: "string" }] },
+      { id: "conv", kind: "agent", agent: { jobType: "j" } },
+      { id: "feed", kind: "agent", agent: { jobType: "j" } },
+      { id: "indep", kind: "agent", agent: { jobType: "j" } },
+    ],
+    edges: [
+      { from: "gate", to: "conv", when: "gate.result", equals: "a" },
+      { from: "gate", to: "conv", default: true },
+      { from: "feed", to: "indep" },
+    ],
+  });
+  assertEquals(errors, []);
+});
