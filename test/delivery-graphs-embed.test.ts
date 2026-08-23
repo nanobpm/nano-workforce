@@ -41,6 +41,17 @@ test("#441: mount.js wires the preview+stage door", () => {
   assert(previewUrl.endsWith("actions/delivery-graph/preview"), `previewUrl default "${previewUrl}" must hit the previewDeliveryGraph door`);
 });
 
+test("DI preview: mount.js wires the proposal-bpmn door (base-relative) and hands the XML to the host explorer", () => {
+  const url = defaultUrl("proposalBpmnUrl");
+  assert(url.endsWith("actions/delivery-graph/proposal-bpmn"), `proposalBpmnUrl default "${url}" must hit the previewProposalBpmn door`);
+  assert(!url.startsWith("/"), `default proposalBpmnUrl "${url}" must be base-relative (App-View #279 resolution class)`);
+  // The staged banner exposes a Preview-DI affordance, and clicking it hands the compiled XML to the
+  // host console over the nano-navigate bridge with the definitionPreview target (never a dispatch).
+  assert(/data-preview-di=/.test(MOUNT_JS), "mount.js must render a Preview-DI affordance carrying the proposal digest");
+  assert(/target:\s*"definitionPreview"/.test(MOUNT_JS), "mount.js must post nano-navigate to the definitionPreview target");
+  assert(/params:\s*\{\s*xml:/.test(MOUNT_JS), "mount.js must carry the compiled BPMN xml in the bridge message");
+});
+
 // The #279 App-View resolution class: a default endpoint must be BASE-RELATIVE (no leading slash) so
 // it resolves under the console app-view base, not the console origin root (which 404s the door).
 test("#441/#279: default previewUrl is base-relative (no leading slash)", () => {
