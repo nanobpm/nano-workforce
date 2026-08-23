@@ -14,6 +14,12 @@
 --
 -- Forward-only, additive (expand): a new nullable column on an existing table, no shape rewrite and no
 -- backfill (the poller repopulates every open row on its next pass). Numbered after the current highest
--- prefix (075); the runner wraps each file in its own transaction, so this file must NOT contain
+-- prefix (076); the runner wraps each file in its own transaction, so this file must NOT contain
 -- BEGIN/COMMIT.
 ALTER TABLE user_tasks ADD COLUMN form_key TEXT;
+
+-- The collapsed Tasks page reads `user_tasks` UNFILTERED ordered by `updated_at desc` (pages/tasks.page.json),
+-- an access pattern the existing composite indexes (`(element_id, updated_at)`, `(subject, element_id)`) can't
+-- serve — SQLite would scan + sort the whole table as the inbox grows. Front the unified inbox's sort with a
+-- single-column index on `updated_at`. Additive and idempotent.
+CREATE INDEX IF NOT EXISTS idx_user_tasks_updated ON user_tasks(updated_at);
