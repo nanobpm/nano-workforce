@@ -74,22 +74,45 @@ jobs:
     if: needs.gate.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     permissions:
-      contents: write # create tags, GitHub Releases, push CHANGELOG/version bump
-      issues: write # comment on released issues
-      pull-requests: write # comment on released PRs
+      # The privileged work (push to `main`, tags, Releases, issue/PR comments) is
+      # done with the release App token below — it is the ruleset bypass actor. The
+      # job's own GITHUB_TOKEN only needs OIDC for npm Trusted Publishing.
+      contents: read
       id-token: write # OIDC token for npm Trusted Publishing (no NPM_TOKEN)
     steps:
+      # Mint a short-lived token for the dedicated release GitHub App. This App is
+      # the ruleset's bypass actor, so @semantic-release/git can push the version
+      # bump + tags straight to a protected `main` (the default GITHUB_TOKEN can't:
+      # it isn't — and at repo level can't be — a ruleset bypass actor). See
+      # AGENTS.md "Releases bypass the ruleset via a dedicated App" and the
+      # `main` ruleset's bypass_actors.
+      - name: Mint release App token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.workflow_run.head_sha }} # release the exact gated commit
           fetch-depth: 0 # semantic-release needs full history + tags
           persist-credentials: true # let @semantic-release/git push the release commit
+          token: ${{ steps.app-token.outputs.token }} # push as the bypass-actor App
+
+      - name: Resolve App bot user id
+        id: app-user
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          id="$(gh api "/users/${{ steps.app-token.outputs.app-slug }}[bot]" --jq .id)"
+          echo "id=$id" >> "$GITHUB_OUTPUT"
 
       - name: Configure git author
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name "${{ steps.app-token.outputs.app-slug }}[bot]"
+          git config user.email "${{ steps.app-user.outputs.id }}+${{ steps.app-token.outputs.app-slug }}[bot]@users.noreply.github.com"
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -107,7 +130,7 @@ jobs:
 
       - name: Release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }} # bypass-actor App token
           # No NPM_TOKEN / NODE_AUTH_TOKEN: publishing uses OIDC Trusted Publishing.
           NPM_CONFIG_PROVENANCE: "true"
         run: npx semantic-release
