@@ -44,13 +44,22 @@ test("renders one leaf section with a worker row per worker (family, host, jobs,
   assert.equal(rowB?.byClass("cockpit-supply-jobs")[0]?.text(), "—");
 });
 
-test("worker buttons carry the drill stream and fire onDrill on click", () => {
+test("worker name buttons open the worker detail route and the inline terminal drill still drills", () => {
   const host = new FakeElement("body");
   const drilled: string[] = [];
-  renderSupply(host, doc, supplyView(sample), { onDrill: (stream) => drilled.push(stream) });
+  const opened: string[] = [];
+  renderSupply(host, doc, supplyView(sample), {
+    onDrill: (stream) => drilled.push(stream),
+    onOpenWorker: (instance) => opened.push(instance),
+  });
 
-  const button = host.byClass("cockpit-worker").find((b) => b.getAttribute("data-stream") === "wk-a");
-  assert.ok(button, "the worker button was rendered with its stream id");
+  const worker = host.byClass("cockpit-worker").find((b) => b.getAttribute("data-instance") === "wk-a");
+  assert.ok(worker, "the worker name button was rendered with its instance id");
+  worker?.dispatch("click");
+  assert.deepEqual(opened, ["wk-a"]);
+
+  const button = host.byClass("cockpit-worker-drill").find((b) => b.getAttribute("data-stream") === "wk-a");
+  assert.ok(button, "the inline live-terminal drill button was rendered with its stream id");
   button?.dispatch("click");
   assert.deepEqual(drilled, ["wk-a"]);
 });

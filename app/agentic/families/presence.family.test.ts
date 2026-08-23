@@ -138,6 +138,18 @@ test("instanceForConnection: resolves the worker instance owning a connection (H
   assertEquals(registry.instanceForConnection(""), undefined, "empty connection → undefined");
 });
 
+test("attributionOf: resolves a worker instance's durable identity + host for job attribution (#485)", () => {
+  const store = createPresenceStore(memSqlite());
+  store.ensureSchema();
+  store.register({ instance: "w1", connectionId: "c1", identity: "leafA", capability: { host: "boxA1" } });
+  store.register({ instance: "w2", connectionId: "c2", identity: "leafB", capability: {} });
+  const registry = new PresenceRegistry(store, () => new Set(["c1", "c2"]));
+  assertEquals(registry.attributionOf("w1"), { identity: "leafA", host: "boxA1" });
+  assertEquals(registry.attributionOf("w2"), { identity: "leafB", host: undefined }, "no host → host undefined");
+  assertEquals(registry.attributionOf("nope"), undefined, "unknown instance → undefined");
+  assertEquals(registry.attributionOf(""), undefined, "empty instance → undefined");
+});
+
 test("reconcile: removes rows whose connection the hub has closed, keeps live ones", () => {
   const store = createPresenceStore(memSqlite());
   store.ensureSchema();

@@ -646,6 +646,16 @@ components:
         planKey:
           type: string
           description: The plan / epic key this job was part of (e.g. owner/repo#142), when still known (advisory).
+        instance:
+          type: string
+          description: The worker instance that ran the session, recovered from durable attribution — present even
+            after the worker exited or the process restarted (advisory).
+        identity:
+          type: string
+          description: The worker's durable identity (presence identity), when recorded (advisory).
+        host:
+          type: string
+          description: The worker's host, when recorded (advisory).
     AgenticTranscriptList:
       type: object
       description: The list of captured agent sessions (past + open) — the cockpit "past sessions" feed.
@@ -742,6 +752,15 @@ components:
         planKey:
           type: string
           description: The plan / epic key, when still known (advisory).
+        instance:
+          type: string
+          description: The worker instance that ran the session, from durable attribution (advisory).
+        identity:
+          type: string
+          description: The worker's durable identity, when recorded (advisory).
+        host:
+          type: string
+          description: The worker's host, when recorded (advisory).
         entries:
           type: array
           description: The retained chunks with `offset >= from`, in offset order.
@@ -2448,6 +2467,13 @@ paths:
           schema:
             type: string
           description: Return only transcripts whose (still-known) correlation names this plan / epic key.
+        - name: instance
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Return only sessions run by this worker instance (durable attribution) — powers the
+            per-worker history view. Survives worker exit / process restart.
         - name: since
           in: query
           required: false

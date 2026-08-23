@@ -126,11 +126,11 @@ test("drilling into a worker subscribes its relay stream on connect", async () =
   assert.deepEqual(subs[0]?.payload, { op: "subscribe", stream: "wk-a", from: 0, credit: 1024 });
 });
 
-test("clicking a rendered worker button drills its stream", async () => {
+test("clicking a rendered worker drill button drills its stream", async () => {
   const r = rig();
   const cockpit = bootSupplyCockpit(r.env);
   await cockpit.refresh();
-  const button = r.host.byClass("cockpit-worker").find((b) => b.getAttribute("data-stream") === "wk-a");
+  const button = r.host.byClass("cockpit-worker-drill").find((b) => b.getAttribute("data-stream") === "wk-a");
   button?.dispatch("click");
   assert.equal(cockpit.currentStream, "wk-a");
   assert.equal(r.sockets.length, 1);

@@ -23,6 +23,8 @@ import type { Liveness, SupplyLeafView, SupplyView, SupplyWorkerView } from "./s
 export interface RenderSupplyOptions {
   /** Called with a worker's relay stream id when the operator drills into it. */
   readonly onDrill?: (stream: string) => void;
+  /** Called with a worker instance when the operator opens its dedicated detail page. */
+  readonly onOpenWorker?: (instance: string) => void;
 }
 
 /** Handles into the rendered tree the caller may need. */
@@ -54,12 +56,22 @@ function workerRow(doc: DocumentLike, worker: SupplyWorkerView, options: RenderS
   nameCell.appendChild(dot(doc, worker.liveness));
   const button = el(doc, "button", "cockpit-worker", worker.instance);
   button.setAttribute("type", "button");
+  button.setAttribute("data-instance", worker.instance);
+  const onOpenWorker = options.onOpenWorker;
+  if (onOpenWorker !== undefined) {
+    button.addEventListener("click", () => onOpenWorker(worker.instance));
+  }
+  nameCell.appendChild(button);
+  const drill = el(doc, "button", "cockpit-worker-drill", "terminal");
+  drill.setAttribute("type", "button");
+  drill.setAttribute("data-instance", worker.instance);
+  drill.setAttribute("data-stream", worker.stream);
   button.setAttribute("data-stream", worker.stream);
   const onDrill = options.onDrill;
   if (onDrill !== undefined) {
-    button.addEventListener("click", () => onDrill(worker.stream));
+    drill.addEventListener("click", () => onDrill(worker.stream));
   }
-  nameCell.appendChild(button);
+  nameCell.appendChild(drill);
   row.appendChild(nameCell);
 
   row.appendChild(el(doc, "td", "cockpit-td cockpit-supply-family", worker.family));
