@@ -1,3 +1,9 @@
+## [0.130.0](https://github.com/nanobpm/nano-workforce/compare/v0.129.1...v0.130.0) (2026-08-23)
+
+### Features
+
+* **delivery-unit:** one derived delivery-unit status union (ADR 0006, S1) ([#494](https://github.com/nanobpm/nano-workforce/issues/494)) ([47245d3](https://github.com/nanobpm/nano-workforce/commit/47245d37599a2f220c9835672c37656b6b0e6a6d)), closes [#464](https://github.com/nanobpm/nano-workforce/issues/464)
+
 ## [0.129.1](https://github.com/nanobpm/nano-workforce/compare/v0.129.0...v0.129.1) (2026-08-23)
 
 ### Code Refactoring
