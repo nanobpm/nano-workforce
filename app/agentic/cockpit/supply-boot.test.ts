@@ -128,12 +128,28 @@ test("drilling into a worker subscribes its relay stream on connect", async () =
 
 test("clicking a rendered worker drill button drills its stream", async () => {
   const r = rig();
+  // Only a worker that currently holds a job renders an inline drill button (an idle worker's stream
+  // has no producer — drilling it would blank). Give wk-a a job so its drill affordance is present.
+  // A busy worker relays on the jobKey-scoped `job:<jobKey>` stream (the supply endpoint repoints its
+  // `stream` there — see supply-view.ts), so the fixture uses that scoped id, not the bare instance id.
+  const drillable = { instance: "wk-a", identity: "leaf-1", stream: "job:j-a", family: "senior", host: "h1", jobKeys: ["j-a"], live: true, staleMs: 0 };
+  r.report = { count: 1, workers: [drillable], leaves: [{ token: "leaf-1", workers: [drillable] }] };
   const cockpit = bootSupplyCockpit(r.env);
   await cockpit.refresh();
-  const button = r.host.byClass("cockpit-worker-drill").find((b) => b.getAttribute("data-stream") === "wk-a");
+  const button = r.host.byClass("cockpit-worker-drill").find((b) => b.getAttribute("data-stream") === "job:j-a");
   button?.dispatch("click");
-  assert.equal(cockpit.currentStream, "wk-a");
+  assert.equal(cockpit.currentStream, "job:j-a");
   assert.equal(r.sockets.length, 1);
+});
+
+test("an idle worker (no current job) renders NO inline drill button — its stream has no producer", async () => {
+  const r = rig(); // the default served fixture worker wk-a has jobKeys: [] → idle
+  const cockpit = bootSupplyCockpit(r.env);
+  await cockpit.refresh();
+  const drills = r.host.byClass("cockpit-worker-drill");
+  assert.equal(drills.length, 0, "no drill button is rendered for an idle worker");
+  // The worker is still openable (its name button) and simply has nothing live to stream.
+  assert.equal(r.host.byData("worker", "wk-a").length, 1);
 });
 
 test("relay output is written to the drilled worker's terminal", async () => {
@@ -144,6 +160,37 @@ test("relay output is written to the drilled worker's terminal", async () => {
   r.sockets[0]?.fireOpen();
   r.sockets[0]?.deliver({ lane: "bulk", family: "relay", seq: 0, payload: { stream: "wk-a", offset: 0, chunk: "boot\n" } });
   assert.deepEqual(r.terminalWrites, ["boot\n"]);
+});
+
+test("a live drill shows a 'waiting for output' note until the first frame, then clears it", async () => {
+  const r = rig();
+  const cockpit = bootSupplyCockpit(r.env);
+  await cockpit.refresh();
+  const note = () => r.host.byClass("cockpit-terminal-note")[0];
+
+  cockpit.drill("wk-a");
+  r.sockets[0]?.fireOpen();
+  assert.equal(note()?.getAttribute("data-terminal-note"), "waiting", "note armed on a connected-but-quiet stream");
+  assert.match(note()?.textContent ?? "", /waiting for live output/i);
+
+  r.sockets[0]?.deliver({ lane: "bulk", family: "relay", seq: 0, payload: { stream: "wk-a", offset: 0, chunk: "hi\n" } });
+  assert.equal(note()?.getAttribute("data-terminal-note"), "none", "note cleared the instant the first frame is written");
+  assert.equal(note()?.textContent, "");
+});
+
+test("switching to a new stream re-arms the 'waiting' note (the prior stream's cleared note does not persist)", async () => {
+  const r = rig();
+  const cockpit = bootSupplyCockpit(r.env);
+  await cockpit.refresh();
+  const note = () => r.host.byClass("cockpit-terminal-note")[0];
+
+  cockpit.drill("wk-a");
+  r.sockets[0]?.fireOpen();
+  r.sockets[0]?.deliver({ lane: "bulk", family: "relay", seq: 0, payload: { stream: "wk-a", offset: 0, chunk: "x" } });
+  assert.equal(note()?.getAttribute("data-terminal-note"), "none");
+
+  cockpit.drill("wk-b");
+  assert.equal(note()?.getAttribute("data-terminal-note"), "waiting", "the new drill re-arms the waiting note");
 });
 
 test("the terminal survives a list refresh — it is not re-mounted and keeps streaming", async () => {

@@ -72,6 +72,7 @@ function workerView(worker, staleAfterMs, byJobKey) {
     host: worker.host ?? "\u2014",
     jobKeys,
     jobs: jobKeys.length,
+    drillable: jobKeys.length > 0,
     correlations,
     liveness: liveness(worker, staleAfterMs),
     staleMs: worker.staleMs,
@@ -141,12 +142,18 @@ function workerRow(doc, worker, onDrill, onOpenWorker) {
   button.setAttribute("data-stream", worker.stream);
   if (onOpenWorker) button.addEventListener("click", () => onOpenWorker(worker.instance));
   nameCell.appendChild(button);
-  const drill = el(doc, "button", "cockpit-worker-drill", "terminal");
-  drill.setAttribute("type", "button");
-  drill.setAttribute("data-instance", worker.instance);
-  drill.setAttribute("data-stream", worker.stream);
-  if (onDrill) drill.addEventListener("click", () => onDrill(worker.stream));
-  nameCell.appendChild(drill);
+  // The inline live-terminal drill — ONLY for a worker that currently holds a job. An idle worker's
+  // `stream` is its bare instance id, which no producer writes to, so drilling it opens a permanently
+  // blank "live" terminal. Suppress the affordance when there is nothing live to stream (mirrors
+  // app/agentic/cockpit/supply-render.ts).
+  if (worker.drillable) {
+    const drill = el(doc, "button", "cockpit-worker-drill", "terminal");
+    drill.setAttribute("type", "button");
+    drill.setAttribute("data-instance", worker.instance);
+    drill.setAttribute("data-stream", worker.stream);
+    if (onDrill) drill.addEventListener("click", () => onDrill(worker.stream));
+    nameCell.appendChild(drill);
+  }
   row.appendChild(nameCell);
 
   row.appendChild(el(doc, "td", "cockpit-td cockpit-supply-family", worker.family));
@@ -494,6 +501,12 @@ export function mountCockpit(host, opts = {}) {
   const terminalHost = el(doc, "div", "cockpit-terminal-host");
   terminalHost.setAttribute("data-terminal", "host");
   terminalPanel.appendChild(terminalHost);
+  // Status note under the terminal, shown while a LIVE drill has connected but no output has arrived
+  // yet (a quiet job between frames), so a blank panel reads as "waiting" not "broken". Cleared on
+  // the first frame and on every mode change (mirrors app/agentic/cockpit/supply-boot.ts).
+  const terminalNote = el(doc, "p", "cockpit-terminal-note");
+  terminalNote.setAttribute("data-terminal-note", "none");
+  terminalPanel.appendChild(terminalNote);
   shell.appendChild(listRegion);
   shell.appendChild(pastRegion);
   shell.appendChild(terminalPanel);
@@ -524,6 +537,19 @@ export function mountCockpit(host, opts = {}) {
     if (next === "live") terminalTitle.textContent = "Worker terminal — live";
     else if (next === "replay") terminalTitle.textContent = "Worker terminal — replay (past session)";
     else terminalTitle.textContent = "Worker terminal";
+    // Any mode change replaces what's behind the panel, so the prior "waiting" note is stale — clear
+    // it. A live drill re-arms it once its fresh terminal is mounted.
+    setNote(undefined);
+  }
+
+  function setNote(text) {
+    if (text == null) {
+      terminalNote.textContent = "";
+      terminalNote.setAttribute("data-terminal-note", "none");
+      return;
+    }
+    terminalNote.textContent = text;
+    terminalNote.setAttribute("data-terminal-note", "waiting");
   }
 
   function teardownTerminal() {
@@ -586,8 +612,19 @@ export function mountCockpit(host, opts = {}) {
     teardownTerminal();
     try {
       terminalHost.replaceChildren();
-      const sink = xtermSink(terminalHost);
-      terminal = sink;
+      const rawSink = xtermSink(terminalHost);
+      terminal = rawSink;
+      // Wrap the sink so the first byte of live output clears the "waiting" note (mirrors supply-boot).
+      let cleared = false;
+      const sink = {
+        write: (chunk) => {
+          if (!cleared) {
+            cleared = true;
+            setNote(undefined);
+          }
+          rawSink.write(chunk);
+        },
+      };
       let session;
       const client = new RelayChannelClient({
         connect: connectRelay,
@@ -599,6 +636,8 @@ export function mountCockpit(host, opts = {}) {
       client.open();
       drill = { stream, client };
       setMode("live", stream);
+      // Arm the "waiting for output" note (after setMode, which clears it) until the first frame.
+      setNote("Connected — waiting for live output…");
     } catch (err) {
       // The new terminal failed to build after the prior one was torn down: reset the region to idle
       // (and drop any partially-built terminal) so the UI never shows a stale "live"/"replay"
