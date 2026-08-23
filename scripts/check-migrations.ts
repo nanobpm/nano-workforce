@@ -52,6 +52,7 @@ const MIGRATIONS_DIR = join(REPO_ROOT, "db", "migrations");
 // boot, issue #357). The two create disjoint tables (`worker_durable_resume`, `plan_conformance`), so
 // apply order is irrelevant. Grandfather 052; any NEW duplicate prefix still fails the build.
 //
+//
 // 075 is the same merge-skew story across two PRs that never saw each other (issue #470): #458 landed
 // `075_feature_read_model_attention_from_user_tasks` and #460/#463 landed `075_delivery_graph_proposals`,
 // each the branch-local "next" prefix, colliding silently only once both were on main (releases then
@@ -59,9 +60,23 @@ const MIGRATIONS_DIR = join(REPO_ROOT, "db", "migrations");
 // a merged migration would re-run it and abort boot, and the immutability check would itself flag the
 // rename. They create DISJOINT objects (`075_delivery_graph_proposals` adds the `delivery_graph_proposals`
 // table + its indexes; `075_feature_read_model_…` redefines the `feature_read_model` VIEW and adds one
-// `user_tasks` index), so their relative apply order is irrelevant. Grandfather 075; any NEW duplicate
-// prefix still fails the build (the next migration is 076).
-const GRANDFATHERED_DUPES: ReadonlySet<string> = new Set(["004", "005", "006", "007", "049", "052", "075"]);
+// `user_tasks` index), so their relative apply order is irrelevant. Grandfather 075 (the next migration
+// is 076, which supersedes 075's `feature_read_model` VIEW body — a NEW, unique prefix).
+//
+// The exemption is keyed by the EXACT set of colliding FILENAMES per prefix, not merely the prefix, so
+// it only pardons the specific historical files that already merged — a THIRD file taking a
+// grandfathered prefix (a fresh 075_*.sql, say) is NOT in the set and still fails the gate. This keeps
+// "any NEW duplicate prefix still fails" literally true even for prefixes that already carry a pardoned
+// collision (Copilot review, #472).
+const GRANDFATHERED_DUPES: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+  ["004", new Set(["004_merge.sql", "004_planning.sql"])],
+  ["005", new Set(["005_job_activation.sql", "005_plan_deps.sql"])],
+  ["006", new Set(["006_plan_review.sql", "006_task_escalation.sql"])],
+  ["007", new Set(["007_plan_review_job_key.sql", "007_wave_gate.sql"])],
+  ["049", new Set(["049_drop_feature_escalation_surface.sql", "049_plan_task_needs.sql", "049_world_checkpoint.sql"])],
+  ["052", new Set(["052_plan_conformance.sql", "052_worker_durable_resume.sql"])],
+  ["075", new Set(["075_delivery_graph_proposals.sql", "075_feature_read_model_attention_from_user_tasks.sql"])],
+]);
 
 const PREFIX = /^(\d{3})_[^/]*\.sql$/;
 
@@ -185,13 +200,22 @@ export function collisionErrorsFromFiles(files: readonly string[]): string[] {
   }
 
   for (const [prefix, group] of byPrefix) {
-    if (group.length > 1 && !GRANDFATHERED_DUPES.has(prefix)) {
-      errors.push(
-        `  prefix ${prefix} is used by ${group.length} files: ${[...group].sort().join(", ")} — ` +
+    if (group.length <= 1) continue;
+    // Keyed by the EXACT historical filename set: a grandfathered prefix pardons ONLY those specific
+    // already-merged files. Any file in the group NOT in that set is a NEW collision and still fails.
+    const exempt = GRANDFATHERED_DUPES.get(prefix);
+    const unexpected = exempt ? group.filter((f) => !exempt.has(f)) : group;
+    if (unexpected.length === 0) continue;
+    errors.push(
+      exempt
+        ? `  prefix ${prefix} is used by ${group.length} files: ${[...group].sort().join(", ")} — only the ` +
+          `grandfathered historical set (${[...exempt].sort().join(", ")}) may share this prefix; ` +
+          `${[...unexpected].sort().join(", ")} is NEW. Renumber it to the next free prefix ` +
+          `(check origin/main, not your branch point).`
+        : `  prefix ${prefix} is used by ${group.length} files: ${[...group].sort().join(", ")} — ` +
           `two migrations cannot share an apply-order slot. Renumber the newer one to the next ` +
           `free prefix (check origin/main, not your branch point).`,
-      );
-    }
+    );
   }
 
   return errors;
