@@ -30,7 +30,7 @@ const EMBED_HTML = readFileSync(`${ROOT}pages/cockpit/embed.html`, "utf8");
 // `const <name> = opts.<name> ?? new URL("<spec>", import.meta.url).href;` in mount.js.
 function defaultSpec(name: string): string {
   const m = MOUNT_JS.match(
-    new RegExp(`opts\\.${name}\\s*\\?\\?\\s*new URL\\(\\s*"([^"]*)"\\s*,\\s*import\\.meta\\.url\\s*\\)`),
+    new RegExp(`opts\\.${name}\\s*\\?\\?\\s*new URL\\(\\s*"([^"]*)"\\s*,\\s*import\\.meta\\.url\\s*\\)\\s*\\.href`),
   );
   assert(
     m,

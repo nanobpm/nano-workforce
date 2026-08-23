@@ -319,7 +319,8 @@ function relaySocketFactory(url) {
  * @param {Element} host — where the cockpit renders (standalone: document.body; embedded: the App-View host).
  * @param {object} [opts]
  * @param {string} [opts.reportUrl] — the supply JSON endpoint the app serves (default
- *   `"app/api/agentic/supply"`, base-relative).
+ *   `new URL("../app/api/agentic/supply", import.meta.url).href`, module-anchored so it
+ *   resolves to the app root `<appMount>/app/api/agentic/supply`, not the `/cockpit/` shell base).
  * @param {string} [opts.relayUrl]  — the agentic channel WebSocket URL (with auth token + capability query).
  * @param {string} [opts.hookSecret] — shared secret sent as `x-hook-secret` on the report fetch when the
  *   app's supply endpoint is guarded by NANO_PR_WEBHOOK_SECRET (omit for open deployments).
@@ -331,7 +332,9 @@ function relaySocketFactory(url) {
  * @param {number} [opts.pastFetchTimeoutMs] — upper bound (ms) on a single past-sessions transcripts
  *   fetch; the fetch is aborted past this so a hung endpoint can't wedge the past panel (default 15000).
  * @param {string} [opts.transcriptsUrl] — the captured-session list endpoint backing the always-on
- *   "past sessions" history + replay (default `"app/api/agentic/transcripts"`, base-relative).
+ *   "past sessions" history + replay (default
+ *   `new URL("../app/api/agentic/transcripts", import.meta.url).href`, module-anchored so it
+ *   resolves to the app root `<appMount>/app/api/agentic/transcripts`, not the `/cockpit/` shell base).
  * @returns a handle with `.dispose()`.
  */
 export function mountCockpit(host, opts = {}) {
