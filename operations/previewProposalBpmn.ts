@@ -54,8 +54,22 @@ export default defineOperation("previewProposalBpmn", async ({ body }, app) => {
   }
 
   // Recompile the staged graph — the SAME pure compiler the agent/preview/dispatch doors use, so the
-  // BPMN (and its DI) is identical to what a dispatch would deploy. No side effects.
-  const compiled = await compileDeliveryGraph(graph);
+  // BPMN (and its DI) is identical to what a dispatch would deploy. No side effects. The compiler can
+  // THROW (e.g. layout fails to emit a `<bpmndi:BPMNDiagram>`), which must stay a clean 400 per the door
+  // contract — never a bubbled 500.
+  let compiled: Awaited<ReturnType<typeof compileDeliveryGraph>>;
+  try {
+    compiled = await compileDeliveryGraph(graph);
+  } catch (err) {
+    app.log.warn("preview-proposal-bpmn: staged graph threw during recompile", { digest });
+    return {
+      status: 400,
+      body: {
+        ok: false,
+        error: `staged proposal ${digest} failed to recompile: ${err instanceof Error ? err.message : String(err)}`,
+      },
+    };
+  }
   if (!compiled.ok) {
     app.log.warn("preview-proposal-bpmn: staged graph no longer compiles", { digest, errors: compiled.errors.length });
     return {

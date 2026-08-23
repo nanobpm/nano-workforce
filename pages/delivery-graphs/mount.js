@@ -162,7 +162,7 @@ function renderPreview(result) {
 /**
  * Mount the compose → preview → stage view into `host`.
  * @param {Element|null} host — the element to render into (or null → look up #delivery-graphs-root).
- * @param {{previewUrl?:string, hookSecret?:string}} [config]
+ * @param {{previewUrl?:string, proposalBpmnUrl?:string, hookSecret?:string}} [config]
  */
 export function mountDeliveryGraphs(host, config = {}) {
   const isElement = host != null && host.nodeType === 1 && typeof host.innerHTML === "string";
@@ -275,6 +275,11 @@ export function mountDeliveryGraphs(host, config = {}) {
   // explorer to drive, so we say so instead of failing silently.
   const isEmbedded = typeof window !== "undefined" && window.parent && window.parent !== window;
   async function doPreviewDi(digest) {
+    const staged = typeof digest === "string" ? digest.trim() : "";
+    if (staged === "") {
+      setStatus("No staged proposal to preview yet — Preview & stage a graph first.", "err");
+      return;
+    }
     if (!isEmbedded) {
       setStatus("Open this page inside the console cockpit to preview the generated DI.", "err");
       return;
@@ -282,7 +287,7 @@ export function mountDeliveryGraphs(host, config = {}) {
     busy(true);
     setStatus("Compiling DI…");
     try {
-      const { status, body } = await post(proposalBpmnUrl, { digest });
+      const { status, body } = await post(proposalBpmnUrl, { digest: staged });
       if (status === 200 && body.ok && typeof body.bpmn === "string" && body.bpmn.trim() !== "") {
         window.parent.postMessage(
           { type: "nano-navigate", target: "definitionPreview", params: { xml: body.bpmn } },
