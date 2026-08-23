@@ -27,9 +27,11 @@ nano-workforce **#305** (consolidate escalations on native `user_tasks` — a na
 
 ### One aggregate, encoded three times
 
-nano-workforce models the same real-world thing — **one agent takes one unit of work and drives it to
-one merged PR** — in three separate representations, each with its own table, status union, operator
-read-surface, `instanceTracking` binding, and dispatch door:
+nano-workforce models the same real-world thing — **a scheduled unit of work driven to a delivery
+outcome** (typically an agent taking one slice to one merged PR, but a unit may instead `wait`, ask a
+`human`, call a `connector`, or — for a feature — terminate `opened`/`converged` without a merged PR;
+and an epic aggregates *many* such units/PRs) — in three separate representations, each with its own
+table, status union, operator read-surface, `instanceTracking` binding, and dispatch door:
 
 | Representation | Data | Process | Shape |
 |---|---|---|---|
@@ -182,7 +184,9 @@ their topology is produced. Unifying that axis is explicitly out of scope here.
 ## Rollout (see #464 for the live checklist)
 
 Each slice is independently shippable; the process slices (S4/S5) are sequenced behind the engine-wasm
-0.7.2 unlock, which has landed.
+0.7.2 unlock. The **dev-testkit** side of that unlock has landed (#416, verified in-process above); S4/S5
+additionally gate on the **deployed broker/runtime** carrying verified `callActivity` support (the
+deployment-runtime prerequisite noted above), not on #416 alone.
 
 - **S0 · ADR** — this record.
 - **S1 · status lifecycle** — one derived status union via ADR 0065 `defineReadModel`, replacing the
