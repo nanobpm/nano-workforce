@@ -326,8 +326,8 @@ export async function compileDeliveryGraph(
   // `analyzeExclusiveTopology` the validator also uses, so gateway-type selection never drifts from the
   // parity the validator enforced. A lone `default: true` edge (no guarded sibling) always fires and is
   // NOT a split; and a node whose guarded + `default` edges all converge on ONE downstream target has
-// no real fan-out either — mirror the validator: key off a guarded `when` fanning to >=2 DISTINCT
-// downstream targets only.
+  // no real fan-out either — mirror the validator: key off a guarded `when` fanning to >=2 DISTINCT
+  // downstream targets only.
   const splitNodes = new Set<string>();
   const guardedNodes = new Set<string>();
   const branchTargetsByNode = new Map<string, Set<string>>();
@@ -367,7 +367,17 @@ export async function compileDeliveryGraph(
     const consumers = consumersById.get(node.id) ?? [];
     const producers = producersById.get(node.id) ?? [];
     const forkExclusive = splitNodes.has(node.id);
-    const joinExclusive = topology.mergeNodes.has(node.id);
+    // A fan-in is an EXCLUSIVE merge (first-token-proceeds) iff EVERY incoming branch is conditional —
+    // a split's own guarded/default out-edge, or a producer only conditionally reached. This is the
+    // SAME parity predicate the validator enforces (`edgeConditional`), so gateway-type selection never
+    // drifts from it. Deriving `joinExclusive` from `mergeNodes` alone over-fires: `analyzeExclusive
+    // Topology` marks every node reachable from >=2 branch targets as a merge, including nodes DOWNSTREAM
+    // of the real re-convergence — so a post-merge node that ALSO joins an independent always-firing
+    // producer would wrongly compile to an exclusive merge instead of the parallel AND-join both the
+    // validator and the semantics demand.
+    const joinExclusive =
+      producers.length > 1 &&
+      producers.every((p) => splitNodes.has(p) || topology.conditional.has(p));
     const forkGateway =
       consumers.length > 1 ? (forkExclusive ? `gwx${splitSeq++}` : `gwf${forkSeq++}`) : undefined;
     const joinGateway =

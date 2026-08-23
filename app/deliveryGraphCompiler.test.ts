@@ -410,3 +410,35 @@ test("S7 compiler: a non-exhaustive guarded split is rejected before compilation
   });
   assert(errors.length > 0, "a non-exhaustive guarded split does not compile");
 });
+
+test("S7 compiler: a post-merge node with an extra always-firing producer joins on a PARALLEL gateway, not an exclusive merge", async () => {
+  // Regression (PR #495 review): `analyzeExclusiveTopology` marks EVERY node reachable from >=2 branch
+  // targets of a split as a merge node — including nodes DOWNSTREAM of the first re-convergence. Here
+  // `bump` splits to `migrate`/`release`, both re-converge on `release` (the real exclusive merge), and
+  // `release` -> `finalize`. `finalize` ALSO has an independent always-firing producer `warmup`, so its
+  // producers {release, warmup} are BOTH unconditional — the validator treats it as a parallel join.
+  // Deriving `joinExclusive` from `mergeNodes` alone wrongly made `finalize` an exclusive merge
+  // (first-token-proceeds), drifting from the validator. It must be a PARALLEL AND-join.
+  const r = await compileOk({
+    name: "postmerge",
+    nodes: [
+      { id: "bump", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "result", type: "string" }] },
+      { id: "warmup", kind: "connector", connector: { target: "npm:install" } },
+      { id: "migrate", kind: "agent", agent: { jobType: "j" } },
+      { id: "release", kind: "connector", connector: { target: "npm:publish" } },
+      { id: "finalize", kind: "connector", connector: { target: "npm:pack" } },
+    ],
+    edges: [
+      { from: "bump", to: "migrate", when: "bump.result", equals: "breaking" },
+      { from: "bump", to: "release", default: true },
+      { from: "migrate", to: "release" },
+      { from: "release", to: "finalize" },
+      { from: "warmup", to: "finalize" },
+    ],
+  });
+  // `release` is the genuine exclusive merge of the split's two branches.
+  assert(/<bpmn:exclusiveGateway id="gwm0"[^>]*name="join into release"/.test(r.bpmn), "release merges its split branches on an exclusive gateway");
+  // `finalize` joins two always-firing producers — it MUST be a parallel AND-join, never an exclusive merge.
+  assert(/<bpmn:parallelGateway id="gwj\d+"[^>]*name="join into finalize"/.test(r.bpmn), "finalize joins its always-firing producers on a parallel gateway");
+  assert(!/<bpmn:exclusiveGateway id="gwm\d+"[^>]*name="join into finalize"/.test(r.bpmn), "finalize is NOT compiled as an exclusive merge");
+});
