@@ -60,6 +60,11 @@ export interface UserTaskRow {
   subject_url: string | null;
   question: string | null;
   process_key: string | null;
+  /** The engine `formKey` of the parked user task's engine-declared form, denormalised so the single
+   *  collapsed Tasks grid can resolve and render the deployed `.form` per row (nano-ide#457). Derived in
+   *  the poller from the `/v2/user-tasks/search` result, falling back to the fixed-form kinds' static
+   *  `.form` linkage; NULL when neither resolves (the grid degrades to bare completion). */
+  form_key: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -103,6 +108,10 @@ export interface UserTaskContext {
   subjectUrl?: string | null;
   question?: string | null;
   processKey?: string | null;
+  /** The engine-resolved `formKey` of the task's engine-declared form, as the poller read it from the
+   *  `/v2/user-tasks/search` result (or the fixed-form fallback). Optional/blank tolerated —
+   *  `buildUserTaskRow` normalises a blank to NULL. */
+  formKey?: string | null;
 }
 
 /** Pure: turn one resolved open escalation task into its desired read-model row, or `null` when the
@@ -123,6 +132,7 @@ export function buildUserTaskRow(ctx: UserTaskContext, at: string = now()): User
   const subjectKey = ctx.subjectKey.trim() || (ctx.processKey ?? "").trim() || userTaskKey;
   const question = typeof ctx.question === "string" && ctx.question.trim() ? ctx.question.trim() : null;
   const subjectTitle = typeof ctx.subjectTitle === "string" && ctx.subjectTitle.trim() ? ctx.subjectTitle.trim() : subjectKey;
+  const formKey = typeof ctx.formKey === "string" && ctx.formKey.trim() ? ctx.formKey.trim() : null;
   return {
     user_task_key: userTaskKey,
     element_id: ctx.elementId,
@@ -133,6 +143,7 @@ export function buildUserTaskRow(ctx: UserTaskContext, at: string = now()): User
     subject_url: ctx.subjectUrl ?? null,
     question,
     process_key: ctx.processKey ?? null,
+    form_key: formKey,
     created_at: at,
     updated_at: at,
   };
@@ -158,7 +169,8 @@ function sameRow(a: UserTaskRow, b: UserTaskRow): boolean {
     a.subject_title === b.subject_title &&
     a.subject_url === b.subject_url &&
     a.question === b.question &&
-    a.process_key === b.process_key
+    a.process_key === b.process_key &&
+    a.form_key === b.form_key
   );
 }
 

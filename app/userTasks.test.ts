@@ -49,9 +49,28 @@ test("buildUserTaskRow: a plan-review task becomes a labelled row with its findi
     subject_url: "https://github.com/o/r/issues/1",
     question: "cap reached: revise scope",
     process_key: "pk-1",
+    form_key: null,
     created_at: AT,
     updated_at: AT,
   });
+});
+
+test("buildUserTaskRow: denormalises the engine form_key, trimming blanks to null (issue #461)", () => {
+  const withForm = buildUserTaskRow(
+    { userTaskKey: "ut-f", elementId: PLAN_REVIEW_ELEMENT, subjectType: "plan", subjectKey: "o/r#1", formKey: "  form-9  " },
+    AT,
+  );
+  assertEquals(withForm?.form_key, "form-9");
+  const blank = buildUserTaskRow(
+    { userTaskKey: "ut-b", elementId: PLAN_REVIEW_ELEMENT, subjectType: "plan", subjectKey: "o/r#1", formKey: "   " },
+    AT,
+  );
+  assertEquals(blank?.form_key, null);
+  const absent = buildUserTaskRow(
+    { userTaskKey: "ut-n", elementId: PLAN_REVIEW_ELEMENT, subjectType: "plan", subjectKey: "o/r#1" },
+    AT,
+  );
+  assertEquals(absent?.form_key, null);
 });
 
 test("buildUserTaskRow: a blank question / missing url normalises to null", () => {

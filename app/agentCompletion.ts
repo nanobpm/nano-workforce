@@ -122,6 +122,17 @@ const ESCALATION_FORM_BY_ELEMENT: Readonly<Record<string, string>> = {
   // (returns `null`) and the completer accepts the captured form variables for the emit binder to type.
 };
 
+/** The fixed `.form` linkage (a `zeebe:formDefinition formId`) that governs a fixed-form escalation
+ *  kind's completion, or `undefined` for a kind with no static form (the delivery-graph `human` node,
+ *  which renders DIFFERENT forms per node — its `formKey` only ever comes from the engine at runtime).
+ *  Exposed so the Tasks-inbox poller can denormalise a row's `form_key` from this SAME single source of
+ *  truth when the raw `/v2/user-tasks/search` result omits the engine-resolved key (issue #461) — the
+ *  REST gateway addresses a deployed form by value whether that value is a deploy key or an authored
+ *  form id, so this id resolves the same deployed `.form` the completer validates against. */
+export function escalationFormId(elementId: string): string | undefined {
+  return ESCALATION_FORM_BY_ELEMENT[elementId];
+}
+
 /** A field's `conditional.hide` rule, parsed from the FEEL subset the `.form` files use
  *  (`=<ref> != "<value>"` / `=<ref> == "<value>"`). A required field is only enforced when it is
  *  actually shown, so an "answer only when resolution=answer" field is not demanded on the abandon

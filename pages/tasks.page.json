@@ -9,30 +9,12 @@
         "variant": "bar",
         "title": "Nano Workforce",
         "items": [
-          {
-            "label": "Overview",
-            "page": "overview"
-          },
-          {
-            "label": "Lineage",
-            "page": "lineage"
-          },
-          {
-            "label": "Convergence",
-            "page": "home"
-          },
-          {
-            "label": "Epics",
-            "page": "epic"
-          },
-          {
-            "label": "Feature",
-            "page": "feature"
-          },
-          {
-            "label": "Delivery Graphs",
-            "page": "delivery-graphs"
-          },
+          { "label": "Overview", "page": "overview" },
+          { "label": "Lineage", "page": "lineage" },
+          { "label": "Convergence", "page": "home" },
+          { "label": "Epics", "page": "epic" },
+          { "label": "Feature", "page": "feature" },
+          { "label": "Delivery Graphs", "page": "delivery-graphs" },
           {
             "label": "Tasks",
             "page": "tasks",
@@ -45,18 +27,9 @@
               "hideWhenZero": true
             }
           },
-          {
-            "label": "Cockpit",
-            "page": "cockpit"
-          },
-          {
-            "label": "Board",
-            "page": "board"
-          },
-          {
-            "label": "Velocity",
-            "page": "velocity"
-          }
+          { "label": "Cockpit", "page": "cockpit" },
+          { "label": "Board", "page": "board" },
+          { "label": "Velocity", "page": "velocity" }
         ],
         "sticky": true
       }
@@ -64,42 +37,30 @@
     {
       "type": "text",
       "id": "title",
-      "props": {
-        "text": "Tasks",
-        "variant": "heading"
-      }
+      "props": { "text": "Tasks", "variant": "heading" }
     },
     {
       "type": "text",
       "id": "subtitle",
       "props": {
-        "text": "Open native user-task escalations awaiting a human decision — across feature runs, epics, and PR review loops. Each row parks a process on your decision; submit one and the process resumes on the same canonical path Urban's task inbox uses. Rows disappear once completed (here, via the inbox, or out-of-band).",
+        "text": "Every open native user-task escalation awaiting a human decision — feature runs, epics, PR review/merge loops, conformance reviews, and delivery-graph human/escalation gates — in one list. The \"Type\" column tells them apart; open a row to complete it via the process's own deployed form, on the same canonical path Urban's task inbox uses. This list is exactly the set the nav badge counts, so a badge always maps to a visible, completable row. Rows disappear once completed (here, via the inbox, or out-of-band).",
         "variant": "sub"
       }
     },
     {
       "type": "dataGrid",
-      "id": "feature-escalations",
+      "id": "user-tasks",
       "props": {
-        "title": "Feature escalations",
+        "title": "Open tasks",
         "data": {
           "kind": "datasource",
           "source": "app",
           "table": "user_tasks",
-          "filter": [
-            {
-              "field": "element_id",
-              "in": [
-                "feature-escalation"
-              ]
-            }
-          ],
-          "orderBy": {
-            "field": "updated_at",
-            "dir": "desc"
-          }
+          "filter": [],
+          "orderBy": { "field": "updated_at", "dir": "desc" }
         },
         "columns": [
+          { "field": "kind_label", "header": "Type" },
           {
             "field": "subject_title",
             "template": "{{subject_title}}",
@@ -108,514 +69,23 @@
             "truncate": true,
             "linkField": "subject_url"
           },
-          {
-            "field": "subject_url",
-            "header": "Issue"
-          },
+          { "field": "subject_url", "header": "Link" },
           {
             "field": "process_key",
             "header": "Process",
-            "link": {
-              "kind": "processExplorer",
-              "keyField": "process_key"
-            }
+            "link": { "kind": "processExplorer", "keyField": "process_key" }
           },
-          {
-            "field": "updated_at",
-            "header": "Updated",
-            "format": "datetime"
-          }
+          { "field": "updated_at", "header": "Updated", "format": "datetime" }
         ],
         "rowKey": "user_task_key",
         "detail": {
           "linkField": "subject_url",
           "fields": [
-            {
-              "field": "question",
-              "label": "Escalation question"
-            }
+            { "field": "question", "label": "Decision context" }
           ],
-          "form": {
-            "showWhenField": "user_task_key",
-            "title": "Answer escalation",
-            "promptField": "question",
-            "submitLabel": "Submit decision",
-            "fields": [
-              {
-                "inputKey": "resolution",
-                "type": "select",
-                "inputLabel": "Resolution",
-                "options": [
-                  { "value": "answer", "label": "Answer — re-dispatch the task with this guidance" },
-                  { "value": "abandon", "label": "Abandon — give up on this task" }
-                ]
-              },
-              {
-                "inputKey": "answer",
-                "type": "textarea",
-                "inputLabel": "Answer / guidance for the implementation agent",
-                "conditional": {
-                  "hide": "=resolution != \"answer\""
-                }
-              }
-            ],
-            "action": {
-              "path": "/app/api/actions/complete-user-task",
-              "successLabel": "Decision submitted — the process will continue",
-              "body": {
-                "userTaskKey": "{{row.user_task_key}}",
-                "variables": "{{form}}"
-              }
-            }
-          }
-        },
-        "refreshMs": 5000
-      }
-    },
-    {
-      "type": "dataGrid",
-      "id": "plan-reviews",
-      "props": {
-        "title": "Plan-review decisions",
-        "data": {
-          "kind": "datasource",
-          "source": "app",
-          "table": "user_tasks",
-          "filter": [
-            {
-              "field": "element_id",
-              "in": [
-                "plan-review-decision"
-              ]
-            }
-          ],
-          "orderBy": {
-            "field": "updated_at",
-            "dir": "desc"
-          }
-        },
-        "columns": [
-          {
-            "field": "subject_title",
-            "template": "{{subject_title}}",
-            "header": "Item",
-            "subtitleField": "subject_key",
-            "truncate": true,
-            "linkField": "subject_url"
-          },
-          {
-            "field": "question",
-            "header": "Findings"
-          },
-          {
-            "field": "subject_url",
-            "header": "Issue"
-          },
-          {
-            "field": "process_key",
-            "header": "Process",
-            "link": {
-              "kind": "processExplorer",
-              "keyField": "process_key"
-            }
-          },
-          {
-            "field": "updated_at",
-            "header": "Updated",
-            "format": "datetime"
-          }
-        ],
-        "rowKey": "user_task_key",
-        "detail": {
-          "linkField": "subject_url",
-          "fields": [
-            {
-              "field": "question",
-              "label": "Review findings"
-            }
-          ],
-          "form": {
-            "showWhenField": "user_task_key",
-            "title": "Review the plan",
-            "promptField": "question",
-            "submitLabel": "Submit decision",
-            "fields": [
-              {
-                "inputKey": "directive",
-                "type": "select",
-                "inputLabel": "Directive",
-                "options": [
-                  { "value": "proceed", "label": "Proceed — dispatch the current plan as-is" },
-                  { "value": "revise", "label": "Revise — send the plan back to the planner" }
-                ]
-              },
-              {
-                "inputKey": "notes",
-                "type": "textarea",
-                "inputLabel": "Revision guidance for the planner",
-                "conditional": {
-                  "hide": "=directive != \"revise\""
-                }
-              }
-            ],
-            "action": {
-              "path": "/app/api/actions/complete-user-task",
-              "successLabel": "Decision recorded",
-              "body": {
-                "userTaskKey": "{{row.user_task_key}}",
-                "variables": "{{form}}"
-              }
-            }
-          }
-        },
-        "refreshMs": 5000
-      }
-    },
-    {
-      "type": "dataGrid",
-      "id": "trial-merges",
-      "props": {
-        "title": "Trial-merge decisions",
-        "data": {
-          "kind": "datasource",
-          "source": "app",
-          "table": "user_tasks",
-          "filter": [
-            {
-              "field": "element_id",
-              "in": [
-                "trial-merge-decision"
-              ]
-            }
-          ],
-          "orderBy": {
-            "field": "updated_at",
-            "dir": "desc"
-          }
-        },
-        "columns": [
-          {
-            "field": "subject_title",
-            "template": "{{subject_title}}",
-            "header": "Item",
-            "subtitleField": "subject_key",
-            "truncate": true,
-            "linkField": "subject_url"
-          },
-          {
-            "field": "question",
-            "header": "Trial merge"
-          },
-          {
-            "field": "subject_url",
-            "header": "Issue"
-          },
-          {
-            "field": "process_key",
-            "header": "Process",
-            "link": {
-              "kind": "processExplorer",
-              "keyField": "process_key"
-            }
-          },
-          {
-            "field": "updated_at",
-            "header": "Updated",
-            "format": "datetime"
-          }
-        ],
-        "rowKey": "user_task_key",
-        "detail": {
-          "linkField": "subject_url",
-          "fields": [
-            {
-              "field": "question",
-              "label": "Trial merge"
-            }
-          ],
-          "form": {
-            "showWhenField": "user_task_key",
-            "title": "Trial-merge decision",
-            "promptField": "question",
-            "submitLabel": "Submit decision",
-            "fields": [
-              {
-                "inputKey": "action",
-                "type": "select",
-                "inputLabel": "Action",
-                "options": [
-                  { "value": "proceed", "label": "Proceed — accept the red trial merge and continue" },
-                  { "value": "rebase", "label": "Rebase — re-run the trial merge" },
-                  { "value": "abandon", "label": "Abandon — stop and finalize the plan" }
-                ]
-              },
-              {
-                "inputKey": "notes",
-                "type": "textarea",
-                "inputLabel": "Notes"
-              }
-            ],
-            "action": {
-              "path": "/app/api/actions/complete-user-task",
-              "successLabel": "Decision recorded",
-              "body": {
-                "userTaskKey": "{{row.user_task_key}}",
-                "variables": "{{form}}"
-              }
-            }
-          }
-        },
-        "refreshMs": 5000
-      }
-    },
-    {
-      "type": "dataGrid",
-      "id": "pr-reviews",
-      "props": {
-        "title": "PR escalations",
-        "data": {
-          "kind": "datasource",
-          "source": "app",
-          "table": "user_tasks",
-          "filter": [
-            {
-              "field": "element_id",
-              "in": [
-                "wait-answer",
-                "wait-merge-answer"
-              ]
-            }
-          ],
-          "orderBy": {
-            "field": "updated_at",
-            "dir": "desc"
-          }
-        },
-        "columns": [
-          {
-            "field": "subject_title",
-            "template": "{{subject_title}}",
-            "header": "Item",
-            "subtitleField": "subject_key",
-            "truncate": true,
-            "linkField": "subject_url"
-          },
-          {
-            "field": "kind_label",
-            "header": "Stage"
-          },
-          {
-            "field": "subject_url",
-            "header": "PR link"
-          },
-          {
-            "field": "process_key",
-            "header": "Process",
-            "link": {
-              "kind": "processExplorer",
-              "keyField": "process_key"
-            }
-          },
-          {
-            "field": "updated_at",
-            "header": "Updated",
-            "format": "datetime"
-          }
-        ],
-        "rowKey": "user_task_key",
-        "detail": {
-          "linkField": "subject_url",
-          "fields": [
-            {
-              "field": "question",
-              "label": "Escalation question"
-            }
-          ],
-          "form": {
-            "showWhenField": "user_task_key",
-            "title": "Answer escalation",
-            "promptField": "question",
-            "inputKey": "answer",
-            "inputLabel": "Your answer",
-            "submitLabel": "Answer & resume",
-            "action": {
-              "path": "/app/api/actions/complete-user-task",
-              "successLabel": "Answered — the loop will resume",
-              "body": {
-                "userTaskKey": "{{row.user_task_key}}",
-                "variables": {
-                  "answer": "{{form.answer}}"
-                }
-              }
-            }
-          }
-        },
-        "refreshMs": 5000
-      }
-    },
-    {
-      "type": "dataGrid",
-      "id": "blocked-runs",
-      "props": {
-        "title": "Blocked feature runs",
-        "data": {
-          "kind": "datasource",
-          "source": "app",
-          "table": "user_tasks",
-          "filter": [
-            {
-              "field": "element_id",
-              "in": [
-                "feature-blocked"
-              ]
-            }
-          ],
-          "orderBy": {
-            "field": "updated_at",
-            "dir": "desc"
-          }
-        },
-        "columns": [
-          {
-            "field": "subject_title",
-            "template": "{{subject_title}}",
-            "header": "Item",
-            "subtitleField": "subject_key",
-            "truncate": true,
-            "linkField": "subject_url"
-          },
-          {
-            "field": "question",
-            "header": "Disposition"
-          },
-          {
-            "field": "subject_url",
-            "header": "Issue"
-          },
-          {
-            "field": "process_key",
-            "header": "Process",
-            "link": {
-              "kind": "processExplorer",
-              "keyField": "process_key"
-            }
-          },
-          {
-            "field": "updated_at",
-            "header": "Updated",
-            "format": "datetime"
-          }
-        ],
-        "rowKey": "user_task_key",
-        "detail": {
-          "linkField": "subject_url",
-          "fields": [
-            {
-              "field": "question",
-              "label": "Disposition"
-            }
-          ],
-          "form": {
-            "showWhenField": "user_task_key",
-            "title": "Acknowledge blocked run",
-            "promptField": "question",
-            "inputKey": "note",
-            "inputLabel": "Disposition note (what you did / why)",
-            "submitLabel": "Acknowledge & close",
-            "action": {
-              "path": "/app/api/actions/complete-user-task",
-              "successLabel": "Acknowledged — the run will close",
-              "body": {
-                "userTaskKey": "{{row.user_task_key}}",
-                "variables": {
-                  "note": "{{form.note}}"
-                }
-              }
-            }
-          }
-        },
-        "refreshMs": 5000
-      }
-    },
-    {
-      "type": "dataGrid",
-      "id": "conformance-reviews",
-      "props": {
-        "title": "Conformance reviews",
-        "data": {
-          "kind": "datasource",
-          "source": "app",
-          "table": "user_tasks",
-          "filter": [
-            {
-              "field": "element_id",
-              "in": [
-                "conformance-escalation"
-              ]
-            }
-          ],
-          "orderBy": {
-            "field": "updated_at",
-            "dir": "desc"
-          }
-        },
-        "columns": [
-          {
-            "field": "subject_title",
-            "template": "{{subject_title}}",
-            "header": "Epic",
-            "subtitleField": "subject_key",
-            "truncate": true,
-            "linkField": "subject_url"
-          },
-          {
-            "field": "question",
-            "header": "Findings"
-          },
-          {
-            "field": "subject_url",
-            "header": "Issue"
-          },
-          {
-            "field": "process_key",
-            "header": "Process",
-            "link": {
-              "kind": "processExplorer",
-              "keyField": "process_key"
-            }
-          },
-          {
-            "field": "updated_at",
-            "header": "Updated",
-            "format": "datetime"
-          }
-        ],
-        "rowKey": "user_task_key",
-        "detail": {
-          "linkField": "subject_url",
-          "fields": [
-            {
-              "field": "question",
-              "label": "Findings"
-            }
-          ],
-          "form": {
-            "showWhenField": "user_task_key",
-            "title": "Acknowledge conformance review",
-            "promptField": "question",
-            "inputKey": "note",
-            "inputLabel": "Disposition note (what you decided / follow-up)",
-            "submitLabel": "Acknowledge & close",
-            "action": {
-              "path": "/app/api/actions/complete-user-task",
-              "successLabel": "Acknowledged — the review will close",
-              "body": {
-                "userTaskKey": "{{row.user_task_key}}",
-                "variables": {
-                  "note": "{{form.note}}"
-                }
-              }
-            }
+          "engineForm": {
+            "formKeyField": "form_key",
+            "userTaskKeyField": "user_task_key"
           }
         },
         "refreshMs": 5000

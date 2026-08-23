@@ -10,6 +10,7 @@
 import { readFileSync } from "node:fs";
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { ABANDONED_STATUS, abandonUrl, mintAbandonToken, renderAbandonBrief } from "./abandon.ts";
+import { escalationFormId } from "./agentCompletion.ts";
 import { agentSlaTimeout } from "./agentSla.ts";
 import {
   CAPS_RESOLVED_MESSAGE,
@@ -2186,6 +2187,10 @@ interface UserTaskSearchItem {
   elementId?: string;
   processInstanceKey?: string | number;
   state?: string;
+  /** The engine's resolution of the task's `.form` linkage (its `formId="X"`) to the deployed form's
+   *  key, attached to the open task. Denormalised onto the row so the collapsed Tasks grid can render
+   *  the deployed form per row (issue #461). The wire may send a JSON number or string. */
+  formKey?: string | number;
 }
 
 /** One discovered open escalation user task, normalised for projection. */
@@ -2193,6 +2198,9 @@ interface OpenUserTask {
   userTaskKey: string;
   elementId: string;
   processInstanceKey: string;
+  /** The engine-reported `formKey`, or "" when the search omitted it (the poller then falls back to the
+   *  kind's static `.form` linkage). */
+  formKey: string;
 }
 
 /** Engine-first sweep (issue #358): read EVERY open (`CREATED`) native user task from the engine over
@@ -2234,7 +2242,7 @@ async function sweepOpenEscalationTasks(base: string, headers: Record<string, st
       const userTaskKey = it.userTaskKey == null ? "" : String(it.userTaskKey);
       if (!userTaskKey || seen.has(userTaskKey)) continue;
       seen.add(userTaskKey);
-      out.push({ userTaskKey, elementId, processInstanceKey: it.processInstanceKey == null ? "" : String(it.processInstanceKey) });
+      out.push({ userTaskKey, elementId, processInstanceKey: it.processInstanceKey == null ? "" : String(it.processInstanceKey), formKey: it.formKey == null ? "" : String(it.formKey) });
     }
     if (items.length < limit) break; // last page
     from += items.length;
@@ -2379,7 +2387,7 @@ export async function pollUserTasks(
   // element + the instance it parks on) into its desired-row context, enriching from its subject row
   // when the instance is tracked or a per-kind fallback when it is orphaned. Returns `null` for a
   // non-escalation element (the leak guard) so an arbitrary internal user task can never reach the inbox.
-  const contextFor = async (elementId: string, userTaskKey: string, processInstanceKey: string): Promise<UserTaskContext | null> => {
+  const contextFor = async (elementId: string, userTaskKey: string, processInstanceKey: string, formKey: string): Promise<UserTaskContext | null> => {
     if (userTaskKindLabel(elementId) === undefined) return null;
     const subj = subjectByInstance.get(processInstanceKey);
     // Orphaned-task fallback: the kind implies its aggregate even when no subject row references the
@@ -2387,6 +2395,11 @@ export async function pollUserTasks(
     // derived from the predicate rather than the static per-element table.
     const subjectType = subj?.type ?? DEFAULT_SUBJECT_TYPE[elementId] ?? (isDeliveryHumanElement(elementId) ? "delivery" : "plan");
     const subjectKey = subj?.key ?? processInstanceKey;
+    // Denormalise the engine `formKey` so the collapsed Tasks grid renders the deployed `.form` per row
+    // (issue #461). Prefer the engine-resolved key the search reported; fall back to the fixed-form kind's
+    // static `.form` linkage (`escalationFormId`) when the search omitted it — the delivery-graph `human`
+    // node has no static form (varies per node), so it relies wholly on the engine-reported key.
+    const resolvedFormKey = formKey.trim() || escalationFormId(elementId) || null;
     let question: string | null = null;
     switch (elementId) {
       case FEATURE_ESCALATION_ELEMENT:
@@ -2412,17 +2425,17 @@ export async function pollUserTasks(
         question = conformanceEscalationQuestion(subj ? { summary: subj.conformanceSummary } : undefined);
         break;
     }
-    return { userTaskKey, elementId, subjectType, subjectKey, subjectTitle: subj?.title ?? null, subjectUrl: subj?.url ?? null, question, processKey: processInstanceKey };
+    return { userTaskKey, elementId, subjectType, subjectKey, subjectTitle: subj?.title ?? null, subjectUrl: subj?.url ?? null, question, processKey: processInstanceKey, formKey: resolvedFormKey };
   };
 
   // Desired set, deduped by completable key (a task is open at most once; guard a page overlap / a
   // subject seen under two statuses mid-pass).
   const desiredByKey = new Map<string, UserTaskRow>();
-  const project = async (elementId: string | undefined, userTaskKey: string, processInstanceKey: string) => {
+  const project = async (elementId: string | undefined, userTaskKey: string, processInstanceKey: string, formKey: string) => {
     if (!elementId) return;
     const rowKey = userTaskKey.trim();
     if (!rowKey || desiredByKey.has(rowKey)) return;
-    const ctx = await contextFor(elementId, userTaskKey, processInstanceKey);
+    const ctx = await contextFor(elementId, userTaskKey, processInstanceKey, formKey);
     if (!ctx) return;
     const row = buildUserTaskRow(ctx, at);
     if (row) desiredByKey.set(rowKey, row);
@@ -2433,7 +2446,7 @@ export async function pollUserTasks(
     const headers: Record<string, string> = { "content-type": "application/json" };
     if (engineRest.token) headers.authorization = `Bearer ${engineRest.token}`;
     for (const t of await sweepOpenEscalationTasks(base, headers)) {
-      await project(t.elementId, t.userTaskKey, t.processInstanceKey);
+      await project(t.elementId, t.userTaskKey, t.processInstanceKey, t.formKey);
     }
   } else {
     // Reduced-capability fallback (no raw-REST surface): typed-seam per-active-subject scan, tracked-only.
@@ -2441,14 +2454,14 @@ export async function pollUserTasks(
     const scanInstance = async (processKey: string | null | undefined) => {
       if (!processKey || seen.has(processKey)) return;
       seen.add(processKey);
-      let tasks: { userTaskKey: string; elementId?: string }[];
+      let tasks: { userTaskKey: string; elementId?: string; formKey?: string }[];
       try {
         tasks = await engine.openUserTasks({ processInstanceKey: processKey });
       } catch (err) {
         console.error(`[poller] user tasks (${processKey}): ${err}`);
         return;
       }
-      for (const t of tasks) await project(t.elementId, t.userTaskKey, processKey);
+      for (const t of tasks) await project(t.elementId, t.userTaskKey, processKey, t.formKey ?? "");
     };
     for (const status of FEATURE_ACTIVE_STATUSES) for (const run of await featureRuns(data).find({ status })) await scanInstance(run.process_key);
     for (const status of PLAN_ACTIVE_STATUSES) for (const plan of await plans(data).find({ status })) await scanInstance(plan.process_key);
