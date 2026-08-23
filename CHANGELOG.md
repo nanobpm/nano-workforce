@@ -1,3 +1,9 @@
+## [0.129.1](https://github.com/nanobpm/nano-workforce/compare/v0.129.0...v0.129.1) (2026-08-23)
+
+### Code Refactoring
+
+* **merge-loop:** sub-process topology + behavioural guards ([#466](https://github.com/nanobpm/nano-workforce/issues/466)) ([#490](https://github.com/nanobpm/nano-workforce/issues/490)) ([ac6f130](https://github.com/nanobpm/nano-workforce/commit/ac6f130d19e545c4d3da23d738c30c1cb6f2b981)), closes [Magikcraft/nano-bpm#971](https://github.com/Magikcraft/nano-bpm/issues/971)
+
 # [0.129.0](https://github.com/nanobpm/nano-workforce/compare/v0.128.0...v0.129.0) (2026-08-23)
 
 
