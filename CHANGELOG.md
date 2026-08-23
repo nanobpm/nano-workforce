@@ -1,3 +1,10 @@
+# [0.126.0](https://github.com/nanobpm/nano-workforce/compare/v0.125.0...v0.126.0) (2026-08-23)
+
+
+### Features
+
+* **delivery-graphs:** preview a staged proposal's generated DI, zero deploy ([#469](https://github.com/nanobpm/nano-workforce/issues/469)) ([c275d72](https://github.com/nanobpm/nano-workforce/commit/c275d7279d8a46d1ca8ce82e366016ca7ef0a22f)), closes [Magikcraft/nano-bpm#972](https://github.com/Magikcraft/nano-bpm/issues/972)
+
 # [0.125.0](https://github.com/nanobpm/nano-workforce/compare/v0.124.0...v0.125.0) (2026-08-23)
 
 
