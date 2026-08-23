@@ -72,12 +72,13 @@ export function renderWorkerDetail(
   if (view.currentJob === undefined) {
     current.appendChild(el(doc, "div", "cockpit-worker-current-empty", "No active job."));
   } else {
-    const button = el(doc, "button", "cockpit-worker-current-job", view.currentJob.label);
+    const currentJob = view.currentJob;
+    const button = el(doc, "button", "cockpit-worker-current-job", currentJob.label);
     button.setAttribute("type", "button");
-    button.setAttribute("data-job-key", view.currentJob.jobKey);
-    button.setAttribute("data-stream", view.currentJob.stream);
+    button.setAttribute("data-job-key", currentJob.jobKey);
+    button.setAttribute("data-stream", currentJob.stream);
     const onDrill = options.onDrill;
-    if (onDrill !== undefined) button.addEventListener("click", () => onDrill(view.currentJob?.stream ?? ""));
+    if (onDrill !== undefined) button.addEventListener("click", () => onDrill(currentJob.stream));
     current.appendChild(button);
   }
   root.appendChild(current);
