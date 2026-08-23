@@ -51,7 +51,17 @@ const MIGRATIONS_DIR = join(REPO_ROOT, "db", "migrations");
 // below — renumbering a merged migration is itself forbidden (the rename would re-run it and abort
 // boot, issue #357). The two create disjoint tables (`worker_durable_resume`, `plan_conformance`), so
 // apply order is irrelevant. Grandfather 052; any NEW duplicate prefix still fails the build.
-const GRANDFATHERED_DUPES: ReadonlySet<string> = new Set(["004", "005", "006", "007", "049", "052"]);
+//
+// 075 is the same merge-skew story across two PRs that never saw each other (issue #470): #458 landed
+// `075_feature_read_model_attention_from_user_tasks` and #460/#463 landed `075_delivery_graph_proposals`,
+// each the branch-local "next" prefix, colliding silently only once both were on main (releases then
+// stalled behind the red gate). Both are already applied forward-only and immutable (#357) — renumbering
+// a merged migration would re-run it and abort boot, and the immutability check would itself flag the
+// rename. They create DISJOINT objects (`075_delivery_graph_proposals` adds the `delivery_graph_proposals`
+// table + its indexes; `075_feature_read_model_…` redefines the `feature_read_model` VIEW and adds one
+// `user_tasks` index), so their relative apply order is irrelevant. Grandfather 075; any NEW duplicate
+// prefix still fails the build (the next migration is 076).
+const GRANDFATHERED_DUPES: ReadonlySet<string> = new Set(["004", "005", "006", "007", "049", "052", "075"]);
 
 const PREFIX = /^(\d{3})_[^/]*\.sql$/;
 
