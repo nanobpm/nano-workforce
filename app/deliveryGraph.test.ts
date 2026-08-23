@@ -549,3 +549,43 @@ test("S7 exclusive-merge-parity: a parallel AND-join fed by an exclusive-split b
   });
   hasCode(errors, "exclusive-merge-parity");
 });
+
+test("S7 default:false is not a default — a `default: false` sibling of a guard is a plain edge and MIXES the fan-out", () => {
+  // `default` is a flag: only `true` marks the else-branch. `default: false` must NOT be treated as
+  // present (else it silently escapes both the guarded and the plain classification and bypasses the
+  // no-mixing rule). Here it must fall through to `plain` and trip mixed-fan-out.
+  const errors = validateDeliveryGraph({
+    nodes: [
+      { id: "bump", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "result", type: "string" }] },
+      { id: "a", kind: "agent", agent: { jobType: "j" } },
+      { id: "b", kind: "agent", agent: { jobType: "j" } },
+    ],
+    edges: [
+      { from: "bump", to: "a", when: "bump.result", equals: "x" },
+      { from: "bump", to: "b", default: false },
+    ],
+  });
+  hasCode(errors, "mixed-fan-out");
+});
+
+test("S7 exclusive-merge-parity: terminal nodes that MIX a conditional tail with an always-firing tail are rejected (the End-sink deadlock/double-fire shape)", () => {
+  // `split` fans an exhaustive XOR to two leaves (`cond`/`other` — exactly one fires); `indep` always
+  // fires. All three are graph leaves, so the End sink joins them. A parallel join there deadlocks on
+  // the untaken branch; an exclusive merge double-fires when both `indep` and a branch arrive. The
+  // validator must reject the mix so the compiler's End-gateway choice is sound.
+  const errors = validateDeliveryGraph({
+    nodes: [
+      { id: "split", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "result", type: "string" }] },
+      { id: "cond", kind: "agent", agent: { jobType: "j" } },
+      { id: "other", kind: "agent", agent: { jobType: "j" } },
+      { id: "feed", kind: "agent", agent: { jobType: "j" } },
+      { id: "indep", kind: "agent", agent: { jobType: "j" } },
+    ],
+    edges: [
+      { from: "split", to: "cond", when: "split.result", equals: "a" },
+      { from: "split", to: "other", default: true },
+      { from: "feed", to: "indep" },
+    ],
+  });
+  hasCode(errors, "exclusive-merge-parity");
+});

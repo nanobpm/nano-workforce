@@ -295,7 +295,7 @@ export async function compileDeliveryGraph(
       if (fact !== undefined) resolved = { ...resolved, fromFact: fact };
       if (edge.when !== undefined) resolved = { ...resolved, when: edge.when };
       if (edge.equals !== undefined) resolved = { ...resolved, equals: edge.equals };
-      if (edge.default !== undefined) resolved = { ...resolved, default: edge.default };
+      if (edge.default === true) resolved = { ...resolved, default: true };
       return resolved;
     })
     .sort(

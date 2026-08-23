@@ -387,7 +387,6 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
     equals?: unknown;
     hasWhen: boolean;
     hasEquals: boolean;
-    hasDefault: boolean;
     isDefault: boolean;
   }[] = [];
   edges.forEach((rawEdge, i) => {
@@ -470,7 +469,6 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
         equals: rawEdge.equals,
         hasWhen: rawEdge.when !== undefined,
         hasEquals: rawEdge.equals !== undefined,
-        hasDefault: rawEdge.default !== undefined,
         isDefault: rawEdge.default === true,
       });
     }
@@ -515,7 +513,6 @@ function validateGuardedEdges(
     equals?: unknown;
     hasWhen: boolean;
     hasEquals: boolean;
-    hasDefault: boolean;
     isDefault: boolean;
   }[],
   nodeFactTypes: ReadonlyMap<string, ReadonlyMap<string, DeliveryFactType>>,
@@ -529,7 +526,7 @@ function validateGuardedEdges(
   const guardFactTypeByIndex = new Map<number, DeliveryGuardScalarType>();
   for (const e of guardEdges) {
     const path = `edges[${e.index}]`;
-    if (e.hasDefault && (e.hasWhen || e.hasEquals)) {
+    if (e.isDefault && (e.hasWhen || e.hasEquals)) {
       errors.push({
         path,
         message: "a `default` edge cannot also carry `when`/`equals` — a default is the unguarded else-branch",
@@ -611,9 +608,9 @@ function validateGuardedEdges(
   }
   const splitNodes = new Set<string>();
   for (const [node, outs] of outByNode) {
-    const guarded = outs.filter((e) => e.hasWhen && !e.hasDefault);
+    const guarded = outs.filter((e) => e.hasWhen && !e.isDefault);
     const defaults = outs.filter((e) => e.isDefault);
-    const plain = outs.filter((e) => !e.hasWhen && !e.hasDefault);
+    const plain = outs.filter((e) => !e.hasWhen && !e.isDefault);
     const isSplit = guarded.length > 0 || defaults.length > 0;
     if (!isSplit) continue;
     splitNodes.add(node);
@@ -705,6 +702,27 @@ function validateGuardedEdges(
         message:
           `node "${node}" merges conditional branches that do not re-converge from a single exclusive ` +
           "split — its incoming branches are not provably mutually exclusive, so it cannot merge safely",
+        code: "exclusive-merge-parity",
+      });
+    }
+  }
+
+  // Same parity, now for the implicit End sink: the compiler joins every LEAF (a node with no
+  // out-edge) at the process End. A leaf is conditional iff it may not fire on a given run
+  // (`topo.conditional`). A leaf set that MIXES a conditional tail with an always-firing one is the
+  // exact deadlock/double-fire shape the End gateway cannot wire — a parallel AND-join waits forever
+  // for the untaken branch, an exclusive merge double-fires when both arrive — so reject it here (this
+  // is the invariant the compiler's End-gateway selection relies on).
+  const leaves = [...allNodes].filter((n) => (forwardAdj.get(n)?.length ?? 0) === 0);
+  if (leaves.length > 1) {
+    const conditionalLeaves = leaves.filter((n) => topo.conditional.has(n));
+    if (conditionalLeaves.length > 0 && conditionalLeaves.length < leaves.length) {
+      errors.push({
+        path: "edges",
+        message:
+          "the graph's terminal nodes mix a conditional (exclusive-split) tail with an always-firing " +
+          "tail — the End sink would deadlock as a parallel join (the untaken branch never arrives) or " +
+          "double-fire as an exclusive merge. Route the conditional tails so they re-converge before the end",
         code: "exclusive-merge-parity",
       });
     }

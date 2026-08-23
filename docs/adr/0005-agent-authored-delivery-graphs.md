@@ -239,7 +239,9 @@ resume cannot double-fire.
 > with `default` (`guard-default-conflict`); a split must not **mix** guarded and plain out-edges
 > (`mixed-fan-out`) nor declare **two** defaults (`multiple-defaults`), must be **exhaustive** — a
 > `default`, unless a single boolean fact is guarded on both `true` and `false` (`non-exhaustive-split`)
-> — and a plain (parallel) AND-join may not be fed by an exclusive-split branch (`exclusive-merge-parity`).
+> — and a plain (parallel) AND-join may not be fed by an exclusive-split branch (`exclusive-merge-parity`),
+> including the implicit **End sink**: the terminal nodes may not mix a conditional (exclusive-split)
+> tail with an always-firing one, which would deadlock the End join or double-fire its exclusive merge.
 > Determinism is preserved: gateway ids are positional over id-sorted nodes, so a graph with no guards
 > compiles byte-for-byte as before.
 
