@@ -370,6 +370,24 @@ agents:
 - **Never `git push --force` on `main`;** use `--force-with-lease` on feature
   branches.
 
+### Merging to `main` (merge queue)
+
+`main` is protected by an **active ruleset** with a **GitHub merge queue**. You
+do not merge a PR directly — you **add it to the queue** (UI "Merge when ready",
+or the product merge loop's queued-merge path). The queue then builds the
+**prospective merged commit** (`merge_group`) and only lands it if the required
+checks pass **on that speculative tree**:
+
+- `typecheck + test (Node)`, `whole-repo invariants`, `Conventional PR title`.
+
+`whole-repo invariants` (the merge-skew guard, #366) runs only on the
+`merge_group` commit and on `push:main`, never on a plain PR — so a
+green-in-isolation PR that would collide once merged (a duplicate migration
+prefix, a layout/artifact drift) is **blocked at merge time**, not after it has
+already reddened `main`. Grouping is `ALLGREEN` (SQUASH merge), so any red entry
+invalidates the whole batch. `Conventional PR title` passes through on
+`merge_group` (the title was validated when the PR entered the queue).
+
 ## Distributed fleet: NANO_WORKFORCE_BASE_URL
 
 The abandon and blackboard hooks are how a **distributed worker fleet** calls back
