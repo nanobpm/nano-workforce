@@ -46,6 +46,21 @@ test("defaults absent family/host to a stable dash and counts + sorts jobKeys", 
   assert.equal(w?.jobs, 2);
 });
 
+test("marks a worker drillable iff it currently holds a job (an idle worker has no live stream)", () => {
+  const view = supplyView(
+    report({
+      workers: [
+        { instance: "busy", identity: "t", stream: "job:9", jobKeys: ["9"], live: true, staleMs: 0 },
+        { instance: "idle", identity: "t", stream: "idle", jobKeys: [], live: true, staleMs: 0 },
+      ],
+    }),
+  );
+  const busy = view.workers.find((w) => w.instance === "busy");
+  const idle = view.workers.find((w) => w.instance === "idle");
+  assert.equal(busy?.drillable, true, "a worker with a current job has a live terminal to drill");
+  assert.equal(idle?.drillable, false, "an idle worker's instance stream has no producer — not drillable");
+});
+
 test("sorts leaves by token and workers by instance, with per-leaf live counts", () => {
   const view = supplyView(
     report({

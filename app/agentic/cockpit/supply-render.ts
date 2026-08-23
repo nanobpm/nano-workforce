@@ -58,20 +58,27 @@ function workerRow(doc: DocumentLike, worker: SupplyWorkerView, options: RenderS
   button.setAttribute("type", "button");
   button.setAttribute("data-instance", worker.instance);
   const onOpenWorker = options.onOpenWorker;
+  const onDrill = options.onDrill;
   if (onOpenWorker !== undefined) {
     button.addEventListener("click", () => onOpenWorker(worker.instance));
   }
   nameCell.appendChild(button);
-  const drill = el(doc, "button", "cockpit-worker-drill", "terminal");
-  drill.setAttribute("type", "button");
-  drill.setAttribute("data-instance", worker.instance);
-  drill.setAttribute("data-stream", worker.stream);
-  button.setAttribute("data-stream", worker.stream);
-  const onDrill = options.onDrill;
-  if (onDrill !== undefined) {
-    drill.addEventListener("click", () => onDrill(worker.stream));
+  // The inline live-terminal drill — ONLY for a worker that currently holds a job. An idle worker's
+  // `stream` is its bare instance id, which no producer writes to, so drilling it would open a
+  // permanently blank "live" terminal (the H6 blank-terminal defect). Suppress the affordance
+  // entirely when there is nothing live to stream; the operator can still open the worker's detail
+  // page (and its captured past sessions) via the name button.
+  if (worker.drillable) {
+    const drill = el(doc, "button", "cockpit-worker-drill", "terminal");
+    drill.setAttribute("type", "button");
+    drill.setAttribute("data-instance", worker.instance);
+    drill.setAttribute("data-stream", worker.stream);
+    button.setAttribute("data-stream", worker.stream);
+    if (onDrill !== undefined) {
+      drill.addEventListener("click", () => onDrill(worker.stream));
+    }
+    nameCell.appendChild(drill);
   }
-  nameCell.appendChild(drill);
   row.appendChild(nameCell);
 
   row.appendChild(el(doc, "td", "cockpit-td cockpit-supply-family", worker.family));

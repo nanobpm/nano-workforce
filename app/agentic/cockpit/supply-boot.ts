@@ -134,6 +134,7 @@ class SupplyCockpit implements SupplyCockpitHandle {
   readonly #pastRegion: ElementLike | undefined;
   readonly #terminalHost: ElementLike;
   readonly #terminalTitle: ElementLike;
+  readonly #terminalNote: ElementLike;
   readonly #terminalPanel: ElementLike;
   readonly #refreshMs: number;
   readonly #pastFetchTimeoutMs: number;
@@ -246,6 +247,14 @@ class SupplyCockpit implements SupplyCockpitHandle {
     this.#terminalHost.className = "cockpit-terminal-host";
     this.#terminalHost.setAttribute("data-terminal", "host");
     this.#terminalPanel.appendChild(this.#terminalHost);
+    // A status note under the terminal, shown while a LIVE drill has connected but no output has
+    // arrived yet (a quiet job between frames): without it the panel is an indistinguishable blank
+    // black rectangle, so the operator can't tell "connected, waiting" from "broken". Cleared the
+    // instant the first frame is written, and on every mode change.
+    this.#terminalNote = env.doc.createElement("p");
+    this.#terminalNote.className = "cockpit-terminal-note";
+    this.#terminalNote.setAttribute("data-terminal-note", "none");
+    this.#terminalPanel.appendChild(this.#terminalNote);
     shell.appendChild(this.#listRegion);
     if (this.#pastRegion !== undefined) shell.appendChild(this.#pastRegion);
     shell.appendChild(this.#terminalPanel);
@@ -272,6 +281,20 @@ class SupplyCockpit implements SupplyCockpitHandle {
     if (mode === "live") this.#terminalTitle.textContent = "Worker terminal — live";
     else if (mode === "replay") this.#terminalTitle.textContent = "Worker terminal — replay (past session)";
     else this.#terminalTitle.textContent = "Worker terminal";
+    // Any mode change replaces what's behind the panel, so the prior "waiting for output" note is
+    // stale — clear it. A live drill re-arms it (below) once its fresh terminal is mounted.
+    this.#setNote(undefined);
+  }
+
+  /** Show (or clear) the terminal status note — the "connected, waiting for output" affordance. */
+  #setNote(text: string | undefined): void {
+    if (text === undefined) {
+      this.#terminalNote.textContent = "";
+      this.#terminalNote.setAttribute("data-terminal-note", "none");
+      return;
+    }
+    this.#terminalNote.textContent = text;
+    this.#terminalNote.setAttribute("data-terminal-note", "waiting");
   }
 
   async refresh(): Promise<void> {
@@ -455,8 +478,24 @@ class SupplyCockpit implements SupplyCockpitHandle {
     try {
       // Fresh terminal for the newly selected worker.
       this.#terminalHost.replaceChildren();
-      const sink = this.#env.createTerminal(this.#terminalHost);
-      this.#terminal = sink;
+      const rawSink = this.#env.createTerminal(this.#terminalHost);
+      this.#terminal = rawSink;
+
+      // Wrap the sink so the FIRST byte of live output clears the "waiting for output" note. A drill
+      // that connects to a quiet stream (a job between frames) otherwise shows a blank panel with no
+      // signal it is working; the note stays until output flows, then vanishes on the first write.
+      // Only `write` is proxied — TerminalSession never disposes the sink (teardown goes through
+      // #terminal, which holds the raw sink), so the wrapper needs nothing else.
+      let cleared = false;
+      const sink: TerminalSink = {
+        write: (chunk) => {
+          if (!cleared) {
+            cleared = true;
+            this.#setNote(undefined);
+          }
+          rawSink.write(chunk);
+        },
+      };
 
       let session: TerminalSession | undefined;
       const client = new RelayChannelClient({
@@ -477,6 +516,9 @@ class SupplyCockpit implements SupplyCockpitHandle {
       client.open();
       this.#drill = { stream, client };
       this.#setMode("live", stream);
+      // Arm the "waiting for output" note (after #setMode, which clears it): shown until the first
+      // frame is written, so a connected-but-quiet stream reads as "waiting", not "broken".
+      this.#setNote("Connected — waiting for live output…");
     } catch (err) {
       // Building the new terminal failed AFTER the prior drill + terminal were already torn down
       // above. Leaving #mode/#shownStream at their prior value would keep the panel showing a stale

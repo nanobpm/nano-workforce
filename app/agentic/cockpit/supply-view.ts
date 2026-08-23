@@ -112,6 +112,14 @@ export interface SupplyWorkerView {
   /** The number of current jobs. */
   readonly jobs: number;
   /**
+   * Whether this worker has a LIVE terminal to drill into. True only while it holds a current job:
+   * a worker relays its terminal on the jobKey-scoped `job:<jobKey>` stream, and the supply endpoint
+   * repoints {@link stream} at it. An IDLE worker (no jobs) has its `stream` default back to the bare
+   * instance id — a stream NO producer ever writes to — so drilling it opens a permanently blank
+   * "live" terminal. The renderer suppresses the drill affordance when this is false.
+   */
+  readonly drillable: boolean;
+  /**
    * The engine context for each of this worker's current jobs (H6), sorted by jobKey — so the operator
    * sees which process instance / plan the terminal belongs to. Empty when nothing correlates.
    */
@@ -200,6 +208,7 @@ function workerView(
     host: worker.host ?? "—",
     jobKeys,
     jobs: jobKeys.length,
+    drillable: jobKeys.length > 0,
     correlations,
     liveness: liveness(worker, staleAfterMs),
     staleMs: worker.staleMs,

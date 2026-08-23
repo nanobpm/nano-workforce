@@ -173,6 +173,18 @@
   border-radius: 6px;
 }
 
+/* The "connected — waiting for output" status note under the terminal (blank-terminal defect fix):
+   hidden until a live drill is connected-but-quiet, so a blank panel reads as "waiting" not "broken". */
+.cockpit-terminal-note {
+  margin: 8px 0 0;
+  font-size: 0.85em;
+  color: #7c8794;
+  font-style: italic;
+}
+.cockpit-terminal-note[data-terminal-note="none"] {
+  display: none;
+}
+
 /* ── Past sessions (H3 read path / #222): the captured-session history + replay. ──────────────── */
 
 .cockpit-past-header {

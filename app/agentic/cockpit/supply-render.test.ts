@@ -64,6 +64,23 @@ test("worker name buttons open the worker detail route and the inline terminal d
   assert.deepEqual(drilled, ["wk-a"]);
 });
 
+test("suppresses the inline drill button for an IDLE worker (no current job → producerless stream)", () => {
+  const host = new FakeElement("body");
+  renderSupply(host, doc, supplyView(sample), { onDrill: () => {}, onOpenWorker: () => {} });
+
+  // wk-a holds job-1 → drillable; wk-b is idle (jobKeys: []) → no drill affordance.
+  const drills = host.byClass("cockpit-worker-drill");
+  assert.equal(drills.length, 1, "exactly one drill button — only for the worker with a live job");
+  assert.equal(drills[0]?.getAttribute("data-instance"), "wk-a");
+  // The idle worker is still openable via its name button; it just cannot be drilled.
+  const idleDrill = host.byData("worker", "wk-b")[0]?.byClass("cockpit-worker-drill") ?? [];
+  assert.equal(idleDrill.length, 0, "the idle worker row has no drill button");
+  assert.ok(
+    host.byClass("cockpit-worker").find((b) => b.getAttribute("data-instance") === "wk-b"),
+    "the idle worker still has its name button (detail page remains reachable)",
+  );
+});
+
 test("does NOT render any demand matrix, missing-agent reds, or diversity light", () => {
   const host = new FakeElement("body");
   renderSupply(host, doc, supplyView(sample));
