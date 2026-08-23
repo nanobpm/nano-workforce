@@ -21,7 +21,7 @@
 // plan-fanout-preflight, delivery-graph, inter-epic-dependency) so the deterministic-exec contract
 // can never drift between them.
 import assert from "node:assert/strict";
-import type { CommandResult, ProbeExec } from "../../app/readiness.ts";
+import { type CommandResult, type ProbeExec, redactString } from "../../app/readiness.ts";
 import { __setProbeExecForTest } from "../../workers/readiness-probe/worker.ts";
 
 export interface DeterministicProbeSeam {
@@ -40,13 +40,18 @@ export function deterministicProbeSeam(label: string): DeterministicProbeSeam {
     run(command: string): Promise<CommandResult> {
       const cmd = command.trim();
       if (cmd !== "true" && cmd !== "false") {
-        escapes.push(`command: ${cmd}`);
+        // A `command` target is an arbitrary shell snippet that can embed a secret, so — exactly as
+        // production `redactTarget` does (app/readiness.ts, ADR 0004 pinned decision 2) — record only
+        // a fixed placeholder, never the raw command, so an escape can't leak credentials into the
+        // teardown assertion at `restoreAndAssertHermetic()`.
+        escapes.push("command: <redacted>");
         return Promise.resolve({ code: 127, stdout: "", stderr: "" });
       }
       return Promise.resolve({ code: cmd === "true" ? 0 : 1, stdout: "", stderr: "" });
     },
     httpGet(url: string): Promise<never> {
-      escapes.push(`http: ${url}`);
+      // A probe URL can carry a token in its userinfo or query string; strip those before recording.
+      escapes.push(`http: ${redactString(url)}`);
       return Promise.reject(new Error(`${label}: unexpected real HTTP probe (command probes only)`));
     },
   };
