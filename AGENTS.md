@@ -357,12 +357,14 @@ agents:
   `test:`, imperative mood. Review-comment fix-ups are `chore:`, not `fix:`.
 - **PR titles must be Conventional too — they become the release trigger.** PRs
   land on `main` via **squash merge**, so the **PR title is the commit subject**
-  semantic-release analyses. Only `feat:` (minor) and `fix:`/`perf:` (patch) cut a
-  release; any other type — or a non-conventional title like `Redesign …` or
-  `Foundation: …` — lands on `main` and is **silently skipped** by the release job
+  semantic-release analyses. `feat:` cuts a **minor**; `fix:`, `perf:`,
+  `refactor:`, `build:`, `revert:`, and `docs:` cut a **patch** (see
+  `.releaserc.json` `releaseRules`); a `BREAKING CHANGE:` footer cuts a **major**.
+  Only `chore:`, `ci:`, `test:`, and `style:` are **no-release** — a PR titled
+  with one of those lands on `main` and is **silently skipped** by the release job
   (no version, no changelog, no deploy). A user-facing feature **must** be titled
   `feat:`. The `PR title lint` workflow (`.github/workflows/pr-title-lint.yml`)
-  enforces this; if a non-conventional title ever slips through, push one empty
+  enforces this; if a non-releasing title ever slips through, push one empty
   releasable commit (`git commit --allow-empty -s -m "feat(scope): …"`) to release
   the accumulated changes.
 - **Feature work in a worktree** off `origin/main`, one branch per change; open a
