@@ -7,6 +7,13 @@ name: PR title lint
 on:
   pull_request:
     types: [opened, edited, synchronize, reopened]
+  # Required status checks in the `main` merge queue must ALSO report on the
+  # queue's speculative `merge_group` commit, or the queue stalls forever waiting
+  # for a check that only ran on the PR. A `merge_group` commit has no PR title to
+  # lint (the title was already validated when the PR entered the queue), so the
+  # job runs with its only step skipped and reports success — the green the queue
+  # needs, without re-linting.
+  merge_group:
 
 permissions:
   pull-requests: read
@@ -16,7 +23,8 @@ jobs:
     name: Conventional PR title
     runs-on: ubuntu-latest
     steps:
-      - uses: amannn/action-semantic-pull-request@v5
+      - if: github.event_name == 'pull_request'
+        uses: amannn/action-semantic-pull-request@v5
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
