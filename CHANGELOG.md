@@ -1,3 +1,10 @@
+# [0.127.0](https://github.com/nanobpm/nano-workforce/compare/v0.126.0...v0.127.0) (2026-08-23)
+
+
+### Features
+
+* **tasks:** collapse Tasks page to one user_tasks list, complete via engine forms ([#461](https://github.com/nanobpm/nano-workforce/issues/461)) ([#484](https://github.com/nanobpm/nano-workforce/issues/484)) ([bbc0745](https://github.com/nanobpm/nano-workforce/commit/bbc0745ddc7b5f79cfee5096dfbd07cf29ea0f38)), closes [nano-ide#457](https://github.com/nano-ide/issues/457) [#445](https://github.com/nanobpm/nano-workforce/issues/445) [#458](https://github.com/nanobpm/nano-workforce/issues/458)
+
 # [0.126.0](https://github.com/nanobpm/nano-workforce/compare/v0.125.0...v0.126.0) (2026-08-23)
 
 
