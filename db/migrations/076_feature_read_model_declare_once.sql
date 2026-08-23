@@ -12,7 +12,7 @@
 --
 -- SEMANTICS ARE UNCHANGED from 075: `attention` still derives from ENGINE TRUTH — an OPEN native user
 -- task in the `user_tasks` inbox (a `feature-blocked` row => blocked glyph, a `feature-escalation` row
--- => `?`), NOT the drift-prone `status` variable (issue #422); `stage`/`stage_state`/`stage_skipped`/
+-- => `⚠`), NOT the drift-prone `status` variable (issue #422); `stage`/`stage_state`/`stage_skipped`/
 -- `list_bucket` are the same pure functions of the row. Only the AUTHORING moves to the framework
 -- primitive; the projected values are identical.
 --
