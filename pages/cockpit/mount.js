@@ -341,16 +341,20 @@ export function mountCockpit(host, opts = {}) {
     );
   }
   const doc = document;
-  // Base-relative defaults (no leading slash) so the browser resolves them against the document's
-  // baseURI. Standalone (served at the app root) this is the origin root; through the Studio console
-  // App-View the document base is the app-view path (`/console/app-view/<AppName>/`) while the iframe
-  // ORIGIN is the console (:8080) — an absolute (leading-slash) path would resolve against the console
-  // origin root (`:8080/app/api/agentic/supply` → 404) instead of the app-view base that proxies the
-  // API, leaving the cockpit empty (#279). A base-relative default lands on the right endpoint both
-  // ways, so the cockpit populates identically standalone and embedded even though the console never
-  // injects window.__NANO_APP_VIEW__.
-  const reportUrl = opts.reportUrl ?? "app/api/agentic/supply";
-  const transcriptsUrl = opts.transcriptsUrl ?? "app/api/agentic/transcripts";
+  // Default endpoints are anchored to THIS MODULE's URL (import.meta.url), NOT the document base.
+  // The API is served at the app root (`<appMount>/app/api/agentic/…`), but the cockpit shell
+  // (embed.html / standalone.html) — and therefore this mount.js — is served one directory deep at
+  // `<appMount>/cockpit/`. A document-base-relative default (`"app/api/agentic/supply"`) resolves
+  // against that `…/cockpit/` base to `…/cockpit/app/api/agentic/supply` → 404 on EVERY surface
+  // (standalone, local urban-SPA App-View embed, and the Studio console App-View, which serves the
+  // shell at `<app-view-base>/cockpit/…`), leaving the cockpit empty (#467). An absolute leading-slash
+  // path is worse still — through Studio it resolves against the console ORIGIN (:8080), not the
+  // app-view base that proxies the API (#279). mount.js is ALWAYS at `<appMount>/cockpit/mount.js`
+  // while the API is ALWAYS at `<appMount>/app/api/…`, so `../app/api/…` off import.meta.url lands on
+  // the right endpoint on all three surfaces regardless of the document base — the console never
+  // injects window.__NANO_APP_VIEW__, so this default is what actually runs there too.
+  const reportUrl = opts.reportUrl ?? new URL("../app/api/agentic/supply", import.meta.url).href;
+  const transcriptsUrl = opts.transcriptsUrl ?? new URL("../app/api/agentic/transcripts", import.meta.url).href;
   const hookSecret = opts.hookSecret;
   const relayUrl = opts.relayUrl ?? defaultRelayUrl(opts.relayToken, opts.relayCapability);
   const refreshMs = opts.refreshMs ?? DEFAULT_REFRESH_MS;
