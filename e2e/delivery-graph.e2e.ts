@@ -24,6 +24,7 @@ import { connectorDedupeKey, deliveryConnectorDispatches, dispatchConnector } fr
 import { readConnectorInput } from "../workers/delivery-connector/worker.ts";
 import { runDeliveryGraph } from "../app/deliveryRunner.ts";
 import type { DeliveryGraph } from "../nano-generated/api-io.d.ts";
+import { deterministicProbeSeam } from "./support/probe-exec.ts";
 
 const APP_ROOT = resolve(import.meta.dirname, "..");
 const GITHUB_ENV: Record<string, string> = { NANO_PR_GITHUB_TRANSPORT: "token", GITHUB_TOKEN: "" };
@@ -57,9 +58,15 @@ describe("delivery-graph runner — engine-native execution (S4)", () => {
     apps.push(app);
     return app;
   };
+  // The `wait` nodes drive `command: true`/`false` probes through the shared readiness-probe worker.
+  // Inject the deterministic exec so they resolve within the virtual clock's drain fixpoint instead
+  // of racing a real subprocess `settle()` cannot await (issue #450).
+  const probeSeam = deterministicProbeSeam("delivery-graph e2e");
+  before(() => probeSeam.install());
   after(async () => {
     for (const app of apps) await app.stop?.();
     for (const d of dirs) rmSync(d, { recursive: true, force: true });
+    probeSeam.restoreAndAssertHermetic();
   });
 
   test("runs end-to-end: agent, wait, human execute; edges gate; fan-in works; human fact late-binds into the connector", async () => {

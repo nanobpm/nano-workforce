@@ -23,6 +23,7 @@ import { after, before, describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { bootTestApp, type TestApp } from "@nanobpm/urban-testkit";
 import { admitGithubState, installAdmitGithub } from "./support/github-admit.ts";
+import { deterministicProbeSeam } from "./support/probe-exec.ts";
 
 const APP_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -89,8 +90,14 @@ async function boot(): Promise<{ app: TestApp; dbDir: string }> {
 
 describe("inter-epic capability gate — adversarial (plan-fanout.bpmn, issue #292 S5)", () => {
   let restoreGithub: (() => void) | undefined;
+  // The adversarial gates poll `command: false` (never-green) probes through the readiness-probe
+  // worker; inject the deterministic exec so each poll resolves inside the virtual clock's drain
+  // fixpoint (the escalation/timeout path is driven by engine-clock advancement, not a real
+  // subprocess) — issue #450.
+  const probeSeam = deterministicProbeSeam("inter-epic adversarial e2e");
 
   before(() => {
+    probeSeam.install();
     for (const [k, v] of Object.entries(GITHUB_ENV_OVERRIDES)) {
       savedEnv.set(k, process.env[k]);
       process.env[k] = v;
@@ -105,6 +112,7 @@ describe("inter-epic capability gate — adversarial (plan-fanout.bpmn, issue #2
       if (v === undefined) delete process.env[k];
       else process.env[k] = v;
     }
+    probeSeam.restoreAndAssertHermetic();
   });
 
   // ── S5 P1 — the gate HOLDS wave 0 ───────────────────────────────────────────────────────────────

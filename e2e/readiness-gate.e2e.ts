@@ -23,34 +23,7 @@ import { dirname, join, resolve } from "node:path";
 import { after, before, describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { bootTestApp, type TestApp } from "@nanobpm/urban-testkit";
-import type { CommandResult, ProbeExec } from "../app/readiness.ts";
-import { __setProbeExecForTest } from "../workers/readiness-probe/worker.ts";
-
-// A synchronous, in-memory ProbeExec so the probe resolves WITHIN the testkit's virtual-clock drain
-// fixpoint instead of spawning a REAL subprocess (real-time work `settle()` cannot deterministically
-// await — issue #450). It maps the hermetic shell builtins these scenarios use to a deterministic
-// `CommandResult` — `true` → exit 0 (green), `false` → exit 1 (never green) — mirroring the real
-// commands' semantics exactly, but with zero real time. Any OTHER command, or any HTTP call, is an
-// unintended probe escape: because `probeSingleShot` catches a thrown/rejected probe error and folds
-// it into a silent "not ready", an escape would otherwise be INVISIBLE and could let a bounded
-// not-ready scenario still pass, masking a regression (reviewer note). So we record every escape and
-// assert none occurred in teardown, failing the suite loudly instead of swallowing it.
-const unexpectedProbeIO: string[] = [];
-const deterministicExec: ProbeExec = {
-  run(command: string): Promise<CommandResult> {
-    const cmd = command.trim();
-    if (cmd !== "true" && cmd !== "false") {
-      unexpectedProbeIO.push(`command: ${cmd}`);
-      return Promise.resolve({ code: 127, stdout: "", stderr: "" });
-    }
-    const code = cmd === "true" ? 0 : 1;
-    return Promise.resolve({ code, stdout: "", stderr: "" });
-  },
-  httpGet(url: string): Promise<never> {
-    unexpectedProbeIO.push(`http: ${url}`);
-    return Promise.reject(new Error(`readiness-gate e2e: unexpected real HTTP probe (command probes only)`));
-  },
-};
+import { deterministicProbeSeam } from "./support/probe-exec.ts";
 
 const APP_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 let dbSeq = 0;
@@ -60,7 +33,7 @@ const GITHUB_ENV_OVERRIDES: Record<string, string> = {
   GITHUB_TOKEN: "",
 };
 const savedEnv = new Map<string, string | undefined>();
-let savedProbeExec: ProbeExec | undefined;
+const probeSeam = deterministicProbeSeam("readiness-gate e2e");
 
 interface TakenFlow {
   from: string;
@@ -94,7 +67,7 @@ describe("nano-workforce artifact-readiness wait-gate (readiness-gate.bpmn)", ()
     // clock (issue #450). Scenario-agnostic: it maps each scenario's command by string. Capture the
     // prior override and restore exactly that in teardown, so the seam is restored to its real prior
     // state rather than assuming production.
-    savedProbeExec = __setProbeExecForTest(deterministicExec);
+    probeSeam.install();
   });
 
   after(() => {
@@ -102,13 +75,11 @@ describe("nano-workforce artifact-readiness wait-gate (readiness-gate.bpmn)", ()
       if (v === undefined) delete process.env[k];
       else process.env[k] = v;
     }
-    // Restore the prior exec — the seam must never outlive this suite.
-    __setProbeExecForTest(savedProbeExec);
-    // Fail loudly if the probe ever escaped the hermetic `true`/`false` builtins (an unexpected
-    // command or any HTTP call). `probeSingleShot` folds a probe error into a silent "not ready", so
-    // without this assertion an escape would be invisible and could let a bounded not-ready scenario
-    // still pass, masking a regression.
-    assert.deepEqual(unexpectedProbeIO, [], `readiness-gate e2e saw unexpected probe I/O: ${unexpectedProbeIO.join(", ")}`);
+    // Restore the prior exec (the seam must never outlive this suite) and fail loudly if the probe
+    // ever escaped the hermetic `true`/`false` builtins — `probeSingleShot` folds a probe error into
+    // a silent "not ready", so without this an escape would be invisible and could let a bounded
+    // not-ready scenario still pass, masking a regression.
+    probeSeam.restoreAndAssertHermetic();
   });
 
   test("READY: a green probe publishes readiness-ready and the gate releases through wait-ready → gate-ready", async () => {

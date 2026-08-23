@@ -22,6 +22,7 @@ import { after, before, describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { bootTestApp, type TestApp } from "@nanobpm/urban-testkit";
 import { admitGithubState, installAdmitGithub } from "./support/github-admit.ts";
+import { deterministicProbeSeam } from "./support/probe-exec.ts";
 
 const APP_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -80,12 +81,17 @@ async function boot(): Promise<{ app: TestApp; dbDir: string }> {
 
 describe("plan-fanout inter-epic capability preflight (plan-fanout.bpmn, issue #292 S3)", () => {
   let restoreGithub: (() => void) | undefined;
+  const probeSeam = deterministicProbeSeam("plan-fanout-preflight e2e");
 
   before(() => {
     for (const [k, v] of Object.entries(GITHUB_ENV_OVERRIDES)) {
       savedEnv.set(k, process.env[k]);
       process.env[k] = v;
     }
+    // Inject the deterministic probe exec so the `command: true` probe resolves WITHIN the virtual
+    // clock's drain fixpoint instead of spawning a real subprocess whose wall-clock completion
+    // `settle()` cannot await — the flake behind this suite (issue #450).
+    probeSeam.install();
     // The fan-out head (`pr.ensure-base-branch`, ADR 0003) reads/creates the base ref via the token
     // transport, which would throw `no GitHub transport available` under an empty token. Pin the
     // shared hermetic admit-github stub (dummy token + fetch intercept) like the sibling plan-fanout
@@ -94,6 +100,7 @@ describe("plan-fanout inter-epic capability preflight (plan-fanout.bpmn, issue #
   });
   after(() => {
     restoreGithub?.();
+    probeSeam.restoreAndAssertHermetic();
     for (const [k, v] of savedEnv) {
       if (v === undefined) delete process.env[k];
       else process.env[k] = v;
