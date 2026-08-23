@@ -1548,6 +1548,44 @@ components:
           type: string
           maxLength: 255
           description: OPTIONAL idempotency key. A re-dispatch with the same key (or, when omitted, the same digest) does not double-launch. Blank/whitespace is treated as absent.
+    DeliveryGraphProposalBpmnRequest:
+      description: >-
+        Request the compiled BPMN of a staged delivery-graph proposal for read-only DI PREVIEW. Carries
+        only the proposal's content `digest`; the door recompiles the staged graph deterministically. No
+        deploy, no dispatch — this reads, it does not launch anything.
+      type: object
+      additionalProperties: false
+      required:
+        - digest
+      properties:
+        digest:
+          type: string
+          description: The staged proposal's content digest — the proposal whose compiled BPMN (with DI) to render.
+    DeliveryGraphProposalBpmnResult:
+      description: >-
+        The compiled BPMN of a staged proposal, for read-only DI preview. `ok` discriminates success; a
+        failure (unknown/expired/superseded/dispatched digest, corrupt or no-longer-compiling graph)
+        carries a human `error`.
+      type: object
+      additionalProperties: false
+      required:
+        - ok
+      properties:
+        ok:
+          type: boolean
+          description: True when the staged graph recompiled and its BPMN is returned; false otherwise.
+        error:
+          type: string
+          description: A human-readable failure message.
+        digest:
+          type: string
+          description: The proposal's content digest, echoed on success.
+        bpmn:
+          type: string
+          description: >-
+            The compiled BPMN 2.0 XML INCLUDING diagram interchange (`bpmndi:BPMNDiagram`), recompiled
+            deterministically from the staged graph — byte-identical to what a dispatch would deploy.
+            Rendered read-only in the host explorer's definition preview. Nothing is deployed.
     DeliveryGraphTextResult:
       description: >-
         The delivery-graph text-ingress outcome (issue #460) — a single shape covering the JSON-paste
@@ -2752,6 +2790,36 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/DeliveryGraphTextResult"
+  /actions/delivery-graph/proposal-bpmn:
+    post:
+      operationId: previewProposalBpmn
+      summary: Recompile a staged delivery-graph proposal's BPMN (with DI) for read-only preview — no deploy, no dispatch.
+      description: >-
+        Return the compiled BPMN 2.0 XML (including diagram interchange) of a staged delivery-graph
+        proposal, so its generated DI can be previewed BEFORE dispatch. The cockpit posts the proposal's
+        `digest`; this door loads that `staged` proposal and recompiles its stored graph deterministically
+        (the recompiled digest must equal the requested one), returning the BPMN. It NEVER deploys a
+        definition or launches an instance — it is a pure read. An unknown / expired / superseded /
+        already-dispatched digest, or a graph that no longer compiles, is a clean 400.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeliveryGraphProposalBpmnRequest"
+      responses:
+        "200":
+          description: The staged proposal recompiled; the body carries its BPMN (with DI).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeliveryGraphProposalBpmnResult"
+        "400":
+          description: The digest was missing, named no live staged proposal, or the stored graph failed to recompile.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeliveryGraphProposalBpmnResult"
   /actions/start/feature:
     post:
       operationId: startFeature

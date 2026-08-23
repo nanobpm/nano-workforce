@@ -21,6 +21,9 @@
 //     graph is STAGED as a proposal (an operator dispatches it from the Staged proposals grid below).
 
 const DEFAULT_PREVIEW_URL = "app/api/actions/delivery-graph/preview";
+// The read-only DI preview door: recompiles a staged proposal's BPMN (with diagram interchange) so its
+// generated diagram can be rendered in the host explorer BEFORE dispatch. No deploy, no dispatch.
+const DEFAULT_PROPOSAL_BPMN_URL = "app/api/actions/delivery-graph/proposal-bpmn";
 
 // A bounded timeout for every door request. Without it a hung preview endpoint leaves the fetch
 // promise pending forever, so the busy() lock never clears and the UI is stranded (buttons disabled,
@@ -143,10 +146,14 @@ function renderPreview(result) {
       <span class="chip">Side effects <b>${esc(result.sideEffectCount)}</b></span>
       <span class="chip">Digest <code>${esc(result.digest)}</code></span>
     </div>
+    <div class="actions">
+      <button class="btn btn-ghost" type="button" data-preview-di="${esc(result.digest)}">Preview generated DI</button>
+      <span class="muted">the real laid-out BPMN, exactly as a dispatch would run it</span>
+    </div>
   </section>`;
   const diagram = `<section class="card">
     <h2>Diagram <span class="muted">(mermaid flowchart source)</span></h2>
-    <p class="muted">The resolved graph as a mermaid <code>flowchart</code>. Paste it into any mermaid renderer, or follow a dispatched run into the process explorer for the live laid-out model.</p>
+    <p class="muted">The resolved graph as a mermaid <code>flowchart</code>. Paste it into any mermaid renderer, or click <b>Preview generated DI</b> above to render the laid-out BPMN in the process explorer.</p>
     <pre class="diagram">${esc(result.diagram)}</pre>
   </section>`;
   return summary + renderSideEffects(result.sideEffects) + renderHumanNodes(result.humanNodes) + diagram;
@@ -155,7 +162,7 @@ function renderPreview(result) {
 /**
  * Mount the compose → preview → stage view into `host`.
  * @param {Element|null} host — the element to render into (or null → look up #delivery-graphs-root).
- * @param {{previewUrl?:string, hookSecret?:string}} [config]
+ * @param {{previewUrl?:string, proposalBpmnUrl?:string, hookSecret?:string}} [config]
  */
 export function mountDeliveryGraphs(host, config = {}) {
   const isElement = host != null && host.nodeType === 1 && typeof host.innerHTML === "string";
@@ -163,6 +170,7 @@ export function mountDeliveryGraphs(host, config = {}) {
   if (!root) return () => {};
 
   const previewUrl = config.previewUrl ?? DEFAULT_PREVIEW_URL;
+  const proposalBpmnUrl = config.proposalBpmnUrl ?? DEFAULT_PROPOSAL_BPMN_URL;
   const headers = () => ({
     "content-type": "application/json",
     ...(config.hookSecret ? { "x-hook-secret": config.hookSecret } : {}),
@@ -257,6 +265,49 @@ export function mountDeliveryGraphs(host, config = {}) {
     jsonEl.value = EXAMPLE_GRAPH;
     outputEl.innerHTML = "";
     setStatus("Example loaded — Preview & stage it.", "");
+  });
+
+  // "Preview generated DI": recompile the staged proposal's BPMN (with diagram interchange) and hand it
+  // to the host console's process explorer, which renders it read-only in a definition-preview view.
+  // We run inside the console App-View iframe, so we fetch from our OWN nwf door (same origin as this
+  // app) and pass the XML UP to the console over the nano-navigate bridge — the XML is far larger than a
+  // URL budget, so it travels in the message, not the path. Standalone (not embedded) there is no host
+  // explorer to drive, so we say so instead of failing silently.
+  const isEmbedded = typeof window !== "undefined" && window.parent && window.parent !== window;
+  async function doPreviewDi(digest) {
+    const staged = typeof digest === "string" ? digest.trim() : "";
+    if (staged === "") {
+      setStatus("No staged proposal to preview yet — Preview & stage a graph first.", "err");
+      return;
+    }
+    if (!isEmbedded) {
+      setStatus("Open this page inside the console cockpit to preview the generated DI.", "err");
+      return;
+    }
+    busy(true);
+    setStatus("Compiling DI…");
+    try {
+      const { status, body } = await post(proposalBpmnUrl, { digest: staged });
+      if (status === 200 && body.ok && typeof body.bpmn === "string" && body.bpmn.trim() !== "") {
+        window.parent.postMessage(
+          { type: "nano-navigate", target: "definitionPreview", params: { xml: body.bpmn } },
+          window.location.origin,
+        );
+        setStatus("\u2713 Opening the generated DI in the process explorer…", "ok");
+      } else {
+        setStatus(body && body.error ? body.error : "Could not compile the DI for this proposal.", "err");
+      }
+    } catch (err) {
+      setStatus(err && err.message ? err.message : "DI preview request failed.", "err");
+    } finally {
+      busy(false);
+    }
+  }
+  outputEl.addEventListener("click", (ev) => {
+    const btn = ev.target && ev.target.closest ? ev.target.closest("[data-preview-di]") : null;
+    if (!btn) return;
+    ev.preventDefault();
+    doPreviewDi(btn.getAttribute("data-preview-di"));
   });
 
   return () => {
