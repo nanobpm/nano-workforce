@@ -138,6 +138,50 @@ test("clicking a past-session button drives a replay", async () => {
   assert.deepEqual(r.terminalWrites, ["PA", "ST"]);
 });
 
+test("opening a worker detail fetches that worker's transcript history and wires replay", async () => {
+  const r = rig();
+  const fetchedFor: Array<string | undefined> = [];
+  const env: SupplyCockpitEnv = {
+    ...r.env,
+    fetchTranscripts: (instance?: string) => {
+      fetchedFor.push(instance);
+      return Promise.resolve(transcripts);
+    },
+  };
+  const cockpit = bootSupplyCockpit(env);
+  await cockpit.refresh();
+  await flush();
+
+  cockpit.openWorker("wk-a");
+  await flush();
+  assert.equal(cockpit.currentRoute.kind, "worker");
+  assert.equal(cockpit.currentRoute.kind === "worker" ? cockpit.currentRoute.instance : undefined, "wk-a");
+  assert.equal(r.host.byData("worker-detail", "wk-a").length, 1, "worker detail header rendered");
+  assert.deepEqual(fetchedFor, [undefined, "wk-a"], "main history is global; detail history is instance-filtered");
+
+  const button = r.host.byClass("cockpit-past-replay").find((b) => b.getAttribute("data-stream") === "job:past");
+  button?.dispatch("click");
+  await flush();
+  assert.equal(cockpit.currentMode, "replay");
+  assert.deepEqual(r.terminalWrites, ["PA", "ST"]);
+});
+
+test("clicking a worker name opens the detail page without breaking current-job drill", async () => {
+  const r = rig();
+  const cockpit = bootSupplyCockpit(r.env);
+  await cockpit.refresh();
+  await flush();
+
+  r.host.byClass("cockpit-worker")[0]?.dispatch("click");
+  await flush();
+  assert.equal(cockpit.currentRoute.kind, "worker");
+  assert.equal(r.host.byData("worker-detail", "wk-a").length, 1);
+
+  r.host.byClass("cockpit-worker-current-job")[0]?.dispatch("click");
+  assert.equal(cockpit.currentMode, "live");
+  assert.equal(cockpit.currentStream, "job:live");
+});
+
 test("replaying after a live drill tears the live stream down and switches to replay", async () => {
   const r = rig();
   const cockpit = bootSupplyCockpit(r.env);

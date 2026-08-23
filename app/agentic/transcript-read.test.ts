@@ -5,9 +5,11 @@
 // time-window semantics directly on listTranscripts() — inclusive boundaries, ordering, and the
 // interaction with a missing/invalid createdAt — where a hand-built store lets us fix exact timestamps.
 import { test } from "node:test";
-import type { TranscriptStore, TranscriptStream } from "@nanobpm/agentic/transcript";
-import { assertEquals } from "#test-assert";
-import { listTranscripts } from "./transcript-read.ts";
+import { DatabaseSync } from "node:sqlite";
+import type { SqliteDb, TranscriptStore, TranscriptStream } from "@nanobpm/agentic/transcript";
+import { assert, assertEquals } from "#test-assert";
+import { AgenticCorrelationStore } from "./correlation-store.ts";
+import { correlationFieldsFor, listTranscripts } from "./transcript-read.ts";
 
 /** A read-only TranscriptStore double: list() returns the seeded metas; read() has no retained chunks. */
 function fakeStore(metas: TranscriptStream[]): TranscriptStore {
@@ -69,4 +71,54 @@ test("listTranscripts: a session with an unparseable createdAt is retained regar
   const store = fakeStore([meta("job:mid", mid), meta("job:bad", "not-a-date")]);
   const out = listTranscripts(store, undefined, { since: late });
   assertEquals(new Set(out.map((t) => t.stream)), new Set(["job:bad"]));
+});
+
+function memoryStore(): SqliteDb {
+  const raw = new DatabaseSync(":memory:");
+  return {
+    exec: (sql) => raw.exec(sql),
+    run: (sql, params = []) => raw.prepare(sql).run(...params),
+    all: <T = Record<string, unknown>>(sql: string, params: unknown[] = []): T[] =>
+      raw.prepare(sql).all(...params) as T[],
+  };
+}
+
+test("durable fallback: a released (past) job is attributed from the durable store when the live registry is empty", () => {
+  // The exact past-session case: the live correlation registry no longer holds the job (undefined here),
+  // so worker attribution + context must come from the durable store recorded at completion.
+  const durable = new AgenticCorrelationStore(memoryStore());
+  durable.record({
+    jobKey: "k1",
+    stream: "job:k1",
+    instance: "worker-A",
+    identity: "gpu-box-7",
+    host: "us-east-1a",
+    processInstanceKey: "pi-9",
+    planKey: "acme/repo#42",
+    completedAt: mid,
+  });
+
+  const fields = correlationFieldsFor("job:k1", undefined, durable);
+  assertEquals(fields.jobKey, "k1");
+  assertEquals(fields.instance, "worker-A");
+  assertEquals(fields.identity, "gpu-box-7");
+  assertEquals(fields.host, "us-east-1a");
+  assertEquals(fields.processInstanceKey, "pi-9");
+  assertEquals(fields.planKey, "acme/repo#42");
+});
+
+test("listTranscripts: the instance filter returns only sessions the durable store attributes to that worker", () => {
+  const store = fakeStore([meta("job:k1", early), meta("job:k2", mid), meta("job:k3", late)]);
+  const durable = new AgenticCorrelationStore(memoryStore());
+  durable.record({ jobKey: "k1", stream: "job:k1", instance: "worker-A", completedAt: early });
+  durable.record({ jobKey: "k2", stream: "job:k2", instance: "worker-B", completedAt: mid });
+  durable.record({ jobKey: "k3", stream: "job:k3", instance: "worker-A", completedAt: late });
+
+  const out = listTranscripts(store, undefined, { instance: "worker-A" }, durable);
+  assertEquals(
+    out.map((t) => t.stream),
+    ["job:k3", "job:k1"],
+    "only worker-A's sessions, newest-first",
+  );
+  assert(out.every((t) => t.instance === "worker-A"), "each row is attributed to worker-A");
 });

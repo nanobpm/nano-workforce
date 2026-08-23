@@ -17,6 +17,7 @@
 import type { TranscriptChunk, TranscriptStore, TranscriptStream } from "@nanobpm/agentic/transcript";
 import type { AgenticTranscript, AgenticTranscriptData } from "../../nano-generated/api-io.d.ts";
 import { type CorrelationRegistry, jobKeyOfStream } from "./correlation.ts";
+import type { AgenticCorrelationStore } from "./correlation-store.ts";
 import { utf8ByteLength } from "./transcript-events.ts";
 
 /** Total captured bytes across a set of retained chunks (UTF-8, the on-the-wire terminal encoding). */
@@ -26,21 +27,34 @@ export function byteLengthOf(chunks: readonly TranscriptChunk[]): number {
   return total;
 }
 
-/** The correlation fields (jobKey + engine context) a stream id resolves to, best-effort. */
+/** The correlation fields (jobKey + engine context + worker attribution) a stream id resolves to, best-effort. */
 interface CorrelationFields {
   jobKey?: string;
   processInstanceKey?: string;
   bpmnProcessId?: string;
   elementId?: string;
   planKey?: string;
+  /** The worker instance that ran the job (durable — survives release / restart). */
+  instance?: string;
+  /** The worker's durable identity, when recorded. */
+  identity?: string;
+  /** The worker's host, when recorded. */
+  host?: string;
 }
 
 /**
- * Resolve a stream id to its correlation fields: the jobKey is always decoded from a `job:<jobKey>`
- * stream id; the engine context (process instance / plan) is added only when the correlation registry
- * still holds the (live) job. Non-job streams yield an empty object.
+ * Resolve a stream id to its correlation fields. The jobKey is always decoded from a `job:<jobKey>`
+ * stream id. Engine context (process instance / plan) + worker attribution (instance / identity /
+ * host) come from the LIVE registry while the job is still linked, and fall back to the DURABLE store
+ * (`AgenticCorrelationStore`) once the job has completed and its live correlation was released — so a
+ * PAST session stays attributable to its worker after the worker exits or the process restarts.
+ * Non-job streams yield an empty object.
  */
-export function correlationFieldsFor(stream: string, correlation: CorrelationRegistry | undefined): CorrelationFields {
+export function correlationFieldsFor(
+  stream: string,
+  correlation: CorrelationRegistry | undefined,
+  durable?: AgenticCorrelationStore | undefined,
+): CorrelationFields {
   const jobKey = jobKeyOfStream(stream);
   if (jobKey === undefined) return {};
   const fields: CorrelationFields = { jobKey };
@@ -51,6 +65,20 @@ export function correlationFieldsFor(stream: string, correlation: CorrelationReg
     if (context.elementId !== undefined) fields.elementId = context.elementId;
     if (context.planKey !== undefined) fields.planKey = context.planKey;
   }
+  // Durable fallback: fill any field the live registry did not supply (a released past session, or a
+  // worker-attribution field the in-memory registry never carried). Live values take precedence.
+  const row = durable?.get(jobKey);
+  if (row) {
+    if (fields.processInstanceKey === undefined && row.processInstanceKey !== undefined) {
+      fields.processInstanceKey = row.processInstanceKey;
+    }
+    if (fields.bpmnProcessId === undefined && row.bpmnProcessId !== undefined) fields.bpmnProcessId = row.bpmnProcessId;
+    if (fields.elementId === undefined && row.elementId !== undefined) fields.elementId = row.elementId;
+    if (fields.planKey === undefined && row.planKey !== undefined) fields.planKey = row.planKey;
+    if (row.instance !== undefined) fields.instance = row.instance;
+    if (row.identity !== undefined) fields.identity = row.identity;
+    if (row.host !== undefined) fields.host = row.host;
+  }
   return fields;
 }
 
@@ -59,6 +87,7 @@ export function toTranscript(
   meta: TranscriptStream,
   store: TranscriptStore,
   correlation: CorrelationRegistry | undefined,
+  durable?: AgenticCorrelationStore | undefined,
 ): AgenticTranscript {
   const chunks = store.read(meta.stream);
   const out: AgenticTranscript = {
@@ -72,12 +101,15 @@ export function toTranscript(
   };
   if (meta.completedAt !== undefined) out.completedAt = meta.completedAt;
   if (meta.firstOffset !== undefined) out.firstOffset = meta.firstOffset;
-  const fields = correlationFieldsFor(meta.stream, correlation);
+  const fields = correlationFieldsFor(meta.stream, correlation, durable);
   if (fields.jobKey !== undefined) out.jobKey = fields.jobKey;
   if (fields.processInstanceKey !== undefined) out.processInstanceKey = fields.processInstanceKey;
   if (fields.bpmnProcessId !== undefined) out.bpmnProcessId = fields.bpmnProcessId;
   if (fields.elementId !== undefined) out.elementId = fields.elementId;
   if (fields.planKey !== undefined) out.planKey = fields.planKey;
+  if (fields.instance !== undefined) out.instance = fields.instance;
+  if (fields.identity !== undefined) out.identity = fields.identity;
+  if (fields.host !== undefined) out.host = fields.host;
   return out;
 }
 
@@ -86,6 +118,8 @@ export interface TranscriptFilter {
   readonly jobKey?: string;
   readonly processInstanceKey?: string;
   readonly planKey?: string;
+  /** The worker instance that ran the session (durable attribution) — powers the worker-history view. */
+  readonly instance?: string;
   /** ISO-8601 lower bound (inclusive) on the session's createdAt. */
   readonly since?: string;
   /** ISO-8601 upper bound (inclusive) on the session's createdAt. */
@@ -95,22 +129,24 @@ export interface TranscriptFilter {
 /**
  * List every captured session projected to the wire shape, sorted newest-first by createdAt (then by
  * stream for a stable tie-break), after applying the (advisory) filters. jobKey / process-instance /
- * plan filters match the correlation-enriched fields; since/until bound createdAt.
+ * plan / instance filters match the correlation-enriched fields; since/until bound createdAt.
  */
 export function listTranscripts(
   store: TranscriptStore,
   correlation: CorrelationRegistry | undefined,
   filter: TranscriptFilter = {},
+  durable?: AgenticCorrelationStore | undefined,
 ): AgenticTranscript[] {
   const sinceMs = filter.since !== undefined ? Date.parse(filter.since) : undefined;
   const untilMs = filter.until !== undefined ? Date.parse(filter.until) : undefined;
   const rows = store
     .list()
-    .map((meta) => toTranscript(meta, store, correlation))
+    .map((meta) => toTranscript(meta, store, correlation, durable))
     .filter((t) => {
       if (filter.jobKey !== undefined && t.jobKey !== filter.jobKey) return false;
       if (filter.processInstanceKey !== undefined && t.processInstanceKey !== filter.processInstanceKey) return false;
       if (filter.planKey !== undefined && t.planKey !== filter.planKey) return false;
+      if (filter.instance !== undefined && t.instance !== filter.instance) return false;
       const createdMs = Date.parse(t.createdAt);
       if (sinceMs !== undefined && Number.isFinite(createdMs) && createdMs < sinceMs) return false;
       if (untilMs !== undefined && Number.isFinite(createdMs) && createdMs > untilMs) return false;
@@ -134,6 +170,7 @@ export function readTranscriptFrom(
   from: number,
   store: TranscriptStore,
   correlation: CorrelationRegistry | undefined,
+  durable?: AgenticCorrelationStore | undefined,
 ): AgenticTranscriptData | undefined {
   const meta = store.get(stream);
   if (meta === undefined) return undefined;
@@ -152,11 +189,14 @@ export function readTranscriptFrom(
     entries,
   };
   if (meta.completedAt !== undefined) out.completedAt = meta.completedAt;
-  const fields = correlationFieldsFor(meta.stream, correlation);
+  const fields = correlationFieldsFor(meta.stream, correlation, durable);
   if (fields.jobKey !== undefined) out.jobKey = fields.jobKey;
   if (fields.processInstanceKey !== undefined) out.processInstanceKey = fields.processInstanceKey;
   if (fields.bpmnProcessId !== undefined) out.bpmnProcessId = fields.bpmnProcessId;
   if (fields.elementId !== undefined) out.elementId = fields.elementId;
   if (fields.planKey !== undefined) out.planKey = fields.planKey;
+  if (fields.instance !== undefined) out.instance = fields.instance;
+  if (fields.identity !== undefined) out.identity = fields.identity;
+  if (fields.host !== undefined) out.host = fields.host;
   return out;
 }

@@ -20,6 +20,7 @@ import { type SqliteDb, TRANSCRIPT_SCHEMA_SQL } from "@nanobpm/agentic/transcrip
 import { assert, assertEquals } from "#test-assert";
 import { noopLog } from "../../../test/log.ts";
 import { CorrelationRegistry, jobStream } from "../correlation.ts";
+import { AgenticCorrelationStore } from "../correlation-store.ts";
 import {
   type CorrelationLink,
   createRelayFamily,
@@ -139,6 +140,11 @@ function mkCorrelatedService(
   db: SqliteDb | undefined,
   correlation: CorrelationRegistry,
   byConnection: Map<string, string>,
+  extra: {
+    attributionForInstance?: (instance: string) => { identity?: string; host?: string } | undefined;
+    correlationStore?: AgenticCorrelationStore;
+    now?: () => string;
+  } = {},
 ): { service: RelayTranscriptService; hub: CapturingHub } {
   const hub = capturingHub();
   const service = new RelayTranscriptService({
@@ -148,6 +154,9 @@ function mkCorrelatedService(
     log: noopLog(),
     correlation: () => correlation,
     instanceForConnection: (id) => byConnection.get(id),
+    attributionForInstance: extra.attributionForInstance,
+    correlationStore: extra.correlationStore,
+    now: extra.now,
   });
   return { service, hub };
 }
@@ -346,6 +355,69 @@ test("H6 correlation write-side: a late produce after completion does not resurr
   hub.handler?.(produce(jobStream("kR"), 1, "late"), p.conn);
   assertEquals(correlation.count(), 0, "a late produce does not resurrect a completed stream");
   assertEquals(correlation.jobKeysFor("worker-R"), [], "released jobKey stays released after a late produce");
+  service.teardown();
+});
+
+test("H6 correlation write-side: a worker starting a NEW job over its live connection supersedes its prior job", () => {
+  const registry = new ConnectionRegistry();
+  const correlation = new CorrelationRegistry();
+  // One worker, ONE long-lived connection — exactly the fleet reality: a worker relays every job it
+  // runs over the same channel connection, one job at a time (correlation.ts). The connection never
+  // disconnects between jobs, so the disconnect-driven #reconcile release never fires; without a
+  // supersede-on-next-job rule the worker's supply row would accumulate EVERY job it ever ran.
+  const byConnection = new Map([["prod", "worker-A"]]);
+  const { service, hub } = mkCorrelatedService(registry, memoryDb(), correlation, byConnection);
+  const p = connect("prod", registry);
+
+  // Job 1: the worker relays k1's terminal → linked.
+  hub.handler?.(produce(jobStream("k1"), 1, "job-1 line"), p.conn);
+  assertEquals(correlation.jobKeysFor("worker-A"), ["k1"], "job 1 is the current job");
+
+  // Job 2 begins on the SAME live connection (no disconnect). The worker relaying k2's terminal PROVES
+  // k1 finished (one job at a time) → k1 is superseded: released AND flushed to a durable past session.
+  hub.handler?.(produce(jobStream("k2"), 1, "job-2 line"), p.conn);
+  assertEquals(correlation.jobKeysFor("worker-A"), ["k2"], "the supply row shows ONLY the current job — no accumulation");
+  assertEquals(correlation.resolve("k1"), undefined, "the prior job's correlation is released");
+  assertEquals(correlation.count(), 1);
+
+  // The superseded job is not lost — its transcript is flushed and completed, i.e. a replayable past session.
+  const priorMeta = service.transcriptOf(jobStream("k1"));
+  assertEquals(priorMeta?.status, "completed", "the superseded job becomes a completed past session");
+  assertEquals(service.reattach(jobStream("k1"), 0)?.entries.length, 1, "the past session replays its captured terminal");
+  service.teardown();
+});
+
+test("H6 durable attribution: completing/superseding a job persists the worker's attribution to the correlation store", () => {
+  const registry = new ConnectionRegistry();
+  const correlation = new CorrelationRegistry();
+  const db = memoryDb();
+  const store = new AgenticCorrelationStore(db);
+  const byConnection = new Map([["prod", "worker-A"]]);
+  // The presence-backed resolver: worker-A's durable identity/host, available while it is registered
+  // but gone once it exits — which is exactly why the job's attribution must be persisted at completion.
+  const attributionForInstance = (instance: string) =>
+    instance === "worker-A" ? { identity: "gpu-box-7", host: "us-east-1a" } : undefined;
+  const { service, hub } = mkCorrelatedService(registry, db, correlation, byConnection, {
+    attributionForInstance,
+    correlationStore: store,
+    now: () => "2024-01-02T03:04:05.000Z",
+  });
+  const p = connect("prod", registry);
+
+  // Job 1 runs, then the worker starts job 2 on the same live connection → job 1 is superseded and
+  // released. Its attribution must be durably recorded BEFORE the live correlation forgets it.
+  hub.handler?.(produce(jobStream("k1"), 1, "job-1 line"), p.conn);
+  hub.handler?.(produce(jobStream("k2"), 1, "job-2 line"), p.conn);
+
+  const durable = store.get("k1");
+  assert(durable !== undefined, "the superseded job's attribution is persisted");
+  assertEquals(durable?.instance, "worker-A");
+  assertEquals(durable?.identity, "gpu-box-7");
+  assertEquals(durable?.host, "us-east-1a");
+  assertEquals(durable?.stream, jobStream("k1"));
+  assertEquals(durable?.completedAt, "2024-01-02T03:04:05.000Z");
+  // The still-active job is NOT yet recorded (attribution is written on completion, not on link).
+  assertEquals(store.get("k2"), undefined, "the active job has no completion attribution yet");
   service.teardown();
 });
 

@@ -26,6 +26,9 @@ export interface TranscriptSummaryReport {
   readonly bpmnProcessId?: string;
   readonly elementId?: string;
   readonly planKey?: string;
+  readonly instance?: string;
+  readonly identity?: string;
+  readonly host?: string;
 }
 
 /** The transcript list report the cockpit polls (mirrors `AgenticTranscriptList`). */
@@ -54,6 +57,9 @@ export interface TranscriptView {
   readonly byteLength: number;
   /** When the session was captured — completedAt when sealed, else createdAt. */
   readonly capturedAt: string;
+  readonly instance?: string;
+  readonly identity?: string;
+  readonly host?: string;
 }
 
 /** The full renderable "past sessions" view. */
@@ -106,6 +112,9 @@ function sessionView(t: TranscriptSummaryReport): TranscriptView {
     size: humanBytes(t.byteLength),
     byteLength: t.byteLength,
     capturedAt: t.completedAt ?? t.createdAt,
+    ...(t.instance !== undefined ? { instance: t.instance } : {}),
+    ...(t.identity !== undefined ? { identity: t.identity } : {}),
+    ...(t.host !== undefined ? { host: t.host } : {}),
   };
 }
 

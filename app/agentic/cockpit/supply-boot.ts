@@ -28,12 +28,15 @@ import {
   TerminalSession,
   type TerminalSink,
 } from "@nanobpm/agentic/cockpit";
+import type { CockpitRoute } from "./cockpit-route.ts";
 import { renderSupply } from "./supply-render.ts";
-import type { SupplyReport } from "./supply-view.ts";
+import type { SupplyReport, SupplyView } from "./supply-view.ts";
 import { supplyView } from "./supply-view.ts";
 import { renderTranscripts, replayTranscript, type TranscriptDataReport } from "./transcript-render.ts";
 import type { TranscriptListReport } from "./transcript-view.ts";
 import { transcriptsView } from "./transcript-view.ts";
+import { renderWorkerDetail } from "./worker-detail-render.ts";
+import { workerDetailView } from "./worker-detail-view.ts";
 
 /** Mounts a terminal into `host` and returns the sink relay output is written to. */
 export type CreateTerminal = (host: ElementLike) => TerminalSink;
@@ -55,7 +58,7 @@ export interface SupplyCockpitEnv {
    * Fetches the captured-session list (`GET /agentic/transcripts`) for the "past sessions" history.
    * Optional: when omitted the past-sessions panel is not rendered (live-only cockpit).
    */
-  readonly fetchTranscripts?: () => Promise<TranscriptListReport>;
+  readonly fetchTranscripts?: (instance?: string) => Promise<TranscriptListReport>;
   /**
    * Fetches a stored transcript's bytes (`GET /agentic/transcripts/{stream}`) for static replay.
    * Required for the "past sessions" replay to work; must be provided together with {@link fetchTranscripts}.
@@ -99,6 +102,12 @@ export interface SupplyCockpitHandle {
   drill(stream: string): void;
   /** Replay a captured past session's stored transcript statically into the terminal (no live worker). */
   replay(stream: string): Promise<void>;
+  /** Open a worker's dedicated detail page. */
+  openWorker(instance: string): void;
+  /** Return to the main worker list. */
+  back(): void;
+  /** The current cockpit route. */
+  readonly currentRoute: CockpitRoute;
   /** The stream currently drilled into or replayed, if any. */
   readonly currentStream: string | undefined;
   /** Whether the terminal is showing a LIVE stream or a REPLAYED transcript (undefined when idle). */
@@ -152,6 +161,9 @@ class SupplyCockpit implements SupplyCockpitHandle {
   // True while a #refreshPast() fetch is in flight, so the supply poll never stacks past-fetches and a
   // hung transcripts endpoint can't accumulate pending calls.
   #pastRefreshing = false;
+  #pastRefreshPending = false;
+  #route: CockpitRoute = { kind: "main" };
+  #view: SupplyView | undefined;
   // Bumped by every start()/stop() so an in-flight #tick() from a previous start cycle can't
   // reschedule after a stop→start race and leave two overlapping poll chains running.
   #generation = 0;
@@ -248,6 +260,10 @@ class SupplyCockpit implements SupplyCockpitHandle {
     return this.#mode;
   }
 
+  get currentRoute(): CockpitRoute {
+    return this.#route;
+  }
+
   /** Reflect the terminal region's playback mode on the panel (title + `data-terminal-mode`). */
   #setMode(mode: TerminalMode | undefined, stream: string | undefined): void {
     this.#mode = mode;
@@ -270,47 +286,75 @@ class SupplyCockpit implements SupplyCockpitHandle {
     }
     if (this.#disposed) return;
     try {
-      renderSupply(this.#listRegion, this.#env.doc, supplyView(report, { staleAfterMs: this.#env.staleAfterMs }), {
-        onDrill: (stream) => this.drill(stream),
-      });
+      this.#view = supplyView(report, { staleAfterMs: this.#env.staleAfterMs });
+      this.#renderRoute();
     } catch (err) {
       this.#env.onError?.(err);
     }
     // Fire-and-forget: the "past sessions" refresh must never gate the supply poll's next tick. A
     // transcripts endpoint that hangs (not just rejects) would otherwise stall #refresh() forever and
     // wedge the live worker list. #refreshPast is single-flight, so a slow fetch can't pile up either.
-    void this.#refreshPast();
+    void this.#refreshPast(this.#route.kind === "worker" ? this.#route.instance : undefined);
+  }
+
+  #renderRoute(): void {
+    const view = this.#view;
+    if (view === undefined) return;
+    if (this.#route.kind === "worker") {
+      renderWorkerDetail(this.#listRegion, this.#env.doc, workerDetailView(view, this.#route.instance), {
+        onBack: () => this.back(),
+        onDrill: (stream) => this.drill(stream),
+      });
+      return;
+    }
+    renderSupply(this.#listRegion, this.#env.doc, view, {
+      onDrill: (stream) => this.drill(stream),
+      onOpenWorker: (instance) => this.openWorker(instance),
+    });
   }
 
   /** Fetch + render the "past sessions" history list, when a transcript source is wired. Independent
    * of the supply fetch: a transcript-endpoint fault (or hang) never blocks the live worker list. */
-  async #refreshPast(): Promise<void> {
+  async #refreshPast(instance?: string): Promise<void> {
     const fetchTranscripts = this.#env.fetchTranscripts;
     if (fetchTranscripts === undefined || this.#pastRegion === undefined) return;
     // Single-flight: while one past-fetch is outstanding (including a hung one), skip starting another
     // so the poll can't stack pending fetches against a slow/unresponsive transcripts endpoint.
-    if (this.#pastRefreshing) return;
+    if (this.#pastRefreshing) {
+      this.#pastRefreshPending = true;
+      return;
+    }
     this.#pastRefreshing = true;
     try {
       let report: TranscriptListReport;
       try {
-        report = await this.#bounded(fetchTranscripts, "transcripts");
+        report = await this.#bounded(() => fetchTranscripts(instance), "transcripts");
       } catch (err) {
         if (this.#disposed) return;
         this.#env.onError?.(err);
         return;
       }
       if (this.#disposed || this.#pastRegion === undefined) return;
+      const currentInstance = this.#route.kind === "worker" ? this.#route.instance : undefined;
+      if (currentInstance !== instance) {
+        this.#pastRefreshPending = true;
+        return;
+      }
       try {
         renderTranscripts(this.#pastRegion, this.#env.doc, transcriptsView(report), {
           onReplay: (stream) => void this.replay(stream),
           ...(this.#mode === "replay" && this.#shownStream !== undefined ? { activeStream: this.#shownStream } : {}),
+          ...(instance !== undefined ? { title: "Job history", emptyText: "No captured sessions for this worker yet." } : {}),
         });
       } catch (err) {
         this.#env.onError?.(err);
       }
     } finally {
       this.#pastRefreshing = false;
+      if (this.#pastRefreshPending && !this.#disposed) {
+        this.#pastRefreshPending = false;
+        void this.#refreshPast(this.#route.kind === "worker" ? this.#route.instance : undefined);
+      }
     }
   }
 
@@ -492,10 +536,32 @@ class SupplyCockpit implements SupplyCockpitHandle {
       replayTranscript(session, data);
       this.#setMode("replay", stream);
       // Re-render the past list so the just-selected session shows as active (best-effort).
-      void this.#refreshPast();
+      void this.#refreshPast(this.#route.kind === "worker" ? this.#route.instance : undefined);
     } catch (err) {
       this.#env.onError?.(err);
     }
+  }
+
+  openWorker(instance: string): void {
+    if (this.#disposed) return;
+    this.#route = { kind: "worker", instance };
+    try {
+      this.#renderRoute();
+    } catch (err) {
+      this.#env.onError?.(err);
+    }
+    void this.#refreshPast(instance);
+  }
+
+  back(): void {
+    if (this.#disposed) return;
+    this.#route = { kind: "main" };
+    try {
+      this.#renderRoute();
+    } catch (err) {
+      this.#env.onError?.(err);
+    }
+    void this.#refreshPast();
   }
 
   dispose(): void {

@@ -33,7 +33,8 @@ import {
   type TranscriptStream,
 } from "@nanobpm/agentic/transcript";
 import type { Logger } from "@nanobpm/urban";
-import { currentCorrelation, type JobContext, jobKeyOfStream } from "../correlation.ts";
+import { currentCorrelation, type JobContext, type JobCorrelation, jobKeyOfStream } from "../correlation.ts";
+import { AgenticCorrelationStore } from "../correlation-store.ts";
 import type { AgenticContext, AgenticFamily } from "../registry.ts";
 import { currentPresenceRegistry } from "./presence.family.ts";
 
@@ -89,6 +90,13 @@ interface StreamState {
    * instance is not yet resolvable (a register/produce race), so a later `produce` frame retries.
    */
   linked: boolean;
+  /**
+   * The worker instance a `job:<jobKey>` stream was linked under (H6). Recorded so a stream's release
+   * (completion / disconnect) can tidy the {@link RelayTranscriptService.#jobStreamByInstance}
+   * supersede index, and so the "one job at a time per worker" supersede rule can identify the
+   * instance's prior job stream.
+   */
+  instance?: string;
 }
 
 /**
@@ -99,6 +107,19 @@ interface StreamState {
 export interface CorrelationLink {
   link(instance: string, jobKey: string, context?: JobContext): void;
   releaseJob(jobKey: string): void;
+  /**
+   * The (still-live) engine context for a jobKey, when the write-side exposes it. Optional so the
+   * minimal double in tests need not implement it; the real {@link CorrelationRegistry} does, and the
+   * relay slice reads it at completion to persist a job's process-instance / plan context durably
+   * before the correlation is released (#485).
+   */
+  resolve?(jobKey: string): JobCorrelation | undefined;
+}
+
+/** A worker's durable identity attributes, resolved from the presence registry at completion time. */
+export interface WorkerAttribution {
+  readonly identity?: string;
+  readonly host?: string;
 }
 
 export interface RelayTranscriptServiceOptions {
@@ -137,6 +158,20 @@ export interface RelayTranscriptServiceOptions {
    * ({@link currentPresenceRegistry}). A resolver returning undefined → no linking (advisory).
    */
   readonly instanceForConnection?: (connectionId: string) => string | undefined;
+  /**
+   * Resolve a producing worker instance's durable identity attributes (identity / host) — read at
+   * job-completion time and persisted with the attribution so a PAST session stays attributable to a
+   * worker after it exits (#485). {@link createRelayFamily} wires it to the presence registry; omitted
+   * → attribution is recorded with instance only (still attributable), never an error.
+   */
+  readonly attributionForInstance?: (instance: string) => WorkerAttribution | undefined;
+  /**
+   * The durable worker-attribution store (#485). Omitted → constructed from {@link db} (absent db →
+   * no durable attribution). Injectable so a test can supply an in-memory store.
+   */
+  readonly correlationStore?: AgenticCorrelationStore;
+  /** "Now" as an ISO-8601 instant, injectable for deterministic completion timestamps. */
+  readonly now?: () => string;
 }
 
 /** The minimal per-connection surface the relay handler receives from the hub (a {@link RelayHub} `RelayConnection`). */
@@ -158,19 +193,41 @@ export class RelayTranscriptService {
   /** The transcript store, or `undefined` when no DataLayer is mounted (relay still works, unpersisted). */
   readonly store: TranscriptStore | undefined;
 
+  /** The durable worker-attribution store (#485), or `undefined` when unpersisted. Exposed so the read path can attribute released jobs. */
+  get correlationStore(): AgenticCorrelationStore | undefined {
+    return this.#correlationStore;
+  }
+
   readonly #registry: ConnectionRegistry;
   readonly #log: Logger;
   readonly #streams = new Map<string, StreamState>();
+  /**
+   * The `job:<jobKey>` relay stream each worker instance is CURRENTLY relaying (H6, #149). A worker
+   * relays every job it runs over one long-lived channel connection, one job at a time
+   * (`../correlation.ts`), so that connection never disconnects between jobs — the disconnect-driven
+   * `#reconcile` release never fires. This index lets a NEW job's first `produce` supersede the
+   * worker's PRIOR job (complete its stream → flush transcript + release correlation), so a supply
+   * row shows only the current job instead of accumulating every job the connection ever ran.
+   */
+  readonly #jobStreamByInstance = new Map<string, string>();
   /** The correlation write-side accessor (H6, #149) — resolved per call so a late family mount wins. */
   readonly #correlation: () => CorrelationLink | undefined;
   /** The connection → producing-instance resolver (H6, #149). */
   readonly #instanceForConnection: (connectionId: string) => string | undefined;
+  /** Resolve a worker instance's durable identity attributes for attribution (#485). */
+  readonly #attributionForInstance: (instance: string) => WorkerAttribution | undefined;
+  /** The durable worker-attribution store, or undefined when unpersisted (#485). */
+  readonly #correlationStore: AgenticCorrelationStore | undefined;
+  /** "Now" as an ISO-8601 instant (injectable for deterministic tests). */
+  readonly #now: () => string;
 
   constructor(options: RelayTranscriptServiceOptions) {
     this.#registry = options.registry;
     this.#log = options.log;
     this.#correlation = options.correlation ?? currentCorrelation;
     this.#instanceForConnection = options.instanceForConnection ?? (() => undefined);
+    this.#attributionForInstance = options.attributionForInstance ?? (() => undefined);
+    this.#now = options.now ?? (() => new Date().toISOString());
     // Persistence is advisory: a store that can't be constructed or whose schema can't be applied
     // (locked/permission-denied/unavailable SQLite) must NOT fail the family mount — fall back to
     // running the relay unpersisted rather than tearing down the whole agentic channel.
@@ -187,6 +244,21 @@ export class RelayTranscriptService {
       }
     }
     this.store = store;
+
+    // The durable worker-attribution store (#485) — advisory, same failure posture as the transcript
+    // store: an unbuildable store falls back to no durable attribution, never a mount failure.
+    let correlationStore = options.correlationStore;
+    if (correlationStore === undefined && options.db) {
+      try {
+        correlationStore = new AgenticCorrelationStore(options.db);
+      } catch (err) {
+        this.#log.warn("agentic correlation store unavailable — past sessions unattributed", {
+          err: String(err),
+        });
+        correlationStore = undefined;
+      }
+    }
+    this.#correlationStore = correlationStore;
 
     this.relay = new RelayHub({
       ...options.relay,
@@ -357,8 +429,17 @@ export class RelayTranscriptService {
     const correlation = this.#correlation();
     if (!correlation) return;
     try {
+      // One job at a time per worker (`../correlation.ts`): the worker relaying a NEW job's terminal
+      // over its live connection PROVES its prior job finished. Supersede it — complete the prior
+      // stream (flush transcript → durable past session, release its correlation) BEFORE linking the
+      // new one — so the worker's supply row never accumulates jobs the disconnect-driven release
+      // would otherwise strand behind a connection that stays open across jobs.
+      const priorStream = this.#jobStreamByInstance.get(instance);
+      if (priorStream !== undefined && priorStream !== stream) this.completeStream(priorStream);
       correlation.link(instance, jobKey);
       state.linked = true;
+      state.instance = instance;
+      this.#jobStreamByInstance.set(instance, stream);
     } catch (err) {
       // Advisory — never throws into the frame handler. Swallow a throwing injectable correlation and
       // leave the stream UNLINKED so a later `produce` retries the link.
@@ -376,8 +457,17 @@ export class RelayTranscriptService {
     const jobKey = jobKeyOfStream(stream);
     if (jobKey === undefined) return;
     try {
+      // Persist the completed job's durable worker attribution + (best-effort) engine context BEFORE
+      // releasing the live correlation, so a PAST session stays attributable to a worker after it
+      // exits (#485) — the in-memory registry is about to forget it. Advisory, best-effort.
+      this.#persistAttribution(stream, jobKey, state);
       this.#correlation()?.releaseJob(jobKey);
       state.linked = false;
+      // Tidy the supersede index so it never points a released instance at a completed stream and
+      // stays bounded across the worker's lifetime.
+      if (state.instance !== undefined && this.#jobStreamByInstance.get(state.instance) === stream) {
+        this.#jobStreamByInstance.delete(state.instance);
+      }
     } catch (err) {
       // Advisory — never throws into the frame handler. Swallow a throwing injectable correlation and
       // leave `state.linked` true so the flag honestly records that the release did NOT happen (rather
@@ -386,6 +476,41 @@ export class RelayTranscriptService {
       // revisits it and `teardown` skips already-completed streams. A retry only occurs on the
       // dead-producer path, where `#reconcile` re-invokes `#unlink` on a still-uncompleted stream.
       this.#log.warn("agentic relay correlation release failed — leaving stream linked", {
+        stream,
+        jobKey,
+        err: String(err),
+      });
+    }
+  }
+
+  /**
+   * Record a completed job's durable attribution (#485): which worker ran it (instance + presence
+   * identity/host) and its still-live engine context (process instance / plan), keyed by jobKey, so
+   * the transcript read path can attribute the PAST session after the live correlation is released
+   * and after a restart. Advisory — a persistence fault is logged, never thrown into the frame
+   * handler, and never blocks the correlation release.
+   */
+  #persistAttribution(stream: string, jobKey: string, state: StreamState): void {
+    const store = this.#correlationStore;
+    const instance = state.instance;
+    if (store === undefined || instance === undefined || instance === "") return;
+    try {
+      const attribution = this.#attributionForInstance(instance) ?? {};
+      const context = this.#correlation()?.resolve?.(jobKey);
+      store.record({
+        jobKey,
+        stream,
+        instance,
+        completedAt: this.#now(),
+        ...(attribution.identity !== undefined ? { identity: attribution.identity } : {}),
+        ...(attribution.host !== undefined ? { host: attribution.host } : {}),
+        ...(context?.processInstanceKey !== undefined ? { processInstanceKey: context.processInstanceKey } : {}),
+        ...(context?.bpmnProcessId !== undefined ? { bpmnProcessId: context.bpmnProcessId } : {}),
+        ...(context?.elementId !== undefined ? { elementId: context.elementId } : {}),
+        ...(context?.planKey !== undefined ? { planKey: context.planKey } : {}),
+      });
+    } catch (err) {
+      this.#log.warn("agentic correlation attribution persist failed — past session left unattributed", {
         stream,
         jobKey,
         err: String(err),
@@ -460,6 +585,10 @@ export function createRelayFamily(options: {
         // are read per call, so this works regardless of family mount order (relay may mount before
         // presence/correlation). Absent registries → no linking, still advisory-correct.
         instanceForConnection: (connectionId) => currentPresenceRegistry()?.instanceForConnection(connectionId),
+        // #485: resolve a completed job's worker attribution (presence identity/host) from the live
+        // presence registry, read per call for the same mount-order independence. Absent → attribution
+        // records instance only.
+        attributionForInstance: (instance) => currentPresenceRegistry()?.attributionOf(instance),
         correlation: currentCorrelation,
       });
       setCurrentRelayTranscriptService(service);

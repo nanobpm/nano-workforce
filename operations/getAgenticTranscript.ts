@@ -28,13 +28,14 @@ export default defineOperation("getAgenticTranscript", async ({ params, query, r
     return { status: 400, body: { error: "invalid from: expected a non-negative integer offset" } };
   }
 
-  const store = currentRelayTranscriptService()?.store;
+  const service = currentRelayTranscriptService();
+  const store = service?.store;
   if (!store) {
     // No transcript store mounted (relay unmounted or unpersisted) - nothing to replay.
     return { status: 404, body: { error: "no transcript for stream" } };
   }
 
-  const data = readTranscriptFrom(params.stream, from, store, currentCorrelation());
+  const data = readTranscriptFrom(params.stream, from, store, currentCorrelation(), service?.correlationStore);
   if (data === undefined) {
     return { status: 404, body: { error: "no transcript for stream" } };
   }

@@ -149,6 +149,20 @@ export class PresenceRegistry {
   }
 
   /**
+   * Resolve a worker instance's durable identity attributes (presence identity + host) for job
+   * attribution (#485). Returns the most recently registered matching row's attributes, or undefined
+   * when the instance is unknown (e.g. it already deregistered).
+   */
+  attributionOf(instance: string): { identity?: string; host?: string } | undefined {
+    if (instance === "") return undefined;
+    let match: { identity?: string; host?: string } | undefined;
+    for (const row of this.#store.list()) {
+      if (row.instance === instance) match = { identity: row.identity, host: row.capability.host };
+    }
+    return match;
+  }
+
+  /**
    * Eagerly drop presence rows whose connection the hub has already closed (a disconnect the hub's
    * single close listener removed from its in-memory registry). Rows also age out on the presence
    * TTL via {@link PresenceStore.sweep}; this is the eager disconnect path. Returns the removed

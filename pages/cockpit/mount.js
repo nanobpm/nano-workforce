@@ -27,6 +27,21 @@ function isPosInt(value) {
   return Number.isSafeInteger(value) && value > 0;
 }
 
+function parseCockpitRoute(hash) {
+  const route = hash.startsWith("#") ? hash.slice(1) : hash;
+  if (route === "" || route === "/cockpit" || route === "/cockpit/") return { kind: "main" };
+  const prefix = "/cockpit/worker/";
+  if (!route.startsWith(prefix)) return { kind: "main" };
+  const raw = route.slice(prefix.length);
+  if (raw === "") return { kind: "main" };
+  try {
+    const instance = decodeURIComponent(raw);
+    return instance === "" ? { kind: "main" } : { kind: "worker", instance };
+  } catch {
+    return { kind: "main" };
+  }
+}
+
 // ── supply projection (mirrors app/agentic/cockpit/supply-view.ts) ─────────────────────────────
 
 function liveness(worker, staleAfterMs) {
@@ -97,7 +112,22 @@ function dot(doc, live) {
   return node;
 }
 
-function workerRow(doc, worker, onDrill) {
+function currentJob(worker) {
+  const correlation = worker.correlations[0];
+  if (correlation != null) return { jobKey: correlation.jobKey, stream: correlation.stream, label: correlation.label };
+  const jobKey = worker.jobKeys[0];
+  if (jobKey == null) return undefined;
+  return { jobKey, stream: worker.stream, label: `job ${jobKey}` };
+}
+
+function workerDetailView(view, instance) {
+  const worker = view.workers.find((w) => w.instance === instance);
+  if (worker == null) return { kind: "missing", instance };
+  const job = currentJob(worker);
+  return job == null ? { kind: "found", worker } : { kind: "found", worker, currentJob: job };
+}
+
+function workerRow(doc, worker, onDrill, onOpenWorker) {
   const row = el(doc, "tr", "cockpit-supply-worker");
   row.setAttribute("data-worker", worker.instance);
   row.setAttribute("data-liveness", worker.liveness);
@@ -107,9 +137,16 @@ function workerRow(doc, worker, onDrill) {
   nameCell.appendChild(dot(doc, worker.liveness));
   const button = el(doc, "button", "cockpit-worker", worker.instance);
   button.setAttribute("type", "button");
+  button.setAttribute("data-instance", worker.instance);
   button.setAttribute("data-stream", worker.stream);
-  if (onDrill) button.addEventListener("click", () => onDrill(worker.stream));
+  if (onOpenWorker) button.addEventListener("click", () => onOpenWorker(worker.instance));
   nameCell.appendChild(button);
+  const drill = el(doc, "button", "cockpit-worker-drill", "terminal");
+  drill.setAttribute("type", "button");
+  drill.setAttribute("data-instance", worker.instance);
+  drill.setAttribute("data-stream", worker.stream);
+  if (onDrill) drill.addEventListener("click", () => onDrill(worker.stream));
+  nameCell.appendChild(drill);
   row.appendChild(nameCell);
 
   row.appendChild(el(doc, "td", "cockpit-td cockpit-supply-family", worker.family));
@@ -138,7 +175,7 @@ function workerRow(doc, worker, onDrill) {
   return row;
 }
 
-function leafSection(doc, leaf, onDrill) {
+function leafSection(doc, leaf, onDrill, onOpenWorker) {
   const section = el(doc, "section", "cockpit-leaf");
   section.setAttribute("data-leaf", leaf.token);
   const header = el(doc, "div", "cockpit-leaf-head");
@@ -152,13 +189,13 @@ function leafSection(doc, leaf, onDrill) {
   thead.appendChild(head);
   table.appendChild(thead);
   const tbody = el(doc, "tbody", "cockpit-supply-tbody");
-  for (const worker of leaf.workers) tbody.appendChild(workerRow(doc, worker, onDrill));
+  for (const worker of leaf.workers) tbody.appendChild(workerRow(doc, worker, onDrill, onOpenWorker));
   table.appendChild(tbody);
   section.appendChild(table);
   return section;
 }
 
-function renderSupply(host, doc, view, onDrill) {
+function renderSupply(host, doc, view, onDrill, onOpenWorker) {
   host.replaceChildren();
   const root = el(doc, "div", "cockpit-supply");
   root.setAttribute("data-worker-count", String(view.count));
@@ -177,8 +214,65 @@ function renderSupply(host, doc, view, onDrill) {
     return;
   }
   const list = el(doc, "div", "cockpit-supply-list");
-  for (const leaf of view.leaves) list.appendChild(leafSection(doc, leaf, onDrill));
+  for (const leaf of view.leaves) list.appendChild(leafSection(doc, leaf, onDrill, onOpenWorker));
   root.appendChild(list);
+  host.appendChild(root);
+}
+
+function backButton(doc, onBack) {
+  const button = el(doc, "button", "cockpit-worker-detail-back", "\u2190 Workers");
+  button.setAttribute("type", "button");
+  if (onBack) button.addEventListener("click", onBack);
+  return button;
+}
+
+function renderWorkerDetail(host, doc, view, onBack, onDrill) {
+  host.replaceChildren();
+  const root = el(doc, "section", "cockpit-worker-detail");
+  root.appendChild(backButton(doc, onBack));
+  if (view.kind === "missing") {
+    root.setAttribute("data-worker-missing", view.instance);
+    root.appendChild(el(doc, "h1", "cockpit-title", `Worker ${view.instance}`));
+    root.appendChild(el(doc, "div", "cockpit-worker-detail-empty", `Worker ${view.instance} is not in the current supply report.`));
+    host.appendChild(root);
+    return;
+  }
+  const worker = view.worker;
+  root.setAttribute("data-worker-detail", worker.instance);
+  root.setAttribute("data-liveness", worker.liveness);
+  const header = el(doc, "header", "cockpit-worker-detail-header");
+  header.appendChild(el(doc, "h1", "cockpit-title", worker.instance));
+  const meta = el(doc, "dl", "cockpit-worker-detail-meta");
+  for (const [klass, label, value] of [
+    ["identity", "identity", worker.identity],
+    ["host", "host", worker.host],
+    ["family", "family", worker.family],
+    ["liveness", "liveness", worker.liveness],
+  ]) {
+    const item = el(doc, "div", "cockpit-worker-detail-meta-item");
+    item.setAttribute("data-field", klass);
+    item.appendChild(el(doc, "dt", undefined, label));
+    const dd = el(doc, "dd", `cockpit-worker-detail-${klass}`, value);
+    if (klass === "liveness") dd.setAttribute("data-liveness", worker.liveness);
+    item.appendChild(dd);
+    meta.appendChild(item);
+  }
+  header.appendChild(meta);
+  root.appendChild(header);
+  const current = el(doc, "section", "cockpit-worker-current");
+  current.appendChild(el(doc, "h2", "cockpit-panel-title", "Current job"));
+  if (view.currentJob == null) {
+    current.appendChild(el(doc, "div", "cockpit-worker-current-empty", "No active job."));
+  } else {
+    const job = view.currentJob;
+    const button = el(doc, "button", "cockpit-worker-current-job", job.label);
+    button.setAttribute("type", "button");
+    button.setAttribute("data-job-key", job.jobKey);
+    button.setAttribute("data-stream", job.stream);
+    if (onDrill) button.addEventListener("click", () => onDrill(job.stream));
+    current.appendChild(button);
+  }
+  root.appendChild(current);
   host.appendChild(root);
 }
 
@@ -251,18 +345,18 @@ function sessionRow(doc, session, onReplay, activeStream) {
   return row;
 }
 
-function renderTranscripts(host, doc, view, onReplay, activeStream) {
+function renderTranscripts(host, doc, view, onReplay, activeStream, title = "Past sessions", emptyText = "No captured sessions yet.") {
   host.replaceChildren();
   const root = el(doc, "div", "cockpit-past");
   root.setAttribute("data-session-count", String(view.count));
   const header = el(doc, "header", "cockpit-past-header");
-  header.appendChild(el(doc, "h2", "cockpit-past-title", "Past sessions"));
+  header.appendChild(el(doc, "h2", "cockpit-past-title", title));
   const summary = el(doc, "span", "cockpit-past-summary", view.retention != null ? `${view.count} \u00b7 kept ${view.retention}` : `${view.count}`);
   summary.setAttribute("data-summary", "past");
   header.appendChild(summary);
   root.appendChild(header);
   if (view.count === 0) {
-    const empty = el(doc, "div", "cockpit-past-empty", "No captured sessions yet.");
+    const empty = el(doc, "div", "cockpit-past-empty", emptyText);
     empty.setAttribute("data-empty", "true");
     root.appendChild(empty);
     host.appendChild(root);
@@ -413,12 +507,15 @@ export function mountCockpit(host, opts = {}) {
   let terminal; // the current xterm sink
   let mode; // "live" | "replay" | undefined
   let shownStream;
+  let route = parseCockpitRoute(location.hash);
+  let view;
   // Bumped by every drillInto()/replayInto()/dispose() that claims the terminal region, so a slow
   // replay fetch that resolves after a newer selection drops its result instead of clobbering it.
   let opToken = 0;
   // True while a refreshPast() fetch is outstanding, so the supply poll never stacks past-fetches
   // against a slow/hung transcripts endpoint.
   let pastRefreshing = false;
+  let pastRefreshPending = false;
 
   function setMode(next, stream) {
     mode = next;
@@ -435,6 +532,52 @@ export function mountCockpit(host, opts = {}) {
     terminal?.dispose?.();
     terminal = undefined;
   }
+
+  function routeInstance() {
+    return route.kind === "worker" ? route.instance : undefined;
+  }
+
+  function renderRoute() {
+    if (view == null) return;
+    if (route.kind === "worker") {
+      renderWorkerDetail(listRegion, doc, workerDetailView(view, route.instance), backToMain, drillInto);
+      return;
+    }
+    renderSupply(listRegion, doc, view, drillInto, openWorker);
+  }
+
+  function openWorker(instance) {
+    const hash = `#/cockpit/worker/${encodeURIComponent(instance)}`;
+    if (location.hash === hash) {
+      route = { kind: "worker", instance };
+      renderRoute();
+      void refreshPast(instance);
+      return;
+    }
+    location.hash = hash;
+  }
+
+  function backToMain() {
+    if (location.hash === "#/cockpit") {
+      route = { kind: "main" };
+      renderRoute();
+      void refreshPast();
+      return;
+    }
+    location.hash = "#/cockpit";
+  }
+
+  function onHashChange() {
+    route = parseCockpitRoute(location.hash);
+    try {
+      renderRoute();
+    } catch (err) {
+      onError(err);
+    }
+    void refreshPast(routeInstance());
+  }
+
+  window.addEventListener("hashchange", onHashChange);
 
   function drillInto(stream) {
     if (disposed || (mode === "live" && drill?.stream === stream)) return;
@@ -503,16 +646,26 @@ export function mountCockpit(host, opts = {}) {
       const session = new TerminalSession({ stream, sink, send: () => {}, from: data.from ?? 0 });
       replayTranscript(session, data);
       setMode("replay", stream);
-      void refreshPast();
+      void refreshPast(routeInstance());
     } catch (err) {
       onError(err);
     }
   }
 
-  async function refreshPast() {
+  function transcriptsListUrl(instance) {
+    if (instance == null) return transcriptsUrl;
+    const url = new URL(transcriptsUrl, location.href);
+    url.searchParams.set("instance", instance);
+    return url.href;
+  }
+
+  async function refreshPast(instance = routeInstance()) {
     // Single-flight: while one past-fetch is outstanding (including a hung one), skip starting another
     // so the supply poll can't stack pending fetches against a slow/unresponsive transcripts endpoint.
-    if (pastRefreshing) return;
+    if (pastRefreshing) {
+      pastRefreshPending = true;
+      return;
+    }
     pastRefreshing = true;
     try {
       let report;
@@ -525,7 +678,7 @@ export function mountCockpit(host, opts = {}) {
         abortTimer.unref?.();
         let res;
         try {
-          res = await fetch(transcriptsUrl, { headers: jsonHeaders(), signal: controller.signal });
+          res = await fetch(transcriptsListUrl(instance), { headers: jsonHeaders(), signal: controller.signal });
         } finally {
           clearTimeout(abortTimer);
         }
@@ -536,13 +689,29 @@ export function mountCockpit(host, opts = {}) {
         return;
       }
       if (disposed) return;
+      if (routeInstance() !== instance) {
+        pastRefreshPending = true;
+        return;
+      }
       try {
-        renderTranscripts(pastRegion, doc, transcriptsView(report), replayInto, mode === "replay" ? shownStream : undefined);
+        renderTranscripts(
+          pastRegion,
+          doc,
+          transcriptsView(report),
+          replayInto,
+          mode === "replay" ? shownStream : undefined,
+          instance == null ? "Past sessions" : "Job history",
+          instance == null ? "No captured sessions yet." : "No captured sessions for this worker yet.",
+        );
       } catch (err) {
         onError(err);
       }
     } finally {
       pastRefreshing = false;
+      if (pastRefreshPending && !disposed) {
+        pastRefreshPending = false;
+        void refreshPast(routeInstance());
+      }
     }
   }
 
@@ -559,12 +728,13 @@ export function mountCockpit(host, opts = {}) {
     }
     if (disposed) return;
     try {
-      renderSupply(listRegion, doc, supplyView(report, staleAfterMs), drillInto);
+      view = supplyView(report, staleAfterMs);
+      renderRoute();
     } catch (err) {
       onError(err);
     }
     // Fire-and-forget: a hung transcripts endpoint must never stall the supply poll's next tick.
-    void refreshPast();
+    void refreshPast(routeInstance());
   }
 
   function tick(gen) {
@@ -594,6 +764,7 @@ export function mountCockpit(host, opts = {}) {
     stop();
     teardownTerminal();
     setMode(undefined, undefined);
+    window.removeEventListener("hashchange", onHashChange);
   }
 
   start();

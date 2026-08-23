@@ -47,10 +47,11 @@ export default defineOperation("listAgenticTranscripts", async ({ query, req }, 
     ...(query.jobKey !== undefined ? { jobKey: query.jobKey } : {}),
     ...(query.processInstanceKey !== undefined ? { processInstanceKey: query.processInstanceKey } : {}),
     ...(query.planKey !== undefined ? { planKey: query.planKey } : {}),
+    ...(query.instance !== undefined ? { instance: query.instance } : {}),
     ...(query.since !== undefined ? { since: query.since } : {}),
     ...(query.until !== undefined ? { until: query.until } : {}),
   };
-  const transcripts = listTranscripts(store, currentCorrelation(), filter);
+  const transcripts = listTranscripts(store, currentCorrelation(), filter, service?.correlationStore);
   const body: AgenticTranscriptList = {
     count: transcripts.length,
     generatedAt: new Date().toISOString(),

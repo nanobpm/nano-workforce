@@ -23,6 +23,10 @@ export interface RenderTranscriptsOptions {
   readonly onReplay?: (stream: string) => void;
   /** The stream currently being replayed, if any — highlighted in the list. */
   readonly activeStream?: string;
+  /** Panel title. Defaults to the global cockpit history label. */
+  readonly title?: string;
+  /** Empty-state copy. Defaults to the global cockpit history copy. */
+  readonly emptyText?: string;
 }
 
 /** Handles into the rendered tree the caller may need. */
@@ -74,14 +78,14 @@ export function renderTranscripts(
   root.setAttribute("data-session-count", String(view.count));
 
   const header = el(doc, "header", "cockpit-past-header");
-  header.appendChild(el(doc, "h2", "cockpit-past-title", "Past sessions"));
+  header.appendChild(el(doc, "h2", "cockpit-past-title", options.title ?? "Past sessions"));
   const summary = el(doc, "span", "cockpit-past-summary", view.retention !== undefined ? `${view.count} · kept ${view.retention}` : `${view.count}`);
   summary.setAttribute("data-summary", "past");
   header.appendChild(summary);
   root.appendChild(header);
 
   if (view.count === 0) {
-    const empty = el(doc, "div", "cockpit-past-empty", "No captured sessions yet.");
+    const empty = el(doc, "div", "cockpit-past-empty", options.emptyText ?? "No captured sessions yet.");
     empty.setAttribute("data-empty", "true");
     root.appendChild(empty);
     host.appendChild(root);

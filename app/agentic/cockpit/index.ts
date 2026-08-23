@@ -6,6 +6,10 @@
 // The DEMAND×supply matrix, missing-agent-type reds, and diversity-SLO lights are OUT OF SCOPE for
 // this epic (#142) and deferred to the paired enrolment epic #152.
 export {
+  type CockpitRoute,
+  parseCockpitRoute,
+} from "./cockpit-route.ts";
+export {
   bootSupplyCockpit,
   type CreateTerminal,
   type SupplyCockpitEnv,
@@ -51,3 +55,15 @@ export {
   type TranscriptView,
   transcriptsView,
 } from "./transcript-view.ts";
+export {
+  type RenderWorkerDetailOptions,
+  renderWorkerDetail,
+  type WorkerDetailDom,
+} from "./worker-detail-render.ts";
+export {
+  type FoundWorkerDetailView,
+  type MissingWorkerDetailView,
+  type WorkerCurrentJobView,
+  type WorkerDetailView,
+  workerDetailView,
+} from "./worker-detail-view.ts";
