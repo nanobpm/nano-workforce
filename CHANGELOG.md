@@ -1,3 +1,10 @@
+# [0.128.0](https://github.com/nanobpm/nano-workforce/compare/v0.127.0...v0.128.0) (2026-08-23)
+
+
+### Features
+
+* **cockpit:** release worker correlation on job end + durable attribution + worker detail history page ([#488](https://github.com/nanobpm/nano-workforce/issues/488)) ([51c1a53](https://github.com/nanobpm/nano-workforce/commit/51c1a539535d6d65177aa4e2e46ff3ce390bec18)), closes [#232](https://github.com/nanobpm/nano-workforce/issues/232)
+
 # [0.127.0](https://github.com/nanobpm/nano-workforce/compare/v0.126.0...v0.127.0) (2026-08-23)
 
 
