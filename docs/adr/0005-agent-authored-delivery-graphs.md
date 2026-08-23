@@ -225,6 +225,24 @@ resume cannot double-fire.
 - **Non-npm emit facts** (OCI/github-release) and behavioural edges beyond the `command` escape hatch —
   added when a real case lands.
 
+> **Amendment (issue #492): conditional (guarded) edges landed (S7).** The "behavioural edges" deferral
+> above is **partially lifted**: an edge may now carry an optional guard — `when: "<node>.<fact>"` +
+> `equals: <scalar>` — or be the split's single `default: true` else-branch. A node whose out-edges
+> carry guards is an **exclusive** (data-based) split instead of the default parallel fan-out; its
+> guarded branches compile to a BPMN `exclusiveGateway` (`gwx<i>`) with one FEEL
+> `conditionExpression` per guarded flow (`=<producerElement>_<fact> = <literal>`) and a named default
+> flow, and where those branches re-converge they merge on an **exclusive** gateway (`gwm<i>`,
+> first-token-proceeds) rather than the parallel AND-join that would deadlock the untaken branch. The
+> validator enforces the guard's shape and closes the deadlock/ambiguity classes: a guard must
+> reference a **scalar** fact **declared by the edge's own producer** (`bad-when`), carry an `equals`
+> whose type matches the fact (`guard-missing-equals` / `guard-type-mismatch`), never combine `when`
+> with `default` (`guard-default-conflict`); a split must not **mix** guarded and plain out-edges
+> (`mixed-fan-out`) nor declare **two** defaults (`multiple-defaults`), must be **exhaustive** — a
+> `default`, unless a single boolean fact is guarded on both `true` and `false` (`non-exhaustive-split`)
+> — and a plain (parallel) AND-join may not be fed by an exclusive-split branch (`exclusive-merge-parity`).
+> Determinism is preserved: gateway ids are positional over id-sorted nodes, so a graph with no guards
+> compiles byte-for-byte as before.
+
 ## Open questions
 
 - **Compiler target for the first cut** — confirm compile-to-native (diagram + native scheduling) vs a

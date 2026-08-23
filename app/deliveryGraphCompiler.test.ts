@@ -323,3 +323,90 @@ test("DI (#440) is deterministic: identical JSON yields byte-identical laid-out 
   const b = await compileOk(RELEASE_RUNBOOK);
   assertEquals(a.bpmn, b.bpmn);
 });
+
+// ── S7: guarded (conditional) edges compile to an exclusive gateway (ADR 0005 S7) ──────────────────
+// A guarded split node's fan-out is an EXCLUSIVE gateway with a FEEL condition per guarded flow and a
+// default flow; a fan-in re-converging its branches is an EXCLUSIVE merge (first-token-proceeds), not
+// the parallel AND-join that would deadlock on the untaken branch. Byte-identical determinism holds.
+const GUARDED_ADOPT = {
+  name: "adopt",
+  nodes: [
+    { id: "bump", kind: "agent", agent: { jobType: "senior:feature" }, emits: [{ name: "result", type: "string" }] },
+    { id: "migrate", kind: "agent", agent: { jobType: "senior:migrate" } },
+    { id: "release", kind: "connector", connector: { target: "npm:publish" } },
+  ],
+  edges: [
+    { from: "bump", to: "migrate", when: "bump.result", equals: "breaking" },
+    { from: "bump", to: "release", default: true },
+    { from: "migrate", to: "release" },
+  ],
+};
+
+test("S7 compiler: a guarded fan-out compiles to an exclusiveGateway with a FEEL condition + a default flow", async () => {
+  const r = await compileOk(GUARDED_ADOPT);
+  // The split's fork gateway is an EXCLUSIVE gateway (gwx), not the parallel fork (gwf).
+  assert(/<bpmn:exclusiveGateway id="gwx0"[^>]*name="fan out of bump"/.test(r.bpmn), "guarded split forks on an exclusiveGateway");
+  assert(!/<bpmn:parallelGateway id="gwf/.test(r.bpmn), "no parallel fork is emitted for a guarded split");
+  // The breaking flow carries a FEEL equality condition comparing the producer's published fact var.
+  // FEEL string literals in a conditionExpression use LITERAL double-quotes (the authored-BPMN
+  // convention), so the guard survives the engine deploy path.
+  assert(
+    r.bpmn.includes('<bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=n0_result = "breaking"</bpmn:conditionExpression>'),
+    `expected the breaking guard condition, got: ${r.bpmn.match(/<bpmn:conditionExpression[^<]*<\/bpmn:conditionExpression>/g)?.join(" | ")}`,
+  );
+  // The gwx gateway names its default (else) flow, and that flow itself carries NO condition.
+  const defMatch = r.bpmn.match(/<bpmn:exclusiveGateway id="gwx0" default="(f\d+)"/);
+  assert(defMatch, "the exclusive split names a default flow");
+  const defFlow = new RegExp(`<bpmn:sequenceFlow id="${defMatch![1]}"[^>]*/>`);
+  assert(defFlow.test(r.bpmn), "the default flow is unconditional (self-closing, no conditionExpression)");
+});
+
+test("S7 compiler: the branches re-converge on an EXCLUSIVE merge, not a parallel AND-join", async () => {
+  const r = await compileOk(GUARDED_ADOPT);
+  assert(/<bpmn:exclusiveGateway id="gwm0"[^>]*name="join into release"/.test(r.bpmn), "release merges on an exclusiveGateway (gwm)");
+  assert(!/<bpmn:parallelGateway id="gwj/.test(r.bpmn), "no parallel AND-join is emitted for the exclusive re-convergence");
+  // The resolved preview carries the guard fields on the edges.
+  const guarded = r.resolved.edges.find((e) => e.to === "migrate" && e.fromNode === "bump");
+  assertEquals(guarded?.when, "bump.result");
+  assertEquals(guarded?.equals, "breaking");
+  const dflt = r.resolved.edges.find((e) => e.to === "release" && e.fromNode === "bump");
+  assertEquals(dflt?.default, true);
+});
+
+test("S7 compiler: multiple mutually-exclusive leaves join End on an exclusive merge (gwm_end)", async () => {
+  // Mode D: `adopt` routes the missing outcome to an escalate (human) leaf and the default to a `done`
+  // leaf. Only one leaf fires, so End must be an EXCLUSIVE merge, else the parallel join deadlocks.
+  const r = await compileOk({
+    name: "surface",
+    nodes: [
+      { id: "adopt", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "surface", type: "string" }] },
+      { id: "escalate", kind: "human", human: { prompt: "file upstream issue" } },
+      { id: "done", kind: "connector", connector: { target: "npm:install" } },
+    ],
+    edges: [
+      { from: "adopt", to: "escalate", when: "adopt.surface", equals: "missing" },
+      { from: "adopt", to: "done", default: true },
+    ],
+  });
+  assert(r.bpmn.includes('id="gwm_end"'), "the exclusive-branch leaves join End on an exclusive merge");
+  assert(!r.bpmn.includes('id="gwj_end"'), "no parallel End join for mutually-exclusive leaves");
+});
+
+test("S7 compiler: byte-identical determinism holds for a guarded graph (input order irrelevant)", async () => {
+  const a = await compileOk(GUARDED_ADOPT);
+  const b = await compileOk({ ...GUARDED_ADOPT, nodes: [...GUARDED_ADOPT.nodes].reverse(), edges: [...GUARDED_ADOPT.edges].reverse() });
+  assertEquals(a.bpmn, b.bpmn);
+  assertEquals(a.diagram, b.diagram);
+  assertEquals(JSON.stringify(a.resolved), JSON.stringify(b.resolved));
+});
+
+test("S7 compiler: a non-exhaustive guarded split is rejected before compilation", async () => {
+  const errors = await compileFail({
+    nodes: [
+      { id: "bump", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "result", type: "string" }] },
+      { id: "migrate", kind: "agent", agent: { jobType: "j" } },
+    ],
+    edges: [{ from: "bump", to: "migrate", when: "bump.result", equals: "breaking" }],
+  });
+  assert(errors.length > 0, "a non-exhaustive guarded split does not compile");
+});

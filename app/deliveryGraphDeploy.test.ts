@@ -207,3 +207,151 @@ test("di coverage: every compiled flow node carries a BPMNShape and every sequen
 function escapeRe(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
+
+// ── S7: guarded (conditional) routing DEPLOYS and ROUTES on the real engine (ADR 0005 S7) ──────────
+// The compiler tests prove a guarded split emits an exclusiveGateway with FEEL conditions; only a live
+// deploy proves the engine EVALUATES those conditions and takes exactly ONE branch. Here the `bump`
+// agent's emitted scalar (`result`) is published to a process var and the exclusive gateway routes on
+// it: the breaking outcome runs the `migrate` node, the green outcome skips straight to `release`, and
+// BOTH re-converge on the exclusive merge to a COMPLETED instance (a parallel merge would deadlock the
+// skipped branch). A guarded string fact needs a `default`, so green rides the else-flow.
+const GUARDED_ADOPT: DeliveryGraph = {
+  name: "adopt runbook",
+  nodes: [
+    { id: "bump", kind: "agent", agent: { jobType: "senior:bump" }, emits: [{ name: "result", type: "string" }] },
+    { id: "migrate", kind: "agent", agent: { jobType: "senior:migrate" } },
+    { id: "release", kind: "connector", connector: { target: "npm:publish", dedupeKey: "rel-1" } },
+  ],
+  edges: [
+    { from: "bump", to: "migrate", when: "bump.result", equals: "breaking" },
+    { from: "bump", to: "release", default: true },
+    { from: "migrate", to: "release" },
+  ],
+};
+
+async function driveGuarded(outcome: "breaking" | "green"): Promise<{ state: string; migrateRan: boolean; releaseRan: boolean }> {
+  const engine = await createWasmEngineClient();
+  try {
+    let migrateRan = false;
+    let releaseRan = false;
+    // The split agent publishes its scalar outcome; the exclusive gateway routes on it.
+    await engine.registerWorker("senior:bump", async () => ({ result: outcome }));
+    await engine.registerWorker("senior:migrate", async () => {
+      migrateRan = true;
+      return {};
+    });
+    await engine.registerWorker(DELIVERY_CONNECTOR_TASK_TYPE, async () => {
+      releaseRan = true;
+      return {};
+    });
+
+    const run = await runDeliveryGraph(engine, GUARDED_ADOPT);
+    assert(run.ok, `runDeliveryGraph failed: ${JSON.stringify(run)}`);
+    const key = run.handle.processInstanceKey;
+
+    let state = "?";
+    for (let round = 0; round < MAX_ROUNDS; round++) {
+      await engine.drain();
+      const [pi] = await engine.searchProcessInstances({ processInstanceKeys: [key] });
+      assert(pi, `no process instance snapshot for ${key}`);
+      state = pi.state ?? "?";
+      if (state === "COMPLETED" || state === "TERMINATED") break;
+    }
+    return { state, migrateRan, releaseRan };
+  } finally {
+    await engine.close();
+  }
+}
+
+test("S7 deploy+route: the breaking guard branch runs `migrate` before re-converging on the exclusive merge to COMPLETED", async () => {
+  const r = await driveGuarded("breaking");
+  assertEquals(r.state, "COMPLETED", "the breaking branch must run to a COMPLETED instance");
+  assert(r.migrateRan, "the breaking outcome must route through the guarded `migrate` node");
+  assert(r.releaseRan, "both branches must re-converge on `release`");
+});
+
+test("S7 deploy+route: the green default branch SKIPS `migrate` and rides the else-flow straight to COMPLETED", async () => {
+  const r = await driveGuarded("green");
+  assertEquals(r.state, "COMPLETED", "the green branch must run to a COMPLETED instance");
+  assert(!r.migrateRan, "the green outcome must NOT route through `migrate` — it rides the default flow");
+  assert(r.releaseRan, "the green outcome still reaches `release` via the else-flow (proof the exclusive merge fires on one token)");
+});
+
+test("S7 deploy+route: mutually-exclusive leaves join End on an exclusive merge — the untaken leaf never blocks completion", async () => {
+  // Mode D: `adopt` routes a missing surface to an escalate (human) leaf, else to a `done` connector
+  // leaf. On the default path the escalate leaf never fires; an exclusive End merge must still let the
+  // instance COMPLETE (a parallel End join would wait forever on the untaken human leaf).
+  const graph: DeliveryGraph = {
+    name: "surface check",
+    nodes: [
+      { id: "adopt", kind: "agent", agent: { jobType: "senior:adopt" }, emits: [{ name: "surface", type: "string" }] },
+      { id: "escalate", kind: "human", human: { prompt: "file the upstream issue" } },
+      { id: "done", kind: "connector", connector: { target: "npm:install", dedupeKey: "done-1" } },
+    ],
+    edges: [
+      { from: "adopt", to: "escalate", when: "adopt.surface", equals: "missing" },
+      { from: "adopt", to: "done", default: true },
+    ],
+  };
+
+  // Default path (surface present): the human leaf is skipped and the instance COMPLETES on its own.
+  {
+    const engine = await createWasmEngineClient();
+    try {
+      let doneRan = false;
+      await engine.registerWorker("senior:adopt", async () => ({ surface: "present" }));
+      await engine.registerWorker(DELIVERY_CONNECTOR_TASK_TYPE, async () => {
+        doneRan = true;
+        return {};
+      });
+      const run = await runDeliveryGraph(engine, graph, { escalationSlaTimeout: "PT1H" });
+      assert(run.ok, `runDeliveryGraph failed: ${JSON.stringify(run)}`);
+      const key = run.handle.processInstanceKey;
+      let state = "?";
+      for (let round = 0; round < MAX_ROUNDS; round++) {
+        await engine.drain();
+        const [pi] = await engine.searchProcessInstances({ processInstanceKeys: [key] });
+        state = pi?.state ?? "?";
+        if (state === "COMPLETED" || state === "TERMINATED") break;
+        const open = await engine.searchUserTasks({ processInstanceKey: key, state: "CREATED" });
+        assertEquals(open.length, 0, "the default path must never surface the escalate human leaf");
+      }
+      assertEquals(state, "COMPLETED", "the default (present) path completes without the human leaf");
+      assert(doneRan, "the default path routes to the `done` connector leaf");
+    } finally {
+      await engine.close();
+    }
+  }
+
+  // Guarded path (surface missing): the human leaf parks; `done` never runs.
+  {
+    const engine = await createWasmEngineClient();
+    try {
+      let doneRan = false;
+      await engine.registerWorker("senior:adopt", async () => ({ surface: "missing" }));
+      await engine.registerWorker(DELIVERY_CONNECTOR_TASK_TYPE, async () => {
+        doneRan = true;
+        return {};
+      });
+      const run = await runDeliveryGraph(engine, graph, { escalationSlaTimeout: "PT1H" });
+      assert(run.ok, `runDeliveryGraph failed: ${JSON.stringify(run)}`);
+      const key = run.handle.processInstanceKey;
+      let parked = "";
+      for (let round = 0; round < MAX_ROUNDS; round++) {
+        await engine.drain();
+        const open = await engine.searchUserTasks({ processInstanceKey: key, state: "CREATED" });
+        if (open.length > 0) {
+          parked = open[0].elementId ?? "";
+          break;
+        }
+      }
+      assert(
+        parked.startsWith("delivery-human-task__") && !parked.endsWith("__esc"),
+        `the missing outcome must park on the escalate human leaf, saw ${JSON.stringify(parked)}`,
+      );
+      assert(!doneRan, "the guarded (missing) path must NOT run the `done` leaf");
+    } finally {
+      await engine.close();
+    }
+  }
+});

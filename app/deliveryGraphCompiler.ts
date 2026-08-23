@@ -37,6 +37,7 @@ import type {
 } from "../nano-generated/api-io.d.ts";
 import { DELIVERY_CONNECTOR_TASK_TYPE } from "./deliveryConnector.ts";
 import {
+  analyzeExclusiveTopology,
   type DeliveryGraphError,
   deliveryNodeFacts,
   resolveDeliveryFrom,
@@ -105,6 +106,15 @@ function escapeXml(value: string): string {
     .replace(/'/g, "&apos;");
 }
 
+/** Escape a string for XML ELEMENT TEXT content while KEEPING literal double-quotes — the convention
+ * every authored `<bpmn:conditionExpression>` FEEL uses (e.g. `=status = "converged"`). Only `&`, `<`,
+ * `>` are entity-escaped (required for text-node well-formedness); quotes stay literal so a FEEL string
+ * literal survives to the engine. Safe because the compiler grafts DI onto its own semantic XML without
+ * re-serializing it, so these text nodes are never round-tripped/normalized. Deterministic and total. */
+function escapeXmlText(value: string): string {
+  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
 /** Render a `name=value` XML attribute, choosing the delimiter so FEEL string literals survive the
  * WASM engine's deploy path. That path does NOT decode `&#34;`/`&quot;` entities before FEEL parsing,
  * so a FEEL expression containing a string literal MUST use a SINGLE-QUOTE attribute delimiter with
@@ -168,13 +178,44 @@ function feelStr(value: string): string {
   return JSON.stringify(value);
 }
 
+/** Render a guard `equals` literal (S7) as its FEEL form — a string becomes a `"…"` literal, a number
+ * its decimal, a boolean `true`/`false`. `undefined` renders as `""` so it can double as a stable sort
+ * key for edges without a guard. Deterministic and total over the `string|number|boolean` scalar set. */
+function feelLiteral(value: string | number | boolean | undefined): string {
+  if (typeof value === "string") return feelStr(value);
+  if (typeof value === "number") return String(value);
+  if (typeof value === "boolean") return value ? "true" : "false";
+  return "";
+}
+
+/** The FEEL predicate a guarded edge (S7) contributes to its exclusive-split flow condition — e.g.
+ * `n0_result = "breaking"` — comparing the producer's published `<element>_<fact>` variable to the
+ * edge's `equals` literal. `when` names `<fromNode>.<fact>` (validated: a scalar fact of this edge's
+ * producer), so the variable is `<producerElement>_<fact>`. Returns `undefined` for a plain or default
+ * edge (no `when`). Deterministic. */
+function guardConditionPart(
+  edge: ResolvedDeliveryEdge,
+  elementById: ReadonlyMap<string, string>,
+  nodeFacts: ReadonlyMap<string, ReadonlySet<string>>,
+): string | undefined {
+  if (edge.when === undefined || edge.default === true) return undefined;
+  const { fact } = resolveDeliveryFrom(edge.when, nodeFacts);
+  if (fact === undefined) return undefined;
+  const producerElement = elementById.get(edge.fromNode) ?? edge.fromNode;
+  return `${producerElement}_${fact} = ${feelLiteral(edge.equals)}`;
+}
+
 /** One sequence flow in the compiled process — `source`/`target` are element ids, `name` an optional
- * (fact) label. */
+ * (fact / guard) label. `condition` is a FEEL boolean guard rendered as a `<bpmn:conditionExpression>`
+ * child (S7 guarded edge); `isDefault` marks the exclusive split's default (else) flow, whose id the
+ * split gateway carries as its `default` attribute. */
 interface Flow {
   id: string;
   source: string;
   target: string;
   name?: string;
+  condition?: string;
+  isDefault?: boolean;
 }
 
 /** One late-binding input a consumer node receives (S4): the producer node's business id, the
@@ -187,14 +228,18 @@ interface BoundInput {
 }
 
 /** A compiled node's structural fixtures: its own BPMN `element` id, and — when it has >1 downstream
- * or >1 upstream — the parallel fork/join gateway that fans its flow out/in. `entry` is the id
- * upstream flows target (the join, else the element); `exit` is the id downstream flows leave from
- * (the fork, else the element). */
+ * or >1 upstream — the fork/join gateway that fans its flow out/in. `entry` is the id upstream flows
+ * target (the join, else the element); `exit` is the id downstream flows leave from (the fork, else
+ * the element). `forkExclusive`/`joinExclusive` select an EXCLUSIVE gateway (S7): a guarded-split
+ * source forks on an `exclusiveGateway` (data-based branch), and a fan-in reconverging exclusive
+ * branches joins on an `exclusiveGateway` (first-token-proceeds) rather than a parallel AND-join. */
 interface NodeWiring {
   node: DeliveryNode;
   element: string;
   forkGateway?: string;
   joinGateway?: string;
+  forkExclusive: boolean;
+  joinExclusive: boolean;
   entry: string;
   exit: string;
 }
@@ -239,19 +284,27 @@ export async function compileDeliveryGraph(
   const edges = Array.isArray(typed.edges) ? typed.edges : [];
 
   // Resolve every edge's `from` endpoint against the SAME node/fact map the validator checked (shared
-  // helper — no drift), then sort edges deterministically by (consumer, producer, fact).
+  // helper — no drift), then sort edges deterministically by (consumer, producer, fact). Guard fields
+  // (`when`/`equals`/`default`, S7) are carried through verbatim so the preview and the compiled
+  // gateway conditions derive from one resolved edge.
   const nodeFacts = deliveryNodeFacts(typed);
   const resolvedEdges: ResolvedDeliveryEdge[] = edges
     .map((edge) => {
       const { nodeId, fact } = resolveDeliveryFrom(edge.from, nodeFacts);
-      const resolved: ResolvedDeliveryEdge = { from: edge.from, to: edge.to, fromNode: nodeId };
-      return fact !== undefined ? { ...resolved, fromFact: fact } : resolved;
+      let resolved: ResolvedDeliveryEdge = { from: edge.from, to: edge.to, fromNode: nodeId };
+      if (fact !== undefined) resolved = { ...resolved, fromFact: fact };
+      if (edge.when !== undefined) resolved = { ...resolved, when: edge.when };
+      if (edge.equals !== undefined) resolved = { ...resolved, equals: edge.equals };
+      if (edge.default !== undefined) resolved = { ...resolved, default: edge.default };
+      return resolved;
     })
     .sort(
       (a, b) =>
         byCodeUnit(a.to, b.to) ||
         byCodeUnit(a.fromNode, b.fromNode) ||
-        byCodeUnit(a.fromFact ?? "", b.fromFact ?? ""),
+        byCodeUnit(a.fromFact ?? "", b.fromFact ?? "") ||
+        byCodeUnit(a.when ?? "", b.when ?? "") ||
+        byCodeUnit(feelLiteral(a.equals), feelLiteral(b.equals)),
     );
 
   // Per-node producer/consumer adjacency (by node id), each sorted + de-duplicated for determinism.
@@ -268,25 +321,51 @@ export async function compileDeliveryGraph(
   for (const list of producersById.values()) list.sort(byCodeUnit);
   for (const list of consumersById.values()) list.sort(byCodeUnit);
 
+  // Exclusive-split topology (S7): a node with any guarded/`default` out-edge is an exclusive split; a
+  // fan-in that re-converges a split's branches is an exclusive merge. Derived from the ONE shared
+  // `analyzeExclusiveTopology` the validator also uses, so gateway-type selection never drifts from the
+  // parity the validator enforced.
+  const splitNodes = new Set<string>();
+  for (const edge of resolvedEdges) {
+    if (edge.when !== undefined || edge.default === true) splitNodes.add(edge.fromNode);
+  }
+  const forwardAdj = new Map<string, string[]>();
+  for (const node of nodes) forwardAdj.set(node.id, [...(consumersById.get(node.id) ?? [])]);
+  const topology = analyzeExclusiveTopology(
+    nodes.map((n) => n.id),
+    forwardAdj,
+    splitNodes,
+  );
+
   // Assign the deterministic BPMN element id per node (`n0`, `n1`, … in sorted order) plus the
-  // fork/join gateway ids (`gwf<i>` / `gwj<i>`) any fan-out/fan-in node needs.
+  // fork/join gateway ids any fan-out/fan-in node needs: a PARALLEL fork/join is `gwf<i>`/`gwj<i>`; an
+  // EXCLUSIVE split/merge (S7) is `gwx<i>`/`gwm<i>`. Each id space has its own positional counter so the
+  // scheme stays deterministic and non-colliding.
   const elementById = new Map<string, string>();
   const wirings: NodeWiring[] = [];
   const wiringById = new Map<string, NodeWiring>();
   let forkSeq = 0;
   let joinSeq = 0;
+  let splitSeq = 0;
+  let mergeSeq = 0;
   nodes.forEach((node, i) => {
     const element = `n${i}`;
     elementById.set(node.id, element);
     const consumers = consumersById.get(node.id) ?? [];
     const producers = producersById.get(node.id) ?? [];
-    const forkGateway = consumers.length > 1 ? `gwf${forkSeq++}` : undefined;
-    const joinGateway = producers.length > 1 ? `gwj${joinSeq++}` : undefined;
+    const forkExclusive = splitNodes.has(node.id);
+    const joinExclusive = topology.mergeNodes.has(node.id);
+    const forkGateway =
+      consumers.length > 1 ? (forkExclusive ? `gwx${splitSeq++}` : `gwf${forkSeq++}`) : undefined;
+    const joinGateway =
+      producers.length > 1 ? (joinExclusive ? `gwm${mergeSeq++}` : `gwj${joinSeq++}`) : undefined;
     const wiring: NodeWiring = {
       node,
       element,
       forkGateway,
       joinGateway,
+      forkExclusive: forkGateway !== undefined && forkExclusive,
+      joinExclusive: joinGateway !== undefined && joinExclusive,
       entry: joinGateway ?? element,
       exit: forkGateway ?? element,
     };
@@ -297,7 +376,11 @@ export async function compileDeliveryGraph(
   const roots = nodes.filter((n) => (producersById.get(n.id) ?? []).length === 0);
   const leaves = nodes.filter((n) => (consumersById.get(n.id) ?? []).length === 0);
   const startForkGateway = roots.length > 1 ? "gwf_start" : undefined;
-  const endJoinGateway = leaves.length > 1 ? "gwj_end" : undefined;
+  // The End sink is an exclusive merge when its leaves are mutually-exclusive branch tails (only one
+  // fires per run); a parallel AND-join there would deadlock on the untaken branch. The validator has
+  // already rejected a leaf set that MIXES conditional and always-firing tails.
+  const endExclusive = leaves.length > 1 && leaves.some((n) => topology.conditional.has(n.id));
+  const endJoinGateway = leaves.length > 1 ? (endExclusive ? "gwm_end" : "gwj_end") : undefined;
 
   // ── Build the flow list in a DETERMINISTIC order, then assign `f0…` ids positionally ────────────
   const flows: Omit<Flow, "id">[] = [];
@@ -320,30 +403,58 @@ export async function compileDeliveryGraph(
   //    two fact-qualified edges between the same pair (e.g. `a.x -> b` and `a.y -> b`) would otherwise
   //    emit parallel flows between endpoints with no diverging gateway — invalid BPMN that schedules
   //    the consumer more than once. `resolvedEdges` is already sorted by (to, fromNode, fromFact), so
-  //    same-endpoint edges are contiguous and their fact labels accumulate in deterministic order.
-  const collapsedEdges: { fromNode: string; to: string; facts: string[] }[] = [];
+  //    same-endpoint edges are contiguous and their fact labels accumulate in deterministic order. For
+  //    a guarded split (S7) the collapsed flow carries the OR of its guard conditions (or is the split
+  //    default); the producer's exit is its exclusive gateway.
+  const collapsedEdges: { fromNode: string; to: string; facts: string[]; conditions: string[]; isDefault: boolean }[] =
+    [];
   for (const edge of resolvedEdges) {
     const last = collapsedEdges[collapsedEdges.length - 1];
+    const guardPart = guardConditionPart(edge, elementById, nodeFacts);
     if (last && last.fromNode === edge.fromNode && last.to === edge.to) {
       if (edge.fromFact !== undefined && !last.facts.includes(edge.fromFact)) last.facts.push(edge.fromFact);
+      if (edge.default === true) last.isDefault = true;
+      if (guardPart !== undefined && !last.conditions.includes(guardPart)) last.conditions.push(guardPart);
     } else {
-      collapsedEdges.push({ fromNode: edge.fromNode, to: edge.to, facts: edge.fromFact !== undefined ? [edge.fromFact] : [] });
+      collapsedEdges.push({
+        fromNode: edge.fromNode,
+        to: edge.to,
+        facts: edge.fromFact !== undefined ? [edge.fromFact] : [],
+        conditions: guardPart !== undefined ? [guardPart] : [],
+        isDefault: edge.default === true,
+      });
     }
   }
   for (const edge of collapsedEdges) {
     const producer = mustGet(wiringById, edge.fromNode);
     const consumer = mustGet(wiringById, edge.to);
-    const flow: Omit<Flow, "id"> = { source: producer.exit, target: consumer.entry };
-    flows.push(edge.facts.length > 0 ? { ...flow, name: edge.facts.join(", ") } : flow);
+    let flow: Omit<Flow, "id"> = { source: producer.exit, target: consumer.entry };
+    // A guard LABEL for the diagram/preview: the fact name(s), else the rendered condition / "default".
+    const label =
+      edge.facts.length > 0
+        ? edge.facts.join(", ")
+        : edge.isDefault
+          ? "default"
+          : edge.conditions.length > 0
+            ? edge.conditions.join(" or ")
+            : undefined;
+    if (label !== undefined) flow = { ...flow, name: label };
+    if (edge.isDefault) {
+      flow = { ...flow, isDefault: true };
+    } else if (edge.conditions.length > 0) {
+      flow = { ...flow, condition: `=${edge.conditions.join(" or ")}` };
+    }
+    flows.push(flow);
   }
   // 5. Leaf(s) → End.
   if (leaves.length === 1) {
     flows.push({ source: mustGet(wiringById, leaves[0].id).exit, target: "End" });
   } else if (leaves.length > 1) {
+    const endGateway = endExclusive ? "gwm_end" : "gwj_end";
     for (const leaf of leaves) {
-      flows.push({ source: mustGet(wiringById, leaf.id).exit, target: "gwj_end" });
+      flows.push({ source: mustGet(wiringById, leaf.id).exit, target: endGateway });
     }
-    flows.push({ source: "gwj_end", target: "End" });
+    flows.push({ source: endGateway, target: "End" });
   }
   const numberedFlows: Flow[] = flows.map((f, i) => ({ id: `f${i}`, ...f }));
 
@@ -532,6 +643,26 @@ function renderBpmn(
   const refs = (tag: string, ids: readonly string[]): string =>
     ids.map((id) => `      <bpmn:${tag}>${id}</bpmn:${tag}>`).join("\n");
 
+  // The default (else) flow id per exclusive-split gateway (S7) — the flow the gateway names in its
+  // `default` attribute so an unmatched runtime value takes the else-branch instead of erroring.
+  const defaultFlowBySource = new Map<string, string>();
+  for (const f of flows) if (f.isDefault) defaultFlowBySource.set(f.source, f.id);
+
+  // Render a diverging/converging gateway. `exclusive` picks `exclusiveGateway` (data-based XOR split /
+  // first-token merge, S7) over the parallel AND fork/join; a diverging exclusive gateway carries its
+  // `default` flow id when one exists.
+  const gateway = (id: string, exclusive: boolean, name: string): string[] => {
+    const tag = exclusive ? "exclusiveGateway" : "parallelGateway";
+    const def = defaultFlowBySource.get(id);
+    const defAttr = def !== undefined ? ` default="${def}"` : "";
+    return [
+      `    <bpmn:${tag} id="${id}"${defAttr} name="${escapeXml(name)}">`,
+      refs("incoming", incoming(id)),
+      refs("outgoing", outgoing(id)),
+      `    </bpmn:${tag}>`,
+    ];
+  };
+
   const lines: string[] = [];
   lines.push('<?xml version="1.0" encoding="UTF-8"?>');
   lines.push(
@@ -551,48 +682,52 @@ function renderBpmn(
   lines.push(refs("outgoing", outgoing("Start")));
   lines.push("    </bpmn:startEvent>");
 
-  // Start fork gateway (fan-out to multiple roots).
+  // Start fork gateway (fan-out to multiple roots) — always a PARALLEL fork: Start unconditionally
+  // activates every independent root.
   if (startForkGateway) {
-    lines.push(`    <bpmn:parallelGateway id="${startForkGateway}" name="fan out to roots">`);
-    lines.push(refs("incoming", incoming(startForkGateway)));
-    lines.push(refs("outgoing", outgoing(startForkGateway)));
-    lines.push("    </bpmn:parallelGateway>");
+    lines.push(...gateway(startForkGateway, false, "fan out to roots"));
   }
 
-  // Node elements (sorted), each preceded by its join gateway and followed by its fork gateway.
+  // Node elements (sorted), each preceded by its join gateway and followed by its fork gateway. An
+  // exclusive split's fork (S7) is an `exclusiveGateway` with guard conditions on its out-flows; an
+  // exclusive-merge's join is a first-token `exclusiveGateway`.
   for (const w of wirings) {
     if (w.joinGateway) {
-      lines.push(`    <bpmn:parallelGateway id="${w.joinGateway}" name="join into ${escapeXml(w.node.id)}">`);
-      lines.push(refs("incoming", incoming(w.joinGateway)));
-      lines.push(refs("outgoing", outgoing(w.joinGateway)));
-      lines.push("    </bpmn:parallelGateway>");
+      lines.push(...gateway(w.joinGateway, w.joinExclusive, `join into ${w.node.id}`));
     }
     lines.push(renderNodeElement(w, incoming(w.element), outgoing(w.element), boundInputsByElement.get(w.element) ?? []));
     if (w.forkGateway) {
-      lines.push(`    <bpmn:parallelGateway id="${w.forkGateway}" name="fan out of ${escapeXml(w.node.id)}">`);
-      lines.push(refs("incoming", incoming(w.forkGateway)));
-      lines.push(refs("outgoing", outgoing(w.forkGateway)));
-      lines.push("    </bpmn:parallelGateway>");
+      lines.push(...gateway(w.forkGateway, w.forkExclusive, `fan out of ${w.node.id}`));
     }
   }
 
-  // End join gateway (fan-in from multiple leaves) + end event.
+  // End join gateway (fan-in from multiple leaves) + end event. Exclusive when the leaves are
+  // mutually-exclusive branch tails (S7), else a parallel AND-join.
   if (endJoinGateway) {
-    lines.push(`    <bpmn:parallelGateway id="${endJoinGateway}" name="join leaves">`);
-    lines.push(refs("incoming", incoming(endJoinGateway)));
-    lines.push(refs("outgoing", outgoing(endJoinGateway)));
-    lines.push("    </bpmn:parallelGateway>");
+    lines.push(...gateway(endJoinGateway, endJoinGateway.startsWith("gwm"), "join leaves"));
   }
   lines.push('    <bpmn:endEvent id="End" name="Graph complete">');
   lines.push(refs("incoming", incoming("End")));
   lines.push("    </bpmn:endEvent>");
 
-  // Sequence flows.
+  // Sequence flows. A guarded flow (S7) carries a `<bpmn:conditionExpression>` FEEL child; the default
+  // flow is unconditional (the gateway names it). Condition text uses LITERAL double-quotes for FEEL
+  // string literals (the authored-BPMN convention, e.g. `=status = "converged"`) — text content is not
+  // subject to the attribute entity-decoding hazard, and the compiler grafts DI without re-serializing
+  // this XML, so the literal quotes survive to deploy.
   for (const f of flows) {
     const nameAttr = f.name !== undefined ? ` name="${escapeXml(f.name)}"` : "";
-    lines.push(
-      `    <bpmn:sequenceFlow id="${f.id}"${nameAttr} sourceRef="${f.source}" targetRef="${f.target}" />`,
-    );
+    if (f.condition !== undefined) {
+      lines.push(
+        `    <bpmn:sequenceFlow id="${f.id}"${nameAttr} sourceRef="${f.source}" targetRef="${f.target}">` +
+          `<bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">${escapeXmlText(f.condition)}</bpmn:conditionExpression>` +
+          "</bpmn:sequenceFlow>",
+      );
+    } else {
+      lines.push(
+        `    <bpmn:sequenceFlow id="${f.id}"${nameAttr} sourceRef="${f.source}" targetRef="${f.target}" />`,
+      );
+    }
   }
 
   lines.push("  </bpmn:process>");
@@ -926,8 +1061,19 @@ function renderMermaid(
   for (const edge of edges) {
     const from = mustGet(elementById, edge.fromNode);
     const to = mustGet(elementById, edge.to);
-    if (edge.fromFact !== undefined) {
-      lines.push(`  ${from} -- "${escapeMermaid(edge.fromFact)}" --> ${to}`);
+    // Label a guarded edge with its predicate (`fact == value`) and a default with `default` (S7), a
+    // fact-qualified edge with the fact name, else an unlabelled arrow.
+    let label: string | undefined;
+    if (edge.when !== undefined && edge.default !== true) {
+      const guardFact = edge.when.includes(".") ? edge.when.slice(edge.when.lastIndexOf(".") + 1) : edge.when;
+      label = `${guardFact} == ${feelLiteral(edge.equals)}`;
+    } else if (edge.default === true) {
+      label = "default";
+    } else if (edge.fromFact !== undefined) {
+      label = edge.fromFact;
+    }
+    if (label !== undefined) {
+      lines.push(`  ${from} -- "${escapeMermaid(label)}" --> ${to}`);
     } else {
       lines.push(`  ${from} --> ${to}`);
     }

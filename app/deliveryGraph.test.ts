@@ -355,3 +355,197 @@ test("invalid-fact-type: an emitted fact missing its `type` is rejected", () => 
   const err = hasCode(errors, "invalid-fact-type");
   assertEquals(err.path, "nodes[0].emits[0].type");
 });
+
+// ── S7: guarded (conditional) edges — the exclusive-gateway extension (ADR 0005 S7) ────────────────
+// A guarded split node emits a scalar outcome fact and routes on it: exactly one out-edge's `when`
+// value matches at runtime (or the `default` else-branch fires). These cases exercise the new
+// validation surface — guard shape, scalar-fact resolution, exhaustiveness, no-mixing, and the
+// exclusive-merge parity the compiler relies on.
+
+/** Mode A (adopt), the ADR's motivating guarded split: `bump` emits a scalar `result`; a guard routes
+ *  the breaking outcome through `migrate`, the default (green) straight to `release`, and the branches
+ *  re-converge at `release` (an exclusive merge). Exhaustive via its `default`. */
+const GUARDED_ADOPT = {
+  name: "adopt",
+  nodes: [
+    { id: "bump", kind: "agent", agent: { jobType: "senior:feature" }, emits: [{ name: "result", type: "string" }] },
+    { id: "migrate", kind: "agent", agent: { jobType: "senior:feature" } },
+    { id: "release", kind: "connector", connector: { target: "npm:publish" } },
+  ],
+  edges: [
+    { from: "bump", to: "migrate", when: "bump.result", equals: "breaking" },
+    { from: "bump", to: "release", default: true },
+    { from: "migrate", to: "release" },
+  ],
+};
+
+test("S7 happy: a well-formed guarded split (with a default) validates with no errors", () => {
+  assertEquals(validateDeliveryGraph(GUARDED_ADOPT), []);
+});
+
+test("S7 happy: a boolean fact guarded on BOTH values is exhaustive without a default", () => {
+  const errors = validateDeliveryGraph({
+    nodes: [
+      { id: "gate", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "ok", type: "boolean" }] },
+      { id: "yes", kind: "agent", agent: { jobType: "j" } },
+      { id: "no", kind: "agent", agent: { jobType: "j" } },
+    ],
+    edges: [
+      { from: "gate", to: "yes", when: "gate.ok", equals: true },
+      { from: "gate", to: "no", when: "gate.ok", equals: false },
+    ],
+  });
+  assertEquals(errors, []);
+});
+
+test("S7 non-exhaustive-split: a string guard without a default is rejected", () => {
+  const errors = validateDeliveryGraph({
+    nodes: [
+      { id: "bump", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "result", type: "string" }] },
+      { id: "migrate", kind: "agent", agent: { jobType: "j" } },
+    ],
+    edges: [{ from: "bump", to: "migrate", when: "bump.result", equals: "breaking" }],
+  });
+  hasCode(errors, "non-exhaustive-split");
+});
+
+test("S7 mixed-fan-out: a node whose out-edges MIX a guard with a plain edge is rejected", () => {
+  const errors = validateDeliveryGraph({
+    nodes: [
+      { id: "bump", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "result", type: "string" }] },
+      { id: "a", kind: "agent", agent: { jobType: "j" } },
+      { id: "b", kind: "agent", agent: { jobType: "j" } },
+    ],
+    edges: [
+      { from: "bump", to: "a", when: "bump.result", equals: "x" },
+      { from: "bump", to: "b" },
+    ],
+  });
+  hasCode(errors, "mixed-fan-out");
+});
+
+test("S7 bad-when: a guard on an UNDECLARED fact is rejected", () => {
+  const errors = validateDeliveryGraph({
+    nodes: [
+      { id: "bump", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "result", type: "string" }] },
+      { id: "a", kind: "agent", agent: { jobType: "j" } },
+      { id: "b", kind: "agent", agent: { jobType: "j" } },
+    ],
+    edges: [
+      { from: "bump", to: "a", when: "bump.nope", equals: "x" },
+      { from: "bump", to: "b", default: true },
+    ],
+  });
+  const err = hasCode(errors, "bad-when");
+  assertEquals(err.path, "edges[0].when");
+});
+
+test("S7 bad-when: a guard on a NON-SCALAR (artifact) fact is rejected", () => {
+  const errors = validateDeliveryGraph({
+    nodes: [
+      { id: "bump", kind: "human", human: {}, emits: [{ name: "art", type: "artifact" }] },
+      { id: "a", kind: "agent", agent: { jobType: "j" } },
+      { id: "b", kind: "agent", agent: { jobType: "j" } },
+    ],
+    edges: [
+      { from: "bump", to: "a", when: "bump.art", equals: "x" },
+      { from: "bump", to: "b", default: true },
+    ],
+  });
+  hasCode(errors, "bad-when");
+});
+
+test("S7 bad-when: a guard referencing a fact of a DIFFERENT node than the edge producer is rejected", () => {
+  const errors = validateDeliveryGraph({
+    nodes: [
+      { id: "bump", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "result", type: "string" }] },
+      { id: "other", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "result", type: "string" }] },
+      { id: "a", kind: "agent", agent: { jobType: "j" } },
+      { id: "b", kind: "agent", agent: { jobType: "j" } },
+    ],
+    edges: [
+      { from: "bump", to: "a", when: "other.result", equals: "x" },
+      { from: "bump", to: "b", default: true },
+    ],
+  });
+  hasCode(errors, "bad-when");
+});
+
+test("S7 guard-missing-equals: `when` without `equals` is rejected", () => {
+  const errors = validateDeliveryGraph({
+    nodes: [
+      { id: "bump", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "result", type: "string" }] },
+      { id: "a", kind: "agent", agent: { jobType: "j" } },
+      { id: "b", kind: "agent", agent: { jobType: "j" } },
+    ],
+    edges: [
+      { from: "bump", to: "a", when: "bump.result" },
+      { from: "bump", to: "b", default: true },
+    ],
+  });
+  hasCode(errors, "guard-missing-equals");
+});
+
+test("S7 guard-type-mismatch: an `equals` whose type differs from the fact's declared type is rejected", () => {
+  const errors = validateDeliveryGraph({
+    nodes: [
+      { id: "bump", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "n", type: "number" }] },
+      { id: "a", kind: "agent", agent: { jobType: "j" } },
+      { id: "b", kind: "agent", agent: { jobType: "j" } },
+    ],
+    edges: [
+      { from: "bump", to: "a", when: "bump.n", equals: "not-a-number" },
+      { from: "bump", to: "b", default: true },
+    ],
+  });
+  hasCode(errors, "guard-type-mismatch");
+});
+
+test("S7 guard-default-conflict: an edge with both `default` and `when` is rejected", () => {
+  const errors = validateDeliveryGraph({
+    nodes: [
+      { id: "bump", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "result", type: "string" }] },
+      { id: "a", kind: "agent", agent: { jobType: "j" } },
+    ],
+    edges: [{ from: "bump", to: "a", when: "bump.result", equals: "x", default: true }],
+  });
+  hasCode(errors, "guard-default-conflict");
+});
+
+test("S7 multiple-defaults: more than one `default` out-edge on a split is rejected", () => {
+  const errors = validateDeliveryGraph({
+    nodes: [
+      { id: "bump", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "result", type: "string" }] },
+      { id: "a", kind: "agent", agent: { jobType: "j" } },
+      { id: "b", kind: "agent", agent: { jobType: "j" } },
+      { id: "c", kind: "agent", agent: { jobType: "j" } },
+    ],
+    edges: [
+      { from: "bump", to: "a", when: "bump.result", equals: "x" },
+      { from: "bump", to: "b", default: true },
+      { from: "bump", to: "c", default: true },
+    ],
+  });
+  hasCode(errors, "multiple-defaults");
+});
+
+test("S7 exclusive-merge-parity: a parallel AND-join fed by an exclusive-split branch is rejected (the deadlock shape)", () => {
+  // `indep` always fires; `x` fires only on the "a" branch of `split`. A plain fan-in of {indep, x}
+  // into `sink` would be a parallel AND-join that waits forever for `x` when the else-branch is taken.
+  const errors = validateDeliveryGraph({
+    nodes: [
+      { id: "split", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "result", type: "string" }] },
+      { id: "x", kind: "agent", agent: { jobType: "j" } },
+      { id: "y", kind: "agent", agent: { jobType: "j" } },
+      { id: "indep", kind: "agent", agent: { jobType: "j" } },
+      { id: "sink", kind: "agent", agent: { jobType: "j" } },
+    ],
+    edges: [
+      { from: "split", to: "x", when: "split.result", equals: "a" },
+      { from: "split", to: "y", default: true },
+      { from: "x", to: "sink" },
+      { from: "indep", to: "sink" },
+    ],
+  });
+  hasCode(errors, "exclusive-merge-parity");
+});
