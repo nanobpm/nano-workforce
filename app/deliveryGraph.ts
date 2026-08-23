@@ -36,6 +36,23 @@ export const DELIVERY_FACT_TYPES = ["string", "number", "boolean", "artifact", "
 /** An emitted fact's declared `type`, narrowed to the closed allowlist. */
 export type DeliveryFactType = (typeof DELIVERY_FACT_TYPES)[number];
 
+/** The SCALAR emitted-fact types a guarded edge's `when` may reference (ADR 0005 S7). A guard is an
+ * equality test `fact == literal`, so only a scalar (single-valued, comparable) fact can be guarded —
+ * `artifact`/`version`/`url` are compound/opaque handles and are rejected as guard subjects. Kept as
+ * the single source of truth so the validator and the compiler agree on what is guardable. */
+export const DELIVERY_GUARD_SCALAR_TYPES = ["string", "number", "boolean"] as const;
+
+/** A guardable scalar fact type, narrowed from the closed emitted-fact allowlist. */
+export type DeliveryGuardScalarType = (typeof DELIVERY_GUARD_SCALAR_TYPES)[number];
+
+/** True when `type` is a guardable SCALAR (`string`/`number`/`boolean`) — the closed set a `when`
+ * guard may reference. */
+export function isDeliveryGuardScalarType(type: unknown): type is DeliveryGuardScalarType {
+  if (typeof type !== "string") return false;
+  for (const t of DELIVERY_GUARD_SCALAR_TYPES) if (t === type) return true;
+  return false;
+}
+
 /** A machine-readable classification of a semantic failure, so a caller can branch on the error
  * class (unknown-kind / dangling / cycle / bad-`from`) without string-matching the message. */
 export type DeliveryGraphErrorCode =
@@ -53,7 +70,16 @@ export type DeliveryGraphErrorCode =
   | "dangling-edge"
   | "bad-from"
   | "self-edge"
-  | "cycle";
+  | "cycle"
+  | "guard-missing-equals"
+  | "guard-missing-when"
+  | "guard-default-conflict"
+  | "bad-when"
+  | "guard-type-mismatch"
+  | "mixed-fan-out"
+  | "multiple-defaults"
+  | "non-exhaustive-split"
+  | "exclusive-merge-parity";
 
 /** A single semantic validation failure. `path` is a JSON-path-qualified pointer at the offending
  * input (`nodes[2].kind`, `edges[1].from`, `nodes[0].emits[1].name`), `message` is human-actionable,
@@ -189,8 +215,10 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
   }
 
   // Pass 1: node ids + kinds + per-kind config + declared facts. Build the id → declared-facts map
-  // used to resolve edge `from` references in pass 2.
+  // used to resolve edge `from` references in pass 2, plus the id → (fact → declared type) map guard
+  // validation (pass 3) reads to enforce that a `when` references a SCALAR fact.
   const nodeFacts = new Map<string, Set<string>>();
+  const nodeFactTypes = new Map<string, Map<string, DeliveryFactType>>();
   nodes.forEach((rawNode, i) => {
     const path = `nodes[${i}]`;
     if (!isRecord(rawNode)) {
@@ -269,6 +297,7 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
     // Collect + validate this node's typed emitted facts (uniqueness within the node). Registered
     // under the id even when other fields are invalid, so downstream edge resolution is best-effort.
     const facts = new Set<string>();
+    const factTypes = new Map<string, DeliveryFactType>();
     if (rawNode.emits !== undefined) {
       if (!Array.isArray(rawNode.emits)) {
         errors.push({
@@ -319,6 +348,8 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
                 `${DELIVERY_FACT_TYPES.join(", ")}`,
               code: "invalid-fact-type",
             });
+          } else {
+            factTypes.set(rawFact.name, rawFact.type);
           }
           facts.add(rawFact.name);
         });
@@ -326,6 +357,7 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
     }
     if (typeof id === "string" && id.length > 0 && !nodeFacts.has(id)) {
       nodeFacts.set(id, facts);
+      nodeFactTypes.set(id, factTypes);
     }
   });
 
@@ -345,6 +377,18 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
   }
   // consumer (`to`) → set of upstream node ids (`from`'s node) — the dependency direction.
   const adjacency = new Map<string, Set<string>>();
+  // Resolved, well-formed edges captured for the guard/topology pass (pass 3). Only edges whose BOTH
+  // endpoints resolve are kept — a dangling/self edge is already reported and must not reach pass 3.
+  const guardEdges: {
+    index: number;
+    fromNode: string;
+    to: string;
+    when?: unknown;
+    equals?: unknown;
+    hasWhen: boolean;
+    hasEquals: boolean;
+    isDefault: boolean;
+  }[] = [];
   edges.forEach((rawEdge, i) => {
     const path = `edges[${i}]`;
     // A non-object entry or a missing/empty `from`/`to` is an edge *shape* error, not an
@@ -417,11 +461,280 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
       const ups = adjacency.get(to) ?? new Set<string>();
       ups.add(nodeId);
       adjacency.set(to, ups);
+      guardEdges.push({
+        index: i,
+        fromNode: nodeId,
+        to,
+        when: rawEdge.when,
+        equals: rawEdge.equals,
+        hasWhen: rawEdge.when !== undefined,
+        hasEquals: rawEdge.equals !== undefined,
+        isDefault: rawEdge.default === true,
+      });
     }
   });
 
   collectCycle(adjacency, errors);
+  // Pass 3: guard (S7) semantics — only when the graph is otherwise structurally sound (every edge
+  // resolved, no cycle). A malformed base graph is reported first; guard analysis assumes a DAG.
+  if (errors.length === 0) {
+    validateGuardedEdges(guardEdges, nodeFactTypes, errors);
+  }
   return errors;
+}
+
+/** True when a guard `equals` literal's JSON type matches the referenced fact's declared scalar type. */
+function equalsMatchesFactType(equals: unknown, factType: DeliveryGuardScalarType): boolean {
+  switch (factType) {
+    case "string":
+      return typeof equals === "string";
+    case "number":
+      return typeof equals === "number";
+    case "boolean":
+      return typeof equals === "boolean";
+  }
+}
+
+/** Pass 3 — validate the S7 guarded-edge (exclusive-split) semantics over the already-resolved edge
+ * set (ADR 0005 S7). Enforces, per edge: `when`⇔`equals` presence, `when`/`default` mutual exclusion,
+ * and that a `when` references a DECLARED SCALAR fact of its own producer whose type matches `equals`.
+ * Then, per split node: no fan-out that MIXES guarded and unconditional out-edges, at most one
+ * `default`, and exhaustiveness (a guarded split must carry a `default` unless it fully covers a
+ * boolean fact). Finally, the exclusive-MERGE parity the compiler relies on: a fan-in must be either
+ * a pure parallel join (all producers unconditional) or a clean exclusive merge (all producers on the
+ * branches of one split that reconverges here) — never a mix (a parallel AND-join fed by a conditional
+ * branch would deadlock; an exclusive merge fed by an always-firing producer would double-fire). */
+function validateGuardedEdges(
+  guardEdges: {
+    index: number;
+    fromNode: string;
+    to: string;
+    when?: unknown;
+    equals?: unknown;
+    hasWhen: boolean;
+    hasEquals: boolean;
+    isDefault: boolean;
+  }[],
+  nodeFactTypes: ReadonlyMap<string, ReadonlyMap<string, DeliveryFactType>>,
+  errors: DeliveryGraphError[],
+): void {
+  const nodeFacts = new Map<string, Set<string>>();
+  for (const [id, facts] of nodeFactTypes) nodeFacts.set(id, new Set(facts.keys()));
+
+  // Per-edge guard shape + reference validation. `guardFactType` is cached per edge for the split-level
+  // exhaustiveness check below.
+  const guardFactTypeByIndex = new Map<number, DeliveryGuardScalarType>();
+  for (const e of guardEdges) {
+    const path = `edges[${e.index}]`;
+    if (e.isDefault && (e.hasWhen || e.hasEquals)) {
+      errors.push({
+        path,
+        message: "a `default` edge cannot also carry `when`/`equals` — a default is the unguarded else-branch",
+        code: "guard-default-conflict",
+      });
+      continue;
+    }
+    if (e.hasWhen && !e.hasEquals) {
+      errors.push({
+        path: `${path}.equals`,
+        message: "a guarded edge with `when` requires an `equals` literal to compare the fact against",
+        code: "guard-missing-equals",
+      });
+      continue;
+    }
+    if (e.hasEquals && !e.hasWhen) {
+      errors.push({
+        path: `${path}.when`,
+        message: "`equals` is only meaningful with a `when` guard reference — add `when` or drop `equals`",
+        code: "guard-missing-when",
+      });
+      continue;
+    }
+    if (!e.hasWhen) continue; // plain or default edge — nothing more to check here.
+
+    const whenStr = e.when;
+    if (typeof whenStr !== "string" || whenStr.length === 0) {
+      errors.push({ path: `${path}.when`, message: "`when` must be a `<nodeId>.<fact>` string", code: "bad-when" });
+      continue;
+    }
+    const { nodeId: whenNode, fact: whenFact } = resolveFrom(whenStr, nodeFacts);
+    if (whenFact === undefined) {
+      errors.push({
+        path: `${path}.when`,
+        message: `guard \`when\` "${whenStr}" must be a qualified \`<nodeId>.<fact>\` reference to a declared fact`,
+        code: "bad-when",
+      });
+      continue;
+    }
+    if (whenNode !== e.fromNode) {
+      errors.push({
+        path: `${path}.when`,
+        message:
+          `guard \`when\` "${whenStr}" must reference a fact of this edge's producer "${e.fromNode}" ` +
+          `(the exclusive-split point), not "${whenNode}"`,
+        code: "bad-when",
+      });
+      continue;
+    }
+    const factType = nodeFactTypes.get(whenNode)?.get(whenFact);
+    if (factType === undefined || !isDeliveryGuardScalarType(factType)) {
+      errors.push({
+        path: `${path}.when`,
+        message:
+          `guard \`when\` "${whenStr}" must reference a declared SCALAR fact ` +
+          `(${DELIVERY_GUARD_SCALAR_TYPES.join(", ")}) of "${whenNode}"`,
+        code: "bad-when",
+      });
+      continue;
+    }
+    if (!equalsMatchesFactType(e.equals, factType)) {
+      errors.push({
+        path: `${path}.equals`,
+        message:
+          `guard \`equals\` for "${whenStr}" must be a ${factType} to match the fact's declared type`,
+        code: "guard-type-mismatch",
+      });
+      continue;
+    }
+    guardFactTypeByIndex.set(e.index, factType);
+  }
+
+  // Group out-edges by producer node to check fan-out shape (mixing / defaults / exhaustiveness).
+  const outByNode = new Map<string, typeof guardEdges>();
+  for (const e of guardEdges) {
+    const list = outByNode.get(e.fromNode) ?? [];
+    list.push(e);
+    outByNode.set(e.fromNode, list);
+  }
+  const splitNodes = new Set<string>();
+  for (const [node, outs] of outByNode) {
+    const guarded = outs.filter((e) => e.hasWhen && !e.isDefault);
+    const defaults = outs.filter((e) => e.isDefault);
+    const plain = outs.filter((e) => !e.hasWhen && !e.isDefault);
+    const isSplit = guarded.length > 0 || defaults.length > 0;
+    if (!isSplit) continue;
+    // Only a GUARDED (`when`) fan-out to >=2 DISTINCT downstream targets is an exclusive split for
+    // topology. A lone `default: true` edge (no guarded sibling) always fires, and a node whose
+    // guarded + `default` edges all converge on ONE downstream node has no real fan-out — that node
+    // fires whenever its producer does. Adding either here would spuriously mark downstream
+    // nodes/leaves conditional and trip false exclusive-merge parity (or misselect the End join). The
+    // per-node mixing/exhaustiveness checks below still run for any `default` fan-out (they gate on
+    // `isSplit`); only the topology set is guard-derived and fan-out-shaped.
+    const branchTargets = new Set([...guarded, ...defaults].map((e) => e.to));
+    if (guarded.length > 0 && branchTargets.size > 1) splitNodes.add(node);
+
+    if (plain.length > 0) {
+      // No mixing: a node is a fork (all edges unconditional) OR an XOR-split (all edges guarded/
+      // default), never both — a plain edge always fires and would break exclusive-branch selection.
+      errors.push({
+        path: `edges[${plain[0].index}]`,
+        message:
+          `node "${node}" mixes guarded/default out-edges with an unconditional one — a split node's ` +
+          "out-edges must ALL be guarded (`when`) or `default`",
+        code: "mixed-fan-out",
+      });
+    }
+    if (defaults.length > 1) {
+      errors.push({
+        path: `edges[${defaults[1].index}]`,
+        message: `node "${node}" has more than one \`default\` out-edge — at most one else-branch per split`,
+        code: "multiple-defaults",
+      });
+    }
+
+    // Exhaustiveness: a guarded split must carry a `default`, UNLESS it fully covers a single boolean
+    // fact (both `true` and `false` guarded) — the only value domain equality guards can exhaust.
+    if (defaults.length === 0) {
+      const guardFactTypes = new Set(guarded.map((e) => guardFactTypeByIndex.get(e.index)));
+      const booleanFacts = new Set(
+        guarded.filter((e) => guardFactTypeByIndex.get(e.index) === "boolean").map((e) => String(e.when)),
+      );
+      let exhaustive = false;
+      if (guardFactTypes.size === 1 && booleanFacts.size === 1) {
+        const covered = new Set(guarded.map((e) => e.equals));
+        exhaustive = covered.has(true) && covered.has(false);
+      }
+      if (!exhaustive) {
+        errors.push({
+          path: `edges[${guarded[0]?.index ?? outs[0].index}]`,
+          message:
+            `guarded split "${node}" is not exhaustive — add a \`default\` else-branch (or cover both ` +
+            "values of a boolean fact) so no runtime value strands the token",
+          code: "non-exhaustive-split",
+        });
+      }
+    }
+  }
+
+  // Exclusive-merge parity. An edge is CONDITIONAL if it leaves a split (a guarded/default branch) or
+  // its producer is itself only conditionally reached; both are computed from the split set + forward
+  // reachability. A fan-in must be uniformly conditional (a clean exclusive merge) or uniformly
+  // unconditional (a parallel join) — a mix is the deadlock/double-fire shape the compiler cannot wire.
+  const forwardAdj = new Map<string, string[]>();
+  const allNodes = new Set<string>();
+  for (const [id] of nodeFactTypes) allNodes.add(id);
+  for (const e of guardEdges) {
+    allNodes.add(e.fromNode);
+    allNodes.add(e.to);
+    const list = forwardAdj.get(e.fromNode) ?? [];
+    if (!list.includes(e.to)) list.push(e.to);
+    forwardAdj.set(e.fromNode, list);
+  }
+  const topo = analyzeExclusiveTopology([...allNodes], forwardAdj, splitNodes);
+
+  // producers per consumer (node id), from resolved edges.
+  const producersByNode = new Map<string, Set<string>>();
+  for (const e of guardEdges) {
+    const set = producersByNode.get(e.to) ?? new Set<string>();
+    set.add(e.fromNode);
+    producersByNode.set(e.to, set);
+  }
+  const edgeConditional = (fromNode: string): boolean => splitNodes.has(fromNode) || topo.conditional.has(fromNode);
+
+  for (const [node, producers] of producersByNode) {
+    if (producers.size < 2) continue;
+    const conditional = [...producers].filter(edgeConditional);
+    const unconditional = [...producers].filter((p) => !edgeConditional(p));
+    if (conditional.length > 0 && unconditional.length > 0) {
+      errors.push({
+        path: "edges",
+        message:
+          `node "${node}" joins a conditional (exclusive-split) branch with an always-firing branch — ` +
+          "a parallel AND-join here deadlocks (the untaken branch never arrives). Route both through " +
+          "one exclusive split so they re-converge as an exclusive merge",
+        code: "exclusive-merge-parity",
+      });
+    } else if (conditional.length === producers.size && !topo.mergeNodes.has(node)) {
+      errors.push({
+        path: "edges",
+        message:
+          `node "${node}" merges conditional branches that do not re-converge from a single exclusive ` +
+          "split — its incoming branches are not provably mutually exclusive, so it cannot merge safely",
+        code: "exclusive-merge-parity",
+      });
+    }
+  }
+
+  // Same parity, now for the implicit End sink: the compiler joins every LEAF (a node with no
+  // out-edge) at the process End. A leaf is conditional iff it may not fire on a given run
+  // (`topo.conditional`). A leaf set that MIXES a conditional tail with an always-firing one is the
+  // exact deadlock/double-fire shape the End gateway cannot wire — a parallel AND-join waits forever
+  // for the untaken branch, an exclusive merge double-fires when both arrive — so reject it here (this
+  // is the invariant the compiler's End-gateway selection relies on).
+  const leaves = [...allNodes].filter((n) => (forwardAdj.get(n)?.length ?? 0) === 0);
+  if (leaves.length > 1) {
+    const conditionalLeaves = leaves.filter((n) => topo.conditional.has(n));
+    if (conditionalLeaves.length > 0 && conditionalLeaves.length < leaves.length) {
+      errors.push({
+        path: "edges",
+        message:
+          "the graph's terminal nodes mix a conditional (exclusive-split) tail with an always-firing " +
+          "tail — the End sink would deadlock as a parallel join (the untaken branch never arrives) or " +
+          "double-fire as an exclusive merge. Route the conditional tails so they re-converge before the end",
+        code: "exclusive-merge-parity",
+      });
+    }
+  }
 }
 
 /** Depth-first cycle detection over the consumer(`to`)→producer(`from`) graph. Pushes ONE
@@ -460,6 +773,72 @@ function collectCycle(adjacency: Map<string, Set<string>>, errors: DeliveryGraph
     if (reported) break;
     if (state.get(node) !== DONE) visit(node, []);
   }
+}
+
+/** The exclusive-split topology derived from a graph's node-level forward adjacency and its set of
+ * exclusive-split node ids (ADR 0005 S7). This is the SINGLE canonical analysis both the semantic
+ * validator (parity enforcement) and the S1 compiler (gateway-type selection) consume, so the two
+ * never drift on which fan-in is an exclusive merge vs a parallel join:
+ *
+ *   • `mergeNodes` — nodes where ≥2 DISTINCT branch targets of the SAME split re-converge (following
+ *     edges forward). These fan-ins must compile to an exclusive/OR merge (first-token-proceeds), not
+ *     a parallel AND-join, which would deadlock waiting for the untaken branch.
+ *   • `conditional` — nodes that MAY NOT execute on a given run: reachable from some split's branch
+ *     target and not yet re-established as always-firing by a re-convergence merge (a merge node and
+ *     everything downstream of it is guaranteed again — exactly one branch always reaches the merge).
+ *
+ * Pure and deterministic — set iteration order does not affect membership, and callers sort before
+ * emitting. */
+export interface ExclusiveTopology {
+  readonly mergeNodes: ReadonlySet<string>;
+  readonly conditional: ReadonlySet<string>;
+}
+
+export function analyzeExclusiveTopology(
+  nodeIds: readonly string[],
+  forwardAdj: ReadonlyMap<string, readonly string[]>,
+  splitNodes: ReadonlySet<string>,
+): ExclusiveTopology {
+  const reachFrom = (start: string): Set<string> => {
+    const seen = new Set<string>();
+    const stack = [start];
+    while (stack.length > 0) {
+      const n = stack.pop();
+      if (n === undefined || seen.has(n)) continue;
+      seen.add(n);
+      for (const next of forwardAdj.get(n) ?? []) if (!seen.has(next)) stack.push(next);
+    }
+    return seen;
+  };
+
+  const mergeNodes = new Set<string>();
+  const splitDownstream = new Set<string>();
+  for (const split of splitNodes) {
+    const branchTargets = forwardAdj.get(split) ?? [];
+    const reachCount = new Map<string, number>();
+    for (const target of branchTargets) {
+      const reach = reachFrom(target);
+      for (const n of reach) {
+        splitDownstream.add(n);
+        reachCount.set(n, (reachCount.get(n) ?? 0) + 1);
+      }
+    }
+    for (const [n, count] of reachCount) if (count >= 2) mergeNodes.add(n);
+  }
+
+  // A merge node (and everything reachable from it) is guaranteed to fire again — exactly one branch of
+  // the split always reaches the merge — so it is NOT conditional even though it sits downstream of a
+  // split. Subtract that closure from the raw split-downstream set.
+  const guaranteedAgain = new Set<string>();
+  for (const merge of mergeNodes) for (const n of reachFrom(merge)) guaranteedAgain.add(n);
+
+  const conditional = new Set<string>();
+  for (const n of splitDownstream) if (!guaranteedAgain.has(n)) conditional.add(n);
+
+  // `nodeIds` participates only to keep the surface honest (every referenced node is known); the sets
+  // above are already complete over the reachable graph.
+  void nodeIds;
+  return { mergeNodes, conditional };
 }
 
 /** Build the `nodeId → declared-fact-names` map for a graph that has ALREADY passed

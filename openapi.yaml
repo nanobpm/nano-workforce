@@ -1502,7 +1502,9 @@ components:
         `from` is either a bare `<nodeId>` (wait for the upstream node's completion fact) or a
         qualified `<nodeId>.<fact>` referencing a declared `emits` fact of that node. Both endpoints
         must resolve to a node in the graph, the referenced fact must be declared, and the whole edge
-        set must be a DAG — all enforced by `validateDeliveryGraph`.
+        set must be a DAG — all enforced by `validateDeliveryGraph`. An OPTIONAL `when`/`equals` guard
+        (or a `default` else-branch) makes the edge CONDITIONAL, turning its producer into an
+        exclusive split (ADR 0005 S7) — a node's out-edges are then ALL guarded or ALL unconditional.
       type: object
       additionalProperties: false
       required:
@@ -1517,6 +1519,33 @@ components:
           type: string
           minLength: 1
           description: The dependent node's id — proceeds once `from` is observed.
+        when:
+          type: string
+          minLength: 1
+          description: >-
+            OPTIONAL guard reference `<nodeId>.<fact>` naming a SCALAR emitted fact (`string`,
+            `number`, or `boolean`) of the `from`-adjacent producer (ADR 0005 S7). Its presence makes
+            this a GUARDED edge and turns the producer into an exclusive-split point: the edge is taken
+            only when that runtime fact `equals` the literal below. Equality-only — no arbitrary
+            expressions (the trust boundary). Mutually exclusive with `default`.
+        equals:
+          description: >-
+            The literal value `when`'s fact must equal for this guarded edge to be taken (ADR 0005 S7).
+            REQUIRED iff `when` is present, and its JSON type must match the referenced fact's declared
+            type (`string`/`number`/`boolean`).
+          oneOf:
+            - type: string
+            - type: number
+            - type: boolean
+        default:
+          type: boolean
+          enum: [true]
+          description: >-
+            OPTIONAL — marks this edge as the ELSE branch of the exclusive split (taken when no guarded
+            edge matches at runtime). A FLAG: only `true` is meaningful, so it is constrained to `true`
+            (omit the field entirely for a non-default edge — `default: false` is not a valid wire
+            value). At most one `default` edge per split node. Mutually exclusive with `when`/`equals`
+            (ADR 0005 S7).
     DeliveryCompileError:
       description: >-
         One semantic-validation or compile failure, path-qualified at the offending input
@@ -1749,6 +1778,19 @@ components:
         fromFact:
           type: string
           description: The referenced emitted fact, when the edge `from` was qualified.
+        when:
+          type: string
+          description: The guard reference (`<nodeId>.<fact>`) verbatim, present only on a guarded edge (ADR 0005 S7).
+        equals:
+          description: The literal the guard fact must equal, present only on a guarded edge (ADR 0005 S7).
+          oneOf:
+            - type: string
+            - type: number
+            - type: boolean
+        default:
+          type: boolean
+          enum: [true]
+          description: True when this is the exclusive split's default (else) branch; a FLAG, only ever `true` and omitted otherwise (ADR 0005 S7).
     ResolvedDeliveryGraph:
       description: >-
         The normalised graph the compiler resolved from the input (ADR 0005 slice S1) — nodes and

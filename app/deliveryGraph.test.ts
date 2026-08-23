@@ -355,3 +355,282 @@ test("invalid-fact-type: an emitted fact missing its `type` is rejected", () => 
   const err = hasCode(errors, "invalid-fact-type");
   assertEquals(err.path, "nodes[0].emits[0].type");
 });
+
+// ── S7: guarded (conditional) edges — the exclusive-gateway extension (ADR 0005 S7) ────────────────
+// A guarded split node emits a scalar outcome fact and routes on it: exactly one out-edge's `when`
+// value matches at runtime (or the `default` else-branch fires). These cases exercise the new
+// validation surface — guard shape, scalar-fact resolution, exhaustiveness, no-mixing, and the
+// exclusive-merge parity the compiler relies on.
+
+/** Mode A (adopt), the ADR's motivating guarded split: `bump` emits a scalar `result`; a guard routes
+ *  the breaking outcome through `migrate`, the default (green) straight to `release`, and the branches
+ *  re-converge at `release` (an exclusive merge). Exhaustive via its `default`. */
+const GUARDED_ADOPT = {
+  name: "adopt",
+  nodes: [
+    { id: "bump", kind: "agent", agent: { jobType: "senior:feature" }, emits: [{ name: "result", type: "string" }] },
+    { id: "migrate", kind: "agent", agent: { jobType: "senior:feature" } },
+    { id: "release", kind: "connector", connector: { target: "npm:publish" } },
+  ],
+  edges: [
+    { from: "bump", to: "migrate", when: "bump.result", equals: "breaking" },
+    { from: "bump", to: "release", default: true },
+    { from: "migrate", to: "release" },
+  ],
+};
+
+test("S7 happy: a well-formed guarded split (with a default) validates with no errors", () => {
+  assertEquals(validateDeliveryGraph(GUARDED_ADOPT), []);
+});
+
+test("S7 happy: a boolean fact guarded on BOTH values is exhaustive without a default", () => {
+  const errors = validateDeliveryGraph({
+    nodes: [
+      { id: "gate", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "ok", type: "boolean" }] },
+      { id: "yes", kind: "agent", agent: { jobType: "j" } },
+      { id: "no", kind: "agent", agent: { jobType: "j" } },
+    ],
+    edges: [
+      { from: "gate", to: "yes", when: "gate.ok", equals: true },
+      { from: "gate", to: "no", when: "gate.ok", equals: false },
+    ],
+  });
+  assertEquals(errors, []);
+});
+
+test("S7 non-exhaustive-split: a string guard without a default is rejected", () => {
+  const errors = validateDeliveryGraph({
+    nodes: [
+      { id: "bump", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "result", type: "string" }] },
+      { id: "migrate", kind: "agent", agent: { jobType: "j" } },
+    ],
+    edges: [{ from: "bump", to: "migrate", when: "bump.result", equals: "breaking" }],
+  });
+  hasCode(errors, "non-exhaustive-split");
+});
+
+test("S7 mixed-fan-out: a node whose out-edges MIX a guard with a plain edge is rejected", () => {
+  const errors = validateDeliveryGraph({
+    nodes: [
+      { id: "bump", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "result", type: "string" }] },
+      { id: "a", kind: "agent", agent: { jobType: "j" } },
+      { id: "b", kind: "agent", agent: { jobType: "j" } },
+    ],
+    edges: [
+      { from: "bump", to: "a", when: "bump.result", equals: "x" },
+      { from: "bump", to: "b" },
+    ],
+  });
+  hasCode(errors, "mixed-fan-out");
+});
+
+test("S7 bad-when: a guard on an UNDECLARED fact is rejected", () => {
+  const errors = validateDeliveryGraph({
+    nodes: [
+      { id: "bump", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "result", type: "string" }] },
+      { id: "a", kind: "agent", agent: { jobType: "j" } },
+      { id: "b", kind: "agent", agent: { jobType: "j" } },
+    ],
+    edges: [
+      { from: "bump", to: "a", when: "bump.nope", equals: "x" },
+      { from: "bump", to: "b", default: true },
+    ],
+  });
+  const err = hasCode(errors, "bad-when");
+  assertEquals(err.path, "edges[0].when");
+});
+
+test("S7 bad-when: a guard on a NON-SCALAR (artifact) fact is rejected", () => {
+  const errors = validateDeliveryGraph({
+    nodes: [
+      { id: "bump", kind: "human", human: {}, emits: [{ name: "art", type: "artifact" }] },
+      { id: "a", kind: "agent", agent: { jobType: "j" } },
+      { id: "b", kind: "agent", agent: { jobType: "j" } },
+    ],
+    edges: [
+      { from: "bump", to: "a", when: "bump.art", equals: "x" },
+      { from: "bump", to: "b", default: true },
+    ],
+  });
+  hasCode(errors, "bad-when");
+});
+
+test("S7 bad-when: a guard referencing a fact of a DIFFERENT node than the edge producer is rejected", () => {
+  const errors = validateDeliveryGraph({
+    nodes: [
+      { id: "bump", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "result", type: "string" }] },
+      { id: "other", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "result", type: "string" }] },
+      { id: "a", kind: "agent", agent: { jobType: "j" } },
+      { id: "b", kind: "agent", agent: { jobType: "j" } },
+    ],
+    edges: [
+      { from: "bump", to: "a", when: "other.result", equals: "x" },
+      { from: "bump", to: "b", default: true },
+    ],
+  });
+  hasCode(errors, "bad-when");
+});
+
+test("S7 guard-missing-equals: `when` without `equals` is rejected", () => {
+  const errors = validateDeliveryGraph({
+    nodes: [
+      { id: "bump", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "result", type: "string" }] },
+      { id: "a", kind: "agent", agent: { jobType: "j" } },
+      { id: "b", kind: "agent", agent: { jobType: "j" } },
+    ],
+    edges: [
+      { from: "bump", to: "a", when: "bump.result" },
+      { from: "bump", to: "b", default: true },
+    ],
+  });
+  hasCode(errors, "guard-missing-equals");
+});
+
+test("S7 guard-type-mismatch: an `equals` whose type differs from the fact's declared type is rejected", () => {
+  const errors = validateDeliveryGraph({
+    nodes: [
+      { id: "bump", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "n", type: "number" }] },
+      { id: "a", kind: "agent", agent: { jobType: "j" } },
+      { id: "b", kind: "agent", agent: { jobType: "j" } },
+    ],
+    edges: [
+      { from: "bump", to: "a", when: "bump.n", equals: "not-a-number" },
+      { from: "bump", to: "b", default: true },
+    ],
+  });
+  hasCode(errors, "guard-type-mismatch");
+});
+
+test("S7 guard-default-conflict: an edge with both `default` and `when` is rejected", () => {
+  const errors = validateDeliveryGraph({
+    nodes: [
+      { id: "bump", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "result", type: "string" }] },
+      { id: "a", kind: "agent", agent: { jobType: "j" } },
+    ],
+    edges: [{ from: "bump", to: "a", when: "bump.result", equals: "x", default: true }],
+  });
+  hasCode(errors, "guard-default-conflict");
+});
+
+test("S7 multiple-defaults: more than one `default` out-edge on a split is rejected", () => {
+  const errors = validateDeliveryGraph({
+    nodes: [
+      { id: "bump", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "result", type: "string" }] },
+      { id: "a", kind: "agent", agent: { jobType: "j" } },
+      { id: "b", kind: "agent", agent: { jobType: "j" } },
+      { id: "c", kind: "agent", agent: { jobType: "j" } },
+    ],
+    edges: [
+      { from: "bump", to: "a", when: "bump.result", equals: "x" },
+      { from: "bump", to: "b", default: true },
+      { from: "bump", to: "c", default: true },
+    ],
+  });
+  hasCode(errors, "multiple-defaults");
+});
+
+test("S7 exclusive-merge-parity: a parallel AND-join fed by an exclusive-split branch is rejected (the deadlock shape)", () => {
+  // `indep` always fires; `x` fires only on the "a" branch of `split`. A plain fan-in of {indep, x}
+  // into `sink` would be a parallel AND-join that waits forever for `x` when the else-branch is taken.
+  const errors = validateDeliveryGraph({
+    nodes: [
+      { id: "split", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "result", type: "string" }] },
+      { id: "x", kind: "agent", agent: { jobType: "j" } },
+      { id: "y", kind: "agent", agent: { jobType: "j" } },
+      { id: "indep", kind: "agent", agent: { jobType: "j" } },
+      { id: "sink", kind: "agent", agent: { jobType: "j" } },
+    ],
+    edges: [
+      { from: "split", to: "x", when: "split.result", equals: "a" },
+      { from: "split", to: "y", default: true },
+      { from: "x", to: "sink" },
+      { from: "indep", to: "sink" },
+    ],
+  });
+  hasCode(errors, "exclusive-merge-parity");
+});
+
+test("S7 default:false is not a default — a `default: false` sibling of a guard is a plain edge and MIXES the fan-out", () => {
+  // `default` is a flag: only `true` marks the else-branch. `default: false` must NOT be treated as
+  // present (else it silently escapes both the guarded and the plain classification and bypasses the
+  // no-mixing rule). Here it must fall through to `plain` and trip mixed-fan-out.
+  const errors = validateDeliveryGraph({
+    nodes: [
+      { id: "bump", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "result", type: "string" }] },
+      { id: "a", kind: "agent", agent: { jobType: "j" } },
+      { id: "b", kind: "agent", agent: { jobType: "j" } },
+    ],
+    edges: [
+      { from: "bump", to: "a", when: "bump.result", equals: "x" },
+      { from: "bump", to: "b", default: false },
+    ],
+  });
+  hasCode(errors, "mixed-fan-out");
+});
+
+test("S7 exclusive-merge-parity: terminal nodes that MIX a conditional tail with an always-firing tail are rejected (the End-sink deadlock/double-fire shape)", () => {
+  // `split` fans an exhaustive XOR to two leaves (`cond`/`other` — exactly one fires); `indep` always
+  // fires. All three are graph leaves, so the End sink joins them. A parallel join there deadlocks on
+  // the untaken branch; an exclusive merge double-fires when both `indep` and a branch arrive. The
+  // validator must reject the mix so the compiler's End-gateway choice is sound.
+  const errors = validateDeliveryGraph({
+    nodes: [
+      { id: "split", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "result", type: "string" }] },
+      { id: "cond", kind: "agent", agent: { jobType: "j" } },
+      { id: "other", kind: "agent", agent: { jobType: "j" } },
+      { id: "feed", kind: "agent", agent: { jobType: "j" } },
+      { id: "indep", kind: "agent", agent: { jobType: "j" } },
+    ],
+    edges: [
+      { from: "split", to: "cond", when: "split.result", equals: "a" },
+      { from: "split", to: "other", default: true },
+      { from: "feed", to: "indep" },
+    ],
+  });
+  hasCode(errors, "exclusive-merge-parity");
+});
+
+test("S7 default-only node is NOT an exclusive split — a lone `default: true` out-edge always fires and must not mark downstream leaves conditional", () => {
+  // `fork` unconditionally fans to `p` and `q` (a parallel fork). `q` has a SINGLE out-edge marked
+  // `default: true` with no guarded `when` sibling — semantically that edge always fires, so `q` is
+  // NOT an exclusive split. Leaves {p, z} are both always-firing and join cleanly at the End sink.
+  // Deriving `splitNodes` from `when`-guarded edges only (not a lone `default`) keeps `q` off the
+  // split set; treating a default-only node as a split spuriously marks `z` conditional and trips a
+  // false End-sink exclusive-merge-parity error.
+  const errors = validateDeliveryGraph({
+    nodes: [
+      { id: "fork", kind: "agent", agent: { jobType: "j" } },
+      { id: "p", kind: "agent", agent: { jobType: "j" } },
+      { id: "q", kind: "agent", agent: { jobType: "j" } },
+      { id: "z", kind: "agent", agent: { jobType: "j" } },
+    ],
+    edges: [
+      { from: "fork", to: "p" },
+      { from: "fork", to: "q" },
+      { from: "q", to: "z", default: true },
+    ],
+  });
+  assertEquals(errors, []);
+});
+
+test("S7 single-target guarded fan-out is NOT an exclusive split — a node whose guarded + default edges all converge on ONE downstream node has no real fan-out and must not mark that node conditional", () => {
+  // `gate` has a guarded edge and a `default` edge that BOTH target `conv` — one distinct downstream
+  // node, so there is no structural fan-out: `conv` fires whenever `gate` does. Deriving `splitNodes`
+  // from "has a guarded edge" alone wrongly adds `gate` to the split set, marking `conv` conditional;
+  // then leaves {conv, indep} look like a mixed conditional/always-firing End sink and trip a false
+  // exclusive-merge-parity error. A split must fan to >=2 distinct targets to be exclusive.
+  const errors = validateDeliveryGraph({
+    nodes: [
+      { id: "gate", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "result", type: "string" }] },
+      { id: "conv", kind: "agent", agent: { jobType: "j" } },
+      { id: "feed", kind: "agent", agent: { jobType: "j" } },
+      { id: "indep", kind: "agent", agent: { jobType: "j" } },
+    ],
+    edges: [
+      { from: "gate", to: "conv", when: "gate.result", equals: "a" },
+      { from: "gate", to: "conv", default: true },
+      { from: "feed", to: "indep" },
+    ],
+  });
+  assertEquals(errors, []);
+});
