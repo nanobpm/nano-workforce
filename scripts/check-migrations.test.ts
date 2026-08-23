@@ -93,4 +93,13 @@ test("collision detector flags a non-NNN shape and grandfathers historical dupes
     [],
     "grandfathered prefix 052 is not a new violation",
   );
+  // 075 (#458 vs #460/#463) is a merged, immutable, disjoint-object collision grandfathered in #470.
+  assertEquals(
+    collisionErrorsFromFiles([
+      "075_delivery_graph_proposals.sql",
+      "075_feature_read_model_attention_from_user_tasks.sql",
+    ]),
+    [],
+    "grandfathered prefix 075 is not a new violation",
+  );
 });
