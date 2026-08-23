@@ -11,11 +11,19 @@ name: Whole-repo invariants (merge-skew guard)
 #
 # This lean workflow re-asserts those whole-repo invariants where the merge actually happens:
 #   - `merge_group`  — the queue's PROSPECTIVE merged commit, so a skew is blocked BEFORE it lands.
+#                      THIS is the merge-skew guard: `derived == f(sources_A ∪ sources_B)`.
+#   - `pull_request` — required so the SAME check (matched by job name) also reports on the PR head.
+#                      GitHub's merge queue will not enqueue a PR until every required status check
+#                      has reported on it, and a check that fires only on `merge_group` never does —
+#                      it stays "expected" and the PR can never enter the queue (deadlock). The PR-head
+#                      run also validates the PR's OWN tree (a self-collision / stale artifact the PR
+#                      introduces alone), catching it before the queue rather than at merge time.
 #   - `push: [main]` — a fast backstop that fails a `main`-scoped build within minutes if something
 #                      slipped through, instead of first surfacing on an unrelated open PR.
 #   - `schedule`     — a daily catch-all for any skew introduced by a merge that bypassed the queue.
 on:
   merge_group:
+  pull_request:
   push:
     branches: [main]
   schedule:
