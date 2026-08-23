@@ -24,6 +24,7 @@ import { after, before, describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { bootTestApp, type TestApp } from "@nanobpm/urban-testkit";
 import { admitGithubState, installAdmitGithub } from "./support/github-admit.ts";
+import { deterministicProbeSeam } from "./support/probe-exec.ts";
 
 const APP_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -92,12 +93,17 @@ async function boot(): Promise<{ app: TestApp; dbDir: string }> {
 
 describe("single-issue feature intake readiness gate (feature.bpmn, issue #295)", () => {
   let restoreGithub: (() => void) | undefined;
+  const probeSeam = deterministicProbeSeam("feature-preflight e2e");
 
   before(() => {
     for (const [k, v] of Object.entries(GITHUB_ENV_OVERRIDES)) {
       savedEnv.set(k, process.env[k]);
       process.env[k] = v;
     }
+    // Inject the deterministic probe exec so the `command: true` probe resolves WITHIN the virtual
+    // clock's drain fixpoint instead of spawning a real subprocess whose wall-clock completion
+    // `settle()` cannot await — the flake behind this suite (issue #450).
+    probeSeam.install();
     // `pr.ensure-base-branch` reads the base ref via the token transport, which would throw
     // `no GitHub transport available` under an empty token. Pin the shared hermetic admit-github
     // stub (dummy token + fetch intercept) like the sibling preflight e2e so base-branch admission
@@ -106,6 +112,7 @@ describe("single-issue feature intake readiness gate (feature.bpmn, issue #295)"
   });
   after(() => {
     restoreGithub?.();
+    probeSeam.restoreAndAssertHermetic();
     for (const [k, v] of savedEnv) {
       if (v === undefined) delete process.env[k];
       else process.env[k] = v;
