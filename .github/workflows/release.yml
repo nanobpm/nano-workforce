@@ -43,8 +43,14 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          # These must ALL be `success` on the release commit before we ship. Keep
-          # in lock-step with the `main` ruleset's required status checks.
+          # These must ALL be `success` on the release commit before we ship.
+          # This is the `main` ruleset's required-check set MINUS the PR-only
+          # checks: `Conventional PR title` gates the merge queue but never runs
+          # on `push:main` (it has no PR title to lint on a merge commit — see
+          # pr-title-lint.yml), so requiring it here would deadlock every release.
+          # With the merge queue enabled these checks already passed on the
+          # speculative merged commit before it landed; this `push:main` gate is
+          # the backstop. Keep in lock-step with the ruleset's required checks.
           required=("typecheck + test (Node)" "whole-repo invariants")
           # Dedupe to ONE row per check name — the latest run (max .id) — so re-runs
           # can't leave us reading a stale conclusion. Slurp every page into a
