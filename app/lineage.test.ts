@@ -6,6 +6,7 @@
 import { test } from "node:test";
 import { assert, assertEquals } from "#test-assert";
 import type { DataLayer } from "@nanobpm/urban";
+import { withTrackingViews } from "../test/trackingViews.ts";
 import {
   deriveLineage,
   type LineagePr,
@@ -176,7 +177,7 @@ function memData(): { data: DataLayer; stores: Record<string, any[]> } {
       },
     };
   }
-  const data = { table: (n: string, pk?: string) => tbl(n, pk) } as any as DataLayer;
+  const data = { table: withTrackingViews((n: string, pk?: string) => tbl(n, pk)) } as any as DataLayer;
   return { data, stores };
 }
 

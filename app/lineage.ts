@@ -21,6 +21,7 @@
 import type { DataLayer } from "@nanobpm/urban";
 import { deriveDelivery, TERMINAL_STATUSES } from "./delivery.ts";
 import { type FeatureRun, featureRuns } from "./feature.ts";
+import { derivedTrackingTable } from "./instanceTracking.ts";
 import { type Plan, type PlanTask, plans, planTasks } from "./plan.ts";
 
 const now = () => new Date().toISOString();
@@ -307,9 +308,19 @@ interface PrRow {
   // Epic-phase projection this module maintains (issue #304, migration 043): the parent epic's phase
   // label for an epic slice PR, NULL otherwise. Read here only to keep the write idempotent.
   epic_phase_label: string | null;
+  // The ADR-0065 derived tracking edge (`pull_requests__tracking.derived_status`). Present ONLY on
+  // rows read through the derived VIEW (`prRowsRead`); undefined on base-table reads/writes. The
+  // frontier stage is derived from THIS, not the base transient `status`, so an out-of-band-
+  // terminated slice reads `abandoned` rather than a stale `converging`.
+  derived_status?: string;
 }
 
 const prRows = (data: DataLayer) => data.table<PrRow>("pull_requests", "pr_key");
+/** Read-only accessor over the PR derived tracking VIEW (`pull_requests__tracking`). The lineage
+ * frontier classifies on the reconciler-derived edge, so `collectThreads` reads through this and
+ * `toLineagePr` folds `derived_status` onto `LineagePr.status`. Writes stay on `prRows`. */
+const prRowsRead = (data: DataLayer) =>
+  derivedTrackingTable<PrRow & { derived_status: string }>(data, "pull_requests", "pr_key");
 
 /** The `lineage_thread_view` VIEW row (migration 064) — the read shape the Lineage page binds. The
  *  view PASSES THROUGH the procedural frontier columns from `lineage_threads` and DERIVES the
@@ -382,7 +393,9 @@ function toLineagePr(row: PrRow): LineagePr {
     prKey: row.pr_key,
     title: row.title,
     url: row.url,
-    status: row.status,
+    // Classify the frontier on the ADR-0065 derived edge when the row came through the tracking VIEW
+    // (`prRowsRead`); fall back to the base transient for any base-table row.
+    status: row.derived_status ?? row.status,
     round: row.current_round,
     processKey: row.process_key,
     outcome: row.outcome,
@@ -394,7 +407,7 @@ function toLineagePr(row: PrRow): LineagePr {
 async function collectThreads(
   data: DataLayer,
 ): Promise<{ threads: Map<string, LineageThread>; allPrs: PrRow[] }> {
-  const allPrs = await prRows(data).all();
+  const allPrs = await prRowsRead(data).all();
   const prByKey = new Map<string, PrRow>();
   for (const pr of allPrs) prByKey.set(pr.pr_key, pr);
 

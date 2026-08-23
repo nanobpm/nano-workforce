@@ -22,6 +22,7 @@ import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { after, before, describe, test } from "node:test";
 import { bootTestApp, type TestApp } from "@nanobpm/urban-testkit";
+import { trackingTargetFor } from "../app/instanceTracking.ts";
 
 // The app root is this repo's root (one level up from `e2e/`) — where nano.app.json + openapi.yaml
 // + db/migrations + resources/processes live.
@@ -160,16 +161,20 @@ describe("nano-workforce e2e (urban-testkit pilot)", () => {
 
     // The operation registered the PR aggregate (instanceTracking table) and started a real engine
     // instance — synchronously, before any worker ran (we never settled).
-    const prs = app.db.table<{ pr_key: string; status: string; process_key: string | null }>(
-      "pull_requests",
-      "pr_key",
-    );
+    const prs = app.db.table<{
+      pr_key: string;
+      status: string;
+      process_key: string | null;
+      abandon_token: string | null;
+    }>("pull_requests", "pr_key");
     const row = await prs.findOne({ pr_key: prKey });
     assert.ok(row, "a pull_requests row was registered");
     assert.equal(row?.status, "converging", "the PR is tracked as actively converging");
     assert.ok(row?.process_key, "the row carries the engine process-instance key");
+    assert.ok(row?.abandon_token, "the row carries a #76 abandon-check capability token");
 
     const processInstanceKey = row!.process_key!;
+    const abandonToken = row!.abandon_token!;
     const before = await app.engine.searchProcessInstances({
       processInstanceKeys: [processInstanceKey],
     });
@@ -182,11 +187,39 @@ describe("nano-workforce e2e (urban-testkit pilot)", () => {
     assert.equal(stillActive?.status, "converging", "row not yet reconciled before any poll fires");
 
     // Advance past the instanceTracking pollMs (derived from nano.app.json above, plus a margin):
-    // the reconciler observes TERMINATED and applies the manifest `onTerminated.set` → status
-    // `abandoned`.
+    // the reconciler observes TERMINATED and feeds urban's instance projection. Under ADR-0065
+    // (urban 0.81.0, the writer→source inversion) it NO LONGER writes `abandoned` onto the base row;
+    // the terminal edge is DERIVED on read via the managed `pull_requests__tracking` VIEW.
     await app.advanceTime(PR_POLL_MS + 1000);
-    const reconciled = await prs.findOne({ pr_key: prKey });
-    assert.equal(reconciled?.status, "abandoned", "reconciler abandoned the terminated PR's row");
+
+    // (1) The base row keeps only the worker-owned transient — it stays `converging`, NOT rewritten.
+    const baseRow = await prs.findOne({ pr_key: prKey });
+    assert.equal(
+      baseRow?.status,
+      "converging",
+      "ADR-0065: the reconciler no longer writes the terminal edge onto the base row",
+    );
+
+    // (2) The derived tracking VIEW reports the terminal edge (`abandoned`) via `derived_status`. Its
+    // name/column are resolved by the app's SSOT helper, which defers to urban's own target resolver.
+    const target = trackingTargetFor("pull_requests");
+    const view = app.db.table<{ pr_key: string } & Record<string, unknown>>(target.view, "pr_key");
+    const derived = await view.findOne({ pr_key: prKey });
+    assert.equal(
+      derived?.[target.statusColumn],
+      "abandoned",
+      "the derived read-model reports the terminated PR as abandoned",
+    );
+
+    // (3) End-to-end, the #76 cooperative abandon-check endpoint (which a servicing agent curls
+    // before any irreversible action) now reports `abandoned: true` — the whole point of the edge.
+    const abandonCheck = await api.call<{ prKey: string; status: string; abandoned: boolean }>(
+      "checkAbandon",
+      { query: { token: abandonToken } },
+    );
+    assert.equal(abandonCheck.status, 200, "the abandon check resolves the known token");
+    assert.equal(abandonCheck.body.abandoned, true, "a servicing agent is told to abort the run");
+    assert.equal(abandonCheck.body.status, "abandoned", "the reported status is the derived edge");
   });
 
   test("coverage gate: every operation the pilot claims to own was exercised", () => {

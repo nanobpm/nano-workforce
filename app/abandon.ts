@@ -10,23 +10,28 @@
 // Design invariants (mirroring the blackboard, app/blackboard.ts):
 //   - CAPABILITY URL. The per-PR token IS the credential; the agent curls the exact URL it was
 //     handed in its prompt. An unknown token is a 404 (never leaks which PRs exist).
-//   - DERIVED, not a separate marker. `abandoned` is read straight off `pull_requests.status`,
-//     which Urban's cancel primitive sets to 'abandoned' on cancel (via the `instanceTracking`
-//     `onTerminated.set` patch, applied the instant the instance terminates). No new state to
-//     keep in sync.
+//   - DERIVED, not a separate marker. `abandoned` is read off the PR's ADR-0065 derived tracking
+//     VIEW (`pull_requests__tracking.derived_status`). Since urban 0.81.0 the `instanceTracking`
+//     reconciler no longer WRITES 'abandoned' onto the base row on cancel; it feeds urban's instance
+//     projection and the `onTerminated.set` edge is recomputed on every read as `derived_status`. So
+//     an out-of-band cancel leaves the base `status` at its transient (e.g. `converging`) but the
+//     derived view reports 'abandoned' immediately — reading the view keeps the abort-check correct
+//     with no new state to sync. (`abandonClosedPr`, #352, still writes 'abandoned' onto the base
+//     row directly; the view passes that worker-written terminal through unchanged.)
 //   - ADVISORY. Like the blackboard, this never hard-locks; it narrows an unavoidable
 //     check-then-push (TOCTOU) window to near-zero. Job fencing in the harness (issue #76 layer 2)
 //     is what makes it airtight.
 import type { DataLayer } from "@nanobpm/urban";
 import { publicBaseUrl } from "./blackboard.ts";
+import { trackingTargetFor } from "./instanceTracking.ts";
 
-/** The one app-row status meaning a PR is terminally abandoned — the run must not be worked on
- * further. Two disjoint producers flip a row here, and both are non-completion terminals that must
+/** The one derived-status value meaning a PR is terminally abandoned — the run must not be worked on
+ * further. Two disjoint producers surface a row here, and both are non-completion terminals that must
  * stop a servicing agent:
- *   1. an explicit **cancel** of a live convergence/merge run (Urban's cancel primitive, via the
- *      `instanceTracking` `onTerminated.set` patch), and
+ *   1. an explicit **cancel** of a live convergence/merge run (Urban's cancel primitive terminates
+ *      the instance; the `instanceTracking` `onTerminated.set` edge derives `abandoned` on read), and
  *   2. **`abandonClosedPr`** reconciling a wave-member PR that was **closed on GitHub without
- *      merging** (#352) — for both `pull_requests` and its `plan_tasks`.
+ *      merging** (#352) — for both `pull_requests` and its `plan_tasks` — by writing the base row.
  * Convergence/merge terminal states `converged`/`merged` are NOT abandonment. In either abandoned
  * case a servicing agent should stop, so the abandon-check endpoint treating both as `abandoned:
  * true` is correct. */
@@ -69,32 +74,49 @@ export function abandonTokenFromUrl(url: string | null | undefined): string | un
   }
 }
 
-/** Resolve an abandon token back to its PR key, or undefined when the token is unknown. */
+/** Resolve an abandon token back to its PR key, or undefined when the token is unknown. Reads the
+ * derived tracking VIEW (a strict superset of the base row) so this stays valid post-ADR-0065. */
 export async function prKeyForAbandonToken(
   data: DataLayer,
   token: string,
 ): Promise<string | undefined> {
   if (!token) return undefined;
   const row = await data
-    .table<{ pr_key: string; abandon_token: string | null }>("pull_requests", "pr_key")
+    .table<{ pr_key: string; abandon_token: string | null }>(
+      trackingTargetFor("pull_requests").view,
+      "pr_key",
+    )
     .findOne({ abandon_token: token });
   return row?.pr_key;
 }
 
-/** The abandon status of a PR, or undefined when the token is unknown. */
+/** The abandon status of a PR, or undefined when the token is unknown. Reads the ADR-0065 derived
+ * tracking VIEW's `derived_status`, so an out-of-band-cancelled run (whose base row is still
+ * `converging`) is correctly reported `abandoned: true` the instant the instance terminates. */
 export async function abandonStatusForToken(
   data: DataLayer,
   token: string,
 ): Promise<{ prKey: string; status: string; abandoned: boolean } | undefined> {
   if (!token) return undefined;
+  const target = trackingTargetFor("pull_requests");
   const row = await data
-    .table<{ pr_key: string; abandon_token: string | null; status: string }>(
-      "pull_requests",
-      "pr_key",
-    )
+    .table<
+      { pr_key: string; abandon_token: string | null } & Record<string, unknown>
+    >(target.view, "pr_key")
     .findOne({ abandon_token: token });
   if (!row) return undefined;
-  return { prKey: row.pr_key, status: row.status, abandoned: isAbandoned(row.status) };
+  const rawStatus = row[target.statusColumn];
+  if (typeof rawStatus !== "string") {
+    // Fail CLOSED: a missing/non-string derived_status must never be reported as
+    // `abandoned:false`. The abort brief tells agents to proceed on a 200 with
+    // `abandoned:false`, so surfacing this as a thrown error (→ 500, which trips the
+    // agent's `curl -f` and aborts) is the safe direction for a cancelled run.
+    throw new Error(
+      `abandonStatusForToken: ${target.view}.${target.statusColumn} is not a string`,
+    );
+  }
+  const status = rawStatus;
+  return { prKey: row.pr_key, status, abandoned: isAbandoned(status) };
 }
 
 /** The instruction block appended (verbatim, via `appendPrompt`) to each side-effecting agent's

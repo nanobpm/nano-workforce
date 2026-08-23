@@ -8,6 +8,7 @@
 import { test } from "node:test";
 import { assertEquals, assertRejects, assertStringIncludes } from "#test-assert";
 import { memDataFor } from "../test/worldDb.ts";
+import { withTrackingViews } from "../test/trackingViews.ts";
 import { DurableResumeRegistry } from "./durableResume.ts";
 import { WorldStore } from "./world/index.ts";
 import { abandonClosedPr, parsePr, pollCapabilityGatesImpl, pollIncidentsImpl, pollWaveGatesImpl, repoEnvelopeVars, startMerge, submitPr, worldRestoreSha } from "./service.ts";
@@ -71,7 +72,7 @@ test("re-submit of a cancelled PR marks stale open escalations", async () => {
       pr_dependencies: { rows: [], key: "pr_key" },
     };
     const data = {
-      table: (name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key),
+      table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
     } as any;
     const engine = {
       createInstance: () => Promise.resolve({ processInstanceKey: "PI-9" }),
@@ -137,7 +138,7 @@ test("pollIncidents mirrors an ACTIVE incident onto the PR row, then clears it, 
     pull_requests: { rows: [row], key: "pr_key" },
   };
   const data = {
-    table: (name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key),
+    table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
   } as any;
   const headers = { "content-type": "application/json" };
 
@@ -190,7 +191,7 @@ test("pollIncidents never queries a PR with no live instance and clears any stal
     pull_requests: { rows: [noKey, terminal], key: "pr_key" },
   };
   const data = {
-    table: (name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key),
+    table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
   } as any;
   const headers = { "content-type": "application/json" };
 
@@ -223,7 +224,7 @@ test("pollIncidents picks the oldest incident by creationTime, sorting a missing
     pull_requests: { rows: [row], key: "pr_key" },
   };
   const data = {
-    table: (name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key),
+    table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
   } as any;
   const headers = { "content-type": "application/json" };
 
@@ -262,7 +263,7 @@ test("submitPr stringifies a numeric processInstanceKey (contract: string | null
       pr_dependencies: { rows: [], key: "pr_key" },
     };
     const data = {
-      table: (name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key),
+      table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
     } as any;
     const engine = {
       // A large key delivered as a JS number — the exact case that breaks dev response validation
@@ -296,7 +297,7 @@ function captureConvergeOnly() {
     pr_dependencies: { rows: [], key: "pr_key" },
   };
   const data = {
-    table: (name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key),
+    table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
   } as any;
   let captured: unknown;
   const engine = {
@@ -347,7 +348,7 @@ function captureRoot() {
     pr_dependencies: { rows: [], key: "pr_key" },
   };
   const data = {
-    table: (name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key),
+    table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
   } as any;
   let captured: unknown;
   const engine = {
@@ -629,7 +630,7 @@ test("pollWaveGatesImpl is level-triggered: PRs merged before the token arrives 
       },
     };
     const data = {
-      table: (name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key),
+      table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
     } as any;
 
     const published: { name: string; correlationKey?: string }[] = [];
@@ -718,7 +719,7 @@ test("pollWaveGatesImpl never releases the barrier on an unverifiable subscripti
       },
     };
     const data = {
-      table: (name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key),
+      table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
     } as any;
 
     const published: { name: string; correlationKey?: string }[] = [];
@@ -822,7 +823,7 @@ test("pollWaveGatesImpl releases the wave when a member PR is closed-unmerged an
       merges: { rows: [], key: "id" },
     };
     const data = {
-      table: (name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key),
+      table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
     } as any;
 
     const published: { name: string; correlationKey?: string }[] = [];
@@ -878,7 +879,7 @@ test("abandonClosedPr is idempotent — the terminal merges audit row is written
     merges: { rows: [], key: "id" },
   };
   const data = {
-    table: (name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key),
+    table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
   } as any;
 
   await abandonClosedPr(data, "owner/repo#70", "closed without merging");
@@ -906,7 +907,7 @@ test("abandonClosedPr self-heals a missing pull_requests parent row before the F
     merges: { rows: [], key: "id" },
   };
   const data = {
-    table: (name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key),
+    table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
   } as any;
 
   await abandonClosedPr(data, "owner/repo#71", "closed without merging");
@@ -932,7 +933,7 @@ test("abandonClosedPr rejects a malformed prKey with a clear error before any FK
     merges: { rows: [], key: "id" },
   };
   const data = {
-    table: (name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key),
+    table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
   } as any;
 
   const err = await assertRejects(() => abandonClosedPr(data, "not-a-valid-pr-key", "closed without merging"));
@@ -1004,7 +1005,7 @@ function capsProbeExec(ready: boolean) {
 
 function capsDataLayer(stores: Record<string, { rows: any[]; key: string }>) {
   return {
-    table: (name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key),
+    table: withTrackingViews((name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
   } as any;
 }
 

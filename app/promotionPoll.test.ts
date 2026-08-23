@@ -6,6 +6,7 @@
 // recording engine: open exactly one PR, never a duplicate on re-run, never for a converging epic,
 // and never for a `main`-based epic.
 import { test } from "node:test";
+import { withTrackingViews } from "../test/trackingViews.ts";
 import { assert, assertEquals } from "#test-assert";
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { resetDefaultBranchCache } from "./github.ts";
@@ -41,7 +42,7 @@ function memData(): { data: DataLayer; stores: Record<string, any[]> } {
       },
     };
   }
-  const data = { table: (n: string, pk?: string) => tbl(n, pk) } as any as DataLayer;
+  const data = { table: withTrackingViews((n: string, pk?: string) => tbl(n, pk)) } as any as DataLayer;
   return { data, stores };
 }
 

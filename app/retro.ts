@@ -17,6 +17,7 @@ import type { DataLayer, EngineClient, Logger } from "@nanobpm/urban";
 import { type BlackboardEntry, isUniqueViolation, readBlackboard } from "./blackboard.ts";
 import { hasDeliveredImplementationForPlan } from "./conformance.ts";
 import { TERMINAL_STATUSES } from "./delivery.ts";
+import { derivedTrackingTable } from "./instanceTracking.ts";
 import { planReviews, planTasks } from "./plan.ts";
 import { aggregateEpicDeltas } from "./taskDelta.ts";
 
@@ -55,7 +56,11 @@ interface PlanRow extends Record<string, unknown> {
 
 const plansTbl = (data: DataLayer) => data.table<PlanRow>("plans", "plan_key");
 const prsTbl = (data: DataLayer) =>
-  data.table<{ pr_key: string; status: string }>("pull_requests", "pr_key");
+  derivedTrackingTable<{ pr_key: string; derived_status: string }>(
+    data,
+    "pull_requests",
+    "pr_key",
+  );
 const retroStartsTbl = (data: DataLayer) =>
   data.table<{ plan_key: string; started_at: string }>("plan_retro_starts", "plan_key");
 
@@ -77,8 +82,10 @@ export async function isPlanComplete(data: DataLayer, planKey: string): Promise<
     if (SETTLED_TASKLESS.has(t.status)) continue;
     // Any task that is meant to yield a PR must have a terminal PR to be settled.
     if (!t.pr_key) return false; // pending/escalated/etc. with no PR yet → still in flight
+    // Any task that is meant to yield a PR must have a terminal PR to be settled. Read the ADR-0065
+    // derived edge so an out-of-band-terminated (`abandoned`) PR is recognised as terminal here.
     const pr = await prsTbl(data).get(t.pr_key);
-    if (!pr || !TERMINAL_PR_STATUSES.has(pr.status)) return false;
+    if (!pr || !TERMINAL_PR_STATUSES.has(pr.derived_status)) return false;
   }
   return true;
 }

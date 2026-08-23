@@ -17,6 +17,7 @@
 import type { DataLayer } from "@nanobpm/urban";
 import { type BlackboardEntry, isUniqueViolation, readBlackboard } from "./blackboard.ts";
 import { TERMINAL_STATUSES } from "./delivery.ts";
+import { derivedTrackingTable } from "./instanceTracking.ts";
 import { planTasks } from "./plan.ts";
 
 const now = () => new Date().toISOString();
@@ -45,15 +46,20 @@ interface PlanRow extends Record<string, unknown> {
 
 const plansTbl = (data: DataLayer) => data.table<PlanRow>("plans", "plan_key");
 const prsTbl = (data: DataLayer) =>
-  data.table<{ pr_key: string; status: string }>("pull_requests", "pr_key");
+  derivedTrackingTable<{ pr_key: string; derived_status: string }>(
+    data,
+    "pull_requests",
+    "pr_key",
+  );
 
 /** A slice's PR "landed" iff it exists and reached a non-abandoned terminal status. The single
  * predicate both {@link gatherConformance} and {@link hasDeliveredImplementationForPlan} apply, so
- * the full digest and the cheap trigger check can't disagree about what counts as landed. */
+ * the full digest and the cheap trigger check can't disagree about what counts as landed. Reads the
+ * ADR-0065 derived edge so an out-of-band-terminated PR is correctly excluded from "landed". */
 async function isLanded(data: DataLayer, prKey: string | null | undefined): Promise<boolean> {
   if (!prKey) return false;
   const pr = await prsTbl(data).get(prKey);
-  return !!pr && LANDED_PR_STATUSES.has(pr.status);
+  return !!pr && LANDED_PR_STATUSES.has(pr.derived_status);
 }
 const conformanceTbl = (data: DataLayer) =>
   data.table<{ plan_key: string } & Record<string, unknown>>("plan_conformance", "plan_key");
