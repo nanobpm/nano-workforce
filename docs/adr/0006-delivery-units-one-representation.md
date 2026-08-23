@@ -103,8 +103,10 @@ half-consolidated; removing both is what makes a single representation reachable
 ## Decision
 
 Adopt a single internal aggregate — the **delivery unit** — defined around its **nodes**: a node is one
-agent's unit of work whose terminal is *typically* one merged PR, though ADR 0005 `wait`/`human`/`connector`
-nodes and PR-less delivery graphs (`delivery_graph_runs` has no `pr_key`) make PR production **optional**.
+**scheduled unit of work** whose executor may be an **agent, probe, human, or connector** (ADR 0005
+`wait`/`human`/`connector` nodes are first-class, not exceptions). Its terminal is *typically* one merged
+PR, but PR-less nodes and delivery graphs (`delivery_graph_runs` has no `pr_key`) make PR production
+**optional**.
 It has **two encodings**, each of which now *references* the shared definition rather than inlining
 a copy — expressed here as the **target** state:
 
