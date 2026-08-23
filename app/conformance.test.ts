@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { assert, assertEquals, assertRejects, assertStringIncludes } from "#test-assert";
 import type { DataLayer } from "@nanobpm/urban";
 import { memBlackboardSource } from "../test/blackboardDb.ts";
+import { withTrackingViews } from "../test/trackingViews.ts";
 import { appendEntry } from "./blackboard.ts";
 import {
   acknowledgeConformance,
@@ -45,7 +46,7 @@ function memData(): { data: DataLayer; stores: Record<string, any[]> } {
       },
     };
   }
-  const data = { table: (n: string, pk?: string) => tbl(n, pk), source: memBlackboardSource().source } as any as DataLayer;
+  const data = { table: withTrackingViews((n: string, pk?: string) => tbl(n, pk)), source: memBlackboardSource().source } as any as DataLayer;
   return { data, stores };
 }
 

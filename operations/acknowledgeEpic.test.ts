@@ -18,6 +18,7 @@ import { assertEquals } from "#test-assert";
 import type { AppApi } from "@nanobpm/urban";
 import { deriveEpicBucket, epicIsAcknowledgeable } from "../app/delivery.ts";
 import { noopLog } from "../test/log.ts";
+import { withTrackingViews } from "../test/trackingViews.ts";
 import handler from "./acknowledgeEpic.ts";
 
 // An in-memory data layer wired through the `plans` gateway (now a plain record table). `extra` seeds
@@ -52,7 +53,7 @@ function memApp(
     };
   }
   const app = {
-    data: { table: (n: string, pk?: string) => tbl(n, pk) },
+    data: { table: withTrackingViews((n: string, pk?: string) => tbl(n, pk)) },
     log: noopLog(),
   } as any as AppApi;
   return { app, rows: stores.plans };

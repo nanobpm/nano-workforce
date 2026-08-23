@@ -7,6 +7,7 @@ import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { afterEach } from "node:test";
 import { fileURLToPath } from "node:url";
 import type { DataLayer } from "@nanobpm/urban";
+import { withTrackingViews } from "./trackingViews.ts";
 
 const openDbs = new Set<DatabaseSync>();
 afterEach(() => {
@@ -103,7 +104,7 @@ export function memDataFor(migrationFiles: readonly string[]): { data: DataLayer
     db.exec(sql);
   }
   const data = {
-    table: (name: string, pk = "id") => gateway(db, name, pk),
+    table: withTrackingViews((name: string, pk = "id") => gateway(db, name, pk)),
     open: () => openDataSource(db),
   } as unknown as DataLayer;
   return { data, db };

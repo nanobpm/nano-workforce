@@ -2,6 +2,7 @@
 import { test } from "node:test";
 import { assertEquals, assertNotEquals } from "#test-assert";
 import type { DataLayer } from "@nanobpm/urban";
+import { withTrackingViews } from "../test/trackingViews.ts";
 import {
   abandonStatusForToken,
   abandonTokenFromUrl,
@@ -26,7 +27,7 @@ function memData(): DataLayer {
       },
     };
   }
-  return { table: (n: string) => tbl(n) } as any as DataLayer;
+  return { table: withTrackingViews((n: string) => tbl(n)) } as any as DataLayer;
 }
 
 async function seedPr(data: DataLayer, pr_key: string, abandon_token: string, status: string) {

@@ -7,7 +7,6 @@
 //
 // Data access goes through the record-oriented gateway (`data.table<T>(name, pk)` — the RAD
 // `Table<T>` surface), not hand-written SQL. Row shapes are declared inline here.
-import { readFileSync } from "node:fs";
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { ABANDONED_STATUS, abandonUrl, mintAbandonToken, renderAbandonBrief } from "./abandon.ts";
 import { escalationFormId } from "./agentCompletion.ts";
@@ -51,6 +50,7 @@ import {
   type PrState,
   requestCopilotReview,
 } from "./github.ts";
+import { activeStatusesFor, derivedTrackingTable } from "./instanceTracking.ts";
 import { pollLineage } from "./lineage.ts";
 import { mergeLanes, readExclusions } from "./mergeExclusion.ts";
 import {
@@ -253,6 +253,16 @@ interface Escalation {
 }
 
 const prs = (data: DataLayer) => data.table<PullRequest>("pull_requests", "pr_key");
+/** A PR row as seen through its derived tracking VIEW (`pull_requests__tracking`): the base columns
+ * plus urban's ADR-0065 `derived_status`, which folds the reconciler's terminal edge
+ * (out-of-band terminate → `abandoned`) over the worker-owned transient. */
+type TrackedPullRequest = PullRequest & { derived_status: string };
+/** Read-only accessor over the PR derived tracking VIEW. Use this — and read `derived_status`, not
+ * `status` — for any terminal-edge classification (delivery/promotion/feature reconciliation), so an
+ * out-of-band-terminated PR (whose base row is still `converging`) is correctly seen as `abandoned`.
+ * Worker-written terminals (`merged`/`converged`) pass through unchanged. Writes stay on `prs`. */
+const prsTracking = (data: DataLayer) =>
+  derivedTrackingTable<TrackedPullRequest>(data, "pull_requests", "pr_key");
 const escs = (data: DataLayer) => data.table<Escalation>("escalations", "id");
 const deps = (data: DataLayer) => data.table<PrDependency>("pr_dependencies", "pr_key");
 
@@ -1948,7 +1958,8 @@ export async function derivePlanDelivery(
     let status = statusByPrKey?.get(t.pr_key);
     if (status === undefined && !statusByPrKey) {
       // On-demand caller: fetch just this slice's PR row rather than loading the whole table.
-      status = (await prs(data).get(t.pr_key))?.status;
+      // Read the ADR-0065 derived edge so an out-of-band-terminated slice reads `abandoned`.
+      status = (await prsTracking(data).get(t.pr_key))?.derived_status;
     }
     prStatuses.push(status ?? MISSING_PR_STATUS);
   }
@@ -2028,8 +2039,9 @@ export async function pollWaitGate(data: DataLayer) {
  * default branch, so there is nothing to promote. Best-effort + per-plan isolated. */
 export async function pollPromotion(data: DataLayer, engine: EngineClient, token: string) {
   // Preload every PR status once per pass (mirrors pollDelivery — avoids an N+1 `prs(data).get`).
+  // Read the ADR-0065 derived edge (`derived_status`) so a terminated slice reads `abandoned`.
   const statusByPrKey = new Map<string, string>();
-  for (const pr of await prs(data).all()) statusByPrKey.set(pr.pr_key, pr.status);
+  for (const pr of await prsTracking(data).all()) statusByPrKey.set(pr.pr_key, pr.derived_status);
   for (const plan of await plans(data).all()) {
     const base = plan.base_branch;
     // A non-`epic/*` base is never promotable — short-circuit before the per-plan delivery join.
@@ -2107,8 +2119,9 @@ export async function pollPromotion(data: DataLayer, engine: EngineClient, token
  * Never touches a run that isn't `converging` — additive/derived only, idempotent, best-effort. */
 export async function pollFeatureDelivery(data: DataLayer) {
   // Preload every PR status once per pass (mirrors pollDelivery — avoids an N+1 `prs(data).get`).
+  // Read the ADR-0065 derived edge (`derived_status`) so a terminated run reads `abandoned`.
   const statusByPrKey = new Map<string, string>();
-  for (const pr of await prs(data).all()) statusByPrKey.set(pr.pr_key, pr.status);
+  for (const pr of await prsTracking(data).all()) statusByPrKey.set(pr.pr_key, pr.derived_status);
   // Only `converging` runs are ever reconciled — query them via the `feature_runs(status)` index
   // (db/migrations/028) instead of scanning all history, so this pass stays O(in-flight), not
   // O(total runs), as the table grows.
@@ -2128,26 +2141,6 @@ export async function pollFeatureDelivery(data: DataLayer) {
       console.error(`[poller] feature delivery ${run.feature_key}: ${err}`);
     }
   }
-}
-
-/** The app manifest, read and parsed exactly ONCE at module load. `activeStatusesFor` is invoked
- * three times during module initialization (the PR/plan/feature constants below); parsing here keeps
- * that to a single synchronous `readFileSync` + `JSON.parse` instead of one per lookup. */
-const APP_MANIFEST: { instanceTracking?: { table: string; activeStatuses?: string[] }[] } = JSON.parse(
-  readFileSync(new URL("../nano.app.json", import.meta.url), "utf8"),
-);
-
-/** Read a tracked table's parked-and-active statuses from the single source of truth
- * (`instanceTracking.<table>.activeStatuses` in nano.app.json), so an app-side scan can never drift
- * from the reconciler's notion of "in-flight". Throws if the binding is missing/empty. */
-function activeStatusesFor(table: string): readonly string[] {
-  const binding = APP_MANIFEST.instanceTracking?.find((b) => b.table === table);
-  if (!binding?.activeStatuses?.length) {
-    throw new Error(
-      `nano.app.json: instanceTracking[table="${table}"].activeStatuses is missing or empty`,
-    );
-  }
-  return binding.activeStatuses;
 }
 
 /** The `pull_requests` statuses a PR instance can be parked-and-active on, DERIVED from the single
