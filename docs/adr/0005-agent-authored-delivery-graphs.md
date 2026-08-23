@@ -99,6 +99,20 @@ The closed set (extensible only by a deliberate ADR/PR, never by graph authors):
 - **`human`** — a scheduled user task + form (§4).
 - **`connector`** — an automated, side-effecting outbound action (the connector I/O surface).
 
+> **Amendment (issue #500): the connector's first REAL target landed — `converge` / `converge-merge`.**
+> The connector I/O surface shipped in slice S4 with a deliberately forward-declared STUB action
+> (`performConnectorAction`), the real target dispatch deferred to a later slice. That slice is this:
+> a `connector` node whose `target` is **`converge-merge`** (or **`converge`** for converge-only)
+> enrolls its `payload.pr` into the app's shared convergence (+ merge) loop via `submitPr` — the SAME
+> seam the feature cell reuses (`workers/converge-feature`), no duplicated machinery. Enrollment lives
+> in the worker (it has `app.data`/`app.engine`); the existing `dispatchConnector` ledger stays the
+> at-most-once fence around it, and `submitPr`'s own `prKey` idempotency makes the enrollment
+> double-safe. This retires the manual `land-*` human gate whose only job was "go run convergence
+> yourself" — the canonical shape is now `agent (opens PR) → connector[converge-merge] →
+> wait[pr, merged]` with no human node. The payload is `{ pr, convergeOnly?, dependsOn? }`; the MVP
+> sources `pr` as a literal (auto-emitting it from the `agent` node as a typed `pr` fact is a deferred
+> follow-up). Other connector targets remain the forward-declared stub.
+
 Crucially, **execution stays engine-native**: each node kind is a real, already-deployed
 sub-process / call activity (`readiness-gate`, a user task, the implementation task, a connector
 invocation). The graph layer owns **scheduling** (which nodes' edges are satisfied → dispatch), not a

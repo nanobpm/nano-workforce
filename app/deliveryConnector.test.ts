@@ -15,10 +15,14 @@ import { join, resolve } from "node:path";
 import type { DataLayer } from "@nanobpm/urban";
 import { bootTestApp, type TestApp } from "@nanobpm/urban-testkit";
 import {
+  CONVERGE_MERGE_TARGET,
+  CONVERGE_TARGET,
   connectorDedupeKey,
+  convergeOnlyForTarget,
   type DeliveryConnectorDispatchRow,
   deliveryConnectorDispatches,
   dispatchConnector,
+  isConvergeTarget,
 } from "./deliveryConnector.ts";
 
 const APP_ROOT = resolve(import.meta.dirname, "..");
@@ -82,6 +86,21 @@ test("connectorDedupeKey: author key wins; else derives <processInstanceKey>:<el
   assertEquals(connectorDedupeKey({ processInstanceKey: "pi9" }), null);
   // The engine can return a NUMERIC processInstanceKey — it must still derive a key, not fail closed.
   assertEquals(connectorDedupeKey({ processInstanceKey: 12345, elementId: "n3" }), "12345:n3");
+});
+
+test("converge targets: `converge`/`converge-merge` are the enrollment targets; `converge` is review-only", () => {
+  assertEquals(CONVERGE_TARGET, "converge");
+  assertEquals(CONVERGE_MERGE_TARGET, "converge-merge");
+  // Only the two converge literals route into `submitPr`; any other target stays a stub dispatch.
+  assert(isConvergeTarget("converge"));
+  assert(isConvergeTarget("converge-merge"));
+  assert(!isConvergeTarget("slack"));
+  assert(!isConvergeTarget("Converge"));
+  assert(!isConvergeTarget(""));
+  // `convergeOnly` default maps onto `submitPr`'s arg: `converge` stops at converged (true),
+  // `converge-merge` drives the merge loop (false) — mirroring converge-feature's autoMerge inversion.
+  assertEquals(convergeOnlyForTarget("converge"), true);
+  assertEquals(convergeOnlyForTarget("converge-merge"), false);
 });
 
 test("first dispatch delivers exactly once; a redelivery on the same key dedupes and never re-acts", async () => {

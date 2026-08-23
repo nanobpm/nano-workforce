@@ -33,6 +33,33 @@ export const DELIVERY_CONNECTOR_TASK_TYPE = "pr.delivery-connector";
 export const OUTCOME_CLAIMED = "claimed";
 export const OUTCOME_DELIVERED = "delivered";
 
+/** The two connector `target`s that enroll an agent-opened PR into the app's SHARED convergence /
+ * merge doors via `submitPr` (issue #500) — the delivery-graph side of the exact seam the feature
+ * cell reuses (`workers/converge-feature`), no duplicated machinery. `converge-merge` drives review
+ * convergence AND the merge loop; `converge` stops at `converged` (converge-only). This is the "real
+ * target dispatch" ADR 0005 deferred as a later slice for the connector I/O surface: a `converge`/
+ * `converge-merge` connector IS the "automated, side-effecting outbound action" a connector is
+ * defined to be. Named constants so the worker's dispatch branch and the docs/preview can never drift
+ * on the literal. */
+export const CONVERGE_TARGET = "converge";
+export const CONVERGE_MERGE_TARGET = "converge-merge";
+
+/** Is `target` one of the converge-enrollment targets (`converge` / `converge-merge`)? The single
+ * predicate the worker branches on to route a dispatch into `submitPr` instead of the forward-declared
+ * stub. */
+export function isConvergeTarget(target: string): boolean {
+  return target === CONVERGE_TARGET || target === CONVERGE_MERGE_TARGET;
+}
+
+/** The DEFAULT `convergeOnly` for a converge target: `converge` is review-only (`true` — stop at
+ * `converged`), `converge-merge` drives the merge loop too (`false`). Maps directly onto `submitPr`'s
+ * `convergeOnly` argument (mirroring how `converge-feature` inverts `autoMerge`). An author may still
+ * override it per-dispatch via the connector payload's `convergeOnly`. Only ever consulted behind
+ * `isConvergeTarget`, so a non-converge target's `false` is unreachable. */
+export function convergeOnlyForTarget(target: string): boolean {
+  return target === CONVERGE_TARGET;
+}
+
 /** One durable dispatch-claim row — the at-most-once ledger entry a connector writes before it acts. */
 export interface DeliveryConnectorDispatchRow extends Record<string, unknown> {
   id?: number;

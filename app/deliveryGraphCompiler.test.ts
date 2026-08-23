@@ -233,6 +233,29 @@ test("sideEffects: agent + connector only; connector carries its dedupeKey", asy
   assert(!r.sideEffects.some((s) => s.nodeId === "publish"));
 });
 
+test("converge-merge worked graph: agent → connector[converge-merge] → wait[pr,merged] compiles with NO human node (retires the manual land gate, #500)", async () => {
+  const graph = {
+    name: "open → converge+merge → wait merged",
+    nodes: [
+      { id: "open", kind: "agent", agent: { jobType: "senior:feature", prompt: "Implement the change and open a PR." } },
+      { id: "land", kind: "connector", connector: { target: "converge-merge", payload: { pr: "acme/repo#123" } } },
+      { id: "merged", kind: "wait", wait: { kind: "pr", target: "acme/repo#123", match: { prState: "merged" }, onTimeout: "escalate" } },
+    ],
+    edges: [
+      { from: "open", to: "land" },
+      { from: "land", to: "merged" },
+    ],
+  };
+  const r = await compileOk(graph);
+  // The canonical shape has NO human land-* gate — convergence is driven by the connector itself.
+  assertEquals(r.humanNodes.length, 0, "no human node bridges the PR to convergence");
+  // The connector is a side effect, naming its converge-merge target; the wait gate is read-only.
+  const connector = r.sideEffects.find((s) => s.nodeId === "land");
+  assertEquals(connector?.kind, "connector");
+  assert(connector?.description.includes("converge-merge"), "the side-effect names the converge-merge target");
+  assert(!r.sideEffects.some((s) => s.nodeId === "merged"), "the wait gate is not a side effect");
+});
+
 test("resolved edges carry the resolved fromNode and the referenced fact", async () => {
   const r = await compileOk(RELEASE_RUNBOOK);
   const factEdge = r.resolved.edges.find((e) => e.from === "watch-b.mergedSha");
