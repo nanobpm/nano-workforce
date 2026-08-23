@@ -25,6 +25,7 @@ import { fileURLToPath } from "node:url";
 import type { EngineJob } from "@nanobpm/urban/runtime";
 import { bootTestApp, type TestApp } from "@nanobpm/urban-testkit";
 import { admitGithubState, installAdmitGithub } from "./support/github-admit.ts";
+import { advancePastTimer } from "./support/time.ts";
 
 const APP_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -154,7 +155,7 @@ describe("plan-fanout escalation SLA + assignment (U5)", () => {
 
         // Never answer — let the SLA elapse. The interrupting boundary cancels the parked task and
         // routes to the task-done end (the safe auto-abandon default).
-        await app.advanceTime(PAST_SLA_MS);
+        await advancePastTimer(app, PAST_SLA_MS);
 
         const flows = takenFlows(app);
         assert.ok(
@@ -180,7 +181,7 @@ describe("plan-fanout escalation SLA + assignment (U5)", () => {
         await openTask(app, processKey, "plan-review-decision");
         await assertAssignmentFilterable(app, processKey, "plan-review-decision");
 
-        await app.advanceTime(PAST_SLA_MS);
+        await advancePastTimer(app, PAST_SLA_MS);
 
         const flows = takenFlows(app);
         assert.ok(
@@ -221,7 +222,7 @@ describe("plan-fanout escalation SLA + assignment (U5)", () => {
         await openTask(app, processKey, "trial-merge-decision");
         await assertAssignmentFilterable(app, processKey, "trial-merge-decision");
 
-        await app.advanceTime(PAST_SLA_MS);
+        await advancePastTimer(app, PAST_SLA_MS);
 
         const flows = takenFlows(app);
         assert.ok(

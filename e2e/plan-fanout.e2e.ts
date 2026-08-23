@@ -22,6 +22,7 @@ import { fileURLToPath } from "node:url";
 import type { EngineJob } from "@nanobpm/urban/runtime";
 import { bootTestApp, type TestApp } from "@nanobpm/urban-testkit";
 import { admitGithubState, installAdmitGithub } from "./support/github-admit.ts";
+import { advancePastTimer } from "./support/time.ts";
 
 const APP_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -413,8 +414,7 @@ describe("plan-fanout escalations (U2 — task + plan-review + trial-merge → u
 
         // Never publish caps-resolved — let the bound (default P1D) elapse. Advancing past it is the
         // ONLY way the token can move, so this proves the wait is genuinely bounded.
-        await app.advanceTime(25 * 60 * 60 * 1000);
-        await app.settle();
+        await advancePastTimer(app, 25 * 60 * 60 * 1000);
 
         const flows = takenFlows(app);
         assert.ok(
