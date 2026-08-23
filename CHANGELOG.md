@@ -1,3 +1,10 @@
+# [0.125.0](https://github.com/nanobpm/nano-workforce/compare/v0.124.0...v0.125.0) (2026-08-23)
+
+
+### Features
+
+* **read-model:** declare feature_read_model once via Urban defineReadModel (ADR-0065 step 2) ([#472](https://github.com/nanobpm/nano-workforce/issues/472)) ([6424efb](https://github.com/nanobpm/nano-workforce/commit/6424efbeabec60366567e218f12edd996bb96780)), closes [#422](https://github.com/nanobpm/nano-workforce/issues/422)
+
 # [0.124.0](https://github.com/nanobpm/nano-workforce/compare/v0.123.2...v0.124.0) (2026-08-23)
 
 
