@@ -1,3 +1,13 @@
+## [0.131.0](https://github.com/nanobpm/nano-workforce/compare/v0.130.0...v0.131.0) (2026-08-23)
+
+### Features
+
+* **delivery-graph:** conditional (guarded) edges → exclusive gateways (ADR 0005 S7) ([#495](https://github.com/nanobpm/nano-workforce/issues/495)) ([48e4fc3](https://github.com/nanobpm/nano-workforce/commit/48e4fc3787067c175dbebdfdd81954dc79e0b167)), closes [nanobpm/nano-workforce#492](https://github.com/nanobpm/nano-workforce/issues/492)
+
+### Bug Fixes
+
+* **cockpit:** suppress idle-worker drill + waiting-for-output note (blank terminal) ([#497](https://github.com/nanobpm/nano-workforce/issues/497)) ([a721c45](https://github.com/nanobpm/nano-workforce/commit/a721c450faf0f3b43ee2d03b2eed312122c3b624)), closes [#496](https://github.com/nanobpm/nano-workforce/issues/496)
+
 ## [0.130.0](https://github.com/nanobpm/nano-workforce/compare/v0.129.1...v0.130.0) (2026-08-23)
 
 ### Features
