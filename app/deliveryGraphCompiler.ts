@@ -321,13 +321,14 @@ export async function compileDeliveryGraph(
   for (const list of producersById.values()) list.sort(byCodeUnit);
   for (const list of consumersById.values()) list.sort(byCodeUnit);
 
-  // Exclusive-split topology (S7): a node with any guarded/`default` out-edge is an exclusive split; a
+  // Exclusive-split topology (S7): a node with a GUARDED (`when`) out-edge is an exclusive split; a
   // fan-in that re-converges a split's branches is an exclusive merge. Derived from the ONE shared
   // `analyzeExclusiveTopology` the validator also uses, so gateway-type selection never drifts from the
-  // parity the validator enforced.
+  // parity the validator enforced. A lone `default: true` edge (no guarded sibling) always fires and is
+  // NOT a split — mirror the validator and key off the guarded `when` only.
   const splitNodes = new Set<string>();
   for (const edge of resolvedEdges) {
-    if (edge.when !== undefined || edge.default === true) splitNodes.add(edge.fromNode);
+    if (edge.when !== undefined && edge.default !== true) splitNodes.add(edge.fromNode);
   }
   const forwardAdj = new Map<string, string[]>();
   for (const node of nodes) forwardAdj.set(node.id, [...(consumersById.get(node.id) ?? [])]);

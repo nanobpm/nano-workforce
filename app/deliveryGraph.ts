@@ -613,7 +613,12 @@ function validateGuardedEdges(
     const plain = outs.filter((e) => !e.hasWhen && !e.isDefault);
     const isSplit = guarded.length > 0 || defaults.length > 0;
     if (!isSplit) continue;
-    splitNodes.add(node);
+    // Only a GUARDED (`when`) fan-out is an exclusive split for topology: a lone `default: true`
+    // edge (no guarded sibling) always fires, so its producer is not conditional — adding it here
+    // would spuriously mark downstream nodes/leaves conditional and trip false exclusive-merge
+    // parity (or misselect the End join). The per-node mixing/exhaustiveness checks below still run
+    // for any `default` fan-out (they gate on `isSplit`); only the topology set is guard-derived.
+    if (guarded.length > 0) splitNodes.add(node);
 
     if (plain.length > 0) {
       // No mixing: a node is a fork (all edges unconditional) OR an XOR-split (all edges guarded/

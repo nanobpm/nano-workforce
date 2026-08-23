@@ -589,3 +589,26 @@ test("S7 exclusive-merge-parity: terminal nodes that MIX a conditional tail with
   });
   hasCode(errors, "exclusive-merge-parity");
 });
+
+test("S7 default-only node is NOT an exclusive split — a lone `default: true` out-edge always fires and must not mark downstream leaves conditional", () => {
+  // `fork` unconditionally fans to `p` and `q` (a parallel fork). `q` has a SINGLE out-edge marked
+  // `default: true` with no guarded `when` sibling — semantically that edge always fires, so `q` is
+  // NOT an exclusive split. Leaves {p, z} are both always-firing and join cleanly at the End sink.
+  // Deriving `splitNodes` from `when`-guarded edges only (not a lone `default`) keeps `q` off the
+  // split set; treating a default-only node as a split spuriously marks `z` conditional and trips a
+  // false End-sink exclusive-merge-parity error.
+  const errors = validateDeliveryGraph({
+    nodes: [
+      { id: "fork", kind: "agent", agent: { jobType: "j" } },
+      { id: "p", kind: "agent", agent: { jobType: "j" } },
+      { id: "q", kind: "agent", agent: { jobType: "j" } },
+      { id: "z", kind: "agent", agent: { jobType: "j" } },
+    ],
+    edges: [
+      { from: "fork", to: "p" },
+      { from: "fork", to: "q" },
+      { from: "q", to: "z", default: true },
+    ],
+  });
+  assertEquals(errors, []);
+});

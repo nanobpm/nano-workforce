@@ -228,8 +228,7 @@ resume cannot double-fire.
 > **Amendment (issue #492): conditional (guarded) edges landed (S7).** The "behavioural edges" deferral
 > above is **partially lifted**: an edge may now carry an optional guard — `when: "<node>.<fact>"` +
 > `equals: <scalar>` — or be the split's single `default: true` else-branch. A node whose out-edges
-> carry guards is an **exclusive** (data-based) split instead of the default parallel fan-out; its
-> guarded branches compile to a BPMN `exclusiveGateway` (`gwx<i>`) with one FEEL
+> carry guards is an **exclusive** (data-based) split instead of the default parallel fan-out; its> guarded branches compile to a BPMN `exclusiveGateway` (`gwx<i>`) with one FEEL
 > `conditionExpression` per guarded flow (`=<producerElement>_<fact> = <literal>`) and a named default
 > flow, and where those branches re-converge they merge on an **exclusive** gateway (`gwm<i>`,
 > first-token-proceeds) rather than the parallel AND-join that would deadlock the untaken branch. The
@@ -242,6 +241,10 @@ resume cannot double-fire.
 > — and a plain (parallel) AND-join may not be fed by an exclusive-split branch (`exclusive-merge-parity`),
 > including the implicit **End sink**: the terminal nodes may not mix a conditional (exclusive-split)
 > tail with an always-firing one, which would deadlock the End join or double-fire its exclusive merge.
+> The exclusive-split topology (both the validator's parity analysis and the compiler's gateway
+> selection) is derived from the **guarded (`when`) edges only** — a lone `default: true` edge with no
+> guarded sibling always fires, so its producer is **not** a split and must not mark downstream
+> nodes/leaves conditional; the per-node mixing/exhaustiveness checks still apply to any `default`.
 > Determinism is preserved: gateway ids are positional over id-sorted nodes, so a graph with no guards
 > compiles byte-for-byte as before.
 
