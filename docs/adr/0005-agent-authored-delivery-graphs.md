@@ -104,10 +104,14 @@ The closed set (extensible only by a deliberate ADR/PR, never by graph authors):
 > (`performConnectorAction`), the real target dispatch deferred to a later slice. That slice is this:
 > a `connector` node whose `target` is **`converge-merge`** (or **`converge`** for converge-only)
 > enrolls its `payload.pr` into the app's shared convergence (+ merge) loop via `submitPr` — the SAME
-> seam the feature cell reuses (`workers/converge-feature`), no duplicated machinery. Enrollment lives
-> in the worker (it has `app.data`/`app.engine`); the existing `dispatchConnector` ledger stays the
-> at-most-once fence around it, and `submitPr`'s own `prKey` idempotency makes the enrollment
-> double-safe. This retires the manual `land-*` human gate whose only job was "go run convergence
+> seam the feature cell reuses (`workers/converge-feature`), no duplicated machinery. Enrollment is
+> defined in the worker (it has `app.data`/`app.engine`) but **injected into `dispatchConnector` as the
+> connector's action**, so the existing at-most-once ledger fence wraps the enrollment itself: it fires
+> only on the claim winner (or a resumed crashed claim), and a `deduped` redelivery — a restart / lost
+> ack / graph resume that lands AFTER the PR settled — never re-runs it. That matters because `submitPr`
+> deliberately RE-OPENS a terminal PR; an unfenced re-call would flip a `merged`/`converged`/`abandoned`
+> PR back to `converging`. `submitPr`'s own `prKey` idempotency additionally makes a resumed re-perform
+> double-safe on a still-live row. This retires the manual `land-*` human gate whose only job was "go run convergence
 > yourself" — the canonical shape is now `agent (opens PR) → connector[converge-merge] →
 > wait[pr, merged]` with no human node. The payload is `{ pr, convergeOnly?, dependsOn? }`; the MVP
 > sources `pr` as a literal (auto-emitting it from the `agent` node as a typed `pr` fact is a deferred

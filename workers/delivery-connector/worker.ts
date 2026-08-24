@@ -108,28 +108,32 @@ const handler: AppJobHandler<In, ConnectorDispatchResult> = async (job, app) => 
     app.data,
     { dedupeKey, target, payload, boundFacts },
     new Date().toISOString(),
+    // For a `converge`/`converge-merge` target, the connector's REAL side effect is enrolling the PR
+    // into the shared convergence (+ merge) loop via `submitPr` — the SAME enrollment
+    // `workers/converge-feature` uses, no duplicated machinery. It is injected as the dispatch's
+    // action so it lives INSIDE the at-most-once + resume envelope (`dispatchConnector`): it fires only
+    // on the claim winner (or a resumed crashed claim), and a `deduped` redelivery — a worker restart /
+    // lost ack / graph resume that lands AFTER the PR has settled — NEVER re-runs it. This is what
+    // preserves the connector's at-most-once semantics against `submitPr`, which deliberately RE-OPENS a
+    // terminal PR (it only short-circuits a non-terminal row); an unconditional call outside the fence
+    // would flip a `merged`/`converged`/`abandoned` PR back to `converging` on redelivery. `submitPr`'s
+    // own `prKey` idempotency still makes a resumed (crashed-claim) re-perform double-safe on a live row.
+    // `rootRequestKey` is the stable per-node `dedupeKey` (authored, else `<processInstanceKey>:<elementId>`),
+    // so the enrolled PR's lineage is deterministic across redeliveries.
+    converge
+      ? async () => {
+          await submitPr(app.data, app.engine, converge.parsed, converge.dependsOn, MAX_ROUNDS, converge.convergeOnly, dedupeKey);
+          app.log.info("delivery-connector: enrolled PR into convergence loop", {
+            target,
+            dedupeKey,
+            prKey: converge.parsed.prKey,
+            convergeOnly: converge.convergeOnly,
+          });
+          return { detail: `enrolled ${converge.parsed.prKey} into convergence loop (convergeOnly=${converge.convergeOnly})` };
+        }
+      : undefined,
   );
   app.log.info("delivery-connector", { target, dedupeKey, outcome: result.connectorOutcome });
-  if (converge) {
-    // The connector's first REAL outbound action (ADR 0005): enroll the target PR into the app's
-    // shared convergence (+ merge, when not converge-only) loop via `submitPr` — the SAME enrollment
-    // `workers/converge-feature` uses, no duplicated machinery. Enrollment lives HERE (the worker has
-    // `app.data`/`app.engine`; the pure `performConnectorAction` does not), so the `dispatchConnector`
-    // ledger above stays the at-most-once fence around the forward-declared stub while `submitPr`'s own
-    // `prKey` idempotency makes the enrollment DOUBLE-SAFE against an at-least-once redelivery / graph
-    // resume. It is called UNCONDITIONALLY (not gated on `result.connectorOutcome`): a redelivery that
-    // DEDUPES the ledger row must still re-assert the enrollment, and `submitPr` collapses a repeat
-    // onto the already-running loop (idempotent on the non-terminal PR row). `rootRequestKey` is the
-    // stable per-node `dedupeKey` (authored, else `<processInstanceKey>:<elementId>`), so the enrolled
-    // PR's lineage is deterministic across redeliveries.
-    await submitPr(app.data, app.engine, converge.parsed, converge.dependsOn, MAX_ROUNDS, converge.convergeOnly, dedupeKey);
-    app.log.info("delivery-connector: enrolled PR into convergence loop", {
-      target,
-      dedupeKey,
-      prKey: converge.parsed.prKey,
-      convergeOnly: converge.convergeOnly,
-    });
-  }
   return result;
 };
 

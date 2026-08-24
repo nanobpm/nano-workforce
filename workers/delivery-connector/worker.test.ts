@@ -192,6 +192,38 @@ test("handler: re-dispatch (at-least-once redelivery) does NOT double-enroll (le
   });
 });
 
+test("handler: a redelivery AFTER the PR reached a terminal state does NOT re-enroll (the connector's at-most-once fence, not submitPr's short-circuit)", async () => {
+  await withGithubOff(async () => {
+    const { app, stores, created } = fakeApp();
+    const job = { variables: { target: "converge-merge", payload: { pr: "owner/repo#11" } }, processInstanceKey: "PI-graph", elementId: "n2" } as never;
+    await handler(job, app);
+    assertEquals(created.length, 1, "the first delivery enrolls the PR");
+    // The convergence (+ merge) loop ran to completion; the PR row is now TERMINAL.
+    stores.pull_requests.rows[0].status = "merged";
+    // An at-least-once redelivery (worker restart / lost ack / graph resume) lands AFTER settlement.
+    // `submitPr` deliberately RE-OPENS a terminal row, so the connector must not call it again — the
+    // node instance already fired exactly once, and the ledger fence must suppress the redelivery.
+    await handler(job, app);
+    assertEquals(created.length, 1, "the settled PR is NOT re-enrolled — no second convergence-loop instance");
+    assertEquals(stores.pull_requests.rows[0].status, "merged", "the terminal PR is never flipped back to converging");
+    assertEquals(stores.delivery_connector_dispatches.rows.length, 1, "still one ledger row — the connector fence deduped the redelivery");
+  });
+});
+
+test("handler: a converge redelivery whose prior claim CRASHED before recording delivery still enrolls (resume, not lost)", async () => {
+  await withGithubOff(async () => {
+    const { app, stores, created } = fakeApp();
+    const job = { variables: { target: "converge-merge", payload: { pr: "owner/repo#12" } }, processInstanceKey: "PI-graph", elementId: "n2" } as never;
+    // Simulate a crash BETWEEN claiming the ledger row and recording delivery: a `claimed` row with no
+    // enrollment yet. The redelivery must RESUME (perform the enrollment), never dedupe on the un-acted claim.
+    stores.delivery_connector_dispatches.rows.push({ id: 1, dedupe_key: "PI-graph:n2", target: "converge-merge", outcome: "claimed", detail: null, dispatched_at: "t0" });
+    await handler(job, app);
+    assertEquals(created.length, 1, "the crashed claim is resumed — the enrollment fires exactly once now");
+    assertEquals(stores.pull_requests.rows.length, 1, "the PR was enrolled on resume");
+    assertEquals(stores.delivery_connector_dispatches.rows[0].outcome, "delivered", "the resumed claim is recorded delivered");
+  });
+});
+
 test("handler: a misconfigured converge connector (no parseable pr) fails CLOSED and writes NO ledger row", async () => {
   await withGithubOff(async () => {
     const { app, stores, created } = fakeApp();
