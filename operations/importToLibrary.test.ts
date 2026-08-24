@@ -133,6 +133,30 @@ test("import-to-library: a valid-JSON but UNCOMPILABLE graph → 400 with path-q
   });
 });
 
+// Regression for PR #533 review (operations/importToLibrary.ts): because `graphJson` is a STRING at
+// the request boundary, the runtime's OpenAPI `DeliveryGraph` shape gate never ran on the parsed
+// object, so a malformed NESTED value the semantic validator does not re-enumerate (here
+// `nodes[0].human.prompt: 42`) could return 200 and persist a contract-violating typed field. The
+// reused shape gate now rejects it at the door with a path-qualified error and persists nothing.
+test("import-to-library: a nested-shape violation (human.prompt not a string) → 400, nothing persisted", async () => {
+  await withApp(async (app, data) => {
+    const malformed = JSON.stringify({
+      name: "malformed",
+      // biome-ignore lint/suspicious/noExplicitAny: deliberately violating the DeliveryGraph shape.
+      nodes: [{ id: "h", kind: "human", human: { prompt: 42 } } as any],
+    });
+    const res = await call(app, { graphJson: malformed });
+    assertEquals(res.status, 400);
+    assertEquals(res.body.ok, false);
+    assert(Array.isArray(res.body.errors) && res.body.errors.length > 0);
+    assert(
+      res.body.errors.some((e: { path: string; message: string }) => e.path.includes("nodes[0]/human/prompt")),
+      "the 400 must carry a path-qualified error at the offending nested field",
+    );
+    assertEquals((await deliveryGraphLibrary(data).all()).length, 0);
+  });
+});
+
 test("import-to-library: an unnamed graph with no override → 400, nothing persisted", async () => {
   await withApp(async (app, data) => {
     // A graph with no `name` cannot derive a library id and no override was supplied.

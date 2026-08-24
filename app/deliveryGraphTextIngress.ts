@@ -12,6 +12,7 @@
 import type { DeliveryGraphTextResult } from "../nano-generated/api-io.d.ts";
 import { compileDeliveryGraph } from "./deliveryGraphCompiler.ts";
 import { proposalReviewUrl } from "./deliveryGraphProposals.ts";
+import { validateDeliveryGraphShape } from "./deliveryGraphShape.ts";
 import { parseDeliveryGraphText } from "./deliveryGraphText.ts";
 import { deliveryGraphDigest } from "./deliveryRunner.ts";
 
@@ -56,6 +57,26 @@ export async function parseAndCompileText(
   const parsed = parseDeliveryGraphText(body);
   if (!parsed.ok) {
     return { ok: false, status: 400, body: { ok: false, error: parsed.error } };
+  }
+  // Re-apply the OpenAPI `DeliveryGraph` SHAPE gate the runtime runs at the typed `compileDeliveryGraph`
+  // edge (its `validateValue`). These text doors receive a raw `graphJson` STRING, so the runtime never
+  // shape-checked the parsed object — without this, malformed NESTED values (`nodes[0].human.prompt: 42`,
+  // `wait.poll.backoff: 42`, unknown properties) reach the semantic validator, which deliberately does
+  // not re-enumerate every optional-field type, and are persisted / later throw in `parseProbe`. Reusing
+  // the SAME validator against the SAME canonical schema (no ajv, no drift-surface hand checks) gives the
+  // text doors byte-identical shape enforcement to the agent door. Structural only, so a not-yet-
+  // resolvable capability/pr probe still passes — its late-binding stays the runner's job.
+  const shapeErrors = validateDeliveryGraphShape(parsed.graph);
+  if (shapeErrors.length > 0) {
+    return {
+      ok: false,
+      status: 400,
+      body: {
+        ok: false,
+        error: `graph failed shape validation: ${shapeErrors.length} error(s)`,
+        errors: shapeErrors,
+      },
+    };
   }
   const compile = deps.compile ?? compileDeliveryGraph;
   let compiled: CompileResult;
