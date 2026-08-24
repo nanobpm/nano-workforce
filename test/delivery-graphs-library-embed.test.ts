@@ -6,8 +6,8 @@
 // compose mount's NEW inbound fill seam over the shared `deliveryGraph.compose.fill` host-bridge
 // message. Plus a Save-to-library affordance on the staged App-View (save-from-digest) and a
 // Save-to-library row action on the dispatched/history grid. This test pins that wiring so it cannot
-// silently regress: the sidecars mount the same module, the door defaults are base-relative (the #279
-// App-View resolution class), Reuse posts the ONE shared fill message, Delete hits the per-entry door,
+// silently regress: the sidecars mount the same module, the door defaults are module-anchored off
+// import.meta.url (the #279/#467/#536 App-View resolution class), Reuse posts the ONE shared fill message, Delete hits the per-entry door,
 // the compose mount adds the inbound fill listener, and the page carries the new Library App-View node.
 import { test } from "node:test";
 import { assert, assertEquals, assertStringIncludes } from "#test-assert";
@@ -23,15 +23,21 @@ const EMBED_HTML = readFileSync(`${DIR}/library-embed.html`, "utf8");
 const STANDALONE_HTML = readFileSync(`${DIR}/library-standalone.html`, "utf8");
 const PAGE_JSON = readFileSync(`${ROOT}pages/delivery-graphs.page.json`, "utf8");
 
-// Pull the string default out of `const <name> = config.<field> ?? <CONST>;` (or a module const).
-function defaultUrl(src: string, name: string): string {
+// Pull a MODULE-ANCHORED default spec out of `const <name> = config.<field> ?? <CONST>;` where the
+// CONST is declared `const <CONST> = new URL("<spec>", import.meta.url).href;` (#467/#536).
+function defaultSpec(src: string, name: string): string {
   const m = src.match(new RegExp(`${name}\\s*=\\s*config\\.\\w+\\s*\\?\\?\\s*(\\w+);`));
   assert(m, `mount must default ${name} from config with a fallback constant`);
-  const constM = src.match(new RegExp(`const ${m![1]}\\s*=\\s*"([^"]*)"`));
-  assert(constM, `mount must declare the ${m![1]} fallback as a string literal`);
+  const constM = src.match(
+    new RegExp(`const ${m![1]}\\s*=\\s*new URL\\(\\s*"([^"]*)"\\s*,\\s*import\\.meta\\.url\\s*\\)\\s*\\.href`),
+  );
+  assert(
+    constM,
+    `mount must default ${m![1]} to new URL("<spec>", import.meta.url) so the door is anchored to the ` +
+      `module's own served location, not the document base (#467/#536)`,
+  );
   return constM![1];
 }
-
 test("#523: the Library App-View mounts the same module standalone and embedded", () => {
   assert(/mountDeliveryGraphLibrary/.test(LIBRARY_JS), "library.mount.js must export mountDeliveryGraphLibrary");
   for (const [file, html] of [["library-embed.html", EMBED_HTML], ["library-standalone.html", STANDALONE_HTML]] as const) {
@@ -52,10 +58,11 @@ test("#523: the page binds the Library node to the library App-View sidecars", (
   assert(library?.props?.standalone === "./delivery-graphs/library-standalone.html", "it has the library standalone sidecar");
 });
 
-test("#523/#279: the Library list door default is base-relative and hits the listLibrary door", () => {
-  const url = defaultUrl(LIBRARY_JS, "libraryUrl");
-  assert(url.endsWith("delivery-graph/library"), `libraryUrl default "${url}" must hit the listLibrary door`);
-  assert(!url.startsWith("/"), `default libraryUrl "${url}" must be base-relative (App-View #279 resolution class)`);
+test("#523/#467/#536: the Library list door default is module-anchored and hits the listLibrary door", () => {
+  const spec = defaultSpec(LIBRARY_JS, "libraryUrl");
+  assert(spec.endsWith("delivery-graph/library"), `libraryUrl default "${spec}" must hit the listLibrary door`);
+  assert(!spec.startsWith("/"), `default libraryUrl "${spec}" must not be absolute (App-View #279 resolution class)`);
+  assert(spec.startsWith("../"), `default libraryUrl "${spec}" must step up out of /delivery-graphs/ (module-anchored, #467/#536)`);
   // The list read consumes the door's `entries` array (one row per saved entry).
   assert(/body\.entries/.test(LIBRARY_JS), "library.mount.js must render one row per `entries[]` item the listLibrary door returns");
 });
@@ -98,9 +105,10 @@ test("#523: the compose mount exposes an INBOUND reuse-fill seam (message → #d
 });
 
 test("#523: Save-to-library on the staged App-View posts save-from-digest", () => {
-  const url = defaultUrl(STAGED_JS, "saveLibraryUrl");
-  assert(url.endsWith("actions/delivery-graph/library/save"), `saveLibraryUrl default "${url}" must hit the saveToLibrary door`);
-  assert(!url.startsWith("/"), `default saveLibraryUrl "${url}" must be base-relative (App-View #279 resolution class)`);
+  const spec = defaultSpec(STAGED_JS, "saveLibraryUrl");
+  assert(spec.endsWith("actions/delivery-graph/library/save"), `saveLibraryUrl default "${spec}" must hit the saveToLibrary door`);
+  assert(!spec.startsWith("/"), `default saveLibraryUrl "${spec}" must not be absolute (App-View #279 resolution class)`);
+  assert(spec.startsWith("../"), `default saveLibraryUrl "${spec}" must step up out of /delivery-graphs/ (module-anchored, #467/#536)`);
   assert(/data-save-library=/.test(STAGED_JS), "staged.mount.js must render a per-row Save-to-library affordance carrying the digest");
   // Save-from-digest: it posts { name, digest } — it must NOT compile or stage a raw graph (the #460
   // operator boundary the staged view enforces stays intact).

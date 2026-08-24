@@ -15,14 +15,23 @@
 // View) and standalone on a phone — only the host element and injected endpoint config differ. The app
 // has no browser build step, so this consumes the preview/stage doors straight off the wire.
 
-const DEFAULT_PREVIEW_URL = "app/api/actions/delivery-graph/preview";
-const DEFAULT_STAGE_URL = "app/api/actions/delivery-graph/stage";
+// Door defaults are anchored to THIS MODULE's url (import.meta.url), NOT the document base. The compose
+// shell (embed.html / standalone.html) — and therefore this mount.js — is served ONE DIRECTORY DEEP at
+// `<appMount>/delivery-graphs/`, while the preview/stage doors are siblings of that dir at
+// `<appMount>/app/api/…`. A document-base-relative default resolves against the `…/delivery-graphs/`
+// shell base → `…/delivery-graphs/app/api/…` → 404 on every surface (the Studio console App-View never
+// injects window.__NANO_APP_VIEW__, so the default is what runs); a leading-slash absolute resolves
+// against the console ORIGIN through Studio (#279). `../app/api/…` off import.meta.url steps up out of
+// `/delivery-graphs/` onto `<appMount>/app/api/…` on all surfaces — the cockpit's #467 fix.
+const DEFAULT_PREVIEW_URL = new URL("../app/api/actions/delivery-graph/preview", import.meta.url).href;
+const DEFAULT_STAGE_URL = new URL("../app/api/actions/delivery-graph/stage", import.meta.url).href;
 
 // The filesystem IMPORT door (issue #524, epic #519 S5). The Import control below reads a chosen
 // `.json` file's text client-side and POSTs it here; the door validates + compiles it and persists it
-// to the library with `source: imported`. Base-relative like the preview/stage defaults (App-View #279
-// resolution class — a leading-slash path 404s).
-const DEFAULT_IMPORT_URL = "app/api/actions/delivery-graph/library/import";
+// to the library with `source: imported`. Module-anchored off import.meta.url like the preview/stage
+// defaults (App-View #279/#467/#536 resolution class — a document-base-relative default 404s under the
+// `…/delivery-graphs/` shell base, a leading-slash absolute resolves against the console origin).
+const DEFAULT_IMPORT_URL = new URL("../app/api/actions/delivery-graph/library/import", import.meta.url).href;
 
 // The INBOUND reuse-fill seam (issue #523, epic #519 S4). Until now the compose textarea (`#dg-json`)
 // had NO inbound prefill path — its value was set only by "Load example" or the operator typing. The

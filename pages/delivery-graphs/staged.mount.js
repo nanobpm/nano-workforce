@@ -17,21 +17,31 @@
 // demand×supply board (pages/board/mount.js): the SAME module mounts embedded in the console (App View)
 // and standalone — only the host element and injected endpoint config differ.
 
-// The read behind the list: every live staged proposal, newest first (base-relative — a leading-slash
-// path resolves against the console iframe ORIGIN, not the app-view base, and 404s the door, #279).
-const DEFAULT_STAGED_URL = "app/api/delivery-graph/staged";
+// The door defaults are anchored to THIS MODULE's url (import.meta.url), NOT the document base. The
+// staged App-View shell (staged-embed.html / staged-standalone.html) — and therefore this mount.js —
+// is served ONE DIRECTORY DEEP at `<appMount>/delivery-graphs/`, while the API is a sibling of that
+// dir at `<appMount>/app/api/…`. A document-base-relative default (`"app/api/delivery-graph/staged"`)
+// resolves against the `…/delivery-graphs/` shell base to `…/delivery-graphs/app/api/delivery-graph/
+// staged` → 404 on EVERY surface (standalone, local urban-SPA App-View, and the Studio console
+// App-View, which never injects window.__NANO_APP_VIEW__ so this default is what runs) — the
+// "Could not load staged proposals." bug. A leading-slash absolute is worse still: through Studio it
+// resolves against the console ORIGIN, not the app-view base (#279). `../app/api/…` off
+// import.meta.url steps up out of `/delivery-graphs/` and lands on `<appMount>/app/api/…` on all
+// three surfaces regardless of the document base — the same fix the cockpit shipped for #467.
+// The read behind the list: every live staged proposal, newest first.
+const DEFAULT_STAGED_URL = new URL("../app/api/delivery-graph/staged", import.meta.url).href;
 // The operator dispatch door: POST { digest } → launches the staged graph engine-natively (#460).
-const DEFAULT_DISPATCH_URL = "app/api/actions/delivery-graph/dispatch";
+const DEFAULT_DISPATCH_URL = new URL("../app/api/actions/delivery-graph/dispatch", import.meta.url).href;
 // The operator dismiss door: POST { digest } → discards a staged proposal as noise, flipping it to the
 // terminal `dismissed` status so it drops off the staged list (#520). Launches nothing.
-const DEFAULT_DISMISS_URL = "app/api/actions/delivery-graph/dismiss";
+const DEFAULT_DISMISS_URL = new URL("../app/api/actions/delivery-graph/dismiss", import.meta.url).href;
 // The read-only DI preview door: recompiles a staged proposal's BPMN (with diagram interchange) so its
 // generated diagram can be rendered in the host explorer BEFORE dispatch. No deploy, no dispatch.
-const DEFAULT_PROPOSAL_BPMN_URL = "app/api/actions/delivery-graph/proposal-bpmn";
+const DEFAULT_PROPOSAL_BPMN_URL = new URL("../app/api/actions/delivery-graph/proposal-bpmn", import.meta.url).href;
 // The save-to-library door: POST { name, digest } → copies this staged proposal's already-stored graph
 // into the reusable library (issue #523, save-from-digest → source `from-staged`). Persists a library
 // entry; it never dispatches or re-stages, so the #460 operator boundary holds.
-const DEFAULT_SAVE_LIBRARY_URL = "app/api/actions/delivery-graph/library/save";
+const DEFAULT_SAVE_LIBRARY_URL = new URL("../app/api/actions/delivery-graph/library/save", import.meta.url).href;
 
 // How often the list re-polls the read door so a freshly-staged (or just-dispatched) proposal appears
 // (or drops off) without a manual refresh — mirrors the 5s cadence the old declarative grid used.

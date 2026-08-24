@@ -15,9 +15,18 @@
 
 import { DG_COMPOSE_FILL_MESSAGE } from "./mount.js";
 
-// The read behind the list: every saved library entry, newest first (base-relative — a leading-slash
-// path resolves against the console iframe ORIGIN, not the app-view base, and 404s the door, #279).
-const DEFAULT_LIBRARY_URL = "app/api/delivery-graph/library";
+// The read behind the list: every saved library entry, newest first. Anchored to THIS MODULE's url
+// (import.meta.url), NOT the document base. The library App-View shell (library-embed.html /
+// library-standalone.html) — and therefore this mount.js — is served ONE DIRECTORY DEEP at
+// `<appMount>/delivery-graphs/`, while the API is a sibling of that dir at `<appMount>/app/api/…`. A
+// document-base-relative default (`"app/api/delivery-graph/library"`) resolves against the
+// `…/delivery-graphs/` shell base to `…/delivery-graphs/app/api/delivery-graph/library` → 404 on EVERY
+// surface (standalone, local urban-SPA App-View, and the Studio console App-View, which never injects
+// window.__NANO_APP_VIEW__ so this default is what runs). A leading-slash absolute is worse still:
+// through Studio it resolves against the console ORIGIN, not the app-view base (#279). `../app/api/…`
+// off import.meta.url steps up out of `/delivery-graphs/` and lands on `<appMount>/app/api/…` on all
+// surfaces regardless of the document base — the same fix the preview/stage doors ship (#467/#536).
+const DEFAULT_LIBRARY_URL = new URL("../app/api/delivery-graph/library", import.meta.url).href;
 
 // How often the list re-polls so a freshly-saved (or just-deleted) entry appears (or drops off)
 // without a manual refresh — mirrors the 5s cadence the staged list uses.
@@ -145,10 +154,11 @@ export function mountDeliveryGraphLibrary(host, config = {}) {
     ...(config.hookSecret && isSameOrigin(url) ? { "x-hook-secret": config.hookSecret } : {}),
   });
 
-  // The delete door is the per-entry path under the list door: DELETE app/api/delivery-graph/library/<id>.
+  // The delete door is the per-entry path under the list door: DELETE .../delivery-graph/library/<id>.
   // Append the id to the path only, preserving any query/hash on the configured door so a
   // `?library=` override carrying a search string or fragment still resolves the per-entry URL.
-  // Kept base-relative (no `new URL`) to preserve the App-View resolution class (#279).
+  // Derived by string-appending to `libraryUrl` (no fresh `new URL`) so it inherits the same
+  // module-anchored (`../app/api/…`, #467/#536) resolution as the list door it hangs off.
   const entryUrl = (id) => {
     const [beforeHash, hash = ""] = libraryUrl.split("#");
     const [path, search = ""] = beforeHash.split("?");
