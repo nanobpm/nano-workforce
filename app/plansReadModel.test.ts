@@ -34,12 +34,22 @@ function viewDb(): DatabaseSync {
        plan_key TEXT PRIMARY KEY, repo TEXT, issue_number INTEGER, issue_url TEXT, title TEXT,
        status TEXT, task_count INTEGER, process_key TEXT, outcome TEXT, created_at TEXT,
        updated_at TEXT, epic_phase TEXT, base_branch TEXT, wait_gate_label TEXT, bound_artifacts TEXT,
-       promotion_pr TEXT, promotion_state TEXT, acknowledged_at TEXT, list_bucket TEXT, ack_open INTEGER);
+       promotion_pr TEXT, promotion_state TEXT, acknowledged_at TEXT, list_bucket TEXT, ack_open INTEGER,
+       derived_status_override TEXT);
      CREATE TABLE plan_tasks (
        id INTEGER PRIMARY KEY, plan_key TEXT, task_index INTEGER, task_id TEXT, title TEXT,
        prompt TEXT, status TEXT, pr_key TEXT, summary TEXT, created_at TEXT, updated_at TEXT,
        wave INTEGER, open_question TEXT, answer TEXT, draft_pr_key TEXT, corr_key TEXT);
      CREATE TABLE pull_requests (pr_key TEXT PRIMARY KEY, url TEXT, status TEXT, process_key TEXT);`,
+  );
+  // Stand-in for the managed `plans__tracking` VIEW urban provisions at mount (ADR-0065): re-exports
+  // `plans.*` plus the `derived_status` the terminal-edge reader (migration 079) reads. A test seeds
+  // `derived_status_override` to model the reconciler's derive edge (a terminated instance ⇒
+  // `abandoned` while base `status` stays frozen); absent, it falls through to the base `status`, exactly
+  // as the real VIEW's `ELSE base.status` branch does.
+  db.exec(
+    `CREATE VIEW plans__tracking AS
+       SELECT p.*, COALESCE(p.derived_status_override, p.status) AS derived_status FROM plans p;`,
   );
   db.exec(MIG("059_plan_wave_summary.sql"));
   db.exec(MIG("060_plan_wave_rollup.sql"));
@@ -47,6 +57,9 @@ function viewDb(): DatabaseSync {
   // 074 redefines plan_read_model to DERIVE list_bucket/ack_open from status + acknowledged_at + the
   // derived plan_delivery signal (issue #439), instead of reading the denormalised base columns.
   db.exec(MIG("074_plan_read_model_derive_bucket.sql"));
+  // 079 re-points plan_read_model's status/bucket derivations at the derived plans__tracking VIEW so a
+  // terminated (derive-only `abandoned`) epic drops out of Active (issue #503).
+  db.exec(MIG("080_plan_read_model_derive_terminal.sql"));
   return db;
 }
 
@@ -366,4 +379,28 @@ test("RED/GREEN GUARD: a RAW-datasource plans.status write (the instanceTracking
   assertEquals(b.list_bucket, "history", "an abandoned epic is filed under History, not wedged in Active");
   assertEquals(b.ack_open, epicIsAcknowledgeable("abandoned", b.delivery) ? 1 : 0);
   assertEquals(b.ack_open, 0, "no phantom Dismiss on a reconciler-cancelled epic");
+});
+
+test("RED/GREEN #503: a DERIVE-ONLY terminated epic (base status frozen, derived_status='abandoned') drops out of Active", () => {
+  // ADR-0065 (urban 0.81.0): cancel/terminate is DERIVE-ONLY — the reconciler feeds urban's projection
+  // and `plans__tracking.derived_status` recomputes `abandoned` on READ; it does NOT write the terminal
+  // onto the base `plans.status` column. So the base row stays frozen at its last transient
+  // (`dispatched`) while the epic is really terminated. Before 079 `plan_read_model` bucketed off the
+  // frozen base column and rendered the dead epic ACTIVE on the epic index/detail forever (the #503 /
+  // #497 phantom). 079 reads the effective status off `plans__tracking`, so it drops to History.
+  const db = viewDb();
+  // Seed a plan whose engine instance was terminated out-of-band: base status still `dispatched`, but
+  // the derive edge reports `abandoned` (modelled via the plans__tracking stand-in's override column).
+  db.prepare(
+    "INSERT INTO plans (plan_key, repo, issue_number, issue_url, status, task_count, updated_at, acknowledged_at, list_bucket, derived_status_override) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  ).run("o/r#term", "o/r", 7, "https://gh/o/r#term", "dispatched", 0, "2026-01-01T00:00:00Z", null, "active", "abandoned");
+
+  const r = db
+    .prepare("SELECT status, list_bucket, ack_open FROM plan_read_model WHERE plan_key = ?")
+    .get("o/r#term") as { status: string; list_bucket: string; ack_open: number };
+
+  assertEquals(r.status, "abandoned", "plan_read_model surfaces the DERIVED terminal, not the frozen base transient");
+  assertEquals(r.list_bucket, "history", "a derive-only terminated epic is filed under History, not wedged Active");
+  assertEquals(r.list_bucket, deriveEpicBucket("abandoned", null, null));
+  assertEquals(r.ack_open, 0, "no phantom Dismiss on a derive-only terminated epic");
 });

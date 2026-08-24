@@ -21,6 +21,7 @@ import {
   fetchDefaultBranch,
   fetchIssueTitle,
 } from "./github.ts";
+import { derivedTrackingTable } from "./instanceTracking.ts";
 import { clearExclusions } from "./mergeExclusion.ts";
 import type { ReadinessProbe } from "./readiness.ts";
 import { clearTaskDeltas } from "./taskDelta.ts";
@@ -197,6 +198,17 @@ export type PlanTaskStatus = typeof PLAN_TASK_STATUSES[number];
  * offers Dismiss without a poller pass. The pure helpers stay the acknowledge-epic guard and the VIEW's
  * test oracle (app/plansReadModel.test.ts). */
 export const plans = (data: DataLayer) => data.table<Plan>("plans", "plan_key");
+/** A plan row as seen through its derived tracking VIEW (`plans__tracking`): the base columns plus
+ * urban's ADR-0065 `derived_status`, which folds the reconciler's terminal edge (out-of-band
+ * terminate / in-app cancel → `abandoned`) over the worker-owned transient. */
+type TrackedPlan = Plan & { derived_status: string };
+/** Read-only accessor over the plan derived tracking VIEW. Use this — and read `derived_status`, not
+ * `status` — for any terminal/active classification (the shared-base admission filter, the
+ * epic-admission idempotency gate), so an out-of-band-terminated epic (whose base row is still
+ * `planning`/`dispatched`) is correctly seen as `abandoned`. Worker-written terminals (`done`/
+ * `failed`) pass through unchanged. Writes stay on `plans`. */
+export const plansTracking = (data: DataLayer) =>
+  derivedTrackingTable<TrackedPlan>(data, "plans", "plan_key");
 export const planTasks = (data: DataLayer) => data.table<PlanTask>("plan_tasks", "id");
 
 /** One dependency edge in the plan DAG (issue #20): `task_id` waits for `depends_on_task_id`.
@@ -590,8 +602,12 @@ export async function findActivePlansByBase(
   repo: string,
   base: string,
 ): Promise<Plan[]> {
-  const rows = await plans(data).find({ repo, base_branch: base });
-  return rows.filter((p) => !PLAN_TERMINAL_STATUSES.some((s) => s === p.status));
+  const rows = await plansTracking(data).find({ repo, base_branch: base });
+  // ADR-0065: classify "active" on the DERIVED terminal edge, not the base transient — an epic whose
+  // engine instance was terminated out-of-band (or by an ordinary in-app cancel) keeps its base
+  // `status` frozen at `planning`/`dispatched` but reads `abandoned` on `plans__tracking.derived_status`.
+  // Reading the base `status` here counted a dead epic as ACTIVE and raised a false same-repo conflict.
+  return rows.filter((p) => !PLAN_TERMINAL_STATUSES.some((s) => s === p.derived_status));
 }
 
 /** Options gating the confirm-default (rule 3) and shared-base (rule 4) admission rules. Both
@@ -926,7 +942,14 @@ export async function startPlan(
   }
   const table = plans(data);
   const existing = await table.get(parsed.planKey);
-  if (existing && !PLAN_TERMINAL_STATUSES.some((s) => s === existing.status)) {
+  // ADR-0065: classify "already running" on the DERIVED terminal edge, not the base transient. An epic
+  // whose engine instance was terminated out-of-band (or by an ordinary in-app cancel — derive-only
+  // under urban 0.81.0) has a base row frozen at `planning`/`dispatched` but a
+  // `plans__tracking.derived_status` of `abandoned`; reading the base `status` here wedged a cancelled
+  // epic `alreadyRunning` (the `submitPr`-wedge twin). Route the idempotency gate through the derived
+  // view so a terminated epic is correctly seen terminal and RE-ADMITTABLE.
+  const trackedExisting = existing ? await plansTracking(data).get(parsed.planKey) : undefined;
+  if (trackedExisting && !PLAN_TERMINAL_STATUSES.some((s) => s === trackedExisting.derived_status)) {
     return { planKey: parsed.planKey, alreadyRunning: true };
   }
   const base = normalizeBaseBranch(baseBranch);

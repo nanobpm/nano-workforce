@@ -18,6 +18,7 @@ import { resetDefaultBranchCache } from "./github.ts";
 import type { PlanDep } from "./plan.ts";
 import { EpicSetValidationError, validateEpicSet } from "./plan.ts";
 import { capabilityProbeForEdge, deriveEpicSchedule, lowerAdmittedSet } from "./planLowering.ts";
+import { withTrackingViews } from "../test/trackingViews.ts";
 import {
   type GithubRelease,
   matchCapability,
@@ -80,7 +81,7 @@ function makeApp(seedPlans: Record<string, unknown>[] = []) {
     };
   };
   const app = {
-    data: { table },
+    data: { table: withTrackingViews(table) },
     engine: {
       createInstance: (req: { processDefinitionId: string; variables?: Record<string, unknown> }) => {
         started.push(req);
@@ -210,7 +211,7 @@ function makeData() {
       return Promise.resolve({ processInstanceKey: `PI-${started.length}` });
     },
   } as unknown as EngineClient;
-  const data = { table } as unknown as DataLayer;
+  const data = { table: withTrackingViews(table) } as unknown as DataLayer;
   return { data, engine, tables, started };
 }
 

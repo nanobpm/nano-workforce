@@ -511,7 +511,14 @@ export async function submitPr(
 ) {
   const table = prs(data);
   const existing = await table.get(parsed.prKey);
-  if (existing && !TERMINAL_STATUSES.includes(existing.status)) {
+  // ADR-0065: classify "already running" on the DERIVED terminal edge, not the base transient. A
+  // PR whose engine instance was terminated out-of-band (or by an ordinary in-app cancel — derive-only
+  // under urban 0.81.0) has a base row frozen at its last worker transient (e.g. `converging`) but a
+  // `pull_requests__tracking.derived_status` of `abandoned`; reading the base `status` here would wedge
+  // it `alreadyRunning` forever (the #497 phantom). Route the idempotency gate through the derived view
+  // so a cancelled PR is correctly seen terminal and RESUBMITTABLE.
+  const trackedExisting = existing ? await prsTracking(data).get(parsed.prKey) : undefined;
+  if (trackedExisting && !TERMINAL_STATUSES.includes(trackedExisting.derived_status)) {
     return { prKey: parsed.prKey, alreadyRunning: true };
   }
 
@@ -747,9 +754,17 @@ export interface ActivePr {
  * BOTH loops' escalations uniformly. Once answered the row leaves `open`, so `openEscalation`
  * derives back to null. */
 export async function activePrs(data: DataLayer): Promise<ActivePr[]> {
-  const all = await prs(data).all();
+  const all = await prsTracking(data).all();
   const active = all
-    .filter((p) => !TERMINAL_STATUSES.includes(p.status))
+    // ADR-0065: classify "in flight" on the DERIVED terminal edge, not the base transient. A PR whose
+    // engine instance was terminated out-of-band (or by an ordinary in-app cancel — derive-only under
+    // urban 0.81.0) keeps its base `status` frozen at the last worker transient but reads `abandoned`
+    // on `pull_requests__tracking.derived_status`; filtering on the base `status` here left the
+    // Convergence tab showing a cancelled PR active indefinitely (the #497 phantom). The base
+    // `status`/worker-owned transient columns are still surfaced on each row below (the view re-exports
+    // `base.*`), and `pull_requests` has no `onWaitingHuman` edge, so for a still-active PR
+    // `derived_status === status`.
+    .filter((p) => !TERMINAL_STATUSES.includes(p.derived_status))
     .sort((a, b) => (a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0));
   // Only an `escalated` PR is parked awaiting a human answer (either loop). Surface the question
   // from its latest still-open `escalations` row; a resubmit retires stale rows and finalize/merge
@@ -972,9 +987,9 @@ async function classifyWaveTarget(
   prKey: string,
   token: string,
 ): Promise<"cleared" | "closed" | "pending"> {
-  const tracked = await prs(data).get(prKey);
-  if (tracked && tracked.status === "merged") return "cleared";
-  if (tracked && tracked.status === ABANDONED_STATUS) return "cleared"; // already reconciled terminal → non-blocking, no re-reconcile needed
+  const tracked = await prsTracking(data).get(prKey);
+  if (tracked && tracked.status === "merged") return "cleared"; // worker-owned terminal, passes through the derive edge unchanged
+  if (tracked && tracked.derived_status === ABANDONED_STATUS) return "cleared"; // ADR-0065 derive-only terminal → non-blocking, no re-reconcile needed
   const parsed = parsePr(prKey);
   if (!parsed) return "cleared"; // unparseable ref can't be checked → never wedge the barrier
   let st: Awaited<ReturnType<typeof fetchPrState>>;
@@ -1016,7 +1031,7 @@ async function flipToMergingThenPublish(
   }
 }
 
-async function mergeLaneDecisionForPr(data: DataLayer, prKey: string): Promise<PrLaneDecision | null> {
+export async function mergeLaneDecisionForPr(data: DataLayer, prKey: string): Promise<PrLaneDecision | null> {
   const taskRows = await planTasks(data).find({ pr_key: prKey });
   const task = taskRows[0];
   if (!task) return null;
@@ -1034,8 +1049,12 @@ async function mergeLaneDecisionForPr(data: DataLayer, prKey: string): Promise<P
   const lanePrKeys = new Set([...taskToPr.values()]);
   const completedPrKeys = new Set<string>();
   for (const lanePrKey of lanePrKeys) {
-    const lanePr = await prs(data).get(lanePrKey);
-    if (lanePr && (lanePr.status === "merged" || lanePr.status === "abandoned")) {
+    const lanePr = await prsTracking(data).get(lanePrKey);
+    // ADR-0065: a lane member is complete when it MERGED (worker-owned terminal, base `status`) OR was
+    // cancelled/terminated (derive-only terminal → `derived_status === "abandoned"`; the base row is
+    // still frozen at its transient). Reading only base `status` here missed a cancelled member and
+    // stalled/misrouted the lane.
+    if (lanePr && (lanePr.status === "merged" || lanePr.derived_status === "abandoned")) {
       completedPrKeys.add(lanePr.pr_key);
     }
   }
@@ -1400,12 +1419,15 @@ async function pollJobActivation(
   const headers: Record<string, string> = { "content-type": "application/json" };
   if (engineToken) headers.authorization = `Bearer ${engineToken}`;
 
-  const all = await prs(data).all();
+  const all = await prsTracking(data).all();
   for (const pr of all) {
     // Only a `converging` PR has a live review-round job. Any other status with a stale worker
     // set (e.g. it just moved to `waiting_review`) gets cleared so the grid can't show a
-    // phantom "agent working".
-    if (pr.status !== "converging") {
+    // phantom "agent working". ADR-0065: classify on the DERIVED status, not the base transient —
+    // a PR whose instance was terminated out-of-band keeps its base `status` frozen at `converging`
+    // but reads `abandoned` on `derived_status`, so a base read would leave `active_worker`/
+    // `lease_until` set on a dead run (a phantom "agent working"). Writes stay on the base `prs`.
+    if (pr.derived_status !== "converging") {
       if (pr.active_worker || pr.lease_until) {
         await prs(data).update(pr.pr_key, {
           active_worker: null,
@@ -1512,13 +1534,16 @@ export async function pollIncidentsImpl(
   base: string,
   headers: Record<string, string>,
 ) {
-  const all = await prs(data).all();
+  const all = await prsTracking(data).all();
   for (const pr of all) {
     // No live instance to inspect (never created, mid-transition, or terminal — the run has
     // finished or was given up, so its instance is gone) → make sure no stale incident lingers on
-    // the row, then move on. Reuses the canonical `TERMINAL_STATUSES` so incident logic can't drift
-    // from the rest of the status machine.
-    if (!pr.process_key || TERMINAL_STATUSES.includes(pr.status)) {
+    // the row, then move on. ADR-0065: classify on the DERIVED terminal edge, not the base transient
+    // — a PR terminated out-of-band keeps its base `status` frozen at `converging` but reads
+    // `abandoned` on `derived_status`, so a base read would keep reconciling incidents against a dead
+    // instance. Reuses the canonical `TERMINAL_STATUSES` so incident logic can't drift from the rest
+    // of the status machine. Writes stay on the base `prs`.
+    if (!pr.process_key || TERMINAL_STATUSES.includes(pr.derived_status)) {
       if (pr.incident_key || pr.incident_message) {
         await prs(data).update(pr.pr_key, {
           incident_key: null,

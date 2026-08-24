@@ -8,7 +8,7 @@ import { assert, assertEquals } from "#test-assert";
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import type { PlanDep } from "./plan.ts";
 import { capabilityProbeForEdge, deriveEpicSchedule, lowerAdmittedSet } from "./planLowering.ts";
-
+import { withTrackingViews } from "../test/trackingViews.ts";
 const edge = (consumer: string, producer: string, pkg = "@scope/pkg", capRef = producer): PlanDep => ({
   plan_key: consumer,
   depends_on_plan_key: producer,
@@ -54,7 +54,7 @@ function makeData() {
       return Promise.resolve({ processInstanceKey: `PI-${started.length}` });
     },
   } as unknown as EngineClient;
-  const data = { table } as unknown as DataLayer;
+  const data = { table: withTrackingViews(table) } as unknown as DataLayer;
   return { data, engine, tables, started };
 }
 
