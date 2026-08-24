@@ -1,3 +1,9 @@
+## [0.131.1](https://github.com/nanobpm/nano-workforce/compare/v0.131.0...v0.131.1) (2026-08-24)
+
+### Bug Fixes
+
+* **delivery-graph:** seed human-task prompt/context so its form is not contextless ([#502](https://github.com/nanobpm/nano-workforce/issues/502)) ([d2991ea](https://github.com/nanobpm/nano-workforce/commit/d2991ea0ec54e36711c27f58b8901ca85b7179e6)), closes [#499](https://github.com/nanobpm/nano-workforce/issues/499) [#499](https://github.com/nanobpm/nano-workforce/issues/499)
+
 ## [0.131.0](https://github.com/nanobpm/nano-workforce/compare/v0.130.0...v0.131.0) (2026-08-23)
 
 ### Features
