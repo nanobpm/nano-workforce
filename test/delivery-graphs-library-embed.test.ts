@@ -115,6 +115,28 @@ test("#523: Save-to-library on the staged App-View posts save-from-digest", () =
   assert(/post\(saveLibraryUrl,\s*\{\s*name:[^}]*digest:/.test(STAGED_JS), "Save-to-library must POST { name, digest } (save-from-digest) to the save door");
 });
 
+test("#538: the in-flight grid's column widths never over-allocate (no 0-width column, no header char-wrap)", () => {
+  // Regression guard: the grid is `table-layout:fixed` with `overflow-wrap:anywhere` headers, so a
+  // column squeezed to 0 width wraps its title one character per line (a ~250px-tall header row). That
+  // happens when the declared widths over-allocate. Pin the contract: every data column carries a
+  // percentage width, and their sum leaves headroom (>=5%) for the implicit row-action column — so no
+  // column can collapse to 0.
+  const page = JSON.parse(PAGE_JSON) as { nodes: Array<Record<string, any>> };
+  const grid = page.nodes.find((n) => n.id === "delivery-graphs-inflight");
+  assert(grid, "the page must carry the delivery-graphs-inflight grid");
+  const columns = (grid?.props?.columns ?? []) as Array<Record<string, any>>;
+  assert(columns.length > 0, "the grid must declare columns");
+  let sum = 0;
+  for (const col of columns) {
+    const w = col.width;
+    assert(typeof w === "string" && /^\d+(\.\d+)?%$/.test(w), `column "${col.header}" must declare a percentage width so it can't collapse to 0 (got ${JSON.stringify(w)})`);
+    const parsed = Number.parseFloat(w);
+    assert(parsed > 0, `column "${col.header}" must declare a positive width so it can't collapse to 0 (got ${JSON.stringify(w)})`);
+    sum += parsed;
+  }
+  assert(sum <= 95, `declared column widths sum to ${sum}% — they must leave >=5% for the row-action column so nothing squeezes to 0 (#538)`);
+});
+
 test("#523: Save-to-library is offered on a dispatched/history grid row (save-from-dispatched)", () => {
   const page = JSON.parse(PAGE_JSON) as { nodes: Array<Record<string, any>> };
   const grid = page.nodes.find((n) => n.id === "delivery-graphs-inflight");
