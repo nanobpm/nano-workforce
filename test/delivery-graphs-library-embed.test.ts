@@ -10,7 +10,7 @@
 // App-View resolution class), Reuse posts the ONE shared fill message, Delete hits the per-entry door,
 // the compose mount adds the inbound fill listener, and the page carries the new Library App-View node.
 import { test } from "node:test";
-import { assert } from "#test-assert";
+import { assert, assertEquals, assertStringIncludes } from "#test-assert";
 import { readFileSync } from "node:fs";
 import { DG_COMPOSE_FILL_MESSAGE } from "../pages/delivery-graphs/mount.js";
 
@@ -84,6 +84,11 @@ test("#523: the compose mount exposes an INBOUND reuse-fill seam (message → #d
   // The compose mount previously had NO inbound prefill — its #dg-json was set only by Load-example /
   // typing. S4 adds a same-origin message listener that fills #dg-json through a single fillComposer seam.
   assert(/export const DG_COMPOSE_FILL_MESSAGE\s*=/.test(COMPOSE_JS), "mount.js must export the DG_COMPOSE_FILL_MESSAGE fill-message type");
+  // Pin the actual wire value the imported const carries: this is the cross-App-View host-bridge
+  // message type the Library/compose sidecars agree on, so a silent change to the string is a
+  // breaking wire-contract change and the compose mount must declare exactly that literal.
+  assertEquals(DG_COMPOSE_FILL_MESSAGE, "nano-delivery-graph-compose-fill", "the shared fill-message type must be the pinned wire-contract string");
+  assertStringIncludes(COMPOSE_JS, `"${DG_COMPOSE_FILL_MESSAGE}"`, "mount.js must declare the fill-message type as the pinned string literal");
   assert(/function fillComposer\(/.test(COMPOSE_JS), "mount.js must define the single fillComposer seam every fill routes through");
   assert(/addEventListener\("message"/.test(COMPOSE_JS), "mount.js must register an inbound `message` listener for the fill seam");
   assert(/data\.type !== DG_COMPOSE_FILL_MESSAGE/.test(COMPOSE_JS), "the listener must gate on the shared fill-message type");
