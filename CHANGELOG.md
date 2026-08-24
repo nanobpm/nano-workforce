@@ -1,3 +1,9 @@
+## [0.139.0](https://github.com/nanobpm/nano-workforce/compare/v0.138.3...v0.139.0) (2026-08-24)
+
+### Features
+
+* deliver the delivery graph surface epic (dismiss, run history, reusable graph library import/export) ([#534](https://github.com/nanobpm/nano-workforce/issues/534)) ([dcbf4b1](https://github.com/nanobpm/nano-workforce/commit/dcbf4b15e2e78dd4bdecf7b06c8fdf8d3849a9d7)), closes [#519](https://github.com/nanobpm/nano-workforce/issues/519) [#526](https://github.com/nanobpm/nano-workforce/issues/526) [#521](https://github.com/nanobpm/nano-workforce/issues/521)
+
 ## [0.138.3](https://github.com/nanobpm/nano-workforce/compare/v0.138.2...v0.138.3) (2026-08-24)
 
 ### Bug Fixes
