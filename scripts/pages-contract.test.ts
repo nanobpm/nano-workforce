@@ -407,3 +407,49 @@ test("issue #386: the human-facing Delivery Graphs surface is wired (nav tab, pa
     "overview delivery-graphs section must link its item to delivery-graph-detail by run_key",
   );
 });
+
+test("issue #521: the Delivery Graphs History tab surfaces dispatch time + the instance key", async () => {
+  // The in-flight grid's History tab (`delivery-graphs-inflight`) is where a completed/failed run is
+  // reviewed after the fact. It must surface WHEN the run was dispatched (`created_at`, stamped at
+  // dispatch) and its engine instance key (`process_key`) as a first-class, Explorer-linked cell —
+  // not just the `updated_at` last-touch. Grid columns are shared across the In-flight/History/All
+  // tabs (the renderer has no per-tab column override — tabs carry only `label`+`filter`), so pinning
+  // the columns on the grid that owns the History tab is what surfaces them on History.
+  const page = JSON.parse(readFileSync(`${ROOT}pages/delivery-graphs.page.json`, "utf8"));
+  const grid = (page.nodes ?? []).find(
+    (n: Json) => n.type === "dataGrid" && n.id === "delivery-graphs-inflight",
+  );
+  assert(grid, "delivery-graphs page must have the `delivery-graphs-inflight` grid");
+
+  // The History tab must exist (this is the tab whose columns we are pinning).
+  const history = (grid.props?.tabs ?? []).find((t: Json) => t.label === "History");
+  assert(history, "the delivery-graphs-inflight grid must have a History tab");
+
+  const columns: Json[] = grid.props?.columns ?? [];
+
+  // Dispatched: the dispatch time, formatted as a datetime, distinct from the `updated_at` "Updated".
+  const dispatched = columns.find((c: Json) => c.field === "created_at");
+  assert(dispatched, "History tab must expose a `created_at` column (dispatch time)");
+  assert(
+    dispatched.header === "Dispatched",
+    "the `created_at` column must be headed \"Dispatched\"",
+  );
+
+  // Instance: an explicit cell carrying `process_key`, deep-linked to the Explorer via the same
+  // `processExplorer` link kind used by the Status column, keyed on `process_key`.
+  const instance = columns.find(
+    (c: Json) => c.field === "process_key" && c.link?.kind === "processExplorer",
+  );
+  assert(
+    instance,
+    "History tab must expose an explicit Instance cell on `process_key` with a processExplorer link",
+  );
+  assert(
+    instance.header === "Instance",
+    "the `process_key` cell must be headed \"Instance\"",
+  );
+  assert(
+    instance.link?.keyField === "process_key",
+    "the Instance cell's processExplorer link must key on `process_key`",
+  );
+});
