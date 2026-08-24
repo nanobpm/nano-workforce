@@ -86,6 +86,32 @@ test("import-to-library: an empty file → 400, nothing persisted", async () => 
   });
 });
 
+// This is a MUTATING library door, so it carries the same optional shared-secret guard as the
+// get/delete/save library doors. `SECRET` is captured at module import, so we cache-bust re-import the
+// handler with NANO_PR_WEBHOOK_SECRET set to exercise both the rejected (401 — nothing persisted) path
+// and the authorized (200) path against a real booted data layer.
+test("import-to-library: shared-secret guard — 401 without x-hook-secret (no import), 200 with it", async () => {
+  await withApp(async (app, data) => {
+    const prev = process.env["NANO_PR_WEBHOOK_SECRET"];
+    process.env["NANO_PR_WEBHOOK_SECRET"] = "s3cr3t";
+    try {
+      const mod = await import(`./importToLibrary.ts?guard=${Date.now()}`);
+      const guarded = mod.default as (c: any, a: any) => Promise<any>;
+      const bad = await guarded({ req: { headers: new Headers() }, params: {}, query: {}, body: { graphJson: GOOD } } as any, app);
+      assertEquals(bad.status, 401);
+      // The rejected request must not have persisted anything.
+      assertEquals((await deliveryGraphLibrary(data).all()).length, 0);
+      const ok = await guarded({ req: { headers: new Headers({ "x-hook-secret": "s3cr3t" }) }, params: {}, query: {}, body: { graphJson: GOOD } } as any, app);
+      assertEquals(ok.status, 200);
+      assertEquals(ok.body.entry.source, "imported");
+      assertEquals((await deliveryGraphLibrary(data).all()).length, 1);
+    } finally {
+      if (prev === undefined) delete process.env["NANO_PR_WEBHOOK_SECRET"];
+      else process.env["NANO_PR_WEBHOOK_SECRET"] = prev;
+    }
+  });
+});
+
 test("import-to-library: a valid-JSON but UNCOMPILABLE graph → 400 with path-qualified errors, nothing persisted", async () => {
   await withApp(async (app, data) => {
     // A structurally-invalid graph (edge references a node that does not exist) fails compilation.

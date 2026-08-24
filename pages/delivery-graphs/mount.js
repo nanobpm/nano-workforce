@@ -26,9 +26,8 @@ const DEFAULT_IMPORT_URL = "app/api/actions/delivery-graph/library/import";
 
 // The INBOUND reuse-fill seam (issue #523, epic #519 S4). Until now the compose textarea (`#dg-json`)
 // had NO inbound prefill path — its value was set only by "Load example" or the operator typing. The
-// Library App-View's per-row **Reuse** (this wave) and the filesystem **Import** (#524, sequenced
-// AFTER this) load a saved graph into the composer by posting a host-bridge message of this shape,
-// which reaches this compose App-View window:
+// Library App-View's per-row **Reuse** (this wave) loads a saved graph into the composer by posting a
+// host-bridge message of this shape, which reaches this compose App-View window:
 //
 //     { type: DG_COMPOSE_FILL_MESSAGE, graphJson: "<a DeliveryGraph JSON string>" }
 //
@@ -36,7 +35,9 @@ const DEFAULT_IMPORT_URL = "app/api/actions/delivery-graph/library/import";
 // DI": a small, typed postMessage envelope across the App-View iframe boundary. The shape is declared
 // once in app/contracts.ts as the `deliveryGraph.compose.fill` wire contract, and this string is the
 // ONE source of truth for its `type` — the Library Reuse producer imports it from here rather than
-// re-declaring a synonym. Every fill (message-driven, or a same-mount caller like the #524 file input)
+// re-declaring a synonym. The filesystem **Import** control (#524, sequenced AFTER this) does NOT use
+// this cross-frame message — it lives in THIS same mount, so it fills directly through `fillComposer()`
+// below. Every fill (this message-driven bridge, or a same-mount caller like the #524 file input)
 // routes through the single `fillComposer()` seam below; keep new fill sources going through it.
 export const DG_COMPOSE_FILL_MESSAGE = "nano-delivery-graph-compose-fill";
 

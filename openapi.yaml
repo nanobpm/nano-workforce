@@ -3314,7 +3314,12 @@ paths:
         `parseAndCompileText` pipeline the preview/stage/save doors use, then persists it with
         `source: imported`. A file that is not valid JSON, or a graph that fails to compile, is a clean
         400 with path-qualified errors and NOTHING is persisted. The entry name defaults to the imported
-        graph's own `name` (an explicit `name` overrides it).
+        graph's own `name` (an explicit `name` overrides it). The optional shared-secret guard mirrors the
+        other write/read library doors: when NANO_PR_WEBHOOK_SECRET is set, callers must present it via the
+        x-hook-secret header (unset → open).
+      security:
+        - hookSecret: []
+        - {}
       requestBody:
         required: true
         content:
@@ -3330,6 +3335,12 @@ paths:
                 $ref: "#/components/schemas/SaveToLibraryResult"
         "400":
           description: The file was not valid JSON, carried no usable name, or the graph failed to compile — nothing persisted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SaveToLibraryResult"
+        "401":
+          description: Missing/invalid shared secret (only when NANO_PR_WEBHOOK_SECRET is set).
           content:
             application/json:
               schema:
