@@ -221,7 +221,12 @@ step, how `Requested`/`PR open`/`Done` bracket the cell run, and how an inserted
 `escalation` cell **collapses into an existing `STAGE_KEYS` bracket** — the `pipeline` renderer binds a
 static `stages` array (`pages/feature.page.json:120-126`), so v1 adds no axis entries and needs no
 renderer change — seeded from `STAGE_KEYS` but owning the canonical definition. It
-is not enough to declare one axis *is* the other.
+is not enough to declare one axis *is* the other. **v1 leaves the two existing axis consumers physically
+in place** — the exported `STAGE_KEYS` (`app/stage.ts`) and the static `stages` array in
+`pages/feature.page.json` — and only *seeds* the new mapping from `STAGE_KEYS`; it does **not** yet
+generate or retire either, so both remain until a follow-up derives the static `stages` array from the
+canonical mapping (a parity test, then retirement of the duplicate) — flagged here as the residual
+drift-surface the one-stepper decision does not close in v1.
 
 **The current step is derived by per-shape correlation (not a single `process_key` join).**
 The projection must answer "which cell has this unit reached," fusing two truth sources:
@@ -269,21 +274,33 @@ branches can occupy incomparable cells at once, and no total order picks a uniqu
 reduce that frontier deterministically to one step — the canonical choice is the **least-advanced active
 branch** (the "still blocked on" read), so the aggregate never renders further along than its slowest
 in-flight branch. This reduction is an explicit S7 decision, not left to the implementer; a set-valued /
-multi-track render would be a separate renderer change, out of scope here. The per-node steps remain
+multi-track render would be a separate renderer change, out of scope here. **v1 does not populate the
+pipeline's `notInPathField` (the skipped-path axis) for the aggregate** — the reduction exposes only the
+scalar `activeField` + terminal `state`, so no deterministic skipped-set rollup is defined and equivalent
+graphs cannot diverge on a skipped path they never render; a per-branch skipped-set rollup onto
+`notInPathField` is deferred with the set-valued renderer change (out of scope). The per-node steps remain
 individually well-defined underneath the reduction. Because the canonical unit union carries more
 terminal states than `done`/`failed` (a branch can end `merged` / `converged` / `skipped` / `blocked` /
-`abandoned`), the rule first **normalizes** each terminal branch into one of two outcomes: `merged` /
-`converged` / `skipped` collapse to a **successful** terminal (`done`), and `failed` / `blocked` /
-`abandoned` collapse to a **failed** terminal — so the combinations below are defined over exactly
-`done`/`failed`. The rule must then define the **terminal combinations** the least-advanced-*active*
+`abandoned`), the rule first **normalizes** each terminal branch — reusing the **shipped
+`featureReadModel` `stage_state` tiers** (`app/featureReadModel.ts`: `STAGE_DONE_STATUSES` + the
+`stage_state` CASE) verbatim rather than inventing a second mapping, per derivation-over-duplication:
+`merged` / `converged` collapse to a **successful** terminal (`done`); `failed` / `skipped` /
+`abandoned` collapse to a **failed** terminal; and `blocked` stays the renderer's **distinct `blocked`**
+state — *not* folded into `done` or `failed`, preserving the existing per-node semantics (`skipped` is a
+failed-tier terminal there, not a success; `blocked` is its own terminal). For the frontier precedence
+below, `done` is the only **successful** terminal, while both `failed` and `blocked` are **non-success,
+operator-actionable** terminals — so the combinations below are defined over `done` (success) vs. a
+non-success terminal (`failed`/`blocked`). The rule must then define the **terminal combinations** the least-advanced-*active*
 read leaves unspecified, so parallel epics/graphs render deterministically: (a) **mixed** — one or more
 branches terminal alongside ≥1 active branch — reduces to the least-advanced *active* branch (terminal
-branches are past, not "still blocked on"), **except** that a failed terminal takes **precedence** and
-renders the aggregate `state = failed` at that branch's step (a failure is the operator's actionable
-signal, not something an in-flight sibling should mask); when **multiple** branches have failed the
-tie-break is **earliest failed step, then stable node id**, so the exposed failed step is deterministic;
-(b) **all-terminal** — reduces to `failed` at the earliest failed step (same tie-break) if any branch
-failed, else `done`.
+branches are past, not "still blocked on"), **except** that a **non-success** terminal (`failed` or
+`blocked`) takes **precedence** and renders the aggregate at that branch's step with that terminal's
+render state (`state = failed` for a failed branch, the distinct `blocked` state for a blocked one — an
+operator-actionable signal, not something an in-flight sibling should mask); when **multiple** branches
+are in a non-success terminal the tie-break is **earliest terminal step, then stable node id**, so the
+exposed step (and its `failed`/`blocked` state) is deterministic; (b) **all-terminal** — reduces to the
+**earliest non-success terminal** step (`failed`/`blocked`, same tie-break) if any branch is non-success,
+else `done`.
 
 **Cross-instance correlation, because composed cells are child instances by default.** engine-core's
 `CallActivity` spawns a **distinct child process instance** and links it to the parent
@@ -334,7 +351,10 @@ here, not left to the implementer**: **derive a configured key statelessly from 
 inputs on every pass** — map the run's `status`/`phase` to the corresponding `STAGE_KEYS` key (e.g. a
 `running` feature to `Implementing`, marked in-progress) rather than remembering a prior key the read
 model does not persist, so the projection survives a restart, no new stage is invented, and no
-renderer/axis change is needed. Adding a dedicated `In flight` key to the canonical axis is
+renderer/axis change is needed. (This stateless per-pass derivation is the **resolved** S7 policy and
+**supersedes** any earlier "hold the aggregate at its last observed configured stage" phrasing — the read
+model persists no such key, so there is nothing to hold; a coarse run is recomputed from current inputs
+every pass.) Adding a dedicated `In flight` key to the canonical axis is
 **explicitly rejected** for v1 — it would fork the stage vocabulary across surfaces; the S7 rollout
 below binds this same **stateless coarse-key** rule, so independent S7 implementations cannot diverge on
 the stage axis or `activeField`. For
@@ -342,11 +362,11 @@ a **first observation with no prior key** (a freshly `running` `delivery_graph_r
 `phase = "Running"`, no stored lifecycle key to hold), S7 must pin a deterministic **initial**
 `STAGE_KEYS` value from a **status-specific** map — a `running` graph, whose dispatch has begun, maps to
 `Implementing` (not the `Requested` head), while the pre-dispatch case below maps to the pre-run initial
-key — so the scalar `activeField` is never undefined. The same rule must cover the **`awaiting-approval`** rows
+key (literally **`Requested`**, `STAGE_KEYS[0]`) — so the scalar `activeField` is never undefined. The same rule must cover the **`awaiting-approval`** rows
 `delivery-graphs.page.json` filters into the active grid: migration 058 gives these a `phase =
 "Awaiting approval"` and a **NULL `process_key`** (no engine instance yet), so they have no observable
-element and no prior lifecycle key — S7 must map them to the same deterministic **initial** pre-run
-`STAGE_KEYS` value (they are dispatch-pending, before `Implementing`), not leave their `activeField`
+element and no prior lifecycle key — S7 must map them to that same deterministic **initial** pre-run
+`STAGE_KEYS` value, literally **`Requested`** (they are dispatch-pending, before `Implementing`), not leave their `activeField`
 undefined. It
 must never fabricate a specific cell position it cannot observe. The **epic pipeline is deferred to S8**:
 because its pre-PR position is unobservable from S7 inputs, epic keeps its `epic_phase` **text cell** as
@@ -394,9 +414,11 @@ their topology is produced. Unifying that axis is explicitly out of scope here.
   rendered by one `pipeline` kind. **S7** unifies **feature + delivery-graph** at **lifecycle-stage
   fidelity** with **no engine change** (even feature is not per-cell today — `deriveStage` collapses
   readiness/timer/implement to `Implementing`); the **epic pipeline is deferred to S8**, keeping its
-  `epic_phase` text cell meanwhile. The *only* upstream dependency — surfacing the element-instance query
+  `epic_phase` text cell meanwhile. The *only* upstream **binding** dependency — surfacing the element-instance query
   on the `@nanobpm/urban` `EngineClient` binding (S8, nano-ide#473), which the engine already serves —
-  then sharpens all three to per-cell and retires epic's write-provenance stamp.
+  then sharpens all three to per-cell and retires epic's write-provenance stamp. (This is the only
+  *binding/platform* dependency, **not** the sole upstream dependency: S8 additionally depends on S4's
+  inline-vs-child/correlation decision (#464) — #473 is necessary, not sufficient; see the S8 rollout.)
 
 ## Rollout (see #464 for the live checklist)
 
@@ -459,7 +481,12 @@ deployment-runtime prerequisite noted above), not on #416 alone.
   miss it, so that step is bound to the S4 inline-vs-child decision (correlate child instances, or keep
   the graph inlined) — it is not a silent promise. Reduce any parallel frontier to the
   **least-advanced active branch** and **promote the `pipeline` stepper
-  kind** (feature-only today) onto the delivery-graph page.
+  kind** (feature-only today) onto the delivery-graph page. Because `delivery_graph_runs` stores **no
+  stage column** (only `phase`/park metadata, whose values such as `Running` are *not* `STAGE_KEYS`), S7
+  supplies the pipeline's `activeField`/`state` for the graph from a **read model/VIEW over
+  `delivery_graph_runs`** that maps `phase`/park metadata onto the `STAGE_KEYS` axis (the stateless
+  coarse-key rule) — it assumes no stored `activeField` column and defines the mapping columns explicitly,
+  so the page renders a valid configured step rather than a raw `phase` string.
   This needs **no** engine-binding change, but ships at **lifecycle-stage fidelity only — for feature
   *and* delivery-graph alike**: even feature is not truly per-cell today (`deriveStage` collapses a
   readiness-probe/timer park or an active `implement-task` all to `Implementing`), and for a
@@ -488,7 +515,9 @@ deployment-runtime prerequisite noted above), not on #416 alone.
   child/root instance keys, so the "no change to the correlation key" is scoped to the axis and renderer,
   not to a fixed single-instance join. This is
   what lets epic's **Planning** phase and the **non-parked** part of **Reviewing** — which run inside
-  `plan-fanout.bpmn` before any PR exists — Planning has no work-table row, and while pre-PR Reviewing
+  `plan-fanout.bpmn` before any PR exists — Planning has no `plan_tasks` work-table row (its `plans`
+  aggregate row *does* exist, carrying `status`/`process_key`, so the gap is a missing per-activity field,
+  not a missing row), and while pre-PR Reviewing
   *does* carry `plan_tasks` rows (`record-plan` writes them), **no field exposes the currently executing
   plan/review activity** (Reviewing *is* partly visible via the real `plan-review-decision` user task,
   but Planning and the running review work are not), today
