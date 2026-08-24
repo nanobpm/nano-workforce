@@ -20,14 +20,15 @@
 // `pr_key` (kind `pr`), and also tolerates a legacy NULL `root_request_key` the same way.
 import type { DataLayer } from "@nanobpm/urban";
 import { deriveDelivery, TERMINAL_STATUSES } from "./delivery.ts";
+import { type DeliveryGraphRun, deliveryGraphRuns } from "./deliveryGraphRun.ts";
 import { type FeatureRun, featureRuns } from "./feature.ts";
 import { derivedTrackingTable } from "./instanceTracking.ts";
 import { type Plan, type PlanTask, plans, planTasks } from "./plan.ts";
 
 const now = () => new Date().toISOString();
 
-/** The three origin shapes a lineage arc can spring from. */
-export type LineageKind = "feature" | "epic" | "pr";
+/** The origin shapes a lineage arc can spring from. */
+export type LineageKind = "feature" | "epic" | "pr" | "delivery";
 
 /** A member PR of a lineage thread — the subset of `pull_requests` the projection reads. */
 export interface LineagePr {
@@ -66,6 +67,23 @@ export type LineageOrigin =
       // A human/webhook PR with no originating request: its own root.
       kind: "pr";
       key: string;
+    }
+  | {
+      // A delivery-graph run (issue #498): a FAN-IN parent thread. The run is the thread root, and
+      // the heterogeneous downstream tasks it spawns — PR convergences across different repos/issue
+      // numbers, package publishes, human gates — nest under it (they thread `root_request_key =
+      // run_key`, mirroring how `submitPr` threads feature/epic roots). Closer to an epic than a
+      // single-PR arc.
+      kind: "delivery";
+      key: string;
+      title: string | null;
+      status: string;
+      // The run's already-derived display phase (`delivery_graph_runs.phase`, recomputed by
+      // `pollDeliveryGraphPhase` from engine truth — generalised from `epic_phase`), e.g. "Running",
+      // "Parked on human node: manual OTP publish", "Completed". NULL until the poller stamps one; the
+      // thread then falls back to a status-derived frontier label.
+      phase: string | null;
+      processKey: string | null;
     };
 
 /** One stitched arc: `request → implementation → PR(s) → convergence → merge → outcome`. */
@@ -241,6 +259,18 @@ export function deriveLineage(origin: LineageOrigin, prsIn: readonly LineagePr[]
       stageLabel = featureStageLabel(stage);
       processKey = origin.processKey ?? rep?.processKey ?? null;
     }
+  } else if (origin.kind === "delivery") {
+    // Fan-in parent (issue #498): the delivery-graph RUN is the thread root; its heterogeneous
+    // downstream PR convergences (across different repos/issues) nest under it. Unlike an epic's
+    // slice rollup, a run's narrative is "where is the run" — so the frontier reflects the run's OWN
+    // derived phase (`delivery_graph_runs.phase`), with member PRs shown as nested children. The
+    // machine `stage` is derived from the run status (tempered to `converging` while a member PR is
+    // still in flight); the human `stageLabel` prefers the run's stamped phase, else a status label.
+    stage = deliveryOriginStage(origin.status, prs);
+    stageLabel = origin.phase ?? deliveryStageLabel(stage);
+    // Active-frontier instance: an in-flight member PR's process, else the run's own.
+    const activePr = prs.find((p) => !TERMINAL_STATUSES.includes(p.status));
+    processKey = activePr?.processKey ?? origin.processKey ?? rep?.processKey ?? null;
   } else {
     // Self-rooted PR (human/webhook): the PR IS the whole arc.
     stage = rep ? prStage(rep.status) : "converging";
@@ -259,7 +289,9 @@ export function deriveLineage(origin: LineageOrigin, prsIn: readonly LineagePr[]
     rootRequestKey: origin.key,
     kind: origin.kind,
     title: origin.kind === "pr" ? (rep?.title ?? null) : origin.title,
-    issueUrl: origin.kind === "pr" ? null : origin.issueUrl,
+    // Only feature/epic threads root on a GitHub issue; a self-rooted PR and a delivery-graph run
+    // (issue #498, keyed by `run_key`) have none.
+    issueUrl: origin.kind === "feature" || origin.kind === "epic" ? origin.issueUrl : null,
     stage,
     stageLabel,
     epicPhaseLabel,
@@ -290,6 +322,42 @@ function featureStageLabel(stage: LineageStage): string {
       return "Abandoned";
     default:
       return prStageLabel(stage, 0);
+  }
+}
+
+/** Map a delivery-graph run's lifecycle status onto a frontier stage (issue #498). A `running` run
+ * with a member PR still in flight reads as `converging` (the fan-in is landing PRs); otherwise it is
+ * `implementing`. Terminal run statuses settle: `done` → `resolved` (the run completed), `failed` /
+ * `abandoned` → `abandoned`. `awaiting-approval` (reserved, no longer produced) parks at `planning`. */
+function deliveryOriginStage(status: string, prs: readonly LineagePr[]): LineageStage {
+  switch (status) {
+    case "awaiting-approval":
+      return "planning";
+    case "running":
+      return prs.some((p) => !TERMINAL_STATUSES.includes(p.status)) ? "converging" : "implementing";
+    case "done":
+      return "resolved";
+    case "failed":
+    case "abandoned":
+      return "abandoned";
+    default:
+      return "implementing";
+  }
+}
+
+/** The fallback frontier label for a delivery thread when the run has not stamped a `phase` yet. */
+function deliveryStageLabel(stage: LineageStage): string {
+  switch (stage) {
+    case "planning":
+      return "Awaiting approval";
+    case "converging":
+      return "Converging";
+    case "resolved":
+      return "Completed";
+    case "abandoned":
+      return "Failed";
+    default:
+      return "Running";
   }
 }
 
@@ -450,6 +518,15 @@ async function collectThreads(
     threads.set(plan.plan_key, deriveLineage(epicOrigin(plan), prs.map(toLineagePr)));
   }
 
+  // Delivery-graph runs (issue #498): each run is a fan-in parent thread keyed on its `run_key`,
+  // attaching the downstream PRs threaded to it (`pull_requests.root_request_key = run_key`). Mirrors
+  // the feature/epic loops — a run with no PR landed yet still projects a thread (its derived phase).
+  const deliveryRows = await deliveryGraphRuns(data).all();
+  for (const run of deliveryRows) {
+    const prs = collectRootPrs(run.run_key, null, prsByRoot, prByKey, claimed);
+    threads.set(run.run_key, deriveLineage(deliveryGraphOrigin(run), prs.map(toLineagePr)));
+  }
+
   // Any PR not claimed by a feature/epic root is its own root: a human/webhook PR, a legacy row
   // predating migration 037's backfill, or a `root_request_key` whose origin row no longer survives.
   // Key each such thread by the root STORED on the PR row (`root_request_key`, falling back to
@@ -529,6 +606,17 @@ function epicOrigin(plan: Plan): LineageOrigin {
     status: plan.status,
     processKey: plan.process_key,
     epicPhase: plan.epic_phase,
+  };
+}
+
+function deliveryGraphOrigin(run: DeliveryGraphRun): LineageOrigin {
+  return {
+    kind: "delivery",
+    key: run.run_key,
+    title: run.title,
+    status: run.status,
+    phase: run.phase,
+    processKey: run.process_key,
   };
 }
 

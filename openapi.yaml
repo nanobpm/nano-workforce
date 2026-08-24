@@ -151,7 +151,7 @@ components:
           description: The origin issue key (feature_key/plan_key), or a self-rooted pr_key.
         kind:
           type: string
-          enum: [feature, epic, pr]
+          enum: [feature, epic, pr, delivery]
         title:
           type: string
           nullable: true
