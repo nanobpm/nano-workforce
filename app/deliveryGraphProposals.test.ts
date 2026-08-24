@@ -267,12 +267,24 @@ test("sweepExpiredProposals: a dispatch racing between the read and the write is
   });
 });
 
+test("markProposalDismissed: flipping a live `staged` row returns true and lands it `dismissed`", async () => {
+  await withData(async (data) => {
+    await stageProposal(data, row());
+    const flipped = await markProposalDismissed(data, "d1");
+    // A real flip reports success (res.changed > 0) so the door can return 200/ok:true.
+    assertEquals(flipped, true);
+    assertEquals((await deliveryGraphProposals(data).get("d1"))?.status, "dismissed");
+  });
+});
+
 test("markProposalDismissed: only a `staged` row is flipped; an already-terminal (dispatched) row is left untouched", async () => {
   await withData(async (data) => {
     await stageProposal(data, row());
     await markProposalDispatched(data, "d1");
-    // A dismiss landing after the row already moved on must NOT clobber the terminal status.
-    await markProposalDismissed(data, "d1");
+    // A dismiss landing after the row already moved on must NOT clobber the terminal status, and must
+    // report the lost race by returning `false` so the door can 400 instead of misreporting success.
+    const flipped = await markProposalDismissed(data, "d1");
+    assertEquals(flipped, false);
     assertEquals((await deliveryGraphProposals(data).get("d1"))?.status, "dispatched");
   });
 });
@@ -314,8 +326,10 @@ test("markProposalDismissed: a dispatch racing between the door's liveness read 
       },
     });
 
-    await markProposalDismissed(racyData as DataLayer, "d1");
+    const flipped = await markProposalDismissed(racyData as DataLayer, "d1");
     assert(raced, "the racing dispatch should have fired");
+    // The guarded UPDATE changed 0 rows (row was `dispatched` at write time) → returns false so the door 400s.
+    assertEquals(flipped, false);
     assertEquals((await deliveryGraphProposals(data).get("d1"))?.status, "dispatched");
   });
 });

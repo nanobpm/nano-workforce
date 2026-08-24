@@ -7,7 +7,9 @@
 // It launches nothing (unlike dispatch) and is reachable only from the cockpit. Idempotent: a re-dismiss
 // of an already-terminal (dismissed / dispatched / superseded / expired) or unknown digest is a clean
 // 400 — the `getStagedProposal` liveness guard only resolves a live `staged` row, so a second dismiss
-// finds no live proposal and refuses without touching state.
+// finds no live proposal and refuses without touching state. The guarded flip itself can also lose a race
+// (a dispatch/supersede/expiry lands between the liveness read and the write), in which case it changes 0
+// rows and this door routes the lost race to the same clean 400 rather than misreporting success.
 
 import { getStagedProposal, markProposalDismissed } from "../app/deliveryGraphProposals.ts";
 import type { DeliveryGraphTextResult } from "../nano-generated/api-io.d.ts";
@@ -32,7 +34,18 @@ export default defineOperation("dismissProposal", async ({ body }, app) => {
     };
   }
 
-  await markProposalDismissed(app.data, digest);
+  // Flip the live `staged` row to `dismissed`. This is a GUARDED UPDATE (`... WHERE status='staged'`), so a
+  // dispatch/supersede/expiry racing between the `getStagedProposal` read above and this write moves the row
+  // off `staged` and the flip legitimately changes 0 rows. In that lost-race case the dismiss did NOT happen,
+  // so we must not report success — fall through to the same clean 400 an already-terminal digest gets.
+  const dismissed = await markProposalDismissed(app.data, digest);
+  if (!dismissed) {
+    app.log.warn("dismiss-delivery-graph rejected: proposal left staged before dismiss landed", { digest });
+    return {
+      status: 400,
+      body: { ok: false, error: `no staged proposal for digest ${digest} — it may already be dismissed, dispatched, superseded, or aged out` },
+    };
+  }
   app.log.info("dismiss-delivery-graph: proposal dismissed", { digest });
 
   const outBody: DeliveryGraphTextResult = { ok: true, digest, message: `staged proposal ${digest} dismissed` };
