@@ -58,6 +58,9 @@ export function isDeliveryGuardScalarType(type: unknown): type is DeliveryGuardS
 export type DeliveryGraphErrorCode =
   | "empty-graph"
   | "invalid-graph-name"
+  | "too-many-nodes"
+  | "too-many-edges"
+  | "too-many-emits"
   | "missing-id"
   | "invalid-id"
   | "duplicate-id"
@@ -138,8 +141,21 @@ const NODE_ID_MAX_LENGTH = 128;
  * call, or a JSON-string body like the library import door's `graphJson`, where the OpenAPI schema
  * never touches the parsed value) would otherwise surface as an unhandled fault mapped to a 400 with
  * NO path-qualified `errors`, and an over-long name would be persisted despite violating the contract.
- * Validating it here turns both into a clean, path-qualified `invalid-graph-name` failure. */
+ * Validating it here turns both into a clean, path-qualified `invalid-graph-name` failure. Length is
+ * counted by Unicode CODE POINT (`[...name].length`), matching openapi/JSON-Schema `maxLength`
+ * semantics — NOT JS `String.length`, which counts UTF-16 code units and would reject an in-contract
+ * name of ≤255 astral characters (e.g. emoji) as over-long. */
 const GRAPH_NAME_MAX_LENGTH = 255;
+
+/** Whole-graph fan-out caps mirroring openapi's `DeliveryGraph` array bounds (`nodes.maxItems: 256`,
+ * `edges.maxItems: 1024`) and `DeliveryNodeCommon.emits.maxItems: 32`. Re-enforced here INDEPENDENTLY
+ * of the OpenAPI shape gate because a bypassed gate (a direct delegate call, or a JSON-string body
+ * like the library import/save doors' `graphJson`, where the schema never touches the parsed value)
+ * would otherwise let an oversized-but-compilable graph reach the layout/compiler and be persisted —
+ * both violating the declared contract and exposing the import path to avoidable CPU/memory growth. */
+const GRAPH_MAX_NODES = 256;
+const GRAPH_MAX_EDGES = 1024;
+const NODE_MAX_EMITS = 32;
 
 /** The per-kind config key a node of the given kind must carry (`agent` → `agent`, etc.). */
 const CONFIG_KEY: Record<DeliveryNodeKind, string> = {
@@ -223,6 +239,12 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
       message: "delivery graph is empty — declare at least one node",
       code: "empty-graph",
     });
+  } else if (nodes.length > GRAPH_MAX_NODES) {
+    errors.push({
+      path: "nodes",
+      message: `delivery graph has too many nodes (${nodes.length}) — the limit is ${GRAPH_MAX_NODES}`,
+      code: "too-many-nodes",
+    });
   }
 
   // Top-level `name` (optional): mirror openapi's `DeliveryGraph.name` `maxLength: 255`, INDEPENDENTLY
@@ -235,7 +257,7 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
         message: "delivery graph `name` must be a string",
         code: "invalid-graph-name",
       });
-    } else if (graph.name.length > GRAPH_NAME_MAX_LENGTH) {
+    } else if ([...graph.name].length > GRAPH_NAME_MAX_LENGTH) {
       errors.push({
         path: "name",
         message: `delivery graph \`name\` must be \u2264 ${GRAPH_NAME_MAX_LENGTH} characters`,
@@ -335,6 +357,12 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
           message: "`emits` must be an array of typed fact declarations",
           code: "missing-config",
         });
+      } else if (rawNode.emits.length > NODE_MAX_EMITS) {
+        errors.push({
+          path: `${path}.emits`,
+          message: `node declares too many emitted facts (${rawNode.emits.length}) — the limit is ${NODE_MAX_EMITS}`,
+          code: "too-many-emits",
+        });
       } else {
         rawNode.emits.forEach((rawFact, j) => {
           if (!isRecord(rawFact) || typeof rawFact.name !== "string" || rawFact.name.length === 0) {
@@ -403,6 +431,14 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
       path: "edges",
       message: "`edges`, when present, must be an array of `{ from, to }` dependency edges",
       code: "invalid-edges",
+    });
+  } else if (edges.length > GRAPH_MAX_EDGES) {
+    // Re-enforce openapi's `edges.maxItems: 1024` INDEPENDENTLY of the bypassed shape gate, so an
+    // oversized-but-compilable graph cannot reach the layout/compiler and be persisted.
+    errors.push({
+      path: "edges",
+      message: `delivery graph has too many edges (${edges.length}) — the limit is ${GRAPH_MAX_EDGES}`,
+      code: "too-many-edges",
     });
   }
   // consumer (`to`) → set of upstream node ids (`from`'s node) — the dependency direction.

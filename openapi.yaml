@@ -3283,12 +3283,11 @@ paths:
         with `source: composed`) OR the `digest` of an existing staged/dispatched proposal whose
         already-stored graph is reused (`source: from-staged` / `from-dispatched`). A graph that is not
         valid JSON or fails to compile is a clean 400 and NOTHING is persisted (an uncompilable graph can
-        never enter the library). Unlike a staged proposal, a library entry has no TTL. The optional
-        shared-secret guard mirrors the other write/read library doors: when NANO_PR_WEBHOOK_SECRET is
-        set, callers must present it via the x-hook-secret header (unset → open).
-      security:
-        - hookSecret: []
-        - {}
+        never enter the library). Unlike a staged proposal, a library entry has no TTL. This door is
+        INTENTIONALLY UNGUARDED (no shared-secret requirement), unlike the get/delete/import library
+        doors: it is also invoked by a DECLARATIVE page row action ("Save to library" on the
+        In-flight/History grid) that structurally cannot attach the `x-hook-secret` header, so a guard
+        here would make the door unreachable by its own UI. See PR #533 review.
       requestBody:
         required: true
         content:
@@ -3308,12 +3307,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SaveToLibraryResult"
-        "401":
-          description: Missing/invalid shared secret (only when NANO_PR_WEBHOOK_SECRET is set).
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/SaveToLibraryResult"
   /actions/delivery-graph/library/import:
     post:
       operationId: importToLibrary
@@ -3326,8 +3319,9 @@ paths:
         `source: imported`. A file that is not valid JSON, or a graph that fails to compile, is a clean
         400 with path-qualified errors and NOTHING is persisted. The entry name defaults to the imported
         graph's own `name` (an explicit `name` overrides it). The optional shared-secret guard mirrors the
-        other write/read library doors: when NANO_PR_WEBHOOK_SECRET is set, callers must present it via the
-        x-hook-secret header (unset → open).
+        get/delete library doors: when NANO_PR_WEBHOOK_SECRET is set, callers must present it via the
+        x-hook-secret header (unset → open). (The `save` door is unguarded — it is also reached by a
+        declarative page row action that cannot carry the header.)
       security:
         - hookSecret: []
         - {}

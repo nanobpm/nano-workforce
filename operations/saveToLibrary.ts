@@ -10,10 +10,15 @@
 // validation is a clean 400 and nothing is written. Mirrors the proposals store/door pattern so the S3
 // API surface is familiar to the S4/S5/S6 slices.
 //
-// This is a MUTATING library door, so — like the get/delete/import library doors — it carries the
-// optional shared-secret guard: when NANO_PR_WEBHOOK_SECRET is set, callers must present it via the
-// x-hook-secret header (the compose client sends it for same-origin requests); unset → open. Without
-// this, a configured deployment would let an unauthenticated caller upsert persistent library entries.
+// This library door is INTENTIONALLY UNGUARDED, unlike the get/delete/import library doors that carry
+// the optional NANO_PR_WEBHOOK_SECRET / x-hook-secret guard. Save is the one library door also reached
+// by a DECLARATIVE page-runtime row action — the "Save to library" action on the In-flight/History grid
+// (`pages/delivery-graphs.page.json`), which posts only `{path, body}` and structurally CANNOT attach a
+// custom `x-hook-secret` header (that affordance is the external `@nanobpm/urban` page runtime's, not
+// ours). A header guard here would therefore make the door unreachable by its own UI (a hard 401 on
+// every dispatched-row Save whenever a secret is configured). The imperative composer/library mounts
+// reach the other doors and can send the header; this door cannot require one until the page runtime
+// grows a supported way for declarative actions to authenticate. See PR #533 review.
 
 import {
   buildLibraryEntryRow,
@@ -23,16 +28,9 @@ import {
 } from "../app/deliveryGraphLibrary.ts";
 import { deliveryGraphProposals, isProposalExpired } from "../app/deliveryGraphProposals.ts";
 import { parseAndCompileText } from "../app/deliveryGraphTextIngress.ts";
-import { envVar } from "../app/version.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
 
-const SECRET = envVar("NANO_PR_WEBHOOK_SECRET") ?? "";
-
-export default defineOperation("saveToLibrary", async ({ body, req }, app) => {
-  if (SECRET && req.headers.get("x-hook-secret") !== SECRET) {
-    app.log.warn("save-to-library rejected: missing/invalid shared secret");
-    return { status: 401, body: { ok: false, error: "unauthorized" } };
-  }
+export default defineOperation("saveToLibrary", async ({ body }, app) => {
   const name = body && typeof body.name === "string" ? body.name.trim() : "";
   if (name === "") {
     app.log.warn("save-to-library rejected: missing name");

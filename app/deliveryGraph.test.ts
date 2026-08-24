@@ -93,6 +93,54 @@ test("invalid-graph-name: a top-level `name` longer than 255 chars is rejected, 
   assertEquals(validateDeliveryGraph({ ...WELL_FORMED, name: "x".repeat(255) }), []);
 });
 
+test("invalid-graph-name: `name` length is counted by code point, not UTF-16 code unit", () => {
+  // Regression (#524 review): JS `String.length` counts UTF-16 code units, but openapi `maxLength`
+  // counts Unicode code points. A name of 255 astral characters (each 2 code units) is WITHIN the
+  // contract and must be accepted; the previous `String.length` check wrongly rejected it as 510.
+  const astral255 = "\u{1F600}".repeat(255); // 255 emoji code points = 510 UTF-16 code units
+  assertEquals([...astral255].length, 255);
+  assertEquals(validateDeliveryGraph({ ...WELL_FORMED, name: astral255 }), []);
+  // 256 code points is over the limit and rejected, path-qualified.
+  const astral256 = "\u{1F600}".repeat(256);
+  const err = hasCode(validateDeliveryGraph({ ...WELL_FORMED, name: astral256 }), "invalid-graph-name");
+  assertEquals(err.path, "name");
+});
+
+test("too-many-nodes: a node set larger than the openapi `maxItems: 256` cap is rejected", () => {
+  // Regression (#524 review): a JSON-string import/save body bypasses the OpenAPI shape gate, so the
+  // declared `nodes.maxItems: 256` bound is re-enforced here — otherwise an oversized-but-compilable
+  // graph reaches the layout/compiler and is persisted.
+  const node = (i: number) => ({ id: `n${i}`, kind: "human", human: { prompt: "x" } });
+  const tooMany = Array.from({ length: 257 }, (_, i) => node(i));
+  const err = hasCode(validateDeliveryGraph({ nodes: tooMany }), "too-many-nodes");
+  assertEquals(err.path, "nodes");
+  // The boundary (exactly 256) is accepted (no too-many-nodes error).
+  const exactly = Array.from({ length: 256 }, (_, i) => node(i));
+  assertEquals(
+    validateDeliveryGraph({ nodes: exactly }).filter((e) => e.code === "too-many-nodes"),
+    [],
+  );
+});
+
+test("too-many-edges: an edge set larger than the openapi `maxItems: 1024` cap is rejected", () => {
+  // Regression (#524 review): re-enforce `edges.maxItems: 1024` for the bypassed shape gate.
+  const nodes = [
+    { id: "a", kind: "human", human: { prompt: "x" } },
+    { id: "b", kind: "human", human: { prompt: "y" } },
+  ];
+  const tooMany = Array.from({ length: 1025 }, () => ({ from: "a", to: "b" }));
+  const err = hasCode(validateDeliveryGraph({ nodes, edges: tooMany }), "too-many-edges");
+  assertEquals(err.path, "edges");
+});
+
+test("too-many-emits: a node declaring more than the openapi `maxItems: 32` facts is rejected", () => {
+  // Regression (#524 review): re-enforce `DeliveryNodeCommon.emits.maxItems: 32` for the bypassed gate.
+  const emits = Array.from({ length: 33 }, (_, i) => ({ name: `f${i}`, type: "string" }));
+  const graph = { nodes: [{ id: "a", kind: "wait", wait: { kind: "capability", target: "x:y" }, emits }] };
+  const err = hasCode(validateDeliveryGraph(graph), "too-many-emits");
+  assertEquals(err.path, "nodes[0].emits");
+});
+
 test("unknown-kind: a node kind outside the closed allowlist is rejected, path-qualified", () => {
   const errors = validateDeliveryGraph({
     nodes: [{ id: "x", kind: "script", script: { run: "rm -rf /" } }],

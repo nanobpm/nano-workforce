@@ -10,10 +10,12 @@
 // to the imported graph's own `name`; an explicit `name` in the body overrides it (an unnamed graph with
 // no override is a clean 400 — the library id is name-derived, so a name is required).
 //
-// This is a MUTATING library door, so — like the get/delete/save library doors — it carries the optional
+// This is a MUTATING library door, so — like the get/delete library doors — it carries the optional
 // shared-secret guard: when NANO_PR_WEBHOOK_SECRET is set, callers must present it via the x-hook-secret
 // header (the compose client sends it for same-origin requests); unset → open. Without this, a configured
-// deployment would let an unauthenticated caller upsert persistent library entries.
+// deployment would let an unauthenticated caller upsert persistent library entries. (The `save` door is
+// the deliberate exception — it is also reached by a declarative page row action that cannot carry the
+// header, so it is unguarded; see `saveToLibrary.ts`.)
 
 import { buildLibraryEntryRow, libraryEntryDto, saveLibraryEntry } from "../app/deliveryGraphLibrary.ts";
 import { parseAndCompileText } from "../app/deliveryGraphTextIngress.ts";
