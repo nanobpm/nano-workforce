@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { assert, assertEquals, assertThrows } from "#test-assert";
 import { PROCESS_ID } from "../../app/service.ts";
 import { withTrackingViews } from "../../test/trackingViews.ts";
-import handler, { readConnectorInput, readConvergeInput } from "./worker.ts";
+import handler, { readConnectorInput, readConvergeInput, safeStringify } from "./worker.ts";
 
 function memTable(rows: Record<string, unknown>[], key: string) {
   return {
@@ -151,6 +151,17 @@ test("readConvergeInput: an unparseable pr whose value is not JSON-serializable 
   const circular: Record<string, unknown> = {};
   circular.self = circular;
   assertThrows(() => readConvergeInput("converge", { pr: circular as unknown as string }), Error, "payload.pr");
+});
+
+test("safeStringify: always returns a string, even for values JSON.stringify serializes to undefined (Symbol/undefined/function)", () => {
+  // JSON.stringify returns `undefined` (WITHOUT throwing) for a Symbol, a bare undefined, or a
+  // function. safeStringify is typed `: string`, so it must fall back to String(value) rather than
+  // leak that `undefined` through and violate its own contract.
+  assertEquals(typeof safeStringify(Symbol("x")), "string");
+  assertEquals(typeof safeStringify(undefined), "string");
+  assertEquals(typeof safeStringify(() => 0), "string");
+  // A normal serializable value still round-trips through JSON.stringify.
+  assertEquals(safeStringify({ a: 1 }), '{"a":1}');
 });
 
 test("handler: a `converge-merge` connector enrolls the PR into the convergence loop via submitPr (row + started convergence-loop instance)", async () => {

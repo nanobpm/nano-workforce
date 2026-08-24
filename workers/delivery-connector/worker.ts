@@ -61,6 +61,20 @@ export function readConnectorInput(vars: In): {
   return { target, payload, boundFacts, warnings };
 }
 
+/** JSON-stringify a user-controlled value for an error message, falling back to `String(value)` when
+ * the value is not JSON-serializable (e.g. a `BigInt` or a circular object throws, or a `Symbol` /
+ * `undefined` / function that `JSON.stringify` serializes to `undefined`) so the intended validation
+ * error is never masked by a serializer `TypeError` and the function always honours its `string`
+ * return type. */
+export function safeStringify(value: unknown): string {
+  try {
+    const s = JSON.stringify(value);
+    return s === undefined ? String(value) : s;
+  } catch {
+    return String(value);
+  }
+}
+
 /** Parse + validate the converge connector's payload (`{ pr, convergeOnly?, dependsOn? }`) for a
  * `converge` / `converge-merge` target. `pr` is REQUIRED and must parse to a canonical `owner/repo#N`
  * (fail CLOSED — a converge connector with no target PR is meaningless and could never enroll).
@@ -70,17 +84,6 @@ export function readConnectorInput(vars: In): {
  * entries are dropped; `submitPr` itself ignores unparseable refs). Exported for unit coverage — the
  * MVP sources `pr` as a literal (identical to how the `wait: pr` node targets a known PR), so no new
  * fact plumbing is needed to ship. */
-/** JSON-stringify a user-controlled value for an error message, falling back to `String(value)` when
- * the value is not JSON-serializable (e.g. a `BigInt` or a circular object) so the intended
- * validation error is never masked by a serializer `TypeError`. */
-function safeStringify(value: unknown): string {
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return String(value);
-  }
-}
-
 export function readConvergeInput(
   target: string,
   payload: Record<string, unknown> | null,
