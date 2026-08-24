@@ -230,9 +230,11 @@ The projection must answer "which cell has this unit reached," fusing two truth 
   tasks). With namespaced cell element ids (§2), a reached element maps to a reached cell — the
   sharpest signal, and the only one that sees a token mid-cell (an active `implement` job) that no
   work-table row has caught up to yet.
-- **Work-table + aggregate truth — the correlated downstream state.** The feature/epic aggregate row
-  (`status` / `pr_key` / flags) gives the coarse `Requested` / `Implementing` / `Done` bracket even
-  with no PR and no park; `pull_requests` (and siblings) carry the `converging` / `waiting_review` /
+- **Work-table + aggregate truth — the correlated downstream state, per shape.** For a **feature**, the
+  `feature_runs` row (`status` / `pr_key` / flags) gives the coarse `Requested` / `Implementing` / `Done`
+  bracket; for an **epic** there is **no aggregate `pr_key`** — its status is `plans.status` / the plan
+  rollups and its slice-PR identity is `plan_tasks.pr_key` (`app/retro.ts`, `app/delivery.ts`). On top of
+  that bracket, `pull_requests` (and siblings) carry the `converging` / `waiting_review` /
   `merging` sub-state that `pollFeatureDelivery` (with the lineage/plan projections) rolls **into** the
   feature row before `deriveStage` maps it — `instanceTracking` supplies only the tracking-status edges,
   not the PR rollup. The projection must
@@ -283,7 +285,9 @@ projection over the cell axis.
 
 **v1 ships on what's correlated today, at lifecycle-stage fidelity; the element-instance query sharpens
 it to per-cell.** Until the binding surfaces the element model, §4b's projection is derivable *now* only
-from aggregate/work-table state + user-task parks — and that is **lifecycle-stage, not per-cell, even
+from aggregate/work-table state, **process-instance lifecycle state** (`searchProcessInstances` —
+`COMPLETED`/`TERMINATED`, which `deriveDeliveryPhase` folds to `done`/`failed`), and user-task parks —
+and that is **lifecycle-stage, not per-cell, even
 for feature**: `deriveStage` collapses a token parked in a readiness-probe service/timer loop, or an
 active `implement-task`, all to `Implementing` while `feature_runs.status` stays `running` and no user
 task is open. It is coarser still for the other two, for reasons that must be stated *separately*:
@@ -304,7 +308,11 @@ in-flight step. Because `activeField` must resolve to a *configured* pipeline st
 `Requested`…`Done`, with no `In flight` key), S7 must make one explicit choice for that coarse case
 rather than emit an unconfigured label: **hold the aggregate at its last observed lifecycle key**
 (e.g. `Implementing`, marked in-progress) so no new stage is invented — the recommended default, since it
-needs no renderer/axis change — *or* deliberately add a single `In flight` key to the canonical axis. It
+needs no renderer/axis change — *or* deliberately add a single `In flight` key to the canonical axis. For
+a **first observation with no prior key** (a freshly `running` `delivery_graph_runs` row carries only
+`phase = "Running"`, no stored lifecycle key to hold), S7 must pin a deterministic **initial**
+`STAGE_KEYS` value — the first non-terminal step — derived from run status or persisted on dispatch, so
+the scalar `activeField` is never undefined. It
 must never fabricate a specific cell position it cannot observe. The **epic pipeline is deferred to S8**:
 because its pre-PR position is unobservable from S7 inputs, epic keeps its `epic_phase` **text cell** as
 an explicit, retained **second source** (write-provenance) until the element query lands — rather than
@@ -397,10 +405,18 @@ deployment-runtime prerequisite noted above), not on #416 alone.
   **per shape**: for a **feature**, `feature_runs` `status`/`pr_key`/flags + the
   `pollFeatureDelivery`-reconciled `pull_requests` state, joined by **`pr_key`** (*not* a naïve
   `process_key` join, which is reassigned downstream); for a **delivery graph** — which has **no
-  `pr_key`** — its `delivery_graph_runs` row, its downstream PRs joined via
-  `pull_requests.root_request_key = delivery_graph_runs.run_key` (`app/lineage.ts`), and engine parks by
-  the run's own `process_key`. Reduce any parallel frontier to the **least-advanced active
-  branch**, correlate with user-task parks (`searchUserTasks`), and **promote the `pipeline` stepper
+  `pr_key`** — its `delivery_graph_runs` row, its downstream PRs correlated through the run's **lineage
+  root mapping** (`app/lineage.ts` `collectRootPrs` over `pull_requests.root_request_key`), and engine
+  parks by the run's own `process_key`. Note the root mapping is **not** a single clean
+  `root_request_key = run_key` join for every PR — a per-node `connector`/agent PR may root by its own
+  `dedupeKey` (else `<processInstanceKey>:<elementId>`), so S7 must **define/persist a run-level root
+  rollup** (or document the per-node correlation and how it aggregates to the run) rather than assume one
+  join. Engine parks correlate via `searchUserTasks({ processInstanceKey: run.process_key })`, which is
+  correct **for today's inlined graphs** (the compiler inlines subProcesses into one flat instance); once
+  S4's `callActivity` composition puts a human cell in a **child** instance, this parent-key query would
+  miss it, so that step is bound to the S4 inline-vs-child decision (correlate child instances, or keep
+  the graph inlined) — it is not a silent promise. Reduce any parallel frontier to the
+  **least-advanced active branch** and **promote the `pipeline` stepper
   kind** (feature-only today) onto the delivery-graph page.
   This needs **no** engine-binding change, but ships at **lifecycle-stage fidelity only — for feature
   *and* delivery-graph alike**: even feature is not truly per-cell today (`deriveStage` collapses a
@@ -424,8 +440,10 @@ deployment-runtime prerequisite noted above), not on #416 alone.
   child/root instance keys, so the "no change to the correlation key" is scoped to the axis and renderer,
   not to a fixed single-instance join. This is
   what lets epic's **Planning** phase and the **non-parked** part of **Reviewing** — which run inside
-  `plan-fanout.bpmn` before any PR exists and have no work-table row (Reviewing *is* partly visible via
-  the real `plan-review-decision` user task, but Planning and the running review work are not), today
+  `plan-fanout.bpmn` before any PR exists — Planning has no work-table row, and while pre-PR Reviewing
+  *does* carry `plan_tasks` rows (`record-plan` writes them), **no field exposes the currently executing
+  plan/review activity** (Reviewing *is* partly visible via the real `plan-review-decision` user task,
+  but Planning and the running review work are not), today
   knowable only from write-provenance — become a pure read-model derivation, bringing epic onto the same
   `pipeline`, retiring the `epic_phase` write-time stamp (`app/epicPhase.ts`, nano-ide#266) and folding
   the user-task-only `pollDeliveryGraphPhase` into one live projection.
