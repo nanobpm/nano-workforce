@@ -170,6 +170,31 @@
   color: #8aa0b8;
 }
 
+/* The filesystem Import control (issue #524): a <label class="btn"> wrapping a visually-hidden native
+   <input type=file>, so the file picker reads as a button consistent with the other actions. The label
+   dims while its input is disabled (busy) via :has(), mirroring .btn:disabled. */
+.dg .dg-import {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.dg .dg-import-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  border: 0;
+}
+
+.dg .dg-import:has(.dg-import-input:disabled) {
+  opacity: 0.5;
+  cursor: default;
+}
+
 .dg .status {
   font-size: 12.5px;
   color: #8aa0b8;

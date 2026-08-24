@@ -18,6 +18,12 @@
 const DEFAULT_PREVIEW_URL = "app/api/actions/delivery-graph/preview";
 const DEFAULT_STAGE_URL = "app/api/actions/delivery-graph/stage";
 
+// The filesystem IMPORT door (issue #524, epic #519 S5). The Import control below reads a chosen
+// `.json` file's text client-side and POSTs it here; the door validates + compiles it and persists it
+// to the library with `source: imported`. Base-relative like the preview/stage defaults (App-View #279
+// resolution class — a leading-slash path 404s).
+const DEFAULT_IMPORT_URL = "app/api/actions/delivery-graph/library/import";
+
 // The INBOUND reuse-fill seam (issue #523, epic #519 S4). Until now the compose textarea (`#dg-json`)
 // had NO inbound prefill path — its value was set only by "Load example" or the operator typing. The
 // Library App-View's per-row **Reuse** (this wave) and the filesystem **Import** (#524, sequenced
@@ -203,7 +209,7 @@ function isSameOrigin(url) {
 /**
  * Mount the compose → preview / stage view into `host`.
  * @param {Element|null} host — the element to render into (or null → look up #delivery-graphs-root).
- * @param {{previewUrl?:string, stageUrl?:string, hookSecret?:string}} [config]
+ * @param {{previewUrl?:string, stageUrl?:string, importUrl?:string, hookSecret?:string}} [config]
  */
 export function mountDeliveryGraphs(host, config = {}) {
   const isElement = host != null && host.nodeType === 1 && typeof host.innerHTML === "string";
@@ -212,6 +218,7 @@ export function mountDeliveryGraphs(host, config = {}) {
 
   const previewUrl = config.previewUrl ?? DEFAULT_PREVIEW_URL;
   const stageUrl = config.stageUrl ?? DEFAULT_STAGE_URL;
+  const importUrl = config.importUrl ?? DEFAULT_IMPORT_URL;
   const headers = (url) => ({
     "content-type": "application/json",
     ...(config.hookSecret && isSameOrigin(url) ? { "x-hook-secret": config.hookSecret } : {}),
@@ -231,6 +238,10 @@ export function mountDeliveryGraphs(host, config = {}) {
           <button id="dg-preview" class="btn btn-primary" type="button">Preview</button>
           <button id="dg-stage" class="btn" type="button">Stage</button>
           <button id="dg-example" class="btn btn-ghost" type="button">Load example</button>
+          <label class="btn btn-ghost dg-import" title="Import a delivery-graph .json file into the library">
+            Import file
+            <input id="dg-import" class="dg-import-input" type="file" accept=".json,application/json" />
+          </label>
           <span id="dg-status" class="status"></span>
         </div>
       </div>
@@ -244,6 +255,7 @@ export function mountDeliveryGraphs(host, config = {}) {
   const previewBtn = root.querySelector("#dg-preview");
   const stageBtn = root.querySelector("#dg-stage");
   const exampleBtn = root.querySelector("#dg-example");
+  const importInput = root.querySelector("#dg-import");
   const composeDetails = root.querySelector("#dg-compose");
 
   // The most recent successful PREVIEW's laid-out BPMN — bridged to the host explorer on demand (the
@@ -260,6 +272,7 @@ export function mountDeliveryGraphs(host, config = {}) {
     previewBtn.disabled = on;
     stageBtn.disabled = on;
     exampleBtn.disabled = on;
+    if (importInput) importInput.disabled = on;
   }
 
   // The SINGLE inbound fill seam (issue #523): load a graph JSON into the composer as if the operator
@@ -369,6 +382,43 @@ export function mountDeliveryGraphs(host, config = {}) {
     outputEl.innerHTML = "";
     setStatus("Example loaded — Preview or Stage it.", "");
   });
+
+  // The filesystem IMPORT control (issue #524, epic #519 S5). Read the chosen `.json` file's text
+  // CLIENT-SIDE, then POST it to the importToLibrary door, which validates + compiles it and (on
+  // success) persists it to the library with `source: imported`. A file that is not valid JSON, or a
+  // graph that will not compile, is a clean 400 whose path-qualified errors render inline — nothing is
+  // persisted. On a successful import we route the file text through the SAME `fillComposer()` seam
+  // #523 introduced (no reshaping — one inbound fill path), so the imported graph appears in the
+  // composer ready to Preview/Stage. The input is reset after each pick so re-choosing the same file
+  // still fires `change`.
+  async function importFile(file) {
+    if (!file) return;
+    busy(true);
+    setStatus(`Importing ${file.name}\u2026`);
+    try {
+      const text = await file.text();
+      const { status, body } = await post(importUrl, { graphJson: text });
+      if (status === 200 && body.ok) {
+        outputEl.innerHTML = "";
+        fillComposer(text, { status: `\u2713 Imported \u201c${body.entry.name}\u201d into the library — Preview or Stage it.` });
+      } else {
+        outputEl.innerHTML = renderErrors(body.error, body.errors);
+        setStatus("Import failed — the file is not a valid, compilable delivery graph.", "err");
+      }
+    } catch (err) {
+      outputEl.innerHTML = renderErrors(err && err.message ? err.message : String(err), []);
+      setStatus("Import request failed.", "err");
+    } finally {
+      busy(false);
+    }
+  }
+  if (importInput) {
+    importInput.addEventListener("change", () => {
+      const file = importInput.files && importInput.files[0];
+      importFile(file);
+      importInput.value = "";
+    });
+  }
   // Any edit invalidates the previewed BPMN so "Preview generated DI" can't show a stale diagram.
   jsonEl.addEventListener("input", () => {
     lastBpmn = "";
