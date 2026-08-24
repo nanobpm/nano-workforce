@@ -1757,6 +1757,126 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/StagedProposalSummary"
+    DeliveryGraphLibraryEntry:
+      description: >-
+        One saved reusable delivery-graph LIBRARY entry (issue #522, epic #519 S3) — the durable base
+        the Library App-View (S4/#523), filesystem import (S5/#524), and export (S6/#525) build on.
+        Unlike a `staged` proposal (content-digest-keyed, TTL-swept), a library entry is keyed by a
+        slug + short-hash of its (mutable) NAME so its graph can be edited without moving the row, and
+        it never ages out. The full `graph` JSON is carried so the export affordance (S6/#525) can build
+        a client-side download from the list payload without a second fetch.
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - name
+        - description
+        - graph
+        - source
+        - createdAt
+        - updatedAt
+      properties:
+        id:
+          type: string
+          description: The entry's stable id — `<slug>-<sha256(name)[:8]>`, derived from the name (not the content).
+        name:
+          type: string
+          description: The saved graph's human name.
+        description:
+          type: string
+          nullable: true
+          description: An optional human note, or null when none was given.
+        graph:
+          type: string
+          description: The `DeliveryGraph` JSON (serialised) — validated/compiled before it was ever persisted.
+        source:
+          type: string
+          enum: [composed, imported, from-staged, from-dispatched]
+          description: How the entry entered the library (raw compose, filesystem import, or a staged/dispatched proposal's digest).
+        createdAt:
+          type: string
+          description: When the entry was first saved (ISO-8601); preserved across an idempotent re-save of the same name.
+        updatedAt:
+          type: string
+          description: When the entry was last saved/edited (ISO-8601).
+    DeliveryGraphLibraryList:
+      description: Every saved library entry (issue #522), newest first.
+      type: object
+      additionalProperties: false
+      required:
+        - count
+        - entries
+      properties:
+        count:
+          type: integer
+        entries:
+          type: array
+          items:
+            $ref: "#/components/schemas/DeliveryGraphLibraryEntry"
+    SaveToLibrarySubmit:
+      description: >-
+        Save a delivery graph to the reusable library (issue #522). Carries the entry `name` (its
+        slug/hash derive the id) and an optional `description`, PLUS exactly one graph source: either a
+        raw `graphJson` STRING (validated + compiled before persisting, `source: composed`), or the
+        `digest` of an existing staged/dispatched proposal whose already-stored graph is reused
+        (`source: from-staged` / `from-dispatched`). A graph that fails to compile is a clean 400 and
+        nothing is persisted.
+      type: object
+      additionalProperties: false
+      required:
+        - name
+      properties:
+        name:
+          type: string
+          description: The entry's human name — its slug + short-hash derive the stable library id (re-saving the same name upserts).
+        description:
+          type: string
+          description: An optional human note stored alongside the entry.
+        graphJson:
+          type: string
+          description: >-
+            A raw `DeliveryGraph` JSON string to validate, compile and save (`source: composed`).
+            Mutually exclusive with `digest`.
+        digest:
+          type: string
+          description: The content digest of an existing staged/dispatched proposal whose stored graph is reused. Mutually exclusive with `graphJson`.
+    SaveToLibraryResult:
+      description: >-
+        The save-to-library outcome (issue #522). `ok` discriminates success; success carries the
+        persisted `entry`, a failure carries a human `error` (and, for a compile failure, path-qualified
+        `errors`). Nothing is persisted on a failure.
+      type: object
+      additionalProperties: false
+      required:
+        - ok
+      properties:
+        ok:
+          type: boolean
+          description: True when the graph validated and the entry was saved; false otherwise.
+        error:
+          type: string
+          description: A human-readable failure message.
+        errors:
+          type: array
+          items:
+            $ref: "#/components/schemas/DeliveryCompileError"
+          description: Path-qualified validation/compile failures, when the submitted or referenced graph was malformed.
+        entry:
+          $ref: "#/components/schemas/DeliveryGraphLibraryEntry"
+    DeleteLibraryEntryResult:
+      description: The delete-library-entry outcome (issue #522). `deleted` is true when a row was removed, false when the id named nothing (idempotent).
+      type: object
+      additionalProperties: false
+      required:
+        - ok
+        - deleted
+      properties:
+        ok:
+          type: boolean
+          description: True — the request was well-formed and processed.
+        deleted:
+          type: boolean
+          description: True when an entry was removed; false when the id named no entry (a re-delete is a clean no-op).
     DeliveryGraphTextResult:
       description: >-
         The delivery-graph text-ingress outcome (issue #460) — a single shape covering the JSON-paste
@@ -3070,6 +3190,130 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/StagedProposalList"
+        "401":
+          description: Missing/invalid shared secret (only when NANO_PR_WEBHOOK_SECRET is set).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+  /actions/delivery-graph/library/save:
+    post:
+      operationId: saveToLibrary
+      summary: Save a delivery graph to the reusable library — from a raw graph JSON or an existing proposal digest (issue #522, #519 S3).
+      description: >-
+        Persist a delivery graph to the reusable LIBRARY (issue #522, epic #519 S3) — the durable base
+        S4/S5/S6 build on. The request carries the entry `name` (its slug + short-hash derive the stable
+        library id, so re-saving the same name upserts) plus EITHER a raw `graphJson` STRING (validated
+        and compiled via the SAME `parseAndCompileText` pipeline the preview/stage doors use, then saved
+        with `source: composed`) OR the `digest` of an existing staged/dispatched proposal whose
+        already-stored graph is reused (`source: from-staged` / `from-dispatched`). A graph that is not
+        valid JSON or fails to compile is a clean 400 and NOTHING is persisted (an uncompilable graph can
+        never enter the library). Unlike a staged proposal, a library entry has no TTL.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SaveToLibrarySubmit"
+      responses:
+        "200":
+          description: The graph validated and the entry was saved (upserted on its name-derived id).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SaveToLibraryResult"
+        "400":
+          description: The request was malformed, the referenced digest named no stored graph, or the graph failed to compile — nothing persisted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SaveToLibraryResult"
+  /delivery-graph/library:
+    get:
+      operationId: listLibrary
+      summary: List the saved reusable delivery-graph library entries (issue #522, #519 S3), newest first.
+      description: >-
+        The read behind the Library App-View (S4/#523): every saved library entry, newest first, with
+        its full `graph` JSON so the export affordance (S6/#525) can build a client-side download from
+        the list payload. Read-only. The optional shared-secret guard mirrors the other read doors
+        (getLineage / listActivePrs / listStagedProposals): when NANO_PR_WEBHOOK_SECRET is set, callers
+        must present it via the x-hook-secret header.
+      security:
+        - hookSecret: []
+        - {}
+      responses:
+        "200":
+          description: The saved library entries, newest first.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeliveryGraphLibraryList"
+        "401":
+          description: Missing/invalid shared secret (only when NANO_PR_WEBHOOK_SECRET is set).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+  /delivery-graph/library/{id}:
+    get:
+      operationId: getLibraryEntry
+      summary: Fetch one saved library entry by id (issue #522, #519 S3).
+      description: >-
+        Return one saved library entry (issue #522) by its `id`, including its full `graph` JSON. An
+        unknown id is a clean 404. The optional shared-secret guard mirrors the other read doors.
+      security:
+        - hookSecret: []
+        - {}
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The library entry's id (`<slug>-<sha256(name)[:8]>`).
+      responses:
+        "200":
+          description: The library entry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeliveryGraphLibraryEntry"
+        "401":
+          description: Missing/invalid shared secret (only when NANO_PR_WEBHOOK_SECRET is set).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+        "404":
+          description: No library entry exists for the given id.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+    delete:
+      operationId: deleteLibraryEntry
+      summary: Delete one saved library entry by id (issue #522, #519 S3).
+      description: >-
+        Delete one saved library entry (issue #522) by its `id`. Idempotent — deleting an id that names
+        no entry returns `deleted: false` (a clean no-op), not an error. The optional shared-secret guard
+        mirrors the other write doors.
+      security:
+        - hookSecret: []
+        - {}
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The library entry's id to delete.
+      responses:
+        "200":
+          description: The delete was processed (see `deleted` for whether a row was actually removed).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeleteLibraryEntryResult"
         "401":
           description: Missing/invalid shared secret (only when NANO_PR_WEBHOOK_SECRET is set).
           content:
