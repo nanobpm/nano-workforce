@@ -247,9 +247,27 @@ export async function markProposalDispatched(data: DataLayer, digest: string): P
 /** Retire a proposal by flipping it to `expired` — its `graph` payload is unusable (e.g. corrupt JSON
  * detected at dispatch), so it can never launch. Reuses the terminal `expired` status the sweep already
  * uses, so a fail-closed retirement drops the row out of the cockpit's staged grid instead of leaving an
- * undismissable `staged` row that fails every dispatch attempt the same way. */
-export async function markProposalExpired(data: DataLayer, digest: string): Promise<void> {
-  await deliveryGraphProposals(data).update(digest, { status: "expired", updated_at: now() });
+ * undismissable `staged` row that fails every dispatch attempt the same way.
+ *
+ * Like `sweepExpiredProposals`/`markProposalDismissed`, the flip is a GUARDED UPDATE
+ * (`... WHERE digest=? AND status='staged'`), not a blind update-by-key. The dispatch door's
+ * `getStagedProposal` liveness read and this write are separate statements, so a proposal can leave
+ * `staged` in the window between them (an operator dismisses it, or it's superseded/dispatched by another
+ * concurrent action); a blind `table.update(digest, …)` would clobber that newer terminal status back to
+ * `expired`, breaking monotonic lifecycle transitions. The `status='staged'` guard makes the write a no-op
+ * when the row has already moved on.
+ *
+ * Returns whether the guarded UPDATE actually flipped a row (`res.changed > 0`), mirroring
+ * `markProposalDismissed`/`sweepExpiredProposals`. A `false` return means the row was no longer `staged`
+ * at write time (a dismiss/supersede/dispatch race won), so the caller must not treat the retirement as
+ * having happened. */
+export async function markProposalExpired(data: DataLayer, digest: string): Promise<boolean> {
+  const db = data.open();
+  const res = await db.exec(
+    `UPDATE "delivery_graph_proposals" SET "status" = 'expired', "updated_at" = ? WHERE "digest" = ? AND "status" = 'staged'`,
+    [now(), digest],
+  );
+  return res.changed > 0;
 }
 
 /** Dismiss a staged proposal at an operator's explicit request — flip it to the terminal `dismissed`
