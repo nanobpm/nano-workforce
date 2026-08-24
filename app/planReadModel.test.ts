@@ -194,6 +194,18 @@ test("DRIFT GUARD: migration 083 embeds each derived column VERBATIM from planRe
   // The hand-authored display strings (D3 — no TS twin) live in this VIEW over the derived columns.
   assert(sql.includes("AS delivery_label"), "083 must carry the hand-authored delivery_label display column");
   assert(sql.includes("AS wave_label"), "083 must carry the hand-authored wave_label display column");
+  // The FROM/JOIN relation names are DERIVED from the declaration (baseTable + each lookup's rollup name
+  // + join keys), not hand-hardcoded — so renaming `baseTable` or a rollup `.name` (which would make 082
+  // create a different-named VIEW) breaks this guard instead of silently leaving 083 pointing at a
+  // stale/missing relation.
+  const alias = PLAN_READ_MODEL_BASE_ALIAS;
+  assert(sql.includes(`FROM ${planReadModel.decl.baseTable} ${alias}`), `083's FROM must be the declaration's baseTable "${planReadModel.decl.baseTable}" (aliased ${alias})`);
+  for (const lk of planReadModel.decl.lookups) {
+    const rollupName = lk.rollup.decl.name;
+    const on = lk.on.map((k) => `${alias}.${k.base} = ${lk.as}.${k.rollup}`).join(" AND ");
+    const join = `LEFT JOIN ${rollupName} ${lk.as} ON ${on}`;
+    assert(sql.includes(join), `083 must LEFT JOIN the declaration's "${rollupName}" lookup exactly as "${join}"`);
+  }
 });
 
 test("FRAMEWORK PARITY GUARD: each plan-family rollup's VIEW and TS reduce agree (assertRollupParity)", () => {
