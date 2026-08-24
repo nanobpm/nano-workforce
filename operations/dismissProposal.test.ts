@@ -86,7 +86,8 @@ describe("dismissProposal — operator dismiss of a staged-proposal by digest", 
     const app = await boot();
     assert.ok(app.api);
     const api = app.api;
-    const staged = await api.call<{ digest: string }>("compileDeliveryGraph", { body: HUMAN_ONLY });
+    const staged = await api.call<{ status: string; digest: string }>("compileDeliveryGraph", { body: HUMAN_ONLY });
+    assert.equal(staged.status, 200);
     const digest = staged.body.digest;
 
     const first = await api.call<{ ok: boolean }>("dismissProposal", { body: { digest } });
