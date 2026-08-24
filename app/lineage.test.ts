@@ -131,6 +131,91 @@ test("feature/self-rooted threads carry no epic phase label", () => {
   assertEquals(self.epicPhaseLabel, null, "a self-rooted PR is not an epic slice");
 });
 
+// ── delivery-graph fan-in parent (issue #498) ─────────────────────────────────────────────────
+
+test("delivery: a running run with no PR yet is implementing, frontier from its phase", () => {
+  const t = deriveLineage(
+    { kind: "delivery", key: "dg-abc", title: "Ship widget", status: "running", phase: "Running", processKey: "d1" },
+    [],
+  );
+  assertEquals(t.kind, "delivery");
+  assertEquals(t.rootRequestKey, "dg-abc");
+  assertEquals(t.stage, "implementing");
+  assertEquals(t.stageLabel, "Running", "the frontier reflects the run's derived phase");
+  assert(t.active, "a running run is active");
+  assertEquals(t.processKey, "d1");
+  assertEquals(t.title, "Ship widget");
+  assertEquals(t.issueUrl, null, "a delivery run is keyed by run_key, not a GitHub issue");
+  assertEquals(t.epicPhaseLabel, null, "a delivery run's member PRs are not epic slices");
+  assertEquals(t.prCount, 0);
+});
+
+test("delivery: downstream PR convergences nest under the run and temper the frontier to converging", () => {
+  const t = deriveLineage(
+    { kind: "delivery", key: "dg-abc", title: "Ship widget", status: "running", phase: "Parked on human node: publish", processKey: "d1" },
+    [
+      pr({ prKey: "a/b#1", status: "merged" }),
+      pr({ prKey: "c/d#9", status: "converging", processKey: "c9" }),
+    ],
+  );
+  assertEquals(t.kind, "delivery");
+  assertEquals(t.stage, "converging", "a member PR still in flight tempers the frontier to converging");
+  assertEquals(t.stageLabel, "Parked on human node: publish", "the label still prefers the run's stamped phase");
+  assertEquals(t.processKey, "c9", "frontier prefers the in-flight member PR's instance");
+  assertEquals(t.prKeys, ["a/b#1", "c/d#9"], "heterogeneous downstream PRs across repos nest under the run");
+  assert(t.active);
+});
+
+test("delivery: a done run settles as resolved (no active frontier)", () => {
+  const t = deriveLineage(
+    { kind: "delivery", key: "dg-abc", title: "Ship widget", status: "done", phase: "Completed", processKey: "d1" },
+    [pr({ prKey: "a/b#1", status: "merged" })],
+  );
+  assertEquals(t.stage, "resolved");
+  assertEquals(t.stageLabel, "Completed");
+  assert(!t.active, "a completed run has no active frontier");
+});
+
+test("delivery: a failed run settles as abandoned", () => {
+  const t = deriveLineage(
+    { kind: "delivery", key: "dg-abc", title: "Ship widget", status: "failed", phase: "Failed", processKey: "d1" },
+    [],
+  );
+  assertEquals(t.stage, "abandoned");
+  assert(!t.active);
+});
+
+test("delivery: an abandoned run with no phase is labeled 'Abandoned', not 'Failed'", () => {
+  // `deliveryOriginStage` folds both `failed` and `abandoned` statuses onto the `abandoned` stage, so
+  // the label must consult the run status: a genuinely abandoned run reads "Abandoned" (only a failed
+  // one reads "Failed"). Regress with no stamped phase so the status-derived fallback label is used.
+  const t = deriveLineage(
+    { kind: "delivery", key: "dg-abc", title: "Ship widget", status: "abandoned", phase: null, processKey: "d1" },
+    [],
+  );
+  assertEquals(t.stage, "abandoned");
+  assertEquals(t.stageLabel, "Abandoned", "an abandoned run is not mislabeled as failed");
+  assert(!t.active);
+});
+
+test("delivery: a failed run with no phase is labeled 'Failed'", () => {
+  const t = deriveLineage(
+    { kind: "delivery", key: "dg-abc", title: "Ship widget", status: "failed", phase: null, processKey: "d1" },
+    [],
+  );
+  assertEquals(t.stage, "abandoned");
+  assertEquals(t.stageLabel, "Failed");
+});
+
+test("delivery: with no stamped phase, the frontier falls back to a status-derived label", () => {
+  const t = deriveLineage(
+    { kind: "delivery", key: "dg-abc", title: "Ship widget", status: "running", phase: null, processKey: "d1" },
+    [],
+  );
+  assertEquals(t.stage, "implementing");
+  assertEquals(t.stageLabel, "Running", "null phase falls back to the status-derived frontier label");
+});
+
 // ── self-rooted (human/webhook) PR ───────────────────────────────────────────────────────────
 
 test("pr: a human/webhook PR with no origin is its own root", () => {
@@ -235,6 +320,67 @@ test("pollLineage: projects feature, epic, and self-rooted threads onto lineage_
   await pollLineage(data);
   const after = stores.lineage_threads.map((r: LineageThreadRow) => r.updated_at);
   assertEquals(after, before, "steady-state pass is a no-op");
+});
+
+test("pollLineage: projects a delivery-graph run as a fan-in parent thread with its downstream PRs nested", async () => {
+  // Issue #498: a dispatched delivery-graph run appears as its own thread, and the downstream PR
+  // convergences threaded to it (root_request_key = run_key) across DIFFERENT repos nest under it
+  // rather than appearing as disconnected self-rooted PRs.
+  const { data, stores } = memData();
+  stores.feature_runs = [];
+  stores.plans = [];
+  stores.plan_tasks = [];
+  stores.delivery_graph_runs = [
+    { run_key: "dg-xyz", title: "Ship widget across repos", status: "running", phase: "Running", process_key: "P-dg" },
+  ];
+  stores.pull_requests = [
+    { pr_key: "a/b#1", title: "widget in a/b", url: "x", status: "merged", current_round: 1, process_key: "c1", outcome: null, root_request_key: "dg-xyz" },
+    { pr_key: "c/d#9", title: "widget in c/d", url: "x", status: "converging", current_round: 2, process_key: "c2", outcome: null, root_request_key: "dg-xyz" },
+  ];
+
+  await pollLineage(data);
+
+  const threads: LineageThreadRow[] = stores.lineage_threads;
+  assertEquals(threads.length, 1, "one delivery thread, not two disconnected self-rooted PRs");
+  const dg = threads.find((t) => t.root_request_key === "dg-xyz");
+  assert(dg, "delivery thread present, keyed on run_key");
+  // A member PR still converging tempers the frontier to converging; the label prefers the run phase.
+  assertEquals(dg?.stage, "converging");
+  assertEquals(dg?.stage_label, "Running");
+  assertEquals(dg?.active, 1);
+  assertEquals(dg?.pr_count, 2);
+  assertEquals(JSON.parse(dg?.pr_keys ?? "[]").sort(), ["a/b#1", "c/d#9"]);
+  // A delivery run's member PRs are not epic slices, so no epic phase label is projected onto them.
+  const prById = (k: string) => stores.pull_requests.find((r: any) => r.pr_key === k);
+  assertEquals(prById("a/b#1").epic_phase_label ?? null, null);
+  assertEquals(prById("c/d#9").epic_phase_label ?? null, null);
+});
+
+test("pollLineage: a delivery run_key colliding with a feature key does not overwrite the feature thread", async () => {
+  // The SQL view (migration 079) classifies epic > feature > delivery, so a `delivery_graph_runs.run_key`
+  // that equals an existing `feature_key`/`plan_key` must NOT clobber that earlier thread — otherwise the
+  // poller would stamp delivery-derived frontier columns onto a row the view still classifies feature/epic,
+  // and the two projections drift. The colliding run is skipped; feature precedence is preserved.
+  const { data, stores } = memData();
+  stores.feature_runs = [
+    { feature_key: "o/r#7", title: "Feature seven", issue_url: "u7", status: "converging", process_key: "f7", pr_key: "o/r#700" },
+  ];
+  stores.plans = [];
+  stores.plan_tasks = [];
+  stores.delivery_graph_runs = [
+    { run_key: "o/r#7", title: "Colliding run", status: "running", phase: "Running", process_key: "P-dup" },
+  ];
+  stores.pull_requests = [
+    { pr_key: "o/r#700", title: "Feat PR", url: "x", status: "converging", current_round: 2, process_key: "c1", outcome: null, root_request_key: "o/r#7" },
+  ];
+
+  await pollLineage(data);
+
+  const threads: LineageThreadRow[] = stores.lineage_threads;
+  assertEquals(threads.length, 1, "the colliding run does not create a second row for the same key");
+  const t = threads.find((r) => r.root_request_key === "o/r#7");
+  assert(t, "the single thread for the shared key is the feature thread");
+  assertEquals(t?.stage_label, "Converging (round 2)", "feature frontier wins; the delivery run did not overwrite it");
 });
 
 test("pollLineage: a self-rooted PR row (root_request_key === pr_key) projects exactly one thread keyed on its pr_key", async () => {

@@ -70,7 +70,7 @@
       "type": "text",
       "id": "subtitle",
       "props": {
-        "text": "One narrative per request, not a card-swap. Each row is a single arc of your intent \u2014 request \u2192 implementing \u2192 PR opened \u2192 converging (round n) \u2192 merged/converged/abandoned \u2014 stitched from the feature/epic that started it, the PR(s) it produced, and their convergence + merge outcome. The Stage column is the active frontier; drill into a row for its member PR(s) and rounds. Epics fan out to N PR sub-threads. A human/webhook PR with no originating request is shown as its own root.",
+        "text": "One narrative per request, not a card-swap. Each row is a single arc of your intent \u2014 request \u2192 implementing \u2192 PR opened \u2192 converging (round n) \u2192 merged/converged/abandoned \u2014 stitched from the feature/epic that started it, the PR(s) it produced, and their convergence + merge outcome. The Stage column is the active frontier; drill into a row for its member PR(s) and rounds. Epics fan out to N PR sub-threads. A delivery-graph run is a fan-in parent thread: the heterogeneous downstream PR convergences it spawns (across different repos/issues) nest under the run, whose frontier reflects its derived phase. A human/webhook PR with no originating request is shown as its own root.",
         "variant": "sub"
       }
     },
