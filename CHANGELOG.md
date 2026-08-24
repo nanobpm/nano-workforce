@@ -1,3 +1,9 @@
+## [0.135.0](https://github.com/nanobpm/nano-workforce/compare/v0.134.0...v0.135.0) (2026-08-24)
+
+### Features
+
+* **delivery-graph:** preview DI for agent-staged proposals ([#511](https://github.com/nanobpm/nano-workforce/issues/511)) ([#513](https://github.com/nanobpm/nano-workforce/issues/513)) ([34f0950](https://github.com/nanobpm/nano-workforce/commit/34f0950fdbb7a9eec9e09d6f84cff46de09ea830))
+
 ## [0.134.0](https://github.com/nanobpm/nano-workforce/compare/v0.133.1...v0.134.0) (2026-08-24)
 
 ### Features
