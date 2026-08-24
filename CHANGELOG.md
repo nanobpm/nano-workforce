@@ -1,3 +1,9 @@
+## [0.137.0](https://github.com/nanobpm/nano-workforce/compare/v0.136.0...v0.137.0) (2026-08-24)
+
+### Features
+
+* single-source plan-family read models onto @nanobpm/urban defineRollup/defineReadModel ([#493](https://github.com/nanobpm/nano-workforce/issues/493)) ([#512](https://github.com/nanobpm/nano-workforce/issues/512)) ([2837636](https://github.com/nanobpm/nano-workforce/commit/283763689cc2d0780393efe7c51b09d7c2bef767)), closes [468/#469](https://github.com/468/nano-workforce/issues/469) [#2](https://github.com/nanobpm/nano-workforce/issues/2) [#503](https://github.com/nanobpm/nano-workforce/issues/503)
+
 ## [0.136.0](https://github.com/nanobpm/nano-workforce/compare/v0.135.0...v0.136.0) (2026-08-24)
 
 ### Features
