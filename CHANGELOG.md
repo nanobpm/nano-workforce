@@ -1,3 +1,9 @@
+## [0.139.2](https://github.com/nanobpm/nano-workforce/compare/v0.139.1...v0.139.2) (2026-08-24)
+
+### Bug Fixes
+
+* **delivery-graphs:** stop the in-flight grid headers wrapping to 0-width columns ([#538](https://github.com/nanobpm/nano-workforce/issues/538)) ([#539](https://github.com/nanobpm/nano-workforce/issues/539)) ([c52e85b](https://github.com/nanobpm/nano-workforce/commit/c52e85bf38edef680914df0336ff95c98a364059))
+
 ## [0.139.1](https://github.com/nanobpm/nano-workforce/compare/v0.139.0...v0.139.1) (2026-08-24)
 
 ### Bug Fixes
