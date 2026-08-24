@@ -18,6 +18,7 @@ import type { EngineClient } from "@nanobpm/urban";
 import type { DeliveryFact, DeliveryGraph, DeliveryNode } from "../nano-generated/api-io.d.ts";
 import { assertNever, compileDeliveryGraph, DELIVERY_GRAPH_PROCESS_ID } from "./deliveryGraphCompiler.ts";
 import { DEFAULT_EVERY_MS, msToIsoDuration, parseProbe, readinessPollEvery } from "./readiness.ts";
+import { isoDuration } from "./reviewWait.ts";
 
 /** The content digest of a compiled graph — `sha256(bpmn)[:12]` — the single source of truth for the
  * content-addressed deploy id (`delivery-graph-<digest>`) AND the dispatch fence's default idempotency
@@ -174,7 +175,7 @@ function buildNodeInput(
 ): NodeInput {
   switch (node.kind) {
     case "agent":
-      return { jobType: node.agent.jobType, appendPrompt: node.agent.prompt ?? "", timeout: node.agent.timeout ?? ctx.nodeTimeout };
+      return { jobType: node.agent.jobType, appendPrompt: node.agent.prompt ?? "", timeout: isoDuration(node.agent.timeout, ctx.nodeTimeout) };
     case "wait": {
       const probe = parseProbe(node.wait);
       return {
@@ -201,7 +202,7 @@ function buildNodeInput(
         target: node.connector.target,
         dedupeKey: node.connector.dedupeKey ?? null,
         payload: node.connector.payload ?? null,
-        timeout: node.connector.timeout ?? ctx.nodeTimeout,
+        timeout: isoDuration(node.connector.timeout, ctx.nodeTimeout),
       };
     default:
       return assertNever(node, "buildNodeInput");

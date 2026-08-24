@@ -1409,7 +1409,7 @@ components:
                   description: OPTIONAL steering prompt appended to the node's job brief.
                 timeout:
                   type: string
-                  pattern: '^P(?!$)(\d+Y)?(\d+M)?(\d+W)?(\d+D)?(T(?=\d)(\d+H)?(\d+M)?(\d+S)?)?$'
+                  pattern: '^[Pp](?!$)(\d+[Yy])?(\d+[Mm])?(\d+[Ww])?(\d+[Dd])?([Tt](?=\d)(\d+[Hh])?(\d+[Mm])?(\d+[Ss])?)?$'
                   description: >-
                     OPTIONAL per-node ISO-8601 SLA timeout (#505). Overrides the run-level `nodeTimeout`
                     (and the `PT1H` default) for THIS node's bounded-timeout → escalate boundary timer, so
@@ -1506,7 +1506,7 @@ components:
                   description: Minimal forward-declared payload stub — the concrete connector payload schema is deferred (ADR non-goal).
                 timeout:
                   type: string
-                  pattern: '^P(?!$)(\d+Y)?(\d+M)?(\d+W)?(\d+D)?(T(?=\d)(\d+H)?(\d+M)?(\d+S)?)?$'
+                  pattern: '^[Pp](?!$)(\d+[Yy])?(\d+[Mm])?(\d+[Ww])?(\d+[Dd])?([Tt](?=\d)(\d+[Hh])?(\d+[Mm])?(\d+[Ss])?)?$'
                   description: >-
                     OPTIONAL per-node ISO-8601 SLA timeout (#505). Overrides the run-level `nodeTimeout`
                     (and the `PT1H` default) for THIS connector node's bounded-timeout → escalate boundary
@@ -1613,20 +1613,20 @@ components:
           description: OPTIONAL idempotency key. A re-dispatch with the same key (or, when omitted, the same digest) does not double-launch. Blank/whitespace is treated as absent.
         nodeTimeout:
           type: string
-          pattern: '^P(?!$)(\d+Y)?(\d+M)?(\d+W)?(\d+D)?(T(?=\d)(\d+H)?(\d+M)?(\d+S)?)?$'
+          pattern: '^[Pp](?!$)(\d+[Yy])?(\d+[Mm])?(\d+[Ww])?(\d+[Dd])?([Tt](?=\d)(\d+[Hh])?(\d+[Mm])?(\d+[Ss])?)?$'
           description: >-
             OPTIONAL run-level ISO-8601 SLA timeout for `agent`/`connector` nodes (#505) — the
             bounded-timeout → escalate boundary bound every such node inherits unless it declares its own
             per-node `timeout`. Absent → the `PT1H` default. An invalid duration is rejected at submit.
         probeTimeout:
           type: string
-          pattern: '^P(?!$)(\d+Y)?(\d+M)?(\d+W)?(\d+D)?(T(?=\d)(\d+H)?(\d+M)?(\d+S)?)?$'
+          pattern: '^[Pp](?!$)(\d+[Yy])?(\d+[Mm])?(\d+[Ww])?(\d+[Dd])?([Tt](?=\d)(\d+[Hh])?(\d+[Mm])?(\d+[Ss])?)?$'
           description: >-
             OPTIONAL run-level ISO-8601 poll budget for `wait` gates (#505) before they escalate. Absent →
             the `PT30M` default. An invalid duration is rejected at submit.
         escalationSlaTimeout:
           type: string
-          pattern: '^P(?!$)(\d+Y)?(\d+M)?(\d+W)?(\d+D)?(T(?=\d)(\d+H)?(\d+M)?(\d+S)?)?$'
+          pattern: '^[Pp](?!$)(\d+[Yy])?(\d+[Mm])?(\d+[Ww])?(\d+[Dd])?([Tt](?=\d)(\d+[Hh])?(\d+[Mm])?(\d+[Ss])?)?$'
           description: >-
             OPTIONAL run-level ISO-8601 SLA for `human` nodes (#505) before they record an `escalated`
             outcome. Absent → the `P1D` default. An invalid duration is rejected at submit.

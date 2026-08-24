@@ -186,6 +186,30 @@ test("a per-node timeout override wins for its node while siblings keep the run/
   assertEquals(connector?.timeout, "PT10M"); // connector per-node override wins too
 });
 
+test("a per-node timeout is normalized (lower-case → canonical) and a malformed one falls back to the run value (#505)", async () => {
+  // A graph built programmatically (bypassing the OpenAPI pattern) can carry a lower-case or malformed
+  // per-node duration. The runner normalizes it through `isoDuration` so a bad value never bakes an
+  // uninterpretable boundary timer: `pt4h` → `PT4H`, and `nonsense` falls back to the run-level default.
+  const graph: DeliveryGraph = {
+    name: "per-node normalization",
+    nodes: [
+      { id: "lower", kind: "agent", agent: { jobType: "senior:feature", timeout: "pt4h" } },
+      { id: "bad", kind: "connector", connector: { target: "slack:post", dedupeKey: "n-1", timeout: "nonsense" } },
+    ],
+    edges: [{ from: "lower", to: "bad" }],
+  } as unknown as DeliveryGraph;
+  const p = await prepareOk(graph, { nodeTimeout: "PT2H" });
+  const agent = Object.values(p.nodeInputs).find((v) => (v as { jobType?: string }).jobType === "senior:feature") as
+    | { timeout: string }
+    | undefined;
+  const connector = Object.values(p.nodeInputs).find((v) => (v as { target?: string }).target === "slack:post") as
+    | { timeout: string }
+    | undefined;
+
+  assertEquals(agent?.timeout, "PT4H"); // lower-case normalized to canonical form
+  assertEquals(connector?.timeout, "PT2H"); // malformed value rejected → run-level default
+});
+
 test("a malformed graph returns the S1 compile errors and prepares nothing", async () => {
   const r = await prepareDeliveryGraph({ nodes: [{ id: "a", kind: "agent", agent: { jobType: "j" } }], edges: [{ from: "a", to: "ghost" }] } as unknown as DeliveryGraph);
   assert(!r.ok, "a dangling edge fails to prepare");
