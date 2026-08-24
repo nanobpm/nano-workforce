@@ -279,8 +279,12 @@ multi-track render would be a separate renderer change, out of scope here. **v1 
 pipeline's `notInPathField` (the skipped-path axis) for the aggregate** — the reduction exposes only the
 scalar `activeField` + terminal `state`, so no deterministic skipped-set rollup is defined and equivalent
 graphs cannot diverge on a skipped path they never render; a per-branch skipped-set rollup onto
-`notInPathField` is deferred with the set-valued renderer change (out of scope). The per-node steps remain
-individually well-defined underneath the reduction. Because the canonical unit union carries more
+`notInPathField` is deferred with the set-valued renderer change (out of scope). The per-node steps are
+individually well-defined **only in the conceptual / S8 element-instance model** underneath the
+reduction; at S7's coarse fidelity an active agent/wait/connector node exposes only `Running` with **no
+node id** (`deriveDeliveryPhase`), so S7 assigns it **no individual cell step** and renders a single
+coarse run-level step — the per-cell reduction becomes observable only once S8 binds the element-instance
+topology. Because the canonical unit union carries more
 terminal states than `done`/`failed` (a branch can end `merged` / `converged` / `skipped` / `blocked` /
 `abandoned`), the rule first **normalizes** each terminal branch — reusing the **shipped
 `featureReadModel` `stage_state` tiers** (`app/featureReadModel.ts`: `STAGE_DONE_STATUSES` + the
@@ -289,7 +293,13 @@ the already-canonical `done` stays `done`, and `merged` / `converged` likewise c
 **successful** terminal (`done`); `failed` / `skipped` /
 `abandoned` collapse to a **failed** terminal; and `blocked` stays the renderer's **distinct `blocked`**
 state — *not* folded into `done` or `failed`, preserving the existing per-node semantics (`skipped` is a
-failed-tier terminal there, not a success; `blocked` is its own terminal). For the frontier precedence
+failed-tier terminal there, not a success; `blocked` is its own terminal). These canonical tiers are
+**not** fed to the renderer as-is: the `pipeline` column's `state` field accepts only `ok` / `failed` /
+`blocked` / `null` (`app/stage.ts` `StageState`), so when rendered the **successful** terminal (`done`)
+must map to `activeField = Done` with `state = ok`, the **failed** tier to `state = failed`, and
+`blocked` to the distinct `blocked` state — the raw canonical `done` never reaches the renderer's
+`stateField` (any other string silently degrades to in-progress, so a converged terminal must not be fed
+`done` verbatim). For the frontier precedence
 below, `done` is the only **successful** terminal, while both `failed` and `blocked` are **non-success,
 operator-actionable** terminals — so the combinations below are defined over `done` (success) vs. a
 non-success terminal (`failed`/`blocked`). The rule must then define the **terminal combinations** the least-advanced-*active*
@@ -342,8 +352,11 @@ task is open. It is coarser still for the other two, for reasons that must be st
   *initial* Planning phase carries only the `plans` row — `plan_tasks` rows first become available once
   **Reviewing** starts, where `record-plan` *does* write them, so from Reviewing on it is not literally
   row-less — but **no field exposes the current
-  pre-PR process position** (which plan/review activity is live), and there is no PR row or open user
-  task for it. Only the write-time `epic_phase` stamp (`app/epicPhase.ts`) and the plan/PR rollups
+  pre-PR process position** (which plan/review activity is live): there is no PR row, and while the
+  `plan-review-decision` user-task park *is* a real open user-task signal for the Reviewing decision
+  point, no field surfaces the **complete activity position** (which plan/review step is live) — the
+  initial Planning phase and the running plan/review work between decision parks remain unobservable.
+  Only the write-time `epic_phase` stamp (`app/epicPhase.ts`) and the plan/PR rollups
   observe *where* it is. `deriveDeliveryPhase` is the delivery-graph projection only and provides no
   evidence for epic resolution.
 
@@ -498,7 +511,12 @@ deployment-runtime prerequisite noted above), not on #416 alone.
   readiness-probe/timer park or an active `implement-task` all to `Implementing`), and for a
   delivery-graph node running with no open user task (`deriveDeliveryPhase` returns generic `Running`, no
   node id) the stepper renders the configured coarse key derived statelessly from run `status`/`phase` (a *configured* stage — never a
-  fabricated cell position or an unconfigured `activeField` label; see the coarse-case rule in §4b). The **epic pipeline is out of S7 scope**: epic's pre-PR position is unobservable from these
+  fabricated cell position or an unconfigured `activeField` label; see the coarse-case rule in §4b). **The
+  least-advanced-*active* frontier reduction (§4b) is therefore *defined* at S7 but not yet *computable*
+  from this source:** `delivery_graph_runs` stores a **single** `phase`/`phase_node_id` per run, not a
+  per-branch topology, so a VIEW over it cannot compare branch advancement — at S7 the graph collapses to
+  that one coarse run-level step, and the genuine per-branch frontier reduction is deferred to S8's
+  element-instance/topology read model (a single-track feature is unaffected). The **epic pipeline is out of S7 scope**: epic's pre-PR position is unobservable from these
   inputs, so epic keeps its write-provenance `epic_phase` **text cell** as an explicit retained second
   source until S8 (below). The mapping can begin as soon as S4 names the cells; the `pipeline` render
   binding for feature + delivery-graph can start immediately.
@@ -544,10 +562,11 @@ deployment-runtime prerequisite noted above), not on #416 alone.
   set; and (c) `app/lineage.ts` also reads `delivery_graph_runs.phase` to form `LineageThread.stageLabel`
   and persists `lineage_threads.stage_label` (shown on delivery-lineage / home rows), so S8 must supply
   that phase narrative from the derived projection or update the lineage read too, else those rows lose
-  their phase label; and (d) two **page bindings** read `plans.epic_phase` **directly** — the epic index
-  grid (`pages/epic.page.json:119`) and the epic-detail page (`pages/epic-detail.page.json:99,146`) — so
+  their phase label; and (d) **three** **page bindings** read `plans.epic_phase` **directly** — the epic
+  index grid (`pages/epic.page.json:119`), the epic-detail page (`pages/epic-detail.page.json:99,146`),
+  and the nested Epic grid on the Home page (`pages/home.page.json:284`) — so
   retiring the column without repointing these page/schema bindings to the pipeline/read-model field
-  renders a missing field on the epic index and detail pages; S8's checklist must replace them too.
+  renders a missing field on the epic index, epic-detail, and Home pages; S8's checklist must replace them too.
 
 ## Non-goals / deferred
 
