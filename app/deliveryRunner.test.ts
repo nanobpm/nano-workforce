@@ -210,6 +210,21 @@ test("a per-node timeout is normalized (lower-case → canonical) and a malforme
   assertEquals(connector?.timeout, "PT2H"); // malformed value rejected → run-level default
 });
 
+test("a RUN-LEVEL timeout is normalized (lower-case → canonical) and a malformed one falls back to the default (#505)", async () => {
+  // A programmatic caller of prepareDeliveryGraph/runDeliveryGraph bypasses the OpenAPI/door validators,
+  // so a lower-case or malformed run-level `nodeTimeout` must not become the fallback baked into a node's
+  // boundary timer FEEL. isoDuration canonicalizes it (`pt3h` → `PT3H`) at the run level too, and a
+  // malformed value falls back to the DEFAULTS run value rather than an uninterpretable duration.
+  const lower = await prepareOk(GRAPH, { nodeTimeout: "pt3h" });
+  for (const v of Object.values(lower.nodeInputs).filter((v) => "timeout" in v)) {
+    assertEquals((v as { timeout: string }).timeout, "PT3H"); // lower-case run value normalized
+  }
+  const bad = await prepareOk(GRAPH, { nodeTimeout: "nonsense" });
+  for (const v of Object.values(bad.nodeInputs).filter((v) => "timeout" in v)) {
+    assertEquals((v as { timeout: string }).timeout, "PT1H"); // malformed run value → PT1H default, never baked raw
+  }
+});
+
 test("a malformed graph returns the S1 compile errors and prepares nothing", async () => {
   const r = await prepareDeliveryGraph({ nodes: [{ id: "a", kind: "agent", agent: { jobType: "j" } }], edges: [{ from: "a", to: "ghost" }] } as unknown as DeliveryGraph);
   assert(!r.ok, "a dangling edge fails to prepare");

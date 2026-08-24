@@ -111,11 +111,14 @@ export async function prepareDeliveryGraph(
   const bpmn = rewriteProcessId(compiled.bpmn, processDefinitionId);
 
   const runKey = options.runKey?.trim() || randomUUID();
+  // Normalize the run-level timeouts through isoDuration so a programmatic caller that bypasses the
+  // OpenAPI/door validators cannot bake a malformed or lower-case duration into a BPMN timer FEEL —
+  // isoDuration canonicalizes case and falls back to the default on a malformed/blank value.
   const timeouts = {
-    nodeTimeout: options.nodeTimeout ?? DEFAULTS.nodeTimeout,
-    probeTimeout: options.probeTimeout ?? DEFAULTS.probeTimeout,
-    probePollEvery: options.probePollEvery ?? DEFAULTS.probePollEvery,
-    escalationSlaTimeout: options.escalationSlaTimeout ?? DEFAULTS.escalationSlaTimeout,
+    nodeTimeout: isoDuration(options.nodeTimeout, DEFAULTS.nodeTimeout),
+    probeTimeout: isoDuration(options.probeTimeout, DEFAULTS.probeTimeout),
+    probePollEvery: isoDuration(options.probePollEvery, DEFAULTS.probePollEvery),
+    escalationSlaTimeout: isoDuration(options.escalationSlaTimeout, DEFAULTS.escalationSlaTimeout),
     escalationAssignee: options.escalationAssignee ?? null,
   };
   const elementByNodeId = new Map(compiled.resolved.nodes.map((n) => [n.id, n.element]));
