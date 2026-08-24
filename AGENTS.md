@@ -229,7 +229,18 @@ Two different `nano:dataEnvelope` uses have different rules — don't conflate t
   `ioMapping` to synthesise it. (A field already materialised in scope by the
   process — e.g. `ReadinessProbeIn.probe`, seeded per multi-instance child via
   `inputElement="probe"` in `resources/processes/feature.bpmn` — needs no such
-  seeding.)
+  seeding.) A **constant/literal** ioMapping source is different again: a
+  `<zeebe:input source="=true" target="lastAttempt"/>` (the readiness-gate
+  boundary's last-attempt marker — `readiness-gate.bpmn:125`, `feature.bpmn:105`,
+  `plan-fanout.bpmn:198`, and the generated `deliveryGraphCompiler.ts:1011`) is
+  *evaluated* and materialised into the job's scope, so it needs **no** backing
+  process variable — its value is the literal, not a reference to an (absent)
+  variable. The "arrives blank" failure above is specific to a field whose value
+  must be *derived from a process variable that isn't in scope* (the `gateKey`
+  case). Do **not** "fix" a working literal marker like `lastAttempt` by seeding
+  it as a process variable: besides being unnecessary, seeding a var an
+  in-subprocess gateway reads re-introduces the multi-instance `=null`-shadow
+  gotcha above.
 
 ## Urban page runtime: rendering primitives are not JS-truthy
 
@@ -316,7 +327,8 @@ Migrations live in `db/migrations/*.sql` and are **auto-applied on boot** from
   agent compute "the next free" prefix. Two files must never share a prefix; `npm run check:migrations`
   (a CI gate) enforces this and fails the build on any new duplicate. Because a
   prefix collision only exists in the *union* of two branches, this gate — like
-  `layout:check` and the generated-artifact `--check`s — is also re-run on the
+  `layout:check`, the navigation-index check (`sync:nav:check`), and a catch-all
+  committed-artifact backstop (`git diff --exit-code`) — is also re-run on the
   merge queue's **prospective merged commit** and on **push to `main`** by
   `.github/workflows/invariants.yml` (issue #366), so a merge-skew collision is
   blocked at merge time or fails a `main`-scoped build within minutes rather than
