@@ -1,3 +1,9 @@
+## [0.134.0](https://github.com/nanobpm/nano-workforce/compare/v0.133.1...v0.134.0) (2026-08-24)
+
+### Features
+
+* **delivery-graph:** node timeout PT1H default, submission + per-node override ([#505](https://github.com/nanobpm/nano-workforce/issues/505)) ([#507](https://github.com/nanobpm/nano-workforce/issues/507)) ([96fe961](https://github.com/nanobpm/nano-workforce/commit/96fe96165bb898919f7000002e68cb4ba5a925e9))
+
 ## [0.133.1](https://github.com/nanobpm/nano-workforce/compare/v0.133.0...v0.133.1) (2026-08-24)
 
 ### Bug Fixes
