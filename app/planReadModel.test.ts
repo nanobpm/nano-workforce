@@ -49,6 +49,7 @@ const MIGRATION_CHAIN = [
   "080_plan_read_model_derive_terminal.sql",
   ROLLUPS_MIGRATION,
   READ_MODEL_MIGRATION,
+  "084_plan_wave_tasks_effective_status.sql",
 ];
 
 // The base `plans` / `plan_tasks` / `pull_requests` shapes the VIEWs read, plus a stand-in for the
@@ -428,6 +429,28 @@ test("plan_wave_tasks carries each task's PR url + process_key link targets (unc
   const rows = db.prepare("SELECT pr_key, pr_url, process_key FROM plan_wave_tasks WHERE plan_key = ? ORDER BY task_index").all("o/r#lt") as Array<Record<string, unknown>>;
   assert(rows[0].pr_url != null && rows[0].process_key != null, "an opened slice links to its PR url + process instance");
   assertEquals({ pr_url: rows[1].pr_url, process_key: rows[1].process_key }, { pr_url: null, process_key: null });
+});
+
+test("plan_wave_tasks derives status=merged from the PR (never strands a landed slice at 'opened') — matching the summary bar", () => {
+  // The reported defect (#530): a slice whose PR converged + merged kept reading Status "opened" in
+  // the wave-state grid, because nothing writes `plan_tasks.status='merged'` on merge and the VIEW
+  // exposed the raw task status. The fix DERIVES the displayed status the SAME way the count VIEWs
+  // bucket `merged` — `pull_requests__tracking.derived_status = 'merged'` overrides the raw status —
+  // so the per-task grid and the per-wave summary bar agree.
+  const db = viewDb();
+  addPlan(db, "o/r#eff", { status: "done" });
+  addTask(db, "o/r#eff", { status: "opened", wave: 0, prStatus: "merged" }); // landed slice, task row frozen at "opened"
+  addTask(db, "o/r#eff", { status: "opened", wave: 0, prStatus: "converging" }); // still converging → stays "opened"
+  addTask(db, "o/r#eff", { status: "blocked", wave: 0 }); // no PR → raw status untouched
+  // A DERIVE-ONLY merged edge (base PR status frozen, tracking recomputes to `merged`) also reads merged.
+  addTask(db, "o/r#eff", { status: "opened", wave: 1, prStatus: "converging", prDerivedOverride: "merged" });
+  const byWaveIdx = db
+    .prepare("SELECT wave, task_index, status FROM plan_wave_tasks WHERE plan_key = ? ORDER BY task_index")
+    .all("o/r#eff") as Array<Record<string, unknown>>;
+  assertEquals(byWaveIdx.map((r) => r.status), ["merged", "opened", "blocked", "merged"]);
+  // The count VIEW and the per-task grid now agree on the merged tally for wave 0 (3 slices, 1 merged).
+  const c = db.prepare("SELECT merged, total FROM plan_wave_counts WHERE plan_key = ? AND wave = 0").get("o/r#eff") as Record<string, unknown>;
+  assertEquals({ merged: Number(c.merged), total: Number(c.total) }, { merged: 1, total: 3 });
 });
 
 test("the operator pages bind the derived plan-family VIEWs (never the raw plans table)", () => {
