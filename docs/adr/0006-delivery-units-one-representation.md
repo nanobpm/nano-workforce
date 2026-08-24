@@ -187,6 +187,76 @@ representation. These unions are **not** identical today — features use
 separate node contract — plus the per-shape mapping and precedence and the write/`instanceTracking`
 behavior — not merely projecting an existing value.
 
+### 4b. One derived **stepper** — the cells are the step axis, correlated by `process_key`
+
+§4 collapses the three status *unions* into one derived union; this decision collapses the three
+*progress projections* — the thing an operator actually reads as "where is this unit in its
+lifecycle" — into **one derived stepper**, rendered by **one** primitive across all three surfaces.
+
+Today that projection is triplicated the same way the aggregate is, and at three different maturity
+levels for one idea:
+
+| Surface | Derivation | Step vocabulary | Render |
+|---|---|---|---|
+| **Feature** | `deriveStage` over a read-model VIEW (`app/stage.ts`, mig. 073) — reconciled from the correlated `pull_requests` work-state | `STAGE_KEYS` = Requested → Implementing → PR open → Converging → Merging → Done | the **`pipeline` stepper** kind (`pages/feature.page.json`) |
+| **Epic** | **write-time stamp** by each spine worker (`app/epicPhase.ts`, `ELEMENT_PHASE`) | `EPIC_PHASE` (wave-labelled) | a plain `{{epic_phase}}` **text cell** |
+| **Delivery graph** | engine-truth poll of open **user tasks** (`pollDeliveryGraphPhase` → `deriveDeliveryPhase`) | `DELIVERY_PHASE` + `Parked on node: X` | a plain `phase` **text cell** |
+
+Three derivations × three vocabularies × two renderers — and only the feature surface renders an
+actual stepper; epic and delivery-graph project a bare string. A change to "the lifecycle steps of a
+unit of work" is the same by-hand-in-three-places drift this ADR exists to remove.
+
+**The step axis is the cells.** Once §2 makes the process a composition of named cells
+(`implement` → `converge?` → `merge?`, plus `wait` / `human` / `escalation`), the ordered cells a unit
+composes **are** its stepper steps — `STAGE_KEYS` is already that sequence written out for the 1-node
+feature. So the canonical step vocabulary is **derived from the cell composition**, defined once (with
+`STAGE_KEYS` as its seed), not re-declared per representation.
+
+**The current step is derived by correlation on `process_key`.** The step vocabulary is the cell
+axis; the projection must answer "which cell has this unit reached." There are two truth sources, and
+§4b's job is to fuse them into one:
+
+- **Engine truth — the furthest element reached — IS available on the runtime.** nwf runs against
+  **Nano's Rust engine over its REST API** (not the wasm testkit). That API exposes a full
+  element-instance read model: `GET/POST /v2/element-instances` (`searchElementInstances` →
+  `elementId` + `elementType` + element **state**, keyed by process-instance) and
+  `/v2/element-instances/.../wait-states` (`searchElementInstanceWaitStates` → **job and message**
+  parks, not only user tasks). With namespaced cell element ids (§2), "furthest element reached" maps
+  directly to "furthest cell reached" — the sharpest possible signal, and it sees a token mid-cell
+  (an active `implement` job) that no work-table row has caught up to yet.
+- **Work-table truth — the correlated downstream state.** `pull_requests` (and siblings), keyed by
+  `process_key` / `pr_key`, carry the convergence/merge sub-state (`converging` / `waiting_review` /
+  `merging` / …) that `instanceTracking` + `deriveStage` already reconcile.
+
+The current step is the **furthest cell whose entry-signal has fired**, taking the engine element
+instance as the primary signal and the work-table state as the corroborating/enriching one, correlated
+by `process_key` — the single handle already on every aggregate and every `instanceTracking` binding.
+For the N-node shapes the per-node step rolls up to the aggregate (an epic's wave stepper is the
+frontier over its nodes' cell steps) — a rollup over the **node rows** (§1), not over engine child
+instances: because engine-core **inline-expands `callActivity` at deploy**, a composed unit is **one
+flat instance**, so there is no child-instance tree to walk and the element-instance query already
+sees every inlined cell's elements under the one process-instance key.
+
+**The binding, not the engine, is the current limiter — and that is the claim to retire.** The
+`@nanobpm/urban` `EngineClient` binding nwf consumes surfaces only `searchProcessInstances` +
+`searchUserTasks` today, so nwf cannot *yet* read the element-instance model the engine already serves.
+This is exactly why the two existing derivations are workarounds: `pollDeliveryGraphPhase`
+(`app/deliveryGraphRun.ts`) can only see **user-task** parks (missing job/message parks and active
+elements), and epic's `epic_phase` (`app/epicPhase.ts`, nano-ide#266) projects from **write-provenance**
+(each worker stamps its own `job.elementId`) *because* a live "furthest element" query wasn't surfaced.
+The enabling upstream step is therefore to **surface `searchElementInstances` / wait-states on the
+`EngineClient` binding** (nano-ide / urban), after which both workarounds collapse into one live
+element-instance projection over the cell axis.
+
+**v1 ships on what's correlated today; the element-instance query is the sharpening upgrade.** Until
+the binding surfaces the element model, §4b's projection is derivable *now* from the same two half-truths
+the mature surfaces already use — user-task parks (`searchUserTasks`) plus work-table state
+(`pull_requests` by `process_key`) — merged over the cell axis and rendered by one stepper. When the
+binding lands the element query, the projection swaps its park/position source for the live engine
+element instance **without changing the step axis, the correlation handle, or the renderer** — the seam
+stays put. So §4b is shippable on today's runtime and strictly sharpens later, and it retires *both* the
+`epic_phase` write-time stamp and the user-task-only delivery-graph poll into one derivation.
+
 ### 5. Preserve — the static-vs-adaptive execution axis (do NOT bundle it)
 
 This ADR consolidates the *representation*, not the *execution strategy*. ADR 0005's deliberate
@@ -214,6 +284,15 @@ their topology is produced. Unifying that axis is explicitly out of scope here.
   the process slices are sequenced behind the (now-live) engine-wasm unlock. No behaviour change is
   intended — this is a representation consolidation, guarded by parity tests against the existing VIEWs
   and by the deploy+run engine tests.
+- **One stepper kills the second-order drift.** The unit's *progress projection* — the thing an
+  operator reads as "where is this in its lifecycle" — is triplicated the same way the aggregate is
+  (feature's `deriveStage`, epic's write-time `epic_phase`, delivery-graph's `pollDeliveryGraphPhase`),
+  and only feature renders an actual stepper; epic and delivery-graph render a bare string. §4b collapses
+  the three onto one derivation over the cell axis, correlated by `process_key`, rendered by one
+  `pipeline` kind on all three pages. Feature + delivery-graph unify with **no engine change** (S7);
+  the *only* upstream dependency is surfacing the element-instance query on the `@nanobpm/urban`
+  `EngineClient` binding (S8) — the engine already serves it — which is what finally retires epic's
+  write-provenance stamp into the same live derivation.
 
 ## Rollout (see #464 for the live checklist)
 
@@ -251,6 +330,26 @@ deployment-runtime prerequisite noted above), not on #416 alone.
   merge (unit → base branch; graph → `main`).
 - **S6 · compiler emits calls** — `deliveryGraphCompiler` references shared cells instead of inlining
   per-node copies.
+- **S7 · one derived stepper — v1 on today's surface** (Decision §4b) — define the step axis as the
+  composed cells (seeded from `STAGE_KEYS`), derive current-step by correlating `process_key` with
+  user-task parks (`searchUserTasks`) **+** work-table state (`pull_requests` …) over the cell axis, and
+  **promote the `pipeline` stepper kind** (feature-only today) onto the epic and delivery-graph pages,
+  replacing the two bare `epic_phase` / `phase` text cells. This needs **no** engine-binding change:
+  feature + delivery-graph collapse onto one derivation and one renderer now; epic keeps its
+  write-provenance `epic_phase` stamp for its pre-PR phases (see S8). The step vocabulary can begin as
+  soon as S4 names the cells; the `pipeline` render binding can start immediately.
+- **S8 · surface the element-instance query → retire the epic write-stamp** (Decision §4b) — the one
+  slice that **does** depend on an upstream binding change. Nano's Rust engine already serves the
+  element-instance read model (`/v2/element-instances` `searchElementInstances` +
+  `.../wait-states` — active elements and **job/message** parks, not only user tasks), but the
+  `@nanobpm/urban` `EngineClient` binding nwf consumes surfaces only `searchProcessInstances` +
+  `searchUserTasks`. Surface `searchElementInstances` / wait-states on the binding (upstream in
+  nano-ide / urban), then swap the S7 projection's park/position source for the live engine element
+  instance — **without changing the step axis, the `process_key` correlation, or the renderer**. This is
+  what lets epic's **Planning / Reviewing** phases (which run inside `plan-fanout.bpmn` before any PR
+  exists and are neither user-task parks nor work-table rows — today knowable only from write-provenance)
+  become a pure read-model derivation, retiring the `epic_phase` write-time stamp (`app/epicPhase.ts`,
+  nano-ide#266) and the user-task-only `pollDeliveryGraphPhase` into one live projection.
 
 ## Non-goals / deferred
 
