@@ -297,8 +297,11 @@ topology. Because the canonical unit union carries more
 terminal states than `done`/`failed` (a branch can end `merged` / `converged` / `skipped` / `blocked` /
 `abandoned`), the rule first **normalizes** each terminal branch — reusing the **shipped
 `featureReadModel` `stage_state` tiers** (`app/featureReadModel.ts`: `STAGE_DONE_STATUSES` + the
-`stage_state` CASE) verbatim rather than inventing a second mapping, per derivation-over-duplication:
-the already-canonical `done` stays `done`, and `merged` / `converged` likewise collapse to that same
+`stage_state` CASE) as the tier basis rather than inventing a second mapping, per derivation-over-duplication.
+Note `done` is **not** itself emitted by the feature model — its `STAGE_DONE_STATUSES`
+(`app/featureReadModel.ts:41`) omits `done` and `stage_state` yields only `ok` / `blocked` / `failed` /
+`null`; `done` is the **new** canonical success value the delivery-unit / plan / graph unions introduce.
+The union normalizes explicitly: its success terminal — `done`, and likewise `merged` / `converged` — collapses to that same
 **successful** terminal (`done`); `failed` / `skipped` /
 `abandoned` collapse to a **failed** terminal; and `blocked` stays the renderer's **distinct `blocked`**
 state — *not* folded into `done` or `failed`, preserving the existing per-node semantics (`skipped` is a
@@ -399,7 +402,11 @@ a **first observation with no prior key** (a freshly `running` `delivery_graph_r
 key (literally **`Requested`**, `STAGE_KEYS[0]`) — so the scalar `activeField` is never undefined. The same rule must cover the **`awaiting-approval`** rows
 `delivery-graphs.page.json` filters into the active grid: migration 058 gives these a `phase =
 "Awaiting approval"` and a **NULL `process_key`** (no engine instance yet), so they have no observable
-element and no prior lifecycle key — S7 must map them to that same deterministic **initial** pre-run
+element and no prior lifecycle key. **`awaiting-approval` is a legacy/reserved status — no longer
+produced** (issue #460 moved dispatch to an operator action; the current producer claims a run directly
+as `running`, `app/deliveryGraphDispatch.ts:104`), so this is only a **fallback for old rows**, not a
+current pre-dispatch path — S7 must **not** reintroduce a removed approval flow. Those retained rows map
+to that same deterministic **initial** pre-run
 `STAGE_KEYS` value, literally **`Requested`** (they are dispatch-pending, before `Implementing`), not leave their `activeField`
 undefined. It
 must never fabricate a specific cell position it cannot observe. The **epic pipeline is deferred to S8**:
@@ -502,8 +509,9 @@ deployment-runtime prerequisite noted above), not on #416 alone.
   root mapping** (`app/lineage.ts` `collectRootPrs` over `pull_requests.root_request_key`), and engine
   parks by the run's own `process_key`. Note the root mapping is **not** a single clean
   `root_request_key = run_key` join for every PR, and the per-node correlation **differs by node kind**,
-  so S7 must **define/persist a run-level root rollup** (or document the per-node correlation and how it
-  aggregates to the run) rather than assume one join: a **connector** PR roots by the connector's
+  so S7 must **persist a run-level root rollup** — a stored run→node/PR mapping, or a canonical run root
+  threaded through every PR-producing node — **not** merely *document* the existing per-node keys (which
+  alone leaves the **agent** case below unattributed), rather than assume one join: a **connector** PR roots by the connector's
   *effective* `dedupeKey` — the author-supplied `connector.dedupeKey`, else the graph-derived
   `<processInstanceKey>:<elementId>` (`app/deliveryConnector.ts` `connectorDedupeKey`) — threaded into
   `submitPr` as its `rootRequestKey`; whereas an **agent** PR has **no `dedupeKey` at all** (the runner
@@ -511,15 +519,22 @@ deployment-runtime prerequisite noted above), not on #416 alone.
   `ioMappingLines`, never a dedupe/root key), so it **self-roots on its own `pr_key`** (`submitPr`'s
   `effectiveRoot = rootRequestKey ?? existing.root_request_key ?? pr_key`) unless the run explicitly
   threads a root. The run-level rollup S7 defines must therefore attribute the **agent** case explicitly —
-  it cannot lean on the connector's `dedupeKey` fallback, which agent nodes never carry. Engine parks correlate via `searchUserTasks({ processInstanceKey: run.process_key })`, which is
+  it cannot lean on the connector's `dedupeKey` fallback, which agent nodes never carry. The rollup also
+  **defines its precedence over `run.status`**: correlated-PR state **overrides** the raw run status for
+  the live frontier — a `running` run with any member PR still in flight reads as **`Converging`**, not
+  `Implementing` (matching the shipped `deliveryOriginStage`, `app/lineage.ts:332-336`) — whereas a
+  **terminal** run status settles the step **without** waiting on member PRs (`done` → `Done`). So `done`
+  does **not** block on an open PR, but a live `running` frontier must **not** mask PR-open/converging work
+  behind `Implementing`. Engine parks correlate via `searchUserTasks({ processInstanceKey: run.process_key })`, which is
   correct **for today's inlined graphs** (the compiler inlines subProcesses into one flat instance); once
   S4's `callActivity` composition puts a human cell in a **child** instance, this parent-key query would
   miss it, so that step is bound to the S4 inline-vs-child decision (correlate child instances, or keep
   the graph inlined) — it is not a silent promise. Reduce any parallel frontier to the
   **least-advanced active branch** and **promote the `pipeline` stepper
-  kind** (feature-only today) onto the delivery-graph surface — **both** the list page and the detail
-  page (`pages/delivery-graph-detail.page.json:95`, which today renders `delivery_graph_runs.phase` as a
-  plain-text Phase column), so S7 does not leave the detail view on a second renderer while §4b claims the
+  kind** (feature-only today) onto **every** delivery-graph surface — the list page, the detail
+  page (`pages/delivery-graph-detail.page.json:95`), **and** the *Active Delivery Graphs* grid on
+  `pages/overview.page.json:217` — each of which today renders `delivery_graph_runs.phase` as a
+  plain-text Phase column, so S7 does not leave any of those views on a second renderer while §4b claims the
   surface uses the shared stepper. Because `delivery_graph_runs` stores **no
   stage column** (only `phase`/park metadata, whose values such as `Running` are *not* `STAGE_KEYS`), S7
   supplies the pipeline's `activeField`/`state` for the graph from a **read model/VIEW over
@@ -582,11 +597,15 @@ deployment-runtime prerequisite noted above), not on #416 alone.
   set; and (c) `app/lineage.ts` also reads `delivery_graph_runs.phase` to form `LineageThread.stageLabel`
   and persists `lineage_threads.stage_label` (shown on delivery-lineage / home rows), so S8 must supply
   that phase narrative from the derived projection or update the lineage read too, else those rows lose
-  their phase label; and (d) **three** **page bindings** read `plans.epic_phase` **directly** — the epic
-  index grid (`pages/epic.page.json:119`), the epic-detail page (`pages/epic-detail.page.json:99,146`),
-  and the nested Epic grid on the Home page (`pages/home.page.json:284`) — so
-  retiring the column without repointing these page/schema bindings to the pipeline/read-model field
-  renders a missing field on the epic index, epic-detail, and Home pages; S8's checklist must replace them too.
+  their phase label; and (d) **three** **page bindings** read the `epic_phase` field, but **not all read
+  raw `plans`**: the epic index grid (`pages/epic.page.json:119`) and the epic-detail page
+  (`pages/epic-detail.page.json:99,146`) bind it through the **`plan_read_model` VIEW**
+  (`pages/epic.page.json:102`, `pages/epic-detail.page.json:95,140`; the VIEW projects `pl.epic_phase`,
+  `db/migrations/083_plan_read_model_declare_once.sql`), while only the nested Epic grid on the Home page
+  (`pages/home.page.json:284`) binds **raw `plans`** directly — so
+  retiring the column without repointing these bindings to the pipeline/read-model field
+  renders a missing field on the epic index, epic-detail, and Home pages; S8's checklist must update
+  **both** the `plan_read_model` VIEW (or its derived field) **and** the raw-`plans` Home binding, not just raw `plans` references.
 
 ## Non-goals / deferred
 
