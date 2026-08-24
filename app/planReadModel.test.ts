@@ -448,7 +448,7 @@ test("plan_wave_tasks derives status=merged from the PR (never strands a landed 
     .prepare("SELECT wave, task_index, status FROM plan_wave_tasks WHERE plan_key = ? ORDER BY task_index")
     .all("o/r#eff") as Array<Record<string, unknown>>;
   assertEquals(byWaveIdx.map((r) => r.status), ["merged", "opened", "blocked", "merged"]);
-  // The count VIEW and the per-task grid now agree on the merged tally for wave 0 (2 slices, 1 merged).
+  // The count VIEW and the per-task grid now agree on the merged tally for wave 0 (3 slices, 1 merged).
   const c = db.prepare("SELECT merged, total FROM plan_wave_counts WHERE plan_key = ? AND wave = 0").get("o/r#eff") as Record<string, unknown>;
   assertEquals({ merged: Number(c.merged), total: Number(c.total) }, { merged: 1, total: 3 });
 });
