@@ -121,6 +121,49 @@ test("probeSingleShot: inconclusive lastAttempt fallback surfaces its redacted d
   assert(res.detail.includes("fallback: still nothing"), "the fallback diagnostic is preserved");
 });
 
+test("#514 Defect A probeSingleShot: a not-ready capability at the boundary emits a structured WARN with the probe detail + observed releases, and threads `observed` to the return", async () => {
+  // Red before the fix: the boundary last-attempt returned a contextless "gate boundary reached" with
+  // no warn and no observed-release context, so an escalated false-negative was undiagnosable.
+  const capProbe = parseProbe({
+    kind: "capability",
+    target: "github-releases:nanobpm/nano-ide",
+    match: { package: "@nanobpm/urban", capabilityRef: "#468" },
+  });
+  // A live @nanobpm/urban release exists, but its provenance body does NOT (yet) reference #468 — the
+  // exact transient false-negative shape from the incident.
+  const releasesJson = JSON.stringify([
+    [{ tag_name: "@nanobpm/urban@0.82.0", body: "## Provenance\n- #200\n" }],
+  ]);
+  const exec: ProbeExec = {
+    async httpGet(): Promise<HttpResponse> {
+      throw new Error("unused");
+    },
+    async run(): Promise<CommandResult> {
+      return { code: 0, stdout: releasesJson, stderr: "" };
+    },
+  };
+  const warns: string[] = [];
+  let publishes = 0;
+  const res = await probeSingleShot({
+    probe: capProbe,
+    exec,
+    env: {},
+    lastAttempt: true,
+    publish: async () => {
+      publishes += 1;
+    },
+    warn: (msg) => warns.push(msg),
+  });
+  assert(!res.ready, "the boundary attempt is still not-ready");
+  assertEquals(publishes, 0, "a not-ready boundary never publishes readiness-ready");
+  assertEquals(warns.length, 1, "exactly one structured warn is emitted at the boundary last attempt");
+  assert(warns[0].includes("escalating"), "the warn says the gate is escalating");
+  assert(warns[0].includes("capability #468 not published"), "the warn carries the probe's last detail");
+  assert(warns[0].includes("@nanobpm/urban@0.82.0 no #468"), "the warn carries the observed candidate releases");
+  assert((res.observed ?? "").includes("@nanobpm/urban@0.82.0 no #468"), "the observed summary is threaded to the return for the escalation task");
+});
+
+
 test("probeSingleShot: forwards a matcher's bind through publish into the message variables (#274 Gap B)", async () => {
   const published: Array<{ detail: string; bind?: Record<string, string> }> = [];
   const payload = JSON.stringify([{ tag_name: "@nanobpm/urban@0.54.0", body: "## Provenance\n- #274\n" }]);

@@ -50,6 +50,7 @@
           <nano:extend name="detail" type="string" optional="true" />
           <nano:extend name="resolvedArtifact" type="string" optional="true" />
           <nano:extend name="mergedSha" type="string" optional="true" />
+          <nano:extend name="observed" type="string" optional="true" />
         </nano:shape>
         <nano:shape id="ReadinessReady" name="readiness-ready message payload">
           <nano:extend name="ready" type="boolean" />

@@ -120,6 +120,13 @@ export interface ProbeResult {
   readonly ready: boolean;
   readonly detail: string;
   readonly bind?: Record<string, string>;
+  /** An OPTIONAL compact, human-readable summary of what the probe actually OBSERVED at poll time
+   * (issue #514 Defect A). Diagnostic-only — it is NEVER part of the gate contract, it does not gate
+   * readiness, and it carries no secret material (provenance is public). The `capability` kind
+   * populates it with {@link summariseCapabilityCandidates} so an ESCALATION (false-negative wait)
+   * surfaces the candidate releases the matcher saw and whether each referenced the ref, letting a
+   * human/agent tell a genuine "not published yet" from a transient false-negative. */
+  readonly observed?: string;
 }
 
 /** A single published GitHub Release, reduced to the two fields the capability resolver reads: the
@@ -448,6 +455,43 @@ function versionForPackage(tag: string, pkg: string): string | undefined {
   return /^\d+(\.\d+)*$/.test(v) ? v : undefined;
 }
 
+/** A compact, deterministic, BOUNDED summary of the capability candidate releases a probe observed
+ * (issue #514 Defect A). Lists the releases tagged `<match.package>@<version>` (newest first) and,
+ * for each, whether its body referenced `match.capabilityRef` — so an escalated capability gate can
+ * show a human/agent EXACTLY what the probe saw (a genuine "not published yet" vs. a transient
+ * false-negative where a matching release was live but its provenance body was momentarily empty).
+ * PURE / never throws — a malformed or empty list yields a plain "no releases observed" note.
+ * Output is capped (newest {@link CAPABILITY_SUMMARY_LIMIT}) so a repo with hundreds of releases
+ * cannot bloat the escalation form or a log line. Provenance is public — nothing here is redacted. */
+export function summariseCapabilityCandidates(
+  match: ProbeMatch | undefined,
+  releases: readonly GithubRelease[],
+): string {
+  const pkg = match?.package;
+  const ref = match?.capabilityRef;
+  if (!pkg) return "capability: no package configured";
+  const num = ref ? capabilityNumber(ref) : undefined;
+  const candidates: { version: string; refs: boolean }[] = [];
+  for (const rel of releases) {
+    if (!rel || typeof rel.tag !== "string" || typeof rel.body !== "string") continue;
+    const version = versionForPackage(rel.tag, pkg);
+    if (!version) continue;
+    candidates.push({ version, refs: num !== undefined && bodyReferences(rel.body, num) });
+  }
+  if (candidates.length === 0) return `no ${pkg} releases observed`;
+  candidates.sort((a, b) => cmpVersion(b.version, a.version)); // newest first, deterministic
+  const referencing = candidates.filter((c) => c.refs).length;
+  const refLabel = num !== undefined ? `#${num}` : "(no ref configured)";
+  const shown = candidates.slice(0, CAPABILITY_SUMMARY_LIMIT);
+  const parts = shown.map((c) => `${pkg}@${c.version} ${c.refs ? `refs ${refLabel}` : `no ${refLabel}`}`);
+  const more = candidates.length > shown.length ? ` (+${candidates.length - shown.length} more)` : "";
+  return `${candidates.length} ${pkg} release(s) observed, ${referencing} referencing ${refLabel}: ${parts.join("; ")}${more}`;
+}
+
+/** Newest-N cap on {@link summariseCapabilityCandidates} so a >100-release repo cannot bloat the
+ * escalation form or a warn log line. */
+const CAPABILITY_SUMMARY_LIMIT = 8;
+
 /** capability readiness (#274 Gap A): among GitHub Releases tagged `<match.package>@*` whose body
  * references `match.capabilityRef`, resolve the **lowest** SemVer version — that is the version that
  * *first* carries the capability (`firstVersion`). Late-binds it as `{ resolvedArtifact }` so the
@@ -457,9 +501,10 @@ function versionForPackage(tag: string, pkg: string): string | undefined {
 export function matchCapability(match: ProbeMatch | undefined, releases: readonly GithubRelease[]): ProbeResult {
   const pkg = match?.package;
   const ref = match?.capabilityRef;
-  if (!pkg || !ref) return { ready: false, detail: "capability: missing package/capabilityRef" };
+  const observed = summariseCapabilityCandidates(match, releases);
+  if (!pkg || !ref) return { ready: false, detail: "capability: missing package/capabilityRef", observed };
   const num = capabilityNumber(ref);
-  if (!num) return { ready: false, detail: "capability: unparseable capabilityRef (no #NNN)" };
+  if (!num) return { ready: false, detail: "capability: unparseable capabilityRef (no #NNN)", observed };
 
   let firstVersion: string | undefined;
   for (const rel of releases) {
@@ -469,9 +514,9 @@ export function matchCapability(match: ProbeMatch | undefined, releases: readonl
     if (!bodyReferences(rel.body, num)) continue;
     if (firstVersion === undefined || cmpVersion(version, firstVersion) < 0) firstVersion = version;
   }
-  if (firstVersion === undefined) return { ready: false, detail: `capability #${num} not published in ${pkg} yet` };
+  if (firstVersion === undefined) return { ready: false, detail: `capability #${num} not published in ${pkg} yet`, observed };
   const resolvedArtifact = `${pkg}@${firstVersion}`;
-  return { ready: true, detail: `capability #${num} carried by ${resolvedArtifact}`, bind: { resolvedArtifact } };
+  return { ready: true, detail: `capability #${num} carried by ${resolvedArtifact}`, bind: { resolvedArtifact }, observed };
 }
 
 /** The **newest** published SemVer version of `pkg` across `releases` — the target of the gated

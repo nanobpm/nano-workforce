@@ -28,6 +28,7 @@ import {
   normalizePoll,
   parseProbe,
   parsePrTarget,
+  summariseCapabilityCandidates,
   parsePrView,
   parseReleases,
   parseReleasesTarget,
@@ -212,6 +213,51 @@ test("matchCapability: the bare '#274' ref form resolves identically to 'nano-id
   const res = matchCapability({ capabilityRef: "#274", package: "@nanobpm/urban" }, [rel("@nanobpm/urban@1.2.3", [274])]);
   assert(res.ready);
   assertEquals(res.bind?.resolvedArtifact, "@nanobpm/urban@1.2.3");
+});
+
+// ── #514 Defect A: the capability gate is self-diagnosing on escalation ──────────────────────────
+
+test("#514 Defect A summariseCapabilityCandidates: lists candidate releases (newest first) and whether each references the ref", () => {
+  const summary = summariseCapabilityCandidates(capMatch, [
+    rel("@nanobpm/urban@0.9.0", [200]),
+    rel("@nanobpm/urban@0.82.0", [274]),
+    rel("@nanobpm/other@1.0.0", [274]), // wrong package — excluded from the per-package summary
+  ]);
+  assertStringIncludes(summary, "2 @nanobpm/urban release(s) observed");
+  assertStringIncludes(summary, "1 referencing #274");
+  // Newest candidate first, and the ref-flag per candidate.
+  assertStringIncludes(summary, "@nanobpm/urban@0.82.0 refs #274");
+  assertStringIncludes(summary, "@nanobpm/urban@0.9.0 no #274");
+  assert(!summary.includes("@nanobpm/other"), "a sibling package never leaks into the per-package summary");
+});
+
+test("#514 Defect A summariseCapabilityCandidates: no matching releases yields a plain observed note (never throws)", () => {
+  assertEquals(summariseCapabilityCandidates(capMatch, []), "no @nanobpm/urban releases observed");
+  assertEquals(summariseCapabilityCandidates(capMatch, [rel("@nanobpm/other@1.0.0", [274])]), "no @nanobpm/urban releases observed");
+});
+
+test("#514 Defect A summariseCapabilityCandidates: caps the newest 8 candidates so a >100-release repo cannot bloat the form/log", () => {
+  const many: GithubRelease[] = [];
+  for (let i = 1; i <= 20; i++) many.push(rel(`@nanobpm/urban@0.${i}.0`, [200]));
+  const summary = summariseCapabilityCandidates(capMatch, many);
+  assertStringIncludes(summary, "20 @nanobpm/urban release(s) observed");
+  assertStringIncludes(summary, "(+12 more)");
+  assertStringIncludes(summary, "@nanobpm/urban@0.20.0 no #274"); // newest is shown
+  assert(!summary.includes("@nanobpm/urban@0.1.0 "), "the oldest is trimmed by the cap");
+});
+
+test("#514 Defect A matchCapability surfaces `observed` on the not-ready path — a false-negative is diagnosable, not contextless", () => {
+  // Red before the fix: matchCapability returned only {ready, detail} with no observed-release context,
+  // so an escalation could not tell a genuine 'not published yet' from a transient false-negative.
+  const notReady = matchCapability(capMatch, [rel("@nanobpm/urban@0.82.0", [200])]);
+  assert(!notReady.ready);
+  assertStringIncludes(notReady.observed ?? "", "@nanobpm/urban@0.82.0 no #274");
+});
+
+test("#514 Defect A matchCapability surfaces `observed` on the ready path too (the resolving release shows as referencing the ref)", () => {
+  const ready = matchCapability(capMatch, [rel("@nanobpm/urban@0.82.0", [274])]);
+  assert(ready.ready);
+  assertStringIncludes(ready.observed ?? "", "@nanobpm/urban@0.82.0 refs #274");
 });
 
 test("cmpVersion: numeric dotted compare (0.9 < 0.54 < 0.60), matching nano-ide publish.mjs", () => {
