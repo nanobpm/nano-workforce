@@ -22,27 +22,32 @@
 // display formatting is out of the framework AST). Use app/featureReadModel.ts as the exemplar.
 
 import { add, and, coalesce, col, count, countWhere, defineRollup, eq, fromRollup, gt, isNotNull, joinSource, lit, max, minWhere, not, or, type Rollup } from "@nanobpm/urban";
+import { TERMINAL_STATUSES } from "./deliveryStatuses.ts";
 
-/** The PR statuses that are TERMINAL for delivery — a slice PR in any of these is resolved (not in
- * flight). The single source of truth is `TERMINAL_STATUSES` (app/delivery.ts); it is inlined as a
- * literal set here (rather than imported) to keep this module a leaf of the read-model dependency
- * graph — app/delivery.ts imports the read model, which imports this file. `plan_delivery_counts`'
- * `prs_in_flight` folds "NOT terminal (incl. a NULL/missing PR row)" exactly as `deriveDelivery` does. */
-const DELIVERY_TERMINAL_PR_STATUSES = ["converged", "merged", "abandoned"] as const;
+/** The slice-PR relation the delivery/wave rollups join: the auto-provisioned `pull_requests__tracking`
+ * derived VIEW (ADR-0065), NOT the raw `pull_requests` table. It re-exports `pull_requests.*` plus a
+ * terminal-folded `derived_status` (`abandoned` on an out-of-band-terminated PR instance, else the base
+ * `pull_requests.status`). Reading `derived_status` here — the SAME column the canonical runtime reads
+ * via `prsTracking` (app/service.ts `derivePlanDelivery`) — keeps the SQL VIEW counts and the runtime
+ * in agreement: an out-of-band-terminated converging slice reads `abandoned` (resolved), so the VIEW
+ * can never wedge an epic at `delivery = 'converging'` after its PR was cancelled. Exported so the
+ * app/delivery.ts adapter feeds its synthesised leaf rows under the same relation name. */
+export const PR_TRACKING_RELATION = "pull_requests__tracking";
 
-/** `plan_tasks t LEFT JOIN pull_requests p ON p.pr_key = t.pr_key` as a rollup source, with a FLAT
- * output namespace so the closed aggregate/predicate machinery reads unqualified column names. The two
- * plan-family count rollups both fold over this two-hop join (D4). */
+/** `plan_tasks t LEFT JOIN pull_requests__tracking p ON p.pr_key = t.pr_key` as a rollup source, with a
+ * FLAT output namespace so the closed aggregate/predicate machinery reads unqualified column names.
+ * `pr_status` is the tracking VIEW's terminal-folded `derived_status` (see {@link PR_TRACKING_RELATION}).
+ * The two plan-family count rollups both fold over this two-hop join (D4). */
 const planTasksJoinPrs = joinSource({
   left: { relation: "plan_tasks", alias: "t" },
-  right: { relation: "pull_requests", alias: "p" },
+  right: { relation: PR_TRACKING_RELATION, alias: "p" },
   on: [{ left: "pr_key", right: "pr_key" }],
   columns: {
     plan_key: ["left", "plan_key"],
     wave: ["left", "wave"],
     task_status: ["left", "status"],
     pr_key: ["left", "pr_key"],
-    pr_status: ["right", "status"],
+    pr_status: ["right", "derived_status"],
   },
 });
 
@@ -103,7 +108,7 @@ export const planWaveProgress: Rollup = defineRollup({
  * slice PRs (061). Only tasks that OPENED a PR count (`prs_opened = COUNT(pr_key)`, non-NULL). A
  * `pr_key` with no `pull_requests` row (`pr_status` NULL, the poller's `MISSING_PR_STATUS` sentinel) is
  * non-terminal, so it counts as `prs_in_flight` — a DB desync can never wrongly promote an epic to
- * `landed`. `prs_in_flight` = opened PRs whose status is NOT in {@link DELIVERY_TERMINAL_PR_STATUSES}
+ * `landed`. `prs_in_flight` = opened PRs whose status is NOT in {@link TERMINAL_STATUSES}
  * (a NULL status is not terminal), exactly `deriveDelivery`'s in-flight fold.
  */
 export const planDeliveryCounts: Rollup = defineRollup({
@@ -113,7 +118,7 @@ export const planDeliveryCounts: Rollup = defineRollup({
   aggregates: {
     prs_opened: count("pr_key"),
     prs_merged: countWhere(and(isNotNull(col("pr_key")), eq(col("pr_status"), lit("merged")))),
-    prs_in_flight: countWhere(and(isNotNull(col("pr_key")), not(or(...DELIVERY_TERMINAL_PR_STATUSES.map((s) => eq(col("pr_status"), lit(s))))))),
+    prs_in_flight: countWhere(and(isNotNull(col("pr_key")), not(or(...TERMINAL_STATUSES.map((s) => eq(col("pr_status"), lit(s))))))),
   },
 });
 

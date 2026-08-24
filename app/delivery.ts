@@ -14,25 +14,27 @@
 // `assertRollupParity` (app/planReadModel.test.ts). Only the pre-formatted `label` display string is
 // still assembled here (D3 — display formatting stays out of the framework AST).
 
+import { TERMINAL_STATUSES } from "./deliveryStatuses.ts";
 import {
   DELIVERY_COUNTS_LOOKUP,
   EFFECTIVE_STATUS_COLUMN,
   planReadModel,
   WAVE_PROGRESS_LOOKUP,
 } from "./planReadModel.ts";
-import { planDeliveryCounts } from "./planRollups.ts";
+import { PR_TRACKING_RELATION, planDeliveryCounts } from "./planRollups.ts";
 
 /** The synthetic correlation key threaded through the adapters: the base row's `plan_key` and each
  * synthesised slice `plan_tasks`/`plan_delivery_counts` row share this value so the compiled rollup
  * lookup / group-reduce correlate exactly as they do on real rows (mirrors app/stage.ts `SELF_KEY`). */
 const SELF_KEY = "self";
 
-/** A PR is "done" in exactly these states; everything else (converging, waiting_review,
- * escalated, and the merge-stage waiting_deps/waiting_merge/waiting_lane/queued) is in flight. `converged`
+/** The PR statuses that are TERMINAL for delivery — re-exported from the canonical leaf module
+ * (app/deliveryStatuses.ts) that BOTH this façade's consumers and the `plan_delivery_counts` rollup
+ * (app/planRollups.ts) read, so the SQL VIEW counts and the TS adapters can never drift. `converged`
  * is terminal only in review-only mode (AUTO_MERGE off); with auto-merge on, a converged PR
- * transitions into the merge stage and lands as `merged`. The status endpoint and the cancel
- * guard both key off this set. */
-export const TERMINAL_STATUSES: readonly string[] = ["converged", "merged", "abandoned"];
+ * transitions into the merge stage and lands as `merged`. The status endpoint and the cancel guard
+ * both key off this set. */
+export { TERMINAL_STATUSES };
 
 /** The derived epic delivery signal (issue #171). Distinct from `plan.status`: `status = done`
  * means "the fan-out finished and ≥1 slice opened a PR, dispatched to convergence" (record-results
@@ -65,12 +67,15 @@ export function deriveDelivery(
   prStatuses: readonly string[],
 ): DeliveryRollup {
   // Lower the caller's per-slice PR statuses into the two LEAF relations the `plan_delivery_counts`
-  // rollup reduces over (`plan_tasks` LEFT JOIN `pull_requests`): one opened slice per PR status. The
-  // framework group-reduce then folds the SAME three counts (`prs_opened`/`prs_merged`/`prs_in_flight`)
-  // the managed VIEW does — a missing/dangling PR status counts as in-flight, never false-`landed`.
+  // rollup reduces over (`plan_tasks` LEFT JOIN `pull_requests__tracking`): one opened slice per PR
+  // status. Callers already resolve the PR's terminal-folded `derived_status` (service.ts reads it via
+  // `prsTracking`), so it is fed under the tracking relation's `derived_status` column — the SAME
+  // column the managed VIEW joins — and the framework group-reduce folds the SAME three counts
+  // (`prs_opened`/`prs_merged`/`prs_in_flight`) the VIEW does; a missing/dangling PR status counts as
+  // in-flight, never false-`landed`.
   const taskRows = prStatuses.map((_, i) => ({ plan_key: SELF_KEY, pr_key: `pr${i}`, wave: null, status: "opened" }));
-  const prRows = prStatuses.map((s, i) => ({ pr_key: `pr${i}`, status: s }));
-  const [counts] = planDeliveryCounts.reduce({ plan_tasks: taskRows, pull_requests: prRows });
+  const prRows = prStatuses.map((s, i) => ({ pr_key: `pr${i}`, derived_status: s }));
+  const [counts] = planDeliveryCounts.reduce({ plan_tasks: taskRows, [PR_TRACKING_RELATION]: prRows });
   const prsOpened = Number(counts?.prs_opened ?? 0);
   const prsMerged = Number(counts?.prs_merged ?? 0);
   const prsInFlight = Number(counts?.prs_in_flight ?? 0);

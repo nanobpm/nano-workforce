@@ -70,14 +70,20 @@ function viewDb(): DatabaseSync {
        id INTEGER PRIMARY KEY, plan_key TEXT, task_index INTEGER, task_id TEXT, title TEXT, prompt TEXT,
        status TEXT, pr_key TEXT, summary TEXT, created_at TEXT, updated_at TEXT, wave INTEGER,
        open_question TEXT, answer TEXT, draft_pr_key TEXT, corr_key TEXT);
-     CREATE TABLE pull_requests (pr_key TEXT PRIMARY KEY, url TEXT, status TEXT, process_key TEXT);`,
+     CREATE TABLE pull_requests (pr_key TEXT PRIMARY KEY, url TEXT, status TEXT, process_key TEXT,
+       derived_status_override TEXT);`,
   );
-  // Stand-in for the managed `plans__tracking` VIEW urban provisions at mount: re-exports `plans.*`
-  // plus the terminal-folded `derived_status`. A test seeds `derived_status_override` to model the
-  // reconciler's derive edge; absent, it falls through to the base `status`.
+  // Stand-in for the managed `plans__tracking` / `pull_requests__tracking` VIEWs urban provisions at
+  // mount: each re-exports `<base>.*` plus the terminal-folded `derived_status`. A test seeds
+  // `derived_status_override` to model the reconciler's derive edge (a terminated instance ⇒ `abandoned`
+  // while base `status` stays frozen); absent, it falls through to the base `status`. The plan-family
+  // count rollups join `pull_requests__tracking.derived_status` (ADR-0065 derive-only), the SAME column
+  // the canonical runtime reads (service.ts `prsTracking`), so the VIEW counts track a cancelled slice.
   db.exec(
     `CREATE VIEW plans__tracking AS
-       SELECT p.*, COALESCE(p.derived_status_override, p.status) AS derived_status FROM plans p;`,
+       SELECT p.*, COALESCE(p.derived_status_override, p.status) AS derived_status FROM plans p;
+     CREATE VIEW pull_requests__tracking AS
+       SELECT p.*, COALESCE(p.derived_status_override, p.status) AS derived_status FROM pull_requests p;`,
   );
   for (const m of MIGRATION_CHAIN) db.exec(MIG(m));
   return db;
@@ -116,19 +122,22 @@ function addPlan(db: DatabaseSync, plan_key: string, plan: SamplePlan): void {
 }
 
 /** Add one slice task, optionally with a PR. `prStatus === undefined` ⇒ no PR row (an un-opened slice);
- *  `prStatus === "missing"` ⇒ a `pr_key` with NO `pull_requests` row (the poller's dangling-PR sentinel). */
-function addTask(db: DatabaseSync, plan_key: string, opts: { status?: string; wave?: number | null; prStatus?: string }): void {
+ *  `prStatus === "missing"` ⇒ a `pr_key` with NO `pull_requests` row (the poller's dangling-PR sentinel).
+ *  `prDerivedOverride` seeds the PR's `derived_status_override` (a DERIVE-ONLY terminated PR whose base
+ *  `status` stays frozen but whose tracking `derived_status` recomputes, e.g. `abandoned`). */
+function addTask(db: DatabaseSync, plan_key: string, opts: { status?: string; wave?: number | null; prStatus?: string; prDerivedOverride?: string | null }): void {
   const id = taskId++;
   const prKey = opts.prStatus === undefined ? null : `pr${id}`;
   db.prepare(
     "INSERT INTO plan_tasks (id, plan_key, task_index, task_id, status, pr_key, wave) VALUES (?, ?, ?, ?, ?, ?, ?)",
   ).run(id, plan_key, id, `t${id}`, opts.status ?? "opened", prKey, opts.wave ?? null);
   if (prKey !== null && opts.prStatus !== "missing") {
-    db.prepare("INSERT INTO pull_requests (pr_key, url, status, process_key) VALUES (?, ?, ?, ?)").run(
+    db.prepare("INSERT INTO pull_requests (pr_key, url, status, process_key, derived_status_override) VALUES (?, ?, ?, ?, ?)").run(
       prKey,
       `https://gh/${prKey}`,
       opts.prStatus,
       `P${id}`,
+      opts.prDerivedOverride ?? null,
     );
   }
 }
@@ -201,23 +210,23 @@ test("FRAMEWORK PARITY GUARD: each plan-family rollup's VIEW and TS reduce agree
         { plan_key: "b", pr_key: "b0", wave: 0, status: "skipped" },
         { plan_key: "b", pr_key: "bMissing", wave: 0, status: "opened" },
       ],
-      pull_requests: [
-        { pr_key: "a0", status: "merged" },
-        { pr_key: "a1", status: "converging" },
-        { pr_key: "a2", status: "merged" },
-        { pr_key: "a3", status: "waiting_review" },
-        { pr_key: "b0", status: "abandoned" },
+      pull_requests__tracking: [
+        { pr_key: "a0", derived_status: "merged" },
+        { pr_key: "a1", derived_status: "converging" },
+        { pr_key: "a2", derived_status: "merged" },
+        { pr_key: "a3", derived_status: "waiting_review" },
+        { pr_key: "b0", derived_status: "abandoned" },
       ],
     },
-    { plan_tasks: [], pull_requests: [] },
+    { plan_tasks: [], pull_requests__tracking: [] },
     {
       plan_tasks: [
         { plan_key: "c", pr_key: "c0", wave: 0, status: "opened" },
         { plan_key: "c", pr_key: "c1", wave: 2, status: "opened" },
       ],
-      pull_requests: [
-        { pr_key: "c0", status: "merged" },
-        { pr_key: "c1", status: "converged" },
+      pull_requests__tracking: [
+        { pr_key: "c0", derived_status: "merged" },
+        { pr_key: "c1", derived_status: "converged" },
       ],
     },
   ];
@@ -344,6 +353,32 @@ test("RED/GREEN #503: a DERIVE-ONLY terminated epic (base status frozen 'dispatc
   assertEquals(row.list_bucket, deriveEpicBucket("abandoned", row.delivery === "converging" ? "converging" : null, null), "list_bucket tracks derived_status via the VIEW");
 });
 
+test("REGRESSION (Copilot #493): a DERIVE-ONLY terminated slice PR (base status frozen 'converging', derived_status='abandoned') is counted RESOLVED — the VIEW joins pull_requests__tracking.derived_status", () => {
+  // ADR-0065 derive-only: cancelling a PR instance recomputes `pull_requests__tracking.derived_status`
+  // to `abandoned` on READ while the base `pull_requests.status` stays frozen at its last transient
+  // (`converging`). The runtime (`service.ts` `derivePlanDelivery`) reads `prsTracking(...).derived_status`,
+  // so the `plan_delivery_counts` rollup MUST join the SAME derived column — otherwise the VIEW would
+  // read the frozen `converging` base, count the slice `prs_in_flight`, and WEDGE the epic at
+  // `delivery='converging'` forever after its PR was cancelled. This asserts the rollup resolves it.
+  const db = viewDb();
+  addPlan(db, "o/r#cancel", { status: "done" });
+  addTask(db, "o/r#cancel", { status: "opened", wave: 0, prStatus: "merged" });
+  // A slice whose base PR row is frozen 'converging' but derived (terminal-folded) to 'abandoned'.
+  addTask(db, "o/r#cancel", { status: "opened", wave: 1, prStatus: "converging", prDerivedOverride: "abandoned" });
+  const row = readModel(db, "o/r#cancel");
+  // Both slice PRs are terminal (one merged, one derived-abandoned) ⇒ nothing in flight, not all merged.
+  assertEquals(row.delivery, null, "a cancelled slice is resolved-not-landed, not a wedged 'converging'");
+  // The pre-derive/raw-status VIEW would have read 'converging' → prs_in_flight=1 → delivery='converging'.
+  assert(row.delivery !== "converging", "the derived_status join closes the raw-status wedge (Copilot #493)");
+
+  // A NON-overridden corpus stays byte-identical: derived_status falls through to base status, so a
+  // genuinely in-flight 'converging' slice still reads converging (the fix only moves overridden rows).
+  addPlan(db, "o/r#live", { status: "done" });
+  addTask(db, "o/r#live", { status: "opened", wave: 0, prStatus: "merged" });
+  addTask(db, "o/r#live", { status: "opened", wave: 1, prStatus: "converging" });
+  assertEquals(readModel(db, "o/r#live").delivery, "converging", "a live (non-overridden) converging slice is unchanged");
+});
+
 test("the migration 082 plan_wave_summary VIEW still pre-formats the `bar` glyph over the (now framework-emitted) plan_wave_counts", () => {
   const db = viewDb();
   const plan = "o/r#bar";
@@ -409,7 +444,7 @@ test("the operator pages bind the derived plan-family VIEWs (never the raw plans
 test("the app/delivery.ts adapters route through the framework backends (planDeliveryCounts.reduce + planReadModel.evaluate) — the wave rollups compose", () => {
   // A guard that the declared rollups are wired as the adapters' engine: the two count rollups fold the
   // same slice-PR partition, and the composed wave-progress rollup reads the wave-counts rollup.
-  assertEquals(planWaveProgress.sourceRelations.slice().sort(), ["plan_tasks", "pull_requests"]);
+  assertEquals(planWaveProgress.sourceRelations.slice().sort(), ["plan_tasks", "pull_requests__tracking"]);
   assertEquals(planWaveCounts.groupBy, ["plan_key", "wave"]);
   assertEquals(planDeliveryCounts.groupBy, ["plan_key"]);
   // The adapters produce the framework-folded counts (deriveDelivery is the reduce()+evaluate() façade).

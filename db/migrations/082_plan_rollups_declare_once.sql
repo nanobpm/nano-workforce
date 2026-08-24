@@ -18,7 +18,7 @@
 -- which 081 superseded 076's feature VIEW).
 --
 -- SEMANTICS are unchanged from 059/060/061 (validated byte-identical over a random corpus): a task is
--- `merged` iff its PR reached `pull_requests.status = 'merged'`, otherwise it falls to its
+-- `merged` iff its PR reached `pull_requests__tracking.derived_status = 'merged'`, otherwise it falls to its
 -- `plan_tasks.status` bucket; the five named buckets stay DISJOINT and sum to `total`; the delivery
 -- counts fold only tasks that OPENED a PR, and a dangling `pr_key` (NULL status) counts as in-flight so
 -- a DB desync can never wrongly promote an epic to `landed`. Each rollup emits `CREATE VIEW <name> AS
@@ -26,7 +26,8 @@
 -- contract guard (scripts/pages-contract.test.ts) still reads each VIEW's output columns.
 --
 -- Layered in dependency order: `plan_wave_counts` first (the leaf GROUP BY over `plan_tasks` LEFT JOIN
--- `pull_requests`), then `plan_delivery_counts` (a sibling GROUP BY over the same join), then
+-- `pull_requests__tracking` (ADR-0065 derived VIEW; reads the terminal-folded `derived_status`, the
+-- SAME column the canonical runtime reads), then `plan_delivery_counts` (a sibling GROUP BY over the same join), then
 -- `plan_wave_progress` (COMPOSED over `plan_wave_counts` — D1's composability). The retained
 -- `plan_wave_summary` (059, the `bar` glyph) and `plan_wave_label` (060) VIEWs read the recreated
 -- `plan_wave_counts`/`plan_wave_progress` unchanged. A merged VIEW is not editable in place, so each is
@@ -41,13 +42,13 @@ CREATE VIEW IF NOT EXISTS "plan_wave_counts" AS
 SELECT
   "t"."plan_key" AS "plan_key",
   "t"."wave" AS "wave",
-  SUM(CASE WHEN COALESCE(((NOT COALESCE(COALESCE(("p"."status" = 'merged'), 0), 0)) AND COALESCE(("t"."status" = 'blocked'), 0)), 0) THEN 1 ELSE 0 END) AS "blocked",
-  SUM(CASE WHEN COALESCE(((NOT COALESCE(COALESCE(("p"."status" = 'merged'), 0), 0)) AND COALESCE(("t"."status" = 'escalated'), 0)), 0) THEN 1 ELSE 0 END) AS "escalated",
-  SUM(CASE WHEN COALESCE(((NOT COALESCE(COALESCE(("p"."status" = 'merged'), 0), 0)) AND (NOT COALESCE(COALESCE((COALESCE(("t"."status" = 'skipped'), 0) OR COALESCE(("t"."status" = 'blocked'), 0) OR COALESCE(("t"."status" = 'escalated'), 0)), 0), 0))), 0) THEN 1 ELSE 0 END) AS "in_flight",
-  SUM(CASE WHEN COALESCE(("p"."status" = 'merged'), 0) THEN 1 ELSE 0 END) AS "merged",
-  SUM(CASE WHEN COALESCE(((NOT COALESCE(COALESCE(("p"."status" = 'merged'), 0), 0)) AND COALESCE(("t"."status" = 'skipped'), 0)), 0) THEN 1 ELSE 0 END) AS "skipped",
+  SUM(CASE WHEN COALESCE(((NOT COALESCE(COALESCE(("p"."derived_status" = 'merged'), 0), 0)) AND COALESCE(("t"."status" = 'blocked'), 0)), 0) THEN 1 ELSE 0 END) AS "blocked",
+  SUM(CASE WHEN COALESCE(((NOT COALESCE(COALESCE(("p"."derived_status" = 'merged'), 0), 0)) AND COALESCE(("t"."status" = 'escalated'), 0)), 0) THEN 1 ELSE 0 END) AS "escalated",
+  SUM(CASE WHEN COALESCE(((NOT COALESCE(COALESCE(("p"."derived_status" = 'merged'), 0), 0)) AND (NOT COALESCE(COALESCE((COALESCE(("t"."status" = 'skipped'), 0) OR COALESCE(("t"."status" = 'blocked'), 0) OR COALESCE(("t"."status" = 'escalated'), 0)), 0), 0))), 0) THEN 1 ELSE 0 END) AS "in_flight",
+  SUM(CASE WHEN COALESCE(("p"."derived_status" = 'merged'), 0) THEN 1 ELSE 0 END) AS "merged",
+  SUM(CASE WHEN COALESCE(((NOT COALESCE(COALESCE(("p"."derived_status" = 'merged'), 0), 0)) AND COALESCE(("t"."status" = 'skipped'), 0)), 0) THEN 1 ELSE 0 END) AS "skipped",
   COUNT(*) AS "total"
-FROM "plan_tasks" "t" LEFT JOIN "pull_requests" "p" ON "t"."pr_key" = "p"."pr_key"
+FROM "plan_tasks" "t" LEFT JOIN "pull_requests__tracking" "p" ON "t"."pr_key" = "p"."pr_key"
 WHERE (NOT COALESCE(("t"."wave" IS NULL), 0))
 GROUP BY "t"."plan_key", "t"."wave";
 
@@ -56,10 +57,10 @@ DROP VIEW IF EXISTS plan_delivery_counts;
 CREATE VIEW IF NOT EXISTS "plan_delivery_counts" AS
 SELECT
   "t"."plan_key" AS "plan_key",
-  SUM(CASE WHEN COALESCE(((NOT COALESCE(("t"."pr_key" IS NULL), 0)) AND (NOT COALESCE(COALESCE((COALESCE(("p"."status" = 'converged'), 0) OR COALESCE(("p"."status" = 'merged'), 0) OR COALESCE(("p"."status" = 'abandoned'), 0)), 0), 0))), 0) THEN 1 ELSE 0 END) AS "prs_in_flight",
-  SUM(CASE WHEN COALESCE(((NOT COALESCE(("t"."pr_key" IS NULL), 0)) AND COALESCE(("p"."status" = 'merged'), 0)), 0) THEN 1 ELSE 0 END) AS "prs_merged",
+  SUM(CASE WHEN COALESCE(((NOT COALESCE(("t"."pr_key" IS NULL), 0)) AND (NOT COALESCE(COALESCE((COALESCE(("p"."derived_status" = 'converged'), 0) OR COALESCE(("p"."derived_status" = 'merged'), 0) OR COALESCE(("p"."derived_status" = 'abandoned'), 0)), 0), 0))), 0) THEN 1 ELSE 0 END) AS "prs_in_flight",
+  SUM(CASE WHEN COALESCE(((NOT COALESCE(("t"."pr_key" IS NULL), 0)) AND COALESCE(("p"."derived_status" = 'merged'), 0)), 0) THEN 1 ELSE 0 END) AS "prs_merged",
   COUNT("t"."pr_key") AS "prs_opened"
-FROM "plan_tasks" "t" LEFT JOIN "pull_requests" "p" ON "t"."pr_key" = "p"."pr_key"
+FROM "plan_tasks" "t" LEFT JOIN "pull_requests__tracking" "p" ON "t"."pr_key" = "p"."pr_key"
 GROUP BY "t"."plan_key";
 
 DROP VIEW IF EXISTS plan_wave_progress;
