@@ -98,6 +98,11 @@ test("import-to-library: a valid-JSON but UNCOMPILABLE graph → 400 with path-q
     assertEquals(res.status, 400);
     assertEquals(res.body.ok, false);
     assert(Array.isArray(res.body.errors) && res.body.errors.length > 0);
+    assert(
+      res.body.errors.every(
+        (e: { path: string; message: string }) => typeof e.path === "string" && e.path.trim().length > 0,
+      ),
+    );
     assertEquals((await deliveryGraphLibrary(data).all()).length, 0);
   });
 });

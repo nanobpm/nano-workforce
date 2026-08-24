@@ -195,6 +195,14 @@
   cursor: default;
 }
 
+/* The native <input type=file> is visually hidden (clipped to 1×1), which also clips its browser
+   focus ring, so surface a visible keyboard focus indicator on the wrapping label instead — keyboard
+   users can tab to Import and see where focus landed. */
+.dg .dg-import:has(.dg-import-input:focus-visible) {
+  outline: 2px solid #58a6ff;
+  outline-offset: 2px;
+}
+
 .dg .status {
   font-size: 12.5px;
   color: #8aa0b8;

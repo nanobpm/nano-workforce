@@ -403,7 +403,7 @@ export function mountDeliveryGraphs(host, config = {}) {
         fillComposer(text, { status: `\u2713 Imported \u201c${body.entry.name}\u201d into the library — Preview or Stage it.` });
       } else {
         outputEl.innerHTML = renderErrors(body.error, body.errors);
-        setStatus("Import failed — the file is not a valid, compilable delivery graph.", "err");
+        setStatus("Import failed — see the details below.", "err");
       }
     } catch (err) {
       outputEl.innerHTML = renderErrors(err && err.message ? err.message : String(err), []);
