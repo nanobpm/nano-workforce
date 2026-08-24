@@ -20,6 +20,14 @@ export const DEFAULT_REVIEW_WAIT_TIMEOUT = "PT20M";
 // would fail to interpret; not a full grammar (we don't need fractional seconds here).
 const ISO_DURATION = /^P(?!$)(\d+Y)?(\d+M)?(\d+W)?(\d+D)?(T(?=\d)(\d+H)?(\d+M)?(\d+S)?)?$/;
 
+/** True when `raw` is a well-formed ISO-8601 duration under {@link isoDuration}'s grammar — the strict
+ * predicate an operator submission door uses to REJECT a malformed duration (400) rather than silently
+ * fall back to a default. Derives from the same {@link ISO_DURATION} grammar so the accept/reject
+ * decision can never drift from the normalise-or-default one. Case-insensitive (`pt2h` is valid). */
+export function isValidIsoDuration(raw: string): boolean {
+  return ISO_DURATION.test(raw.trim().toUpperCase());
+}
+
 /** Validate an ISO-8601 duration string for a BPMN timer's `<bpmn:timeDuration>`, falling back to
  * `def` when the value is absent, blank, or malformed — a bad env value must never deploy an
  * uninterpretable timer expression into a process. Normalises to upper case (`pt20m` → `PT20M`).

@@ -1407,6 +1407,15 @@ components:
                   type: string
                   maxLength: 20000
                   description: OPTIONAL steering prompt appended to the node's job brief.
+                timeout:
+                  type: string
+                  pattern: '^[Pp](?!$)(\d+[Yy])?(\d+[Mm])?(\d+[Ww])?(\d+[Dd])?([Tt](?=\d)(\d+[Hh])?(\d+[Mm])?(\d+[Ss])?)?$'
+                  maxLength: 64
+                  description: >-
+                    OPTIONAL per-node ISO-8601 SLA timeout (#505). Overrides the run-level `nodeTimeout`
+                    (and the `PT1H` default) for THIS node's bounded-timeout → escalate boundary timer, so
+                    a legitimately-long node (e.g. a full `senior:feature` implementation) can outlast a
+                    quick gate without a spurious escalation. Absent → the run/default value.
     DeliveryNodeWait:
       description: >-
         A `wait` node — a durable `ReadinessProbe` (ADR 0001 §2) watching an external fact. Reuses the
@@ -1496,6 +1505,14 @@ components:
                   type: object
                   additionalProperties: true
                   description: Minimal forward-declared payload stub — the concrete connector payload schema is deferred (ADR non-goal).
+                timeout:
+                  type: string
+                  pattern: '^[Pp](?!$)(\d+[Yy])?(\d+[Mm])?(\d+[Ww])?(\d+[Dd])?([Tt](?=\d)(\d+[Hh])?(\d+[Mm])?(\d+[Ss])?)?$'
+                  maxLength: 64
+                  description: >-
+                    OPTIONAL per-node ISO-8601 SLA timeout (#505). Overrides the run-level `nodeTimeout`
+                    (and the `PT1H` default) for THIS connector node's bounded-timeout → escalate boundary
+                    timer. Absent → the run/default value.
     DeliveryEdge:
       description: >-
         A dependency edge — "`to` proceeds once fact `from` is observable" (ADR 0005 Decision 3).
@@ -1596,6 +1613,28 @@ components:
           type: string
           maxLength: 255
           description: OPTIONAL idempotency key. A re-dispatch with the same key (or, when omitted, the same digest) does not double-launch. Blank/whitespace is treated as absent.
+        nodeTimeout:
+          type: string
+          pattern: '^[Pp](?!$)(\d+[Yy])?(\d+[Mm])?(\d+[Ww])?(\d+[Dd])?([Tt](?=\d)(\d+[Hh])?(\d+[Mm])?(\d+[Ss])?)?$'
+          maxLength: 64
+          description: >-
+            OPTIONAL run-level ISO-8601 SLA timeout for `agent`/`connector` nodes (#505) — the
+            bounded-timeout → escalate boundary bound every such node inherits unless it declares its own
+            per-node `timeout`. Absent → the `PT1H` default. An invalid duration is rejected at submit.
+        probeTimeout:
+          type: string
+          pattern: '^[Pp](?!$)(\d+[Yy])?(\d+[Mm])?(\d+[Ww])?(\d+[Dd])?([Tt](?=\d)(\d+[Hh])?(\d+[Mm])?(\d+[Ss])?)?$'
+          maxLength: 64
+          description: >-
+            OPTIONAL run-level ISO-8601 poll budget for `wait` gates (#505) before they escalate. Absent →
+            the `PT30M` default. An invalid duration is rejected at submit.
+        escalationSlaTimeout:
+          type: string
+          pattern: '^[Pp](?!$)(\d+[Yy])?(\d+[Mm])?(\d+[Ww])?(\d+[Dd])?([Tt](?=\d)(\d+[Hh])?(\d+[Mm])?(\d+[Ss])?)?$'
+          maxLength: 64
+          description: >-
+            OPTIONAL run-level ISO-8601 SLA for `human` nodes (#505) before they record an `escalated`
+            outcome. Absent → the `P1D` default. An invalid duration is rejected at submit.
     DeliveryGraphProposalBpmnRequest:
       description: >-
         Request the compiled BPMN of a staged delivery-graph proposal for read-only DI PREVIEW. Carries

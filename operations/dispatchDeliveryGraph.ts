@@ -12,8 +12,38 @@
 
 import { dispatchDeliveryGraphRun } from "../app/deliveryGraphDispatch.ts";
 import { getStagedProposal, markProposalDispatched, markProposalExpired } from "../app/deliveryGraphProposals.ts";
+import { isValidIsoDuration } from "../app/reviewWait.ts";
 import type { DeliveryGraphTextResult } from "../nano-generated/api-io.d.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
+
+/** Cap an untrusted, rejected duration string before it is echoed into logs/response bodies. `openapi.yaml`
+ * caps these dispatch duration fields at `maxLength: 64` at the edge, and the door re-enforces that bound
+ * (see `MAX_DURATION_LEN`); this truncation is defense-in-depth for when the edge validator is bypassed,
+ * so a very large malformed value can never bloat either the logs or the response. */
+const MAX_ECHO_LEN = 80;
+function truncateForEcho(value: string): string {
+  return value.length > MAX_ECHO_LEN ? `${value.slice(0, MAX_ECHO_LEN)}… (${value.length} chars)` : value;
+}
+
+/** Door-level cap on a duration override, mirroring the `maxLength: 64` on these fields in `openapi.yaml`.
+ * Re-enforced here so a syntactically-valid-but-oversized duration is still rejected when the edge
+ * validator is bypassed (internal calls/tests), keeping seeded process variables and error/log output bounded. */
+const MAX_DURATION_LEN = 64;
+
+/** Validate an OPTIONAL run-level ISO-8601 duration override off the dispatch body (#505). Blank/
+ * whitespace is treated as absent (→ the runner default). A present-but-malformed value returns
+ * `{ ok: false, invalid }` so the door can reject it at submit rather than silently deploy an
+ * uninterpretable timer. Reuses the canonical `reviewWait` grammar so accept/reject never drifts from
+ * the runner's normalise-or-default one, and enforces `MAX_DURATION_LEN` so an oversized value is
+ * rejected even if the OpenAPI `maxLength` edge check is bypassed. */
+function validateDurationOverride(raw: unknown): { ok: true; value: string | undefined } | { ok: false; invalid: string } {
+  if (raw === undefined || raw === null) return { ok: true, value: undefined };
+  if (typeof raw !== "string") return { ok: false, invalid: String(raw) };
+  const trimmed = raw.trim();
+  if (trimmed === "") return { ok: true, value: undefined };
+  if (trimmed.length > MAX_DURATION_LEN || !isValidIsoDuration(trimmed)) return { ok: false, invalid: trimmed };
+  return { ok: true, value: trimmed.toUpperCase() };
+}
 
 export default defineOperation("dispatchDeliveryGraph", async ({ body }, app) => {
   const digest = body && typeof body === "object" && "digest" in body && typeof body.digest === "string" ? body.digest.trim() : "";
@@ -23,6 +53,27 @@ export default defineOperation("dispatchDeliveryGraph", async ({ body }, app) =>
   }
   const idemRaw = body && typeof body === "object" && "idempotencyKey" in body && typeof body.idempotencyKey === "string" ? body.idempotencyKey.trim() : "";
   const idempotencyKey = idemRaw !== "" ? idemRaw : undefined;
+
+  // Run-level timeout overrides (#505) — exposed at submission, validated as ISO-8601 durations here so
+  // an invalid value is a clean 400 (never a deployed, uninterpretable timer). Absent → runner defaults.
+  const rawTimeouts: Record<"nodeTimeout" | "probeTimeout" | "escalationSlaTimeout", unknown> =
+    body && typeof body === "object"
+      ? {
+          nodeTimeout: "nodeTimeout" in body ? body.nodeTimeout : undefined,
+          probeTimeout: "probeTimeout" in body ? body.probeTimeout : undefined,
+          escalationSlaTimeout: "escalationSlaTimeout" in body ? body.escalationSlaTimeout : undefined,
+        }
+      : { nodeTimeout: undefined, probeTimeout: undefined, escalationSlaTimeout: undefined };
+  const timeouts: { nodeTimeout?: string; probeTimeout?: string; escalationSlaTimeout?: string } = {};
+  for (const field of ["nodeTimeout", "probeTimeout", "escalationSlaTimeout"] as const) {
+    const parsed = validateDurationOverride(rawTimeouts[field]);
+    if (!parsed.ok) {
+      const shown = truncateForEcho(parsed.invalid);
+      app.log.warn("dispatch-delivery-graph rejected: invalid duration", { field, value: shown, invalidLength: parsed.invalid.length });
+      return { status: 400, body: { ok: false, error: `\`${field}\` must be an ISO-8601 duration (e.g. \`PT2H\`); got \`${shown}\`` } };
+    }
+    if (parsed.value !== undefined) timeouts[field] = parsed.value;
+  }
 
   // Load the live staged proposal for this digest — refuses an unknown/expired/superseded/already-
   // dispatched digest cleanly (no run is launched).
@@ -47,7 +98,7 @@ export default defineOperation("dispatchDeliveryGraph", async ({ body }, app) =>
     return { status: 400, body: { ok: false, error: `staged proposal ${digest} is corrupt: ${err instanceof Error ? err.message : String(err)}` } };
   }
 
-  const dispatched = await dispatchDeliveryGraphRun(app, graph, { runKey: idempotencyKey, title: proposal.title });
+  const dispatched = await dispatchDeliveryGraphRun(app, graph, { runKey: idempotencyKey, title: proposal.title, ...timeouts });
   if (!dispatched.ok) {
     app.log.warn("dispatch-delivery-graph refused: compile", { digest, errors: dispatched.errors.length });
     const outBody: DeliveryGraphTextResult = {

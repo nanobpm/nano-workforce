@@ -18,6 +18,7 @@ import type { EngineClient } from "@nanobpm/urban";
 import type { DeliveryFact, DeliveryGraph, DeliveryNode } from "../nano-generated/api-io.d.ts";
 import { assertNever, compileDeliveryGraph, DELIVERY_GRAPH_PROCESS_ID } from "./deliveryGraphCompiler.ts";
 import { DEFAULT_EVERY_MS, msToIsoDuration, parseProbe, readinessPollEvery } from "./readiness.ts";
+import { isoDuration } from "./reviewWait.ts";
 
 /** The content digest of a compiled graph — `sha256(bpmn)[:12]` — the single source of truth for the
  * content-addressed deploy id (`delivery-graph-<digest>`) AND the dispatch fence's default idempotency
@@ -53,7 +54,7 @@ export interface DeliveryRunOptions extends DeliveryRunTimeouts {
 }
 
 const DEFAULTS: Required<Omit<DeliveryRunTimeouts, "escalationAssignee">> = {
-  nodeTimeout: "PT30M",
+  nodeTimeout: "PT1H",
   probeTimeout: "PT30M",
   probePollEvery: msToIsoDuration(DEFAULT_EVERY_MS),
   escalationSlaTimeout: "P1D",
@@ -110,11 +111,14 @@ export async function prepareDeliveryGraph(
   const bpmn = rewriteProcessId(compiled.bpmn, processDefinitionId);
 
   const runKey = options.runKey?.trim() || randomUUID();
+  // Normalize the run-level timeouts through isoDuration so a programmatic caller that bypasses the
+  // OpenAPI/door validators cannot bake a malformed or lower-case duration into a BPMN timer FEEL —
+  // isoDuration canonicalizes case and falls back to the default on a malformed/blank value.
   const timeouts = {
-    nodeTimeout: options.nodeTimeout ?? DEFAULTS.nodeTimeout,
-    probeTimeout: options.probeTimeout ?? DEFAULTS.probeTimeout,
-    probePollEvery: options.probePollEvery ?? DEFAULTS.probePollEvery,
-    escalationSlaTimeout: options.escalationSlaTimeout ?? DEFAULTS.escalationSlaTimeout,
+    nodeTimeout: isoDuration(options.nodeTimeout, DEFAULTS.nodeTimeout),
+    probeTimeout: isoDuration(options.probeTimeout, DEFAULTS.probeTimeout),
+    probePollEvery: isoDuration(options.probePollEvery, DEFAULTS.probePollEvery),
+    escalationSlaTimeout: isoDuration(options.escalationSlaTimeout, DEFAULTS.escalationSlaTimeout),
     escalationAssignee: options.escalationAssignee ?? null,
   };
   const elementByNodeId = new Map(compiled.resolved.nodes.map((n) => [n.id, n.element]));
@@ -174,7 +178,7 @@ function buildNodeInput(
 ): NodeInput {
   switch (node.kind) {
     case "agent":
-      return { jobType: node.agent.jobType, appendPrompt: node.agent.prompt ?? "", timeout: ctx.nodeTimeout };
+      return { jobType: node.agent.jobType, appendPrompt: node.agent.prompt ?? "", timeout: isoDuration(node.agent.timeout, ctx.nodeTimeout) };
     case "wait": {
       const probe = parseProbe(node.wait);
       return {
@@ -201,7 +205,7 @@ function buildNodeInput(
         target: node.connector.target,
         dedupeKey: node.connector.dedupeKey ?? null,
         payload: node.connector.payload ?? null,
-        timeout: ctx.nodeTimeout,
+        timeout: isoDuration(node.connector.timeout, ctx.nodeTimeout),
       };
     default:
       return assertNever(node, "buildNodeInput");
