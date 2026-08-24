@@ -211,6 +211,42 @@ Two different `nano:dataEnvelope` uses have different rules — don't conflate t
   deriving a worker's array inputs from the model this way over a hand-typed
   `interface In`; don't "fix" a modelled `list="true"` array back to a joined
   scalar.
+- **A service-task/worker `dataEnvelope.in` field is read from PROCESS scope, not
+  task-local `ioMapping`.** (This applies to service-task/worker job envelopes; a
+  `dataEnvelope.in` on a **message subscription** — e.g. `CapsResolved` at
+  `plan-fanout.bpmn:12` — is instead populated from the correlated **message
+  payload**, so this gotcha does not apply there.) At runtime the engine populates
+  each declared `.in` field *by name* from the process variables in scope — a
+  `<zeebe:ioMapping>` input that synthesises a **new** name with no backing process
+  variable is silently ignored, so the field arrives **blank**. The engine itself
+  raises no incident for that *omitted* field (an `.in` name with no backing
+  variable resolves to null and blanks) — but this is distinct from a FEEL
+  `ioMapping` that **errors**: on the pinned engine (`@nanobpm/engine-wasm` 0.8.1's
+  `IO_MAPPING_ERROR` fix — before it, a failed mapping silently blanked, e.g. a
+  blocked converge-gate's escalation *question*; see the `e2e/*escalation*.e2e.ts`
+  comments) a failed FEEL mapping now raises an **incident** rather than blanking
+  through. A consumer that fails fast on the blank value will also incident (e.g.
+  `pr.readiness-probe` once read an empty `gateKey`;
+  `readGateVars` in `workers/readiness-probe/worker.ts` now *throws* on a blank
+  `gateKey`, creating an incident). Tasks like `ensure-base-branch` work only because
+  `repo`/`baseBranch` already exist as process variables. Seed any field a task must
+  read — **that is not already created in the task's visible process scope** — as a
+  real process variable at plan start (e.g. in `startPlan`); don't rely on
+  `ioMapping` to synthesise it. (A field already materialised in scope by the
+  process — e.g. `ReadinessProbeIn.probe`, seeded per multi-instance child via
+  `inputElement="probe"` in `resources/processes/feature.bpmn` — needs no such
+  seeding.) A **constant/literal** ioMapping source is different again: a
+  `<zeebe:input source="=true" target="lastAttempt"/>` (the readiness-gate
+  boundary's last-attempt marker — `readiness-gate.bpmn:125`, `feature.bpmn:105`,
+  `plan-fanout.bpmn:198`, and the generated `deliveryGraphCompiler.ts:1011`) is
+  *evaluated* and materialised into the job's scope, so it needs **no** backing
+  process variable — its value is the literal, not a reference to an (absent)
+  variable. The "arrives blank" failure above is specific to a field whose value
+  must be *derived from a process variable that isn't in scope* (the `gateKey`
+  case). Do **not** "fix" a working literal marker like `lastAttempt` by seeding
+  it as a process variable: besides being unnecessary, seeding a var an
+  in-subprocess gateway reads re-introduces the multi-instance `=null`-shadow
+  gotcha above.
 
 ## Urban page runtime: rendering primitives are not JS-truthy
 
@@ -235,6 +271,21 @@ silently — cheap to avoid, annoying to debug after the fact.
   `showWhenField` is hidden for `0`/`null`/`""` alike — so a `0`-or-`NULL` flag
   correctly hides it either way. (This is why the same flag can need `NULL` for a
   badge yet work as `0` for a `showWhenField` button.)
+- **Renderer kinds are a version-pinned set — verify against the installed
+  package, not an issue reference.** The page renderers are a finite set fixed by
+  the pinned `@nanobpm/urban`; a version *range* only guarantees *some* matching
+  build is installed. Do **not** assume a primitive exists because an issue,
+  changelog, or *Links* section mentions it — `urban check` (a CI gate) rejects
+  unknown renderer kinds only *after* you've authored a page around a phantom one
+  (epic #254 bounced three review rounds asserting a page-level "stepper" that
+  never shipped). Confirm the kind against the installed `RENDERERS` map
+  (`node_modules/@nanobpm/urban/dist/runtime/core/modules/pages.js`) and the kinds
+  already used across `pages/*.page.json`. Note a **nano-ide issue can ship a data
+  read-model, not a page renderer** (nano-ide#254 shipped the lineage projection, a data
+  primitive) — read *what kind* of primitive it delivers. Build composite visuals
+  as a `dataGrid` column renderer over stored columns (e.g. the `"kind":
+  "pipeline"` column in `pages/feature.page.json`), not a page-level primitive,
+  unless you've verified that primitive exists in the installed build.
 
 ### The top nav has a single source of truth — edit `pages/_nav.json`
 
@@ -271,10 +322,24 @@ Migrations live in `db/migrations/*.sql` and are **auto-applied on boot** from
 - Number a new migration after the current highest prefix (they apply in order).
   Check `origin/main`, not your branch point — a fan-out epic branch forks at one
   prefix while `main` keeps advancing, so the branch-local "next" number collides
-  on merge. Two files must never share a prefix; `npm run check:migrations`
+  on merge. **In a *simultaneous* fan-out wave, checking `origin/main` isn't
+  enough**: every sibling forks at the same commit, sees the same highest prefix,
+  and independently takes the same next number (main hasn't advanced yet), so the
+  planner must **pre-assign each slice a disjoint prefix block at decomposition
+  time** (e.g. give slice A `NNN`–`NNN+1`, slice B `NNN+2`–`NNN+3`, plus a separate
+  cleanup block — start the whole allocation *after* the current highest committed
+  prefix, never at fixed literals like `060`, which are long occupied) rather than
+  have each
+  agent compute "the next free" prefix. (This is the same "coarsen parallel work on
+  a shared surface" principle as the one-task-owns-each-`.bpmn` rule above — a
+  migration-prefix block is a shared numbering surface just like a `.bpmn`
+  diagram.) Two files must never share a prefix; `npm run check:migrations`
   (a CI gate) enforces this and fails the build on any new duplicate. Because a
-  prefix collision only exists in the *union* of two branches, this gate — like
-  `layout:check` and the generated-artifact `--check`s — is also re-run on the
+  **merge-skew** prefix collision only exists in the *union* of two branches (a
+  single branch that adds two same-prefix files is a self-collision
+  `check:migrations` already catches on the PR itself), this gate — like
+  `layout:check`, the navigation-index check (`sync:nav:check`), and a catch-all
+  committed-artifact backstop (`git diff --exit-code`) — is also re-run on the
   merge queue's **prospective merged commit** and on **push to `main`** by
   `.github/workflows/invariants.yml` (issue #366), so a merge-skew collision is
   blocked at merge time or fails a `main`-scoped build within minutes rather than
