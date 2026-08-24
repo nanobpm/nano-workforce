@@ -1762,9 +1762,12 @@ components:
         One saved reusable delivery-graph LIBRARY entry (issue #522, epic #519 S3) — the durable base
         the Library App-View (S4/#523), filesystem import (S5/#524), and export (S6/#525) build on.
         Unlike a `staged` proposal (content-digest-keyed, TTL-swept), a library entry is keyed by a
-        slug + short-hash of its (mutable) NAME so its graph can be edited without moving the row, and
-        it never ages out. The full `graph` JSON is carried so the export affordance (S6/#525) can build
-        a client-side download from the list payload without a second fetch.
+        slug + short-hash of its NAME — the name *is* the identity — so its graph can be edited in
+        place without moving the row, and it never ages out. (A rename is not an in-place update:
+        because the id is derived from the name, renaming derives a new id, i.e. a new entry; the old
+        row remains until explicitly deleted.) The full `graph` JSON is carried so the export
+        affordance (S6/#525) can build a client-side download from the list payload without a second
+        fetch.
       type: object
       additionalProperties: false
       required:

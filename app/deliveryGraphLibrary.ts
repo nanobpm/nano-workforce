@@ -6,9 +6,11 @@
 //
 //   • Keyed by a slug + short-hash of the entry NAME (`libraryEntryId`), NOT the content digest.
 //     Proposals are content-addressed (a re-compile is a new digest, a new row); a library entry is
-//     meant to be EDITED (its graph is mutable) while its identity stays put, so keying on the human,
-//     mutable name gives a stable, human-readable id. Re-saving the same name is idempotent (upsert:
-//     the graph refreshes, `created_at` is preserved).
+//     meant to have its GRAPH edited in place — the NAME *is* the identity, so keying on the human,
+//     readable name gives a stable, human-readable id and re-saving the same name is idempotent
+//     (upsert: the graph refreshes, `created_at` is preserved). Because the id is derived from the
+//     name, a rename is NOT an in-place update: it derives a *new* id (a new entry), leaving the old
+//     row until it is explicitly deleted.
 //   • NO TTL. A proposal ages out of the cockpit; a saved library entry is kept until explicitly
 //     deleted — there is no `expires_at` and no sweep.
 //
