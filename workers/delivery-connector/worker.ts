@@ -16,7 +16,7 @@ import {
   dispatchConnector,
   isConvergeTarget,
 } from "../../app/deliveryConnector.ts";
-import { MAX_ROUNDS, type ParsedPr, parsePr, submitPr } from "../../app/service.ts";
+import { isPrSettled, MAX_ROUNDS, type ParsedPr, parsePr, submitPr } from "../../app/service.ts";
 
 // Typed off the compiled `connector` subProcess ioMapping (a RUNTIME-generated definition, so there is
 // no static data-envelope to derive from): `target`/`dedupeKey`/`payload` are seeded from the node's
@@ -116,12 +116,28 @@ const handler: AppJobHandler<In, ConnectorDispatchResult> = async (job, app) => 
     // lost ack / graph resume that lands AFTER the PR has settled — NEVER re-runs it. This is what
     // preserves the connector's at-most-once semantics against `submitPr`, which deliberately RE-OPENS a
     // terminal PR (it only short-circuits a non-terminal row); an unconditional call outside the fence
-    // would flip a `merged`/`converged`/`abandoned` PR back to `converging` on redelivery. `submitPr`'s
-    // own `prKey` idempotency still makes a resumed (crashed-claim) re-perform double-safe on a live row.
+    // would flip a `merged`/`converged`/`abandoned` PR back to `converging` on redelivery.
+    //
+    // The action is ALSO terminal-safe (idempotent on RESUME). A still-`claimed` crashed claim is
+    // re-performed by `dispatchConnector` (it never recorded delivery), and its first attempt may have
+    // already enrolled the PR AND let the convergence/merge loop settle it. Because `submitPr` re-opens a
+    // terminal row, re-performing blindly would regress that settled PR — so the action first checks
+    // `isPrSettled` and NO-OPS when the PR row is already terminal. On a LIVE (non-terminal) row
+    // `submitPr`'s own `prKey` short-circuit (`alreadyRunning`) already makes the resume double-safe.
     // `rootRequestKey` is the stable per-node `dedupeKey` (authored, else `<processInstanceKey>:<elementId>`),
     // so the enrolled PR's lineage is deterministic across redeliveries.
     converge
       ? async () => {
+          if (await isPrSettled(app.data, converge.parsed.prKey)) {
+            // Resume against an already-settled PR: the enrollment already ran its course. Record the
+            // dispatch delivered WITHOUT re-opening the terminal PR (never regress a settled PR).
+            app.log.info("delivery-connector: enrollment skipped — PR already terminal (resume-safe)", {
+              target,
+              dedupeKey,
+              prKey: converge.parsed.prKey,
+            });
+            return { detail: `${converge.parsed.prKey} already terminal — enrollment skipped (at-most-once resume-safe)` };
+          }
           await submitPr(app.data, app.engine, converge.parsed, converge.dependsOn, MAX_ROUNDS, converge.convergeOnly, dedupeKey);
           app.log.info("delivery-connector: enrolled PR into convergence loop", {
             target,

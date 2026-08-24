@@ -224,6 +224,25 @@ test("handler: a converge redelivery whose prior claim CRASHED before recording 
   });
 });
 
+test("handler: a crash-window RESUME whose PR already SETTLED to terminal does NOT re-open it (the enrollment action is terminal-safe)", async () => {
+  await withGithubOff(async () => {
+    const { app, stores, created } = fakeApp();
+    const job = { variables: { target: "converge-merge", payload: { pr: "owner/repo#13" } }, processInstanceKey: "PI-graph", elementId: "n2" } as never;
+    // The first attempt claimed the ledger AND enrolled the PR, which then ran the convergence (+ merge)
+    // loop to completion (`merged`) — but the worker crashed BEFORE recording `delivered`, leaving a
+    // still-`claimed` row. A redelivery RESUMES that claim (perform-again, since it never recorded done).
+    stores.delivery_connector_dispatches.rows.push({ id: 1, dedupe_key: "PI-graph:n2", target: "converge-merge", outcome: "claimed", detail: null, dispatched_at: "t0" });
+    stores.pull_requests.rows.push({ pr_key: "owner/repo#13", status: "merged" });
+    // `submitPr` deliberately RE-OPENS a terminal PR (it only short-circuits a NON-terminal row), so a
+    // resumed re-perform would flip the settled PR back to `converging`. The enrollment action must be
+    // terminal-safe: on resume against an already-settled PR it no-ops (no submitPr, no new instance).
+    await handler(job, app);
+    assertEquals(created.length, 0, "the settled PR is NOT re-enrolled on resume — no new convergence-loop instance");
+    assertEquals(stores.pull_requests.rows[0].status, "merged", "the terminal PR stays terminal (never flipped back to converging)");
+    assertEquals(stores.delivery_connector_dispatches.rows[0].outcome, "delivered", "the resumed claim is recorded delivered (the dispatch is done, no side effect was needed)");
+  });
+});
+
 test("handler: a misconfigured converge connector (no parseable pr) fails CLOSED and writes NO ledger row", async () => {
   await withGithubOff(async () => {
     const { app, stores, created } = fakeApp();

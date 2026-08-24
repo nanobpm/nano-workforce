@@ -109,7 +109,9 @@ export function connectorDedupeKey(input: {
  * side effect (e.g. `submitPr`, which deliberately re-opens a TERMINAL PR) is fenced by the ledger and
  * can never double-fire — the reason the enrollment lives HERE rather than unconditionally around the
  * dispatch. Returns the `detail` recorded on the ledger row. May be async (the real converge enrollment
- * awaits `submitPr`). Must be idempotent so a resumed crashed claim can safely re-perform it. */
+ * awaits `submitPr`). Must be idempotent so a resumed crashed claim can safely re-perform it — including
+ * terminal-safe against a NON-idempotent target (the converge action no-ops when its PR already settled,
+ * so a resume can never regress a terminal PR by re-opening it). */
 export type ConnectorAction = (input: {
   target: string;
   payload: Record<string, unknown> | null;
