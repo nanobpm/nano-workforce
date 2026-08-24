@@ -95,9 +95,14 @@ export async function probeSingleShot(deps: {
     `readiness gate escalating ${label}: not ready at boundary — ${failingDetail}` +
       (observed ? `; observed: ${observed}` : ""),
   );
+  // Return the actual failing probe detail (not a generic "gate boundary reached" string): downstream
+  // the wait-gate seeds `probeDetail` and the escalation context FEEL from `detail`, so overwriting it
+  // here would make the escalation non-diagnostic — the very defect this change fixes. The fact that the
+  // boundary/timeout was reached is already communicated by the escalation context ("exceeded its SLA …
+  // before its ReadinessProbe went green") and the structured WARN above.
   return {
     ready: false,
-    detail: settled ? `gate boundary reached (fallback: ${settled.detail})` : "gate boundary reached",
+    detail: failingDetail,
     observed,
   };
 }

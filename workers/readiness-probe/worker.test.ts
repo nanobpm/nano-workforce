@@ -161,6 +161,16 @@ test("#514 Defect A probeSingleShot: a not-ready capability at the boundary emit
   assert(warns[0].includes("capability #468 not published"), "the warn carries the probe's last detail");
   assert(warns[0].includes("@nanobpm/urban@0.82.0 no #468"), "the warn carries the observed candidate releases");
   assert((res.observed ?? "").includes("@nanobpm/urban@0.82.0 no #468"), "the observed summary is threaded to the return for the escalation task");
+  // The return `detail` must carry the probe's actual last matcher detail — NOT a generic "gate boundary
+  // reached" string — because the wait-gate seeds `probeDetail` and the escalation context FEEL from it.
+  assert(
+    res.detail.includes("capability #468 not published"),
+    "the boundary return `detail` carries the probe's diagnostic last detail, keeping the escalation diagnostic",
+  );
+  assert(
+    !res.detail.includes("gate boundary reached"),
+    "the boundary return no longer clobbers `detail` with a generic contextless string",
+  );
 });
 
 
