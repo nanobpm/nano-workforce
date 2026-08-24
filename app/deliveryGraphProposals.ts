@@ -256,11 +256,22 @@ export async function markProposalExpired(data: DataLayer, digest: string): Prom
  * status so it drops out of the cockpit's staged grid (which filters to `status = 'staged'`), exactly
  * like `superseded`/`expired`. Unlike `expired` (a TTL sweep) or `superseded` (a newer digest landed),
  * `dismissed` records a deliberate operator "this is noise, hide it" — the proposal was neither aged out
- * nor replaced. Mirrors `markProposalExpired`'s shape/semantics: a blind update-by-key on the terminal
- * status. Callers (the `dismissProposal` door) gate this behind a `getStagedProposal` liveness check so
- * an unknown or already-terminal digest is refused before this runs, keeping the dismiss idempotent. */
+ * nor replaced. Callers (the `dismissProposal` door) gate this behind a `getStagedProposal` liveness
+ * check so an unknown or already-terminal digest is refused before this runs, keeping the dismiss
+ * idempotent.
+ *
+ * Like `sweepExpiredProposals`, the flip is a GUARDED UPDATE (`... WHERE digest=? AND status='staged'`),
+ * not a blind update-by-key. The door's `getStagedProposal` check and this write are separate statements,
+ * so a dispatch (or a supersede/expiry sweep) can move the row off `staged` in the window between them; a
+ * blind `table.update(digest, …)` would clobber that newer terminal status back to `dismissed`, silently
+ * re-hiding a run the operator just launched. The `status='staged'` guard makes the write a no-op when the
+ * row has already moved on, preserving monotonic lifecycle transitions under concurrent operator actions. */
 export async function markProposalDismissed(data: DataLayer, digest: string): Promise<void> {
-  await deliveryGraphProposals(data).update(digest, { status: "dismissed", updated_at: now() });
+  const db = data.open();
+  await db.exec(
+    `UPDATE "delivery_graph_proposals" SET "status" = 'dismissed', "updated_at" = ? WHERE "digest" = ? AND "status" = 'staged'`,
+    [now(), digest],
+  );
 }
 
 /** Age out every `staged` proposal whose TTL has elapsed by flipping it to `expired`, so it drops out

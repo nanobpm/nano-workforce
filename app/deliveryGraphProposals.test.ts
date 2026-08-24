@@ -16,6 +16,7 @@ import {
   deliveryGraphProposals,
   getStagedProposal,
   isProposalExpired,
+  markProposalDismissed,
   markProposalDispatched,
   proposalExpiry,
   proposalLogicalKey,
@@ -262,6 +263,59 @@ test("sweepExpiredProposals: a dispatch racing between the read and the write is
     const swept = await sweepExpiredProposals(racyData as DataLayer, at);
     assert(raced, "the racing dispatch should have fired");
     assertEquals(swept, 0);
+    assertEquals((await deliveryGraphProposals(data).get("d1"))?.status, "dispatched");
+  });
+});
+
+test("markProposalDismissed: only a `staged` row is flipped; an already-terminal (dispatched) row is left untouched", async () => {
+  await withData(async (data) => {
+    await stageProposal(data, row());
+    await markProposalDispatched(data, "d1");
+    // A dismiss landing after the row already moved on must NOT clobber the terminal status.
+    await markProposalDismissed(data, "d1");
+    assertEquals((await deliveryGraphProposals(data).get("d1"))?.status, "dispatched");
+  });
+});
+
+test("markProposalDismissed: a dispatch racing between the door's liveness read and the write is NOT clobbered to `dismissed`", async () => {
+  await withData(async (data) => {
+    // A live staged proposal — the door's `getStagedProposal` sees it as `staged` before the write.
+    await stageProposal(data, row());
+
+    // Wrap the data layer so that, in the window between the door's liveness read and `markProposalDismissed`'s
+    // guarded `exec`, the operator dispatches the proposal (status: staged -> dispatched). A blind
+    // update-by-key would clobber that dispatch back to `dismissed`; the guarded UPDATE (`WHERE status='staged'`)
+    // must instead no-op and leave the row `dispatched`.
+    let raced = false;
+    const racyData = new Proxy(data, {
+      get(target, prop, receiver) {
+        if (prop === "open") {
+          return () => {
+            const src = target.open();
+            return new Proxy(src, {
+              get(s, p) {
+                if (p === "exec") {
+                  return async (sql: string, params?: unknown[]) => {
+                    if (!raced) {
+                      raced = true;
+                      await markProposalDispatched(data, "d1");
+                    }
+                    return s.exec(sql, params);
+                  };
+                }
+                const v = Reflect.get(s, p, s);
+                return typeof v === "function" ? v.bind(s) : v;
+              },
+            });
+          };
+        }
+        const v = Reflect.get(target, prop, target);
+        return typeof v === "function" ? v.bind(target) : v;
+      },
+    });
+
+    await markProposalDismissed(racyData as DataLayer, "d1");
+    assert(raced, "the racing dispatch should have fired");
     assertEquals((await deliveryGraphProposals(data).get("d1"))?.status, "dispatched");
   });
 });
