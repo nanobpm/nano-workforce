@@ -240,8 +240,10 @@ test("#514 Defect B: a resumed wait-node escalation maps the operator-supplied v
   assert(/source="=if \(is defined\(value\)\) then value else null" target="detail"/.test(escV), "the operator's value is mapped onto the version emit's source var (detail)");
 
   const escA = escBlockForNode(r.bpmn, "n3");
-  // An `artifact` emit is sourced from `resolvedArtifact`.
-  assert(/source="=if \(is defined\(resolvedArtifact\)\) then resolvedArtifact else null" target="resolvedArtifact"/.test(escA), "the operator's artifact is mapped onto the artifact emit's source var (resolvedArtifact)");
+  // An `artifact` emit is ALSO sourced from the generic form's single `value` field (the form has no
+  // `resolvedArtifact` field), mapped onto the artifact emit's source var (resolvedArtifact) — so an
+  // artifact wait-node escalation is actually resumable via the UI.
+  assert(/source="=if \(is defined\(value\)\) then value else null" target="resolvedArtifact"/.test(escA), "the operator's value is mapped onto the artifact emit's source var (resolvedArtifact)");
 });
 
 test("#514 Defect B: a service-node escalation (agent) stays inert — no emit field, no resume output mapping (only wait resumes)", async () => {

@@ -236,6 +236,23 @@ test("#514 Defect A summariseCapabilityCandidates: no matching releases yields a
   assertEquals(summariseCapabilityCandidates(capMatch, [rel("@nanobpm/other@1.0.0", [274])]), "no @nanobpm/urban releases observed");
 });
 
+test("#514 Defect A summariseCapabilityCandidates: an unparseable capabilityRef is labelled distinctly and omits the meaningless per-candidate refs/no flags", () => {
+  const badRef = { ...capMatch, capabilityRef: "not-a-number" };
+  const summary = summariseCapabilityCandidates(badRef, [rel("@nanobpm/urban@0.82.0", [274])]);
+  assertStringIncludes(summary, "1 @nanobpm/urban release(s) observed (unparseable ref)");
+  assertStringIncludes(summary, "@nanobpm/urban@0.82.0");
+  assert(!summary.includes("(no ref configured)"), "a configured-but-unparseable ref is NOT reported as missing");
+  assert(!summary.includes("no #") && !summary.includes("refs #"), "no meaningless per-candidate ref flags when there is no parseable number");
+  assert(!summary.includes("referencing"), "no aggregate referencing count when there is no parseable number");
+});
+
+test("#514 Defect A summariseCapabilityCandidates: a genuinely absent ref is labelled '(no ref configured)'", () => {
+  const noRef = { ...capMatch, capabilityRef: undefined };
+  const summary = summariseCapabilityCandidates(noRef, [rel("@nanobpm/urban@0.82.0", [274])]);
+  assertStringIncludes(summary, "1 @nanobpm/urban release(s) observed (no ref configured)");
+  assert(!summary.includes("unparseable"), "a missing ref is not reported as unparseable");
+});
+
 test("#514 Defect A summariseCapabilityCandidates: caps the newest 8 candidates so a >100-release repo cannot bloat the form/log", () => {
   const many: GithubRelease[] = [];
   for (let i = 1; i <= 20; i++) many.push(rel(`@nanobpm/urban@0.${i}.0`, [200]));

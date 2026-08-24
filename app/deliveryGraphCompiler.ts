@@ -1141,9 +1141,13 @@ function escalationTaskLines(
       const target = factSourceVar(opts.resume.kind, fact);
       if (seen.has(target)) continue;
       seen.add(target);
-      const src = fact.type === "artifact" ? "resolvedArtifact" : "value";
+      // The generic escalation form (`GENERIC_HUMAN_FORM`) captures the operator's answer in a single
+      // `value` field — it has NO `resolvedArtifact` field — so every emit type resumes from `value`,
+      // mapped onto that fact's emit-source var (artifact→resolvedArtifact, version→detail, …). Sourcing
+      // an artifact from a `resolvedArtifact` form field the form never sets would publish null and make
+      // an artifact wait-node escalation non-resumable via the UI.
       outputs.push(
-        `            <zeebe:output ${attr("source", `=if (is defined(${src})) then ${src} else null`)} target="${target}" />`,
+        `            <zeebe:output ${attr("source", `=if (is defined(value)) then value else null`)} target="${target}" />`,
       );
     }
   }

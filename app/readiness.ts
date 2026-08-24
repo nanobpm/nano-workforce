@@ -480,11 +480,19 @@ export function summariseCapabilityCandidates(
   }
   if (candidates.length === 0) return `no ${pkg} releases observed`;
   candidates.sort((a, b) => cmpVersion(b.version, a.version)); // newest first, deterministic
-  const referencing = candidates.filter((c) => c.refs).length;
-  const refLabel = num !== undefined ? `#${num}` : "(no ref configured)";
   const shown = candidates.slice(0, CAPABILITY_SUMMARY_LIMIT);
-  const parts = shown.map((c) => `${pkg}@${c.version} ${c.refs ? `refs ${refLabel}` : `no ${refLabel}`}`);
   const more = candidates.length > shown.length ? ` (+${candidates.length - shown.length} more)` : "";
+  if (num === undefined) {
+    // No parseable ref number to test candidates against: distinguish a configured-but-unparseable ref
+    // from a genuinely absent one, and OMIT the per-candidate/aggregate "refs/no" flags — with nothing
+    // to match, every candidate would carry a meaningless "no", which is misleading rather than diagnostic.
+    const why = ref ? "(unparseable ref)" : "(no ref configured)";
+    const parts = shown.map((c) => `${pkg}@${c.version}`);
+    return `${candidates.length} ${pkg} release(s) observed ${why}: ${parts.join("; ")}${more}`;
+  }
+  const referencing = candidates.filter((c) => c.refs).length;
+  const refLabel = `#${num}`;
+  const parts = shown.map((c) => `${pkg}@${c.version} ${c.refs ? `refs ${refLabel}` : `no ${refLabel}`}`);
   return `${candidates.length} ${pkg} release(s) observed, ${referencing} referencing ${refLabel}: ${parts.join("; ")}${more}`;
 }
 
