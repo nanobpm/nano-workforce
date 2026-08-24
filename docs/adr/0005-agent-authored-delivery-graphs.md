@@ -268,6 +268,32 @@ resume cannot double-fire.
 > Determinism is preserved: gateway ids are positional over id-sorted nodes, so a graph with no guards
 > compiles byte-for-byte as before.
 
+> **Amendment (issue #506): the agent-node classifier-emit contract.** S7 (above) routes a guarded
+> split on a producer's emitted scalar, published to `<producerElement>_<fact>` by the node's output
+> ioMapping — which, for an `agent`/`connector` node, reads the engine variable named exactly after the
+> fact (`factSourceVar` → `fact.name`). A REAL `senior:*` fleet agent, though, completes with its
+> **Output-contract envelope** (`{ status, summary, pr, question, delta }`) and never a bare
+> `{ <fact>: <value> }`, so a guarded split authored on a `senior:feature` node compiled + was
+> deadlock-safe (the `default` else-flow fires when the fact is unset) but its non-default branch was
+> **inert** — the migrate/escalate arm never fired. The contract that closes this:
+> - An `agent` node's declared `emits[]` is threaded into the node's `appendPrompt` (its sole steering
+>   channel — the delivery agent node carries no base-prompt resource) as a **classifier emit contract**
+>   block (`deliveryRunner.renderEmitContract`), instructing the servicing agent to ALSO return each
+>   declared fact as a **top-level field** of its result JSON — the very same `AGENT_RESULT_FILE`
+>   channel that already carries `status`/`summary`/`pr`. The fleet harness merges that JSON into the
+>   job completion variables, so `<fact.name>` lands in scope exactly where the output ioMapping reads
+>   it. `emits` stays the single source of truth: the contract text is derived from it, never a parallel
+>   declaration.
+> - The convention a graph author relies on: declare `emits: [{ name, type }]` on the agent node and
+>   guard the downstream edge with `when: "<node>.<name>"` + `equals: <literal>`; a contract-following
+>   agent returns `{ …, <name>: <value> }` and the split routes on it. Omitting the fact (the agent
+>   could not decide) takes the `default` branch — the deadlock-safe fallback S7 already guarantees.
+> - A no-emit agent node appends nothing, so a plain implementation node is byte-for-byte unchanged.
+>   The `deploy+route` coverage now drives BOTH branches with a **real contract-following worker** (it
+>   asserts the emit contract reached it via `appendPrompt`, then completes with the full envelope
+>   carrying the fact), not a bare-`{ result }` stub — proving the instruction is actually delivered and
+>   the real completion shape routes.
+
 ## Open questions
 
 - **Compiler target for the first cut** — confirm compile-to-native (diagram + native scheduling) vs a

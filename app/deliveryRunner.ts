@@ -170,6 +170,39 @@ function rewriteProcessId(bpmn: string, processDefinitionId: string): string {
     .replace(`bpmnElement="${DELIVERY_GRAPH_PROCESS_ID}"`, `bpmnElement="${processDefinitionId}"`);
 }
 
+/** Render the classifier-emit contract appended to an `agent` node's `appendPrompt` (issue #506) — the
+ * instruction that turns a declared `emits[]` into completion variables a downstream guarded split (S7)
+ * can route on. A `senior:*` fleet agent completes with the Output-contract envelope (`status`,
+ * `summary`, `pr`, …); the delivery output ioMapping instead publishes the engine variable named exactly
+ * after each fact (`factSourceVar` → `fact.name`), so the agent must ALSO return each declared fact as a
+ * TOP-LEVEL field of that same result JSON. This block tells it so, deriving entirely from the node's
+ * declared `emits` (no second source of truth). Empty for a no-emit node → the prompt is unchanged, so a
+ * plain implementation node behaves exactly as before. Deterministic: fixed wording, facts in declared
+ * order, so identical graphs still compile+seed byte-identically. */
+export function renderEmitContract(emits: readonly DeliveryFact[]): string {
+  if (emits.length === 0) return "";
+  const facts = emits.map((f) => `- \`${f.name}\` (${f.type})${f.description ? ` — ${f.description}` : ""}`);
+  return [
+    "",
+    "",
+    "---",
+    "",
+    "## Classifier emit contract (delivery graph)",
+    "",
+    "This node is a PRODUCER in a delivery graph: a downstream **guarded split** routes on the typed",
+    "fact(s) below. In ADDITION to your normal result fields (`status`, `summary`, `pr`, …), the",
+    "structured result you write to `AGENT_RESULT_FILE` MUST include these TOP-LEVEL fields, each a",
+    "bare scalar of the declared type:",
+    "",
+    ...facts,
+    "",
+    "The value you return for each fact IS the routing decision — a downstream edge fires only when the",
+    "fact equals a specific literal, otherwise the graph takes the `default` (else) branch. If you",
+    "genuinely cannot determine a fact, OMIT it (the default branch is taken) rather than guessing.",
+  ].join("\n");
+}
+
+
 /** Build the `nodeInputs.<element>` seed for one node, per its kind — the exact fields the compiled
  * subProcess ioMapping pulls. Total over the closed kind set. */
 function buildNodeInput(
@@ -177,8 +210,21 @@ function buildNodeInput(
   ctx: { runKey: string; element: string; nodeTimeout: string; probeTimeout: string; probePollEvery: string; escalationSlaTimeout: string; escalationAssignee: string | null },
 ): NodeInput {
   switch (node.kind) {
-    case "agent":
-      return { jobType: node.agent.jobType, appendPrompt: node.agent.prompt ?? "", timeout: isoDuration(node.agent.timeout, ctx.nodeTimeout) };
+    case "agent": {
+      // Classifier-emit contract (issue #506). A `senior:*` fleet agent's real completion is the
+      // Output-contract envelope (`{ status, summary, pr, … }`) — it does NOT return a bare fact, so a
+      // node's declared `emits` would never appear and a downstream GUARDED split (S7) could only ever
+      // take its `default` branch. Close the gap the same way `factSourceVar` already reads it: the
+      // output ioMapping publishes the engine variable named exactly after each fact, so the agent must
+      // return `{ <fact>: <value> }` AS A TOP-LEVEL field of its result JSON (the same channel that
+      // carries `status`/`summary`/`pr`). The agent only knows to do this if it is TOLD — so the
+      // declared emits are rendered into the node's `appendPrompt` (its sole steering channel; the
+      // delivery agent node carries no base-prompt resource), keeping `emits` the single source of
+      // truth. A no-emit node appends nothing, so a plain implementation node is unchanged.
+      const basePrompt = node.agent.prompt ?? "";
+      const emits = Array.isArray(node.emits) ? node.emits.map((f) => ({ ...f })) : [];
+      return { jobType: node.agent.jobType, appendPrompt: basePrompt + renderEmitContract(emits), timeout: isoDuration(node.agent.timeout, ctx.nodeTimeout) };
+    }
     case "wait": {
       const probe = parseProbe(node.wait);
       return {

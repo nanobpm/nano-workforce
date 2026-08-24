@@ -277,6 +277,110 @@ test("S7 deploy+route: the green default branch SKIPS `migrate` and rides the el
   assert(r.releaseRan, "the green outcome still reaches `release` via the else-flow (proof the exclusive merge fires on one token)");
 });
 
+// ── #506: the REAL agentic-worker classifier-emit contract drives a guarded split ──────────────────
+// The S7 stubs above (`() => ({ result: outcome })`) prove the ENGINE routes on a published fact, but a
+// bare `{ result }` is NOT what a real `senior:*` fleet agent returns — it completes with the whole
+// Output-contract envelope (`{ status, summary, pr, … }`) and never a bare fact. So the gap #506 closes
+// is: (a) the node's declared `emits` must be threaded into the agent's `appendPrompt` so a real agent
+// is TOLD to surface the fact, and (b) the fact rides that SAME envelope as an extra top-level field.
+// This graph proves both against the real engine: the `adopt` node declares `emits: [result]` and is
+// serviced by a worker that (1) ASSERTS the emit contract reached it via `appendPrompt` — proving the
+// runner actually delivers the instruction, not a test stub — and (2) returns the full envelope with the
+// fact folded in, exactly as a contract-following agent would. Both branches are driven end to end.
+const GUARDED_ADOPT_REAL: DeliveryGraph = {
+  name: "adopt runbook (real agent)",
+  nodes: [
+    {
+      id: "adopt",
+      kind: "agent",
+      agent: { jobType: "senior:feature", prompt: "Adopt the published package into this consumer and open a PR." },
+      emits: [{ name: "result", type: "string", description: "breaking | compatible" }],
+    },
+    { id: "migrate", kind: "agent", agent: { jobType: "senior:migrate" } },
+    { id: "release", kind: "connector", connector: { target: "npm:publish", dedupeKey: "rel-real-1" } },
+  ],
+  edges: [
+    { from: "adopt", to: "migrate", when: "adopt.result", equals: "breaking" },
+    { from: "adopt", to: "release", default: true },
+    { from: "migrate", to: "release" },
+  ],
+};
+
+/** Drive `GUARDED_ADOPT_REAL` with a worker that behaves like a REAL contract-following `senior:feature`
+ *  agent: it reads the emit contract the runner threaded into its `appendPrompt`, then completes with the
+ *  full Output-contract envelope carrying the classifier fact as a top-level field. Returns whether the
+ *  contract actually reached the agent, plus which branches ran. */
+async function driveGuardedRealAgent(outcome: "breaking" | "compatible"): Promise<{
+  state: string;
+  contractDelivered: boolean;
+  factSurfaced: boolean;
+  migrateRan: boolean;
+  releaseRan: boolean;
+}> {
+  const engine = await createWasmEngineClient();
+  try {
+    let contractDelivered = false;
+    let factSurfaced = false;
+    let migrateRan = false;
+    let releaseRan = false;
+
+    await engine.registerWorker("senior:feature", async (job) => {
+      const appendPrompt = String((job.variables as Record<string, unknown> | undefined)?.appendPrompt ?? "");
+      // (a) The classifier emit contract MUST have reached the agent via its steering channel — this is
+      //     the #506 fix (a plain `senior:feature` seed would carry no such instruction).
+      contractDelivered =
+        appendPrompt.includes("Classifier emit contract") &&
+        appendPrompt.includes("`result`") &&
+        appendPrompt.includes("AGENT_RESULT_FILE");
+      factSurfaced = appendPrompt.includes("`result`");
+      // (b) A real agent completes with the WHOLE Output-contract envelope, folding the declared fact in
+      //     as an extra top-level field — NOT a bare `{ result }` stub.
+      return { status: "opened", summary: `adopt done (${outcome})`, pr: "owner/repo#900", result: outcome };
+    });
+    await engine.registerWorker("senior:migrate", async () => {
+      migrateRan = true;
+      return { status: "opened", summary: "migrated", pr: "owner/repo#901" };
+    });
+    await engine.registerWorker(DELIVERY_CONNECTOR_TASK_TYPE, async () => {
+      releaseRan = true;
+      return {};
+    });
+
+    const run = await runDeliveryGraph(engine, GUARDED_ADOPT_REAL);
+    assert(run.ok, `runDeliveryGraph failed: ${JSON.stringify(run)}`);
+    const key = run.handle.processInstanceKey;
+
+    let state = "?";
+    for (let round = 0; round < MAX_ROUNDS; round++) {
+      await engine.drain();
+      const [pi] = await engine.searchProcessInstances({ processInstanceKeys: [key] });
+      assert(pi, `no process instance snapshot for ${key}`);
+      state = pi.state ?? "?";
+      if (state === "COMPLETED" || state === "TERMINATED") break;
+    }
+    return { state, contractDelivered, factSurfaced, migrateRan, releaseRan };
+  } finally {
+    await engine.close();
+  }
+}
+
+test("#506 deploy+route: a REAL contract-following agent's envelope carries the classifier fact and routes the BREAKING branch through `migrate`", async () => {
+  const r = await driveGuardedRealAgent("breaking");
+  assert(r.contractDelivered, "the emit contract must reach the agent via its threaded appendPrompt (the #506 fix)");
+  assert(r.factSurfaced, "the declared fact must be named to the agent");
+  assertEquals(r.state, "COMPLETED", "the breaking branch must run to a COMPLETED instance");
+  assert(r.migrateRan, "the breaking outcome (returned inside the real Output-contract envelope) must route through `migrate`");
+  assert(r.releaseRan, "both branches must re-converge on `release`");
+});
+
+test("#506 deploy+route: the SAME real agent returning `compatible` in its envelope rides the default flow, SKIPPING `migrate`", async () => {
+  const r = await driveGuardedRealAgent("compatible");
+  assert(r.contractDelivered, "the emit contract must reach the agent via its threaded appendPrompt (the #506 fix)");
+  assertEquals(r.state, "COMPLETED", "the compatible branch must run to a COMPLETED instance");
+  assert(!r.migrateRan, "the compatible outcome must NOT route through `migrate` — the envelope's `result` rides the default flow");
+  assert(r.releaseRan, "the compatible outcome still reaches `release` via the else-flow");
+});
+
 test("S7 deploy+route: mutually-exclusive leaves join End on an exclusive merge — the untaken leaf never blocks completion", async () => {
   // Mode D: `adopt` routes a missing surface to an escalate (human) leaf, else to a `done` connector
   // leaf. On the default path the escalate leaf never fires; an exclusive End merge must still let the
