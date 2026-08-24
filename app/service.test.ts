@@ -11,7 +11,9 @@ import { memDataFor } from "../test/worldDb.ts";
 import { withTrackingViews } from "../test/trackingViews.ts";
 import { DurableResumeRegistry } from "./durableResume.ts";
 import { WorldStore } from "./world/index.ts";
-import { abandonClosedPr, parsePr, pollCapabilityGatesImpl, pollIncidentsImpl, pollWaveGatesImpl, repoEnvelopeVars, startMerge, submitPr, worldRestoreSha } from "./service.ts";
+import { abandonClosedPr, isPrSettled, parsePr, pollCapabilityGatesImpl, pollIncidentsImpl, pollWaveGatesImpl, repoEnvelopeVars, startMerge, submitPr, worldRestoreSha } from "./service.ts";
+import { trackingTargetFor } from "./instanceTracking.ts";
+import type { DataLayer } from "@nanobpm/urban";
 
 function memTable(rows: any[], key: string) {
   return {
@@ -48,6 +50,31 @@ function withGithubOff(run: () => Promise<void>): Promise<void> {
     if (prevTok !== undefined) process.env["GITHUB_TOKEN"] = prevTok;
   });
 }
+
+test("isPrSettled reads the derived tracking view — an out-of-band-abandoned PR (base row still converging) is settled", async () => {
+  // The base `pull_requests` row still reads `converging`, but the ADR-0065 derived tracking VIEW
+  // folds the reconciler's out-of-band terminal edge into `derived_status: "abandoned"`. Terminal-edge
+  // classification must read `derived_status`, not the stale base `status`, or a crash-window RESUME
+  // of the delivery-connector enrollment action re-runs `submitPr` against a PR that has actually
+  // already settled (and the ledger detail falsely claims it enrolled).
+  const PR_KEY = "owner/repo#7";
+  const view = trackingTargetFor("pull_requests").view;
+  const base = { pr_key: PR_KEY, status: "converging" };
+  function make(derived: string) {
+    return {
+      table(name: string) {
+        if (name === "pull_requests") return { get: async (k: string) => (k === PR_KEY ? { ...base } : null) };
+        if (name === view) return { get: async (k: string) => (k === PR_KEY ? { ...base, derived_status: derived } : null) };
+        throw new Error(`unexpected table ${name}`);
+      },
+    } as any as DataLayer;
+  }
+  assertEquals(await isPrSettled(make("abandoned"), PR_KEY), true, "out-of-band-abandoned PR is settled via derived_status");
+  assertEquals(await isPrSettled(make("converging"), PR_KEY), false, "a genuinely live PR is not settled");
+  const empty = { table: () => ({ get: async () => null }) } as any as DataLayer;
+  assertEquals(await isPrSettled(empty, PR_KEY), false, "an absent PR row is not settled");
+});
+
 
 test("re-submit of a cancelled PR marks stale open escalations", async () => {
   await withGithubOff(async () => {

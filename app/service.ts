@@ -483,15 +483,18 @@ export async function worldRestoreSha(data: DataLayer, prKey: string): Promise<s
 }
 
 /** Whether the `pull_requests` row for `prKey` already exists AND is in a TERMINAL state
- * (`converged`/`merged`/`abandoned`). The delivery-connector's converge-enrollment action guards on
- * this so a crash-window RESUME (a `claimed`-but-not-`delivered` ledger row whose first attempt
- * already enrolled the PR and let it settle) never re-runs `submitPr` against a settled PR —
- * `submitPr` deliberately RE-OPENS a terminal row, so an unconditional re-perform would flip the PR
- * back to `converging`, regressing a settled PR. Reuses the canonical `TERMINAL_STATUSES` so the
- * terminal-safety check can't drift from the one the loop/incident logic uses. */
+ * (`converged`/`merged`/`abandoned`). Reads the ADR-0065 derived tracking VIEW's `derived_status`
+ * (via `prsTracking`), NOT the base `status`, so an out-of-band-terminated PR — whose base row is
+ * still `converging` but whose reconciled edge is `abandoned` — is correctly seen as settled. The
+ * delivery-connector's converge-enrollment action guards on this so a crash-window RESUME (a
+ * `claimed`-but-not-`delivered` ledger row whose first attempt already enrolled the PR and let it
+ * settle) never re-runs `submitPr` against a settled PR — `submitPr` deliberately RE-OPENS a terminal
+ * row, so an unconditional re-perform would flip the PR back to `converging`, regressing a settled PR.
+ * Reuses the canonical `TERMINAL_STATUSES` so the terminal-safety check can't drift from the one the
+ * loop/incident logic uses. */
 export async function isPrSettled(data: DataLayer, prKey: string): Promise<boolean> {
-  const existing = await prs(data).get(prKey);
-  return !!existing && TERMINAL_STATUSES.includes(existing.status);
+  const existing = await prsTracking(data).get(prKey);
+  return !!existing && TERMINAL_STATUSES.includes(existing.derived_status);
 }
 
 /** Register a PR row (if new) and start the convergence process. Idempotent on prKey. Optional
