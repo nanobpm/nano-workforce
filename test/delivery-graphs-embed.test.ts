@@ -84,15 +84,22 @@ test("#460: the compose view exposes NO dispatch or approval affordance — it o
   assert(!/approvalToken/.test(MOUNT_JS), "mount.js must NOT carry the removed replayable approvalToken");
 });
 
-test("#460: dispatch is the operator's Staged-proposals row-action on the page", () => {
-  // The page (not mount.js) offers dispatch: a Staged proposals grid over delivery_graph_proposals
-  // with a Dispatch row-action that posts the proposal's digest to the operator dispatch door.
+test("#460/#511: dispatch is the operator's action on the Staged-proposals App-View", () => {
+  // Dispatch is NOT in the compose view (asserted above). It lives on the Staged-proposals surface,
+  // which is now an App-View (issue #511) rather than a declarative grid: a grid row-action can POST but
+  // cannot hand the recompiled BPMN up to the host explorer, so a staged proposal had a Dispatch button
+  // but no way to SEE the graph. The App-View carries BOTH Preview-DI and Dispatch. The wiring itself
+  // (which doors staged.mount.js posts to) is pinned by delivery-graphs-staged-embed.test.ts.
   const page = JSON.parse(PAGE_JSON) as { nodes: Array<Record<string, any>> };
   const staged = page.nodes.find((n) => n.id === "delivery-graphs-staged");
-  assert(staged, "the page must carry a Staged proposals grid");
-  assert(staged?.props?.data?.table === "delivery_graph_proposals", "the staged grid binds to delivery_graph_proposals");
-  const dispatch = (staged?.props?.rowActions ?? []).find((a: any) => a.label === "Dispatch");
-  assert(dispatch, "the staged grid must expose a Dispatch row-action");
-  assert(dispatch.action.path.endsWith("actions/delivery-graph/dispatch"), "Dispatch posts to the operator dispatch door");
-  assert(dispatch.action.body.digest === "{{row.digest}}", "Dispatch posts the proposal's digest");
+  assert(staged, "the page must carry a Staged proposals surface");
+  assert(staged?.type === "appView", "the Staged proposals surface is an App-View (#511), not a declarative grid");
+  assert(
+    staged?.props?.embed === "./delivery-graphs/staged-embed.html",
+    "the Staged proposals App-View embeds ./delivery-graphs/staged-embed.html",
+  );
+  assert(
+    staged?.props?.standalone === "./delivery-graphs/staged-standalone.html",
+    "the Staged proposals App-View has a standalone shell",
+  );
 });

@@ -1673,6 +1673,62 @@ components:
             The compiled BPMN 2.0 XML INCLUDING diagram interchange (`bpmndi:BPMNDiagram`), recompiled
             deterministically from the staged graph — byte-identical to what a dispatch would deploy.
             Rendered read-only in the host explorer's definition preview. Nothing is deployed.
+    StagedProposalSummary:
+      description: >-
+        One LIVE staged delivery-graph proposal (issue #511) — the metadata the staged App-View renders
+        as a Preview-DI + Dispatch row. A projection of the durable `delivery_graph_proposals` row; the
+        `graph`/`preview` payloads are omitted (the App-View recompiles by `digest` for the DI preview).
+      type: object
+      additionalProperties: false
+      required:
+        - digest
+        - title
+        - nodeCount
+        - humanNodeCount
+        - sideEffectCount
+        - sideEffecting
+        - createdAt
+        - expiresAt
+      properties:
+        digest:
+          type: string
+          description: The proposal's content digest — the handle the Preview-DI and Dispatch doors take.
+        title:
+          type: string
+          nullable: true
+          description: The graph's name, when it carried one.
+        nodeCount:
+          type: integer
+          description: Total nodes in the compiled graph.
+        humanNodeCount:
+          type: integer
+          description: How many nodes park on a person.
+        sideEffectCount:
+          type: integer
+          description: How many nodes perform a side effect (merge/publish) once dispatched.
+        sideEffecting:
+          type: boolean
+          description: True when the graph has any side-effecting node — dispatching it authorises those actions.
+        createdAt:
+          type: string
+          description: When the proposal was staged (ISO-8601).
+        expiresAt:
+          type: string
+          description: When the proposal ages out of its TTL if never dispatched (ISO-8601).
+    StagedProposalList:
+      description: The live staged delivery-graph proposals awaiting dispatch (issue #511), newest first.
+      type: object
+      additionalProperties: false
+      required:
+        - count
+        - proposals
+      properties:
+        count:
+          type: integer
+        proposals:
+          type: array
+          items:
+            $ref: "#/components/schemas/StagedProposalSummary"
     DeliveryGraphTextResult:
       description: >-
         The delivery-graph text-ingress outcome (issue #460) — a single shape covering the JSON-paste
@@ -2927,6 +2983,32 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/DeliveryGraphProposalBpmnResult"
+  /delivery-graph/staged:
+    get:
+      operationId: listStagedProposals
+      summary: List the LIVE staged delivery-graph proposals awaiting dispatch (issue #511), newest first.
+      description: >-
+        The read behind the staged-proposals App-View: every `staged` delivery-graph proposal that has
+        not aged out of its TTL, newest first, projected to the Preview-DI + Dispatch metadata (the
+        `graph`/`preview` payloads are omitted — the App-View recompiles by `digest` for the DI preview).
+        Mirrors the `previewProposalBpmn`/`dispatchDeliveryGraph` freshness guard so an expired-but-not-
+        yet-swept row is never listed. Read-only.
+      security:
+        - hookSecret: []
+        - {}
+      responses:
+        "200":
+          description: The live staged proposals.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StagedProposalList"
+        "401":
+          description: Missing/invalid shared secret (only when NANO_PR_WEBHOOK_SECRET is set).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
   /actions/start/feature:
     post:
       operationId: startFeature
