@@ -37,15 +37,42 @@ export interface TextIngressOk {
 
 export type TextIngressResult = TextIngressOk | TextIngressFailure;
 
+/** Injectable seam for {@link parseAndCompileText}. `compile` defaults to the real
+ * {@link compileDeliveryGraph}; a test overrides it to drive the never-throws guard with a compiler
+ * that REJECTS — the real layout pass only throws on a server-side fault (a missing `bpmn-auto-layout`
+ * peer, so no DI is produced), which is not reproducible from input alone. */
+export interface ParseAndCompileDeps {
+  compile?: (graph: unknown) => Promise<CompileResult>;
+}
+
 /** Parse a UI JSON-paste body (`{ graphJson }`), then run the SAME pure compiler the agent door uses.
  * A blank/invalid paste or a graph that fails validation is returned as a ready-to-send 400; success
- * carries the compiled graph plus its content `digest` and human `name`. Never throws / never a 500. */
-export async function parseAndCompileText(body: unknown): Promise<TextIngressResult> {
+ * carries the compiled graph plus its content `digest` and human `name`. Never throws / never a 500 —
+ * even a server-side layout fault is caught and mapped to the door's clean 400/no-persist shape. */
+export async function parseAndCompileText(
+  body: unknown,
+  deps: ParseAndCompileDeps = {},
+): Promise<TextIngressResult> {
   const parsed = parseDeliveryGraphText(body);
   if (!parsed.ok) {
     return { ok: false, status: 400, body: { ok: false, error: parsed.error } };
   }
-  const compiled = await compileDeliveryGraph(parsed.graph);
+  const compile = deps.compile ?? compileDeliveryGraph;
+  let compiled: CompileResult;
+  try {
+    compiled = await compile(parsed.graph);
+  } catch (err) {
+    // `compileDeliveryGraph` returns ok:false for every INPUT failure, but its layout pass
+    // (`layoutDeliveryDiagram` → `layoutBpmn`) can still THROW on a server-side fault — e.g. the
+    // `bpmn-auto-layout` peer missing, so no DI block is produced. Uncaught, that rejection would
+    // escape whichever door called us (preview/stage/save/import — none wrap this call) as a raw,
+    // unhandled 500, breaking the "never throws / never a 500" promise every caller depends on. Map it
+    // to the SAME clean 400 shape a compile error produces, so ONE guard keeps the door's documented
+    // "compile failure → clean 400, nothing persisted" contract honest for this edge case across all
+    // four doors, rather than leaking a partial/unhandled failure.
+    const message = err instanceof Error ? err.message : String(err);
+    return { ok: false, status: 400, body: { ok: false, error: `graph failed to compile: ${message}` } };
+  }
   if (!compiled.ok) {
     return {
       ok: false,

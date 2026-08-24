@@ -193,8 +193,9 @@ function renderPreview(result, staged) {
   return summary + renderSideEffects(result.sideEffects) + renderHumanNodes(result.humanNodes) + diagram;
 }
 
-// Only attach the guard secret when the resolved door URL is SAME-ORIGIN. The preview/stage door URLs
-// can be overridden (e.g. via the standalone `?preview=` / `?stage=` query params) to a full `https://…`
+// Only attach the guard secret when the resolved door URL is SAME-ORIGIN. The preview/stage/import door
+// URLs can be overridden (e.g. via the standalone `?preview=` / `?stage=` / `?import=` query params) to a
+// full `https://…`
 // URL on a foreign origin; sending `x-hook-secret` there would exfiltrate the shared guard secret to an
 // arbitrary host. A cross-origin (or unparseable, or non-browser) target therefore gets no secret.
 function isSameOrigin(url) {
