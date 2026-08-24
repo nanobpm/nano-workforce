@@ -111,6 +111,20 @@ function renderList(proposals) {
   return header + proposals.map(renderProposal).join("");
 }
 
+// Only attach the guard secret when the resolved door URL is SAME-ORIGIN. The staged/dispatch/dismiss/
+// proposal-bpmn/save-library door URLs can be overridden (e.g. via the standalone `?staged=` /
+// `?dispatch=` / `?proposal-bpmn=` query params) to a full `https://…` URL on a foreign origin; sending
+// `x-hook-secret` there would exfiltrate the shared guard secret to an arbitrary host. A cross-origin
+// (or unparseable, or non-browser) target therefore gets no secret.
+function isSameOrigin(url) {
+  try {
+    if (typeof window === "undefined" || !window.location) return false;
+    return new URL(url, window.location.href).origin === window.location.origin;
+  } catch (_e) {
+    return false;
+  }
+}
+
 /**
  * Mount the staged-proposals list into `host`.
  * @param {Element|null} host — the element to render into (or null → look up #delivery-graphs-staged-root).
@@ -127,9 +141,9 @@ export function mountStagedProposals(host, config = {}) {
   const proposalBpmnUrl = config.proposalBpmnUrl ?? DEFAULT_PROPOSAL_BPMN_URL;
   const saveLibraryUrl = config.saveLibraryUrl ?? DEFAULT_SAVE_LIBRARY_URL;
   const refreshMs = typeof config.refreshMs === "number" && config.refreshMs > 0 ? config.refreshMs : DEFAULT_REFRESH_MS;
-  const headers = () => ({
+  const headers = (url) => ({
     "content-type": "application/json",
-    ...(config.hookSecret ? { "x-hook-secret": config.hookSecret } : {}),
+    ...(config.hookSecret && isSameOrigin(url) ? { "x-hook-secret": config.hookSecret } : {}),
   });
 
   root.innerHTML = `<div class="dg">
@@ -167,7 +181,7 @@ export function mountStagedProposals(host, config = {}) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
     try {
-      const res = await fetch(url, { ...init, headers: headers(), signal: controller.signal });
+      const res = await fetch(url, { ...init, headers: headers(url), signal: controller.signal });
       let body = {};
       try {
         body = await res.json();

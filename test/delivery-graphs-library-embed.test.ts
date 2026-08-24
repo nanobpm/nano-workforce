@@ -122,3 +122,27 @@ test("#523: Save-to-library is offered on a dispatched/history grid row (save-fr
     "the Save-to-library row action must save-from-digest, naming the entry from the run title",
   );
 });
+test("#523: the x-hook-secret guard is gated on a same-origin door (no cross-origin secret exfil)", () => {
+  // A `?library=` / `?staged=` / `?preview=` override can point a door at a full `https://…` URL on a
+  // FOREIGN origin. The shared guard secret must NEVER ride along to an arbitrary host, so each mount
+  // attaches `x-hook-secret` only when the resolved door URL is same-origin.
+  for (const [name, src] of [
+    ["library.mount.js", LIBRARY_JS],
+    ["mount.js", COMPOSE_JS],
+    ["staged.mount.js", STAGED_JS],
+  ] as const) {
+    assert(/function isSameOrigin\(url\)/.test(src), `${name} must define an isSameOrigin(url) guard`);
+    assert(
+      /new URL\(url,\s*window\.location\.href\)\.origin === window\.location\.origin/.test(src),
+      `${name} isSameOrigin must compare the resolved URL origin against window.location.origin`,
+    );
+    assert(
+      /config\.hookSecret && isSameOrigin\(url\)\s*\?\s*\{\s*"x-hook-secret"/.test(src),
+      `${name} must attach x-hook-secret ONLY when hookSecret is set AND the door URL is same-origin`,
+    );
+    assert(
+      /headers:\s*headers\(url\)/.test(src),
+      `${name} must thread the request URL into headers(url) so the secret gate sees the target origin`,
+    );
+  }
+});
