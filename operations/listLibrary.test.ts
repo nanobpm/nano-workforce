@@ -54,3 +54,26 @@ test("list-library: saved entries returned newest-first with their graph JSON", 
     assert(typeof res.body.entries[0].updatedAt === "string");
   });
 });
+
+// The optional shared-secret guard is enforced in the handler (not by OpenAPI `security`), mirroring
+// the other read doors (getLineage / listActivePrs / listStagedProposals). `SECRET` is captured at
+// module import, so we cache-bust re-import the handler with NANO_PR_WEBHOOK_SECRET set to exercise
+// both the rejected (401) and authorized (200) paths against a real booted data layer.
+test("list-library: shared-secret guard — 401 without x-hook-secret, 200 with it", async () => {
+  await withApp(async (app) => {
+    const prev = process.env["NANO_PR_WEBHOOK_SECRET"];
+    process.env["NANO_PR_WEBHOOK_SECRET"] = "s3cr3t";
+    try {
+      const mod = await import(`./listLibrary.ts?guard=${Date.now()}`);
+      const guarded = mod.default as (c: any, a: any) => Promise<any>;
+      const bad = await guarded({ req: { headers: new Headers() }, params: {}, query: {} } as any, app);
+      assertEquals(bad.status, 401);
+      const ok = await guarded({ req: { headers: new Headers({ "x-hook-secret": "s3cr3t" }) }, params: {}, query: {} } as any, app);
+      assertEquals(ok.status, 200);
+      assert(Array.isArray(ok.body.entries));
+    } finally {
+      if (prev === undefined) delete process.env["NANO_PR_WEBHOOK_SECRET"];
+      else process.env["NANO_PR_WEBHOOK_SECRET"] = prev;
+    }
+  });
+});

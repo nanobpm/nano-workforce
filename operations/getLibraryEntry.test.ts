@@ -49,3 +49,27 @@ test("get-library-entry: an unknown id → 404", async () => {
     assert(typeof res.body.error === "string");
   });
 });
+
+// The optional shared-secret guard is enforced in the handler (not by OpenAPI `security`), mirroring
+// the other read doors. `SECRET` is captured at module import, so we cache-bust re-import the handler
+// with NANO_PR_WEBHOOK_SECRET set to exercise both the rejected (401) and authorized (200) paths
+// against a real booted data layer holding a known entry.
+test("get-library-entry: shared-secret guard — 401 without x-hook-secret, 200 with it", async () => {
+  await withApp(async (app, data) => {
+    const saved = await saveLibraryEntry(data, buildLibraryEntryRow({ name: "runbook", graphJson: GRAPH, source: "composed" }));
+    const prev = process.env["NANO_PR_WEBHOOK_SECRET"];
+    process.env["NANO_PR_WEBHOOK_SECRET"] = "s3cr3t";
+    try {
+      const mod = await import(`./getLibraryEntry.ts?guard=${Date.now()}`);
+      const guarded = mod.default as (c: any, a: any) => Promise<any>;
+      const bad = await guarded({ req: { headers: new Headers() }, params: { id: saved.id }, query: {} } as any, app);
+      assertEquals(bad.status, 401);
+      const ok = await guarded({ req: { headers: new Headers({ "x-hook-secret": "s3cr3t" }) }, params: { id: saved.id }, query: {} } as any, app);
+      assertEquals(ok.status, 200);
+      assertEquals(ok.body.id, saved.id);
+    } finally {
+      if (prev === undefined) delete process.env["NANO_PR_WEBHOOK_SECRET"];
+      else process.env["NANO_PR_WEBHOOK_SECRET"] = prev;
+    }
+  });
+});

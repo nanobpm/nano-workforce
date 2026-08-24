@@ -74,6 +74,10 @@ test("save-to-library: from a staged proposal digest → 200, reuses the stored 
     // The reused graph compiles to the SAME digest the proposal carried.
     const proposal = await (await import("../app/deliveryGraphProposals.ts")).deliveryGraphProposals(data).get(digest);
     assert(proposal !== undefined);
+    // The saved entry reuses the proposal's stored graph verbatim (the digest path), not a recompile:
+    // both the response payload and the persisted row carry exactly the proposal's `graph`.
+    assertEquals(res.body.entry.graph, proposal.graph);
+    assertEquals((await deliveryGraphLibrary(data).get(res.body.entry.id))?.graph, proposal.graph);
     assertEquals((await deliveryGraphLibrary(data).all()).length, 1);
   });
 });
