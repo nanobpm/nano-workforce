@@ -1,3 +1,9 @@
+## [0.138.3](https://github.com/nanobpm/nano-workforce/compare/v0.138.2...v0.138.3) (2026-08-24)
+
+### Bug Fixes
+
+* **epic-detail:** derive plan_wave_tasks.status=merged so a landed slice isn't stranded at "opened" ([#530](https://github.com/nanobpm/nano-workforce/issues/530)) ([#531](https://github.com/nanobpm/nano-workforce/issues/531)) ([3893f7f](https://github.com/nanobpm/nano-workforce/commit/3893f7fe5534a1510b53a489a0aa83630c6207b9))
+
 ## [0.138.2](https://github.com/nanobpm/nano-workforce/compare/v0.138.1...v0.138.2) (2026-08-24)
 
 ### Documentation
