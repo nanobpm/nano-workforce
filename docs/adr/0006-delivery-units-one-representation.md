@@ -202,7 +202,7 @@ levels for one idea:
 |---|---|---|---|
 | **Feature** | `deriveStage` over the declare-once read-model (`app/stage.ts`; mig. 076 declared it, mig. 081 superseded the VIEW for terminal-folded status — 073 is historical). Its inputs are the feature run's effective `status` / `pr_key` / `converge`+`auto_merge` flags / open user-task projections; `pollFeatureDelivery` separately reconciles PR status **into** that row upstream | `STAGE_KEYS` = Requested → Implementing → PR open → Converging → Merging → Done | the **`pipeline` stepper** kind (`pages/feature.page.json`) |
 | **Epic** | **write-time stamp** by each spine worker (`app/epicPhase.ts`, `ELEMENT_PHASE`) | `EPIC_PHASE` (wave-labelled) | a plain `{{epic_phase}}` **text cell** |
-| **Delivery graph** | engine-truth poll of open **user tasks** (`pollDeliveryGraphPhase` → `deriveDeliveryPhase`) | `DELIVERY_PHASE` + `Parked on human node: <label>` | a plain `phase` **text cell** |
+| **Delivery graph** | engine-truth poll of **process-instance state + open user-task parks** (`pollDeliveryGraphPhase` → `deriveDeliveryPhase`: `COMPLETED`/`TERMINATED` → `done`/`failed`, else the open human-node park) | `DELIVERY_PHASE` + `Parked on human node: <label>` | a plain `phase` **text cell** |
 
 Three derivations × three vocabularies × two renderers — and only the feature surface renders an
 actual stepper; epic and delivery-graph project a bare string. A change to "the lifecycle steps of a
@@ -242,7 +242,8 @@ The projection must answer "which cell has this unit reached," fusing two truth 
 **Correlation is per-shape, because `process_key` is reassigned.** A feature/epic aggregate's
 `process_key` identifies its *own* (feature / plan-fanout) process instance, but
 `pull_requests.process_key` is **overwritten** — first to the downstream convergence instance, then
-again to the merge instance (`app/service.ts` `startConverge` / `startMerge`). The stable
+again to the merge instance (`app/service.ts` — `submitPr` writes the convergence-instance key,
+`startMerge` the merge-instance key). The stable
 aggregate↔PR link is **`pr_key`**, and epics additionally need node/root mapping (lineage
 `rootRequestKey`, nwf#245). So §4b must define the per-shape joins — or persist a **canonical unit
 key** — rather than assume a single `process_key` join; a naïve `process_key` join would misattribute
@@ -290,14 +291,21 @@ task is open. It is coarser still for the other two, for reasons that must be st
 - **Delivery graph:** `deriveDeliveryPhase` (`app/deliveryGraphRun.ts`) returns a generic `Running`
   with **no node id** for an active `agent` / `wait` / `connector` node when no human task is open, and
   `delivery_graph_runs` stores no current node.
-- **Epic:** its pre-PR position (Planning, and the non-parked part of Reviewing) has **no** work-table
-  row, PR row, or open user task at all — only the write-time `epic_phase` stamp (`app/epicPhase.ts`)
-  and the plan/PR rollups observe it. `deriveDeliveryPhase` is the delivery-graph projection only and
-  provides no evidence for epic resolution.
+- **Epic:** during its pre-PR position (Planning, and the non-parked part of Reviewing) `record-plan`
+  *does* write `plan_tasks` rows, so it is not literally row-less — but **no field exposes the current
+  pre-PR process position** (which plan/review activity is live), and there is no PR row or open user
+  task for it. Only the write-time `epic_phase` stamp (`app/epicPhase.ts`) and the plan/PR rollups
+  observe *where* it is. `deriveDeliveryPhase` is the delivery-graph projection only and provides no
+  evidence for epic resolution.
 
 So v1's scope is deliberately bounded: the one derivation + `pipeline` renderer covers **feature and
 delivery-graph at lifecycle-stage fidelity**, rendering any unobservable node as an **explicitly coarse**
-single "in flight" step (never an invented cell position). The **epic pipeline is deferred to S8**:
+in-flight step. Because `activeField` must resolve to a *configured* pipeline stage (`STAGE_KEYS` runs
+`Requested`…`Done`, with no `In flight` key), S7 must make one explicit choice for that coarse case
+rather than emit an unconfigured label: **hold the aggregate at its last observed lifecycle key**
+(e.g. `Implementing`, marked in-progress) so no new stage is invented — the recommended default, since it
+needs no renderer/axis change — *or* deliberately add a single `In flight` key to the canonical axis. It
+must never fabricate a specific cell position it cannot observe. The **epic pipeline is deferred to S8**:
 because its pre-PR position is unobservable from S7 inputs, epic keeps its `epic_phase` **text cell** as
 an explicit, retained **second source** (write-provenance) until the element query lands — rather than
 fabricating a derived step or promoting `epic_phase` to a permanent stepper source. When the binding
@@ -340,10 +348,12 @@ their topology is produced. Unifying that axis is explicitly out of scope here.
   and only feature renders an actual stepper; epic and delivery-graph render a bare string. §4b collapses
   the three onto one derivation over the cell axis (with an explicit cell→step mapping and per-shape
   correlation — `pr_key`/canonical unit key, since `pull_requests.process_key` is reassigned downstream),
-  rendered by one `pipeline` kind on all three pages. Feature unifies at full per-cell fidelity with **no
-  engine change** (S7); epic + delivery-graph render a coarse "in flight" step until the *only* upstream
-  dependency — surfacing the element-instance query on the `@nanobpm/urban` `EngineClient` binding (S8),
-  which the engine already serves — sharpens them to per-cell and retires epic's write-provenance stamp.
+  rendered by one `pipeline` kind. **S7** unifies **feature + delivery-graph** at **lifecycle-stage
+  fidelity** with **no engine change** (even feature is not per-cell today — `deriveStage` collapses
+  readiness/timer/implement to `Implementing`); the **epic pipeline is deferred to S8**, keeping its
+  `epic_phase` text cell meanwhile. The *only* upstream dependency — surfacing the element-instance query
+  on the `@nanobpm/urban` `EngineClient` binding (S8, nano-ide#473), which the engine already serves —
+  then sharpens all three to per-cell and retires epic's write-provenance stamp.
 
 ## Rollout (see #464 for the live checklist)
 
@@ -384,16 +394,20 @@ deployment-runtime prerequisite noted above), not on #416 alone.
 - **S7 · one derived stepper — v1 on today's surface** (Decision §4b) — define the **cell → step
   mapping** (seeded from `STAGE_KEYS`, but owning the canonical definition — `STAGE_KEYS` mixes
   lifecycle states with cells), derive current-step by correlating the aggregate/work-table state
-  (`feature_runs` `status`/`pr_key`/flags + the `pollFeatureDelivery`-reconciled `pull_requests` state,
-  joined by **`pr_key`** per shape — *not* a naïve `process_key` join, which is reassigned downstream)
-  with user-task parks (`searchUserTasks`), reducing any parallel frontier to the **least-advanced active
-  branch**, and **promote the `pipeline` stepper kind** (feature-only today) onto the delivery-graph page.
+  **per shape**: for a **feature**, `feature_runs` `status`/`pr_key`/flags + the
+  `pollFeatureDelivery`-reconciled `pull_requests` state, joined by **`pr_key`** (*not* a naïve
+  `process_key` join, which is reassigned downstream); for a **delivery graph** — which has **no
+  `pr_key`** — its `delivery_graph_runs` row, its downstream PRs joined via
+  `pull_requests.root_request_key = delivery_graph_runs.run_key` (`app/lineage.ts`), and engine parks by
+  the run's own `process_key`. Reduce any parallel frontier to the **least-advanced active
+  branch**, correlate with user-task parks (`searchUserTasks`), and **promote the `pipeline` stepper
+  kind** (feature-only today) onto the delivery-graph page.
   This needs **no** engine-binding change, but ships at **lifecycle-stage fidelity only — for feature
   *and* delivery-graph alike**: even feature is not truly per-cell today (`deriveStage` collapses a
   readiness-probe/timer park or an active `implement-task` all to `Implementing`), and for a
   delivery-graph node running with no open user task (`deriveDeliveryPhase` returns generic `Running`, no
-  node id) the stepper renders an **explicitly coarse "in flight" step** rather than fabricating a cell
-  position. The **epic pipeline is out of S7 scope**: epic's pre-PR position is unobservable from these
+  node id) the stepper holds at the last observed lifecycle key (a *configured* stage — never a
+  fabricated cell position or an unconfigured `activeField` label; see the coarse-case rule in §4b). The **epic pipeline is out of S7 scope**: epic's pre-PR position is unobservable from these
   inputs, so epic keeps its write-provenance `epic_phase` **text cell** as an explicit retained second
   source until S8 (below). The mapping can begin as soon as S4 names the cells; the `pipeline` render
   binding for feature + delivery-graph can start immediately.
