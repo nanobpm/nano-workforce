@@ -16,9 +16,12 @@ const CSS = readFileSync(`${DIR}/delivery-graphs.css`, "utf8");
 const EMBED_HTML = readFileSync(`${DIR}/embed.html`, "utf8");
 const STANDALONE_HTML = readFileSync(`${DIR}/standalone.html`, "utf8");
 
-// Pull the module-anchored default spec out of `const <name> = config.<name> ?? <CONST>;` where the
-// CONST is declared `const <CONST> = new URL("<spec>", import.meta.url).href;`.
-function defaultUrl(name: string): string {
+// Pull the module-anchored default URL *spec* (the "<spec>" literal inside
+// `new URL("<spec>", import.meta.url)`, e.g. "../app/api/…") out of
+// `const <name> = config.<name> ?? <CONST>;` where the CONST is declared
+// `const <CONST> = new URL("<spec>", import.meta.url).href;`. This is the unresolved
+// relative spec, not a resolved URL string — hence `Spec`, not `Url`.
+function defaultSpec(name: string): string {
   const m = MOUNT_JS.match(new RegExp(`${name}\\s*=\\s*config\\.\\w+\\s*\\?\\?\\s*(\\w+);`));
   assert(m, `mount.js must default ${name} from config with a fallback constant`);
   const constM = MOUNT_JS.match(
@@ -39,12 +42,12 @@ test("#524: the compose mount renders a file-input Import control accepting .jso
 });
 
 test("#524: Import wires the importToLibrary door (base-relative), reading the file text client-side", () => {
-  const importUrl = defaultUrl("importUrl");
+  const importSpec = defaultSpec("importUrl");
   assert(
-    importUrl.endsWith("actions/delivery-graph/library/import"),
-    `importUrl default "${importUrl}" must hit the importToLibrary door`,
+    importSpec.endsWith("actions/delivery-graph/library/import"),
+    `importUrl default spec "${importSpec}" must hit the importToLibrary door`,
   );
-  assert(!importUrl.startsWith("/"), `default importUrl "${importUrl}" must be base-relative (App-View #279 resolution class)`);
+  assert(!importSpec.startsWith("/"), `default importUrl spec "${importSpec}" must be base-relative (App-View #279 resolution class)`);
   // The file's text is read CLIENT-SIDE and POSTed as graphJson to the import door.
   assert(/\.text\(\)/.test(MOUNT_JS), "mount.js must read the selected file's text client-side via File.text()");
   assert(/post\(importUrl,\s*\{\s*graphJson:/.test(MOUNT_JS), "the Import handler must POST the file text as graphJson to the import door");
