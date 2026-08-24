@@ -138,6 +138,54 @@ test("wait gateKeys default to a fresh per-run token so concurrent runs of one g
   assertEquals(gateKeyOf(seeded), "run-7:n3");
 });
 
+test("the node timeout defaults to PT1H (raised from PT30M) when no option is supplied (#505)", async () => {
+  // #505: the hard PT30M default tripped the boundary timer on legitimately-long implementation nodes.
+  // With no timeout option, every agent/connector node inherits the NEW PT1H run default.
+  const p = await prepareOk(GRAPH);
+  const timeouts = Object.values(p.nodeInputs)
+    .filter((v) => "timeout" in v)
+    .map((v) => (v as { timeout: string }).timeout);
+  assert(timeouts.length === 2, `expected the agent + connector nodes to seed a timeout, got ${timeouts.length}`);
+  for (const t of timeouts) assertEquals(t, "PT1H");
+});
+
+test("a submission nodeTimeout override seeds every agent/connector node with that duration (#505)", async () => {
+  // AC: an operator dispatch that sets nodeTimeout: "PT2H" seeds PT2H for ALL agent/connector nodes.
+  const p = await prepareOk(GRAPH, { nodeTimeout: "PT2H" });
+  const timeouts = Object.values(p.nodeInputs)
+    .filter((v) => "timeout" in v)
+    .map((v) => (v as { timeout: string }).timeout);
+  assert(timeouts.length === 2, `expected two seeded node timeouts, got ${timeouts.length}`);
+  for (const t of timeouts) assertEquals(t, "PT2H");
+});
+
+test("a per-node timeout override wins for its node while siblings keep the run/default value (#505)", async () => {
+  // AC: a node declaring timeout: "PT4H" seeds nodeInputs.<el>.timeout == "PT4H" while its siblings keep
+  // the run-level (here PT2H) value. Asserted positionally on the compiled nodeInputs map.
+  const graph: DeliveryGraph = {
+    name: "per-node override",
+    nodes: [
+      { id: "heavy", kind: "agent", agent: { jobType: "senior:feature", prompt: "long build", timeout: "PT4H" } },
+      { id: "quick", kind: "agent", agent: { jobType: "senior:demo" } },
+      { id: "notify", kind: "connector", connector: { target: "slack:post", dedupeKey: "n-1", timeout: "PT10M" } },
+    ],
+    edges: [
+      { from: "heavy", to: "quick" },
+      { from: "quick", to: "notify" },
+    ],
+  };
+  const p = await prepareOk(graph, { nodeTimeout: "PT2H" });
+  const byJobType = (jt: string) =>
+    Object.values(p.nodeInputs).find((v) => (v as { jobType?: string }).jobType === jt) as { timeout: string } | undefined;
+  const connector = Object.values(p.nodeInputs).find((v) => (v as { target?: string }).target === "slack:post") as
+    | { timeout: string }
+    | undefined;
+
+  assertEquals(byJobType("senior:feature")?.timeout, "PT4H"); // per-node override wins
+  assertEquals(byJobType("senior:demo")?.timeout, "PT2H"); // sibling keeps the run-level value
+  assertEquals(connector?.timeout, "PT10M"); // connector per-node override wins too
+});
+
 test("a malformed graph returns the S1 compile errors and prepares nothing", async () => {
   const r = await prepareDeliveryGraph({ nodes: [{ id: "a", kind: "agent", agent: { jobType: "j" } }], edges: [{ from: "a", to: "ghost" }] } as unknown as DeliveryGraph);
   assert(!r.ok, "a dangling edge fails to prepare");

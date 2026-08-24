@@ -23,6 +23,7 @@ import {
   DELIVERY_PHASE,
   deliveryGraphRuns,
 } from "./deliveryGraphRun.ts";
+import type { DeliveryRunTimeouts } from "./deliveryRunner.ts";
 import { deliveryGraphDigest, runDeliveryGraph } from "./deliveryRunner.ts";
 
 /** The outcome of a dispatch attempt — mirrors the retained run lifecycle. `ok:false` carries the
@@ -48,7 +49,7 @@ export type DispatchDeliveryGraphResult =
 export async function dispatchDeliveryGraphRun(
   app: Pick<AppApi, "data" | "engine" | "log">,
   graph: unknown,
-  options: { runKey?: string | null; title?: string | null } = {},
+  options: { runKey?: string | null; title?: string | null } & DeliveryRunTimeouts = {},
 ): Promise<DispatchDeliveryGraphResult> {
   const validationErrors = validateDeliveryGraph(graph);
   if (validationErrors.length > 0) {
@@ -130,7 +131,14 @@ export async function dispatchDeliveryGraphRun(
   };
   let launched: Awaited<ReturnType<typeof runDeliveryGraph>>;
   try {
-    launched = await runDeliveryGraph(app.engine, typedGraph, { runKey });
+    // Thread the operator-supplied run-level timeouts (#505) so a submission override reaches every
+    // node's seeded `nodeInputs` (absent → the runner's PT1H/PT30M/P1D defaults).
+    launched = await runDeliveryGraph(app.engine, typedGraph, {
+      runKey,
+      nodeTimeout: options.nodeTimeout,
+      probeTimeout: options.probeTimeout,
+      escalationSlaTimeout: options.escalationSlaTimeout,
+    });
   } catch (err) {
     await markClaimFailed();
     app.log.error("dispatch-delivery-graph launch threw", { runKey });

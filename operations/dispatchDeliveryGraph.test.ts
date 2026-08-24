@@ -182,4 +182,35 @@ describe("dispatchDeliveryGraph — operator dispatch by staged-proposal digest"
     assert.equal((await deliveryGraphProposals(app.db).get(digest))?.status, "expired");
     assert.equal((await deliveryGraphRuns(app.db).all()).length, 0);
   });
+
+  test("an invalid run-level nodeTimeout duration is rejected at submit → 400, nothing launched (#505)", async () => {
+    const app = await boot();
+    assert.ok(app.api);
+    const api = app.api;
+    const staged = await api.call<{ digest: string }>("compileDeliveryGraph", { body: HUMAN_ONLY });
+    const res = await api.call<{ ok?: boolean; error?: string; issues?: Array<{ path: string }> }>("dispatchDeliveryGraph", {
+      body: { digest: staged.body.digest, nodeTimeout: "2 hours" },
+    });
+    // Rejected at submit — either by the edge shape-validator (openapi `pattern`) or the door's own
+    // ISO-8601 guard; both surface a 400. Nothing launches and the proposal stays staged (dispatchable).
+    assert.equal(res.status, 400);
+    assert.equal((await deliveryGraphRuns(app.db).all()).length, 0);
+    assert.equal((await deliveryGraphProposals(app.db).get(staged.body.digest))?.status, "staged");
+  });
+
+  test("a valid run-level nodeTimeout override dispatches the run → 202 running (#505)", async () => {
+    const app = await boot();
+    assert.ok(app.api);
+    const api = app.api;
+    const staged = await api.call<{ digest: string }>("compileDeliveryGraph", { body: HUMAN_ONLY });
+    const res = await api.call<{ ok: boolean; status: string }>("dispatchDeliveryGraph", {
+      body: { digest: staged.body.digest, nodeTimeout: "PT2H" },
+    });
+    assert.equal(res.status, 202);
+    assert.equal(res.body.ok, true);
+    assert.equal(res.body.status, "running");
+    await app.settle();
+    assert.equal((await deliveryGraphRuns(app.db).all()).length, 1);
+    assert.equal((await deliveryGraphProposals(app.db).get(staged.body.digest))?.status, "dispatched");
+  });
 });

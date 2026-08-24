@@ -53,7 +53,7 @@ export interface DeliveryRunOptions extends DeliveryRunTimeouts {
 }
 
 const DEFAULTS: Required<Omit<DeliveryRunTimeouts, "escalationAssignee">> = {
-  nodeTimeout: "PT30M",
+  nodeTimeout: "PT1H",
   probeTimeout: "PT30M",
   probePollEvery: msToIsoDuration(DEFAULT_EVERY_MS),
   escalationSlaTimeout: "P1D",
@@ -174,7 +174,7 @@ function buildNodeInput(
 ): NodeInput {
   switch (node.kind) {
     case "agent":
-      return { jobType: node.agent.jobType, appendPrompt: node.agent.prompt ?? "", timeout: ctx.nodeTimeout };
+      return { jobType: node.agent.jobType, appendPrompt: node.agent.prompt ?? "", timeout: node.agent.timeout ?? ctx.nodeTimeout };
     case "wait": {
       const probe = parseProbe(node.wait);
       return {
@@ -201,7 +201,7 @@ function buildNodeInput(
         target: node.connector.target,
         dedupeKey: node.connector.dedupeKey ?? null,
         payload: node.connector.payload ?? null,
-        timeout: ctx.nodeTimeout,
+        timeout: node.connector.timeout ?? ctx.nodeTimeout,
       };
     default:
       return assertNever(node, "buildNodeInput");
