@@ -41,6 +41,13 @@ test("#524: Import wires the importToLibrary door (base-relative), reading the f
   // The file's text is read CLIENT-SIDE and POSTed as graphJson to the import door.
   assert(/\.text\(\)/.test(MOUNT_JS), "mount.js must read the selected file's text client-side via File.text()");
   assert(/post\(importUrl,\s*\{\s*graphJson:/.test(MOUNT_JS), "the Import handler must POST the file text as graphJson to the import door");
+  // The <input> must actually be WIRED to the handler: without a change listener that invokes
+  // importFile(), the door + handler could stay intact while Import is inert (every other assertion
+  // here still green). Pin the change→importFile wiring so removing the listener fails the suite.
+  assert(
+    /addEventListener\(\s*["']change["'][\s\S]{0,200}?importFile\(/.test(MOUNT_JS),
+    "the Import file input's change listener must invoke importFile() so picking a file triggers an import",
+  );
 });
 
 test("#524: a successful import routes through #523's single fillComposer() seam", () => {
