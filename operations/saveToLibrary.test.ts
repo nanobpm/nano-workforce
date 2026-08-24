@@ -198,3 +198,28 @@ test("save-to-library: providing BOTH graphJson and digest → 400, nothing pers
     assertEquals((await deliveryGraphLibrary(data).all()).length, 0);
   });
 });
+
+// Regression (PR #533 review): this door is INTENTIONALLY UNGUARDED, unlike the get/delete/import
+// library doors — it is also invoked by a DECLARATIVE page row action ("Save to library" on the
+// In-flight/History grid) that structurally cannot attach an `x-hook-secret` header. So even when
+// NANO_PR_WEBHOOK_SECRET is configured, a save WITHOUT the header must still succeed (a header guard
+// would 401 the door's own UI). We cache-bust re-import the handler with the secret set to prove it
+// ignores the header entirely.
+test("save-to-library: stays open even when NANO_PR_WEBHOOK_SECRET is set (no header guard)", async () => {
+  await withApp(async (app, data) => {
+    const prev = process.env["NANO_PR_WEBHOOK_SECRET"];
+    process.env["NANO_PR_WEBHOOK_SECRET"] = "s3cr3t";
+    try {
+      const mod = await import(`./saveToLibrary.ts?guard=${Date.now()}`);
+      const reloaded = mod.default as (c: any, a: any) => Promise<any>;
+      // No x-hook-secret header, yet the save is accepted and persisted.
+      const res = await reloaded({ req: { headers: new Headers() }, params: {}, query: {}, body: { name: "unguarded", graphJson: GOOD } } as any, app);
+      assertEquals(res.status, 200);
+      assertEquals(res.body.entry.source, "composed");
+      assertEquals((await deliveryGraphLibrary(data).all()).length, 1);
+    } finally {
+      if (prev === undefined) delete process.env["NANO_PR_WEBHOOK_SECRET"];
+      else process.env["NANO_PR_WEBHOOK_SECRET"] = prev;
+    }
+  });
+});

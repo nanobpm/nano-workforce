@@ -389,8 +389,16 @@ export const WIRE_CONTRACTS = {
     name: "deliveryGraph.compose.fill",
     owner: "pages/delivery-graphs/mount.js",
     semantics:
-      "The INBOUND reuse-fill host-bridge message that loads a saved `DeliveryGraph` JSON into the Delivery Graphs COMPOSE App-View textarea (`#dg-json`) — issue #523, epic #519 S4. The compose mount (consumer) registers a same-origin `window` `message` listener for this shape and routes it through its single `fillComposer()` seam; the producers are the Library App-View **Reuse** action (#523) and the filesystem **Import** control (#524), which post it across the App-View iframe boundary (the INBOUND twin of the existing OUTBOUND `nano-navigate` DI-preview bridge). The `type` string is exported ONCE as `DG_COMPOSE_FILL_MESSAGE` from pages/delivery-graphs/mount.js — both producers import it, never re-declare a synonym.",
+      "The INBOUND reuse-fill host-bridge message that loads a saved `DeliveryGraph` JSON into the Delivery Graphs COMPOSE App-View textarea (`#dg-json`) — issue #523, epic #519 S4. The compose mount (consumer) registers a same-origin `window` `message` listener for this shape and routes it through its single `fillComposer()` seam; the producer is the Library App-View **Reuse** action (#523), which posts it across the App-View iframe boundary (the INBOUND twin of the existing OUTBOUND `nano-navigate` DI-preview bridge). The filesystem **Import** control (#524) is NOT a producer of this message — it lives in the same compose mount and fills directly through `fillComposer()`, no cross-frame hop. The `type` string is exported ONCE as `DG_COMPOSE_FILL_MESSAGE` from pages/delivery-graphs/mount.js — the Reuse producer imports it, never re-declares a synonym.",
     shape: '{ type: "nano-delivery-graph-compose-fill", graphJson: string }',
+  },
+  "deliveryGraph.library.import.submit": {
+    category: "wire",
+    name: "deliveryGraph.library.import.submit",
+    owner: "operations/importToLibrary.ts",
+    semantics:
+      "Filesystem-import request body POSTed to /actions/delivery-graph/library/import (issue #524, epic #519 S5). Declared in openapi.yaml as `ImportToLibrarySubmit`; the compose App-View's `<input type=file accept=.json>` reads the picked file's text client-side and POSTs it here as the raw `graphJson` string. The door validates + compiles it through the SAME `parseAndCompileText` pipeline preview/stage/save use, then persists `source: imported` — an uncompilable graph is a clean 400 and NOTHING is written. Its `name` defaults to the imported graph's own `name`; an explicit `name` overrides it (an unnamed graph with no override is a clean 400 — the library id is name-derived). Related to but DISTINCT from `SaveToLibrarySubmit` (which is graphJson-OR-digest and needs no required file text); consume this ONE shape across the openapi edge, the door, and the compose mount — do not re-declare a synonym.",
+    shape: "{ graphJson: string, name?: string, description?: string }",
   },
 } as const satisfies Record<string, WireContract>;
 

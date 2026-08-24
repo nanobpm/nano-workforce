@@ -1858,6 +1858,30 @@ components:
         digest:
           type: string
           description: The content digest of an existing staged/dispatched proposal whose stored graph is reused. Mutually exclusive with `graphJson`.
+    ImportToLibrarySubmit:
+      description: >-
+        Import a delivery graph into the reusable library FROM A FILE (issue #524, epic #519 S5). The
+        compose App-View's `<input type=file accept=.json>` reads the selected file's text client-side
+        and POSTs it here as the raw `graphJson` string. The door validates + compiles it via the SAME
+        `parseAndCompileText` pipeline the preview/stage/save doors use, then persists it with
+        `source: imported`. A file that is not valid JSON, or a graph that fails to compile, is a clean
+        400 with path-qualified errors and NOTHING is persisted. The entry `name` defaults to the
+        imported graph's own `name`; an explicit `name` overrides it (an unnamed graph with no override
+        is a clean 400).
+      type: object
+      additionalProperties: false
+      required:
+        - graphJson
+      properties:
+        graphJson:
+          type: string
+          description: The raw `DeliveryGraph` JSON text read from the imported file (validated + compiled before persisting).
+        name:
+          type: string
+          description: Optional override for the entry name — its slug + short-hash derive the library id. Defaults to the imported graph's own `name`.
+        description:
+          type: string
+          description: An optional human note stored alongside the imported entry.
     SaveToLibraryResult:
       description: >-
         The save-to-library outcome (issue #522). `ok` discriminates success; success carries the
@@ -3259,7 +3283,11 @@ paths:
         with `source: composed`) OR the `digest` of an existing staged/dispatched proposal whose
         already-stored graph is reused (`source: from-staged` / `from-dispatched`). A graph that is not
         valid JSON or fails to compile is a clean 400 and NOTHING is persisted (an uncompilable graph can
-        never enter the library). Unlike a staged proposal, a library entry has no TTL.
+        never enter the library). Unlike a staged proposal, a library entry has no TTL. This door is
+        INTENTIONALLY UNGUARDED (no shared-secret requirement), unlike the get/delete/import library
+        doors: it is also invoked by a DECLARATIVE page row action ("Save to library" on the
+        In-flight/History grid) that structurally cannot attach the `x-hook-secret` header, so a guard
+        here would make the door unreachable by its own UI. See PR #533 review.
       requestBody:
         required: true
         content:
@@ -3275,6 +3303,49 @@ paths:
                 $ref: "#/components/schemas/SaveToLibraryResult"
         "400":
           description: The request was malformed, the referenced digest named no stored graph, or the graph failed to compile — nothing persisted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SaveToLibraryResult"
+  /actions/delivery-graph/library/import:
+    post:
+      operationId: importToLibrary
+      summary: Import a delivery graph FROM A FILE into the reusable library (issue #524, #519 S5).
+      description: >-
+        Import a delivery graph into the LIBRARY from a filesystem file (issue #524, epic #519 S5). The
+        compose App-View's `<input type=file accept=.json>` reads the chosen file's text client-side and
+        POSTs it here as the raw `graphJson`. The door validates + compiles it via the SAME
+        `parseAndCompileText` pipeline the preview/stage/save doors use, then persists it with
+        `source: imported`. A file that is not valid JSON, or a graph that fails to compile, is a clean
+        400 with path-qualified errors and NOTHING is persisted. The entry name defaults to the imported
+        graph's own `name` (an explicit `name` overrides it). The optional shared-secret guard mirrors the
+        get/delete library doors: when NANO_PR_WEBHOOK_SECRET is set, callers must present it via the
+        x-hook-secret header (unset → open). (The `save` door is unguarded — it is also reached by a
+        declarative page row action that cannot carry the header.)
+      security:
+        - hookSecret: []
+        - {}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ImportToLibrarySubmit"
+      responses:
+        "200":
+          description: The imported graph validated and the entry was saved (source=imported).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SaveToLibraryResult"
+        "400":
+          description: The file was not valid JSON, carried no usable name, or the graph failed to compile — nothing persisted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SaveToLibraryResult"
+        "401":
+          description: Missing/invalid shared secret (only when NANO_PR_WEBHOOK_SECRET is set).
           content:
             application/json:
               schema:

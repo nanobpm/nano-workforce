@@ -9,6 +9,16 @@
 // doors use, so an uncompilable graph can NEVER be persisted — a bad JSON string or a graph that fails
 // validation is a clean 400 and nothing is written. Mirrors the proposals store/door pattern so the S3
 // API surface is familiar to the S4/S5/S6 slices.
+//
+// This library door is INTENTIONALLY UNGUARDED, unlike the get/delete/import library doors that carry
+// the optional NANO_PR_WEBHOOK_SECRET / x-hook-secret guard. Save is the one library door also reached
+// by a DECLARATIVE page-runtime row action — the "Save to library" action on the In-flight/History grid
+// (`pages/delivery-graphs.page.json`), which posts only `{path, body}` and structurally CANNOT attach a
+// custom `x-hook-secret` header (that affordance is the external `@nanobpm/urban` page runtime's, not
+// ours). A header guard here would therefore make the door unreachable by its own UI (a hard 401 on
+// every dispatched-row Save whenever a secret is configured). The imperative composer/library mounts
+// reach the other doors and can send the header; this door cannot require one until the page runtime
+// grows a supported way for declarative actions to authenticate. See PR #533 review.
 
 import {
   buildLibraryEntryRow,
