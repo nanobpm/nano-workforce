@@ -277,9 +277,10 @@ export function mountDeliveryGraphs(host, config = {}) {
     // through to the fill just because the origin was absent.
     if (ev.origin !== window.location.origin) return;
     // The fill message is routed UP to the console and back down when embedded, so accept it only from
-    // the parent frame in that case; standalone, there is no parent and the import path fills directly.
+    // the parent frame in that case — a missing/falsy `ev.source` is rejected too, never allowed to fall
+    // through; standalone, there is no parent and the import path fills directly.
     const embedded = typeof window.parent !== "undefined" && window.parent !== window;
-    if (embedded && ev.source && ev.source !== window.parent) return;
+    if (embedded && ev.source !== window.parent) return;
     const data = ev.data;
     if (!data || data.type !== DG_COMPOSE_FILL_MESSAGE || typeof data.graphJson !== "string") return;
     fillComposer(data.graphJson, { status: "Reused a saved graph \u2014 Preview or Stage it." });
