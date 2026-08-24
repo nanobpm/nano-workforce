@@ -185,6 +185,28 @@ test("delivery: a failed run settles as abandoned", () => {
   assert(!t.active);
 });
 
+test("delivery: an abandoned run with no phase is labeled 'Abandoned', not 'Failed'", () => {
+  // `deliveryOriginStage` folds both `failed` and `abandoned` statuses onto the `abandoned` stage, so
+  // the label must consult the run status: a genuinely abandoned run reads "Abandoned" (only a failed
+  // one reads "Failed"). Regress with no stamped phase so the status-derived fallback label is used.
+  const t = deriveLineage(
+    { kind: "delivery", key: "dg-abc", title: "Ship widget", status: "abandoned", phase: null, processKey: "d1" },
+    [],
+  );
+  assertEquals(t.stage, "abandoned");
+  assertEquals(t.stageLabel, "Abandoned", "an abandoned run is not mislabeled as failed");
+  assert(!t.active);
+});
+
+test("delivery: a failed run with no phase is labeled 'Failed'", () => {
+  const t = deriveLineage(
+    { kind: "delivery", key: "dg-abc", title: "Ship widget", status: "failed", phase: null, processKey: "d1" },
+    [],
+  );
+  assertEquals(t.stage, "abandoned");
+  assertEquals(t.stageLabel, "Failed");
+});
+
 test("delivery: with no stamped phase, the frontier falls back to a status-derived label", () => {
   const t = deriveLineage(
     { kind: "delivery", key: "dg-abc", title: "Ship widget", status: "running", phase: null, processKey: "d1" },
@@ -332,6 +354,33 @@ test("pollLineage: projects a delivery-graph run as a fan-in parent thread with 
   const prById = (k: string) => stores.pull_requests.find((r: any) => r.pr_key === k);
   assertEquals(prById("a/b#1").epic_phase_label ?? null, null);
   assertEquals(prById("c/d#9").epic_phase_label ?? null, null);
+});
+
+test("pollLineage: a delivery run_key colliding with a feature key does not overwrite the feature thread", async () => {
+  // The SQL view (migration 079) classifies epic > feature > delivery, so a `delivery_graph_runs.run_key`
+  // that equals an existing `feature_key`/`plan_key` must NOT clobber that earlier thread — otherwise the
+  // poller would stamp delivery-derived frontier columns onto a row the view still classifies feature/epic,
+  // and the two projections drift. The colliding run is skipped; feature precedence is preserved.
+  const { data, stores } = memData();
+  stores.feature_runs = [
+    { feature_key: "o/r#7", title: "Feature seven", issue_url: "u7", status: "converging", process_key: "f7", pr_key: "o/r#700" },
+  ];
+  stores.plans = [];
+  stores.plan_tasks = [];
+  stores.delivery_graph_runs = [
+    { run_key: "o/r#7", title: "Colliding run", status: "running", phase: "Running", process_key: "P-dup" },
+  ];
+  stores.pull_requests = [
+    { pr_key: "o/r#700", title: "Feat PR", url: "x", status: "converging", current_round: 2, process_key: "c1", outcome: null, root_request_key: "o/r#7" },
+  ];
+
+  await pollLineage(data);
+
+  const threads: LineageThreadRow[] = stores.lineage_threads;
+  assertEquals(threads.length, 1, "the colliding run does not create a second row for the same key");
+  const t = threads.find((r) => r.root_request_key === "o/r#7");
+  assert(t, "the single thread for the shared key is the feature thread");
+  assertEquals(t?.stage_label, "Converging (round 2)", "feature frontier wins; the delivery run did not overwrite it");
 });
 
 test("pollLineage: a self-rooted PR row (root_request_key === pr_key) projects exactly one thread keyed on its pr_key", async () => {

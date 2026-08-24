@@ -267,7 +267,7 @@ export function deriveLineage(origin: LineageOrigin, prsIn: readonly LineagePr[]
     // machine `stage` is derived from the run status (tempered to `converging` while a member PR is
     // still in flight); the human `stageLabel` prefers the run's stamped phase, else a status label.
     stage = deliveryOriginStage(origin.status, prs);
-    stageLabel = origin.phase ?? deliveryStageLabel(stage);
+    stageLabel = origin.phase ?? deliveryStageLabel(stage, origin.status);
     // Active-frontier instance: an in-flight member PR's process, else the run's own.
     const activePr = prs.find((p) => !TERMINAL_STATUSES.includes(p.status));
     processKey = activePr?.processKey ?? origin.processKey ?? rep?.processKey ?? null;
@@ -345,8 +345,11 @@ function deliveryOriginStage(status: string, prs: readonly LineagePr[]): Lineage
   }
 }
 
-/** The fallback frontier label for a delivery thread when the run has not stamped a `phase` yet. */
-function deliveryStageLabel(stage: LineageStage): string {
+/** The fallback frontier label for a delivery thread when the run has not stamped a `phase` yet.
+ * `deliveryOriginStage` folds both the `failed` and `abandoned` run statuses onto the terminal
+ * `abandoned` stage, so the stage alone cannot tell them apart — take the run `status` too and label a
+ * genuinely `abandoned` run "Abandoned" (only a `failed` run reads "Failed"). */
+function deliveryStageLabel(stage: LineageStage, status: string): string {
   switch (stage) {
     case "planning":
       return "Awaiting approval";
@@ -355,7 +358,7 @@ function deliveryStageLabel(stage: LineageStage): string {
     case "resolved":
       return "Completed";
     case "abandoned":
-      return "Failed";
+      return status === "abandoned" ? "Abandoned" : "Failed";
     default:
       return "Running";
   }
@@ -523,6 +526,12 @@ async function collectThreads(
   // the feature/epic loops — a run with no PR landed yet still projects a thread (its derived phase).
   const deliveryRows = await deliveryGraphRuns(data).all();
   for (const run of deliveryRows) {
+    // Feature/epic precedence: the SQL view's CASE classifies epic > feature > delivery, so a
+    // `run_key` that collides with an existing `plan_key`/`feature_key` must NOT overwrite that
+    // thread — otherwise the poller projection would stamp delivery-derived frontier columns onto a
+    // row the view still classifies epic/feature, and the two drift. Skip the colliding run so the
+    // earlier feature/epic thread (and the view's precedence) stays intact.
+    if (threads.has(run.run_key)) continue;
     const prs = collectRootPrs(run.run_key, null, prsByRoot, prByKey, claimed);
     threads.set(run.run_key, deriveLineage(deliveryGraphOrigin(run), prs.map(toLineagePr)));
   }
