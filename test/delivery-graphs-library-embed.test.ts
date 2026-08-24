@@ -122,7 +122,9 @@ test("#538: the in-flight grid's column widths never over-allocate (no 0-width c
   for (const col of columns) {
     const w = col.width;
     assert(typeof w === "string" && /^\d+(\.\d+)?%$/.test(w), `column "${col.header}" must declare a percentage width so it can't collapse to 0 (got ${JSON.stringify(w)})`);
-    sum += Number.parseFloat(w);
+    const parsed = Number.parseFloat(w);
+    assert(parsed > 0, `column "${col.header}" must declare a positive width so it can't collapse to 0 (got ${JSON.stringify(w)})`);
+    sum += parsed;
   }
   assert(sum <= 95, `declared column widths sum to ${sum}% — they must leave >=5% for the row-action column so nothing squeezes to 0 (#538)`);
 });
