@@ -882,7 +882,7 @@ function innerBodyLines(w: NodeWiring): string[] {
     case "connector":
       return serviceBodyLines(el, node.id, `type="${DELEGATE_TASK_TYPE.connector}"`, [], `connector → ${node.connector.target}`);
     case "wait":
-      return waitBodyLines(el, node.id);
+      return waitBodyLines(el, node);
     case "human":
       return humanBodyLines(el, node.id);
     default:
@@ -951,8 +951,19 @@ function serviceBodyLines(
 /** `wait` body: `start → pr.readiness-probe (poll) → ready? → end`, escalating on not-ready or on the
  * `=probeTimeout` engine bound. The probe polls its OWN target, so an unrelated upstream event can
  * never flip it to ready (#274/S2 concurrency-correctness); the `pr` kind (S2) binds `mergedSha`. */
-function waitBodyLines(el: string, nodeId: string): string[] {
+function waitBodyLines(el: string, node: DeliveryNode): string[] {
+  const nodeId = node.id;
   const esc = escalationTaskElement(el);
+  const emits = normaliseEmits(node);
+  // Defect A: read-only probe diagnostics seeded onto the escalation task so the operator/agent can
+  // tell a genuine "not published yet" from a transient false-negative — the probe's last detail, the
+  // resolved target/match, and a compact summary of the candidate releases the probe observed.
+  const diagnosticInputs = [
+    { source: "=if (is defined(detail)) then detail else null", target: "probeDetail" },
+    { source: "=if (is defined(observed)) then observed else null", target: "observedReleases" },
+    { source: `=nodeInputs.${el}.probe.target`, target: "probeTarget" },
+    { source: `=nodeInputs.${el}.probe.match`, target: "probeMatch" },
+  ];
   return [
     `      <bpmn:startEvent id="${el}_start"><bpmn:outgoing>${el}_i0</bpmn:outgoing></bpmn:startEvent>`,
     `      <bpmn:subProcess id="${el}_probeLoop" name="Probe readiness loop: ${escapeXml(nodeId)}">`,
@@ -962,6 +973,7 @@ function waitBodyLines(el: string, nodeId: string): string[] {
     '            <zeebe:output source="=if (is defined(detail)) then detail else null" target="detail" />',
     '            <zeebe:output source="=if (is defined(resolvedArtifact)) then resolvedArtifact else null" target="resolvedArtifact" />',
     '            <zeebe:output source="=if (is defined(mergedSha)) then mergedSha else null" target="mergedSha" />',
+    '            <zeebe:output source="=if (is defined(observed)) then observed else null" target="observed" />',
     "          </zeebe:ioMapping>",
     "        </bpmn:extensionElements>",
     `        <bpmn:incoming>${el}_i0</bpmn:incoming>`,
@@ -1024,7 +1036,8 @@ function waitBodyLines(el: string, nodeId: string): string[] {
       nodeId,
       [`${el}_i4`],
       `${el}_i5`,
-      escalationContextFeel(nodeId, "readiness gate", "probeTimeout", " before its ReadinessProbe went green — decide how to proceed."),
+      waitEscalationContextFeel(nodeId),
+      { resume: { kind: node.kind, emits }, diagnosticInputs },
     ),
     `      <bpmn:endEvent id="${el}_end"><bpmn:incoming>${el}_i1</bpmn:incoming><bpmn:incoming>${el}_i5</bpmn:incoming><bpmn:incoming>${el}_i7</bpmn:incoming></bpmn:endEvent>`,
     flow(`${el}_i0`, `${el}_start`, `${el}_probeLoop`),
@@ -1084,15 +1097,60 @@ function humanBodyLines(el: string, nodeId: string): string[] {
  * convention) that a human OR an agent (ADR 0046) answers to unstick a stalled node. `contextFeel` is
  * a FEEL expression yielding the context line seeded onto the generic form's read-only prompt field
  * (issue #499) — e.g. "Node n1 (senior:feature) exceeded its SLA (PT30M); …" — so the operator can see
- * WHICH node timed out and that in-flight work may already exist, instead of a blank form. The emit
- * field is labelled "none" so the generic form hides its (inert on an escalation) typed-value input. */
+ * WHICH node timed out and that in-flight work may already exist, instead of a blank form.
+ *
+ * `opts.resume` turns an inert escalation into a RESUMABLE one (issue #514 Defect B): when the parked
+ * `wait` node declares emits, the form must both PRESENT its typed-value field (so `emitMode`/
+ * `emitLabel` are derived from those emits, not forced to "none") and, on completion, MAP the
+ * operator-supplied value onto the node's emit-source variable (`detail` for scalar/version,
+ * `resolvedArtifact` for artifact, `mergedSha` for a merge oid — {@link factSourceVar}). Without that
+ * mapping a naive resume publishes `<el>_<fact> = null`, silently starving the downstream consumer.
+ * `opts.diagnosticInputs` seeds read-only probe context (issue #514 Defect A) onto the same task so the
+ * operator can see WHY the gate escalated (its last probe detail + observed candidate releases). */
 function escalationTaskLines(
   esc: string,
   nodeId: string,
   incoming: readonly string[],
   outgoing: string,
   contextFeel: string,
+  opts?: {
+    resume?: { kind: DeliveryNode["kind"]; emits: readonly DeliveryFact[] };
+    diagnosticInputs?: readonly { source: string; target: string }[];
+  },
 ): string[] {
+  const emits = opts?.resume?.emits ?? [];
+  const emitMode = emits.length > 0 ? "typed" : "none";
+  const emitLabel = emits.map((e) => `${e.name} (${e.type})`).join(", ");
+  const inputs: string[] = [
+    `            <zeebe:input ${attr("source", contextFeel)} target="prompt" />`,
+    `            <zeebe:input ${attr("source", `=${feelStr(nodeId)}`)} target="nodeId" />`,
+    `            <zeebe:input ${attr("source", `=${feelStr(emitMode)}`)} target="emitMode" />`,
+  ];
+  if (emits.length > 0) {
+    inputs.push(`            <zeebe:input ${attr("source", `=${feelStr(emitLabel)}`)} target="emitLabel" />`);
+  }
+  for (const di of opts?.diagnosticInputs ?? []) {
+    inputs.push(`            <zeebe:input ${attr("source", di.source)} target="${di.target}" />`);
+  }
+  // Defect B: map the operator's captured typed value onto the node's emit-source var, so the
+  // subProcess output ioMapping publishes the SAME `<el>_<fact>` shape a normally-completing node does.
+  const outputs: string[] = [];
+  if (opts?.resume) {
+    const seen = new Set<string>();
+    for (const fact of emits) {
+      const target = factSourceVar(opts.resume.kind, fact);
+      if (seen.has(target)) continue;
+      seen.add(target);
+      // The generic escalation form (`GENERIC_HUMAN_FORM`) captures the operator's answer in a single
+      // `value` field — it has NO `resolvedArtifact` field — so every emit type resumes from `value`,
+      // mapped onto that fact's emit-source var (artifact→resolvedArtifact, version→detail, …). Sourcing
+      // an artifact from a `resolvedArtifact` form field the form never sets would publish null and make
+      // an artifact wait-node escalation non-resumable via the UI.
+      outputs.push(
+        `            <zeebe:output ${attr("source", `=if (is defined(value)) then value else null`)} target="${target}" />`,
+      );
+    }
+  }
   return [
     `      <bpmn:userTask id="${esc}" name="Escalate: ${escapeXml(nodeId)}">`,
     "        <bpmn:extensionElements>",
@@ -1100,9 +1158,8 @@ function escalationTaskLines(
     "          <zeebe:userTask />",
     '          <zeebe:assignmentDefinition candidateGroups="operators" />',
     "          <zeebe:ioMapping>",
-    `            <zeebe:input ${attr("source", contextFeel)} target="prompt" />`,
-    `            <zeebe:input ${attr("source", `=${feelStr(nodeId)}`)} target="nodeId" />`,
-    `            <zeebe:input ${attr("source", '="none"')} target="emitMode" />`,
+    ...inputs,
+    ...outputs,
     "          </zeebe:ioMapping>",
     "        </bpmn:extensionElements>",
     ...incoming.map((id) => `        <bpmn:incoming>${id}</bpmn:incoming>`),
@@ -1118,6 +1175,23 @@ function escalationTaskLines(
 function escalationContextFeel(nodeId: string, descriptor: string, timeoutVar: string, tail: string): string {
   const head = feelStr(`Node ${nodeId} (${descriptor}) exceeded its SLA (`);
   return `=${head} + string(${timeoutVar}) + ${feelStr(`)${tail}`)}`;
+}
+
+/** The escalation context line for a `wait` gate (issue #514 Defect A). Extends the base #499 line with
+ * the probe's RUNTIME last `detail` and its observed-candidate summary (`observed`), so a human/agent
+ * reading the (read-only) prompt can immediately tell a genuine "not published yet" from a transient
+ * false-negative — without hunting for the internal variables. Both are folded in defensively (an
+ * as-yet-unset var renders "—", never a FEEL error). */
+function waitEscalationContextFeel(nodeId: string): string {
+  const base = escalationContextFeel(
+    nodeId,
+    "readiness gate",
+    "probeTimeout",
+    " before its ReadinessProbe went green — decide how to proceed.",
+  );
+  const lastProbe = `(if (is defined(detail)) then string(detail) else "—")`;
+  const observed = `(if (is defined(observed)) then string(observed) else "—")`;
+  return `${base} + " Last probe: " + ${lastProbe} + ". Observed: " + ${observed} + "."`;
 }
 
 /** A plain `<bpmn:sequenceFlow>` (6-space indented). */

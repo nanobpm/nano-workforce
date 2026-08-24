@@ -160,6 +160,99 @@ test("#499 escalation context: an agent-node timeout escalation seeds a context 
   assert(escBlock.includes('="none"') && escBlock.includes('target="emitMode"'), "the escalation labels its emit field N/A so the generic form hides the inert value input");
 });
 
+// The #514 motivating case: a `capability` wait gate that emits a version, escalating on a
+// false-negative. Its escalation must be self-diagnosing (Defect A) AND resumable with its emit
+// (Defect B). Two emit shapes (`version` → `detail`, `artifact` → `resolvedArtifact`) exercise the
+// per-emit-type mapping.
+const CAP_GATE = {
+  name: "capability gate",
+  nodes: [
+    { id: "gv", kind: "agent", agent: { jobType: "senior:feature", prompt: "ship the rollup" } },
+    {
+      id: "n2",
+      kind: "wait",
+      wait: {
+        kind: "capability",
+        target: "github-releases:nanobpm/nano-ide",
+        match: { package: "@nanobpm/urban", capabilityRef: "#468" },
+        onTimeout: "escalate",
+      },
+      emits: [{ name: "publishedVersion", type: "version" }],
+    },
+    {
+      id: "n3",
+      kind: "wait",
+      wait: {
+        kind: "capability",
+        target: "github-releases:nanobpm/nano-ide",
+        match: { package: "@nanobpm/urban", capabilityRef: "#469" },
+        onTimeout: "escalate",
+      },
+      emits: [{ name: "artifactRef", type: "artifact" }],
+    },
+    { id: "sink", kind: "connector", connector: { target: "npm:install", dedupeKey: "c1" } },
+  ],
+  edges: [
+    { from: "gv", to: "n2" },
+    { from: "n2.publishedVersion", to: "n3" },
+    { from: "n3.artifactRef", to: "sink" },
+  ],
+};
+
+/** The subProcess element id the compiler assigned to a node (elements are positional `n<k>`, not the
+ * node id). Located via the subProcess `name="<kind>: <nodeId>"`. */
+function elementForNode(bpmn: string, nodeId: string): string {
+  const m = bpmn.match(new RegExp(`<bpmn:subProcess id="([^"]+)" name="[^"]*: ${nodeId}"`));
+  assert(m, `a subProcess for node ${nodeId} exists`);
+  return m![1];
+}
+
+/** Slice a compiled BPMN to a node's escalation user task body. */
+function escBlockForNode(bpmn: string, nodeId: string): string {
+  const esc = `delivery-human-task__${elementForNode(bpmn, nodeId)}__esc`;
+  const start = bpmn.indexOf(`<bpmn:userTask id="${esc}"`);
+  assert(start !== -1, `escalation task ${esc} for node ${nodeId} exists`);
+  return bpmn.slice(start, bpmn.indexOf("</bpmn:userTask>", start));
+}
+
+test("#514 Defect A: a capability wait-gate escalation surfaces the probe's last detail, target/match, and observed releases so it is self-diagnosing", async () => {
+  const r = await compileOk(CAP_GATE);
+  const esc = escBlockForNode(r.bpmn, "n2");
+  // The read-only prompt context now folds in the RUNTIME last probe detail + observed candidate summary.
+  assert(esc.includes('target="prompt"'), "the escalation seeds a prompt context line");
+  assert(esc.includes("Last probe: ") && esc.includes("if (is defined(detail)) then string(detail)"), "the prompt folds in the last probe detail");
+  assert(esc.includes("Observed: ") && esc.includes("if (is defined(observed)) then string(observed)"), "the prompt folds in the observed candidate summary");
+  // Discrete diagnostic task variables the form/agent can bind directly.
+  assert(esc.includes('target="probeDetail"'), "the escalation surfaces the probe's last detail as a discrete variable");
+  assert(esc.includes('target="observedReleases"'), "the escalation surfaces the observed candidate releases");
+  assert(/source="=nodeInputs\.[^"]+\.probe\.target" target="probeTarget"/.test(esc), "the escalation surfaces the resolved probe target");
+  assert(/source="=nodeInputs\.[^"]+\.probe\.match" target="probeMatch"/.test(esc), "the escalation surfaces the resolved probe match");
+});
+
+test("#514 Defect B: a resumed wait-node escalation maps the operator-supplied value onto the node's emit source (version→detail, artifact→resolvedArtifact)", async () => {
+  const r = await compileOk(CAP_GATE);
+  // Red before the fix: the wait escalation forced emitMode="none" (hiding the value field) and carried
+  // NO output mapping, so a resume published `<el>_<fact> = null`, starving the downstream consumer.
+  const escV = escBlockForNode(r.bpmn, "n2");
+  // A `version` emit is sourced from `detail` — the operator's captured `value` must be mapped there.
+  assert(escV.includes('="typed"') && escV.includes('target="emitMode"'), "a wait node with emits PRESENTS its value field on escalation, not 'none'");
+  assert(escV.includes("publishedVersion (version)") && escV.includes('target="emitLabel"'), "the emit label names the awaited fact");
+  assert(/source="=if \(is defined\(value\)\) then value else null" target="detail"/.test(escV), "the operator's value is mapped onto the version emit's source var (detail)");
+
+  const escA = escBlockForNode(r.bpmn, "n3");
+  // An `artifact` emit is ALSO sourced from the generic form's single `value` field (the form has no
+  // `resolvedArtifact` field), mapped onto the artifact emit's source var (resolvedArtifact) — so an
+  // artifact wait-node escalation is actually resumable via the UI.
+  assert(/source="=if \(is defined\(value\)\) then value else null" target="resolvedArtifact"/.test(escA), "the operator's value is mapped onto the artifact emit's source var (resolvedArtifact)");
+});
+
+test("#514 Defect B: a service-node escalation (agent) stays inert — no emit field, no resume output mapping (only wait resumes)", async () => {
+  const r = await compileOk(CAP_GATE);
+  const esc = escBlockForNode(r.bpmn, "gv");
+  assert(esc.includes('="none"') && esc.includes('target="emitMode"'), "an agent-node escalation keeps its emit field hidden");
+  assert(!esc.includes("<bpmn:output") && !esc.includes("<zeebe:output"), "an agent-node escalation carries no emit-source output mapping");
+});
+
 
 test("rejects unknown kind (by construction) with a path-qualified error, nothing compiled", async () => {
   const errors = await compileFail({

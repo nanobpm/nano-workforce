@@ -35,7 +35,7 @@ export { READINESS_READY_MESSAGE };
  * kind-agnostic emit primitive (#274 Gap B), but it flows from matcher output into both the
  * `readiness-ready` message variables and the worker output — so a matcher that binds `ready`/`detail`
  * could shadow the canonical payload and break the gate contract. */
-const RESERVED_BIND_KEYS: ReadonlySet<string> = new Set(["ready", "detail"]);
+const RESERVED_BIND_KEYS: ReadonlySet<string> = new Set(["ready", "detail", "observed"]);
 export function safeBind(bind?: Record<string, string>): Record<string, string> {
   if (!bind) return {};
   const out: Record<string, string> = {};
@@ -60,6 +60,7 @@ export async function probeSingleShot(deps: {
   lastAttempt?: boolean;
   fallback?: () => Promise<ProbeResult | null>;
   log?: (msg: string) => void;
+  warn?: (msg: string) => void;
 }): Promise<ProbeResult> {
   const label = redactTarget(deps.probe);
   const res: ProbeResult = await probeOnce(deps.probe, deps.exec, deps.env).catch((err) => ({
@@ -84,9 +85,25 @@ export async function probeSingleShot(deps: {
     await deps.publish(settled.detail, settled.bind);
     return settled;
   }
+  // Boundary last attempt and STILL not ready: this is the escalation trigger. Surface a structured
+  // warn (issue #514 Defect A) carrying the probe's last detail + what it OBSERVED, so a false-negative
+  // (a matching release was live but its provenance body was momentarily empty) is diagnosable from the
+  // logs — not just a contextless "escalated". `observed` is diagnostic-only and secret-free.
+  const failingDetail = settled ? `${res.detail} (fallback: ${settled.detail})` : res.detail;
+  const observed = settled?.observed ?? res.observed;
+  deps.warn?.(
+    `readiness gate escalating ${label}: not ready at boundary — ${failingDetail}` +
+      (observed ? `; observed: ${observed}` : ""),
+  );
+  // Return the actual failing probe detail (not a generic "gate boundary reached" string): downstream
+  // the wait-gate seeds `probeDetail` and the escalation context FEEL from `detail`, so overwriting it
+  // here would make the escalation non-diagnostic — the very defect this change fixes. The fact that the
+  // boundary/timeout was reached is already communicated by the escalation context ("exceeded its SLA …
+  // before its ReadinessProbe went green") and the structured WARN above.
   return {
     ready: false,
-    detail: settled ? `gate boundary reached (fallback: ${settled.detail})` : "gate boundary reached",
+    detail: failingDetail,
+    observed,
   };
 }
 
@@ -149,8 +166,14 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
       });
     },
     log: (msg) => app.log.info(msg),
+    warn: (msg) => app.log.warn(msg),
   });
-  return { ready: result.ready, detail: result.detail, ...safeBind(result.bind) };
+  return {
+    ready: result.ready,
+    detail: result.detail,
+    ...(result.observed !== undefined ? { observed: result.observed } : {}),
+    ...safeBind(result.bind),
+  };
 };
 
 export default handler;
