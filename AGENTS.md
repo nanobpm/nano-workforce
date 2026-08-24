@@ -219,8 +219,14 @@ Two different `nano:dataEnvelope` uses have different rules — don't conflate t
   each declared `.in` field *by name* from the process variables in scope — a
   `<zeebe:ioMapping>` input that synthesises a **new** name with no backing process
   variable is silently ignored, so the field arrives **blank**. The engine itself
-  raises no incident for the missing mapping — but a consumer that fails fast on the
-  blank value will (e.g. `pr.readiness-probe` once read an empty `gateKey`;
+  raises no incident for that *omitted* field (an `.in` name with no backing
+  variable resolves to null and blanks) — but this is distinct from a FEEL
+  `ioMapping` that **errors**: on the pinned engine (`@nanobpm/engine-wasm` 0.8.1's
+  `IO_MAPPING_ERROR` fix — before it, a failed mapping silently blanked, e.g. a
+  blocked converge-gate's escalation *question*; see the `e2e/*escalation*.e2e.ts`
+  comments) a failed FEEL mapping now raises an **incident** rather than blanking
+  through. A consumer that fails fast on the blank value will also incident (e.g.
+  `pr.readiness-probe` once read an empty `gateKey`;
   `readGateVars` in `workers/readiness-probe/worker.ts` now *throws* on a blank
   `gateKey`, creating an incident). Tasks like `ensure-base-branch` work only because
   `repo`/`baseBranch` already exist as process variables. Seed any field a task must
@@ -324,9 +330,14 @@ Migrations live in `db/migrations/*.sql` and are **auto-applied on boot** from
   cleanup block — start the whole allocation *after* the current highest committed
   prefix, never at fixed literals like `060`, which are long occupied) rather than
   have each
-  agent compute "the next free" prefix. Two files must never share a prefix; `npm run check:migrations`
+  agent compute "the next free" prefix. (This is the same "coarsen parallel work on
+  a shared surface" principle as the one-task-owns-each-`.bpmn` rule above — a
+  migration-prefix block is a shared numbering surface just like a `.bpmn`
+  diagram.) Two files must never share a prefix; `npm run check:migrations`
   (a CI gate) enforces this and fails the build on any new duplicate. Because a
-  prefix collision only exists in the *union* of two branches, this gate — like
+  **merge-skew** prefix collision only exists in the *union* of two branches (a
+  single branch that adds two same-prefix files is a self-collision
+  `check:migrations` already catches on the PR itself), this gate — like
   `layout:check`, the navigation-index check (`sync:nav:check`), and a catch-all
   committed-artifact backstop (`git diff --exit-code`) — is also re-run on the
   merge queue's **prospective merged commit** and on **push to `main`** by
