@@ -29,7 +29,10 @@ async function withApp(fn: (app: AppApi, data: DataLayer) => Promise<void>): Pro
 }
 
 async function call(app: AppApi, body: unknown) {
-  return (await handler({ req: {} as any, params: {}, query: {}, body } as any, app)) as any;
+  // A real empty `Headers` (not `{}`) so the door's shared-secret guard — which reads
+  // `req.headers.get("x-hook-secret")` whenever NANO_PR_WEBHOOK_SECRET is configured — is safe to
+  // dereference here too, not only in the guard-specific test below.
+  return (await handler({ req: { headers: new Headers() } as any, params: {}, query: {}, body } as any, app)) as any;
 }
 
 const GOOD = JSON.stringify({
@@ -64,6 +67,26 @@ test("import-to-library: an explicit name overrides the graph's own name", async
     assertEquals(res.body.entry.description, "from disk");
     assert(res.body.entry.id.startsWith("my-import-"));
     assertEquals((await deliveryGraphLibrary(data).all()).length, 1);
+  });
+});
+
+// The `nameOverride ?? ingress.name` fallback: a graph with NO own name must still import when an
+// explicit override supplies one (the complement of the unnamed-with-no-override → 400 case below).
+test("import-to-library: an unnamed graph imports when an explicit override supplies the name", async () => {
+  await withApp(async (app, data) => {
+    const unnamed = JSON.stringify({
+      nodes: [{ id: "a", kind: "human", human: { prompt: "do X" } }],
+      edges: [],
+    });
+    const res = await call(app, { graphJson: unnamed, name: "Named By Override", description: "from disk" });
+    assertEquals(res.status, 200);
+    assertEquals(res.body.ok, true);
+    assertEquals(res.body.entry.name, "Named By Override");
+    assertEquals(res.body.entry.source, "imported");
+    assert(res.body.entry.id.startsWith("named-by-override-"));
+    // Persisted exactly one row, readable back with source=imported.
+    assertEquals((await deliveryGraphLibrary(data).all()).length, 1);
+    assertEquals((await deliveryGraphLibrary(data).get(res.body.entry.id))?.source, "imported");
   });
 });
 

@@ -40,7 +40,31 @@ test("a non-Error thrown value is still caught and reported, never rethrown", as
   assert(result.body.error.includes("kaboom"), "the stringified non-Error cause must be surfaced");
 });
 
-// The reused OpenAPI shape gate closes the `graphJson`-string bypass: a nested-type violation the
+test("a shape-validator that throws (unreadable/corrupt openapi.yaml) is mapped to a clean 400 — never a 500", async () => {
+  let compileCalled = false;
+  const result = await parseAndCompileText(VALID_BODY, {
+    validateShape: () => {
+      throw new Error("ENOENT: openapi.yaml not found");
+    },
+    compile: () => {
+      compileCalled = true;
+      return Promise.reject(new Error("compile must not run when the shape gate itself faults"));
+    },
+  });
+  assert(!result.ok, "a thrown shape-validator fault must surface as ok:false, not a resolved success");
+  assertEquals(result.status, 400, "a caught spec-load fault must be the door's clean 400, not a 500");
+  assert(!compileCalled, "the compiler must not run when the shape gate itself throws");
+  assert(
+    result.body.error.includes("graph shape check unavailable"),
+    "the 400 body must report the shape gate as unavailable",
+  );
+  assert(
+    result.body.error.includes("ENOENT: openapi.yaml not found"),
+    "the 400 body must carry the underlying spec-load failure cause",
+  );
+});
+
+
 // semantic validator does NOT re-enumerate is now rejected at the door with a path-qualified error,
 // BEFORE compile runs (so a throwing compiler is never reached for these malformed bodies).
 for (const [label, graph, needle] of [

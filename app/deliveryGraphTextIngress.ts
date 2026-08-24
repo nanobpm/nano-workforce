@@ -44,6 +44,11 @@ export type TextIngressResult = TextIngressOk | TextIngressFailure;
  * peer, so no DI is produced), which is not reproducible from input alone. */
 export interface ParseAndCompileDeps {
   compile?: (graph: unknown) => Promise<CompileResult>;
+  /** Injectable seam for the reused OpenAPI shape gate — defaults to the real
+   * {@link validateDeliveryGraphShape}. A test overrides it to drive the spec-load guard with a
+   * validator that THROWS, standing in for a stripped/corrupt deployment whose `openapi.yaml` cannot
+   * be read/parsed — not reproducible from input alone. */
+  validateShape?: (graph: unknown) => ReturnType<typeof validateDeliveryGraphShape>;
 }
 
 /** Parse a UI JSON-paste body (`{ graphJson }`), then run the SAME pure compiler the agent door uses.
@@ -66,7 +71,24 @@ export async function parseAndCompileText(
   // the SAME validator against the SAME canonical schema (no ajv, no drift-surface hand checks) gives the
   // text doors byte-identical shape enforcement to the agent door. Structural only, so a not-yet-
   // resolvable capability/pr probe still passes — its late-binding stays the runner's job.
-  const shapeErrors = validateDeliveryGraphShape(parsed.graph);
+  let shapeErrors: ReturnType<typeof validateDeliveryGraphShape>;
+  try {
+    shapeErrors = (deps.validateShape ?? validateDeliveryGraphShape)(parsed.graph);
+  } catch (err) {
+    // `validateDeliveryGraphShape` reads/parses `openapi.yaml` (once, cached) to reuse the runtime's
+    // OWN validator. A stripped or corrupted deployment where the spec is missing/unparseable — or the
+    // `DeliveryGraph` schema cannot be resolved — makes that read THROW. Left uncaught it would escape
+    // whichever door called us (none wrap this call) as a raw, unhandled 500, breaking the "never throws
+    // / never a 500" promise every caller depends on. This is a server-side fault (like the layout fault
+    // caught below), not bad input, so map it to the SAME clean 400/no-persist shape — ONE contract for
+    // every server fault this pipeline can hit, no partial/unhandled leak.
+    const message = err instanceof Error ? err.message : String(err);
+    return {
+      ok: false,
+      status: 400,
+      body: { ok: false, error: `graph shape check unavailable: ${message}` },
+    };
+  }
   if (shapeErrors.length > 0) {
     return {
       ok: false,
