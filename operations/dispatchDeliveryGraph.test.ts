@@ -215,6 +215,23 @@ describe("dispatchDeliveryGraph — operator dispatch by staged-proposal digest"
     assert.equal((await deliveryGraphRuns(app.db).all()).length, 0);
   });
 
+  test("a syntactically-valid but oversized duration is rejected at the door → 400, nothing launched (#505)", async () => {
+    const app = await boot();
+    assert.ok(app.api);
+    const api = app.api;
+    const staged = await api.call<{ digest: string }>("compileDeliveryGraph", { body: HUMAN_ONLY });
+    // Matches the ISO-8601 grammar but exceeds the door's MAX_DURATION_LEN (64) — the door re-enforces the
+    // openapi `maxLength: 64` so an oversized value is refused even if the edge validator is bypassed.
+    const longValid = `PT${"9".repeat(70)}H`;
+    const res = await api.call<{ ok?: boolean; error?: string }>("dispatchDeliveryGraph", {
+      body: { digest: staged.body.digest, nodeTimeout: longValid },
+    });
+    assert.equal(res.status, 400);
+    assert.ok((res.body.error ?? "").length < 300, `error body should be bounded, got ${(res.body.error ?? "").length} chars`);
+    assert.equal((await deliveryGraphRuns(app.db).all()).length, 0);
+    assert.equal((await deliveryGraphProposals(app.db).get(staged.body.digest))?.status, "staged");
+  });
+
   test("a valid run-level nodeTimeout override dispatches the run → 202 running (#505)", async () => {
     const app = await boot();
     assert.ok(app.api);

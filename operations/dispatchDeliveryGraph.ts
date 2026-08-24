@@ -16,24 +16,32 @@ import { isValidIsoDuration } from "../app/reviewWait.ts";
 import type { DeliveryGraphTextResult } from "../nano-generated/api-io.d.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
 
-/** Cap an untrusted, rejected duration string before it is echoed into logs/response bodies. The
- * dispatch fields carry no max length, so a very large malformed value would otherwise bloat both. */
+/** Cap an untrusted, rejected duration string before it is echoed into logs/response bodies. `openapi.yaml`
+ * caps these dispatch duration fields at `maxLength: 64` at the edge, and the door re-enforces that bound
+ * (see `MAX_DURATION_LEN`); this truncation is defense-in-depth for when the edge validator is bypassed,
+ * so a very large malformed value can never bloat either the logs or the response. */
 const MAX_ECHO_LEN = 80;
 function truncateForEcho(value: string): string {
   return value.length > MAX_ECHO_LEN ? `${value.slice(0, MAX_ECHO_LEN)}… (${value.length} chars)` : value;
 }
 
+/** Door-level cap on a duration override, mirroring the `maxLength: 64` on these fields in `openapi.yaml`.
+ * Re-enforced here so a syntactically-valid-but-oversized duration is still rejected when the edge
+ * validator is bypassed (internal calls/tests), keeping seeded process variables and error/log output bounded. */
+const MAX_DURATION_LEN = 64;
+
 /** Validate an OPTIONAL run-level ISO-8601 duration override off the dispatch body (#505). Blank/
  * whitespace is treated as absent (→ the runner default). A present-but-malformed value returns
  * `{ ok: false, invalid }` so the door can reject it at submit rather than silently deploy an
  * uninterpretable timer. Reuses the canonical `reviewWait` grammar so accept/reject never drifts from
- * the runner's normalise-or-default one. */
+ * the runner's normalise-or-default one, and enforces `MAX_DURATION_LEN` so an oversized value is
+ * rejected even if the OpenAPI `maxLength` edge check is bypassed. */
 function validateDurationOverride(raw: unknown): { ok: true; value: string | undefined } | { ok: false; invalid: string } {
   if (raw === undefined || raw === null) return { ok: true, value: undefined };
   if (typeof raw !== "string") return { ok: false, invalid: String(raw) };
   const trimmed = raw.trim();
   if (trimmed === "") return { ok: true, value: undefined };
-  if (!isValidIsoDuration(trimmed)) return { ok: false, invalid: trimmed };
+  if (trimmed.length > MAX_DURATION_LEN || !isValidIsoDuration(trimmed)) return { ok: false, invalid: trimmed };
   return { ok: true, value: trimmed.toUpperCase() };
 }
 
