@@ -1392,7 +1392,17 @@ components:
           properties:
             id: { type: string }
             kind: { type: string, enum: [agent] }
-            emits: { type: array, items: { $ref: "#/components/schemas/DeliveryFact" } }
+            emits:
+              type: array
+              items: { $ref: "#/components/schemas/DeliveryFact" }
+              description: >-
+                The typed facts this agent node hands forward (issue #506 — the classifier-emit
+                contract). Each declared fact is appended to the node's dispatch prompt as an
+                instruction the servicing `senior:*` agent MUST honour: return the fact as an extra
+                TOP-LEVEL field of its result JSON (the same `AGENT_RESULT_FILE` envelope that carries
+                `status`/`summary`/`pr`). The delivery output-mapping publishes that completion variable
+                (named exactly after the fact) so a downstream guarded edge (`when: "<node>.<fact>"` +
+                `equals`) routes on it; an omitted fact takes the split's `default` branch.
             agent:
               type: object
               additionalProperties: false

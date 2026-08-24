@@ -448,6 +448,23 @@ A **typed fact** (`emits[]` entry) is `{ name, type, description? }` where
 downstream as `<nodeId>.<name>`. A "click done" human node or a pass-through node declares
 no facts.
 
+**Guarded routing + the agent classifier-emit contract.** An edge may carry a **guard** —
+`when: "<nodeId>.<fact>"` + `equals: <scalar>` — or be the split's single `default: true`
+else-branch (S7). A node whose out-edges are guarded is a **data-based exclusive split**: at
+runtime exactly one branch fires, chosen by the producer's emitted fact. For an **`agent`**
+node the fact is late-bound from the servicing job's completion: the delivery output-mapping
+publishes the engine variable named **exactly after the fact** (e.g. a fact `result` reads the
+completion variable `result`). A real `senior:*` fleet agent completes with its **Output
+contract** envelope (`{ status, summary, pr, question, delta }`), so — to make a guarded split
+fire — an agent node that declares `emits` has a **classifier emit contract** automatically
+appended to its prompt at dispatch: the agent MUST return each declared fact as an **extra
+top-level field of the same result JSON** (the `AGENT_RESULT_FILE` it already writes
+`status`/`summary`/`pr` to). Author side, this means: declare `emits: [{ name, type }]` on the
+agent node and guard the downstream edge on `<node>.<name>`; a contract-following agent returns
+`{ …, <name>: <value> }` and the split routes on it. If the agent cannot decide the fact it
+**omits** it, and the split takes its `default` (else) branch — the deadlock-safe fallback. A
+node that declares no `emits` gets no contract text and behaves exactly as before.
+
 ### 9.2 The agent loop: draft → compile → stage → ask an operator to dispatch
 
 ```

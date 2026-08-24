@@ -119,6 +119,39 @@ test("the human node seeds prompt/nodeId/emits; a click-done (no-emit, no-prompt
   assertEquals(ack?.nodeId, "ack");
 });
 
+test("agent node classifier-emit contract (#506): a declared `emits` threads the emit instruction into appendPrompt; a no-emit node leaves it untouched", async () => {
+  // #506: a guarded split (S7) routes on a producer's emitted scalar, published from the engine
+  // variable named exactly after the fact. A real `senior:*` agent completes with the Output-contract
+  // envelope and would never return that fact unless TOLD — so an agent node that declares `emits`
+  // must carry the emit contract in its `appendPrompt` (its only steering channel), while a plain
+  // implementation node (no emits) must be byte-for-byte unchanged.
+  const graph: DeliveryGraph = {
+    name: "classifier",
+    nodes: [
+      { id: "adopt", kind: "agent", agent: { jobType: "senior:feature", prompt: "adopt the package" }, emits: [{ name: "result", type: "string", description: "breaking | compatible" }] },
+      { id: "plain", kind: "agent", agent: { jobType: "senior:feature", prompt: "just implement it" } },
+    ],
+    edges: [{ from: "adopt.result", to: "plain", when: "adopt.result", equals: "breaking" }, { from: "adopt", to: "plain", default: true }],
+  };
+  const p = await prepareOk(graph);
+  const agents = Object.values(p.nodeInputs).filter((v) => "jobType" in v) as Array<Record<string, unknown>>;
+  const adopt = agents.find((v) => String(v.appendPrompt).startsWith("adopt the package"));
+  const plain = agents.find((v) => String(v.appendPrompt).startsWith("just implement it"));
+
+  // The emit-declaring node keeps its authored prompt AND gains the emit contract naming its fact.
+  assert(adopt, "the emit-declaring agent node must be seeded");
+  const adoptPrompt = String(adopt?.appendPrompt);
+  assert(adoptPrompt.startsWith("adopt the package"), "the authored prompt is preserved as the prefix");
+  assert(adoptPrompt.includes("Classifier emit contract"), `the emit contract must be threaded in, got: ${adoptPrompt}`);
+  assert(adoptPrompt.includes("`result`") && adoptPrompt.includes("(string)"), "the declared fact name + type must be surfaced to the agent");
+  assert(adoptPrompt.includes("breaking | compatible"), "the fact's optional description rides the contract");
+  assert(adoptPrompt.includes("AGENT_RESULT_FILE"), "the contract names the completion channel the fact rides");
+
+  // A node that declares NO facts is untouched — appendPrompt is exactly the authored prompt.
+  assertEquals(plain?.appendPrompt, "just implement it");
+});
+
+
 test("wait gateKeys default to a fresh per-run token so concurrent runs of one graph never cross-correlate", async () => {
   const gateKeyOf = (p: Awaited<ReturnType<typeof prepareOk>>) =>
     (Object.values(p.nodeInputs).find((v) => "gateKey" in v) as { gateKey?: string } | undefined)?.gateKey;
