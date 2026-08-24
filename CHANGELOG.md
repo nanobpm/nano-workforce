@@ -1,3 +1,9 @@
+## [0.138.0](https://github.com/nanobpm/nano-workforce/compare/v0.137.0...v0.138.0) (2026-08-24)
+
+### Features
+
+* **delivery-graphs:** split preview from stage + collapsible compose + fix example ([#517](https://github.com/nanobpm/nano-workforce/issues/517)) ([abb4a10](https://github.com/nanobpm/nano-workforce/commit/abb4a10e9a8f7f53be40488d9991a3660a9f7518)), closes [#516](https://github.com/nanobpm/nano-workforce/issues/516) [#460](https://github.com/nanobpm/nano-workforce/issues/460) [#516](https://github.com/nanobpm/nano-workforce/issues/516)
+
 ## [0.137.0](https://github.com/nanobpm/nano-workforce/compare/v0.136.0...v0.137.0) (2026-08-24)
 
 ### Features
