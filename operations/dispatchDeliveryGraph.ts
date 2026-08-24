@@ -16,11 +16,6 @@ import { isValidIsoDuration } from "../app/reviewWait.ts";
 import type { DeliveryGraphTextResult } from "../nano-generated/api-io.d.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
 
-/** Validate an OPTIONAL run-level ISO-8601 duration override off the dispatch body (#505). Blank/
- * whitespace is treated as absent (→ the runner default). A present-but-malformed value returns
- * `{ invalid }` so the door can reject it at submit rather than silently deploy an uninterpretable timer.
- * Reuses the canonical `reviewWait` grammar so accept/reject never drifts from the runner's
- * normalise-or-default one. */
 /** Cap an untrusted, rejected duration string before it is echoed into logs/response bodies. The
  * dispatch fields carry no max length, so a very large malformed value would otherwise bloat both. */
 const MAX_ECHO_LEN = 80;
@@ -28,6 +23,11 @@ function truncateForEcho(value: string): string {
   return value.length > MAX_ECHO_LEN ? `${value.slice(0, MAX_ECHO_LEN)}… (${value.length} chars)` : value;
 }
 
+/** Validate an OPTIONAL run-level ISO-8601 duration override off the dispatch body (#505). Blank/
+ * whitespace is treated as absent (→ the runner default). A present-but-malformed value returns
+ * `{ ok: false, invalid }` so the door can reject it at submit rather than silently deploy an
+ * uninterpretable timer. Reuses the canonical `reviewWait` grammar so accept/reject never drifts from
+ * the runner's normalise-or-default one. */
 function validateDurationOverride(raw: unknown): { ok: true; value: string | undefined } | { ok: false; invalid: string } {
   if (raw === undefined || raw === null) return { ok: true, value: undefined };
   if (typeof raw !== "string") return { ok: false, invalid: String(raw) };
