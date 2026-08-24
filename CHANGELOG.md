@@ -1,3 +1,9 @@
+## [0.138.2](https://github.com/nanobpm/nano-workforce/compare/v0.138.1...v0.138.2) (2026-08-24)
+
+### Documentation
+
+* **agents:** consolidate retro feedback ([#268](https://github.com/nanobpm/nano-workforce/issues/268), [#322](https://github.com/nanobpm/nano-workforce/issues/322), [#449](https://github.com/nanobpm/nano-workforce/issues/449)); drop stale [#415](https://github.com/nanobpm/nano-workforce/issues/415) ([#518](https://github.com/nanobpm/nano-workforce/issues/518)) ([3c47cb2](https://github.com/nanobpm/nano-workforce/commit/3c47cb21d079b6b9f5470abacb0190373208d0ca)), closes [#416](https://github.com/nanobpm/nano-workforce/issues/416) [#887](https://github.com/nanobpm/nano-workforce/issues/887) [#254](https://github.com/nanobpm/nano-workforce/issues/254) [#254](https://github.com/nanobpm/nano-workforce/issues/254) [nano-ide#254](https://github.com/nanobpm/nano-ide/issues/254)
+
 ## [0.138.1](https://github.com/nanobpm/nano-workforce/compare/v0.138.0...v0.138.1) (2026-08-24)
 
 ### Bug Fixes
