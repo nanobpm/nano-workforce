@@ -1,3 +1,9 @@
+## [0.133.0](https://github.com/nanobpm/nano-workforce/compare/v0.132.0...v0.133.0) (2026-08-24)
+
+### Features
+
+* **delivery-graph:** connector `converge`/`converge-merge` target enrolls a PR via submitPr (retire the manual land gate) ([#501](https://github.com/nanobpm/nano-workforce/issues/501)) ([a24562e](https://github.com/nanobpm/nano-workforce/commit/a24562eb12db8e6f81e6f382e94886a537f16378)), closes [#500](https://github.com/nanobpm/nano-workforce/issues/500)
+
 ## [0.132.0](https://github.com/nanobpm/nano-workforce/compare/v0.131.1...v0.132.0) (2026-08-24)
 
 ### Features
