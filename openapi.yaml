@@ -148,7 +148,7 @@ components:
       properties:
         rootRequestKey:
           type: string
-          description: The origin issue key (feature_key/plan_key), or a self-rooted pr_key.
+          description: The origin issue key (feature_key/plan_key), a self-rooted pr_key, or a delivery-graph run_key.
         kind:
           type: string
           enum: [feature, epic, pr, delivery]
