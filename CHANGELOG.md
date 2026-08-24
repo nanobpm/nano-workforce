@@ -1,3 +1,9 @@
+## [0.139.1](https://github.com/nanobpm/nano-workforce/compare/v0.139.0...v0.139.1) (2026-08-24)
+
+### Bug Fixes
+
+* **delivery-graphs:** anchor App-View door defaults to import.meta.url ([#536](https://github.com/nanobpm/nano-workforce/issues/536)) ([#537](https://github.com/nanobpm/nano-workforce/issues/537)) ([58cd57e](https://github.com/nanobpm/nano-workforce/commit/58cd57e7f35937a9d1720e2fd4d938f70ce8f304)), closes [#279](https://github.com/nanobpm/nano-workforce/issues/279) [#467](https://github.com/nanobpm/nano-workforce/issues/467) [#279-only](https://github.com/nanobpm/nano-workforce/issues/279-only) [#279](https://github.com/nanobpm/nano-workforce/issues/279) [#279](https://github.com/nanobpm/nano-workforce/issues/279)
+
 ## [0.139.0](https://github.com/nanobpm/nano-workforce/compare/v0.138.3...v0.139.0) (2026-08-24)
 
 ### Features
