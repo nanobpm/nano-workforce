@@ -6,12 +6,13 @@
 // Stage are SEPARATE operator actions (#516): Preview compiles without persisting; Stage persists a
 // proposal. Dispatch is deliberately NOT in this view (issue #460): it is an OPERATOR row-action on the
 // Staged proposals grid on the same page. This test pins the wiring so it can't silently regress: the
-// sidecars exist, mount.js hits the preview + stage doors with base-relative defaults (the #279
-// App-View resolution class — a leading-slash path 404s), it renders each preview facet, its compose
-// panel is collapsible, and it exposes NO dispatch/approval affordance (the self-approval hole #460
-// closes).
+// sidecars exist, mount.js hits the preview + stage doors with MODULE-ANCHORED defaults (`new
+// URL("../app/api/…", import.meta.url)`, the #467 App-View resolution class — this module is served one
+// dir deep under `/delivery-graphs/`, so a document-base-relative or leading-slash default 404s; see
+// test/delivery-graphs-staged-embed.test.ts and #536), it renders each preview facet, its compose panel
+// is collapsible, and it exposes NO dispatch/approval affordance (the self-approval hole #460 closes).
 import { test } from "node:test";
-import { assert } from "#test-assert";
+import { assert, assertEquals } from "#test-assert";
 import { readFileSync } from "node:fs";
 import { parseAndCompileText } from "../app/deliveryGraphTextIngress.ts";
 import { EXAMPLE_GRAPH } from "../pages/delivery-graphs/mount.js";
@@ -24,13 +25,39 @@ const STANDALONE_HTML = readFileSync(`${DIR}/standalone.html`, "utf8");
 const CSS = readFileSync(`${DIR}/delivery-graphs.css`, "utf8");
 const PAGE_JSON = readFileSync(`${ROOT}pages/delivery-graphs.page.json`, "utf8");
 
-// Pull the string default out of `const <name> = config.<name> ?? <CONST>;` (a module const).
-function defaultUrl(name: string): string {
+// The REAL served location of mount.js on each surface: one directory deep under `/delivery-graphs/`.
+const STANDALONE_MOUNT = "http://127.0.0.1:3000/delivery-graphs/mount.js";
+const STUDIO_MOUNT = "http://studio-host:8080/console/app-view/Workforce/delivery-graphs/mount.js";
+
+// Pull the module-anchored default spec out of `const <name> = config.<field> ?? <CONST>;` where the
+// CONST is declared `const <CONST> = new URL("<spec>", import.meta.url).href;`.
+function defaultSpec(name: string): string {
   const m = MOUNT_JS.match(new RegExp(`${name}\\s*=\\s*config\\.\\w+\\s*\\?\\?\\s*(\\w+);`));
   assert(m, `mount.js must default ${name} from config with a fallback constant`);
-  const constM = MOUNT_JS.match(new RegExp(`const ${m![1]}\\s*=\\s*"([^"]*)"`));
-  assert(constM, `mount.js must declare the ${m![1]} fallback as a string literal`);
+  const constM = MOUNT_JS.match(
+    new RegExp(`const ${m![1]}\\s*=\\s*new URL\\(\\s*"([^"]*)"\\s*,\\s*import\\.meta\\.url\\s*\\)\\s*\\.href`),
+  );
+  assert(
+    constM,
+    `mount.js must default ${m![1]} to new URL("<spec>", import.meta.url) so the door is anchored to the ` +
+      `module's own served location, not the document base (#467/#536)`,
+  );
   return constM![1];
+}
+
+// A module-anchored door default must (a) not be absolute (#279), (b) step up out of /delivery-graphs/
+// (#467), and (c) resolve onto <appMount>/app/api/… both standalone AND inside the Studio iframe.
+function assertModuleAnchored(name: string, endpoint: string): void {
+  const spec = defaultSpec(name);
+  assert(!spec.startsWith("/"), `default ${name} spec "${spec}" must not be absolute (resolves against console origin, #279)`);
+  assert(spec.startsWith("../"), `default ${name} spec "${spec}" must step up out of /delivery-graphs/ (#467)`);
+  assert(spec.endsWith(endpoint), `default ${name} spec "${spec}" must hit the ${endpoint} door`);
+  assertEquals(new URL(spec, STANDALONE_MOUNT).href, `http://127.0.0.1:3000/${endpoint}`, `default ${name} must resolve to the app root (#467)`);
+  assertEquals(
+    new URL(spec, STUDIO_MOUNT).href,
+    `http://studio-host:8080/console/app-view/Workforce/${endpoint}`,
+    `default ${name} must resolve under the app-view base, not the console origin (#279) nor the /delivery-graphs/ base (#467/#536)`,
+  );
 }
 
 test("#441: the delivery-graphs App View mounts the same module standalone and embedded", () => {
@@ -41,13 +68,9 @@ test("#441: the delivery-graphs App View mounts the same module standalone and e
   }
 });
 
-test("#516: mount.js wires SEPARATE preview and stage doors (base-relative)", () => {
-  const previewUrl = defaultUrl("previewUrl");
-  assert(previewUrl.endsWith("actions/delivery-graph/preview"), `previewUrl default "${previewUrl}" must hit the previewDeliveryGraph door`);
-  assert(!previewUrl.startsWith("/"), `default previewUrl "${previewUrl}" must be base-relative (App-View #279 resolution class)`);
-  const stageUrl = defaultUrl("stageUrl");
-  assert(stageUrl.endsWith("actions/delivery-graph/stage"), `stageUrl default "${stageUrl}" must hit the stageDeliveryGraph door`);
-  assert(!stageUrl.startsWith("/"), `default stageUrl "${stageUrl}" must be base-relative (App-View #279 resolution class)`);
+test("#516/#467: mount.js wires SEPARATE preview and stage doors, module-anchored to the app root", () => {
+  assertModuleAnchored("previewUrl", "app/api/actions/delivery-graph/preview");
+  assertModuleAnchored("stageUrl", "app/api/actions/delivery-graph/stage");
   // Preview and Stage are distinct buttons wired to distinct actions.
   assert(/id="dg-preview"/.test(MOUNT_JS) && /id="dg-stage"/.test(MOUNT_JS), "mount.js must render distinct Preview and Stage buttons");
   assert(/submit\(previewUrl,\s*false\)/.test(MOUNT_JS), "the Preview button must submit to the preview door WITHOUT staging");

@@ -32,6 +32,21 @@ function defaultUrl(src: string, name: string): string {
   return constM![1];
 }
 
+// Pull a MODULE-ANCHORED default spec out of `const <name> = config.<field> ?? <CONST>;` where the
+// CONST is declared `const <CONST> = new URL("<spec>", import.meta.url).href;` (#467/#536).
+function defaultSpec(src: string, name: string): string {
+  const m = src.match(new RegExp(`${name}\\s*=\\s*config\\.\\w+\\s*\\?\\?\\s*(\\w+);`));
+  assert(m, `mount must default ${name} from config with a fallback constant`);
+  const constM = src.match(
+    new RegExp(`const ${m![1]}\\s*=\\s*new URL\\(\\s*"([^"]*)"\\s*,\\s*import\\.meta\\.url\\s*\\)\\s*\\.href`),
+  );
+  assert(
+    constM,
+    `mount must default ${m![1]} to new URL("<spec>", import.meta.url) so the door is anchored to the ` +
+      `module's own served location, not the document base (#467/#536)`,
+  );
+  return constM![1];
+}
 test("#523: the Library App-View mounts the same module standalone and embedded", () => {
   assert(/mountDeliveryGraphLibrary/.test(LIBRARY_JS), "library.mount.js must export mountDeliveryGraphLibrary");
   for (const [file, html] of [["library-embed.html", EMBED_HTML], ["library-standalone.html", STANDALONE_HTML]] as const) {
@@ -98,9 +113,10 @@ test("#523: the compose mount exposes an INBOUND reuse-fill seam (message → #d
 });
 
 test("#523: Save-to-library on the staged App-View posts save-from-digest", () => {
-  const url = defaultUrl(STAGED_JS, "saveLibraryUrl");
+  const url = defaultSpec(STAGED_JS, "saveLibraryUrl");
   assert(url.endsWith("actions/delivery-graph/library/save"), `saveLibraryUrl default "${url}" must hit the saveToLibrary door`);
-  assert(!url.startsWith("/"), `default saveLibraryUrl "${url}" must be base-relative (App-View #279 resolution class)`);
+  assert(!url.startsWith("/"), `default saveLibraryUrl "${url}" must not be absolute (App-View #279 resolution class)`);
+  assert(url.startsWith("../"), `default saveLibraryUrl "${url}" must step up out of /delivery-graphs/ (module-anchored, #467/#536)`);
   assert(/data-save-library=/.test(STAGED_JS), "staged.mount.js must render a per-row Save-to-library affordance carrying the digest");
   // Save-from-digest: it posts { name, digest } — it must NOT compile or stage a raw graph (the #460
   // operator boundary the staged view enforces stays intact).

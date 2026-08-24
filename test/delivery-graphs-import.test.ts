@@ -16,12 +16,19 @@ const CSS = readFileSync(`${DIR}/delivery-graphs.css`, "utf8");
 const EMBED_HTML = readFileSync(`${DIR}/embed.html`, "utf8");
 const STANDALONE_HTML = readFileSync(`${DIR}/standalone.html`, "utf8");
 
-// Pull the string default out of `const <name> = config.<name> ?? <CONST>;` (a module const).
+// Pull the module-anchored default spec out of `const <name> = config.<name> ?? <CONST>;` where the
+// CONST is declared `const <CONST> = new URL("<spec>", import.meta.url).href;`.
 function defaultUrl(name: string): string {
   const m = MOUNT_JS.match(new RegExp(`${name}\\s*=\\s*config\\.\\w+\\s*\\?\\?\\s*(\\w+);`));
   assert(m, `mount.js must default ${name} from config with a fallback constant`);
-  const constM = MOUNT_JS.match(new RegExp(`const ${m![1]}\\s*=\\s*"([^"]*)"`));
-  assert(constM, `mount.js must declare the ${m![1]} fallback as a string literal`);
+  const constM = MOUNT_JS.match(
+    new RegExp(`const ${m![1]}\\s*=\\s*new URL\\(\\s*"([^"]*)"\\s*,\\s*import\\.meta\\.url\\s*\\)\\s*\\.href`),
+  );
+  assert(
+    constM,
+    `mount.js must default ${m![1]} to new URL("<spec>", import.meta.url) so the door is anchored ` +
+      `to the module's own served location, not the document base (#467/#536)`,
+  );
   return constM![1];
 }
 
