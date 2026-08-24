@@ -4,6 +4,13 @@
   "type": "default",
   "components": [
     {
+      "type": "text",
+      "text": "### Delivery graph — node `{{nodeId}}`",
+      "conditional": {
+        "hide": "=(nodeId = null) or (nodeId = \"\")"
+      }
+    },
+    {
       "type": "textarea",
       "key": "prompt",
       "label": "Now do this",
@@ -11,12 +18,29 @@
       "readonly": true
     },
     {
+      "type": "text",
+      "text": "**Emits:** {{emitLabel}} — enter its typed value below (validated against the node's declared fact).",
+      "conditional": {
+        "hide": "=emitMode != \"typed\""
+      }
+    },
+    {
       "type": "textfield",
       "key": "value",
       "label": "Emitted value",
       "description": "The typed value this step hands forward to its downstream dependents. Validated against the node's declared emitted fact.",
+      "conditional": {
+        "hide": "=emitMode != \"typed\""
+      },
       "validate": {
         "required": true
+      }
+    },
+    {
+      "type": "text",
+      "text": "_This step emits no typed fact (N/A) — just complete it to unblock its dependents._",
+      "conditional": {
+        "hide": "=emitMode = \"typed\""
       }
     },
     {

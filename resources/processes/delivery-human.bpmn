@@ -10,6 +10,10 @@
         <zeebe:userTask />
         <zeebe:assignmentDefinition candidateGroups="operators" assignee="=if (is defined(escalationAssignee) and escalationAssignee != null and trim(string(escalationAssignee)) != &#34;&#34;) then escalationAssignee else null" />
         <zeebe:ioMapping>
+          <zeebe:input source="=if (is defined(prompt)) then prompt else null" target="prompt" />
+          <zeebe:input source="=if (is defined(nodeId)) then nodeId else null" target="nodeId" />
+          <zeebe:input source="=if (is defined(emits) and count(emits) != 0) then &#34;typed&#34; else &#34;none&#34;" target="emitMode" />
+          <zeebe:input source="=if (is defined(emits)) then string join(for _e in emits return _e.name + &#34; (&#34; + _e.type + &#34;)&#34;, &#34;, &#34;) else &#34;&#34;" target="emitLabel" />
           <zeebe:output source="=&#34;completed&#34;" target="humanOutcome" />
           <zeebe:output source="=if (is defined(value)) then value else null" target="humanEmitValue" />
           <zeebe:output source="=if (is defined(resolvedArtifact)) then resolvedArtifact else null" target="humanEmitArtifact" />

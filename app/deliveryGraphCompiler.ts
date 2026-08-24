@@ -823,6 +823,16 @@ function ioMappingLines(w: NodeWiring, boundInputs: readonly BoundInput[]): stri
     case "human":
       inputs.push({ source: cfg("escalationSlaTimeout"), target: "escalationSlaTimeout" });
       inputs.push({ source: cfg("escalationAssignee"), target: "escalationAssignee" });
+      // Seed the authored instruction + node identity + emit context so the generic human form renders
+      // "now do X", names the parked node, and labels/hides its emit field (issue #499). `emits` is the
+      // single source of truth; the emit label/mode are derived from it in FEEL here (no duplicate seed).
+      inputs.push({ source: cfg("prompt"), target: "prompt" });
+      inputs.push({ source: cfg("nodeId"), target: "nodeId" });
+      inputs.push({ source: `=if count(${cfg("emits").slice(1)}) = 0 then "none" else "typed"`, target: "emitMode" });
+      inputs.push({
+        source: `=string join(for _e in ${cfg("emits").slice(1)} return _e.name + " (" + _e.type + ")", ", ")`,
+        target: "emitLabel",
+      });
       break;
     case "connector":
       inputs.push({ source: cfg("target"), target: "target" });
@@ -868,9 +878,9 @@ function innerBodyLines(w: NodeWiring): string[] {
   const node = w.node;
   switch (node.kind) {
     case "agent":
-      return serviceBodyLines(el, node.id, attr("type", node.agent.jobType), []);
+      return serviceBodyLines(el, node.id, attr("type", node.agent.jobType), [], node.agent.jobType);
     case "connector":
-      return serviceBodyLines(el, node.id, `type="${DELEGATE_TASK_TYPE.connector}"`, []);
+      return serviceBodyLines(el, node.id, `type="${DELEGATE_TASK_TYPE.connector}"`, [], `connector → ${node.connector.target}`);
     case "wait":
       return waitBodyLines(el, node.id);
     case "human":
@@ -882,8 +892,15 @@ function innerBodyLines(w: NodeWiring): string[] {
 
 /** `agent`/`connector` body: `start → serviceTask → end`, with a bounded `=nodeTimeout` boundary that
  * escalates the stalled node onto a human-completable user task. `taskDefAttr` is the pre-rendered
- * `type="…"` attribute; `taskProps` are optional `<zeebe:property>` envelope lines. */
-function serviceBodyLines(el: string, nodeId: string, taskDefAttr: string, taskProps: readonly string[]): string[] {
+ * `type="…"` attribute; `taskProps` are optional `<zeebe:property>` envelope lines; `descriptor`
+ * names the stalled work (job type / connector target) for the escalation task's context line (#499). */
+function serviceBodyLines(
+  el: string,
+  nodeId: string,
+  taskDefAttr: string,
+  taskProps: readonly string[],
+  descriptor: string,
+): string[] {
   const esc = escalationTaskElement(el);
   const taskExt =
     taskProps.length > 0
@@ -911,7 +928,18 @@ function serviceBodyLines(el: string, nodeId: string, taskDefAttr: string, taskP
     `        <bpmn:outgoing>${el}_i2</bpmn:outgoing>`,
     `        <bpmn:timerEventDefinition id="${el}_ted"><bpmn:timeDuration xsi:type="bpmn:tFormalExpression">=nodeTimeout</bpmn:timeDuration></bpmn:timerEventDefinition>`,
     "      </bpmn:boundaryEvent>",
-    ...escalationTaskLines(esc, nodeId, [`${el}_i2`], `${el}_i3`),
+    ...escalationTaskLines(
+      esc,
+      nodeId,
+      [`${el}_i2`],
+      `${el}_i3`,
+      escalationContextFeel(
+        nodeId,
+        descriptor,
+        "nodeTimeout",
+        "; in-flight work may already exist — check for a draft PR or partial state before retrying or reassigning.",
+      ),
+    ),
     `      <bpmn:endEvent id="${el}_end"><bpmn:incoming>${el}_i1</bpmn:incoming><bpmn:incoming>${el}_i3</bpmn:incoming></bpmn:endEvent>`,
     flow(`${el}_i0`, `${el}_start`, `${el}_task`),
     flow(`${el}_i1`, `${el}_task`, `${el}_end`),
@@ -991,7 +1019,13 @@ function waitBodyLines(el: string, nodeId: string): string[] {
     `        <bpmn:outgoing>${el}_i7</bpmn:outgoing>`,
     `        <bpmn:outgoing>${el}_i4</bpmn:outgoing>`,
     "      </bpmn:exclusiveGateway>",
-    ...escalationTaskLines(esc, nodeId, [`${el}_i4`], `${el}_i5`),
+    ...escalationTaskLines(
+      esc,
+      nodeId,
+      [`${el}_i4`],
+      `${el}_i5`,
+      escalationContextFeel(nodeId, "readiness gate", "probeTimeout", " before its ReadinessProbe went green — decide how to proceed."),
+    ),
     `      <bpmn:endEvent id="${el}_end"><bpmn:incoming>${el}_i1</bpmn:incoming><bpmn:incoming>${el}_i5</bpmn:incoming><bpmn:incoming>${el}_i7</bpmn:incoming></bpmn:endEvent>`,
     flow(`${el}_i0`, `${el}_start`, `${el}_probeLoop`),
     flow(`${el}_i1`, `${el}_probeLoop`, `${el}_end`),
@@ -1047,19 +1081,43 @@ function humanBodyLines(el: string, nodeId: string): string[] {
 }
 
 /** A bounded node's escalation user task — a human-completable stop (`isDeliveryHumanElement`
- * convention) that a human OR an agent (ADR 0046) answers to unstick a stalled node. */
-function escalationTaskLines(esc: string, nodeId: string, incoming: readonly string[], outgoing: string): string[] {
+ * convention) that a human OR an agent (ADR 0046) answers to unstick a stalled node. `contextFeel` is
+ * a FEEL expression yielding the context line seeded onto the generic form's read-only prompt field
+ * (issue #499) — e.g. "Node n1 (senior:feature) exceeded its SLA (PT30M); …" — so the operator can see
+ * WHICH node timed out and that in-flight work may already exist, instead of a blank form. The emit
+ * field is labelled "none" so the generic form hides its (inert on an escalation) typed-value input. */
+function escalationTaskLines(
+  esc: string,
+  nodeId: string,
+  incoming: readonly string[],
+  outgoing: string,
+  contextFeel: string,
+): string[] {
   return [
     `      <bpmn:userTask id="${esc}" name="Escalate: ${escapeXml(nodeId)}">`,
     "        <bpmn:extensionElements>",
     `          <zeebe:formDefinition formId="${GENERIC_HUMAN_FORM}" />`,
     "          <zeebe:userTask />",
     '          <zeebe:assignmentDefinition candidateGroups="operators" />',
+    "          <zeebe:ioMapping>",
+    `            <zeebe:input ${attr("source", contextFeel)} target="prompt" />`,
+    `            <zeebe:input ${attr("source", `=${feelStr(nodeId)}`)} target="nodeId" />`,
+    `            <zeebe:input ${attr("source", '="none"')} target="emitMode" />`,
+    "          </zeebe:ioMapping>",
     "        </bpmn:extensionElements>",
     ...incoming.map((id) => `        <bpmn:incoming>${id}</bpmn:incoming>`),
     `        <bpmn:outgoing>${outgoing}</bpmn:outgoing>`,
     "      </bpmn:userTask>",
   ];
+}
+
+/** Build the FEEL context line seeded onto an escalation task's read-only prompt field (issue #499).
+ * The node id + descriptor (job type / connector target / "readiness gate") are baked as compile-time
+ * literals; the elapsed SLA is read from the node body's runtime `timeoutVar` (`nodeTimeout` for a
+ * bounded service node, `probeTimeout` for a `wait` gate). `tail` closes the sentence per kind. */
+function escalationContextFeel(nodeId: string, descriptor: string, timeoutVar: string, tail: string): string {
+  const head = feelStr(`Node ${nodeId} (${descriptor}) exceeded its SLA (`);
+  return `=${head} + string(${timeoutVar}) + ${feelStr(`)${tail}`)}`;
 }
 
 /** A plain `<bpmn:sequenceFlow>` (6-space indented). */

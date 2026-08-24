@@ -29,6 +29,17 @@ async function compileFail(graph: unknown) {
   return r.errors;
 }
 
+/** The sub-process element id of the PLANNED human user task in a compiled graph — i.e. the
+ * delivery-human-task element that is NOT a bounded node's __esc timeout twin. Returns "" if none. */
+function humanTaskSubEl(bpmn: string): string {
+  const parts = bpmn.split('<bpmn:userTask id="delivery-human-task__');
+  for (let k = 1; k < parts.length; k++) {
+    const id = parts[k].slice(0, parts[k].indexOf('"'));
+    if (!id.endsWith("__esc")) return id;
+  }
+  return "";
+}
+
 // The ADR's motivating case: an agent merges PR #B, a `pr` wait node watches it merge and emits
 // `mergedSha`, a human does the manual OTP publish emitting `resolvedArtifact`, and a connector
 // consumes the published artifact.
@@ -113,6 +124,42 @@ test("late-binding: a fact-qualified edge threads a boundFacts input into the co
   const boundInput = /<zeebe:input source='=\[\{from: "publish"[^']*\}\]' target="boundFacts"/.test(r.bpmn);
   assert(boundInput, `boundFacts is a single-quoted FEEL list literal, got: ${r.bpmn.match(/source='[^']*' target="boundFacts"/)?.[0] ?? r.bpmn.match(/source="[^"]*" target="boundFacts"/)?.[0]}`);
 });
+
+test("#499 human context: the human user-task seeds prompt/nodeId/emit context so its generic form is not contextless", async () => {
+  const r = await compileOk(RELEASE_RUNBOOK);
+  // The human node's subProcess ioMapping must thread the authored prompt + node identity + emit
+  // context from `nodeInputs.<el>` onto the user task (the form reads them). A dropped prompt input is
+  // exactly the contextless-form bug (#499). Locate the PLANNED human task (not an `__esc` twin).
+  const subEl = humanTaskSubEl(r.bpmn);
+  assert(subEl !== "", "the graph inlines a planned human user task");
+  assert(r.bpmn.includes(`source="=nodeInputs.${subEl}.prompt" target="prompt"`), "the human task seeds its authored prompt");
+  assert(r.bpmn.includes(`source="=nodeInputs.${subEl}.nodeId" target="nodeId"`), "the human task seeds its node identity");
+  // The emit label/mode are DERIVED in FEEL from the seeded emits list (single source of truth) — a
+  // single-quoted attribute so the literal quotes survive the engine deploy path.
+  assert(
+    r.bpmn.includes(`source='=if count(nodeInputs.${subEl}.emits) = 0 then "none" else "typed"' target="emitMode"`),
+    "emitMode is derived from the emits count",
+  );
+  assert(
+    r.bpmn.includes(`for _e in nodeInputs.${subEl}.emits return _e.name`) && r.bpmn.includes('target="emitLabel"'),
+    "emitLabel is derived from the emits list",
+  );
+});
+
+test("#499 escalation context: an agent-node timeout escalation seeds a context line naming the node, its job type, and the elapsed SLA", async () => {
+  const r = await compileOk(RELEASE_RUNBOOK);
+  // The `__esc` timeout-escalation user task previously carried NO ioMapping — a blank form that never
+  // said a timeout occurred, on which node. It must now seed a `prompt` context line from a compile-time
+  // literal (node id + job type) concatenated with the runtime elapsed SLA (`nodeTimeout`).
+  const start = r.bpmn.indexOf('<bpmn:userTask id="delivery-human-task__n1__esc"');
+  assert(start !== -1, "a bounded node inlines an escalation user task");
+  const escBlock = r.bpmn.slice(start, r.bpmn.indexOf("</bpmn:userTask>", start));
+  assert(escBlock.includes('target="prompt"'), "the escalation task seeds a prompt context line");
+  assert(escBlock.includes("Node open-b (senior:feature) exceeded its SLA ("), "the context names the node and its job type");
+  assert(escBlock.includes("string(nodeTimeout)"), "the context reports the elapsed SLA at runtime");
+  assert(escBlock.includes('="none"') && escBlock.includes('target="emitMode"'), "the escalation labels its emit field N/A so the generic form hides the inert value input");
+});
+
 
 test("rejects unknown kind (by construction) with a path-qualified error, nothing compiled", async () => {
   const errors = await compileFail({
