@@ -59,7 +59,7 @@ function viewDb(): DatabaseSync {
   db.exec(MIG("074_plan_read_model_derive_bucket.sql"));
   // 079 re-points plan_read_model's status/bucket derivations at the derived plans__tracking VIEW so a
   // terminated (derive-only `abandoned`) epic drops out of Active (issue #503).
-  db.exec(MIG("079_plan_read_model_derive_terminal.sql"));
+  db.exec(MIG("080_plan_read_model_derive_terminal.sql"));
   return db;
 }
 
