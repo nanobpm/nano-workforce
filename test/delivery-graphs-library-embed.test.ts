@@ -113,10 +113,10 @@ test("#523: the compose mount exposes an INBOUND reuse-fill seam (message → #d
 });
 
 test("#523: Save-to-library on the staged App-View posts save-from-digest", () => {
-  const url = defaultSpec(STAGED_JS, "saveLibraryUrl");
-  assert(url.endsWith("actions/delivery-graph/library/save"), `saveLibraryUrl default "${url}" must hit the saveToLibrary door`);
-  assert(!url.startsWith("/"), `default saveLibraryUrl "${url}" must not be absolute (App-View #279 resolution class)`);
-  assert(url.startsWith("../"), `default saveLibraryUrl "${url}" must step up out of /delivery-graphs/ (module-anchored, #467/#536)`);
+  const spec = defaultSpec(STAGED_JS, "saveLibraryUrl");
+  assert(spec.endsWith("actions/delivery-graph/library/save"), `saveLibraryUrl default "${spec}" must hit the saveToLibrary door`);
+  assert(!spec.startsWith("/"), `default saveLibraryUrl "${spec}" must not be absolute (App-View #279 resolution class)`);
+  assert(spec.startsWith("../"), `default saveLibraryUrl "${spec}" must step up out of /delivery-graphs/ (module-anchored, #467/#536)`);
   assert(/data-save-library=/.test(STAGED_JS), "staged.mount.js must render a per-row Save-to-library affordance carrying the digest");
   // Save-from-digest: it posts { name, digest } — it must NOT compile or stage a raw graph (the #460
   // operator boundary the staged view enforces stays intact).
