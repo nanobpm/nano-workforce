@@ -32,6 +32,33 @@ const REQUEST_TIMEOUT_MS = 30000;
 // brought back by re-saving), so the operator acknowledges it.
 const DELETE_CONFIRM = "Delete this saved library entry? It is removed from the library — to bring it back you must save it again.";
 
+// The filename suffix for an exported delivery graph (issue #525, epic #519 S6). Export is a purely
+// client-side Blob download of the entry's stored graph JSON — no backend door — so the graph a peer
+// deployment (or a sibling library) later re-imports is byte-identical to what was saved.
+export const DELIVERY_GRAPH_EXPORT_SUFFIX = ".deliverygraph.json";
+
+/**
+ * Build the client-side download descriptor for exporting a library entry's graph JSON (issue #525).
+ * Pure and DOM-free so it is unit-testable in isolation from the mount: it returns the exact
+ * { filename, mime, contents } the Export Blob download is assembled from.
+ *   • `contents` is the entry's STORED graph JSON verbatim (never re-serialised, so a round-trip
+ *     export→import can't drift the bytes); an entry with no stored graph yields "".
+ *   • `filename` is the entry name sanitised to a safe basename with the `.deliverygraph.json` suffix,
+ *     falling back to the entry id (then a constant) when the name is empty or all-unsafe characters.
+ * @param {{name?:string, id?:string, graph?:string}} entry
+ * @returns {{filename:string, mime:string, contents:string}}
+ */
+export function buildDeliveryGraphExport(entry) {
+  const contents = entry && typeof entry.graph === "string" ? entry.graph : "";
+  const name = String(entry && entry.name != null ? entry.name : "").trim();
+  const id = String(entry && entry.id != null ? entry.id : "").trim();
+  // Collapse any run of filesystem-unsafe characters to a single hyphen, then trim leading/trailing
+  // separators so we never emit a hidden dotfile or a name with dangling punctuation.
+  const safe = name.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^[-.]+|[-.]+$/g, "");
+  const stem = safe || (id ? `delivery-graph-${id}` : "delivery-graph");
+  return { filename: `${stem}${DELIVERY_GRAPH_EXPORT_SUFFIX}`, mime: "application/json", contents };
+}
+
 /** Escape untrusted strings before they touch innerHTML. */
 function esc(value) {
   return String(value ?? "").replace(
@@ -67,6 +94,7 @@ function renderEntry(entry) {
     </div>
     <div class="actions">
       <button class="btn btn-primary" type="button" data-reuse="${esc(entry.id)}">Reuse</button>
+      <button class="btn btn-ghost" type="button" data-export="${esc(entry.id)}">Export</button>
       <button class="btn btn-ghost" type="button" data-delete="${esc(entry.id)}">Delete</button>
     </div>
   </section>`;
@@ -82,7 +110,7 @@ function renderList(entries) {
   }
   const header = `<section class="card card-ok">
     <h2>Library <span class="count">${entries.length}</span></h2>
-    <p class="ok">Saved, reusable delivery graphs. <b>Reuse</b> loads one back into the composer above to edit / re-stage; <b>Delete</b> removes it.</p>
+    <p class="ok">Saved, reusable delivery graphs. <b>Reuse</b> loads one back into the composer above to edit / re-stage; <b>Export</b> downloads its graph JSON; <b>Delete</b> removes it.</p>
   </section>`;
   return header + entries.map(renderEntry).join("");
 }
@@ -239,6 +267,43 @@ export function mountDeliveryGraphLibrary(host, config = {}) {
     setStatus("\u2713 Loaded into the composer above \u2014 edit, Preview or Stage it.", "ok");
   }
 
+  // "Export": a purely client-side download of a saved entry's graph JSON as `<name>.deliverygraph.json`
+  // (issue #525). No backend door — the list door already carries each entry's `graph` inline (the same
+  // field Reuse uses), so we assemble a Blob from it and drive an anchor download. The bytes written are
+  // the STORED graph verbatim (buildDeliveryGraphExport never re-serialises), so an export→import
+  // round-trip is byte-stable. Runs in any context (embedded or standalone) — unlike Reuse it needs no
+  // console to route it.
+  function doExport(id) {
+    const entry = entries.find((e) => e && e.id === id);
+    if (!entry) {
+      setStatus("That entry is no longer in the library \u2014 refresh and try again.", "err");
+      return;
+    }
+    const { filename, mime, contents } = buildDeliveryGraphExport(entry);
+    if (typeof contents !== "string" || contents.trim() === "") {
+      setStatus("That entry has no stored graph to export.", "err");
+      return;
+    }
+    let url = null;
+    let a = null;
+    try {
+      const blob = new Blob([contents], { type: mime });
+      url = URL.createObjectURL(blob);
+      a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      setStatus(`\u2713 Downloaded ${filename}`, "ok");
+    } catch (err) {
+      setStatus(err && err.message ? err.message : "Export failed.", "err");
+    } finally {
+      if (a) a.remove();
+      // Defer revoke to the next tick so the download can start reliably before the URL is freed.
+      if (url) setTimeout(() => URL.revokeObjectURL(url), 0);
+    }
+  }
+
   // "Delete": remove a saved library entry via the deleteLibraryEntry door (idempotent). Confirm (it is
   // a one-way drop off the library), then DELETE the per-entry path; refresh so the row leaves at once.
   async function doDelete(id) {
@@ -268,6 +333,12 @@ export function mountDeliveryGraphLibrary(host, config = {}) {
     if (reuseBtn) {
       ev.preventDefault();
       doReuse(reuseBtn.getAttribute("data-reuse"));
+      return;
+    }
+    const exportBtn = ev.target && ev.target.closest ? ev.target.closest("[data-export]") : null;
+    if (exportBtn) {
+      ev.preventDefault();
+      doExport(exportBtn.getAttribute("data-export"));
       return;
     }
     const deleteBtn = ev.target && ev.target.closest ? ev.target.closest("[data-delete]") : null;
