@@ -211,6 +211,15 @@ Two different `nano:dataEnvelope` uses have different rules — don't conflate t
   deriving a worker's array inputs from the model this way over a hand-typed
   `interface In`; don't "fix" a modelled `list="true"` array back to a joined
   scalar.
+- **`dataEnvelope.in` fields are read from PROCESS scope, not task-local
+  `ioMapping`.** At runtime the engine populates each declared `.in` field *by
+  name* from the process variables in scope — a `<zeebe:ioMapping>` input that
+  synthesises a **new** name with no backing process variable is silently ignored,
+  so the field arrives **blank** with no incident (e.g. `pr.readiness-probe` once
+  read an empty `gateKey`). Tasks like `ensure-base-branch` work only because
+  `repo`/`baseBranch` already exist as process variables. Seed any field a task
+  must read as a real process variable at plan start (e.g. in `startPlan`); don't
+  rely on `ioMapping` to synthesise it.
 
 ## Urban page runtime: rendering primitives are not JS-truthy
 
@@ -235,6 +244,21 @@ silently — cheap to avoid, annoying to debug after the fact.
   `showWhenField` is hidden for `0`/`null`/`""` alike — so a `0`-or-`NULL` flag
   correctly hides it either way. (This is why the same flag can need `NULL` for a
   badge yet work as `0` for a `showWhenField` button.)
+- **Renderer kinds are a version-pinned set — verify against the installed
+  package, not an issue reference.** The page renderers are a finite set fixed by
+  the pinned `@nanobpm/urban`; a version *range* only guarantees *some* matching
+  build is installed. Do **not** assume a primitive exists because an issue,
+  changelog, or *Links* section mentions it — `urban check` (a CI gate) rejects
+  unknown renderer kinds only *after* you've authored a page around a phantom one
+  (epic #254 bounced three review rounds asserting a page-level "stepper" that
+  never shipped). Confirm the kind against the installed `RENDERERS` map
+  (`node_modules/@nanobpm/urban/dist/runtime/core/modules/pages.js`) and the kinds
+  already used across `pages/*.page.json`. Note a **nano-ide issue can ship a data
+  read-model, not a page renderer** (#254 shipped the lineage projection, a data
+  primitive) — read *what kind* of primitive it delivers. Build composite visuals
+  as a `dataGrid` column renderer over stored columns (e.g. the `"kind":
+  "pipeline"` column in `pages/feature.page.json`), not a page-level primitive,
+  unless you've verified that primitive exists in the installed build.
 
 ### The top nav has a single source of truth — edit `pages/_nav.json`
 
@@ -271,7 +295,12 @@ Migrations live in `db/migrations/*.sql` and are **auto-applied on boot** from
 - Number a new migration after the current highest prefix (they apply in order).
   Check `origin/main`, not your branch point — a fan-out epic branch forks at one
   prefix while `main` keeps advancing, so the branch-local "next" number collides
-  on merge. Two files must never share a prefix; `npm run check:migrations`
+  on merge. **In a *simultaneous* fan-out wave, checking `origin/main` isn't
+  enough**: every sibling forks at the same commit, sees the same highest prefix,
+  and independently takes the same next number (main hasn't advanced yet), so the
+  planner must **pre-assign each slice a disjoint prefix block at decomposition
+  time** (e.g. `060-061` / `062-063`, plus a cleanup block) rather than have each
+  agent compute "the next free" prefix. Two files must never share a prefix; `npm run check:migrations`
   (a CI gate) enforces this and fails the build on any new duplicate. Because a
   prefix collision only exists in the *union* of two branches, this gate — like
   `layout:check` and the generated-artifact `--check`s — is also re-run on the
