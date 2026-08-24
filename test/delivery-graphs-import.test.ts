@@ -48,6 +48,14 @@ test("#524: Import wires the importToLibrary door (base-relative), reading the f
     `importUrl default spec "${importSpec}" must hit the importToLibrary door`,
   );
   assert(!importSpec.startsWith("/"), `default importUrl spec "${importSpec}" must be base-relative (App-View #279 resolution class)`);
+  // Pin the MODULE-anchored invariant, not merely "not absolute": the spec must step UP out of the
+  // /delivery-graphs/ shell base with "../" (resolved against import.meta.url), so a regression back to a
+  // document-base-relative "app/api/…" — which 404s under the shell base (#467/#536) — fails the guard.
+  assert(
+    importSpec.startsWith("../"),
+    `default importUrl spec "${importSpec}" must be module-anchored with a "../" prefix (steps out of the ` +
+      `/delivery-graphs/ shell base off import.meta.url), not document-base-relative (#467/#536)`,
+  );
   // The file's text is read CLIENT-SIDE and POSTed as graphJson to the import door.
   assert(/\.text\(\)/.test(MOUNT_JS), "mount.js must read the selected file's text client-side via File.text()");
   assert(/post\(importUrl,\s*\{\s*graphJson:/.test(MOUNT_JS), "the Import handler must POST the file text as graphJson to the import door");
