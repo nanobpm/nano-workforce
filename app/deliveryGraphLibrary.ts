@@ -95,8 +95,9 @@ export function buildLibraryEntryRow(input: {
 
 /** Persist a library entry, UPSERTing on its name-derived `id`. A first save inserts; a re-save of the
  * same name refreshes the graph/description/source and `updated_at` while PRESERVING the original
- * `created_at` (the library entry keeps its place in the newest-first list unless the graph is what
- * changed — an edit updates in place, it does not create a duplicate). Returns the written row. */
+ * `created_at` — an edit updates in place, it does not create a duplicate. Because `created_at` is
+ * preserved, a re-save never changes the entry's position in the newest-first list, regardless of
+ * which fields (graph included) changed. Returns the written row. */
 export async function saveLibraryEntry(data: DataLayer, row: DeliveryGraphLibraryEntry): Promise<DeliveryGraphLibraryEntry> {
   const table = deliveryGraphLibrary(data);
   const existing = await table.get(row.id);
@@ -111,7 +112,10 @@ export async function saveLibraryEntry(data: DataLayer, row: DeliveryGraphLibrar
 }
 
 /** Every saved library entry, newest first. The Library App-View (S4/#523) polls this to render the
- * list. Read-only; no write. */
+ * list. Read-only; no write. `DataLayer.all()` has no `ORDER BY` (see `app/lineage.ts`), so — like
+ * every other read-projection in this app — we sort in memory. The library is a curated, small-
+ * cardinality set (human-saved graphs), so the O(n log n) sort is not a hot path; the
+ * `ix_delivery_graph_library_created` index is kept for a future DB-ordered read path. */
 export async function listLibraryEntries(data: DataLayer): Promise<DeliveryGraphLibraryEntry[]> {
   const rows = await deliveryGraphLibrary(data).all();
   return rows.sort((a, b) => b.created_at.localeCompare(a.created_at));
