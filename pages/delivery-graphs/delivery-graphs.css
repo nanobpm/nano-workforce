@@ -33,6 +33,53 @@
   border-color: rgba(63, 185, 80, 0.5);
 }
 
+/* The compose panel is a native <details> so it can collapse (#516). Its <summary> is the disclosure
+   header; the caret rotates on open, and the body hides when collapsed (the textarea keeps its value). */
+.dg .compose > summary {
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 15px;
+  font-weight: 600;
+  user-select: none;
+}
+
+.dg .compose > summary::-webkit-details-marker {
+  display: none;
+}
+
+.dg .compose > summary::before {
+  content: "\25B6";
+  font-size: 10px;
+  color: #8aa0b8;
+  transition: transform 0.15s ease;
+}
+
+.dg .compose[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.dg .compose > summary:focus-visible {
+  outline: 2px solid #388bfd;
+  outline-offset: 3px;
+  border-radius: 4px;
+}
+
+.dg .compose > summary .hint {
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.dg .compose[open] > summary .hint {
+  display: none;
+}
+
+.dg .compose-body {
+  margin-top: 12px;
+}
+
 .dg h2 {
   margin: 0 0 8px;
   font-size: 15px;

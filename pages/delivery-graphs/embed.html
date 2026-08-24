@@ -24,7 +24,7 @@
       const cfg = window.__NANO_APP_VIEW__ ?? {};
       mountDeliveryGraphs(cfg.host ?? document.getElementById("delivery-graphs-root"), {
         previewUrl: cfg.previewUrl,
-        dispatchUrl: cfg.dispatchUrl,
+        stageUrl: cfg.stageUrl,
         hookSecret: cfg.hookSecret,
       });
     </script>

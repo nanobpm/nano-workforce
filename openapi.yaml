@@ -1590,12 +1590,30 @@ components:
         message:
           type: string
           description: Human-actionable description of the failure.
-    DeliveryGraphTextSubmit:
+    DeliveryGraphPreviewSubmit:
       description: >-
-        The human-facing UI JSON-paste PREVIEW request (issue #386). The Delivery Graphs page's text
-        field cannot submit a structured object, so the operator's pasted delivery-graph is carried as
+        The human-facing UI JSON-paste PREVIEW request (issues #386 + #516). The Delivery Graphs page's
+        "Preview" action cannot submit a structured object, so the operator's pasted delivery-graph is
+        carried as a raw JSON STRING (`graphJson`), parsed server-side and handed to the SAME pure
+        `compileDeliveryGraph` compiler the agent-facing door uses. Preview compiles WITHOUT persisting.
+        Per-operation schema (not shared with the stage door) so each door's request stays independently
+        evolvable.
+      type: object
+      additionalProperties: false
+      required:
+        - graphJson
+      properties:
+        graphJson:
+          type: string
+          description: The pasted delivery-graph JSON (a serialised `DeliveryGraph`), parsed server-side.
+    DeliveryGraphStageSubmit:
+      description: >-
+        The human-facing UI JSON-paste STAGE request (issue #516) — the commit half of the preview/stage
+        split. The Delivery Graphs page's "Stage" action carries the operator's pasted delivery-graph as
         a raw JSON STRING (`graphJson`), parsed server-side and handed to the SAME pure
-        `compileDeliveryGraph` compiler the agent-facing door uses. No parallel compile path.
+        `compileDeliveryGraph` compiler the preview/agent doors use, then persisted as a `staged`
+        proposal. Per-operation schema (not shared with the preview door) so each door's request stays
+        independently evolvable.
       type: object
       additionalProperties: false
       required:
@@ -1820,6 +1838,13 @@ components:
           description: >-
             The side-effecting (`agent`/`connector`) actions the compiled graph WILL perform (preview)
             — what an approval authorises (Decision 7), rendered by the Delivery Graphs page (#441).
+        bpmn:
+          type: string
+          description: >-
+            The compiled BPMN 2.0 XML INCLUDING diagram interchange (`bpmndi:BPMNDiagram`) — returned by
+            the PURE preview door (`previewDeliveryGraph`) only, so the Delivery Graphs page can render
+            the laid-out BPMN in the host explorer WITHOUT staging (#516). Byte-identical to what a
+            dispatch would deploy. Omitted by the stage/dispatch outcomes.
     ResolvedDeliveryNode:
       description: >-
         A normalised node in the compiled graph (ADR 0005 slice S1) — its `id`, `kind`, the
@@ -2887,24 +2912,56 @@ paths:
   /actions/delivery-graph/preview:
     post:
       operationId: previewDeliveryGraph
-      summary: UI JSON-paste PREVIEW+STAGE — parse a pasted delivery-graph JSON string, compile it and stage it for operator dispatch. (ADR 0005 Decision 7 / #460)
+      summary: UI JSON-paste PURE PREVIEW — parse a pasted delivery-graph JSON string and compile it, without staging. (ADR 0005 Decision 7 / #460 / #516)
       description: >-
-        The human-facing UI JSON-paste PREVIEW+STAGE ingress. The Delivery Graphs page's "Preview &
-        stage" action posts the operator's pasted JSON as a STRING; this door parses it and runs the
-        SAME `compileDeliveryGraph` compiler the agent-facing door uses, and — like the agent compile
-        door (issue #460) — persists the compiled graph as a `staged` proposal (content-addressed by its
-        `digest`). It returns a compact preview summary (the `digest`, node/human/side-effect counts,
-        the mermaid `diagram`, the human stops and side effects) plus a navigational `reviewUrl`. It
-        never deploys or dispatches — dispatch is a separate operator action on the staged proposal
-        (the Dispatch button on the staged-proposals grid). A blank/invalid JSON string, or a graph that
-        fails validation, is a 400 carrying a human `error` (and path-qualified `errors` for a compile
-        failure); nothing is staged.
+        The human-facing UI JSON-paste PURE PREVIEW ingress. The Delivery Graphs page's "Preview"
+        action posts the operator's pasted JSON as a STRING; this door parses it and runs the SAME
+        `compileDeliveryGraph` compiler the agent-facing door uses, but — unlike the compile/stage doors
+        — it does NOT persist anything (#516: preview and staging are separate operator actions). It
+        returns a compact preview summary (`staged:false`, the `digest`, node/human/side-effect counts,
+        the mermaid `diagram`, the human stops and side effects) PLUS the compiled `bpmn` (with diagram
+        interchange) so the page can render the laid-out BPMN in the host explorer without staging. It
+        never deploys, stages or dispatches. A blank/invalid JSON string, or a graph that fails
+        validation, is a 400 carrying a human `error` (and path-qualified `errors` for a compile failure).
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/DeliveryGraphTextSubmit"
+              $ref: "#/components/schemas/DeliveryGraphPreviewSubmit"
+      responses:
+        "200":
+          description: The pasted graph parsed, validated and compiled — the preview summary and compiled BPMN are returned; nothing is staged.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeliveryGraphTextResult"
+        "400":
+          description: The pasted text was not valid JSON, or the graph failed validation/compilation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeliveryGraphTextResult"
+  /actions/delivery-graph/stage:
+    post:
+      operationId: stageDeliveryGraph
+      summary: UI JSON-paste STAGE — parse a pasted delivery-graph JSON string, compile it and stage it for operator dispatch. (ADR 0005 Decision 7 / #460 / #516)
+      description: >-
+        The human-facing UI JSON-paste STAGE ingress — the deliberate commit half of the preview/stage
+        split (#516). The Delivery Graphs page's "Stage" action posts the operator's pasted JSON as a
+        STRING; this door parses it, runs the SAME `compileDeliveryGraph` compiler the preview/agent
+        doors use, and — on success — persists the compiled graph as a `staged` proposal
+        (content-addressed by its `digest`). It returns the same preview summary as the preview door but
+        with `staged:true`. It never deploys or dispatches — dispatch is a separate operator action on
+        the staged proposal (the Dispatch button on the staged-proposals grid). A blank/invalid JSON
+        string, or a graph that fails validation, is a 400 carrying a human `error` (and path-qualified
+        `errors` for a compile failure); nothing is staged.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeliveryGraphStageSubmit"
       responses:
         "200":
           description: The pasted graph parsed, validated and compiled — staged for operator dispatch; the preview summary is returned.
