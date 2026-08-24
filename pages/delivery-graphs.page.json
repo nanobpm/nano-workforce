@@ -95,6 +95,16 @@
       }
     },
     {
+      "type": "appView",
+      "id": "delivery-graphs-library",
+      "props": {
+        "title": "Library",
+        "embed": "./delivery-graphs/library-embed.html",
+        "standalone": "./delivery-graphs/library-standalone.html",
+        "fill": true
+      }
+    },
+    {
       "type": "dataGrid",
       "id": "delivery-graphs-inflight",
       "props": {
@@ -120,10 +130,12 @@
         "columns": [
           { "field": "title", "template": "{{title}}", "header": "Graph", "subtitleField": "run_key", "truncate": true, "width": "28%", "link": { "kind": "page", "page": "delivery-graph-detail", "keyField": "run_key" } },
           { "field": "status", "header": "Status", "link": { "kind": "processExplorer", "keyField": "process_key" } },
+          { "field": "process_key", "header": "Instance", "width": "9rem", "truncate": true, "link": { "kind": "processExplorer", "keyField": "process_key" } },
           { "field": "phase", "header": "Phase", "truncate": true, "width": "26%" },
           { "field": "node_count", "header": "Nodes" },
           { "field": "human_node_count", "header": "Human" },
           { "field": "side_effect_count", "header": "Side effects" },
+          { "field": "created_at", "header": "Dispatched", "width": "9rem", "format": "datetime" },
           { "field": "updated_at", "header": "Updated", "width": "9rem", "format": "datetime" }
         ],
         "detail": {
@@ -132,7 +144,18 @@
             { "field": "digest", "label": "Digest" },
             { "field": "phase_node_id", "label": "Parked node" }
           ]
-        }
+        },
+        "rowActions": [
+          {
+            "label": "Save to library",
+            "confirm": "Save this dispatched delivery graph to the reusable library? Its stored graph is copied into the Library (source: from-dispatched) so it can be reused later.",
+            "showWhenField": "title",
+            "action": {
+              "path": "/app/api/actions/delivery-graph/library/save",
+              "body": { "name": "{{row.title}}", "digest": "{{row.digest}}" }
+            }
+          }
+        ]
       }
     }
   ]

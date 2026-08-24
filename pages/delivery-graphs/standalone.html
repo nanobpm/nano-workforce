@@ -13,7 +13,7 @@
     <!--
       Standalone shell (phone / direct link). Loads the SAME ./mount.js the console App-View embed uses,
       so the standalone and embedded views render identically. Endpoints default to the current origin;
-      override the preview/dispatch endpoints via ?preview= / ?dispatch=. For a secured deployment, pass
+      override the preview/stage/import endpoints via ?preview= / ?stage= / ?import=. For a secured deployment, pass
       the guard secret via the URL fragment #secret= (sent as x-hook-secret) — NOT the query string, so
       it never leaks via server access logs, browser history, or the Referer header. The fragment is
       stripped from the address bar immediately after it is read.
@@ -31,6 +31,7 @@
       mountDeliveryGraphs(document.getElementById("delivery-graphs-root"), {
         previewUrl: params.get("preview") ?? undefined,
         stageUrl: params.get("stage") ?? undefined,
+        importUrl: params.get("import") ?? undefined,
         hookSecret,
       });
     </script>

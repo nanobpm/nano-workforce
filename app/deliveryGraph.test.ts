@@ -76,6 +76,90 @@ test("a non-object graph is rejected without throwing", () => {
   assertEquals(validateDeliveryGraph({ nodes: "nope" })[0].code, "empty-graph");
 });
 
+test("invalid-graph-name: a non-string top-level `name` is rejected, path-qualified", () => {
+  // Regression (#524 review): a JSON-string import body bypasses the OpenAPI shape gate, so a
+  // non-string `name` would otherwise reach the compiler and THROW out of `escapeXml` (surfacing as a
+  // 400 with no path-qualified `errors`). The semantic validator now catches it cleanly.
+  const err = hasCode(validateDeliveryGraph({ ...WELL_FORMED, name: 42 }), "invalid-graph-name");
+  assertEquals(err.path, "name");
+});
+
+test("invalid-graph-name: a top-level `name` longer than 255 chars is rejected, path-qualified", () => {
+  // Regression (#524 review): an over-long name would otherwise be persisted despite violating the
+  // openapi `DeliveryGraph.name` `maxLength: 255` contract.
+  const err = hasCode(validateDeliveryGraph({ ...WELL_FORMED, name: "x".repeat(256) }), "invalid-graph-name");
+  assertEquals(err.path, "name");
+  // The boundary (exactly 255) is accepted.
+  assertEquals(validateDeliveryGraph({ ...WELL_FORMED, name: "x".repeat(255) }), []);
+});
+
+test("invalid-graph-name: `name` length is counted by code point, not UTF-16 code unit", () => {
+  // Regression (#524 review): JS `String.length` counts UTF-16 code units, but openapi `maxLength`
+  // counts Unicode code points. A name of 255 astral characters (each 2 code units) is WITHIN the
+  // contract and must be accepted; the previous `String.length` check wrongly rejected it as 510.
+  const astral255 = "\u{1F600}".repeat(255); // 255 emoji code points = 510 UTF-16 code units
+  assertEquals([...astral255].length, 255);
+  assertEquals(validateDeliveryGraph({ ...WELL_FORMED, name: astral255 }), []);
+  // 256 code points is over the limit and rejected, path-qualified.
+  const astral256 = "\u{1F600}".repeat(256);
+  const err = hasCode(validateDeliveryGraph({ ...WELL_FORMED, name: astral256 }), "invalid-graph-name");
+  assertEquals(err.path, "name");
+});
+
+test("too-many-nodes: a node set larger than the openapi `maxItems: 256` cap is rejected", () => {
+  // Regression (#524 review): a JSON-string import/save body bypasses the OpenAPI shape gate, so the
+  // declared `nodes.maxItems: 256` bound is re-enforced here — otherwise an oversized-but-compilable
+  // graph reaches the layout/compiler and is persisted.
+  const node = (i: number) => ({ id: `n${i}`, kind: "human", human: { prompt: "x" } });
+  const tooMany = Array.from({ length: 257 }, (_, i) => node(i));
+  const err = hasCode(validateDeliveryGraph({ nodes: tooMany }), "too-many-nodes");
+  assertEquals(err.path, "nodes");
+  // The cap SHORT-CIRCUITS the per-node walk: an oversized array is rejected on the cap ALONE, so
+  // even when every node is independently invalid (here: `human` config of the wrong type) the
+  // validator returns ONLY the single `too-many-nodes` error rather than doing 257 nodes' worth of
+  // per-node validation/map-building work first (#533 review — make the resource limit effective).
+  const oversizedAndInvalid = Array.from({ length: 257 }, (_, i) => ({ id: `n${i}`, kind: "human", human: 42 }));
+  assertEquals(validateDeliveryGraph({ nodes: oversizedAndInvalid }), [
+    {
+      path: "nodes",
+      message: "delivery graph has too many nodes (257) — the limit is 256",
+      code: "too-many-nodes",
+    },
+  ]);
+  // The boundary (exactly 256) is accepted (no too-many-nodes error).
+  const exactly = Array.from({ length: 256 }, (_, i) => node(i));
+  assertEquals(
+    validateDeliveryGraph({ nodes: exactly }).filter((e) => e.code === "too-many-nodes"),
+    [],
+  );
+});
+
+test("too-many-edges: an edge set larger than the openapi `maxItems: 1024` cap is rejected", () => {
+  // Regression (#524 review): re-enforce `edges.maxItems: 1024` for the bypassed shape gate.
+  const nodes = [
+    { id: "a", kind: "human", human: { prompt: "x" } },
+    { id: "b", kind: "human", human: { prompt: "y" } },
+  ];
+  const tooMany = Array.from({ length: 1025 }, () => ({ from: "a", to: "b" }));
+  const err = hasCode(validateDeliveryGraph({ nodes, edges: tooMany }), "too-many-edges");
+  assertEquals(err.path, "edges");
+  // The cap SHORT-CIRCUITS the edge walk: an oversized edge array is rejected before any endpoint
+  // resolution / adjacency work, so even 1025 dangling edges surface ONLY the cap error, not 1025
+  // `dangling-edge` errors (#533 review — make the resource limit effective).
+  const oversizedDangling = Array.from({ length: 1025 }, () => ({ from: "ghost", to: "phantom" }));
+  const capOnly = validateDeliveryGraph({ nodes, edges: oversizedDangling });
+  assertEquals(capOnly.filter((e) => e.code === "dangling-edge"), []);
+  assertEquals(hasCode(capOnly, "too-many-edges").path, "edges");
+});
+
+test("too-many-emits: a node declaring more than the openapi `maxItems: 32` facts is rejected", () => {
+  // Regression (#524 review): re-enforce `DeliveryNodeCommon.emits.maxItems: 32` for the bypassed gate.
+  const emits = Array.from({ length: 33 }, (_, i) => ({ name: `f${i}`, type: "string" }));
+  const graph = { nodes: [{ id: "a", kind: "wait", wait: { kind: "capability", target: "x:y" }, emits }] };
+  const err = hasCode(validateDeliveryGraph(graph), "too-many-emits");
+  assertEquals(err.path, "nodes[0].emits");
+});
+
 test("unknown-kind: a node kind outside the closed allowlist is rejected, path-qualified", () => {
   const errors = validateDeliveryGraph({
     nodes: [{ id: "x", kind: "script", script: { run: "rm -rf /" } }],

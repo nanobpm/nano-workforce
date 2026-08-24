@@ -276,8 +276,10 @@ export async function compileDeliveryGraph(
     return { ok: false, errors: validationErrors.map(({ path, message }) => ({ path, message })) };
   }
 
-  // The graph passed both the OpenAPI shape gate (at the edge) and the semantic validator, so it is
-  // safe to narrow to the typed contract. Every field below is well-formed by construction.
+  // The graph passed the OpenAPI `DeliveryGraph` SHAPE gate (the runtime edge for the typed agent
+  // door; `validateDeliveryGraphShape` in the shared text-ingress for the graphJson-string doors) and
+  // the semantic validator, so it is safe to narrow to the typed contract. Every field below is
+  // well-formed by construction.
   // biome-ignore lint/plugin: validated external body narrowed to its contract after validateDeliveryGraph
   const typed = graph as DeliveryGraph;
   const nodes = [...typed.nodes].sort((a, b) => byCodeUnit(a.id, b.id));

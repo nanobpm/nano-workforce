@@ -18,6 +18,29 @@
 const DEFAULT_PREVIEW_URL = "app/api/actions/delivery-graph/preview";
 const DEFAULT_STAGE_URL = "app/api/actions/delivery-graph/stage";
 
+// The filesystem IMPORT door (issue #524, epic #519 S5). The Import control below reads a chosen
+// `.json` file's text client-side and POSTs it here; the door validates + compiles it and persists it
+// to the library with `source: imported`. Base-relative like the preview/stage defaults (App-View #279
+// resolution class — a leading-slash path 404s).
+const DEFAULT_IMPORT_URL = "app/api/actions/delivery-graph/library/import";
+
+// The INBOUND reuse-fill seam (issue #523, epic #519 S4). Until now the compose textarea (`#dg-json`)
+// had NO inbound prefill path — its value was set only by "Load example" or the operator typing. The
+// Library App-View's per-row **Reuse** (this wave) loads a saved graph into the composer by posting a
+// host-bridge message of this shape, which reaches this compose App-View window:
+//
+//     { type: DG_COMPOSE_FILL_MESSAGE, graphJson: "<a DeliveryGraph JSON string>" }
+//
+// It is the INBOUND twin of the OUTBOUND `nano-navigate` bridge already used for "Preview generated
+// DI": a small, typed postMessage envelope across the App-View iframe boundary. The shape is declared
+// once in app/contracts.ts as the `deliveryGraph.compose.fill` wire contract, and this string is the
+// ONE source of truth for its `type` — the Library Reuse producer imports it from here rather than
+// re-declaring a synonym. The filesystem **Import** control (#524, sequenced AFTER this) does NOT use
+// this cross-frame message — it lives in THIS same mount, so it fills directly through `fillComposer()`
+// below. Every fill (this message-driven bridge, or a same-mount caller like the #524 file input)
+// routes through the single `fillComposer()` seam below; keep new fill sources going through it.
+export const DG_COMPOSE_FILL_MESSAGE = "nano-delivery-graph-compose-fill";
+
 // A bounded timeout for every door request. Without it a hung endpoint leaves the fetch promise pending
 // forever, so the busy() lock never clears and the UI is stranded (buttons disabled, status stuck) with
 // no way to retry. On timeout the AbortController rejects the fetch, which surfaces as an error banner
@@ -171,10 +194,24 @@ function renderPreview(result, staged) {
   return summary + renderSideEffects(result.sideEffects) + renderHumanNodes(result.humanNodes) + diagram;
 }
 
+// Only attach the guard secret when the resolved door URL is SAME-ORIGIN. The preview/stage/import door
+// URLs can be overridden (e.g. via the standalone `?preview=` / `?stage=` / `?import=` query params) to a
+// full `https://…`
+// URL on a foreign origin; sending `x-hook-secret` there would exfiltrate the shared guard secret to an
+// arbitrary host. A cross-origin (or unparseable, or non-browser) target therefore gets no secret.
+function isSameOrigin(url) {
+  try {
+    if (typeof window === "undefined" || !window.location) return false;
+    return new URL(url, window.location.href).origin === window.location.origin;
+  } catch (_e) {
+    return false;
+  }
+}
+
 /**
  * Mount the compose → preview / stage view into `host`.
  * @param {Element|null} host — the element to render into (or null → look up #delivery-graphs-root).
- * @param {{previewUrl?:string, stageUrl?:string, hookSecret?:string}} [config]
+ * @param {{previewUrl?:string, stageUrl?:string, importUrl?:string, hookSecret?:string}} [config]
  */
 export function mountDeliveryGraphs(host, config = {}) {
   const isElement = host != null && host.nodeType === 1 && typeof host.innerHTML === "string";
@@ -183,9 +220,10 @@ export function mountDeliveryGraphs(host, config = {}) {
 
   const previewUrl = config.previewUrl ?? DEFAULT_PREVIEW_URL;
   const stageUrl = config.stageUrl ?? DEFAULT_STAGE_URL;
-  const headers = () => ({
+  const importUrl = config.importUrl ?? DEFAULT_IMPORT_URL;
+  const headers = (url) => ({
     "content-type": "application/json",
-    ...(config.hookSecret ? { "x-hook-secret": config.hookSecret } : {}),
+    ...(config.hookSecret && isSameOrigin(url) ? { "x-hook-secret": config.hookSecret } : {}),
   });
 
   // The static compose shell. The compose card is a native <details> so an operator can COLLAPSE the
@@ -202,6 +240,10 @@ export function mountDeliveryGraphs(host, config = {}) {
           <button id="dg-preview" class="btn btn-primary" type="button">Preview</button>
           <button id="dg-stage" class="btn" type="button">Stage</button>
           <button id="dg-example" class="btn btn-ghost" type="button">Load example</button>
+          <label class="btn btn-ghost dg-import" title="Import a delivery-graph .json file into the library">
+            Import file
+            <input id="dg-import" class="dg-import-input" type="file" accept=".json,application/json" />
+          </label>
           <span id="dg-status" class="status"></span>
         </div>
       </div>
@@ -215,6 +257,8 @@ export function mountDeliveryGraphs(host, config = {}) {
   const previewBtn = root.querySelector("#dg-preview");
   const stageBtn = root.querySelector("#dg-stage");
   const exampleBtn = root.querySelector("#dg-example");
+  const importInput = root.querySelector("#dg-import");
+  const composeDetails = root.querySelector("#dg-compose");
 
   // The most recent successful PREVIEW's laid-out BPMN — bridged to the host explorer on demand (the
   // preview door returns it, so DI preview needs no staging, #516). Cleared whenever the composed graph
@@ -230,6 +274,51 @@ export function mountDeliveryGraphs(host, config = {}) {
     previewBtn.disabled = on;
     stageBtn.disabled = on;
     exampleBtn.disabled = on;
+    if (importInput) importInput.disabled = on;
+    // Lock the textarea too: an in-flight import awaits file.text() + the POST, and on success
+    // fillComposer() overwrites #dg-json unconditionally — leaving it editable would let a slow import
+    // silently clobber edits the operator made during the delay.
+    jsonEl.disabled = on;
+  }
+
+  // The SINGLE inbound fill seam (issue #523): load a graph JSON into the composer as if the operator
+  // had pasted it. It is driven by the Library Reuse host-bridge message (below) and — same-mount, no
+  // bridge — by the #524 filesystem import that lands after this. It resets the previewed BPMN (so
+  // "Preview generated DI" can never show a stale diagram against freshly-filled JSON), clears the old
+  // output, and expands the (possibly collapsed) compose panel so the loaded graph is visible. Returns
+  // true when it filled, false for a blank/non-string payload (nothing is clobbered on a bad fill).
+  function fillComposer(graphJson, opts = {}) {
+    if (typeof graphJson !== "string" || graphJson.trim() === "") return false;
+    jsonEl.value = graphJson;
+    lastBpmn = "";
+    outputEl.innerHTML = "";
+    if (composeDetails && !composeDetails.open) composeDetails.open = true;
+    setStatus(opts.status || "Loaded into the composer \u2014 Preview or Stage it.", "ok");
+    return true;
+  }
+
+  // The inbound half of the App-View bridge: fill the composer from a Library Reuse (or import)
+  // message. Only a SAME-ORIGIN message of the agreed `deliveryGraph.compose.fill` shape fills — a
+  // foreign origin or a mismatched shape is ignored, so this listener can't be driven by an unrelated
+  // page. Registered on `window` (the message arrives on this App-View's own window) and torn down by
+  // the disposer below.
+  function onFillMessage(ev) {
+    if (!ev || typeof window === "undefined") return;
+    // Same-origin host-bridge seam: require an EXACT origin match. A missing/empty/foreign `ev.origin`
+    // (a malformed or forged event, or a future browser edge case) is rejected outright — never fall
+    // through to the fill just because the origin was absent.
+    if (ev.origin !== window.location.origin) return;
+    // The fill message is routed UP to the console and back down when embedded, so accept it only from
+    // the parent frame in that case — a missing/falsy `ev.source` is rejected too, never allowed to fall
+    // through; standalone, there is no parent and the import path fills directly.
+    const embedded = typeof window.parent !== "undefined" && window.parent !== window;
+    if (embedded && ev.source !== window.parent) return;
+    const data = ev.data;
+    if (!data || data.type !== DG_COMPOSE_FILL_MESSAGE || typeof data.graphJson !== "string") return;
+    fillComposer(data.graphJson, { status: "Reused a saved graph \u2014 Preview or Stage it." });
+  }
+  if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+    window.addEventListener("message", onFillMessage);
   }
 
   /** POST a JSON body to a door and return { status, body } (never throws on an HTTP error). Rejects
@@ -240,7 +329,7 @@ export function mountDeliveryGraphs(host, config = {}) {
     try {
       const res = await fetch(url, {
         method: "POST",
-        headers: headers(),
+        headers: headers(url),
         body: JSON.stringify(payload),
         signal: controller.signal,
       });
@@ -299,6 +388,43 @@ export function mountDeliveryGraphs(host, config = {}) {
     outputEl.innerHTML = "";
     setStatus("Example loaded — Preview or Stage it.", "");
   });
+
+  // The filesystem IMPORT control (issue #524, epic #519 S5). Read the chosen `.json` file's text
+  // CLIENT-SIDE, then POST it to the importToLibrary door, which validates + compiles it and (on
+  // success) persists it to the library with `source: imported`. A file that is not valid JSON, or a
+  // graph that will not compile, is a clean 400 whose path-qualified errors render inline — nothing is
+  // persisted. On a successful import we route the file text through the SAME `fillComposer()` seam
+  // #523 introduced (no reshaping — one inbound fill path), so the imported graph appears in the
+  // composer ready to Preview/Stage. The input is reset after each pick so re-choosing the same file
+  // still fires `change`.
+  async function importFile(file) {
+    if (!file) return;
+    busy(true);
+    setStatus(`Importing ${file.name}\u2026`);
+    try {
+      const text = await file.text();
+      const { status, body } = await post(importUrl, { graphJson: text });
+      if (status === 200 && body.ok) {
+        outputEl.innerHTML = "";
+        fillComposer(text, { status: `\u2713 Imported \u201c${body.entry.name}\u201d into the library — Preview or Stage it.` });
+      } else {
+        outputEl.innerHTML = renderErrors(body.error, body.errors);
+        setStatus("Import failed — see the details below.", "err");
+      }
+    } catch (err) {
+      outputEl.innerHTML = renderErrors(err && err.message ? err.message : String(err), []);
+      setStatus("Import request failed.", "err");
+    } finally {
+      busy(false);
+    }
+  }
+  if (importInput) {
+    importInput.addEventListener("change", () => {
+      const file = importInput.files && importInput.files[0];
+      importFile(file);
+      importInput.value = "";
+    });
+  }
   // Any edit invalidates the previewed BPMN so "Preview generated DI" can't show a stale diagram.
   jsonEl.addEventListener("input", () => {
     lastBpmn = "";
@@ -334,6 +460,9 @@ export function mountDeliveryGraphs(host, config = {}) {
   });
 
   return () => {
+    if (typeof window !== "undefined" && typeof window.removeEventListener === "function") {
+      window.removeEventListener("message", onFillMessage);
+    }
     root.innerHTML = "";
   };
 }

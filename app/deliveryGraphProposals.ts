@@ -36,9 +36,10 @@ export function proposalReviewUrl(digest: string, base: string = publicBaseUrl()
 
 /** The proposal lifecycle. `staged` = awaiting operator review/dispatch; `superseded` = replaced by a
  * newer digest for the same logical graph; `dispatched` = the operator launched it; `expired` = it aged
- * out of its TTL before an operator dispatched it. `superseded`/`dispatched`/`expired` all drop out of
- * the cockpit's staged list (which filters to `status = 'staged'`). */
-export const DELIVERY_PROPOSAL_STATUSES = ["staged", "superseded", "dispatched", "expired"] as const;
+ * out of its TTL before an operator dispatched it; `dismissed` = an operator explicitly discarded it as
+ * noise. `superseded`/`dispatched`/`expired`/`dismissed` all drop out of the cockpit's staged list
+ * (which filters to `status = 'staged'`). */
+export const DELIVERY_PROPOSAL_STATUSES = ["staged", "superseded", "dispatched", "expired", "dismissed"] as const;
 export type DeliveryProposalStatus = typeof DELIVERY_PROPOSAL_STATUSES[number];
 
 /** One staged delivery-graph proposal — the durable row keyed by content `digest`. `side_effecting`
@@ -246,9 +247,56 @@ export async function markProposalDispatched(data: DataLayer, digest: string): P
 /** Retire a proposal by flipping it to `expired` — its `graph` payload is unusable (e.g. corrupt JSON
  * detected at dispatch), so it can never launch. Reuses the terminal `expired` status the sweep already
  * uses, so a fail-closed retirement drops the row out of the cockpit's staged grid instead of leaving an
- * undismissable `staged` row that fails every dispatch attempt the same way. */
-export async function markProposalExpired(data: DataLayer, digest: string): Promise<void> {
-  await deliveryGraphProposals(data).update(digest, { status: "expired", updated_at: now() });
+ * undismissable `staged` row that fails every dispatch attempt the same way.
+ *
+ * Like `sweepExpiredProposals`/`markProposalDismissed`, the flip is a GUARDED UPDATE
+ * (`... WHERE digest=? AND status='staged'`), not a blind update-by-key. The dispatch door's
+ * `getStagedProposal` liveness read and this write are separate statements, so a proposal can leave
+ * `staged` in the window between them (an operator dismisses it, or it's superseded/dispatched by another
+ * concurrent action); a blind `table.update(digest, …)` would clobber that newer terminal status back to
+ * `expired`, breaking monotonic lifecycle transitions. The `status='staged'` guard makes the write a no-op
+ * when the row has already moved on.
+ *
+ * Returns whether the guarded UPDATE actually flipped a row (`res.changed > 0`), mirroring
+ * `markProposalDismissed`/`sweepExpiredProposals`. A `false` return means the row was no longer `staged`
+ * at write time (a dismiss/supersede/dispatch race won), so the caller must not treat the retirement as
+ * having happened. */
+export async function markProposalExpired(data: DataLayer, digest: string): Promise<boolean> {
+  const db = data.open();
+  const res = await db.exec(
+    `UPDATE "delivery_graph_proposals" SET "status" = 'expired', "updated_at" = ? WHERE "digest" = ? AND "status" = 'staged'`,
+    [now(), digest],
+  );
+  return res.changed > 0;
+}
+
+/** Dismiss a staged proposal at an operator's explicit request — flip it to the terminal `dismissed`
+ * status so it drops out of the cockpit's staged grid (which filters to `status = 'staged'`), exactly
+ * like `superseded`/`expired`. Unlike `expired` (a TTL sweep) or `superseded` (a newer digest landed),
+ * `dismissed` records a deliberate operator "this is noise, hide it" — the proposal was neither aged out
+ * nor replaced. Callers (the `dismissProposal` door) gate this behind a `getStagedProposal` liveness
+ * check so an unknown or already-terminal digest is refused before this runs, keeping the dismiss
+ * idempotent.
+ *
+ * Like `sweepExpiredProposals`, the flip is a GUARDED UPDATE (`... WHERE digest=? AND status='staged'`),
+ * not a blind update-by-key. The door's `getStagedProposal` check and this write are separate statements,
+ * so a dispatch (or a supersede/expiry sweep) can move the row off `staged` in the window between them; a
+ * blind `table.update(digest, …)` would clobber that newer terminal status back to `dismissed`, silently
+ * re-hiding a run the operator just launched. The `status='staged'` guard makes the write a no-op when the
+ * row has already moved on, preserving monotonic lifecycle transitions under concurrent operator actions.
+ *
+ * Returns whether the guarded UPDATE actually flipped a row (`res.changed > 0`), mirroring how
+ * `sweepExpiredProposals` counts `res.changed`. A `false` return means the row was no longer `staged` at
+ * write time (the dispatch/supersede/expiry race above won), so the caller (the `dismissProposal` door)
+ * must NOT report success — the dismiss lost the race and its idempotency contract routes that to a clean
+ * 400, exactly as an already-terminal digest does. */
+export async function markProposalDismissed(data: DataLayer, digest: string): Promise<boolean> {
+  const db = data.open();
+  const res = await db.exec(
+    `UPDATE "delivery_graph_proposals" SET "status" = 'dismissed', "updated_at" = ? WHERE "digest" = ? AND "status" = 'staged'`,
+    [now(), digest],
+  );
+  return res.changed > 0;
 }
 
 /** Age out every `staged` proposal whose TTL has elapsed by flipping it to `expired`, so it drops out

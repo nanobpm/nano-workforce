@@ -16,7 +16,9 @@ import {
   deliveryGraphProposals,
   getStagedProposal,
   isProposalExpired,
+  markProposalDismissed,
   markProposalDispatched,
+  markProposalExpired,
   proposalExpiry,
   proposalLogicalKey,
   proposalReviewUrl,
@@ -263,5 +265,139 @@ test("sweepExpiredProposals: a dispatch racing between the read and the write is
     assert(raced, "the racing dispatch should have fired");
     assertEquals(swept, 0);
     assertEquals((await deliveryGraphProposals(data).get("d1"))?.status, "dispatched");
+  });
+});
+
+test("markProposalDismissed: flipping a live `staged` row returns true and lands it `dismissed`", async () => {
+  await withData(async (data) => {
+    await stageProposal(data, row());
+    const flipped = await markProposalDismissed(data, "d1");
+    // A real flip reports success (res.changed > 0) so the door can return 200/ok:true.
+    assertEquals(flipped, true);
+    assertEquals((await deliveryGraphProposals(data).get("d1"))?.status, "dismissed");
+  });
+});
+
+test("markProposalDismissed: only a `staged` row is flipped; an already-terminal (dispatched) row is left untouched", async () => {
+  await withData(async (data) => {
+    await stageProposal(data, row());
+    await markProposalDispatched(data, "d1");
+    // A dismiss landing after the row already moved on must NOT clobber the terminal status, and must
+    // report the lost race by returning `false` so the door can 400 instead of misreporting success.
+    const flipped = await markProposalDismissed(data, "d1");
+    assertEquals(flipped, false);
+    assertEquals((await deliveryGraphProposals(data).get("d1"))?.status, "dispatched");
+  });
+});
+
+test("markProposalDismissed: a dispatch racing between the door's liveness read and the write is NOT clobbered to `dismissed`", async () => {
+  await withData(async (data) => {
+    // A live staged proposal — the door's `getStagedProposal` sees it as `staged` before the write.
+    await stageProposal(data, row());
+
+    // Wrap the data layer so that, in the window between the door's liveness read and `markProposalDismissed`'s
+    // guarded `exec`, the operator dispatches the proposal (status: staged -> dispatched). A blind
+    // update-by-key would clobber that dispatch back to `dismissed`; the guarded UPDATE (`WHERE status='staged'`)
+    // must instead no-op and leave the row `dispatched`.
+    let raced = false;
+    const racyData = new Proxy(data, {
+      get(target, prop, receiver) {
+        if (prop === "open") {
+          return () => {
+            const src = target.open();
+            return new Proxy(src, {
+              get(s, p) {
+                if (p === "exec") {
+                  return async (sql: string, params?: unknown[]) => {
+                    if (!raced) {
+                      raced = true;
+                      await markProposalDispatched(data, "d1");
+                    }
+                    return s.exec(sql, params);
+                  };
+                }
+                const v = Reflect.get(s, p, s);
+                return typeof v === "function" ? v.bind(s) : v;
+              },
+            });
+          };
+        }
+        const v = Reflect.get(target, prop, target);
+        return typeof v === "function" ? v.bind(target) : v;
+      },
+    });
+
+    const flipped = await markProposalDismissed(racyData as DataLayer, "d1");
+    assert(raced, "the racing dispatch should have fired");
+    // The guarded UPDATE changed 0 rows (row was `dispatched` at write time) → returns false so the door 400s.
+    assertEquals(flipped, false);
+    assertEquals((await deliveryGraphProposals(data).get("d1"))?.status, "dispatched");
+  });
+});
+
+test("markProposalExpired: flipping a live `staged` row returns true and lands it `expired`", async () => {
+  await withData(async (data) => {
+    await stageProposal(data, row());
+    const flipped = await markProposalExpired(data, "d1");
+    // A real flip reports success (res.changed > 0).
+    assertEquals(flipped, true);
+    assertEquals((await deliveryGraphProposals(data).get("d1"))?.status, "expired");
+  });
+});
+
+test("markProposalExpired: only a `staged` row is flipped; an already-terminal (dispatched) row is left untouched", async () => {
+  await withData(async (data) => {
+    await stageProposal(data, row());
+    await markProposalDispatched(data, "d1");
+    // A retirement landing after the row already moved on must NOT clobber the terminal status back to
+    // `expired`, and must report the lost race by returning `false`.
+    const flipped = await markProposalExpired(data, "d1");
+    assertEquals(flipped, false);
+    assertEquals((await deliveryGraphProposals(data).get("d1"))?.status, "dispatched");
+  });
+});
+
+test("markProposalExpired: a dismiss racing between the dispatch door's liveness read and the write is NOT clobbered to `expired`", async () => {
+  await withData(async (data) => {
+    // A live staged proposal — the dispatch door's `getStagedProposal` sees it as `staged` before the write.
+    await stageProposal(data, row());
+
+    // Wrap the data layer so that, in the window between the door's liveness read and `markProposalExpired`'s
+    // guarded `exec`, the operator dismisses the proposal (status: staged -> dismissed). A blind
+    // update-by-key would clobber that dismiss back to `expired`; the guarded UPDATE (`WHERE status='staged'`)
+    // must instead no-op and leave the row `dismissed`.
+    let raced = false;
+    const racyData = new Proxy(data, {
+      get(target, prop, receiver) {
+        if (prop === "open") {
+          return () => {
+            const src = target.open();
+            return new Proxy(src, {
+              get(s, p) {
+                if (p === "exec") {
+                  return async (sql: string, params?: unknown[]) => {
+                    if (!raced) {
+                      raced = true;
+                      await markProposalDismissed(data, "d1");
+                    }
+                    return s.exec(sql, params);
+                  };
+                }
+                const v = Reflect.get(s, p, s);
+                return typeof v === "function" ? v.bind(s) : v;
+              },
+            });
+          };
+        }
+        const v = Reflect.get(target, prop, target);
+        return typeof v === "function" ? v.bind(target) : v;
+      },
+    });
+
+    const flipped = await markProposalExpired(racyData as DataLayer, "d1");
+    assert(raced, "the racing dismiss should have fired");
+    // The guarded UPDATE changed 0 rows (row was `dismissed` at write time) → returns false.
+    assertEquals(flipped, false);
+    assertEquals((await deliveryGraphProposals(data).get("d1"))?.status, "dismissed");
   });
 });

@@ -22,9 +22,16 @@
 const DEFAULT_STAGED_URL = "app/api/delivery-graph/staged";
 // The operator dispatch door: POST { digest } → launches the staged graph engine-natively (#460).
 const DEFAULT_DISPATCH_URL = "app/api/actions/delivery-graph/dispatch";
+// The operator dismiss door: POST { digest } → discards a staged proposal as noise, flipping it to the
+// terminal `dismissed` status so it drops off the staged list (#520). Launches nothing.
+const DEFAULT_DISMISS_URL = "app/api/actions/delivery-graph/dismiss";
 // The read-only DI preview door: recompiles a staged proposal's BPMN (with diagram interchange) so its
 // generated diagram can be rendered in the host explorer BEFORE dispatch. No deploy, no dispatch.
 const DEFAULT_PROPOSAL_BPMN_URL = "app/api/actions/delivery-graph/proposal-bpmn";
+// The save-to-library door: POST { name, digest } → copies this staged proposal's already-stored graph
+// into the reusable library (issue #523, save-from-digest → source `from-staged`). Persists a library
+// entry; it never dispatches or re-stages, so the #460 operator boundary holds.
+const DEFAULT_SAVE_LIBRARY_URL = "app/api/actions/delivery-graph/library/save";
 
 // How often the list re-polls the read door so a freshly-staged (or just-dispatched) proposal appears
 // (or drops off) without a manual refresh — mirrors the 5s cadence the old declarative grid used.
@@ -41,6 +48,13 @@ const DISPATCH_CONFIRM =
   "Dispatch this staged delivery graph? This launches the graph engine-natively — any side-effecting " +
   "node (it merges PRs / publishes packages) will run. Clicking Dispatch IS the approval, " +
   "content-addressed to exactly the graph you previewed.";
+
+// The confirm shown before a dismiss — dismissing is a terminal discard: the proposal drops off the
+// staged list for good (it can be re-staged only by recompiling). It launches nothing, so this is a
+// lighter acknowledgement than Dispatch, but still a one-way action the operator confirms.
+const DISMISS_CONFIRM =
+  "Dismiss this staged delivery graph? It is discarded as noise and drops off the staged list — this " +
+  "launches nothing, but to bring it back you must recompile/re-stage it.";
 
 /** Escape untrusted strings before they touch innerHTML. */
 function esc(value) {
@@ -76,6 +90,8 @@ function renderProposal(p) {
     <div class="actions">
       <button class="btn btn-ghost" type="button" data-preview-di="${esc(p.digest)}">Preview generated DI</button>
       <button class="btn btn-primary" type="button" data-dispatch="${esc(p.digest)}">Dispatch</button>
+      <button class="btn btn-ghost" type="button" data-save-library="${esc(p.digest)}" data-title="${esc(p.title ?? "")}">Save to library</button>
+      <button class="btn btn-ghost" type="button" data-dismiss="${esc(p.digest)}">Dismiss</button>
     </div>
   </section>`;
 }
@@ -95,10 +111,24 @@ function renderList(proposals) {
   return header + proposals.map(renderProposal).join("");
 }
 
+// Only attach the guard secret when the resolved door URL is SAME-ORIGIN. The staged/dispatch/dismiss/
+// proposal-bpmn/save-library door URLs can be overridden (e.g. via the standalone `?staged=` /
+// `?dispatch=` / `?proposal-bpmn=` query params) to a full `https://…` URL on a foreign origin; sending
+// `x-hook-secret` there would exfiltrate the shared guard secret to an arbitrary host. A cross-origin
+// (or unparseable, or non-browser) target therefore gets no secret.
+function isSameOrigin(url) {
+  try {
+    if (typeof window === "undefined" || !window.location) return false;
+    return new URL(url, window.location.href).origin === window.location.origin;
+  } catch (_e) {
+    return false;
+  }
+}
+
 /**
  * Mount the staged-proposals list into `host`.
  * @param {Element|null} host — the element to render into (or null → look up #delivery-graphs-staged-root).
- * @param {{stagedUrl?:string, dispatchUrl?:string, proposalBpmnUrl?:string, hookSecret?:string, refreshMs?:number}} [config]
+ * @param {{stagedUrl?:string, dispatchUrl?:string, dismissUrl?:string, proposalBpmnUrl?:string, saveLibraryUrl?:string, hookSecret?:string, refreshMs?:number}} [config]
  */
 export function mountStagedProposals(host, config = {}) {
   const isElement = host != null && host.nodeType === 1 && typeof host.innerHTML === "string";
@@ -107,11 +137,13 @@ export function mountStagedProposals(host, config = {}) {
 
   const stagedUrl = config.stagedUrl ?? DEFAULT_STAGED_URL;
   const dispatchUrl = config.dispatchUrl ?? DEFAULT_DISPATCH_URL;
+  const dismissUrl = config.dismissUrl ?? DEFAULT_DISMISS_URL;
   const proposalBpmnUrl = config.proposalBpmnUrl ?? DEFAULT_PROPOSAL_BPMN_URL;
+  const saveLibraryUrl = config.saveLibraryUrl ?? DEFAULT_SAVE_LIBRARY_URL;
   const refreshMs = typeof config.refreshMs === "number" && config.refreshMs > 0 ? config.refreshMs : DEFAULT_REFRESH_MS;
-  const headers = () => ({
+  const headers = (url) => ({
     "content-type": "application/json",
-    ...(config.hookSecret ? { "x-hook-secret": config.hookSecret } : {}),
+    ...(config.hookSecret && isSameOrigin(url) ? { "x-hook-secret": config.hookSecret } : {}),
   });
 
   root.innerHTML = `<div class="dg">
@@ -149,7 +181,7 @@ export function mountStagedProposals(host, config = {}) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
     try {
-      const res = await fetch(url, { ...init, headers: headers(), signal: controller.signal });
+      const res = await fetch(url, { ...init, headers: headers(url), signal: controller.signal });
       let body = {};
       try {
         body = await res.json();
@@ -254,6 +286,67 @@ export function mountStagedProposals(host, config = {}) {
     }
   }
 
+  // "Dismiss": the operator's discard (#520). Confirm (dismiss is a one-way drop off the staged list),
+  // then POST the digest to the dismiss door; on success the proposal flips to `dismissed` and drops off
+  // the list on the next poll — refresh immediately so the operator sees it leave. Launches nothing.
+  async function doDismiss(digest) {
+    const staged = typeof digest === "string" ? digest.trim() : "";
+    if (staged === "") return;
+    if (typeof window !== "undefined" && typeof window.confirm === "function" && !window.confirm(DISMISS_CONFIRM)) {
+      return;
+    }
+    busy(true);
+    setStatus("Dismissing…");
+    try {
+      const { status, body } = await post(dismissUrl, { digest: staged });
+      if ((status === 200 || status === 202) && body.ok) {
+        setStatus("\u2713 Dismissed — the proposal is off the staged list.", "ok");
+        await refresh();
+      } else {
+        setStatus(body && body.error ? body.error : "Dismiss failed.", "err");
+      }
+    } catch (err) {
+      setStatus(err && err.message ? err.message : "Dismiss request failed.", "err");
+    } finally {
+      busy(false);
+    }
+  }
+
+  // "Save to library": copy this staged proposal's already-stored graph into the reusable library
+  // (issue #523, save-from-digest → source `from-staged`). Prompt the operator for the entry name
+  // (defaulting to the proposal title — its slug/short-hash derive the library id, so re-saving the
+  // same name upserts), then POST { name, digest } to the save door. This persists a library entry
+  // only — it never dispatches or re-stages, so the operator boundary the staged view enforces (#460)
+  // is untouched.
+  async function doSaveToLibrary(digest, defaultName) {
+    const staged = typeof digest === "string" ? digest.trim() : "";
+    if (staged === "") return;
+    let name = defaultName ? String(defaultName) : "";
+    if (typeof window !== "undefined" && typeof window.prompt === "function") {
+      const entered = window.prompt("Save to library as (name):", name);
+      if (entered === null) return; // operator cancelled
+      name = entered;
+    }
+    if (name.trim() === "") {
+      setStatus("A library entry needs a non-blank name.", "err");
+      return;
+    }
+    busy(true);
+    setStatus("Saving to library…");
+    try {
+      const { status, body } = await post(saveLibraryUrl, { name: name.trim(), digest: staged });
+      if (status === 200 && body.ok) {
+        setStatus("\u2713 Saved to the library \u2014 reuse it from the Library view.", "ok");
+      } else {
+        setStatus(body && body.error ? body.error : "Save to library failed.", "err");
+      }
+    } catch (err) {
+      setStatus(err && err.message ? err.message : "Save-to-library request failed.", "err");
+    } finally {
+      busy(false);
+    }
+  }
+
   listEl.addEventListener("click", (ev) => {
     const previewBtn = ev.target && ev.target.closest ? ev.target.closest("[data-preview-di]") : null;
     if (previewBtn) {
@@ -265,6 +358,18 @@ export function mountStagedProposals(host, config = {}) {
     if (dispatchBtn) {
       ev.preventDefault();
       doDispatch(dispatchBtn.getAttribute("data-dispatch"));
+      return;
+    }
+    const saveLibraryBtn = ev.target && ev.target.closest ? ev.target.closest("[data-save-library]") : null;
+    if (saveLibraryBtn) {
+      ev.preventDefault();
+      doSaveToLibrary(saveLibraryBtn.getAttribute("data-save-library"), saveLibraryBtn.getAttribute("data-title"));
+      return;
+    }
+    const dismissBtn = ev.target && ev.target.closest ? ev.target.closest("[data-dismiss]") : null;
+    if (dismissBtn) {
+      ev.preventDefault();
+      doDismiss(dismissBtn.getAttribute("data-dismiss"));
     }
   });
 

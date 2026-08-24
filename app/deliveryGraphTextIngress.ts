@@ -12,6 +12,7 @@
 import type { DeliveryGraphTextResult } from "../nano-generated/api-io.d.ts";
 import { compileDeliveryGraph } from "./deliveryGraphCompiler.ts";
 import { proposalReviewUrl } from "./deliveryGraphProposals.ts";
+import { validateDeliveryGraphShape } from "./deliveryGraphShape.ts";
 import { parseDeliveryGraphText } from "./deliveryGraphText.ts";
 import { deliveryGraphDigest } from "./deliveryRunner.ts";
 
@@ -37,15 +38,84 @@ export interface TextIngressOk {
 
 export type TextIngressResult = TextIngressOk | TextIngressFailure;
 
+/** Injectable seam for {@link parseAndCompileText}. `compile` defaults to the real
+ * {@link compileDeliveryGraph}; a test overrides it to drive the never-throws guard with a compiler
+ * that REJECTS — the real layout pass only throws on a server-side fault (a missing `bpmn-auto-layout`
+ * peer, so no DI is produced), which is not reproducible from input alone. */
+export interface ParseAndCompileDeps {
+  compile?: (graph: unknown) => Promise<CompileResult>;
+  /** Injectable seam for the reused OpenAPI shape gate — defaults to the real
+   * {@link validateDeliveryGraphShape}. A test overrides it to drive the spec-load guard with a
+   * validator that THROWS, standing in for a stripped/corrupt deployment whose `openapi.yaml` cannot
+   * be read/parsed — not reproducible from input alone. */
+  validateShape?: (graph: unknown) => ReturnType<typeof validateDeliveryGraphShape>;
+}
+
 /** Parse a UI JSON-paste body (`{ graphJson }`), then run the SAME pure compiler the agent door uses.
  * A blank/invalid paste or a graph that fails validation is returned as a ready-to-send 400; success
- * carries the compiled graph plus its content `digest` and human `name`. Never throws / never a 500. */
-export async function parseAndCompileText(body: unknown): Promise<TextIngressResult> {
+ * carries the compiled graph plus its content `digest` and human `name`. Never throws / never a 500 —
+ * even a server-side layout fault is caught and mapped to the door's clean 400/no-persist shape. */
+export async function parseAndCompileText(
+  body: unknown,
+  deps: ParseAndCompileDeps = {},
+): Promise<TextIngressResult> {
   const parsed = parseDeliveryGraphText(body);
   if (!parsed.ok) {
     return { ok: false, status: 400, body: { ok: false, error: parsed.error } };
   }
-  const compiled = await compileDeliveryGraph(parsed.graph);
+  // Re-apply the OpenAPI `DeliveryGraph` SHAPE gate the runtime runs at the typed `compileDeliveryGraph`
+  // edge (its `validateValue`). These text doors receive a raw `graphJson` STRING, so the runtime never
+  // shape-checked the parsed object — without this, malformed NESTED values (`nodes[0].human.prompt: 42`,
+  // `wait.poll.backoff: 42`, unknown properties) reach the semantic validator, which deliberately does
+  // not re-enumerate every optional-field type, and are persisted / later throw in `parseProbe`. Reusing
+  // the SAME validator against the SAME canonical schema (no ajv, no drift-surface hand checks) gives the
+  // text doors byte-identical shape enforcement to the agent door. Structural only, so a not-yet-
+  // resolvable capability/pr probe still passes — its late-binding stays the runner's job.
+  let shapeErrors: ReturnType<typeof validateDeliveryGraphShape>;
+  try {
+    shapeErrors = (deps.validateShape ?? validateDeliveryGraphShape)(parsed.graph);
+  } catch (err) {
+    // `validateDeliveryGraphShape` reads/parses `openapi.yaml` (once, cached) to reuse the runtime's
+    // OWN validator. A stripped or corrupted deployment where the spec is missing/unparseable — or the
+    // `DeliveryGraph` schema cannot be resolved — makes that read THROW. Left uncaught it would escape
+    // whichever door called us (none wrap this call) as a raw, unhandled 500, breaking the "never throws
+    // / never a 500" promise every caller depends on. This is a server-side fault (like the layout fault
+    // caught below), not bad input, so map it to the SAME clean 400/no-persist shape — ONE contract for
+    // every server fault this pipeline can hit, no partial/unhandled leak.
+    const message = err instanceof Error ? err.message : String(err);
+    return {
+      ok: false,
+      status: 400,
+      body: { ok: false, error: `graph shape check unavailable: ${message}` },
+    };
+  }
+  if (shapeErrors.length > 0) {
+    return {
+      ok: false,
+      status: 400,
+      body: {
+        ok: false,
+        error: `graph failed shape validation: ${shapeErrors.length} error(s)`,
+        errors: shapeErrors,
+      },
+    };
+  }
+  const compile = deps.compile ?? compileDeliveryGraph;
+  let compiled: CompileResult;
+  try {
+    compiled = await compile(parsed.graph);
+  } catch (err) {
+    // `compileDeliveryGraph` returns ok:false for every INPUT failure, but its layout pass
+    // (`layoutDeliveryDiagram` → `layoutBpmn`) can still THROW on a server-side fault — e.g. the
+    // `bpmn-auto-layout` peer missing, so no DI block is produced. Uncaught, that rejection would
+    // escape whichever door called us (preview/stage/save/import — none wrap this call) as a raw,
+    // unhandled 500, breaking the "never throws / never a 500" promise every caller depends on. Map it
+    // to the SAME clean 400 shape a compile error produces, so ONE guard keeps the door's documented
+    // "compile failure → clean 400, nothing persisted" contract honest for this edge case across all
+    // four doors, rather than leaking a partial/unhandled failure.
+    const message = err instanceof Error ? err.message : String(err);
+    return { ok: false, status: 400, body: { ok: false, error: `graph failed to compile: ${message}` } };
+  }
   if (!compiled.ok) {
     return {
       ok: false,
