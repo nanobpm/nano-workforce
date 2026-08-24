@@ -28,6 +28,10 @@ const DEFAULT_DISMISS_URL = "app/api/actions/delivery-graph/dismiss";
 // The read-only DI preview door: recompiles a staged proposal's BPMN (with diagram interchange) so its
 // generated diagram can be rendered in the host explorer BEFORE dispatch. No deploy, no dispatch.
 const DEFAULT_PROPOSAL_BPMN_URL = "app/api/actions/delivery-graph/proposal-bpmn";
+// The save-to-library door: POST { name, digest } → copies this staged proposal's already-stored graph
+// into the reusable library (issue #523, save-from-digest → source `from-staged`). Persists a library
+// entry; it never dispatches or re-stages, so the #460 operator boundary holds.
+const DEFAULT_SAVE_LIBRARY_URL = "app/api/actions/delivery-graph/library/save";
 
 // How often the list re-polls the read door so a freshly-staged (or just-dispatched) proposal appears
 // (or drops off) without a manual refresh — mirrors the 5s cadence the old declarative grid used.
@@ -86,6 +90,7 @@ function renderProposal(p) {
     <div class="actions">
       <button class="btn btn-ghost" type="button" data-preview-di="${esc(p.digest)}">Preview generated DI</button>
       <button class="btn btn-primary" type="button" data-dispatch="${esc(p.digest)}">Dispatch</button>
+      <button class="btn btn-ghost" type="button" data-save-library="${esc(p.digest)}" data-title="${esc(p.title ?? "")}">Save to library</button>
       <button class="btn btn-ghost" type="button" data-dismiss="${esc(p.digest)}">Dismiss</button>
     </div>
   </section>`;
@@ -109,7 +114,7 @@ function renderList(proposals) {
 /**
  * Mount the staged-proposals list into `host`.
  * @param {Element|null} host — the element to render into (or null → look up #delivery-graphs-staged-root).
- * @param {{stagedUrl?:string, dispatchUrl?:string, dismissUrl?:string, proposalBpmnUrl?:string, hookSecret?:string, refreshMs?:number}} [config]
+ * @param {{stagedUrl?:string, dispatchUrl?:string, dismissUrl?:string, proposalBpmnUrl?:string, saveLibraryUrl?:string, hookSecret?:string, refreshMs?:number}} [config]
  */
 export function mountStagedProposals(host, config = {}) {
   const isElement = host != null && host.nodeType === 1 && typeof host.innerHTML === "string";
@@ -120,6 +125,7 @@ export function mountStagedProposals(host, config = {}) {
   const dispatchUrl = config.dispatchUrl ?? DEFAULT_DISPATCH_URL;
   const dismissUrl = config.dismissUrl ?? DEFAULT_DISMISS_URL;
   const proposalBpmnUrl = config.proposalBpmnUrl ?? DEFAULT_PROPOSAL_BPMN_URL;
+  const saveLibraryUrl = config.saveLibraryUrl ?? DEFAULT_SAVE_LIBRARY_URL;
   const refreshMs = typeof config.refreshMs === "number" && config.refreshMs > 0 ? config.refreshMs : DEFAULT_REFRESH_MS;
   const headers = () => ({
     "content-type": "application/json",
@@ -292,6 +298,41 @@ export function mountStagedProposals(host, config = {}) {
     }
   }
 
+  // "Save to library": copy this staged proposal's already-stored graph into the reusable library
+  // (issue #523, save-from-digest → source `from-staged`). Prompt the operator for the entry name
+  // (defaulting to the proposal title — its slug/short-hash derive the library id, so re-saving the
+  // same name upserts), then POST { name, digest } to the save door. This persists a library entry
+  // only — it never dispatches or re-stages, so the operator boundary the staged view enforces (#460)
+  // is untouched.
+  async function doSaveToLibrary(digest, defaultName) {
+    const staged = typeof digest === "string" ? digest.trim() : "";
+    if (staged === "") return;
+    let name = defaultName ? String(defaultName) : "";
+    if (typeof window !== "undefined" && typeof window.prompt === "function") {
+      const entered = window.prompt("Save to library as (name):", name);
+      if (entered === null) return; // operator cancelled
+      name = entered;
+    }
+    if (name.trim() === "") {
+      setStatus("A library entry needs a non-blank name.", "err");
+      return;
+    }
+    busy(true);
+    setStatus("Saving to library…");
+    try {
+      const { status, body } = await post(saveLibraryUrl, { name: name.trim(), digest: staged });
+      if (status === 200 && body.ok) {
+        setStatus("\u2713 Saved to the library \u2014 reuse it from the Library view.", "ok");
+      } else {
+        setStatus(body && body.error ? body.error : "Save to library failed.", "err");
+      }
+    } catch (err) {
+      setStatus(err && err.message ? err.message : "Save-to-library request failed.", "err");
+    } finally {
+      busy(false);
+    }
+  }
+
   listEl.addEventListener("click", (ev) => {
     const previewBtn = ev.target && ev.target.closest ? ev.target.closest("[data-preview-di]") : null;
     if (previewBtn) {
@@ -303,6 +344,12 @@ export function mountStagedProposals(host, config = {}) {
     if (dispatchBtn) {
       ev.preventDefault();
       doDispatch(dispatchBtn.getAttribute("data-dispatch"));
+      return;
+    }
+    const saveLibraryBtn = ev.target && ev.target.closest ? ev.target.closest("[data-save-library]") : null;
+    if (saveLibraryBtn) {
+      ev.preventDefault();
+      doSaveToLibrary(saveLibraryBtn.getAttribute("data-save-library"), saveLibraryBtn.getAttribute("data-title"));
       return;
     }
     const dismissBtn = ev.target && ev.target.closest ? ev.target.closest("[data-dismiss]") : null;

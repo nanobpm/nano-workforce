@@ -18,6 +18,22 @@
 const DEFAULT_PREVIEW_URL = "app/api/actions/delivery-graph/preview";
 const DEFAULT_STAGE_URL = "app/api/actions/delivery-graph/stage";
 
+// The INBOUND reuse-fill seam (issue #523, epic #519 S4). Until now the compose textarea (`#dg-json`)
+// had NO inbound prefill path — its value was set only by "Load example" or the operator typing. The
+// Library App-View's per-row **Reuse** (this wave) and the filesystem **Import** (#524, sequenced
+// AFTER this) load a saved graph into the composer by posting a host-bridge message of this shape,
+// which reaches this compose App-View window:
+//
+//     { type: DG_COMPOSE_FILL_MESSAGE, graphJson: "<a DeliveryGraph JSON string>" }
+//
+// It is the INBOUND twin of the OUTBOUND `nano-navigate` bridge already used for "Preview generated
+// DI": a small, typed postMessage envelope across the App-View iframe boundary. The shape is declared
+// once in app/contracts.ts as the `deliveryGraph.compose.fill` wire contract, and this string is the
+// ONE source of truth for its `type` — the Library Reuse producer imports it from here rather than
+// re-declaring a synonym. Every fill (message-driven, or a same-mount caller like the #524 file input)
+// routes through the single `fillComposer()` seam below; keep new fill sources going through it.
+export const DG_COMPOSE_FILL_MESSAGE = "nano-delivery-graph-compose-fill";
+
 // A bounded timeout for every door request. Without it a hung endpoint leaves the fetch promise pending
 // forever, so the busy() lock never clears and the UI is stranded (buttons disabled, status stuck) with
 // no way to retry. On timeout the AbortController rejects the fetch, which surfaces as an error banner
@@ -215,6 +231,7 @@ export function mountDeliveryGraphs(host, config = {}) {
   const previewBtn = root.querySelector("#dg-preview");
   const stageBtn = root.querySelector("#dg-stage");
   const exampleBtn = root.querySelector("#dg-example");
+  const composeDetails = root.querySelector("#dg-compose");
 
   // The most recent successful PREVIEW's laid-out BPMN — bridged to the host explorer on demand (the
   // preview door returns it, so DI preview needs no staging, #516). Cleared whenever the composed graph
@@ -230,6 +247,37 @@ export function mountDeliveryGraphs(host, config = {}) {
     previewBtn.disabled = on;
     stageBtn.disabled = on;
     exampleBtn.disabled = on;
+  }
+
+  // The SINGLE inbound fill seam (issue #523): load a graph JSON into the composer as if the operator
+  // had pasted it. It is driven by the Library Reuse host-bridge message (below) and — same-mount, no
+  // bridge — by the #524 filesystem import that lands after this. It resets the previewed BPMN (so
+  // "Preview generated DI" can never show a stale diagram against freshly-filled JSON), clears the old
+  // output, and expands the (possibly collapsed) compose panel so the loaded graph is visible. Returns
+  // true when it filled, false for a blank/non-string payload (nothing is clobbered on a bad fill).
+  function fillComposer(graphJson, opts = {}) {
+    if (typeof graphJson !== "string" || graphJson.trim() === "") return false;
+    jsonEl.value = graphJson;
+    lastBpmn = "";
+    outputEl.innerHTML = "";
+    if (composeDetails && !composeDetails.open) composeDetails.open = true;
+    setStatus(opts.status || "Loaded into the composer \u2014 Preview or Stage it.", "ok");
+    return true;
+  }
+
+  // The inbound half of the App-View bridge: fill the composer from a Library Reuse (or import)
+  // message. Only a SAME-ORIGIN message of the agreed `deliveryGraph.compose.fill` shape fills — a
+  // foreign origin or a mismatched shape is ignored, so this listener can't be driven by an unrelated
+  // page. Registered on `window` (the message arrives on this App-View's own window) and torn down by
+  // the disposer below.
+  function onFillMessage(ev) {
+    if (ev && ev.origin && typeof window !== "undefined" && ev.origin !== window.location.origin) return;
+    const data = ev && ev.data;
+    if (!data || data.type !== DG_COMPOSE_FILL_MESSAGE || typeof data.graphJson !== "string") return;
+    fillComposer(data.graphJson, { status: "Reused a saved graph \u2014 Preview or Stage it." });
+  }
+  if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+    window.addEventListener("message", onFillMessage);
   }
 
   /** POST a JSON body to a door and return { status, body } (never throws on an HTTP error). Rejects
@@ -334,6 +382,9 @@ export function mountDeliveryGraphs(host, config = {}) {
   });
 
   return () => {
+    if (typeof window !== "undefined" && typeof window.removeEventListener === "function") {
+      window.removeEventListener("message", onFillMessage);
+    }
     root.innerHTML = "";
   };
 }
