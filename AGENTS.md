@@ -211,15 +211,25 @@ Two different `nano:dataEnvelope` uses have different rules — don't conflate t
   deriving a worker's array inputs from the model this way over a hand-typed
   `interface In`; don't "fix" a modelled `list="true"` array back to a joined
   scalar.
-- **`dataEnvelope.in` fields are read from PROCESS scope, not task-local
-  `ioMapping`.** At runtime the engine populates each declared `.in` field *by
-  name* from the process variables in scope — a `<zeebe:ioMapping>` input that
-  synthesises a **new** name with no backing process variable is silently ignored,
-  so the field arrives **blank** with no incident (e.g. `pr.readiness-probe` once
-  read an empty `gateKey`). Tasks like `ensure-base-branch` work only because
-  `repo`/`baseBranch` already exist as process variables. Seed any field a task
-  must read as a real process variable at plan start (e.g. in `startPlan`); don't
-  rely on `ioMapping` to synthesise it.
+- **A service-task/worker `dataEnvelope.in` field is read from PROCESS scope, not
+  task-local `ioMapping`.** (This applies to service-task/worker job envelopes; a
+  `dataEnvelope.in` on a **message subscription** — e.g. `CapsResolved` at
+  `plan-fanout.bpmn:12` — is instead populated from the correlated **message
+  payload**, so this gotcha does not apply there.) At runtime the engine populates
+  each declared `.in` field *by name* from the process variables in scope — a
+  `<zeebe:ioMapping>` input that synthesises a **new** name with no backing process
+  variable is silently ignored, so the field arrives **blank**. The engine itself
+  raises no incident for the missing mapping — but a consumer that fails fast on the
+  blank value will (e.g. `pr.readiness-probe` once read an empty `gateKey`;
+  `readGateVars` in `workers/readiness-probe/worker.ts` now *throws* on a blank
+  `gateKey`, creating an incident). Tasks like `ensure-base-branch` work only because
+  `repo`/`baseBranch` already exist as process variables. Seed any field a task must
+  read — **that is not already created in the task's visible process scope** — as a
+  real process variable at plan start (e.g. in `startPlan`); don't rely on
+  `ioMapping` to synthesise it. (A field already materialised in scope by the
+  process — e.g. `ReadinessProbeIn.probe`, seeded per multi-instance child via
+  `inputElement="probe"` in `resources/processes/feature.bpmn` — needs no such
+  seeding.)
 
 ## Urban page runtime: rendering primitives are not JS-truthy
 
@@ -254,7 +264,7 @@ silently — cheap to avoid, annoying to debug after the fact.
   never shipped). Confirm the kind against the installed `RENDERERS` map
   (`node_modules/@nanobpm/urban/dist/runtime/core/modules/pages.js`) and the kinds
   already used across `pages/*.page.json`. Note a **nano-ide issue can ship a data
-  read-model, not a page renderer** (#254 shipped the lineage projection, a data
+  read-model, not a page renderer** (nano-ide#254 shipped the lineage projection, a data
   primitive) — read *what kind* of primitive it delivers. Build composite visuals
   as a `dataGrid` column renderer over stored columns (e.g. the `"kind":
   "pipeline"` column in `pages/feature.page.json`), not a page-level primitive,
@@ -299,7 +309,10 @@ Migrations live in `db/migrations/*.sql` and are **auto-applied on boot** from
   enough**: every sibling forks at the same commit, sees the same highest prefix,
   and independently takes the same next number (main hasn't advanced yet), so the
   planner must **pre-assign each slice a disjoint prefix block at decomposition
-  time** (e.g. `060-061` / `062-063`, plus a cleanup block) rather than have each
+  time** (e.g. give slice A `NNN`–`NNN+1`, slice B `NNN+2`–`NNN+3`, plus a separate
+  cleanup block — start the whole allocation *after* the current highest committed
+  prefix, never at fixed literals like `060`, which are long occupied) rather than
+  have each
   agent compute "the next free" prefix. Two files must never share a prefix; `npm run check:migrations`
   (a CI gate) enforces this and fails the build on any new duplicate. Because a
   prefix collision only exists in the *union* of two branches, this gate — like
