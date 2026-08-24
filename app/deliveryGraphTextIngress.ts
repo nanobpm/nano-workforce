@@ -8,11 +8,12 @@
 // (derivation over duplication) rather than being copied per door — the previous single door inlined
 // it, and forking it would have created two drift-prone compile paths. Neither door dispatches; the
 // #460 boundary (dispatch is an operator action on a staged proposal) is untouched.
-import { compileDeliveryGraph } from "./deliveryGraphCompiler.ts";
-import { parseDeliveryGraphText } from "./deliveryGraphText.ts";
-import { proposalReviewUrl } from "./deliveryGraphProposals.ts";
-import { deliveryGraphDigest } from "./deliveryRunner.ts";
+
 import type { DeliveryGraphTextResult } from "../nano-generated/api-io.d.ts";
+import { compileDeliveryGraph } from "./deliveryGraphCompiler.ts";
+import { proposalReviewUrl } from "./deliveryGraphProposals.ts";
+import { parseDeliveryGraphText } from "./deliveryGraphText.ts";
+import { deliveryGraphDigest } from "./deliveryRunner.ts";
 
 type CompileResult = Awaited<ReturnType<typeof compileDeliveryGraph>>;
 type CompiledOk = Extract<CompileResult, { ok: true }>;
