@@ -1,3 +1,9 @@
+## [0.132.0](https://github.com/nanobpm/nano-workforce/compare/v0.131.1...v0.132.0) (2026-08-24)
+
+### Features
+
+* **lineage:** surface delivery-graph runs as fan-in parent threads ([#504](https://github.com/nanobpm/nano-workforce/issues/504)) ([c62b925](https://github.com/nanobpm/nano-workforce/commit/c62b92556dd8ec21f42bc70ca4eba5455e448343)), closes [#498](https://github.com/nanobpm/nano-workforce/issues/498) [#498](https://github.com/nanobpm/nano-workforce/issues/498)
+
 ## [0.131.1](https://github.com/nanobpm/nano-workforce/compare/v0.131.0...v0.131.1) (2026-08-24)
 
 ### Bug Fixes
