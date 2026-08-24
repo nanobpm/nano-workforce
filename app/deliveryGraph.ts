@@ -57,6 +57,7 @@ export function isDeliveryGuardScalarType(type: unknown): type is DeliveryGuardS
  * class (unknown-kind / dangling / cycle / bad-`from`) without string-matching the message. */
 export type DeliveryGraphErrorCode =
   | "empty-graph"
+  | "invalid-graph-name"
   | "missing-id"
   | "invalid-id"
   | "duplicate-id"
@@ -129,6 +130,16 @@ export const FACT_NAME_MAX_LENGTH = 128;
  * resolvable while dot-free fact names keep `<nodeId>.<fact>` unambiguous. */
 const NODE_ID_PATTERN = /^[A-Za-z_][A-Za-z0-9_.-]*$/;
 const NODE_ID_MAX_LENGTH = 128;
+
+/** The graph's optional top-level `name` must match openapi's `DeliveryGraph.name` `maxLength: 255`.
+ * Re-enforced here INDEPENDENTLY of the OpenAPI shape gate because later steps trust it: the compiler
+ * feeds `graph.name` straight into `escapeXml(processName)` / `escapeMermaid`, so a NON-STRING name
+ * (`.replace` is not a function) THROWS out of the compiler — a bypassed shape gate (a direct delegate
+ * call, or a JSON-string body like the library import door's `graphJson`, where the OpenAPI schema
+ * never touches the parsed value) would otherwise surface as an unhandled fault mapped to a 400 with
+ * NO path-qualified `errors`, and an over-long name would be persisted despite violating the contract.
+ * Validating it here turns both into a clean, path-qualified `invalid-graph-name` failure. */
+const GRAPH_NAME_MAX_LENGTH = 255;
 
 /** The per-kind config key a node of the given kind must carry (`agent` → `agent`, etc.). */
 const CONFIG_KEY: Record<DeliveryNodeKind, string> = {
@@ -212,6 +223,25 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
       message: "delivery graph is empty — declare at least one node",
       code: "empty-graph",
     });
+  }
+
+  // Top-level `name` (optional): mirror openapi's `DeliveryGraph.name` `maxLength: 255`, INDEPENDENTLY
+  // of the shape gate — a non-string name would otherwise throw out of the compiler's `escapeXml`, and
+  // an over-long one would be persisted despite violating the contract (see GRAPH_NAME_MAX_LENGTH).
+  if (graph.name !== undefined) {
+    if (typeof graph.name !== "string") {
+      errors.push({
+        path: "name",
+        message: "delivery graph `name` must be a string",
+        code: "invalid-graph-name",
+      });
+    } else if (graph.name.length > GRAPH_NAME_MAX_LENGTH) {
+      errors.push({
+        path: "name",
+        message: `delivery graph \`name\` must be \u2264 ${GRAPH_NAME_MAX_LENGTH} characters`,
+        code: "invalid-graph-name",
+      });
+    }
   }
 
   // Pass 1: node ids + kinds + per-kind config + declared facts. Build the id → declared-facts map

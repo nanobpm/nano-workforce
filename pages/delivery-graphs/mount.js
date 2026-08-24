@@ -275,6 +275,10 @@ export function mountDeliveryGraphs(host, config = {}) {
     stageBtn.disabled = on;
     exampleBtn.disabled = on;
     if (importInput) importInput.disabled = on;
+    // Lock the textarea too: an in-flight import awaits file.text() + the POST, and on success
+    // fillComposer() overwrites #dg-json unconditionally — leaving it editable would let a slow import
+    // silently clobber edits the operator made during the delay.
+    jsonEl.disabled = on;
   }
 
   // The SINGLE inbound fill seam (issue #523): load a graph JSON into the composer as if the operator

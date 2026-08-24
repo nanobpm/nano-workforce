@@ -76,6 +76,23 @@ test("a non-object graph is rejected without throwing", () => {
   assertEquals(validateDeliveryGraph({ nodes: "nope" })[0].code, "empty-graph");
 });
 
+test("invalid-graph-name: a non-string top-level `name` is rejected, path-qualified", () => {
+  // Regression (#524 review): a JSON-string import body bypasses the OpenAPI shape gate, so a
+  // non-string `name` would otherwise reach the compiler and THROW out of `escapeXml` (surfacing as a
+  // 400 with no path-qualified `errors`). The semantic validator now catches it cleanly.
+  const err = hasCode(validateDeliveryGraph({ ...WELL_FORMED, name: 42 }), "invalid-graph-name");
+  assertEquals(err.path, "name");
+});
+
+test("invalid-graph-name: a top-level `name` longer than 255 chars is rejected, path-qualified", () => {
+  // Regression (#524 review): an over-long name would otherwise be persisted despite violating the
+  // openapi `DeliveryGraph.name` `maxLength: 255` contract.
+  const err = hasCode(validateDeliveryGraph({ ...WELL_FORMED, name: "x".repeat(256) }), "invalid-graph-name");
+  assertEquals(err.path, "name");
+  // The boundary (exactly 255) is accepted.
+  assertEquals(validateDeliveryGraph({ ...WELL_FORMED, name: "x".repeat(255) }), []);
+});
+
 test("unknown-kind: a node kind outside the closed allowlist is rejected, path-qualified", () => {
   const errors = validateDeliveryGraph({
     nodes: [{ id: "x", kind: "script", script: { run: "rm -rf /" } }],

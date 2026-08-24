@@ -3283,7 +3283,12 @@ paths:
         with `source: composed`) OR the `digest` of an existing staged/dispatched proposal whose
         already-stored graph is reused (`source: from-staged` / `from-dispatched`). A graph that is not
         valid JSON or fails to compile is a clean 400 and NOTHING is persisted (an uncompilable graph can
-        never enter the library). Unlike a staged proposal, a library entry has no TTL.
+        never enter the library). Unlike a staged proposal, a library entry has no TTL. The optional
+        shared-secret guard mirrors the other write/read library doors: when NANO_PR_WEBHOOK_SECRET is
+        set, callers must present it via the x-hook-secret header (unset → open).
+      security:
+        - hookSecret: []
+        - {}
       requestBody:
         required: true
         content:
@@ -3299,6 +3304,12 @@ paths:
                 $ref: "#/components/schemas/SaveToLibraryResult"
         "400":
           description: The request was malformed, the referenced digest named no stored graph, or the graph failed to compile — nothing persisted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SaveToLibraryResult"
+        "401":
+          description: Missing/invalid shared secret (only when NANO_PR_WEBHOOK_SECRET is set).
           content:
             application/json:
               schema:

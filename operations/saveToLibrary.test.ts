@@ -198,3 +198,29 @@ test("save-to-library: providing BOTH graphJson and digest → 400, nothing pers
     assertEquals((await deliveryGraphLibrary(data).all()).length, 0);
   });
 });
+
+// This is a MUTATING library door, so it carries the same optional shared-secret guard as the
+// get/delete/import library doors. `SECRET` is captured at module import, so we cache-bust re-import the
+// handler with NANO_PR_WEBHOOK_SECRET set to exercise both the rejected (401 — nothing persisted) path
+// and the authorized (200) path against a real booted data layer.
+test("save-to-library: shared-secret guard — 401 without x-hook-secret (no save), 200 with it", async () => {
+  await withApp(async (app, data) => {
+    const prev = process.env["NANO_PR_WEBHOOK_SECRET"];
+    process.env["NANO_PR_WEBHOOK_SECRET"] = "s3cr3t";
+    try {
+      const mod = await import(`./saveToLibrary.ts?guard=${Date.now()}`);
+      const guarded = mod.default as (c: any, a: any) => Promise<any>;
+      const bad = await guarded({ req: { headers: new Headers() }, params: {}, query: {}, body: { name: "guarded", graphJson: GOOD } } as any, app);
+      assertEquals(bad.status, 401);
+      // The rejected request must not have persisted anything.
+      assertEquals((await deliveryGraphLibrary(data).all()).length, 0);
+      const ok = await guarded({ req: { headers: new Headers({ "x-hook-secret": "s3cr3t" }) }, params: {}, query: {}, body: { name: "guarded", graphJson: GOOD } } as any, app);
+      assertEquals(ok.status, 200);
+      assertEquals(ok.body.entry.source, "composed");
+      assertEquals((await deliveryGraphLibrary(data).all()).length, 1);
+    } finally {
+      if (prev === undefined) delete process.env["NANO_PR_WEBHOOK_SECRET"];
+      else process.env["NANO_PR_WEBHOOK_SECRET"] = prev;
+    }
+  });
+});

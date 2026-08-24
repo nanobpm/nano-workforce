@@ -13,6 +13,8 @@ const ROOT = decodeURIComponent(new URL("../", import.meta.url).pathname);
 const DIR = `${ROOT}pages/delivery-graphs`;
 const MOUNT_JS = readFileSync(`${DIR}/mount.js`, "utf8");
 const CSS = readFileSync(`${DIR}/delivery-graphs.css`, "utf8");
+const EMBED_HTML = readFileSync(`${DIR}/embed.html`, "utf8");
+const STANDALONE_HTML = readFileSync(`${DIR}/standalone.html`, "utf8");
 
 // Pull the string default out of `const <name> = config.<name> ?? <CONST>;` (a module const).
 function defaultUrl(name: string): string {
@@ -54,6 +56,26 @@ test("#524: an import failure renders the door's path-qualified compile errors i
   assert(
     /renderErrors\(body\.error,\s*body\.errors\)/.test(importHandler),
     "an import 400 must render the door's path-qualified errors inline",
+  );
+});
+
+test("#524: both shells forward importUrl into the mount (embed via cfg, standalone via ?import=)", () => {
+  // The mount resolves `config.importUrl ?? DEFAULT_IMPORT_URL`, so the default-URL guard above passes
+  // even if a shell drops the `importUrl` forwarding entirely — silently breaking embedded custom
+  // deployments and the standalone `?import=` override. Pin BOTH forwardings, exactly as the shells
+  // already forward previewUrl/stageUrl.
+  assert(
+    /importUrl:\s*cfg\.importUrl/.test(EMBED_HTML),
+    "embed.html must forward the console-injected importUrl (importUrl: cfg.importUrl) into the mount",
+  );
+  assert(
+    /importUrl:\s*params\.get\("import"\)/.test(STANDALONE_HTML),
+    "standalone.html must forward the ?import= override (importUrl: params.get(\"import\")) into the mount",
+  );
+  // mount.js must actually read config.importUrl (not hard-code the default), so the forwarding matters.
+  assert(
+    /const importUrl\s*=\s*config\.importUrl\s*\?\?/.test(MOUNT_JS),
+    "mount.js must resolve importUrl from config.importUrl with a fallback default",
   );
 });
 
