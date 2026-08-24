@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Delivery graphs — staged proposals (preview · dispatch)</title>
+    <link rel="stylesheet" href="./delivery-graphs.css" />
+    <style>
+      html, body { margin: 0; height: 100%; background: #0b0f14; }
+    </style>
+  </head>
+  <body>
+    <!--
+      Standalone shell (phone / direct link). Loads the SAME ./staged.mount.js the console App-View embed
+      uses, so the standalone and embedded views render identically. Endpoints default to the current
+      origin; override the list/dispatch/preview endpoints via ?staged= / ?dispatch= / ?proposal-bpmn=.
+      For a secured deployment, pass the guard secret via the URL fragment #secret= (sent as
+      x-hook-secret) — NOT the query string, so it never leaks via server access logs, browser history,
+      or the Referer header. The fragment is stripped from the address bar immediately after it is read.
+      Note: "Preview generated DI" needs the host console explorer to render into, so it only works when
+      embedded — standalone it reports that instead of failing silently.
+    -->
+    <main id="delivery-graphs-staged-root"></main>
+    <script type="module">
+      import { mountStagedProposals } from "./staged.mount.js";
+
+      const params = new URLSearchParams(location.search);
+      const secrets = new URLSearchParams(location.hash.slice(1));
+      const hookSecret = secrets.get("secret") ?? undefined;
+      if (location.hash) {
+        history.replaceState(null, "", location.pathname + location.search);
+      }
+      mountStagedProposals(document.getElementById("delivery-graphs-staged-root"), {
+        stagedUrl: params.get("staged") ?? undefined,
+        dispatchUrl: params.get("dispatch") ?? undefined,
+        proposalBpmnUrl: params.get("proposal-bpmn") ?? undefined,
+        hookSecret,
+      });
+    </script>
+  </body>
+</html>

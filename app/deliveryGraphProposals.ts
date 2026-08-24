@@ -221,6 +221,22 @@ export async function getStagedProposal(
   return row;
 }
 
+/** Every LIVE staged proposal — `status = 'staged'` AND not aged out of its TTL — newest first. The
+ * staged App-View (`pages/delivery-graphs/staged.mount.js`) polls this to render the Preview-DI +
+ * Dispatch list. Mirrors `getStagedProposal`'s freshness guard (`isProposalExpired`) so an
+ * expired-but-not-yet-swept row is never offered for preview/dispatch, unlike a raw
+ * `status = 'staged'` datasource filter which cannot express a `expires_at > now` cutoff and so lingers
+ * an aged-out row until the sweep realises the TTL. Read-only; no write. */
+export async function listStagedProposals(
+  data: DataLayer,
+  at: Date = new Date(),
+): Promise<DeliveryGraphProposal[]> {
+  const rows = await deliveryGraphProposals(data).find({ status: "staged" });
+  return rows
+    .filter((row) => !isProposalExpired(row.expires_at, at))
+    .sort((a, b) => b.created_at.localeCompare(a.created_at));
+}
+
 /** Mark a staged proposal `dispatched` once the operator launches it — it drops out of the cockpit's
  * staged list (the run then shows in the in-flight grid). */
 export async function markProposalDispatched(data: DataLayer, digest: string): Promise<void> {
