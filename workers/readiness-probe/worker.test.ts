@@ -23,11 +23,12 @@ function execReturning(seq: Array<HttpResponse>, counts: { http: number } = { ht
 const httpProbe = (poll?: ReadinessProbe["poll"]): ReadinessProbe =>
   parseProbe({ kind: "http", target: "https://x/health?token=s3cr3t", poll });
 
-test("safeBind: strips reserved keys (ready/detail) so a bind can only ADD outputs, never shadow the payload", () => {
-  const cleaned = safeBind({ resolvedArtifact: "@nanobpm/urban@0.54.0", ready: "false", detail: "spoofed" });
+test("safeBind: strips reserved keys (ready/detail/observed) so a bind can only ADD outputs, never shadow the payload", () => {
+  const cleaned = safeBind({ resolvedArtifact: "@nanobpm/urban@0.54.0", ready: "false", detail: "spoofed", observed: "spoofed" });
   assertEquals(cleaned.resolvedArtifact, "@nanobpm/urban@0.54.0");
   assertEquals("ready" in cleaned, false, "a bound 'ready' can never override the canonical payload");
   assertEquals("detail" in cleaned, false, "a bound 'detail' can never override the canonical payload");
+  assertEquals("observed" in cleaned, false, "a bound 'observed' can never clobber the top-level diagnostic summary");
   assertEquals(Object.keys(safeBind(undefined)).length, 0, "an absent bind yields an empty object");
 });
 

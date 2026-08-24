@@ -35,7 +35,7 @@ export { READINESS_READY_MESSAGE };
  * kind-agnostic emit primitive (#274 Gap B), but it flows from matcher output into both the
  * `readiness-ready` message variables and the worker output — so a matcher that binds `ready`/`detail`
  * could shadow the canonical payload and break the gate contract. */
-const RESERVED_BIND_KEYS: ReadonlySet<string> = new Set(["ready", "detail"]);
+const RESERVED_BIND_KEYS: ReadonlySet<string> = new Set(["ready", "detail", "observed"]);
 export function safeBind(bind?: Record<string, string>): Record<string, string> {
   if (!bind) return {};
   const out: Record<string, string> = {};
