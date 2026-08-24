@@ -105,7 +105,14 @@ export function mountDeliveryGraphLibrary(host, config = {}) {
   });
 
   // The delete door is the per-entry path under the list door: DELETE app/api/delivery-graph/library/<id>.
-  const entryUrl = (id) => `${libraryUrl.replace(/\/+$/, "")}/${encodeURIComponent(id)}`;
+  // Append the id to the path only, preserving any query/hash on the configured door so a
+  // `?library=` override carrying a search string or fragment still resolves the per-entry URL.
+  // Kept base-relative (no `new URL`) to preserve the App-View resolution class (#279).
+  const entryUrl = (id) => {
+    const [beforeHash, hash = ""] = libraryUrl.split("#");
+    const [path, search = ""] = beforeHash.split("?");
+    return `${path.replace(/\/+$/, "")}/${encodeURIComponent(id)}${search ? `?${search}` : ""}${hash ? `#${hash}` : ""}`;
+  };
 
   root.innerHTML = `<div class="dg">
     <div class="actions">
