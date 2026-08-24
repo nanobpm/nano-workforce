@@ -29,9 +29,11 @@ import { EFFECTIVE_STATUS_COLUMN } from "./featureReadModel.ts";
 const SRC = (name: string): string => readFileSync(fileURLToPath(new URL(`./${name}`, import.meta.url)), "utf8");
 
 /** Strip line (`//`) and block (`/* … *​/`) comments so the scan only inspects executable code — a
- * doc comment may legitimately mention `.status` in prose without being a classification. */
+ * doc comment may legitimately mention `.status` in prose without being a classification. The line
+ * stripper skips a `//` preceded by `:` so a URL scheme inside a string/template literal (e.g.
+ * `https://…` in app/service.ts) is not mistaken for a comment start and does not corrupt the scan. */
 function stripComments(src: string): string {
-  return src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+  return src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
 }
 
 test("class guard: every TERMINAL_STATUSES classification in service.ts reads derived_status, not base status", () => {
