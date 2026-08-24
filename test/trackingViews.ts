@@ -39,7 +39,7 @@ export function withTrackingViews<F extends TableFn>(base: F): F {
           // stays byte-for-byte the pass-through the previous behaviour modelled.
           {
             ...row,
-            [derivedColumn]: row[derivedColumn] !== undefined ? row[derivedColumn] : row[statusField],
+            [derivedColumn]: row[derivedColumn] ?? row[statusField],
           };
     // biome-ignore lint/suspicious/noExplicitAny: test-only Proxy over a dynamic DataLayer table.
     return new Proxy(inner, {

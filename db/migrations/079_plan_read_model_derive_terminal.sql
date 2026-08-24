@@ -20,9 +20,10 @@
 -- re-exporting `plans.*` plus a `derived_status` column that is `abandoned` on a terminated instance and
 -- the base `plans.status` otherwise. SQLite does not validate a view body at CREATE time, so this
 -- migration (which runs before the runtime mount that provisions `plans__tracking`) is created fine and
--- resolves once the managed VIEW exists; the `COALESCE(t.derived_status, pl.status)` fallback keeps the
--- projection correct even if the managed VIEW is ever absent (it degrades to the previous base-column
--- behaviour rather than nulling the status).
+-- resolves once the managed VIEW exists. The `COALESCE(t.derived_status, pl.status)` fallback degrades to
+-- the previous base-column behaviour only for an unexpected NULL `derived_status` or a missing joined row
+-- (the LEFT JOIN yielding no `t` row) — it does NOT protect against the `plans__tracking` VIEW being
+-- absent, which would fail this VIEW's query at read time.
 --
 -- A merged view is not editable in place (that would edit a shipped migration), so this DROPs and
 -- re-CREATEs it. `plan_read_model` is a leaf — no other view builds on it — so the DROP is safe. Its
