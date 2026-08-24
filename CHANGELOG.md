@@ -1,3 +1,9 @@
+## [0.138.1](https://github.com/nanobpm/nano-workforce/compare/v0.138.0...v0.138.1) (2026-08-24)
+
+### Bug Fixes
+
+* **delivery-graph:** self-diagnosing + resumable capability wait-gate escalation ([#514](https://github.com/nanobpm/nano-workforce/issues/514)) ([#515](https://github.com/nanobpm/nano-workforce/issues/515)) ([b13ae50](https://github.com/nanobpm/nano-workforce/commit/b13ae50bf9638a5eabd12342e9c3d1ba7d70eaab)), closes [#499](https://github.com/nanobpm/nano-workforce/issues/499)
+
 ## [0.138.0](https://github.com/nanobpm/nano-workforce/compare/v0.137.0...v0.138.0) (2026-08-24)
 
 ### Features
