@@ -22,6 +22,9 @@
 const DEFAULT_STAGED_URL = "app/api/delivery-graph/staged";
 // The operator dispatch door: POST { digest } → launches the staged graph engine-natively (#460).
 const DEFAULT_DISPATCH_URL = "app/api/actions/delivery-graph/dispatch";
+// The operator dismiss door: POST { digest } → discards a staged proposal as noise, flipping it to the
+// terminal `dismissed` status so it drops off the staged list (#520). Launches nothing.
+const DEFAULT_DISMISS_URL = "app/api/actions/delivery-graph/dismiss";
 // The read-only DI preview door: recompiles a staged proposal's BPMN (with diagram interchange) so its
 // generated diagram can be rendered in the host explorer BEFORE dispatch. No deploy, no dispatch.
 const DEFAULT_PROPOSAL_BPMN_URL = "app/api/actions/delivery-graph/proposal-bpmn";
@@ -41,6 +44,13 @@ const DISPATCH_CONFIRM =
   "Dispatch this staged delivery graph? This launches the graph engine-natively — any side-effecting " +
   "node (it merges PRs / publishes packages) will run. Clicking Dispatch IS the approval, " +
   "content-addressed to exactly the graph you previewed.";
+
+// The confirm shown before a dismiss — dismissing is a terminal discard: the proposal drops off the
+// staged list for good (it can be re-staged only by recompiling). It launches nothing, so this is a
+// lighter acknowledgement than Dispatch, but still a one-way action the operator confirms.
+const DISMISS_CONFIRM =
+  "Dismiss this staged delivery graph? It is discarded as noise and drops off the staged list — this " +
+  "launches nothing, but to bring it back you must recompile/re-stage it.";
 
 /** Escape untrusted strings before they touch innerHTML. */
 function esc(value) {
@@ -76,6 +86,7 @@ function renderProposal(p) {
     <div class="actions">
       <button class="btn btn-ghost" type="button" data-preview-di="${esc(p.digest)}">Preview generated DI</button>
       <button class="btn btn-primary" type="button" data-dispatch="${esc(p.digest)}">Dispatch</button>
+      <button class="btn btn-ghost" type="button" data-dismiss="${esc(p.digest)}">Dismiss</button>
     </div>
   </section>`;
 }
@@ -98,7 +109,7 @@ function renderList(proposals) {
 /**
  * Mount the staged-proposals list into `host`.
  * @param {Element|null} host — the element to render into (or null → look up #delivery-graphs-staged-root).
- * @param {{stagedUrl?:string, dispatchUrl?:string, proposalBpmnUrl?:string, hookSecret?:string, refreshMs?:number}} [config]
+ * @param {{stagedUrl?:string, dispatchUrl?:string, dismissUrl?:string, proposalBpmnUrl?:string, hookSecret?:string, refreshMs?:number}} [config]
  */
 export function mountStagedProposals(host, config = {}) {
   const isElement = host != null && host.nodeType === 1 && typeof host.innerHTML === "string";
@@ -107,6 +118,7 @@ export function mountStagedProposals(host, config = {}) {
 
   const stagedUrl = config.stagedUrl ?? DEFAULT_STAGED_URL;
   const dispatchUrl = config.dispatchUrl ?? DEFAULT_DISPATCH_URL;
+  const dismissUrl = config.dismissUrl ?? DEFAULT_DISMISS_URL;
   const proposalBpmnUrl = config.proposalBpmnUrl ?? DEFAULT_PROPOSAL_BPMN_URL;
   const refreshMs = typeof config.refreshMs === "number" && config.refreshMs > 0 ? config.refreshMs : DEFAULT_REFRESH_MS;
   const headers = () => ({
@@ -254,6 +266,32 @@ export function mountStagedProposals(host, config = {}) {
     }
   }
 
+  // "Dismiss": the operator's discard (#520). Confirm (dismiss is a one-way drop off the staged list),
+  // then POST the digest to the dismiss door; on success the proposal flips to `dismissed` and drops off
+  // the list on the next poll — refresh immediately so the operator sees it leave. Launches nothing.
+  async function doDismiss(digest) {
+    const staged = typeof digest === "string" ? digest.trim() : "";
+    if (staged === "") return;
+    if (typeof window !== "undefined" && typeof window.confirm === "function" && !window.confirm(DISMISS_CONFIRM)) {
+      return;
+    }
+    busy(true);
+    setStatus("Dismissing…");
+    try {
+      const { status, body } = await post(dismissUrl, { digest: staged });
+      if ((status === 200 || status === 202) && body.ok) {
+        setStatus("\u2713 Dismissed — the proposal is off the staged list.", "ok");
+        await refresh();
+      } else {
+        setStatus(body && body.error ? body.error : "Dismiss failed.", "err");
+      }
+    } catch (err) {
+      setStatus(err && err.message ? err.message : "Dismiss request failed.", "err");
+    } finally {
+      busy(false);
+    }
+  }
+
   listEl.addEventListener("click", (ev) => {
     const previewBtn = ev.target && ev.target.closest ? ev.target.closest("[data-preview-di]") : null;
     if (previewBtn) {
@@ -265,6 +303,12 @@ export function mountStagedProposals(host, config = {}) {
     if (dispatchBtn) {
       ev.preventDefault();
       doDispatch(dispatchBtn.getAttribute("data-dispatch"));
+      return;
+    }
+    const dismissBtn = ev.target && ev.target.closest ? ev.target.closest("[data-dismiss]") : null;
+    if (dismissBtn) {
+      ev.preventDefault();
+      doDismiss(dismissBtn.getAttribute("data-dismiss"));
     }
   });
 

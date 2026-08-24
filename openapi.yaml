@@ -1663,6 +1663,21 @@ components:
           description: >-
             OPTIONAL run-level ISO-8601 SLA for `human` nodes (#505) before they record an `escalated`
             outcome. Absent → the `P1D` default. An invalid duration is rejected at submit.
+    DeliveryGraphDismissRequest:
+      description: >-
+        The OPERATOR dismiss request (#520). The cockpit's staged-proposals grid posts the content
+        `digest` of the proposal the operator wants to discard as noise; the door loads that staged
+        proposal and flips it to the terminal `dismissed` status. Dismiss is an operator action — this
+        request carries NO graph and NO token (the graph is already staged; the operator's click is the
+        approval). It launches nothing.
+      type: object
+      additionalProperties: false
+      required:
+        - digest
+      properties:
+        digest:
+          type: string
+          description: The staged proposal's content digest (its primary key) — the proposal to dismiss.
     DeliveryGraphProposalBpmnRequest:
       description: >-
         Request the compiled BPMN of a staged delivery-graph proposal for read-only DI PREVIEW. Carries
@@ -3016,6 +3031,39 @@ paths:
             The supplied `idempotencyKey` is already bound to a DIFFERENT running delivery graph, so this
             proposal's graph was NOT launched and the staged proposal was left untouched (not marked
             dispatched). Retry with a fresh `idempotencyKey` (or none). The body carries a human `error`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeliveryGraphTextResult"
+  /actions/delivery-graph/dismiss:
+    post:
+      operationId: dismissProposal
+      summary: OPERATOR DISMISS — discard a staged delivery-graph proposal by its digest as noise (idempotent). (#520)
+      description: >-
+        The OPERATOR-ONLY dismiss door (#520). The cockpit's staged-proposals grid posts the `digest` of
+        the proposal the operator wants to discard as noise; this door loads that live `staged` proposal
+        and flips it to the terminal `dismissed` status, so it drops out of the staged list — exactly like
+        `superseded`/`expired`, but recording a deliberate operator discard rather than a TTL sweep or a
+        newer digest landing. It launches nothing. Idempotent: a re-dismiss of an already-terminal
+        (dismissed / dispatched / superseded / expired) or unknown digest is a clean 400, leaving state
+        untouched.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeliveryGraphDismissRequest"
+      responses:
+        "200":
+          description: The staged proposal was dismissed; it drops out of the staged list.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeliveryGraphTextResult"
+        "400":
+          description: >-
+            The digest was missing, or named no live staged proposal (unknown / already dismissed /
+            dispatched / superseded / expired). The body carries a human `error`. Nothing changed.
           content:
             application/json:
               schema:
