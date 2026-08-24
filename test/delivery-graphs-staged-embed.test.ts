@@ -75,3 +75,12 @@ test("#460/#511: Dispatch is the operator's launch — posts the digest to the d
   assert(!/graphJson/.test(MOUNT_JS), "staged.mount.js must NOT submit pasted graph JSON (it only lists+dispatches staged proposals)");
   assert(!/approvalToken/.test(MOUNT_JS), "staged.mount.js must NOT carry the removed replayable approvalToken");
 });
+
+test("#520: Dismiss is the operator's discard — posts the digest to the dismiss door, behind a confirm, and launches nothing", () => {
+  const url = defaultUrl("dismissUrl");
+  assert(url.endsWith("actions/delivery-graph/dismiss"), `dismissUrl default "${url}" must hit the dismissProposal door`);
+  assert(!url.startsWith("/"), `default dismissUrl "${url}" must be base-relative (App-View #279 resolution class)`);
+  assert(/data-dismiss=/.test(MOUNT_JS), "staged.mount.js must render a per-row Dismiss affordance carrying the digest");
+  // Dismiss is a one-way discard off the staged list — confirm before it drops the proposal.
+  assert(/window\.confirm\(DISMISS_CONFIRM\)/.test(MOUNT_JS), "staged.mount.js must confirm before dismissing (a one-way discard off the staged list)");
+});

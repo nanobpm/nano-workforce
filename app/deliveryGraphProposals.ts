@@ -36,9 +36,10 @@ export function proposalReviewUrl(digest: string, base: string = publicBaseUrl()
 
 /** The proposal lifecycle. `staged` = awaiting operator review/dispatch; `superseded` = replaced by a
  * newer digest for the same logical graph; `dispatched` = the operator launched it; `expired` = it aged
- * out of its TTL before an operator dispatched it. `superseded`/`dispatched`/`expired` all drop out of
- * the cockpit's staged list (which filters to `status = 'staged'`). */
-export const DELIVERY_PROPOSAL_STATUSES = ["staged", "superseded", "dispatched", "expired"] as const;
+ * out of its TTL before an operator dispatched it; `dismissed` = an operator explicitly discarded it as
+ * noise. `superseded`/`dispatched`/`expired`/`dismissed` all drop out of the cockpit's staged list
+ * (which filters to `status = 'staged'`). */
+export const DELIVERY_PROPOSAL_STATUSES = ["staged", "superseded", "dispatched", "expired", "dismissed"] as const;
 export type DeliveryProposalStatus = typeof DELIVERY_PROPOSAL_STATUSES[number];
 
 /** One staged delivery-graph proposal — the durable row keyed by content `digest`. `side_effecting`
@@ -249,6 +250,17 @@ export async function markProposalDispatched(data: DataLayer, digest: string): P
  * undismissable `staged` row that fails every dispatch attempt the same way. */
 export async function markProposalExpired(data: DataLayer, digest: string): Promise<void> {
   await deliveryGraphProposals(data).update(digest, { status: "expired", updated_at: now() });
+}
+
+/** Dismiss a staged proposal at an operator's explicit request — flip it to the terminal `dismissed`
+ * status so it drops out of the cockpit's staged grid (which filters to `status = 'staged'`), exactly
+ * like `superseded`/`expired`. Unlike `expired` (a TTL sweep) or `superseded` (a newer digest landed),
+ * `dismissed` records a deliberate operator "this is noise, hide it" — the proposal was neither aged out
+ * nor replaced. Mirrors `markProposalExpired`'s shape/semantics: a blind update-by-key on the terminal
+ * status. Callers (the `dismissProposal` door) gate this behind a `getStagedProposal` liveness check so
+ * an unknown or already-terminal digest is refused before this runs, keeping the dismiss idempotent. */
+export async function markProposalDismissed(data: DataLayer, digest: string): Promise<void> {
+  await deliveryGraphProposals(data).update(digest, { status: "dismissed", updated_at: now() });
 }
 
 /** Age out every `staged` proposal whose TTL has elapsed by flipping it to `expired`, so it drops out
