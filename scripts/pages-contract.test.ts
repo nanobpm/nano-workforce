@@ -434,6 +434,10 @@ test("issue #521: the Delivery Graphs History tab surfaces dispatch time + the i
     dispatched.header === "Dispatched",
     "the `created_at` column must be headed \"Dispatched\"",
   );
+  assert(
+    dispatched.format === "datetime",
+    "the `created_at` (Dispatched) column must be formatted as a datetime",
+  );
 
   // Instance: an explicit cell carrying `process_key`, deep-linked to the Explorer via the same
   // `processExplorer` link kind used by the Status column, keyed on `process_key`.
