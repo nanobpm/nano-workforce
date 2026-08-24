@@ -284,19 +284,23 @@ export function mountDeliveryGraphLibrary(host, config = {}) {
       setStatus("That entry has no stored graph to export.", "err");
       return;
     }
+    let url = null;
+    let a = null;
     try {
       const blob = new Blob([contents], { type: mime });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
+      url = URL.createObjectURL(blob);
+      a = document.createElement("a");
       a.href = url;
       a.download = filename;
       document.body.appendChild(a);
       a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
       setStatus(`\u2713 Downloaded ${filename}`, "ok");
     } catch (err) {
       setStatus(err && err.message ? err.message : "Export failed.", "err");
+    } finally {
+      if (a) a.remove();
+      // Defer revoke to the next tick so the download can start reliably before the URL is freed.
+      if (url) setTimeout(() => URL.revokeObjectURL(url), 0);
     }
   }
 
