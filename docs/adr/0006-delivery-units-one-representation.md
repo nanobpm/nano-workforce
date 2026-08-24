@@ -20,8 +20,9 @@ to collapse three bespoke status unions into one),
 nano-ide **#424** (datasource can read a SQL VIEW — the *data-level* unlock),
 nano-workforce **#416** (the PR bumping the testkit to engine-wasm 0.7.2, which executes `callActivity`
 — the *process-level* unlock),
-nano-workforce **#464** (the tracking issue — currently slices S1–S6; the S7/S8 slices below are
-**added by this ADR** and must be appended to #464's checklist, which does not yet list them),
+nano-workforce **#464** (the tracking issue — its live checklist currently ends at **S5**; **S6 is
+present in this ADR's rollout but not yet listed there**, and the S7/S8 slices below are **added by this
+ADR** — so S6–S8 must all be appended to #464's checklist, which does not yet list them),
 nano-workforce **#305** (consolidate escalations on native `user_tasks` — a natural sub-step of S1/S3),
 nano-ide **#473** (surface the element-instance query on the `EngineClient` binding — the sole upstream
 **binding/platform** dependency of the S8 stepper slice; S8 *additionally* depends on S4's
@@ -284,7 +285,8 @@ terminal states than `done`/`failed` (a branch can end `merged` / `converged` / 
 `abandoned`), the rule first **normalizes** each terminal branch — reusing the **shipped
 `featureReadModel` `stage_state` tiers** (`app/featureReadModel.ts`: `STAGE_DONE_STATUSES` + the
 `stage_state` CASE) verbatim rather than inventing a second mapping, per derivation-over-duplication:
-`merged` / `converged` collapse to a **successful** terminal (`done`); `failed` / `skipped` /
+the already-canonical `done` stays `done`, and `merged` / `converged` likewise collapse to that same
+**successful** terminal (`done`); `failed` / `skipped` /
 `abandoned` collapse to a **failed** terminal; and `blocked` stays the renderer's **distinct `blocked`**
 state — *not* folded into `done` or `failed`, preserving the existing per-node semantics (`skipped` is a
 failed-tier terminal there, not a success; `blocked` is its own terminal). For the frontier precedence
@@ -336,8 +338,10 @@ task is open. It is coarser still for the other two, for reasons that must be st
 - **Delivery graph:** `deriveDeliveryPhase` (`app/deliveryGraphRun.ts`) returns a generic `Running`
   with **no node id** for an active `agent` / `wait` / `connector` node when no human task is open, and
   `delivery_graph_runs` stores no current node.
-- **Epic:** during its pre-PR position (Planning, and the non-parked part of Reviewing) `record-plan`
-  *does* write `plan_tasks` rows, so it is not literally row-less — but **no field exposes the current
+- **Epic:** `record-plan` is classified **Reviewing** (`app/epicPhase.ts`), not Planning, so the
+  *initial* Planning phase carries only the `plans` row — `plan_tasks` rows first become available once
+  **Reviewing** starts, where `record-plan` *does* write them, so from Reviewing on it is not literally
+  row-less — but **no field exposes the current
   pre-PR process position** (which plan/review activity is live), and there is no PR row or open user
   task for it. Only the write-time `epic_phase` stamp (`app/epicPhase.ts`) and the plan/PR rollups
   observe *where* it is. `deriveDeliveryPhase` is the delivery-graph projection only and provides no
@@ -402,9 +406,11 @@ their topology is produced. Unifying that axis is explicitly out of scope here.
   table-to-VIEW slice requires a **separately designed recovery/compatibility migration**, not a plain
   revert.
 - **Cost.** A backfill/migration for `delivery_units`; a one-time extraction of the shared cells; and
-  the process slices are sequenced behind the (now-live) engine-wasm unlock. No behaviour change is
-  intended — this is a representation consolidation, guarded by parity tests against the existing VIEWs
-  and by the deploy+run engine tests.
+  the   process slices are sequenced behind the (now-live) engine-wasm unlock. No **process/data-semantic**
+  behaviour change is intended — this is a representation consolidation, guarded by parity tests against
+  the existing VIEWs and by the deploy+run engine tests. (The rendered cell *does* change for operators —
+  S7 turns the delivery-graph `phase` text cell into a `pipeline`, and S8 the epic phase cell; that
+  operator-visible presentation change is intended, per the S7/S8 rollout below.)
 - **One stepper kills the second-order drift.** The unit's *progress projection* — the thing an
   operator reads as "where is this in its lifecycle" — is triplicated the same way the aggregate is
   (feature's `deriveStage`, epic's write-time `epic_phase`, delivery-graph's `pollDeliveryGraphPhase`),
@@ -526,7 +532,7 @@ deployment-runtime prerequisite noted above), not on #416 alone.
   its genesis write in `startPlan`, `app/plan.ts`**, which stamps `epic_phase` for fresh/replanned
   epics, so the retirement must move or drop that write too or those epics still depend on the retired
   source) and folding
-  the user-task-only `pollDeliveryGraphPhase` into one live projection. **Three ownerships this retirement
+  the user-task-only `pollDeliveryGraphPhase` into one live projection. **Ownerships this retirement
   must carry forward, not silently drop:** (a) `app/lineage.ts` consumes `plans.epic_phase` to project
   `epicPhaseLabel` and writes `pull_requests.epic_phase_label`, shown on the home/convergence surfaces —
   so S8's replacement contract must supply that label from the derived pipeline (a derived
@@ -538,7 +544,10 @@ deployment-runtime prerequisite noted above), not on #416 alone.
   set; and (c) `app/lineage.ts` also reads `delivery_graph_runs.phase` to form `LineageThread.stageLabel`
   and persists `lineage_threads.stage_label` (shown on delivery-lineage / home rows), so S8 must supply
   that phase narrative from the derived projection or update the lineage read too, else those rows lose
-  their phase label.
+  their phase label; and (d) two **page bindings** read `plans.epic_phase` **directly** — the epic index
+  grid (`pages/epic.page.json:119`) and the epic-detail page (`pages/epic-detail.page.json:99,146`) — so
+  retiring the column without repointing these page/schema bindings to the pipeline/read-model field
+  renders a missing field on the epic index and detail pages; S8's checklist must replace them too.
 
 ## Non-goals / deferred
 
