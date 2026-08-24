@@ -144,6 +144,15 @@ test("readConvergeInput: a missing / unparseable pr fails CLOSED (a converge con
   assertThrows(() => readConvergeInput("converge", { pr: "not-a-pr" }), Error, "payload.pr");
 });
 
+test("readConvergeInput: an unparseable pr whose value is not JSON-serializable still fails CLOSED with the intended error (not a serializer TypeError)", () => {
+  // `p.pr` is user-controlled payload data; a BigInt (or a circular object) makes JSON.stringify
+  // throw, which must NOT mask the intended "requires payload.pr" error.
+  assertThrows(() => readConvergeInput("converge", { pr: 10n as unknown as string }), Error, "payload.pr");
+  const circular: Record<string, unknown> = {};
+  circular.self = circular;
+  assertThrows(() => readConvergeInput("converge", { pr: circular as unknown as string }), Error, "payload.pr");
+});
+
 test("handler: a `converge-merge` connector enrolls the PR into the convergence loop via submitPr (row + started convergence-loop instance)", async () => {
   await withGithubOff(async () => {
     const { app, stores, created } = fakeApp();

@@ -70,6 +70,17 @@ export function readConnectorInput(vars: In): {
  * entries are dropped; `submitPr` itself ignores unparseable refs). Exported for unit coverage — the
  * MVP sources `pr` as a literal (identical to how the `wait: pr` node targets a known PR), so no new
  * fact plumbing is needed to ship. */
+/** JSON-stringify a user-controlled value for an error message, falling back to `String(value)` when
+ * the value is not JSON-serializable (e.g. a `BigInt` or a circular object) so the intended
+ * validation error is never masked by a serializer `TypeError`. */
+function safeStringify(value: unknown): string {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
 export function readConvergeInput(
   target: string,
   payload: Record<string, unknown> | null,
@@ -79,7 +90,7 @@ export function readConvergeInput(
   if (!parsed) {
     throw new Error(
       `delivery-connector: '${target}' target requires payload.pr as a parseable "owner/repo#N" ` +
-        `(got ${JSON.stringify(p.pr ?? null)})`,
+        `(got ${safeStringify(p.pr ?? null)})`,
     );
   }
   const convergeOnly = typeof p.convergeOnly === "boolean" ? p.convergeOnly : convergeOnlyForTarget(target);
