@@ -1,3 +1,13 @@
+## [0.136.0](https://github.com/nanobpm/nano-workforce/compare/v0.135.0...v0.136.0) (2026-08-24)
+
+### Features
+
+* **delivery:** agent-node classifier-emit contract so S7 guarded branches fire ([#506](https://github.com/nanobpm/nano-workforce/issues/506)) ([#509](https://github.com/nanobpm/nano-workforce/issues/509)) ([f3acd5b](https://github.com/nanobpm/nano-workforce/commit/f3acd5bd5977fe3b12797f7d1e3acb7d5e67eb8c))
+
+### Bug Fixes
+
+* **deps:** update dependency @nanobpm/urban to ^0.82.0 ([#482](https://github.com/nanobpm/nano-workforce/issues/482)) ([81decc1](https://github.com/nanobpm/nano-workforce/commit/81decc1b8ebd53b2835aaecbb369c5347371ceb3))
+
 ## [0.135.0](https://github.com/nanobpm/nano-workforce/compare/v0.134.0...v0.135.0) (2026-08-24)
 
 ### Features
