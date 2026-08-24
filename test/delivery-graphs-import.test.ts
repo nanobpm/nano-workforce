@@ -2,7 +2,7 @@
 // epic #519 S5). The Import control is ADDED into the PRE-EXISTING compose mount (pages/delivery-graphs/
 // mount.js — the one #523 reshaped), alongside #523's inbound reuse-fill seam. It must: render an
 // `<input type=file accept=.json>`, read the picked file's text client-side, POST it to the
-// importToLibrary door (base-relative, App-View #279 resolution class), route a successful import back
+// importToLibrary door (module-anchored relative spec, App-View #279 + #467/#536 resolution class), route a successful import back
 // through #523's SINGLE `fillComposer()` seam (no second inbound fill path), and render path-qualified
 // compile errors inline on a 400. This test pins that wiring so it can't silently regress.
 import { test } from "node:test";
@@ -41,13 +41,13 @@ test("#524: the compose mount renders a file-input Import control accepting .jso
   assert(/accept="[^"]*\.json[^"]*"/.test(MOUNT_JS), "the Import file input must accept .json files");
 });
 
-test("#524: Import wires the importToLibrary door (base-relative), reading the file text client-side", () => {
+test("#524: Import wires the importToLibrary door (module-anchored relative), reading the file text client-side", () => {
   const importSpec = defaultSpec("importUrl");
   assert(
     importSpec.endsWith("actions/delivery-graph/library/import"),
     `importUrl default spec "${importSpec}" must hit the importToLibrary door`,
   );
-  assert(!importSpec.startsWith("/"), `default importUrl spec "${importSpec}" must be base-relative (App-View #279 resolution class)`);
+  assert(!importSpec.startsWith("/"), `default importUrl spec "${importSpec}" must be relative, not absolute (App-View #279 + #467/#536 resolution class)`);
   // Pin the MODULE-anchored invariant, not merely "not absolute": the spec must step UP out of the
   // /delivery-graphs/ shell base with "../" (resolved against import.meta.url), so a regression back to a
   // document-base-relative "app/api/…" — which 404s under the shell base (#467/#536) — fails the guard.
