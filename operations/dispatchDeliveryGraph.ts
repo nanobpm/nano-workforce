@@ -21,6 +21,13 @@ import { defineOperation } from "../nano-generated/operations.ts";
  * `{ invalid }` so the door can reject it at submit rather than silently deploy an uninterpretable timer.
  * Reuses the canonical `reviewWait` grammar so accept/reject never drifts from the runner's
  * normalise-or-default one. */
+/** Cap an untrusted, rejected duration string before it is echoed into logs/response bodies. The
+ * dispatch fields carry no max length, so a very large malformed value would otherwise bloat both. */
+const MAX_ECHO_LEN = 80;
+function truncateForEcho(value: string): string {
+  return value.length > MAX_ECHO_LEN ? `${value.slice(0, MAX_ECHO_LEN)}… (${value.length} chars)` : value;
+}
+
 function validateDurationOverride(raw: unknown): { ok: true; value: string | undefined } | { ok: false; invalid: string } {
   if (raw === undefined || raw === null) return { ok: true, value: undefined };
   if (typeof raw !== "string") return { ok: false, invalid: String(raw) };
@@ -53,8 +60,9 @@ export default defineOperation("dispatchDeliveryGraph", async ({ body }, app) =>
   for (const field of ["nodeTimeout", "probeTimeout", "escalationSlaTimeout"] as const) {
     const parsed = validateDurationOverride(rawTimeouts[field]);
     if (!parsed.ok) {
-      app.log.warn("dispatch-delivery-graph rejected: invalid duration", { field, value: parsed.invalid });
-      return { status: 400, body: { ok: false, error: `\`${field}\` must be an ISO-8601 duration (e.g. \`PT2H\`); got \`${parsed.invalid}\`` } };
+      const shown = truncateForEcho(parsed.invalid);
+      app.log.warn("dispatch-delivery-graph rejected: invalid duration", { field, value: shown, invalidLength: parsed.invalid.length });
+      return { status: 400, body: { ok: false, error: `\`${field}\` must be an ISO-8601 duration (e.g. \`PT2H\`); got \`${shown}\`` } };
     }
     if (parsed.value !== undefined) timeouts[field] = parsed.value;
   }

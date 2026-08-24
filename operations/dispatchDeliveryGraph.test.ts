@@ -198,6 +198,23 @@ describe("dispatchDeliveryGraph — operator dispatch by staged-proposal digest"
     assert.equal((await deliveryGraphProposals(app.db).get(staged.body.digest))?.status, "staged");
   });
 
+  test("an oversized invalid duration never bloats the 400 response — rejected with a bounded error, nothing launched (#505)", async () => {
+    const app = await boot();
+    assert.ok(app.api);
+    const api = app.api;
+    const staged = await api.call<{ digest: string }>("compileDeliveryGraph", { body: HUMAN_ONLY });
+    const huge = `PT${"9".repeat(5000)}X`;
+    const res = await api.call<{ ok?: boolean; error?: string }>("dispatchDeliveryGraph", {
+      body: { digest: staged.body.digest, nodeTimeout: huge },
+    });
+    assert.equal(res.status, 400);
+    // The 5000-char blob is never echoed back verbatim — the edge pattern rejects it, and the door's
+    // own guard (`truncateForEcho`) caps the echo when the edge is bypassed. Either way the response
+    // stays bounded, so a malformed input can't bloat logs/response bodies.
+    assert.ok((res.body.error ?? "").length < 300, `error body should be bounded, got ${(res.body.error ?? "").length} chars`);
+    assert.equal((await deliveryGraphRuns(app.db).all()).length, 0);
+  });
+
   test("a valid run-level nodeTimeout override dispatches the run → 202 running (#505)", async () => {
     const app = await boot();
     assert.ok(app.api);

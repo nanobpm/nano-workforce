@@ -138,6 +138,8 @@ export async function dispatchDeliveryGraphRun(
       nodeTimeout: options.nodeTimeout,
       probeTimeout: options.probeTimeout,
       escalationSlaTimeout: options.escalationSlaTimeout,
+      probePollEvery: options.probePollEvery,
+      escalationAssignee: options.escalationAssignee,
     });
   } catch (err) {
     await markClaimFailed();
