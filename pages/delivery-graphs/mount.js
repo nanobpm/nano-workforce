@@ -1,42 +1,35 @@
-// pages/delivery-graphs/mount.js — the Delivery Graphs compose → preview → STAGE view (ADR 0005,
-// issues #441 + #460). The human front door for a delivery graph: author/paste a `DeliveryGraph` JSON
-// and PREVIEW it — a compile that renders the plan (mermaid `diagram`, the `humanNodes[]` stop-points,
-// the `sideEffects[]` a dispatch will perform) AND stages it as a proposal for dispatch.
+// pages/delivery-graphs/mount.js — the Delivery Graphs COMPOSE → PREVIEW / STAGE view (ADR 0005,
+// issues #441 + #460 + #516). The human front door for a delivery graph: author/paste a `DeliveryGraph`
+// JSON, PREVIEW it (a pure compile that renders the plan — mermaid `diagram`, the `humanNodes[]`
+// stop-points, the `sideEffects[]` a dispatch will perform — and the laid-out BPMN in the host
+// explorer), and, as a SEPARATE deliberate action, STAGE it as a proposal for dispatch.
 //
-// Dispatch is deliberately NOT here (issue #460): it is an OPERATOR action on the **Staged proposals**
-// grid on the same page (the Dispatch row-action, which posts the proposal's `digest`). Removing the
-// dispatch affordance from every agent-reachable seam closes the self-approval hole the old replayable
-// approval token (a content digest handed back to the same caller) left open — this view only ever
-// stages, never launches.
+// Preview and Stage are separate (issue #516): Preview compiles WITHOUT persisting, so an operator can
+// inspect and iterate on a graph before committing it to the Staged-proposals list. Dispatch is NOT
+// here (issue #460): it is an OPERATOR action on the **Staged proposals** grid on the same page.
+// Removing the dispatch affordance from every agent-reachable seam closes the self-approval hole the
+// old replayable approval token left open — this view only ever previews/stages, never launches.
 //
 // A self-contained, dependency-free renderer in the SAME shape as the demand×supply board
 // (pages/board/mount.js) and the agent cockpit: the SAME module mounts embedded in the console (App
 // View) and standalone on a phone — only the host element and injected endpoint config differ. The app
-// has no browser build step, so this consumes the preview door straight off the wire.
-//
-// It is a THIN UI over the EXISTING door — there is no parallel compile/stage path:
-//   • PREVIEW & STAGE → POST previewUrl (previewDeliveryGraph) — renders the mermaid `diagram`, the
-//     `humanNodes[]` stop-points, the `sideEffects[]` a dispatch will perform, and path-qualified
-//     validation `errors[]` inline for a 400 (the fix-and-recompile loop); on success the compiled
-//     graph is STAGED as a proposal (an operator dispatches it from the Staged proposals grid below).
+// has no browser build step, so this consumes the preview/stage doors straight off the wire.
 
 const DEFAULT_PREVIEW_URL = "app/api/actions/delivery-graph/preview";
-// The read-only DI preview door: recompiles a staged proposal's BPMN (with diagram interchange) so its
-// generated diagram can be rendered in the host explorer BEFORE dispatch. No deploy, no dispatch.
-const DEFAULT_PROPOSAL_BPMN_URL = "app/api/actions/delivery-graph/proposal-bpmn";
+const DEFAULT_STAGE_URL = "app/api/actions/delivery-graph/stage";
 
-// A bounded timeout for every door request. Without it a hung preview endpoint leaves the fetch
-// promise pending forever, so the busy() lock never clears and the UI is stranded (buttons disabled,
-// status stuck) with no way to retry. On timeout the AbortController rejects the fetch, which surfaces
-// as an error banner and re-enables the controls via the callers' finally blocks.
+// A bounded timeout for every door request. Without it a hung endpoint leaves the fetch promise pending
+// forever, so the busy() lock never clears and the UI is stranded (buttons disabled, status stuck) with
+// no way to retry. On timeout the AbortController rejects the fetch, which surfaces as an error banner
+// and re-enables the controls via the callers' finally blocks.
 const REQUEST_TIMEOUT_MS = 30000;
 
-const EXAMPLE_GRAPH = JSON.stringify(
+export const EXAMPLE_GRAPH = JSON.stringify(
   {
     name: "example-runbook",
     nodes: [
       { id: "build", kind: "agent", agent: { jobType: "senior:feature" }, emits: [{ name: "pr", type: "url" }] },
-      { id: "soak", kind: "wait", wait: { target: "checks-green" } },
+      { id: "soak", kind: "wait", wait: { kind: "pr", target: "owner/repo#123", match: { prState: "checks-green" } } },
       { id: "signoff", kind: "human", human: { prompt: "Review the PR and approve the release." } },
       { id: "publish", kind: "connector", connector: { target: "publish-package", dedupeKey: "example-runbook-publish" } },
     ],
@@ -128,15 +121,19 @@ function renderErrors(message, errors) {
   </section>`;
 }
 
-/** Render the successful preview: the staged banner, summary chips, the human/side-effect tables, and
- * the mermaid source. Dispatch is NOT offered here — the operator dispatches the staged proposal from
- * the Staged proposals grid below (issue #460). */
-function renderPreview(result) {
+/** Render the successful result: the preview/staged banner, summary chips, the human/side-effect
+ * tables, and the mermaid source. When `staged` is false (a pure Preview, #516) the banner offers
+ * "Preview generated DI" (the door returns the laid-out BPMN, so it renders WITHOUT staging) and a
+ * reminder that nothing is staged yet. When `staged` is true the banner points the operator at the
+ * Staged proposals grid below, where the per-row Dispatch (and DI preview) live (#460 + #513). */
+function renderPreview(result, staged) {
   const title = result.title ? `<code>${esc(result.title)}</code>` : '<span class="muted">(unnamed)</span>';
   const gate = result.sideEffecting
     ? '<span class="pill pill-connector">side-effecting</span>'
     : '<span class="pill pill-wait">no side effects</span>';
-  const summary = `<section class="card card-ok">
+  const canPreviewDi = typeof result.bpmn === "string" && result.bpmn.trim() !== "";
+  const summary = staged
+    ? `<section class="card card-ok">
     <h2>Staged ${gate}</h2>
     <p class="ok">Compiled and staged as a proposal. Dispatch is an operator action — review it in the <b>Staged proposals</b> grid below and click <b>Dispatch</b> on the one you approve.</p>
     <div class="chips">
@@ -146,23 +143,38 @@ function renderPreview(result) {
       <span class="chip">Side effects <b>${esc(result.sideEffectCount)}</b></span>
       <span class="chip">Digest <code>${esc(result.digest)}</code></span>
     </div>
-    <div class="actions">
-      <button class="btn btn-ghost" type="button" data-preview-di="${esc(result.digest)}">Preview generated DI</button>
-      <span class="muted">the real laid-out BPMN, exactly as a dispatch would run it</span>
+  </section>`
+    : `<section class="card card-ok">
+    <h2>Previewed ${gate}</h2>
+    <p class="ok">Compiled — <b>not staged yet</b>. Review the plan below, then click <b>Stage</b> to add it to the Staged proposals for dispatch.</p>
+    <div class="chips">
+      <span class="chip">Graph ${title}</span>
+      <span class="chip">Nodes <b>${esc(result.nodeCount)}</b></span>
+      <span class="chip">Human <b>${esc(result.humanNodeCount)}</b></span>
+      <span class="chip">Side effects <b>${esc(result.sideEffectCount)}</b></span>
+      <span class="chip">Digest <code>${esc(result.digest)}</code></span>
     </div>
+    ${
+      canPreviewDi
+        ? `<div class="actions">
+      <button class="btn btn-ghost" type="button" data-preview-di>Preview generated DI</button>
+      <span class="muted">the real laid-out BPMN, exactly as a dispatch would run it</span>
+    </div>`
+        : ""
+    }
   </section>`;
   const diagram = `<section class="card">
     <h2>Diagram <span class="muted">(mermaid flowchart source)</span></h2>
-    <p class="muted">The resolved graph as a mermaid <code>flowchart</code>. Paste it into any mermaid renderer, or click <b>Preview generated DI</b> above to render the laid-out BPMN in the process explorer.</p>
+    <p class="muted">The resolved graph as a mermaid <code>flowchart</code>. Paste it into any mermaid renderer${staged ? "" : ", or click <b>Preview generated DI</b> above to render the laid-out BPMN in the process explorer"}.</p>
     <pre class="diagram">${esc(result.diagram)}</pre>
   </section>`;
   return summary + renderSideEffects(result.sideEffects) + renderHumanNodes(result.humanNodes) + diagram;
 }
 
 /**
- * Mount the compose → preview → stage view into `host`.
+ * Mount the compose → preview / stage view into `host`.
  * @param {Element|null} host — the element to render into (or null → look up #delivery-graphs-root).
- * @param {{previewUrl?:string, proposalBpmnUrl?:string, hookSecret?:string}} [config]
+ * @param {{previewUrl?:string, stageUrl?:string, hookSecret?:string}} [config]
  */
 export function mountDeliveryGraphs(host, config = {}) {
   const isElement = host != null && host.nodeType === 1 && typeof host.innerHTML === "string";
@@ -170,25 +182,30 @@ export function mountDeliveryGraphs(host, config = {}) {
   if (!root) return () => {};
 
   const previewUrl = config.previewUrl ?? DEFAULT_PREVIEW_URL;
-  const proposalBpmnUrl = config.proposalBpmnUrl ?? DEFAULT_PROPOSAL_BPMN_URL;
+  const stageUrl = config.stageUrl ?? DEFAULT_STAGE_URL;
   const headers = () => ({
     "content-type": "application/json",
     ...(config.hookSecret ? { "x-hook-secret": config.hookSecret } : {}),
   });
 
-  // The static compose shell. The <textarea> is a real element (its value must survive re-renders of
-  // the output panes), so it is created once and never clobbered.
+  // The static compose shell. The compose card is a native <details> so an operator can COLLAPSE the
+  // large paste panel (#516) and focus on the Staged / in-flight grids, expanding it only to author.
+  // The <textarea> is a real element (its value must survive re-renders of the output panes, and it is
+  // only HIDDEN — never destroyed — when the panel collapses), so it is created once and never clobbered.
   root.innerHTML = `<div class="dg">
-    <section class="card">
-      <h2>1 · Compose</h2>
-      <p class="muted">Paste or author a <code>DeliveryGraph</code> JSON (nodes/edges over the closed <code>agent</code>/<code>wait</code>/<code>human</code>/<code>connector</code> vocabulary).</p>
-      <textarea id="dg-json" class="json" spellcheck="false" placeholder='{ "name": "…", "nodes": [ … ], "edges": [ … ] }'></textarea>
-      <div class="actions">
-        <button id="dg-preview" class="btn btn-primary" type="button">Preview &amp; stage</button>
-        <button id="dg-example" class="btn btn-ghost" type="button">Load example</button>
-        <span id="dg-status" class="status"></span>
+    <details id="dg-compose" class="compose card" open>
+      <summary><span class="step">1 · Compose</span><span class="hint muted">paste a DeliveryGraph, then Preview or Stage</span></summary>
+      <div class="compose-body">
+        <p class="muted">Paste or author a <code>DeliveryGraph</code> JSON (nodes/edges over the closed <code>agent</code>/<code>wait</code>/<code>human</code>/<code>connector</code> vocabulary).</p>
+        <textarea id="dg-json" class="json" spellcheck="false" placeholder='{ "name": "…", "nodes": [ … ], "edges": [ … ] }'></textarea>
+        <div class="actions">
+          <button id="dg-preview" class="btn btn-primary" type="button">Preview</button>
+          <button id="dg-stage" class="btn" type="button">Stage</button>
+          <button id="dg-example" class="btn btn-ghost" type="button">Load example</button>
+          <span id="dg-status" class="status"></span>
+        </div>
       </div>
-    </section>
+    </details>
     <div id="dg-output"></div>
   </div>`;
 
@@ -196,7 +213,13 @@ export function mountDeliveryGraphs(host, config = {}) {
   const statusEl = root.querySelector("#dg-status");
   const outputEl = root.querySelector("#dg-output");
   const previewBtn = root.querySelector("#dg-preview");
+  const stageBtn = root.querySelector("#dg-stage");
   const exampleBtn = root.querySelector("#dg-example");
+
+  // The most recent successful PREVIEW's laid-out BPMN — bridged to the host explorer on demand (the
+  // preview door returns it, so DI preview needs no staging, #516). Cleared whenever the composed graph
+  // changes so a stale diagram can never be shown against edited JSON.
+  let lastBpmn = "";
 
   function setStatus(text, tone) {
     statusEl.textContent = text || "";
@@ -205,6 +228,7 @@ export function mountDeliveryGraphs(host, config = {}) {
 
   function busy(on) {
     previewBtn.disabled = on;
+    stageBtn.disabled = on;
     exampleBtn.disabled = on;
   }
 
@@ -236,78 +260,77 @@ export function mountDeliveryGraphs(host, config = {}) {
     return jsonEl.value;
   }
 
-  async function doPreview() {
+  /** Shared compile driver for both Preview (stage=false) and Stage (stage=true). Both POST the pasted
+   * JSON to their door and render the SAME summary; only the banner and whether a proposal was
+   * persisted differ. */
+  async function submit(url, staged) {
     if (graphJson().trim() === "") {
-      setStatus("Paste a delivery-graph JSON to preview.", "err");
+      setStatus(`Paste a delivery-graph JSON to ${staged ? "stage" : "preview"}.`, "err");
       return;
     }
     busy(true);
-    setStatus("Compiling & staging…");
+    setStatus(staged ? "Compiling & staging…" : "Compiling…");
     try {
-      const { status, body } = await post(previewUrl, { graphJson: graphJson() });
+      const { status, body } = await post(url, { graphJson: graphJson() });
       if (status === 200 && body.ok) {
-        outputEl.innerHTML = renderPreview(body);
-        setStatus("\u2713 Staged — dispatch it from the Staged proposals grid below.", "ok");
+        lastBpmn = !staged && typeof body.bpmn === "string" ? body.bpmn : lastBpmn;
+        outputEl.innerHTML = renderPreview(body, staged);
+        setStatus(
+          staged ? "\u2713 Staged — dispatch it from the Staged proposals grid below." : "\u2713 Previewed — Stage it when you're ready.",
+          "ok",
+        );
       } else {
         outputEl.innerHTML = renderErrors(body.error, body.errors);
-        setStatus("Preview failed — fix the errors and re-preview.", "err");
+        setStatus(`${staged ? "Stage" : "Preview"} failed — fix the errors and retry.`, "err");
       }
     } catch (err) {
       outputEl.innerHTML = renderErrors(err && err.message ? err.message : String(err), []);
-      setStatus("Preview request failed.", "err");
+      setStatus(`${staged ? "Stage" : "Preview"} request failed.`, "err");
     } finally {
       busy(false);
     }
   }
 
-  previewBtn.addEventListener("click", doPreview);
+  previewBtn.addEventListener("click", () => submit(previewUrl, false));
+  stageBtn.addEventListener("click", () => submit(stageUrl, true));
   exampleBtn.addEventListener("click", () => {
     jsonEl.value = EXAMPLE_GRAPH;
+    lastBpmn = "";
     outputEl.innerHTML = "";
-    setStatus("Example loaded — Preview & stage it.", "");
+    setStatus("Example loaded — Preview or Stage it.", "");
+  });
+  // Any edit invalidates the previewed BPMN so "Preview generated DI" can't show a stale diagram.
+  jsonEl.addEventListener("input", () => {
+    lastBpmn = "";
   });
 
-  // "Preview generated DI": recompile the staged proposal's BPMN (with diagram interchange) and hand it
-  // to the host console's process explorer, which renders it read-only in a definition-preview view.
-  // We run inside the console App-View iframe, so we fetch from our OWN nwf door (same origin as this
-  // app) and pass the XML UP to the console over the nano-navigate bridge — the XML is far larger than a
-  // URL budget, so it travels in the message, not the path. Standalone (not embedded) there is no host
-  // explorer to drive, so we say so instead of failing silently.
+  // "Preview generated DI": hand the previewed proposal's laid-out BPMN (returned by the preview door,
+  // #516) to the host console's process explorer, which renders it read-only in a definition-preview
+  // view. We run inside the console App-View iframe, so we pass the XML UP to the console over the
+  // nano-navigate bridge — the XML is far larger than a URL budget, so it travels in the message, not
+  // the path. Standalone (not embedded) there is no host explorer to drive, so we say so instead of
+  // failing silently.
   const isEmbedded = typeof window !== "undefined" && window.parent && window.parent !== window;
-  async function doPreviewDi(digest) {
-    const staged = typeof digest === "string" ? digest.trim() : "";
-    if (staged === "") {
-      setStatus("No staged proposal to preview yet — Preview & stage a graph first.", "err");
+  function doPreviewDi() {
+    if (lastBpmn.trim() === "") {
+      setStatus("Preview a graph first — the laid-out BPMN comes from the preview.", "err");
       return;
     }
     if (!isEmbedded) {
       setStatus("Open this page inside the console cockpit to preview the generated DI.", "err");
       return;
     }
-    busy(true);
-    setStatus("Compiling DI…");
-    try {
-      const { status, body } = await post(proposalBpmnUrl, { digest: staged });
-      if (status === 200 && body.ok && typeof body.bpmn === "string" && body.bpmn.trim() !== "") {
-        window.parent.postMessage(
-          { type: "nano-navigate", target: "definitionPreview", params: { xml: body.bpmn } },
-          window.location.origin,
-        );
-        setStatus("\u2713 Opening the generated DI in the process explorer…", "ok");
-      } else {
-        setStatus(body && body.error ? body.error : "Could not compile the DI for this proposal.", "err");
-      }
-    } catch (err) {
-      setStatus(err && err.message ? err.message : "DI preview request failed.", "err");
-    } finally {
-      busy(false);
-    }
+    window.parent.postMessage(
+      { type: "nano-navigate", target: "definitionPreview", params: { xml: lastBpmn } },
+      window.location.origin,
+    );
+    setStatus("\u2713 Opening the generated DI in the process explorer…", "ok");
   }
   outputEl.addEventListener("click", (ev) => {
     const btn = ev.target && ev.target.closest ? ev.target.closest("[data-preview-di]") : null;
     if (!btn) return;
     ev.preventDefault();
-    doPreviewDi(btn.getAttribute("data-preview-di"));
+    doPreviewDi();
   });
 
   return () => {

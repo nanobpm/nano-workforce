@@ -1,9 +1,8 @@
-// Tests for the POST /app/api/actions/delivery-graph/preview operation `previewDeliveryGraph` (ADR
-// 0005 Decision 7, issues #460 + #516) — the human-facing UI JSON-paste PURE PREVIEW ingress. It
-// parses the operator's pasted JSON STRING, runs the SAME `compileDeliveryGraph` compiler the agent
-// door uses, and returns a compact summary (200, `staged:false`, + the compiled `bpmn`) or a human
-// `error` + path-qualified `errors` (400). Unlike the stage door it persists NOTHING — preview and
-// staging are separate operator actions (#516).
+// Tests for the POST /app/api/actions/delivery-graph/stage operation `stageDeliveryGraph` (ADR 0005
+// Decision 7, issues #460 + #516) — the STAGE half of the preview/stage split. It parses the
+// operator's pasted JSON STRING, runs the SAME compiler the preview/agent doors use, and — on success
+// — persists the compiled graph as a `staged` proposal (200, `staged:true`). Unlike the pure preview
+// door it PERSISTS; unlike dispatch it never launches (no run key / instance key comes back).
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -13,12 +12,12 @@ import type { AppApi, DataLayer } from "@nanobpm/urban";
 import { bootTestApp } from "@nanobpm/urban-testkit";
 import { deliveryGraphProposals } from "../app/deliveryGraphProposals.ts";
 import { noopLog } from "../test/log.ts";
-import handler from "./previewDeliveryGraph.ts";
+import handler from "./stageDeliveryGraph.ts";
 
 const APP_ROOT = resolve(import.meta.dirname, "..");
 
 async function withApp(fn: (app: AppApi, data: DataLayer) => Promise<void>): Promise<void> {
-  const dir = mkdtempSync(join(tmpdir(), "nwf-dgpreview-"));
+  const dir = mkdtempSync(join(tmpdir(), "nwf-dgstage-"));
   const app = await bootTestApp(APP_ROOT, { env: { NANO_APP_DB_URL: `file:${join(dir, "app.db")}` } });
   try {
     const edge = { data: app.db, log: noopLog() } as unknown as AppApi;
@@ -42,48 +41,41 @@ const GOOD = JSON.stringify({
   edges: [{ from: "a", to: "b" }],
 });
 
-test("preview-delivery-graph: a pasted well-formed graph → 200 summary, NOT staged, with digest + counts + bpmn", async () => {
+test("stage-delivery-graph: a pasted well-formed graph → 200, staged, with digest + counts", async () => {
   await withApp(async (app, data) => {
     const res = await call(app, { graphJson: GOOD });
     assertEquals(res.status, 200);
     assertEquals(res.body.ok, true);
-    // #516: preview is PURE — it compiles but never stages.
-    assertEquals(res.body.staged, false);
+    assertEquals(res.body.staged, true);
     assert(typeof res.body.digest === "string" && res.body.digest.length > 0);
     assert(typeof res.body.reviewUrl === "string" && res.body.reviewUrl.length > 0);
     assertEquals(res.body.nodeCount, 2);
     assertEquals(res.body.humanNodeCount, 1);
     assertEquals(res.body.sideEffectCount, 1);
     assertEquals(res.body.sideEffecting, true);
-    assert(typeof res.body.diagram === "string" && res.body.diagram.length > 0);
     assertEquals(res.body.title, "runbook");
-    // The PURE preview returns the laid-out BPMN so the page can render the DI without staging (#516).
-    assert(typeof res.body.bpmn === "string" && res.body.bpmn.includes("bpmndi:BPMNDiagram"));
-    // The FULL preview detail (#441) — the human stop-points and side-effecting actions the page renders.
+    // Full preview detail is still returned so the page renders the same summary as preview.
     assert(Array.isArray(res.body.humanNodes) && res.body.humanNodes.length === 1);
-    assertEquals(res.body.humanNodes[0].nodeId, "b");
-    assertEquals(res.body.humanNodes[0].prompt, "do X");
     assert(Array.isArray(res.body.sideEffects) && res.body.sideEffects.length === 1);
-    assertEquals(res.body.sideEffects[0].nodeId, "a");
-    assertEquals(res.body.sideEffects[0].kind, "agent");
-    assert(typeof res.body.sideEffects[0].description === "string" && res.body.sideEffects[0].description.length > 0);
-    // NOTHING was staged, and no dispatch handle came back.
-    assertEquals((await deliveryGraphProposals(data).all()).length, 0);
+    // The stage door persists a `staged` proposal — and returns NO dispatch handle (#460).
+    assertEquals((await deliveryGraphProposals(data).get(res.body.digest))?.status, "staged");
     assertEquals(res.body.runKey, undefined);
     assertEquals(res.body.processInstanceKey, undefined);
+    // The stage summary omits the heavy BPMN (the staged grid recompiles by digest for its DI preview).
+    assertEquals(res.body.bpmn, undefined);
   });
 });
 
-test("preview-delivery-graph: repeated previews are pure — the identical digest, still nothing staged", async () => {
+test("stage-delivery-graph: repeated stages of the same graph → one live row (idempotent on digest)", async () => {
   await withApp(async (app, data) => {
     const a = await call(app, { graphJson: GOOD });
     const b = await call(app, { graphJson: GOOD });
     assertEquals(a.body.digest, b.body.digest);
-    assertEquals((await deliveryGraphProposals(data).all()).length, 0);
+    assertEquals((await deliveryGraphProposals(data).find({ digest: a.body.digest })).length, 1);
   });
 });
 
-test("preview-delivery-graph: text that is not valid JSON → 400 with a human error, nothing staged", async () => {
+test("stage-delivery-graph: text that is not valid JSON → 400, nothing staged", async () => {
   await withApp(async (app, data) => {
     const res = await call(app, { graphJson: "{ not json" });
     assertEquals(res.status, 400);
@@ -93,16 +85,7 @@ test("preview-delivery-graph: text that is not valid JSON → 400 with a human e
   });
 });
 
-test("preview-delivery-graph: a blank paste → 400, never a 500", async () => {
-  await withApp(async (app) => {
-    const res = await call(app, { graphJson: "   " });
-    assertEquals(res.status, 400);
-    assertEquals(res.body.ok, false);
-    assert(typeof res.body.error === "string" && res.body.error.length > 0);
-  });
-});
-
-test("preview-delivery-graph: a valid-JSON but malformed graph → 400 with path-qualified errors, nothing staged", async () => {
+test("stage-delivery-graph: a valid-JSON but malformed graph → 400 with path-qualified errors, nothing staged", async () => {
   await withApp(async (app, data) => {
     const res = await call(app, {
       graphJson: JSON.stringify({ nodes: [{ id: "a", kind: "agent", agent: { jobType: "j" } }], edges: [{ from: "a", to: "ghost" }] }),
@@ -110,14 +93,13 @@ test("preview-delivery-graph: a valid-JSON but malformed graph → 400 with path
     assertEquals(res.status, 400);
     assertEquals(res.body.ok, false);
     assert(Array.isArray(res.body.errors) && res.body.errors.length > 0);
-    assert(res.body.errors.every((e: { path: string; message: string }) => typeof e.path === "string"));
     assertEquals((await deliveryGraphProposals(data).all()).length, 0);
   });
 });
 
-test("preview-delivery-graph: a pasted JSON array (not an object) → 400", async () => {
+test("stage-delivery-graph: a blank paste → 400, never a 500", async () => {
   await withApp(async (app) => {
-    const res = await call(app, { graphJson: "[]" });
+    const res = await call(app, { graphJson: "   " });
     assertEquals(res.status, 400);
     assertEquals(res.body.ok, false);
   });
