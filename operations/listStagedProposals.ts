@@ -29,7 +29,7 @@ export default defineOperation("listStagedProposals", async ({ req }, app) => {
     nodeCount: row.node_count,
     humanNodeCount: row.human_node_count,
     sideEffectCount: row.side_effect_count,
-    sideEffecting: row.side_effecting !== 0,
+    sideEffecting: row.side_effecting === 1,
     createdAt: row.created_at,
     expiresAt: row.expires_at,
   }));

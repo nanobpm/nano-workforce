@@ -10,6 +10,7 @@ import { join, resolve } from "node:path";
 import { after, describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { bootTestApp, type TestApp } from "@nanobpm/urban-testkit";
+import { noopLog } from "../test/log.ts";
 
 const APP_ROOT = resolve(import.meta.dirname, "..");
 const GITHUB_ENV: Record<string, string> = { NANO_PR_GITHUB_TRANSPORT: "token", GITHUB_TOKEN: "" };
@@ -119,5 +120,40 @@ describe("listStagedProposals — the live staged-proposals list", () => {
 
     const after = await api.call<ListResponse>("listStagedProposals", {});
     assert.equal(after.body.count, 0, "a dispatched proposal is no longer staged");
+  });
+
+  // The optional shared-secret guard is enforced in the handler (not by OpenAPI `security`), mirroring
+  // the other read doors (getLineage / listActivePrs). `SECRET` is captured at module import, so we
+  // cache-bust re-import the handler with NANO_PR_WEBHOOK_SECRET set to exercise both the rejected and
+  // authorized paths, driving it directly against a real booted data layer.
+  test("shared-secret guard: 401 without x-hook-secret, 200 with it", async () => {
+    const app = await boot();
+    const stubApp = { log: noopLog(), data: app.db } as any;
+    const ctx = (headers: Record<string, string> = {}) => ({
+      req: {
+        method: "GET",
+        path: "/app/api/delivery-graph/staged",
+        query: new URLSearchParams(),
+        headers: new Headers(headers),
+        text: async () => "",
+      } as any,
+      params: {},
+      query: {},
+      body: undefined,
+    });
+    const prev = process.env["NANO_PR_WEBHOOK_SECRET"];
+    process.env["NANO_PR_WEBHOOK_SECRET"] = "s3cr3t";
+    try {
+      const mod = await import(`./listStagedProposals.ts?guard=${Date.now()}`);
+      const guarded = mod.default as (c: unknown, a: unknown) => Promise<{ status: number; body: any }>;
+      const bad = await guarded(ctx(), stubApp);
+      assert.equal(bad.status, 401);
+      const ok = await guarded(ctx({ "x-hook-secret": "s3cr3t" }), stubApp);
+      assert.equal(ok.status, 200);
+      assert.ok(Array.isArray(ok.body.proposals));
+    } finally {
+      if (prev === undefined) delete process.env["NANO_PR_WEBHOOK_SECRET"];
+      else process.env["NANO_PR_WEBHOOK_SECRET"] = prev;
+    }
   });
 });

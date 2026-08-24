@@ -130,10 +130,17 @@ export function mountStagedProposals(host, config = {}) {
   }
 
   let busyCount = 0;
-  function busy(on) {
-    busyCount += on ? 1 : -1;
+  // A re-render (renderList → new buttons) resets every button to enabled, so the disabled state is
+  // NOT stored on the elements — it is derived from busyCount and re-applied after each render (below)
+  // and on every busy()/idle() transition. That keeps a poll or dispatch-driven refresh from silently
+  // re-enabling the buttons while a Preview/Dispatch request is still in flight.
+  function applyDisabled() {
     const disabled = busyCount > 0;
     for (const btn of listEl.querySelectorAll("button")) btn.disabled = disabled;
+  }
+  function busy(on) {
+    busyCount += on ? 1 : -1;
+    applyDisabled();
   }
 
   /** Fetch JSON from a door and return { status, body } (never throws on an HTTP error). Rejects
@@ -159,6 +166,9 @@ export function mountStagedProposals(host, config = {}) {
   const post = (url, payload) => request(url, { method: "POST", body: JSON.stringify(payload) });
 
   let disposed = false;
+  // True while the last completed load failed — so a subsequent successful load knows to clear its own
+  // stale error banner, WITHOUT clobbering a transient action toast (Preview/Dispatch ok/err message).
+  let loadErrorShown = false;
 
   async function refresh() {
     try {
@@ -166,13 +176,21 @@ export function mountStagedProposals(host, config = {}) {
       if (disposed) return;
       if (status === 200 && Array.isArray(body.proposals)) {
         listEl.innerHTML = renderList(body.proposals);
+        applyDisabled();
+        if (loadErrorShown) {
+          setStatus("");
+          loadErrorShown = false;
+        }
       } else {
         listEl.innerHTML = renderList([]);
+        applyDisabled();
         setStatus(body && body.error ? body.error : "Could not load staged proposals.", "err");
+        loadErrorShown = true;
       }
     } catch (err) {
       if (disposed) return;
       setStatus(err && err.message ? err.message : "Staged-proposals request failed.", "err");
+      loadErrorShown = true;
     }
   }
 
@@ -251,7 +269,12 @@ export function mountStagedProposals(host, config = {}) {
   });
 
   refresh();
-  const timer = setInterval(refresh, refreshMs);
+  // Skip a scheduled poll while a Preview/Dispatch request is in flight: re-rendering the list mid-
+  // request would drop the in-flight button (and its disabled state) out from under the user. The
+  // dispatch path drives its own refresh() on completion, so nothing is missed.
+  const timer = setInterval(() => {
+    if (busyCount === 0) refresh();
+  }, refreshMs);
 
   return () => {
     disposed = true;
