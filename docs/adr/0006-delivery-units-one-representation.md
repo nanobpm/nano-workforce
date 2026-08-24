@@ -21,7 +21,9 @@ nano-ide **#424** (datasource can read a SQL VIEW — the *data-level* unlock),
 nano-workforce **#416** (the PR bumping the testkit to engine-wasm 0.7.2, which executes `callActivity`
 — the *process-level* unlock),
 nano-workforce **#464** (the tracking issue with slices S1–S6),
-nano-workforce **#305** (consolidate escalations on native `user_tasks` — a natural sub-step of S1/S3).
+nano-workforce **#305** (consolidate escalations on native `user_tasks` — a natural sub-step of S1/S3),
+nano-ide **#473** (surface the element-instance query on the `EngineClient` binding — the sole upstream
+dependency of the S8 stepper slice).
 
 ## Context
 
@@ -187,7 +189,7 @@ representation. These unions are **not** identical today — features use
 separate node contract — plus the per-shape mapping and precedence and the write/`instanceTracking`
 behavior — not merely projecting an existing value.
 
-### 4b. One derived **stepper** — the cells are the step axis, correlated by `process_key`
+### 4b. One derived **stepper** — the cells are the step axis, per-shape correlated
 
 §4 collapses the three status *unions* into one derived union; this decision collapses the three
 *progress projections* — the thing an operator actually reads as "where is this unit in its
@@ -198,7 +200,7 @@ levels for one idea:
 
 | Surface | Derivation | Step vocabulary | Render |
 |---|---|---|---|
-| **Feature** | `deriveStage` over the declare-once read-model (`app/stage.ts`; mig. 076 declared it, mig. 081 superseded the VIEW for terminal-folded status — 073 is historical) — reconciled from the feature run's `status` / `pr_key` / flags **and** the correlated `pull_requests` work-state | `STAGE_KEYS` = Requested → Implementing → PR open → Converging → Merging → Done | the **`pipeline` stepper** kind (`pages/feature.page.json`) |
+| **Feature** | `deriveStage` over the declare-once read-model (`app/stage.ts`; mig. 076 declared it, mig. 081 superseded the VIEW for terminal-folded status — 073 is historical). Its inputs are the feature run's effective `status` / `pr_key` / `converge`+`auto_merge` flags / open user-task projections; `pollFeatureDelivery` separately reconciles PR status **into** that row upstream | `STAGE_KEYS` = Requested → Implementing → PR open → Converging → Merging → Done | the **`pipeline` stepper** kind (`pages/feature.page.json`) |
 | **Epic** | **write-time stamp** by each spine worker (`app/epicPhase.ts`, `ELEMENT_PHASE`) | `EPIC_PHASE` (wave-labelled) | a plain `{{epic_phase}}` **text cell** |
 | **Delivery graph** | engine-truth poll of open **user tasks** (`pollDeliveryGraphPhase` → `deriveDeliveryPhase`) | `DELIVERY_PHASE` + `Parked on human node: <label>` | a plain `phase` **text cell** |
 
@@ -217,7 +219,7 @@ step, how `Requested`/`PR open`/`Done` bracket the cell run, and where an insert
 `escalation` cell appears as a step — seeded from `STAGE_KEYS` but owning the canonical definition. It
 is not enough to declare one axis *is* the other.
 
-**The current step is derived by correlation — and the correlation key is not simply `process_key`.**
+**The current step is derived by per-shape correlation (not a single `process_key` join).**
 The projection must answer "which cell has this unit reached," fusing two truth sources:
 
 - **Engine truth — the furthest element reached — IS available on the runtime.** nwf runs against
@@ -231,7 +233,9 @@ The projection must answer "which cell has this unit reached," fusing two truth 
 - **Work-table + aggregate truth — the correlated downstream state.** The feature/epic aggregate row
   (`status` / `pr_key` / flags) gives the coarse `Requested` / `Implementing` / `Done` bracket even
   with no PR and no park; `pull_requests` (and siblings) carry the `converging` / `waiting_review` /
-  `merging` sub-state that `instanceTracking` + `deriveStage` already reconcile. The projection must
+  `merging` sub-state that `pollFeatureDelivery` (with the lineage/plan projections) rolls **into** the
+  feature row before `deriveStage` maps it — `instanceTracking` supplies only the tracking-status edges,
+  not the PR rollup. The projection must
   name an explicit **precedence** between engine truth and this state (engine element position when
   available, else aggregate/work-table), not silently pick one.
 
@@ -244,12 +248,15 @@ aggregate↔PR link is **`pr_key`**, and epics additionally need node/root mappi
 key** — rather than assume a single `process_key` join; a naïve `process_key` join would misattribute
 or miss work-table state. This canonical-key requirement is itself an argument for the §1 aggregate.
 
-**The aggregate step is a frontier, not a single "furthest."** For the 1-node feature there is one
-active step. For an N-node/parallel DAG (epic waves, delivery graphs), two branches can occupy
-incomparable cells at once, and no total order picks a unique maximum — so the aggregate is a
-**frontier** (set-valued, or reduced by an explicit, deterministic rollup, e.g. the least-advanced
-active branch for a "still blocked on" read). §4b specifies that rollup rather than leaving "furthest"
-undefined; the per-node steps remain individually well-defined.
+**The aggregate step is a frontier — reduced to one deterministic step for the renderer.** For the
+1-node feature there is one active step. For an N-node/parallel DAG (epic waves, delivery graphs), two
+branches can occupy incomparable cells at once, and no total order picks a unique maximum. But the
+`pipeline` renderer binds a **single scalar** `activeField` (`pages/feature.page.json`), so S7 **must**
+reduce that frontier deterministically to one step — the canonical choice is the **least-advanced active
+branch** (the "still blocked on" read), so the aggregate never renders further along than its slowest
+in-flight branch. This reduction is an explicit S7 decision, not left to the implementer; a set-valued /
+multi-track render would be a separate renderer change, out of scope here. The per-node steps remain
+individually well-defined underneath the reduction.
 
 **Cross-instance correlation, because composed cells are child instances by default.** engine-core's
 `CallActivity` spawns a **distinct child process instance** and links it to the parent
@@ -273,19 +280,32 @@ The enabling upstream step is to **surface `searchElementInstances` / wait-state
 binding** (nano-ide / urban), after which both workarounds collapse into one live element-instance
 projection over the cell axis.
 
-**v1 ships on what's correlated today, at a coarser resolution; the element-instance query sharpens
-it.** Until the binding surfaces the element model, §4b's projection is derivable *now* only from the
-aggregate/work-table state + user-task parks — which is enough for feature (its `deriveStage` already
-runs on exactly this) but is **coarse for delivery-graph and epic**: `deriveDeliveryPhase` returns a
-generic `Running` with **no node id** for an active `agent` / `wait` / `connector` node when no human
-task is open, and `delivery_graph_runs` stores no current node. So the v1 stepper must either (a) render
-those as an **explicitly coarse** step (a single "in flight" step, not an invented cell position), or
-(b) gate the per-cell delivery-graph/epic resolution on the element-instance source (S8). It must not
-fabricate a precise step it cannot observe. When the binding lands the element query, the projection
-swaps its park/position source for the live engine element instance **without changing the step axis,
-the correlation key, or the renderer** — so §4b is shippable now at feature-grade fidelity and sharpens
-epic + delivery-graph to per-cell later, retiring *both* the `epic_phase` write-time stamp and the
-user-task-only delivery-graph poll into one derivation.
+**v1 ships on what's correlated today, at lifecycle-stage fidelity; the element-instance query sharpens
+it to per-cell.** Until the binding surfaces the element model, §4b's projection is derivable *now* only
+from aggregate/work-table state + user-task parks — and that is **lifecycle-stage, not per-cell, even
+for feature**: `deriveStage` collapses a token parked in a readiness-probe service/timer loop, or an
+active `implement-task`, all to `Implementing` while `feature_runs.status` stays `running` and no user
+task is open. It is coarser still for the other two, for reasons that must be stated *separately*:
+
+- **Delivery graph:** `deriveDeliveryPhase` (`app/deliveryGraphRun.ts`) returns a generic `Running`
+  with **no node id** for an active `agent` / `wait` / `connector` node when no human task is open, and
+  `delivery_graph_runs` stores no current node.
+- **Epic:** its pre-PR position (Planning, and the non-parked part of Reviewing) has **no** work-table
+  row, PR row, or open user task at all — only the write-time `epic_phase` stamp (`app/epicPhase.ts`)
+  and the plan/PR rollups observe it. `deriveDeliveryPhase` is the delivery-graph projection only and
+  provides no evidence for epic resolution.
+
+So v1's scope is deliberately bounded: the one derivation + `pipeline` renderer covers **feature and
+delivery-graph at lifecycle-stage fidelity**, rendering any unobservable node as an **explicitly coarse**
+single "in flight" step (never an invented cell position). The **epic pipeline is deferred to S8**:
+because its pre-PR position is unobservable from S7 inputs, epic keeps its `epic_phase` **text cell** as
+an explicit, retained **second source** (write-provenance) until the element query lands — rather than
+fabricating a derived step or promoting `epic_phase` to a permanent stepper source. When the binding
+lands the element query (S8), the projection swaps its park/position source for the live engine element
+instance — sharpening feature + delivery-graph to per-cell and bringing epic onto the same `pipeline` —
+**preserving the step axis and renderer, and using whatever parent/child correlation strategy S4
+selects** — retiring *both* the `epic_phase` write-time stamp and the user-task-only delivery-graph poll
+into one derivation.
 
 ### 5. Preserve — the static-vs-adaptive execution axis (do NOT bundle it)
 
@@ -364,29 +384,37 @@ deployment-runtime prerequisite noted above), not on #416 alone.
 - **S7 · one derived stepper — v1 on today's surface** (Decision §4b) — define the **cell → step
   mapping** (seeded from `STAGE_KEYS`, but owning the canonical definition — `STAGE_KEYS` mixes
   lifecycle states with cells), derive current-step by correlating the aggregate/work-table state
-  (`feature_runs` `status`/`pr_key`/flags + `pull_requests`, joined by **`pr_key`** per shape — *not* a
-  naïve `process_key` join, which is reassigned downstream) with user-task parks (`searchUserTasks`), and
-  **promote the `pipeline` stepper kind** (feature-only today) onto the epic and delivery-graph pages.
-  This needs **no** engine-binding change, but ships at **feature-grade fidelity only**: feature gets a
-  true per-cell stepper now, while for a delivery-graph/epic node that is running with no open user task
-  (`deriveDeliveryPhase` returns generic `Running`, no node id), the stepper renders an **explicitly
-  coarse "in flight" step** rather than fabricating a cell position. Epic keeps its write-provenance
-  `epic_phase` stamp for its pre-PR phases (see S8). The mapping can begin as soon as S4 names the cells;
-  the `pipeline` render binding can start immediately.
+  (`feature_runs` `status`/`pr_key`/flags + the `pollFeatureDelivery`-reconciled `pull_requests` state,
+  joined by **`pr_key`** per shape — *not* a naïve `process_key` join, which is reassigned downstream)
+  with user-task parks (`searchUserTasks`), reducing any parallel frontier to the **least-advanced active
+  branch**, and **promote the `pipeline` stepper kind** (feature-only today) onto the delivery-graph page.
+  This needs **no** engine-binding change, but ships at **lifecycle-stage fidelity only — for feature
+  *and* delivery-graph alike**: even feature is not truly per-cell today (`deriveStage` collapses a
+  readiness-probe/timer park or an active `implement-task` all to `Implementing`), and for a
+  delivery-graph node running with no open user task (`deriveDeliveryPhase` returns generic `Running`, no
+  node id) the stepper renders an **explicitly coarse "in flight" step** rather than fabricating a cell
+  position. The **epic pipeline is out of S7 scope**: epic's pre-PR position is unobservable from these
+  inputs, so epic keeps its write-provenance `epic_phase` **text cell** as an explicit retained second
+  source until S8 (below). The mapping can begin as soon as S4 names the cells; the `pipeline` render
+  binding for feature + delivery-graph can start immediately.
 - **S8 · surface the element-instance query → retire the epic write-stamp** (Decision §4b) — the one
-  slice that **does** depend on an upstream binding change. Nano's Rust engine already serves the
-  element-instance read model (`POST /v2/element-instances/search` `searchElementInstances` +
-  element-instance **wait-states** — active elements and **job/message** parks, not only user tasks), but
-  the `@nanobpm/urban` `EngineClient` binding nwf consumes surfaces only `searchProcessInstances` +
-  `searchUserTasks`. Surface `searchElementInstances` / wait-states on the binding (upstream in
-  nano-ide / urban), then swap the S7 projection's park/position source for the live engine element
-  instance — **without changing the step axis, the correlation key, or the renderer**. This is
+  slice that **does** depend on an upstream binding change, tracked as **`nanobpm/nano-ide#473`**. Nano's
+  Rust engine already serves the element-instance read model (`POST /v2/element-instances/search`
+  `searchElementInstances` + element-instance **wait-states** — active elements and **job/message**
+  parks, not only user tasks), but the `@nanobpm/urban` `EngineClient` binding nwf consumes surfaces only
+  `searchProcessInstances` + `searchUserTasks`. Surface `searchElementInstances` / wait-states on the
+  binding (upstream in nano-ide / urban, **nano-ide#473**), then swap the S7 projection's park/position
+  source for the live engine element instance — **preserving the step axis and the renderer, and using
+  whatever parent/child correlation strategy S4 selects**: if S4 chooses cross-instance correlation
+  (default `callActivity` child instances), S8 must also extend the element lookup to resolve the
+  child/root instance keys, so the "no change to the correlation key" is scoped to the axis and renderer,
+  not to a fixed single-instance join. This is
   what lets epic's **Planning** phase and the **non-parked** part of **Reviewing** — which run inside
   `plan-fanout.bpmn` before any PR exists and have no work-table row (Reviewing *is* partly visible via
   the real `plan-review-decision` user task, but Planning and the running review work are not), today
-  knowable only from write-provenance — become a pure read-model derivation, retiring the `epic_phase`
-  write-time stamp (`app/epicPhase.ts`, nano-ide#266) and folding the user-task-only
-  `pollDeliveryGraphPhase` into one live projection.
+  knowable only from write-provenance — become a pure read-model derivation, bringing epic onto the same
+  `pipeline`, retiring the `epic_phase` write-time stamp (`app/epicPhase.ts`, nano-ide#266) and folding
+  the user-task-only `pollDeliveryGraphPhase` into one live projection.
 
 ## Non-goals / deferred
 
