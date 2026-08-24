@@ -78,6 +78,69 @@ test("save-to-library: from a staged proposal digest → 200, reuses the stored 
   });
 });
 
+test("save-to-library: from a dispatched proposal digest → 200, source=from-dispatched", async () => {
+  await withApp(async (app, data) => {
+    const staged = await stage(app, GOOD);
+    assertEquals(staged.status, 200);
+    const digest = staged.body.digest;
+    const { markProposalDispatched } = await import("../app/deliveryGraphProposals.ts");
+    await markProposalDispatched(data, digest);
+    const res = await call(app, { name: "Saved From Dispatched", digest });
+    assertEquals(res.status, 200);
+    assertEquals(res.body.ok, true);
+    assertEquals(res.body.entry.source, "from-dispatched");
+    assertEquals((await deliveryGraphLibrary(data).all()).length, 1);
+  });
+});
+
+test("save-to-library: a superseded proposal digest → 400, nothing persisted", async () => {
+  await withApp(async (app, data) => {
+    const staged = await stage(app, GOOD);
+    assertEquals(staged.status, 200);
+    const digest = staged.body.digest;
+    const proposals = (await import("../app/deliveryGraphProposals.ts")).deliveryGraphProposals(data);
+    await proposals.update(digest, { status: "superseded" });
+    assertEquals((await proposals.get(digest))?.status, "superseded");
+    const res = await call(app, { name: "Saved From Superseded", digest });
+    assertEquals(res.status, 400);
+    assertEquals(res.body.ok, false);
+    assert(typeof res.body.error === "string" && res.body.error.includes("not a live staged/dispatched proposal"));
+    assertEquals((await deliveryGraphLibrary(data).all()).length, 0);
+  });
+});
+
+test("save-to-library: an expired proposal digest → 400, nothing persisted", async () => {
+  await withApp(async (app, data) => {
+    const staged = await stage(app, GOOD);
+    assertEquals(staged.status, 200);
+    const digest = staged.body.digest;
+    const { markProposalExpired } = await import("../app/deliveryGraphProposals.ts");
+    await markProposalExpired(data, digest);
+    const res = await call(app, { name: "Saved From Expired", digest });
+    assertEquals(res.status, 400);
+    assertEquals(res.body.ok, false);
+    assert(typeof res.body.error === "string" && res.body.error.includes("not a live staged/dispatched proposal"));
+    assertEquals((await deliveryGraphLibrary(data).all()).length, 0);
+  });
+});
+
+test("save-to-library: a staged-but-TTL-expired proposal digest → 400, nothing persisted", async () => {
+  await withApp(async (app, data) => {
+    const staged = await stage(app, GOOD);
+    assertEquals(staged.status, 200);
+    const digest = staged.body.digest;
+    // Force the row's TTL horizon into the past while leaving status=`staged`.
+    await (await import("../app/deliveryGraphProposals.ts"))
+      .deliveryGraphProposals(data)
+      .update(digest, { expires_at: new Date(Date.now() - 60_000).toISOString() });
+    const res = await call(app, { name: "Saved From Stale Staged", digest });
+    assertEquals(res.status, 400);
+    assertEquals(res.body.ok, false);
+    assert(typeof res.body.error === "string" && res.body.error.includes("not a live staged/dispatched proposal"));
+    assertEquals((await deliveryGraphLibrary(data).all()).length, 0);
+  });
+});
+
 test("save-to-library: an unknown digest → 400, nothing persisted", async () => {
   await withApp(async (app, data) => {
     const res = await call(app, { name: "ghost", digest: "deadbeef0000" });

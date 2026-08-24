@@ -16,7 +16,7 @@ import {
   libraryEntryDto,
   saveLibraryEntry,
 } from "../app/deliveryGraphLibrary.ts";
-import { deliveryGraphProposals } from "../app/deliveryGraphProposals.ts";
+import { deliveryGraphProposals, isProposalExpired } from "../app/deliveryGraphProposals.ts";
 import { parseAndCompileText } from "../app/deliveryGraphTextIngress.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
 
@@ -44,6 +44,14 @@ export default defineOperation("saveToLibrary", async ({ body }, app) => {
     if (!proposal) {
       app.log.warn("save-to-library rejected: unknown digest", { digest });
       return { status: 400, body: { ok: false, error: `no stored graph for digest ${digest} — stage or dispatch it first, or save a raw graph` } };
+    }
+    // Only a LIVE staged (not aged out of its TTL) or dispatched proposal may seed the library — a
+    // superseded/expired/stale-staged digest is not a canonical graph, and reusing it would both persist a
+    // retired graph and mis-label it `source: from-staged`.
+    const isLiveStaged = proposal.status === "staged" && !isProposalExpired(proposal.expires_at);
+    if (!isLiveStaged && proposal.status !== "dispatched") {
+      app.log.warn("save-to-library rejected: digest not live staged/dispatched", { digest, status: proposal.status });
+      return { status: 400, body: { ok: false, error: `digest ${digest} is not a live staged/dispatched proposal (status ${proposal.status}) — stage or dispatch it first, or save a raw graph` } };
     }
     sourceGraphJson = proposal.graph;
     source = proposal.status === "dispatched" ? "from-dispatched" : "from-staged";
