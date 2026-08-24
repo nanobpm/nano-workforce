@@ -445,6 +445,9 @@ test("the operator pages bind the derived plan-family VIEWs (never the raw plans
   const detail = PAGE("epic-detail.page.json");
   const byId = (id: string) => (detail.nodes ?? []).find((n: { id: string }) => n.id === id);
   assertEquals(byId("wave-banner").props.data.table, "plan_read_model");
+  // The primary epic detail grid must also read the derived read model, not the raw `plans` table — a
+  // regression pointing it at `plans` would otherwise pass this guard (suppressed advisory test:400).
+  assertEquals(byId("epic-plan").props.data.table, "plan_read_model");
   assertEquals(byId("wave-summary").props.data.table, "plan_wave_summary");
   const summaryCols: string[] = byId("wave-summary").props.columns.map((c: { field: string }) => c.field);
   for (const f of ["wave", "bar", "merged", "in_flight", "blocked", "escalated", "skipped", "total"]) {
