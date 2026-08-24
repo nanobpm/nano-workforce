@@ -95,6 +95,16 @@
       }
     },
     {
+      "type": "appView",
+      "id": "delivery-graphs-library",
+      "props": {
+        "title": "Library",
+        "embed": "./delivery-graphs/library-embed.html",
+        "standalone": "./delivery-graphs/library-standalone.html",
+        "fill": true
+      }
+    },
+    {
       "type": "dataGrid",
       "id": "delivery-graphs-inflight",
       "props": {
@@ -134,7 +144,18 @@
             { "field": "digest", "label": "Digest" },
             { "field": "phase_node_id", "label": "Parked node" }
           ]
-        }
+        },
+        "rowActions": [
+          {
+            "label": "Save to library",
+            "confirm": "Save this dispatched delivery graph to the reusable library? Its stored graph is copied into the Library (source: from-dispatched) so it can be reused later.",
+            "showWhenField": "title",
+            "action": {
+              "path": "/app/api/actions/delivery-graph/library/save",
+              "body": { "name": "{{row.title}}", "digest": "{{row.digest}}" }
+            }
+          }
+        ]
       }
     }
   ]

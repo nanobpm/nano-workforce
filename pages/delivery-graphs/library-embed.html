@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Delivery graphs — library (reuse · delete) (App View embed)</title>
+    <link rel="stylesheet" href="./delivery-graphs.css" />
+    <style>
+      html, body { margin: 0; height: 100%; background: #0b0f14; }
+    </style>
+  </head>
+  <body>
+    <!--
+      Console App-View embed (ADR 0057, issue #523). The console loads this document into its App-View
+      surface and hands it a host element; we mount the SAME reusable-library list (Reuse + Delete) via
+      the SAME ./library.mount.js as the standalone shell — only the host and the injected endpoint
+      config differ, so the view renders identically. When the console injects endpoint config via
+      `window.__NANO_APP_VIEW__`, it wins.
+    -->
+    <main id="delivery-graphs-library-root"></main>
+    <script type="module">
+      import { mountDeliveryGraphLibrary } from "./library.mount.js";
+
+      const cfg = window.__NANO_APP_VIEW__ ?? {};
+      mountDeliveryGraphLibrary(cfg.host ?? document.getElementById("delivery-graphs-library-root"), {
+        libraryUrl: cfg.libraryUrl,
+        hookSecret: cfg.hookSecret,
+      });
+    </script>
+  </body>
+</html>

@@ -384,6 +384,14 @@ export const WIRE_CONTRACTS = {
     shape:
       '{ name?: string, nodes: Array<{ id: string, kind: "agent"|"wait"|"human"|"connector", emits?: Array<{ name: string, type: "string"|"number"|"boolean"|"artifact"|"version"|"url", description?: string }>, agent?: { jobType: string, prompt?: string }, wait?: ReadinessProbe, human?: { formKey?: string, prompt?: string }, connector?: { target: string, dedupeKey?: string, payload?: object } }>, edges?: Array<{ from: string, to: string }> }',
   },
+  "deliveryGraph.compose.fill": {
+    category: "wire",
+    name: "deliveryGraph.compose.fill",
+    owner: "pages/delivery-graphs/mount.js",
+    semantics:
+      "The INBOUND reuse-fill host-bridge message that loads a saved `DeliveryGraph` JSON into the Delivery Graphs COMPOSE App-View textarea (`#dg-json`) — issue #523, epic #519 S4. The compose mount (consumer) registers a same-origin `window` `message` listener for this shape and routes it through its single `fillComposer()` seam; the producers are the Library App-View **Reuse** action (#523) and the filesystem **Import** control (#524), which post it across the App-View iframe boundary (the INBOUND twin of the existing OUTBOUND `nano-navigate` DI-preview bridge). The `type` string is exported ONCE as `DG_COMPOSE_FILL_MESSAGE` from pages/delivery-graphs/mount.js — both producers import it, never re-declare a synonym.",
+    shape: '{ type: "nano-delivery-graph-compose-fill", graphJson: string }',
+  },
 } as const satisfies Record<string, WireContract>;
 
 export const TYPE_CONTRACTS = {
