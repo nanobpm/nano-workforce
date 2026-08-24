@@ -240,11 +240,19 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
       code: "empty-graph",
     });
   } else if (nodes.length > GRAPH_MAX_NODES) {
-    errors.push({
-      path: "nodes",
-      message: `delivery graph has too many nodes (${nodes.length}) — the limit is ${GRAPH_MAX_NODES}`,
-      code: "too-many-nodes",
-    });
+    // Short-circuit on the cap BEFORE the per-node walk. Raw `graphJson` (the import/save doors)
+    // bypasses openapi's `nodes.maxItems: 256`, so an arbitrarily large array would otherwise still
+    // drive the full `nodes.forEach` — building the id→facts/types maps for every supplied node —
+    // before returning the same 400. Rejecting on the cap ALONE keeps the advertised resource limit
+    // effective (bounded validation work on an oversized untrusted import), rather than merely
+    // reporting it after doing the unbounded walk.
+    return [
+      {
+        path: "nodes",
+        message: `delivery graph has too many nodes (${nodes.length}) — the limit is ${GRAPH_MAX_NODES}`,
+        code: "too-many-nodes",
+      },
+    ];
   }
 
   // Top-level `name` (optional): mirror openapi's `DeliveryGraph.name` `maxLength: 255`, INDEPENDENTLY
@@ -434,12 +442,17 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
     });
   } else if (edges.length > GRAPH_MAX_EDGES) {
     // Re-enforce openapi's `edges.maxItems: 1024` INDEPENDENTLY of the bypassed shape gate, so an
-    // oversized-but-compilable graph cannot reach the layout/compiler and be persisted.
+    // oversized-but-compilable graph cannot reach the layout/compiler and be persisted. Short-circuit
+    // on the cap BEFORE the `edges.forEach` walk: like the node cap, a raw import that bypasses
+    // `maxItems` must not force endpoint resolution, `guardEdges` allocation, and adjacency work for
+    // every edge before returning the same 400 — so the advertised resource limit stays effective.
+    // Any node-level errors already accumulated in pass 1 are returned alongside the cap.
     errors.push({
       path: "edges",
       message: `delivery graph has too many edges (${edges.length}) — the limit is ${GRAPH_MAX_EDGES}`,
       code: "too-many-edges",
     });
+    return errors;
   }
   // consumer (`to`) → set of upstream node ids (`from`'s node) — the dependency direction.
   const adjacency = new Map<string, Set<string>>();

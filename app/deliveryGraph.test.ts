@@ -114,6 +114,18 @@ test("too-many-nodes: a node set larger than the openapi `maxItems: 256` cap is 
   const tooMany = Array.from({ length: 257 }, (_, i) => node(i));
   const err = hasCode(validateDeliveryGraph({ nodes: tooMany }), "too-many-nodes");
   assertEquals(err.path, "nodes");
+  // The cap SHORT-CIRCUITS the per-node walk: an oversized array is rejected on the cap ALONE, so
+  // even when every node is independently invalid (here: `human` config of the wrong type) the
+  // validator returns ONLY the single `too-many-nodes` error rather than doing 257 nodes' worth of
+  // per-node validation/map-building work first (#533 review — make the resource limit effective).
+  const oversizedAndInvalid = Array.from({ length: 257 }, (_, i) => ({ id: `n${i}`, kind: "human", human: 42 }));
+  assertEquals(validateDeliveryGraph({ nodes: oversizedAndInvalid }), [
+    {
+      path: "nodes",
+      message: "delivery graph has too many nodes (257) — the limit is 256",
+      code: "too-many-nodes",
+    },
+  ]);
   // The boundary (exactly 256) is accepted (no too-many-nodes error).
   const exactly = Array.from({ length: 256 }, (_, i) => node(i));
   assertEquals(
@@ -131,6 +143,13 @@ test("too-many-edges: an edge set larger than the openapi `maxItems: 1024` cap i
   const tooMany = Array.from({ length: 1025 }, () => ({ from: "a", to: "b" }));
   const err = hasCode(validateDeliveryGraph({ nodes, edges: tooMany }), "too-many-edges");
   assertEquals(err.path, "edges");
+  // The cap SHORT-CIRCUITS the edge walk: an oversized edge array is rejected before any endpoint
+  // resolution / adjacency work, so even 1025 dangling edges surface ONLY the cap error, not 1025
+  // `dangling-edge` errors (#533 review — make the resource limit effective).
+  const oversizedDangling = Array.from({ length: 1025 }, () => ({ from: "ghost", to: "phantom" }));
+  const capOnly = validateDeliveryGraph({ nodes, edges: oversizedDangling });
+  assertEquals(capOnly.filter((e) => e.code === "dangling-edge"), []);
+  assertEquals(hasCode(capOnly, "too-many-edges").path, "edges");
 });
 
 test("too-many-emits: a node declaring more than the openapi `maxItems: 32` facts is rejected", () => {
