@@ -99,6 +99,24 @@ The closed set (extensible only by a deliberate ADR/PR, never by graph authors):
 - **`human`** — a scheduled user task + form (§4).
 - **`connector`** — an automated, side-effecting outbound action (the connector I/O surface).
 
+> **Amendment (issue #500): the connector's first REAL target landed — `converge` / `converge-merge`.**
+> The connector I/O surface shipped in slice S4 with a deliberately forward-declared STUB action
+> (`performConnectorAction`), the real target dispatch deferred to a later slice. That slice is this:
+> a `connector` node whose `target` is **`converge-merge`** (or **`converge`** for converge-only)
+> enrolls its `payload.pr` into the app's shared convergence (+ merge) loop via `submitPr` — the SAME
+> seam the feature cell reuses (`workers/converge-feature`), no duplicated machinery. Enrollment is
+> defined in the worker (it has `app.data`/`app.engine`) but **injected into `dispatchConnector` as the
+> connector's action**, so the existing at-most-once ledger fence wraps the enrollment itself: it fires
+> only on the claim winner (or a resumed crashed claim), and a `deduped` redelivery — a restart / lost
+> ack / graph resume that lands AFTER the PR settled — never re-runs it. That matters because `submitPr`
+> deliberately RE-OPENS a terminal PR; an unfenced re-call would flip a `merged`/`converged`/`abandoned`
+> PR back to `converging`. `submitPr`'s own `prKey` idempotency additionally makes a resumed re-perform
+> double-safe on a still-live row. This retires the manual `land-*` human gate whose only job was "go run convergence
+> yourself" — the canonical shape is now `agent (opens PR) → connector[converge-merge] →
+> wait[pr, merged]` with no human node. The payload is `{ pr, convergeOnly?, dependsOn? }`; the MVP
+> sources `pr` as a literal (auto-emitting it from the `agent` node as a typed `pr` fact is a deferred
+> follow-up). Other connector targets remain the forward-declared stub.
+
 Crucially, **execution stays engine-native**: each node kind is a real, already-deployed
 sub-process / call activity (`readiness-gate`, a user task, the implementation task, a connector
 invocation). The graph layer owns **scheduling** (which nodes' edges are satisfied → dispatch), not a

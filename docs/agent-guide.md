@@ -435,7 +435,7 @@ layer schedules, it does not re-implement execution):
 | `agent` | `agent: { jobType, prompt? }` | a worker runs an agent job type (the fan-out body). **Side-effecting.** | yes |
 | `wait` | `wait: <ReadinessProbe>` | a durable, bounded readiness probe — kind ∈ `http`, `command`, `npm`, `github-check`, `capability`, `pr`. Read-only. | yes (binds observed facts) |
 | `human` | `human?: { formKey?, prompt? }` | a scheduled user task + form (the Tasks inbox, §3). Blocks dependents, SLA-bounded, answerable by a human **or** an agent. | yes |
-| `connector` | `connector: { target, dedupeKey?, payload? }` | an automated, side-effecting outbound action. Carries a `dedupeKey` (at-least-once safe). *(payload is a forward-declared stub.)* | yes |
+| `connector` | `connector: { target, dedupeKey?, payload? }` | an automated, side-effecting outbound action. Carries a `dedupeKey` (at-least-once safe). Two **real targets** ship today — **`converge`** and **`converge-merge`** (§9.4); other targets are a forward-declared stub. | yes |
 
 A **`wait` node's `wait` is a `ReadinessProbe` verbatim** (the same shape feature-run
 intake uses): `{ kind, target, onTimeout?, match?, poll? }`. The **`pr` kind** watches an
@@ -559,3 +559,49 @@ To swap the manual PR-#303 path for a **capability** edge instead of a raw `pr` 
 the consumer a `wait` node with `kind: "capability"` (resolving *which published
 `pkg@version` first carries the change*) fed by the same `manual-publish.publishedVersion`
 fact — the fact-edge syntax is identical.
+
+### 9.4 Connector targets — drive a PR to convergence + merge (`converge` / `converge-merge`)
+
+A `connector` node with **`target: "converge-merge"`** (or **`"converge"`**) enrolls an
+agent-opened PR into the app's **shared convergence loop** — the *same* enrollment §1 (a
+standalone submit) and a feature run use (`submitPr`), no duplicated machinery. This replaces
+the old habit of bridging an `agent`-opened PR to review with a **human `land-*` gate** whose
+only job was "go run convergence yourself".
+
+- **`converge-merge`** — drive review convergence **and then the merge loop** (the PR merges
+  once converged + green). Equivalent to a submit with `convergeOnly: false`.
+- **`converge`** — **converge-only**: drive review convergence and stop at `converged`, never
+  handing off to the merge loop (equivalent to `convergeOnly: true`).
+
+**Payload:** `{ pr: "owner/repo#123", convergeOnly?: boolean, dependsOn?: string[] }`. `pr` is
+required (a literal `owner/repo#N`, identical to how a `wait: pr` node targets a known PR).
+`convergeOnly` defaults from the target and may be overridden per-node; `dependsOn` is unioned
+into the PR's merge-stage dependency set. The enrollment is idempotent (the connector's
+at-least-once dedupe fence **plus** `submitPr`'s own `prKey` idempotency), so a graph resume /
+redelivery never double-enrolls.
+
+**Canonical shape** — the agent opens the PR, the connector enrolls it, and a `wait[pr, merged]`
+gate binds `mergedSha` when it lands, with **no human node**:
+
+```json
+{
+  "name": "open → converge+merge → wait merged",
+  "nodes": [
+    { "id": "open", "kind": "agent",
+      "agent": { "jobType": "senior:feature", "prompt": "Implement the change in acme/repo and open a PR." } },
+    { "id": "land", "kind": "connector",
+      "connector": { "target": "converge-merge", "payload": { "pr": "acme/repo#123" } } },
+    { "id": "merged", "kind": "wait",
+      "wait": { "kind": "pr", "target": "acme/repo#123", "match": { "prState": "merged" }, "onTimeout": "escalate" } }
+  ],
+  "edges": [
+    { "from": "open", "to": "land" },
+    { "from": "land", "to": "merged" }
+  ]
+}
+```
+
+> **Follow-up (not shipped):** the MVP sources the connector's `pr` as a **literal**. Auto-emitting
+> the opened PR from the `agent` node as a typed `pr` fact (so the connector/`wait` bind it instead of
+> a literal) is a later slice — not required for the graph above.
+

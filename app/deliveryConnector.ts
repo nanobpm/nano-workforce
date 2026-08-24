@@ -33,6 +33,33 @@ export const DELIVERY_CONNECTOR_TASK_TYPE = "pr.delivery-connector";
 export const OUTCOME_CLAIMED = "claimed";
 export const OUTCOME_DELIVERED = "delivered";
 
+/** The two connector `target`s that enroll an agent-opened PR into the app's SHARED convergence /
+ * merge doors via `submitPr` (issue #500) — the delivery-graph side of the exact seam the feature
+ * cell reuses (`workers/converge-feature`), no duplicated machinery. `converge-merge` drives review
+ * convergence AND the merge loop; `converge` stops at `converged` (converge-only). This is the "real
+ * target dispatch" ADR 0005 deferred as a later slice for the connector I/O surface: a `converge`/
+ * `converge-merge` connector IS the "automated, side-effecting outbound action" a connector is
+ * defined to be. Named constants so the worker's dispatch branch and the docs/preview can never drift
+ * on the literal. */
+export const CONVERGE_TARGET = "converge";
+export const CONVERGE_MERGE_TARGET = "converge-merge";
+
+/** Is `target` one of the converge-enrollment targets (`converge` / `converge-merge`)? The single
+ * predicate the worker branches on to route a dispatch into `submitPr` instead of the forward-declared
+ * stub. */
+export function isConvergeTarget(target: string): boolean {
+  return target === CONVERGE_TARGET || target === CONVERGE_MERGE_TARGET;
+}
+
+/** The DEFAULT `convergeOnly` for a converge target: `converge` is review-only (`true` — stop at
+ * `converged`), `converge-merge` drives the merge loop too (`false`). Maps directly onto `submitPr`'s
+ * `convergeOnly` argument (mirroring how `converge-feature` inverts `autoMerge`). An author may still
+ * override it per-dispatch via the connector payload's `convergeOnly`. Only ever consulted behind
+ * `isConvergeTarget`, so a non-converge target's `false` is unreachable. */
+export function convergeOnlyForTarget(target: string): boolean {
+  return target === CONVERGE_TARGET;
+}
+
 /** One durable dispatch-claim row — the at-most-once ledger entry a connector writes before it acts. */
 export interface DeliveryConnectorDispatchRow extends Record<string, unknown> {
   id?: number;
@@ -77,16 +104,27 @@ export function connectorDedupeKey(input: {
   return null;
 }
 
-/** The forward-declared connector I/O surface (ADR non-goal — the concrete scheme is deferred). A STUB
- * that "performs" the action by returning a deterministic acknowledgement; a later slice replaces the
- * body with the real transport without touching the idempotency envelope around it. */
-function performConnectorAction(_input: {
+/** The side effect a connector dispatch performs EXACTLY ONCE per dedupe key. It runs only on the claim
+ * winner (or a resumed crashed claim), never on a `deduped` settled redelivery, so a real, non-idempotent
+ * side effect (e.g. `submitPr`, which deliberately re-opens a TERMINAL PR) is fenced by the ledger and
+ * can never double-fire — the reason the enrollment lives HERE rather than unconditionally around the
+ * dispatch. Returns the `detail` recorded on the ledger row. May be async (the real converge enrollment
+ * awaits `submitPr`). Must be idempotent so a resumed crashed claim can safely re-perform it — including
+ * terminal-safe against a NON-idempotent target (the converge action no-ops when its PR already settled,
+ * so a resume can never regress a terminal PR by re-opening it). */
+export type ConnectorAction = (input: {
   target: string;
   payload: Record<string, unknown> | null;
   boundFacts: readonly BoundFact[];
-}): { detail: string } {
+}) => { detail: string } | Promise<{ detail: string }>;
+
+/** The forward-declared connector I/O surface (ADR non-goal — the concrete scheme is deferred). The
+ * DEFAULT `ConnectorAction`: a STUB that "performs" the action by returning a deterministic
+ * acknowledgement; a caller with a real side effect (the converge worker's `submitPr` enrollment) injects
+ * its own action into `dispatchConnector` instead, without touching the idempotency envelope around it. */
+const performConnectorAction: ConnectorAction = (_input) => {
   return { detail: "connector stub — I/O surface forward-declared (ADR 0005 non-goal)" };
-}
+};
 
 /** The result of one connector dispatch attempt. `delivered` — the claim was won and the action fired
  * exactly once; `deduped` — the key was already claimed (an at-least-once redelivery), so the recorded
@@ -107,13 +145,14 @@ async function resumeOrDedupe(
   ledger: ReturnType<typeof deliveryConnectorDispatches>,
   row: DeliveryConnectorDispatchRow,
   input: { dedupeKey: string; target: string; payload?: Record<string, unknown> | null; boundFacts?: readonly BoundFact[] | null },
+  perform: ConnectorAction,
 ): Promise<ConnectorDispatchResult> {
   if (row.outcome === OUTCOME_DELIVERED) {
     return { connectorOutcome: "deduped", connectorDedupeKey: input.dedupeKey, connectorDetail: row.detail ?? "" };
   }
   // Still `claimed` — a prior attempt (sequential or the concurrent-race winner) claimed the key but
   // never recorded delivery. Resume on the existing row rather than dedupe forever on an un-acted claim.
-  const { detail } = performConnectorAction({
+  const { detail } = await perform({
     target: input.target,
     payload: input.payload ?? null,
     boundFacts: input.boundFacts ?? [],
@@ -149,6 +188,7 @@ export async function dispatchConnector(
   data: DataLayer,
   input: { dedupeKey: string; target: string; payload?: Record<string, unknown> | null; boundFacts?: readonly BoundFact[] | null },
   at: string,
+  perform: ConnectorAction = performConnectorAction,
 ): Promise<ConnectorDispatchResult> {
   const ledger = deliveryConnectorDispatches(data);
   const existing = await ledger.findOne({ dedupe_key: input.dedupeKey });
@@ -167,7 +207,7 @@ export async function dispatchConnector(
   if (existing) {
     // A prior attempt recorded (`delivered`) or claimed-but-crashed (`claimed`) this key. Dedupe or
     // resume it on the existing row — the ONE decision shared with the fence-loser path below.
-    return resumeOrDedupe(ledger, existing, input);
+    return resumeOrDedupe(ledger, existing, input, perform);
   }
   let claimId: number | bigint;
   try {
@@ -196,11 +236,11 @@ export async function dispatchConnector(
     // as the sequential path. Deduping a still-`claimed` winner here would complete the job on our ack,
     // so a winner that then crashed would strand the side effect forever (the engine won't redeliver an
     // acked job); resuming closes that gap and is safe because the action is idempotent.
-    if (won) return resumeOrDedupe(ledger, won, input);
+    if (won) return resumeOrDedupe(ledger, won, input, perform);
     return { connectorOutcome: "deduped", connectorDedupeKey: input.dedupeKey, connectorDetail: "" };
   }
   // We alone won the claim — perform the side effect exactly once and record its outcome on our row.
-  const { detail } = performConnectorAction({
+  const { detail } = await perform({
     target: input.target,
     payload: input.payload ?? null,
     boundFacts: input.boundFacts ?? [],

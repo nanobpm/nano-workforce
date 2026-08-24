@@ -12,8 +12,11 @@ import {
   type BoundFact,
   type ConnectorDispatchResult,
   connectorDedupeKey,
+  convergeOnlyForTarget,
   dispatchConnector,
+  isConvergeTarget,
 } from "../../app/deliveryConnector.ts";
+import { isPrSettled, MAX_ROUNDS, type ParsedPr, parsePr, submitPr } from "../../app/service.ts";
 
 // Typed off the compiled `connector` subProcess ioMapping (a RUNTIME-generated definition, so there is
 // no static data-envelope to derive from): `target`/`dedupeKey`/`payload` are seeded from the node's
@@ -58,8 +61,52 @@ export function readConnectorInput(vars: In): {
   return { target, payload, boundFacts, warnings };
 }
 
+/** JSON-stringify a user-controlled value for an error message, falling back to `String(value)` when
+ * the value is not JSON-serializable (e.g. a `BigInt` or a circular object throws, or a `Symbol` /
+ * `undefined` / function that `JSON.stringify` serializes to `undefined`) so the intended validation
+ * error is never masked by a serializer `TypeError` and the function always honours its `string`
+ * return type. */
+export function safeStringify(value: unknown): string {
+  try {
+    const s = JSON.stringify(value);
+    return s === undefined ? String(value) : s;
+  } catch {
+    return String(value);
+  }
+}
+
+/** Parse + validate the converge connector's payload (`{ pr, convergeOnly?, dependsOn? }`) for a
+ * `converge` / `converge-merge` target. `pr` is REQUIRED and must parse to a canonical `owner/repo#N`
+ * (fail CLOSED — a converge connector with no target PR is meaningless and could never enroll).
+ * `convergeOnly` DEFAULTS from the target (`converge` → review-only `true`; `converge-merge` → drive
+ * the merge loop `false`) and may be overridden per-dispatch by an explicit boolean. `dependsOn` is an
+ * optional list of PR refs unioned into the enrolled PR's merge-stage dependency set (only non-string
+ * entries are dropped; `submitPr` itself ignores unparseable refs). Exported for unit coverage — the
+ * MVP sources `pr` as a literal (identical to how the `wait: pr` node targets a known PR), so no new
+ * fact plumbing is needed to ship. */
+export function readConvergeInput(
+  target: string,
+  payload: Record<string, unknown> | null,
+): { parsed: ParsedPr; convergeOnly: boolean; dependsOn: string[] } {
+  const p = payload ?? {};
+  const parsed = parsePr(p.pr);
+  if (!parsed) {
+    throw new Error(
+      `delivery-connector: '${target}' target requires payload.pr as a parseable "owner/repo#N" ` +
+        `(got ${safeStringify(p.pr ?? null)})`,
+    );
+  }
+  const convergeOnly = typeof p.convergeOnly === "boolean" ? p.convergeOnly : convergeOnlyForTarget(target);
+  const dependsOn = Array.isArray(p.dependsOn) ? p.dependsOn.filter((d): d is string => typeof d === "string") : [];
+  return { parsed, convergeOnly, dependsOn };
+}
+
 const handler: AppJobHandler<In, ConnectorDispatchResult> = async (job, app) => {
   const { target, payload, boundFacts, warnings } = readConnectorInput(job.variables);
+  // A `converge`/`converge-merge` target enrolls a PR into the shared convergence (+ merge) loop.
+  // Parse + validate its payload BEFORE claiming a ledger row, so a misconfigured converge node (no
+  // parseable `pr`) fails CLOSED without writing a junk dispatch row it could never act on.
+  const converge = isConvergeTarget(target) ? readConvergeInput(target, payload) : null;
   const dedupeKey = connectorDedupeKey({
     dedupeKey: job.variables.dedupeKey ?? null,
     processInstanceKey: job.processInstanceKey ?? null,
@@ -75,6 +122,46 @@ const handler: AppJobHandler<In, ConnectorDispatchResult> = async (job, app) => 
     app.data,
     { dedupeKey, target, payload, boundFacts },
     new Date().toISOString(),
+    // For a `converge`/`converge-merge` target, the connector's REAL side effect is enrolling the PR
+    // into the shared convergence (+ merge) loop via `submitPr` — the SAME enrollment
+    // `workers/converge-feature` uses, no duplicated machinery. It is injected as the dispatch's
+    // action so it lives INSIDE the at-most-once + resume envelope (`dispatchConnector`): it fires only
+    // on the claim winner (or a resumed crashed claim), and a `deduped` redelivery — a worker restart /
+    // lost ack / graph resume that lands AFTER the PR has settled — NEVER re-runs it. This is what
+    // preserves the connector's at-most-once semantics against `submitPr`, which deliberately RE-OPENS a
+    // terminal PR (it only short-circuits a non-terminal row); an unconditional call outside the fence
+    // would flip a `merged`/`converged`/`abandoned` PR back to `converging` on redelivery.
+    //
+    // The action is ALSO terminal-safe (idempotent on RESUME). A still-`claimed` crashed claim is
+    // re-performed by `dispatchConnector` (it never recorded delivery), and its first attempt may have
+    // already enrolled the PR AND let the convergence/merge loop settle it. Because `submitPr` re-opens a
+    // terminal row, re-performing blindly would regress that settled PR — so the action first checks
+    // `isPrSettled` and NO-OPS when the PR row is already terminal. On a LIVE (non-terminal) row
+    // `submitPr`'s own `prKey` short-circuit (`alreadyRunning`) already makes the resume double-safe.
+    // `rootRequestKey` is the stable per-node `dedupeKey` (authored, else `<processInstanceKey>:<elementId>`),
+    // so the enrolled PR's lineage is deterministic across redeliveries.
+    converge
+      ? async () => {
+          if (await isPrSettled(app.data, converge.parsed.prKey)) {
+            // Resume against an already-settled PR: the enrollment already ran its course. Record the
+            // dispatch delivered WITHOUT re-opening the terminal PR (never regress a settled PR).
+            app.log.info("delivery-connector: enrollment skipped — PR already terminal (resume-safe)", {
+              target,
+              dedupeKey,
+              prKey: converge.parsed.prKey,
+            });
+            return { detail: `${converge.parsed.prKey} already terminal — enrollment skipped (at-most-once resume-safe)` };
+          }
+          await submitPr(app.data, app.engine, converge.parsed, converge.dependsOn, MAX_ROUNDS, converge.convergeOnly, dedupeKey);
+          app.log.info("delivery-connector: enrolled PR into convergence loop", {
+            target,
+            dedupeKey,
+            prKey: converge.parsed.prKey,
+            convergeOnly: converge.convergeOnly,
+          });
+          return { detail: `enrolled ${converge.parsed.prKey} into convergence loop (convergeOnly=${converge.convergeOnly})` };
+        }
+      : undefined,
   );
   app.log.info("delivery-connector", { target, dedupeKey, outcome: result.connectorOutcome });
   return result;
