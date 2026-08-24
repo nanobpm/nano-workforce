@@ -271,8 +271,16 @@ export function mountDeliveryGraphs(host, config = {}) {
   // page. Registered on `window` (the message arrives on this App-View's own window) and torn down by
   // the disposer below.
   function onFillMessage(ev) {
-    if (ev && ev.origin && typeof window !== "undefined" && ev.origin !== window.location.origin) return;
-    const data = ev && ev.data;
+    if (!ev || typeof window === "undefined") return;
+    // Same-origin host-bridge seam: require an EXACT origin match. A missing/empty/foreign `ev.origin`
+    // (a malformed or forged event, or a future browser edge case) is rejected outright — never fall
+    // through to the fill just because the origin was absent.
+    if (ev.origin !== window.location.origin) return;
+    // The fill message is routed UP to the console and back down when embedded, so accept it only from
+    // the parent frame in that case; standalone, there is no parent and the import path fills directly.
+    const embedded = typeof window.parent !== "undefined" && window.parent !== window;
+    if (embedded && ev.source && ev.source !== window.parent) return;
+    const data = ev.data;
     if (!data || data.type !== DG_COMPOSE_FILL_MESSAGE || typeof data.graphJson !== "string") return;
     fillComposer(data.graphJson, { status: "Reused a saved graph \u2014 Preview or Stage it." });
   }
