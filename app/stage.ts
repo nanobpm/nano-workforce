@@ -14,7 +14,7 @@
 // anywhere (not in SQL, not in the page, not in each poller/worker): every reader flows through the
 // VIEW or these adapters, both sourced from the one declaration.
 
-import { type FeatureReadModelDerivedColumn, featureReadModel, STAGE_DONE_STATUSES, USER_TASKS_PROJECTION } from "./featureReadModel.ts";
+import { EFFECTIVE_STATUS_COLUMN, type FeatureReadModelDerivedColumn, featureReadModel, STAGE_DONE_STATUSES, USER_TASKS_PROJECTION } from "./featureReadModel.ts";
 
 // Re-exported for back-compat with existing importers (operations/acknowledgeDone.ts). Its canonical
 // home is now app/featureReadModel.ts, where it feeds the terminal tier of the derived columns.
@@ -90,7 +90,12 @@ function evalDerived<T>(column: FeatureReadModelDerivedColumn, baseRow: Record<s
 export function deriveStage(run: StageInput): DerivedStage {
   const baseRow = {
     feature_key: SELF_KEY,
-    status: run.status,
+    // The status-classifying derivations read the tracking VIEW's terminal-folded `derived_status`
+    // (ADR-0065), so this façade feeds the caller's effective `status` under that column name — the SQL
+    // VIEW reads `fr."derived_status"` off `feature_runs__tracking`, and both lowerings agree by
+    // construction (`assertReadModelParity`). Callers off the write path pass the run's effective
+    // status (which equals the base transient for any non-terminated run).
+    [EFFECTIVE_STATUS_COLUMN]: run.status,
     pr_key: run.pr_key ?? null,
     converge: run.converge ?? null,
     auto_merge: run.auto_merge ?? null,
@@ -111,5 +116,5 @@ export function deriveStage(run: StageInput): DerivedStage {
  * `feature_runs.list_bucket` base column is vestigial (retired as a write projection, issue #439). This
  * adapter is the TS lowering of that derivation, used off the write path (redispatch gating, tests). */
 export function deriveListBucket(status: string, acknowledgedAt: string | null | undefined): "active" | "history" {
-  return evalDerived<"active" | "history">("list_bucket", { status, acknowledged_at: acknowledgedAt ?? null });
+  return evalDerived<"active" | "history">("list_bucket", { [EFFECTIVE_STATUS_COLUMN]: status, acknowledged_at: acknowledgedAt ?? null });
 }

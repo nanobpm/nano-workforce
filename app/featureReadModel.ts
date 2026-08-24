@@ -47,20 +47,38 @@ export const STAGE_DONE_STATUSES: readonly string[] = ["merged", "converged", "b
  * promote this to the framework's canonical `urban_open_user_tasks` projection.) */
 export const USER_TASKS_PROJECTION = "user_tasks";
 
-/** `status IN (…)` as a closed-DSL predicate: an OR of equalities over the base row's `status`. */
-const statusIn = (...statuses: readonly string[]): Expr => or(...statuses.map((s) => eq(col("status"), lit(s))));
+/** The base table the read model reads: the auto-provisioned `feature_runs__tracking` derived VIEW
+ * (ADR-0065, urban 0.81.0), NOT the raw `feature_runs` table. The VIEW re-exports `feature_runs.*`
+ * plus a `derived_status` column that folds the `instanceTracking` reconciler's terminal edge
+ * (out-of-band terminate / in-app cancel → `abandoned`) over the worker-owned transient `status`. The
+ * status-classifying derivations below read `derived_status`, so a terminated run renders `Done`/
+ * `failed` instead of freezing at its last transient (`Implementing` forever — issue #503). The
+ * non-status base columns (`pr_key`/`converge`/`auto_merge`/`acknowledged_at`/`feature_key`) come off
+ * the same VIEW's pass-through of `base.*`. */
+export const FEATURE_READ_MODEL_BASE_TABLE = "feature_runs__tracking";
 
-/** The terminal tier — the row's `status` is one of the 6 `Done` statuses. */
+/** The effective-status column the status-classifying derivations read: the tracking VIEW's ADR-0065
+ * `derived_status` (terminal-folded), NOT the frozen base `status`. Single source of truth for the
+ * column name so the derivations can't drift from it. */
+export const EFFECTIVE_STATUS_COLUMN = "derived_status";
+
+/** `derived_status IN (…)` as a closed-DSL predicate: an OR of equalities over the tracking VIEW's
+ * terminal-folded effective status. */
+const statusIn = (...statuses: readonly string[]): Expr =>
+  or(...statuses.map((s) => eq(col(EFFECTIVE_STATUS_COLUMN), lit(s))));
+
+/** The terminal tier — the row's effective (terminal-folded) status is one of the 6 `Done` statuses. */
 const isDone: Expr = statusIn(...STAGE_DONE_STATUSES);
 
 /** The canonical pipeline `stage`. TOTAL over all 11 statuses. Terminal → `Done`; else `converging`
  * → `Converging`; else a raised PR (`pr_key` set, mirroring `(pr_key ?? "") !== ""`) or `opened` →
- * `PR open`; else a live/parked implementation status → `Implementing`; else `Requested`. */
+ * `PR open`; else a live/parked implementation status → `Implementing`; else `Requested`. Classifies
+ * on the terminal-folded `derived_status` so a cancelled/terminated run is `Done`, not frozen. */
 const stage: Expr = caseWhen(
   [
     when(isDone, lit("Done")),
-    when(eq(col("status"), lit("converging")), lit("Converging")),
-    when(or(neq(col("pr_key"), lit("")), eq(col("status"), lit("opened"))), lit("PR open")),
+    when(eq(col(EFFECTIVE_STATUS_COLUMN), lit("converging")), lit("Converging")),
+    when(or(neq(col("pr_key"), lit("")), eq(col(EFFECTIVE_STATUS_COLUMN), lit("opened"))), lit("PR open")),
     when(statusIn("running", "escalated", "awaiting_operator"), lit("Implementing")),
   ],
   lit("Requested"),
@@ -68,11 +86,12 @@ const stage: Expr = caseWhen(
 
 /** The active stage's render state in the `kind:"pipeline"` column's vocabulary: `ok` (merged/
  * converged), `blocked` (terminal blocked), `failed` (failed/skipped/abandoned), else NULL (in
- * progress). A pure function of `status`, so it is correct even for a parked/live status (NULL). */
+ * progress). A pure function of the terminal-folded `derived_status`, so a terminated run renders a
+ * terminal `failed` state instead of a frozen NULL. */
 const stageState: Expr = caseWhen(
   [
     when(statusIn("merged", "converged"), lit("ok")),
-    when(eq(col("status"), lit("blocked")), lit("blocked")),
+    when(eq(col(EFFECTIVE_STATUS_COLUMN), lit("blocked")), lit("blocked")),
     when(statusIn("failed", "skipped", "abandoned"), lit("failed")),
   ],
   lit(null),
@@ -136,7 +155,7 @@ export type FeatureReadModelDerivedColumn = (typeof FEATURE_READ_MODEL_DERIVED)[
  */
 export const featureReadModel: ReadModel = defineReadModel({
   name: "feature_read_model",
-  baseTable: "feature_runs",
+  baseTable: FEATURE_READ_MODEL_BASE_TABLE,
   selectBaseColumns: false,
   derive: {
     stage,

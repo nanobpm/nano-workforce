@@ -30,7 +30,17 @@ export function withTrackingViews<F extends TableFn>(base: F): F {
     const statusField = baseStatusFieldFor(baseName);
     // biome-ignore lint/suspicious/noExplicitAny: test-only projection over dynamic row shapes.
     const project = (row: any) =>
-      row == null ? row : { ...row, [derivedColumn]: row[statusField] };
+      row == null
+        ? row
+        : // Honor an explicitly-seeded `derived_status` so a test can model the ADR-0065 divergence a
+          // real terminated instance produces — the base `<statusField>` frozen at its last transient
+          // while the derive edge reports the terminal (`abandoned`/`failed`/`reviewed`). When a row
+          // seeds no derived column the VIEW's `ELSE base.<statusField>` fall-through applies, so it
+          // stays byte-for-byte the pass-through the previous behaviour modelled.
+          {
+            ...row,
+            [derivedColumn]: row[derivedColumn] !== undefined ? row[derivedColumn] : row[statusField],
+          };
     // biome-ignore lint/suspicious/noExplicitAny: test-only Proxy over a dynamic DataLayer table.
     return new Proxy(inner, {
       get(target: any, prop: string) {

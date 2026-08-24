@@ -18,6 +18,7 @@ import { assertEquals } from "#test-assert";
 import type { AppApi } from "@nanobpm/urban";
 import { resetDefaultBranchCache } from "../app/github.ts";
 import { noopLog } from "../test/log.ts";
+import { withTrackingViews } from "../test/trackingViews.ts";
 import startEpicSet from "./startEpicSet.ts";
 
 // ── in-memory github model (mirrors startPlanFanout.admission.integration.test.ts) ───────────────
@@ -116,7 +117,7 @@ function makeApp(seedPlans: Record<string, unknown>[] = []) {
     };
   };
   const app = {
-    data: { table },
+    data: { table: withTrackingViews(table) },
     engine: {
       createInstance: (req: { processDefinitionId: string; variables?: Record<string, unknown> }) => {
         started.push(req);
@@ -526,7 +527,7 @@ function makeSqliteApp(
     delete: () => Promise.resolve(),
   });
   const app = {
-    data: { table },
+    data: { table: withTrackingViews(table) },
     engine: { createInstance: () => Promise.resolve({ processInstanceKey: "PI-1" }) },
     log: noopLog(),
   } as any as AppApi;

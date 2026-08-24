@@ -9,6 +9,7 @@ import { assertEquals } from "#test-assert";
 import type { AppApi } from "@nanobpm/urban";
 import { resetDefaultBranchCache } from "../app/github.ts";
 import { noopLog } from "../test/log.ts";
+import { withTrackingViews } from "../test/trackingViews.ts";
 import startPlanFanout from "./startPlanFanout.ts";
 
 // ── in-memory github model ───────────────────────────────────────────────────
@@ -112,7 +113,7 @@ function makeApp(seedPlans: Record<string, unknown>[] = []) {
     };
   };
   const app = {
-    data: { table },
+    data: { table: withTrackingViews(table) },
     engine: {
       createInstance: (req: { processDefinitionId: string; variables?: Record<string, unknown> }) => {
         started.push(req);

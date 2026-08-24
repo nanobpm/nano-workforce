@@ -6,6 +6,7 @@
 // is not a positive integer, so the loop is always bounded.
 import { after, test } from "node:test";
 import { assertEquals, assertRejects, assertThrows } from "#test-assert";
+import { withTrackingViews } from "../test/trackingViews.ts";
 import { positiveIntEnv } from "./plan.ts";
 
 const KEY = "NANO_PLAN_REVIEW_ROUNDS_TEST";
@@ -126,8 +127,8 @@ test("re-plan of a finished issue clears stale plan_reviews rows", async () => {
     plan_task_deps: { rows: [], key: "plan_key" },
   };
   const data = {
-    table: (name: string, key: string) =>
-      memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key),
+    table: withTrackingViews((name: string, key: string) =>
+      memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
   } as any;
   const engine = {
     createInstance: () => Promise.resolve({ processInstanceKey: "PI-1" }),
@@ -146,8 +147,8 @@ test("re-plan of a finished issue clears stale plan_reviews rows", async () => {
 
 function memData(stores: Record<string, { rows: any[]; key: string }>) {
   return {
-    table: (name: string, key: string) =>
-      memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key),
+    table: withTrackingViews((name: string, key: string) =>
+      memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
   } as any;
 }
 

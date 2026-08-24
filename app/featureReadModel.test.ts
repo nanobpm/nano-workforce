@@ -10,12 +10,12 @@
 // emitted from the ONE `featureReadModel` declaration, which ALSO drives the TS via `fnFor`. This
 // suite therefore guards THREE things:
 //
-//   1. DRIFT GUARD — migration 076 embeds each derived column's SQL VERBATIM from
+//   1. DRIFT GUARD — migration 080 embeds each derived column's SQL VERBATIM from
 //      `featureReadModel.sqlSelectFor(...)`, so the checked-in VIEW cannot drift from the declaration.
 //   2. FRAMEWORK PARITY GUARD — `assertReadModelParity` proves the SQL and TS lowerings the ONE
 //      declaration compiles to agree (the role the old hand-written lockstep test played, now
 //      framework-owned).
-//   3. END-TO-END BEHAVIOUR on the REAL migration VIEW (076 applied to an in-memory DB): the full
+//   3. END-TO-END BEHAVIOUR on the REAL migration VIEW (080 applied to an in-memory DB): the full
 //      status × open-task matrix vs the model-derived oracle, the stale-stored-column ignore, the
 //      reconciler `status`-bypass, the #422 answered-escalation drift, and the page binding.
 import { readFileSync } from "node:fs";
@@ -31,11 +31,14 @@ import { deriveListBucket, deriveStage } from "./stage.ts";
 const MIG = (name: string) => readFileSync(fileURLToPath(new URL(`../db/migrations/${name}`, import.meta.url)), "utf8");
 const PAGE = (name: string) => JSON.parse(readFileSync(fileURLToPath(new URL(`../pages/${name}`, import.meta.url)), "utf8"));
 
-const MIGRATION_076 = "076_feature_read_model_declare_once.sql";
+const MIGRATION_LATEST = "080_feature_read_model_derive_terminal.sql";
 
 // The base `feature_runs` shape the VIEW reads, plus the `user_tasks` inbox (034) the `attention`
-// derivation `EXISTS`-reads. The stored derived columns are present precisely so the tests can seed
-// STALE values and prove the VIEW ignores them.
+// derivation `EXISTS`-reads, plus a stand-in for the managed `feature_runs__tracking` derived VIEW
+// (ADR-0065) the read model now reads its terminal-folded `derived_status` off. The stored derived
+// columns are present precisely so the tests can seed STALE values and prove the VIEW ignores them;
+// `derived_status_override` lets a test model the reconciler's derive edge (a terminated instance ⇒
+// `abandoned` while base `status` stays frozen).
 function viewDb(): DatabaseSync {
   const db = new DatabaseSync(":memory:");
   db.exec(
@@ -43,14 +46,23 @@ function viewDb(): DatabaseSync {
        feature_key TEXT PRIMARY KEY, repo TEXT, issue_number INTEGER, issue_url TEXT, title TEXT,
        base_branch TEXT, status TEXT, process_key TEXT, pr_key TEXT, converge INTEGER, auto_merge INTEGER,
        outcome TEXT, delivery_label TEXT, acknowledged_at TEXT, created_at TEXT, updated_at TEXT,
-       stage TEXT, stage_state TEXT, stage_skipped TEXT, attention TEXT, list_bucket TEXT);`,
+       stage TEXT, stage_state TEXT, stage_skipped TEXT, attention TEXT, list_bucket TEXT,
+       derived_status_override TEXT);`,
   );
   db.exec(
     `CREATE TABLE user_tasks (
        user_task_key TEXT PRIMARY KEY, element_id TEXT NOT NULL, subject_type TEXT NOT NULL,
        subject_key TEXT NOT NULL);`,
   );
-  db.exec(MIG(MIGRATION_076));
+  // Stand-in for the managed `feature_runs__tracking` VIEW urban provisions at mount: re-exports
+  // `feature_runs.*` plus the terminal-folded `derived_status` the read model (migration 080) reads. A
+  // test seeds `derived_status_override` to model the reconciler's derive edge; absent, it falls through
+  // to the base `status`, exactly as the real VIEW's `ELSE base.status` branch does.
+  db.exec(
+    `CREATE VIEW feature_runs__tracking AS
+       SELECT f.*, COALESCE(f.derived_status_override, f.status) AS derived_status FROM feature_runs f;`,
+  );
+  db.exec(MIG(MIGRATION_LATEST));
   return db;
 }
 
@@ -126,22 +138,22 @@ function parityDb(db: DatabaseSync): ParityDb {
   };
 }
 
-test("DRIFT GUARD: migration 076 embeds each derived column VERBATIM from featureReadModel.sqlSelectFor (the VIEW cannot drift from the declaration)", () => {
-  const sql = MIG(MIGRATION_076);
+test("DRIFT GUARD: migration 080 embeds each derived column VERBATIM from featureReadModel.sqlSelectFor (the VIEW cannot drift from the declaration)", () => {
+  const sql = MIG(MIGRATION_LATEST);
   for (const col of FEATURE_READ_MODEL_DERIVED) {
     const emitted = featureReadModel.sqlSelectFor(col, { baseAlias: FEATURE_READ_MODEL_BASE_ALIAS });
     assert(
       sql.includes(`${emitted} AS ${col}`),
-      `migration ${MIGRATION_076} no longer embeds the declaration's SQL for "${col}" — regenerate it ` +
+      `migration ${MIGRATION_LATEST} no longer embeds the declaration's SQL for "${col}" — regenerate it ` +
         `from featureReadModel (or add a new superseding migration). Expected to contain:\n  ${emitted} AS ${col}`,
     );
   }
   // The VIEW is a DROP+CREATE that supersedes 073/075, and keeps every base column as an aliased
   // pass-through so the static pages↔schema contract guard still sees them.
-  assert(/DROP VIEW IF EXISTS feature_read_model;/.test(sql), "076 must DROP the superseded VIEW first");
-  assert(/CREATE VIEW feature_read_model AS/.test(sql), "076 must (re)create feature_read_model");
+  assert(/DROP VIEW IF EXISTS feature_read_model;/.test(sql), "080 must DROP the superseded VIEW first");
+  assert(/CREATE VIEW feature_read_model AS/.test(sql), "080 must (re)create feature_read_model");
   for (const base of ["feature_key", "status", "pr_key", "converge", "auto_merge", "acknowledged_at", "title", "repo"]) {
-    assert(sql.includes(`fr.${base} AS ${base}`), `076 must pass base column "${base}" through the VIEW`);
+    assert(sql.includes(`fr.${base} AS ${base}`), `080 must pass base column "${base}" through the VIEW`);
   }
 });
 
@@ -157,7 +169,11 @@ test("FRAMEWORK PARITY GUARD: featureReadModel's SQL and TS lowerings agree over
               const userTasks =
                 openTask && el !== null ? [{ subject_type: "feature", subject_key: "self", element_id: el }] : [];
               samples.push({
-                baseRow: { feature_key: "self", status, pr_key, converge, auto_merge, acknowledged_at },
+                // The status-classifying derivations read the tracking VIEW's terminal-folded
+                // `derived_status`; for a live (non-terminated) run it equals the base transient, so
+                // parity samples set it from `status`. (The parity guard's fixture table is named for the
+                // model's baseTable, `feature_runs__tracking`.)
+                baseRow: { feature_key: "self", status, derived_status: status, pr_key, converge, auto_merge, acknowledged_at },
                 projections: { user_tasks: userTasks },
               });
             }
@@ -172,7 +188,7 @@ test("FRAMEWORK PARITY GUARD: featureReadModel's SQL and TS lowerings agree over
   db.close();
 });
 
-test("the migration 076 VIEW derives stage/stage_state/stage_skipped/attention EXACTLY like deriveStage, over every status × converge/auto_merge/pr_key × open-task combination", () => {
+test("the migration 080 VIEW derives stage/stage_state/stage_skipped/attention EXACTLY like deriveStage, over every status × converge/auto_merge/pr_key × open-task combination", () => {
   const db = viewDb();
   const cases: Array<{ key: string; run: SampleRun; hasOpenBlockedTask: boolean; hasOpenEscalationTask: boolean }> = [];
   let i = 0;
@@ -217,7 +233,7 @@ test("the migration 076 VIEW derives stage/stage_state/stage_skipped/attention E
   }
 });
 
-test("the migration 076 VIEW derives list_bucket EXACTLY like deriveListBucket (history iff terminal AND acknowledged)", () => {
+test("the migration 080 VIEW derives list_bucket EXACTLY like deriveListBucket (history iff terminal AND acknowledged)", () => {
   const db = viewDb();
   let i = 0;
   const cases: Array<{ key: string; status: string; ackAt: string | null }> = [];
@@ -237,7 +253,7 @@ test("the migration 076 VIEW derives list_bucket EXACTLY like deriveListBucket (
   }
 });
 
-test("the migration 076 VIEW IGNORES any stale STORED projection columns — it reads only from status et al.", () => {
+test("the migration 080 VIEW IGNORES any stale STORED projection columns — it reads only from status et al.", () => {
   const db = viewDb();
   // A merged run whose STORED columns lie (frozen from when it was `running`). The VIEW must re-derive.
   addRun(db, "o/r#stale", {
@@ -310,6 +326,35 @@ test("RED/GREEN GUARD: a RAW-datasource feature_runs.status write (the instanceT
   assert(row.stage_state != null, "Dismiss is renderable (stage_state is non-null) so the run can be ticked off");
   assertEquals(row.list_bucket, "active", "a just-cancelled run sits in Active until dismissed");
   assertEquals(row.list_bucket, deriveListBucket("abandoned", null));
+});
+
+test("RED/GREEN #503: a DERIVE-ONLY terminated run (base status frozen at 'running', derived_status='abandoned') renders Done/failed, not wedged 'Implementing'", () => {
+  // ADR-0065 (urban 0.81.0): cancel/terminate is DERIVE-ONLY — the reconciler feeds urban's projection
+  // and `feature_runs__tracking.derived_status` recomputes `abandoned` on READ; it does NOT write the
+  // terminal onto the base `feature_runs.status` column. So the base row stays frozen at its last
+  // transient (`running`) while the run is really terminated. Before 080 the read model classified off
+  // the frozen base `status` and rendered the dead run "Implementing" on the Feature history grid
+  // forever (the #503 phantom). 080 reads the terminal-folded `derived_status`, so it renders Done/
+  // failed with no worker write.
+  const db = viewDb();
+  // Seed a run whose engine instance was terminated out-of-band: base status still `running`, but the
+  // derive edge reports `abandoned` (modelled via the feature_runs__tracking stand-in's override).
+  addRun(db, "o/r#term", {
+    status: "running",
+    stored: { stage: "Implementing", stage_state: undefined, attention: "⚠", list_bucket: "active" },
+  });
+  assertEquals(projection(db, "o/r#term").stage, "Implementing", "precondition: the live transient renders Implementing");
+
+  db.prepare("UPDATE feature_runs SET derived_status_override = 'abandoned' WHERE feature_key = ?").run("o/r#term");
+
+  const row = projection(db, "o/r#term");
+  const oracle = deriveStage({ status: "abandoned", pr_key: null, converge: 0, auto_merge: 0 });
+  assertEquals(row.stage, "Done", "a derive-only terminated run is Done, not wedged at Implementing (the #503 phantom)");
+  assertEquals(row.stage, oracle.stage);
+  assertEquals(row.stage_state, "failed", "the derived terminal renders a FAILED state (was frozen NULL/Implementing)");
+  assertEquals(row.stage_state, oracle.state);
+  assertEquals(row.attention, null, "the stale ⚠ badge is gone once the run is terminated");
+  assertEquals(row.list_bucket, "active", "a just-cancelled run sits in Active until dismissed");
 });
 
 test("the Feature page binds the derived feature_read_model VIEW (not the raw feature_runs table)", () => {

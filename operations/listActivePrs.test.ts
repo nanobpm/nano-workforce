@@ -5,6 +5,7 @@ import { test } from "node:test";
 import { assert, assertEquals } from "#test-assert";
 import type { AppApi } from "@nanobpm/urban";
 import { noopLog } from "../test/log.ts";
+import { withTrackingViews } from "../test/trackingViews.ts";
 import handler from "./listActivePrs.ts";
 
 function memApp(rows: any[], escalations: any[] = []): AppApi {
@@ -24,7 +25,7 @@ function memApp(rows: any[], escalations: any[] = []): AppApi {
       },
     };
   };
-  return { data: { table }, log: noopLog() } as any as AppApi;
+  return { data: { table: withTrackingViews(table) }, log: noopLog() } as any as AppApi;
 }
 
 function input(headers: Record<string, string> = {}) {
