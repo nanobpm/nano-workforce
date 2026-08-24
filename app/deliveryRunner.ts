@@ -15,7 +15,7 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import type { EngineClient } from "@nanobpm/urban";
-import type { DeliveryGraph, DeliveryNode } from "../nano-generated/api-io.d.ts";
+import type { DeliveryFact, DeliveryGraph, DeliveryNode } from "../nano-generated/api-io.d.ts";
 import { assertNever, compileDeliveryGraph, DELIVERY_GRAPH_PROCESS_ID } from "./deliveryGraphCompiler.ts";
 import { DEFAULT_EVERY_MS, msToIsoDuration, parseProbe, readinessPollEvery } from "./readiness.ts";
 
@@ -65,7 +65,7 @@ const DEFAULTS: Required<Omit<DeliveryRunTimeouts, "escalationAssignee">> = {
 type NodeInput =
   | { jobType: string; appendPrompt: string; timeout: string }
   | { gateKey: string; probe: unknown; probeTimeout: string; probePollEvery: string }
-  | { escalationSlaTimeout: string; escalationAssignee: string | null }
+  | { escalationSlaTimeout: string; escalationAssignee: string | null; prompt: string; nodeId: string; emits: DeliveryFact[] }
   | { target: string; dedupeKey: string | null; payload: Record<string, unknown> | null; timeout: string };
 
 /** The result of compiling + preparing a graph for deployment: the content-addressed process id, the
@@ -185,7 +185,17 @@ function buildNodeInput(
       };
     }
     case "human":
-      return { escalationSlaTimeout: ctx.escalationSlaTimeout, escalationAssignee: ctx.escalationAssignee };
+      return {
+        escalationSlaTimeout: ctx.escalationSlaTimeout,
+        escalationAssignee: ctx.escalationAssignee,
+        // Seed the authored instruction, node identity, and declared emits so the human user-task's
+        // form can render its "now do X" prompt, name the parked node, and label/hide its emit field
+        // (issue #499 — the generic form otherwise renders contextless). `emits` stays the single
+        // source of truth: the compiled ioMapping derives the emit label/mode from it in FEEL.
+        prompt: node.human?.prompt ?? "",
+        nodeId: node.id ?? ctx.element,
+        emits: Array.isArray(node.emits) ? node.emits.map((f) => ({ ...f })) : [],
+      };
     case "connector":
       return {
         target: node.connector.target,

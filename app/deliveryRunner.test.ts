@@ -79,10 +79,44 @@ test("nodeInputs seeds the exact per-kind fields each node's subProcess ioMappin
   assert(wait?.probe && typeof wait.probe === "object", "the wait node carries its ReadinessProbe descriptor");
 
   const human = byField((v) => "escalationSlaTimeout" in v);
-  assertEquals(human, { escalationSlaTimeout: "PT2H", escalationAssignee: "alice" });
+  assertEquals(human, {
+    escalationSlaTimeout: "PT2H",
+    escalationAssignee: "alice",
+    // #499: the human node seeds its authored prompt, node identity, and declared emits so the
+    // generic user-task form renders "now do X", names the parked node, and labels its emit field.
+    prompt: "run the manual OTP publish",
+    nodeId: "publish",
+    emits: [{ name: "resolvedArtifact", type: "artifact" }],
+  });
 
   const connector = byField((v) => v.target === "npm:install");
   assertEquals(connector, { target: "npm:install", dedupeKey: "consume-1", payload: null, timeout: "PT10M" });
+});
+
+test("the human node seeds prompt/nodeId/emits; a click-done (no-emit, no-prompt) node seeds empty defaults", async () => {
+  // #499: the compiled human user-task's form reads `prompt`/`nodeId`/`emits` from `nodeInputs.<el>`;
+  // a discarded prompt is the contextless-form bug. Pin both an emit-declaring node and the degenerate
+  // click-done node (no `human` config, no `emits`) so the seed never regresses to null/undefined.
+  const graph: DeliveryGraph = {
+    nodes: [
+      { id: "publish", kind: "human", human: { prompt: "run the manual OTP publish" }, emits: [{ name: "resolvedArtifact", type: "artifact" }] },
+      { id: "ack", kind: "human" },
+    ],
+    edges: [{ from: "publish.resolvedArtifact", to: "ack" }],
+  };
+  const p = await prepareOk(graph);
+  const humans = Object.values(p.nodeInputs).filter((v) => "escalationSlaTimeout" in v) as Array<Record<string, unknown>>;
+  const publish = humans.find((v) => v.nodeId === "publish");
+  const ack = humans.find((v) => v.nodeId === "ack");
+
+  assertEquals(publish?.prompt, "run the manual OTP publish");
+  assertEquals(publish?.emits, [{ name: "resolvedArtifact", type: "artifact" }]);
+
+  // The click-done node carries a defined-but-empty prompt and an empty emits list (never undefined),
+  // so the form seeds a blank instruction and hides its emit field rather than seeding null.
+  assertEquals(ack?.prompt, "");
+  assertEquals(ack?.emits, []);
+  assertEquals(ack?.nodeId, "ack");
 });
 
 test("wait gateKeys default to a fresh per-run token so concurrent runs of one graph never cross-correlate", async () => {
