@@ -1,3 +1,9 @@
+## [0.133.1](https://github.com/nanobpm/nano-workforce/compare/v0.133.0...v0.133.1) (2026-08-24)
+
+### Bug Fixes
+
+* **read-model:** migrate remaining terminal-edge readers to derived_status ([#503](https://github.com/nanobpm/nano-workforce/issues/503)) ([#508](https://github.com/nanobpm/nano-workforce/issues/508)) ([663f113](https://github.com/nanobpm/nano-workforce/commit/663f1135a79a14436565f2a6b2320ad62bb0db6b))
+
 ## [0.133.0](https://github.com/nanobpm/nano-workforce/compare/v0.132.0...v0.133.0) (2026-08-24)
 
 ### Features
