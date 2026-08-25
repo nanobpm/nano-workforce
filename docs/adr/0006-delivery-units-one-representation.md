@@ -338,7 +338,14 @@ epic rollup.** The normalization above collapses `converged` (and `merged`) into
 but not merged is **resolved-not-landed**: `deriveDelivery` reports epic success as `delivery = landed`
 **only when every slice PR has merged** (`prsInFlight == 0 && prsMerged == prsOpened && prsOpened > 0`),
 and treats `converged` / `abandoned` slices as terminal-but-not-landed that never make an epic `landed`
-(`app/delivery.ts:39-64`). So the all-terminal rule's `else done` is evaluated against a **shape-scoped
+(`app/delivery.ts:39-64`). **A `blocked`/`skipped` task produces no PR and so is invisible to that
+PR-count predicate** (`record-results` can set `plan.status = done` once *one* slice opens a PR while
+siblings are blocked/skipped — `app/delivery.ts:40-42`), so `delivery = landed` alone would wrongly
+bucket an epic with one merged slice plus a blocked task as `Done`. The epic success predicate is
+therefore **`delivery = landed` AND no task in a non-success terminal** (`blocked`/`skipped`): such a
+task independently vetoes the success bucket, and the epic renders that blocked/skipped branch's step
+(`state = blocked`/`failed`), never `Done` — keeping `blocked`/`skipped` non-success terminals
+consistent with the per-cell rule. So the all-terminal rule's `else done` is evaluated against a **shape-scoped
 success predicate**: for a feature/graph cell, a `converged` branch counts as `done`; for the **epic**
 aggregate, only `delivery = landed` satisfies the success bucket — an all-`converged` (review-only) epic
 renders as its least-advanced *converged* step, **not** `Done`, so a review-only epic is never reported
@@ -425,7 +432,11 @@ a **first observation with no prior key** (a freshly `running` `delivery_graph_r
 `phase = "Running"`, no stored lifecycle key to hold), S7 must pin a deterministic **initial**
 `STAGE_KEYS` value from a **status-specific** map — a `running` graph, whose dispatch has begun, maps to
 `Implementing` (not the `Requested` head), while the pre-dispatch case below maps to the pre-run initial
-key (literally **`Requested`**, `STAGE_KEYS[0]`) — so the scalar `activeField` is never undefined. The same rule must cover the **`awaiting-approval`** rows
+key (literally **`Requested`**, `STAGE_KEYS[0]`) — so the scalar `activeField` is never undefined. A
+**terminal** row is pinned the same way so it can never render an undefined/invalid active stage: a
+`done` graph (phase `Completed`) maps to the `STAGE_KEYS` **tail** (`Done`) with `state = ok`, while a
+`failed`/`abandoned` graph (phase `Failed`) maps to that same tail bracket with `state = failed` —
+terminal status settles the `activeField` outright rather than leaving it unset. The same rule must cover the **`awaiting-approval`** rows
 `delivery-graphs.page.json` filters into the active grid: their schema leaves `process_key` **NULL**
 (no engine instance yet) and the **door seeds `phase = "Awaiting approval"` at write time** (migration
 058 only *creates* the `delivery_graph_runs` table — it seeds no rows and assigns no `phase`/`process_key`;
@@ -581,7 +592,13 @@ deployment-runtime prerequisite noted above), not on #416 alone.
   engine park **and** a member PR in flight — the **human park wins** (the branch reads as its park step,
   e.g. `Awaiting approval`, over the PR-derived `Converging`), because an open user-task gate is the branch's
   current actionable frontier and the PR work sits behind it; absent a park, PR state drives the step as
-  above. Engine parks correlate via `searchUserTasks({ processInstanceKey: run.process_key })`, which is
+  above. Because `Awaiting approval` is a park **label**, not a `STAGE_KEYS` value, it can **not** be the
+  pipeline's scalar `activeField`: a parked branch pins its `activeField` to the frontier's current
+  `STAGE_KEYS` bracket per the coarse-key rule (a pre-PR `running` frontier → `Implementing`, an
+  `awaiting-approval`/pre-dispatch row → `Requested`), and the human-readable `Parked on human node:
+  <label>` text rides the **separate companion park-label field** — so the pipeline never receives a
+  non-`STAGE_KEYS` `activeField` while the actionable park label is still surfaced alongside it.
+  Engine parks correlate via `searchUserTasks({ processInstanceKey: run.process_key })`, which is
   correct **for today's inlined graphs** (the compiler inlines subProcesses into one flat instance); once
   S4's `callActivity` composition puts a human cell in a **child** instance, this parent-key query would
   miss it, so that step is bound to the S4 inline-vs-child decision (correlate child instances, or keep
@@ -593,8 +610,11 @@ deployment-runtime prerequisite noted above), not on #416 alone.
   plain-text Phase column, so S7 does not leave any of those views on a second renderer while §4b claims the
   surface uses the shared stepper. Promoting the `pipeline` kind must **not drop** the actionable
   `Parked on human node: <label>` detail the plain-text Phase column carries today: S7 retains it as a
-  companion derived **park-label** field alongside the stepper on the list and *Active Delivery Graphs*
-  grids (which have no other inline park detail), not only on the detail page's `phase_node_id`. Because `delivery_graph_runs` stores **no
+  companion derived **park-label** field alongside the stepper on **all three** surfaces — the list and
+  *Active Delivery Graphs* grids (which have no other inline park detail) **and the detail page**, whose
+  `phase_node_id` field carries only the node **ID**, not the human-readable `Parked on human node:
+  <label>` text its plain-text `phase` cell shows today, so promoting the `pipeline` kind on the detail
+  page would otherwise lose that actionable label too. Because `delivery_graph_runs` stores **no
   stage column** (only `phase`/park metadata, whose values such as `Running` are *not* `STAGE_KEYS`), S7
   supplies the pipeline's `activeField`/`state` for the graph from a **read model/VIEW over
   `delivery_graph_runs`** that maps `phase`/park metadata onto the `STAGE_KEYS` axis (the stateless
