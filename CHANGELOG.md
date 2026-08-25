@@ -1,3 +1,9 @@
+## [0.139.4](https://github.com/nanobpm/nano-workforce/compare/v0.139.3...v0.139.4) (2026-08-25)
+
+### Bug Fixes
+
+* **delivery-graph:** honor a wait node's per-node poll.timeoutMs + onTimeout ([#462](https://github.com/nanobpm/nano-workforce/issues/462)) ([#545](https://github.com/nanobpm/nano-workforce/issues/545)) ([f91d456](https://github.com/nanobpm/nano-workforce/commit/f91d4561736e0d7b4bbcaf55a7a4ff61a602b82d)), closes [Magikcraft/nano-bpm#978](https://github.com/Magikcraft/nano-bpm/issues/978)
+
 ## [0.139.3](https://github.com/nanobpm/nano-workforce/compare/v0.139.2...v0.139.3) (2026-08-25)
 
 ### Documentation
