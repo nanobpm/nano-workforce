@@ -258,6 +258,28 @@ test("a RUN-LEVEL timeout is normalized (lower-case → canonical) and a malform
   }
 });
 
+test("a wait node's per-node poll.timeoutMs drives its escalation boundary while a sibling keeps the run/default (#462)", async () => {
+  // AC (#462): a `wait` node declaring `poll.timeoutMs` seeds nodeInputs.<el>.probeTimeout derived
+  // from that budget (the compiled `=probeTimeout` boundary), while a sibling wait WITHOUT a declared
+  // timeout keeps the run-level value. Mirrors the per-node `everyMs → probePollEvery` override that
+  // already exists — the escalation boundary is the one budget that was silently ignored, so a 7-day
+  // gate escalated at the 30-minute run default.
+  const graph: DeliveryGraph = {
+    name: "per-node wait timeout",
+    nodes: [
+      { id: "long-gate", kind: "wait", wait: { kind: "pr", target: "owner/repo#1", match: { prState: "merged" }, poll: { timeoutMs: 604_800_000 } } },
+      { id: "default-gate", kind: "wait", wait: { kind: "pr", target: "owner/repo#2", match: { prState: "merged" } } },
+    ],
+    edges: [{ from: "long-gate", to: "default-gate" }],
+  };
+  const p = await prepareOk(graph, { probeTimeout: "PT20M", runKey: "run-462" });
+  const waits = Object.values(p.nodeInputs).filter((v) => "gateKey" in v) as Array<{ gateKey: string; probeTimeout: string }>;
+  const byGate = (suffix: string) => waits.find((w) => w.gateKey.endsWith(suffix));
+  // Element ids are positional by sorted node id: default-gate → n0, long-gate → n1.
+  assertEquals(byGate(":n1")?.probeTimeout, "PT604800S"); // 7 days in seconds — the per-node budget wins
+  assertEquals(byGate(":n0")?.probeTimeout, "PT20M"); // sibling keeps the run-level value
+});
+
 test("a malformed graph returns the S1 compile errors and prepares nothing", async () => {
   const r = await prepareDeliveryGraph({ nodes: [{ id: "a", kind: "agent", agent: { jobType: "j" } }], edges: [{ from: "a", to: "ghost" }] } as unknown as DeliveryGraph);
   assert(!r.ok, "a dangling edge fails to prepare");

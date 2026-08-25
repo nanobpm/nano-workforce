@@ -953,10 +953,16 @@ function serviceBodyLines(
 /** `wait` body: `start → pr.readiness-probe (poll) → ready? → end`, escalating on not-ready or on the
  * `=probeTimeout` engine bound. The probe polls its OWN target, so an unrelated upstream event can
  * never flip it to ready (#274/S2 concurrency-correctness); the `pr` kind (S2) binds `mergedSha`. */
-function waitBodyLines(el: string, node: DeliveryNode): string[] {
+function waitBodyLines(el: string, node: Extract<DeliveryNode, { kind: "wait" }>): string[] {
   const nodeId = node.id;
   const esc = escalationTaskElement(el);
   const emits = normaliseEmits(node);
+  // `onTimeout` routing (#462): `escalate` (default) parks the not-ready-at-boundary token on a
+  // human-completable escalation task; `continue` proceeds past the gate as not-ready WITHOUT a human
+  // stop (a documented sharp edge — the downstream side-effecting node then runs without the awaited
+  // fact). `fail` is rejected earlier at validation (blocked on engine terminate-end, #978), so it
+  // never reaches here.
+  const continueOnTimeout = node.wait?.onTimeout === "continue";
   // Defect A: read-only probe diagnostics seeded onto the escalation task so the operator/agent can
   // tell a genuine "not published yet" from a transient false-negative — the probe's last detail, the
   // resolved target/match, and a compact summary of the candidate releases the probe observed.
@@ -1033,22 +1039,27 @@ function waitBodyLines(el: string, node: DeliveryNode): string[] {
     `        <bpmn:outgoing>${el}_i7</bpmn:outgoing>`,
     `        <bpmn:outgoing>${el}_i4</bpmn:outgoing>`,
     "      </bpmn:exclusiveGateway>",
-    ...escalationTaskLines(
-      esc,
-      nodeId,
-      [`${el}_i4`],
-      `${el}_i5`,
-      waitEscalationContextFeel(nodeId),
-      { resume: { kind: node.kind, emits }, diagnosticInputs },
-    ),
-    `      <bpmn:endEvent id="${el}_end"><bpmn:incoming>${el}_i1</bpmn:incoming><bpmn:incoming>${el}_i5</bpmn:incoming><bpmn:incoming>${el}_i7</bpmn:incoming></bpmn:endEvent>`,
+    ...(continueOnTimeout
+      ? []
+      : escalationTaskLines(
+          esc,
+          nodeId,
+          [`${el}_i4`],
+          `${el}_i5`,
+          waitEscalationContextFeel(nodeId),
+          { resume: { kind: node.kind, emits }, diagnosticInputs },
+        )),
+    // On `continue`, the not-ready-at-boundary branch (`_i4`) proceeds straight to the node end (no
+    // human stop, no `_i5` escalation-return flow); on `escalate` it parks on the escalation task,
+    // which returns via `_i5`.
+    `      <bpmn:endEvent id="${el}_end"><bpmn:incoming>${el}_i1</bpmn:incoming>${continueOnTimeout ? `<bpmn:incoming>${el}_i4</bpmn:incoming>` : `<bpmn:incoming>${el}_i5</bpmn:incoming>`}<bpmn:incoming>${el}_i7</bpmn:incoming></bpmn:endEvent>`,
     flow(`${el}_i0`, `${el}_start`, `${el}_probeLoop`),
     flow(`${el}_i1`, `${el}_probeLoop`, `${el}_end`),
     flow(`${el}_i2`, `${el}_be`, `${el}_lastAttempt`),
     flow(`${el}_i6`, `${el}_lastAttempt`, `${el}_lastGw`),
     `      <bpmn:sequenceFlow id="${el}_i7" name="ready" sourceRef="${el}_lastGw" targetRef="${el}_end"><bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=ready = true</bpmn:conditionExpression></bpmn:sequenceFlow>`,
-    `      <bpmn:sequenceFlow id="${el}_i4" name="not ready" sourceRef="${el}_lastGw" targetRef="${esc}" />`,
-    flow(`${el}_i5`, esc, `${el}_end`),
+    `      <bpmn:sequenceFlow id="${el}_i4" name="not ready" sourceRef="${el}_lastGw" targetRef="${continueOnTimeout ? `${el}_end` : esc}" />`,
+    ...(continueOnTimeout ? [] : [flow(`${el}_i5`, esc, `${el}_end`)]),
   ];
 }
 
