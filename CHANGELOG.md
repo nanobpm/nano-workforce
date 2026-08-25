@@ -1,3 +1,9 @@
+## [0.139.3](https://github.com/nanobpm/nano-workforce/compare/v0.139.2...v0.139.3) (2026-08-25)
+
+### Documentation
+
+* **adr:** add §4b derived stepper decision to ADR 0006 ([#540](https://github.com/nanobpm/nano-workforce/issues/540)) ([e85d25b](https://github.com/nanobpm/nano-workforce/commit/e85d25be90fb77cd5ea53b5836df68103c2e2f33)), closes [#464](https://github.com/nanobpm/nano-workforce/issues/464) [nano-ide#473](https://github.com/nanobpm/nano-ide/issues/473) [#473](https://github.com/nanobpm/nano-workforce/issues/473) [#473](https://github.com/nanobpm/nano-workforce/issues/473) [#464](https://github.com/nanobpm/nano-workforce/issues/464)
+
 ## [0.139.2](https://github.com/nanobpm/nano-workforce/compare/v0.139.1...v0.139.2) (2026-08-24)
 
 ### Bug Fixes
