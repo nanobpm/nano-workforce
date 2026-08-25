@@ -195,7 +195,7 @@ representation. These unions are **not** identical today — features use
 separate node contract — plus the per-shape mapping and precedence and the write/`instanceTracking`
 behavior — not merely projecting an existing value.
 
-### 4b. One derived **stepper** — the cells are the step axis, per-shape correlated
+### 4b. One derived **stepper** — the cells are the source positions mapped onto the shared step axis, per-shape correlated
 
 §4 collapses the three status *unions* into one derived union; this decision collapses the three
 *progress projections* — the thing an operator actually reads as "where is this unit in its
@@ -342,7 +342,13 @@ and treats `converged` / `abandoned` slices as terminal-but-not-landed that neve
 success predicate**: for a feature/graph cell, a `converged` branch counts as `done`; for the **epic**
 aggregate, only `delivery = landed` satisfies the success bucket — an all-`converged` (review-only) epic
 renders as its least-advanced *converged* step, **not** `Done`, so a review-only epic is never reported
-as landed.
+as landed. **Concretely for the renderer:** the epic projection does **not** reuse the per-feature
+`deriveStage` success-collapse (which folds `converged` → `Done`/`ok`, `app/featureReadModel.ts:73-95`);
+its `activeField` is the **least-advanced slice cell's** `STAGE_KEYS` bracket and its `state` is that
+cell's `pipeline` render state (`ok`/`blocked`/`failed`/in-progress), and the `Done` bucket is entered
+**only** when `deriveDelivery` reports `delivery = landed` (all slice PRs merged) — never on `converged`
+alone. So an all-`converged` epic pins `activeField` to the converged slices' shared bracket with
+`state = ok` (resolved-not-landed), and renders `Done` only once every slice has merged.
 
 **Cross-instance correlation, because composed cells are child instances by default.** engine-core's
 `CallActivity` spawns a **distinct child process instance** and links it to the parent
@@ -413,8 +419,10 @@ a **first observation with no prior key** (a freshly `running` `delivery_graph_r
 `STAGE_KEYS` value from a **status-specific** map — a `running` graph, whose dispatch has begun, maps to
 `Implementing` (not the `Requested` head), while the pre-dispatch case below maps to the pre-run initial
 key (literally **`Requested`**, `STAGE_KEYS[0]`) — so the scalar `activeField` is never undefined. The same rule must cover the **`awaiting-approval`** rows
-`delivery-graphs.page.json` filters into the active grid: migration 058 gives these a `phase =
-"Awaiting approval"` and a **NULL `process_key`** (no engine instance yet), so they have no observable
+`delivery-graphs.page.json` filters into the active grid: their schema leaves `process_key` **NULL**
+(no engine instance yet) and the **door seeds `phase = "Awaiting approval"` at write time** (migration
+058 only *creates* the `delivery_graph_runs` table — it seeds no rows and assigns no `phase`/`process_key`;
+those come from the run builder/dispatch path), so they have no observable
 element and no prior lifecycle key. **`awaiting-approval` is a legacy/reserved status — no longer
 produced** (issue #460 moved dispatch to an operator action; the current producer claims a run directly
 as `running`, `app/deliveryGraphDispatch.ts:104`), so this is only a **fallback for old rows**, not a
@@ -523,7 +531,9 @@ deployment-runtime prerequisite noted above), not on #416 alone.
 - **S7 · one derived stepper — v1 on today's surface** (Decision §4b) — define the **cell → step
   mapping** (seeded from `STAGE_KEYS`, but owning the canonical definition — `STAGE_KEYS` mixes
   lifecycle states with cells), derive current-step by correlating the aggregate/work-table state
-  **per shape**: for a **feature**, `feature_runs` `status`/`pr_key`/flags + the
+  **per shape**: for a **feature**, the terminal-folded `feature_runs__tracking` `derived_status`
+  (the canonical effective-status VIEW the projection reads — `app/featureReadModel.ts`, *not* the raw
+  `feature_runs.status`, which a terminated run can leave frozen at `running`/`escalated`)/`pr_key`/flags + the
   `pollFeatureDelivery`-reconciled `pull_requests` state, joined by **`pr_key`** (*not* a naïve
   `process_key` join, which is reassigned downstream); for a **delivery graph** — which has **no
   `pr_key`** — its `delivery_graph_runs` row, its downstream PRs correlated through the run's **lineage
@@ -538,7 +548,7 @@ deployment-runtime prerequisite noted above), not on #416 alone.
   writers off the legacy tables, the mapping's home is either (i) a column/relation on **`delivery_units`**
   (added, dual-written, and backfilled under S2's expand/contract order — §479-490 — so the derived VIEW
   exposes it), or (ii) **threaded into the PRs themselves** as each PR-producing node's `root_request_key`
-  (`app/submitPr.ts`), which survives the legacy-table retirement. Storing it *only* on
+  (`app/service.ts`'s `submitPr`, line 503), which survives the legacy-table retirement. Storing it *only* on
   `delivery_graph_runs` would be orphaned when that table becomes a derived VIEW, so S7 is **sequenced
   after S2 establishes `delivery_units` ownership** (or takes the PR-threaded option). Rather than assume
   one join: a **connector** PR roots by the connector's
