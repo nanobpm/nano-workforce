@@ -1,3 +1,9 @@
+## [0.143.0](https://github.com/nanobpm/nano-workforce/compare/v0.142.0...v0.143.0) (2026-08-25)
+
+### Features
+
+* **delivery-graph:** idempotency preflight on agent nodes ([#551](https://github.com/nanobpm/nano-workforce/issues/551)) ([#552](https://github.com/nanobpm/nano-workforce/issues/552)) ([f16fa6d](https://github.com/nanobpm/nano-workforce/commit/f16fa6d32336fdd025b810ba763403b352986937)), closes [979/#980](https://github.com/979/nano-workforce/issues/980) [#506](https://github.com/nanobpm/nano-workforce/issues/506)
+
 ## [0.142.0](https://github.com/nanobpm/nano-workforce/compare/v0.141.0...v0.142.0) (2026-08-25)
 
 ### Features
