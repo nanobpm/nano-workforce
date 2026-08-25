@@ -252,7 +252,7 @@ test("#514 Defect A: a capability wait-gate escalation surfaces the probe's last
   // Discrete diagnostic task variables the form/agent can bind directly.
   assert(esc.includes('target="probeDetail"'), "the escalation surfaces the probe's last detail as a discrete variable");
   assert(esc.includes('target="observedReleases"'), "the escalation surfaces the observed candidate releases");
-  assert(/source="=nodeInputs\.[^"]+\.probe\.target" target="probeTarget"/.test(esc), "the escalation surfaces the resolved probe target");
+  assert(/source="=if \(is defined\(probe\.target\)\) then probe\.target else nodeInputs\.[^"]+\.probe\.target" target="probeTarget"/.test(esc), "the escalation surfaces the resolved (late-bound) probe target");
   assert(/source="=nodeInputs\.[^"]+\.probe\.match" target="probeMatch"/.test(esc), "the escalation surfaces the resolved probe match");
 });
 
@@ -421,6 +421,56 @@ test("converge-merge worked graph: agent → connector[converge-merge] → wait[
   assertEquals(connector?.kind, "connector");
   assert(connector?.description.includes("converge-merge"), "the side-effect names the converge-merge target");
   assert(!r.sideEffects.some((s) => s.nodeId === "merged"), "the wait gate is not a side effect");
+});
+
+test("#548 no-literal converge shape: an emitted `pr` fact late-binds the connector (boundFacts) AND the wait target (context put)", async () => {
+  // The canonical `agent → connector[converge-merge] → wait[pr, merged]` shape carrying NO hardcoded PR
+  // number: `open` emits the PR it opened as a typed `pr` fact, and both downstream consumers reference
+  // it (`open.pr`) on incoming fact edges. The compiler must (a) publish the fact as `<open>_pr`, (b)
+  // thread it into the connector's `boundFacts` input, and (c) rewrite the wait's probe target via
+  // `context put` to poll the late-bound PR.
+  const graph = {
+    name: "no-literal converge",
+    nodes: [
+      {
+        id: "open",
+        kind: "agent",
+        agent: { jobType: "senior:feature", prompt: "Implement and open a PR." },
+        emits: [{ name: "pr", type: "pr" }],
+      },
+      { id: "land", kind: "connector", connector: { target: "converge-merge", payload: { pr: "open.pr" } } },
+      { id: "merged", kind: "wait", wait: { kind: "pr", target: "open.pr", match: { prState: "merged" } } },
+    ],
+    edges: [
+      { from: "open.pr", to: "land" },
+      { from: "open.pr", to: "merged" },
+    ],
+  };
+  const r = await compileOk(graph);
+  const openEl = r.resolved.edges.find((e) => e.from === "open.pr")?.fromNode;
+  assertEquals(openEl, "open", "the fact edge resolves to the `open` producer node");
+  // (a) the producer publishes its declared `pr` emit into a flat `<element>_pr` parent variable.
+  assert(/target="[^"]*_pr"/.test(r.bpmn), "the agent's `pr` emit is published as `<element>_pr`");
+  // (b) the connector receives the fact list — its `boundFacts` input names the `pr` fact + producer.
+  assert(/target="boundFacts"/.test(r.bpmn), "the connector is threaded a boundFacts input");
+  assert(/name: "pr"/.test(r.bpmn), "the boundFacts entry names the `pr` fact");
+  // (c) the wait probe target is late-bound via `context put`, not the raw `open.pr` reference literal.
+  assert(/context put\([^)]*\.probe, "target",/.test(r.bpmn), "the wait probe target is rewritten via context put");
+  assert(!/target="owner\/repo#/.test(r.bpmn), "no hardcoded PR literal is compiled into the graph");
+});
+
+test("a wait node with a LITERAL pr target compiles the probe unchanged (no spurious context put)", async () => {
+  const graph = {
+    name: "literal target",
+    nodes: [
+      { id: "open", kind: "agent", agent: { jobType: "senior:feature", prompt: "open a PR" } },
+      { id: "merged", kind: "wait", wait: { kind: "pr", target: "acme/repo#7", match: { prState: "merged" } } },
+    ],
+    edges: [{ from: "open", to: "merged" }],
+  };
+  const r = await compileOk(graph);
+  assert(!/context put/.test(r.bpmn), "a literal target is not wrapped in a context put rewrite");
+  assert(/source="=nodeInputs\.[^"]+\.probe" target="probe"/.test(r.bpmn), "the probe is seeded directly from nodeInputs");
 });
 
 test("resolved edges carry the resolved fromNode and the referenced fact", async () => {

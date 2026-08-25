@@ -39,26 +39,14 @@ export const OUTCOME_DELIVERED = "delivered";
  * convergence AND the merge loop; `converge` stops at `converged` (converge-only). This is the "real
  * target dispatch" ADR 0005 deferred as a later slice for the connector I/O surface: a `converge`/
  * `converge-merge` connector IS the "automated, side-effecting outbound action" a connector is
- * defined to be. Named constants so the worker's dispatch branch and the docs/preview can never drift
- * on the literal. */
-export const CONVERGE_TARGET = "converge";
-export const CONVERGE_MERGE_TARGET = "converge-merge";
-
-/** Is `target` one of the converge-enrollment targets (`converge` / `converge-merge`)? The single
- * predicate the worker branches on to route a dispatch into `submitPr` instead of the forward-declared
- * stub. */
-export function isConvergeTarget(target: string): boolean {
-  return target === CONVERGE_TARGET || target === CONVERGE_MERGE_TARGET;
-}
-
-/** The DEFAULT `convergeOnly` for a converge target: `converge` is review-only (`true` — stop at
- * `converged`), `converge-merge` drives the merge loop too (`false`). Maps directly onto `submitPr`'s
- * `convergeOnly` argument (mirroring how `converge-feature` inverts `autoMerge`). An author may still
- * override it per-dispatch via the connector payload's `convergeOnly`. Only ever consulted behind
- * `isConvergeTarget`, so a non-converge target's `false` is unreachable. */
-export function convergeOnlyForTarget(target: string): boolean {
-  return target === CONVERGE_TARGET;
-}
+ * defined to be. The converge-target vocabulary lives in the dependency-free {@link ./convergeTargets.ts}
+ * so the pure validator can share it; re-exported here for the worker's existing import surface. */
+export {
+  CONVERGE_MERGE_TARGET,
+  CONVERGE_TARGET,
+  convergeOnlyForTarget,
+  isConvergeTarget,
+} from "./convergeTargets.ts";
 
 /** One durable dispatch-claim row — the at-most-once ledger entry a connector writes before it acts. */
 export interface DeliveryConnectorDispatchRow extends Record<string, unknown> {
@@ -80,6 +68,29 @@ export interface BoundFact {
   from: string;
   name: string;
   value: unknown;
+}
+
+/** Resolve a converge connector's effective target PR (issue #548), late-binding it from an upstream
+ * `agent` node's emitted `pr` fact so the canonical `agent → connector[converge-merge] → wait` shape
+ * needs NO hardcoded literal. Precedence, given the author-supplied `payload.pr` and the threaded
+ * `boundFacts`:
+ *   • an explicit fact REFERENCE — a `payload.pr` string that exactly matches a threaded fact's
+ *     `<from>.<name>` — resolves to that fact's value (an `owner/repo#N` PR ref emitted upstream);
+ *   • an explicit LITERAL — any other `payload.pr` string — is returned as-is (a real `owner/repo#N`
+ *     is never `<node>.<fact>`-shaped, so it can't collide with a reference), and `parsePr` validates it;
+ *   • OMITTED (`payload.pr` absent) — binds the single incoming fact named `pr` (the canonical emit),
+ *     else the single incoming bound fact when there is exactly one, else stays undefined so
+ *     {@link readConvergeInput} raises its "requires payload.pr" error (fail closed).
+ * Pure + total (no PR parsing here — the caller validates), so it is unit-testable without the engine. */
+export function resolveConvergePr(payloadPr: unknown, boundFacts: readonly BoundFact[]): unknown {
+  if (typeof payloadPr === "string" && payloadPr.trim() !== "") {
+    const ref = boundFacts.find((b) => `${b.from}.${b.name}` === payloadPr.trim());
+    return ref ? ref.value : payloadPr;
+  }
+  const named = boundFacts.filter((b) => b.name === "pr");
+  if (named.length === 1) return named[0].value;
+  if (named.length === 0 && boundFacts.length === 1) return boundFacts[0].value;
+  return payloadPr;
 }
 
 /** The effective dedupe key for a connector dispatch: the author-supplied `connector.dedupeKey` when

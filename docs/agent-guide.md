@@ -597,28 +597,41 @@ into the PR's merge-stage dependency set. The enrollment is idempotent (the conn
 at-least-once dedupe fence **plus** `submitPr`'s own `prKey` idempotency), so a graph resume /
 redelivery never double-enrolls.
 
-**Canonical shape** — the agent opens the PR, the connector enrolls it, and a `wait[pr, merged]`
-gate binds `mergedSha` when it lands, with **no human node**:
+**Canonical shape** — the agent opens the PR, emits it as a typed **`pr` fact**, and the connector
+and `wait[pr, merged]` gate **late-bind** that fact (no hardcoded PR number, no human node). The
+author never knows the PR number at compose time, so reference it by fact:
 
 ```json
 {
   "name": "open → converge+merge → wait merged",
   "nodes": [
     { "id": "open", "kind": "agent",
-      "agent": { "jobType": "senior:feature", "prompt": "Implement the change in acme/repo and open a PR." } },
+      "agent": { "jobType": "senior:feature", "prompt": "Implement the change in acme/repo and open a PR." },
+      "emits": [ { "name": "pr", "type": "pr" } ] },
     { "id": "land", "kind": "connector",
-      "connector": { "target": "converge-merge", "payload": { "pr": "acme/repo#123" } } },
+      "connector": { "target": "converge-merge", "payload": { "pr": "open.pr" } } },
     { "id": "merged", "kind": "wait",
-      "wait": { "kind": "pr", "target": "acme/repo#123", "match": { "prState": "merged" }, "onTimeout": "escalate" } }
+      "wait": { "kind": "pr", "target": "open.pr", "match": { "prState": "merged" }, "onTimeout": "escalate" } }
   ],
   "edges": [
-    { "from": "open", "to": "land" },
-    { "from": "land", "to": "merged" }
+    { "from": "open.pr", "to": "land" },
+    { "from": "open.pr", "to": "merged" }
   ]
 }
 ```
 
-> **Follow-up (not shipped):** the MVP sources the connector's `pr` as a **literal**. Auto-emitting
-> the opened PR from the `agent` node as a typed `pr` fact (so the connector/`wait` bind it instead of
-> a literal) is a later slice — not required for the graph above.
+The `pr` fact is threaded along the **fact-qualified edges** (`open.pr → land`, `open.pr → merged`) —
+those edges are what carry the observed PR into each consumer, so they are **required** when you
+reference `open.pr` (the validator rejects a reference with no threading edge, `unbound-pr`). Three
+ways to name the target PR:
+
+- **fact reference** `"<node>.pr"` — late-bound from the upstream `agent`'s emitted `pr` fact (the
+  shape above). The referenced fact must be declared **`pr`-typed** and threaded on an incoming edge.
+- **omitted** (connector only) — `payload` without a `pr` auto-binds the **single** incoming `pr`
+  fact, so `"connector": { "target": "converge-merge" }` works when exactly one `pr` fact flows in.
+- **literal** `"owner/repo#N"` — still accepted for a PR you already know (a real ref is never
+  `<node>.pr`-shaped, so it never collides with a reference).
+
+`senior:feature` already returns the PR it opened, so declaring `emits: [{ "name": "pr", "type": "pr" }]`
+on the agent node is all it takes to publish it (issue #548).
 

@@ -822,12 +822,30 @@ function ioMappingLines(w: NodeWiring, boundInputs: readonly BoundInput[]): stri
       // threads null rather than raising a FEEL error.
       inputs.push({ source: guarded(TRANSCRIPT_URL_BASE_VAR), target: TRANSCRIPT_URL_BASE_VAR });
       break;
-    case "wait":
+    case "wait": {
       inputs.push({ source: cfg("gateKey"), target: "gateKey" });
-      inputs.push({ source: cfg("probe"), target: "probe" });
+      // #548 late-binding: when the authored probe `target` is a `<node>.<fact>` reference to an
+      // upstream emitted fact threaded on an incoming edge, rewrite the seeded probe's `target` to the
+      // OBSERVED value via FEEL `context put`, so the canonical `agent → connector[converge-merge] →
+      // wait[pr, merged]` shape polls the PR the agent opened with NO hardcoded literal. A plain literal
+      // target (a real `owner/repo#N` is never `<node>.<fact>`-shaped) can't match a bound ref, so it
+      // passes through unchanged. Guarded (`is defined`) so an as-yet-unobserved fact keeps the
+      // authored value rather than raising a FEEL error.
+      const boundTarget = boundInputs.find((b) => `${b.fromNode}.${b.fact}` === node.wait.target);
+      if (boundTarget) {
+        const varName = `${boundTarget.producerElement}_${boundTarget.fact}`;
+        const probeRef = cfg("probe").slice(1);
+        inputs.push({
+          source: `=context put(${probeRef}, "target", if (is defined(${varName})) then ${varName} else ${probeRef}.target)`,
+          target: "probe",
+        });
+      } else {
+        inputs.push({ source: cfg("probe"), target: "probe" });
+      }
       inputs.push({ source: cfg("probeTimeout"), target: "probeTimeout" });
       inputs.push({ source: cfg("probePollEvery"), target: "probePollEvery" });
       break;
+    }
     case "human":
       inputs.push({ source: cfg("escalationSlaTimeout"), target: "escalationSlaTimeout" });
       inputs.push({ source: cfg("escalationAssignee"), target: "escalationAssignee" });
@@ -983,7 +1001,7 @@ function waitBodyLines(el: string, node: Extract<DeliveryNode, { kind: "wait" }>
   const diagnosticInputs = [
     { source: "=if (is defined(detail)) then detail else null", target: "probeDetail" },
     { source: "=if (is defined(observed)) then observed else null", target: "observedReleases" },
-    { source: `=nodeInputs.${el}.probe.target`, target: "probeTarget" },
+    { source: `=if (is defined(probe.target)) then probe.target else nodeInputs.${el}.probe.target`, target: "probeTarget" },
     { source: `=nodeInputs.${el}.probe.match`, target: "probeMatch" },
   ];
   return [

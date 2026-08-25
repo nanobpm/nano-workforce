@@ -15,6 +15,7 @@ import {
   convergeOnlyForTarget,
   dispatchConnector,
   isConvergeTarget,
+  resolveConvergePr,
 } from "../../app/deliveryConnector.ts";
 import { isPrSettled, MAX_ROUNDS, type ParsedPr, parsePr, submitPr } from "../../app/service.ts";
 
@@ -81,19 +82,26 @@ export function safeStringify(value: unknown): string {
  * `convergeOnly` DEFAULTS from the target (`converge` → review-only `true`; `converge-merge` → drive
  * the merge loop `false`) and may be overridden per-dispatch by an explicit boolean. `dependsOn` is an
  * optional list of PR refs unioned into the enrolled PR's merge-stage dependency set (only non-string
- * entries are dropped; `submitPr` itself ignores unparseable refs). Exported for unit coverage — the
- * MVP sources `pr` as a literal (identical to how the `wait: pr` node targets a known PR), so no new
- * fact plumbing is needed to ship. */
+ * entries are dropped; `submitPr` itself ignores unparseable refs). Exported for unit coverage.
+ *
+ * `pr` may be sourced three ways (issue #548), resolved by {@link resolveConvergePr} against the
+ * threaded `boundFacts` BEFORE parsing: a LITERAL `owner/repo#N`, an explicit fact REFERENCE
+ * (`payload.pr: "<upstreamNode>.pr"`), or OMITTED — late-bound from the single incoming `pr` fact an
+ * upstream `agent` node emitted for the PR it opened. This is what lets the canonical
+ * `agent → connector[converge-merge] → wait` shape carry no hardcoded PR number. */
 export function readConvergeInput(
   target: string,
   payload: Record<string, unknown> | null,
+  boundFacts: readonly BoundFact[] | null,
 ): { parsed: ParsedPr; convergeOnly: boolean; dependsOn: string[] } {
   const p = payload ?? {};
-  const parsed = parsePr(p.pr);
+  const prValue = resolveConvergePr(p.pr, boundFacts ?? []);
+  const parsed = parsePr(prValue);
   if (!parsed) {
     throw new Error(
-      `delivery-connector: '${target}' target requires payload.pr as a parseable "owner/repo#N" ` +
-        `(got ${safeStringify(p.pr ?? null)})`,
+      `delivery-connector: '${target}' target requires a target PR — a literal "owner/repo#N" in ` +
+        `payload.pr, an upstream-fact reference (payload.pr: "<node>.pr"), or a threaded \`pr\` fact ` +
+        `bound from an upstream \`agent\` node (got ${safeStringify(prValue ?? null)})`,
     );
   }
   const convergeOnly = typeof p.convergeOnly === "boolean" ? p.convergeOnly : convergeOnlyForTarget(target);
@@ -106,7 +114,7 @@ const handler: AppJobHandler<In, ConnectorDispatchResult> = async (job, app) => 
   // A `converge`/`converge-merge` target enrolls a PR into the shared convergence (+ merge) loop.
   // Parse + validate its payload BEFORE claiming a ledger row, so a misconfigured converge node (no
   // parseable `pr`) fails CLOSED without writing a junk dispatch row it could never act on.
-  const converge = isConvergeTarget(target) ? readConvergeInput(target, payload) : null;
+  const converge = isConvergeTarget(target) ? readConvergeInput(target, payload, boundFacts) : null;
   const dedupeKey = connectorDedupeKey({
     dedupeKey: job.variables.dedupeKey ?? null,
     processInstanceKey: job.processInstanceKey ?? null,
