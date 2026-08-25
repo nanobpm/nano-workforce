@@ -87,12 +87,35 @@ export function stepOrdinal(step: StepKey): number {
  * shape-aware predicate (`converged` is resolved-not-landed) is applied by the caller, not here. */
 export type TerminalTier = "ok" | "failed" | "blocked";
 
-const SUCCESS_TERMINALS: readonly string[] = ["merged", "converged", "done"];
+/** The delivery-graph canonical SUCCESS terminal (app/deliveryGraphReadModel.ts). `STAGE_DONE_STATUSES`
+ * predates the S7 axis and does NOT include it, so it is the one status tiered ON TOP of the shared
+ * feature basis below (special-cased per the ADR §4b `done` value). */
+export const DONE_TERMINAL = "done";
+
+/** The per-cell terminal PARTITION — the SAME basis as featureReadModel's `stage_state` CASE
+ * (app/featureReadModel.ts: `merged`/`converged`→ok, `blocked`→blocked, `failed`/`skipped`/`abandoned`→
+ * failed). It is NOT a second hand-kept copy: every member is drawn from the shipped
+ * `STAGE_DONE_STATUSES`, and the exhaustiveness guard below fails at module load if this partition ever
+ * stops covering that canonical set EXACTLY — so a terminal status added to `STAGE_DONE_STATUSES` cannot
+ * silently fall through untiered (drift becomes a hard error, not a wrong render). */
+const SUCCESS_TERMINALS: readonly string[] = ["merged", "converged"];
+const BLOCKED_TERMINAL = "blocked";
 const FAILED_TERMINALS: readonly string[] = ["failed", "skipped", "abandoned"];
 
+// Structural coupling to the single source of truth: the partition must tier EXACTLY the members of
+// STAGE_DONE_STATUSES (the delivery-graph `done` value is tiered separately, so it is excluded here).
+const _tiered = new Set<string>([...SUCCESS_TERMINALS, BLOCKED_TERMINAL, ...FAILED_TERMINALS]);
+const _canonical = new Set<string>(STAGE_DONE_STATUSES);
+if (_tiered.size !== _canonical.size || [..._canonical].some((s) => !_tiered.has(s))) {
+  throw new Error(
+    "stepAxis terminalTier partition drifted from STAGE_DONE_STATUSES — every terminal status must be " +
+      `tiered exactly once. tiered=[${[..._tiered].sort().join(",")}] canonical=[${[..._canonical].sort().join(",")}]`,
+  );
+}
+
 export function terminalTier(status: string): TerminalTier | null {
-  if (SUCCESS_TERMINALS.includes(status)) return "ok";
-  if (status === "blocked") return "blocked";
+  if (status === DONE_TERMINAL || SUCCESS_TERMINALS.includes(status)) return "ok";
+  if (status === BLOCKED_TERMINAL) return "blocked";
   if (FAILED_TERMINALS.includes(status)) return "failed";
   return null;
 }

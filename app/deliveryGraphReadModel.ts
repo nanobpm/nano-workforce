@@ -41,13 +41,15 @@
 
 import { and, caseWhen, col, countWhere, defineReadModel, defineRollup, type Expr, eq, fromTable, gt, isNotNull, lit, not, or, type ReadModel, type Rollup, rcol, when } from "@nanobpm/urban";
 import { TERMINAL_STATUSES } from "./deliveryStatuses.ts";
+import { PR_TRACKING_RELATION } from "./planRollups.ts";
 
 /** The slice-PR relation the member-PR rollup folds over: the auto-provisioned
  * `pull_requests__tracking` derived VIEW (ADR-0065), NOT the raw `pull_requests` table — so a member PR
  * that was terminated out of band reads its terminal-folded `derived_status` (`abandoned`) and is not
- * held in the live frontier (§4b S7 rollout §558-562). The SAME relation the plan-family rollups read
- * (app/planRollups.ts `PR_TRACKING_RELATION`). */
-export const PR_TRACKING_RELATION = "pull_requests__tracking";
+ * held in the live frontier (§4b S7 rollout §558-562). Re-exported from app/planRollups.ts — the ONE
+ * canonical declaration of the tracking-relation name — so this model shares that single source rather
+ * than reintroducing a drift surface if the relation is ever renamed. */
+export { PR_TRACKING_RELATION };
 
 /** The delivery-graph member-PR rollup: one row per `root_request_key` with the single count the
  * `Implementing`→`Converging` temper reads — how many attached PRs are still IN FLIGHT (their

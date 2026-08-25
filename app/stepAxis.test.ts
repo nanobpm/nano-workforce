@@ -4,9 +4,10 @@
 
 import { test } from "node:test";
 import { assert, assertEquals } from "#test-assert";
-import { STAGE_KEYS } from "./stage.ts";
+import { STAGE_DONE_STATUSES, STAGE_KEYS } from "./stage.ts";
 import {
   CELL_STEP,
+  DONE_TERMINAL,
   type FrontierBranch,
   INITIAL_STEP,
   reduceFrontier,
@@ -59,6 +60,17 @@ test("terminalTier reuses the shipped stage_state tiers (converged/merged/done�
   assertEquals(terminalTier("abandoned"), "failed");
   assertEquals(terminalTier("running"), null);
   assertEquals(terminalTier("converging"), null);
+});
+
+test("terminalTier's partition is DERIVED from STAGE_DONE_STATUSES — every canonical terminal is tiered exactly once (drift guard)", () => {
+  // The stepAxis module already throws at load if the partition drifts from STAGE_DONE_STATUSES; assert
+  // the coupling here too so a reviewer sees the invariant. Every STAGE_DONE_STATUSES member gets a
+  // non-null tier, and the only status tiered OUTSIDE that canonical set is the delivery-graph `done`.
+  for (const status of STAGE_DONE_STATUSES) {
+    assert(terminalTier(status) !== null, `STAGE_DONE_STATUSES member "${status}" must be tiered by terminalTier`);
+  }
+  assertEquals(terminalTier(DONE_TERMINAL), "ok");
+  assert(!STAGE_DONE_STATUSES.includes(DONE_TERMINAL), "`done` is the S7 canonical success value, tiered on top of STAGE_DONE_STATUSES (not a member of it)");
 });
 
 // ── reduceFrontier — the deterministic parallel-frontier rollup (§4b §280-332) ────────────────────
