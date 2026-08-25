@@ -74,7 +74,8 @@ test("attachElementInstance is a no-op for a released (or never-linked) job or a
   reg.attachElementInstance("", "ei-1");
 });
 
-test("link ignores empty instance or jobKey", () => {  const reg = new CorrelationRegistry();
+test("link ignores empty instance or jobKey", () => {
+  const reg = new CorrelationRegistry();
   reg.link("", "6494");
   reg.link("wk-a", "");
   assert.equal(reg.count(), 0);

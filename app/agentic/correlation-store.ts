@@ -172,7 +172,8 @@ export class AgenticCorrelationStore {
   }
 
   /** The durable attribution for a jobKey, or undefined when none was recorded. */
-  get(jobKey: string): DurableCorrelation | undefined {    if (jobKey === "") return undefined;
+  get(jobKey: string): DurableCorrelation | undefined {
+    if (jobKey === "") return undefined;
     const rows = this.#db.all<Row>("SELECT * FROM agentic_correlation WHERE job_key = ?", [jobKey]);
     return rows.length > 0 ? fromRow(rows[0]) : undefined;
   }

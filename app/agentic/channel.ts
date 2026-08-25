@@ -124,7 +124,8 @@ async function discoverRegistry(log: Logger): Promise<AgenticFamilyRegistry> {
 export async function mountAgenticChannel(
   opts: MountAgenticChannelOptions,
 ): Promise<AgenticChannelHandle> {
-  const { server, data, log } = opts;  // Local-first: `secure` defaults to true at the library level (fail-closed for callers that don't
+  const { server, data, log } = opts;
+  // Local-first: `secure` defaults to true at the library level (fail-closed for callers that don't
   // opt in), but `main.ts` passes `secure: false` for the on-by-default LOCAL channel. In LOCAL mode
   // an empty secret is fine — we substitute the well-known localhost token and drop the credential
   // requirement so a `nano work` worker appears live with zero configuration.

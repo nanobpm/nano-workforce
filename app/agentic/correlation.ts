@@ -125,7 +125,8 @@ export class CorrelationRegistry {
   }
 
   /** Release one job (it finished / moved on). No-op if it was never linked. */
-  releaseJob(jobKey: string): void {    const instance = this.#instanceOf.get(jobKey);
+  releaseJob(jobKey: string): void {
+    const instance = this.#instanceOf.get(jobKey);
     if (instance !== undefined) {
       this.#jobsOf.get(instance)?.delete(jobKey);
       this.#pruneInstance(instance);
