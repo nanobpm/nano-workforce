@@ -331,6 +331,19 @@ exposed step (and its `failed`/`blocked` state) is deterministic; (b) **all-term
 **earliest non-success terminal** step (`failed`/`blocked`, same tie-break) if any branch is non-success,
 else `done`.
 
+**The success predicate is shape-aware — `converged` is a success terminal per-PR/cell, but NOT for the
+epic rollup.** The normalization above collapses `converged` (and `merged`) into the success terminal
+`done` at the **per-PR / per-cell frontier** — correct for a single PR's own stepper (a review-only PR
+*is* done once converged). But an **epic** aggregates *slice PRs*, and there a slice that is `converged`
+but not merged is **resolved-not-landed**: `deriveDelivery` reports epic success as `delivery = landed`
+**only when every slice PR has merged** (`prsInFlight == 0 && prsMerged == prsOpened && prsOpened > 0`),
+and treats `converged` / `abandoned` slices as terminal-but-not-landed that never make an epic `landed`
+(`app/delivery.ts:39-64`). So the all-terminal rule's `else done` is evaluated against a **shape-scoped
+success predicate**: for a feature/graph cell, a `converged` branch counts as `done`; for the **epic**
+aggregate, only `delivery = landed` satisfies the success bucket — an all-`converged` (review-only) epic
+renders as its least-advanced *converged* step, **not** `Done`, so a review-only epic is never reported
+as landed.
+
 **Cross-instance correlation, because composed cells are child instances by default.** engine-core's
 `CallActivity` spawns a **distinct child process instance** and links it to the parent
 (`engine-core/src/model.rs`); `inline_call_activities` (embedded-subprocess, one flat instance) is an
@@ -417,7 +430,15 @@ lands the element query (S8), the projection swaps its park/position source for 
 instance — sharpening feature + delivery-graph to per-cell and bringing epic onto the same `pipeline` —
 **preserving the step axis and renderer, and using whatever parent/child correlation strategy S4
 selects** — retiring *both* the `epic_phase` write-time stamp and the user-task-only delivery-graph poll
-into one derivation.
+into one derivation. **"Per-cell" here means per-cell *source fidelity*, rendered onto the existing
+collapsed lifecycle axis — not a new per-cell step axis.** S8 sharpens the *source* the projection reads
+(a live engine element-instance identifies exactly which cell a token occupies) while the rendered step
+still **collapses that cell into the existing six `STAGE_KEYS` brackets** per §4b's cell→step mapping
+(inserted `wait` / `human` / `escalation` cells fold into an existing bracket, §217-232); the static
+six-stage `pipeline` `stages` array and its renderer are **preserved unchanged**. S8 does **not**
+introduce a per-cell stages array or a distinct step per cell — a distinct cell can be *observed* as the
+active source but is *displayed* at its collapsed lifecycle key. (Promoting cells to first-class steps
+would be a separate axis-contract change, out of scope for S8.)
 
 ### 5. Preserve — the static-vs-adaptive execution axis (do NOT bundle it)
 
@@ -511,7 +532,16 @@ deployment-runtime prerequisite noted above), not on #416 alone.
   `root_request_key = run_key` join for every PR, and the per-node correlation **differs by node kind**,
   so S7 must **persist a run-level root rollup** — a stored run→node/PR mapping, or a canonical run root
   threaded through every PR-producing node — **not** merely *document* the existing per-node keys (which
-  alone leaves the **agent** case below unattributed), rather than assume one join: a **connector** PR roots by the connector's
+  alone leaves the **agent** case below unattributed). **This persisted rollup must land on the canonical
+  aggregate, sequenced around S2's ownership — not on the legacy `delivery_graph_runs` row S2/S3 retire.**
+  Because S2 repoints `delivery_graph_runs` reads to `delivery_units`-derived VIEWs/rows and S3 moves the
+  writers off the legacy tables, the mapping's home is either (i) a column/relation on **`delivery_units`**
+  (added, dual-written, and backfilled under S2's expand/contract order — §479-490 — so the derived VIEW
+  exposes it), or (ii) **threaded into the PRs themselves** as each PR-producing node's `root_request_key`
+  (`app/submitPr.ts`), which survives the legacy-table retirement. Storing it *only* on
+  `delivery_graph_runs` would be orphaned when that table becomes a derived VIEW, so S7 is **sequenced
+  after S2 establishes `delivery_units` ownership** (or takes the PR-threaded option). Rather than assume
+  one join: a **connector** PR roots by the connector's
   *effective* `dedupeKey` — the author-supplied `connector.dedupeKey`, else the graph-derived
   `<processInstanceKey>:<elementId>` (`app/deliveryConnector.ts` `connectorDedupeKey`) — threaded into
   `submitPr` as its `rootRequestKey`; whereas an **agent** PR has **no `dedupeKey` at all** (the runner
@@ -597,7 +627,7 @@ deployment-runtime prerequisite noted above), not on #416 alone.
   set; and (c) `app/lineage.ts` also reads `delivery_graph_runs.phase` to form `LineageThread.stageLabel`
   and persists `lineage_threads.stage_label` (shown on delivery-lineage / home rows), so S8 must supply
   that phase narrative from the derived projection or update the lineage read too, else those rows lose
-  their phase label; and (d) **three** **page bindings** read the `epic_phase` field, but **not all read
+  their phase label; and (d) **four field bindings across three pages** read the `epic_phase` field, but **not all read
   raw `plans`**: the epic index grid (`pages/epic.page.json:119`) and the epic-detail page
   (`pages/epic-detail.page.json:99,146`) bind it through the **`plan_read_model` VIEW**
   (`pages/epic.page.json:102`, `pages/epic-detail.page.json:95,140`; the VIEW projects `pl.epic_phase`,
