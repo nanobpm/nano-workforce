@@ -85,14 +85,30 @@
         "data": {
           "kind": "datasource",
           "source": "app",
-          "table": "delivery_graph_runs",
+          "table": "delivery_graph_read_model",
           "orderBy": { "field": "updated_at", "dir": "desc" },
           "filter": [{ "field": "run_key", "eqParam": true }]
         },
         "columns": [
           { "field": "title", "template": "{{title}}", "header": "Graph", "subtitleField": "run_key", "truncate": true, "width": "30%" },
           { "field": "status", "header": "Status", "link": { "kind": "processExplorer", "keyField": "process_key" } },
-          { "field": "phase", "header": "Phase", "truncate": true, "width": "30%" },
+          {
+            "field": "stage",
+            "header": "Pipeline",
+            "kind": "pipeline",
+            "stages": [
+              { "key": "Requested", "label": "Requested" },
+              { "key": "Implementing", "label": "Implementing" },
+              { "key": "PR open", "label": "PR open" },
+              { "key": "Converging", "label": "Converging" },
+              { "key": "Merging", "label": "Merging" },
+              { "key": "Done", "label": "Done" }
+            ],
+            "activeField": "stage",
+            "stateField": "stage_state",
+            "locus": { "field": "process_key", "link": { "kind": "processExplorer", "keyField": "process_key" } }
+          },
+          { "field": "park_label", "header": "Parked", "truncate": true, "width": "30%" },
           { "field": "node_count", "header": "Nodes" },
           { "field": "human_node_count", "header": "Human" },
           { "field": "side_effect_count", "header": "Side effects" },

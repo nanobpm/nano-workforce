@@ -333,8 +333,10 @@ test("issue #205: overview is the landing page and first nav item", async () => 
     plan_read_model: { field: "list_bucket", in: ["active"] },
     feature_runs: { field: "status", in: ["running", "escalated", "awaiting_operator"] },
     // The 4th dispatch surface (issue #386) — active delivery graphs. Both in-flight statuses
-    // (`awaiting-approval` parked at the gate, `running` dispatched) show here.
-    delivery_graph_runs: { field: "status", in: ["awaiting-approval", "running"] },
+    // (`awaiting-approval` parked at the gate, `running` dispatched) show here. Binds the derived
+    // `delivery_graph_read_model` VIEW (S7 / #541 — the single source of truth for the pipeline
+    // projection it also renders), which re-exports every run column plus the effective `status`.
+    delivery_graph_read_model: { field: "status", in: ["awaiting-approval", "running"] },
   };
   const grids = (overview.nodes ?? []).filter((n: Json) => n.type === "dataGrid");
   for (const [table, { field, in: values }] of Object.entries(expected)) {
@@ -361,19 +363,21 @@ test("issue #386: the human-facing Delivery Graphs surface is wired (nav tab, pa
   assert(tab, "pages/_nav.json must carry a `Delivery Graphs` nav tab → the delivery-graphs page");
 
   // 2) The page carries the compose → preview → dispatch App View (issue #441 — the rendered preview
-  //    that consumes the compile output), plus an in-flight grid over the delivery_graph_runs aggregate
-  //    that links to the per-graph detail page. The rich preview (mermaid diagram + humanNodes[] +
-  //    sideEffects[] + inline errors) can't render in a bare `actionForm` (its response is discarded),
-  //    so the surface is an `appView` embed over the SAME compile/dispatch doors.
+  //    that consumes the compile output), plus an in-flight grid over the delivery-graph run data (the
+  //    derived `delivery_graph_read_model` VIEW, S7 / #541 — which re-exports every `delivery_graph_runs`
+  //    column plus the pipeline projection) that links to the per-graph detail page. The rich preview
+  //    (mermaid diagram + humanNodes[] + sideEffects[] + inline errors) can't render in a bare
+  //    `actionForm` (its response is discarded), so the surface is an `appView` embed over the SAME
+  //    compile/dispatch doors.
   const page = JSON.parse(readFileSync(`${ROOT}pages/delivery-graphs.page.json`, "utf8"));
   const compose = (page.nodes ?? []).find(
     (n: Json) => n.type === "appView" && typeof n.props?.embed === "string" && n.props.embed.includes("delivery-graphs/embed.html"),
   );
   assert(compose, "delivery-graphs page must have an appView embedding ./delivery-graphs/embed.html (the compose → preview → dispatch view, #441)");
   const grid = (page.nodes ?? []).find(
-    (n: Json) => n.type === "dataGrid" && n.props?.data?.table === "delivery_graph_runs",
+    (n: Json) => n.type === "dataGrid" && n.props?.data?.table === "delivery_graph_read_model",
   );
-  assert(grid, "delivery-graphs page must have an in-flight grid over delivery_graph_runs");
+  assert(grid, "delivery-graphs page must have an in-flight grid over the derived delivery_graph_read_model VIEW");
   const linkCol = (grid.props?.columns ?? []).find((c: Json) => c.link?.page === "delivery-graph-detail");
   assert(
     linkCol && linkCol.link?.keyField === "run_key",
@@ -383,9 +387,9 @@ test("issue #386: the human-facing Delivery Graphs surface is wired (nav tab, pa
   // 3) The per-graph detail page reads the run aggregate scoped to the route param (run_key).
   const detail = JSON.parse(readFileSync(`${ROOT}pages/delivery-graph-detail.page.json`, "utf8"));
   const runGrid = (detail.nodes ?? []).find(
-    (n: Json) => n.type === "dataGrid" && n.props?.data?.table === "delivery_graph_runs",
+    (n: Json) => n.type === "dataGrid" && n.props?.data?.table === "delivery_graph_read_model",
   );
-  assert(runGrid, "delivery-graph-detail must bind a grid to delivery_graph_runs");
+  assert(runGrid, "delivery-graph-detail must bind a grid to the derived delivery_graph_read_model VIEW");
   assert(
     (runGrid.props?.data?.filter ?? []).some((fl: Json) => fl.field === "run_key" && fl.eqParam === true),
     "delivery-graph-detail must scope its run grid to the route param (run_key eqParam)",
@@ -399,7 +403,7 @@ test("issue #386: the human-facing Delivery Graphs surface is wired (nav tab, pa
     "overview subtitle must no longer say 'three dispatch surfaces' (a delivery graph is a 4th)",
   );
   const ovGrid = (overview.nodes ?? []).find(
-    (n: Json) => n.type === "dataGrid" && n.props?.data?.table === "delivery_graph_runs",
+    (n: Json) => n.type === "dataGrid" && n.props?.data?.table === "delivery_graph_read_model",
   );
   const ovLink = (ovGrid?.props?.columns ?? []).find((c: Json) => c.link?.page === "delivery-graph-detail");
   assert(

@@ -207,14 +207,30 @@
         "data": {
           "kind": "datasource",
           "source": "app",
-          "table": "delivery_graph_runs",
+          "table": "delivery_graph_read_model",
           "orderBy": { "field": "updated_at", "dir": "desc" },
           "filter": [{ "field": "status", "in": ["awaiting-approval", "running"] }]
         },
         "columns": [
           { "field": "title", "template": "{{title}}", "header": "Item", "subtitleField": "run_key", "truncate": true, "width": "30%", "link": { "kind": "page", "page": "delivery-graph-detail", "keyField": "run_key" } },
           { "field": "status", "header": "Status", "link": { "kind": "processExplorer", "keyField": "process_key" } },
-          { "field": "phase", "header": "Phase", "truncate": true, "width": "28%" },
+          {
+            "field": "stage",
+            "header": "Pipeline",
+            "kind": "pipeline",
+            "stages": [
+              { "key": "Requested", "label": "Requested" },
+              { "key": "Implementing", "label": "Implementing" },
+              { "key": "PR open", "label": "PR open" },
+              { "key": "Converging", "label": "Converging" },
+              { "key": "Merging", "label": "Merging" },
+              { "key": "Done", "label": "Done" }
+            ],
+            "activeField": "stage",
+            "stateField": "stage_state",
+            "locus": { "field": "process_key", "link": { "kind": "processExplorer", "keyField": "process_key" } }
+          },
+          { "field": "park_label", "header": "Parked", "truncate": true, "width": "28%" },
           { "field": "updated_at", "header": "Updated", "width": "9rem", "format": "datetime" }
         ],
         "detail": {
