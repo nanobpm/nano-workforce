@@ -643,6 +643,11 @@ components:
         elementId:
           type: string
           description: The BPMN element id (activity/task) the job was for, when still known (advisory).
+        elementInstanceKey:
+          type: string
+          description: The engine element-instance key the job's token occupied (#544) — the per-occupancy
+            handle, unambiguous across a looping / retried activity where many instances share one elementId.
+            Resolved from the job's element-instance wait-state; advisory, present when resolution landed.
         planKey:
           type: string
           description: The plan / epic key this job was part of (e.g. owner/repo#142), when still known (advisory).
@@ -749,6 +754,10 @@ components:
         elementId:
           type: string
           description: The BPMN element id, when still known (advisory).
+        elementInstanceKey:
+          type: string
+          description: The engine element-instance key the job's token occupied (#544) — per-occupancy,
+            unambiguous across a looping / retried activity; advisory, present when resolution landed.
         planKey:
           type: string
           description: The plan / epic key, when still known (advisory).
@@ -2802,6 +2811,13 @@ paths:
           schema:
             type: string
           description: Return only transcripts whose (still-known) correlation names this process instance.
+        - name: elementInstanceKey
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Return only transcripts whose correlation names this engine element-instance key (#544) —
+            resolves a session to one occupancy of a looping / retried activity, unlike the static elementId.
         - name: planKey
           in: query
           required: false

@@ -9,6 +9,7 @@ import { DatabaseSync } from "node:sqlite";
 import type { SqliteDb, TranscriptRing, TranscriptStore, TranscriptStream } from "@nanobpm/agentic/transcript";
 import { assert, assertEquals } from "#test-assert";
 import { AgenticCorrelationStore } from "./correlation-store.ts";
+import { CorrelationRegistry } from "./correlation.ts";
 import { correlationFieldsFor, listTranscripts, readTranscriptFrom } from "./transcript-read.ts";
 
 /** A read-only TranscriptStore double: list() returns the seeded metas; read() has no retained chunks. */
@@ -105,6 +106,32 @@ test("durable fallback: a released (past) job is attributed from the durable sto
   assertEquals(fields.host, "us-east-1a");
   assertEquals(fields.processInstanceKey, "pi-9");
   assertEquals(fields.planKey, "acme/repo#42");
+});
+
+test("#544: the durable element-instance key surfaces on the read projection and its filter", () => {
+  const durable = new AgenticCorrelationStore(memoryStore());
+  // Two iterations of the SAME static element (`agent`) — distinct element instances, distinct jobKeys.
+  durable.record({ jobKey: "k1", stream: "job:k1", instance: "worker-A", elementId: "agent", elementInstanceKey: "ei-1", completedAt: early });
+  durable.record({ jobKey: "k2", stream: "job:k2", instance: "worker-A", elementId: "agent", elementInstanceKey: "ei-2", completedAt: late });
+
+  // The key surfaces on the correlation fields (durable fallback, live registry empty).
+  assertEquals(correlationFieldsFor("job:k1", undefined, durable).elementInstanceKey, "ei-1");
+
+  const store = fakeStore([meta("job:k1", early), meta("job:k2", late)]);
+  // The elementInstanceKey filter resolves a session to ONE occupancy, where the elementId cannot.
+  const out = listTranscripts(store, undefined, { elementInstanceKey: "ei-2" }, durable);
+  assertEquals(out.map((t) => t.stream), ["job:k2"], "only the ei-2 occupancy matches");
+  assertEquals(out[0].elementInstanceKey, "ei-2", "the projection carries the element-instance key");
+});
+
+test("#544: the live correlation's element-instance key takes precedence over the durable row on read", () => {
+  const registry = new CorrelationRegistry();
+  registry.link("worker-A", "k1", { elementId: "agent" });
+  registry.attachElementInstance("k1", "ei-live");
+  const durable = new AgenticCorrelationStore(memoryStore());
+  durable.record({ jobKey: "k1", stream: "job:k1", instance: "worker-A", elementInstanceKey: "ei-old", completedAt: mid });
+
+  assertEquals(correlationFieldsFor("job:k1", registry, durable).elementInstanceKey, "ei-live");
 });
 
 test("listTranscripts: the instance filter returns only sessions the durable store attributes to that worker", () => {

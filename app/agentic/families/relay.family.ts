@@ -35,6 +35,7 @@ import {
 import type { Logger } from "@nanobpm/urban";
 import { currentCorrelation, type JobContext, type JobCorrelation, jobKeyOfStream } from "../correlation.ts";
 import { AgenticCorrelationStore } from "../correlation-store.ts";
+import type { ElementInstanceResolver } from "../element-instance.ts";
 import type { AgenticContext, AgenticFamily } from "../registry.ts";
 import { currentPresenceRegistry } from "./presence.family.ts";
 
@@ -105,6 +106,13 @@ interface StreamState {
    * instance's prior job stream.
    */
   instance?: string;
+  /**
+   * The engine element-instance key this `job:<jobKey>` stream's job occupies (#544), once the
+   * asynchronous link-time resolution ({@link RelayTranscriptService.#resolveElementInstance}) lands.
+   * Stashed on the stream so job completion can persist it even if the live correlation was already
+   * enriched-and-released, and so a resolution that returns after completion can still be recognised.
+   */
+  elementInstanceKey?: string;
 }
 
 /**
@@ -115,6 +123,12 @@ interface StreamState {
 export interface CorrelationLink {
   link(instance: string, jobKey: string, context?: JobContext): void;
   releaseJob(jobKey: string): void;
+  /**
+   * Enrich a still-linked job's context with the engine element-instance key it occupies (#544),
+   * resolved asynchronously after the link. Optional so the minimal double in tests need not implement
+   * it; the real {@link CorrelationRegistry} does. A no-op once the job is released.
+   */
+  attachElementInstance?(jobKey: string, elementInstanceKey: string): void;
   /**
    * The (still-live) engine context for a jobKey, when the write-side exposes it. Optional so the
    * minimal double in tests need not implement it; the real {@link CorrelationRegistry} does, and the
@@ -178,6 +192,15 @@ export interface RelayTranscriptServiceOptions {
    * no durable attribution). Injectable so a test can supply an in-memory store.
    */
   readonly correlationStore?: AgenticCorrelationStore;
+  /**
+   * Resolve the engine element-instance key a `job:<jobKey>` stream's job occupies (#544). Called
+   * fire-and-forget on the first `produce` (while the job's JOB park is still live), and its result
+   * enriches the live correlation context / durable attribution so a captured session is keyed on the
+   * element INSTANCE (unambiguous across a looping / retried job), not just the static element id.
+   * Advisory and READ-ONLY — never awaited in a frame handler, never gates a flow. {@link createRelayFamily}
+   * wires it to the channel's {@link AgenticContext.resolveElementInstance}; omitted → no enrichment.
+   */
+  readonly resolveElementInstance?: ElementInstanceResolver;
   /** "Now" as an ISO-8601 instant, injectable for deterministic completion timestamps. */
   readonly now?: () => string;
 }
@@ -226,6 +249,8 @@ export class RelayTranscriptService {
   readonly #attributionForInstance: (instance: string) => WorkerAttribution | undefined;
   /** The durable worker-attribution store, or undefined when unpersisted (#485). */
   readonly #correlationStore: AgenticCorrelationStore | undefined;
+  /** Resolve the engine element-instance key a job occupies (#544), or undefined when not wired. */
+  readonly #resolveElementInstance: ElementInstanceResolver | undefined;
   /** "Now" as an ISO-8601 instant (injectable for deterministic tests). */
   readonly #now: () => string;
 
@@ -235,6 +260,7 @@ export class RelayTranscriptService {
     this.#correlation = options.correlation ?? currentCorrelation;
     this.#instanceForConnection = options.instanceForConnection ?? (() => undefined);
     this.#attributionForInstance = options.attributionForInstance ?? (() => undefined);
+    this.#resolveElementInstance = options.resolveElementInstance;
     this.#now = options.now ?? (() => new Date().toISOString());
     // Persistence is advisory: a store that can't be constructed or whose schema can't be applied
     // (locked/permission-denied/unavailable SQLite) must NOT fail the family mount — fall back to
@@ -448,6 +474,10 @@ export class RelayTranscriptService {
       state.linked = true;
       state.instance = instance;
       this.#jobStreamByInstance.set(instance, stream);
+      // #544: resolve the element INSTANCE this job occupies while its JOB park is still live (the
+      // park is gone once the job completes, so this must fire at link time, not completion time).
+      // Advisory and asynchronous — fire-and-forget so it never blocks the synchronous frame handler.
+      this.#enrichElementInstance(stream, jobKey, state);
     } catch (err) {
       // Advisory — never throws into the frame handler. Swallow a throwing injectable correlation and
       // leave the stream UNLINKED so a later `produce` retries the link.
@@ -457,6 +487,51 @@ export class RelayTranscriptService {
         err: String(err),
       });
     }
+  }
+
+  /**
+   * #544: asynchronously resolve the engine element-instance key this job occupies and record it, from
+   * the first `produce` while the JOB park is still live. Fire-and-forget: it is invoked from the
+   * synchronous frame handler but never awaited, and every failure is swallowed (advisory). On success
+   * it enriches BOTH the live correlation context (so a still-running job's reads see it) AND stashes
+   * it on the stream state (so completion persists it); it ALSO backfills the durable row directly, to
+   * cover the race where resolution returns AFTER the job completed and released its live correlation.
+   */
+  #enrichElementInstance(stream: string, jobKey: string, state: StreamState): void {
+    const resolve = this.#resolveElementInstance;
+    if (resolve === undefined) return;
+    const processInstanceKey = this.#correlation()?.resolve?.(jobKey)?.processInstanceKey;
+    // Self-contained advisory: a synchronous throw (a misbehaving resolver) is swallowed here rather
+    // than surfacing in `#link`'s catch as a misleading "link failed", and the async rejection path is
+    // handled by `.catch`. Either way this never throws into the synchronous frame handler.
+    let pending: Promise<string | undefined>;
+    try {
+      pending = resolve(jobKey, processInstanceKey);
+    } catch (err) {
+      this.#log.warn("agentic relay element-instance resolution failed — session left un-keyed", {
+        stream,
+        jobKey,
+        err: String(err),
+      });
+      return;
+    }
+    void pending
+      .then((elementInstanceKey) => {
+        if (elementInstanceKey === undefined || elementInstanceKey === "") return;
+        state.elementInstanceKey = elementInstanceKey;
+        // Enrich the live context if still linked (a no-op once released), and backfill the durable
+        // row if it was already persisted (a no-op before completion) — the two are complementary, so
+        // exactly one lands depending on whether resolution beat completion.
+        this.#correlation()?.attachElementInstance?.(jobKey, elementInstanceKey);
+        this.#correlationStore?.setElementInstanceKey(jobKey, elementInstanceKey);
+      })
+      .catch((err: unknown) => {
+        this.#log.warn("agentic relay element-instance resolution failed — session left un-keyed", {
+          stream,
+          jobKey,
+          err: String(err),
+        });
+      });
   }
 
   /** H6 write-side (#149): release a `job:<jobKey>` stream's correlation on completion / disconnect. */
@@ -505,6 +580,10 @@ export class RelayTranscriptService {
     try {
       const attribution = this.#attributionForInstance(instance) ?? {};
       const context = this.#correlation()?.resolve?.(jobKey);
+      // #544: prefer the live context's element-instance key; fall back to the stream state (the
+      // resolution may have landed after the context was released, or the context write-side may not
+      // carry it). Either source is the same resolved value.
+      const elementInstanceKey = context?.elementInstanceKey ?? state.elementInstanceKey;
       store.record({
         jobKey,
         stream,
@@ -516,6 +595,7 @@ export class RelayTranscriptService {
         ...(context?.bpmnProcessId !== undefined ? { bpmnProcessId: context.bpmnProcessId } : {}),
         ...(context?.elementId !== undefined ? { elementId: context.elementId } : {}),
         ...(context?.planKey !== undefined ? { planKey: context.planKey } : {}),
+        ...(elementInstanceKey !== undefined ? { elementInstanceKey } : {}),
       });
     } catch (err) {
       this.#log.warn("agentic correlation attribution persist failed — past session left unattributed", {
@@ -618,6 +698,10 @@ export function createRelayFamily(options: {
         // records instance only.
         attributionForInstance: (instance) => currentPresenceRegistry()?.attributionOf(instance),
         correlation: currentCorrelation,
+        // #544: the advisory element-instance resolver the composition root closed over the engine.
+        // Absent (engine-less host, or a test that mounts without it) → sessions are keyed on the
+        // static element id only, exactly as before this slice.
+        resolveElementInstance: ctx.resolveElementInstance,
       });
       setCurrentRelayTranscriptService(service);
 

@@ -55,6 +55,13 @@ export interface JobCorrelation {
   readonly bpmnProcessId?: string;
   /** The BPMN element id (activity/task) the job is for, if known. */
   readonly elementId?: string;
+  /**
+   * The engine element-instance key the job's token occupies (#544), if resolved. Unlike
+   * {@link elementId} (the static id, ambiguous across a looping / retried activity) this names the
+   * specific occupancy. Best-effort: it is enriched asynchronously via {@link CorrelationRegistry.attachElementInstance}
+   * after the link, so it may be absent for a just-linked job and stays absent if resolution never lands.
+   */
+  readonly elementInstanceKey?: string;
   /** The plan / epic key this job is part of (e.g. `owner/repo#142`), if known. */
   readonly planKey?: string;
   /** The relay stream id the job's terminal is relayed on (`job:<jobKey>`). */
@@ -86,8 +93,12 @@ export class CorrelationRegistry {
 
   /**
    * Link a worker instance to a job it is now processing, recording the job's engine context. A
-   * re-link of the same jobKey to a different instance moves it (dropping the old reverse edge); a
-   * re-link with fresh context overwrites the context (last write wins). Both args must be non-empty.
+   * re-link of the same jobKey to a different instance moves it (dropping the old reverse edge). The
+   * context is MERGED over any existing attribution, not replaced: explicitly provided fields win
+   * (last write wins per field), but fields omitted from `context` are preserved — so a bare re-link
+   * cannot clear or clobber context another path already attached (e.g. an async-resolved
+   * `elementInstanceKey`). `jobKey`/`stream` are always re-derived canonically. Both args must be
+   * non-empty.
    */
   link(instance: string, jobKey: string, context: JobContext = {}): void {
     if (instance === "" || jobKey === "") return;
@@ -100,7 +111,32 @@ export class CorrelationRegistry {
     const jobs = this.#jobsOf.get(instance) ?? new Set<string>();
     jobs.add(jobKey);
     this.#jobsOf.set(instance, jobs);
-    this.#context.set(jobKey, { jobKey, stream: jobStream(jobKey), ...stripUndefined(context) });
+    // Merge over any existing attribution rather than clobbering it: a jobKey is engine-unique, so a
+    // re-link (e.g. a worker reconnecting mid-job, or a richer orchestrator context arriving later)
+    // must not drop context another path already attached — notably the #544 `elementInstanceKey`,
+    // which is resolved asynchronously and could otherwise be wiped by a subsequent bare `link`.
+    // Explicitly provided fields still win; `jobKey`/`stream` are always re-derived canonically.
+    const existing = this.#context.get(jobKey);
+    this.#context.set(jobKey, {
+      ...existing,
+      jobKey,
+      stream: jobStream(jobKey),
+      ...stripUndefined(context),
+    });
+  }
+
+  /**
+   * Enrich a still-linked job's context with the engine element-instance key it occupies (#544),
+   * resolved asynchronously after the link (the element-instance read is an engine round-trip the
+   * synchronous link path cannot await). Best-effort and idempotent: a no-op if the job is no longer
+   * linked (it completed and released before resolution returned — the durable backfill covers that
+   * case instead) or if the key is empty. Preserves every other context field.
+   */
+  attachElementInstance(jobKey: string, elementInstanceKey: string): void {
+    if (jobKey === "" || elementInstanceKey === "") return;
+    const existing = this.#context.get(jobKey);
+    if (existing === undefined) return;
+    this.#context.set(jobKey, { ...existing, elementInstanceKey });
   }
 
   /** Release one job (it finished / moved on). No-op if it was never linked. */
@@ -170,11 +206,12 @@ export class CorrelationRegistry {
 
 /** Drop `undefined`-valued keys so the stored context never materializes an explicit `{ key: undefined }` hole. */
 function stripUndefined(context: JobContext): JobContext {
-  const { processInstanceKey, bpmnProcessId, elementId, planKey } = context;
+  const { processInstanceKey, bpmnProcessId, elementId, elementInstanceKey, planKey } = context;
   return {
     ...(processInstanceKey !== undefined ? { processInstanceKey } : {}),
     ...(bpmnProcessId !== undefined ? { bpmnProcessId } : {}),
     ...(elementId !== undefined ? { elementId } : {}),
+    ...(elementInstanceKey !== undefined ? { elementInstanceKey } : {}),
     ...(planKey !== undefined ? { planKey } : {}),
   };
 }

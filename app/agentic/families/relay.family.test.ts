@@ -134,6 +134,12 @@ function mkService(registry: ConnectionRegistry, db: SqliteDb | undefined): {
   return { service, hub };
 }
 
+/** Flush the microtask/macrotask queue so a fire-and-forget promise chain (the async #544 element-
+ * instance resolution) settles before the test asserts on its effects. */
+function tick(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 /** Build a service with the H6 correlation write-side wired (a real registry + a connection→instance map). */
 function mkCorrelatedService(
   registry: ConnectionRegistry,
@@ -143,6 +149,7 @@ function mkCorrelatedService(
   extra: {
     attributionForInstance?: (instance: string) => { identity?: string; host?: string } | undefined;
     correlationStore?: AgenticCorrelationStore;
+    resolveElementInstance?: (jobKey: string, processInstanceKey?: string) => Promise<string | undefined>;
     now?: () => string;
   } = {},
 ): { service: RelayTranscriptService; hub: CapturingHub } {
@@ -156,6 +163,7 @@ function mkCorrelatedService(
     instanceForConnection: (id) => byConnection.get(id),
     attributionForInstance: extra.attributionForInstance,
     correlationStore: extra.correlationStore,
+    resolveElementInstance: extra.resolveElementInstance,
     now: extra.now,
   });
   return { service, hub };
@@ -449,6 +457,88 @@ test("H6 durable attribution: completing/superseding a job persists the worker's
   assertEquals(durable?.completedAt, "2024-01-02T03:04:05.000Z");
   // The still-active job is NOT yet recorded (attribution is written on completion, not on link).
   assertEquals(store.get("k2"), undefined, "the active job has no completion attribution yet");
+  service.teardown();
+});
+
+test("#544 element-instance enrichment: link-time resolution keys the completed session on the element instance", async () => {
+  const registry = new ConnectionRegistry();
+  const correlation = new CorrelationRegistry();
+  const db = memoryDb();
+  const store = new AgenticCorrelationStore(db);
+  const byConnection = new Map([["prod", "worker-A"]]);
+  // The engine resolves job k1's live JOB park to element instance ei-1 (resolution wins the race,
+  // i.e. it returns while the job is still live — the common case for a long-lived agent job).
+  const resolveElementInstance = (jobKey: string) =>
+    Promise.resolve(jobKey === "k1" ? "ei-1" : undefined);
+  const { service, hub } = mkCorrelatedService(registry, db, correlation, byConnection, {
+    correlationStore: store,
+    resolveElementInstance,
+    now: () => "2024-01-02T03:04:05.000Z",
+  });
+  const p = connect("prod", registry);
+
+  // First produce links the job and fires the (async) element-instance resolution.
+  hub.handler?.(produce(jobStream("k1"), 1, "job-1 line"), p.conn);
+  await tick();
+  // The live correlation context is enriched while the job runs.
+  assertEquals(correlation.resolve("k1")?.elementInstanceKey, "ei-1", "the live context carries the element instance");
+
+  // Superseding with a new job completes k1 → its attribution persists WITH the element-instance key.
+  hub.handler?.(produce(jobStream("k2"), 1, "job-2 line"), p.conn);
+  const durable = store.get("k1");
+  assertEquals(durable?.elementInstanceKey, "ei-1", "the completed session is keyed on the element instance");
+  service.teardown();
+});
+
+test("#544 element-instance enrichment: a resolution that lands AFTER completion backfills the durable row", async () => {
+  const registry = new ConnectionRegistry();
+  const correlation = new CorrelationRegistry();
+  const db = memoryDb();
+  const store = new AgenticCorrelationStore(db);
+  const byConnection = new Map([["prod", "worker-A"]]);
+  // A deferred resolution the test releases MANUALLY, to force the race where the element-instance
+  // key arrives only after the job already completed and released its live correlation.
+  let release: (key: string | undefined) => void = () => {};
+  const pending = new Promise<string | undefined>((resolve) => {
+    release = resolve;
+  });
+  const { service, hub } = mkCorrelatedService(registry, db, correlation, byConnection, {
+    correlationStore: store,
+    resolveElementInstance: () => pending,
+  });
+  const p = connect("prod", registry);
+
+  // Link job k1 (fires the still-pending resolution), then supersede it → k1 completes and persists
+  // its attribution BEFORE the element instance is known.
+  hub.handler?.(produce(jobStream("k1"), 1, "job-1 line"), p.conn);
+  hub.handler?.(produce(jobStream("k2"), 1, "job-2 line"), p.conn);
+  assertEquals(store.get("k1")?.elementInstanceKey, undefined, "persisted before the element instance resolved");
+  assertEquals(correlation.resolve("k1"), undefined, "k1's live correlation was already released");
+
+  // The resolution finally lands — it backfills the durable row directly (the live context is gone).
+  release("ei-late");
+  await tick();
+  assertEquals(store.get("k1")?.elementInstanceKey, "ei-late", "the durable row is backfilled after the fact");
+  service.teardown();
+});
+
+test("#544 element-instance enrichment: an unresolved job (never parked) leaves the session un-keyed, not erroring", async () => {
+  const registry = new ConnectionRegistry();
+  const correlation = new CorrelationRegistry();
+  const db = memoryDb();
+  const store = new AgenticCorrelationStore(db);
+  const byConnection = new Map([["prod", "worker-A"]]);
+  const { service, hub } = mkCorrelatedService(registry, db, correlation, byConnection, {
+    correlationStore: store,
+    resolveElementInstance: () => Promise.resolve(undefined),
+  });
+  const p = connect("prod", registry);
+  hub.handler?.(produce(jobStream("k1"), 1, "job-1 line"), p.conn);
+  await tick();
+  hub.handler?.(produce(jobStream("k2"), 1, "job-2 line"), p.conn);
+  const durable = store.get("k1");
+  assert(durable !== undefined, "the session is still attributed");
+  assertEquals(durable?.elementInstanceKey, undefined, "no element-instance key when the job was not resolvable");
   service.teardown();
 });
 

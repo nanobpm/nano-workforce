@@ -1,6 +1,7 @@
 // Unit tests for the durable worker-attribution store (app/agentic/correlation-store.ts, #485).
-//   - drift guard: db/migrations/078 mirrors AGENTIC_CORRELATION_SCHEMA_SQL;
+//   - drift guard: migrations 078 + 086 reproduce AGENTIC_CORRELATION_SCHEMA_SQL's effective schema;
 //   - record/get/byStream round-trips, including the optional (nullable) engine-context columns;
+//   - byElementInstance read axis (#544) and its per-occupancy uniqueness;
 //   - upsert semantics (re-recording a jobKey is last-write-wins).
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -24,20 +25,60 @@ function memoryDb(): SqliteDb {
   };
 }
 
-test("drift guard: migration 078 mirrors AGENTIC_CORRELATION_SCHEMA_SQL", async () => {
-  const migrationPath = join(HERE, "..", "..", "db", "migrations", "078_agentic_correlation.sql");
-  const raw = await readFile(migrationPath, "utf8");
-  const ddl = raw
-    .split("\n")
-    .filter((line) => !line.trimStart().startsWith("--"))
+/**
+ * The effective schema of `agentic_correlation` as SQLite reports it: the ordered column list
+ * (name/type/nullability/default/pk) plus the set of indexes (name + normalised definition). This is
+ * derivation-over-duplication: comparing the *observed* schema rather than raw DDL text means the
+ * migration path and the canonical DDL are pinned to each other regardless of formatting, so the two
+ * cannot silently drift even though (post expand-and-contract) they are no longer byte-identical text.
+ */
+function effectiveSchema(db: DatabaseSync): string {
+  const columns = db
+    .prepare("PRAGMA table_info(agentic_correlation)")
+    .all()
+    .map((c) => {
+      const col = c as { name: string; type: string; notnull: number; dflt_value: unknown; pk: number };
+      return `${col.name}|${col.type}|${col.notnull}|${col.dflt_value ?? ""}|${col.pk}`;
+    })
     .join("\n");
-  const normalise = (s: string) => s.trim().replace(/\s+/g, " ");
+  const indexes = db
+    .prepare(
+      "SELECT name, sql FROM sqlite_master WHERE type = 'index' AND tbl_name = 'agentic_correlation' ORDER BY name",
+    )
+    .all()
+    .map((i) => {
+      const idx = i as { name: string; sql: string | null };
+      return `${idx.name}|${(idx.sql ?? "").trim().replace(/\s+/g, " ")}`;
+    })
+    .join("\n");
+  return `COLUMNS\n${columns}\nINDEXES\n${indexes}`;
+}
+
+test("drift guard: migrations 078 + 086 reproduce AGENTIC_CORRELATION_SCHEMA_SQL's effective schema", async () => {
+  const migrationsDir = join(HERE, "..", "..", "db", "migrations");
+  const base = await readFile(join(migrationsDir, "078_agentic_correlation.sql"), "utf8");
+  const expand = await readFile(join(migrationsDir, "086_agentic_correlation_element_instance.sql"), "utf8");
+
+  const migrated = new DatabaseSync(":memory:");
+  migrated.exec(base);
+  migrated.exec(expand);
+
+  const canonical = new DatabaseSync(":memory:");
+  canonical.exec(AGENTIC_CORRELATION_SCHEMA_SQL);
+
   assertEquals(
-    normalise(ddl),
-    normalise(AGENTIC_CORRELATION_SCHEMA_SQL),
-    "078_agentic_correlation.sql drifted from AGENTIC_CORRELATION_SCHEMA_SQL",
+    effectiveSchema(migrated),
+    effectiveSchema(canonical),
+    "migrations 078 + 086 drifted from AGENTIC_CORRELATION_SCHEMA_SQL",
   );
-  assert(ddl.includes("agentic_correlation"));
+  // The #544 column and its index are present in both paths.
+  assert(effectiveSchema(canonical).includes("element_instance_key"), "canonical DDL has element_instance_key");
+  assert(
+    effectiveSchema(canonical).includes("ix_agentic_correlation_element_instance"),
+    "canonical DDL indexes element_instance_key",
+  );
+  migrated.close();
+  canonical.close();
 });
 
 test("record + get round-trips full attribution, and byStream decodes the jobKey", () => {
@@ -67,6 +108,41 @@ test("record + get round-trips full attribution, and byStream decodes the jobKey
   assertEquals(store.byStream(jobStream("job-1"))?.instance, "worker-A");
 });
 
+test("byElementInstance keys per-occupancy, distinguishing a looping/retried activity's iterations", () => {
+  const store = new AgenticCorrelationStore(memoryDb());
+  // Two runs of the SAME static element (`agent`) in the same process instance — a loop / retry —
+  // occupy DISTINCT element instances. Keyed on element_id they'd be indistinguishable; keyed on the
+  // element-instance key each resolves to its own attribution (the whole point of #544).
+  store.record({
+    jobKey: "job-iter-1",
+    stream: jobStream("job-iter-1"),
+    instance: "worker-A",
+    processInstanceKey: "pi-9",
+    elementId: "agent",
+    elementInstanceKey: "ei-100",
+    completedAt: "2026-08-23T00:05:00.000Z",
+  });
+  store.record({
+    jobKey: "job-iter-2",
+    stream: jobStream("job-iter-2"),
+    instance: "worker-A",
+    processInstanceKey: "pi-9",
+    elementId: "agent",
+    elementInstanceKey: "ei-200",
+    completedAt: "2026-08-23T00:10:00.000Z",
+  });
+
+  assertEquals(store.get("job-iter-1")?.elementInstanceKey, "ei-100");
+  const first = store.byElementInstance("ei-100");
+  assertEquals(first.length, 1);
+  assertEquals(first[0].jobKey, "job-iter-1");
+  const second = store.byElementInstance("ei-200");
+  assertEquals(second.length, 1);
+  assertEquals(second[0].jobKey, "job-iter-2");
+  assertEquals(store.byElementInstance("ei-nope").length, 0);
+  assertEquals(store.byElementInstance("").length, 0);
+});
+
 test("optional context columns are omitted (not null) when unknown", () => {
   const store = new AgenticCorrelationStore(memoryDb());
   store.record({
@@ -89,6 +165,23 @@ test("record is an upsert: re-recording a jobKey is last-write-wins", () => {
   const got = store.get("job-3");
   assertEquals(got?.host, "second.local");
   assertEquals(got?.completedAt, "2026-08-23T02:10:00.000Z");
+});
+
+test("record preserves an existing element_instance_key when a later re-record omits it (monotonic)", () => {
+  const store = new AgenticCorrelationStore(memoryDb());
+  const base = { jobKey: "job-4", stream: jobStream("job-4"), completedAt: "2026-08-23T02:00:00.000Z" };
+  // The durable backfill path (or a first record that carried the resolved key).
+  store.record({ ...base, instance: "worker-D", elementInstanceKey: "ei-777" });
+  // A later best-effort re-record that does NOT know the key must not wipe it back to NULL.
+  store.record({ ...base, instance: "worker-D", host: "later.local" });
+  const got = store.get("job-4");
+  assertEquals(got?.host, "later.local");
+  assertEquals(got?.elementInstanceKey, "ei-777");
+  // setElementInstanceKey backfill then a bare re-record likewise survives.
+  store.record({ jobKey: "job-5", stream: jobStream("job-5"), completedAt: "2026-08-23T03:00:00.000Z", instance: "worker-E" });
+  store.setElementInstanceKey("job-5", "ei-888");
+  store.record({ jobKey: "job-5", stream: jobStream("job-5"), completedAt: "2026-08-23T03:05:00.000Z", instance: "worker-E" });
+  assertEquals(store.get("job-5")?.elementInstanceKey, "ei-888");
 });
 
 test("get is undefined for an unknown jobKey and byStream undefined for a non-job stream", () => {

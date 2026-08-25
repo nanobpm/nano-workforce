@@ -33,6 +33,8 @@ interface CorrelationFields {
   processInstanceKey?: string;
   bpmnProcessId?: string;
   elementId?: string;
+  /** The engine element-instance key the job's token occupied (#544) — per-occupancy, unlike elementId. */
+  elementInstanceKey?: string;
   planKey?: string;
   /** The worker instance that ran the job (durable — survives release / restart). */
   instance?: string;
@@ -63,6 +65,7 @@ export function correlationFieldsFor(
     if (context.processInstanceKey !== undefined) fields.processInstanceKey = context.processInstanceKey;
     if (context.bpmnProcessId !== undefined) fields.bpmnProcessId = context.bpmnProcessId;
     if (context.elementId !== undefined) fields.elementId = context.elementId;
+    if (context.elementInstanceKey !== undefined) fields.elementInstanceKey = context.elementInstanceKey;
     if (context.planKey !== undefined) fields.planKey = context.planKey;
   }
   // Durable fallback: fill any field the live registry did not supply (a released past session, or a
@@ -74,6 +77,9 @@ export function correlationFieldsFor(
     }
     if (fields.bpmnProcessId === undefined && row.bpmnProcessId !== undefined) fields.bpmnProcessId = row.bpmnProcessId;
     if (fields.elementId === undefined && row.elementId !== undefined) fields.elementId = row.elementId;
+    if (fields.elementInstanceKey === undefined && row.elementInstanceKey !== undefined) {
+      fields.elementInstanceKey = row.elementInstanceKey;
+    }
     if (fields.planKey === undefined && row.planKey !== undefined) fields.planKey = row.planKey;
     if (row.instance !== undefined) fields.instance = row.instance;
     if (row.identity !== undefined) fields.identity = row.identity;
@@ -106,6 +112,7 @@ export function toTranscript(
   if (fields.processInstanceKey !== undefined) out.processInstanceKey = fields.processInstanceKey;
   if (fields.bpmnProcessId !== undefined) out.bpmnProcessId = fields.bpmnProcessId;
   if (fields.elementId !== undefined) out.elementId = fields.elementId;
+  if (fields.elementInstanceKey !== undefined) out.elementInstanceKey = fields.elementInstanceKey;
   if (fields.planKey !== undefined) out.planKey = fields.planKey;
   if (fields.instance !== undefined) out.instance = fields.instance;
   if (fields.identity !== undefined) out.identity = fields.identity;
@@ -117,6 +124,8 @@ export function toTranscript(
 export interface TranscriptFilter {
   readonly jobKey?: string;
   readonly processInstanceKey?: string;
+  /** The engine element-instance key (#544) — resolves a session to one occupancy of a looping activity. */
+  readonly elementInstanceKey?: string;
   readonly planKey?: string;
   /** The worker instance that ran the session (durable attribution) — powers the worker-history view. */
   readonly instance?: string;
@@ -145,6 +154,7 @@ export function listTranscripts(
     .filter((t) => {
       if (filter.jobKey !== undefined && t.jobKey !== filter.jobKey) return false;
       if (filter.processInstanceKey !== undefined && t.processInstanceKey !== filter.processInstanceKey) return false;
+      if (filter.elementInstanceKey !== undefined && t.elementInstanceKey !== filter.elementInstanceKey) return false;
       if (filter.planKey !== undefined && t.planKey !== filter.planKey) return false;
       if (filter.instance !== undefined && t.instance !== filter.instance) return false;
       const createdMs = Date.parse(t.createdAt);
@@ -225,6 +235,7 @@ export function readTranscriptFrom(
   if (fields.processInstanceKey !== undefined) out.processInstanceKey = fields.processInstanceKey;
   if (fields.bpmnProcessId !== undefined) out.bpmnProcessId = fields.bpmnProcessId;
   if (fields.elementId !== undefined) out.elementId = fields.elementId;
+  if (fields.elementInstanceKey !== undefined) out.elementInstanceKey = fields.elementInstanceKey;
   if (fields.planKey !== undefined) out.planKey = fields.planKey;
   if (fields.instance !== undefined) out.instance = fields.instance;
   if (fields.identity !== undefined) out.identity = fields.identity;

@@ -20,6 +20,7 @@
 import { Server } from "node:http";
 import { createNanoSdkEngineClient, runFromEnv, selectHost } from "@nanobpm/urban";
 import { type AgenticChannelHandle, mountAgenticChannel } from "./app/agentic/channel.ts";
+import { makeElementInstanceResolver } from "./app/agentic/element-instance.ts";
 import { announceEngine, resolveEngineAddress } from "./app/enginePreflight.ts";
 import { MAX_ROUNDS, pollOnce } from "./app/service.ts";
 import { envVar } from "./app/version.ts";
@@ -79,6 +80,11 @@ if (httpServer instanceof Server) {
       secret: agenticSecret ?? "",
       secure,
       data: app.data,
+      // #544: advisory, read-only element-instance resolution over the shared engine's wait-state
+      // read model, so the relay slice can key a captured agent session on the element INSTANCE it
+      // occupied (unambiguous across a looping / retried job), not just the static element id. A
+      // narrow closure — the agentic families never hold the engine handle itself.
+      resolveElementInstance: makeElementInstanceResolver(engine),
       log: app.log,
     });
     if (!secure) {
