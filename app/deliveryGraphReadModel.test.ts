@@ -34,6 +34,7 @@ import {
   PR_COUNTS_LOOKUP,
 } from "./deliveryGraphReadModel.ts";
 import { reduceFrontier, type StepKey } from "./stepAxis.ts";
+import { applyMigrationSet, readMigrationSetFromDisk } from "../test/migrations.ts";
 
 const MIG = (name: string) => readFileSync(fileURLToPath(new URL(`../db/migrations/${name}`, import.meta.url)), "utf8");
 const PAGE = (name: string) => JSON.parse(readFileSync(fileURLToPath(new URL(`../pages/${name}`, import.meta.url)), "utf8"));
@@ -155,10 +156,19 @@ test("DRIFT GUARD: migration 086 embeds each derived column VERBATIM from delive
   }
   assert(/DROP VIEW IF EXISTS delivery_graph_read_model;/.test(sql), "086 must DROP the VIEW first");
   assert(/CREATE VIEW delivery_graph_read_model AS/.test(sql), "086 must (re)create delivery_graph_read_model");
-  // Base identity pass-throughs (so the static pages↔schema contract guard sees the VIEW columns) and
-  // the hand-authored park_label display column (D3 — no TS twin).
-  for (const base of ["run_key", "process_key", "process_definition_id", "digest", "title", "phase", "phase_node_id", "node_count", "human_node_count", "side_effect_count", "created_at", "updated_at"]) {
-    assert(sql.includes(`dg.${base} AS ${base}`), `086 must pass base column "${base}" through the VIEW`);
+  // Base identity pass-throughs — DERIVED from the REAL `delivery_graph_runs` schema (the migration
+  // chain applied to a throwaway DB), NOT a hand-kept list that could silently omit a column: the VIEW
+  // must re-export EVERY base column so the static pages↔schema contract guard sees them (and a future
+  // regeneration can't drop one without failing here). `status` is the one exception — it is exposed as
+  // the effective COALESCE below rather than a bare pass-through — so it is asserted separately.
+  const schemaDb = new DatabaseSync(":memory:");
+  applyMigrationSet(schemaDb, readMigrationSetFromDisk());
+  const baseColumns = (schemaDb.prepare("PRAGMA table_info(delivery_graph_runs)").all() as { name: string }[]).map((r) => r.name);
+  schemaDb.close();
+  assert(baseColumns.length > 0, "the migration chain must create the delivery_graph_runs base table");
+  for (const base of baseColumns) {
+    if (base === "status") continue;
+    assert(sql.includes(`dg.${base} AS ${base}`), `086 must pass base column "${base}" through the VIEW (derived from the real delivery_graph_runs schema)`);
   }
   assert(sql.includes("COALESCE(dg.derived_status, dg.status) AS status"), "086 must expose the effective status so the pages' Active/History filter tracks a terminated run");
   assert(sql.includes("AS park_label"), "086 must carry the hand-authored park_label companion column");
