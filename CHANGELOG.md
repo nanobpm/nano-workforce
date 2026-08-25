@@ -1,3 +1,9 @@
+## [0.141.0](https://github.com/nanobpm/nano-workforce/compare/v0.140.0...v0.141.0) (2026-08-25)
+
+### Features
+
+* **agentic:** key agentic_correlation on elementInstanceKey ([#544](https://github.com/nanobpm/nano-workforce/issues/544)) ([#549](https://github.com/nanobpm/nano-workforce/issues/549)) ([3399597](https://github.com/nanobpm/nano-workforce/commit/33995973f4d207612ba62d6d9c421c40de1bcfba)), closes [nano-ide#473](https://github.com/nanobpm/nano-ide/issues/473)
+
 ## [0.140.0](https://github.com/nanobpm/nano-workforce/compare/v0.139.4...v0.140.0) (2026-08-25)
 
 ### Features
