@@ -1,3 +1,9 @@
+## [0.140.0](https://github.com/nanobpm/nano-workforce/compare/v0.139.4...v0.140.0) (2026-08-25)
+
+### Features
+
+* **agentic:** emit transcriptUrl as a job-output variable (Stage 0, [#543](https://github.com/nanobpm/nano-workforce/issues/543)) ([#547](https://github.com/nanobpm/nano-workforce/issues/547)) ([26b8410](https://github.com/nanobpm/nano-workforce/commit/26b84105405f283acad35ea4026e247fc92d607c)), closes [#544](https://github.com/nanobpm/nano-workforce/issues/544) [#486](https://github.com/nanobpm/nano-workforce/issues/486) [#486](https://github.com/nanobpm/nano-workforce/issues/486)
+
 ## [0.139.4](https://github.com/nanobpm/nano-workforce/compare/v0.139.3...v0.139.4) (2026-08-25)
 
 ### Bug Fixes
