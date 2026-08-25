@@ -16,6 +16,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { EngineClient } from "@nanobpm/urban";
 import type { DeliveryFact, DeliveryGraph, DeliveryNode } from "../nano-generated/api-io.d.ts";
+import { TRANSCRIPT_URL_BASE_VAR, transcriptUrlBaseFor } from "./agentic/transcript-url.ts";
 import { assertNever, compileDeliveryGraph, DELIVERY_GRAPH_PROCESS_ID } from "./deliveryGraphCompiler.ts";
 import { DEFAULT_EVERY_MS, msToIsoDuration, parseProbe, readinessPollEvery, readinessTimeout } from "./readiness.ts";
 import { isoDuration } from "./reviewWait.ts";
@@ -147,7 +148,14 @@ export async function runDeliveryGraph(
   await engine.deployResources([{ name: `${processDefinitionId}.bpmn`, content: bpmn, contentType: "application/xml" }]);
   const { processInstanceKey } = await engine.createInstance({
     processDefinitionId,
-    variables: { nodeInputs },
+    variables: {
+      nodeInputs,
+      // Stage 0 transcript correlation (#543): the transcript-endpoint base every agent node's
+      // completing worker appends its jobKey-scoped stream to, to emit `transcriptUrl` (see the agent
+      // node ioMapping in deliveryGraphCompiler). Seeded once at the run root — the same value for
+      // every node — and read down into each agent job via `=transcriptUrlBase`.
+      [TRANSCRIPT_URL_BASE_VAR]: transcriptUrlBaseFor(),
+    },
   });
   // The engine can yield a numeric key; `DeliveryRunHandle.processInstanceKey` is typed `string` and
   // downstream consumers expect a string — coerce (codebase-wide `String(...)` pattern, e.g. app/plan.ts).

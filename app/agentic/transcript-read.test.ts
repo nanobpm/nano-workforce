@@ -6,10 +6,10 @@
 // interaction with a missing/invalid createdAt — where a hand-built store lets us fix exact timestamps.
 import { test } from "node:test";
 import { DatabaseSync } from "node:sqlite";
-import type { SqliteDb, TranscriptStore, TranscriptStream } from "@nanobpm/agentic/transcript";
+import type { SqliteDb, TranscriptRing, TranscriptStore, TranscriptStream } from "@nanobpm/agentic/transcript";
 import { assert, assertEquals } from "#test-assert";
 import { AgenticCorrelationStore } from "./correlation-store.ts";
-import { correlationFieldsFor, listTranscripts } from "./transcript-read.ts";
+import { correlationFieldsFor, listTranscripts, readTranscriptFrom } from "./transcript-read.ts";
 
 /** A read-only TranscriptStore double: list() returns the seeded metas; read() has no retained chunks. */
 function fakeStore(metas: TranscriptStream[]): TranscriptStore {
@@ -121,4 +121,97 @@ test("listTranscripts: the instance filter returns only sessions the durable sto
     "only worker-A's sessions, newest-first",
   );
   assert(out.every((t) => t.instance === "worker-A"), "each row is attributed to worker-A");
+});
+
+// --- #486: the still-live-ring read fallback that makes a freshly-emitted transcriptUrl readable ---
+//
+// A multiplexing worker relays every job over one long-lived connection and only flushes a job's ring
+// to the durable store when it disconnects or a NEW job supersedes it — NOT when the job completes. In
+// the window between "job completed (transcriptUrl emitted)" and that flush, the durable store has no
+// row, so the transcript endpoint must serve the live ring or it would 404 the URL it just emitted.
+
+/** A minimal live ring double satisfying {@link TranscriptRing}: the whole retained window from `from`. */
+function fakeRing(entries: { offset: number; chunk: string }[]): TranscriptRing {
+  const nextOffset = entries.length === 0 ? 0 : entries[entries.length - 1].offset + 1;
+  return {
+    since: (from: number) => ({ entries: entries.filter((e) => e.offset >= from) }),
+    nextOffset,
+  };
+}
+
+/** A store double whose `get` returns a seeded row (or undefined), with the matching `since` window. */
+function getStore(row: TranscriptStream | undefined, entries: { offset: number; chunk: string }[] = []): TranscriptStore {
+  return {
+    get: (_stream: string) => row,
+    since: (_stream: string, from: number) => ({
+      entries: entries.filter((e) => e.offset >= from),
+      gap: false,
+      nextOffset: row?.nextOffset ?? 0,
+    }),
+  } as unknown as TranscriptStore;
+}
+
+test("readTranscriptFrom: falls back to the live ring when the durable store has no row (#486)", () => {
+  const ring = fakeRing([
+    { offset: 0, chunk: "hello " },
+    { offset: 1, chunk: "world" },
+  ]);
+  const out = readTranscriptFrom("job:live1", 0, getStore(undefined), undefined, undefined, {
+    ring,
+    createdAt: mid,
+  });
+  assert(out !== undefined, "a live-but-unflushed stream is readable, not a 404");
+  assertEquals(out.status, "open", "an unflushed live stream reads as open");
+  assertEquals(out.lifecycle, "ephemeral");
+  assertEquals(out.createdAt, mid);
+  assertEquals(out.nextOffset, 2);
+  assertEquals(out.chunkCount, 2);
+  assertEquals(
+    out.entries.map((e) => e.chunk).join(""),
+    "hello world",
+    "the captured bytes are served straight from the ring",
+  );
+  assertEquals(out.jobKey, "live1", "the jobKey is still decoded from the stream id");
+});
+
+test("readTranscriptFrom: the live-ring fallback honours the resume-from offset", () => {
+  const ring = fakeRing([
+    { offset: 0, chunk: "a" },
+    { offset: 1, chunk: "b" },
+    { offset: 2, chunk: "c" },
+  ]);
+  const out = readTranscriptFrom("job:live2", 2, getStore(undefined), undefined, undefined, { ring, createdAt: mid });
+  assert(out !== undefined);
+  assertEquals(out.from, 2);
+  assertEquals(
+    out.entries.map((e) => e.chunk).join(""),
+    "c",
+    "only chunks at/after the requested offset are replayed",
+  );
+});
+
+test("readTranscriptFrom: prefers the durable store once the ring has been flushed", () => {
+  const row: TranscriptStream = {
+    stream: "job:flushed",
+    lifecycle: "ephemeral",
+    status: "completed",
+    createdAt: early,
+    completedAt: late,
+    nextOffset: 1,
+  };
+  const store = getStore(row, [{ offset: 0, chunk: "durable" }]);
+  // A live ring is ALSO provided, but the flushed durable row wins (it is the source of truth once flushed).
+  const out = readTranscriptFrom("job:flushed", 0, store, undefined, undefined, {
+    ring: fakeRing([{ offset: 0, chunk: "stale-ring" }]),
+    createdAt: mid,
+  });
+  assert(out !== undefined);
+  assertEquals(out.status, "completed", "the flushed durable row is served, not the live ring");
+  assertEquals(out.completedAt, late);
+  assertEquals(out.entries.map((e) => e.chunk).join(""), "durable");
+});
+
+test("readTranscriptFrom: returns undefined when neither the store nor a live ring has the stream", () => {
+  const out = readTranscriptFrom("job:gone", 0, getStore(undefined), undefined, undefined, undefined);
+  assertEquals(out, undefined);
 });

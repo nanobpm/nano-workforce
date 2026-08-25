@@ -292,6 +292,37 @@ test("retention: a disconnected producer auto-completes its ephemeral stream on 
   service.teardown();
 });
 
+test("#486 live fallback: an uncompleted stream's ring is served pre-flush, then yields to the durable store", () => {
+  const registry = new ConnectionRegistry();
+  const hub = capturingHub();
+  const service = new RelayTranscriptService({
+    hub,
+    registry,
+    db: memoryDb(),
+    log: noopLog(),
+    now: () => "2026-03-04T05:06:07.000Z",
+  });
+  const p = connect("prod", registry);
+  for (let i = 0; i < 3; i++) hub.handler?.(produce(jobStream("Lk1"), 1, `r${i}`), p.conn);
+
+  // The job has completed and emitted its transcriptUrl, but this multiplexing worker is still live so
+  // no disconnect/supersede flushed the ring — the durable store still 404s (#486). The live fallback
+  // exposes the captured ring + its opened-at instant so the read path can serve it immediately.
+  assertEquals(service.transcriptOf(jobStream("Lk1")), undefined, "not yet flushed while the worker is live");
+  const live = service.liveFallback(jobStream("Lk1"));
+  assert(live !== undefined, "a live, unflushed stream has a serveable ring");
+  assertEquals(live.createdAt, "2026-03-04T05:06:07.000Z", "createdAt is the stream's opened-at instant");
+  assertEquals(live.ring.since(0).entries.length, 3, "the whole captured window is available");
+  assertEquals(live.ring.nextOffset, 3);
+
+  // Once the stream completes (flushed to durable), the durable store is the source of truth and the
+  // live fallback steps aside so a completed transcript is never double-sourced.
+  service.completeStream(jobStream("Lk1"));
+  assertEquals(service.transcriptOf(jobStream("Lk1"))?.status, "completed");
+  assertEquals(service.liveFallback(jobStream("Lk1")), undefined, "a completed stream no longer falls back to the ring");
+  service.teardown();
+});
+
 test("H6 correlation write-side: a produce on job:<k> links instance→[k]; stream completion releases it", () => {
   const registry = new ConnectionRegistry();
   const correlation = new CorrelationRegistry();

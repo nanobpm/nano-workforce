@@ -15,6 +15,7 @@
 // Data access goes through the record gateway (`data.table`), never hand-written
 // SQL — matching app/plan.ts and app/service.ts.
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
+import { TRANSCRIPT_URL_BASE_VAR, transcriptUrlBaseFor } from "./agentic/transcript-url.ts";
 import { coalesceTitle, fetchIssueTitle } from "./github.ts";
 import { ESCALATION_SLA_TIMEOUT, normalizeBaseBranch, type ParsedIssue, renderBaseBranchBrief } from "./plan.ts";
 import type { ReadinessProbe } from "./readiness.ts";
@@ -400,6 +401,11 @@ export async function startFeature(
       probePollEvery: readinessProbes ? (readiness.probePollEvery ?? null) : null,
       gateKey: readinessProbes ? `feature-readiness:${parsed.planKey}` : null,
       resolvedArtifacts: null,
+      // Stage 0 transcript correlation (#543): the transcript-endpoint base the `implement-task` agent
+      // worker appends its jobKey-scoped stream to, to emit a `transcriptUrl` output variable that
+      // links this feature run to its agent transcript in Nano Explorer (feature.bpmn `implement-task`
+      // ioMapping). Read down into the job via `=transcriptUrlBase`.
+      [TRANSCRIPT_URL_BASE_VAR]: transcriptUrlBaseFor(),
     },
   });
   const processKey = processInstanceKey == null ? null : String(processInstanceKey);

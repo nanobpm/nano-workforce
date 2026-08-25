@@ -91,6 +91,14 @@ interface StreamState {
    */
   linked: boolean;
   /**
+   * When this stream's in-memory state was first opened, ISO-8601 (stamped from the service clock).
+   * The durable transcript row carries its own `created_at` (stamped at flush/`open`), but a
+   * still-live ephemeral stream has no durable row yet (#486): its ring holds the captured bytes but
+   * the store 404s until a producer disconnect / supersede flushes it. This is the authoritative
+   * "when opened" for {@link RelayTranscriptService.liveFallback} to serve the pre-flush ring.
+   */
+  createdAt: string;
+  /**
    * The worker instance a `job:<jobKey>` stream was linked under (H6). Recorded so a stream's release
    * (completion / disconnect) can tidy the {@link RelayTranscriptService.#jobStreamByInstance}
    * supersede index, and so the "one job at a time per worker" supersede rule can identify the
@@ -536,10 +544,30 @@ export class RelayTranscriptService {
     }
   }
 
+  /**
+   * The still-live relay ring for a stream, for the read path to serve BEFORE a durable flush (#486).
+   *
+   * A multiplexing worker relays every job over one long-lived connection, one job at a time, so an
+   * ephemeral job stream is only flushed to the durable store when the worker disconnects or a NEW
+   * job supersedes it — NOT when the job itself completes. In the window between "job completed
+   * (`transcriptUrl` emitted)" and that flush, {@link TranscriptStore.get} returns undefined and the
+   * transcript endpoint would 404 the freshly-emitted URL. This exposes the live ring (+ its opened-at
+   * instant) so {@link readTranscriptFrom} can serve the captured bytes directly, making the URL
+   * readable the moment it is emitted. Returns undefined when there is no live ring, or once the
+   * stream has been completed (the durable store is then the source of truth).
+   */
+  liveFallback(stream: string): { ring: TranscriptRing; createdAt: string } | undefined {
+    const ring = this.relay.ring(stream);
+    if (ring === undefined) return undefined;
+    const state = this.#streams.get(stream);
+    if (state?.completed) return undefined;
+    return { ring, createdAt: state?.createdAt ?? this.#now() };
+  }
+
   #stateFor(stream: string): StreamState {
     let state = this.#streams.get(stream);
     if (state === undefined) {
-      state = { lifecycle: "ephemeral", completed: false, linked: false };
+      state = { lifecycle: "ephemeral", completed: false, linked: false, createdAt: this.#now() };
       this.#streams.set(stream, state);
     }
     return state;
