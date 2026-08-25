@@ -20,8 +20,13 @@ to collapse three bespoke status unions into one),
 nano-ide **#424** (datasource can read a SQL VIEW — the *data-level* unlock),
 nano-workforce **#416** (the PR bumping the testkit to engine-wasm 0.7.2, which executes `callActivity`
 — the *process-level* unlock),
-nano-workforce **#464** (the tracking issue with slices S1–S6),
-nano-workforce **#305** (consolidate escalations on native `user_tasks` — a natural sub-step of S1/S3).
+nano-workforce **#464** (the tracking issue — its live checklist currently ends at **S5**; **S6 is
+present in this ADR's rollout but not yet listed there**, and the S7/S8 slices below are **added by this
+ADR** — so S6–S8 must all be appended to #464's checklist, which does not yet list them),
+nano-workforce **#305** (consolidate escalations on native `user_tasks` — a natural sub-step of S1/S3),
+nano-ide **#473** (surface the element-instance query on the `EngineClient` binding — the sole upstream
+**binding/platform** dependency of the S8 stepper slice; S8 *additionally* depends on S4's
+inline-vs-child / correlation decision, tracked with #464).
 
 ## Context
 
@@ -85,7 +90,10 @@ the multi-instance `implement` subprocess in `plan-fanout.bpmn` — plus a **thi
 compiler that re-emits it once per graph node. Sibling cells
 (readiness-poll, human-escalation) duplicate the same way. **No `callActivity` exists in any diagram**
 because it did nothing. **Unlocked by #416** (engine-wasm 0.4.0 → **0.7.2**). engine-core executes
-`callActivity` by inline-expanding the called process at deploy (`engine-core/src/model.rs:1217/1255`).
+`callActivity` natively as a **linked child process instance** (`engine-core/src/model.rs`); inline-expanding
+the called process into one flat instance is the **opt-in** `inline_call_activities` transform, *not* the
+default — the same native-child-vs-opt-in-inline distinction §4b's cross-instance-correlation note below
+depends on.
 **Verified live:** a `callActivity` parent+child model deployed through engine-wasm 0.7.2 runs to
 `COMPLETED`. Caveat: #416 bumps only the **dev-only** `@nanobpm/urban-testkit`; the production
 `@nanobpm/urban` broker does not itself pin `engine-wasm`, so this verification proves the in-process
@@ -187,6 +195,277 @@ representation. These unions are **not** identical today — features use
 separate node contract — plus the per-shape mapping and precedence and the write/`instanceTracking`
 behavior — not merely projecting an existing value.
 
+### 4b. One derived **stepper** — the cells are the source positions mapped onto the shared step axis, per-shape correlated
+
+§4 collapses the three status *unions* into one derived union; this decision collapses the three
+*progress projections* — the thing an operator actually reads as "where is this unit in its
+lifecycle" — into **one derived stepper**, rendered by **one** primitive across all three surfaces.
+
+Today that projection is triplicated the same way the aggregate is, and at three different maturity
+levels for one idea:
+
+| Surface | Derivation | Step vocabulary | Render |
+|---|---|---|---|
+| **Feature** | `deriveStage` over the declare-once read-model (`app/stage.ts`; mig. 076 declared it, mig. 081 superseded the VIEW for terminal-folded status — 073 is historical). Its inputs are the feature run's effective `status` / `pr_key` / `converge`+`auto_merge` flags / open user-task projections; `pollFeatureDelivery` separately reconciles PR status **into** that row upstream | `STAGE_KEYS` = Requested → Implementing → PR open → Converging → Merging → Done | the **`pipeline` stepper** kind (`pages/feature.page.json`) |
+| **Epic** | **write-time stamp** by each spine worker (`app/epicPhase.ts`, `ELEMENT_PHASE`) | `EPIC_PHASE` (wave-labelled) | a plain `{{epic_phase}}` **text cell** |
+| **Delivery graph** | engine-truth poll of **process-instance state + open user-task parks** (`pollDeliveryGraphPhase` → `deriveDeliveryPhase`: `COMPLETED`/`TERMINATED` → `done`/`failed`, else the open human-node park) | `DELIVERY_PHASE` + `Parked on human node: <label>` | a plain `phase` **text cell** |
+
+Three derivations × three vocabularies × two renderers — and only the feature surface renders an
+actual stepper; epic and delivery-graph project a bare string. A change to "the lifecycle steps of a
+unit of work" is the same by-hand-in-three-places drift this ADR exists to remove.
+
+**The step axis is the cells — but the cell→step mapping must be defined, not assumed.** Once §2 makes
+the process a composition of named cells (`implement` → `converge?` → `merge?`, plus `wait` / `human` /
+`escalation`), those ordered cells are the natural step axis. `STAGE_KEYS` is the closest *existing*
+projection of it, but it is **not** literally that sequence: `Requested` / `PR open` / `Done` are
+lifecycle states, while `implement` / `converge` / `merge` are process cells (and today's feature
+derivation additionally treats `Merging` as an upcoming/visual stage and can mark stages *skipped*). So
+§4b's first deliverable is an explicit **cell → step mapping** — which cell entry/exit advances which
+step, how `Requested`/`PR open`/`Done` bracket the cell run, and how an inserted `wait` / `human` /
+`escalation` cell **collapses into an existing `STAGE_KEYS` bracket** — the `pipeline` renderer binds a
+static `stages` array (`pages/feature.page.json:120-126`), so v1 adds no axis entries and needs no
+renderer change — seeded from `STAGE_KEYS` but owning the canonical definition. It
+is not enough to declare one axis *is* the other. **v1 leaves the two existing axis consumers physically
+in place** — the exported `STAGE_KEYS` (`app/stage.ts`) and the static `stages` array in
+`pages/feature.page.json` — and only *seeds* the new mapping from `STAGE_KEYS`; it does **not** yet
+generate or retire either, so both remain until a follow-up derives the static `stages` array from the
+canonical mapping (a parity test, then retirement of the duplicate) — flagged here as the residual
+drift-surface the one-stepper decision does not close in v1. (The canonical stage *derivation* itself
+already has a single author — `app/featureReadModel.ts`, from which both the SQLite VIEW and the
+`deriveStage` TS oracle are generated; its `caseWhen` emits the `Requested`…`Done` literals directly and
+does **not** import `STAGE_KEYS`. So `STAGE_KEYS` is not the derivation's source but *itself* one of the
+two vocabulary duplicates whose literals must be reconciled against — and ultimately derived from — the
+canonical `featureReadModel` declaration; `featureReadModel` is that canonical author, not a third
+divergent one.)
+
+**The current step is derived by per-shape correlation (not a single `process_key` join).**
+The projection must answer "which cell has this unit reached," fusing two truth sources:
+
+- **Engine truth — the furthest element reached — IS available on the runtime.** nwf runs against
+  **Nano's Rust engine over its REST API** (not the wasm testkit). That API exposes a full
+  element-instance read model: `POST /v2/element-instances/search` (`searchElementInstances` →
+  `elementId` + `elementType` + element **state**, keyed by process-instance) and the element-instance
+  **wait-states** search (`searchElementInstanceWaitStates` → **job and message** parks, not only user
+  tasks). With namespaced cell element ids (a convention §2/S4 must still define — the current compiler
+  uses node-local ids), a reached element maps to a reached cell — the
+  sharpest signal, and the only one that sees a token mid-cell (an active `implement` job) that no
+  work-table row has caught up to yet.
+- **Work-table + aggregate truth — the correlated downstream state, per shape.** For a **feature**, the
+  `feature_runs` row (`status` / `pr_key` / flags) gives the coarse `Requested` / `Implementing` / `Done`
+  bracket; for an **epic** there is **no aggregate `pr_key`** — its status is `plans.status` / the plan
+  rollups and its slice-PR identity is `plan_tasks.pr_key` (`app/retro.ts`, `app/delivery.ts`). On top of
+  that bracket, `pull_requests` (and siblings) carry the `converging` / `waiting_review` /
+  `merging` sub-state — but this is a **coarse status handoff, not a preserved sub-state**:
+  `pollFeatureDelivery` maps the feature's **own `pr_key`** PR status into `feature_runs` (keeping the
+  detailed value only in `delivery_label`), and `deriveStage` reads neither `delivery_label` nor those
+  sub-states — an opened `pr_key` renders `PR open` and a `converging` run renders `Converging`, i.e. it
+  exposes only the coarse lifecycle key (never `Merging` as the active stage). (`pollFeatureDelivery` does
+  **not** consume the lineage/plan projections — those are separate aggregate rollups for the epic path,
+  not the feature derivation; `instanceTracking` supplies only the tracking-status edges, not the PR
+  rollup.) So S7 must describe this as a coarse handoff and, for an epic, treat the lineage/plan rollups
+  as their own shape-specific path. The projection must
+  name an explicit **precedence** between engine truth and this state (engine element position when
+  available, else aggregate/work-table), not silently pick one.
+
+**Correlation is per-shape, because `process_key` is reassigned.** A feature/epic aggregate's
+`process_key` identifies its *own* (feature / plan-fanout) process instance, but
+`pull_requests.process_key` is **overwritten** — first to the downstream convergence instance, then
+again to the merge instance (`app/service.ts` — `submitPr` writes the convergence-instance key,
+`startMerge` the merge-instance key). The stable
+aggregate↔PR link is **`pr_key`**, and epics additionally need node/root mapping (lineage
+`rootRequestKey`, nwf#245). So §4b must define the per-shape joins — or persist a **canonical unit
+key** — rather than assume a single `process_key` join; a naïve `process_key` join would misattribute
+or miss work-table state. This canonical-key requirement is itself an argument for the §1 aggregate.
+
+**The aggregate step is a frontier — reduced to one deterministic step for the renderer.** For the
+1-node feature there is one active step. For an N-node/parallel DAG (epic waves, delivery graphs), two
+branches can occupy incomparable cells at once, and no total order picks a unique maximum. But the
+`pipeline` renderer binds a **single scalar** `activeField` (`pages/feature.page.json`), so S7 **must**
+reduce that frontier deterministically to one step — the canonical choice is the **least-advanced active
+branch** (the "still blocked on" read), so the aggregate never renders further along than its slowest
+in-flight branch. This reduction is an explicit S7 decision, not left to the implementer; a set-valued /
+multi-track render would be a separate renderer change, out of scope here. **v1 does not populate the
+pipeline's `notInPathField` (the skipped-path axis) for the aggregate** — the reduction exposes only the
+scalar `activeField` + terminal `state`, so no deterministic skipped-set rollup is defined and equivalent
+graphs cannot diverge on a skipped path they never render; a per-branch skipped-set rollup onto
+`notInPathField` is deferred with the set-valued renderer change (out of scope). The per-node steps are
+individually well-defined **only in the conceptual / S8 element-instance model** underneath the
+reduction; at S7's coarse fidelity an active agent/wait/connector node exposes only `Running` with **no
+node id** (`deriveDeliveryPhase`), so S7 assigns it **no individual cell step** and renders a single
+coarse run-level step — the per-cell reduction becomes observable only once S8 binds the element-instance
+topology. Because the canonical unit union carries more
+terminal states than `done`/`failed` (a branch can end `merged` / `converged` / `skipped` / `blocked` /
+`abandoned`), the rule first **normalizes** each terminal branch — reusing the **shipped
+`featureReadModel` `stage_state` tiers** (`app/featureReadModel.ts`: `STAGE_DONE_STATUSES` + the
+`stage_state` CASE) as the tier basis rather than inventing a second mapping, per derivation-over-duplication.
+Note `done` is **not** itself emitted by the feature model — its `STAGE_DONE_STATUSES`
+(`app/featureReadModel.ts:41`) omits `done` and `stage_state` yields only `ok` / `blocked` / `failed` /
+`null`; `done` is the **new** canonical success value the delivery-unit / plan / graph unions introduce.
+The union normalizes explicitly: its success terminal — `done`, and likewise `merged` / `converged` — collapses to that same
+**successful** terminal (`done`); `failed` / `skipped` /
+`abandoned` collapse to a **failed** terminal; and `blocked` stays the renderer's **distinct `blocked`**
+state — *not* folded into `done` or `failed`, preserving the existing per-node semantics (`skipped` is a
+failed-tier terminal there, not a success; `blocked` is its own terminal). These canonical tiers are
+**not** fed to the renderer as-is: the `pipeline` column's `state` field accepts only `ok` / `failed` /
+`blocked` / `null` (`app/stage.ts` `StageState`), so when rendered the **successful** terminal (`done`)
+must map to `activeField = Done` with `state = ok`, the **failed** tier to `state = failed`, and
+`blocked` to the distinct `blocked` state — the raw canonical `done` never reaches the renderer's
+`stateField` (any other string silently degrades to in-progress, so a converged terminal must not be fed
+`done` verbatim). For the frontier precedence
+below, `done` is the only **successful** terminal, while both `failed` and `blocked` are **non-success,
+operator-actionable** terminals — so the combinations below are defined over `done` (success) vs. a
+non-success terminal (`failed`/`blocked`). This `done` is the **derived per-cell/delivery success
+terminal**, **not** the raw `plans.status = 'done'` fan-out handoff — per `app/delivery.ts:39-42` that
+plan status only means "the fan-out finished and ≥1 slice opened a PR, dispatched to convergence" (other
+slices may still be blocked/skipped), so feeding it verbatim would render an epic `Done` prematurely; the
+epic's actual success signal is `delivery = landed` (all slice PRs merged), which is what maps to this
+success bucket. The rule must then define the **terminal combinations** the least-advanced-*active*
+read leaves unspecified, so parallel epics/graphs render deterministically: (a) **mixed** — one or more
+branches terminal alongside ≥1 active branch — reduces to the least-advanced *active* branch (terminal
+branches are past, not "still blocked on"), **except** that a **non-success** terminal (`failed` or
+`blocked`) takes **precedence** and renders the aggregate at that branch's step with that terminal's
+render state (`state = failed` for a failed branch, the distinct `blocked` state for a blocked one — an
+operator-actionable signal, not something an in-flight sibling should mask); when **multiple** branches
+are in a non-success terminal the tie-break is **earliest terminal step, then stable node id**, so the
+exposed step (and its `failed`/`blocked` state) is deterministic; (b) **all-terminal** — reduces to the
+**earliest non-success terminal** step (`failed`/`blocked`, same tie-break) if any branch is non-success,
+else `done`.
+
+**The success predicate is shape-aware — `converged` is a success terminal per-PR/cell, but NOT for the
+epic rollup.** The normalization above collapses `converged` (and `merged`) into the success terminal
+`done` at the **per-PR / per-cell frontier** — correct for a single PR's own stepper (a review-only PR
+*is* done once converged). But an **epic** aggregates *slice PRs*, and there a slice that is `converged`
+but not merged is **resolved-not-landed**: `deriveDelivery` reports epic success as `delivery = landed`
+**only when every slice PR has merged** (`prsInFlight == 0 && prsMerged == prsOpened && prsOpened > 0`),
+and treats `converged` / `abandoned` slices as terminal-but-not-landed that never make an epic `landed`
+(`app/delivery.ts:39-64`). **A `blocked`/`skipped` task produces no PR and so is invisible to that
+PR-count predicate** (`record-results` can set `plan.status = done` once *one* slice opens a PR while
+siblings are blocked/skipped — `app/delivery.ts:40-42`), so `delivery = landed` alone would wrongly
+bucket an epic with one merged slice plus a blocked task as `Done`. The epic success predicate is
+therefore **`delivery = landed` AND no task in a non-success terminal** (`blocked`/`skipped`): such a
+task independently vetoes the success bucket, and the epic renders that blocked/skipped branch's step
+(`state = blocked`/`failed`), never `Done` — keeping `blocked`/`skipped` non-success terminals
+consistent with the per-cell rule. So the all-terminal rule's `else done` is evaluated against a **shape-scoped
+success predicate**: for a feature/graph cell, a `converged` branch counts as `done`; for the **epic**
+aggregate, only `delivery = landed` satisfies the success bucket — an all-`converged` (review-only) epic
+renders as its least-advanced *converged* step, **not** `Done`, so a review-only epic is never reported
+as landed. **Concretely for the renderer:** the epic projection does **not** reuse the per-feature
+`deriveStage` success-collapse (which folds `converged` → `Done`/`ok`, `app/featureReadModel.ts:73-95`);
+its `activeField` is the **least-advanced slice cell's** `STAGE_KEYS` bracket and its `state` is that
+cell's `pipeline` render state (`ok`/`blocked`/`failed`/in-progress), and the `Done` bucket is entered
+**only** when `deriveDelivery` reports `delivery = landed` (all slice PRs merged) — never on `converged`
+alone. So an all-`converged` epic pins `activeField` to the converged slices' shared bracket with
+`state = ok` (resolved-not-landed), and renders `Done` only once every slice has merged. This `Done`
+bucket is scoped to **integration-branch landing**: for a custom-base (`epic/*`) epic, `delivery = landed`
+means every slice merged onto the integration branch, after which `pollPromotion` (#299,
+`app/promotion.ts`, `app/service.ts`) opens the final `epic/* → <default>` promotion PR and tracks it via
+`promotion_state` (`ready`/`open`/`promoted`). The §4b stepper **intentionally ends at integration-branch
+landing** and does *not* fold that downstream promotion into cell success — a landed epic whose promotion
+PR is still `open` reads `Done` on the delivery stepper, with promotion surfaced by the epic card's
+existing `promotion_state`, not the stepper.
+
+**Cross-instance correlation, because composed cells are child instances by default.** engine-core's
+`CallActivity` spawns a **distinct child process instance** and links it to the parent
+(`engine-core/src/model.rs`); `inline_call_activities` (embedded-subprocess, one flat instance) is an
+**opt-in** transform, not the default. So a §2 cell composition is a **parent + child instances**
+unless the composition explicitly opts into inlining — and the broker's `/v2/process-instances/search`
+has been observed returning null parent/root keys (#464), meaning a filter on the parent key alone
+cannot be assumed to see a child cell's elements. §4b therefore requires an explicit choice at S4:
+either compose cells with `inline_call_activities` (keeping one flat instance, so the element query
+under one key suffices) **or** correlate across child instances by the canonical unit key. This is a
+named design decision, not a settled fact.
+
+**The binding, not the engine, is the current limiter — and that is the claim to retire.** The
+`@nanobpm/urban` `EngineClient` binding nwf consumes surfaces only `searchProcessInstances` +
+`searchUserTasks` today, so nwf cannot *yet* read the element-instance model the engine already serves.
+This is exactly why the two existing derivations are workarounds: `pollDeliveryGraphPhase`
+(`app/deliveryGraphRun.ts`) sees only **user-task** parks (missing job/message parks and active
+elements), and epic's `epic_phase` (`app/epicPhase.ts`, nano-ide#266) projects from **write-provenance**
+(each worker stamps its own `job.elementId`) *because* a live "furthest element" query wasn't surfaced.
+The enabling upstream step is to **surface `searchElementInstances` / wait-states on the `EngineClient`
+binding** (nano-ide / urban), after which both workarounds collapse into one live element-instance
+projection over the cell axis.
+
+**v1 ships on what's correlated today, at lifecycle-stage fidelity; the element-instance query sharpens
+it to per-cell.** Until the binding surfaces the element model, §4b's projection is derivable *now* only
+from aggregate/work-table state, **process-instance lifecycle state** (`searchProcessInstances` —
+`COMPLETED`/`TERMINATED`, which `deriveDeliveryPhase` folds to `done`/`failed`), and user-task parks —
+and that is **lifecycle-stage, not per-cell, even
+for feature**: `deriveStage` collapses a token parked in a readiness-probe service/timer loop, or an
+active `implement-task`, all to `Implementing` while `feature_runs.status` stays `running` and no user
+task is open. It is coarser still for the other two, for reasons that must be stated *separately*:
+
+- **Delivery graph:** `deriveDeliveryPhase` (`app/deliveryGraphRun.ts`) returns a generic `Running`
+  with **no node id** for an active `agent` / `wait` / `connector` node when no human task is open, and
+  `delivery_graph_runs` stores no current node.
+- **Epic:** `record-plan` is classified **Reviewing** (`app/epicPhase.ts`), not Planning, so the
+  *initial* Planning phase carries only the `plans` row — `plan_tasks` rows first become available once
+  **Reviewing** starts, where `record-plan` *does* write them, so from Reviewing on it is not literally
+  row-less — but **no field exposes the current
+  pre-PR process position** (which plan/review activity is live): there is no PR row, and while the
+  `plan-review-decision` user-task park *is* a real open user-task signal for the Reviewing decision
+  point, no field surfaces the **complete activity position** (which plan/review step is live) — the
+  initial Planning phase and the running plan/review work between decision parks remain unobservable.
+  Only the write-time `epic_phase` stamp (`app/epicPhase.ts`) and the plan/PR rollups
+  observe *where* it is. `deriveDeliveryPhase` is the delivery-graph projection only and provides no
+  evidence for epic resolution.
+
+So v1's scope is deliberately bounded: the one derivation + `pipeline` renderer covers **feature and
+delivery-graph at lifecycle-stage fidelity**, rendering any unobservable node as an **explicitly coarse**
+in-flight step. Because `activeField` must resolve to a *configured* pipeline stage (`STAGE_KEYS` runs
+`Requested`…`Done`, with no `In flight` key), S7's canonical behaviour for that coarse case is **fixed
+here, not left to the implementer**: **derive a configured key statelessly from the current coarse
+inputs on every pass** — map the run's `status`/`phase` to the corresponding `STAGE_KEYS` key (e.g. a
+`running` feature *with no PR key* to `Implementing`, marked in-progress — preserving `deriveStage`'s
+input precedence, where the `pr_key`/`opened` arm runs **before** the `running` arm, so a `running`
+feature whose `pr_key` is set already derives `PR open`, not `Implementing`; `app/stage.ts`,
+`app/featureReadModel.ts:77-85`) rather than remembering a prior key the read
+model does not persist, so the projection survives a restart, no new stage is invented, and no
+renderer/axis change is needed. (This stateless per-pass derivation is the **resolved** S7 policy and
+**supersedes** any earlier "hold the aggregate at its last observed configured stage" phrasing — the read
+model persists no such key, so there is nothing to hold; a coarse run is recomputed from current inputs
+every pass.) Adding a dedicated `In flight` key to the canonical axis is
+**explicitly rejected** for v1 — it would fork the stage vocabulary across surfaces; the S7 rollout
+below binds this same **stateless coarse-key** rule, so independent S7 implementations cannot diverge on
+the stage axis or `activeField`. For
+a **first observation with no prior key** (a freshly `running` `delivery_graph_runs` row carries only
+`phase = "Running"`, no stored lifecycle key to hold), S7 must pin a deterministic **initial**
+`STAGE_KEYS` value from a **status-specific** map — a `running` graph, whose dispatch has begun, maps to
+`Implementing` (not the `Requested` head), while the pre-dispatch case below maps to the pre-run initial
+key (literally **`Requested`**, `STAGE_KEYS[0]`) — so the scalar `activeField` is never undefined. A
+**terminal** row is pinned the same way so it can never render an undefined/invalid active stage: a
+`done` graph (phase `Completed`) maps to the `STAGE_KEYS` **tail** (`Done`) with `state = ok`, while a
+`failed`/`abandoned` graph (phase `Failed`) maps to that same tail bracket with `state = failed` —
+terminal status settles the `activeField` outright rather than leaving it unset. The same rule must cover the **`awaiting-approval`** rows
+`delivery-graphs.page.json` filters into the active grid: their schema leaves `process_key` **NULL**
+(no engine instance yet) and the **door seeds `phase = "Awaiting approval"` at write time** (migration
+058 only *creates* the `delivery_graph_runs` table — it seeds no rows and assigns no `phase`/`process_key`;
+those come from the run builder/dispatch path), so they have no observable
+element and no prior lifecycle key. **`awaiting-approval` is a legacy/reserved status — no longer
+produced** (issue #460 moved dispatch to an operator action; the current producer claims a run directly
+as `running`, `app/deliveryGraphDispatch.ts:104`), so this is only a **fallback for old rows**, not a
+current pre-dispatch path — S7 must **not** reintroduce a removed approval flow. Those retained rows map
+to that same deterministic **initial** pre-run
+`STAGE_KEYS` value, literally **`Requested`** (they are dispatch-pending, before `Implementing`), not leave their `activeField`
+undefined. It
+must never fabricate a specific cell position it cannot observe. The **epic pipeline is deferred to S8**:
+because its pre-PR position is unobservable from S7 inputs, epic keeps its `epic_phase` **text cell** as
+an explicit, retained **second source** (write-provenance) until the element query lands — rather than
+fabricating a derived step or promoting `epic_phase` to a permanent stepper source. When the binding
+lands the element query (S8), the projection swaps its park/position source for the live engine element
+instance — sharpening feature + delivery-graph to per-cell and bringing epic onto the same `pipeline` —
+**preserving the step axis and renderer, and using whatever parent/child correlation strategy S4
+selects** — retiring *both* the `epic_phase` write-time stamp and the user-task-only delivery-graph poll
+into one derivation. **"Per-cell" here means per-cell *source fidelity*, rendered onto the existing
+collapsed lifecycle axis — not a new per-cell step axis.** S8 sharpens the *source* the projection reads
+(a live engine element-instance identifies exactly which cell a token occupies) while the rendered step
+still **collapses that cell into the existing six `STAGE_KEYS` brackets** per §4b's cell→step mapping
+(inserted `wait` / `human` / `escalation` cells fold into an existing bracket, §217-232); the static
+six-stage `pipeline` `stages` array and its renderer are **preserved unchanged**. S8 does **not**
+introduce a per-cell stages array or a distinct step per cell — a distinct cell can be *observed* as the
+active source but is *displayed* at its collapsed lifecycle key. (Promoting cells to first-class steps
+would be a separate axis-contract change, out of scope for S8.)
+
 ### 5. Preserve — the static-vs-adaptive execution axis (do NOT bundle it)
 
 This ADR consolidates the *representation*, not the *execution strategy*. ADR 0005's deliberate
@@ -211,9 +490,25 @@ their topology is produced. Unifying that axis is explicitly out of scope here.
   table-to-VIEW slice requires a **separately designed recovery/compatibility migration**, not a plain
   revert.
 - **Cost.** A backfill/migration for `delivery_units`; a one-time extraction of the shared cells; and
-  the process slices are sequenced behind the (now-live) engine-wasm unlock. No behaviour change is
-  intended — this is a representation consolidation, guarded by parity tests against the existing VIEWs
-  and by the deploy+run engine tests.
+  the process slices are sequenced behind the (now-live) engine-wasm unlock. No **process/data-semantic**
+  behaviour change is intended — this is a representation consolidation, guarded by parity tests against
+  the existing VIEWs and by the deploy+run engine tests. (The rendered cell *does* change for operators —
+  S7 turns the delivery-graph `phase` text cell into a `pipeline`, and S8 the epic phase cell; that
+  operator-visible presentation change is intended, per the S7/S8 rollout below.)
+- **One stepper kills the second-order drift.** The unit's *progress projection* — the thing an
+  operator reads as "where is this in its lifecycle" — is triplicated the same way the aggregate is
+  (feature's `deriveStage`, epic's write-time `epic_phase`, delivery-graph's `pollDeliveryGraphPhase`),
+  and only feature renders an actual stepper; epic and delivery-graph render a bare string. §4b collapses
+  the three onto one derivation over the cell axis (with an explicit cell→step mapping and per-shape
+  correlation — `pr_key`/canonical unit key, since `pull_requests.process_key` is reassigned downstream),
+  rendered by one `pipeline` kind. **S7** unifies **feature + delivery-graph** at **lifecycle-stage
+  fidelity** with **no engine change** (even feature is not per-cell today — `deriveStage` collapses
+  readiness/timer/implement to `Implementing`); the **epic pipeline is deferred to S8**, keeping its
+  `epic_phase` text cell meanwhile. The *only* upstream **binding** dependency — surfacing the element-instance query
+  on the `@nanobpm/urban` `EngineClient` binding (S8, nano-ide#473), which the engine already serves —
+  then sharpens all three to per-cell and retires epic's write-provenance stamp. (This is the only
+  *binding/platform* dependency, **not** the sole upstream dependency: S8 additionally depends on S4's
+  inline-vs-child/correlation decision (#464) — #473 is necessary, not sufficient; see the S8 rollout.)
 
 ## Rollout (see #464 for the live checklist)
 
@@ -251,6 +546,145 @@ deployment-runtime prerequisite noted above), not on #416 alone.
   merge (unit → base branch; graph → `main`).
 - **S6 · compiler emits calls** — `deliveryGraphCompiler` references shared cells instead of inlining
   per-node copies.
+- **S7 · one derived stepper — v1 on today's surface** (Decision §4b) — define the **cell → step
+  mapping** (seeded from `STAGE_KEYS`, but owning the canonical definition — `STAGE_KEYS` mixes
+  lifecycle states with cells), derive current-step by correlating the aggregate/work-table state
+  **per shape**: for a **feature**, the terminal-folded `feature_runs__tracking` `derived_status`
+  (the canonical effective-status VIEW the projection reads — `app/featureReadModel.ts`, *not* the raw
+  `feature_runs.status`, which a terminated run can leave frozen at `running`/`escalated`)/`pr_key`/flags + the
+  member PR's terminal-folded **`pull_requests__tracking.derived_status`** (the ADR-0065 tracking VIEW that
+  is the *direct* source — `app/lineage.ts:382-394`; *not* `pollFeatureDelivery`, which is the **consumer**
+  that projects that state into `feature_runs`), joined by **`pr_key`** (*not* a naïve
+  `process_key` join, which is reassigned downstream); for a **delivery graph** — which has **no
+  `pr_key`** — its `delivery_graph_runs` row, its downstream PRs (read through the **same
+  `pull_requests__tracking.derived_status`** tracking VIEW, so a terminated convergence that leaves base
+  `status = 'converging'` while `derived_status = 'abandoned'` is *not* held in the live frontier —
+  `app/lineage.ts:382-394`) correlated through the run's **lineage
+  root mapping** (`app/lineage.ts` `collectRootPrs` over `pull_requests.root_request_key`), and engine
+  parks by the run's own `process_key`. Note the root mapping is **not** a single clean
+  `root_request_key = run_key` join for every PR, and the per-node correlation **differs by node kind**,
+  so S7 must **persist a run-level root rollup** — a stored run→node/PR mapping, or a canonical run root
+  threaded through every PR-producing node — **not** merely *document* the existing per-node keys (which
+  alone leaves the **agent** case below unattributed). **This persisted rollup must land on the canonical
+  aggregate, sequenced around S2's ownership — not on the legacy `delivery_graph_runs` row S2/S3 retire.**
+  Because S2 repoints `delivery_graph_runs` reads to `delivery_units`-derived VIEWs/rows and S3 moves the
+  writers off the legacy tables, the mapping's home is either (i) a column/relation on **`delivery_units`**
+  (added, dual-written, and backfilled under S2's expand/contract order — §508-519 — so the derived VIEW
+  exposes it), or (ii) **threaded into the PRs themselves** as each PR-producing node's `root_request_key`
+  (`app/service.ts`'s `submitPr`, line 503), which survives the legacy-table retirement. Storing it *only* on
+  `delivery_graph_runs` would be orphaned when that table becomes a derived VIEW, so S7 is **sequenced
+  after S2 establishes `delivery_units` ownership** (or takes the PR-threaded option). Rather than assume
+  one join: a **connector** PR roots by the connector's
+  *effective* `dedupeKey` — the author-supplied `connector.dedupeKey`, else the graph-derived
+  `<processInstanceKey>:<elementId>` (`app/deliveryConnector.ts` `connectorDedupeKey`) — threaded into
+  `submitPr` as its `rootRequestKey`; whereas an **agent** PR has **no `dedupeKey` at all** (the runner
+  seeds only `jobType`/`appendPrompt`/`timeout` for an `agent` node, `app/deliveryGraphCompiler.ts`
+  `ioMappingLines`, never a dedupe/root key), so it **self-roots on its own `pr_key`** (`submitPr`'s
+  `effectiveRoot = rootRequestKey ?? existing.root_request_key ?? pr_key`) unless the run explicitly
+  threads a root. The run-level rollup S7 defines must therefore attribute the **agent** case explicitly —
+  it cannot lean on the connector's `dedupeKey` fallback, which agent nodes never carry. The rollup also
+  **defines its precedence over `run.status`**: correlated-PR state **overrides** the raw run status for
+  the live frontier — a `running` run with any member PR still in flight reads as **`Converging`**, not
+  `Implementing` (matching the shipped `deliveryOriginStage`, `app/lineage.ts:332-336`) — whereas a
+  **terminal** run status settles the step **without** waiting on member PRs (`done` → `Done`). So `done`
+  does **not** block on an open PR, but a live `running` frontier must **not** mask PR-open/converging work
+  behind `Implementing`. **Park-versus-PR precedence:** when both are live at a `running` frontier — an open
+  engine park **and** a member PR in flight — the **human park wins** (the branch reads as its park step,
+  e.g. `Awaiting approval`, over the PR-derived `Converging`), because an open user-task gate is the branch's
+  current actionable frontier and the PR work sits behind it; absent a park, PR state drives the step as
+  above. Because `Awaiting approval` is a park **label**, not a `STAGE_KEYS` value, it can **not** be the
+  pipeline's scalar `activeField`: a parked branch pins its `activeField` to the frontier's current
+  `STAGE_KEYS` bracket per the coarse-key rule (a pre-PR `running` frontier → `Implementing`, an
+  `awaiting-approval`/pre-dispatch row → `Requested`), and the human-readable `Parked on human node:
+  <label>` text rides the **separate companion park-label field** — so the pipeline never receives a
+  non-`STAGE_KEYS` `activeField` while the actionable park label is still surfaced alongside it.
+  Engine parks correlate via `searchUserTasks({ processInstanceKey: run.process_key })`, which is
+  correct **for today's inlined graphs** (the compiler inlines subProcesses into one flat instance); once
+  S4's `callActivity` composition puts a human cell in a **child** instance, this parent-key query would
+  miss it, so that step is bound to the S4 inline-vs-child decision (correlate child instances, or keep
+  the graph inlined) — it is not a silent promise. Reduce any parallel frontier to the
+  **least-advanced active branch** and **promote the `pipeline` stepper
+  kind** (feature-only today) onto **every** delivery-graph surface — the list page, the detail
+  page (`pages/delivery-graph-detail.page.json:95`), **and** the *Active Delivery Graphs* grid on
+  `pages/overview.page.json:217` — each of which today renders `delivery_graph_runs.phase` as a
+  plain-text Phase column, so S7 does not leave any of those views on a second renderer while §4b claims the
+  surface uses the shared stepper. Promoting the `pipeline` kind must **not drop** the actionable
+  `Parked on human node: <label>` detail the plain-text Phase column carries today: S7 retains it as a
+  companion derived **park-label** field alongside the stepper on **all three** surfaces — the list and
+  *Active Delivery Graphs* grids (which have no other inline park detail) **and the detail page**, whose
+  `phase_node_id` field carries only the node **ID**, not the human-readable `Parked on human node:
+  <label>` text its plain-text `phase` cell shows today, so promoting the `pipeline` kind on the detail
+  page would otherwise lose that actionable label too. Because `delivery_graph_runs` stores **no
+  stage column** (only `phase`/park metadata, whose values such as `Running` are *not* `STAGE_KEYS`), S7
+  supplies the pipeline's `activeField`/`state` for the graph from a **read model/VIEW over
+  `delivery_graph_runs`** that maps `phase`/park metadata onto the `STAGE_KEYS` axis (the stateless
+  coarse-key rule) — it assumes no stored `activeField` column and defines the mapping columns explicitly,
+  so the page renders a valid configured step rather than a raw `phase` string.
+  This needs **no** engine-binding change, but ships at **lifecycle-stage fidelity only — for feature
+  *and* delivery-graph alike**: even feature is not truly per-cell today (`deriveStage` collapses a
+  readiness-probe/timer park or an active `implement-task` all to `Implementing`), and for a
+  delivery-graph node running with no open user task (`deriveDeliveryPhase` returns generic `Running`, no
+  node id) the stepper renders the configured coarse key derived statelessly from run `status`/`phase` (a *configured* stage — never a
+  fabricated cell position or an unconfigured `activeField` label; see the coarse-case rule in §4b). **The
+  least-advanced-*active* frontier reduction (§4b) is therefore *defined* at S7 but not yet *computable*
+  from this source:** `delivery_graph_runs` stores a **single** `phase`/`phase_node_id` per run, not a
+  per-branch topology, so a VIEW over it cannot compare branch advancement — at S7 the graph collapses to
+  that one coarse run-level step, and the genuine per-branch frontier reduction is deferred to S8's
+  element-instance/topology read model (a single-track feature is unaffected). The **epic pipeline is out of S7 scope**: epic's pre-PR position is unobservable from these
+  inputs, so epic keeps its write-provenance `epic_phase` **text cell** as an explicit retained second
+  source until S8 (below). The mapping can begin as soon as S4 names the cells; the `pipeline` render
+  binding for feature + delivery-graph can start immediately.
+- **S8 · surface the element-instance query → retire the epic write-stamp** (Decision §4b) — the
+  slice that depends on an upstream binding change, tracked as **`nanobpm/nano-ide#473`** — but
+  #473 is **necessary, not sufficient**: it surfaces the element read model keyed by a *process-instance
+  key*, while the current process-instance read model has been observed returning **null parent/root
+  keys** (#464), so under S4's default `callActivity` child instances #473 alone cannot traverse from a
+  run to its child cells' elements. S8 therefore also depends on S4's inline-vs-child decision (inline
+  the graph so one flat instance suffices, **or** resolve the child/root correlation, tracked with #464)
+  — #473 is not the sole upstream dependency. Nano's
+  Rust engine already serves the element-instance read model (`POST /v2/element-instances/search`
+  `searchElementInstances` + element-instance **wait-states** — active elements and **job/message**
+  parks, not only user tasks), but the `@nanobpm/urban` `EngineClient` binding nwf consumes surfaces only
+  `searchProcessInstances` + `searchUserTasks`. Surface `searchElementInstances` / wait-states on the
+  binding (upstream in nano-ide / urban, **nano-ide#473**), then swap the S7 projection's park/position
+  source for the live engine element instance — **preserving the step axis and the renderer, and using
+  whatever parent/child correlation strategy S4 selects**: if S4 chooses cross-instance correlation
+  (default `callActivity` child instances), S8 must also extend the element lookup to resolve the
+  child/root instance keys, so the "no change to the correlation key" is scoped to the axis and renderer,
+  not to a fixed single-instance join. This is
+  what lets epic's **Planning** phase and the **non-parked** part of **Reviewing** — which run inside
+  `plan-fanout.bpmn` before any PR exists — Planning has no `plan_tasks` work-table row (its `plans`
+  aggregate row *does* exist, carrying `status`/`process_key`, so the gap is a missing per-activity field,
+  not a missing row), and while pre-PR Reviewing
+  *does* carry `plan_tasks` rows (`record-plan` writes them), **no field exposes the currently executing
+  plan/review activity** (Reviewing *is* partly visible via the real `plan-review-decision` user task,
+  but Planning and the running review work are not), today
+  knowable only from write-provenance — become a pure read-model derivation, bringing epic onto the same
+  `pipeline`, retiring the `epic_phase` write-time stamp (`app/epicPhase.ts`, nano-ide#266 — **including
+  its genesis write in `startPlan`, `app/plan.ts`**, which stamps `epic_phase` for fresh/replanned
+  epics, so the retirement must move or drop that write too or those epics still depend on the retired
+  source) and folding
+  the user-task-only `pollDeliveryGraphPhase` into one live projection. **Ownerships this retirement
+  must carry forward, not silently drop:** (a) `app/lineage.ts` consumes `plans.epic_phase` to project
+  `epicPhaseLabel` and writes `pull_requests.epic_phase_label`, shown on the home/convergence surfaces —
+  so S8's replacement contract must supply that label from the derived pipeline (a derived
+  compatibility field) or update the lineage projection, or it either breaks the display or leaves a
+  second phase source; and (b) `pollDeliveryGraphPhase` is not only a park projection — it also owns the
+  `COMPLETED → done` / `TERMINATED → failed` terminal reconciliation for graphs (`app/service.ts`,
+  since a delivery graph has no spine worker to write its own terminal row), so S8 must **retain or move**
+  that reconciliation into the live projection, or completed graphs stay wedged in the active `running`
+  set; and (c) `app/lineage.ts` also reads `delivery_graph_runs.phase` to form `LineageThread.stageLabel`
+  and persists `lineage_threads.stage_label` (shown on delivery-lineage / home rows), so S8 must supply
+  that phase narrative from the derived projection or update the lineage read too, else those rows lose
+  their phase label; and (d) **four field bindings across three pages** read the `epic_phase` field, but **not all read
+  raw `plans`**: the epic index grid (`pages/epic.page.json:119`) and the epic-detail page
+  (`pages/epic-detail.page.json:99,146`) bind it through the **`plan_read_model` VIEW**
+  (`pages/epic.page.json:102`, `pages/epic-detail.page.json:95,140`; the VIEW projects `pl.epic_phase`,
+  `db/migrations/083_plan_read_model_declare_once.sql`), while only the nested Epic grid on the Home page
+  (`pages/home.page.json:284`) binds **raw `plans`** directly — so
+  retiring the column without repointing these bindings to the pipeline/read-model field
+  renders a missing field on the epic index, epic-detail, and Home pages; S8's checklist must update
+  **both** the `plan_read_model` VIEW (or its derived field) **and** the raw-`plans` Home binding, not just raw `plans` references.
 
 ## Non-goals / deferred
 
