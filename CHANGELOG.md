@@ -1,3 +1,9 @@
+## [0.145.0](https://github.com/nanobpm/nano-workforce/compare/v0.144.0...v0.145.0) (2026-08-25)
+
+### Features
+
+* **stepper:** live element-instance epic-phase projection (S8, [#542](https://github.com/nanobpm/nano-workforce/issues/542)) ([#554](https://github.com/nanobpm/nano-workforce/issues/554)) ([fdc3ccc](https://github.com/nanobpm/nano-workforce/commit/fdc3ccc8ffe3797954c8502385634f7c0937571e)), closes [#464](https://github.com/nanobpm/nano-workforce/issues/464) [#541](https://github.com/nanobpm/nano-workforce/issues/541) [#546](https://github.com/nanobpm/nano-workforce/issues/546) [nano-ide#473](https://github.com/nanobpm/nano-ide/issues/473)
+
 ## [0.144.0](https://github.com/nanobpm/nano-workforce/compare/v0.143.0...v0.144.0) (2026-08-25)
 
 ### Features
