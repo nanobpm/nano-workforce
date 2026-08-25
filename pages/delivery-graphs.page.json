@@ -118,7 +118,7 @@
         "data": {
           "kind": "datasource",
           "source": "app",
-          "table": "delivery_graph_runs",
+          "table": "delivery_graph_read_model",
           "orderBy": { "field": "updated_at", "dir": "desc" },
           "filter": [{ "field": "status", "in": ["awaiting-approval", "running"] }]
         },
@@ -128,15 +128,32 @@
           { "label": "All", "filter": [] }
         ],
         "columns": [
-          { "field": "title", "template": "{{title}}", "header": "Graph", "subtitleField": "run_key", "truncate": true, "width": "20%", "link": { "kind": "page", "page": "delivery-graph-detail", "keyField": "run_key" } },
-          { "field": "status", "header": "Status", "truncate": true, "width": "12%", "link": { "kind": "processExplorer", "keyField": "process_key" } },
-          { "field": "process_key", "header": "Instance", "width": "9%", "truncate": true, "link": { "kind": "processExplorer", "keyField": "process_key" } },
-          { "field": "phase", "header": "Phase", "truncate": true, "width": "15%" },
+          { "field": "title", "template": "{{title}}", "header": "Graph", "subtitleField": "run_key", "truncate": true, "width": "18%", "link": { "kind": "page", "page": "delivery-graph-detail", "keyField": "run_key" } },
+          { "field": "status", "header": "Status", "truncate": true, "width": "10%", "link": { "kind": "processExplorer", "keyField": "process_key" } },
+          { "field": "process_key", "header": "Instance", "width": "8%", "truncate": true, "link": { "kind": "processExplorer", "keyField": "process_key" } },
+          {
+            "field": "stage",
+            "header": "Pipeline",
+            "kind": "pipeline",
+            "width": "18%",
+            "stages": [
+              { "key": "Requested", "label": "Requested" },
+              { "key": "Implementing", "label": "Implementing" },
+              { "key": "PR open", "label": "PR open" },
+              { "key": "Converging", "label": "Converging" },
+              { "key": "Merging", "label": "Merging" },
+              { "key": "Done", "label": "Done" }
+            ],
+            "activeField": "stage",
+            "stateField": "stage_state",
+            "locus": { "field": "process_key", "link": { "kind": "processExplorer", "keyField": "process_key" } }
+          },
+          { "field": "park_label", "header": "Parked", "truncate": true, "width": "12%" },
           { "field": "node_count", "header": "Nodes", "width": "5%" },
           { "field": "human_node_count", "header": "Human", "width": "5%" },
-          { "field": "side_effect_count", "header": "Effects", "width": "7%" },
-          { "field": "created_at", "header": "Dispatched", "width": "11%", "truncate": true, "format": "datetime" },
-          { "field": "updated_at", "header": "Updated", "width": "11%", "truncate": true, "format": "datetime" }
+          { "field": "side_effect_count", "header": "Effects", "width": "6%" },
+          { "field": "created_at", "header": "Dispatched", "width": "7%", "truncate": true, "format": "datetime" },
+          { "field": "updated_at", "header": "Updated", "width": "6%", "truncate": true, "format": "datetime" }
         ],
         "detail": {
           "fields": [
