@@ -2334,9 +2334,9 @@ export async function pollEpicPhase(
       "plan_key",
     )
     .all()) {
-    // Coerce SQL NULL to `undefined` so a missing `current_wave`/`wave_count` stays MISSING through
-    // the wave label — `null` passed as a wave number would otherwise coerce to `0` and mislabel an
-    // unknown wave as `wave 1/t` (the derivation guards this too, see `toWave`).
+    // Coerce SQL NULL to `null` so a missing `current_wave`/`wave_count` stays MISSING through the
+    // wave label — a wave number that coerced to `0` would otherwise mislabel an unknown wave as
+    // `wave 1/t` (the derivation guards this too, see `toWave`, which treats `null`/`undefined` alike).
     waveByPlan.set(w.plan_key, {
       current: w.current_wave ?? null,
       total: w.wave_count ?? null,

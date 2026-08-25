@@ -153,6 +153,13 @@ export function deriveEpicPhase(
  *  from the phase vocabulary. */
 const EPIC_PHASE_ORDER: readonly string[] = Object.values(EPIC_PHASE);
 
+/** Constant-time phase→ordinal lookup for {@link deriveEpicPhaseLive}'s hot loop — precomputed once
+ *  from {@link EPIC_PHASE_ORDER} so the per-element "furthest reached" compare is O(1) instead of a
+ *  linear `indexOf` per ACTIVE instance (avoids O(n·k) on high-fanout epics; #542 review). */
+const EPIC_PHASE_ORDINAL: ReadonlyMap<string, number> = new Map(
+  EPIC_PHASE_ORDER.map((phase, ordinal) => [phase, ordinal]),
+);
+
 /** The finest-grained element-instance signal `deriveEpicPhaseLive` reads — the structural subset of
  *  urban's `ElementInstanceSummary` it needs (the element's BPMN id and whether a token is currently
  *  AT it). Kept structural (not the full binding type) so the derivation unit-tests in isolation. */
@@ -186,7 +193,7 @@ export function deriveEpicPhaseLive(
     if (el.state !== "ACTIVE") continue;
     const base = deriveEpicPhase(el.elementId);
     if (base === null) continue;
-    const ordinal = EPIC_PHASE_ORDER.indexOf(base);
+    const ordinal = EPIC_PHASE_ORDINAL.get(base) ?? -1;
     if (ordinal > bestOrdinal) {
       bestOrdinal = ordinal;
       bestBase = base;
