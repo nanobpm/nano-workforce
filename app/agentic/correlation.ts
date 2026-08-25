@@ -107,7 +107,18 @@ export class CorrelationRegistry {
     const jobs = this.#jobsOf.get(instance) ?? new Set<string>();
     jobs.add(jobKey);
     this.#jobsOf.set(instance, jobs);
-    this.#context.set(jobKey, { jobKey, stream: jobStream(jobKey), ...stripUndefined(context) });
+    // Merge over any existing attribution rather than clobbering it: a jobKey is engine-unique, so a
+    // re-link (e.g. a worker reconnecting mid-job, or a richer orchestrator context arriving later)
+    // must not drop context another path already attached — notably the #544 `elementInstanceKey`,
+    // which is resolved asynchronously and could otherwise be wiped by a subsequent bare `link`.
+    // Explicitly provided fields still win; `jobKey`/`stream` are always re-derived canonically.
+    const existing = this.#context.get(jobKey);
+    this.#context.set(jobKey, {
+      ...existing,
+      jobKey,
+      stream: jobStream(jobKey),
+      ...stripUndefined(context),
+    });
   }
 
   /**

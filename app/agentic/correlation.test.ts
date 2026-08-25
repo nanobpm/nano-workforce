@@ -102,6 +102,20 @@ test("re-linking a jobKey to a new instance MOVES it (drops the stale reverse ed
   assert.equal(reg.count(), 1);
 });
 
+test("re-linking a jobKey preserves an already-attached elementInstanceKey (no clobber)", () => {
+  const reg = new CorrelationRegistry();
+  reg.link("wk-a", "6494");
+  reg.attachElementInstance("6494", "ei-42");
+  // A subsequent bare re-link (worker reconnect mid-job) must not wipe the async-resolved key.
+  reg.link("wk-a", "6494");
+  assert.equal(reg.resolve("6494")?.elementInstanceKey, "ei-42");
+  // A move to a new worker connection likewise keeps the element-instance the job occupies.
+  reg.link("wk-b", "6494", { planKey: "o/r#7" });
+  assert.equal(reg.resolve("6494")?.elementInstanceKey, "ei-42");
+  assert.equal(reg.resolve("6494")?.planKey, "o/r#7");
+});
+
+
 test("releaseJob removes one job from both projections", () => {
   const reg = new CorrelationRegistry();
   reg.link("wk-a", "6494");
