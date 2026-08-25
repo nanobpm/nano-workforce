@@ -1,3 +1,9 @@
+## [0.142.0](https://github.com/nanobpm/nano-workforce/compare/v0.141.0...v0.142.0) (2026-08-25)
+
+### Features
+
+* **delivery-graph:** late-bind converge/wait PR from an emitted `pr` fact ([#548](https://github.com/nanobpm/nano-workforce/issues/548)) ([#550](https://github.com/nanobpm/nano-workforce/issues/550)) ([dbb3aab](https://github.com/nanobpm/nano-workforce/commit/dbb3aabfe8aeaa9951d2ce9f5a2b732eaa99748b))
+
 ## [0.141.0](https://github.com/nanobpm/nano-workforce/compare/v0.140.0...v0.141.0) (2026-08-25)
 
 ### Features
