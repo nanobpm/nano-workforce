@@ -93,8 +93,12 @@ export class CorrelationRegistry {
 
   /**
    * Link a worker instance to a job it is now processing, recording the job's engine context. A
-   * re-link of the same jobKey to a different instance moves it (dropping the old reverse edge); a
-   * re-link with fresh context overwrites the context (last write wins). Both args must be non-empty.
+   * re-link of the same jobKey to a different instance moves it (dropping the old reverse edge). The
+   * context is MERGED over any existing attribution, not replaced: explicitly provided fields win
+   * (last write wins per field), but fields omitted from `context` are preserved — so a bare re-link
+   * cannot clear or clobber context another path already attached (e.g. an async-resolved
+   * `elementInstanceKey`). `jobKey`/`stream` are always re-derived canonically. Both args must be
+   * non-empty.
    */
   link(instance: string, jobKey: string, context: JobContext = {}): void {
     if (instance === "" || jobKey === "") return;
