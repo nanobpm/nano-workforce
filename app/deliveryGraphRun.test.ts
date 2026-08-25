@@ -115,7 +115,7 @@ test("pollDeliveryGraphPhase: a numeric engine processInstanceKey still matches 
     // The engine can yield a NUMERIC key; the poller compares against the string process_key.
     const engine = {
       searchProcessInstances: async () => [{ processInstanceKey: 12345, state: "COMPLETED" }],
-      searchUserTasks: async () => [],
+      searchElementInstanceWaitStates: async () => [],
     };
     await pollDeliveryGraphPhase(data, engine as never);
     assertEquals((await runs.get("rk"))?.status, "done");

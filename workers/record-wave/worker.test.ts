@@ -145,8 +145,9 @@ test("record-wave retries the same wave when a task is still pending", async () 
   // Wave progress (current_wave/wave_label) was retired as a stored projection (epic #412) — derived
   // from `plan_tasks` by the plan_wave_label VIEW — so record-wave no longer writes it.
   assertEquals("current_wave" in (planUpdates[0].patch as Record<string, unknown>), false);
-  // Domain-phase projection (#261): more waves remain, so the epic stays Implementing (wave n/t).
-  assertEquals((planUpdates[0].patch as Record<string, unknown>).epic_phase, "Implementing (wave 2/2)");
+  // Domain-phase projection is no longer stamped by this worker (S8, #542) — the epic phase is a pure
+  // read-model derivation off the live element-instance model (`pollEpicPhase`, app/service.ts).
+  assertEquals("epic_phase" in (planUpdates[0].patch as Record<string, unknown>), false);
 });
 
 test("record-wave pins current_wave to the last index and clears gate_wave on the final wave", async () => {
@@ -178,9 +179,9 @@ test("record-wave pins current_wave to the last index and clears gate_wave on th
   assertEquals((planUpdates[0].patch as Record<string, unknown>).gate_wave, null);
   assertEquals("current_wave" in (planUpdates[0].patch as Record<string, unknown>), false);
   assertEquals("wave_label" in (planUpdates[0].patch as Record<string, unknown>), false);
-  // Domain-phase projection (#261): the final wave landed with no successor and no trial merge, so
-  // the epic enters Finalizing (record-results then advances to the Dispatched terminal).
-  assertEquals((planUpdates[0].patch as Record<string, unknown>).epic_phase, "Finalizing");
+  // Domain-phase projection is no longer stamped by this worker (S8, #542) — the epic phase is a pure
+  // read-model derivation off the live element-instance model (`pollEpicPhase`, app/service.ts).
+  assertEquals("epic_phase" in (planUpdates[0].patch as Record<string, unknown>), false);
 });
 
 test("record-wave writes no wave-progress columns for a taskless plan (waveCount 0)", async () => {

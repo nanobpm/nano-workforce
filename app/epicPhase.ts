@@ -1,4 +1,22 @@
-// app/epicPhase.ts — reify the epic's own domain lifecycle as a derived `epic_phase` (issue #261).
+// app/epicPhase.ts — reify the epic's own domain lifecycle as a derived `epic_phase` (issue #261,
+// S8 #542 / ADR 0006 §4b).
+//
+// LIVE READ-MODEL DERIVATION (S8, #542). The epic phase is now a PURE read-model derivation off the
+// live engine element-instance model — the write-time provenance stamp (each spine worker stamping
+// the phase it enters) is RETIRED. `deriveEpicPhaseLive` reads the plan-fanout instance's live
+// element instances (`EngineClient.searchElementInstances`, nano-ide#473) and projects the
+// FURTHEST-REACHED active element onto the same structural `ELEMENT_PHASE` map the write-stamp used
+// (derive-don't-duplicate: one structural source, two consumers retired to one). This lifts S7's
+// coarse lifecycle-stage fidelity to true per-cell / mid-cell position — an active `implement` job or
+// a pre-PR `review-plan` agent is read live from the token position, ahead of any work-table row.
+// The `pollEpicPhase` poll pass (app/service.ts) owns the write, so no worker stamps `epic_phase`.
+//
+// Because plan-fanout.bpmn runs the WHOLE epic spine (`plan` → `review-plan` → the `implement`
+// multi-instance subProcess → `trial-merge` → `record-results`) as ONE process instance — the
+// `implement` fan-out is an embedded subProcess, not a callActivity child instance — a single
+// element-instance search over the plan's `process_key` sees every spine cell. (When S4 callActivity
+// composition lands, the same derivation extends to child instances via the engine's native
+// parent/root keys, Magikcraft/nano-bpm#977 — the #464 option-B correlation decision.)
 //
 // `plans.status` only distinguishes `planning` / `dispatched` / `done` / `failed` / `abandoned` —
 // and `dispatched` is the `plan-fanout.bpmn` PROCESS-INSTANCE terminal ("fan-out job done"), not the
@@ -42,6 +60,9 @@ export const EPIC_PHASE = {
  *  `toWave` coercion the wave workers already apply, so a NaN/absent counter degrades to an
  *  unlabelled `Implementing` rather than emitting `wave NaN/…`. */
 const toWave = (v: unknown): number | null => {
+  // `null`/`undefined` are ABSENT, not zero: `Number(null)` is `0`, which would otherwise label a
+  // missing `current_wave` as `wave 1/t`. Treat them as unusable so missing wave data stays missing.
+  if (v === null || v === undefined) return null;
   const n = Math.trunc(Number(v));
   return Number.isFinite(n) && n >= 0 ? n : null;
 };
@@ -74,8 +95,10 @@ export function implementingPhase(current: unknown, total: unknown): string {
  *   • `select-wave` ("Select wave") → Implementing: it dispatches the wave and is the last host write
  *     before the write-silent `implement` MI, so it durably marks the implementation phase for the
  *     wave it launches (wave-labelled via {@link implementingPhase} at the call site).
- *   • `record-results` ("Finalize plan") → Dispatched: the finalize step's lasting result is the
- *     "Fleet dispatched" terminal end event.
+ *   • `record-results` ("Finalize plan") → Finalizing: while the finalizer token is ACTIVE the epic
+ *     is finalizing. Its TERMINAL "Fleet dispatched" phase is NOT read from this (fleeting) live
+ *     token — a completion marker has no ACTIVE element to read once the instance ends — but derived
+ *     from the durable terminal status (see {@link deriveTerminalEpicPhase}).
  * `record-wave`'s next phase is data-dependent (trial-merge vs. next wave vs. finalize), so it is
  * resolved at its call site rather than from the element id alone; its structural fallback here is
  * the wave it just landed.
@@ -97,7 +120,7 @@ const ELEMENT_PHASE: Readonly<Record<string, string>> = {
   "record-trial-merge": EPIC_PHASE.TRIAL_MERGING,
   "trial-merge-decision": EPIC_PHASE.TRIAL_MERGING,
   "resolve-trial-attention": EPIC_PHASE.TRIAL_MERGING,
-  "record-results": EPIC_PHASE.DISPATCHED,
+  "record-results": EPIC_PHASE.FINALIZING,
 };
 
 /** Optional wave context for a wave-bearing phase, sourced from the wave/levelize records. */
@@ -122,4 +145,75 @@ export function deriveEpicPhase(
   if (base === undefined) return null;
   if (base === EPIC_PHASE.IMPLEMENTING) return implementingPhase(wave?.current, wave?.total);
   return base;
+}
+
+/** The epic spine's phase ORDER — the total order `deriveEpicPhaseLive` compares "furthest reached"
+ *  by. It IS the declaration order of {@link EPIC_PHASE} (Planning → Reviewing → Implementing → Trial
+ *  merging → Finalizing → Dispatched), the epic's natural forward spine, so the ordinal cannot drift
+ *  from the phase vocabulary. */
+const EPIC_PHASE_ORDER: readonly string[] = Object.values(EPIC_PHASE);
+
+/** Constant-time phase→ordinal lookup for {@link deriveEpicPhaseLive}'s hot loop — precomputed once
+ *  from {@link EPIC_PHASE_ORDER} so the per-element "furthest reached" compare is O(1) instead of a
+ *  linear `indexOf` per ACTIVE instance (avoids O(n·k) on high-fanout epics; #542 review). */
+const EPIC_PHASE_ORDINAL: ReadonlyMap<string, number> = new Map(
+  EPIC_PHASE_ORDER.map((phase, ordinal) => [phase, ordinal]),
+);
+
+/** The finest-grained element-instance signal `deriveEpicPhaseLive` reads — the structural subset of
+ *  urban's `ElementInstanceSummary` it needs (the element's BPMN id and whether a token is currently
+ *  AT it). Kept structural (not the full binding type) so the derivation unit-tests in isolation. */
+export interface EpicElementInstance {
+  readonly elementId: string;
+  readonly state: string;
+}
+
+/**
+ * Derive the epic phase LIVE from the plan-fanout instance's element instances (S8 #542) — the pure
+ * read-model derivation that RETIRES the write-time stamp. Among the ACTIVE element instances (a token
+ * currently sitting AT the element — a running agent job, an open human gate, a readiness-probe loop),
+ * pick the one mapping FURTHEST along the epic spine ({@link EPIC_PHASE_ORDER}) and project it via the
+ * SAME structural {@link deriveEpicPhase} map — so the live derivation and the (now retired) stamp
+ * share one source. Returns `null` when no active element marks a phase (e.g. the instance is parked
+ * only on non-spine plumbing), so the caller leaves the last known phase untouched rather than
+ * clobbering it. A wave-bearing phase (`Implementing`) is wave-labelled from {@link WaveContext}.
+ *
+ * "Furthest reached" (max spine ordinal), not "least advanced": the `implement` multi-instance
+ * subProcess keeps `select-wave`/`record-wave` and per-child `implement-task` tokens live at once, all
+ * mapping to `Implementing`; a later `trial-merge` token, once reached, is the epic's true position, so
+ * the max is the faithful "where has this epic got to" read.
+ */
+export function deriveEpicPhaseLive(
+  elements: readonly EpicElementInstance[],
+  wave?: WaveContext,
+): string | null {
+  let bestBase: string | null = null;
+  let bestOrdinal = -1;
+  for (const el of elements) {
+    if (el.state !== "ACTIVE") continue;
+    const base = deriveEpicPhase(el.elementId);
+    if (base === null) continue;
+    const ordinal = EPIC_PHASE_ORDINAL.get(base) ?? -1;
+    if (ordinal > bestOrdinal) {
+      bestOrdinal = ordinal;
+      bestBase = base;
+    }
+  }
+  if (bestBase === null) return null;
+  return bestBase === EPIC_PHASE.IMPLEMENTING ? implementingPhase(wave?.current, wave?.total) : bestBase;
+}
+
+/**
+ * Derive the epic's TERMINAL phase from its durable status — the completion-marker counterpart to the
+ * live derivation (S8 #542 review). The "Fleet dispatched" phase is reached only when the plan-fanout
+ * instance ENDS, at which point there is no ACTIVE element to read; live-observing the fleeting ACTIVE
+ * `record-results` token via a coarse (default 60s) poll would miss it on nearly every fast finalize,
+ * freezing the row at the last live phase. So `Dispatched` is derived from the durable read-model
+ * (`plans.status`) instead: a `done` epic that dispatched ≥1 slice (`taskCount > 0`) reads Dispatched.
+ * Returns `null` for a taskless `done` (planner emitted no tasks — nothing was dispatched) and for any
+ * non-`done` terminal (`failed`/`abandoned`), so those never mislabel as Dispatched and the caller
+ * leaves the last live phase untouched.
+ */
+export function deriveTerminalEpicPhase(status: string, taskCount: number): string | null {
+  return status === "done" && taskCount > 0 ? EPIC_PHASE.DISPATCHED : null;
 }

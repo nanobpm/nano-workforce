@@ -15,7 +15,6 @@
 // and, crucially, so a later wave's `dependsOn` can reference the PR keys earlier waves produced.
 import type { AppJobHandler } from "@nanobpm/urban";
 import { appendEntry } from "../../app/blackboard.ts";
-import { EPIC_PHASE, implementingPhase } from "../../app/epicPhase.ts";
 import { fetchPrFiles, fetchPrHead } from "../../app/github.ts";
 import { deriveExclusions, recordExclusions } from "../../app/mergeExclusion.ts";
 import { loadMergeProtocol } from "../../app/mergeProtocol.ts";
@@ -302,25 +301,11 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
   const nextWave = stillPendingCurrentWave ? currentWave : currentWave + 1;
   const hasMoreWaves = stillPendingCurrentWave || nextWave < waveCount;
 
-  // Wave index the epic is now on (issue #137): while more waves remain, the wave about to run; on
-  // the final wave, pinned to the last index so a finished epic reads N/N (nextWave would be
-  // waveCount, one past the last band). This is a LOCAL value only — it is used below to derive the
-  // `epic_phase` (Implementing wave n/t) and the domain phase.
-  const projectedCurrentWave = hasMoreWaves ? nextWave : Math.max(0, waveCount - 1);
-  // Operator-visibility wave progress (current_wave / wave_label) was RETIRED as a stored projection
-  // (epic #412) — it is now derived from `plan_tasks` by the `plan_wave_label` / `plan_read_model`
-  // VIEWs (060/061), so this worker no longer denormalises it (select-wave no longer writes it
-  // either). `projectedCurrentWave` above is not persisted; it only feeds the phase derivation.
-
-  // Domain-phase projection (#261): the wave landed — stamp the phase the epic is ENTERING next,
-  // which is data-dependent here (unlike the structural spine writers). A trial merge runs → Trial
-  // merging; another wave follows → Implementing (next wave n/t); otherwise the finalizer runs →
-  // Finalizing (record-results then advances to the Dispatched terminal).
-  const epicPhase = runTrialMerge
-    ? EPIC_PHASE.TRIAL_MERGING
-    : hasMoreWaves
-      ? implementingPhase(projectedCurrentWave, waveCount)
-      : EPIC_PHASE.FINALIZING;
+  // The epic's domain phase is no longer stamped here (S8, #542) — it is a pure read-model derivation
+  // off the live element-instance model (`pollEpicPhase` → `deriveEpicPhaseLive`, app/epicPhase.ts),
+  // which reads the live token position (a running `implement` fan-out, `trial-merge`, or the
+  // finalizer) directly rather than this worker projecting the phase it is ABOUT to enter. This write
+  // now only arms the durable wave-merge barrier marker.
 
   // Wave-merge barrier: when another wave follows, park the plan-fanout instance at the
   // `wait-wave-merged` catch event until THIS wave's opened PRs have MERGED (not merely opened).
@@ -334,7 +319,6 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
   try {
     await plans(app.data).update(planKey, {
       gate_wave: hasMoreWaves ? currentWave : null,
-      epic_phase: epicPhase,
       updated_at: ts,
     });
   } catch (err) {

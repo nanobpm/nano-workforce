@@ -17,7 +17,6 @@
 // in that case (the edges were invalid).
 import type { AppJobHandler } from "@nanobpm/urban";
 import { type CapabilityNeed, parseCapabilityNeeds } from "../../app/capabilityNeed.ts";
-import { deriveEpicPhase } from "../../app/epicPhase.ts";
 import { plans, planTaskDeps, planTaskNeeds, planTasks } from "../../app/plan.ts";
 import { computeWaves, WaveError, type WaveTask } from "../../app/waves.ts";
 import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
@@ -147,11 +146,6 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
     // denormalises it onto the `plans` row.
     updated_at: ts,
   };
-  // Domain-phase projection (#261): recording the plan hands the epic to the `review-plan` agent,
-  // so it enters the Reviewing phase (derived structurally from this worker's BPMN element id).
-  // Guard against a null derivation (element id absent) clobbering the genesis phase.
-  const epicPhase = deriveEpicPhase(job.elementId);
-  if (epicPhase) patch.epic_phase = epicPhase;
   if (tasks.length === 0) patch.outcome = note ? str(note) : "planner emitted no tasks";
   await plans(app.data).update(planKey, patch);
 
