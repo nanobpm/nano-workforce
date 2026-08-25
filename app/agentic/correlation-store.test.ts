@@ -167,6 +167,23 @@ test("record is an upsert: re-recording a jobKey is last-write-wins", () => {
   assertEquals(got?.completedAt, "2026-08-23T02:10:00.000Z");
 });
 
+test("record preserves an existing element_instance_key when a later re-record omits it (monotonic)", () => {
+  const store = new AgenticCorrelationStore(memoryDb());
+  const base = { jobKey: "job-4", stream: jobStream("job-4"), completedAt: "2026-08-23T02:00:00.000Z" };
+  // The durable backfill path (or a first record that carried the resolved key).
+  store.record({ ...base, instance: "worker-D", elementInstanceKey: "ei-777" });
+  // A later best-effort re-record that does NOT know the key must not wipe it back to NULL.
+  store.record({ ...base, instance: "worker-D", host: "later.local" });
+  const got = store.get("job-4");
+  assertEquals(got?.host, "later.local");
+  assertEquals(got?.elementInstanceKey, "ei-777");
+  // setElementInstanceKey backfill then a bare re-record likewise survives.
+  store.record({ jobKey: "job-5", stream: jobStream("job-5"), completedAt: "2026-08-23T03:00:00.000Z", instance: "worker-E" });
+  store.setElementInstanceKey("job-5", "ei-888");
+  store.record({ jobKey: "job-5", stream: jobStream("job-5"), completedAt: "2026-08-23T03:05:00.000Z", instance: "worker-E" });
+  assertEquals(store.get("job-5")?.elementInstanceKey, "ei-888");
+});
+
 test("get is undefined for an unknown jobKey and byStream undefined for a non-job stream", () => {
   const store = new AgenticCorrelationStore(memoryDb());
   assertEquals(store.get("nope"), undefined);

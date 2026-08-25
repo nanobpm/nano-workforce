@@ -121,7 +121,12 @@ export class AgenticCorrelationStore {
     this.#db.exec(AGENTIC_CORRELATION_SCHEMA_SQL);
   }
 
-  /** Upsert a completed job's attribution (last write wins on jobKey). */
+  /**
+   * Upsert a completed job's attribution (last write wins on jobKey). One exception: the async
+   * `element_instance_key` (#544) is written MONOTONICALLY — a re-record that omits it (a common
+   * best-effort enrichment, or a value already set via {@link setElementInstanceKey}) preserves the
+   * stored key via COALESCE rather than clobbering it back to NULL.
+   */
   record(entry: DurableCorrelation): void {
     this.#db.run(
       `INSERT INTO agentic_correlation
@@ -138,7 +143,7 @@ export class AgenticCorrelationStore {
          plan_key = excluded.plan_key,
          linked_at = excluded.linked_at,
          completed_at = excluded.completed_at,
-         element_instance_key = excluded.element_instance_key`,
+         element_instance_key = COALESCE(excluded.element_instance_key, agentic_correlation.element_instance_key)`,
       [
         entry.jobKey,
         entry.stream,
