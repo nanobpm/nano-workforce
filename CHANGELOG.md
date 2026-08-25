@@ -1,3 +1,9 @@
+## [0.144.0](https://github.com/nanobpm/nano-workforce/compare/v0.143.0...v0.144.0) (2026-08-25)
+
+### Features
+
+* **stepper:** derived stepper v1 — one pipeline projection for feature + delivery graph ([#541](https://github.com/nanobpm/nano-workforce/issues/541)) ([#546](https://github.com/nanobpm/nano-workforce/issues/546)) ([0aa365a](https://github.com/nanobpm/nano-workforce/commit/0aa365af158df3de3c79f8a42226a2694a75af52)), closes [#540](https://github.com/nanobpm/nano-workforce/issues/540) [#538](https://github.com/nanobpm/nano-workforce/issues/538) [205/#386](https://github.com/205/nano-workforce/issues/386) [#542](https://github.com/nanobpm/nano-workforce/issues/542)
+
 ## [0.143.0](https://github.com/nanobpm/nano-workforce/compare/v0.142.0...v0.143.0) (2026-08-25)
 
 ### Features
