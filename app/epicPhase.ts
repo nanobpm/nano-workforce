@@ -1,4 +1,22 @@
-// app/epicPhase.ts — reify the epic's own domain lifecycle as a derived `epic_phase` (issue #261).
+// app/epicPhase.ts — reify the epic's own domain lifecycle as a derived `epic_phase` (issue #261,
+// S8 #542 / ADR 0006 §4b).
+//
+// LIVE READ-MODEL DERIVATION (S8, #542). The epic phase is now a PURE read-model derivation off the
+// live engine element-instance model — the write-time provenance stamp (each spine worker stamping
+// the phase it enters) is RETIRED. `deriveEpicPhaseLive` reads the plan-fanout instance's live
+// element instances (`EngineClient.searchElementInstances`, nano-ide#473) and projects the
+// FURTHEST-REACHED active element onto the same structural `ELEMENT_PHASE` map the write-stamp used
+// (derive-don't-duplicate: one structural source, two consumers retired to one). This lifts S7's
+// coarse lifecycle-stage fidelity to true per-cell / mid-cell position — an active `implement` job or
+// a pre-PR `review-plan` agent is read live from the token position, ahead of any work-table row.
+// The `pollEpicPhase` poll pass (app/service.ts) owns the write, so no worker stamps `epic_phase`.
+//
+// Because plan-fanout.bpmn runs the WHOLE epic spine (`plan` → `review-plan` → the `implement`
+// multi-instance subProcess → `trial-merge` → `record-results`) as ONE process instance — the
+// `implement` fan-out is an embedded subProcess, not a callActivity child instance — a single
+// element-instance search over the plan's `process_key` sees every spine cell. (When S4 callActivity
+// composition lands, the same derivation extends to child instances via the engine's native
+// parent/root keys, Magikcraft/nano-bpm#977 — the #464 option-B correlation decision.)
 //
 // `plans.status` only distinguishes `planning` / `dispatched` / `done` / `failed` / `abandoned` —
 // and `dispatched` is the `plan-fanout.bpmn` PROCESS-INSTANCE terminal ("fan-out job done"), not the
@@ -122,4 +140,53 @@ export function deriveEpicPhase(
   if (base === undefined) return null;
   if (base === EPIC_PHASE.IMPLEMENTING) return implementingPhase(wave?.current, wave?.total);
   return base;
+}
+
+/** The epic spine's phase ORDER — the total order `deriveEpicPhaseLive` compares "furthest reached"
+ *  by. It IS the declaration order of {@link EPIC_PHASE} (Planning → Reviewing → Implementing → Trial
+ *  merging → Finalizing → Dispatched), the epic's natural forward spine, so the ordinal cannot drift
+ *  from the phase vocabulary. */
+const EPIC_PHASE_ORDER: readonly string[] = Object.values(EPIC_PHASE);
+
+/** The finest-grained element-instance signal `deriveEpicPhaseLive` reads — the structural subset of
+ *  urban's `ElementInstanceSummary` it needs (the element's BPMN id and whether a token is currently
+ *  AT it). Kept structural (not the full binding type) so the derivation unit-tests in isolation. */
+export interface EpicElementInstance {
+  readonly elementId: string;
+  readonly state: string;
+}
+
+/**
+ * Derive the epic phase LIVE from the plan-fanout instance's element instances (S8 #542) — the pure
+ * read-model derivation that RETIRES the write-time stamp. Among the ACTIVE element instances (a token
+ * currently sitting AT the element — a running agent job, an open human gate, a readiness-probe loop),
+ * pick the one mapping FURTHEST along the epic spine ({@link EPIC_PHASE_ORDER}) and project it via the
+ * SAME structural {@link deriveEpicPhase} map — so the live derivation and the (now retired) stamp
+ * share one source. Returns `null` when no active element marks a phase (e.g. the instance is parked
+ * only on non-spine plumbing), so the caller leaves the last known phase untouched rather than
+ * clobbering it. A wave-bearing phase (`Implementing`) is wave-labelled from {@link WaveContext}.
+ *
+ * "Furthest reached" (max spine ordinal), not "least advanced": the `implement` multi-instance
+ * subProcess keeps `select-wave`/`record-wave` and per-child `implement-task` tokens live at once, all
+ * mapping to `Implementing`; a later `trial-merge` token, once reached, is the epic's true position, so
+ * the max is the faithful "where has this epic got to" read.
+ */
+export function deriveEpicPhaseLive(
+  elements: readonly EpicElementInstance[],
+  wave?: WaveContext,
+): string | null {
+  let bestBase: string | null = null;
+  let bestOrdinal = -1;
+  for (const el of elements) {
+    if (el.state !== "ACTIVE") continue;
+    const base = deriveEpicPhase(el.elementId);
+    if (base === null) continue;
+    const ordinal = EPIC_PHASE_ORDER.indexOf(base);
+    if (ordinal > bestOrdinal) {
+      bestOrdinal = ordinal;
+      bestBase = base;
+    }
+  }
+  if (bestBase === null) return null;
+  return bestBase === EPIC_PHASE.IMPLEMENTING ? implementingPhase(wave?.current, wave?.total) : bestBase;
 }

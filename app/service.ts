@@ -27,11 +27,12 @@ import {
   conformanceEscalationQuestion,
 } from "./conformance.ts";
 import { isUniqueConstraintFence } from "./dbFence.ts";
-import { deriveDelivery, TERMINAL_STATUSES } from "./delivery.ts";
+import { deriveDelivery, EPIC_LIVE_STATUSES, TERMINAL_STATUSES } from "./delivery.ts";
 import { sweepExpiredProposals } from "./deliveryGraphProposals.ts";
 import { deliveryGraphRuns, deriveDeliveryPhase, parseHumanLabels } from "./deliveryGraphRun.ts";
 import { isDeliveryHumanElement } from "./deliveryHuman.ts";
 import { fleetSupportsDurableResume } from "./durableResume.ts";
+import { deriveEpicPhaseLive } from "./epicPhase.ts";
 import { deriveFeatureDelivery, FEATURE_BLOCKED_ELEMENT, FEATURE_ESCALATION_ELEMENT, FEATURE_RUN_STATUSES, type FeatureRunStatus, featureEscalations, featureRuns } from "./feature.ts";
 import {
   classifyMergeability,
@@ -2309,6 +2310,45 @@ async function sweepOpenEscalationTasks(base: string, headers: Record<string, st
  * completed task's row is deleted (answered here, via the task inbox, or out-of-band) and `showCount`
  * reflects live pending work. Best-effort + idempotent — per-instance failures are isolated so one bad
  * instance never stalls the pass. */
+/** Poll pass (S8, #542 / ADR 0006 §4b): reconcile each LIVE epic's `plans.epic_phase` from the engine
+ * element-instance model — the PURE read-model derivation that RETIRES the write-time stamp the spine
+ * workers used to write. For each plan still live (`EPIC_LIVE_STATUSES`) with a running instance, read
+ * its element instances (`searchElementInstances`, nano-ide#473) and project the furthest-reached
+ * active spine element onto its domain phase (`deriveEpicPhaseLive`, app/epicPhase.ts — the SAME
+ * `ELEMENT_PHASE` structural map the stamp used). The wave label rides the `plan_wave_progress` rollup
+ * VIEW (the single wave-frontier source, 060/082), so the Implementing band reads `wave n/t` without a
+ * second wave derivation. Writes only on a real change (a steady-state pass is a no-op) and leaves the
+ * last phase untouched when nothing active marks one (`null`), so a plan parked on non-spine plumbing
+ * never clobbers to blank. Best-effort + idempotent — a per-plan failure is isolated. */
+export async function pollEpicPhase(
+  data: DataLayer,
+  engine: Pick<EngineClient, "searchElementInstances">,
+) {
+  const waveByPlan = new Map<string, { current: number | null; total: number | null }>();
+  for (const w of await data
+    .table<{ plan_key: string; wave_count: number | null; current_wave: number | null }>(
+      "plan_wave_progress",
+      "plan_key",
+    )
+    .all()) {
+    waveByPlan.set(w.plan_key, { current: w.current_wave, total: w.wave_count });
+  }
+  for (const status of EPIC_LIVE_STATUSES) {
+    for (const plan of await plans(data).find({ status })) {
+      if (!plan.process_key) continue;
+      try {
+        const elements = await engine.searchElementInstances({ processInstanceKey: plan.process_key });
+        const phase = deriveEpicPhaseLive(elements, waveByPlan.get(plan.plan_key) ?? undefined);
+        if (phase !== null && phase !== plan.epic_phase) {
+          await plans(data).update(plan.plan_key, { epic_phase: phase, updated_at: now() });
+        }
+      } catch (err) {
+        console.error(`[poller] epic phase ${plan.plan_key}: ${err}`);
+      }
+    }
+  }
+}
+
 /** Poll pass (ADR 0005 slice S5): reconcile each RUNNING delivery-graph run's derived phase from
  * engine truth, and complete it when its instance ends. A delivery graph is a DYNAMIC compiled
  * process with no happy-path host worker, so — unlike `plans`/`feature_runs`, whose spine workers
@@ -2316,22 +2356,25 @@ async function sweepOpenEscalationTasks(base: string, headers: Record<string, st
  * transition (instanceTracking's `onTerminated` edge reconciles only TERMINATED, never COMPLETED, so
  * a graph that ends normally would otherwise stay `running` forever). Generalises the `epic_phase`
  * derived-phase machinery to a graph whose element ids aren't known ahead of time: the parked-node
- * label is derived from the run row's stamped `human_labels` + the instance's OPEN user tasks. Scoped
- * to `running` rows (an `awaiting-approval` run has no instance yet), so it stays O(in-flight). */
+ * label is derived from the run row's stamped `human_labels` + the instance's live USER_TASK parks.
+ * The parked node is now sourced from the unified element-instance wait-state channel
+ * (`searchElementInstanceWaitStates`, nano-ide#473) rather than a separate user-task search, folding
+ * this read onto the same live element-instance model the epic derivation uses (S8, #542). Scoped to
+ * `running` rows (an `awaiting-approval` run has no instance yet), so it stays O(in-flight). */
 export async function pollDeliveryGraphPhase(
   data: DataLayer,
-  engine: Pick<EngineClient, "searchProcessInstances" | "searchUserTasks">,
+  engine: Pick<EngineClient, "searchProcessInstances" | "searchElementInstanceWaitStates">,
 ) {
   for (const run of await deliveryGraphRuns(data).find({ status: "running" })) {
     if (!run.process_key) continue;
     const processKey = run.process_key;
     try {
-      const [snapshots, tasks] = await Promise.all([
+      const [snapshots, parks] = await Promise.all([
         engine.searchProcessInstances({ processInstanceKeys: [processKey] }),
-        engine.searchUserTasks({ processInstanceKey: processKey, state: "CREATED" }),
+        engine.searchElementInstanceWaitStates({ processInstanceKey: processKey, waitStateType: "USER_TASK" }),
       ]);
       const state = snapshots.find((s) => String(s.processInstanceKey) === processKey)?.state ?? null;
-      const projection = deriveDeliveryPhase(state, tasks, parseHumanLabels(run.human_labels));
+      const projection = deriveDeliveryPhase(state, parks, parseHumanLabels(run.human_labels));
       if (run.status !== projection.status || run.phase !== projection.phase || run.phase_node_id !== projection.phase_node_id) {
         await deliveryGraphRuns(data).update(run.run_key, {
           status: projection.status,
@@ -2538,6 +2581,7 @@ export async function pollOnce(
   await pollFeatureDelivery(data);
   await pollLineage(data);
   await pollUserTasks(data, engine, engineRest);
+  await pollEpicPhase(data, engine);
   await pollDeliveryGraphPhase(data, engine);
   await pollDeliveryProposals(data);
   if (engineRest) {

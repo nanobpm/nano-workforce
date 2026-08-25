@@ -83,9 +83,10 @@ test("select-wave dispatches the active wave without writing wave-progress colum
   assertEquals(plans[0].current_wave, undefined);
   assertEquals(plans[0].wave_count, undefined);
   assertEquals(plans[0].wave_label, undefined);
-  // Domain-phase projection (#261): dispatching the wave marks the epic Implementing (wave n/t),
-  // derived from this worker's BPMN element id + the levelize records.
-  assertEquals(plans[0].epic_phase, "Implementing (wave 2/2)");
+  // Domain-phase projection is no longer stamped by this worker (S8, #542) — the epic phase is now a
+  // pure read-model derivation off the live element-instance model (`pollEpicPhase`, app/service.ts),
+  // so select-wave introduces no `epic_phase` onto the plan row.
+  assertEquals(plans[0].epic_phase, undefined);
 });
 
 test("select-wave captures the preflight's resolvedArtifacts onto plans.bound_artifacts (#292 S4)", async () => {

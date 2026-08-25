@@ -16,7 +16,6 @@
 // immediately (the same 0-task path the flat fan-out already relied on).
 import type { AppJobHandler } from "@nanobpm/urban";
 import type { CapabilityNeed } from "../../app/capabilityNeed.ts";
-import { deriveEpicPhase } from "../../app/epicPhase.ts";
 import { plans, planTaskDeps, planTaskNeeds, planTasks } from "../../app/plan.ts";
 import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 
@@ -52,20 +51,6 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
   const statusById = new Map<string, string>();
   for (const r of rows) statusById.set(r.task_id, r.status);
 
-  // Operator-visibility projection (issue #137): mark this as the wave the fleet is now
-  // implementing, so the epics-index can show wave X/N at a glance. wave_count is derivable from
-  // the levelized rows (max wave + 1), so the "X/N" label stays correct even if a re-levelize
-  // changed the total. Best-effort + idempotent (a retry re-writes the same value) and
-  // display-only — it must never gate control flow, which stays driven by the process
-  // `currentWave`/`waveCount`/`gate_wave` state.
-  const waveCount = rows.reduce((m, r) => Math.max(m, r.wave ?? 0), -1) + 1;
-  // Domain-phase projection (#261): select-wave dispatches this wave and is the last host write
-  // before the write-silent `implement` MI, so it durably marks the implementation phase for the
-  // wave it launches — `Implementing (wave n/t)` from the levelize records (job.elementId +
-  // current/total waves). A null derivation (element id absent) must not clobber the phase.
-  const epicPhase = waveCount > 0
-    ? deriveEpicPhase(job.elementId, { current: currentWave, total: waveCount })
-    : null;
   // Inter-epic gate projection (#292 slice S4): reaching select-wave proves this epic's leading
   // capability PREFLIGHT (S3) already went GREEN, so capture the `resolvedArtifacts` the preflight
   // bound — the exact `pkg@version`s first carrying each producer's awaited capability — onto the
@@ -76,20 +61,21 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
   const boundArtifacts = Array.isArray(job.variables.resolvedArtifacts)
     ? job.variables.resolvedArtifacts.filter((v): v is string => typeof v === "string" && v.trim().length > 0)
     : [];
-  try {
-    await plans(app.data).update(planKey, {
-      // Operator-visibility wave progress (current_wave / wave_count / wave_label) was RETIRED as a
-      // stored projection (epic #412) — it is now derived from `plan_tasks` by the `plan_wave_label`
-      // / `plan_read_model` VIEWs (060/061), so select-wave no longer denormalises it. This write
-      // still stamps the derived domain phase and the inter-epic gate's bound artifacts.
-      ...(epicPhase ? { epic_phase: epicPhase } : {}),
-      ...(boundArtifacts.length > 0 ? { bound_artifacts: JSON.stringify(boundArtifacts) } : {}),
-      updated_at: ts,
-    });
-  } catch (err) {
-    app.log.error(`select-wave: projecting plan row (epic phase / bound artifacts) failed for ${planKey}`, {
-      err: String(err),
-    });
+  // The epic's Implementing (wave n/t) phase is no longer stamped here (S8, #542) — it is a pure
+  // read-model derivation off the live element-instance model (`pollEpicPhase`, app/service.ts), which
+  // reads the running `implement` fan-out directly. This write now only carries the inter-epic gate's
+  // bound artifacts, so it is skipped entirely when there are none.
+  if (boundArtifacts.length > 0) {
+    try {
+      await plans(app.data).update(planKey, {
+        bound_artifacts: JSON.stringify(boundArtifacts),
+        updated_at: ts,
+      });
+    } catch (err) {
+      app.log.error(`select-wave: projecting plan row (bound artifacts) failed for ${planKey}`, {
+        err: String(err),
+      });
+    }
   }
 
   const deps = await planTaskDeps(app.data).find({ plan_key: planKey });

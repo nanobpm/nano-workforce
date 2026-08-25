@@ -5,7 +5,7 @@
 // epic view can show WHICH phase an epic is in — not only the process-instance terminal status.
 import { test } from "node:test";
 import { assertEquals } from "#test-assert";
-import { deriveEpicPhase, EPIC_PHASE, implementingPhase } from "./epicPhase.ts";
+import { deriveEpicPhase, deriveEpicPhaseLive, EPIC_PHASE, implementingPhase } from "./epicPhase.ts";
 
 test("deriveEpicPhase maps each spine element to its domain phase", () => {
   // Planning genesis + hand-off into Reviewing when the plan is recorded.
@@ -59,4 +59,52 @@ test("implementingPhase clamps the 1-based label to the total and degrades grace
   assertEquals(implementingPhase(0, 0), "Implementing");
   assertEquals(implementingPhase(undefined, undefined), "Implementing");
   assertEquals(implementingPhase("x", "y"), "Implementing");
+});
+
+// ── deriveEpicPhaseLive: the S8 live element-instance derivation (#542) ────────────────────────────
+test("deriveEpicPhaseLive projects the FURTHEST active spine element onto its phase", () => {
+  // A pre-PR Reviewing epic: the plan is recorded (COMPLETED) and the review-plan agent is running.
+  assertEquals(
+    deriveEpicPhaseLive([
+      { elementId: "record-plan", state: "COMPLETED" },
+      { elementId: "review-plan", state: "ACTIVE" },
+    ]),
+    EPIC_PHASE.REVIEWING,
+  );
+  // The implement multi-instance keeps select-wave/record-wave AND per-child implement-task tokens
+  // live at once; a later trial-merge token, once reached, is the epic's true furthest position.
+  assertEquals(
+    deriveEpicPhaseLive([
+      { elementId: "implement-task", state: "ACTIVE" },
+      { elementId: "record-wave", state: "ACTIVE" },
+      { elementId: "trial-merge", state: "ACTIVE" },
+    ]),
+    EPIC_PHASE.TRIAL_MERGING,
+  );
+});
+
+test("deriveEpicPhaseLive wave-labels a live Implementing token from the wave context", () => {
+  assertEquals(
+    deriveEpicPhaseLive([{ elementId: "implement-task", state: "ACTIVE" }], { current: 1, total: 3 }),
+    "Implementing (wave 2/3)",
+  );
+  // Mid-cell fidelity (S8): an active implement job with no wave numbers yet still reads Implementing.
+  assertEquals(
+    deriveEpicPhaseLive([{ elementId: "implement-task", state: "ACTIVE" }]),
+    EPIC_PHASE.IMPLEMENTING,
+  );
+});
+
+test("deriveEpicPhaseLive ignores non-ACTIVE tokens and non-spine plumbing, returning null when nothing marks a phase", () => {
+  // COMPLETED/TERMINATED tokens are past, not the live position — an all-completed set marks nothing.
+  assertEquals(
+    deriveEpicPhaseLive([
+      { elementId: "plan", state: "COMPLETED" },
+      { elementId: "review-plan", state: "TERMINATED" },
+    ]),
+    null,
+  );
+  // A token parked only on non-spine plumbing (no ELEMENT_PHASE entry) leaves the phase untouched.
+  assertEquals(deriveEpicPhaseLive([{ elementId: "some-gateway", state: "ACTIVE" }]), null);
+  assertEquals(deriveEpicPhaseLive([]), null);
 });

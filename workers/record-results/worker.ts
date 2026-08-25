@@ -13,7 +13,6 @@
 
 import type { AppJobHandler } from "@nanobpm/urban";
 import { BpmnError } from "@nanobpm/urban";
-import { deriveEpicPhase } from "../../app/epicPhase.ts";
 import { plans, planTasks } from "../../app/plan.ts";
 import type { WorkerInputs } from "../../nano-generated/worker-io.d.ts";
 
@@ -50,16 +49,14 @@ const handler: AppJobHandler<In> = async (job, app) => {
     throw new BpmnError("NO_WORK_DISPATCHED", `${planKey}: ${outcome}`);
   }
 
-  // Domain-phase projection (#261): the finalizer landed with opened PRs — the epic reaches its
-  // terminal "Fleet dispatched" phase (derived structurally from this worker's BPMN element id).
-  // The failed/no-work path above leaves epic_phase untouched: its terminal signal is status +
-  // outcome, and stamping "Dispatched" against a failed epic would misread. A null derivation
-  // (element id absent) must not clobber the last implementing phase.
-  const epicPhase = deriveEpicPhase(job.elementId);
+  // The epic's terminal "Fleet dispatched" phase is no longer stamped here (S8, #542): it is a pure
+  // read-model derivation off the live element-instance model (`pollEpicPhase` → `deriveEpicPhaseLive`,
+  // app/epicPhase.ts), which reads `Dispatched` from the ACTIVE `record-results` token while the plan
+  // is still live, then freezes it as the plan goes terminal. The failed/no-work path above likewise
+  // no longer stamps a phase — its terminal signal is status + outcome.
   await plans(app.data).update(planKey, {
     status: "done",
     outcome: `${opened} PR(s) dispatched to convergence`,
-    ...(epicPhase ? { epic_phase: epicPhase } : {}),
     updated_at: ts,
   });
 
