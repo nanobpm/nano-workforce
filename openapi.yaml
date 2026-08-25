@@ -1430,7 +1430,14 @@ components:
       description: >-
         A `wait` node — a durable `ReadinessProbe` (ADR 0001 §2) watching an external fact. Reuses the
         existing `ReadinessProbe` shape verbatim (Decision 3 — never a second wait loop); the `pr`
-        merge-state kind is added to that shape by slice S2 and flows in here automatically.
+        merge-state kind is added to that shape by slice S2 and flows in here automatically. The
+        probe's `poll.timeoutMs` sets THIS node's escalation boundary (how long the gate waits before
+        it acts on `onTimeout`), falling back to the run/default when absent (#462). `onTimeout`
+        `escalate` (default) parks the elapsed gate on a human-completable task; `continue` proceeds
+        past the gate as not-ready with NO human stop (a sharp edge — the downstream side-effecting
+        node then runs without the awaited fact); `fail` is NOT yet supported on a delivery `wait`
+        node (blocked on engine terminate-end execution, Magikcraft/nano-bpm#978) and is rejected at
+        compile with a path-qualified error rather than silently degrading.
       allOf:
         - $ref: "#/components/schemas/DeliveryNodeCommon"
         - type: object

@@ -83,7 +83,8 @@ export type DeliveryGraphErrorCode =
   | "mixed-fan-out"
   | "multiple-defaults"
   | "non-exhaustive-split"
-  | "exclusive-merge-parity";
+  | "exclusive-merge-parity"
+  | "unsupported-on-timeout";
 
 /** A single semantic validation failure. `path` is a JSON-path-qualified pointer at the offending
  * input (`nodes[2].kind`, `edges[1].from`, `nodes[0].emits[1].name`), `message` is human-actionable,
@@ -341,6 +342,21 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
               code: "missing-required-field",
             });
           }
+        }
+        // A `wait` node's `onTimeout: fail` cannot be honored yet: the compiler would emit a terminate
+        // end on the not-ready-at-boundary path, but the engine treats terminate-end events as
+        // parsed-not-executed (Magikcraft/nano-bpm bpmn.rs), so `fail` would silently degrade to a plain
+        // end — the "declared knob silently ignored" defect class. Reject it loudly (path-qualified)
+        // until engine parity lands (Magikcraft/nano-bpm#978), rather than mis-compile it. `escalate`
+        // (default) and `continue` ARE honored.
+        if (kind === "wait" && config.onTimeout === "fail") {
+          errors.push({
+            path: `${path}.${configKey}.onTimeout`,
+            message:
+              "`onTimeout: fail` on a `wait` node is not yet supported (blocked on engine terminate-end " +
+              "execution, Magikcraft/nano-bpm#978); use `escalate` (default) or `continue`",
+            code: "unsupported-on-timeout",
+          });
         }
       }
     } else if (rawNode.human !== undefined && !isRecord(rawNode.human)) {

@@ -718,3 +718,16 @@ test("S7 single-target guarded fan-out is NOT an exclusive split — a node whos
   });
   assertEquals(errors, []);
 });
+
+test("a wait node's onTimeout: fail is rejected (unsupported-on-timeout) while continue/escalate validate (#462)", () => {
+  const waitWith = (onTimeout: string) => ({
+    name: "onTimeout",
+    nodes: [{ id: "g", kind: "wait", wait: { kind: "pr", target: "acme/repo#1", match: { prState: "merged" }, onTimeout } }],
+    edges: [],
+  });
+  const err = hasCode(validateDeliveryGraph(waitWith("fail")), "unsupported-on-timeout");
+  assertEquals(err.path, "nodes[0].wait.onTimeout");
+  // continue + escalate are honored — they must NOT raise the unsupported-on-timeout error.
+  assertEquals(validateDeliveryGraph(waitWith("continue")), []);
+  assertEquals(validateDeliveryGraph(waitWith("escalate")), []);
+});

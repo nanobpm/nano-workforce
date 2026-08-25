@@ -605,3 +605,45 @@ test("S7 compiler: a post-merge node with an extra always-firing producer joins 
   assert(/<bpmn:parallelGateway id="gwj\d+"[^>]*name="join into finalize"/.test(r.bpmn), "finalize joins its always-firing producers on a parallel gateway");
   assert(!/<bpmn:exclusiveGateway id="gwm\d+"[^>]*name="join into finalize"/.test(r.bpmn), "finalize is NOT compiled as an exclusive merge");
 });
+
+test("a wait node's onTimeout: continue proceeds past the gate with NO escalation task; escalate (default) keeps the human stop (#462)", async () => {
+  // AC (#462): `onTimeout: continue` routes the not-ready-at-boundary branch straight to the node end
+  // — no `__esc` escalation user task, no human stop — while the default (`escalate`) parks it on the
+  // escalation task. Two sibling wait nodes, one of each, isolate the difference.
+  const graph = {
+    name: "continue vs escalate",
+    nodes: [
+      { id: "soft", kind: "wait", wait: { kind: "pr", target: "acme/repo#1", match: { prState: "merged" }, onTimeout: "continue" } },
+      { id: "hard", kind: "wait", wait: { kind: "pr", target: "acme/repo#2", match: { prState: "merged" }, onTimeout: "escalate" } },
+    ],
+    edges: [{ from: "soft", to: "hard" }],
+  };
+  const r = await compileOk(graph);
+  const softEl = elementForNode(r.bpmn, "soft");
+  const hardEl = elementForNode(r.bpmn, "hard");
+  // continue: no escalation twin for `soft`, and its not-ready boundary flow lands on the node end.
+  assert(!r.bpmn.includes(`delivery-human-task__${softEl}__esc`), "continue emits no escalation user task");
+  assert(
+    r.bpmn.includes(`<bpmn:sequenceFlow id="${softEl}_i4" name="not ready" sourceRef="${softEl}_lastGw" targetRef="${softEl}_end" />`),
+    "continue routes the not-ready boundary branch to the node end",
+  );
+  // escalate: `hard` keeps its escalation twin and routes not-ready to it.
+  assert(r.bpmn.includes(`delivery-human-task__${hardEl}__esc`), "escalate keeps the escalation user task");
+  assert(
+    r.bpmn.includes(`<bpmn:sequenceFlow id="${hardEl}_i4" name="not ready" sourceRef="${hardEl}_lastGw" targetRef="delivery-human-task__${hardEl}__esc" />`),
+    "escalate routes the not-ready boundary branch to the escalation task",
+  );
+});
+
+test("a wait node's onTimeout: fail is rejected at compile with a path-qualified error (blocked on engine terminate-end, #462/#978)", async () => {
+  const errors = await compileFail({
+    name: "fail not yet supported",
+    nodes: [
+      { id: "g", kind: "wait", wait: { kind: "pr", target: "acme/repo#1", match: { prState: "merged" }, onTimeout: "fail" } },
+    ],
+    edges: [],
+  });
+  const hit = errors.find((e) => e.path === "nodes[0].wait.onTimeout");
+  assert(hit, `expected a path-qualified onTimeout error, got ${JSON.stringify(errors)}`);
+  assert(hit?.message.includes("#978"), `the error names the blocking engine issue, got ${hit?.message}`);
+});
