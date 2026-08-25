@@ -178,6 +178,48 @@ function rewriteProcessId(bpmn: string, processDefinitionId: string): string {
     .replace(`bpmnElement="${DELIVERY_GRAPH_PROCESS_ID}"`, `bpmnElement="${processDefinitionId}"`);
 }
 
+/** The idempotency preflight prepended to EVERY `agent` node's `appendPrompt` (issue #551). A delivery
+ * agent node dispatches a raw `senior:feature` job with no `feature_runs` idempotency row and no
+ * PR-existence guard, and the job carries retries — so an idle/timeout re-dispatch hands the SAME
+ * "implement #N" prompt to another worker, who (in a fresh worktree, blind to the first) opens a SECOND
+ * PR on the same issue. That is exactly how instance 43077's node n0 (`Magikcraft/nano-bpm#977`) spawned
+ * the #979/#980 duplicate. The advisory AGENTS.md claim protocol did not prevent it because nothing tells
+ * the *agent* to look first. This block does: a preflight that makes the agent **adopt-and-report** an
+ * existing PR instead of opening a duplicate. Adopt-and-report (not "escalate") because a delivery agent
+ * node has NO in-band escalate route — an in-flight agent can only complete (job done) or fail (which
+ * raises an incident, the stuck state we are avoiding); adopting completes the completion-barrier node
+ * cleanly, with no duplicate and no incident. Fixed wording (no derived data), so identical graphs still
+ * compile+seed deterministically; it is unconditional because every agent node that opens a PR is exposed
+ * to the same re-dispatch race. This is an advisory guard — the categorical fix (an engine-level
+ * preflight guard, or routing the node through the idempotent feature cell) is tracked as a follow-up. */
+export function renderIdempotencyPreamble(): string {
+  return [
+    "## Idempotency preflight (delivery graph) — check BEFORE you implement",
+    "",
+    "This node may be re-dispatched (a retry after a timeout) or run in parallel with another worker.",
+    "BEFORE you write ANY code, confirm nobody is already delivering the issue you were asked to implement:",
+    "",
+    "1. Read that issue's comments for an existing **claim** (a comment beginning `Claimed —`, an",
+    "   assignee, or a referenced in-progress branch/worktree).",
+    "2. List the repository's OPEN pull requests for one that already references the issue (a `Closes",
+    "   #N`, the issue number in its title/body, or a branch named for it).",
+    "",
+    "If an existing claim OR an open PR already covers this issue, DO NOT open a second PR — a duplicate",
+    "PR is a defect: it splits review and collides in the same files. Instead **adopt and report**:",
+    "complete WITHOUT making any changes and return the EXISTING PR as your result — put it in your `pr`",
+    "field (a URL or `owner/repo#N`) and complete with your normal success status, with a `summary` that",
+    "names the PR you adopted. This satisfies the node cleanly; a downstream door (or a human) drives the",
+    "existing PR the rest of the way.",
+    "",
+    "Only implement — and open your own PR — when NO claim and NO open PR exist for the issue.",
+    "",
+    "---",
+    "",
+    "",
+  ].join("\n");
+}
+
+
 /** Render the classifier-emit contract appended to an `agent` node's `appendPrompt` (issue #506) — the
  * instruction that turns a declared `emits[]` into completion variables a downstream guarded split (S7)
  * can route on. A `senior:*` fleet agent completes with the Output-contract envelope (`status`,
@@ -231,7 +273,7 @@ function buildNodeInput(
       // truth. A no-emit node appends nothing, so a plain implementation node is unchanged.
       const basePrompt = node.agent.prompt ?? "";
       const emits = Array.isArray(node.emits) ? node.emits.map((f) => ({ ...f })) : [];
-      return { jobType: node.agent.jobType, appendPrompt: basePrompt + renderEmitContract(emits), timeout: isoDuration(node.agent.timeout, ctx.nodeTimeout) };
+      return { jobType: node.agent.jobType, appendPrompt: renderIdempotencyPreamble() + basePrompt + renderEmitContract(emits), timeout: isoDuration(node.agent.timeout, ctx.nodeTimeout) };
     }
     case "wait": {
       const probe = parseProbe(node.wait);

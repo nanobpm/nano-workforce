@@ -11,7 +11,7 @@
 // proven end-to-end in `e2e/delivery-graph.e2e.ts`.
 import { test } from "node:test";
 import { assert, assertEquals } from "#test-assert";
-import { prepareDeliveryGraph, runDeliveryGraph } from "./deliveryRunner.ts";
+import { prepareDeliveryGraph, renderIdempotencyPreamble, runDeliveryGraph } from "./deliveryRunner.ts";
 import type { DeliveryGraph } from "../nano-generated/api-io.d.ts";
 
 const GRAPH: DeliveryGraph = {
@@ -70,7 +70,9 @@ test("nodeInputs seeds the exact per-kind fields each node's subProcess ioMappin
   const byField = (pred: (v: Record<string, unknown>) => boolean) => Object.values(inputs).find((v) => pred(v as Record<string, unknown>)) as Record<string, unknown> | undefined;
 
   const agent = byField((v) => v.jobType === "senior:feature");
-  assertEquals(agent, { jobType: "senior:feature", appendPrompt: "un-draft + merge #B", timeout: "PT10M" });
+  // Every agent node's appendPrompt is prefixed with the idempotency preflight (#551), then the
+  // authored prompt (this node declares no emits, so the emit contract adds nothing).
+  assertEquals(agent, { jobType: "senior:feature", appendPrompt: renderIdempotencyPreamble() + "un-draft + merge #B", timeout: "PT10M" });
 
   const wait = byField((v) => "gateKey" in v);
   assertEquals(wait?.gateKey, "run-7:n3");
@@ -135,20 +137,60 @@ test("agent node classifier-emit contract (#506): a declared `emits` threads the
   };
   const p = await prepareOk(graph);
   const agents = Object.values(p.nodeInputs).filter((v) => "jobType" in v) as Array<Record<string, unknown>>;
-  const adopt = agents.find((v) => String(v.appendPrompt).startsWith("adopt the package"));
-  const plain = agents.find((v) => String(v.appendPrompt).startsWith("just implement it"));
+  const adopt = agents.find((v) => String(v.appendPrompt).includes("adopt the package"));
+  const plain = agents.find((v) => String(v.appendPrompt).includes("just implement it"));
 
-  // The emit-declaring node keeps its authored prompt AND gains the emit contract naming its fact.
+  // The emit-declaring node keeps its authored prompt AND gains the emit contract naming its fact,
+  // both AFTER the unconditional idempotency preflight (#551).
   assert(adopt, "the emit-declaring agent node must be seeded");
   const adoptPrompt = String(adopt?.appendPrompt);
-  assert(adoptPrompt.startsWith("adopt the package"), "the authored prompt is preserved as the prefix");
+  assert(adoptPrompt.startsWith(renderIdempotencyPreamble()), "the idempotency preflight leads every agent prompt");
+  assert(adoptPrompt.includes("adopt the package"), "the authored prompt is preserved after the preflight");
   assert(adoptPrompt.includes("Classifier emit contract"), `the emit contract must be threaded in, got: ${adoptPrompt}`);
   assert(adoptPrompt.includes("`result`") && adoptPrompt.includes("(string)"), "the declared fact name + type must be surfaced to the agent");
   assert(adoptPrompt.includes("breaking | compatible"), "the fact's optional description rides the contract");
   assert(adoptPrompt.includes("AGENT_RESULT_FILE"), "the contract names the completion channel the fact rides");
 
-  // A node that declares NO facts is untouched — appendPrompt is exactly the authored prompt.
-  assertEquals(plain?.appendPrompt, "just implement it");
+  // A node that declares NO facts still carries the preflight, then exactly the authored prompt — the
+  // emit contract contributes nothing.
+  assertEquals(plain?.appendPrompt, renderIdempotencyPreamble() + "just implement it");
+});
+
+
+test("agent node idempotency preflight (#551): every agent prompt leads with adopt-and-report guidance; non-agent nodes are untouched", async () => {
+  // #551: a delivery agent node dispatches a raw retry-carrying `senior:feature` job with no
+  // PR-existence guard, so a re-dispatch opened a DUPLICATE PR (instance 43077 n0 → #979/#980). The
+  // fix threads an unconditional idempotency preflight into every agent node's `appendPrompt` telling
+  // the agent to CHECK for an existing claim/open PR and ADOPT-AND-REPORT it rather than open a second.
+  // Pin: (a) both agent nodes lead with the preflight regardless of emits, (b) it names the check +
+  // the adopt-and-report contract, and (c) wait/human/connector nodes never carry it.
+  const graph: DeliveryGraph = {
+    name: "idempotency",
+    nodes: [
+      { id: "emitter", kind: "agent", agent: { jobType: "senior:feature", prompt: "do X" }, emits: [{ name: "result", type: "string" }] },
+      { id: "plain", kind: "agent", agent: { jobType: "senior:feature", prompt: "do Y" } },
+      { id: "gate", kind: "wait", wait: { kind: "pr", target: "owner/repo#1", match: { prState: "merged" } } },
+    ],
+    edges: [{ from: "emitter", to: "plain" }, { from: "plain", to: "gate" }],
+  };
+  const p = await prepareOk(graph);
+  const preamble = renderIdempotencyPreamble();
+
+  // Every agent node leads with the preflight, ahead of its authored prompt (and any emit contract).
+  const agents = Object.values(p.nodeInputs).filter((v) => "jobType" in v) as Array<Record<string, unknown>>;
+  assertEquals(agents.length, 2, "both agent nodes are seeded");
+  for (const a of agents) {
+    const prompt = String(a.appendPrompt);
+    assert(prompt.startsWith(preamble), "the preflight is the leading prefix of every agent prompt");
+    assert(prompt.includes("Idempotency preflight"), "the preflight heading is present");
+    assert(prompt.includes("DO NOT open a second PR") || prompt.includes("do not open a second"), "it forbids a duplicate PR");
+    assert(prompt.includes("adopt and report"), "it names the adopt-and-report contract");
+  }
+
+  // The preflight is unconditional but AGENT-ONLY — a wait node's seed carries no prompt at all.
+  const wait = Object.values(p.nodeInputs).find((v) => "gateKey" in v) as Record<string, unknown> | undefined;
+  assert(wait, "the wait node is seeded");
+  assert(!("appendPrompt" in wait!), "a non-agent node never carries the agent idempotency preflight");
 });
 
 
