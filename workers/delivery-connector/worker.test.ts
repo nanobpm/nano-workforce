@@ -123,34 +123,52 @@ test("readConnectorInput: an array payload is rejected (arrays are not plain obj
 
 test("readConvergeInput: parses pr; convergeOnly defaults from the target; dependsOn is optional", () => {
   // `converge-merge` drives the merge loop → convergeOnly defaults false.
-  const merge = readConvergeInput("converge-merge", { pr: "owner/repo#7" });
+  const merge = readConvergeInput("converge-merge", { pr: "owner/repo#7" }, null);
   assertEquals(merge.parsed.prKey, "owner/repo#7");
   assertEquals(merge.convergeOnly, false);
   assertEquals(merge.dependsOn, []);
   // `converge` is review-only → convergeOnly defaults true.
-  const conv = readConvergeInput("converge", { pr: "owner/repo#7" });
+  const conv = readConvergeInput("converge", { pr: "owner/repo#7" }, null);
   assertEquals(conv.convergeOnly, true);
 });
 
 test("readConvergeInput: an explicit payload.convergeOnly overrides the target default; dependsOn threads through", () => {
-  const r = readConvergeInput("converge-merge", { pr: "owner/repo#7", convergeOnly: true, dependsOn: ["owner/repo#5", 42] as unknown as string[] });
+  const r = readConvergeInput("converge-merge", { pr: "owner/repo#7", convergeOnly: true, dependsOn: ["owner/repo#5", 42] as unknown as string[] }, null);
   assertEquals(r.convergeOnly, true, "the explicit boolean wins over the target default");
   assertEquals(r.dependsOn, ["owner/repo#5"], "non-string dependsOn entries are dropped");
 });
 
 test("readConvergeInput: a missing / unparseable pr fails CLOSED (a converge connector with no target PR is meaningless)", () => {
-  assertThrows(() => readConvergeInput("converge-merge", null), Error, "payload.pr");
-  assertThrows(() => readConvergeInput("converge-merge", {}), Error, "payload.pr");
-  assertThrows(() => readConvergeInput("converge", { pr: "not-a-pr" }), Error, "payload.pr");
+  assertThrows(() => readConvergeInput("converge-merge", null, null), Error, "payload.pr");
+  assertThrows(() => readConvergeInput("converge-merge", {}, null), Error, "payload.pr");
+  assertThrows(() => readConvergeInput("converge", { pr: "not-a-pr" }, null), Error, "payload.pr");
 });
 
 test("readConvergeInput: an unparseable pr whose value is not JSON-serializable still fails CLOSED with the intended error (not a serializer TypeError)", () => {
   // `p.pr` is user-controlled payload data; a BigInt (or a circular object) makes JSON.stringify
   // throw, which must NOT mask the intended "requires payload.pr" error.
-  assertThrows(() => readConvergeInput("converge", { pr: 10n as unknown as string }), Error, "payload.pr");
+  assertThrows(() => readConvergeInput("converge", { pr: 10n as unknown as string }, null), Error, "payload.pr");
   const circular: Record<string, unknown> = {};
   circular.self = circular;
-  assertThrows(() => readConvergeInput("converge", { pr: circular as unknown as string }), Error, "payload.pr");
+  assertThrows(() => readConvergeInput("converge", { pr: circular as unknown as string }, null), Error, "payload.pr");
+});
+
+test("readConvergeInput: #548 late-binds the PR from an upstream agent's emitted `pr` fact (no literal needed)", () => {
+  const bound = [{ from: "open", name: "pr", value: "owner/repo#42" }];
+  // OMITTED payload.pr → binds the single incoming `pr` fact.
+  assertEquals(readConvergeInput("converge-merge", null, bound).parsed.prKey, "owner/repo#42");
+  assertEquals(readConvergeInput("converge-merge", {}, bound).parsed.prKey, "owner/repo#42");
+  // EXPLICIT reference form → resolves that specific threaded fact.
+  assertEquals(readConvergeInput("converge", { pr: "open.pr" }, bound).parsed.prKey, "owner/repo#42");
+  // A LITERAL still wins as-is even when a bound fact is present (never `<node>.<fact>`-shaped).
+  assertEquals(readConvergeInput("converge", { pr: "owner/repo#9" }, bound).parsed.prKey, "owner/repo#9");
+});
+
+test("readConvergeInput: #548 a dangling reference (no matching bound fact) fails CLOSED", () => {
+  // "open.pr" is reference-shaped but nothing threaded it → falls through to a literal parse, which
+  // rejects (it is not an `owner/repo#N`), so a mis-wired graph never silently enrolls a junk PR.
+  assertThrows(() => readConvergeInput("converge-merge", { pr: "open.pr" }, []), Error, "payload.pr");
+  assertThrows(() => readConvergeInput("converge-merge", { pr: "open.pr" }, [{ from: "other", name: "pr", value: "o/r#1" }]), Error, "payload.pr");
 });
 
 test("safeStringify: always returns a string, even for values JSON.stringify serializes to undefined (Symbol/undefined/function)", () => {

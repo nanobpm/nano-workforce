@@ -1361,10 +1361,13 @@ components:
           description: The fact's identifier, referenced downstream as `<nodeId>.<name>`. Must be unique within the node.
         type:
           type: string
-          enum: [string, number, boolean, artifact, version, url]
+          enum: [string, number, boolean, artifact, version, url, pr]
           description: >-
             The fact's declared type. `artifact` is a `pkg@version` handle, `version` a bare version
-            string, `url` a location — mirrors the values `capability`/`pr` probes late-bind.
+            string, `url` a location — mirrors the values `capability`/`pr` probes late-bind. `pr`
+            (issue #548) is a PR reference (`owner/repo#N`) an `agent` node emits for the PR it opened,
+            so a downstream `connector[converge*]`/`wait[pr]` node LATE-BINDS its target PR from the
+            fact instead of a hardcoded literal.
         description:
           type: string
           maxLength: 512

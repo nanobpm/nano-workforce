@@ -19,6 +19,8 @@
 // Every error carries a JSON-path-qualified `path` (`nodes[2].kind`, `edges[1].from`, …) so the
 // caller can point the author straight at the offending input.
 
+import { isConvergeTarget } from "./convergeTargets.ts";
+
 /** The CLOSED node-kind allowlist (ADR 0005 Decision 2) — the trust boundary. Extensible only by a
  * deliberate ADR/PR (add the openapi variant + a case here), never by a graph author. Kept as the
  * single source of truth for "which kinds are legal" so the validator and any future compiler agree. */
@@ -30,8 +32,11 @@ export type DeliveryNodeKind = (typeof DELIVERY_NODE_KINDS)[number];
 /** The CLOSED emitted-fact type allowlist (ADR 0005 Decision 3/4) — mirrors the `DeliveryFact.type`
  * enum in `openapi.yaml`. Kept as the single source of truth so the semantic validator rejects an
  * untyped/unknown fact type even when the OpenAPI shape validator is bypassed (a directly-invoked
- * delegate), since later compilation/execution steps rely on this allowlist. */
-export const DELIVERY_FACT_TYPES = ["string", "number", "boolean", "artifact", "version", "url"] as const;
+ * delegate), since later compilation/execution steps rely on this allowlist. `pr` (issue #548) is the
+ * PR-reference type an `agent` node emits for the PR it opened (`owner/repo#N`), so a downstream
+ * `connector[converge*]` / `wait[pr]` node LATE-BINDS its target PR from that fact instead of a
+ * hardcoded literal (the canonical `agent → connector[converge-merge] → wait[pr, merged]` shape). */
+export const DELIVERY_FACT_TYPES = ["string", "number", "boolean", "artifact", "version", "url", "pr"] as const;
 
 /** An emitted fact's declared `type`, narrowed to the closed allowlist. */
 export type DeliveryFactType = (typeof DELIVERY_FACT_TYPES)[number];
@@ -84,7 +89,8 @@ export type DeliveryGraphErrorCode =
   | "multiple-defaults"
   | "non-exhaustive-split"
   | "exclusive-merge-parity"
-  | "unsupported-on-timeout";
+  | "unsupported-on-timeout"
+  | "unbound-pr";
 
 /** A single semantic validation failure. `path` is a JSON-path-qualified pointer at the offending
  * input (`nodes[2].kind`, `edges[1].from`, `nodes[0].emits[1].name`), `message` is human-actionable,
@@ -280,6 +286,19 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
   // validation (pass 3) reads to enforce that a `when` references a SCALAR fact.
   const nodeFacts = new Map<string, Set<string>>();
   const nodeFactTypes = new Map<string, Map<string, DeliveryFactType>>();
+  // #548 PR late-binding: the converge-connector / pr-wait nodes whose target PR must resolve to a
+  // literal `owner/repo#N` OR a threaded upstream `pr` fact. Collected in pass 1, validated in pass 4
+  // once the incoming fact edges are known — so an author who references a `pr` fact that isn't
+  // actually threaded (or isn't `pr`-typed) is rejected at COMPILE, not left to fail closed at runtime.
+  const prBindConsumers: {
+    path: string;
+    field: "connector.payload.pr" | "wait.target";
+    id: string;
+    // The authored PR ref: the connector's `payload.pr` or the wait's `target`. `undefined` when
+    // absent (a connector may omit it and auto-bind the single incoming `pr` fact; a wait's `target`
+    // is a required field reported missing elsewhere).
+    authored: string | undefined;
+  }[] = [];
   nodes.forEach((rawNode, i) => {
     const path = `nodes[${i}]`;
     if (!isRecord(rawNode)) {
@@ -357,6 +376,26 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
               "execution, Magikcraft/nano-bpm#978); use `escalate` (default) or `continue`",
             code: "unsupported-on-timeout",
           });
+        }
+        // #548: register a converge-connector / pr-wait as a PR-binding consumer (pass 4 validates the
+        // binding once edges are resolved). Only when the id is usable so pass 4 can key by node id.
+        if (typeof id === "string" && id.length > 0) {
+          if (kind === "connector" && typeof config.target === "string" && isConvergeTarget(config.target)) {
+            const payload = isRecord(config.payload) ? config.payload : undefined;
+            prBindConsumers.push({
+              path,
+              field: "connector.payload.pr",
+              id,
+              authored: payload !== undefined && typeof payload.pr === "string" ? payload.pr : undefined,
+            });
+          } else if (kind === "wait" && config.kind === "pr") {
+            prBindConsumers.push({
+              path,
+              field: "wait.target",
+              id,
+              authored: typeof config.target === "string" ? config.target : undefined,
+            });
+          }
         }
       }
     } else if (rawNode.human !== undefined && !isRecord(rawNode.human)) {
@@ -472,6 +511,9 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
   }
   // consumer (`to`) → set of upstream node ids (`from`'s node) — the dependency direction.
   const adjacency = new Map<string, Set<string>>();
+  // #548: consumer (`to`) → the resolved fact edges threaded INTO it (`<node>.<fact>` refs + declared
+  // types), so pass 4 can confirm a converge/wait PR reference is actually threaded and `pr`-typed.
+  const incomingFactRefs = new Map<string, { ref: string; factName: string; factType: DeliveryFactType | undefined }[]>();
   // Resolved, well-formed edges captured for the guard/topology pass (pass 3). Only edges whose BOTH
   // endpoints resolve are kept — a dangling/self edge is already reported and must not reach pass 3.
   const guardEdges: {
@@ -556,6 +598,13 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
       const ups = adjacency.get(to) ?? new Set<string>();
       ups.add(nodeId);
       adjacency.set(to, ups);
+      // #548: record a resolved, DECLARED fact edge so pass 4 can confirm a converge/wait PR reference
+      // is actually threaded into its consumer (and is `pr`-typed).
+      if (fact !== undefined && upstreamFacts.has(fact)) {
+        const refs = incomingFactRefs.get(to) ?? [];
+        refs.push({ ref: `${nodeId}.${fact}`, factName: fact, factType: nodeFactTypes.get(nodeId)?.get(fact) });
+        incomingFactRefs.set(to, refs);
+      }
       guardEdges.push({
         index: i,
         fromNode: nodeId,
@@ -570,12 +619,117 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
   });
 
   collectCycle(adjacency, errors);
-  // Pass 3: guard (S7) semantics — only when the graph is otherwise structurally sound (every edge
-  // resolved, no cycle). A malformed base graph is reported first; guard analysis assumes a DAG.
+  // Passes 3 & 4 assume an otherwise structurally-sound graph (every edge resolved, no cycle) — a
+  // malformed base graph is reported first, and guard/binding analysis assumes a DAG with resolved
+  // fact edges. Both run under the SAME soundness snapshot so a pass-3 guard error can't suppress a
+  // pass-4 binding error (they are independent classes and should surface together).
   if (errors.length === 0) {
+    // Pass 3: guard (S7) semantics.
     validateGuardedEdges(guardEdges, nodeFactTypes, errors);
+    // Pass 4 (#548): converge/wait PR late-binding — a referenced PR fact must be threaded + `pr`-typed.
+    validatePrBindings(prBindConsumers, incomingFactRefs, nodeFacts, nodeFactTypes, errors);
   }
   return errors;
+}
+
+/** Pass 4 (#548) — validate that every converge-connector / pr-wait node can resolve its target PR.
+ * A converge/wait node needs a PR to enroll or poll; it may name it three ways (mirroring the runtime
+ * `resolveConvergePr` / the wait compiler `context put` late-bind):
+ *   • a LITERAL `owner/repo#N` — never `<node>.<fact>`-shaped, so it resolves to no graph node and is
+ *     accepted here (the worker/probe validates the literal at runtime);
+ *   • a fact REFERENCE `<node>.pr` — REQUIRES that the referenced node declares a `pr`-typed fact of
+ *     that name AND that a fact edge actually threads it into this consumer (else it can never bind);
+ *   • OMITTED (connectors only) — auto-binds the single incoming `pr` fact, else the single incoming
+ *     fact; rejected when there is no PR to bind or the choice is ambiguous.
+ * Rejecting these at compile (fail closed, path-qualified) turns a silent runtime "requires payload.pr"
+ * / unparseable-target failure into an actionable authoring error. */
+function validatePrBindings(
+  consumers: readonly {
+    path: string;
+    field: "connector.payload.pr" | "wait.target";
+    id: string;
+    authored: string | undefined;
+  }[],
+  incomingFactRefs: ReadonlyMap<string, { ref: string; factName: string; factType: DeliveryFactType | undefined }[]>,
+  nodeFacts: ReadonlyMap<string, ReadonlySet<string>>,
+  nodeFactTypes: ReadonlyMap<string, ReadonlyMap<string, DeliveryFactType>>,
+  errors: DeliveryGraphError[],
+): void {
+  for (const c of consumers) {
+    const incoming = incomingFactRefs.get(c.id) ?? [];
+    const errPath = `${c.path}.${c.field}`;
+    if (c.authored !== undefined) {
+      // `resolveFrom` returns a `fact` iff the reference's prefix is an existing node — so a real PR
+      // literal (`owner/repo#N`, no node-qualified dot) resolves to no fact and passes through.
+      const resolved = resolveFrom(c.authored, nodeFacts);
+      if (resolved.fact === undefined) continue; // a literal — validated at runtime.
+      const ref = `${resolved.nodeId}.${resolved.fact}`;
+      const declaredType = nodeFactTypes.get(resolved.nodeId)?.get(resolved.fact);
+      if (declaredType === undefined) {
+        errors.push({
+          path: errPath,
+          message:
+            `${c.id}'s PR reference "${c.authored}" points at fact "${resolved.fact}" that node ` +
+            `"${resolved.nodeId}" does not declare in its \`emits[]\``,
+          code: "unbound-pr",
+        });
+      } else if (declaredType !== "pr") {
+        errors.push({
+          path: errPath,
+          message:
+            `${c.id}'s PR reference "${c.authored}" resolves to a "${declaredType}" fact — a converge/` +
+            "wait PR binding must reference a `pr`-typed fact",
+          code: "unbound-pr",
+        });
+      } else if (!incoming.some((f) => f.ref === ref)) {
+        errors.push({
+          path: errPath,
+          message:
+            `${c.id}'s PR reference "${ref}" is not threaded into it — add a fact edge ` +
+            `{ from: "${ref}", to: "${c.id}" } so the emitted PR late-binds`,
+          code: "unbound-pr",
+        });
+      }
+      continue;
+    }
+    // OMITTED. Only a connector may omit its PR (auto-bind); a wait's `target` is a required field
+    // already reported missing elsewhere, so skip it here to avoid a duplicate error.
+    if (c.field !== "connector.payload.pr") continue;
+    const prNamed = incoming.filter((f) => f.factName === "pr");
+    if (prNamed.length === 1) {
+      if (prNamed[0].factType !== "pr") {
+        errors.push({
+          path: errPath,
+          message:
+            `converge connector "${c.id}" auto-binds its single incoming \`pr\` fact, but that fact is ` +
+            `typed "${prNamed[0].factType}" — declare it as \`pr\` or set connector.payload.pr explicitly`,
+          code: "unbound-pr",
+        });
+      }
+    } else if (prNamed.length === 0 && incoming.length === 1) {
+      if (incoming[0].factType !== "pr") {
+        errors.push({
+          path: errPath,
+          message:
+            `converge connector "${c.id}" would auto-bind its single incoming fact "${incoming[0].ref}", ` +
+            `but it is typed "${incoming[0].factType}", not \`pr\` — thread a \`pr\` fact or set ` +
+            "connector.payload.pr to a literal or `<node>.pr` reference",
+          code: "unbound-pr",
+        });
+      }
+    } else {
+      errors.push({
+        path: errPath,
+        message:
+          prNamed.length === 0
+            ? `converge connector "${c.id}" has no target PR — set connector.payload.pr to a literal ` +
+              '"owner/repo#N" or a "<node>.pr" reference, or thread a single `pr` fact edge into it'
+            : `converge connector "${c.id}" has ${prNamed.length} incoming \`pr\` facts — disambiguate ` +
+              'by setting connector.payload.pr to the specific "<node>.pr" reference',
+        code: "unbound-pr",
+      });
+    }
+  }
 }
 
 /** True when a guard `equals` literal's JSON type matches the referenced fact's declared scalar type. */

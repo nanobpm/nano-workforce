@@ -113,9 +113,11 @@ The closed set (extensible only by a deliberate ADR/PR, never by graph authors):
 > PR back to `converging`. `submitPr`'s own `prKey` idempotency additionally makes a resumed re-perform
 > double-safe on a still-live row. This retires the manual `land-*` human gate whose only job was "go run convergence
 > yourself" — the canonical shape is now `agent (opens PR) → connector[converge-merge] →
-> wait[pr, merged]` with no human node. The payload is `{ pr, convergeOnly?, dependsOn? }`; the MVP
-> sources `pr` as a literal (auto-emitting it from the `agent` node as a typed `pr` fact is a deferred
-> follow-up). Other connector targets remain the forward-declared stub.
+> wait[pr, merged]` with no human node. The payload is `{ pr, convergeOnly?, dependsOn? }`; the `pr`
+> may be a literal `owner/repo#N`, a `<node>.pr` fact reference late-bound from an upstream `agent`
+> node's emitted `pr` fact, or omitted to auto-bind the single incoming `pr` fact (issue #548 —
+> shipped: the connector resolves it via `resolveConvergePr`, and the `wait[pr]` target is late-bound
+> in the compiler via FEEL `context put`). Other connector targets remain the forward-declared stub.
 
 Crucially, **execution stays engine-native**: each node kind is a real, already-deployed
 sub-process / call activity (`readiness-gate`, a user task, the implementation task, a connector

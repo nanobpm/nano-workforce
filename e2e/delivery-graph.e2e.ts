@@ -155,6 +155,36 @@ describe("delivery-graph runner — engine-native execution (S4)", () => {
     assert.ok(takenFlows(app).some((f) => f.endsWith("->End")), "the graph reached its End event");
   });
 
+  test("#548 wait target LATE-BINDS from an upstream fact via FEEL `context put` (engine-native)", async () => {
+    const app = track(await boot(freshDir()));
+
+    // The agent emits a `cmd` fact whose OBSERVED value is the deterministic green probe command
+    // ("true"). The downstream wait references that fact as its probe `target` (`a.cmd`) — the compiler
+    // rewrites the seeded probe's target via FEEL `context put`, so the probe polls the LATE-BOUND
+    // value, not a hardcoded literal. This is the exact mechanism the canonical `agent →
+    // connector[converge-merge] → wait[pr, merged]` shape uses to poll the PR the agent opened (#548).
+    await app.engine.registerWorker("senior:demo", async () => ({ cmd: "true" }));
+
+    const graph: DeliveryGraph = {
+      name: "e2e wait late-bind",
+      nodes: [
+        { id: "a", kind: "agent", agent: { jobType: "senior:demo" }, emits: [{ name: "cmd", type: "string" }] },
+        { id: "w", kind: "wait", wait: { kind: "command", target: "a.cmd", poll: { everyMs: 5, backoff: "fixed" } } },
+      ],
+      edges: [{ from: "a.cmd", to: "w" }],
+    };
+
+    const run = await runDeliveryGraph(app.engine, graph, { probeTimeout: "PT2S" });
+    assert.ok(run.ok, `graph should deploy + run, got ${JSON.stringify(run)}`);
+    await app.settle();
+
+    // The wait's probe ran the LATE-BOUND command "true" (green) — had `context put` not resolved the
+    // `a.cmd` reference to "true", the probe would have run the literal "a.cmd" (a probe escape the
+    // hermetic seam records + fails on), and the gate would never have resolved. The graph reaching End
+    // proves the wait released its ready branch off the late-bound target.
+    assert.ok(takenFlows(app).some((f) => f.endsWith("->End")), "the late-bound wait resolved and the graph reached End");
+  });
+
   test("resume never double-fires: an at-least-once redelivery of the connector dedupes", async () => {
     const app = track(await boot(freshDir()));
     // The connector fired once above's-style; here prove the idempotency directly against the ledger a

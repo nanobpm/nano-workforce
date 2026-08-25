@@ -731,3 +731,114 @@ test("a wait node's onTimeout: fail is rejected (unsupported-on-timeout) while c
   assertEquals(validateDeliveryGraph(waitWith("continue")), []);
   assertEquals(validateDeliveryGraph(waitWith("escalate")), []);
 });
+
+// ── Pass 4 (#548): converge/wait PR late-binding ──────────────────────────────────────────────────
+
+/** The canonical no-literal converge shape: `open` emits a `pr` fact, both the converge connector and
+ * the pr-wait reference it (`open.pr`) on incoming fact edges. */
+function noLiteralConverge(overrides?: {
+  connectorPr?: unknown;
+  waitTarget?: string;
+  openEmitsPr?: boolean;
+  edges?: { from: string; to: string }[];
+}) {
+  const emits = overrides?.openEmitsPr === false ? [{ name: "pr", type: "url" }] : [{ name: "pr", type: "pr" }];
+  const connector =
+    "connectorPr" in (overrides ?? {})
+      ? { target: "converge-merge", payload: { pr: overrides?.connectorPr } }
+      : { target: "converge-merge", payload: { pr: "open.pr" } };
+  return {
+    name: "no-literal converge",
+    nodes: [
+      { id: "open", kind: "agent", agent: { jobType: "senior:feature", prompt: "open a PR" }, emits },
+      { id: "land", kind: "connector", connector },
+      { id: "merged", kind: "wait", wait: { kind: "pr", target: overrides?.waitTarget ?? "open.pr", match: { prState: "merged" } } },
+    ],
+    edges: overrides?.edges ?? [
+      { from: "open.pr", to: "land" },
+      { from: "open.pr", to: "merged" },
+    ],
+  };
+}
+
+test("#548 a converge connector + pr-wait that reference a threaded `pr` fact validate", () => {
+  assertEquals(validateDeliveryGraph(noLiteralConverge()), []);
+});
+
+test("#548 a LITERAL owner/repo#N PR on both the connector and the wait validates (no binding needed)", () => {
+  const g = noLiteralConverge({ connectorPr: "acme/repo#12", waitTarget: "acme/repo#12", edges: [{ from: "open", to: "land" }, { from: "land", to: "merged" }] });
+  assertEquals(validateDeliveryGraph(g), []);
+});
+
+test("#548 a PR reference that is NOT threaded by a fact edge is rejected (unbound-pr)", () => {
+  // The connector/wait name `open.pr`, but the edges carry only a plain completion dependency — the
+  // `pr` fact never flows in, so it can never late-bind.
+  const g = noLiteralConverge({ edges: [{ from: "open", to: "land" }, { from: "land", to: "merged" }] });
+  const errs = validateDeliveryGraph(g);
+  const unbound = errs.filter((e) => e.code === "unbound-pr");
+  assertEquals(unbound.length, 2, `both consumers are unbound: ${JSON.stringify(errs)}`);
+  assert(unbound.some((e) => e.path === "nodes[1].connector.payload.pr"));
+  assert(unbound.some((e) => e.path === "nodes[2].wait.target"));
+});
+
+test("#548 a PR reference to a non-`pr`-typed fact is rejected (unbound-pr)", () => {
+  const g = noLiteralConverge({ openEmitsPr: false }); // `open` emits `pr` as a `url`, not `pr`
+  const err = hasCode(validateDeliveryGraph(g), "unbound-pr");
+  assert(err.message.includes("must reference a `pr`-typed fact") || err.message.includes('"url"'), err.message);
+});
+
+test("#548 a PR reference to an undeclared fact is rejected (unbound-pr)", () => {
+  // `open` emits no facts, but the connector references `open.pr`.
+  const g = {
+    name: "undeclared ref",
+    nodes: [
+      { id: "open", kind: "agent", agent: { jobType: "j", prompt: "p" } },
+      { id: "land", kind: "connector", connector: { target: "converge", payload: { pr: "open.pr" } } },
+    ],
+    edges: [{ from: "open", to: "land" }],
+  };
+  const err = hasCode(validateDeliveryGraph(g), "unbound-pr");
+  assert(err.message.includes("does not declare"), err.message);
+});
+
+test("#548 a converge connector that OMITS payload.pr auto-binds a single threaded `pr` fact", () => {
+  const g = {
+    name: "omitted auto-bind",
+    nodes: [
+      { id: "open", kind: "agent", agent: { jobType: "senior:feature", prompt: "open" }, emits: [{ name: "pr", type: "pr" }] },
+      { id: "land", kind: "connector", connector: { target: "converge-merge" } },
+    ],
+    edges: [{ from: "open.pr", to: "land" }],
+  };
+  assertEquals(validateDeliveryGraph(g), []);
+});
+
+test("#548 a converge connector with NO PR at all is rejected (unbound-pr)", () => {
+  const g = {
+    name: "no pr",
+    nodes: [
+      { id: "open", kind: "agent", agent: { jobType: "j", prompt: "p" } },
+      { id: "land", kind: "connector", connector: { target: "converge-merge" } },
+    ],
+    edges: [{ from: "open", to: "land" }],
+  };
+  const err = hasCode(validateDeliveryGraph(g), "unbound-pr");
+  assert(err.message.includes("has no target PR"), err.message);
+});
+
+test("#548 a converge connector with MULTIPLE incoming `pr` facts is rejected as ambiguous (unbound-pr)", () => {
+  const g = {
+    name: "ambiguous pr",
+    nodes: [
+      { id: "a", kind: "agent", agent: { jobType: "j", prompt: "p" }, emits: [{ name: "pr", type: "pr" }] },
+      { id: "b", kind: "agent", agent: { jobType: "j", prompt: "p" }, emits: [{ name: "pr", type: "pr" }] },
+      { id: "land", kind: "connector", connector: { target: "converge-merge" } },
+    ],
+    edges: [
+      { from: "a.pr", to: "land" },
+      { from: "b.pr", to: "land" },
+    ],
+  };
+  const err = hasCode(validateDeliveryGraph(g), "unbound-pr");
+  assert(err.message.includes("disambiguate"), err.message);
+});
