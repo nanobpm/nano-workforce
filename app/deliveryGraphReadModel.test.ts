@@ -4,12 +4,12 @@
 // exemplars are app/featureReadModel.test.ts and app/planReadModel.test.ts.
 //
 // Guards:
-//   1. DRIFT GUARD — migration 086 embeds the rollup VIEW DDL VERBATIM from `rollup.viewDdl()` and each
+//   1. DRIFT GUARD — migration 087 embeds the rollup VIEW DDL VERBATIM from `rollup.viewDdl()` and each
 //      derived column VERBATIM from `deliveryGraphReadModel.sqlSelectFor(...)`, so the checked-in VIEWs
 //      cannot drift from the declarations.
 //   2. FRAMEWORK PARITY GUARD — `assertRollupParity` / `assertReadModelParity` prove the SQL and TS
 //      lowerings each declaration compiles to agree.
-//   3. END-TO-END BEHAVIOUR on the REAL migration VIEW (086 applied to an in-memory DB): the coarse-key
+//   3. END-TO-END BEHAVIOUR on the REAL migration VIEW (087 applied to an in-memory DB): the coarse-key
 //      matrix, the member-PR temper, the terminal-fold bypass, and the companion `park_label`.
 //   4. PARITY vs TODAY'S PHASE — for representative `deriveDeliveryPhase` outputs (what the plain Phase
 //      text cell showed), the derived stepper matches, and the actionable park label is retained.
@@ -39,13 +39,13 @@ import { applyMigrationSet, readMigrationSetFromDisk } from "../test/migrations.
 const MIG = (name: string) => readFileSync(fileURLToPath(new URL(`../db/migrations/${name}`, import.meta.url)), "utf8");
 const PAGE = (name: string) => JSON.parse(readFileSync(fileURLToPath(new URL(`../pages/${name}`, import.meta.url)), "utf8"));
 
-const READ_MODEL_MIGRATION = "086_delivery_graph_read_model.sql";
+const READ_MODEL_MIGRATION = "087_delivery_graph_read_model.sql";
 
 // A minimal in-memory DB carrying the base `delivery_graph_runs` / `pull_requests` shapes the VIEW
 // reads, plus stand-ins for the managed `<table>__tracking` derived VIEWs urban provisions at mount
 // (each re-exports `base.*` plus the terminal-folded `derived_status`). `derived_status_override` models
 // the reconciler's derive edge (a terminated instance ⇒ `failed`/`abandoned` while base `status` stays
-// frozen). Then migration 086 (the rollup VIEW + the read model VIEW) is applied.
+// frozen). Then migration 087 (the rollup VIEW + the read model VIEW) is applied.
 function viewDb(): DatabaseSync {
   const db = new DatabaseSync(":memory:");
   db.exec(
@@ -131,7 +131,7 @@ function parityDb(db: DatabaseSync): ParityDb {
 
 // ── 1. DRIFT GUARD ────────────────────────────────────────────────────────────────────────────────
 
-test("DRIFT GUARD: migration 086 embeds the rollup VIEW DDL VERBATIM from rollup.viewDdl() (the VIEW cannot drift from defineRollup)", () => {
+test("DRIFT GUARD: migration 087 embeds the rollup VIEW DDL VERBATIM from rollup.viewDdl() (the VIEW cannot drift from defineRollup)", () => {
   const sql = MIG(READ_MODEL_MIGRATION);
   for (const rollup of DELIVERY_GRAPH_ROLLUPS) {
     assert(
@@ -139,11 +139,11 @@ test("DRIFT GUARD: migration 086 embeds the rollup VIEW DDL VERBATIM from rollup
       `migration ${READ_MODEL_MIGRATION} no longer embeds the declaration's VIEW DDL for rollup "${rollup.decl.name}" — ` +
         `regenerate it from app/deliveryGraphReadModel.ts. Expected to contain:\n${rollup.viewDdl()}`,
     );
-    assert(new RegExp(`DROP VIEW IF EXISTS ${rollup.decl.name};`).test(sql), `086 must DROP "${rollup.decl.name}" first`);
+    assert(new RegExp(`DROP VIEW IF EXISTS ${rollup.decl.name};`).test(sql), `087 must DROP "${rollup.decl.name}" first`);
   }
 });
 
-test("DRIFT GUARD: migration 086 embeds each derived column VERBATIM from deliveryGraphReadModel.sqlSelectFor (the VIEW cannot drift from the declaration)", () => {
+test("DRIFT GUARD: migration 087 embeds each derived column VERBATIM from deliveryGraphReadModel.sqlSelectFor (the VIEW cannot drift from the declaration)", () => {
   const sql = MIG(READ_MODEL_MIGRATION);
   const alias = DELIVERY_GRAPH_READ_MODEL_BASE_ALIAS;
   for (const c of DELIVERY_GRAPH_READ_MODEL_DERIVED) {
@@ -154,8 +154,8 @@ test("DRIFT GUARD: migration 086 embeds each derived column VERBATIM from delive
         `app/deliveryGraphReadModel.ts. Expected to contain:\n  ${emitted} AS ${c}`,
     );
   }
-  assert(/DROP VIEW IF EXISTS delivery_graph_read_model;/.test(sql), "086 must DROP the VIEW first");
-  assert(/CREATE VIEW delivery_graph_read_model AS/.test(sql), "086 must (re)create delivery_graph_read_model");
+  assert(/DROP VIEW IF EXISTS delivery_graph_read_model;/.test(sql), "087 must DROP the VIEW first");
+  assert(/CREATE VIEW delivery_graph_read_model AS/.test(sql), "087 must (re)create delivery_graph_read_model");
   // Base identity pass-throughs — DERIVED from the REAL `delivery_graph_runs` schema (the migration
   // chain applied to a throwaway DB), NOT a hand-kept list that could silently omit a column: the VIEW
   // must re-export EVERY base column so the static pages↔schema contract guard sees them (and a future
@@ -168,17 +168,17 @@ test("DRIFT GUARD: migration 086 embeds each derived column VERBATIM from delive
   assert(baseColumns.length > 0, "the migration chain must create the delivery_graph_runs base table");
   for (const base of baseColumns) {
     if (base === "status") continue;
-    assert(sql.includes(`dg.${base} AS ${base}`), `086 must pass base column "${base}" through the VIEW (derived from the real delivery_graph_runs schema)`);
+    assert(sql.includes(`dg.${base} AS ${base}`), `087 must pass base column "${base}" through the VIEW (derived from the real delivery_graph_runs schema)`);
   }
-  assert(sql.includes("COALESCE(dg.derived_status, dg.status) AS status"), "086 must expose the effective status so the pages' Active/History filter tracks a terminated run");
-  assert(sql.includes("AS park_label"), "086 must carry the hand-authored park_label companion column");
+  assert(sql.includes("COALESCE(dg.derived_status, dg.status) AS status"), "087 must expose the effective status so the pages' Active/History filter tracks a terminated run");
+  assert(sql.includes("AS park_label"), "087 must carry the hand-authored park_label companion column");
   // FROM/JOIN relations are DERIVED from the declaration (baseTable + lookup rollup name + join keys).
   const alias2 = DELIVERY_GRAPH_READ_MODEL_BASE_ALIAS;
-  assert(sql.includes(`FROM ${deliveryGraphReadModel.decl.baseTable} ${alias2}`), `086's FROM must be the declaration's baseTable "${deliveryGraphReadModel.decl.baseTable}"`);
+  assert(sql.includes(`FROM ${deliveryGraphReadModel.decl.baseTable} ${alias2}`), `087's FROM must be the declaration's baseTable "${deliveryGraphReadModel.decl.baseTable}"`);
   for (const lk of deliveryGraphReadModel.decl.lookups) {
     const on = lk.on.map((k) => `${alias2}.${k.base} = ${lk.as}.${k.rollup}`).join(" AND ");
     const join = `LEFT JOIN ${lk.rollup.decl.name} ${lk.as} ON ${on}`;
-    assert(sql.includes(join), `086 must LEFT JOIN the declaration's "${lk.rollup.decl.name}" lookup exactly as "${join}"`);
+    assert(sql.includes(join), `087 must LEFT JOIN the declaration's "${lk.rollup.decl.name}" lookup exactly as "${join}"`);
   }
 });
 
@@ -224,7 +224,7 @@ test("FRAMEWORK PARITY GUARD: deliveryGraphReadModel's SQL and TS lowerings agre
 
 // ── 3. END-TO-END BEHAVIOUR on the real migration VIEW ────────────────────────────────────────────
 
-test("the migration 086 VIEW maps the run lifecycle onto the coarse STAGE_KEYS bracket + render state", () => {
+test("the migration 087 VIEW maps the run lifecycle onto the coarse STAGE_KEYS bracket + render state", () => {
   const db = viewDb();
   // awaiting-approval (reserved legacy pre-dispatch rows) → the initial Requested bracket.
   addRun(db, "await", { status: "awaiting-approval", phase: "Awaiting approval" });
