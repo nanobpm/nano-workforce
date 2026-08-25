@@ -35,6 +35,7 @@ import type {
   ResolvedDeliveryEdge,
   ResolvedDeliveryNode,
 } from "../nano-generated/api-io.d.ts";
+import { TRANSCRIPT_URL_BASE_VAR, TRANSCRIPT_URL_VAR } from "./agentic/transcript-url.ts";
 import { DELIVERY_CONNECTOR_TASK_TYPE } from "./deliveryConnector.ts";
 import {
   analyzeExclusiveTopology,
@@ -815,6 +816,11 @@ function ioMappingLines(w: NodeWiring, boundInputs: readonly BoundInput[]): stri
       inputs.push({ source: cfg("jobType"), target: "jobType" });
       inputs.push({ source: cfg("appendPrompt"), target: "appendPrompt" });
       inputs.push({ source: cfg("timeout"), target: "nodeTimeout" });
+      // Stage 0 transcript correlation (#543): seed the transcript URL base so the completing fleet
+      // worker can append its own jobKey-scoped stream and emit `transcriptUrl` (below). `transcriptUrlBase`
+      // is a top-level launch variable (deliveryRunner) — guarded so a hand-seeded instance without it
+      // threads null rather than raising a FEEL error.
+      inputs.push({ source: guarded(TRANSCRIPT_URL_BASE_VAR), target: TRANSCRIPT_URL_BASE_VAR });
       break;
     case "wait":
       inputs.push({ source: cfg("gateKey"), target: "gateKey" });
@@ -860,6 +866,14 @@ function ioMappingLines(w: NodeWiring, boundInputs: readonly BoundInput[]): stri
   // Outputs: publish each declared emit into `<element>_<fact>` for a downstream consumer to bind.
   for (const fact of normaliseEmits(node)) {
     outputs.push({ source: guarded(factSourceVar(node.kind, fact)), target: `${el}_${fact.name}` });
+  }
+
+  // Stage 0 transcript correlation (#543): propagate the completing worker's `transcriptUrl` (built
+  // from the seeded base + its jobKey) up to the process-instance scope, where Nano Explorer's
+  // variables panel renders it as the link from this run to the agent's transcript. Guarded so a job
+  // completed without it (an older fleet worker) threads null instead of raising a FEEL error.
+  if (node.kind === "agent") {
+    outputs.push({ source: guarded(TRANSCRIPT_URL_VAR), target: TRANSCRIPT_URL_VAR });
   }
 
   const lines: string[] = ["        <zeebe:ioMapping>"];

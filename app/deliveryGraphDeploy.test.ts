@@ -22,6 +22,13 @@ import { assert, assertEquals } from "#test-assert";
 import { DELIVERY_CONNECTOR_TASK_TYPE } from "./deliveryConnector.ts";
 import { compileDeliveryGraph } from "./deliveryGraphCompiler.ts";
 import { runDeliveryGraph } from "./deliveryRunner.ts";
+import { jobStream } from "./agentic/correlation.ts";
+import {
+  TRANSCRIPT_URL_BASE_VAR,
+  TRANSCRIPT_URL_VAR,
+  transcriptUrlBaseFor,
+  transcriptUrlForJob,
+} from "./agentic/transcript-url.ts";
 import type { DeliveryGraph } from "../nano-generated/api-io.d.ts";
 
 /** A graph exercising the full node-kind matrix: `agent` (a named `senior:*` job), `wait` (the
@@ -207,6 +214,78 @@ test("di coverage: every compiled flow node carries a BPMNShape and every sequen
 function escapeRe(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
+
+/** Read a running process instance's scope variables out of the wasm engine's raw snapshot, by key. */
+function instanceVariables(engine: { snapshot(): Record<string, unknown> }, key: string): Record<string, unknown> {
+  const snap = engine.snapshot();
+  const instances = snap.instances;
+  assert(Array.isArray(instances), "snapshot.instances is an array of instance rows");
+  const row = instances.find((i): i is { key: string; variables: Record<string, unknown> } => {
+    return typeof i === "object" && i !== null && (i as { key?: unknown }).key === key;
+  });
+  assert(row !== undefined, `no snapshot instance row for ${key}`);
+  return row.variables ?? {};
+}
+
+test("#543 transcript correlation: a completed agent job exposes a resolvable instance-scope transcriptUrl", async () => {
+  const engine = await createWasmEngineClient();
+  try {
+    // A minimal agent→human graph: the agent job completes (emitting its transcript URL the way the
+    // real fleet worker does — the seeded base + its own jobKey-scoped stream), then the instance parks
+    // on the human node so its scope variables are still inspectable (a bare agent graph would COMPLETE
+    // and drop them). The worker captures its jobKey so the test can assert the exact URL the SSOT
+    // builder yields for it.
+    let workerJobKey = "";
+    let seededBase: unknown;
+    await engine.registerWorker(
+      "senior:feature",
+      async (job) => {
+        workerJobKey = String(job.jobKey);
+        seededBase = job.variables?.transcriptUrlBase;
+        // Mirror the harness: append the jobKey-scoped stream id to the app-seeded base (#486/#543).
+        return { transcriptUrl: `${String(job.variables?.transcriptUrlBase)}${jobStream(workerJobKey)}` };
+      },
+      { fetchVariables: [TRANSCRIPT_URL_BASE_VAR] },
+    );
+
+    const graph: DeliveryGraph = {
+      name: "transcript correlation",
+      nodes: [
+        { id: "impl", kind: "agent", agent: { jobType: "senior:feature", prompt: "ship it" } },
+        { id: "review", kind: "human", human: { prompt: "review the run" } },
+      ],
+      edges: [{ from: "impl", to: "review" }],
+    };
+    const run = await runDeliveryGraph(engine, graph);
+    assert(run.ok, `runDeliveryGraph failed: ${JSON.stringify(run)}`);
+    const key = run.handle.processInstanceKey;
+
+    // Drive until the agent node has completed and the instance parks on the human user task.
+    let parked = false;
+    for (let round = 0; round < MAX_ROUNDS; round++) {
+      await engine.drain();
+      const open = await engine.searchUserTasks({ processInstanceKey: key, state: "CREATED" });
+      if (open.length > 0) {
+        parked = true;
+        break;
+      }
+    }
+    assert(parked, "the agent node must complete and the instance park on the human node");
+
+    // The app seeded the transcript endpoint base onto the agent job (input mapping)...
+    assertEquals(seededBase, transcriptUrlBaseFor(), "the agent job receives the seeded transcriptUrlBase");
+    // ...and the worker-emitted transcriptUrl propagated up to the process-instance scope (output
+    // mapping), resolving to EXACTLY the SSOT URL for that jobKey — the link Nano Explorer renders.
+    const vars = instanceVariables(engine, key);
+    assertEquals(
+      vars[TRANSCRIPT_URL_VAR],
+      transcriptUrlForJob(workerJobKey),
+      "the completed agent job exposes a resolvable, correct transcriptUrl on the instance",
+    );
+  } finally {
+    await engine.close();
+  }
+});
 
 // ── S7: guarded (conditional) routing DEPLOYS and ROUTES on the real engine (ADR 0005 S7) ──────────
 // The compiler tests prove a guarded split emits an exclusiveGateway with FEEL conditions; only a live

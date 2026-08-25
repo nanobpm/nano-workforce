@@ -29,13 +29,21 @@ export default defineOperation("getAgenticTranscript", async ({ params, query, r
   }
 
   const service = currentRelayTranscriptService();
-  const store = service?.store;
-  if (!store) {
-    // No transcript store mounted (relay unmounted or unpersisted) - nothing to replay.
+  if (!service) {
+    // No relay/transcript service mounted at all - nothing to replay.
     return { status: 404, body: { error: "no transcript for stream" } };
   }
 
-  const data = readTranscriptFrom(params.stream, from, store, currentCorrelation(), service?.correlationStore);
+  // Read the durable store first, falling back to the still-live relay ring (#486) so a `transcriptUrl`
+  // emitted by a job on a still-live multiplexing worker is readable before its ring is flushed.
+  const data = readTranscriptFrom(
+    params.stream,
+    from,
+    service.store,
+    currentCorrelation(),
+    service.correlationStore,
+    service.liveFallback(params.stream),
+  );
   if (data === undefined) {
     return { status: 404, body: { error: "no transcript for stream" } };
   }

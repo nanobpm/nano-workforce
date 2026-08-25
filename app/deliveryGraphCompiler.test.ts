@@ -81,6 +81,33 @@ test("happy path: a well-formed graph compiles to a full preview with no side ef
   assertEquals(r.sideEffects.length, 2);
 });
 
+test("#543 transcript correlation: only an agent node seeds transcriptUrlBase and emits transcriptUrl", async () => {
+  const r = await compileOk(RELEASE_RUNBOOK);
+  // The agent node's subProcess ioMapping threads the seeded base IN (so the completing worker can
+  // build its own jobKey-scoped URL) and propagates the worker-set transcriptUrl OUT to the instance.
+  assert(
+    /<zeebe:input source="=if \(is defined\(transcriptUrlBase\)\) then transcriptUrlBase else null" target="transcriptUrlBase"/.test(
+      r.bpmn,
+    ),
+    "an agent node seeds transcriptUrlBase",
+  );
+  assert(
+    /<zeebe:output source="=if \(is defined\(transcriptUrl\)\) then transcriptUrl else null" target="transcriptUrl"/.test(r.bpmn),
+    "an agent node propagates the worker-emitted transcriptUrl up to the instance scope",
+  );
+  // RELEASE_RUNBOOK has exactly ONE agent node — wait/human/connector must NOT carry the mapping.
+  assertEquals(
+    (r.bpmn.match(/target="transcriptUrl"/g) ?? []).length,
+    1,
+    "only the agent node emits transcriptUrl (non-agent kinds do not)",
+  );
+  assertEquals(
+    (r.bpmn.match(/target="transcriptUrlBase"/g) ?? []).length,
+    1,
+    "only the agent node seeds transcriptUrlBase",
+  );
+});
+
 test("determinism: the same JSON always yields byte-identical bpmn/diagram/resolved", async () => {
   const a = await compileOk(RELEASE_RUNBOOK);
   const b = await compileOk(RELEASE_RUNBOOK);

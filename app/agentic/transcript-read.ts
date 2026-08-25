@@ -14,7 +14,7 @@
 // Pure and side-effect-free apart from reading the store: no I/O beyond the injected store, so it is
 // unit-testable on the injected env (Node, no browser), and never touches the engine or a BPMN flow.
 
-import type { TranscriptChunk, TranscriptStore, TranscriptStream } from "@nanobpm/agentic/transcript";
+import type { TranscriptChunk, TranscriptRing, TranscriptStore, TranscriptStream } from "@nanobpm/agentic/transcript";
 import type { AgenticTranscript, AgenticTranscriptData } from "../../nano-generated/api-io.d.ts";
 import { type CorrelationRegistry, jobKeyOfStream } from "./correlation.ts";
 import type { AgenticCorrelationStore } from "./correlation-store.ts";
@@ -163,33 +163,64 @@ export function listTranscripts(
 /**
  * Fetch a stored transcript's bytes from offset `from` (inclusive), projected onto the range/offset
  * wire shape — the SAME resume-from-offset contract the live terminal renders, so the cockpit replays
- * a closed stream through its existing renderer. Returns undefined when the stream has no transcript.
+ * a closed stream through its existing renderer.
+ *
+ * Reads the durable {@link TranscriptStore} first; when the store has no row for the stream (it was
+ * never persisted, or — the #486 caveat — the job completed on a still-live multiplexing worker whose
+ * ring has not been flushed yet) it falls back to the injected live ring so a freshly-emitted
+ * `transcriptUrl` is readable the moment it is emitted. Returns undefined only when neither the store
+ * nor a live ring has the stream.
  */
 export function readTranscriptFrom(
   stream: string,
   from: number,
-  store: TranscriptStore,
+  store: TranscriptStore | undefined,
   correlation: CorrelationRegistry | undefined,
   durable?: AgenticCorrelationStore | undefined,
+  live?: { ring: TranscriptRing; createdAt: string } | undefined,
 ): AgenticTranscriptData | undefined {
-  const meta = store.get(stream);
-  if (meta === undefined) return undefined;
-  const slice = store.since(stream, from);
-  const entries = slice.entries.map((c) => ({ offset: c.offset, chunk: c.chunk }));
-  const out: AgenticTranscriptData = {
-    stream: meta.stream,
-    lifecycle: meta.lifecycle,
-    status: meta.status,
-    createdAt: meta.createdAt,
-    nextOffset: slice.nextOffset,
-    byteLength: byteLengthOf(slice.entries),
-    chunkCount: entries.length,
-    from,
-    gap: slice.gap,
-    entries,
-  };
-  if (meta.completedAt !== undefined) out.completedAt = meta.completedAt;
-  const fields = correlationFieldsFor(meta.stream, correlation, durable);
+  const meta = store?.get(stream);
+  let out: AgenticTranscriptData;
+  if (store !== undefined && meta !== undefined) {
+    const slice = store.since(stream, from);
+    const entries = slice.entries.map((c) => ({ offset: c.offset, chunk: c.chunk }));
+    out = {
+      stream: meta.stream,
+      lifecycle: meta.lifecycle,
+      status: meta.status,
+      createdAt: meta.createdAt,
+      nextOffset: slice.nextOffset,
+      byteLength: byteLengthOf(slice.entries),
+      chunkCount: entries.length,
+      from,
+      gap: slice.gap,
+      entries,
+    };
+    if (meta.completedAt !== undefined) out.completedAt = meta.completedAt;
+  } else if (live !== undefined) {
+    // #486: no durable row yet — the job completed on a still-live multiplexing worker whose ring has
+    // not been flushed. Serve the captured bytes straight from the live ring so a freshly-emitted
+    // `transcriptUrl` is readable immediately (an open ephemeral stream), rather than 404-ing until the
+    // worker disconnects. `gap` is derived structurally: the first returned entry sitting past `from`
+    // means retention already evicted the requested prefix.
+    const slice = live.ring.since(from);
+    const entries = slice.entries.map((c) => ({ offset: c.offset, chunk: c.chunk }));
+    out = {
+      stream,
+      lifecycle: "ephemeral",
+      status: "open",
+      createdAt: live.createdAt,
+      nextOffset: live.ring.nextOffset,
+      byteLength: byteLengthOf(slice.entries),
+      chunkCount: entries.length,
+      from,
+      gap: entries.length > 0 && entries[0].offset > from,
+      entries,
+    };
+  } else {
+    return undefined;
+  }
+  const fields = correlationFieldsFor(out.stream, correlation, durable);
   if (fields.jobKey !== undefined) out.jobKey = fields.jobKey;
   if (fields.processInstanceKey !== undefined) out.processInstanceKey = fields.processInstanceKey;
   if (fields.bpmnProcessId !== undefined) out.bpmnProcessId = fields.bpmnProcessId;
