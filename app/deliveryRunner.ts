@@ -227,6 +227,15 @@ function buildNodeInput(
     }
     case "wait": {
       const probe = parseProbe(node.wait);
+      // Only a VALID, positive per-node budget overrides the run level. Match the `>= 1` predicate
+      // `readinessTimeout`/`readinessPollEvery` apply internally, rather than a bare JS-truthiness
+      // check on `poll.timeoutMs`/`everyMs`: a negative (`-1`) value is truthy, so a truthiness gate
+      // would route to `readinessTimeout(probe, {})`, which then rejects it (`< 1`) and — because
+      // `env` is `{}` — falls back to the *built-in* default (PT30M / DEFAULT_EVERY_MS), silently
+      // discarding the run/dispatch override in `ctx.*`. Gating on the same validity predicate here
+      // makes an invalid per-node value fall through to `ctx.probeTimeout`/`ctx.probePollEvery`.
+      const declaredTimeout = typeof probe.poll?.timeoutMs === "number" && probe.poll.timeoutMs >= 1;
+      const declaredEvery = typeof probe.poll?.everyMs === "number" && probe.poll.everyMs >= 1;
       return {
         gateKey: `${ctx.runKey}:${ctx.element}`,
         probe: node.wait,
@@ -235,8 +244,8 @@ function buildNodeInput(
         // otherwise a node's poll budget is honored for the interval but silently ignored for the
         // boundary (a 7-day gate escalated at the 30-minute run default). Falls back to the run-level
         // `ctx.probeTimeout` (which itself honors the dispatch override / default) when undeclared.
-        probeTimeout: probe.poll?.timeoutMs ? readinessTimeout(probe, {}) : ctx.probeTimeout,
-        probePollEvery: probe.poll?.everyMs ? readinessPollEvery(probe, {}) : ctx.probePollEvery,
+        probeTimeout: declaredTimeout ? readinessTimeout(probe, {}) : ctx.probeTimeout,
+        probePollEvery: declaredEvery ? readinessPollEvery(probe, {}) : ctx.probePollEvery,
       };
     }
     case "human":

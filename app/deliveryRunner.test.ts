@@ -280,6 +280,29 @@ test("a wait node's per-node poll.timeoutMs drives its escalation boundary while
   assertEquals(byGate(":n0")?.probeTimeout, "PT20M"); // sibling keeps the run-level value
 });
 
+test("an invalid per-node poll.timeoutMs/everyMs falls back to the run-level ctx.* override, not the built-in default (#462)", async () => {
+  // Guard against the JS-truthiness gap: a negative `poll.timeoutMs` (`-1`) is truthy, so a bare
+  // `probe.poll?.timeoutMs ? readinessTimeout(probe, {}) : ctx.probeTimeout` would route to
+  // `readinessTimeout(probe, {})`, which rejects `< 1` and — with `env: {}` — returns the built-in
+  // PT30M default, silently discarding the run/dispatch override. An invalid value must fall through
+  // to `ctx.*` (the run-level value) instead. Same for `everyMs`.
+  const graph: DeliveryGraph = {
+    name: "invalid per-node budget",
+    nodes: [
+      {
+        id: "bad-gate",
+        kind: "wait",
+        wait: { kind: "pr", target: "owner/repo#1", match: { prState: "merged" }, poll: { timeoutMs: -1, everyMs: -5 } },
+      },
+    ],
+    edges: [],
+  };
+  const p = await prepareOk(graph, { probeTimeout: "PT20M", probePollEvery: "PT42S", runKey: "run-462b" });
+  const wait = Object.values(p.nodeInputs).find((v) => "gateKey" in v) as { probeTimeout: string; probePollEvery: string } | undefined;
+  assertEquals(wait?.probeTimeout, "PT20M"); // run-level override, NOT the built-in PT30M default
+  assertEquals(wait?.probePollEvery, "PT42S"); // run-level cadence, NOT DEFAULT_EVERY_MS
+});
+
 test("a malformed graph returns the S1 compile errors and prepares nothing", async () => {
   const r = await prepareDeliveryGraph({ nodes: [{ id: "a", kind: "agent", agent: { jobType: "j" } }], edges: [{ from: "a", to: "ghost" }] } as unknown as DeliveryGraph);
   assert(!r.ok, "a dangling edge fails to prepare");
