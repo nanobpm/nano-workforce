@@ -60,6 +60,9 @@ export const EPIC_PHASE = {
  *  `toWave` coercion the wave workers already apply, so a NaN/absent counter degrades to an
  *  unlabelled `Implementing` rather than emitting `wave NaN/…`. */
 const toWave = (v: unknown): number | null => {
+  // `null`/`undefined` are ABSENT, not zero: `Number(null)` is `0`, which would otherwise label a
+  // missing `current_wave` as `wave 1/t`. Treat them as unusable so missing wave data stays missing.
+  if (v === null || v === undefined) return null;
   const n = Math.trunc(Number(v));
   return Number.isFinite(n) && n >= 0 ? n : null;
 };
@@ -92,8 +95,10 @@ export function implementingPhase(current: unknown, total: unknown): string {
  *   • `select-wave` ("Select wave") → Implementing: it dispatches the wave and is the last host write
  *     before the write-silent `implement` MI, so it durably marks the implementation phase for the
  *     wave it launches (wave-labelled via {@link implementingPhase} at the call site).
- *   • `record-results` ("Finalize plan") → Dispatched: the finalize step's lasting result is the
- *     "Fleet dispatched" terminal end event.
+ *   • `record-results` ("Finalize plan") → Finalizing: while the finalizer token is ACTIVE the epic
+ *     is finalizing. Its TERMINAL "Fleet dispatched" phase is NOT read from this (fleeting) live
+ *     token — a completion marker has no ACTIVE element to read once the instance ends — but derived
+ *     from the durable terminal status (see {@link deriveTerminalEpicPhase}).
  * `record-wave`'s next phase is data-dependent (trial-merge vs. next wave vs. finalize), so it is
  * resolved at its call site rather than from the element id alone; its structural fallback here is
  * the wave it just landed.
@@ -115,7 +120,7 @@ const ELEMENT_PHASE: Readonly<Record<string, string>> = {
   "record-trial-merge": EPIC_PHASE.TRIAL_MERGING,
   "trial-merge-decision": EPIC_PHASE.TRIAL_MERGING,
   "resolve-trial-attention": EPIC_PHASE.TRIAL_MERGING,
-  "record-results": EPIC_PHASE.DISPATCHED,
+  "record-results": EPIC_PHASE.FINALIZING,
 };
 
 /** Optional wave context for a wave-bearing phase, sourced from the wave/levelize records. */
@@ -189,4 +194,19 @@ export function deriveEpicPhaseLive(
   }
   if (bestBase === null) return null;
   return bestBase === EPIC_PHASE.IMPLEMENTING ? implementingPhase(wave?.current, wave?.total) : bestBase;
+}
+
+/**
+ * Derive the epic's TERMINAL phase from its durable status — the completion-marker counterpart to the
+ * live derivation (S8 #542 review). The "Fleet dispatched" phase is reached only when the plan-fanout
+ * instance ENDS, at which point there is no ACTIVE element to read; live-observing the fleeting ACTIVE
+ * `record-results` token via a coarse (default 60s) poll would miss it on nearly every fast finalize,
+ * freezing the row at the last live phase. So `Dispatched` is derived from the durable read-model
+ * (`plans.status`) instead: a `done` epic that dispatched ≥1 slice (`taskCount > 0`) reads Dispatched.
+ * Returns `null` for a taskless `done` (planner emitted no tasks — nothing was dispatched) and for any
+ * non-`done` terminal (`failed`/`abandoned`), so those never mislabel as Dispatched and the caller
+ * leaves the last live phase untouched.
+ */
+export function deriveTerminalEpicPhase(status: string, taskCount: number): string | null {
+  return status === "done" && taskCount > 0 ? EPIC_PHASE.DISPATCHED : null;
 }

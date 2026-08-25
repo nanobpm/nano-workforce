@@ -32,7 +32,7 @@ import { sweepExpiredProposals } from "./deliveryGraphProposals.ts";
 import { deliveryGraphRuns, deriveDeliveryPhase, parseHumanLabels } from "./deliveryGraphRun.ts";
 import { isDeliveryHumanElement } from "./deliveryHuman.ts";
 import { fleetSupportsDurableResume } from "./durableResume.ts";
-import { deriveEpicPhaseLive } from "./epicPhase.ts";
+import { deriveEpicPhaseLive, deriveTerminalEpicPhase } from "./epicPhase.ts";
 import { deriveFeatureDelivery, FEATURE_BLOCKED_ELEMENT, FEATURE_ESCALATION_ELEMENT, FEATURE_RUN_STATUSES, type FeatureRunStatus, featureEscalations, featureRuns } from "./feature.ts";
 import {
   classifyMergeability,
@@ -2319,7 +2319,10 @@ async function sweepOpenEscalationTasks(base: string, headers: Record<string, st
  * VIEW (the single wave-frontier source, 060/082), so the Implementing band reads `wave n/t` without a
  * second wave derivation. Writes only on a real change (a steady-state pass is a no-op) and leaves the
  * last phase untouched when nothing active marks one (`null`), so a plan parked on non-spine plumbing
- * never clobbers to blank. Best-effort + idempotent — a per-plan failure is isolated. */
+ * never clobbers to blank. The terminal `Dispatched` phase is a COMPLETION marker (no ACTIVE token to
+ * read once the instance ends), so a second pass derives it from the durable terminal status
+ * (`deriveTerminalEpicPhase` over `done` epics) rather than the fleeting ACTIVE `record-results` token
+ * a coarse poll would miss. Best-effort + idempotent — a per-plan failure is isolated. */
 export async function pollEpicPhase(
   data: DataLayer,
   engine: Pick<EngineClient, "searchElementInstances">,
@@ -2331,7 +2334,13 @@ export async function pollEpicPhase(
       "plan_key",
     )
     .all()) {
-    waveByPlan.set(w.plan_key, { current: w.current_wave, total: w.wave_count });
+    // Coerce SQL NULL to `undefined` so a missing `current_wave`/`wave_count` stays MISSING through
+    // the wave label — `null` passed as a wave number would otherwise coerce to `0` and mislabel an
+    // unknown wave as `wave 1/t` (the derivation guards this too, see `toWave`).
+    waveByPlan.set(w.plan_key, {
+      current: w.current_wave ?? null,
+      total: w.wave_count ?? null,
+    });
   }
   for (const status of EPIC_LIVE_STATUSES) {
     for (const plan of await plans(data).find({ status })) {
@@ -2345,6 +2354,17 @@ export async function pollEpicPhase(
       } catch (err) {
         console.error(`[poller] epic phase ${plan.plan_key}: ${err}`);
       }
+    }
+  }
+  // Terminal "Fleet dispatched" phase: a COMPLETION marker, derived from the durable terminal status
+  // rather than a fleeting ACTIVE `record-results` token a coarse poll would miss (#542 review). A
+  // `done` epic that dispatched ≥1 slice freezes at Dispatched; a taskless `done` and any non-`done`
+  // terminal are left untouched (`deriveTerminalEpicPhase` returns null). Idempotent — writes only on
+  // a real change, so a steady-state pass over already-Dispatched rows is a no-op.
+  for (const plan of await plans(data).find({ status: "done" })) {
+    const phase = deriveTerminalEpicPhase(plan.status, plan.task_count);
+    if (phase !== null && phase !== plan.epic_phase) {
+      await plans(data).update(plan.plan_key, { epic_phase: phase, updated_at: now() });
     }
   }
 }

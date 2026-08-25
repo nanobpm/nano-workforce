@@ -33,7 +33,12 @@ const now = () => new Date().toISOString();
 
 async function seedPlan(
   data: DataLayer,
-  over: { status?: string; process_key?: string | null; epic_phase?: string | null } = {},
+  over: {
+    status?: string;
+    process_key?: string | null;
+    epic_phase?: string | null;
+    task_count?: number;
+  } = {},
 ) {
   await plans(data).insert({
     plan_key: "owner/repo#7",
@@ -42,7 +47,7 @@ async function seedPlan(
     issue_url: "https://github.com/owner/repo/issues/7",
     title: "Epic",
     status: over.status ?? "dispatched",
-    task_count: 0,
+    task_count: over.task_count ?? 0,
     epic_phase: over.epic_phase ?? EPIC_PHASE.PLANNING,
     process_key: "process_key" in over ? over.process_key : "pi-1",
     created_at: now(),
@@ -109,6 +114,32 @@ test("pollEpicPhase never touches a terminal (non-live) epic", async () => {
     await pollEpicPhase(data, engine as never);
     assertEquals(called, false);
     assertEquals((await plans(data).get("owner/repo#7"))?.epic_phase, EPIC_PHASE.DISPATCHED);
+  });
+});
+
+test("pollEpicPhase freezes a done epic that dispatched a fleet at the terminal Dispatched phase", async () => {
+  await withData(async (data) => {
+    await seedPlan(data, { status: "done", task_count: 2, epic_phase: EPIC_PHASE.TRIAL_MERGING });
+    let called = false;
+    const engine = {
+      searchElementInstances: async () => {
+        called = true;
+        return [];
+      },
+    };
+    await pollEpicPhase(data, engine as never);
+    // Derived from the terminal status, not the (skipped) live element search.
+    assertEquals(called, false);
+    assertEquals((await plans(data).get("owner/repo#7"))?.epic_phase, EPIC_PHASE.DISPATCHED);
+  });
+});
+
+test("pollEpicPhase never labels a taskless done epic Dispatched", async () => {
+  await withData(async (data) => {
+    // A done epic that dispatched nothing (planner emitted no tasks) must NOT read Dispatched.
+    await seedPlan(data, { status: "done", task_count: 0, epic_phase: EPIC_PHASE.PLANNING });
+    await pollEpicPhase(data, { searchElementInstances: async () => [] } as never);
+    assertEquals((await plans(data).get("owner/repo#7"))?.epic_phase, EPIC_PHASE.PLANNING);
   });
 });
 

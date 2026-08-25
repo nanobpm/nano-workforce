@@ -49,11 +49,13 @@ const handler: AppJobHandler<In> = async (job, app) => {
     throw new BpmnError("NO_WORK_DISPATCHED", `${planKey}: ${outcome}`);
   }
 
-  // The epic's terminal "Fleet dispatched" phase is no longer stamped here (S8, #542): it is a pure
-  // read-model derivation off the live element-instance model (`pollEpicPhase` → `deriveEpicPhaseLive`,
-  // app/epicPhase.ts), which reads `Dispatched` from the ACTIVE `record-results` token while the plan
-  // is still live, then freezes it as the plan goes terminal. The failed/no-work path above likewise
-  // no longer stamps a phase — its terminal signal is status + outcome.
+  // The epic's terminal "Fleet dispatched" phase is no longer stamped here (S8, #542). While this
+  // finalizer's token is ACTIVE the epic reads `Finalizing` from the live element-instance model
+  // (`pollEpicPhase` → `deriveEpicPhaseLive`); the terminal `Dispatched` is then derived from this
+  // `done` status by `pollEpicPhase` (`deriveTerminalEpicPhase`) — a completion marker with no live
+  // token to read, so it is taken from the durable terminal status, not a fleeting ACTIVE token. The
+  // failed/no-work path above likewise stamps no phase — its terminal signal is status + outcome, and
+  // a `failed` epic is deliberately never labelled Dispatched.
   await plans(app.data).update(planKey, {
     status: "done",
     outcome: `${opened} PR(s) dispatched to convergence`,
