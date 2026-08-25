@@ -1,0 +1,21 @@
+-- Key the durable agent correlation on the ELEMENT INSTANCE, not just the static BPMN element id
+-- (#544, Stage 1 of transcript↔process-run correlation; ADR 0006 §4b intersection, #464).
+--
+-- `078_agentic_correlation.sql` records `element_id` — the STATIC BPMN id — which is ambiguous across
+-- a looping / retried job: the same activity id occupies many distinct element instances over a
+-- process instance's life, so a transcript keyed only by `element_id` cannot say WHICH occupancy a
+-- token was in. `element_instance_key` is the engine's per-occupancy handle (the same one Nano
+-- Explorer addresses runtime position by, and the one Camunda keys its agent model on), resolved from
+-- the agent job's `jobKey` via the engine element-instance wait-state read (nano-ide#473's binding).
+--
+-- Expand-and-contract: this is the EXPAND step — a nullable, additive column alongside the retained
+-- `element_id` (kept during the transition, never dropped here). NULL for pre-#544 rows and whenever
+-- the (advisory, best-effort) resolution did not land, so it never gates a BPMN sequence flow.
+--
+-- Single source of truth: the durable table's canonical DDL is `AGENTIC_CORRELATION_SCHEMA_SQL` in
+-- `app/agentic/correlation-store.ts` (applied idempotently at store construction). This migration
+-- brings an already-078-migrated DB up to that same effective shape; a drift-guard test
+-- (`correlation-store.test.ts`) pins the migrated schema (078 + 086) to the canonical DDL so the two
+-- can never diverge.
+ALTER TABLE agentic_correlation ADD COLUMN element_instance_key TEXT;
+CREATE INDEX IF NOT EXISTS ix_agentic_correlation_element_instance ON agentic_correlation (element_instance_key);

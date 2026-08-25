@@ -55,6 +55,13 @@ export interface JobCorrelation {
   readonly bpmnProcessId?: string;
   /** The BPMN element id (activity/task) the job is for, if known. */
   readonly elementId?: string;
+  /**
+   * The engine element-instance key the job's token occupies (#544), if resolved. Unlike
+   * {@link elementId} (the static id, ambiguous across a looping / retried activity) this names the
+   * specific occupancy. Best-effort: it is enriched asynchronously via {@link CorrelationRegistry.attachElementInstance}
+   * after the link, so it may be absent for a just-linked job and stays absent if resolution never lands.
+   */
+  readonly elementInstanceKey?: string;
   /** The plan / epic key this job is part of (e.g. `owner/repo#142`), if known. */
   readonly planKey?: string;
   /** The relay stream id the job's terminal is relayed on (`job:<jobKey>`). */
@@ -103,9 +110,22 @@ export class CorrelationRegistry {
     this.#context.set(jobKey, { jobKey, stream: jobStream(jobKey), ...stripUndefined(context) });
   }
 
+  /**
+   * Enrich a still-linked job's context with the engine element-instance key it occupies (#544),
+   * resolved asynchronously after the link (the element-instance read is an engine round-trip the
+   * synchronous link path cannot await). Best-effort and idempotent: a no-op if the job is no longer
+   * linked (it completed and released before resolution returned — the durable backfill covers that
+   * case instead) or if the key is empty. Preserves every other context field.
+   */
+  attachElementInstance(jobKey: string, elementInstanceKey: string): void {
+    if (jobKey === "" || elementInstanceKey === "") return;
+    const existing = this.#context.get(jobKey);
+    if (existing === undefined) return;
+    this.#context.set(jobKey, { ...existing, elementInstanceKey });
+  }
+
   /** Release one job (it finished / moved on). No-op if it was never linked. */
-  releaseJob(jobKey: string): void {
-    const instance = this.#instanceOf.get(jobKey);
+  releaseJob(jobKey: string): void {    const instance = this.#instanceOf.get(jobKey);
     if (instance !== undefined) {
       this.#jobsOf.get(instance)?.delete(jobKey);
       this.#pruneInstance(instance);
@@ -170,11 +190,12 @@ export class CorrelationRegistry {
 
 /** Drop `undefined`-valued keys so the stored context never materializes an explicit `{ key: undefined }` hole. */
 function stripUndefined(context: JobContext): JobContext {
-  const { processInstanceKey, bpmnProcessId, elementId, planKey } = context;
+  const { processInstanceKey, bpmnProcessId, elementId, elementInstanceKey, planKey } = context;
   return {
     ...(processInstanceKey !== undefined ? { processInstanceKey } : {}),
     ...(bpmnProcessId !== undefined ? { bpmnProcessId } : {}),
     ...(elementId !== undefined ? { elementId } : {}),
+    ...(elementInstanceKey !== undefined ? { elementInstanceKey } : {}),
     ...(planKey !== undefined ? { planKey } : {}),
   };
 }

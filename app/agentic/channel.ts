@@ -22,6 +22,7 @@ import {
   WebSocketChannelTransport,
 } from "@nanobpm/agentic/channel";
 import type { DataLayer, Logger } from "@nanobpm/urban";
+import type { ElementInstanceResolver } from "./element-instance.ts";
 import { loadAgenticFamilies } from "./loader.ts";
 import { AgenticFamilyRegistry } from "./registry.ts";
 
@@ -83,6 +84,12 @@ export interface MountAgenticChannelOptions {
   readonly secure?: boolean;
   /** The app's SQLite data layer, threaded to family modules (may be absent when data isn't mounted). */
   readonly data: DataLayer | undefined;
+  /**
+   * An advisory, read-only element-instance resolver (#544), threaded to family modules via
+   * {@link AgenticContext.resolveElementInstance}. `main.ts` closes it over the shared engine's
+   * element-instance wait-state read; absent → families run without element-instance enrichment.
+   */
+  readonly resolveElementInstance?: ElementInstanceResolver;
   /** A structured logger for lifecycle lines. */
   readonly log: Logger;
   /**
@@ -117,8 +124,7 @@ async function discoverRegistry(log: Logger): Promise<AgenticFamilyRegistry> {
 export async function mountAgenticChannel(
   opts: MountAgenticChannelOptions,
 ): Promise<AgenticChannelHandle> {
-  const { server, data, log } = opts;
-  // Local-first: `secure` defaults to true at the library level (fail-closed for callers that don't
+  const { server, data, log } = opts;  // Local-first: `secure` defaults to true at the library level (fail-closed for callers that don't
   // opt in), but `main.ts` passes `secure: false` for the on-by-default LOCAL channel. In LOCAL mode
   // an empty secret is fine — we substitute the well-known localhost token and drop the credential
   // requirement so a `nano work` worker appears live with zero configuration.
@@ -193,7 +199,14 @@ export async function mountAgenticChannel(
   let registry: AgenticFamilyRegistry | undefined;
   try {
     registry = await (opts.families ? opts.families() : discoverRegistry(log));
-    await registry.mountAll({ hub, registry: hub.registry, transport, data, log });
+    await registry.mountAll({
+      hub,
+      registry: hub.registry,
+      transport,
+      data,
+      resolveElementInstance: opts.resolveElementInstance,
+      log,
+    });
   } catch (err) {
     await registry?.teardownAll(log);
     await hub.close();

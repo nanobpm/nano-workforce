@@ -23,11 +23,16 @@
 //   - `db/migrations/024_agentic_transcript.sql` → H3 (#146)
 //   - `db/migrations/025_agentic_blackboard.sql` → H4 (#147), only if it needs a schema change
 //
-// Invariants (ADR 0056): app-tier only, never the engine; the Camunda-8 job protocol (worker⇄engine)
-// is untouched — the agentic channel is the only new conversation; advisory semantics are preserved
-// (a family NEVER hard-locks or gates a BPMN sequence flow).
+// Invariants (ADR 0056): app-tier only — a family NEVER participates in or gates the Camunda-8 job
+// protocol (worker⇄engine): it does not activate/complete jobs, publish messages, or gate a BPMN
+// sequence flow; the agentic channel is the only new conversation, and its semantics are advisory. An
+// ADVISORY, READ-ONLY query against the engine's read model (e.g. resolving the element instance a job
+// occupies, #544) is permitted — it observes state to enrich a visibility record, never drives it — and
+// is offered to families as the narrow {@link AgenticContext.resolveElementInstance} seam so a family
+// depends on a capability, not the engine handle.
 import type { AgenticHub, ConnectionRegistry, WebSocketChannelTransport } from "@nanobpm/agentic/channel";
 import type { DataLayer, Logger } from "@nanobpm/urban";
+import type { ElementInstanceResolver } from "./element-instance.ts";
 
 /**
  * The reusable handle the seam threads to every family module at mount time. A sibling family uses
@@ -43,6 +48,15 @@ export interface AgenticContext {
   readonly transport: WebSocketChannelTransport;
   /** The app's SQLite data layer — the same store the advisory blackboard uses (may be absent). */
   readonly data: DataLayer | undefined;
+  /**
+   * An ADVISORY, READ-ONLY element-instance resolver (#544), when the composition root supplies one.
+   * A family may call it to enrich a visibility record with the engine element-instance key a job
+   * occupies. It is a narrow function shape (not an engine handle) closed over the engine's element-
+   * instance wait-state read — so a family can query the engine's READ MODEL for advisory enrichment
+   * WITHOUT participating in or gating the Camunda-8 job protocol (the invariant above forbids the
+   * latter, not the former). Absent when no engine is wired (tests, engine-less hosts).
+   */
+  readonly resolveElementInstance?: ElementInstanceResolver;
   /** A structured logger for boot/shutdown lifecycle lines. */
   readonly log: Logger;
 }

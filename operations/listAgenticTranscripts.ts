@@ -46,6 +46,7 @@ export default defineOperation("listAgenticTranscripts", async ({ query, req }, 
   const filter: TranscriptFilter = {
     ...(query.jobKey !== undefined ? { jobKey: query.jobKey } : {}),
     ...(query.processInstanceKey !== undefined ? { processInstanceKey: query.processInstanceKey } : {}),
+    ...(query.elementInstanceKey !== undefined ? { elementInstanceKey: query.elementInstanceKey } : {}),
     ...(query.planKey !== undefined ? { planKey: query.planKey } : {}),
     ...(query.instance !== undefined ? { instance: query.instance } : {}),
     ...(query.since !== undefined ? { since: query.since } : {}),

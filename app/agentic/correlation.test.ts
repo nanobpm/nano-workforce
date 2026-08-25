@@ -42,8 +42,39 @@ test("link records context and both projections; resolve carries the job: stream
   assert.equal(reg.count(), 1);
 });
 
-test("link ignores empty instance or jobKey", () => {
+test("attachElementInstance enriches a linked job's context, preserving every other field (#544)", () => {
   const reg = new CorrelationRegistry();
+  reg.link("wk-a", "6494", { processInstanceKey: "4612", elementId: "agent", planKey: "o/r#142" });
+  reg.attachElementInstance("6494", "ei-77");
+  const c = reg.resolve("6494");
+  assert.ok(c);
+  assert.equal(c.elementInstanceKey, "ei-77");
+  // Enrichment is additive — it must not clobber the fields the link established.
+  assert.equal(c.processInstanceKey, "4612");
+  assert.equal(c.elementId, "agent");
+  assert.equal(c.planKey, "o/r#142");
+  assert.equal(c.jobKey, "6494");
+  assert.equal(c.stream, "job:6494");
+});
+
+test("attachElementInstance is a no-op for a released (or never-linked) job or an empty key (#544)", () => {
+  const reg = new CorrelationRegistry();
+  // Never linked.
+  reg.attachElementInstance("nope", "ei-1");
+  assert.equal(reg.resolve("nope"), undefined);
+  // Released before the resolution landed (the completion-race path).
+  reg.link("wk-a", "6494");
+  reg.releaseJob("6494");
+  reg.attachElementInstance("6494", "ei-1");
+  assert.equal(reg.resolve("6494"), undefined);
+  // Empty inputs are ignored, and never materialise a context.
+  reg.link("wk-b", "7000");
+  reg.attachElementInstance("7000", "");
+  assert.equal(reg.resolve("7000")?.elementInstanceKey, undefined);
+  reg.attachElementInstance("", "ei-1");
+});
+
+test("link ignores empty instance or jobKey", () => {  const reg = new CorrelationRegistry();
   reg.link("", "6494");
   reg.link("wk-a", "");
   assert.equal(reg.count(), 0);
