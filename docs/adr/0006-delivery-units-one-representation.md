@@ -348,7 +348,14 @@ its `activeField` is the **least-advanced slice cell's** `STAGE_KEYS` bracket an
 cell's `pipeline` render state (`ok`/`blocked`/`failed`/in-progress), and the `Done` bucket is entered
 **only** when `deriveDelivery` reports `delivery = landed` (all slice PRs merged) — never on `converged`
 alone. So an all-`converged` epic pins `activeField` to the converged slices' shared bracket with
-`state = ok` (resolved-not-landed), and renders `Done` only once every slice has merged.
+`state = ok` (resolved-not-landed), and renders `Done` only once every slice has merged. This `Done`
+bucket is scoped to **integration-branch landing**: for a custom-base (`epic/*`) epic, `delivery = landed`
+means every slice merged onto the integration branch, after which `pollPromotion` (#299,
+`app/promotion.ts`, `app/service.ts`) opens the final `epic/* → <default>` promotion PR and tracks it via
+`promotion_state` (`ready`/`open`/`promoted`). The §4b stepper **intentionally ends at integration-branch
+landing** and does *not* fold that downstream promotion into cell success — a landed epic whose promotion
+PR is still `open` reads `Done` on the delivery stepper, with promotion surfaced by the epic card's
+existing `promotion_state`, not the stepper.
 
 **Cross-instance correlation, because composed cells are child instances by default.** engine-core's
 `CallActivity` spawns a **distinct child process instance** and links it to the parent
@@ -534,9 +541,14 @@ deployment-runtime prerequisite noted above), not on #416 alone.
   **per shape**: for a **feature**, the terminal-folded `feature_runs__tracking` `derived_status`
   (the canonical effective-status VIEW the projection reads — `app/featureReadModel.ts`, *not* the raw
   `feature_runs.status`, which a terminated run can leave frozen at `running`/`escalated`)/`pr_key`/flags + the
-  `pollFeatureDelivery`-reconciled `pull_requests` state, joined by **`pr_key`** (*not* a naïve
+  member PR's terminal-folded **`pull_requests__tracking.derived_status`** (the ADR-0065 tracking VIEW that
+  is the *direct* source — `app/lineage.ts:382-394`; *not* `pollFeatureDelivery`, which is the **consumer**
+  that projects that state into `feature_runs`), joined by **`pr_key`** (*not* a naïve
   `process_key` join, which is reassigned downstream); for a **delivery graph** — which has **no
-  `pr_key`** — its `delivery_graph_runs` row, its downstream PRs correlated through the run's **lineage
+  `pr_key`** — its `delivery_graph_runs` row, its downstream PRs (read through the **same
+  `pull_requests__tracking.derived_status`** tracking VIEW, so a terminated convergence that leaves base
+  `status = 'converging'` while `derived_status = 'abandoned'` is *not* held in the live frontier —
+  `app/lineage.ts:382-394`) correlated through the run's **lineage
   root mapping** (`app/lineage.ts` `collectRootPrs` over `pull_requests.root_request_key`), and engine
   parks by the run's own `process_key`. Note the root mapping is **not** a single clean
   `root_request_key = run_key` join for every PR, and the per-node correlation **differs by node kind**,
@@ -546,7 +558,7 @@ deployment-runtime prerequisite noted above), not on #416 alone.
   aggregate, sequenced around S2's ownership — not on the legacy `delivery_graph_runs` row S2/S3 retire.**
   Because S2 repoints `delivery_graph_runs` reads to `delivery_units`-derived VIEWs/rows and S3 moves the
   writers off the legacy tables, the mapping's home is either (i) a column/relation on **`delivery_units`**
-  (added, dual-written, and backfilled under S2's expand/contract order — §479-490 — so the derived VIEW
+  (added, dual-written, and backfilled under S2's expand/contract order — §508-519 — so the derived VIEW
   exposes it), or (ii) **threaded into the PRs themselves** as each PR-producing node's `root_request_key`
   (`app/service.ts`'s `submitPr`, line 503), which survives the legacy-table retirement. Storing it *only* on
   `delivery_graph_runs` would be orphaned when that table becomes a derived VIEW, so S7 is **sequenced
@@ -565,7 +577,11 @@ deployment-runtime prerequisite noted above), not on #416 alone.
   `Implementing` (matching the shipped `deliveryOriginStage`, `app/lineage.ts:332-336`) — whereas a
   **terminal** run status settles the step **without** waiting on member PRs (`done` → `Done`). So `done`
   does **not** block on an open PR, but a live `running` frontier must **not** mask PR-open/converging work
-  behind `Implementing`. Engine parks correlate via `searchUserTasks({ processInstanceKey: run.process_key })`, which is
+  behind `Implementing`. **Park-versus-PR precedence:** when both are live at a `running` frontier — an open
+  engine park **and** a member PR in flight — the **human park wins** (the branch reads as its park step,
+  e.g. `Awaiting approval`, over the PR-derived `Converging`), because an open user-task gate is the branch's
+  current actionable frontier and the PR work sits behind it; absent a park, PR state drives the step as
+  above. Engine parks correlate via `searchUserTasks({ processInstanceKey: run.process_key })`, which is
   correct **for today's inlined graphs** (the compiler inlines subProcesses into one flat instance); once
   S4's `callActivity` composition puts a human cell in a **child** instance, this parent-key query would
   miss it, so that step is bound to the S4 inline-vs-child decision (correlate child instances, or keep
@@ -575,7 +591,10 @@ deployment-runtime prerequisite noted above), not on #416 alone.
   page (`pages/delivery-graph-detail.page.json:95`), **and** the *Active Delivery Graphs* grid on
   `pages/overview.page.json:217` — each of which today renders `delivery_graph_runs.phase` as a
   plain-text Phase column, so S7 does not leave any of those views on a second renderer while §4b claims the
-  surface uses the shared stepper. Because `delivery_graph_runs` stores **no
+  surface uses the shared stepper. Promoting the `pipeline` kind must **not drop** the actionable
+  `Parked on human node: <label>` detail the plain-text Phase column carries today: S7 retains it as a
+  companion derived **park-label** field alongside the stepper on the list and *Active Delivery Graphs*
+  grids (which have no other inline park detail), not only on the detail page's `phase_node_id`. Because `delivery_graph_runs` stores **no
   stage column** (only `phase`/park metadata, whose values such as `Running` are *not* `STAGE_KEYS`), S7
   supplies the pipeline's `activeField`/`state` for the graph from a **read model/VIEW over
   `delivery_graph_runs`** that maps `phase`/park metadata onto the `STAGE_KEYS` axis (the stateless
