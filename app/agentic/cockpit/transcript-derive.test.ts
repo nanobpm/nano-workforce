@@ -137,6 +137,35 @@ test("structured edit args (path + old/new text) render as a synthesized diff", 
   assertEquals(host.byData("tool-args", "true").length, 0);
 });
 
+test("structured edit args ending in a trailing newline do not synthesize a spurious empty diff line", () => {
+  const host = new FakeElement("div");
+  renderDerivedTranscript(
+    host,
+    doc,
+    page([env("tool-call", { name: "write", callId: "s2", args: { path: "a.txt", oldText: "one\ntwo\n", newText: "one\nTWO\n" } })]),
+  );
+  // "one\ntwo\n" would naively split into 3 segments (…, "two", "") — the trailing empty is dropped.
+  assertEquals(host.byData("diff-line", "del").length, 2);
+  assertEquals(host.byData("diff-line", "add").length, 2);
+});
+
+test("an args-synthesized diff still renders non-diff result content (args+result, diff special render)", () => {
+  const host = new FakeElement("div");
+  renderDerivedTranscript(
+    host,
+    doc,
+    page([
+      env("tool-call", { name: "write", callId: "s3", args: { path: "a.txt", oldText: "one", newText: "ONE" } }),
+      env("tool-result", { callId: "s3", ok: true, content: "wrote 1 file" }),
+    ]),
+  );
+  const card = host.byData("tool", "write")[0];
+  assertEquals(card?.getAttribute("data-tool-kind"), "diff");
+  // The diff came from args, so the result content is not the diff source — it is still shown.
+  const resultEl = host.byData("tool-result", "true")[0];
+  assertEquals(resultEl?.textContent, "wrote 1 file");
+});
+
 test("a pending escalate permission renders Allow/Deny buttons that invoke onPermissionResolve", () => {
   const host = new FakeElement("div");
   const calls: Array<{ callId: string; optionId: string; allowed: boolean }> = [];

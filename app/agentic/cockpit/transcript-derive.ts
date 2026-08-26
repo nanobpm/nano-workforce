@@ -116,6 +116,13 @@ function parseUnifiedDiff(text: string): DiffLine[] {
   return lines.map((line) => ({ kind: classifyUnifiedLine(line), text: line }));
 }
 
+/** Split a block of text into lines, dropping a single trailing empty segment (text ending in "\n"). */
+function splitTextLines(text: string): string[] {
+  const lines = text.split("\n");
+  if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+  return lines;
+}
+
 /** Synthesize a diff from structured edit args (`{ path?, oldText/old_string, newText/new_string }`). */
 function structuredDiff(args: unknown): DiffLine[] | undefined {
   if (typeof args !== "object" || args === null) return undefined;
@@ -126,10 +133,10 @@ function structuredDiff(args: unknown): DiffLine[] | undefined {
   const path = pickString(args, ["path", "file", "filePath", "fileName"]);
   if (path !== undefined) lines.push({ kind: "ctx", text: `diff --git a/${path} b/${path}` });
   if (oldText !== undefined && oldText.length > 0) {
-    for (const line of oldText.split("\n")) lines.push({ kind: "del", text: `-${line}` });
+    for (const line of splitTextLines(oldText)) lines.push({ kind: "del", text: `-${line}` });
   }
   if (newText !== undefined && newText.length > 0) {
-    for (const line of newText.split("\n")) lines.push({ kind: "add", text: `+${line}` });
+    for (const line of splitTextLines(newText)) lines.push({ kind: "add", text: `+${line}` });
   }
   return lines.length > 0 ? lines : undefined;
 }
@@ -175,7 +182,10 @@ function renderTool(doc: DocumentLike, tool: DerivedTool): ElementLike {
       pre.appendChild(row);
     }
     card.appendChild(pre);
-  } else if (typeof tool.result?.content === "string") {
+  }
+
+  // Render the result content unless it was itself consumed as the diff source (source === "result").
+  if (typeof tool.result?.content === "string" && !(diff !== undefined && diff.source === "result")) {
     const resEl = el(doc, "pre", "cockpit-transcript-tool-result", tool.result.content);
     resEl.setAttribute("data-tool-result", "true");
     card.appendChild(resEl);
