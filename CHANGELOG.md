@@ -1,3 +1,9 @@
+## [0.146.0](https://github.com/nanobpm/nano-workforce/compare/v0.145.1...v0.146.0) (2026-08-26)
+
+### Features
+
+* **agentic:** add a permission transcript-event kind (request + resolution) ([#560](https://github.com/nanobpm/nano-workforce/issues/560)) ([722bb96](https://github.com/nanobpm/nano-workforce/commit/722bb962b24c85faf585e598b905bf67a43040d4)), closes [#559](https://github.com/nanobpm/nano-workforce/issues/559)
+
 ## [0.145.1](https://github.com/nanobpm/nano-workforce/compare/v0.145.0...v0.145.1) (2026-08-26)
 
 ### Bug Fixes
