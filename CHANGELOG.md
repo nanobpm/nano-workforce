@@ -1,3 +1,9 @@
+## [0.148.0](https://github.com/nanobpm/nano-workforce/compare/v0.147.0...v0.148.0) (2026-08-26)
+
+### Features
+
+* **agentic:** bridge escalate-policy ACP permission requests to the nwf Tasks inbox ([#562](https://github.com/nanobpm/nano-workforce/issues/562)) ([44e5cfb](https://github.com/nanobpm/nano-workforce/commit/44e5cfb3ff262fa50db17466f690b64eb3405e56)), closes [#559](https://github.com/nanobpm/nano-workforce/issues/559) [#setMode](https://github.com/nanobpm/nano-workforce/issues/setMode) [#structuredRegion](https://github.com/nanobpm/nano-workforce/issues/structuredRegion) [#561](https://github.com/nanobpm/nano-workforce/issues/561)
+
 ## [0.147.0](https://github.com/nanobpm/nano-workforce/compare/v0.146.0...v0.147.0) (2026-08-26)
 
 ### Features
