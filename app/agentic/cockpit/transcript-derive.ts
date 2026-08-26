@@ -18,6 +18,7 @@ import {
   type DerivedTool,
   type DerivedView,
   deriveViewFromChunks,
+  type PermissionOptionKind,
 } from "../transcript-events.ts";
 import type { TranscriptDataReport } from "./transcript-render.ts";
 
@@ -177,9 +178,11 @@ function renderTool(doc: DocumentLike, tool: DerivedTool): ElementLike {
     const pre = el(doc, "pre", "cockpit-transcript-diff");
     pre.setAttribute("data-diff", "true");
     for (const line of diff.lines) {
-      // Block-level row (matching the message rows) so each diff line renders on its
-      // own line inside the <pre> without depending on host CSS forcing display:block.
-      const row = el(doc, "div", "cockpit-transcript-diff-line", line.text);
+      // A <pre> may only contain phrasing content, so each diff line is a phrasing <span>
+      // (not a block <div>, which would be invalid markup) carrying a trailing "\n". The
+      // enclosing <pre> preserves that newline, so lines break onto their own line without
+      // depending on host CSS forcing display:block.
+      const row = el(doc, "span", "cockpit-transcript-diff-line", `${line.text}\n`);
       row.setAttribute("data-diff-line", line.kind);
       pre.appendChild(row);
     }
@@ -196,7 +199,7 @@ function renderTool(doc: DocumentLike, tool: DerivedTool): ElementLike {
 }
 
 /** Does a permission option kind allow (true) or reject (false) the proposed action? */
-function optionAllows(kind: string): boolean {
+function optionAllows(kind: PermissionOptionKind): boolean {
   return kind === "allow-once" || kind === "allow-always";
 }
 
