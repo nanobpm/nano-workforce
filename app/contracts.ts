@@ -136,6 +136,13 @@ export const ENV_CONTRACTS = {
     owner: "app/service.ts",
     semantics: "Minutes between review nudges.",
   },
+  NANO_PR_MERGE_LANDED_WAIT_TIMEOUT: {
+    category: "env",
+    name: "NANO_PR_MERGE_LANDED_WAIT_TIMEOUT",
+    owner: "app/service.ts",
+    semantics:
+      "How long the merge loop waits for a queued PR to actually land before escalating (FEEL/ISO-8601 duration).",
+  },
   NANO_PR_AUTO_MERGE: {
     category: "env",
     name: "NANO_PR_AUTO_MERGE",

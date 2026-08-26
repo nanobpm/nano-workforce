@@ -41,6 +41,7 @@ import {
 const MODEL = readFileSync("resources/processes/merge-loop.bpmn", "utf8");
 
 const AGENT_SLA_MS = 30 * 60 * 1000; // matches the PT30M we start instances with
+const LANDED_WAIT_MS = 30 * 60 * 1000; // matches the PT30M landedWaitTimeout we start instances with
 
 type Output = Record<string, unknown>;
 type Responder = Output | Output[] | ((job: { variables: Record<string, unknown> }) => Output);
@@ -80,6 +81,7 @@ const DEFAULT_VARS: Record<string, unknown> = {
   rebaseRound: 0,
   mergeRetryRound: 0,
   agentSlaTimeout: "PT30M",
+  landedWaitTimeout: "PT30M",
   abandonBrief: null,
   failingChecksList: null,
   status: null,
@@ -206,9 +208,34 @@ test("a queued merge parks on the event gateway; the landed message marks it mer
   const engine = await boot({ responses: { "pr.merge": { mergeStatus: "queued" } } });
   await engine.publishMessage({ name: "deps-cleared", correlationKey: "pr-1" });
   await engine.publishMessage({ name: "merge-ready", correlationKey: "pr-1", variables: { mergeState: "ready" } });
-  assertThatInstance(engine, byProcessId("merge-loop")).isActive().hasActiveElements("wait-landed", "wait-evicted");
+  assertThatInstance(engine, byProcessId("merge-loop")).isActive().hasActiveElements("wait-landed", "wait-evicted", "wait-landed-timeout");
   await engine.publishMessage({ name: "merge-landed", correlationKey: "pr-1" });
   assertThatInstance(engine, byProcessId("merge-loop")).hasCompleted().hasCompletedElements("mark-merged");
+});
+
+test("a queued merge that never lands escalates when the landing timeout fires (#556)", async () => {
+  // The Mergify wedge: `attempt-merge` classifies the merge `queued` on an ambiguous signal, but the
+  // repo never actually enqueued the PR, so `merge-landed` can never be published. Without the timer
+  // arm the token would park at `wait-landed` forever (ACTIVE, no incident). The timer bounds it.
+  const engine = await boot({ responses: { "pr.merge": { mergeStatus: "queued" } } });
+  await engine.publishMessage({ name: "deps-cleared", correlationKey: "pr-1" });
+  await engine.publishMessage({ name: "merge-ready", correlationKey: "pr-1", variables: { mergeState: "ready" } });
+  assertThatInstance(engine, byProcessId("merge-loop")).isActive().hasActiveElement("wait-landed");
+  await engine.advanceTime(LANDED_WAIT_MS + 1);
+  await assertThatUserTask(engine, { instance: byProcessId("merge-loop"), elementId: "wait-merge-answer" }).isCreated();
+  assertThatInstance(engine, byProcessId("merge-loop")).hasCompletedElements("merge-esc-landed");
+  assert(!completedElementIds(engine).has("mark-merged"), "a never-landed queued merge must not mark-merged");
+  assertStringIncludes(String(escalation(engine).question ?? ""), "did not land within the merge-queue landing timeout", "the escalation must name the landing-timeout trigger");
+});
+
+test("answering the landing-timeout escalation re-arms the merge poller (#556)", async () => {
+  const engine = await boot({ responses: { "pr.merge": { mergeStatus: "queued" } } });
+  await engine.publishMessage({ name: "deps-cleared", correlationKey: "pr-1" });
+  await engine.publishMessage({ name: "merge-ready", correlationKey: "pr-1", variables: { mergeState: "ready" } });
+  await engine.advanceTime(LANDED_WAIT_MS + 1);
+  await assertThatUserTask(engine, { instance: byProcessId("merge-loop"), elementId: "wait-merge-answer" }).isCreated();
+  await engine.completeUserTask(await mergeAnswerTaskKey(engine), { answer: "queued it manually, retry" });
+  assertThatInstance(engine, byProcessId("merge-loop")).isActive().hasActiveElement("wait-mergeable");
 });
 
 test("an evicted queued merge re-arms the poller rather than completing", async () => {

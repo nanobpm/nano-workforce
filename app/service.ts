@@ -54,6 +54,7 @@ import {
 import { activeStatusesFor, derivedTrackingTable } from "./instanceTracking.ts";
 import { pollLineage } from "./lineage.ts";
 import { mergeLanes, readExclusions } from "./mergeExclusion.ts";
+import { mergeLandedWaitTimeout } from "./mergeLandedWait.ts";
 import {
   freshHeadRunAction,
   headRunPresenceCount,
@@ -155,6 +156,18 @@ export const AGENT_SLA_TIMEOUT = agentSlaTimeout(process.env.NANO_PR_AGENT_SLA_T
  * `review-ready`). ISO-8601 duration; a malformed `NANO_PR_REVIEW_WAIT_TIMEOUT` falls back to the
  * default so an uninterpretable timer is never deployed. */
 export const REVIEW_WAIT_TIMEOUT = reviewWaitTimeout(process.env.NANO_PR_REVIEW_WAIT_TIMEOUT);
+
+/** How long the merge loop waits for a `queued` PR to actually land before escalating to a human.
+ * Seeded as the `landedWaitTimeout` process variable at merge start and evaluated by the merge-loop's
+ * `wait-landed-timeout` timer catch (the timer arm of the `eg-landed` event-based gateway, racing the
+ * `merge-landed` / `merge-evicted` messages). `attempt-merge` classifies a merge as `queued` on an
+ * ambiguous "merge queue" signal without verifying a real enqueue, so on a repo that never actually
+ * queues a plain `gh pr merge` (e.g. Mergify) the loop would otherwise park at `wait-landed` forever
+ * (issue #556). ISO-8601 duration; a malformed `NANO_PR_MERGE_LANDED_WAIT_TIMEOUT` falls back to the
+ * default so an uninterpretable timer is never deployed. */
+export const MERGE_LANDED_WAIT_TIMEOUT = mergeLandedWaitTimeout(
+  process.env.NANO_PR_MERGE_LANDED_WAIT_TIMEOUT,
+);
 
 /** Cooldown (ms) between the poller's automatic Copilot re-request nudges for a single waiting PR.
  * Copilot dismisses re-requests, so the poller retries — but not on every tick; this throttles it
@@ -708,6 +721,7 @@ export async function startMerge(
       mergeRetryRound: 0,
       mergeRetryMax: MAX_MERGE_RETRIES,
       agentSlaTimeout: AGENT_SLA_TIMEOUT,
+      landedWaitTimeout: MERGE_LANDED_WAIT_TIMEOUT,
       // Lineage (issue #245): thread the origin identity onto the merge instance (see startMerge).
       rootRequestKey,
       abandonUrl: abUrl,
