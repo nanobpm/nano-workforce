@@ -24,6 +24,7 @@ import { readFileSync } from "node:fs";
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { CONFORMANCE_ESCALATION_ELEMENT } from "./conformance.ts";
 import { DELIVERY_HUMAN_ELEMENT, isDeliveryHumanElement } from "./deliveryHuman.ts";
+import { ACP_PERMISSION_ELEMENT } from "./userTasks.ts";
 
 const now = () => new Date().toISOString();
 
@@ -92,13 +93,18 @@ export const CONFORMANCE_ESCALATION_TASK_ELEMENT = CONFORMANCE_ESCALATION_ELEMEN
 
 /** The user-task `elementId`s a HUMAN operator may complete from the Tasks inbox via the one canonical
  *  `complete-user-task` door: every agent-answerable escalation PLUS the human-only `feature-blocked`
- *  and `conformance-escalation` acknowledgements. The AGENT completer stays scoped to
- *  `ESCALATION_TASK_ELEMENTS` (neither ack), so widening the human surface never lets an agent retire
- *  a blocked run or a conformance review. */
+ *  and `conformance-escalation` acknowledgements, PLUS the advisory ACP permission prompt
+ *  (`ACP_PERMISSION_ELEMENT`, issue #559) a bridged escalate-policy `session/request_permission` raises.
+ *  The AGENT completer stays scoped to `ESCALATION_TASK_ELEMENTS` (none of these three), so widening the
+ *  human surface never lets an agent retire a blocked run, a conformance review, or an agent-permission
+ *  prompt. The permission element has no static `.form` (it is not a BPMN user task), so
+ *  `validateEscalationVariables` leaves its Allow/Deny variables unenforced — the permission bridge
+ *  translates them into a RESOLUTION frame (`app/agentic/permission-bridge.ts`). */
 export const HUMAN_COMPLETABLE_ELEMENTS: ReadonlySet<string> = new Set([
   ...ESCALATION_TASK_ELEMENTS,
   FEATURE_BLOCKED_TASK_ELEMENT,
   CONFORMANCE_ESCALATION_TASK_ELEMENT,
+  ACP_PERMISSION_ELEMENT,
 ]);
 
 /** Each escalation `elementId` → the `.form` whose contract governs its completion variables (the

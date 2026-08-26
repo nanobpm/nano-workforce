@@ -292,6 +292,14 @@ export const ENV_CONTRACTS = {
     owner: "app/agentGuide.ts",
     semantics: "Engine transport selector.",
   },
+  NANO_WORKFORCE_PERMISSION_ESCALATION: {
+    category: "env",
+    name: "NANO_WORKFORCE_PERMISSION_ESCALATION",
+    owner: "app/agentic/permission-bridge.ts",
+    semantics:
+      "Per-hire opt-in master switch for the ACP permission-escalation bridge (issue #559, ADR 0056). When on ('1'/'true'/'on'/'yes'), an escalate-policy session/request_permission is bridged to a nano-workforce Tasks-inbox escalation and the operator's Allow/Deny answer is flowed back down the relay as a permission RESOLUTION. Default OFF → yolo auto-allow: no user task, no prompt. A yolo-policy request never reaches the bridge regardless.",
+    default: "off",
+  },
 } as const satisfies Record<string, EnvContract>;
 
 /** The set of declared config-key names — the single typed vocabulary of env keys. */
