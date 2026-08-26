@@ -302,9 +302,9 @@ export const CORE_TRANSCRIPT_VOCAB: TranscriptVocab = Object.freeze({
   },
   // ACP `plan` mapping: ACP `session/update` plan updates map onto the EXISTING `step`/`turn`
   // vocabulary rather than a new kind — an ACP plan ENTRY becomes a `step` (its `label` is the plan
-  // entry's title, its optional `index` the entry ordinal), and a plan/turn BOUNDARY becomes a `turn`
-  // (its `index` the ACP turn/plan ordinal). The decoders below already cope with an ACP-shaped
-  // `label`/`index`, so no new kind is needed.
+  // entry's title; the entry ordinal is not preserved, as `StepEvent` carries only a `label`), and a
+  // plan/turn BOUNDARY becomes a `turn` (its `index` the ACP turn/plan ordinal). The decoders below
+  // already cope with an ACP-shaped `label` (`step`) / `index` (`turn`), so no new kind is needed.
   turn: (body, offset) => {
     const index = num(body, "index");
     return index !== undefined ? { kind: "turn", offset, index } : { kind: "turn", offset };
