@@ -32,6 +32,7 @@ import type { CockpitRoute } from "./cockpit-route.ts";
 import { renderSupply } from "./supply-render.ts";
 import type { SupplyReport, SupplyView } from "./supply-view.ts";
 import { supplyView } from "./supply-view.ts";
+import { type RenderDerivedTranscriptOptions, renderDerivedTranscript } from "./transcript-derive.ts";
 import { renderTranscripts, replayTranscript, type TranscriptDataReport } from "./transcript-render.ts";
 import type { TranscriptListReport } from "./transcript-view.ts";
 import { transcriptsView } from "./transcript-view.ts";
@@ -88,6 +89,16 @@ export interface SupplyCockpitEnv {
   readonly pastFetchTimeoutMs?: number;
   /** Notified of a fetch/render/relay error (the poll keeps going). */
   readonly onError?: (err: unknown) => void;
+  /**
+   * The seam the wave-2 escalation bridge attaches to: threaded into the STRUCTURED replay view's
+   * {@link RenderDerivedTranscriptOptions.onPermissionResolve}, so a pending escalate-permission
+   * prompt's Allow/Deny click reaches the bridge. Optional (default `undefined`): the structured view
+   * still renders, its prompt buttons just have no handler. NOTE (runtime-layer truth): this is the
+   * TYPED boot/replay path exercised by unit tests + the published package, NOT the operator's live
+   * browser cockpit (`pages/cockpit/mount.js`, a hand-maintained drift twin) — surfacing the prompt
+   * there is a separate follow-up.
+   */
+  readonly onPermissionResolve?: RenderDerivedTranscriptOptions["onPermissionResolve"];
 }
 
 /** The running supply cockpit; dispose to stop polling and tear down the terminal. */
@@ -132,6 +143,10 @@ class SupplyCockpit implements SupplyCockpitHandle {
   readonly #env: SupplyCockpitEnv;
   readonly #listRegion: ElementLike;
   readonly #pastRegion: ElementLike | undefined;
+  // A dedicated volatile region the STRUCTURED derived view (messages, rich tool/diff cards, permission
+  // prompts) is mounted into on a replay — beside, and additive to, the byte-level terminal replay
+  // (which is left untouched). Present only when the transcript read endpoints are wired.
+  readonly #structuredRegion: ElementLike | undefined;
   readonly #terminalHost: ElementLike;
   readonly #terminalTitle: ElementLike;
   readonly #terminalNote: ElementLike;
@@ -247,6 +262,14 @@ class SupplyCockpit implements SupplyCockpitHandle {
     this.#terminalHost.className = "cockpit-terminal-host";
     this.#terminalHost.setAttribute("data-terminal", "host");
     this.#terminalPanel.appendChild(this.#terminalHost);
+    // The STRUCTURED derived view is mounted here on a replay, additive beside the byte terminal above.
+    // Only exists when the transcript read endpoints are wired (same pairing as the past-sessions list).
+    if (env.fetchTranscripts !== undefined) {
+      this.#structuredRegion = env.doc.createElement("div");
+      this.#structuredRegion.className = "cockpit-structured-region";
+      this.#structuredRegion.setAttribute("data-structured", "region");
+      this.#terminalPanel.appendChild(this.#structuredRegion);
+    }
     // A status note under the terminal, shown while a LIVE drill has connected but no output has
     // arrived yet (a quiet job between frames): without it the panel is an indistinguishable blank
     // black rectangle, so the operator can't tell "connected, waiting" from "broken". Cleared the
@@ -284,6 +307,11 @@ class SupplyCockpit implements SupplyCockpitHandle {
     // Any mode change replaces what's behind the panel, so the prior "waiting for output" note is
     // stale — clear it. A live drill re-arms it (below) once its fresh terminal is mounted.
     this.#setNote(undefined);
+    // The STRUCTURED derived view is only valid alongside a replay. Any non-replay mode (a live drill
+    // or idle) must clear it, or a stale derived transcript / pending permission prompt would linger —
+    // visible and CLICKABLE — over the live terminal, risking an operator action against the wrong
+    // callId. A replay re-mounts it (in replay(), after this #setMode("replay", …)).
+    if (mode !== "replay") this.#structuredRegion?.replaceChildren();
   }
 
   /** Show (or clear) the terminal status note — the "connected, waiting for output" affordance. */
@@ -577,6 +605,14 @@ class SupplyCockpit implements SupplyCockpitHandle {
       const session = new TerminalSession({ stream, sink, send: () => {}, from: data.from });
       replayTranscript(session, data);
       this.#setMode("replay", stream);
+      // Additively mount the STRUCTURED derived view beside the byte replay above (the byte replay is
+      // left untouched). The env's onPermissionResolve seam is threaded into the render so a pending
+      // escalate-permission prompt's Allow/Deny click reaches whatever the bridge wires there.
+      if (this.#structuredRegion !== undefined) {
+        renderDerivedTranscript(this.#structuredRegion, this.#env.doc, data, {
+          onPermissionResolve: this.#env.onPermissionResolve,
+        });
+      }
       // Re-render the past list so the just-selected session shows as active (best-effort).
       void this.#refreshPast(this.#route.kind === "worker" ? this.#route.instance : undefined);
     } catch (err) {

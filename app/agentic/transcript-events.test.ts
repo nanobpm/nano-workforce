@@ -275,6 +275,14 @@ test("core vocab: malformed permission envelopes fall back to raw stream-chunk",
     }).kind,
     "stream-chunk",
   );
+  // resolution with a present-but-NON-STRING `by` (e.g. 123) — rejected, not accepted with `by` dropped
+  assertEquals(
+    parseTranscriptEvent({
+      offset: 0,
+      chunk: env("permission", { phase: "resolution", callId: "p1", optionId: "allow", allowed: true, by: 123 }),
+    }).kind,
+    "stream-chunk",
+  );
   // missing callId
   assertEquals(
     parseTranscriptEvent({ offset: 0, chunk: env("permission", { phase: "request", policy: "escalate", options: REQUEST_OPTIONS }) }).kind,
