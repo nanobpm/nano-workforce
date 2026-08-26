@@ -1,3 +1,9 @@
+## [0.147.0](https://github.com/nanobpm/nano-workforce/compare/v0.146.0...v0.147.0) (2026-08-26)
+
+### Features
+
+* **cockpit:** rich tool/diff cards + permission prompt mounted into the typed replay path ([#561](https://github.com/nanobpm/nano-workforce/issues/561)) ([4bd04a0](https://github.com/nanobpm/nano-workforce/commit/4bd04a06f12569e418566cb47b8a7bbf053cdb20)), closes [#559](https://github.com/nanobpm/nano-workforce/issues/559) [#setMode](https://github.com/nanobpm/nano-workforce/issues/setMode) [#structuredRegion](https://github.com/nanobpm/nano-workforce/issues/structuredRegion)
+
 ## [0.146.0](https://github.com/nanobpm/nano-workforce/compare/v0.145.1...v0.146.0) (2026-08-26)
 
 ### Features
