@@ -36,6 +36,7 @@ export {
 export {
   type DerivedTranscriptDom,
   deriveTranscript,
+  type RenderDerivedTranscriptOptions,
   renderDerivedTranscript,
 } from "./transcript-derive.ts";
 export {

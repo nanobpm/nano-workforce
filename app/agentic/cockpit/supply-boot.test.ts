@@ -7,8 +7,10 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { FakeDocument, FakeElement, FakeSocket } from "../../../test/agentic-cockpit-doubles.ts";
+import { TRANSCRIPT_EVENT_MARKER, TRANSCRIPT_EVENT_VERSION } from "../transcript-events.ts";
 import { bootSupplyCockpit, type SupplyCockpitEnv } from "./supply-boot.ts";
 import type { SupplyReport } from "./supply-view.ts";
+import type { TranscriptDataReport } from "./transcript-render.ts";
 
 const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
 
@@ -357,4 +359,79 @@ test("a drill whose terminal build throws resets the panel to idle instead of le
   cockpit.drill("wk-a");
   assert.equal(cockpit.currentMode, "live");
   assert.equal(cockpit.currentStream, "wk-a");
+});
+
+// A transcript envelope (marker + kind + fields), matching the one event grammar the fold parses.
+function env(kind: string, extra: Record<string, unknown> = {}): string {
+  return JSON.stringify({ [TRANSCRIPT_EVENT_MARKER]: TRANSCRIPT_EVENT_VERSION, kind, ...extra });
+}
+
+// A captured transcript carrying a pending ESCALATE permission request, for the structured replay path.
+function permissionTranscript(stream: string): TranscriptDataReport {
+  const chunks = [
+    env("turn", { index: 0 }),
+    env("message", { role: "assistant", text: "I need to run a command" }),
+    env("permission", {
+      phase: "request",
+      callId: "perm-1",
+      policy: "escalate",
+      title: "Run `rm -rf build`?",
+      options: [
+        { optionId: "allow", name: "Allow", kind: "allow-once" },
+        { optionId: "deny", name: "Deny", kind: "reject-once" },
+      ],
+    }),
+  ];
+  return { stream, from: 0, gap: false, nextOffset: chunks.length, entries: chunks.map((chunk, offset) => ({ offset, chunk })) };
+}
+
+// A rig whose replay endpoints (list + per-session bytes) are wired, plus an optional permission hook.
+function replayRig(onPermissionResolve?: SupplyCockpitEnv["onPermissionResolve"]): {
+  readonly env: SupplyCockpitEnv;
+  readonly host: FakeElement;
+  readonly data: TranscriptDataReport;
+} {
+  const r = rig();
+  const data = permissionTranscript("job:done");
+  const env: SupplyCockpitEnv = {
+    ...r.env,
+    fetchTranscripts: () => Promise.resolve({ count: 0, transcripts: [] }),
+    fetchTranscript: () => Promise.resolve(data),
+    ...(onPermissionResolve !== undefined ? { onPermissionResolve } : {}),
+  };
+  return { env, host: r.host, data };
+}
+
+test("replay MOUNTS the structured derived view beside the byte replay (typed boot/replay path)", async () => {
+  const { env, host } = replayRig();
+  const cockpit = bootSupplyCockpit(env);
+  await cockpit.replay("job:done");
+
+  // The dedicated structured region exists and now holds the derived view (the byte terminal replay,
+  // asserted elsewhere, is untouched — this is additive beside it).
+  const region = host.byData("structured", "region")[0];
+  assert.ok(region !== undefined, "the structured region is present");
+  assert.equal(region?.byClass("cockpit-transcript-derived").length, 1, "the derived structured view is mounted");
+  assert.equal(host.byData("permission", "request").length, 1, "the permission prompt is rendered in the structured view");
+});
+
+test("a SupplyCockpitEnv.onPermissionResolve hook is threaded into the structured render so a click reaches it", async () => {
+  const resolutions: Array<{ callId: string; optionId: string; allowed: boolean }> = [];
+  const { env, host } = replayRig((resolution) => resolutions.push(resolution));
+  const cockpit = bootSupplyCockpit(env);
+  await cockpit.replay("job:done");
+
+  const allow = host.byClass("cockpit-transcript-permission-option").find((b) => b.getAttribute("data-option-id") === "allow");
+  assert.ok(allow !== undefined, "the Allow button rendered");
+  allow?.dispatch("click");
+  assert.deepEqual(resolutions, [{ callId: "perm-1", optionId: "allow", allowed: true }]);
+});
+
+test("the structured view renders even without an onPermissionResolve hook (buttons are inert, no throw)", async () => {
+  const { env, host } = replayRig();
+  const cockpit = bootSupplyCockpit(env);
+  await cockpit.replay("job:done");
+  const allow = host.byClass("cockpit-transcript-permission-option").find((b) => b.getAttribute("data-option-id") === "allow");
+  assert.ok(allow !== undefined, "the Allow button rendered without a hook");
+  allow?.dispatch("click"); // no handler wired — must not throw
 });
