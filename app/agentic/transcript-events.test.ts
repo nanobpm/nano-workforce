@@ -184,3 +184,219 @@ test("deriveViewFromChunks: a mixed log derives typed structure while retaining 
   assertEquals(view.messages.map((m) => m.text), ["hi"]);
   assertEquals(view.rawChunkCount, 1);
 });
+
+// --- permission kind (issue #559) -----------------------------------------------------------------
+
+const REQUEST_OPTIONS = [
+  { optionId: "allow", name: "Allow", kind: "allow-once" },
+  { optionId: "deny", name: "Deny", kind: "reject-once" },
+];
+
+test("core vocab decodes a permission REQUEST envelope", () => {
+  const chunk = env("permission", {
+    phase: "request",
+    callId: "p1",
+    policy: "escalate",
+    options: REQUEST_OPTIONS,
+    toolName: "write_file",
+    title: "Write to /etc/hosts?",
+    reason: "The agent wants to modify a system file",
+  });
+  assertEquals(parseTranscriptEvent({ offset: 1, chunk }), {
+    kind: "permission",
+    phase: "request",
+    offset: 1,
+    callId: "p1",
+    policy: "escalate",
+    options: REQUEST_OPTIONS,
+    toolName: "write_file",
+    title: "Write to /etc/hosts?",
+    reason: "The agent wants to modify a system file",
+  });
+});
+
+test("core vocab decodes a permission REQUEST with only required fields (optional fields omitted)", () => {
+  const chunk = env("permission", { phase: "request", callId: "p2", policy: "yolo", options: REQUEST_OPTIONS });
+  assertEquals(parseTranscriptEvent({ offset: 0, chunk }), {
+    kind: "permission",
+    phase: "request",
+    offset: 0,
+    callId: "p2",
+    policy: "yolo",
+    options: REQUEST_OPTIONS,
+  });
+});
+
+test("core vocab decodes a permission RESOLUTION envelope", () => {
+  const chunk = env("permission", { phase: "resolution", callId: "p1", optionId: "allow", allowed: true, by: "operator" });
+  assertEquals(parseTranscriptEvent({ offset: 2, chunk }), {
+    kind: "permission",
+    phase: "resolution",
+    offset: 2,
+    callId: "p1",
+    optionId: "allow",
+    allowed: true,
+    by: "operator",
+  });
+});
+
+test("core vocab: malformed permission envelopes fall back to raw stream-chunk", () => {
+  // request missing options
+  assertEquals(
+    parseTranscriptEvent({ offset: 0, chunk: env("permission", { phase: "request", callId: "p1", policy: "escalate" }) }).kind,
+    "stream-chunk",
+  );
+  // request with a bad policy
+  assertEquals(
+    parseTranscriptEvent({
+      offset: 0,
+      chunk: env("permission", { phase: "request", callId: "p1", policy: "maybe", options: REQUEST_OPTIONS }),
+    }).kind,
+    "stream-chunk",
+  );
+  // request with a malformed option (bad kind)
+  assertEquals(
+    parseTranscriptEvent({
+      offset: 0,
+      chunk: env("permission", { phase: "request", callId: "p1", policy: "escalate", options: [{ optionId: "a", name: "A", kind: "nope" }] }),
+    }).kind,
+    "stream-chunk",
+  );
+  // resolution missing allowed
+  assertEquals(
+    parseTranscriptEvent({ offset: 0, chunk: env("permission", { phase: "resolution", callId: "p1", optionId: "allow" }) }).kind,
+    "stream-chunk",
+  );
+  // resolution with a present-but-unknown `by` provenance (rejected, not silently dropped)
+  assertEquals(
+    parseTranscriptEvent({
+      offset: 0,
+      chunk: env("permission", { phase: "resolution", callId: "p1", optionId: "allow", allowed: true, by: "robot" }),
+    }).kind,
+    "stream-chunk",
+  );
+  // missing callId
+  assertEquals(
+    parseTranscriptEvent({ offset: 0, chunk: env("permission", { phase: "request", policy: "escalate", options: REQUEST_OPTIONS }) }).kind,
+    "stream-chunk",
+  );
+  // unknown phase
+  assertEquals(
+    parseTranscriptEvent({ offset: 0, chunk: env("permission", { phase: "wat", callId: "p1" }) }).kind,
+    "stream-chunk",
+  );
+});
+
+test("mergeTranscriptVocab: the permission kind is additive — provable via a merged vocab too", () => {
+  // Registering an unrelated kind via merge must not disturb the core `permission` decoder.
+  const vocab = mergeTranscriptVocab(CORE_TRANSCRIPT_VOCAB, {
+    reasoning: (body, offset) => ({ kind: "message", offset, role: "system", text: String(body.text ?? "") }),
+  });
+  const chunk = env("permission", { phase: "request", callId: "p9", policy: "escalate", options: REQUEST_OPTIONS });
+  assertEquals(parseTranscriptEvent({ offset: 5, chunk }, vocab), {
+    kind: "permission",
+    phase: "request",
+    offset: 5,
+    callId: "p9",
+    policy: "escalate",
+    options: REQUEST_OPTIONS,
+  });
+});
+
+test("encodeTranscriptEvent round-trips the permission kind through the one parser", () => {
+  const events: TranscriptEvent[] = [
+    {
+      kind: "permission",
+      phase: "request",
+      offset: 10,
+      callId: "p1",
+      policy: "escalate",
+      options: REQUEST_OPTIONS.map((o) => ({ optionId: o.optionId, name: o.name, kind: o.kind === "allow-once" ? "allow-once" : "reject-once" })),
+      toolName: "rm",
+      title: "Delete?",
+      reason: "why",
+    },
+    { kind: "permission", phase: "resolution", offset: 11, callId: "p1", optionId: "deny", allowed: false, by: "auto" },
+  ];
+  for (const original of events) {
+    const chunk = encodeTranscriptEvent(original);
+    assertEquals(parseTranscriptEvent({ offset: original.offset, chunk }), original);
+  }
+});
+
+test("deriveView: pairs a permission request with its resolution by callId, carrying policy + options", () => {
+  const view = deriveView([
+    { kind: "turn", offset: 0, index: 0 },
+    {
+      kind: "permission",
+      phase: "request",
+      offset: 1,
+      callId: "p1",
+      policy: "escalate",
+      options: [
+        { optionId: "allow", name: "Allow", kind: "allow-once" },
+        { optionId: "deny", name: "Deny", kind: "reject-once" },
+      ],
+      title: "Write file?",
+    },
+    { kind: "permission", phase: "resolution", offset: 2, callId: "p1", optionId: "allow", allowed: true, by: "operator" },
+  ]);
+  assertEquals(view.permissions.length, 1);
+  const permission = view.permissions[0];
+  assertEquals(permission?.policy, "escalate");
+  assertEquals(permission?.title, "Write file?");
+  assertEquals(permission?.options.length, 2);
+  assertEquals(permission?.resolved, { allowed: true, optionId: "allow", offset: 2, by: "operator" });
+  // Also attached to its enclosing turn.
+  assertEquals(view.turns[0]?.permissions.length, 1);
+  assertEquals(view.turns[0]?.permissions[0]?.resolved?.optionId, "allow");
+});
+
+test("deriveView: an unresolved permission request stays pending (no resolution)", () => {
+  const view = deriveView([
+    {
+      kind: "permission",
+      phase: "request",
+      offset: 0,
+      callId: "p1",
+      policy: "escalate",
+      options: [{ optionId: "allow", name: "Allow", kind: "allow-once" }],
+    },
+  ]);
+  assertEquals(view.permissions.length, 1);
+  assertEquals(view.permissions[0]?.resolved, undefined);
+  assertEquals(view.permissions[0]?.policy, "escalate");
+  // Content before any turn event opens an implicit turn 0 (consistent with messages/tools).
+  assertEquals(view.turns.length, 1);
+  assertEquals(view.turns[0]?.permissions.length, 1);
+});
+
+test("deriveView: the policy field survives derivation for a yolo request", () => {
+  const view = deriveView([
+    {
+      kind: "permission",
+      phase: "request",
+      offset: 0,
+      callId: "p1",
+      policy: "yolo",
+      options: [{ optionId: "allow", name: "Allow", kind: "allow-always" }],
+    },
+    { kind: "permission", phase: "resolution", offset: 1, callId: "p1", optionId: "allow", allowed: true, by: "auto" },
+  ]);
+  assertEquals(view.permissions[0]?.policy, "yolo");
+  assertEquals(view.permissions[0]?.resolved?.by, "auto");
+});
+
+test("ACP plan updates map onto the existing step/turn vocabulary (no new kind)", () => {
+  // An ACP plan entry becomes a `step` (its label the entry title); a plan/turn boundary a `turn`.
+  const view = deriveViewFromChunks([
+    { offset: 0, chunk: env("turn", { index: 0 }) },
+    { offset: 1, chunk: env("step", { label: "Investigate the failing test", index: 0 }) },
+    { offset: 2, chunk: env("step", { label: "Fix the bug", index: 1 }) },
+    { offset: 3, chunk: env("turn", { index: 1 }) },
+    { offset: 4, chunk: env("step", { label: "Write a regression test" }) },
+  ]);
+  assertEquals(view.turns.length, 2);
+  assertEquals(view.turns[0]?.steps, 2);
+  assertEquals(view.turns[1]?.steps, 1);
+});

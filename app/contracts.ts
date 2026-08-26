@@ -407,9 +407,26 @@ export const WIRE_CONTRACTS = {
       "Filesystem-import request body POSTed to /actions/delivery-graph/library/import (issue #524, epic #519 S5). Declared in openapi.yaml as `ImportToLibrarySubmit`; the compose App-View's `<input type=file accept=.json>` reads the picked file's text client-side and POSTs it here as the raw `graphJson` string. The door validates + compiles it through the SAME `parseAndCompileText` pipeline preview/stage/save use, then persists `source: imported` — an uncompilable graph is a clean 400 and NOTHING is written. Its `name` defaults to the imported graph's own `name`; an explicit `name` overrides it (an unnamed graph with no override is a clean 400 — the library id is name-derived). Related to but DISTINCT from `SaveToLibrarySubmit` (which is graphJson-OR-digest and needs no required file text); consume this ONE shape across the openapi edge, the door, and the compose mount — do not re-declare a synonym.",
     shape: "{ graphJson: string, name?: string, description?: string }",
   },
+  "transcript.permission": {
+    category: "wire",
+    name: "transcript.permission",
+    owner: "app/agentic/transcript-events.ts",
+    semantics:
+      "The `permission` transcript-event envelope (issue #559) modelling ACP's `session/request_permission`, decoded by the ONE parser (`parseTranscriptEvent`) and folded by the ONE fold (`deriveView`) in app/agentic/transcript-events.ts. Two phases share the `kind:\"permission\"` discriminant, distinguished by `phase`. A REQUEST carries a stable `callId` (pairs the resolution back, like tool-call/tool-result), the producer-tagged `policy` (\"escalate\" = must ask a human, \"yolo\" = auto-allowed), the offered `options` (a NON-EMPTY array of ACP `{optionId,name,kind}` where kind is allow-once/allow-always/reject-once/reject-always — the decoder rejects a missing or empty `options`), and optional `toolName`/`title`/`reason`. A RESOLUTION carries the same `callId`, the chosen `optionId`, a boolean `allowed`, and optional `by` provenance (operator/auto). deriveView surfaces these as `DerivedPermission` (paired by callId) on `DerivedView.permissions` and `DerivedTurn.permissions`. The cockpit-render and escalation-bridge slices CONSUME this exact wire shape — do not re-declare a synonym.",
+    shape:
+      '{ nwfTranscriptEvent: 1, kind: "permission", phase: "request", callId: string, policy: "escalate"|"yolo", options: [{ optionId: string, name: string, kind: "allow-once"|"allow-always"|"reject-once"|"reject-always" }, ...Array<{ optionId: string, name: string, kind: "allow-once"|"allow-always"|"reject-once"|"reject-always" }>], toolName?: string, title?: string, reason?: string } | { nwfTranscriptEvent: 1, kind: "permission", phase: "resolution", callId: string, optionId: string, allowed: boolean, by?: "operator"|"auto" }',
+  },
 } as const satisfies Record<string, WireContract>;
 
 export const TYPE_CONTRACTS = {
+  PermissionPolicy: {
+    category: "type",
+    name: "PermissionPolicy",
+    owner: "app/agentic/transcript-events.ts",
+    semantics:
+      "The role's permission policy a `permission` transcript-event REQUEST is tagged with (issue #559): `\"escalate\"` (a human must be asked — cockpit renders an Allow/Deny prompt, the escalation bridge raises a user task) vs `\"yolo\"` (auto-allowed, never prompts). Exported from app/agentic/transcript-events.ts alongside the shared permission contract types (`PermissionOption`, `PermissionOptionKind`, `PermissionRequestEvent`, `PermissionResolutionEvent`, and the derived `DerivedPermission` surface on `DerivedView`/`DerivedTurn`). The cockpit-render and escalation-bridge siblings IMPORT these — they must not reinvent a divergent permission shape or a synonym policy enum.",
+    module: "app/agentic/transcript-events.ts",
+  },
   BlackboardEntry: {
     category: "type",
     name: "BlackboardEntry",
