@@ -32,7 +32,7 @@ import { jobStream } from "./correlation.ts";
 import {
   type DerivedPermission,
   encodeTranscriptEvent,
-  type PermissionOptionKind,
+  optionKindAllows,
   type PermissionResolutionEvent,
 } from "./transcript-events.ts";
 
@@ -47,12 +47,10 @@ export function permissionEscalationEnabled(env: Record<string, string | undefin
   return raw === "1" || raw === "true" || raw === "on" || raw === "yes";
 }
 
-/** Pure: does a permission option kind ALLOW (true) or REJECT (false) the proposed action? The option
- *  `kind` is the single source of truth (`allow-*` vs `reject-*`), mirroring the cockpit seam's own
- *  allow/deny derivation so the two paths can never disagree on what a chosen option means. */
-export function optionKindAllows(kind: PermissionOptionKind): boolean {
-  return kind === "allow-once" || kind === "allow-always";
-}
+/** Re-exported canonical allow/deny derivation (defined beside `PermissionOptionKind` in
+ *  `transcript-events.ts`). The bridge and the cockpit render seam share this ONE implementation, so the
+ *  completion-door path and the `onPermissionResolve` seam can never disagree on what a chosen option means. */
+export { optionKindAllows };
 
 /** Pure: whether the chosen `optionId` allows the action, derived from the REQUEST's own options.
  *  Returns false for an unknown option (fail-closed — an unrecognised answer denies). */

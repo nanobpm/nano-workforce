@@ -18,7 +18,7 @@ import {
   type DerivedTool,
   type DerivedView,
   deriveViewFromChunks,
-  type PermissionOptionKind,
+  optionKindAllows,
 } from "../transcript-events.ts";
 import type { TranscriptDataReport } from "./transcript-render.ts";
 
@@ -198,11 +198,6 @@ function renderTool(doc: DocumentLike, tool: DerivedTool): ElementLike {
   return card;
 }
 
-/** Does a permission option kind allow (true) or reject (false) the proposed action? */
-function optionAllows(kind: PermissionOptionKind): boolean {
-  return kind === "allow-once" || kind === "allow-always";
-}
-
 /**
  * Render one permission prompt card from a {@link DerivedPermission}:
  * - a pending `escalate` request → interactive Allow/Deny buttons wired to `onPermissionResolve`;
@@ -241,7 +236,7 @@ function renderPermission(doc: DocumentLike, perm: DerivedPermission, options: R
   card.setAttribute("data-status", "pending");
   const actions = el(doc, "div", "cockpit-transcript-permission-actions");
   for (const option of perm.options) {
-    const allowed = optionAllows(option.kind);
+    const allowed = optionKindAllows(option.kind);
     const button = el(doc, "button", "cockpit-transcript-permission-option", option.name);
     button.setAttribute("type", "button");
     button.setAttribute("data-option-id", option.optionId);
