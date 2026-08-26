@@ -86,7 +86,9 @@ against the wrong base will not be merged into the epic.
    `Depends-on:`** — that keyword is a merge barrier (scraped into the PR's
    merge-dependency set and honored natively by Mergify), so pointing it at an
    issue registers a bogus, unmergeable dependency. Reserve `Depends-on:` strictly
-   for real PR→PR merge barriers (as in `fix-ci.md` / `rebase.md`).
+   for real PR→PR merge barriers — i.e. only when this PR genuinely cannot merge
+   until another *PR* lands first, written as `Depends-on: owner/repo#123` (never
+   pointing at an issue).
 5. Clean up any scratch clone/worktree you created outside the commit.
 
 ## Closing keywords vs. scope splits — don't close a broader-scoped parent
