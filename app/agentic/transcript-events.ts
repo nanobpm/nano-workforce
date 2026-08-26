@@ -131,7 +131,7 @@ export interface LifecycleEvent extends TranscriptEventBase {
 // It is decoded here (the ONE parser) and folded here (the ONE fold) into a paired {@link DerivedPermission}.
 // These exported types are the SINGLE SOURCE OF TRUTH the sibling slices (cockpit render, escalation
 // bridge) consume — they must import these, never reinvent a divergent permission shape. See the durable
-// declaration in `app/contracts.ts` (`type:PermissionPolicy`, `wire:permission.request/resolution`).
+// declaration in `app/contracts.ts` (`type:PermissionPolicy`, `wire:transcript.permission`).
 
 /**
  * The role's permission policy the PRODUCER tags a request with. `"escalate"` means a human must be
@@ -345,6 +345,9 @@ export const CORE_TRANSCRIPT_VOCAB: TranscriptVocab = Object.freeze({
       if (optionId === undefined) return undefined;
       if (typeof body.allowed !== "boolean") return undefined;
       const by = str(body, "by");
+      // Reject a malformed `by` rather than silently dropping it: a present-but-unknown provenance is a
+      // producer bug, and swallowing it would make the typed event diverge from the on-wire JSON.
+      if (by !== undefined && by !== "operator" && by !== "auto") return undefined;
       const event: PermissionResolutionEvent = {
         kind: "permission",
         phase: "resolution",
@@ -353,7 +356,7 @@ export const CORE_TRANSCRIPT_VOCAB: TranscriptVocab = Object.freeze({
         optionId,
         allowed: body.allowed,
       };
-      return { ...event, ...(by === "operator" || by === "auto" ? { by } : {}) };
+      return { ...event, ...(by !== undefined ? { by } : {}) };
     }
     return undefined;
   },
@@ -445,7 +448,7 @@ export interface DerivedMessage {
  * The cockpit and the escalation bridge read THIS — they never re-parse the log.
  */
 export interface DerivedPermission {
-  readonly callId?: string;
+  readonly callId: string;
   readonly policy: PermissionPolicy;
   readonly options: readonly PermissionOption[];
   readonly toolName?: string;
@@ -518,7 +521,6 @@ export function deriveView(events: Iterable<TranscriptEvent>): DerivedView {
   const openTools = new Map<string, DerivedTool>();
   let anonymousTool: DerivedTool | undefined;
   const openPermissions = new Map<string, DerivedPermission>();
-  let anonymousPermission: DerivedPermission | undefined;
   let rawByteLength = 0;
   let rawChunkCount = 0;
   let lifecycle: "open" | "completed" | "exited" = "open";
@@ -597,15 +599,13 @@ export function deriveView(events: Iterable<TranscriptEvent>): DerivedView {
           };
           permissions.push(permission);
           ensureTurn(event.offset).permissions.push(permission);
-          if (event.callId !== undefined) openPermissions.set(event.callId, permission);
-          else anonymousPermission = permission;
+          openPermissions.set(event.callId, permission);
         } else {
-          const target = event.callId !== undefined ? openPermissions.get(event.callId) : anonymousPermission;
+          const target = openPermissions.get(event.callId);
           if (target !== undefined) {
             pairResolution(permissions, target, event);
             pairResolutionInTurns(turns, target, event);
-            if (event.callId !== undefined) openPermissions.delete(event.callId);
-            else anonymousPermission = undefined;
+            openPermissions.delete(event.callId);
           }
         }
         break;

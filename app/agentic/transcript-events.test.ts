@@ -267,6 +267,14 @@ test("core vocab: malformed permission envelopes fall back to raw stream-chunk",
     parseTranscriptEvent({ offset: 0, chunk: env("permission", { phase: "resolution", callId: "p1", optionId: "allow" }) }).kind,
     "stream-chunk",
   );
+  // resolution with a present-but-unknown `by` provenance (rejected, not silently dropped)
+  assertEquals(
+    parseTranscriptEvent({
+      offset: 0,
+      chunk: env("permission", { phase: "resolution", callId: "p1", optionId: "allow", allowed: true, by: "robot" }),
+    }).kind,
+    "stream-chunk",
+  );
   // missing callId
   assertEquals(
     parseTranscriptEvent({ offset: 0, chunk: env("permission", { phase: "request", policy: "escalate", options: REQUEST_OPTIONS }) }).kind,
