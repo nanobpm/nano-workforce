@@ -44,6 +44,15 @@ export const PR_WAIT_ANSWER_ELEMENT = "wait-answer";
  *  canonical `completeUserTask` door and surfaced in this same Tasks inbox. */
 export const PR_WAIT_MERGE_ANSWER_ELEMENT = "wait-merge-answer";
 
+/** The ACP permission-prompt escalation (issue #559, ADR 0056) — the Tasks-inbox kind a bridged
+ *  `session/request_permission` surfaces under when an escalate-policy agent asks a human to Allow/Deny
+ *  a proposed action. Unlike the other escalation elements this is NOT a BPMN user-task element; it is
+ *  the advisory app-tier permission bridge's row kind, raised from a derived permission REQUEST and
+ *  answered through the same canonical `completeEscalationAsHuman` door as every other escalation, with
+ *  the operator's answer flowed back down the relay as a permission RESOLUTION. The bridge is OPT-IN per
+ *  hire — a `yolo`-policy request never reaches this path (see `app/agentic/permission-bridge.ts`). */
+export const ACP_PERMISSION_ELEMENT = "acp-permission";
+
 /** One row per currently-open native user-task escalation, denormalised for the Tasks page. Keyed on
  *  the completable `user_task_key` (a task is open at most once). Present iff the engine reports the
  *  task open; `pollUserTasks` deletes it once the task is gone. */
@@ -83,6 +92,7 @@ export const USER_TASK_KIND_LABELS: Readonly<Record<string, string>> = {
   [PR_WAIT_MERGE_ANSWER_ELEMENT]: "PR merge",
   [CONFORMANCE_ESCALATION_ELEMENT]: "Conformance review",
   [DELIVERY_HUMAN_ELEMENT]: "Delivery: human step",
+  [ACP_PERMISSION_ELEMENT]: "Agent permission",
 };
 
 /** The Tasks-inbox label for an open user-task `elementId`, or `undefined` when the element is not a
@@ -99,7 +109,7 @@ export function userTaskKindLabel(elementId: string): string | undefined {
 export interface UserTaskContext {
   userTaskKey: string;
   elementId: string;
-  subjectType: "feature" | "plan" | "pr" | "delivery";
+  subjectType: "feature" | "plan" | "pr" | "delivery" | "agent";
   subjectKey: string;
   /** The subject's human-readable title from its own row (`feature_runs`/`plans`/`pull_requests`.
    *  `title`). Optional/blank tolerated — `buildUserTaskRow` coalesces it to `subjectKey` so the

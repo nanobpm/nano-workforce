@@ -143,6 +143,15 @@ export type PermissionPolicy = "escalate" | "yolo";
 /** The kind of a permission option — mirrors ACP's option kinds (allow/reject × once/always). */
 export type PermissionOptionKind = "allow-once" | "allow-always" | "reject-once" | "reject-always";
 
+/** Pure, canonical: does a permission option kind ALLOW (true) or REJECT (false) the proposed action?
+ *  The `allow-*` vs `reject-*` prefix is the single source of truth. This lives beside
+ *  {@link PermissionOptionKind} so every consumer (the cockpit render seam and the permission-escalation
+ *  bridge) derives allow/deny from ONE implementation — the two paths can never disagree on what a
+ *  chosen option means (no drift surface). */
+export function optionKindAllows(kind: PermissionOptionKind): boolean {
+  return kind === "allow-once" || kind === "allow-always";
+}
+
 /** One offered permission option (ACP `options[]` member): a stable id, a label, and its kind. */
 export interface PermissionOption {
   readonly optionId: string;
