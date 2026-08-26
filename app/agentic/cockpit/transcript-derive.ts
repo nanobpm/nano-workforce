@@ -177,7 +177,9 @@ function renderTool(doc: DocumentLike, tool: DerivedTool): ElementLike {
     const pre = el(doc, "pre", "cockpit-transcript-diff");
     pre.setAttribute("data-diff", "true");
     for (const line of diff.lines) {
-      const row = el(doc, "span", "cockpit-transcript-diff-line", line.text);
+      // Block-level row (matching the message rows) so each diff line renders on its
+      // own line inside the <pre> without depending on host CSS forcing display:block.
+      const row = el(doc, "div", "cockpit-transcript-diff-line", line.text);
       row.setAttribute("data-diff-line", line.kind);
       pre.appendChild(row);
     }
