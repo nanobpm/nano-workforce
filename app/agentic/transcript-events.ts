@@ -162,7 +162,7 @@ export interface PermissionRequestEvent extends TranscriptEventBase {
   readonly callId: string;
   /** The producer-tagged policy the cockpit + bridge branch on. */
   readonly policy: PermissionPolicy;
-  /** The offered options (at minimum an allow and a deny). */
+  /** The offered options — always at least one (the decoder rejects an empty list). */
   readonly options: readonly PermissionOption[];
   /** The tool the proposed action would invoke, when known. */
   readonly toolName?: string;
