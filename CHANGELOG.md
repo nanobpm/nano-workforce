@@ -1,3 +1,9 @@
+## [0.148.1](https://github.com/nanobpm/nano-workforce/compare/v0.148.0...v0.148.1) (2026-08-26)
+
+### Bug Fixes
+
+* **prompts:** stop suggesting Depends-on: for parent-issue linking in feature.md ([#557](https://github.com/nanobpm/nano-workforce/issues/557)) ([3f698ba](https://github.com/nanobpm/nano-workforce/commit/3f698ba2c1ab4f43a154a8bf3f426aa343062ea4)), closes [Magikcraft/nano-bpm#988](https://github.com/Magikcraft/nano-bpm/issues/988) [#N](https://github.com/nanobpm/nano-workforce/issues/N) [#N](https://github.com/nanobpm/nano-workforce/issues/N) [#555](https://github.com/nanobpm/nano-workforce/issues/555)
+
 ## [0.148.0](https://github.com/nanobpm/nano-workforce/compare/v0.147.0...v0.148.0) (2026-08-26)
 
 ### Features
