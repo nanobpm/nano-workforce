@@ -80,8 +80,15 @@ against the wrong base will not be merged into the epic.
 3. Implement `task.prompt`. Keep the change scoped to this slice only.
 4. Commit (sign off — this repo family enforces DCO: `git commit -s`), push the
    branch, and open a pull request with `gh pr create` describing the slice and
-   linking the parent issue (`Depends-on:`/`Closes` as appropriate — but read the
-   scope-split rule below before you reach for `Closes`).
+   linking the parent issue with a **non-blocking** ref — `Refs #N` / `Part of #N`,
+   or `Closes #N` when you delivered its full scope (but read the scope-split rule
+   below before you reach for `Closes`). **Never link a parent issue with
+   `Depends-on:`** — that keyword is a merge barrier (scraped into the PR's
+   merge-dependency set and honored natively by Mergify), so pointing it at an
+   issue registers a bogus, unmergeable dependency. Reserve `Depends-on:` strictly
+   for real PR→PR merge barriers — i.e. only when this PR genuinely cannot merge
+   until another *PR* lands first, written as `Depends-on: owner/repo#123` (never
+   pointing at an issue).
 5. Clean up any scratch clone/worktree you created outside the commit.
 
 ## Closing keywords vs. scope splits — don't close a broader-scoped parent
