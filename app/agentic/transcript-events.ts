@@ -346,7 +346,10 @@ export const CORE_TRANSCRIPT_VOCAB: TranscriptVocab = Object.freeze({
       if (typeof body.allowed !== "boolean") return undefined;
       const by = str(body, "by");
       // Reject a malformed `by` rather than silently dropping it: a present-but-unknown provenance is a
-      // producer bug, and swallowing it would make the typed event diverge from the on-wire JSON.
+      // producer bug, and swallowing it would make the typed event diverge from the on-wire JSON. This
+      // covers BOTH a present-but-non-string `by` (e.g. `by: 123`, where str() coerces to undefined) and
+      // a string that isn't a known provenance — either way the on-wire `by` is present but invalid.
+      if (body.by !== undefined && by === undefined) return undefined;
       if (by !== undefined && by !== "operator" && by !== "auto") return undefined;
       const event: PermissionResolutionEvent = {
         kind: "permission",

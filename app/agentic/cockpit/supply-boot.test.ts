@@ -435,3 +435,20 @@ test("the structured view renders even without an onPermissionResolve hook (butt
   assert.ok(allow !== undefined, "the Allow button rendered without a hook");
   allow?.dispatch("click"); // no handler wired — must not throw
 });
+
+test("switching from replay to a LIVE drill CLEARS the stale structured derived view (no wrong-callId clicks)", async () => {
+  const { env, host } = replayRig();
+  const cockpit = bootSupplyCockpit(env);
+  await cockpit.replay("job:done");
+  // The structured region is populated with the derived view + pending permission prompt.
+  assert.equal(host.byData("permission", "request").length, 1, "the permission prompt is mounted on replay");
+
+  // Drilling into a live stream must tear the stale structured view down — leaving a clickable permission
+  // prompt over a live terminal risks an operator action against the wrong callId.
+  cockpit.drill("wk-a");
+  assert.equal(cockpit.currentMode, "live");
+  const region = host.byData("structured", "region")[0];
+  assert.ok(region !== undefined, "the structured region element persists (it is cleared, not removed)");
+  assert.equal(region?.byClass("cockpit-transcript-derived").length, 0, "the derived structured view is cleared on live drill");
+  assert.equal(host.byData("permission", "request").length, 0, "the stale permission prompt is gone in live mode");
+});

@@ -307,6 +307,11 @@ class SupplyCockpit implements SupplyCockpitHandle {
     // Any mode change replaces what's behind the panel, so the prior "waiting for output" note is
     // stale — clear it. A live drill re-arms it (below) once its fresh terminal is mounted.
     this.#setNote(undefined);
+    // The STRUCTURED derived view is only valid alongside a replay. Any non-replay mode (a live drill
+    // or idle) must clear it, or a stale derived transcript / pending permission prompt would linger —
+    // visible and CLICKABLE — over the live terminal, risking an operator action against the wrong
+    // callId. A replay re-mounts it (in replay(), after this #setMode("replay", …)).
+    if (mode !== "replay") this.#structuredRegion?.replaceChildren();
   }
 
   /** Show (or clear) the terminal status note — the "connected, waiting for output" affordance. */
