@@ -298,6 +298,41 @@ hand-edit the `nav` node in a page file. `scripts/sync-nav.test.ts` (run under
 `npm run sync:nav:check` is the CI-friendly verify. This is the "no drift surfaces"
 rule applied to the nav that was previously copy-pasted across every page.
 
+## The agentic cockpit has two runtimes: typed `app/agentic/cockpit/` and the browser drift twin `pages/cockpit/mount.js`
+
+The code a real operator runs in the cockpit is **not** the typed TypeScript under
+`app/agentic/cockpit/`. The app has no build step, so the browser cannot import
+that core; the page importmap resolves `@nanobpm/agentic/cockpit` to the
+**CDN-published** `@nanobpm/agentic` (`dist/cockpit/index.js`), and
+`pages/cockpit/mount.js` — loaded by both `pages/cockpit/standalone.html` and the
+console App-View `pages/cockpit/embed.html` — imports **only** `RelayChannelClient`
+and `TerminalSession` from it. Everything else (the supply projection, the render,
+the poll loop, byte replay) is **hand-re-expressed** in `mount.js` as plain browser
+ESM, kept faithful to the typed core by discipline, not by the compiler.
+
+Consequences, all of which have burned real review rounds (epic #559 bounced the
+plan **twice** on exactly this):
+
+- **A change to `app/agentic/cockpit/` does NOT reach the operator's browser.**
+  `renderDerivedTranscript`, `deriveView`, `DerivedView` and friends run only in
+  unit tests and the published package — `mount.js` references none of them. If a
+  feature must be *seen by a human*, you must **explicitly** make the parallel edit
+  in `mount.js`; the typed-source change never propagates on its own. Never write a
+  prompt, comment, test, or PR that claims a typed-cockpit change "so a real
+  operator sees it" without that parallel `mount.js` edit.
+- **There is no in-repo cockpit boot site.** `bootSupplyCockpit` / `new
+  SupplyCockpit` are constructed **nowhere** in runtime code — only in
+  `supply-boot.ts`'s own definition, the `index.ts` re-export, and `*.test.ts`.
+  `mount.js` constructs no `SupplyCockpitEnv` and calls no `bootSupplyCockpit`. Do
+  not instruct a slice to "wire X into the boot/route layer" or "pass a hook into
+  the `SupplyCockpitEnv` your boot constructs" — there is no such live call to
+  attach to. Wiring a typed seam through to the live browser is always a **separate,
+  explicit `mount.js` follow-up**; scope it as such and don't claim it as done.
+- **Treat `mount.js` as a known, hand-maintained twin** (like `pages/_nav.json`
+  above, but without a `sync` check — this drift is semantic, so no mechanical
+  guard catches it). When you touch the typed cockpit, decide up front whether the
+  browser twin needs the same edit, and say so.
+
 ## The poller owns liveness/reconciliation
 
 `main.ts` runs a **self-scheduling** poll loop (`pollOnce` in `app/service.ts`),
