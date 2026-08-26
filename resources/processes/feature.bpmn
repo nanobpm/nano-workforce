@@ -176,7 +176,7 @@
           <zeebe:linkedResource resourceId="feature.md" bindingType="latest" resourceType="GenericScript" linkName="prompt" />
         </zeebe:linkedResources>
         <zeebe:ioMapping>
-          <zeebe:input source="=&#34;&#10;&#10;---&#10;&#10;&#34; + task.prompt + (if (baseBranchBrief = null) then &#34;&#34; else baseBranchBrief) + (if (resolvedArtifacts = null or count(resolvedArtifacts[item != null]) = 0) then &#34;&#34; else (&#34;&#10;&#10;---&#10;&#10;**Bound upstream readiness (intake gate).** This feature was scheduled to wait until an upstream landed and published. Build/install/clone against EXACTLY these resolved published versions (the ones first carrying the awaited capability), and bump the consumer dependency to them — never merely the newest:&#10;&#10;&#34; + string join(resolvedArtifacts[item != null], &#34;&#10;&#34;))) + (if (customInstructions = null) then &#34;&#34; else &#34;&#10;&#10;---&#10;&#10;## Operator custom instructions&#10;&#10;The operator supplied these instructions for this run — follow them:&#10;&#10;&#34; + customInstructions)" target="appendPrompt" />
+          <zeebe:input source="=&quot;&#10;&#10;---&#10;&#10;&quot; + task.prompt + (if (baseBranchBrief = null) then &quot;&quot; else baseBranchBrief) + (if (resolvedArtifacts = null or count(resolvedArtifacts[item != null]) = 0) then &quot;&quot; else (&quot;&#10;&#10;---&#10;&#10;**Bound upstream readiness (intake gate).** This feature was scheduled to wait until an upstream landed and published. Build/install/clone against EXACTLY these resolved published versions (the ones first carrying the awaited capability), and bump the consumer dependency to them — never merely the newest:&#10;&#10;&quot; + string join(resolvedArtifacts[item != null], &quot;&#10;&quot;))) + (if (customInstructions = null) then &quot;&quot; else &quot;&#10;&#10;---&#10;&#10;## Operator custom instructions&#10;&#10;The operator supplied these instructions for this run — follow them:&#10;&#10;&quot; + customInstructions)" target="appendPrompt" />
           <zeebe:input source="=if (is defined(transcriptUrlBase)) then transcriptUrlBase else null" target="transcriptUrlBase" />
           <zeebe:output source="=status" target="status" />
           <zeebe:output source="=question" target="question" />
@@ -206,7 +206,7 @@
       <bpmn:extensionElements>
         <zeebe:formDefinition formId="feature-escalation" />
         <zeebe:userTask />
-        <zeebe:assignmentDefinition candidateGroups="operators" assignee="=if (is defined(escalationAssignee) and escalationAssignee != null and trim(string(escalationAssignee)) != &#34;&#34;) then escalationAssignee else null" />
+        <zeebe:assignmentDefinition candidateGroups="operators" assignee="=if (is defined(escalationAssignee) and escalationAssignee != null and trim(string(escalationAssignee)) != &quot;&quot;) then escalationAssignee else null" />
       </bpmn:extensionElements>
       <bpmn:incoming>w_toEscalationTask</bpmn:incoming>
       <bpmn:outgoing>w_toAnswerGw</bpmn:outgoing>

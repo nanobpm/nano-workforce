@@ -10,6 +10,7 @@
 // a BPMN flow change from merging with an un-regenerated diagram.
 import { readdir, readFile, writeFile } from "node:fs/promises";
 import { layoutBpmn } from "@nanobpm/urban";
+import { normalizeXmlEntities } from "./xml-entities.ts";
 
 async function readText(path: string): Promise<string> {
   return await readFile(path, "utf8");
@@ -53,7 +54,7 @@ async function main() {
   const stale: string[] = [];
   for (const file of files) {
     const current = await readText(file);
-    const laid = await layoutBpmn(current);
+    const laid = normalizeXmlEntities(await layoutBpmn(current));
     const { shapes, edges } = countDi(laid);
     if (check) {
       if (laid !== current) {

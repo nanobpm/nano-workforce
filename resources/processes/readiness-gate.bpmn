@@ -153,7 +153,7 @@
     <bpmn:endEvent id="gate-ready" name="Ready">
       <bpmn:extensionElements>
         <zeebe:ioMapping>
-          <zeebe:input source="=&#34;ready&#34;" target="gateOutcome" />
+          <zeebe:input source="=&quot;ready&quot;" target="gateOutcome" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_ready</bpmn:incoming>
@@ -181,7 +181,7 @@
     <bpmn:endEvent id="gate-escalated" name="Escalated">
       <bpmn:extensionElements>
         <zeebe:ioMapping>
-          <zeebe:input source="=&#34;escalated&#34;" target="gateOutcome" />
+          <zeebe:input source="=&quot;escalated&quot;" target="gateOutcome" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_ack</bpmn:incoming>
@@ -189,7 +189,7 @@
     <bpmn:endEvent id="gate-failed" name="Failed">
       <bpmn:extensionElements>
         <zeebe:ioMapping>
-          <zeebe:input source="=&#34;failed&#34;" target="gateOutcome" />
+          <zeebe:input source="=&quot;failed&quot;" target="gateOutcome" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_fail</bpmn:incoming>
@@ -198,7 +198,7 @@
     <bpmn:endEvent id="gate-continued" name="Continued">
       <bpmn:extensionElements>
         <zeebe:ioMapping>
-          <zeebe:input source="=&#34;continued&#34;" target="gateOutcome" />
+          <zeebe:input source="=&quot;continued&quot;" target="gateOutcome" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_continue</bpmn:incoming>

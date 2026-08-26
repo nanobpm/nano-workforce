@@ -108,7 +108,7 @@
           <zeebe:property name="io.nanobpm.dataEnvelope.out" value="PrReviewRoundOut" />
         </zeebe:properties>
         <zeebe:ioMapping>
-          <zeebe:input source="=(if (abandonBrief = null) then &#34;&#34; else abandonBrief)" target="appendPrompt" />
+          <zeebe:input source="=(if (abandonBrief = null) then &quot;&quot; else abandonBrief)" target="appendPrompt" />
           <zeebe:output source="=null" target="answer" />
           <zeebe:output source="=false" target="scopePending" />
         </zeebe:ioMapping>
@@ -166,9 +166,9 @@
           <zeebe:property name="io.nanobpm.dataEnvelope.out" value="EscalationOut" />
         </zeebe:properties>
         <zeebe:ioMapping>
-          <zeebe:input source="=&#34;blocked&#34;" target="status" />
+          <zeebe:input source="=&quot;blocked&quot;" target="status" />
           <zeebe:input source="=false" target="recordRound" />
-          <zeebe:input source="=&#34;Round &#34; + string(round) + &#34; reported the review comments were addressed, but the PR head did not advance (no commit was pushed), so another review round would loop on identical code. A human must decide how to proceed (reply to resume the loop).&#34;" target="question" />
+          <zeebe:input source="=&quot;Round &quot; + string(round) + &quot; reported the review comments were addressed, but the PR head did not advance (no commit was pushed), so another review round would loop on identical code. A human must decide how to proceed (reply to resume the loop).&quot;" target="question" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_noProgress</bpmn:incoming>
@@ -204,9 +204,9 @@
           <zeebe:property name="io.nanobpm.dataEnvelope.out" value="EscalationOut" />
         </zeebe:properties>
         <zeebe:ioMapping>
-          <zeebe:input source="=&#34;blocked&#34;" target="status" />
+          <zeebe:input source="=&quot;blocked&quot;" target="status" />
           <zeebe:input source="=false" target="recordRound" />
-          <zeebe:input source="=&#34;No review arrived within the review-wait timeout (&#34; + reviewWaitTimeout + &#34;). A human must decide how to proceed (reply to resume the loop).&#34;" target="question" />
+          <zeebe:input source="=&quot;No review arrived within the review-wait timeout (&quot; + reviewWaitTimeout + &quot;). A human must decide how to proceed (reply to resume the loop).&quot;" target="question" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_reviewStalled</bpmn:incoming>
@@ -241,8 +241,8 @@
           <zeebe:property name="io.nanobpm.dataEnvelope.out" value="EscalationOut" />
         </zeebe:properties>
         <zeebe:ioMapping>
-          <zeebe:input source="=&#34;blocked&#34;" target="status" />
-          <zeebe:input source="=&#34;Not converged after &#34; + string(maxRounds) + &#34; rounds. A human must decide how to proceed.&#34;" target="question" />
+          <zeebe:input source="=&quot;blocked&quot;" target="status" />
+          <zeebe:input source="=&quot;Not converged after &quot; + string(maxRounds) + &quot; rounds. A human must decide how to proceed.&quot;" target="question" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_guardMax</bpmn:incoming>
@@ -309,7 +309,7 @@
           <zeebe:property name="io.nanobpm.dataEnvelope.out" value="EscalationOut" />
         </zeebe:properties>
         <zeebe:ioMapping>
-          <zeebe:input source="=&#34;blocked&#34;" target="status" />
+          <zeebe:input source="=&quot;blocked&quot;" target="status" />
           <zeebe:input source="=false" target="recordRound" />
           <zeebe:input source="=convergeBlockReason" target="question" />
         </zeebe:ioMapping>
@@ -347,7 +347,7 @@
           <zeebe:property name="io.nanobpm.dataEnvelope.out" value="EscalationOut" />
         </zeebe:properties>
         <zeebe:ioMapping>
-          <zeebe:input source="=&#34;blocked&#34;" target="status" />
+          <zeebe:input source="=&quot;blocked&quot;" target="status" />
           <zeebe:input source="=false" target="recordRound" />
           <zeebe:input source="=scopeBlockReason" target="question" />
           <zeebe:output source="=true" target="scopePending" />

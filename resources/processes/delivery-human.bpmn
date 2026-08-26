@@ -8,13 +8,13 @@
       <bpmn:extensionElements>
         <zeebe:formDefinition formId="delivery-human-generic" />
         <zeebe:userTask />
-        <zeebe:assignmentDefinition candidateGroups="operators" assignee="=if (is defined(escalationAssignee) and escalationAssignee != null and trim(string(escalationAssignee)) != &#34;&#34;) then escalationAssignee else null" />
+        <zeebe:assignmentDefinition candidateGroups="operators" assignee="=if (is defined(escalationAssignee) and escalationAssignee != null and trim(string(escalationAssignee)) != &quot;&quot;) then escalationAssignee else null" />
         <zeebe:ioMapping>
           <zeebe:input source="=if (is defined(prompt)) then prompt else null" target="prompt" />
           <zeebe:input source="=if (is defined(nodeId)) then nodeId else null" target="nodeId" />
-          <zeebe:input source="=if (is defined(emits) and count(emits) != 0) then &#34;typed&#34; else &#34;none&#34;" target="emitMode" />
-          <zeebe:input source="=if (is defined(emits)) then string join(for _e in emits return _e.name + &#34; (&#34; + _e.type + &#34;)&#34;, &#34;, &#34;) else &#34;&#34;" target="emitLabel" />
-          <zeebe:output source="=&#34;completed&#34;" target="humanOutcome" />
+          <zeebe:input source="=if (is defined(emits) and count(emits) != 0) then &quot;typed&quot; else &quot;none&quot;" target="emitMode" />
+          <zeebe:input source="=if (is defined(emits)) then string join(for _e in emits return _e.name + &quot; (&quot; + _e.type + &quot;)&quot;, &quot;, &quot;) else &quot;&quot;" target="emitLabel" />
+          <zeebe:output source="=&quot;completed&quot;" target="humanOutcome" />
           <zeebe:output source="=if (is defined(value)) then value else null" target="humanEmitValue" />
           <zeebe:output source="=if (is defined(resolvedArtifact)) then resolvedArtifact else null" target="humanEmitArtifact" />
           <zeebe:output source="=if (is defined(note)) then note else null" target="humanNote" />
@@ -35,7 +35,7 @@
     <bpmn:endEvent id="human-escalated" name="Human step timed out (escalated)">
       <bpmn:extensionElements>
         <zeebe:ioMapping>
-          <zeebe:input source="=&#34;escalated&#34;" target="humanOutcome" />
+          <zeebe:input source="=&quot;escalated&quot;" target="humanOutcome" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_sla</bpmn:incoming>
