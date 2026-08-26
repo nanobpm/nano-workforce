@@ -1,3 +1,9 @@
+## [0.145.1](https://github.com/nanobpm/nano-workforce/compare/v0.145.0...v0.145.1) (2026-08-26)
+
+### Bug Fixes
+
+* bound the merge-loop wait-landed wait so a never-enqueued PR escalates ([#556](https://github.com/nanobpm/nano-workforce/issues/556)) ([#558](https://github.com/nanobpm/nano-workforce/issues/558)) ([0e14578](https://github.com/nanobpm/nano-workforce/commit/0e14578e23d3914f8ae82a9fd84280fbc05c6588))
+
 ## [0.145.0](https://github.com/nanobpm/nano-workforce/compare/v0.144.0...v0.145.0) (2026-08-25)
 
 ### Features
