@@ -170,6 +170,42 @@
   color: #8aa0b8;
 }
 
+/* The inline in-DOM confirmation (issue #569): a two-step Dispatch/Dismiss "Confirm / Cancel" pair, or
+   an inline Save-to-library name input, rendered by staged.mount.js in place of the native
+   window.confirm/window.prompt the sandboxed console App-View iframe suppresses. It sits in the same
+   .actions row as the buttons it replaces. */
+.dg .confirm {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.dg .btn-danger {
+  background: #b5321f;
+  border-color: #d1442e;
+  color: #fff;
+}
+
+.dg .btn-danger:hover {
+  background: #d1442e;
+}
+
+.dg .confirm-msg {
+  color: #d7e0ea;
+  font-size: 13px;
+}
+
+.dg .confirm-input {
+  background: #0f1621;
+  color: #d7e0ea;
+  border: 1px solid #2b3a4e;
+  border-radius: 7px;
+  padding: 7px 12px;
+  font-size: 13px;
+  min-width: 200px;
+}
+
 /* The filesystem Import control (issue #524): a <label class="btn"> wrapping a visually-hidden native
    <input type=file>, so the file picker reads as a button consistent with the other actions. The label
    dims while its input is disabled (busy) via :has(), mirroring .btn:disabled. */

@@ -54,6 +54,11 @@ const REQUEST_TIMEOUT_MS = 30000;
 
 // The confirm shown before a dispatch — dispatching authorises every side-effecting node, so the
 // operator acknowledges that the launch (and its side effects) is content-addressed to this graph.
+// This is rendered as an IN-DOM inline confirmation step (NOT a native window.confirm): the console
+// loads this view in a sandboxed App-View iframe with no `allow-modals`, where window.confirm is
+// silently suppressed (returns false) — so a native-modal gate reads as "operator declined" and the
+// button no-ops (#569). The two-step inline control keeps the #460 "the click IS the approval" UX
+// without depending on a host capability the App-View iframe doesn't grant.
 const DISPATCH_CONFIRM =
   "Dispatch this staged delivery graph? This launches the graph engine-natively — any side-effecting " +
   "node (it merges PRs / publishes packages) will run. Clicking Dispatch IS the approval, " +
@@ -61,7 +66,8 @@ const DISPATCH_CONFIRM =
 
 // The confirm shown before a dismiss — dismissing is a terminal discard: the proposal drops off the
 // staged list for good (it can be re-staged only by recompiling). It launches nothing, so this is a
-// lighter acknowledgement than Dispatch, but still a one-way action the operator confirms.
+// lighter acknowledgement than Dispatch, but still a one-way action the operator confirms. Rendered
+// as the same IN-DOM inline confirmation as Dispatch (no native window.confirm), for the #569 reason.
 const DISMISS_CONFIRM =
   "Dismiss this staged delivery graph? It is discarded as noise and drops off the staged list — this " +
   "launches nothing, but to bring it back you must recompile/re-stage it.";
@@ -81,8 +87,56 @@ function fmtTime(iso) {
   return esc(new Date(t).toLocaleString());
 }
 
-/** Render one staged proposal as a card row with Preview-DI + Dispatch actions. */
-function renderProposal(p) {
+// Is `pending` an open inline confirmation for `kind` on this proposal's row? `pending` is the single
+// open confirmation (or null) — see mountStagedProposals. Only the matching row+kind swaps its button
+// for the two-step inline control; every other row keeps its plain button.
+function isPending(pending, kind, digest) {
+  return pending != null && pending.kind === kind && pending.digest === digest;
+}
+
+// The Dispatch affordance for a row: normally a single button; while its inline confirmation is open,
+// an in-DOM "Confirm dispatch / Cancel" pair (NOT a native window.confirm, suppressed in the sandboxed
+// App-View iframe — #569). Clicking "Confirm dispatch" IS the operator approval (#460).
+function dispatchControl(p, pending) {
+  if (isPending(pending, "dispatch", p.digest)) {
+    return `<span class="confirm" data-confirm="dispatch">
+      <span class="confirm-msg">${esc(DISPATCH_CONFIRM)}</span>
+      <button class="btn btn-primary" type="button" data-dispatch-confirm="${esc(p.digest)}">Confirm dispatch</button>
+      <button class="btn btn-ghost" type="button" data-dispatch-cancel="${esc(p.digest)}">Cancel</button>
+    </span>`;
+  }
+  return `<button class="btn btn-primary" type="button" data-dispatch="${esc(p.digest)}">Dispatch</button>`;
+}
+
+// The Dismiss affordance: a plain button, or — while open — the in-DOM "Confirm dismiss / Cancel" pair.
+function dismissControl(p, pending) {
+  if (isPending(pending, "dismiss", p.digest)) {
+    return `<span class="confirm" data-confirm="dismiss">
+      <span class="confirm-msg">${esc(DISMISS_CONFIRM)}</span>
+      <button class="btn btn-danger" type="button" data-dismiss-confirm="${esc(p.digest)}">Confirm dismiss</button>
+      <button class="btn btn-ghost" type="button" data-dismiss-cancel="${esc(p.digest)}">Cancel</button>
+    </span>`;
+  }
+  return `<button class="btn btn-ghost" type="button" data-dismiss="${esc(p.digest)}">Dismiss</button>`;
+}
+
+// The Save-to-library affordance: a plain button, or — while open — an in-DOM text input for the entry
+// name plus Save/Cancel (replacing the native window.prompt, which returns null under sandbox — #569).
+function saveControl(p, pending) {
+  if (isPending(pending, "save", p.digest)) {
+    const name = typeof pending.name === "string" ? pending.name : "";
+    return `<span class="confirm" data-confirm="save">
+      <input class="confirm-input" type="text" data-library-name="${esc(p.digest)}" value="${esc(name)}" placeholder="Library entry name" aria-label="Library entry name" />
+      <button class="btn btn-primary" type="button" data-save-library-confirm="${esc(p.digest)}">Save</button>
+      <button class="btn btn-ghost" type="button" data-save-library-cancel="${esc(p.digest)}">Cancel</button>
+    </span>`;
+  }
+  return `<button class="btn btn-ghost" type="button" data-save-library="${esc(p.digest)}" data-title="${esc(p.title ?? "")}">Save to library</button>`;
+}
+
+/** Render one staged proposal as a card row with Preview-DI + Dispatch actions (and any open
+ *  in-DOM confirmation, keyed by `pending`). */
+function renderProposal(p, pending) {
   const title = p.title ? `<code>${esc(p.title)}</code>` : '<span class="muted">(unnamed)</span>';
   const gate = p.sideEffecting
     ? '<span class="pill pill-connector">side-effecting</span>'
@@ -99,15 +153,15 @@ function renderProposal(p) {
     </div>
     <div class="actions">
       <button class="btn btn-ghost" type="button" data-preview-di="${esc(p.digest)}">Preview generated DI</button>
-      <button class="btn btn-primary" type="button" data-dispatch="${esc(p.digest)}">Dispatch</button>
-      <button class="btn btn-ghost" type="button" data-save-library="${esc(p.digest)}" data-title="${esc(p.title ?? "")}">Save to library</button>
-      <button class="btn btn-ghost" type="button" data-dismiss="${esc(p.digest)}">Dismiss</button>
+      ${dispatchControl(p, pending)}
+      ${saveControl(p, pending)}
+      ${dismissControl(p, pending)}
     </div>
   </section>`;
 }
 
-/** Render the whole list (or the empty state). */
-function renderList(proposals) {
+/** Render the whole list (or the empty state), threading the single open in-DOM confirmation. */
+function renderList(proposals, pending) {
   if (!Array.isArray(proposals) || proposals.length === 0) {
     return `<section class="card">
       <h2>Staged proposals <span class="count">0</span></h2>
@@ -118,7 +172,7 @@ function renderList(proposals) {
     <h2>Staged proposals <span class="count">${proposals.length}</span></h2>
     <p class="ok">Awaiting an operator. <b>Preview generated DI</b> renders the laid-out BPMN in the process explorer; <b>Dispatch</b> launches it (dispatch is the approval, #460).</p>
   </section>`;
-  return header + proposals.map(renderProposal).join("");
+  return header + proposals.map((p) => renderProposal(p, pending)).join("");
 }
 
 // Only attach the guard secret when the resolved door URL is SAME-ORIGIN. The staged/dispatch/dismiss/
@@ -172,6 +226,14 @@ export function mountStagedProposals(host, config = {}) {
   }
 
   let busyCount = 0;
+  // The proposals from the last successful load — kept so an in-DOM confirmation opened/closed by a
+  // click can re-render the SAME list synchronously (without waiting for the next poll).
+  let currentProposals = [];
+  // The single open in-DOM confirmation, or null. Shape: { kind: "dispatch"|"dismiss"|"save",
+  // digest: string, name?: string }. This REPLACES the native window.confirm/window.prompt the console's
+  // sandboxed App-View iframe suppresses (#569): the operator approval is an inline two-step control
+  // (Confirm/Cancel) or an inline name input, rendered by renderProposal from this state.
+  let pending = null;
   // A re-render (renderList → new buttons) resets every button to enabled, so the disabled state is
   // NOT stored on the elements — it is derived from busyCount and re-applied after each render (below)
   // and on every busy()/idle() transition. That keeps a poll or dispatch-driven refresh from silently
@@ -182,6 +244,12 @@ export function mountStagedProposals(host, config = {}) {
   }
   function busy(on) {
     busyCount += on ? 1 : -1;
+    applyDisabled();
+  }
+  // Re-render the list from the last-known proposals, threading the open confirmation. Used by the
+  // click handlers that open/close an inline confirmation so it appears/disappears immediately.
+  function rerender() {
+    listEl.innerHTML = renderList(currentProposals, pending);
     applyDisabled();
   }
 
@@ -217,14 +285,24 @@ export function mountStagedProposals(host, config = {}) {
       const { status, body } = await get(stagedUrl);
       if (disposed) return;
       if (status === 200 && Array.isArray(body.proposals)) {
-        listEl.innerHTML = renderList(body.proposals);
-        applyDisabled();
+        currentProposals = body.proposals;
+        // If the proposal an inline confirmation is open over has since dropped off the list (dispatched
+        // elsewhere, dismissed, or expired), the confirmation is stale — clear it so the poll can redraw.
+        if (pending != null && !body.proposals.some((p) => p.digest === pending.digest)) pending = null;
+        // While a confirmation (or its name input) is open, DON'T clobber the DOM the operator is
+        // interacting with — the fetch above still runs, so an expiry is detected and cleared above.
+        if (pending == null) {
+          listEl.innerHTML = renderList(body.proposals, pending);
+          applyDisabled();
+        }
         if (loadErrorShown) {
           setStatus("");
           loadErrorShown = false;
         }
       } else {
-        listEl.innerHTML = renderList([]);
+        currentProposals = [];
+        pending = null;
+        listEl.innerHTML = renderList([], pending);
         applyDisabled();
         setStatus(body && body.error ? body.error : "Could not load staged proposals.", "err");
         loadErrorShown = true;
@@ -270,15 +348,13 @@ export function mountStagedProposals(host, config = {}) {
     }
   }
 
-  // "Dispatch": the operator's launch (#460). Confirm (dispatch authorises every side-effecting node),
-  // then POST the digest to the dispatch door; on success the proposal flips to `dispatched` and drops
-  // off the list on the next poll — refresh immediately so the operator sees it leave.
+  // "Dispatch": the operator's launch (#460). The confirmation is an IN-DOM two-step control (opened by
+  // the click handler, #569) — by the time we're here the operator has clicked "Confirm dispatch", so we
+  // POST the digest to the dispatch door; on success the proposal flips to `dispatched` and drops off
+  // the list on the next poll — refresh immediately so the operator sees it leave.
   async function doDispatch(digest) {
     const staged = typeof digest === "string" ? digest.trim() : "";
     if (staged === "") return;
-    if (typeof window !== "undefined" && typeof window.confirm === "function" && !window.confirm(DISPATCH_CONFIRM)) {
-      return;
-    }
     busy(true);
     setStatus("Dispatching…");
     try {
@@ -296,15 +372,13 @@ export function mountStagedProposals(host, config = {}) {
     }
   }
 
-  // "Dismiss": the operator's discard (#520). Confirm (dismiss is a one-way drop off the staged list),
-  // then POST the digest to the dismiss door; on success the proposal flips to `dismissed` and drops off
-  // the list on the next poll — refresh immediately so the operator sees it leave. Launches nothing.
+  // "Dismiss": the operator's discard (#520). Confirmed via the same IN-DOM two-step control as Dispatch
+  // (#569); on the confirm we POST the digest to the dismiss door; on success the proposal flips to
+  // `dismissed` and drops off the list on the next poll — refresh immediately so the operator sees it
+  // leave. Launches nothing.
   async function doDismiss(digest) {
     const staged = typeof digest === "string" ? digest.trim() : "";
     if (staged === "") return;
-    if (typeof window !== "undefined" && typeof window.confirm === "function" && !window.confirm(DISMISS_CONFIRM)) {
-      return;
-    }
     busy(true);
     setStatus("Dismissing…");
     try {
@@ -323,20 +397,15 @@ export function mountStagedProposals(host, config = {}) {
   }
 
   // "Save to library": copy this staged proposal's already-stored graph into the reusable library
-  // (issue #523, save-from-digest → source `from-staged`). Prompt the operator for the entry name
-  // (defaulting to the proposal title — its slug/short-hash derive the library id, so re-saving the
-  // same name upserts), then POST { name, digest } to the save door. This persists a library entry
-  // only — it never dispatches or re-stages, so the operator boundary the staged view enforces (#460)
-  // is untouched.
-  async function doSaveToLibrary(digest, defaultName) {
+  // (issue #523, save-from-digest → source `from-staged`). The entry name comes from an IN-DOM inline
+  // text input (defaulting to the proposal title — its slug/short-hash derive the library id, so
+  // re-saving the same name upserts), NOT a native window.prompt (suppressed under the App-View sandbox,
+  // #569). We POST { name, digest } to the save door. This persists a library entry only — it never
+  // dispatches or re-stages, so the operator boundary the staged view enforces (#460) is untouched.
+  async function doSaveToLibrary(digest, rawName) {
     const staged = typeof digest === "string" ? digest.trim() : "";
     if (staged === "") return;
-    let name = defaultName ? String(defaultName) : "";
-    if (typeof window !== "undefined" && typeof window.prompt === "function") {
-      const entered = window.prompt("Save to library as (name):", name);
-      if (entered === null) return; // operator cancelled
-      name = entered;
-    }
+    const name = typeof rawName === "string" ? rawName : "";
     if (name.trim() === "") {
       setStatus("A library entry needs a non-blank name.", "err");
       return;
@@ -357,36 +426,132 @@ export function mountStagedProposals(host, config = {}) {
     }
   }
 
+  // Open an inline confirmation for `kind` on `digest` (Dispatch/Dismiss) or the inline name input
+  // (Save) — replacing the native modal the sandboxed App-View iframe suppresses (#569).
+  function openConfirm(kind, digest, name) {
+    const staged = typeof digest === "string" ? digest.trim() : "";
+    if (staged === "") return;
+    pending = { kind, digest: staged, name: typeof name === "string" ? name : "" };
+    rerender();
+    // Move focus into the name input so the operator can type immediately (best-effort; not all hosts
+    // implement focus()).
+    if (kind === "save") {
+      const input = listEl.querySelector(`[data-library-name="${cssAttr(staged)}"]`);
+      if (input && typeof input.focus === "function") input.focus();
+    }
+  }
+
+  // Close any open inline confirmation and redraw the plain buttons.
+  function closeConfirm() {
+    pending = null;
+    rerender();
+  }
+
+  // The digest values are content-address hex (safe for a CSS attribute-selector), but escape a double
+  // quote defensively so a crafted value can't break out of the [data-library-name="…"] selector.
+  function cssAttr(value) {
+    return String(value).replace(/["\\]/g, "\\$&");
+  }
+
+  // Read the current text of the inline library-name input for `digest` (empty string if it's gone).
+  function readLibraryName(digest) {
+    const input = listEl.querySelector(`[data-library-name="${cssAttr(digest)}"]`);
+    return input && typeof input.value === "string" ? input.value : "";
+  }
+
+  // Keep pending.name in sync as the operator types, so a background poll re-render (or a later confirm)
+  // preserves what they've entered.
+  listEl.addEventListener("input", (ev) => {
+    const input = ev.target && ev.target.closest ? ev.target.closest("[data-library-name]") : null;
+    if (input && pending != null && pending.kind === "save") {
+      pending.name = typeof input.value === "string" ? input.value : "";
+    }
+  });
+
   listEl.addEventListener("click", (ev) => {
-    const previewBtn = ev.target && ev.target.closest ? ev.target.closest("[data-preview-di]") : null;
+    const closest = (sel) => (ev.target && ev.target.closest ? ev.target.closest(sel) : null);
+
+    const previewBtn = closest("[data-preview-di]");
     if (previewBtn) {
       ev.preventDefault();
       doPreviewDi(previewBtn.getAttribute("data-preview-di"));
       return;
     }
-    const dispatchBtn = ev.target && ev.target.closest ? ev.target.closest("[data-dispatch]") : null;
+
+    // Dispatch: click opens the inline confirmation; "Confirm dispatch" performs the POST; "Cancel"
+    // closes it. The click IS the approval (#460), now gated on an in-DOM step, not window.confirm (#569).
+    const dispatchBtn = closest("[data-dispatch]");
     if (dispatchBtn) {
       ev.preventDefault();
-      doDispatch(dispatchBtn.getAttribute("data-dispatch"));
+      openConfirm("dispatch", dispatchBtn.getAttribute("data-dispatch"));
       return;
     }
-    const saveLibraryBtn = ev.target && ev.target.closest ? ev.target.closest("[data-save-library]") : null;
-    if (saveLibraryBtn) {
+    const dispatchConfirmBtn = closest("[data-dispatch-confirm]");
+    if (dispatchConfirmBtn) {
       ev.preventDefault();
-      doSaveToLibrary(saveLibraryBtn.getAttribute("data-save-library"), saveLibraryBtn.getAttribute("data-title"));
+      const digest = dispatchConfirmBtn.getAttribute("data-dispatch-confirm");
+      closeConfirm();
+      doDispatch(digest);
       return;
     }
-    const dismissBtn = ev.target && ev.target.closest ? ev.target.closest("[data-dismiss]") : null;
+    const dispatchCancelBtn = closest("[data-dispatch-cancel]");
+    if (dispatchCancelBtn) {
+      ev.preventDefault();
+      closeConfirm();
+      return;
+    }
+
+    // Dismiss: same two-step inline confirmation.
+    const dismissBtn = closest("[data-dismiss]");
     if (dismissBtn) {
       ev.preventDefault();
-      doDismiss(dismissBtn.getAttribute("data-dismiss"));
+      openConfirm("dismiss", dismissBtn.getAttribute("data-dismiss"));
+      return;
+    }
+    const dismissConfirmBtn = closest("[data-dismiss-confirm]");
+    if (dismissConfirmBtn) {
+      ev.preventDefault();
+      const digest = dismissConfirmBtn.getAttribute("data-dismiss-confirm");
+      closeConfirm();
+      doDismiss(digest);
+      return;
+    }
+    const dismissCancelBtn = closest("[data-dismiss-cancel]");
+    if (dismissCancelBtn) {
+      ev.preventDefault();
+      closeConfirm();
+      return;
+    }
+
+    // Save to library: the button opens an inline name input; "Save" reads it and POSTs; "Cancel" closes.
+    const saveLibraryBtn = closest("[data-save-library]");
+    if (saveLibraryBtn) {
+      ev.preventDefault();
+      openConfirm("save", saveLibraryBtn.getAttribute("data-save-library"), saveLibraryBtn.getAttribute("data-title"));
+      return;
+    }
+    const saveConfirmBtn = closest("[data-save-library-confirm]");
+    if (saveConfirmBtn) {
+      ev.preventDefault();
+      const digest = saveConfirmBtn.getAttribute("data-save-library-confirm");
+      const name = readLibraryName(digest);
+      closeConfirm();
+      doSaveToLibrary(digest, name);
+      return;
+    }
+    const saveCancelBtn = closest("[data-save-library-cancel]");
+    if (saveCancelBtn) {
+      ev.preventDefault();
+      closeConfirm();
     }
   });
 
   refresh();
   // Skip a scheduled poll while a Preview/Dispatch request is in flight: re-rendering the list mid-
   // request would drop the in-flight button (and its disabled state) out from under the user. The
-  // dispatch path drives its own refresh() on completion, so nothing is missed.
+  // dispatch path drives its own refresh() on completion, so nothing is missed. While an inline
+  // confirmation is open the poll still fetches (so an expiry is detected) but refresh() leaves the DOM
+  // the operator is interacting with untouched (see refresh).
   const timer = setInterval(() => {
     if (busyCount === 0) refresh();
   }, refreshMs);
