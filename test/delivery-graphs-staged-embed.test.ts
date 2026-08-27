@@ -110,10 +110,15 @@ test("#511: DI preview — the staged view wires the proposal-bpmn door and brid
   assert(/params:\s*\{\s*xml:/.test(MOUNT_JS), "staged.mount.js must carry the compiled BPMN xml in the bridge message");
 });
 
-test("#460/#511: Dispatch is the operator's launch — posts the digest to the dispatch door, and never compiles/stages", () => {
+test("#460/#511/#569: Dispatch is the operator's launch — posts the digest to the dispatch door, and never compiles/stages", () => {
   assertModuleAnchored("dispatchUrl", "app/api/actions/delivery-graph/dispatch");
   assert(/data-dispatch=/.test(MOUNT_JS), "staged.mount.js must render a per-row Dispatch affordance carrying the digest");
-  assert(/window\.confirm\(/.test(MOUNT_JS), "Dispatch must confirm before launching (dispatch authorises side effects)");
+  // #569: the confirmation must be IN-DOM (a two-step "Confirm dispatch" affordance), NOT a native
+  // window.confirm — the sandboxed console App-View iframe (no allow-modals) suppresses window.confirm
+  // (returns false), so a native-modal gate reads as "operator declined" and the button silently no-ops.
+  assert(/data-dispatch-confirm=/.test(MOUNT_JS), "Dispatch must confirm via an in-DOM two-step control (data-dispatch-confirm), not window.confirm (#569)");
+  assert(!/window\.confirm\(/.test(MOUNT_JS), "Dispatch must NOT gate on native window.confirm — it is suppressed in the sandboxed App-View iframe (#569)");
+  assert(!/window\.prompt\(/.test(MOUNT_JS), "the staged view must NOT gate on native window.prompt — it is suppressed in the sandboxed App-View iframe (#569)");
   // Operator-only: this surface dispatches a digest that is ALREADY staged — it must not compile or
   // stage (that is the compose view), so the #460 boundary holds and the self-approval hole stays shut.
   assert(!/delivery-graph\/preview\b/.test(MOUNT_JS), "staged.mount.js must NOT wire the compile/stage door");
@@ -121,9 +126,19 @@ test("#460/#511: Dispatch is the operator's launch — posts the digest to the d
   assert(!/approvalToken/.test(MOUNT_JS), "staged.mount.js must NOT carry the removed replayable approvalToken");
 });
 
-test("#520: Dismiss is the operator's discard — posts the digest to the dismiss door, behind a confirm, and launches nothing", () => {
+test("#520/#569: Dismiss is the operator's discard — posts the digest to the dismiss door, behind an in-DOM confirm, and launches nothing", () => {
   assertModuleAnchored("dismissUrl", "app/api/actions/delivery-graph/dismiss");
   assert(/data-dismiss=/.test(MOUNT_JS), "staged.mount.js must render a per-row Dismiss affordance carrying the digest");
-  // Dismiss is a one-way discard off the staged list — confirm before it drops the proposal.
-  assert(/window\.confirm\(DISMISS_CONFIRM\)/.test(MOUNT_JS), "staged.mount.js must confirm before dismissing (a one-way discard off the staged list)");
+  // Dismiss is a one-way discard off the staged list — confirm before it drops the proposal, via the
+  // same in-DOM two-step control as Dispatch (#569), not a native window.confirm.
+  assert(/data-dismiss-confirm=/.test(MOUNT_JS), "staged.mount.js must confirm before dismissing via an in-DOM control (data-dismiss-confirm), not window.confirm (#569)");
+});
+
+test("#523/#569: Save-to-library names the entry via an in-DOM input, not a native window.prompt", () => {
+  assertModuleAnchored("saveLibraryUrl", "app/api/actions/delivery-graph/library/save");
+  assert(/data-save-library=/.test(MOUNT_JS), "staged.mount.js must render a per-row Save-to-library affordance carrying the digest");
+  // #569: the library name must come from an in-DOM text input; window.prompt returns null under the
+  // App-View sandbox, which the old code read as "operator cancelled" → silent no-op.
+  assert(/data-library-name=/.test(MOUNT_JS), "staged.mount.js must collect the library name via an in-DOM input (data-library-name), not window.prompt (#569)");
+  assert(/data-save-library-confirm=/.test(MOUNT_JS), "staged.mount.js must confirm the save via an in-DOM Save affordance (data-save-library-confirm)");
 });
