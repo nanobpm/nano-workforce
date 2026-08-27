@@ -452,8 +452,10 @@ be a **`<nodeId>.<fact>` late-binding reference** the compiler resolves at dispa
 rather than a literal handle.
 
 A **typed fact** (`emits[]` entry) is `{ name, type, description? }` where
-`type ∈ string|number|boolean|artifact|version|url` (`artifact` = a `pkg@version` handle,
-`version` = a bare version). `name` matches `^[A-Za-z_][A-Za-z0-9_]*$` and is referenced
+`type ∈ string|number|boolean|artifact|version|url|pr` (`artifact` = a `pkg@version` handle,
+`version` = a bare version, `pr` = a PR reference `owner/repo#N` an `agent` node emits for the
+PR it opened, late-bound by a downstream `wait[pr]`/`connector[converge*]` target — issue #548).
+`name` matches `^[A-Za-z_][A-Za-z0-9_]*$` and is referenced
 downstream as `<nodeId>.<name>`. A "click done" human node or a pass-through node declares
 no facts.
 
