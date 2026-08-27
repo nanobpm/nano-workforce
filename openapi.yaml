@@ -1250,7 +1250,7 @@ components:
         target:
           type: string
           minLength: 1
-          description: The kind-specific target (a URL, a shell command, a `pkg@version`, an `owner/repo@ref`, `github-releases:owner/repo`, an `owner/repo#123` PR reference for the `pr` kind, or an `owner/repo#NN` planKey — the epic issue — for the `epic` kind). For a `pr`/`epic` target it may instead be a `<nodeId>.<fact>` late-binding reference the compiler resolves at dispatch (issue #548/#570).
+          description: The kind-specific target (a URL, a shell command, a `pkg@version`, an `owner/repo@ref`, `github-releases:owner/repo`, an `owner/repo#123` PR reference for the `pr` kind, or an `owner/repo#NN` planKey — the epic issue — for the `epic` kind). For a `pr`/`epic` target used in a **delivery-graph `wait` node** it may instead be a `<nodeId>.<fact>` late-binding reference the delivery-graph compiler resolves at dispatch (issue #548/#570); this rewrite exists ONLY on the delivery-graph dispatch path — other surfaces (e.g. feature-intake readiness) have no such resolver, so they must supply a literal handle.
         onTimeout:
           type: string
           enum: [escalate, fail, continue]

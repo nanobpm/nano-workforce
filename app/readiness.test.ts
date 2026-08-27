@@ -478,10 +478,16 @@ test("parseProbe: a FACT-BOUND pr target (`<node>.<fact>`) parses (resolved at d
   // The documented canonical `agent → converge-merge → wait[pr merged]` shape wires the wait's
   // `target` to the upstream node's emitted `pr` fact (`open.pr`). It is NOT an `owner/repo#N`
   // literal at parse/dispatch time — the compiler rewrites it to the OBSERVED PR — so parseProbe must
-  // accept it rather than throw and abort the whole dispatch.
-  const p = parseProbe({ kind: "pr", target: "open.pr", match: { prState: "merged" } });
+  // accept it (WITH the delivery-graph opt-in) rather than throw and abort the whole dispatch.
+  const p = parseProbe({ kind: "pr", target: "open.pr", match: { prState: "merged" } }, { allowLateBoundTarget: true });
   assertEquals(p.kind, "pr");
   assertEquals(p.target, "open.pr");
+});
+
+test("parseProbe: a fact-bound pr target is REJECTED without the delivery-graph opt-in (non-delivery-graph surfaces have no resolver, must fail loudly at submit)", () => {
+  // `app/featureReadiness.ts` parses probes with NO late-binding compiler rewrite, so a fact-ref
+  // target there could never resolve. Default-off keeps the loud submit-time failure (Copilot #572).
+  assertThrows(() => parseProbe({ kind: "pr", target: "open.pr", match: { prState: "merged" } }), Error, "owner/repo#<number>");
 });
 
 test("parseProbe: a genuinely malformed (dot-free) pr literal still throws — #570 keeps the loud failure", () => {
@@ -517,9 +523,13 @@ test("parseProbe: an epic probe with an unknown match.epicState throws (mistyped
   );
 });
 
-test("parseProbe: a FACT-BOUND epic target parses (late-binding, same as pr)", () => {
-  const p = parseProbe({ kind: "epic", target: "plan.epic" });
+test("parseProbe: a FACT-BOUND epic target parses WITH the delivery-graph opt-in (late-binding, same as pr)", () => {
+  const p = parseProbe({ kind: "epic", target: "plan.epic" }, { allowLateBoundTarget: true });
   assertEquals(p.target, "plan.epic");
+});
+
+test("parseProbe: a fact-bound epic target is REJECTED without the delivery-graph opt-in (fails loudly at submit)", () => {
+  assertThrows(() => parseProbe({ kind: "epic", target: "plan.epic" }), Error, "planKey");
 });
 
 // ── matchEpic (pure — operates on an already-fetched epic observation) ────────────────────────────

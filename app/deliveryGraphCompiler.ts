@@ -151,9 +151,10 @@ function byCodeUnit(a: string, b: string): number {
 
 /** The engine variable a producer node's OUTPUT mapping reads to publish a declared emitted `fact`
  * (S4 late-binding). Each node kind's real body exposes the observed value under a canonical name:
- *   • `wait` (readiness-gate) — a `mergedSha` fact reads the merge oid; an `artifact` fact reads the
- *     `resolvedArtifact` bind (mirroring the `capability`/`pr` probe binds); anything else reads the
- *     probe's `detail`.
+ *   • `wait` (readiness-gate) — a `mergedSha` fact reads the merge oid; a `prCount` fact reads the
+ *     epic-match `prCount` bind (how many slice PRs a `wait[epic]` landed); an `artifact` fact reads
+ *     the `resolvedArtifact` bind (mirroring the `capability`/`pr` probe binds); anything else reads
+ *     the probe's `detail`.
  *   • `human` (delivery-human) — an `artifact` fact reads `humanEmitArtifact`; anything else reads
  *     `humanEmitValue` (the generic typed-emit form's captured value).
  *   • `agent`/`connector` — the body's job worker returns the value under the fact's own name.
@@ -161,7 +162,13 @@ function byCodeUnit(a: string, b: string): number {
 function factSourceVar(kind: DeliveryNode["kind"], fact: DeliveryFact): string {
   switch (kind) {
     case "wait":
-      return fact.name === "mergedSha" ? "mergedSha" : fact.type === "artifact" ? "resolvedArtifact" : "detail";
+      return fact.name === "mergedSha"
+        ? "mergedSha"
+        : fact.name === "prCount"
+          ? "prCount"
+          : fact.type === "artifact"
+            ? "resolvedArtifact"
+            : "detail";
     case "human":
       return fact.type === "artifact" ? "humanEmitArtifact" : "humanEmitValue";
     case "agent":
@@ -1013,6 +1020,7 @@ function waitBodyLines(el: string, node: Extract<DeliveryNode, { kind: "wait" }>
     '            <zeebe:output source="=if (is defined(detail)) then detail else null" target="detail" />',
     '            <zeebe:output source="=if (is defined(resolvedArtifact)) then resolvedArtifact else null" target="resolvedArtifact" />',
     '            <zeebe:output source="=if (is defined(mergedSha)) then mergedSha else null" target="mergedSha" />',
+    '            <zeebe:output source="=if (is defined(prCount)) then prCount else null" target="prCount" />',
     '            <zeebe:output source="=if (is defined(observed)) then observed else null" target="observed" />',
     "          </zeebe:ioMapping>",
     "        </bpmn:extensionElements>",

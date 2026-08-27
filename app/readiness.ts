@@ -209,8 +209,17 @@ function isRecord(v: unknown): v is Record<string, unknown> {
  * Throws a descriptive error on an unknown/missing `kind`, a blank `target`, an invalid
  * `onTimeout`/`backoff`, or a `credentialEnv` on a non-`http` kind — a malformed probe must fail
  * loudly at the worker, never silently wait forever (nor let a caller believe a subprocess probe is
- * authenticated when its credential is silently ignored). */
-export function parseProbe(raw: unknown): ReadinessProbe {
+ * authenticated when its credential is silently ignored).
+ *
+ * `opts.allowLateBoundTarget` opts a caller into accepting a fact-bound `<nodeId>.<fact>` target for
+ * the `pr`/`epic` kinds — the #548/#570 late-binding reference the delivery-graph compiler rewrites
+ * to the observed handle at dispatch. It is OFF by default: only the delivery-graph dispatch path
+ * (`app/deliveryRunner.ts`) sets it. Every other surface (e.g. feature-intake readiness in
+ * `app/featureReadiness.ts`) has no such compiler rewrite, so a fact-ref target there could never
+ * resolve — keeping it off means a mis-declared gate fails loudly at submit rather than degrading
+ * into a runtime timeout/escalation. */
+export function parseProbe(raw: unknown, opts?: { allowLateBoundTarget?: boolean }): ReadinessProbe {
+  const allowLateBoundTarget = opts?.allowLateBoundTarget === true;
   if (!isRecord(raw)) throw new Error("readiness probe: descriptor must be an object");
   const kind = str(raw.kind).trim();
   if (!isProbeKind(kind)) {
@@ -252,16 +261,19 @@ export function parseProbe(raw: unknown): ReadinessProbe {
   // reference the compiler rewrites to the OBSERVED PR at dispatch and the readiness-probe worker
   // resolves at runtime — it is legitimately not a literal here, so validating it as one would reject
   // the documented canonical `agent → converge-merge → wait[pr merged]` shape (issue #570). A
-  // genuinely malformed literal (dot-free, e.g. `foo`) is not fact-ref-shaped, so it still fails.
-  if (kind === "pr" && !isFactRefTarget(target) && !parsePrTarget(target)) {
+  // genuinely malformed literal (dot-free, e.g. `foo`) is not fact-ref-shaped, so it still fails. The
+  // exemption is gated on `allowLateBoundTarget`: a non-delivery-graph caller (default OFF) has no
+  // compiler rewrite, so a fact-ref target there can never resolve — it must fail loudly at submit.
+  if (kind === "pr" && !(allowLateBoundTarget && isFactRefTarget(target)) && !parsePrTarget(target)) {
     throw new Error(
       `readiness probe (pr): 'target' ('${target}') must be an 'owner/repo#<number>' PR reference (e.g. 'nanobpm/nano-workforce#377')`,
     );
   }
   // An epic edge is keyed by the durable `planKey` (`owner/repo#NN`, the epic issue) — the stable
   // business id, so a resubmit/replay still resolves (issue #568). Validate it as a literal planKey,
-  // exempting a fact-bound reference for the same #548 late-binding reason as `pr` above.
-  if (kind === "epic" && !isFactRefTarget(target) && !parsePrTarget(target)) {
+  // exempting a fact-bound reference for the same #548 late-binding reason as `pr` above (and gated
+  // on the same `allowLateBoundTarget` opt-in, so a non-delivery-graph caller still fails loudly).
+  if (kind === "epic" && !(allowLateBoundTarget && isFactRefTarget(target)) && !parsePrTarget(target)) {
     throw new Error(
       `readiness probe (epic): 'target' ('${target}') must be a 'owner/repo#<number>' planKey (the epic issue, e.g. 'nanobpm/nano-workforce#374')`,
     );
