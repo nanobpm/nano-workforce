@@ -1,3 +1,9 @@
+## [0.148.2](https://github.com/nanobpm/nano-workforce/compare/v0.148.1...v0.148.2) (2026-08-27)
+
+### Bug Fixes
+
+* **delivery-graph:** in-DOM confirm for staged Dispatch/Dismiss/Save (App-View sandbox) ([#571](https://github.com/nanobpm/nano-workforce/issues/571)) ([6607399](https://github.com/nanobpm/nano-workforce/commit/6607399d0a172b878e50a05432091d8e97c7e224)), closes [#460](https://github.com/nanobpm/nano-workforce/issues/460) [#569](https://github.com/nanobpm/nano-workforce/issues/569)
+
 ## [0.148.1](https://github.com/nanobpm/nano-workforce/compare/v0.148.0...v0.148.1) (2026-08-26)
 
 ### Bug Fixes
