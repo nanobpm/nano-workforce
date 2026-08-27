@@ -275,7 +275,7 @@ export function parseProbe(raw: unknown, opts?: { allowLateBoundTarget?: boolean
   // on the same `allowLateBoundTarget` opt-in, so a non-delivery-graph caller still fails loudly).
   if (kind === "epic" && !(allowLateBoundTarget && isFactRefTarget(target)) && !parsePrTarget(target)) {
     throw new Error(
-      `readiness probe (epic): 'target' ('${target}') must be a 'owner/repo#<number>' planKey (the epic issue, e.g. 'nanobpm/nano-workforce#374')`,
+      `readiness probe (epic): 'target' ('${target}') must be an 'owner/repo#<number>' planKey (the epic issue, e.g. 'nanobpm/nano-workforce#374')`,
     );
   }
   const poll = isRecord(raw.poll) ? parsePoll(raw.poll) : undefined;
