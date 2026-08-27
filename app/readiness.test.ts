@@ -18,6 +18,7 @@ import {
   MAX_EVERY_MS,
   matchCapability,
   matchCommand,
+  matchEpic,
   matchGithubCheck,
   matchHttp,
   matchNpm,
@@ -28,6 +29,10 @@ import {
   normalizePoll,
   parseProbe,
   parsePrTarget,
+  epicLineageUrl,
+  type EpicObservation,
+  isFactRefTarget,
+  parseEpicLineage,
   summariseCapabilityCandidates,
   parsePrView,
   parseReleases,
@@ -466,6 +471,131 @@ test("parseProbe: a pr probe with an unknown match.prState throws (mistyped stat
 test("parseProbe: a valid pr probe round-trips its prState", () => {
   const p = parseProbe({ kind: "pr", target: "o/r#12", match: { prState: "mergeable" } });
   assertEquals(p.match?.prState, "mergeable");
+});
+
+// ── #570: a fact-bound pr/epic target DISPATCHES (late-binding), a malformed literal still fails ──
+test("parseProbe: a FACT-BOUND pr target (`<node>.<fact>`) parses (resolved at dispatch, not a literal here) — #570", () => {
+  // The documented canonical `agent → converge-merge → wait[pr merged]` shape wires the wait's
+  // `target` to the upstream node's emitted `pr` fact (`open.pr`). It is NOT an `owner/repo#N`
+  // literal at parse/dispatch time — the compiler rewrites it to the OBSERVED PR — so parseProbe must
+  // accept it rather than throw and abort the whole dispatch.
+  const p = parseProbe({ kind: "pr", target: "open.pr", match: { prState: "merged" } });
+  assertEquals(p.kind, "pr");
+  assertEquals(p.target, "open.pr");
+});
+
+test("parseProbe: a genuinely malformed (dot-free) pr literal still throws — #570 keeps the loud failure", () => {
+  assertThrows(() => parseProbe({ kind: "pr", target: "foo" }), Error, "owner/repo#<number>");
+});
+
+test("isFactRefTarget: distinguishes a `<node>.<fact>` reference from a literal handle", () => {
+  assert(isFactRefTarget("open.pr"), "a dotted, hash-free ref is a fact reference");
+  assert(isFactRefTarget("converge-merge.mergedSha"), "a hyphenated node id with a fact");
+  assert(!isFactRefTarget("nanobpm/nano-workforce#377"), "a literal PR handle carries a #number");
+  assert(!isFactRefTarget("foo"), "a dot-free bare word is not a fact reference");
+  assert(!isFactRefTarget("open."), "a trailing dot is not a fact reference");
+  assert(!isFactRefTarget(".pr"), "a leading dot is not a fact reference");
+});
+
+// ── parseProbe: epic kind (#568 — planKey target + validated epicState) ───────────────────────────
+test("parseProbe: accepts an owner/repo#NN epic probe (keyed by planKey) and defaults onTimeout to escalate", () => {
+  const p = parseProbe({ kind: "epic", target: "nanobpm/nano-ide#488", match: { epicState: "merged" } });
+  assertEquals(p.kind, "epic");
+  assertEquals(p.onTimeout, "escalate");
+  assertEquals(p.match?.epicState, "merged");
+});
+
+test("parseProbe: an epic probe whose target is no planKey throws (never resolvable)", () => {
+  assertThrows(() => parseProbe({ kind: "epic", target: "nanobpm/nano-ide" }), Error, "planKey");
+});
+
+test("parseProbe: an epic probe with an unknown match.epicState throws (mistyped state fails loudly)", () => {
+  assertThrows(
+    () => parseProbe({ kind: "epic", target: "o/r#1", match: { epicState: "landed" } }),
+    Error,
+    "invalid match.epicState",
+  );
+});
+
+test("parseProbe: a FACT-BOUND epic target parses (late-binding, same as pr)", () => {
+  const p = parseProbe({ kind: "epic", target: "plan.epic" });
+  assertEquals(p.target, "plan.epic");
+});
+
+// ── matchEpic (pure — operates on an already-fetched epic observation) ────────────────────────────
+function epicObs(over: Partial<EpicObservation> = {}): EpicObservation {
+  return { present: true, stage: "converging", active: true, prCount: 3, ...over };
+}
+
+test("matchEpic: green once the epic settles on a fully-merged aggregate, binding prCount", () => {
+  const r = matchEpic({ epicState: "merged" }, epicObs({ stage: "merged", active: false, prCount: 5 }));
+  assert(r.ready, "a fully-merged epic is ready");
+  assertEquals(r.bind?.prCount, "5");
+});
+
+test("matchEpic: not-ready while the epic is still in flight", () => {
+  const r = matchEpic({ epicState: "merged" }, epicObs({ stage: "converging", active: true }));
+  assert(!r.ready, "an in-flight epic is not ready");
+});
+
+test("matchEpic: a failed/abandoned epic is NOT ready (routes via onTimeout, never a false-green)", () => {
+  // A settled-but-not-merged epic (abandoned/resolved) never reports ready, so the bounded wait routes
+  // to onTimeout rather than hanging OR falsely proceeding — issue #568 acceptance.
+  for (const stage of ["abandoned", "resolved", "converged"]) {
+    const r = matchEpic({ epicState: "merged" }, epicObs({ stage, active: false }));
+    assert(!r.ready, `a '${stage}' epic must not be ready`);
+    assertStringIncludes(r.detail, "onTimeout");
+  }
+});
+
+test("matchEpic: an as-yet-unobserved planKey is not ready (keep waiting)", () => {
+  const r = matchEpic(undefined, { present: false, stage: "", active: false, prCount: 0 });
+  assert(!r.ready);
+});
+
+test("parseEpicLineage: reads the matching thread from a `/lineage?root=` response", () => {
+  const payload = { count: 1, threads: [{ rootRequestKey: "o/r#7", stage: "merged", active: false, prCount: 4 }] };
+  const obs = parseEpicLineage(payload, "o/r#7");
+  assertEquals(obs, { present: true, stage: "merged", active: false, prCount: 4 });
+});
+
+test("parseEpicLineage: an unknown/empty root yields an absent observation (not ready, no throw)", () => {
+  assertEquals(parseEpicLineage({ count: 0, threads: [] }, "o/r#9"), { present: false, stage: "", active: false, prCount: 0 });
+  assertEquals(parseEpicLineage("garbage", "o/r#9"), { present: false, stage: "", active: false, prCount: 0 });
+});
+
+test("epicLineageUrl: builds the app lineage read-model URL from the base + planKey", () => {
+  assertEquals(epicLineageUrl("o/r#12", "http://host:3000/"), "http://host:3000/app/api/lineage?root=o%2Fr%2312");
+});
+
+test("probeOnce: an epic probe reads the app lineage endpoint and goes green when fully merged", async () => {
+  const capture: { url?: string } = {};
+  const exec: ProbeExec = {
+    async httpGet(url) {
+      capture.url = url;
+      return { status: 200, body: JSON.stringify({ count: 1, threads: [{ rootRequestKey: "o/r#7", stage: "merged", active: false, prCount: 2 }] }) };
+    },
+    async run() {
+      return { code: 0, stdout: "", stderr: "" };
+    },
+  };
+  const probe = parseProbe({ kind: "epic", target: "o/r#7" });
+  const r = await probeOnce(probe, exec, { NANO_WORKFORCE_BASE_URL: "http://host:3000" });
+  assert(r.ready, "a fully-merged epic goes green");
+  assertStringIncludes(capture.url ?? "", "/app/api/lineage?root=o%2Fr%237");
+});
+
+test("probeOnce: an epic probe stays not-ready on a non-2xx lineage read (transient → keep waiting)", async () => {
+  const exec: ProbeExec = {
+    async httpGet() {
+      return { status: 503, body: "" };
+    },
+    async run() {
+      return { code: 0, stdout: "", stderr: "" };
+    },
+  };
+  const r = await probeOnce(parseProbe({ kind: "epic", target: "o/r#7" }), exec, {});
+  assert(!r.ready, "a failed read is not ready, never a throw");
 });
 
 // ── matchPr (pure — operates on an already-fetched PR observation) ────────────────────────────────
