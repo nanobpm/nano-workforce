@@ -30,7 +30,7 @@ import { isoDuration, isoDurationToMs } from "./reviewWait.ts";
  * merge loop (`app/mergeProtocol.ts` / `app/github.ts`) into a first-class probe so "watch an
  * in-flight PR reach a declared state" is a graph edge, not logic buried in the merge-loop node
  * body — the ACTION (landing the PR) stays in that node body; this kind only OBSERVES. */
-export type ProbeKind = "http" | "command" | "npm" | "github-check" | "capability" | "pr";
+export type ProbeKind = "http" | "command" | "npm" | "github-check" | "capability" | "pr" | "epic";
 
 /** The declared PR state a `pr` probe waits for (ADR 0005 §2). Each is a discovered fact about an
  * in-flight PR, read from its live GitHub state and evaluated by {@link matchPr}:
@@ -41,16 +41,26 @@ export type ProbeKind = "http" | "command" | "npm" | "github-check" | "capabilit
  *   • `checks-green` — every head check run is complete with none failing (required checks green). */
 export type PrCondition = "ready" | "merged" | "mergeable" | "checks-green";
 
+/** The declared epic (plan-fanout) state an `epic` probe waits for (issue #568). An nwf epic fans out
+ * many slice PRs across waves whose numbers are unknown at compose time, so this kind gates on the
+ * app's AGGREGATE ("all slices merged"), not a single PR. Both values mean the same terminal —
+ * "fully merged" — and are read from the app's lineage read-model (`stage === "merged"`, i.e. every
+ * opened slice landed): `merged` is the canonical name; `done` is accepted as a synonym for the plan
+ * aggregate reaching `done`. A failed/abandoned/mixed epic never reports this stage, so it never goes
+ * ready and the bounded wait routes to `onTimeout` rather than hanging. */
+export type EpicCondition = "merged" | "done";
+
 /** What the gate does when the bounded wait times out (the engine timer arm fires). */
 export type OnTimeout = "escalate" | "fail" | "continue";
 
 /** Backoff policy between poll attempts. */
 export type Backoff = "fixed" | "exponential";
 
-const PROBE_KINDS: readonly ProbeKind[] = ["http", "command", "npm", "github-check", "capability", "pr"];
+const PROBE_KINDS: readonly ProbeKind[] = ["http", "command", "npm", "github-check", "capability", "pr", "epic"];
 const ON_TIMEOUTS: readonly OnTimeout[] = ["escalate", "fail", "continue"];
 const BACKOFFS: readonly Backoff[] = ["fixed", "exponential"];
 const PR_CONDITIONS: readonly PrCondition[] = ["ready", "merged", "mergeable", "checks-green"];
+const EPIC_CONDITIONS: readonly EpicCondition[] = ["merged", "done"];
 
 /** The per-kind readiness predicate. Every field is optional; each kind reads only the ones it
  * understands and applies a sensible default when a field is absent (see the matchers below). */
@@ -84,6 +94,10 @@ export interface ProbeMatch {
   /** pr: the declared PR state the probe waits for (default `merged`). One of {@link PrCondition} —
    * `ready` (out of draft), `merged`, `mergeable`, or `checks-green`. */
   readonly prState?: PrCondition;
+  /** epic: the declared epic (plan-fanout) aggregate state the probe waits for (default `merged`).
+   * One of {@link EpicCondition} — `merged`/`done` both mean "fully merged" (every opened slice
+   * landed). Issue #568. */
+  readonly epicState?: EpicCondition;
 }
 
 /** The poll cadence: how often to re-probe, how long to keep trying, and the backoff shape. */
@@ -195,8 +209,17 @@ function isRecord(v: unknown): v is Record<string, unknown> {
  * Throws a descriptive error on an unknown/missing `kind`, a blank `target`, an invalid
  * `onTimeout`/`backoff`, or a `credentialEnv` on a non-`http` kind — a malformed probe must fail
  * loudly at the worker, never silently wait forever (nor let a caller believe a subprocess probe is
- * authenticated when its credential is silently ignored). */
-export function parseProbe(raw: unknown): ReadinessProbe {
+ * authenticated when its credential is silently ignored).
+ *
+ * `opts.allowLateBoundTarget` opts a caller into accepting a fact-bound `<nodeId>.<fact>` target for
+ * the `pr`/`epic` kinds — the #548/#570 late-binding reference the delivery-graph compiler rewrites
+ * to the observed handle at dispatch. It is OFF by default: only the delivery-graph dispatch path
+ * (`app/deliveryRunner.ts`) sets it. Every other surface (e.g. feature-intake readiness in
+ * `app/featureReadiness.ts`) has no such compiler rewrite, so a fact-ref target there could never
+ * resolve — keeping it off means a mis-declared gate fails loudly at submit rather than degrading
+ * into a runtime timeout/escalation. */
+export function parseProbe(raw: unknown, opts?: { allowLateBoundTarget?: boolean }): ReadinessProbe {
+  const allowLateBoundTarget = opts?.allowLateBoundTarget === true;
   if (!isRecord(raw)) throw new Error("readiness probe: descriptor must be an object");
   const kind = str(raw.kind).trim();
   if (!isProbeKind(kind)) {
@@ -233,10 +256,26 @@ export function parseProbe(raw: unknown): ReadinessProbe {
     }
   }
   // A pr edge whose target names no numeric PR id can never resolve — fail loudly at parse (mirroring
-  // the capability ref guard) rather than surface it as a timeout much later. `owner/repo#123`.
-  if (kind === "pr" && !parsePrTarget(target)) {
+  // the capability ref guard) rather than surface it as a timeout much later. `owner/repo#123`. A
+  // FACT-BOUND target (`<nodeId>.<fact>`, e.g. `open.pr`) is exempt: it is a #548 late-binding
+  // reference the compiler rewrites to the OBSERVED PR at dispatch and the readiness-probe worker
+  // resolves at runtime — it is legitimately not a literal here, so validating it as one would reject
+  // the documented canonical `agent → converge-merge → wait[pr merged]` shape (issue #570). A
+  // genuinely malformed literal (dot-free, e.g. `foo`) is not fact-ref-shaped, so it still fails. The
+  // exemption is gated on `allowLateBoundTarget`: a non-delivery-graph caller (default OFF) has no
+  // compiler rewrite, so a fact-ref target there can never resolve — it must fail loudly at submit.
+  if (kind === "pr" && !(allowLateBoundTarget && isFactRefTarget(target)) && !parsePrTarget(target)) {
     throw new Error(
       `readiness probe (pr): 'target' ('${target}') must be an 'owner/repo#<number>' PR reference (e.g. 'nanobpm/nano-workforce#377')`,
+    );
+  }
+  // An epic edge is keyed by the durable `planKey` (`owner/repo#NN`, the epic issue) — the stable
+  // business id, so a resubmit/replay still resolves (issue #568). Validate it as a literal planKey,
+  // exempting a fact-bound reference for the same #548 late-binding reason as `pr` above (and gated
+  // on the same `allowLateBoundTarget` opt-in, so a non-delivery-graph caller still fails loudly).
+  if (kind === "epic" && !(allowLateBoundTarget && isFactRefTarget(target)) && !parsePrTarget(target)) {
+    throw new Error(
+      `readiness probe (epic): 'target' ('${target}') must be an 'owner/repo#<number>' planKey (the epic issue, e.g. 'nanobpm/nano-workforce#374')`,
     );
   }
   const poll = isRecord(raw.poll) ? parsePoll(raw.poll) : undefined;
@@ -292,7 +331,45 @@ function parseMatch(raw: Record<string, unknown>): ProbeMatch {
     package: str(raw.package).trim() || undefined,
     verifyCommand: str(raw.verifyCommand).trim() || undefined,
     prState: parsePrCondition(raw.prState),
+    epicState: parseEpicCondition(raw.epicState),
   };
+}
+
+/** Narrow a raw `match.epicState` to an {@link EpicCondition}, throwing on a non-empty unknown value so
+ * a mistyped state fails loudly at parse rather than waiting forever. An absent/blank value yields
+ * undefined — {@link matchEpic} then applies the `merged` default. */
+function parseEpicCondition(raw: unknown): EpicCondition | undefined {
+  const s = str(raw).trim();
+  if (s === "") return undefined;
+  if (!isEpicCondition(s)) {
+    throw new Error(`readiness probe (epic): invalid match.epicState '${s}' (expected one of ${EPIC_CONDITIONS.join(", ")})`);
+  }
+  return s;
+}
+
+function isEpicCondition(v: string): v is EpicCondition {
+  for (const c of EPIC_CONDITIONS) if (c === v) return true;
+  return false;
+}
+
+// A late-binding probe `target` is a `<nodeId>.<fact>` reference to an upstream node's emitted fact
+// (#548) — the compiler rewrites it to the OBSERVED value at dispatch via a FEEL `context put`, and
+// the readiness-probe worker resolves it at runtime, so it is legitimately NOT a literal
+// `owner/repo#N` at parse time (issue #570). A literal PR/epic handle always carries a `#<number>` and
+// never this dotted, hash-free shape, so the two are unambiguous. Splits on the LAST dot, mirroring
+// the graph's `resolveFrom` (a node id MAY contain dots; a fact name — matched by FACT_REF_FACT — may
+// not), so a dot-free malformed literal is not fact-ref-shaped and still fails its kind's validation.
+const FACT_REF_NODE_ID = /^[A-Za-z_][A-Za-z0-9_.-]*$/;
+const FACT_REF_FACT = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/** Whether `target` is a `<nodeId>.<fact>` late-binding fact reference (issue #548/#570) rather than a
+ * literal `owner/repo#<number>` handle. See the note above. */
+export function isFactRefTarget(target: string): boolean {
+  const t = target.trim();
+  if (t === "" || t.includes("#")) return false;
+  const dot = t.lastIndexOf(".");
+  if (dot <= 0 || dot === t.length - 1) return false;
+  return FACT_REF_NODE_ID.test(t.slice(0, dot)) && FACT_REF_FACT.test(t.slice(dot + 1));
 }
 
 /** Narrow a raw `match.prState` to a {@link PrCondition}, throwing on a non-empty unknown value so a
@@ -693,6 +770,83 @@ export function prViewCommand(repo: string, number: string): string {
   return `gh pr view ${shellQuote(number)} --repo ${shellQuote(repo)} --json ${shellQuote("state,mergedAt,mergeStateStatus,statusCheckRollup,isDraft,headRefOid,mergeCommit")}`;
 }
 
+// ── Epic / plan-fanout probe (issue #568 — gate a graph on an epic reaching "fully merged") ──────
+
+/** A live epic (plan-fanout) observation, reduced to the fields {@link matchEpic} reads. An nwf epic
+ * fans out many slice PRs across waves, so "fully merged" is an AGGREGATE, read from the app's own
+ * lineage read-model (`/lineage?root=<planKey>`, {@link parseEpicLineage}) rather than any single PR.
+ * `stage`/`active` are the lineage thread's already-derived frontier: an epic reaches `stage:"merged"`
+ * (and `active:false`) EXACTLY when every opened slice landed (`app/lineage.ts`), while a
+ * failed/abandoned/mixed epic settles on `abandoned`/`resolved` — never `merged` — so it never goes
+ * ready and the bounded wait routes to `onTimeout`. Kept separate from I/O so the matcher stays
+ * pure/unit-testable, exactly like {@link PrObservation}. */
+export interface EpicObservation {
+  /** Whether the planKey resolved to a known lineage thread at all (an as-yet-unknown/never-started
+   * epic yields `present:false` → not ready, keep waiting). */
+  readonly present: boolean;
+  /** The lineage thread's derived frontier stage (e.g. `converging`, `merged`, `resolved`). */
+  readonly stage: string;
+  /** Whether the arc still has an active frontier (false once every stage has settled). */
+  readonly active: boolean;
+  /** Count of slice PRs on the epic — bound downstream as a fact (parity with the `pr` kind's
+   * `mergedSha`), so a consumer can pin how many PRs the epic landed. */
+  readonly prCount: number;
+}
+
+/** Parse a raw `/lineage?root=<planKey>` response (already JSON-decoded) into an {@link EpicObservation}
+ * for `planKey`. The endpoint returns `{ count, threads: [thread] }` (or `threads: []` for an unknown
+ * root); this reads the thread whose `rootRequestKey` matches `planKey`. Tolerant: a malformed/empty
+ * payload yields an absent observation, so a transient read degrades to "not ready" (keep waiting),
+ * never a throw. */
+export function parseEpicLineage(payload: unknown, planKey: string): EpicObservation {
+  const j = isRecord(payload) ? payload : {};
+  const threads = Array.isArray(j.threads) ? j.threads : [];
+  const key = planKey.trim();
+  const thread = threads.find((t) => isRecord(t) && str(t.rootRequestKey).trim() === key);
+  if (!isRecord(thread)) return { present: false, stage: "", active: false, prCount: 0 };
+  const prCount = num(thread.prCount);
+  return {
+    present: true,
+    stage: str(thread.stage).trim().toLowerCase(),
+    active: thread.active === true,
+    prCount: typeof prCount === "number" ? prCount : 0,
+  };
+}
+
+/** epic readiness (issue #568): does the observed epic satisfy the declared `match.epicState`
+ * (default `merged`)? PURE — it operates on an already-fetched {@link EpicObservation} and NEVER
+ * throws, so a transient/garbled read is simply "not ready yet". "Fully merged" means the lineage
+ * thread settled on `stage:"merged"` — every opened slice landed. A failed/abandoned/mixed epic
+ * settles on another terminal (`abandoned`/`resolved`/`converged`), so it stays not-ready and the
+ * bounded wait routes to `onTimeout` rather than hanging. A `merged` match binds `{ prCount }` so a
+ * downstream edge can pin how many slice PRs the epic landed (parity with the `pr` kind's
+ * `mergedSha`). Both `merged` and `done` map to the same "fully merged" terminal. */
+export function matchEpic(match: ProbeMatch | undefined, epic: EpicObservation): ProbeResult {
+  const want: EpicCondition = match?.epicState ?? "merged";
+  if (!epic.present) return { ready: false, detail: `epic (${want}): planKey not observed yet (not ready)` };
+  if (epic.stage === "merged" && !epic.active) {
+    return { ready: true, detail: `epic fully merged (${epic.prCount} slices)`, bind: { prCount: String(epic.prCount) } };
+  }
+  const settled = !epic.active;
+  return {
+    ready: false,
+    detail: settled
+      ? `epic settled on '${epic.stage}' (not fully merged) — routing via onTimeout`
+      : `epic in flight (stage '${epic.stage || "unknown"}', not merged yet)`,
+    observed: `stage=${epic.stage || "unknown"} active=${epic.active} prCount=${epic.prCount}`,
+  };
+}
+
+/** Build the app's lineage read-model URL for an epic's `planKey`. The app mounts its OpenAPI paths
+ * under `/app/api` (mirroring `abandonUrl`/`blackboardUrl` in `app/blackboard.ts`), and `?root=`
+ * accepts a `plan_key`. `base` is the ONE `NANO_WORKFORCE_BASE_URL` env contract (never a second
+ * name), read through the typed schema — so an epic gate is observed over the SAME reachable base a
+ * remote fleet already uses for the abandon/blackboard hooks. */
+export function epicLineageUrl(planKey: string, base: string): string {
+  const b = base.trim().replace(/\/+$/, "") || readEnvOr("NANO_WORKFORCE_BASE_URL");
+  return `${b}/app/api/lineage?root=${encodeURIComponent(planKey.trim())}`;
+}
+
 
 // ── Single probe attempt (does I/O via the injected {@link ProbeExec}) ──────────────────────────
 
@@ -734,6 +888,17 @@ export async function probeOnce(
       const out = await exec.run(prViewCommand(ref.repo, ref.number), env);
       if (out.code !== 0) return { ready: false, detail: "pr: gh pr view failed (not ready)" };
       return matchPr(probe.match, parsePrView(parseJson(out.stdout)));
+    }
+    case "epic": {
+      // "Fully merged" is the app's AGGREGATE, not a GitHub read — observe it over the app's own
+      // lineage read-model (level-triggered, same poll machinery as `pr`). A fact-bound target that is
+      // still unresolved (`<node>.<fact>`) is not a literal planKey, so treat it as "not ready" and
+      // keep waiting rather than issue a malformed request.
+      if (!parsePrTarget(probe.target)) return { ready: false, detail: "epic: unresolved/unparseable planKey (not ready)" };
+      const url = epicLineageUrl(probe.target, readEnvOr("NANO_WORKFORCE_BASE_URL", "", env));
+      const resp = await exec.httpGet(url, { accept: "application/json" });
+      if (resp.status < 200 || resp.status >= 300) return { ready: false, detail: `epic: lineage read HTTP ${resp.status} (not ready)` };
+      return matchEpic(probe.match, parseEpicLineage(parseJson(resp.body), probe.target));
     }
   }
 }

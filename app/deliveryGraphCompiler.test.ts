@@ -152,6 +152,57 @@ test("late-binding: a fact-qualified edge threads a boundFacts input into the co
   assert(boundInput, `boundFacts is a single-quoted FEEL list literal, got: ${r.bpmn.match(/source='[^']*' target="boundFacts"/)?.[0] ?? r.bpmn.match(/source="[^"]*" target="boundFacts"/)?.[0]}`);
 });
 
+test("#568 epic wait kind: an `epic` wait node compiles to a readiness gate and seeds its probe verbatim", async () => {
+  // A new `wait` kind `epic` (issue #568) gates a graph on an nwf plan-fanout epic reaching "fully
+  // merged", keyed by its planKey. It reuses the SAME readiness-gate machinery as `pr` (Decision 3 —
+  // never a second wait loop), so it compiles through with no BPMN branch: the node delegates to
+  // `pr.readiness-probe` and seeds `nodeInputs.<el>.probe` (the whole descriptor) verbatim.
+  const graph = {
+    name: "epic gate",
+    nodes: [
+      { id: "gate-epic", kind: "wait", wait: { kind: "epic", target: "nanobpm/nano-ide#488", match: { epicState: "merged" }, onTimeout: "escalate" } },
+      { id: "start-b", kind: "agent", agent: { jobType: "senior:feature", prompt: "implement #567" } },
+    ],
+    edges: [{ from: "gate-epic", to: "start-b" }],
+  };
+  const r = await compileOk(graph);
+  const types = new Set([...r.bpmn.matchAll(/<zeebe:taskDefinition type="([^"]+)"/g)].map((m) => m[1]));
+  assert(types.has("pr.readiness-probe"), "the epic wait delegates to the shared readiness-probe gate");
+  // The epic wait's element (n0 — sorted node id `gate-epic` precedes `start-b`) seeds its probe.
+  assert(r.bpmn.includes('source="=nodeInputs.n0.probe" target="probe"'), "the epic wait seeds its probe descriptor verbatim");
+});
+
+test("#572 epic prCount emit: a wait[epic] node's `prCount` fact publishes from the epic-match `prCount` bind, not the probe detail", async () => {
+  // matchEpic binds `{ prCount }` on a fully-merged match, but the probe-loop only lifted
+  // ready/detail/resolvedArtifact/mergedSha/observed out of the gate scope, and factSourceVar mapped
+  // a non-mergedSha/non-artifact fact to `detail` — so a documented `emits: [{name:"prCount"}]` wait
+  // node published the detail STRING instead of the count. Thread prCount end-to-end (Copilot #572).
+  const graph = {
+    name: "epic count gate",
+    nodes: [
+      {
+        id: "gate-epic",
+        kind: "wait",
+        wait: { kind: "epic", target: "nanobpm/nano-ide#488", match: { epicState: "merged" }, onTimeout: "escalate" },
+        emits: [{ name: "prCount", type: "number" }],
+      },
+      { id: "start-b", kind: "agent", agent: { jobType: "senior:feature", prompt: "implement #567" } },
+    ],
+    edges: [{ from: "gate-epic.prCount", to: "start-b" }],
+  };
+  const r = await compileOk(graph);
+  // The probe-loop subProcess must lift `prCount` out of the gate scope (alongside mergedSha).
+  assert(
+    r.bpmn.includes('source="=if (is defined(prCount)) then prCount else null" target="prCount"'),
+    "the probe loop lifts the prCount bind out of the gate scope",
+  );
+  // The wait node's emit output must SOURCE prCount from the `prCount` variable, not `detail`.
+  assert(
+    r.bpmn.includes('source="=if (is defined(prCount)) then prCount else null" target="n0_prCount"'),
+    "the prCount emit publishes from the prCount bind variable, not the probe detail",
+  );
+});
+
 test("#499 human context: the human user-task seeds prompt/nodeId/emit context so its generic form is not contextless", async () => {
   const r = await compileOk(RELEASE_RUNBOOK);
   // The human node's subProcess ioMapping must thread the authored prompt + node identity + emit

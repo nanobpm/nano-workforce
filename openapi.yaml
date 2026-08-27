@@ -1245,12 +1245,12 @@ components:
       properties:
         kind:
           type: string
-          enum: [http, command, npm, github-check, capability, pr]
-          description: The readiness source. `command` is the escape hatch; `capability` resolves a cross-repo published-artifact edge; `pr` watches an in-flight PR's merge state (ADR 0005 §2).
+          enum: [http, command, npm, github-check, capability, pr, epic]
+          description: The readiness source. `command` is the escape hatch; `capability` resolves a cross-repo published-artifact edge; `pr` watches an in-flight PR's merge state (ADR 0005 §2); `epic` gates on an nwf plan-fanout epic reaching "fully merged", keyed by its `planKey` (issue #568).
         target:
           type: string
           minLength: 1
-          description: The kind-specific target (a URL, a shell command, a `pkg@version`, an `owner/repo@ref`, `github-releases:owner/repo`, or an `owner/repo#123` PR reference for the `pr` kind).
+          description: The kind-specific target (a URL, a shell command, a `pkg@version`, an `owner/repo@ref`, `github-releases:owner/repo`, an `owner/repo#123` PR reference for the `pr` kind, or an `owner/repo#NN` planKey — the epic issue — for the `epic` kind). For a `pr`/`epic` target used in a **delivery-graph `wait` node** it may instead be a `<nodeId>.<fact>` late-binding reference the delivery-graph compiler resolves at dispatch (issue #548/#570); this rewrite exists ONLY on the delivery-graph dispatch path — other surfaces (e.g. feature-intake readiness) have no such resolver, so they must supply a literal handle.
         onTimeout:
           type: string
           enum: [escalate, fail, continue]
@@ -1274,6 +1274,7 @@ components:
             package: { type: string, description: "capability: the package whose releases are scanned for provenance." }
             verifyCommand: { type: string, description: "capability: optional empirical verifier run once at the gate boundary." }
             prState: { type: string, enum: [ready, merged, mergeable, checks-green], description: "pr: the declared PR state to wait for (default merged)." }
+            epicState: { type: string, enum: [merged, done], description: "epic: the declared plan-fanout aggregate state to wait for (default merged) — both mean 'fully merged' (issue #568)." }
         poll:
           type: object
           additionalProperties: false

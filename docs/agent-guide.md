@@ -433,18 +433,29 @@ layer schedules, it does not re-implement execution):
 | kind | config | what it does | may `emits`? |
 |---|---|---|---|
 | `agent` | `agent: { jobType, prompt? }` | a worker runs an agent job type (the fan-out body). **Side-effecting.** | yes |
-| `wait` | `wait: <ReadinessProbe>` | a durable, bounded readiness probe — kind ∈ `http`, `command`, `npm`, `github-check`, `capability`, `pr`. Read-only. | yes (binds observed facts) |
+| `wait` | `wait: <ReadinessProbe>` | a durable, bounded readiness probe — kind ∈ `http`, `command`, `npm`, `github-check`, `capability`, `pr`, `epic`. Read-only. | yes (binds observed facts) |
 | `human` | `human?: { formKey?, prompt? }` | a scheduled user task + form (the Tasks inbox, §3). Blocks dependents, SLA-bounded, answerable by a human **or** an agent. | yes |
 | `connector` | `connector: { target, dedupeKey?, payload? }` | an automated, side-effecting outbound action. Carries a `dedupeKey` (at-least-once safe). Two **real targets** ship today — **`converge`** and **`converge-merge`** (§9.4); other targets are a forward-declared stub. | yes |
 
 A **`wait` node's `wait` is a `ReadinessProbe` verbatim** (the same shape feature-run
 intake uses): `{ kind, target, onTimeout?, match?, poll? }`. The **`pr` kind** watches an
 in-flight PR — `target: "owner/repo#123"`, `match.prState ∈ ready|merged|mergeable|checks-green`
-(default `merged`) — and on a merged match binds `mergedSha` as an output fact.
+(default `merged`) — and on a merged match binds `mergedSha` as an output fact. The **`epic`
+kind** (issue #568) gates on an **nwf plan-fanout epic reaching "fully merged"** — `target:
+"owner/repo#NN"` is the epic's durable **`planKey`** (the epic issue, *not* the engine
+`processInstanceKey`, so a resubmit/replay still resolves), `match.epicState ∈ merged|done`
+(default `merged`, both mean "every opened slice landed"). It observes the app's own aggregate
+(the lineage read-model), so a **failed/abandoned/mixed** epic never reports merged and the
+bounded wait routes to **`onTimeout`** rather than hanging; on a fully-merged match it binds
+`prCount` (how many slice PRs landed) as an output fact. Both `pr` and `epic` targets may also
+be a **`<nodeId>.<fact>` late-binding reference** the compiler resolves at dispatch (§9.4),
+rather than a literal handle.
 
 A **typed fact** (`emits[]` entry) is `{ name, type, description? }` where
-`type ∈ string|number|boolean|artifact|version|url` (`artifact` = a `pkg@version` handle,
-`version` = a bare version). `name` matches `^[A-Za-z_][A-Za-z0-9_]*$` and is referenced
+`type ∈ string|number|boolean|artifact|version|url|pr` (`artifact` = a `pkg@version` handle,
+`version` = a bare version, `pr` = a PR reference `owner/repo#N` an `agent` node emits for the
+PR it opened, late-bound by a downstream `wait[pr]`/`connector[converge*]` target — issue #548).
+`name` matches `^[A-Za-z_][A-Za-z0-9_]*$` and is referenced
 downstream as `<nodeId>.<name>`. A "click done" human node or a pass-through node declares
 no facts.
 
@@ -635,3 +646,39 @@ ways to name the target PR:
 `senior:feature` already returns the PR it opened, so declaring `emits: [{ "name": "pr", "type": "pr" }]`
 on the agent node is all it takes to publish it (issue #548).
 
+### 9.5 Gate a graph on an epic reaching "fully merged" (`wait[epic]`)
+
+Sometimes the thing you must wait for is not one PR but a **whole epic** — an nwf
+`plan-fanout` that fans many slice PRs across waves whose numbers are unknown at compose
+time. The **`wait` kind `epic`** (issue #568) gates on that epic reaching **"fully merged"**
+(every opened slice landed), keyed by its durable **`planKey`** (`owner/repo#NN` — the epic
+issue), so *"start feature B once epic A has fully landed"* is an automated edge, not a human
+babysitting a `confirm` gate.
+
+```json
+{
+  "name": "start #567 once epic #488 has fully merged",
+  "nodes": [
+    { "id": "gate-epic", "kind": "wait",
+      "wait": { "kind": "epic", "target": "nanobpm/nano-ide#488",
+                "match": { "epicState": "merged" }, "onTimeout": "escalate" },
+      "emits": [ { "name": "prCount", "type": "number" } ] },
+    { "id": "start-b", "kind": "agent",
+      "agent": { "jobType": "senior:feature", "prompt": "Implement nanobpm/nano-workforce#567 and open a PR." } }
+  ],
+  "edges": [ { "from": "gate-epic", "to": "start-b" } ]
+}
+```
+
+Semantics:
+
+- **`target` is the `planKey`** (`owner/repo#NN`, the epic issue) — the *stable business id*,
+  not the engine `processInstanceKey` (`64200`), so a resubmit/replay still resolves.
+- **`match.epicState`** is `merged` (default) or its synonym `done` — both mean "every opened
+  slice landed". The gate reads the app's own **aggregate** (the lineage read-model over
+  `NANO_WORKFORCE_BASE_URL`), so it is level-triggered like `pr` (no missed edge).
+- **A failed/abandoned/mixed epic never reports merged**, so it never falsely releases the
+  gate; the **bounded** wait elapses and routes via **`onTimeout`** (`escalate`/`continue`) —
+  it does **not** hang.
+- On a fully-merged match it binds **`prCount`** (how many slice PRs the epic landed) as an
+  output fact, so a downstream node can consume it (parity with the `pr` kind's `mergedSha`).

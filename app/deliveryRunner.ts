@@ -276,7 +276,7 @@ function buildNodeInput(
       return { jobType: node.agent.jobType, appendPrompt: renderIdempotencyPreamble() + basePrompt + renderEmitContract(emits), timeout: isoDuration(node.agent.timeout, ctx.nodeTimeout) };
     }
     case "wait": {
-      const probe = parseProbe(node.wait);
+      const probe = parseProbe(node.wait, { allowLateBoundTarget: true });
       // Only a VALID, positive per-node budget overrides the run level. Match the `>= 1` predicate
       // `readinessTimeout`/`readinessPollEvery` apply internally, rather than a bare JS-truthiness
       // check on `poll.timeoutMs`/`everyMs`: a negative (`-1`) value is truthy, so a truthiness gate

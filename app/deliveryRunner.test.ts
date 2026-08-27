@@ -362,3 +362,33 @@ test("runDeliveryGraph coerces a numeric engine processInstanceKey to a string h
   assertEquals(r.handle.processInstanceKey, "987654321");
   assertEquals(typeof r.handle.processInstanceKey, "string");
 });
+
+test("the canonical `agent → converge-merge → wait[pr merged]` graph DISPATCHES with a fact-bound wait target (#570)", async () => {
+  // Regression for #570: a `wait[pr]` node whose `target` is a fact reference (`open.pr`, the #548
+  // late-binding shape the guide documents as canonical) COMPILED+staged but threw at dispatch —
+  // `buildNodeInput`'s wait case eagerly `parseProbe`'d the fact-ref target as a literal `owner/repo#N`
+  // and aborted the whole launch. It must now LAUNCH (the target is resolved at runtime by the
+  // readiness-probe worker), while a genuinely malformed literal still fails loudly (see the
+  // deliveryRunner sibling assertion + readiness.test.ts).
+  const graph: DeliveryGraph = {
+    name: "canonical land shape",
+    nodes: [
+      { id: "open", kind: "agent", agent: { jobType: "senior:feature", prompt: "open a PR" }, emits: [{ name: "pr", type: "pr" }] },
+      { id: "converge-merge", kind: "connector", connector: { target: "converge-merge", payload: { pr: "open.pr" } } },
+      { id: "merged", kind: "wait", wait: { kind: "pr", target: "open.pr", match: { prState: "merged" }, onTimeout: "escalate" } },
+    ],
+    edges: [
+      { from: "open.pr", to: "converge-merge" },
+      { from: "open.pr", to: "merged" },
+    ],
+  };
+  // Dispatch through the full launch path (prepare → deploy → createInstance). Before the fix this
+  // threw synchronously inside buildNodeInput; now it launches.
+  const engine = {
+    deployResources: async () => [],
+    createInstance: async () => ({ processInstanceKey: "555" }),
+  };
+  const r = await runDeliveryGraph(engine, graph);
+  assert(r.ok, `expected the canonical fact-bound wait[pr] graph to launch, got ${JSON.stringify(r)}`);
+  assertEquals(r.handle.processInstanceKey, "555");
+});
