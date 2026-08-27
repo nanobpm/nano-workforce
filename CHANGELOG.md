@@ -1,3 +1,9 @@
+## [0.149.0](https://github.com/nanobpm/nano-workforce/compare/v0.148.2...v0.149.0) (2026-08-27)
+
+### Features
+
+* **delivery-graph:** epic 'fully merged' wait kind + dispatch fact-bound wait[pr] targets ([#572](https://github.com/nanobpm/nano-workforce/issues/572)) ([91e9ad8](https://github.com/nanobpm/nano-workforce/commit/91e9ad8f5d1e7079859937e245c01ceb0497be84)), closes [#570](https://github.com/nanobpm/nano-workforce/issues/570) [#548](https://github.com/nanobpm/nano-workforce/issues/548) [#568](https://github.com/nanobpm/nano-workforce/issues/568) [#570](https://github.com/nanobpm/nano-workforce/issues/570) [#568](https://github.com/nanobpm/nano-workforce/issues/568) [#548](https://github.com/nanobpm/nano-workforce/issues/548)
+
 ## [0.148.2](https://github.com/nanobpm/nano-workforce/compare/v0.148.1...v0.148.2) (2026-08-27)
 
 ### Bug Fixes
