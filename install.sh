@@ -807,7 +807,11 @@ api() {
     API_STATUS='000'; API_BODY=''; API_ERR=0
     return 0
   fi
-  set -- -sS -X "$_method" -H 'Accept: application/json'
+  # Bound every request so a stalled endpoint (SYN/DNS/proxy hang) can't wedge
+  # the otherwise-bounded phase-2 poll loop: --connect-timeout caps the connect
+  # phase, --max-time caps the whole request. A timeout surfaces as a non-zero
+  # curl exit (API_ERR) → API_STATUS='000', handled like any transport failure.
+  set -- -sS --connect-timeout 10 --max-time 30 -X "$_method" -H 'Accept: application/json'
   if [ -n "$_body" ]; then
     set -- "$@" -H 'Content-Type: application/json' --data "$_body"
   fi
