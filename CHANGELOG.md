@@ -1,3 +1,9 @@
+## [0.150.1](https://github.com/nanobpm/nano-workforce/compare/v0.150.0...v0.150.1) (2026-08-28)
+
+### Bug Fixes
+
+* **startFeature:** thread probePollEvery through the readiness gate ([#579](https://github.com/nanobpm/nano-workforce/issues/579)) ([#582](https://github.com/nanobpm/nano-workforce/issues/582)) ([d8f7739](https://github.com/nanobpm/nano-workforce/commit/d8f773907e1c66292fa6799f70e8d957f6f5f626)), closes [#295](https://github.com/nanobpm/nano-workforce/issues/295)
+
 ## [0.150.0](https://github.com/nanobpm/nano-workforce/compare/v0.149.0...v0.150.0) (2026-08-28)
 
 ### Features
