@@ -205,6 +205,7 @@ CJS
     done
     if [ -z "$_port" ]; then
       kill "$_pid" 2>/dev/null || true
+      wait "$_pid" 2>/dev/null || true
       PHASE2_OUT="stub console never reported a port for mode '$_mode'"; PHASE2_RC=127
       return 0
     fi
@@ -216,10 +217,11 @@ CJS
     PHASE2_RC=$?
     set -e
     kill "$_pid" 2>/dev/null || true
+    wait "$_pid" 2>/dev/null || true
   }
 
   if [ -z "$STUBDIR" ] || [ ! -f "$STUB" ]; then
-    fail "s8-s11: could not create the stub console"
+    fail "s8-s12: could not create the stub console"
   else
     # Scenario 8 — happy path: success asserted via /app/api/version, exit 0.
     run_phase2 happy

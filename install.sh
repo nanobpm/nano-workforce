@@ -768,8 +768,8 @@ EOF
 # Phase 2 — install & run the Nano Workforce app via the nano console API
 # (nanobpm/nano-workforce#583). Everything below talks to the console that
 # `c8 nano start` brought up (default http://localhost:8080, console under
-# /console). Read-only GETs run even under --dry-run's live path is avoided:
-# --dry-run prints the exact calls and mutates (and reads) nothing.
+# /console). Under --dry-run, all live console calls are avoided — including
+# read-only GETs: --dry-run prints the exact calls and mutates (and reads) nothing.
 # ---------------------------------------------------------------------------
 
 # scheme://host:port of a URL (drops any path), e.g. http://localhost:8080/v2
