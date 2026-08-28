@@ -474,7 +474,7 @@ live_models() { # $1 harness -> newline list on stdout
 # Step 4/5 — interactive selection + model + instances
 # ---------------------------------------------------------------------------
 add_selection() { # $1 harness $2 model $3 instances
-  if [ -n "$2" ] && ! printf '%s' "$2" | grep -Eq '^[A-Za-z0-9._/@+-]+$'; then
+  if [ -n "$2" ] && ! printf '%s' "$2" | LC_ALL=C grep -Eq '^[A-Za-z0-9._/@+-]+$'; then
     die "refusing model id '$2' for $1: only [A-Za-z0-9._/@+-] are allowed (':' is reserved as the --harness field separator, so it must not appear in a model id; guards against shell-metacharacter injection into the hire --command)."
   fi
   SELECTIONS="${SELECTIONS}$1${SEP}$2${SEP}$3
@@ -1030,7 +1030,7 @@ install_app() {
 
   PROJECT=${PROJECT_NAME:-Workforce}
   case "$PROJECT" in
-    ''|*[!A-Za-z0-9._-]*) die "invalid --project-name '$PROJECT': only [A-Za-z0-9._-] are allowed." ;;
+    ''|*[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0-9._-]*) die "invalid --project-name '$PROJECT': only [A-Za-z0-9._-] are allowed." ;;
   esac
   CONSOLE_ORIGIN=$(origin_of "${NANO_INSTALL_CONSOLE_ORIGIN:-${NANOBPMN_BASE_URL:-http://localhost:8080}}")
   APPVIEW_BASE="${CONSOLE_ORIGIN}/console/app-view/${PROJECT}"
