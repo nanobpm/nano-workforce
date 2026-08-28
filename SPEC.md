@@ -492,7 +492,7 @@ queries skip (`merging`), so a slow pass can't double-signal.
 | `GITHUB_TOKEN` | — | GitHub API (poller + agent) |
 | `NANO_PR_POLL_MS` | 60000 | poll interval |
 | `NANO_PR_MAX_ROUNDS` | 20 | default round cap (per-submit `maxRounds` override, clamped 1–100) |
-| `NANO_PR_WEBHOOK_SECRET` | — | optional shared secret (`X-Hook-Secret`) for guarded operations (e.g. `/app/api/agent`, `/app/api/version`, `/app/api/status`) |
+| `NANO_PR_WEBHOOK_SECRET` | — | optional shared secret (`x-hook-secret`) for guarded operations (e.g. `/app/api/agent`, `/app/api/version`, `/app/api/status`) |
 | `NANO_PR_AUTO_MERGE` | 1 | run the merge stage after convergence (`0` = review-only; per-submit `convergeOnly: true` override) |
 | `NANO_PR_MERGE_METHOD` | squash | `squash` \| `merge` \| `rebase` |
 | `NANO_PR_MERGE_ADMIN` | 0 | pass `--admin` on merge |

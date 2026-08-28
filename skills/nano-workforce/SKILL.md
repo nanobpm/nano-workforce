@@ -1,6 +1,6 @@
 ---
 name: nano-workforce
-description: Drive and debug a running Nano Workforce instance — submit PRs for review convergence, submit issues/epics for plan→implement→converge, submit agent-authored delivery graphs (ADR 0005), answer escalations, and unstick stuck instances. Use when the user asks to operate, drive, submit work to, or debug their Nano Workforce.
+description: Drive and debug a running Nano Workforce instance — submit PRs for review convergence, submit issues/epics for plan→implement→converge, submit agent-authored delivery graphs (ADR 0005), answer escalations, and unstick stuck instances. Prefer the instance's MCP server (add it → its tools appear); fall back to the live operator guide. Use when the user asks to operate, drive, submit work to, or debug their Nano Workforce.
 ---
 
 # Nano Workforce operator skill
@@ -12,27 +12,88 @@ implements → converges** them across a fleet of coding agents, and runs
 DAGs — ADR 0005).
 
 **This skill is a thin bootstrap by design.** It does not describe the endpoints.
-Every running nwf instance serves its own operator guide, *live*, keyed to that
-instance's URLs and matched to its deployed version. Your job is to fetch that
-guide and follow it — never to work from a cached copy, which drifts across
-versions and instances.
+Every running nwf instance is self-describing — over **MCP** where your client
+supports it, and over its **live operator guide** everywhere else. Your job is to
+reach that live surface and follow it, never to work from a cached copy that drifts
+across versions and instances.
 
-## 1. Confirm which instance you are driving — always
+There are two paths. **Prefer MCP (§A).** If your client has no MCP support, use the
+fetch-the-live-guide fallback (§B). Both talk to the same app; MCP is a projection of
+the same OpenAPI contract, not a different system (ADR 0067).
 
-A user typically runs **several** Nano Workforce instances — e.g. a local dev copy,
-one on the LAN (`http://merlin.local:3000/app/api`), and a public tunnel
-(an ngrok URL) when off the LAN. Every action here is **side-effecting** —
-submitting work, answering escalations, merging PRs — so targeting the wrong
-instance is a real mistake, not a harmless one. **Never silently default to a
-base URL.**
+## A. Preferred — drive over MCP
 
-### Sources of candidate instances
+The Urban runtime serves a Streamable-HTTP MCP endpoint at **`/app/mcp`** for every
+instance, with **zero app-side MCP code**: the app's operations are projected into
+tools from its OpenAPI spec, alongside a framework-owned engine-debug tool family
+(process instances, wait states, variables, incidents) and the app's projection
+reads. The operator **guide** (the same guide as §B) is itself one of those projected
+tools — `GET /app/api/agent` becomes the `getAgentInstructions` read tool — so the
+workflow knowledge (orient first, preview before dispatch, escalations are for humans)
+is discoverable over the same channel as the drive tools; the runtime additionally
+serves its derived **system brief** as an MCP resource plus an orientation prompt.
 
-Gather candidates from, in order:
+**Register one MCP server entry per instance.** Naming the instance
+(`"drive workforce-merlin"`) makes the wrong-instance mistake structurally
+impossible — tool calls are namespaced per server entry. For the Copilot CLI, in
+`~/.copilot/mcp-config.json` (user-wide) or `.mcp.json` (repo-scoped):
 
-1. **A named-instance registry** the user maintains — first of these that exists:
-   `$NANO_WORKFORCE_INSTANCES` (JSON object of `name → base URL`), or
-   `~/.config/nano-workforce/instances.json` (same shape). Example:
+```json
+{
+  "mcpServers": {
+    "workforce-local": {
+      "type": "http",
+      "url": "http://localhost:3000/app/mcp",
+      "tools": ["*"]
+    },
+    "workforce-merlin": {
+      "type": "http",
+      "url": "http://merlin.local:3000/app/mcp",
+      "headers": { "x-hook-secret": "$NANO_PR_WEBHOOK_SECRET" },
+      "tools": ["*"]
+    }
+  }
+}
+```
+
+Or from the terminal:
+`copilot mcp add --transport http workforce-local http://localhost:3000/app/mcp`
+(add `--header` for a guarded instance). Claude/Cursor use the same server entries.
+
+Then: start a session, confirm the `workforce-*` tools appear, and ask the agent to
+use a **named** instance (`"Using workforce-local, show what's in flight and any open
+escalations"`). It should call the status operation tool, not curl.
+
+**Guard posture.** When `NANO_PR_WEBHOOK_SECRET` is **unset**, both reads (status,
+instances, incidents, projections, the operator guide) and mutations (submit work,
+answer escalations, cancel/retry/resolve) work from loopback with no credential. When it
+**is set**, that secret is required as an `x-hook-secret` header on **both reads and
+mutations** — read endpoints like `getAgentInstructions`/`getVersion` also return `401`
+without it — put it in the server entry's `headers`, never in chat. **Operator-only doors stay operator-only:** the delivery-graph
+dispatch/dismiss lifecycle (the human clicking Dispatch *is* the approval, ADR 0005)
+is `x-mcp`-excluded and is **not** a tool — dispatch stays a human action in the
+cockpit.
+
+The full server-entry recipes (multiple instances, Basic-Auth-fronted instances,
+LAN exposure) live in the **agent-configuration runbook** — see the repo README
+("Configure an agent over MCP") and [`docs/mcp-runbook.md`](../../docs/mcp-runbook.md).
+
+## B. Fallback — no MCP client? Fetch the live guide
+
+Agents without MCP are unchanged: resolve the instance, then fetch and follow its
+live guide.
+
+### B.1 Confirm which instance you are driving — always
+
+A user typically runs **several** instances — a local dev copy, one on the LAN
+(`http://merlin.local:3000/app/api`), and a public tunnel (ngrok) when off the LAN.
+Every action is **side-effecting**, so targeting the wrong instance is a real
+mistake. **Never silently default to a base URL.** Gather candidates, in order:
+
+1. A named-instance registry the user maintains — first that exists:
+   `$NANO_WORKFORCE_INSTANCES` (JSON `name → base URL`) or
+   `~/.config/nano-workforce/instances.json` (same shape). This is also the source
+   for the per-instance MCP server names in §A. Example:
 
    ```json
    { "local": "http://localhost:3000/app/api",
@@ -40,33 +101,25 @@ Gather candidates from, in order:
      "remote": "https://<subdomain>.ngrok.app/app/api" }
    ```
 
-2. `$NANO_WORKFORCE_URL`, if set (a single default; accept as-is, append `/app/api`
-   only if it is a bare origin).
+2. `$NANO_WORKFORCE_URL`, if set (a single default; append `/app/api` only if it is
+   a bare origin).
 3. Any URL the user names in the conversation.
 4. Local fallback: `http://localhost:3000/app/api` (port `PR_REVIEW_PORT`, default `3000`).
 
-### Choosing
+If the user named an instance, use it. Otherwise probe candidates for reachability
+and ask which to use, marking which are live:
 
-- If the user **named an instance** (by name from the registry, or by URL), use it.
-- Otherwise, **probe the candidates for reachability** and ask the user which to
-  use, offering the candidates as choices and marking which are live. Reachability
-  disambiguates the common case — off the LAN, `merlin.local` won't resolve, so the
-  tunnel instance is the live one:
+```bash
+curl -sS --max-time 3 \
+  ${NANO_PR_WEBHOOK_SECRET:+-H "x-hook-secret: $NANO_PR_WEBHOOK_SECRET"} \
+  "$BASE/version" | jq '{appVersion, gitSha, uptimeSeconds}'
+```
 
-  ```bash
-  # For each candidate base, a fast liveness + identity check:
-  curl -sS --max-time 3 \
-    ${NANO_PR_WEBHOOK_SECRET:+-H "x-hook-secret: $NANO_PR_WEBHOOK_SECRET"} \
-    "$BASE/version" | jq '{appVersion, gitSha, uptimeSeconds}'
-  ```
+Only skip the question when exactly **one** candidate exists and is reachable — and
+even then, name the instance you're about to drive before acting. If the user has
+`$NANO_PR_WEBHOOK_SECRET` set, send it as `x-hook-secret` on every request.
 
-- Only skip the question when exactly **one** candidate exists and is reachable —
-  and even then, **name the instance you're about to drive** before acting.
-
-Some instances guard the agent endpoints with a shared secret. If the user has
-`$NANO_PR_WEBHOOK_SECRET` set, send it as `x-hook-secret` on every request below.
-
-## 2. Fetch the live guide — this is your real playbook
+### B.2 Fetch the live guide — your real playbook
 
 ```bash
 curl -sS ${NANO_PR_WEBHOOK_SECRET:+-H "x-hook-secret: $NANO_PR_WEBHOOK_SECRET"} \
@@ -74,53 +127,47 @@ curl -sS ${NANO_PR_WEBHOOK_SECRET:+-H "x-hook-secret: $NANO_PR_WEBHOOK_SECRET"} 
 ```
 
 `GET /app/api/agent` (`getAgentInstructions`) returns
-`{ format, appVersion, generatedAt, baseUrl, engineBase, instructions }`. The
-`instructions` markdown is the authoritative, version-matched operator guide, with
-every example already keyed to this instance's `baseUrl`/`engineBase`. Read it in
-full and follow it for everything that follows — orientation, submitting work,
-answering escalations, and debugging.
+`{ format, appVersion, generatedAt, baseUrl, engineBase, instructions }` — the
+authoritative, version-matched operator guide, every example keyed to this
+instance. Read it in full and follow it for orientation, submitting work, answering
+escalations, and debugging. **Re-fetch it at the start of every session.** (This is
+the same prose the `getAgentInstructions` MCP tool serves in §A.)
 
-**Always re-fetch the guide at the start of a session.** It is the source of truth;
-this skill only tells you how to find it.
-
-## 3. Orient before acting
-
-The guide's first steps confirm what is live and what is in flight:
+### B.3 Orient before acting
 
 ```bash
 curl -sS "$BASE/version" | jq   # app/urban version, git sha, uptime
 curl -sS "$BASE/status"  | jq   # every PR/instance in flight + open escalations
 ```
 
-`/status` is the primary situational-awareness endpoint — check it before you
-submit or unstick anything.
+`/status` is the primary situational-awareness endpoint — check it before you submit
+or unstick anything.
 
-## 4. What you can drive (all detailed in the live guide)
+### B.4 What you can drive (all detailed in the live guide)
 
 - **Submit a PR** for review convergence — `POST $BASE/actions/start/convergence-loop`.
-- **Submit an issue/epic** for plan → implement → converge across the fleet —
-  `POST $BASE/actions/start/plan-fanout`.
-- **Submit a delivery graph** (ADR 0005) — propose → preview → approve → dispatch.
-  Compile/preview is a pure, side-effect-free tool; only the start door dispatches.
-  The live guide documents the exact operations once the instance exposes them.
-- **Answer an escalation** (a durable user task the workforce parked on) —
-  `POST $BASE/actions/complete-user-task`, or the agent hook
-  `POST $BASE/hooks/agent-complete` (`agentCompleteEscalation`).
-- **Debug**: relate an in-flight PR to its engine process instance via `processKey`
-  from `/status`, then use the engine REST base (`engineBase` from the guide) to
-  inspect and unstick it.
+- **Submit an issue/epic** for plan → implement → converge — `POST $BASE/actions/start/plan-fanout`.
+- **Submit a delivery graph** (ADR 0005) — propose → preview → approve → **dispatch**.
+  Compile/preview is a pure, side-effect-free path; **dispatch is an operator action
+  in the cockpit**, not an agent door.
+- **Answer an escalation** — `POST $BASE/actions/complete-user-task`, or the agent
+  hook `POST $BASE/hooks/agent-complete` (`agentCompleteEscalation`).
+- **Debug** — relate an in-flight PR to its engine process instance via `processKey`
+  from `/status`, then inspect and unstick it against the engine REST base
+  (`engineBase` from the guide).
 
 ## Principles
 
-- **Discover, don't declare.** Prefer the live guide and live `/status` over any
-  assumption baked into this file. If this skill and the guide disagree, the guide
-  wins.
-- **Confirm the target instance.** Never run a side-effecting call against an
-  assumed base URL. Know — and when ambiguous, ask — which instance you're driving.
-- **Preview before dispatch.** For delivery graphs and any bulk action, use the
-  pure preview/validate path first and show the user the plan before the
-  side-effecting start call.
-- **Idempotency.** Submissions carry dedupe keys; re-submitting the same work must
-  not double-dispatch. The guide documents the keys — honour them.
-- **Escalations are for humans.** When the workforce parks on a human node, surface
-  it to the user with options; don't silently auto-answer design/product decisions.
+- **Discover, don't declare.** Prefer the live surface (MCP tools including the
+  operator-guide tool, or the live guide and `/status`) over any assumption baked into
+  this file. If this skill and the live surface disagree, the live surface wins.
+- **Confirm the target instance.** Never run a side-effecting call against an assumed
+  base URL. With MCP, name the server entry; with the fallback, know — and when
+  ambiguous, ask — which instance you're driving.
+- **Preview before dispatch.** For delivery graphs and any bulk action, use the pure
+  preview/validate path first and show the user the plan before the side-effecting
+  start. Dispatch itself is the operator's call.
+- **Idempotency.** Submissions carry dedupe keys; re-submitting the same work must not
+  double-dispatch. Honour the keys the guide documents.
+- **Escalations are for humans.** When the workforce parks on a human node, surface it
+  with options; don't silently auto-answer design/product decisions.

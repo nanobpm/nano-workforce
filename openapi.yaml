@@ -3134,6 +3134,12 @@ paths:
   /actions/delivery-graph/stage:
     post:
       operationId: stageDeliveryGraph
+      # x-mcp exclusion (ADR 0067 §2 / nano-ide#488): operator-only cockpit door, kept OFF the
+      # runtime-projected MCP tool surface. The staged-proposal lifecycle (stage -> dispatch ->
+      # dismiss) is the human approval path (ADR 0005 Decision 7 — the operator's click IS the
+      # approval); agents author graphs through the pure compile/preview doors only, never stage.
+      x-mcp:
+        exclude: true
       summary: UI JSON-paste STAGE — parse a pasted delivery-graph JSON string, compile it and stage it for operator dispatch. (ADR 0005 Decision 7 / #460 / #516)
       description: >-
         The human-facing UI JSON-paste STAGE ingress — the deliberate commit half of the preview/stage
@@ -3167,6 +3173,11 @@ paths:
   /actions/delivery-graph/dispatch:
     post:
       operationId: dispatchDeliveryGraph
+      # x-mcp exclusion (ADR 0067 §2 / nano-ide#488): the canonical operator-only door. Dispatch
+      # approval IS a human clicking Dispatch in the cockpit (ADR 0005 Decision 7) — there is no
+      # replayable token and no agent-facing dispatch handle, so it is never a projected MCP tool.
+      x-mcp:
+        exclude: true
       summary: OPERATOR DISPATCH — launch a staged delivery-graph proposal by its digest (idempotent). (ADR 0005 Decision 7 / #460)
       description: >-
         The OPERATOR-ONLY dispatch door (ADR 0005 Decision 7, issue #460). The cockpit's staged-proposals
@@ -3212,6 +3223,11 @@ paths:
   /actions/delivery-graph/dismiss:
     post:
       operationId: dismissProposal
+      # x-mcp exclusion (ADR 0067 §2 / nano-ide#488): operator-only cockpit door — discarding a
+      # staged proposal as noise is a human decision in the same approval class as dispatch, so it
+      # stays off the projected MCP tool surface.
+      x-mcp:
+        exclude: true
       summary: OPERATOR DISMISS — discard a staged delivery-graph proposal by its digest as noise (idempotent). (#520)
       description: >-
         The OPERATOR-ONLY dismiss door (#520). The cockpit's staged-proposals grid posts the `digest` of

@@ -282,7 +282,7 @@ agent at that URL to author, compile, and submit a graph unaided. See
 | `NANO_PR_GITHUB_TRANSPORT` | `auto` | how the poller reads GitHub: `gh` (host CLI), `token` (`GITHUB_TOKEN` over HTTP), or `auto` |
 | `NANO_PR_POLL_MS` | `60000` | review-ready poll interval |
 | `NANO_PR_MAX_ROUNDS` | `20` | default cap: escalate after N rounds (per-submit override via the form / the `maxRounds` field on `start/convergence-loop`; clamped 1–100) |
-| `NANO_PR_WEBHOOK_SECRET` | — | optional shared secret (`X-Hook-Secret`) for guarded operations (e.g. `POST /app/api/agent`, `/app/api/version`, `/app/api/status`); unset = open |
+| `NANO_PR_WEBHOOK_SECRET` | — | optional shared secret (`x-hook-secret`) for guarded operations (e.g. `GET /app/api/agent`, `/app/api/version`, `/app/api/status`); unset = open |
 | `NANO_PR_AUTO_MERGE` | `1` | after convergence, run the merge stage; `0` = stop at `converged` (review-only). Per-submit override via the `convergeOnly` field on `start/convergence-loop` (`true` forces review-only for that PR) |
 | `NANO_PR_MERGE_METHOD` | `squash` | merge method: `squash`, `merge`, or `rebase` |
 | `NANO_PR_MERGE_ADMIN` | `0` | pass `--admin` to override failing non-required checks (use with care) |
@@ -452,9 +452,42 @@ curl -sS http://localhost:3000/app/api/agent | jq -r .instructions
 ```
 
 Like `/version` and `/status`, this endpoint honours the optional
-`NANO_PR_WEBHOOK_SECRET` guard (`X-Hook-Secret` header): when that secret is set it
+`NANO_PR_WEBHOOK_SECRET` guard (`x-hook-secret` header): when that secret is set it
 returns `401` without the matching header; unset = open. The source lives in
-`resources/agent-guide.md`.
+`docs/agent-guide.md`.
+
+### Configure an agent over MCP
+
+Where your agent supports **MCP**, prefer it over the curl path above. The Urban
+runtime serves a Streamable-HTTP MCP endpoint at **`/app/mcp`** for every instance and
+projects this app's `openapi.yaml` into tools with **zero MCP code in nwf** — the app
+operations (including the operator guide, projected from `GET /app/api/agent` as the
+`getAgentInstructions` read tool), a framework-owned engine-debug tool family (process
+instances, wait states, variables, incidents), the `urban_*` projection reads, and the
+runtime's derived **system brief** as an MCP resource plus an orientation prompt
+(ADR 0067, nano-ide#488). Register one server entry per instance and name
+it when you drive — tool calls are namespaced per entry, so the wrong-instance mistake
+becomes impossible:
+
+```bash
+copilot mcp add --transport http workforce-local http://localhost:3000/app/mcp
+# guarded instance: add the app secret as a header (never in chat)
+copilot mcp add --transport http workforce-merlin http://merlin.local:3000/app/mcp \
+  --header "x-hook-secret: $NANO_PR_WEBHOOK_SECRET"
+```
+
+When `NANO_PR_WEBHOOK_SECRET` is unset, reads and mutations both work from loopback with
+no credential; when it is set, that secret is required as an `x-hook-secret` header on
+**both** — read endpoints like `GET /app/api/agent` and `GET /app/api/version` also
+return `401` without it. **Operator-only doors stay operator-only** —
+delivery-graph **dispatch** (and the stage/dismiss lifecycle) is `x-mcp`-excluded, so the
+human clicking Dispatch in the cockpit remains the approval (ADR 0005). MCP is a **third
+door**: `GET /app/api/agent` and `GET /app/api/agent/skill` are unchanged for agents
+without it.
+
+The full recipe — multiple instances, Basic-Auth-fronted instances, LAN exposure,
+verification and wedged-instance debugging prompts — is the **agent-configuration
+runbook**: [`docs/mcp-runbook.md`](docs/mcp-runbook.md).
 
 ---
 
