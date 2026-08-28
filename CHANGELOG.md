@@ -1,3 +1,9 @@
+## [0.150.2](https://github.com/nanobpm/nano-workforce/compare/v0.150.1...v0.150.2) (2026-08-28)
+
+### Bug Fixes
+
+* honour X-Forwarded-Prefix in resolveApiBase so the operator guide baseUrl resolves behind the app-view proxy ([#580](https://github.com/nanobpm/nano-workforce/issues/580)) ([21fdeca](https://github.com/nanobpm/nano-workforce/commit/21fdecac2d7c383cca066fa47950d9b6d28f41fc)), closes [#578](https://github.com/nanobpm/nano-workforce/issues/578)
+
 ## [0.150.1](https://github.com/nanobpm/nano-workforce/compare/v0.150.0...v0.150.1) (2026-08-28)
 
 ### Bug Fixes
