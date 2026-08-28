@@ -422,7 +422,8 @@ live_models() { # $1 harness -> newline list on stdout
       pi --list-models 2>/dev/null | awk 'NR>1 && $2 != "" {print $2}' ;;
     kimi)
       kimi provider list --json 2>/dev/null \
-        | grep -o '"[a-zA-Z0-9._-]*"' | tr -d '"' | grep -- '-' ;;
+        | tr ',' '\n' \
+        | sed -n 's/.*"\([A-Za-z0-9._]*-[A-Za-z0-9._-]*\)".*/\1/p' ;;
     *) : ;;
   esac
 }
@@ -431,8 +432,8 @@ live_models() { # $1 harness -> newline list on stdout
 # Step 4/5 — interactive selection + model + instances
 # ---------------------------------------------------------------------------
 add_selection() { # $1 harness $2 model $3 instances
-  if [ -n "$2" ] && ! printf '%s' "$2" | grep -Eq '^[A-Za-z0-9._:/@+-]+$'; then
-    die "refusing model id '$2' for $1: only [A-Za-z0-9._:/@+-] are allowed (guards against shell-metacharacter injection into the hire --command)."
+  if [ -n "$2" ] && ! printf '%s' "$2" | grep -Eq '^[A-Za-z0-9._/@+-]+$'; then
+    die "refusing model id '$2' for $1: only [A-Za-z0-9._/@+-] are allowed (':' is reserved as the --harness field separator, so it must not appear in a model id; guards against shell-metacharacter injection into the hire --command)."
   fi
   SELECTIONS="${SELECTIONS}$1${SEP}$2${SEP}$3
 "
