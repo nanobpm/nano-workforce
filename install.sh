@@ -1058,7 +1058,11 @@ app_verify() {
 
 # Step 13 — the operator surfaces.
 app_surfaces() {
-  info "Nano Workforce is up"
+  if [ "$DRY_RUN" -eq 1 ]; then
+    info "dry-run: no calls were made — the following surfaces would be available once installed:"
+  else
+    info "Nano Workforce is up"
+  fi
   cat >&2 <<EOF
   App (cockpit)   : ${APPVIEW_BASE}/
   Tasks inbox     : ${APPVIEW_BASE}/tasks
@@ -1108,9 +1112,17 @@ report_and_exit() {
     exit 1
   fi
   if [ "$SKIP_APP" -eq 1 ]; then
-    ok "Done — engine up, workforce of hired agents up (app install skipped)."
+    if [ "$DRY_RUN" -eq 1 ]; then
+      ok "Dry-run complete — no changes were made (app install skipped via --skip-app)."
+    else
+      ok "Done — engine up, workforce of hired agents up (app install skipped)."
+    fi
   else
-    ok "Done — engine + workforce up, and the Nano Workforce app is running."
+    if [ "$DRY_RUN" -eq 1 ]; then
+      ok "Dry-run complete — no changes were made; the above is what would run."
+    else
+      ok "Done — engine + workforce up, and the Nano Workforce app is running."
+    fi
   fi
   exit 0
 }

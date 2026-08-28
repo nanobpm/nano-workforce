@@ -135,6 +135,16 @@ assert_contains "s6: surface agent guide" \
   "http://localhost:8080/console/app-view/Workforce/app/api/agent" "$OUT"
 assert_contains "s6: surface MCP endpoint" \
   "http://localhost:8080/console/app-view/Workforce/app/mcp" "$OUT"
+# Dry-run must not assert readiness: it changed nothing, so it must not claim the
+# app "is up" / "is running" — it states the surfaces are what *would* be available.
+assert_not_contains "s6: dry-run does not falsely claim the app is up" \
+  "Nano Workforce is up" "$OUT"
+assert_not_contains "s6: dry-run does not falsely claim the app is running" \
+  "the Nano Workforce app is running" "$OUT"
+assert_contains "s6: dry-run frames surfaces as would-be-available" \
+  "would be available" "$OUT"
+assert_contains "s6: dry-run final report states no changes were made" \
+  "Dry-run complete — no changes were made" "$OUT"
 
 # --- Scenario 6b: --project-name flows through every URL and body ----------
 OUT=$(NANO_INSTALL_HARNESSES_OVERRIDE="copilot" \
@@ -157,6 +167,8 @@ OUT=$(NANO_INSTALL_HARNESSES_OVERRIDE="copilot" \
   sh "$SCRIPT" --harness copilot:gpt-5.4:1 --yes --dry-run --skip-app 2>&1)
 assert_not_contains "s7: no console API calls under --skip-app" "/console/api/" "$OUT"
 assert_contains "s7: skip note shown" "Phase 2 skipped (--skip-app)" "$OUT"
+assert_contains "s7: dry-run + skip-app report states no changes were made" \
+  "Dry-run complete — no changes were made" "$OUT"
 
 # --- Scenarios 8-13: live phase-2 flow against a stubbed node console -------
 if command -v node >/dev/null 2>&1 && command -v curl >/dev/null 2>&1; then
