@@ -1,3 +1,9 @@
+## [0.150.4](https://github.com/nanobpm/nano-workforce/compare/v0.150.3...v0.150.4) (2026-08-28)
+
+### Documentation
+
+* **agent guide:** document the PT30M wait-gate default and poll bounds in §9 ([#585](https://github.com/nanobpm/nano-workforce/issues/585)) ([3092ae9](https://github.com/nanobpm/nano-workforce/commit/3092ae9c1448c8b540aa62abf58b268e14f3f0ee)), closes [nanobpm/nano-workforce#584](https://github.com/nanobpm/nano-workforce/issues/584)
+
 ## [0.150.3](https://github.com/nanobpm/nano-workforce/compare/v0.150.2...v0.150.3) (2026-08-28)
 
 ### Bug Fixes
