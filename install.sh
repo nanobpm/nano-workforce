@@ -776,6 +776,10 @@ EOF
 # -> http://localhost:8080.
 origin_of() {
   _u=$1
+  case "$_u" in
+    *://*) : ;;
+    *) die "invalid console origin '$_u': expected a URL with a scheme, e.g. http://localhost:8080 (set NANO_INSTALL_CONSOLE_ORIGIN or NANOBPMN_BASE_URL accordingly)." ;;
+  esac
   _scheme=${_u%%://*}
   _rest=${_u#*://}
   _auth=${_rest%%/*}
@@ -809,6 +813,7 @@ api() {
   fi
   _tmp=$(mktemp 2>/dev/null || printf '/tmp/nwf-install.%s' "$$")
   API_STATUS=$(curl "$@" -o "$_tmp" -w '%{http_code}' "$_url" 2>/dev/null) && API_ERR=0 || API_ERR=$?
+  [ "$API_ERR" -ne 0 ] && API_STATUS='000'
   API_BODY=$(cat "$_tmp" 2>/dev/null || true)
   rm -f "$_tmp"
   return 0
@@ -826,7 +831,7 @@ build_config_body() { # $1 = redact? ("redact" to mask the token)
     _gh="\"NANO_PR_GITHUB_TRANSPORT\":\"auto\""
   fi
   printf '{"env":{%s,"NANOBPMN_BASE_URL":"%s","NANO_WORKFORCE_BASE_URL":"%s","PR_REVIEW_PORT":"%s"}}' \
-    "$_gh" "$(json_str "$CONSOLE_ORIGIN")" "$(json_str "$APPVIEW_BASE")" "${PR_REVIEW_PORT:-3000}"
+    "$_gh" "$(json_str "$CONSOLE_ORIGIN")" "$(json_str "$APPVIEW_BASE")" "$(json_str "${PR_REVIEW_PORT:-3000}")"
 }
 
 # Step 9 — the console must be reachable before we mutate anything.

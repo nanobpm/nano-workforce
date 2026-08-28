@@ -201,8 +201,13 @@ CJS
     while [ "$_i" -lt 50 ]; do
       _port=$(sed -n 's/^PORT //p' "$STUBDIR/$_mode.log" 2>/dev/null)
       [ -n "$_port" ] && break
-      _i=$((_i + 1)); sleep 0.1
+      _i=$((_i + 1)); sleep 1
     done
+    if [ -z "$_port" ]; then
+      kill "$_pid" 2>/dev/null || true
+      PHASE2_OUT="stub console never reported a port for mode '$_mode'"; PHASE2_RC=127
+      return 0
+    fi
     set +e
     PHASE2_OUT=$(NANO_INSTALL_TEST_PHASE2_ONLY=1 \
       NANO_INSTALL_CONSOLE_ORIGIN="http://127.0.0.1:$_port" \
@@ -250,6 +255,20 @@ CJS
     assert_contains "s11: console-off is a clear message" "console unreachable" "$OFF"
     assert_not_contains "s11: console-off mutates nothing (no extension install)" \
       "extensions/install" "$OFF"
+
+    # Scenario 12 — schemeless console origin: fail early with a clear message,
+    # never emit the "localhost:8080://localhost:8080"-style invalid origin.
+    set +e
+    SCHEMELESS=$(NANO_INSTALL_TEST_PHASE2_ONLY=1 NANO_INSTALL_CONSOLE_ORIGIN="localhost:8080" \
+      sh "$SCRIPT" --yes 2>&1)
+    SCHEMELESSRC=$?
+    set -e
+    if [ "$SCHEMELESSRC" -ne 0 ]; then pass "s12: schemeless origin exits non-zero"; else
+      fail "s12: schemeless origin should exit non-zero"; fi
+    assert_contains "s12: schemeless origin is a clear message" \
+      "expected a URL with a scheme" "$SCHEMELESS"
+    assert_not_contains "s12: schemeless origin never doubles the authority" \
+      "localhost:8080://localhost:8080" "$SCHEMELESS"
 
     rm -rf "$STUBDIR"
   fi
