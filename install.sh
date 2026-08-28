@@ -196,7 +196,7 @@ Options:
                      first selection, 1 thereafter. To set instances WITHOUT a
                      model, leave the model field empty: name::instances (e.g.
                      copilot::2 — 'copilot:2' means model "2", not 2 instances).
-  --yes              Skip the confirmation summary.
+  -y, --yes          Skip the confirmation summary.
   --install-adapters Auto-install a selected harness's missing ACP adapter
                      (claude/pi) instead of prompting/skipping.
   --shell <bash|zsh|fish>
@@ -717,7 +717,7 @@ print_status_and_hints() {
   info "What now"
   cat >&2 <<EOF
   $CLI nano status                                  engine health
-  $CLI nano workforce list | status                 the composed fleet (desired vs actual)
+  $CLI nano workforce list                          the composed fleet (desired vs actual)
   $CLI nano workforce add <profile> --instances N --auto   grow the fleet, then 'workforce start'
   $CLI nano workforce remove <profile>              shrink it, then 'workforce start'
   $CLI nano supervisor status                       per-worker state
