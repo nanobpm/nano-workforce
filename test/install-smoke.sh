@@ -170,7 +170,7 @@ assert_contains "s7: skip note shown" "Phase 2 skipped (--skip-app)" "$OUT"
 assert_contains "s7: dry-run + skip-app report states no changes were made" \
   "Dry-run complete — no changes were made" "$OUT"
 
-# --- Scenarios 8-13: live phase-2 flow against a stubbed node console -------
+# --- Scenarios 8-15: live phase-2 flow against a stubbed node console -------
 if command -v node >/dev/null 2>&1 && command -v curl >/dev/null 2>&1; then
   STUBDIR=$(mktemp -d "${TMPDIR:-/tmp}/nwf-smoke.XXXXXX")
   STUB="$STUBDIR/stub-console.cjs"
@@ -233,7 +233,7 @@ CJS
   }
 
   if [ -z "$STUBDIR" ] || [ ! -f "$STUB" ]; then
-    fail "s8-s13: could not create the stub console"
+    fail "s8-s15: could not create the stub console"
   else
     # Scenario 8 — happy path: success asserted via /app/api/version, exit 0.
     run_phase2 happy
