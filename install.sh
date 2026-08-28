@@ -865,6 +865,20 @@ api() {
   return 0
 }
 
+# Human-readable outcome of the last api() call, for a user-facing error. On a
+# transport failure api() forces API_STATUS='000' (curl couldn't complete the
+# request — DNS/connect/timeout), which as a bare "HTTP 000" is meaningless and
+# hides the real cause; describe it as a transport failure (with curl's exit
+# code) instead. Otherwise report the actual HTTP status. One source so every
+# phase-2 console call site renders 000 the same way (no drift).
+api_outcome() {
+  if [ "$API_STATUS" = '000' ]; then
+    printf 'transport failure (curl exit %s) — could not reach %s' "$API_ERR" "$CONSOLE_ORIGIN"
+  else
+    printf 'HTTP %s' "$API_STATUS"
+  fi
+}
+
 # The env map written into ProjectConfig.env (step 5). Real body + a token-
 # redacted display are built the same way so they never drift.
 build_config_body() { # $1 = redact? ("redact" to mask the token)
@@ -951,7 +965,7 @@ app_provision() {
   if [ "$DRY_RUN" -eq 0 ]; then
     case "$API_STATUS" in
       2*) ok "urban toolkit ensured" ;;
-      *) warn "urban install returned HTTP $API_STATUS (informational — continuing)" ;;
+      *) warn "urban install returned $(api_outcome) (informational — continuing)" ;;
     esac
   fi
 
@@ -963,9 +977,9 @@ app_provision() {
     case "$API_STATUS" in
       2*)  ok "extension installed/upgraded" ;;
       409) note "extension already installed — continuing." ;;
-      *)   err "extension install -> HTTP $API_STATUS"
+      *)   err "extension install -> $(api_outcome)"
            [ -n "$API_BODY" ] && note "$API_BODY"
-           record_failure "app: extension install HTTP $API_STATUS"
+           record_failure "app: extension install $(api_outcome)"
            return 1 ;;
     esac
   fi
@@ -980,8 +994,8 @@ app_provision() {
   else
     case "$API_STATUS" in
       2*) : ;;
-      *)  err "listing projects/templates -> HTTP $API_STATUS"
-          record_failure "app: list projects HTTP $API_STATUS"
+      *)  err "listing projects/templates -> $(api_outcome)"
+          record_failure "app: list projects $(api_outcome)"
           return 1 ;;
     esac
     if printf '%s' "$API_BODY" | grep -Eq '"id"[[:space:]]*:[[:space:]]*"nano-workforce"'; then
@@ -1005,9 +1019,9 @@ app_provision() {
     case "$API_STATUS" in
       2*)  ok "project '$PROJECT' created" ;;
       409) note "project '$PROJECT' already exists — configuring and running it (not re-scaffolding)." ;;
-      *)   err "createProject -> HTTP $API_STATUS"
+      *)   err "createProject -> $(api_outcome)"
            [ -n "$API_BODY" ] && note "$API_BODY"
-           record_failure "app: createProject HTTP $API_STATUS"
+           record_failure "app: createProject $(api_outcome)"
            return 1 ;;
     esac
   fi
@@ -1026,9 +1040,9 @@ app_provision() {
   if [ "$DRY_RUN" -eq 0 ]; then
     case "$API_STATUS" in
       2*) ok "config written (NANO_WORKFORCE_BASE_URL=${APPVIEW_BASE})" ;;
-      *)  err "PUT project config -> HTTP $API_STATUS"
+      *)  err "PUT project config -> $(api_outcome)"
           [ -n "$API_BODY" ] && note "$API_BODY"
-          record_failure "app: PUT config HTTP $API_STATUS"
+          record_failure "app: PUT config $(api_outcome)"
           return 1 ;;
     esac
   fi
@@ -1040,9 +1054,9 @@ app_provision() {
   if [ "$DRY_RUN" -eq 0 ]; then
     case "$API_STATUS" in
       2*) ok "run requested" ;;
-      *)  err "runProject -> HTTP $API_STATUS"
+      *)  err "runProject -> $(api_outcome)"
           [ -n "$API_BODY" ] && note "$API_BODY"
-          record_failure "app: runProject HTTP $API_STATUS"
+          record_failure "app: runProject $(api_outcome)"
           return 1 ;;
     esac
   fi
