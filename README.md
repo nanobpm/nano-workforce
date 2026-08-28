@@ -79,6 +79,47 @@ You can also run Nano Workforce directly, outside Studio, against a running Nano
 engine. This is the second-class path — no left-rail integration or update UI — but
 it's the same app and the same behaviour.
 
+### Install with one command
+
+If you already have one or more coding-agent CLIs installed (`kimi`, `qwen`,
+`copilot`, `claude`, `pi`), one command takes you from there to a **running Nano
+engine with a supervised workforce of hired agents**:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/nanobpm/nano-workforce/main/install.sh | sh
+```
+
+It installs `@camunda8/cli` and the `c8ctl-plugin-nano` plugin, installs shell
+completion, detects which of your harnesses are installed, lets you multi-select
+which to hire (with a model and an instance count each), hires each with
+`--rank senior --protocol acp --permission yolo`, composes a declarative
+**workforce manifest** (`c8 nano workforce add`), and brings it up
+(`c8 nano start` then `c8 nano workforce start`).
+
+> ⚠️ The hired agents run **unattended** with `--permission yolo` — full tool
+> access (shell, file writes, network) as your user on this host. The script shows
+> a confirmation summary before it hires anything; pass `--yes` to skip it.
+
+**What it does *not* do:** it stops at "engine up, workforce up, agents polling".
+It does **not** install/deploy/run the Nano Workforce **app** itself — for that,
+use Nano Studio (above) or the manual steps below.
+
+Prompts read from `/dev/tty`, so the `curl … | sh` pipe works interactively. It is
+also fully scriptable and safe to re-run (it converges rather than duplicating):
+
+```sh
+# Non-interactive (CI / re-provisioning); repeatable --harness <name>[:<model>][:<instances>]
+curl -fsSL https://raw.githubusercontent.com/nanobpm/nano-workforce/main/install.sh | sh -s -- --harness copilot:gpt-5.4:5 --harness claude:opus:1 --yes
+
+# Preview every command without changing anything
+curl -fsSL https://raw.githubusercontent.com/nanobpm/nano-workforce/main/install.sh | sh -s -- --harness copilot:gpt-5.4:1 --dry-run
+```
+
+`qwen` must always be given an explicit model (it stalls without one). With no
+controlling terminal and no `--harness`, the script exits with usage rather than
+hanging. Because it is served from `main`, a merged change to `install.sh` is live
+immediately.
+
 ### Prerequisites
 
 - A running **Nano gateway/engine** (default `http://localhost:8080`) — what the app

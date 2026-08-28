@@ -92,6 +92,28 @@ jobs:
   # blocker, and a self-proving canary asserts the oracle's red path genuinely fires so the gate can
   # never rot into a vacuous green while the corpus is parked. Hermetic (in-process wasm engine, no
   # sockets), so it runs on every PR/push as its own job.
+  # install.sh onboarding script (issue #576): POSIX-sh cleanliness + a hermetic
+  # dry-run smoke test asserting the emitted command sequence. The script is
+  # served from `main` for `curl … | sh`, so a broken change is live the instant
+  # it merges — this gate keeps that surface honest.
+  install-script:
+    name: install.sh (shellcheck + dry-run smoke)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: shellcheck (POSIX sh)
+        run: shellcheck -s sh install.sh test/install-smoke.sh
+
+      - name: Dry-run smoke test
+        run: sh test/install-smoke.sh
+
   derivation-parity:
     name: derivation parity (nwf corpus regression guard)
     runs-on: ubuntu-latest
