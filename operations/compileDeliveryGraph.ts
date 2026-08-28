@@ -21,12 +21,13 @@ import {
   stageProposal,
 } from "../app/deliveryGraphProposals.ts";
 import { deliveryGraphDigest } from "../app/deliveryRunner.ts";
+import { resolvePublicOrigin } from "../app/resolveApiBase.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
 
 const STAGED_MESSAGE =
   "The graph compiled and is staged for operator review. Ask the operator to preview and approve — or request modifications — in the cockpit. Dispatch is an operator action; there is no start endpoint.";
 
-export default defineOperation("compileDeliveryGraph", async ({ body }, app) => {
+export default defineOperation("compileDeliveryGraph", async ({ body, req }, app) => {
   // The runtime validates the body's SHAPE against `DeliveryGraph` before we run; the compiler adds
   // the SEMANTIC checks (acyclicity, edge integrity, fact resolution). A directly-invoked delegate
   // could still pass `undefined` — the compiler reads its input as `unknown` and maps that to a clean
@@ -75,7 +76,10 @@ export default defineOperation("compileDeliveryGraph", async ({ body }, app) => 
       message: STAGED_MESSAGE,
       digest,
       preview,
-      reviewUrl: proposalReviewUrl(digest),
+      // Navigational, human-facing link → keyed to the ORIGIN this request arrived on (tunnel,
+      // proxy prefix, …), not the static deployment-wide NANO_WORKFORCE_BASE_URL, so the operator
+      // driving this instance can actually open it (#577).
+      reviewUrl: proposalReviewUrl(digest, resolvePublicOrigin(req)),
     },
   };
 });

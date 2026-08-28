@@ -30,8 +30,9 @@ async function withApp(fn: (app: AppApi, data: DataLayer) => Promise<void>): Pro
   }
 }
 
-async function call(app: AppApi, body: unknown) {
-  return (await handler({ req: {} as any, params: {}, query: {}, body } as any, app)) as any;
+async function call(app: AppApi, body: unknown, headers: Record<string, string> = {}) {
+  const req = { path: "/app/api/actions/compile-delivery-graph", headers: new Headers(headers) };
+  return (await handler({ req: req as any, params: {}, query: {}, body } as any, app)) as any;
 }
 
 const GOOD = {
@@ -76,6 +77,33 @@ test("compile-delivery-graph: the response exposes NO dispatch handle — no run
     // `reviewUrl` is navigational only — it points at the cockpit page, not an API dispatch endpoint.
     assert(typeof res.body.reviewUrl === "string");
     assert(!/\/actions\/start\/delivery-graph/.test(res.body.reviewUrl), "reviewUrl is not a dispatch endpoint");
+  });
+});
+
+// ── #577: reviewUrl is a caller-facing link → keyed to the request origin, not the static base ──
+test("compile-delivery-graph: reviewUrl is on the request's forwarded origin, not NANO_WORKFORCE_BASE_URL", async () => {
+  await withApp(async (app) => {
+    const res = await call(app, GOOD, { "x-forwarded-proto": "https", "x-forwarded-host": "example.test" });
+    assertEquals(res.status, 200);
+    assertEquals(
+      res.body.reviewUrl,
+      `https://example.test/app/pages/delivery-graphs#proposal-${res.body.digest}`,
+    );
+  });
+});
+
+test("compile-delivery-graph: reviewUrl honours the reverse-proxy x-forwarded-prefix", async () => {
+  await withApp(async (app) => {
+    const res = await call(app, GOOD, {
+      "x-forwarded-proto": "https",
+      "x-forwarded-host": "nano.ngrok-free.dev",
+      "x-forwarded-prefix": "/console/app-view/Workforce",
+    });
+    assertEquals(res.status, 200);
+    assertEquals(
+      res.body.reviewUrl,
+      `https://nano.ngrok-free.dev/console/app-view/Workforce/app/pages/delivery-graphs#proposal-${res.body.digest}`,
+    );
   });
 });
 
