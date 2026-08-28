@@ -312,10 +312,22 @@ CJS
     assert_contains "s14: control-char token has a clear message" \
       "control characters" "$PHASE2_OUT"
 
+    # Scenario 15 — the control-char gate covers EVERY interpolated config value,
+    # not just the token: a non-token field (here PR_REVIEW_PORT) carrying a
+    # control character must be rejected the same way, naming the offending key.
+    _ctrl_port="$(printf '3000\nbad')"
+    export PR_REVIEW_PORT="$_ctrl_port"
+    run_phase2 happy
+    unset PR_REVIEW_PORT
+    if [ "$PHASE2_RC" -ne 0 ]; then pass "s15: control-char non-token field rejected (exit non-zero)"; else
+      fail "s15: control-char non-token field should exit non-zero"; printf '%s\n' "$PHASE2_OUT" | sed 's/^/    | /' >&2; fi
+    assert_contains "s15: rejection names the offending field" \
+      "PR_REVIEW_PORT contains control characters" "$PHASE2_OUT"
+
     rm -rf "$STUBDIR"
   fi
 else
-  pass "s8-s13: skipped (node or curl unavailable for the stubbed-console tests)"
+  pass "s8-s15: skipped (node or curl unavailable for the stubbed-console tests)"
 fi
 
 if [ "$FAILED" -ne 0 ]; then

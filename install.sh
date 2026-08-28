@@ -869,13 +869,21 @@ api() {
 # redacted display are built the same way so they never drift.
 build_config_body() { # $1 = redact? ("redact" to mask the token)
   _tok="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
-  if [ -n "$_tok" ]; then
-    # Reject a control character (e.g. a stray newline/tab from a mis-set env
-    # var) before it corrupts the JSON body and fails the console API opaquely.
-    if has_control_chars "$_tok"; then
-      err "GITHUB_TOKEN/GH_TOKEN contains control characters (e.g. a stray newline or tab); refusing to build an invalid JSON config body — check the value for trailing whitespace."
+  # json_str() only escapes \ and " — it does NOT escape control characters — so
+  # a stray newline/tab (from a mis-set env var or trailing whitespace) in ANY
+  # interpolated value would corrupt the JSON body and fail the console API
+  # opaquely. The config gate, not the escaper, is the single place that rejects
+  # them, so validate every value that flows into the body, not just the token.
+  for _cc in "GITHUB_TOKEN/GH_TOKEN=$_tok" \
+             "NANOBPMN_BASE_URL=$CONSOLE_ORIGIN" \
+             "NANO_WORKFORCE_BASE_URL=$APPVIEW_BASE" \
+             "PR_REVIEW_PORT=${PR_REVIEW_PORT:-3000}"; do
+    if has_control_chars "${_cc#*=}"; then
+      err "${_cc%%=*} contains control characters (e.g. a stray newline or tab); refusing to build an invalid JSON config body — check the value for trailing whitespace."
       return 1
     fi
+  done
+  if [ -n "$_tok" ]; then
     if [ "${1:-}" = redact ]; then _tokval='***'; else _tokval=$(json_str "$_tok"); fi
     _gh="\"GITHUB_TOKEN\":\"${_tokval}\""
   else
