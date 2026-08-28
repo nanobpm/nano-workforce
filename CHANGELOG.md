@@ -1,3 +1,9 @@
+## [0.152.0](https://github.com/nanobpm/nano-workforce/compare/v0.151.1...v0.152.0) (2026-08-28)
+
+### Features
+
+* **onboarding:** one-command install script — hire your coding harnesses and bring up a Nano workforce ([#597](https://github.com/nanobpm/nano-workforce/issues/597)) ([73b840b](https://github.com/nanobpm/nano-workforce/commit/73b840bbb3c602e83d4cac6990e69d0b77ed0344)), closes [jwulf/c8ctl-plugin-nano#117](https://github.com/jwulf/c8ctl-plugin-nano/issues/117) [#576](https://github.com/nanobpm/nano-workforce/issues/576)
+
 ## [0.151.1](https://github.com/nanobpm/nano-workforce/compare/v0.151.0...v0.151.1) (2026-08-28)
 
 ### Bug Fixes
