@@ -454,7 +454,36 @@ curl -sS http://localhost:3000/app/api/agent | jq -r .instructions
 Like `/version` and `/status`, this endpoint honours the optional
 `NANO_PR_WEBHOOK_SECRET` guard (`X-Hook-Secret` header): when that secret is set it
 returns `401` without the matching header; unset = open. The source lives in
-`resources/agent-guide.md`.
+`docs/agent-guide.md`.
+
+### Configure an agent over MCP
+
+Where your agent supports **MCP**, prefer it over the curl path above. The Urban
+runtime serves a Streamable-HTTP MCP endpoint at **`/app/mcp`** for every instance and
+projects this app's `openapi.yaml` into tools with **zero MCP code in nwf** — the app
+operations, a framework-owned engine-debug tool family (process instances, wait states,
+variables, incidents), the `urban_*` projection reads, and the operator guide as an MCP
+**resource** (ADR 0067, nano-ide#488). Register one server entry per instance and name
+it when you drive — tool calls are namespaced per entry, so the wrong-instance mistake
+becomes impossible:
+
+```bash
+copilot mcp add --transport http workforce-local http://localhost:3000/app/mcp
+# guarded instance: add the app secret as a header (never in chat)
+copilot mcp add --transport http workforce-merlin http://merlin.local:3000/app/mcp \
+  --header "x-hook-secret: $NANO_PR_WEBHOOK_SECRET"
+```
+
+Reads work from loopback with no credential; mutations require the instance secret as a
+header when `NANO_PR_WEBHOOK_SECRET` is set. **Operator-only doors stay operator-only** —
+delivery-graph **dispatch** (and the stage/dismiss lifecycle) is `x-mcp`-excluded, so the
+human clicking Dispatch in the cockpit remains the approval (ADR 0005). MCP is a **third
+door**: `GET /app/api/agent` and `GET /app/api/agent/skill` are unchanged for agents
+without it.
+
+The full recipe — multiple instances, Basic-Auth-fronted instances, LAN exposure,
+verification and wedged-instance debugging prompts — is the **agent-configuration
+runbook**: [`docs/mcp-runbook.md`](docs/mcp-runbook.md).
 
 ---
 

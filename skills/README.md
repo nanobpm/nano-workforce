@@ -7,9 +7,12 @@ loads on demand when its `description` matches the task.
 ## `nano-workforce`
 
 A **thin bootstrap** that teaches any agent to operate a running Nano Workforce
-instance: it resolves the instance base URL and fetches the instance's *live*
-operator guide (`GET /app/api/agent`), then follows it. It deliberately holds no
-endpoint detail of its own — the live, version-matched guide is the source of truth.
+instance. Where the client supports **MCP**, it registers the instance's `/app/mcp`
+server (its tools + operator-playbook resource appear automatically — ADR 0067); where
+it does not, it resolves the instance base URL and fetches the instance's *live*
+operator guide (`GET /app/api/agent`), then follows it. Either way it deliberately holds
+no endpoint detail of its own — the live, version-matched surface is the source of truth.
+See [`docs/mcp-runbook.md`](../docs/mcp-runbook.md) for the MCP server-entry recipes.
 
 ### Install
 
