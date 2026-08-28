@@ -89,6 +89,10 @@ SEP=$(printf '\037')      # US (unit separator): non-whitespace, so `read` never
 #   NANO_INSTALL_ADAPTERS_PRESENT    — space list of adapter bins to treat present.
 HARNESS_OVERRIDE="${NANO_INSTALL_HARNESSES_OVERRIDE:-}"
 ADAPTERS_PRESENT="${NANO_INSTALL_ADAPTERS_PRESENT:-}"
+# Whether the override was *set at all* (even to ""). A set-but-empty value means
+# "no adapters present" and must NOT fall back to command -v, or the smoke test
+# stops being hermetic on a runner image that happens to ship an adapter binary.
+if [ "${NANO_INSTALL_ADAPTERS_PRESENT+set}" = set ]; then ADAPTERS_PRESENT_SET=1; else ADAPTERS_PRESENT_SET=0; fi
 
 CLI=''      # resolved c8ctl / c8 binary
 TTY=''      # /dev/tty if usable, else empty
@@ -189,7 +193,9 @@ Options:
                      Non-interactive selection; repeatable. <name> is one of
                      kimi|qwen|copilot|claude|pi. Omit :model for the harness
                      default (NOT allowed for qwen). Omit :instances for 5 on the
-                     first selection, 1 thereafter.
+                     first selection, 1 thereafter. To set instances WITHOUT a
+                     model, leave the model field empty: name::instances (e.g.
+                     copilot::2 — 'copilot:2' means model "2", not 2 instances).
   --yes              Skip the confirmation summary.
   --install-adapters Auto-install a selected harness's missing ACP adapter
                      (claude/pi) instead of prompting/skipping.
@@ -390,7 +396,7 @@ adapter_pkg() { # $1 harness -> npm package for its adapter (empty if native)
 }
 
 adapter_present() { # $1 adapter bin -> 0 if present
-  if [ -n "$ADAPTERS_PRESENT" ]; then
+  if [ "$ADAPTERS_PRESENT_SET" -eq 1 ]; then
     case " $ADAPTERS_PRESENT " in *" $1 "*) return 0 ;; *) return 1 ;; esac
   fi
   command -v "$1" >/dev/null 2>&1
@@ -501,8 +507,9 @@ choose_model() { # $1 harness
 
 # Ensure a harness's ACP adapter is present; may install (with consent) or skip.
 # Returns 0 to keep the harness, 1 to skip it.
-ensure_adapter() { # $1 harness
+ensure_adapter() { # $1 harness; $2 "interactive" to allow the install prompt
   _h=$1
+  _interactive=${2:-}
   _bin=$(adapter_bin "$_h")
   [ -n "$_bin" ] || return 0                    # native, nothing to do
   if adapter_present "$_bin"; then return 0; fi
@@ -514,7 +521,10 @@ ensure_adapter() { # $1 harness
     record_failure "$_h: adapter install ($_pkg) failed"
     return 1
   fi
-  if [ -n "$TTY" ] && confirm "$_h needs the ACP adapter '$_bin' ($_pkg). Install it globally now?"; then
+  # Only prompt in the interactive selection path. A flag-driven (--harness) run
+  # must stay fully scriptable even from a terminal — use --install-adapters as
+  # the explicit non-interactive install mechanism.
+  if [ "$_interactive" = interactive ] && [ -n "$TTY" ] && confirm "$_h needs the ACP adapter '$_bin' ($_pkg). Install it globally now?"; then
     info "Installing $_h ACP adapter ($_pkg)"
     if run npm i -g "$_pkg"; then return 0; fi
     warn "adapter install failed for $_h — skipping this harness."
@@ -563,7 +573,7 @@ interactive_select() {
 
   _first=1
   for _h in $_chosen; do
-    ensure_adapter "$_h" || continue
+    ensure_adapter "$_h" interactive || continue
     choose_model "$_h"; _model=$ANS
     if [ "$_first" -eq 1 ]; then _def=5; else _def=1; fi
     while :; do

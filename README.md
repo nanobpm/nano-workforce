@@ -109,10 +109,10 @@ also fully scriptable and safe to re-run (it converges rather than duplicating):
 
 ```sh
 # Non-interactive (CI / re-provisioning); repeatable --harness <name>[:<model>][:<instances>]
-curl -fsSL …/install.sh | sh -s -- --harness copilot:gpt-5.4:5 --harness claude:opus:1 --yes
+curl -fsSL https://raw.githubusercontent.com/nanobpm/nano-workforce/main/install.sh | sh -s -- --harness copilot:gpt-5.4:5 --harness claude:opus:1 --yes
 
 # Preview every command without changing anything
-curl -fsSL …/install.sh | sh -s -- --harness copilot:gpt-5.4:1 --dry-run
+curl -fsSL https://raw.githubusercontent.com/nanobpm/nano-workforce/main/install.sh | sh -s -- --harness copilot:gpt-5.4:1 --dry-run
 ```
 
 `qwen` must always be given an explicit model (it stalls without one). With no
