@@ -70,11 +70,19 @@ assert_contains "s3: copilot still hired" "nano hire --name copilot" "$OUT"
 if [ "$RC" -ne 0 ]; then pass "s3: partial success exits non-zero"; else fail "s3: expected non-zero exit after a skip"; fi
 
 # --- Scenario 4: no TTY + no --harness must not hang; exits non-zero --------
-set +e
-sh "$SCRIPT" --dry-run </dev/null >/dev/null 2>&1
-RC=$?
-set -e
-if [ "$RC" -ne 0 ]; then pass "s4: no TTY and no --harness exits non-zero"; else fail "s4: expected non-zero exit with no TTY and no flags"; fi
+# install.sh reads prompts from /dev/tty, and `</dev/null` does not detach the
+# controlling terminal — so from an interactive shell this scenario would open
+# the real tty and hang. Only exercise it when there is no controlling TTY (CI),
+# and skip it (still PASS) when run interactively.
+if ( exec </dev/tty ) >/dev/null 2>&1; then
+  pass "s4: skipped (controlling TTY present; would hang interactively)"
+else
+  set +e
+  sh "$SCRIPT" --dry-run </dev/null >/dev/null 2>&1
+  RC=$?
+  set -e
+  if [ "$RC" -ne 0 ]; then pass "s4: no TTY and no --harness exits non-zero"; else fail "s4: expected non-zero exit with no TTY and no flags"; fi
+fi
 
 # --- Scenario 5: default instances (5 then 1) and default model ------------
 OUT=$(NANO_INSTALL_HARNESSES_OVERRIDE="copilot claude" NANO_INSTALL_ADAPTERS_PRESENT="claude-code-acp" \

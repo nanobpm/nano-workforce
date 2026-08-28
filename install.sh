@@ -89,9 +89,10 @@ SEP=$(printf '\037')      # US (unit separator): non-whitespace, so `read` never
 #   NANO_INSTALL_ADAPTERS_PRESENT    — space list of adapter bins to treat present.
 HARNESS_OVERRIDE="${NANO_INSTALL_HARNESSES_OVERRIDE:-}"
 ADAPTERS_PRESENT="${NANO_INSTALL_ADAPTERS_PRESENT:-}"
-# Whether the override was *set at all* (even to ""). A set-but-empty value means
-# "no adapters present" and must NOT fall back to command -v, or the smoke test
-# stops being hermetic on a runner image that happens to ship an adapter binary.
+# Whether each override was *set at all* (even to ""). A set-but-empty value means
+# "none detected/present" and must NOT fall back to command -v, or the smoke test
+# stops being hermetic on a runner image that happens to ship a harness/adapter binary.
+if [ "${NANO_INSTALL_HARNESSES_OVERRIDE+set}" = set ]; then HARNESS_OVERRIDE_SET=1; else HARNESS_OVERRIDE_SET=0; fi
 if [ "${NANO_INSTALL_ADAPTERS_PRESENT+set}" = set ]; then ADAPTERS_PRESENT_SET=1; else ADAPTERS_PRESENT_SET=0; fi
 
 CLI=''      # resolved c8ctl / c8 binary
@@ -342,7 +343,7 @@ version_gate() {
 # Step 3 — Detect installed harnesses
 # ---------------------------------------------------------------------------
 harness_detected() { # $1 harness -> 0 if present
-  if [ -n "$HARNESS_OVERRIDE" ]; then
+  if [ "$HARNESS_OVERRIDE_SET" -eq 1 ]; then
     case " $HARNESS_OVERRIDE " in *" $1 "*) return 0 ;; *) return 1 ;; esac
   fi
   command -v "$1" >/dev/null 2>&1
