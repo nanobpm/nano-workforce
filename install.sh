@@ -156,7 +156,8 @@ ver_field() { # ver index(1..3) -> numeric field, missing = 0
     1) printf '%s' "${_v%%.*}" ;;
     2) _r=${_v#*.}; [ "$_r" = "$_v" ] && { printf '0'; return; }; printf '%s' "${_r%%.*}" ;;
     3) _r=${_v#*.}; [ "$_r" = "$_v" ] && { printf '0'; return; }
-       _r=${_r#*.}; case "$_r" in *.*) printf '%s' "${_r%%.*}" ;; "$_v") printf '0' ;; *) printf '%s' "$_r" ;; esac ;;
+       _p=${_r#*.}; [ "$_p" = "$_r" ] && { printf '0'; return; }
+       printf '%s' "${_p%%.*}" ;;
   esac
 }
 
@@ -444,7 +445,7 @@ choose_model() { # $1 harness
   # Build the candidate list: live query for pi/kimi, else curated. Model ids
   # contain no spaces, so a space-separated list + `for` keeps this in the
   # current shell (no subshell to lose _map/_count to).
-  _live=$(live_models "$_h" 2>/dev/null | sed '/^$/d' | head -20 | tr '\n' ' ' || true)
+  _live=$(live_models "$_h" 2>/dev/null | sed '/^$/d' | head -n 20 | tr '\n' ' ' || true)
   if [ -n "$(printf '%s' "$_live" | tr -d ' ')" ]; then
     _cands=$_live
     note "live models for $_h:"
@@ -490,7 +491,7 @@ choose_model() { # $1 harness
       ''|*[!0-9]*)
         warn "please choose one of the listed options" ;;
       *)
-        _sel=$(printf '%s' "$_map" | tr ' ' '\n' | grep "^${ANS}=" | head -1 | cut -d= -f2-)
+        _sel=$(printf '%s' "$_map" | tr ' ' '\n' | grep "^${ANS}=" | head -n 1 | cut -d= -f2-)
         if [ -n "$_sel" ]; then ANS=$_sel; return 0; fi
         warn "no such option: $ANS" ;;
     esac
@@ -549,7 +550,7 @@ interactive_select() {
         case "$_tok" in
           ''|*[!0-9]*) warn "not a number: $_tok"; _bad=1; break ;;
         esac
-        _m=$(printf '%s' "$_idxmap" | grep "^${_tok}=" | head -1 | cut -d= -f2-)
+        _m=$(printf '%s' "$_idxmap" | grep "^${_tok}=" | head -n 1 | cut -d= -f2-)
         if [ -z "$_m" ]; then warn "no such option: $_tok"; _bad=1; break; fi
         case " $_chosen " in *" $_m "*) : ;; *) _chosen="$_chosen $_m" ;; esac
       done
@@ -561,7 +562,7 @@ interactive_select() {
 
   _first=1
   for _h in $_chosen; do
-    ensure_adapter "$_h" || { _first=0; continue; }
+    ensure_adapter "$_h" || continue
     choose_model "$_h"; _model=$ANS
     if [ "$_first" -eq 1 ]; then _def=5; else _def=1; fi
     while :; do
@@ -600,7 +601,7 @@ noninteractive_select() {
     if [ "$_name" = qwen ] && [ -z "$_model" ]; then
       die "--harness qwen requires an explicit model (qwen stalls with none): use qwen:<model>[:<instances>]"
     fi
-    ensure_adapter "$_name" || { _first=0; continue; }
+    ensure_adapter "$_name" || continue
     if [ -z "$_inst" ]; then
       if [ "$_first" -eq 1 ]; then _inst=5; else _inst=1; fi
     fi

@@ -1,11 +1,11 @@
 #!/bin/sh
 # Hermetic smoke test for install.sh — asserts the command sequence it EMITS
-# under --dry-run for a few selections, plus the guard-rail exit codes. No CLI,
-# npm or coding harness is installed: --dry-run means the mutating commands are
-# printed (never run), harness detection is stubbed via
+# under --dry-run for a few selections, plus the guard-rail exit codes. No nano
+# CLI or coding harness/adapter needs to be installed: --dry-run means the
+# mutating commands are printed (never run), harness detection is stubbed via
 # NANO_INSTALL_HARNESSES_OVERRIDE, and adapter presence via
-# NANO_INSTALL_ADAPTERS_PRESENT. `node` and `npm` are required (the preflight
-# probe), so run it where both are available.
+# NANO_INSTALL_ADAPTERS_PRESENT. Only `node` and `npm` are required (the
+# preflight probe still runs), so run it where both are available.
 #
 # Run from the repo root:  sh test/install-smoke.sh
 set -eu
