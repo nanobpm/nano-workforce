@@ -59,10 +59,23 @@ function sanitiseForwardedPrefix(raw: string | null): string {
 /** The trusted (proto, host) pair for a request — the ONE place proxy-header handling lives so
  * `resolveApiBase` and `resolvePublicOrigin` can't drift (AGENTS.md "derivation over duplication").
  * Only `http`/`https` are trusted from the user-controlled `x-forwarded-proto`; the host prefers
- * `x-forwarded-host` over `host`. `host` is "" when neither header is present. */
+ * `x-forwarded-host` over `host`. `host` is "" when neither header is present or the advertised host
+ * is not a valid authority (see {@link sanitiseHost}). */
 function requestProtoHost(req: { headers: Headers }): { proto: string; host: string } {
   const rawProto = (req.headers.get("x-forwarded-proto") ?? "http").split(",")[0].trim().toLowerCase();
   const proto = rawProto === "http" || rawProto === "https" ? rawProto : "http";
-  const host = (req.headers.get("x-forwarded-host") ?? req.headers.get("host") ?? "").split(",")[0].trim();
-  return { proto, host };
+  const rawHost = (req.headers.get("x-forwarded-host") ?? req.headers.get("host") ?? "").split(",")[0].trim();
+  return { proto, host: sanitiseHost(rawHost) };
+}
+
+/** Sanitise the untrusted, proxy/user-controlled host (`x-forwarded-host`/`host`) into a bare
+ * authority — a registered name or IPv4 with an optional `:port`, or a bracketed IPv6 literal with
+ * an optional `:port` — or "" when it carries anything else. The host is reflected verbatim into the
+ * `${proto}://${host}` authority of a caller-facing URL, so a hostile value like
+ * `evil.com@real.example` (userinfo injection) or `real.example/extra-path` (path injection) must be
+ * rejected outright rather than smuggled through. */
+function sanitiseHost(host: string): string {
+  if (!host) return "";
+  const valid = /^(?:[A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\])(?::\d+)?$/.test(host);
+  return valid ? host : "";
 }

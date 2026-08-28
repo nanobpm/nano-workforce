@@ -93,3 +93,25 @@ test("resolvePublicOrigin: sanitises a fully hostile x-forwarded-prefix to no pr
 test("resolvePublicOrigin: falls back to a localhost origin when the Host header is absent", () => {
   assertEquals(resolvePublicOrigin(req({}, "/app/api/actions/compile-delivery-graph")), "http://localhost:3000");
 });
+
+// ── host sanitisation: the untrusted x-forwarded-host/host authority is reflected into the URL ──
+test("rejects a userinfo-injecting host (falls back to localhost)", () => {
+  const r = req({ "x-forwarded-host": "evil.com@real.example" }, "/app/api/actions/compile-delivery-graph");
+  assertEquals(resolvePublicOrigin(r), "http://localhost:3000");
+  assertEquals(resolveApiBase(req({ "x-forwarded-host": "evil.com@real.example" }, "/app/api/agent"), "agent"), "http://localhost:3000/app/api");
+});
+
+test("rejects a path-injecting host (falls back to localhost)", () => {
+  const r = req({ "x-forwarded-host": "real.example/extra-path" }, "/app/api/actions/compile-delivery-graph");
+  assertEquals(resolvePublicOrigin(r), "http://localhost:3000");
+});
+
+test("accepts a host:port authority", () => {
+  const r = req({ "x-forwarded-host": "wf.example.com:8443", "x-forwarded-proto": "https" }, "/app/api/actions/compile-delivery-graph");
+  assertEquals(resolvePublicOrigin(r), "https://wf.example.com:8443");
+});
+
+test("accepts a bracketed IPv6 host authority", () => {
+  const r = req({ "x-forwarded-host": "[2001:db8::1]:3000" }, "/app/api/actions/compile-delivery-graph");
+  assertEquals(resolvePublicOrigin(r), "http://[2001:db8::1]:3000");
+});
