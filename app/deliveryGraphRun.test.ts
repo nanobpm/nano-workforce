@@ -115,7 +115,55 @@ test("pollDeliveryGraphPhase: a numeric engine processInstanceKey still matches 
     // The engine can yield a NUMERIC key; the poller compares against the string process_key.
     const engine = {
       searchProcessInstances: async () => [{ processInstanceKey: 12345, state: "COMPLETED" }],
-      searchElementInstanceWaitStates: async () => [],
+      searchUserTasks: async () => [],
+    };
+    await pollDeliveryGraphPhase(data, engine as never);
+    assertEquals((await runs.get("rk"))?.status, "done");
+  });
+});
+
+// ── pollDeliveryGraphPhase: engine 422 on USER_TASK wait-state read (nano-bpm#1042) ────────────
+// The deployed engine's wait-state read model only accepts JOB | MESSAGE, so a `waitStateType:
+// "USER_TASK"` filter 422s on a live gateway. This pass reads parks via `searchUserTasks({ state:
+// "CREATED" })` — NOT `searchElementInstanceWaitStates` — precisely so that 422 can never reject the
+// `Promise.all` and skip reconciliation. Guard both projections this pass owns against regressing back
+// onto the wait-state channel: the parked-label projection AND the COMPLETED → `done` transition.
+test("pollDeliveryGraphPhase: with an engine that 422s on waitStateType=USER_TASK, the parked label still projects (reads via searchUserTasks)", async () => {
+  await withData(async (data) => {
+    const runs = deliveryGraphRuns(data);
+    const humanEl = humanTaskElementId("publish");
+    await runs.insert({
+      ...claimRow("running"),
+      process_key: "PI-1",
+      human_labels: JSON.stringify({ [humanEl]: "run the manual OTP publish" }),
+    });
+    // A client that rejects the wait-state read the way a live gateway does (HTTP 422). If the poller
+    // reached for it, the throw would reject the Promise.all and reconciliation would be skipped.
+    const engine = {
+      searchProcessInstances: async () => [{ processInstanceKey: "PI-1", state: "ACTIVE" }],
+      searchUserTasks: async () => [{ userTaskKey: "ut-1", elementId: humanEl }],
+      searchElementInstanceWaitStates: async () => {
+        throw new Error("HttpSdkError: HTTP 422 — filter.waitStateType did not match any variant of untagged enum WaitStateTypeFilterProperty");
+      },
+    };
+    await pollDeliveryGraphPhase(data, engine as never);
+    const row = await runs.get("rk");
+    assertEquals(row?.status, "running");
+    assertEquals(row?.phase, "Parked on human node: run the manual OTP publish");
+    assertEquals(row?.phase_node_id, humanEl);
+  });
+});
+
+test("pollDeliveryGraphPhase: with an engine that 422s on waitStateType=USER_TASK, a COMPLETED instance still reconciles to done", async () => {
+  await withData(async (data) => {
+    const runs = deliveryGraphRuns(data);
+    await runs.insert({ ...claimRow("running"), process_key: "PI-2" });
+    const engine = {
+      searchProcessInstances: async () => [{ processInstanceKey: "PI-2", state: "COMPLETED" }],
+      searchUserTasks: async () => [],
+      searchElementInstanceWaitStates: async () => {
+        throw new Error("HttpSdkError: HTTP 422 — filter.waitStateType did not match any variant of untagged enum WaitStateTypeFilterProperty");
+      },
     };
     await pollDeliveryGraphPhase(data, engine as never);
     assertEquals((await runs.get("rk"))?.status, "done");
