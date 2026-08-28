@@ -790,6 +790,34 @@ origin_of() {
 # ports, and tokens, none of which contain control characters.
 json_str() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
 
+# Print the path of a freshly created, private (0600) temp file on stdout, or
+# return non-zero if none could be made. Prefers mktemp; when mktemp is absent
+# it falls back to a noclobber (set -C) create loop so a pre-existing path — a
+# symlink/clobber attack on a shared /tmp — can never be followed or reused, and
+# the file we read back is always the empty one we just created (never stale).
+mktemp_safe() {
+  _mt=$(mktemp 2>/dev/null) && { printf '%s' "$_mt"; return 0; }
+  _dir=${TMPDIR:-/tmp}; _n=0
+  while [ "$_n" -lt 20 ]; do
+    _cand="${_dir%/}/nwf-install.$$.${_n}.$(_rand)"
+    # `set -C` makes `>` fail if the target exists (regular file OR symlink), so
+    # the create is atomic and cannot clobber/follow an attacker-planted path.
+    if ( set -C; umask 077; : >"$_cand" ) 2>/dev/null; then
+      printf '%s' "$_cand"; return 0
+    fi
+    _n=$((_n + 1))
+  done
+  return 1
+}
+
+# Best-effort small random token for the mktemp fallback path (entropy only —
+# security rests on the noclobber create, not on this being unguessable; the
+# per-iteration counter in the candidate path guarantees uniqueness regardless).
+_rand() {
+  awk 'BEGIN{srand();printf "%d", rand()*1000000}' 2>/dev/null && return 0
+  date +%s 2>/dev/null || printf '%s' "$$"
+}
+
 # api METHOD PATH [BODY] [DISPLAY]
 #   Sets API_STATUS (HTTP code, "000" on transport failure), API_BODY, API_ERR
 #   (curl exit code, 0 on success). Under --dry-run nothing is sent: the call is
@@ -815,7 +843,7 @@ api() {
   if [ -n "$_body" ]; then
     set -- "$@" -H 'Content-Type: application/json' --data "$_body"
   fi
-  _tmp=$(mktemp 2>/dev/null || printf '/tmp/nwf-install.%s' "$$")
+  _tmp=$(mktemp_safe) || { API_STATUS='000'; API_BODY=''; API_ERR=1; return 0; }
   API_STATUS=$(curl "$@" -o "$_tmp" -w '%{http_code}' "$_url" 2>/dev/null) && API_ERR=0 || API_ERR=$?
   [ "$API_ERR" -ne 0 ] && API_STATUS='000'
   API_BODY=$(cat "$_tmp" 2>/dev/null || true)

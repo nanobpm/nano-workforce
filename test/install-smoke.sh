@@ -158,7 +158,7 @@ OUT=$(NANO_INSTALL_HARNESSES_OVERRIDE="copilot" \
 assert_not_contains "s7: no console API calls under --skip-app" "/console/api/" "$OUT"
 assert_contains "s7: skip note shown" "Phase 2 skipped (--skip-app)" "$OUT"
 
-# --- Scenarios 8-12: live phase-2 flow against a stubbed node console -------
+# --- Scenarios 8-13: live phase-2 flow against a stubbed node console -------
 if command -v node >/dev/null 2>&1 && command -v curl >/dev/null 2>&1; then
   STUBDIR=$(mktemp -d)
   STUB="$STUBDIR/stub-console.cjs"
@@ -221,7 +221,7 @@ CJS
   }
 
   if [ -z "$STUBDIR" ] || [ ! -f "$STUB" ]; then
-    fail "s8-s12: could not create the stub console"
+    fail "s8-s13: could not create the stub console"
   else
     # Scenario 8 — happy path: success asserted via /app/api/version, exit 0.
     run_phase2 happy
@@ -272,10 +272,25 @@ CJS
     assert_not_contains "s12: schemeless origin never doubles the authority" \
       "localhost:8080://localhost:8080" "$SCHEMELESS"
 
+    # Scenario 13 — mktemp unavailable: api() must fall back to a safe noclobber
+    # temp file and the happy path must still converge. A PATH-shim `mktemp` that
+    # always fails forces mktemp_safe() down its fallback branch for the script.
+    SHIMDIR="$STUBDIR/shim"
+    mkdir -p "$SHIMDIR"
+    printf '#!/bin/sh\nexit 1\n' > "$SHIMDIR/mktemp"
+    chmod +x "$SHIMDIR/mktemp"
+    _oldpath="$PATH"
+    PATH="$SHIMDIR:$PATH"; export PATH
+    run_phase2 happy
+    PATH="$_oldpath"; export PATH
+    if [ "$PHASE2_RC" -eq 0 ]; then pass "s13: mktemp-unavailable fallback converges (exit zero)"; else
+      fail "s13: mktemp-unavailable fallback should exit zero"; printf '%s\n' "$PHASE2_OUT" | sed 's/^/    | /' >&2; fi
+    assert_contains "s13: fallback still asserts readiness via /app/api/version" "app is up" "$PHASE2_OUT"
+
     rm -rf "$STUBDIR"
   fi
 else
-  pass "s8-s12: skipped (node or curl unavailable for the stubbed-console tests)"
+  pass "s8-s13: skipped (node or curl unavailable for the stubbed-console tests)"
 fi
 
 if [ "$FAILED" -ne 0 ]; then
