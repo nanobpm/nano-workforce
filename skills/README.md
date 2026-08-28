@@ -8,7 +8,8 @@ loads on demand when its `description` matches the task.
 
 A **thin bootstrap** that teaches any agent to operate a running Nano Workforce
 instance. Where the client supports **MCP**, it registers the instance's `/app/mcp`
-server (its tools + operator-playbook resource appear automatically — ADR 0067); where
+server (its tools appear automatically, including the operator guide as the
+`getAgentInstructions` tool — ADR 0067); where
 it does not, it resolves the instance base URL and fetches the instance's *live*
 operator guide (`GET /app/api/agent`), then follows it. Either way it deliberately holds
 no endpoint detail of its own — the live, version-matched surface is the source of truth.

@@ -27,9 +27,11 @@ The Urban runtime serves a Streamable-HTTP MCP endpoint at **`/app/mcp`** for ev
 instance, with **zero app-side MCP code**: the app's operations are projected into
 tools from its OpenAPI spec, alongside a framework-owned engine-debug tool family
 (process instances, wait states, variables, incidents) and the app's projection
-reads. The operator **playbook** (the same guide as §B) is served as an MCP
-**resource**, so the workflow knowledge — orient first, preview before dispatch,
-escalations are for humans — is discoverable over the same channel as the tools.
+reads. The operator **guide** (the same guide as §B) is itself one of those projected
+tools — `GET /app/api/agent` becomes the `getAgentInstructions` read tool — so the
+workflow knowledge (orient first, preview before dispatch, escalations are for humans)
+is discoverable over the same channel as the drive tools; the runtime additionally
+serves its derived **system brief** as an MCP resource plus an orientation prompt.
 
 **Register one MCP server entry per instance.** Naming the instance
 (`"drive workforce-merlin"`) makes the wrong-instance mistake structurally
@@ -62,8 +64,8 @@ Then: start a session, confirm the `workforce-*` tools appear, and ask the agent
 use a **named** instance (`"Using workforce-local, show what's in flight and any open
 escalations"`). It should call the status operation tool, not curl.
 
-**Guard posture.** Reads (status, instances, incidents, projections, the playbook
-resource) work from loopback with no credential. Mutations (submit work, answer
+**Guard posture.** Reads (status, instances, incidents, projections, the operator
+guide) work from loopback with no credential. Mutations (submit work, answer
 escalations, cancel/retry/resolve) require the instance's shared secret as a header
 **when `NANO_PR_WEBHOOK_SECRET` is set** — put it in the server entry's `headers`,
 never in chat. **Operator-only doors stay operator-only:** the delivery-graph
@@ -128,7 +130,7 @@ curl -sS ${NANO_PR_WEBHOOK_SECRET:+-H "x-hook-secret: $NANO_PR_WEBHOOK_SECRET"} 
 authoritative, version-matched operator guide, every example keyed to this
 instance. Read it in full and follow it for orientation, submitting work, answering
 escalations, and debugging. **Re-fetch it at the start of every session.** (This is
-the same prose the MCP playbook resource serves in §A.)
+the same prose the `getAgentInstructions` MCP tool serves in §A.)
 
 ### B.3 Orient before acting
 
@@ -155,9 +157,9 @@ or unstick anything.
 
 ## Principles
 
-- **Discover, don't declare.** Prefer the live surface (MCP tools + playbook
-  resource, or the live guide and `/status`) over any assumption baked into this
-  file. If this skill and the live surface disagree, the live surface wins.
+- **Discover, don't declare.** Prefer the live surface (MCP tools including the
+  operator-guide tool, or the live guide and `/status`) over any assumption baked into
+  this file. If this skill and the live surface disagree, the live surface wins.
 - **Confirm the target instance.** Never run a side-effecting call against an assumed
   base URL. With MCP, name the server entry; with the fallback, know — and when
   ambiguous, ask — which instance you're driving.

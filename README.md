@@ -461,9 +461,11 @@ returns `401` without the matching header; unset = open. The source lives in
 Where your agent supports **MCP**, prefer it over the curl path above. The Urban
 runtime serves a Streamable-HTTP MCP endpoint at **`/app/mcp`** for every instance and
 projects this app's `openapi.yaml` into tools with **zero MCP code in nwf** — the app
-operations, a framework-owned engine-debug tool family (process instances, wait states,
-variables, incidents), the `urban_*` projection reads, and the operator guide as an MCP
-**resource** (ADR 0067, nano-ide#488). Register one server entry per instance and name
+operations (including the operator guide, projected from `GET /app/api/agent` as the
+`getAgentInstructions` read tool), a framework-owned engine-debug tool family (process
+instances, wait states, variables, incidents), the `urban_*` projection reads, and the
+runtime's derived **system brief** as an MCP resource plus an orientation prompt
+(ADR 0067, nano-ide#488). Register one server entry per instance and name
 it when you drive — tool calls are namespaced per entry, so the wrong-instance mistake
 becomes impossible:
 

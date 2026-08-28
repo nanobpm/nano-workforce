@@ -8,9 +8,11 @@
 The Urban runtime serves a Streamable-HTTP MCP endpoint at **`/app/mcp`** for every
 hosted app and projects this app's `openapi.yaml` into tools — **zero MCP server code
 in nwf**. An MCP-capable agent gets nwf's operations (submit work, answer escalations,
-read status), the framework-owned engine-debug tool family (process instances, wait
-states, variables, incidents), the `urban_*` projection reads, and the operator
-**playbook** as an MCP resource — all namespaced per server entry.
+read status, and the operator **guide** itself — `GET /app/api/agent`, projected as the
+`getAgentInstructions` read tool), the framework-owned engine-debug tool family (process
+instances, wait states, variables, incidents), the `urban_*` projection reads, and the
+runtime's derived **system brief** as an MCP resource plus an orientation prompt — all
+namespaced per server entry.
 
 This replaces the SKILL.md instance-probing dance for MCP clients: naming the
 instance (`"drive workforce-merlin"`) makes the wrong-instance mistake structurally
@@ -98,13 +100,14 @@ The agent should call the status operation tool, not curl.
 > it's stuck."*
 
 The agent has: instance search, wait states, variables, incidents (engine truth) +
-the `urban_*` projection reads (app belief) + the playbook resource for the
-convergence-loop-specific meaning of each wedge shape. A wedge is frequently exactly a
-disagreement between the two planes.
+the `urban_*` projection reads (app belief) + the operator guide (the
+`getAgentInstructions` tool) for the convergence-loop-specific meaning of each wedge
+shape. A wedge is frequently exactly a disagreement between the two planes.
 
 ## 4. Guard posture
 
-Reads (status, instances, incidents, projections, playbook) work from loopback with no
+Reads (status, instances, incidents, projections, the operator guide) work from
+loopback with no
 credential. Mutations (cancel/retry/resolve, `start/*` operations, answering
 escalations) require the instance's secret as a header **when `NANO_PR_WEBHOOK_SECRET`
 is set** — put it in the server entry's `headers`, never in chat. For a remote fleet,

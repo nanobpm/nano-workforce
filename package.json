@@ -59,7 +59,7 @@
   },
   "dependencies": {
     "@nanobpm/agentic": "^0.4.0",
-    "@nanobpm/urban": "^0.83.0",
+    "@nanobpm/urban": "^0.86.0",
     "bpmn-auto-layout": "^2.0.0-alpha.2"
   },
   "devDependencies": {
@@ -73,8 +73,7 @@
     "conventional-changelog-conventionalcommits": "^8.0.0",
     "linkedom": "^0.18.13",
     "semantic-release": "^25.0.0",
-    "typescript": "^5.6.0",
-    "yaml": "^2.9.0"
+    "typescript": "^5.6.0"
   },
   "overrides": {
     "@semantic-release/npm": "^13.1.5"
