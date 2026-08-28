@@ -79,6 +79,8 @@ DRY_RUN=0
 ASSUME_YES=0
 SHELL_OVERRIDE=''
 INSTALL_ADAPTERS=0        # auto-install missing adapters without prompting
+SKIP_APP=0               # phase 1 only: bring up engine + workforce, don't install the app
+PROJECT_NAME=''          # console project name for the Nano Workforce app (default: Workforce)
 CLI_HARNESS_SPECS=''      # newline-separated name[:model][:instances] from --harness
 SELECTIONS=''             # newline-separated "name<US>model<US>instances" (US = non-whitespace 0x1f, so an empty model field does not collapse under read)
 FAILURES=''               # newline-separated failure notes (partial-success report)
@@ -97,6 +99,23 @@ if [ "${NANO_INSTALL_ADAPTERS_PRESENT+set}" = set ]; then ADAPTERS_PRESENT_SET=1
 
 CLI=''      # resolved c8ctl / c8 binary
 TTY=''      # /dev/tty if usable, else empty
+
+# ---------------------------------------------------------------------------
+# Phase 2 (app install) configuration + test hooks.
+#   NANO_INSTALL_CONSOLE_ORIGIN     — override the console/engine origin (tests).
+#   NANO_INSTALL_APP_POLL_ATTEMPTS  — readiness-poll attempt count (tests).
+#   NANO_INSTALL_APP_POLL_INTERVAL  — seconds between readiness polls (tests).
+# CONSOLE_ORIGIN is the scheme://host:port the nano console+engine listen on
+# (default http://localhost:8080); the console API lives under /console there.
+CONSOLE_ORIGIN=''
+APPVIEW_BASE=''
+PROJECT=''
+APP_POLL_ATTEMPTS="${NANO_INSTALL_APP_POLL_ATTEMPTS:-60}"
+APP_POLL_INTERVAL="${NANO_INSTALL_APP_POLL_INTERVAL:-2}"
+# Results of the last api() call.
+API_STATUS=''
+API_BODY=''
+API_ERR=0
 
 # ---------------------------------------------------------------------------
 # Command runner — honours --dry-run for mutating commands.
@@ -200,6 +219,11 @@ Options:
   -y, --yes          Skip the confirmation summary.
   --install-adapters Auto-install a selected harness's missing ACP adapter
                      (claude/pi) instead of prompting/skipping.
+  --project-name <name>
+                     Console project name for the Nano Workforce app
+                     (default: Workforce). [A-Za-z0-9._-] only.
+  --skip-app         Run phase 1 only (engine + workforce); do NOT install,
+                     scaffold, configure, or run the Nano Workforce app.
   --shell <bash|zsh|fish>
                      Override shell-completion detection.
   --dry-run          Print every command that would run; change nothing.
@@ -207,6 +231,13 @@ Options:
 
 Non-interactive example:
   curl -fsSL .../install.sh | sh -s -- --harness copilot:gpt-5.4:5 --harness claude:opus:1 --yes
+
+Phases:
+  1. (nanobpm/nano-workforce#576) install @camunda8/cli + the nano plugin, hire
+     your harnesses, compose a workforce manifest, bring up engine + workforce.
+  2. (nanobpm/nano-workforce#583) install the @nanobpm/nano-workforce console
+     extension, scaffold + configure + run a Workforce project, and print its
+     app-view URL. Skip it with --skip-app.
 
 With no controlling terminal (/dev/tty) and no --harness, the script exits
 non-zero rather than hanging on a prompt.
@@ -230,6 +261,11 @@ parse_args() {
         shift ;;
       --yes|-y) ASSUME_YES=1; shift ;;
       --install-adapters) INSTALL_ADAPTERS=1; shift ;;
+      --skip-app) SKIP_APP=1; shift ;;
+      --project-name)
+        [ $# -ge 2 ] || die "--project-name requires a value"
+        PROJECT_NAME=$2; shift 2 ;;
+      --project-name=*) PROJECT_NAME=${1#--project-name=}; shift ;;
       --dry-run) DRY_RUN=1; shift ;;
       --shell)
         [ $# -ge 2 ] || die "--shell requires a value (bash|zsh|fish)"
@@ -725,11 +761,286 @@ print_status_and_hints() {
   $CLI nano supervisor logs <worker> --follow       tail one worker's logs
   $CLI nano workforce stop   /   $CLI nano stop      shut the fleet / engine down
   $CLI nano hire --list                             the hired profiles
-
-  Note: the Nano Workforce APP itself is not installed by this script yet — this
-  brings up the engine + a workforce of hired agents. See the README's "Run from
-  the CLI" section for installing/running the app.
 EOF
+}
+
+# ---------------------------------------------------------------------------
+# Phase 2 — install & run the Nano Workforce app via the nano console API
+# (nanobpm/nano-workforce#583). Everything below talks to the console that
+# `c8 nano start` brought up (default http://localhost:8080, console under
+# /console). Read-only GETs run even under --dry-run's live path is avoided:
+# --dry-run prints the exact calls and mutates (and reads) nothing.
+# ---------------------------------------------------------------------------
+
+# scheme://host:port of a URL (drops any path), e.g. http://localhost:8080/v2
+# -> http://localhost:8080.
+origin_of() {
+  _u=$1
+  _scheme=${_u%%://*}
+  _rest=${_u#*://}
+  _auth=${_rest%%/*}
+  printf '%s://%s' "$_scheme" "$_auth"
+}
+
+# Minimal JSON string escaper (backslash + double-quote); values here are URLs,
+# ports, and tokens, none of which contain control characters.
+json_str() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+
+# api METHOD PATH [BODY] [DISPLAY]
+#   Sets API_STATUS (HTTP code, "000" on transport failure), API_BODY, API_ERR
+#   (curl exit code, 0 on success). Under --dry-run nothing is sent: the call is
+#   printed (DISPLAY overrides BODY in the printout, e.g. to redact a token).
+api() {
+  _method=$1; _path=$2; _body=${3:-}; _display=${4:-}
+  _url="${CONSOLE_ORIGIN}${_path}"
+  if [ "$DRY_RUN" -eq 1 ]; then
+    _shown=${_display:-$_body}
+    if [ -n "$_shown" ]; then
+      printf '+ %s %s  %s\n' "$_method" "$_url" "$_shown" >&2
+    else
+      printf '+ %s %s\n' "$_method" "$_url" >&2
+    fi
+    API_STATUS='000'; API_BODY=''; API_ERR=0
+    return 0
+  fi
+  set -- -sS -X "$_method" -H 'Accept: application/json'
+  if [ -n "$_body" ]; then
+    set -- "$@" -H 'Content-Type: application/json' --data "$_body"
+  fi
+  _tmp=$(mktemp 2>/dev/null || printf '/tmp/nwf-install.%s' "$$")
+  API_STATUS=$(curl "$@" -o "$_tmp" -w '%{http_code}' "$_url" 2>/dev/null) && API_ERR=0 || API_ERR=$?
+  API_BODY=$(cat "$_tmp" 2>/dev/null || true)
+  rm -f "$_tmp"
+  return 0
+}
+
+# The env map written into ProjectConfig.env (step 5). Real body + a token-
+# redacted display are built the same way so they never drift.
+build_config_body() { # $1 = redact? ("redact" to mask the token)
+  _tok="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
+  if [ -n "$_tok" ]; then
+    if [ "${1:-}" = redact ]; then _tokval='***'; else _tokval=$(json_str "$_tok"); fi
+    _gh="\"GITHUB_TOKEN\":\"${_tokval}\""
+  else
+    # No token in the environment: rely on the host `gh` CLI transport instead.
+    _gh="\"NANO_PR_GITHUB_TRANSPORT\":\"auto\""
+  fi
+  printf '{"env":{%s,"NANOBPMN_BASE_URL":"%s","NANO_WORKFORCE_BASE_URL":"%s","PR_REVIEW_PORT":"%s"}}' \
+    "$_gh" "$(json_str "$CONSOLE_ORIGIN")" "$(json_str "$APPVIEW_BASE")" "${PR_REVIEW_PORT:-3000}"
+}
+
+# Step 9 — the console must be reachable before we mutate anything.
+app_preflight() {
+  info "Preflighting the console at ${CONSOLE_ORIGIN}/console"
+  api GET /console/api/projects
+  if [ "$DRY_RUN" -eq 1 ]; then
+    note "dry-run: assuming the console is reachable."
+    return 0
+  fi
+  if [ "$API_ERR" -ne 0 ] || [ "$API_STATUS" = '000' ]; then
+    err "console unreachable at ${CONSOLE_ORIGIN}/console/api (curl exit ${API_ERR})."
+    note "The engine was likely started with NANOBPMN_CONSOLE=off/observe."
+    note "'c8 nano start' defaults to 'studio' (console on) — check your engine config."
+    note "Nothing was changed; phase 1 (engine + workforce) is intact."
+    record_failure "app: console unreachable — no changes made"
+    return 1
+  fi
+  case "$API_STATUS" in
+    2*) ok "console reachable" ;;
+    *) err "console preflight GET /console/api/projects -> HTTP $API_STATUS"
+       record_failure "app: console preflight HTTP $API_STATUS"
+       return 1 ;;
+  esac
+}
+
+# Step 10 — confirm (keys, never values).
+confirm_app() {
+  info "About to install the Nano Workforce app"
+  note "console extension : @nanobpm/nano-workforce"
+  note "project           : ${PROJECT} (from template 'nano-workforce')"
+  if [ -n "${GITHUB_TOKEN:-${GH_TOKEN:-}}" ]; then _ghkey='GITHUB_TOKEN'; else _ghkey='NANO_PR_GITHUB_TRANSPORT'; fi
+  note "env keys written  : ${_ghkey}, NANOBPMN_BASE_URL, NANO_WORKFORCE_BASE_URL, PR_REVIEW_PORT (values not shown)"
+  note "app-view URL      : ${APPVIEW_BASE}/"
+  if [ "$ASSUME_YES" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
+    [ "$DRY_RUN" -eq 1 ] && note "dry-run: not asking for confirmation."
+    return 0
+  fi
+  if [ -z "$TTY" ]; then
+    die "refusing to install the app without confirmation and no /dev/tty — re-run with --yes."
+  fi
+  if confirm "Install and run the Nano Workforce app now?"; then
+    return 0
+  fi
+  note "skipping app install at user request (phase 1 is up and usable)."
+  return 1
+}
+
+# Steps 11.1–11.6 — install extension, scaffold, configure, run.
+app_provision() {
+  # 11.1 — ensure the Urban toolkit (idempotent no-op when urban resolves).
+  # Do NOT gate on urbanAvailable: a live instance can report false while a
+  # Workforce project runs happily — treat the response as informational.
+  info "Installing the Urban toolkit"
+  api POST /console/api/urban/install
+  if [ "$DRY_RUN" -eq 0 ]; then
+    case "$API_STATUS" in
+      2*) ok "urban toolkit ensured" ;;
+      *) warn "urban install returned HTTP $API_STATUS (informational — continuing)" ;;
+    esac
+  fi
+
+  # 11.2 — install the console extension. Idempotent: an existing extension is
+  # upgraded (2xx) or already present (409/2xx) — either way, continue.
+  info "Installing the @nanobpm/nano-workforce console extension"
+  api POST /console/api/extensions/install '{"pkg":"@nanobpm/nano-workforce"}'
+  if [ "$DRY_RUN" -eq 0 ]; then
+    case "$API_STATUS" in
+      2*)  ok "extension installed/upgraded" ;;
+      409) note "extension already installed — continuing." ;;
+      *)   err "extension install -> HTTP $API_STATUS"
+           [ -n "$API_BODY" ] && note "$API_BODY"
+           record_failure "app: extension install HTTP $API_STATUS"
+           return 1 ;;
+    esac
+  fi
+
+  # 11.3 — confirm the pack contributed template id 'nano-workforce'. NB the
+  # templates come from GET /console/api/projects, NOT GET /console/api/config/ide
+  # (which returns {} live); the npm pkg name is not the template id.
+  info "Confirming the 'nano-workforce' template is available"
+  api GET /console/api/projects
+  if [ "$DRY_RUN" -eq 1 ]; then
+    note "dry-run: would confirm template 'nano-workforce' in the projects listing."
+  else
+    case "$API_STATUS" in
+      2*) : ;;
+      *)  err "listing projects/templates -> HTTP $API_STATUS"
+          record_failure "app: list projects HTTP $API_STATUS"
+          return 1 ;;
+    esac
+    if printf '%s' "$API_BODY" | grep -q '"nano-workforce"'; then
+      ok "template 'nano-workforce' present"
+    else
+      err "the extension did not contribute template 'nano-workforce'."
+      note "Install may be mid-flight; re-run, or check the console extensions list."
+      record_failure "app: template 'nano-workforce' missing after extension install"
+      return 1
+    fi
+  fi
+
+  # 11.4 — scaffold the project. 409 => it already exists: DO NOT re-scaffold
+  # (app.db lives in the project); fall through to configure + run.
+  info "Scaffolding project '$PROJECT' from template 'nano-workforce'"
+  _create_body=$(printf '{"name":"%s","template":"nano-workforce"}' "$(json_str "$PROJECT")")
+  api POST /console/api/projects "$_create_body"
+  if [ "$DRY_RUN" -eq 1 ]; then
+    note "dry-run: on 409 (project exists) we skip scaffolding and continue to configure + run."
+  else
+    case "$API_STATUS" in
+      2*)  ok "project '$PROJECT' created" ;;
+      409) note "project '$PROJECT' already exists — configuring and running it (not re-scaffolding)." ;;
+      *)   err "createProject -> HTTP $API_STATUS"
+           [ -n "$API_BODY" ] && note "$API_BODY"
+           record_failure "app: createProject HTTP $API_STATUS"
+           return 1 ;;
+    esac
+  fi
+
+  # 11.5 — write ProjectConfig.env (token redacted in dry-run output).
+  info "Configuring project '$PROJECT' (ProjectConfig.env)"
+  _cfg_body=$(build_config_body)
+  _cfg_show=$(build_config_body redact)
+  api PUT "/console/api/projects/${PROJECT}/config" "$_cfg_body" "$_cfg_show"
+  if [ "$DRY_RUN" -eq 0 ]; then
+    case "$API_STATUS" in
+      2*) ok "config written (NANO_WORKFORCE_BASE_URL=${APPVIEW_BASE})" ;;
+      *)  err "PUT project config -> HTTP $API_STATUS"
+          [ -n "$API_BODY" ] && note "$API_BODY"
+          record_failure "app: PUT config HTTP $API_STATUS"
+          return 1 ;;
+    esac
+  fi
+
+  # 11.6 — run. Running an already-running project is a no-op that returns its
+  # current RunState, so this is safe to re-run (converges, never force-restarts).
+  info "Running project '$PROJECT'"
+  api POST "/console/api/projects/${PROJECT}/run"
+  if [ "$DRY_RUN" -eq 0 ]; then
+    case "$API_STATUS" in
+      2*) ok "run requested" ;;
+      *)  err "runProject -> HTTP $API_STATUS"
+          [ -n "$API_BODY" ] && note "$API_BODY"
+          record_failure "app: runProject HTTP $API_STATUS"
+          return 1 ;;
+    esac
+  fi
+}
+
+# Step 12 — assert readiness by polling the app's OWN /app/api/version through
+# the proxy. The runProject response reports the supervisor's state, not the
+# app's readiness, so never trust it alone.
+app_verify() {
+  info "Waiting for the app to answer /app/api/version"
+  if [ "$DRY_RUN" -eq 1 ]; then
+    note "dry-run: would poll GET ${APPVIEW_BASE}/app/api/version until HTTP 200."
+    return 0
+  fi
+  _n=0
+  while [ "$_n" -lt "$APP_POLL_ATTEMPTS" ]; do
+    api GET "/console/app-view/${PROJECT}/app/api/version"
+    case "$API_STATUS" in
+      2*) ok "app is up ($(printf '%s' "$API_BODY" | tr -d '[:space:]' | cut -c1-80))"; return 0 ;;
+    esac
+    _n=$((_n + 1))
+    [ "$_n" -lt "$APP_POLL_ATTEMPTS" ] && sleep "$APP_POLL_INTERVAL"
+  done
+  err "the app did not answer 200 on /app/api/version within $((APP_POLL_ATTEMPTS * APP_POLL_INTERVAL))s (last HTTP ${API_STATUS})."
+  note "It may have booted but not finished self-healing its Urban surface (deps + codegen)."
+  note "Verify your nano-bpm build carries the self-heal-on-Run fix (Magikcraft/nano-bpm#1036); check: ${APPVIEW_BASE}/app/api/version"
+  record_failure "app: readiness poll timed out (last HTTP ${API_STATUS})"
+  return 1
+}
+
+# Step 13 — the operator surfaces.
+app_surfaces() {
+  info "Nano Workforce is up"
+  cat >&2 <<EOF
+  App (cockpit)   : ${APPVIEW_BASE}/
+  Tasks inbox     : ${APPVIEW_BASE}/tasks
+  Delivery Graphs : ${APPVIEW_BASE}/delivery-graphs
+  Agent guide     : ${APPVIEW_BASE}/app/api/agent
+  MCP endpoint    : ${APPVIEW_BASE}/app/mcp
+
+  Drive it by pointing a coding agent at the agent guide (GET /app/api/agent),
+  or add the instance's /app/mcp as an MCP server, e.g.:
+    copilot mcp add --transport http workforce ${APPVIEW_BASE}/app/mcp
+EOF
+}
+
+# Phase 2 entrypoint. Returns non-zero on a genuine failure (recorded) so the
+# final report exits non-zero; a benign user decline returns 1 WITHOUT recording.
+install_app() {
+  info "Phase 2 — install & run the Nano Workforce app (nanobpm/nano-workforce#583)"
+
+  PROJECT=${PROJECT_NAME:-Workforce}
+  case "$PROJECT" in
+    ''|*[!A-Za-z0-9._-]*) die "invalid --project-name '$PROJECT': only [A-Za-z0-9._-] are allowed." ;;
+  esac
+  CONSOLE_ORIGIN=$(origin_of "${NANO_INSTALL_CONSOLE_ORIGIN:-${NANOBPMN_BASE_URL:-http://localhost:8080}}")
+  APPVIEW_BASE="${CONSOLE_ORIGIN}/console/app-view/${PROJECT}"
+
+  if [ "$DRY_RUN" -eq 0 ] && ! command -v curl >/dev/null 2>&1; then
+    err "curl not found — phase 2 needs curl to talk to the console API."
+    note "Install curl and re-run (phase 1 is up and usable), or use --skip-app."
+    record_failure "app: curl missing — phase 2 skipped"
+    return 1
+  fi
+
+  app_preflight  || return 1
+  confirm_app    || return 1
+  app_provision  || return 1
+  app_verify     || return 1
+  app_surfaces
 }
 
 # ---------------------------------------------------------------------------
@@ -741,7 +1052,11 @@ report_and_exit() {
     printf '%s\n' "$FAILURES" | sed '/^$/d' | while IFS= read -r _f; do note "- $_f"; done
     exit 1
   fi
-  ok "Done — engine up, workforce of hired agents up."
+  if [ "$SKIP_APP" -eq 1 ]; then
+    ok "Done — engine up, workforce of hired agents up (app install skipped)."
+  else
+    ok "Done — engine + workforce up, and the Nano Workforce app is running."
+  fi
   exit 0
 }
 
@@ -776,7 +1091,23 @@ main() {
   compose_workforce
   bring_up || true
   print_status_and_hints
+  if [ "$SKIP_APP" -eq 1 ]; then
+    info "Phase 2 skipped (--skip-app)"
+    note "The Nano Workforce app was NOT installed — re-run without --skip-app to"
+    note "install the console extension, scaffold + configure + run the app."
+  else
+    install_app || true
+  fi
   report_and_exit
 }
+
+# Undocumented test hook: exercise phase 2 in isolation against a stub console
+# (no CLI install, no engine), used by the hermetic readiness/convergence tests.
+if [ "${NANO_INSTALL_TEST_PHASE2_ONLY:-0}" = 1 ]; then
+  parse_args "$@"
+  init_tty
+  install_app || true
+  report_and_exit
+fi
 
 main "$@"

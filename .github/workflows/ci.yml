@@ -92,10 +92,11 @@ jobs:
   # blocker, and a self-proving canary asserts the oracle's red path genuinely fires so the gate can
   # never rot into a vacuous green while the corpus is parked. Hermetic (in-process wasm engine, no
   # sockets), so it runs on every PR/push as its own job.
-  # install.sh onboarding script (issue #576): POSIX-sh cleanliness + a hermetic
-  # dry-run smoke test asserting the emitted command sequence. The script is
-  # served from `main` for `curl … | sh`, so a broken change is live the instant
-  # it merges — this gate keeps that surface honest.
+  # install.sh onboarding script (issues #576 + #583): POSIX-sh cleanliness + a
+  # hermetic smoke test asserting the emitted command sequence (phase 1) and the
+  # phase-2 console call flow (dry-run + a stubbed-console live run). The script
+  # is served from `main` for `curl … | sh`, so a broken change is live the
+  # instant it merges — this gate keeps that surface honest.
   install-script:
     name: install.sh (shellcheck + dry-run smoke)
     runs-on: ubuntu-latest
@@ -111,7 +112,7 @@ jobs:
       - name: shellcheck (POSIX sh)
         run: shellcheck -s sh install.sh test/install-smoke.sh
 
-      - name: Dry-run smoke test
+      - name: Smoke test (dry-run sequence + stubbed-console phase 2)
         run: sh test/install-smoke.sh
 
   derivation-parity:
