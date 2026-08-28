@@ -70,6 +70,16 @@ test("ignores a x-forwarded-prefix with .. traversal", () => {
   assertEquals(resolveApiBase(r, "agent"), "http://h/app/api");
 });
 
+test("ignores a x-forwarded-prefix with percent-encoded .. traversal", () => {
+  const r = req({ host: "h", "x-forwarded-prefix": "/a/%2e%2e/%2e%2e" }, "/app/api/agent");
+  assertEquals(resolveApiBase(r, "agent"), "http://h/app/api");
+});
+
+test("ignores a x-forwarded-prefix with a percent-encoded authority", () => {
+  const r = req({ host: "h", "x-forwarded-prefix": "/%2F%2Fevil.test" }, "/app/api/agent");
+  assertEquals(resolveApiBase(r, "agent"), "http://h/app/api");
+});
+
 test("ignores a relative (non-absolute) x-forwarded-prefix", () => {
   const r = req({ host: "h", "x-forwarded-prefix": "console/app-view/Workforce" }, "/app/api/agent");
   assertEquals(resolveApiBase(r, "agent"), "http://h/app/api");

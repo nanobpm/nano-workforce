@@ -110,7 +110,8 @@ test("a hostile x-forwarded-prefix is ignored rather than reflected into the bas
   assertEquals(body.body.baseUrl, "http://wf.example.com/app/api", "hostile prefix falls back to today's behaviour");
 });
 
-test("x-forwarded-proto is restricted to http/https", async () => {  const spoofed = input({ host: "wf.example.com", "x-forwarded-proto": "javascript" });
+test("x-forwarded-proto is restricted to http/https", async () => {
+  const spoofed = input({ host: "wf.example.com", "x-forwarded-proto": "javascript" });
   const body = (await handler(spoofed, app)) as any;
   assertEquals(body.body.baseUrl, "http://wf.example.com/app/api", "unsafe scheme falls back to http");
 });

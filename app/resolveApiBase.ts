@@ -25,13 +25,22 @@ export function resolveApiBase(req: { path: string; headers: Headers }, mountSuf
   // under "/console/app-view/{project}"). X-Forwarded-Prefix is the de-facto standard header for it.
   // It is untrusted, proxy-supplied input that ends up in a URL handed to an agent, so validate it as
   // strictly as x-forwarded-proto above: accept only an absolute path of URL-safe path characters —
-  // rejecting anything with a scheme, an authority ("//host"), or ".." traversal — then drop trailing
-  // slashes so it composes cleanly with the base path. Anything else falls back to an empty prefix,
-  // i.e. today's behaviour.
+  // rejecting anything with a scheme, an authority ("//host"), or a "."/".." traversal segment — then
+  // drop trailing slashes so it composes cleanly with the base path. Anything else falls back to an
+  // empty prefix, i.e. today's behaviour.
+  //
+  // Percent-encoding can smuggle those forms past a literal check: "%2e%2e" decodes to "..", and
+  // "%2f%2f" decodes to an authority-introducing "//". So normalise the common encoded spellings of
+  // "." and "/" (case-insensitively) before rejecting dot-segments and "//"; the still-encoded raw
+  // value is what we reflect once it validates.
   const rawPrefix = (req.headers.get("x-forwarded-prefix") ?? "").split(",")[0].trim();
-  const prefix = /^\/(?!\/)[A-Za-z0-9._~\-/%]*$/.test(rawPrefix) && !rawPrefix.includes("..")
-    ? rawPrefix.replace(/\/+$/, "")
-    : "";
+  const decodedPrefix = rawPrefix.replace(/%2e/gi, ".").replace(/%2f/gi, "/");
+  const prefix =
+    /^\/(?!\/)[A-Za-z0-9._~\-/%]*$/.test(rawPrefix) &&
+    !decodedPrefix.includes("//") &&
+    !/(^|\/)\.\.?(\/|$)/.test(decodedPrefix)
+      ? rawPrefix.replace(/\/+$/, "")
+      : "";
   // The op is mounted at "<base>/<mountSuffix>"; strip the trailing segments to recover the base path.
   const suffix = mountSuffix.replace(/^\/+/, "").replace(/\/+$/, "");
   const stripRe = new RegExp(`/${suffix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/*$`);
