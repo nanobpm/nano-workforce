@@ -1,3 +1,9 @@
+## [0.151.0](https://github.com/nanobpm/nano-workforce/compare/v0.150.4...v0.151.0) (2026-08-28)
+
+### Features
+
+* make Agent Instructions modal MCP-first, skill-as-fallback ([#587](https://github.com/nanobpm/nano-workforce/issues/587)) ([cd2b613](https://github.com/nanobpm/nano-workforce/commit/cd2b613a35c0411ad5000dece36e54b584cffbc7)), closes [#575](https://github.com/nanobpm/nano-workforce/issues/575) [nanobpm/nano-workforce#586](https://github.com/nanobpm/nano-workforce/issues/586)
+
 ## [0.150.4](https://github.com/nanobpm/nano-workforce/compare/v0.150.3...v0.150.4) (2026-08-28)
 
 ### Documentation
