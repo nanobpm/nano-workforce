@@ -1,5 +1,6 @@
 // Tests for app/resolveApiBase.ts — the single canonical control-API base reconstruction shared by
-// getAgentInstructions and getAgentSkill. Covers proxy-header handling, scheme restriction,
+// getAgentInstructions and getAgentSkill, plus the human-facing resolvePublicOrigin (#577). Covers
+// proxy-header handling, scheme restriction, host sanitisation, x-forwarded-prefix sanitisation,
 // host-absent fallback, and mount-suffix stripping for both mount depths.
 import { test } from "node:test";
 import { assertEquals } from "#test-assert";
@@ -42,7 +43,66 @@ test("strips multiple trailing slashes after the mount suffix", () => {
   assertEquals(resolveApiBase(req({ host: "h" }, "/app/api/agent/skill///"), "agent/skill"), "http://h/app/api");
 });
 
+// ── resolveApiBase: x-forwarded-prefix sanitisation (#580) via the shared sanitiseForwardedPrefix ──
+test("prepends a validated x-forwarded-prefix to the reconstructed base", () => {
+  const r = req(
+    { host: "nano.ngrok-free.dev", "x-forwarded-prefix": "/console/app-view/Workforce" },
+    "/app/api/agent",
+  );
+  assertEquals(resolveApiBase(r, "agent"), "http://nano.ngrok-free.dev/console/app-view/Workforce/app/api");
+});
+
+test("normalises a trailing slash on x-forwarded-prefix", () => {
+  const r = req({ host: "h", "x-forwarded-prefix": "/console/app-view/Workforce/" }, "/app/api/agent");
+  assertEquals(resolveApiBase(r, "agent"), "http://h/console/app-view/Workforce/app/api");
+});
+
+test("ignores a x-forwarded-prefix carrying a scheme", () => {
+  const r = req({ host: "h", "x-forwarded-prefix": "https://evil.test" }, "/app/api/agent");
+  assertEquals(resolveApiBase(r, "agent"), "http://h/app/api");
+});
+
+test("ignores a x-forwarded-prefix carrying an authority", () => {
+  const r = req({ host: "h", "x-forwarded-prefix": "//evil.test" }, "/app/api/agent");
+  assertEquals(resolveApiBase(r, "agent"), "http://h/app/api");
+});
+
+test("ignores a x-forwarded-prefix with .. traversal", () => {
+  const r = req({ host: "h", "x-forwarded-prefix": "/a/../.." }, "/app/api/agent");
+  assertEquals(resolveApiBase(r, "agent"), "http://h/app/api");
+});
+
+test("ignores a x-forwarded-prefix with percent-encoded .. traversal", () => {
+  const r = req({ host: "h", "x-forwarded-prefix": "/a/%2e%2e/%2e%2e" }, "/app/api/agent");
+  assertEquals(resolveApiBase(r, "agent"), "http://h/app/api");
+});
+
+test("ignores a x-forwarded-prefix with a percent-encoded authority", () => {
+  const r = req({ host: "h", "x-forwarded-prefix": "/%2F%2Fevil.test" }, "/app/api/agent");
+  assertEquals(resolveApiBase(r, "agent"), "http://h/app/api");
+});
+
+test("ignores a relative (non-absolute) x-forwarded-prefix", () => {
+  const r = req({ host: "h", "x-forwarded-prefix": "console/app-view/Workforce" }, "/app/api/agent");
+  assertEquals(resolveApiBase(r, "agent"), "http://h/app/api");
+});
+
+test("prefix composes with x-forwarded-proto and x-forwarded-host", () => {
+  const r = req(
+    {
+      host: "internal",
+      "x-forwarded-host": "nano.ngrok-free.dev",
+      "x-forwarded-proto": "https",
+      "x-forwarded-prefix": "/console/app-view/Workforce",
+    },
+    "/app/api/agent/skill",
+  );
+  assertEquals(resolveApiBase(r, "agent/skill"), "https://nano.ngrok-free.dev/console/app-view/Workforce/app/api");
+});
+
 // ── resolvePublicOrigin: the human-facing ORIGIN (+ proxy prefix), no /app/api suffix (#577) ──
+// Shares sanitiseForwardedPrefix with resolveApiBase, so the prefix policy (absolute-only, reject
+// scheme/authority/traversal entirely, percent-aware) is identical on both surfaces — no drift.
 test("resolvePublicOrigin: bare origin from the host header", () => {
   assertEquals(resolvePublicOrigin(req({ host: "wf.example.com" }, "/app/api/actions/compile-delivery-graph")), "http://wf.example.com");
 });
@@ -65,9 +125,9 @@ test("resolvePublicOrigin: appends the reverse-proxy x-forwarded-prefix", () => 
   assertEquals(resolvePublicOrigin(r), "https://nano.ngrok-free.dev/console/app-view/Workforce");
 });
 
-test("resolvePublicOrigin: normalises stray slashes on x-forwarded-prefix", () => {
-  const r = req({ host: "h", "x-forwarded-prefix": "console/app-view///" }, "/app/api/actions/compile-delivery-graph");
-  assertEquals(resolvePublicOrigin(r), "http://h/console/app-view");
+test("resolvePublicOrigin: normalises a trailing slash on x-forwarded-prefix", () => {
+  const r = req({ host: "h", "x-forwarded-prefix": "/console/app-view/Workforce/" }, "/app/api/actions/compile-delivery-graph");
+  assertEquals(resolvePublicOrigin(r), "http://h/console/app-view/Workforce");
 });
 
 test("resolvePublicOrigin: treats a slash-only x-forwarded-prefix as empty (no double slash)", () => {
@@ -75,17 +135,17 @@ test("resolvePublicOrigin: treats a slash-only x-forwarded-prefix as empty (no d
   assertEquals(resolvePublicOrigin(r), "http://h");
 });
 
-test("resolvePublicOrigin: drops path-traversal segments from x-forwarded-prefix", () => {
+test("resolvePublicOrigin: rejects a path-traversal x-forwarded-prefix entirely", () => {
   const r = req({ host: "h", "x-forwarded-prefix": "/console/../../etc" }, "/app/api/actions/compile-delivery-graph");
-  assertEquals(resolvePublicOrigin(r), "http://h/console/etc");
+  assertEquals(resolvePublicOrigin(r), "http://h");
 });
 
-test("resolvePublicOrigin: drops segments with a scheme/authority in x-forwarded-prefix", () => {
+test("resolvePublicOrigin: rejects a scheme/authority x-forwarded-prefix", () => {
   const r = req({ host: "h", "x-forwarded-prefix": "https://evil.example/hijack" }, "/app/api/actions/compile-delivery-graph");
   assertEquals(resolvePublicOrigin(r), "http://h");
 });
 
-test("resolvePublicOrigin: sanitises a fully hostile x-forwarded-prefix to no prefix", () => {
+test("resolvePublicOrigin: rejects a relative (non-absolute) x-forwarded-prefix", () => {
   const r = req({ host: "h", "x-forwarded-prefix": "@evil.example" }, "/app/api/actions/compile-delivery-graph");
   assertEquals(resolvePublicOrigin(r), "http://h");
 });

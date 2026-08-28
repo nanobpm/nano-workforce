@@ -4,8 +4,9 @@
 // to the request base (getAgentInstructions, getAgentSkill, …) — per AGENTS.md "Derivation over
 // duplication: no drift surfaces", proxy-header handling and base-path stripping must not fork.
 //
-// Honour reverse-proxy forwarding headers; fall back to a localhost default when the Host header is
-// absent (e.g. a raw unit-test request).
+// Honour reverse-proxy forwarding headers — proto, host, and the external path prefix
+// (X-Forwarded-Prefix, e.g. the console app-view proxy's "/console/app-view/{project}") — and fall
+// back to a localhost default when the Host header is absent (e.g. a raw unit-test request).
 
 /**
  * Recover the control-API base from a request, stripping the operation's own mount suffix.
@@ -17,11 +18,12 @@
  */
 export function resolveApiBase(req: { path: string; headers: Headers }, mountSuffix: string): string {
   const { proto, host } = requestProtoHost(req);
+  const prefix = sanitiseForwardedPrefix(req.headers.get("x-forwarded-prefix"));
   // The op is mounted at "<base>/<mountSuffix>"; strip the trailing segments to recover the base path.
   const suffix = mountSuffix.replace(/^\/+/, "").replace(/\/+$/, "");
   const stripRe = new RegExp(`/${suffix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/*$`);
   const basePath = req.path.replace(stripRe, "") || "/app/api";
-  return host ? `${proto}://${host}${basePath}` : `http://localhost:3000${basePath}`;
+  return host ? `${proto}://${host}${prefix}${basePath}` : `http://localhost:3000${prefix}${basePath}`;
 }
 
 /** The public ORIGIN (+ proxy prefix) this request arrived on — the base for a navigational link
@@ -39,21 +41,26 @@ export function resolvePublicOrigin(req: { path: string; headers: Headers }): st
 }
 
 /** Sanitise the untrusted, proxy/user-controlled `x-forwarded-prefix` into a safe leading-slash,
- * no-trailing-slash path segment (or ""). The prefix is the reverse-proxy path the public URL was
- * mounted under (e.g. "/console/app-view/Workforce") and is reflected into a navigational link, so it
- * must not smuggle a scheme/authority, path traversal, or a stray trailing slash into the origin. We
- * split on "/" and first drop empty segments (collapsing a "/"-only prefix and any double slashes to
- * "") and `.`/`..` traversal. If ANY surviving segment carries a hostile character (":", "@", "%",
- * whitespace, …) we reject the whole prefix ("") rather than reflect a half-trusted path. A prefix
- * that sanitises to nothing yields "" (no prefix), never a lone "/". Because the return is always
- * either "" or a leading-"/" path, it can never alter the `${proto}://${host}` authority. */
+ * no-trailing-slash path segment (or ""). The ONE canonical prefix sanitiser shared by
+ * {@link resolveApiBase} and {@link resolvePublicOrigin} (AGENTS.md "derivation over duplication") —
+ * the prefix is the reverse-proxy path the public URL was mounted under (e.g.
+ * "/console/app-view/Workforce") and is reflected into a caller-facing URL, so it must not smuggle a
+ * scheme, an authority ("//host"), or a "."/".." traversal segment into the URL. Accept only an
+ * absolute path of URL-safe path characters, then drop trailing slashes so it composes cleanly with
+ * the base path; anything else falls back to an empty prefix. Percent-encoding can smuggle those
+ * forms past a literal check ("%2e%2e" decodes to "..", "%2f%2f" to an authority-introducing "//"),
+ * so normalise the common encoded spellings of "." and "/" (case-insensitively) before rejecting
+ * dot-segments and "//"; the still-encoded raw value is what we reflect once it validates. Because
+ * the return is always either "" or a leading-"/" path, it can never alter the `${proto}://${host}`
+ * authority. */
 function sanitiseForwardedPrefix(raw: string | null): string {
-  const first = (raw ?? "").split(",")[0].trim();
-  if (!first) return "";
-  const segments = first.split("/").filter((seg) => seg !== "" && seg !== "." && seg !== "..");
-  if (segments.length === 0) return "";
-  if (!segments.every((seg) => /^[A-Za-z0-9._~-]+$/.test(seg))) return "";
-  return `/${segments.join("/")}`;
+  const rawPrefix = (raw ?? "").split(",")[0].trim();
+  const decodedPrefix = rawPrefix.replace(/%2e/gi, ".").replace(/%2f/gi, "/");
+  return /^\/(?!\/)[A-Za-z0-9._~\-/%]*$/.test(rawPrefix) &&
+    !decodedPrefix.includes("//") &&
+    !/(^|\/)\.\.?(\/|$)/.test(decodedPrefix)
+    ? rawPrefix.replace(/\/+$/, "")
+    : "";
 }
 
 /** The trusted (proto, host) pair for a request — the ONE place proxy-header handling lives so

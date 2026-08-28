@@ -13,7 +13,7 @@
 // confirm-default / shared-base rules, with the same typed-error → HTTP mapping.
 
 import { startFeature } from "../app/feature.ts";
-import { parseFeatureReadiness } from "../app/featureReadiness.ts";
+import { type FeatureReadiness, parseFeatureReadiness } from "../app/featureReadiness.ts";
 import { BaseBranchMustExistError } from "../app/github.ts";
 import {
   admitPlan,
@@ -23,7 +23,6 @@ import {
   parseIssue,
   SharedBaseError,
 } from "../app/plan.ts";
-import type { ReadinessProbe } from "../app/readiness.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
 
 export default defineOperation("startFeature", async ({ body }, app) => {
@@ -126,7 +125,12 @@ export default defineOperation("startFeature", async ({ body }, app) => {
   // `blockedOn` shorthand (resolved against `consumerPackage`) into the probes + bound the run parks
   // on before implementing. A malformed gate (bad descriptor, unparseable handle, blank package) is a
   // 400 at the edge — it must never wait forever at runtime.
-  let readiness: { probes: ReadinessProbe[]; probeTimeout: string | null };
+  // Type the local as the parser's OWN return type (not a hand-written subset): `parseFeatureReadiness`
+  // derives `probes`, `probeTimeout` AND `probePollEvery` together, and all three must be threaded to
+  // the run. A narrower local silently drops a field the parser produced (issue #579: `probePollEvery`
+  // was dropped, so every gated start 500'd on startFeature's invariant) without TypeScript flagging it,
+  // because the narrower shape is structurally assignable from the wider return.
+  let readiness: FeatureReadiness;
   try {
     readiness = parseFeatureReadiness({
       readiness: "readiness" in body ? body.readiness : undefined,
@@ -138,6 +142,31 @@ export default defineOperation("startFeature", async ({ body }, app) => {
     app.log.warn("start-feature rejected: invalid readiness gate", { message });
     return { status: 400, body: { error: message } };
   }
+  // Validate the gate's timing bounds at the EDGE, before dispatch: a non-empty probe set is
+  // load-bearing together with a non-blank `probeTimeout` (preflight escalation timers + pr.readiness-probe)
+  // and `probePollEvery` (preflight retry cadence). `parseFeatureReadiness` always derives all three
+  // together, so this only fires for a mis-derived/hand-seeded gate — but validating here turns that
+  // into a caller-meaningful 400 rather than a bare-Error 500 from startFeature's internal invariant.
+  if (readiness.probes.length > 0) {
+    const missingBounds: string[] = [];
+    if ((readiness.probeTimeout ?? "").trim() === "") missingBounds.push("a timeout");
+    if ((readiness.probePollEvery ?? "").trim() === "") missingBounds.push("a poll cadence");
+    if (missingBounds.length > 0) {
+      app.log.warn("start-feature rejected: readiness gate missing timing bound", {
+        missing: missingBounds,
+        probes: readiness.probes.length,
+      });
+      return {
+        status: 400,
+        body: {
+          error:
+            `readiness gate is malformed: ${readiness.probes.length} probe(s) but the request did not ` +
+            `resolve to ${missingBounds.join(" and ")}. A gated start (readiness/blockedOn) must resolve ` +
+            `to a non-blank timeout and poll cadence`,
+        },
+      };
+    }
+  }
   const result = await startFeature(
     app.data,
     app.engine,
@@ -146,7 +175,7 @@ export default defineOperation("startFeature", async ({ body }, app) => {
     converge,
     autoMerge,
     customInstructions,
-    { probes: readiness.probes, probeTimeout: readiness.probeTimeout },
+    { probes: readiness.probes, probeTimeout: readiness.probeTimeout, probePollEvery: readiness.probePollEvery },
   );
   app.log.info("feature run started", {
     featureKey: parsed.planKey,
