@@ -4,8 +4,9 @@
 // to the request base (getAgentInstructions, getAgentSkill, …) — per AGENTS.md "Derivation over
 // duplication: no drift surfaces", proxy-header handling and base-path stripping must not fork.
 //
-// Honour reverse-proxy forwarding headers; fall back to a localhost default when the Host header is
-// absent (e.g. a raw unit-test request).
+// Honour reverse-proxy forwarding headers — proto, host, and the external path prefix
+// (X-Forwarded-Prefix, e.g. the console app-view proxy's "/console/app-view/{project}") — and fall
+// back to a localhost default when the Host header is absent (e.g. a raw unit-test request).
 
 /**
  * Recover the control-API base from a request, stripping the operation's own mount suffix.
@@ -20,9 +21,20 @@ export function resolveApiBase(req: { path: string; headers: Headers }, mountSuf
   // x-forwarded-proto is user-controlled behind some proxies; only trust http/https.
   const proto = rawProto === "http" || rawProto === "https" ? rawProto : "http";
   const host = (req.headers.get("x-forwarded-host") ?? req.headers.get("host") ?? "").split(",")[0].trim();
+  // The external path prefix stripped by a reverse proxy (e.g. the console app-view proxy mounts us
+  // under "/console/app-view/{project}"). X-Forwarded-Prefix is the de-facto standard header for it.
+  // It is untrusted, proxy-supplied input that ends up in a URL handed to an agent, so validate it as
+  // strictly as x-forwarded-proto above: accept only an absolute path of URL-safe path characters —
+  // rejecting anything with a scheme, an authority ("//host"), or ".." traversal — then drop trailing
+  // slashes so it composes cleanly with the base path. Anything else falls back to an empty prefix,
+  // i.e. today's behaviour.
+  const rawPrefix = (req.headers.get("x-forwarded-prefix") ?? "").split(",")[0].trim();
+  const prefix = /^\/(?!\/)[A-Za-z0-9._~\-/%]*$/.test(rawPrefix) && !rawPrefix.includes("..")
+    ? rawPrefix.replace(/\/+$/, "")
+    : "";
   // The op is mounted at "<base>/<mountSuffix>"; strip the trailing segments to recover the base path.
   const suffix = mountSuffix.replace(/^\/+/, "").replace(/\/+$/, "");
   const stripRe = new RegExp(`/${suffix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/*$`);
   const basePath = req.path.replace(stripRe, "") || "/app/api";
-  return host ? `${proto}://${host}${basePath}` : `http://localhost:3000${basePath}`;
+  return host ? `${proto}://${host}${prefix}${basePath}` : `http://localhost:3000${prefix}${basePath}`;
 }

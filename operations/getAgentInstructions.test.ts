@@ -86,8 +86,31 @@ test("examples are keyed to the request's control-API base and leave no placehol
   assert(!md.includes("__ENGINE__"), "no unsubstituted __ENGINE__ placeholder");
 });
 
-test("x-forwarded-proto is restricted to http/https", async () => {
-  const spoofed = input({ host: "wf.example.com", "x-forwarded-proto": "javascript" });
+test("x-forwarded-prefix is prepended to the baseUrl and rendered examples", async () => {
+  const proxied = input(
+    {
+      host: "internal",
+      "x-forwarded-host": "nano.ngrok-free.dev",
+      "x-forwarded-proto": "https",
+      "x-forwarded-prefix": "/console/app-view/Workforce",
+    },
+  );
+  const body = (await handler(proxied, app)) as any;
+  assertEquals(body.body.baseUrl, "https://nano.ngrok-free.dev/console/app-view/Workforce/app/api");
+  const md = body.body.instructions as string;
+  assert(
+    md.includes("https://nano.ngrok-free.dev/console/app-view/Workforce/app/api/version"),
+    "prefixed base URL substituted into examples",
+  );
+});
+
+test("a hostile x-forwarded-prefix is ignored rather than reflected into the baseUrl", async () => {
+  const hostile = input({ host: "wf.example.com", "x-forwarded-prefix": "https://evil.test" });
+  const body = (await handler(hostile, app)) as any;
+  assertEquals(body.body.baseUrl, "http://wf.example.com/app/api", "hostile prefix falls back to today's behaviour");
+});
+
+test("x-forwarded-proto is restricted to http/https", async () => {  const spoofed = input({ host: "wf.example.com", "x-forwarded-proto": "javascript" });
   const body = (await handler(spoofed, app)) as any;
   assertEquals(body.body.baseUrl, "http://wf.example.com/app/api", "unsafe scheme falls back to http");
 });
