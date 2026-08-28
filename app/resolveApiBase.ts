@@ -34,11 +34,26 @@ export function resolveApiBase(req: { path: string; headers: Headers }, mountSuf
  * localhost origin when the Host header is absent (a raw unit-test request). */
 export function resolvePublicOrigin(req: { path: string; headers: Headers }): string {
   const { proto, host } = requestProtoHost(req);
-  // x-forwarded-prefix is the reverse-proxy path the public URL was mounted under (e.g.
-  // "/console/app-view/Workforce"); normalise to a leading-slash, no-trailing-slash segment or "".
-  const rawPrefix = (req.headers.get("x-forwarded-prefix") ?? "").split(",")[0].trim();
-  const prefix = rawPrefix ? `/${rawPrefix.replace(/^\/+/, "").replace(/\/+$/, "")}` : "";
+  const prefix = sanitiseForwardedPrefix(req.headers.get("x-forwarded-prefix"));
   return host ? `${proto}://${host}${prefix}` : `http://localhost:3000${prefix}`;
+}
+
+/** Sanitise the untrusted, proxy/user-controlled `x-forwarded-prefix` into a safe leading-slash,
+ * no-trailing-slash path segment (or ""). The prefix is the reverse-proxy path the public URL was
+ * mounted under (e.g. "/console/app-view/Workforce") and is reflected into a navigational link, so it
+ * must not smuggle a scheme/authority, path traversal, or a stray trailing slash into the origin. We
+ * split on "/" and first drop empty segments (collapsing a "/"-only prefix and any double slashes to
+ * "") and `.`/`..` traversal. If ANY surviving segment carries a hostile character (":", "@", "%",
+ * whitespace, …) we reject the whole prefix ("") rather than reflect a half-trusted path. A prefix
+ * that sanitises to nothing yields "" (no prefix), never a lone "/". Because the return is always
+ * either "" or a leading-"/" path, it can never alter the `${proto}://${host}` authority. */
+function sanitiseForwardedPrefix(raw: string | null): string {
+  const first = (raw ?? "").split(",")[0].trim();
+  if (!first) return "";
+  const segments = first.split("/").filter((seg) => seg !== "" && seg !== "." && seg !== "..");
+  if (segments.length === 0) return "";
+  if (!segments.every((seg) => /^[A-Za-z0-9._~-]+$/.test(seg))) return "";
+  return `/${segments.join("/")}`;
 }
 
 /** The trusted (proto, host) pair for a request — the ONE place proxy-header handling lives so

@@ -70,6 +70,26 @@ test("resolvePublicOrigin: normalises stray slashes on x-forwarded-prefix", () =
   assertEquals(resolvePublicOrigin(r), "http://h/console/app-view");
 });
 
+test("resolvePublicOrigin: treats a slash-only x-forwarded-prefix as empty (no double slash)", () => {
+  const r = req({ host: "h", "x-forwarded-prefix": "///" }, "/app/api/actions/compile-delivery-graph");
+  assertEquals(resolvePublicOrigin(r), "http://h");
+});
+
+test("resolvePublicOrigin: drops path-traversal segments from x-forwarded-prefix", () => {
+  const r = req({ host: "h", "x-forwarded-prefix": "/console/../../etc" }, "/app/api/actions/compile-delivery-graph");
+  assertEquals(resolvePublicOrigin(r), "http://h/console/etc");
+});
+
+test("resolvePublicOrigin: drops segments with a scheme/authority in x-forwarded-prefix", () => {
+  const r = req({ host: "h", "x-forwarded-prefix": "https://evil.example/hijack" }, "/app/api/actions/compile-delivery-graph");
+  assertEquals(resolvePublicOrigin(r), "http://h");
+});
+
+test("resolvePublicOrigin: sanitises a fully hostile x-forwarded-prefix to no prefix", () => {
+  const r = req({ host: "h", "x-forwarded-prefix": "@evil.example" }, "/app/api/actions/compile-delivery-graph");
+  assertEquals(resolvePublicOrigin(r), "http://h");
+});
+
 test("resolvePublicOrigin: falls back to a localhost origin when the Host header is absent", () => {
   assertEquals(resolvePublicOrigin(req({}, "/app/api/actions/compile-delivery-graph")), "http://localhost:3000");
 });
