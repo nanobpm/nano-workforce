@@ -1,3 +1,9 @@
+## [0.150.0](https://github.com/nanobpm/nano-workforce/compare/v0.149.0...v0.150.0) (2026-08-28)
+
+### Features
+
+* adopt Urban MCP surface — x-mcp exclusions, runbook, MCP-first skill ([#575](https://github.com/nanobpm/nano-workforce/issues/575)) ([44e89e4](https://github.com/nanobpm/nano-workforce/commit/44e89e40b6cbff0e4c7de32dad76d35f6d534cc6)), closes [nano-ide#488](https://github.com/nanobpm/nano-ide/issues/488) [nano-ide#488](https://github.com/nanobpm/nano-ide/issues/488) [#567](https://github.com/nanobpm/nano-workforce/issues/567) [#567](https://github.com/nanobpm/nano-workforce/issues/567) [nano-ide#488](https://github.com/nanobpm/nano-ide/issues/488)
+
 ## [0.149.0](https://github.com/nanobpm/nano-workforce/compare/v0.148.2...v0.149.0) (2026-08-27)
 
 ### Features
