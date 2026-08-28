@@ -282,7 +282,7 @@ agent at that URL to author, compile, and submit a graph unaided. See
 | `NANO_PR_GITHUB_TRANSPORT` | `auto` | how the poller reads GitHub: `gh` (host CLI), `token` (`GITHUB_TOKEN` over HTTP), or `auto` |
 | `NANO_PR_POLL_MS` | `60000` | review-ready poll interval |
 | `NANO_PR_MAX_ROUNDS` | `20` | default cap: escalate after N rounds (per-submit override via the form / the `maxRounds` field on `start/convergence-loop`; clamped 1–100) |
-| `NANO_PR_WEBHOOK_SECRET` | — | optional shared secret (`x-hook-secret`) for guarded operations (e.g. `POST /app/api/agent`, `/app/api/version`, `/app/api/status`); unset = open |
+| `NANO_PR_WEBHOOK_SECRET` | — | optional shared secret (`x-hook-secret`) for guarded operations (e.g. `GET /app/api/agent`, `/app/api/version`, `/app/api/status`); unset = open |
 | `NANO_PR_AUTO_MERGE` | `1` | after convergence, run the merge stage; `0` = stop at `converged` (review-only). Per-submit override via the `convergeOnly` field on `start/convergence-loop` (`true` forces review-only for that PR) |
 | `NANO_PR_MERGE_METHOD` | `squash` | merge method: `squash`, `merge`, or `rebase` |
 | `NANO_PR_MERGE_ADMIN` | `0` | pass `--admin` to override failing non-required checks (use with care) |
