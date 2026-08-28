@@ -68,12 +68,14 @@ test("x-mcp leaves the agent-facing drive/preview/read operations exposed", () =
 });
 
 // The operator guide (workflow knowledge) is discoverable over MCP as the projected
-// `getAgentInstructions` READ tool — a safe GET, so the runtime exposes it unguarded on loopback,
-// instance-keyed by the same `resolveApiBase` rewriting as its HTTP route. This is how the guide's
-// prose reaches an MCP agent; the framework separately serves its derived system brief as a
-// resource. Pin the projection facts so an accidental exclusion (or a verb change that would flip
-// it into a guarded mutation) fails CI.
-test("the operator guide is projected as an unguarded read tool over MCP", () => {
+// `getAgentInstructions` READ tool — a safe GET, so the runtime projects it as a read tool
+// (not `x-mcp`-excluded) on loopback, instance-keyed by the same `resolveApiBase` rewriting
+// as its HTTP route. ("Read tool" describes the projected verb, not an auth posture: the
+// route still honours the app's optional `x-hook-secret` guard when `NANO_PR_WEBHOOK_SECRET`
+// is set.) This is how the guide's prose reaches an MCP agent; the framework separately
+// serves its derived system brief as a resource. Pin the projection facts so an accidental
+// exclusion (or a verb change that would flip it into a mutation) fails CI.
+test("the operator guide is projected as a read tool (GET, not x-mcp excluded) over MCP", () => {
   const op = projectedOperations().find((o) => o.operationId === "getAgentInstructions");
   assert(op, "getAgentInstructions must exist in openapi.yaml");
   assertEquals(op.mcpExcluded, false, "the operator guide must stay exposed over MCP");

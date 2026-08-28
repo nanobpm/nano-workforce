@@ -476,8 +476,10 @@ copilot mcp add --transport http workforce-merlin http://merlin.local:3000/app/m
   --header "x-hook-secret: $NANO_PR_WEBHOOK_SECRET"
 ```
 
-Reads work from loopback with no credential; mutations require the instance secret as a
-header when `NANO_PR_WEBHOOK_SECRET` is set. **Operator-only doors stay operator-only** —
+When `NANO_PR_WEBHOOK_SECRET` is unset, reads and mutations both work from loopback with
+no credential; when it is set, that secret is required as an `x-hook-secret` header on
+**both** — read endpoints like `GET /app/api/agent` and `GET /app/api/version` also
+return `401` without it. **Operator-only doors stay operator-only** —
 delivery-graph **dispatch** (and the stage/dismiss lifecycle) is `x-mcp`-excluded, so the
 human clicking Dispatch in the cockpit remains the approval (ADR 0005). MCP is a **third
 door**: `GET /app/api/agent` and `GET /app/api/agent/skill` are unchanged for agents

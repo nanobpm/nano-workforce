@@ -64,11 +64,12 @@ Then: start a session, confirm the `workforce-*` tools appear, and ask the agent
 use a **named** instance (`"Using workforce-local, show what's in flight and any open
 escalations"`). It should call the status operation tool, not curl.
 
-**Guard posture.** Reads (status, instances, incidents, projections, the operator
-guide) work from loopback with no credential. Mutations (submit work, answer
-escalations, cancel/retry/resolve) require the instance's shared secret as a header
-**when `NANO_PR_WEBHOOK_SECRET` is set** — put it in the server entry's `headers`,
-never in chat. **Operator-only doors stay operator-only:** the delivery-graph
+**Guard posture.** When `NANO_PR_WEBHOOK_SECRET` is **unset**, both reads (status,
+instances, incidents, projections, the operator guide) and mutations (submit work,
+answer escalations, cancel/retry/resolve) work from loopback with no credential. When it
+**is set**, that secret is required as an `x-hook-secret` header on **both reads and
+mutations** — read endpoints like `getAgentInstructions`/`getVersion` also return `401`
+without it — put it in the server entry's `headers`, never in chat. **Operator-only doors stay operator-only:** the delivery-graph
 dispatch/dismiss lifecycle (the human clicking Dispatch *is* the approval, ADR 0005)
 is `x-mcp`-excluded and is **not** a tool — dispatch stays a human action in the
 cockpit.

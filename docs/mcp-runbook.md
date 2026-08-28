@@ -106,11 +106,13 @@ shape. A wedge is frequently exactly a disagreement between the two planes.
 
 ## 4. Guard posture
 
-Reads (status, instances, incidents, projections, the operator guide) work from
-loopback with no
-credential. Mutations (cancel/retry/resolve, `start/*` operations, answering
-escalations) require the instance's secret as a header **when `NANO_PR_WEBHOOK_SECRET`
-is set** — put it in the server entry's `headers`, never in chat. For a remote fleet,
+When `NANO_PR_WEBHOOK_SECRET` is **unset**, both reads (status, instances, incidents,
+projections, the operator guide) and mutations (cancel/retry/resolve, `start/*`
+operations, answering escalations) work from loopback with no credential. When it **is
+set**, the guard is not mutation-only: that secret is required as an `x-hook-secret`
+header on **both reads and mutations** — read endpoints like `GET /app/api/agent` and
+`GET /app/api/version` also return `401` without it. Put it in the server entry's
+`headers`, never in chat. For a remote fleet,
 `NANO_WORKFORCE_BASE_URL` reachability rules apply unchanged, and LAN exposure of
 `/app/mcp` follows the same `network.bind` manifest setting as the rest of the app's
 HTTP surface.
