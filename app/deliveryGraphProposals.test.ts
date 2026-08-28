@@ -25,6 +25,7 @@ import {
   stageProposal,
   sweepExpiredProposals,
 } from "./deliveryGraphProposals.ts";
+import { publicBaseUrl } from "./blackboard.ts";
 
 const APP_ROOT = resolve(import.meta.dirname, "..");
 
@@ -85,6 +86,12 @@ test("proposalReviewUrl: a navigational deep-link to the cockpit page — NOT a 
   const url = proposalReviewUrl("abc123", "https://cockpit.example");
   assertEquals(url, "https://cockpit.example/app/pages/delivery-graphs#proposal-abc123");
   assert(!/\/actions\//.test(url), "reviewUrl points at a page, never an API action");
+});
+
+test("proposalReviewUrl: with no base falls back to publicBaseUrl() — the text-ingress (no request) path (#577)", () => {
+  // The staging text-ingress path has no HTTP request to derive an origin from, so the default base
+  // must stay the deployment-wide NANO_WORKFORCE_BASE_URL via publicBaseUrl().
+  assertEquals(proposalReviewUrl("abc123"), `${publicBaseUrl()}/app/pages/delivery-graphs#proposal-abc123`);
 });
 
 test("buildProposalRow: stamps status staged, boolean→0/1, and TTL from createdAt", () => {
