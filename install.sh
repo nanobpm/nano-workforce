@@ -324,7 +324,7 @@ version_gate() {
       ok "'nano workforce' available" ;;
     *)
       # Second chance: some builds print with leading whitespace/newlines.
-      if printf '%s' "$_out" | grep -q '"workers"\|"version"\|"name"'; then
+      if printf '%s' "$_out" | grep -Eq '"workers"|"version"|"name"'; then
         ok "'nano workforce' available"
       else
         die "the installed $PLUGIN is too old: it has no 'nano workforce' command (needs jwulf/c8ctl-plugin-nano#117). Upgrade with: $CLI upgrade plugin $PLUGIN"
@@ -430,6 +430,9 @@ live_models() { # $1 harness -> newline list on stdout
 # Step 4/5 — interactive selection + model + instances
 # ---------------------------------------------------------------------------
 add_selection() { # $1 harness $2 model $3 instances
+  if [ -n "$2" ] && ! printf '%s' "$2" | grep -Eq '^[A-Za-z0-9._:/@+-]+$'; then
+    die "refusing model id '$2' for $1: only [A-Za-z0-9._:/@+-] are allowed (guards against shell-metacharacter injection into the hire --command)."
+  fi
   SELECTIONS="${SELECTIONS}$1${SEP}$2${SEP}$3
 "
 }
@@ -641,7 +644,6 @@ confirm_or_die() {
 # ---------------------------------------------------------------------------
 hire_all() {
   info "Hiring agents"
-  printf '%s\n' "$SELECTIONS" | sed '/^$/d' > "/tmp/.nano_hire_$$"
   while IFS="$SEP" read -r _h _model _inst; do
     [ -n "$_h" ] || continue
     _cmd=$(build_command "$_h" "$_model")
@@ -659,13 +661,13 @@ hire_all() {
       warn "hire failed for $_h — continuing with the rest."
       record_failure "$_h: hire failed"
     fi
-  done < "/tmp/.nano_hire_$$"
-  rm -f "/tmp/.nano_hire_$$"
+  done <<EOF
+$(printf '%s\n' "$SELECTIONS" | sed '/^$/d')
+EOF
 }
 
 compose_workforce() {
   info "Composing the workforce manifest"
-  printf '%s\n' "$SELECTIONS" | sed '/^$/d' > "/tmp/.nano_wf_$$"
   while IFS="$SEP" read -r _h _model _inst; do
     [ -n "$_h" ] || continue
     if run "$CLI" nano workforce add "$_h" --instances "$_inst" --auto; then
@@ -674,8 +676,9 @@ compose_workforce() {
       warn "workforce add failed for $_h."
       record_failure "$_h: workforce add failed"
     fi
-  done < "/tmp/.nano_wf_$$"
-  rm -f "/tmp/.nano_wf_$$"
+  done <<EOF
+$(printf '%s\n' "$SELECTIONS" | sed '/^$/d')
+EOF
 }
 
 bring_up() {

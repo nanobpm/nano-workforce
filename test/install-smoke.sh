@@ -4,7 +4,8 @@
 # npm or coding harness is installed: --dry-run means the mutating commands are
 # printed (never run), harness detection is stubbed via
 # NANO_INSTALL_HARNESSES_OVERRIDE, and adapter presence via
-# NANO_INSTALL_ADAPTERS_PRESENT. Only `node` is required (the preflight probe).
+# NANO_INSTALL_ADAPTERS_PRESENT. `node` and `npm` are required (the preflight
+# probe), so run it where both are available.
 #
 # Run from the repo root:  sh test/install-smoke.sh
 set -eu
