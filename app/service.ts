@@ -2391,13 +2391,19 @@ export async function pollEpicPhase(
  * a graph that ends normally would otherwise stay `running` forever). Generalises the `epic_phase`
  * derived-phase machinery to a graph whose element ids aren't known ahead of time: the parked-node
  * label is derived from the run row's stamped `human_labels` + the instance's live USER_TASK parks.
- * The parked node is now sourced from the unified element-instance wait-state channel
- * (`searchElementInstanceWaitStates`, nano-ide#473) rather than a separate user-task search, folding
- * this read onto the same live element-instance model the epic derivation uses (S8, #542). Scoped to
- * `running` rows (an `awaiting-approval` run has no instance yet), so it stays O(in-flight). */
+ * The parked node is read via `searchUserTasks({ state: "CREATED" })` rather than the unified
+ * element-instance wait-state channel (`searchElementInstanceWaitStates({ waitStateType: "USER_TASK" })`,
+ * S8, #542/nano-ide#473): the deployed engine's wait-state read model only accepts `JOB | MESSAGE`, so
+ * a `USER_TASK` filter 422s on a live gateway, rejecting the whole `Promise.all` and skipping this pass's
+ * reconciliation entirely (the parked label never updates and the COMPLETED → `done` transition this pass
+ * OWNS never fires, leaving a finished graph `running` forever). `deriveDeliveryPhase` consumes only
+ * `elementId` from the park rows, which `searchUserTasks` supplies the same way.
+ * TODO(Magikcraft/nano-bpm#1042): re-fold onto `searchElementInstanceWaitStates({ waitStateType:
+ * "USER_TASK" })` once the engine projects `USER_TASK` wait states and that engine is deployed.
+ * Scoped to `running` rows (an `awaiting-approval` run has no instance yet), so it stays O(in-flight). */
 export async function pollDeliveryGraphPhase(
   data: DataLayer,
-  engine: Pick<EngineClient, "searchProcessInstances" | "searchElementInstanceWaitStates">,
+  engine: Pick<EngineClient, "searchProcessInstances" | "searchUserTasks">,
 ) {
   for (const run of await deliveryGraphRuns(data).find({ status: "running" })) {
     if (!run.process_key) continue;
@@ -2405,7 +2411,7 @@ export async function pollDeliveryGraphPhase(
     try {
       const [snapshots, parks] = await Promise.all([
         engine.searchProcessInstances({ processInstanceKeys: [processKey] }),
-        engine.searchElementInstanceWaitStates({ processInstanceKey: processKey, waitStateType: "USER_TASK" }),
+        engine.searchUserTasks({ processInstanceKey: processKey, state: "CREATED" }),
       ]);
       const state = snapshots.find((s) => String(s.processInstanceKey) === processKey)?.state ?? null;
       const projection = deriveDeliveryPhase(state, parks, parseHumanLabels(run.human_labels));
