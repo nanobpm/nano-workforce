@@ -877,6 +877,7 @@ confirm_app() {
     return 0
   fi
   note "skipping app install at user request (phase 1 is up and usable)."
+  SKIP_APP=1   # keep report_and_exit honest: the app was explicitly skipped
   return 1
 }
 
