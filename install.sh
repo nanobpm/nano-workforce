@@ -786,8 +786,15 @@ origin_of() {
   printf '%s://%s' "$_scheme" "$_auth"
 }
 
-# Minimal JSON string escaper (backslash + double-quote); values here are URLs,
-# ports, and tokens, none of which contain control characters.
+# True (exit 0) iff $1 contains a control character (newline, tab, CR, …). Such
+# characters cannot appear literally in a JSON string without full \uXXXX
+# escaping, so we reject them at the config gate (see build_config_body) rather
+# than emit invalid JSON that fails the console API opaquely.
+has_control_chars() { [ "$(printf '%s' "$1" | LC_ALL=C tr -cd '[:cntrl:]' | wc -c)" -ne 0 ]; }
+
+# Minimal JSON string escaper (backslash + double-quote). Control characters are
+# rejected up front by build_config_body via has_control_chars(), so the values
+# reaching here (URLs, ports, tokens) are already control-char-free.
 json_str() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
 
 # Print the path of a freshly created, private (0600) temp file on stdout, or
@@ -863,6 +870,12 @@ api() {
 build_config_body() { # $1 = redact? ("redact" to mask the token)
   _tok="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
   if [ -n "$_tok" ]; then
+    # Reject a control character (e.g. a stray newline/tab from a mis-set env
+    # var) before it corrupts the JSON body and fails the console API opaquely.
+    if has_control_chars "$_tok"; then
+      err "GITHUB_TOKEN/GH_TOKEN contains control characters (e.g. a stray newline or tab); refusing to build an invalid JSON config body — check the value for trailing whitespace."
+      return 1
+    fi
     if [ "${1:-}" = redact ]; then _tokval='***'; else _tokval=$(json_str "$_tok"); fi
     _gh="\"GITHUB_TOKEN\":\"${_tokval}\""
   else
@@ -993,8 +1006,14 @@ app_provision() {
 
   # 11.5 — write ProjectConfig.env (token redacted in dry-run output).
   info "Configuring project '$PROJECT' (ProjectConfig.env)"
-  _cfg_body=$(build_config_body)
-  _cfg_show=$(build_config_body redact)
+  _cfg_body=$(build_config_body) || {
+    record_failure "app: invalid ProjectConfig.env value (control characters)"
+    return 1
+  }
+  _cfg_show=$(build_config_body redact) || {
+    record_failure "app: invalid ProjectConfig.env value (control characters)"
+    return 1
+  }
   api PUT "/console/api/projects/${PROJECT}/config" "$_cfg_body" "$_cfg_show"
   if [ "$DRY_RUN" -eq 0 ]; then
     case "$API_STATUS" in

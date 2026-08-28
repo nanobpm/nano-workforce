@@ -172,7 +172,7 @@ assert_contains "s7: dry-run + skip-app report states no changes were made" \
 
 # --- Scenarios 8-13: live phase-2 flow against a stubbed node console -------
 if command -v node >/dev/null 2>&1 && command -v curl >/dev/null 2>&1; then
-  STUBDIR=$(mktemp -d)
+  STUBDIR=$(mktemp -d "${TMPDIR:-/tmp}/nwf-smoke.XXXXXX")
   STUB="$STUBDIR/stub-console.cjs"
   # The repo's package.json sets "type":"module", so the CommonJS stub must be
   # a .cjs file. It answers just enough of the console API to exercise the flow.
@@ -298,6 +298,19 @@ CJS
     if [ "$PHASE2_RC" -eq 0 ]; then pass "s13: mktemp-unavailable fallback converges (exit zero)"; else
       fail "s13: mktemp-unavailable fallback should exit zero"; printf '%s\n' "$PHASE2_OUT" | sed 's/^/    | /' >&2; fi
     assert_contains "s13: fallback still asserts readiness via /app/api/version" "app is up" "$PHASE2_OUT"
+
+    # Scenario 14 — a GITHUB_TOKEN carrying a control character (e.g. a stray
+    # newline) must be rejected with a clear error before any JSON config body
+    # is emitted, never producing invalid JSON that fails the console API
+    # opaquely. The token flows through json_str() unredacted on the live PUT.
+    _ctrl_token="$(printf 'ghp_bad\ntoken')"
+    export GITHUB_TOKEN="$_ctrl_token"
+    run_phase2 happy
+    unset GITHUB_TOKEN
+    if [ "$PHASE2_RC" -ne 0 ]; then pass "s14: control-char token rejected (exit non-zero)"; else
+      fail "s14: control-char token should exit non-zero"; printf '%s\n' "$PHASE2_OUT" | sed 's/^/    | /' >&2; fi
+    assert_contains "s14: control-char token has a clear message" \
+      "control characters" "$PHASE2_OUT"
 
     rm -rf "$STUBDIR"
   fi
