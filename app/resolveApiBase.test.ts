@@ -41,3 +41,59 @@ test("tolerates a leading slash on the mount suffix", () => {
 test("strips multiple trailing slashes after the mount suffix", () => {
   assertEquals(resolveApiBase(req({ host: "h" }, "/app/api/agent/skill///"), "agent/skill"), "http://h/app/api");
 });
+
+test("prepends a validated x-forwarded-prefix to the reconstructed base", () => {
+  const r = req(
+    { host: "nano.ngrok-free.dev", "x-forwarded-prefix": "/console/app-view/Workforce" },
+    "/app/api/agent",
+  );
+  assertEquals(resolveApiBase(r, "agent"), "http://nano.ngrok-free.dev/console/app-view/Workforce/app/api");
+});
+
+test("normalises a trailing slash on x-forwarded-prefix", () => {
+  const r = req({ host: "h", "x-forwarded-prefix": "/console/app-view/Workforce/" }, "/app/api/agent");
+  assertEquals(resolveApiBase(r, "agent"), "http://h/console/app-view/Workforce/app/api");
+});
+
+test("ignores a x-forwarded-prefix carrying a scheme", () => {
+  const r = req({ host: "h", "x-forwarded-prefix": "https://evil.test" }, "/app/api/agent");
+  assertEquals(resolveApiBase(r, "agent"), "http://h/app/api");
+});
+
+test("ignores a x-forwarded-prefix carrying an authority", () => {
+  const r = req({ host: "h", "x-forwarded-prefix": "//evil.test" }, "/app/api/agent");
+  assertEquals(resolveApiBase(r, "agent"), "http://h/app/api");
+});
+
+test("ignores a x-forwarded-prefix with .. traversal", () => {
+  const r = req({ host: "h", "x-forwarded-prefix": "/a/../.." }, "/app/api/agent");
+  assertEquals(resolveApiBase(r, "agent"), "http://h/app/api");
+});
+
+test("ignores a x-forwarded-prefix with percent-encoded .. traversal", () => {
+  const r = req({ host: "h", "x-forwarded-prefix": "/a/%2e%2e/%2e%2e" }, "/app/api/agent");
+  assertEquals(resolveApiBase(r, "agent"), "http://h/app/api");
+});
+
+test("ignores a x-forwarded-prefix with a percent-encoded authority", () => {
+  const r = req({ host: "h", "x-forwarded-prefix": "/%2F%2Fevil.test" }, "/app/api/agent");
+  assertEquals(resolveApiBase(r, "agent"), "http://h/app/api");
+});
+
+test("ignores a relative (non-absolute) x-forwarded-prefix", () => {
+  const r = req({ host: "h", "x-forwarded-prefix": "console/app-view/Workforce" }, "/app/api/agent");
+  assertEquals(resolveApiBase(r, "agent"), "http://h/app/api");
+});
+
+test("prefix composes with x-forwarded-proto and x-forwarded-host", () => {
+  const r = req(
+    {
+      host: "internal",
+      "x-forwarded-host": "nano.ngrok-free.dev",
+      "x-forwarded-proto": "https",
+      "x-forwarded-prefix": "/console/app-view/Workforce",
+    },
+    "/app/api/agent/skill",
+  );
+  assertEquals(resolveApiBase(r, "agent/skill"), "https://nano.ngrok-free.dev/console/app-view/Workforce/app/api");
+});
