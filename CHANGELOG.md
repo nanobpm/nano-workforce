@@ -1,3 +1,9 @@
+## [0.151.1](https://github.com/nanobpm/nano-workforce/compare/v0.151.0...v0.151.1) (2026-08-28)
+
+### Bug Fixes
+
+* **delivery-graph:** read parked human nodes via searchUserTasks until engine projects USER_TASK wait states ([#595](https://github.com/nanobpm/nano-workforce/issues/595)) ([5dfb3fe](https://github.com/nanobpm/nano-workforce/commit/5dfb3fed1b0483c3a110979bd0aa7802ef3b17d2)), closes [#542](https://github.com/nanobpm/nano-workforce/issues/542) [Magikcraft/nano-bpm#1042](https://github.com/Magikcraft/nano-bpm/issues/1042) [nanobpm/nano-workforce#594](https://github.com/nanobpm/nano-workforce/issues/594)
+
 ## [0.151.0](https://github.com/nanobpm/nano-workforce/compare/v0.150.4...v0.151.0) (2026-08-28)
 
 ### Features
