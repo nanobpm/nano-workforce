@@ -180,6 +180,12 @@ curl -sS __BASE__/../../tasks/api/tasks \
 The inbox UI is also served at `__BASE__/../../tasks` for a human to browse, filter, and
 answer (assignee/candidate-group and age surface on each task once assignment lands).
 
+> **`wait`-gate escalations are different — completing one does NOT re-arm the gate.** The
+> escalation kinds above resume a loop with your answer. A **delivery-graph `wait` node**
+> (§9) that elapses its bound also parks a task, but completing *that* one releases the token
+> **as not-ready** and the graph proceeds **past the gate** — the downstream side-effecting
+> node then runs against the unmet dependency. See §9.2 before clearing one.
+
 **Answer a task** by completing it with the typed variables its form expects — the
 completion resumes the parked process:
 
@@ -438,7 +444,20 @@ layer schedules, it does not re-implement execution):
 | `connector` | `connector: { target, dedupeKey?, payload? }` | an automated, side-effecting outbound action. Carries a `dedupeKey` (at-least-once safe). Two **real targets** ship today — **`converge`** and **`converge-merge`** (§9.4); other targets are a forward-declared stub. | yes |
 
 A **`wait` node's `wait` is a `ReadinessProbe` verbatim** (the same shape feature-run
-intake uses): `{ kind, target, onTimeout?, match?, poll? }`. The **`pr` kind** watches an
+intake uses): `{ kind, target, onTimeout?, match?, poll? }`, where `poll` is
+`{ everyMs?, timeoutMs?, backoff? }` — `everyMs` is the re-probe cadence, `timeoutMs` the
+total bounded budget, and `backoff ∈ fixed|exponential`.
+
+> **The bound is invisible unless you set it.** When `poll` (or `poll.timeoutMs`) is
+> **omitted**, the gate inherits the built-in default budget of **`PT30M` (30 minutes),
+> re-probing every 15s** (`DEFAULT_READINESS_TIMEOUT` / `DEFAULT_EVERY_MS`,
+> `app/readiness.ts`). That default is right for *"is the package published yet"* and badly
+> wrong for `wait[pr, merged]` / `wait[epic]`, which routinely wait **hours or days** — an
+> unpopulated `poll` on such a gate escalates after 30 minutes for no visible reason. Neither
+> `compile` nor `preview` surfaces the effective bound, so **set `poll.timeoutMs` explicitly**
+> on any gate that waits on a merge or an epic (see §9.4 / §9.5).
+
+The **`pr` kind** watches an
 in-flight PR — `target: "owner/repo#123"`, `match.prState ∈ ready|merged|mergeable|checks-green`
 (default `merged`) — and on a merged match binds `mergedSha` as an output fact. The **`epic`
 kind** (issue #568) gates on an **nwf plan-fanout epic reaching "fully merged"** — `target:
@@ -526,6 +545,18 @@ Graphs** grid (e.g. *"parked on human node: manual OTP publish"*). A `human` nod
 **Tasks** inbox and is answered exactly as an escalation is (§3) — its completion emits any
 declared facts, which downstream edges bind.
 
+> **Completing a `wait` escalation proceeds *as not-ready* — it does NOT re-arm the gate.**
+> A `wait` node with `onTimeout: "escalate"` (the default) that elapses its bound parks a
+> human-completable escalation task on the Tasks inbox. **Completing that task does not retry
+> the probe or wait for readiness** — it releases the token **as not-ready** and the graph
+> proceeds **past the gate**, so the downstream side-effecting node then runs *against the
+> unmet dependency* (`waitBodyLines`, `app/deliveryGraphCompiler.ts`). An operator clearing
+> what looks like a stuck task therefore *launches the very work the gate was holding back*.
+> If the dependency genuinely is not ready, do **not** complete the escalation to "unstick"
+> it — extend the gate's `poll.timeoutMs` and re-dispatch, or abandon the run. (Same for
+> `onTimeout: "continue"`, which proceeds past the gate as not-ready with **no** human stop
+> at all.)
+
 > **Why the split?** Making the compile door the end of the agent surface closes a
 > self-approval hole: the old flow handed the same caller a content-addressed approval token
 > to re-submit with, so any holder of the API credential approved its own graph. Removing the
@@ -544,7 +575,8 @@ publish and records the version → open+merge PR #303 (repo 3) consuming that v
   "name": "cross-repo release: merge #101 → un-draft+merge #202 → manual OTP publish → consume in #303",
   "nodes": [
     { "id": "merge-a", "kind": "wait",
-      "wait": { "kind": "pr", "target": "acme/repo-1#101", "match": { "prState": "merged" }, "onTimeout": "escalate" } },
+      "wait": { "kind": "pr", "target": "acme/repo-1#101", "match": { "prState": "merged" },
+                "poll": { "everyMs": 300000, "timeoutMs": 259200000 }, "onTimeout": "escalate" } },
     { "id": "undraft-merge-b", "kind": "agent",
       "agent": { "jobType": "senior:merge", "prompt": "Take draft PR acme/repo-2#202 out of draft and merge it once its required checks are green." } },
     { "id": "manual-publish", "kind": "human",
@@ -553,7 +585,8 @@ publish and records the version → open+merge PR #303 (repo 3) consuming that v
     { "id": "open-pr-c", "kind": "agent",
       "agent": { "jobType": "senior:feature", "prompt": "Bump @acme/widget to the published version in acme/repo-3 and open PR #303." } },
     { "id": "merge-c", "kind": "wait",
-      "wait": { "kind": "pr", "target": "acme/repo-3#303", "match": { "prState": "merged" }, "onTimeout": "escalate" } }
+      "wait": { "kind": "pr", "target": "acme/repo-3#303", "match": { "prState": "merged" },
+                "poll": { "everyMs": 300000, "timeoutMs": 259200000 }, "onTimeout": "escalate" } }
   ],
   "edges": [
     { "from": "merge-a", "to": "undraft-merge-b" },
@@ -622,7 +655,8 @@ author never knows the PR number at compose time, so reference it by fact:
     { "id": "land", "kind": "connector",
       "connector": { "target": "converge-merge", "payload": { "pr": "open.pr" } } },
     { "id": "merged", "kind": "wait",
-      "wait": { "kind": "pr", "target": "open.pr", "match": { "prState": "merged" }, "onTimeout": "escalate" } }
+      "wait": { "kind": "pr", "target": "open.pr", "match": { "prState": "merged" },
+                "poll": { "everyMs": 300000, "timeoutMs": 259200000 }, "onTimeout": "escalate" } }
   ],
   "edges": [
     { "from": "open.pr", "to": "land" },
@@ -630,6 +664,11 @@ author never knows the PR number at compose time, so reference it by fact:
   ]
 }
 ```
+
+The `merged` gate carries an explicit **`poll`** (re-probe every 5 minutes, budget 3 days:
+`timeoutMs: 259200000`) because a `wait[pr, merged]` waits on a human-paced merge — **omitting
+`poll` inherits the 30-minute default** (§9.1) and escalates mid-review. Set `poll.timeoutMs`
+to a realistic budget on any merge/epic gate.
 
 The `pr` fact is threaded along the **fact-qualified edges** (`open.pr → land`, `open.pr → merged`) —
 those edges are what carry the observed PR into each consumer, so they are **required** when you
@@ -661,7 +700,9 @@ babysitting a `confirm` gate.
   "nodes": [
     { "id": "gate-epic", "kind": "wait",
       "wait": { "kind": "epic", "target": "nanobpm/nano-ide#488",
-                "match": { "epicState": "merged" }, "onTimeout": "escalate" },
+                "match": { "epicState": "merged" },
+                "poll": { "everyMs": 300000, "timeoutMs": 259200000 },
+                "onTimeout": "escalate" },
       "emits": [ { "name": "prCount", "type": "number" } ] },
     { "id": "start-b", "kind": "agent",
       "agent": { "jobType": "senior:feature", "prompt": "Implement nanobpm/nano-workforce#567 and open a PR." } }
@@ -680,5 +721,11 @@ Semantics:
 - **A failed/abandoned/mixed epic never reports merged**, so it never falsely releases the
   gate; the **bounded** wait elapses and routes via **`onTimeout`** (`escalate`/`continue`) —
   it does **not** hang.
+- **Set `poll.timeoutMs` to a realistic budget.** An epic reaching "fully merged" is a
+  multi-day, human-paced event, so the example gives it `poll: { everyMs: 300000, timeoutMs:
+  259200000 }` (re-probe every 5 minutes, budget 3 days). **Omitting `poll` inherits the
+  30-minute default** (§9.1) — the gate would escalate long before the epic lands, and (per
+  §9.2) completing that escalation would release `start-b` **as not-ready**, launching feature
+  B before its dependency merged. Size `timeoutMs` to how long the epic realistically takes.
 - On a fully-merged match it binds **`prCount`** (how many slice PRs the epic landed) as an
   output fact, so a downstream node can consume it (parity with the `pr` kind's `mergedSha`).
