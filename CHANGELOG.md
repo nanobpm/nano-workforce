@@ -1,3 +1,9 @@
+## [0.150.3](https://github.com/nanobpm/nano-workforce/compare/v0.150.2...v0.150.3) (2026-08-28)
+
+### Bug Fixes
+
+* **compileDeliveryGraph:** key reviewUrl to the request origin ([#577](https://github.com/nanobpm/nano-workforce/issues/577)) ([#581](https://github.com/nanobpm/nano-workforce/issues/581)) ([8c04c95](https://github.com/nanobpm/nano-workforce/commit/8c04c95b9d3617b3d71d28e54a7f24cae54c6e2c))
+
 ## [0.150.2](https://github.com/nanobpm/nano-workforce/compare/v0.150.1...v0.150.2) (2026-08-28)
 
 ### Bug Fixes
