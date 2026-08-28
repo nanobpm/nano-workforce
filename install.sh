@@ -326,17 +326,16 @@ version_gate() {
     return 0
   fi
   _out=$("$CLI" nano workforce list --json 2>/dev/null || true)
-  case "$_out" in
-    '{'*|' {'*|"$(printf '\n')"'{'*)
-      ok "'nano workforce' available" ;;
-    *)
-      # Second chance: some builds print with leading whitespace/newlines.
-      if printf '%s' "$_out" | grep -Eq '"workers"|"version"|"name"'; then
-        ok "'nano workforce' available"
-      else
-        die "the installed $PLUGIN is too old: it has no 'nano workforce' command (needs jwulf/c8ctl-plugin-nano#117). Upgrade with: $CLI upgrade plugin $PLUGIN"
-      fi ;;
-  esac
+  # Require the first non-whitespace character to be '{' — a real JSON object.
+  # An older plugin prints usage/help text, which never starts with '{'. We strip
+  # all whitespace and inspect the first character so leading blank lines or
+  # indentation don't fool the gate, and so help text that merely mentions
+  # "workers"/"version"/"name" can't produce a false positive.
+  if [ "$(printf '%s' "$_out" | tr -d '[:space:]' | cut -c1)" = '{' ]; then
+    ok "'nano workforce' available"
+  else
+    die "the installed $PLUGIN is too old: it has no 'nano workforce' command (needs jwulf/c8ctl-plugin-nano#117). Upgrade with: $CLI upgrade plugin $PLUGIN"
+  fi
 }
 
 # ---------------------------------------------------------------------------
