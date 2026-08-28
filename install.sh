@@ -839,12 +839,19 @@ api() {
   # the otherwise-bounded phase-2 poll loop: --connect-timeout caps the connect
   # phase, --max-time caps the whole request. A timeout surfaces as a non-zero
   # curl exit (API_ERR) → API_STATUS='000', handled like any transport failure.
-  set -- -sS --connect-timeout 10 --max-time 30 -X "$_method" -H 'Accept: application/json'
-  if [ -n "$_body" ]; then
-    set -- "$@" -H 'Content-Type: application/json' --data "$_body"
-  fi
   _tmp=$(mktemp_safe) || { API_STATUS='000'; API_BODY=''; API_ERR=1; return 0; }
-  API_STATUS=$(curl "$@" -o "$_tmp" -w '%{http_code}' "$_url" 2>/dev/null) && API_ERR=0 || API_ERR=$?
+  # Assemble curl's argument list with `set --` inside a SUBSHELL so it stays
+  # local to that subshell and never touches the script's own positional
+  # parameters ($1, $2, …) — keeping api() free of any $@ side effect. (POSIX
+  # already saves/restores positionals across a function call, but scoping the
+  # `set --` here makes that independent of shell quirks and future edits.)
+  API_STATUS=$(
+    set -- -sS --connect-timeout 10 --max-time 30 -X "$_method" -H 'Accept: application/json'
+    if [ -n "$_body" ]; then
+      set -- "$@" -H 'Content-Type: application/json' --data "$_body"
+    fi
+    curl "$@" -o "$_tmp" -w '%{http_code}' "$_url" 2>/dev/null
+  ) && API_ERR=0 || API_ERR=$?
   [ "$API_ERR" -ne 0 ] && API_STATUS='000'
   API_BODY=$(cat "$_tmp" 2>/dev/null || true)
   rm -f "$_tmp"
