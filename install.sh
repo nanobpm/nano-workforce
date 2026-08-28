@@ -995,6 +995,16 @@ app_verify() {
     note "dry-run: would poll GET ${APPVIEW_BASE}/app/api/version until HTTP 200."
     return 0
   fi
+  # APP_POLL_ATTEMPTS/APP_POLL_INTERVAL come from env hooks and feed `test`
+  # arithmetic + `sleep`. A non-integer value would make `set -e` abort with an
+  # opaque shell error mid-loop; validate them as non-negative integers up front
+  # and record a clear failure instead.
+  case "$APP_POLL_ATTEMPTS" in
+    ''|*[!0-9]*) record_failure "app: NANO_INSTALL_APP_POLL_ATTEMPTS must be a non-negative integer (got '${APP_POLL_ATTEMPTS}')"; return 1 ;;
+  esac
+  case "$APP_POLL_INTERVAL" in
+    ''|*[!0-9]*) record_failure "app: NANO_INSTALL_APP_POLL_INTERVAL must be a non-negative integer (got '${APP_POLL_INTERVAL}')"; return 1 ;;
+  esac
   _n=0
   while [ "$_n" -lt "$APP_POLL_ATTEMPTS" ]; do
     api GET "/console/app-view/${PROJECT}/app/api/version"

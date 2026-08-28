@@ -158,7 +158,7 @@ OUT=$(NANO_INSTALL_HARNESSES_OVERRIDE="copilot" \
 assert_not_contains "s7: no console API calls under --skip-app" "/console/api/" "$OUT"
 assert_contains "s7: skip note shown" "Phase 2 skipped (--skip-app)" "$OUT"
 
-# --- Scenarios 8-11: live phase-2 flow against a stubbed node console -------
+# --- Scenarios 8-12: live phase-2 flow against a stubbed node console -------
 if command -v node >/dev/null 2>&1 && command -v curl >/dev/null 2>&1; then
   STUBDIR=$(mktemp -d)
   STUB="$STUBDIR/stub-console.cjs"
