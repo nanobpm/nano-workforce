@@ -273,7 +273,7 @@ CJS
     rm -rf "$STUBDIR"
   fi
 else
-  pass "s8-s11: skipped (node or curl unavailable for the stubbed-console tests)"
+  pass "s8-s12: skipped (node or curl unavailable for the stubbed-console tests)"
 fi
 
 if [ "$FAILED" -ne 0 ]; then

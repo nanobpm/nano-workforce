@@ -923,7 +923,7 @@ app_provision() {
           record_failure "app: list projects HTTP $API_STATUS"
           return 1 ;;
     esac
-    if printf '%s' "$API_BODY" | grep -q '"nano-workforce"'; then
+    if printf '%s' "$API_BODY" | grep -Eq '"id"[[:space:]]*:[[:space:]]*"nano-workforce"'; then
       ok "template 'nano-workforce' present"
     else
       err "the extension did not contribute template 'nano-workforce'."
