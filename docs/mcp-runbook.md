@@ -149,3 +149,31 @@ Agents without MCP are unchanged — resolve the instance, then
 [`nano-workforce` skill](../skills/nano-workforce/SKILL.md), which fetches the same
 live guide. `GET /app/api/agent` and `GET /app/api/agent/skill` keep working exactly as
 before.
+
+## 6. Regression harness — pin the MCP surface from nwf's side
+
+The MCP projection layer (schema shape, argument encoding, session handshake) is
+covered end-to-end by a reusable e2e harness (epic #605 slice S1, issue #607):
+`e2e/support/mcp-harness.ts`. It boots a hermetic in-process instance and drives
+the **real** `/app/mcp` endpoint over the full Streamable-HTTP client handshake —
+`initialize` → capture `Mcp-Session-Id` → `notifications/initialized` →
+`tools/list` → `tools/call` — asserting the client-visible contract every agent
+depends on:
+
+- every projected tool schema is `$ref`-free with an explicit `type` (a leaked
+  `$ref` is unresolvable in the MCP context);
+- an object argument arrives **as an object**, never coerced to a string;
+- validation failures answer uniformly with `issues[{path,message}]`;
+- side-effecting calls stage nothing, so the suite is safe to re-run.
+
+It runs in CI under `npm run e2e` (hermetic — no socket, no GitHub), so a
+reintroduced `$ref` or a stringified object body fails the build instead of
+reaching an agent.
+
+**Extending it (new per-tool case).** Import `bootMcpHarness` from
+`e2e/support/mcp-harness.ts` in your own `e2e/<slice>.e2e.ts` and drive
+`harness.listTools()` / `harness.callTool(name, args)` — the handshake, session
+management and teardown are owned by the harness, so you add a `test(...)`, never
+a second transport. The module header documents the seam and the exported
+assertion helpers (`assertSchemaSelfContained`, `assertObjectBodyAccepted`,
+`assertValidationIssues`) in full; `e2e/mcp-surface.e2e.ts` is the worked example.
