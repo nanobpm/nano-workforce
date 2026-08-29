@@ -51,8 +51,20 @@ components:
           description: A human-readable summary of the rejection.
         issues:
           type: array
+          minItems: 1
           items:
-            $ref: "#/components/schemas/DeliveryCompileError"
+            type: object
+            additionalProperties: false
+            required:
+              - path
+              - message
+            properties:
+              path:
+                type: string
+                description: JSON-path pointer at the offending input (e.g. `section`).
+              message:
+                type: string
+                description: Human-actionable description of the failure.
           description: The path-qualified `{ path, message }` failures (at least one).
     ActivePr:
       type: object
