@@ -101,7 +101,9 @@ and brings it up (`c8 nano start` then `c8 nano workforce start`).
 neither review, push, nor merge, the preflight checks for a **usable** credential
 on this host before hiring: a `GITHUB_TOKEN`/`GH_TOKEN` in the environment
 *(validated with `gh api user` / a raw `api.github.com/user` probe, not trusted
-merely for being set)*, or the `gh` CLI *installed, authenticated, and proven with
+merely for being set — in the rare case where neither `gh` nor `curl` is present
+to probe with, it cannot validate and warns that it is proceeding on trust)*, or
+the `gh` CLI *installed, authenticated, and proven with
 `gh api user`*. It
 distinguishes gh missing, installed-but-unauthenticated, and
 authenticated-but-unusable (expired token, missing `repo` scope, SAML SSO), warns
