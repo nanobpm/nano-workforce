@@ -22,7 +22,7 @@
 import type { DeliveryEdge, DeliveryGraph, DeliveryNode } from "../nano-generated/api-io.d.ts";
 import { CONVERGE_MERGE_TARGET } from "./convergeTargets.ts";
 import { deliveryGraphVocabulary } from "./deliveryGraphVocabulary.ts";
-import { parseIssue } from "./plan.ts";
+import { type ParsedIssue, parseIssue } from "./plan.ts";
 
 /** A path-qualified validation failure — the uniform door error contract `issues[{path,message}]`
  * (the same shape the runtime request-validator and the S1 harness assert). */
@@ -63,6 +63,17 @@ export const MAX_SEQUENCE_ISSUES = 64;
  * downstream connector / `wait[pr]` node late-binds its target PR from the fact (§9.4, issue #548). */
 const PR_EMIT = { name: "pr", type: "pr" as const };
 
+/** Parse a ref into an issue target ONLY if its number is a positive, safe integer. `parseIssue`'s
+ * `\d+` accepts `#0` and precision-overflowing numbers (e.g. `#99999999999999999999`, which coerces
+ * past `Number.MAX_SAFE_INTEGER`), but such a target can never resolve to a real issue/PR — staging a
+ * gate on it would wait forever. Reject it deterministically at the door instead (Copilot review,
+ * PR #618), so only `#N` with `N >= 1 && Number.isSafeInteger(N)` is accepted. */
+function parseIssueRef(ref: unknown): ParsedIssue | null {
+  const parsed = typeof ref === "string" ? parseIssue(ref) : null;
+  if (!parsed) return null;
+  return Number.isSafeInteger(parsed.number) && parsed.number >= 1 ? parsed : null;
+}
+
 /**
  * Build the canonical delivery graph for a `sequenceIssues` intent, or return path-qualified
  * `issues[{path,message}]` rejections for invalid input. Validates:
@@ -91,7 +102,7 @@ export function buildSequenceGraph(intent: unknown): SequenceIssuesResult {
     });
   } else {
     rawIssues.forEach((ref, i) => {
-      const parsed = typeof ref === "string" ? parseIssue(ref) : null;
+      const parsed = parseIssueRef(ref);
       if (!parsed) {
         issues.push({
           path: `issues[${i}]`,
@@ -110,7 +121,7 @@ export function buildSequenceGraph(intent: unknown): SequenceIssuesResult {
   // directly, bypassing OpenAPI validation).
   let behindKey: string | null = null;
   if (rawBehind !== undefined && rawBehind !== null) {
-    const parsed = typeof rawBehind === "string" ? parseIssue(rawBehind) : null;
+    const parsed = parseIssueRef(rawBehind);
     if (!parsed) {
       issues.push({
         path: "behind",

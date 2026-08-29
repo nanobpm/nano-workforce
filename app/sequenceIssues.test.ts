@@ -164,6 +164,21 @@ test("sequenceIssues: an empty-string `behind` → rejected at behind (not silen
   assert(issues.some((i) => i.path === "behind"), `expected behind path, got ${JSON.stringify(issues)}`);
 });
 
+test("sequenceIssues: a non-positive issue number (`#0`) → rejected at the offending index", () => {
+  const issues = rejects({ issues: ["acme/repo#0"] });
+  assert(issues.some((i) => i.path === "issues[0]"), `expected issues[0] path, got ${JSON.stringify(issues)}`);
+});
+
+test("sequenceIssues: an unsafe-integer issue number → rejected at the offending index", () => {
+  const issues = rejects({ issues: ["acme/repo#1", "acme/repo#99999999999999999999"] });
+  assert(issues.some((i) => i.path === "issues[1]"), `expected issues[1] path, got ${JSON.stringify(issues)}`);
+});
+
+test("sequenceIssues: a non-positive `behind` number (`#0`) → rejected at behind", () => {
+  const issues = rejects({ behind: "acme/repo#0", issues: ["acme/repo#1"] });
+  assert(issues.some((i) => i.path === "behind"), `expected behind path, got ${JSON.stringify(issues)}`);
+});
+
 test("sequenceIssues: more than the max issues → rejected", () => {
   const many = Array.from({ length: MAX_SEQUENCE_ISSUES + 1 }, (_, i) => `acme/repo#${i + 1}`);
   const issues = rejects({ issues: many });
