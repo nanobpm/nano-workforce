@@ -24,10 +24,20 @@
 //   node --experimental-strip-types scripts/inline-mcp-bodies.ts --check  # verify (CI)
 //
 // The convention every projected request-body operation MUST follow (and every later slice that
-// adds one inherits): `type: object` with inline `properties`, NO `$ref` in the projected schema,
-// an explicit `example`, and a description that carries the contract. `test/mcp-tool-schemas.test.ts`
-// is the runtime drift guard — it runs the REAL urban projector over the spec and fails if any
-// projected tool body reintroduces a `$ref` or loses its explicit type.
+// adds one inherits): author the body as a SINGLE top-level `$ref` to a `components.schemas` entry,
+// yielding a `type: object` with inline `properties`, NO `$ref` in the projected schema, and a
+// description that carries the contract; the graph doors (`compileDeliveryGraph`/
+// `previewDeliveryGraph`) additionally carry a worked `example` (enforced by
+// `test/mcp-tool-schemas.test.ts`). `test/mcp-tool-schemas.test.ts` is the runtime drift guard — it
+// runs the REAL urban projector over the spec and fails if any projected tool body reintroduces a
+// `$ref` or loses its explicit type.
+//
+// Drift detection survives inlining: the generated `# BEGIN` sentinel records the source component
+// (`source=#/components/schemas/…`), so on every subsequent run the generator re-derives the inline
+// body from the CURRENT component — even though the operation's `schema:` no longer carries a
+// `$ref` — and `--check` fails if a source component changed but its inline body was not
+// regenerated. (Without the recorded source the check would be a permanent false green: once the
+// `$ref` is inlined there is nothing left to re-derive from.)
 //
 // Mirrors the repo's other derive/verify pairs (layout-bpmn --check, sync-nav --check,
 // check-contracts / reconcile-contracts).
@@ -40,8 +50,14 @@ import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 const ROOT = decodeURIComponent(new URL("../", import.meta.url).pathname);
 const SPEC_PATH = `${ROOT}openapi.yaml`;
 
-const BEGIN = "# BEGIN generated:mcp-body (scripts/inline-mcp-bodies.ts — do not hand-edit)";
+const BEGIN_PREFIX = "# BEGIN generated:mcp-body";
+const BEGIN_TAIL = "(scripts/inline-mcp-bodies.ts — do not hand-edit)";
 const END = "# END generated:mcp-body";
+
+/** The `# BEGIN` sentinel for a block, embedding the source component so a later run can re-derive. */
+function beginMarker(sourceRef: string): string {
+  return `${BEGIN_PREFIX} source=${sourceRef} ${BEGIN_TAIL}`;
+}
 
 type Schema = Record<string, unknown>;
 
@@ -130,11 +146,42 @@ function isProjected(op: Record<string, unknown>): boolean {
 
 interface Target {
   operationId: string;
+  sourceRef: string;
   inline: Schema;
 }
 
-/** Collect the projected, request-body operations whose body schema still carries a `$ref`. */
-function collectTargets(doc: Record<string, unknown>): Target[] {
+/**
+ * Recover `operationId -> source component $ref` from the `# BEGIN … source=…` sentinels already in
+ * the raw text. This is what lets `--check` keep detecting drift AFTER the `$ref` has been inlined:
+ * the operation's parsed `schema:` no longer carries a `$ref`, but the recorded source does, so the
+ * generator can re-derive the block from the current component. Scans by operation region (the same
+ * indentation-free `operationId:` split `spliceSchema` uses) so a block is attributed to its owner.
+ */
+function recordedSources(text: string): Map<string, string> {
+  const out = new Map<string, string>();
+  const opRe = /^ *operationId: (\S+)/gm;
+  const ops: Array<{ id: string; at: number }> = [];
+  for (let m = opRe.exec(text); m !== null; m = opRe.exec(text)) {
+    ops.push({ id: m[1], at: m.index });
+  }
+  for (let i = 0; i < ops.length; i++) {
+    const end = i + 1 < ops.length ? ops[i + 1].at : text.length;
+    const region = text.slice(ops[i].at, end);
+    const bm = region.match(/# BEGIN generated:mcp-body source=(\S+)/);
+    if (bm) out.set(ops[i].id, bm[1]);
+  }
+  return out;
+}
+
+/**
+ * Collect the projected request-body operations to (re)generate. A body is a managed target when it
+ * is authored as a single top-level `$ref` (first authoring) OR already carries a generated block
+ * whose source component was recorded in its sentinel (subsequent runs). Either way the inline body
+ * is DERIVED from the CURRENT `components.schemas`, so a source-component change is always re-derived
+ * (and caught by `--check`). A projected body that leaks a NON-top-level `$ref` violates the
+ * single-top-level-`$ref` convention and is rejected loudly rather than silently half-inlined.
+ */
+function collectTargets(doc: Record<string, unknown>, recorded: Map<string, string>): Target[] {
   const comps: Record<string, unknown> =
     isRecord(doc.components) && isRecord(doc.components.schemas) ? doc.components.schemas : {};
   const paths = isRecord(doc.paths) ? doc.paths : {};
@@ -151,15 +198,31 @@ function collectTargets(doc: Record<string, unknown>): Target[] {
           ? body.content["application/json"]
           : undefined;
       const json = isRecord(jsonNode) ? jsonNode.schema : undefined;
-      if (!isRecord(json) || !hasRef(json)) continue;
-      const derefed = deref(json, comps, new Set());
+      if (!isRecord(json)) continue;
+      let sourceRef: string | undefined;
+      if (typeof json.$ref === "string") {
+        sourceRef = json.$ref;
+      } else if (recorded.has(op.operationId)) {
+        sourceRef = recorded.get(op.operationId);
+      } else {
+        if (hasRef(json)) {
+          throw new Error(
+            `${op.operationId}: projected request body must be authored as a single top-level ` +
+              "`$ref` to a components.schemas entry (found a nested `$ref`) — see the MCP schema " +
+              "convention in openapi.yaml.",
+          );
+        }
+        continue;
+      }
+      if (sourceRef === undefined) continue;
+      const derefed = deref({ $ref: sourceRef }, comps, new Set());
       const inline: Schema = isRecord(derefed) ? derefed : {};
       if (typeof inline.type !== "string") {
         // A `oneOf`/`anyOf` body root has no single `type`; every projected body IS an object, so
         // pin the explicit `type: object` the MCP contract requires alongside the variant union.
         inline.type = "object";
       }
-      targets.push({ operationId: op.operationId, inline });
+      targets.push({ operationId: op.operationId, sourceRef, inline });
     }
   }
   targets.sort((a, b) => a.operationId.localeCompare(b.operationId));
@@ -167,14 +230,14 @@ function collectTargets(doc: Record<string, unknown>): Target[] {
 }
 
 /** Render an inline schema as a YAML block indented to `pad` spaces, wrapped in the sentinels. */
-function renderBlock(inline: Schema, pad: string): string {
-  const dumped = stringifyYaml(inline, { indent: 2, lineWidth: 0 });
+function renderBlock(inline: Schema, pad: string, sourceRef: string): string {
+  const dumped = stringifyYaml(inline, { indent: 2, lineWidth: 0, singleQuote: true });
   const body = dumped
     .replace(/\n$/, "")
     .split("\n")
     .map((line) => (line.length ? pad + line : line))
     .join("\n");
-  return `${pad}${BEGIN}\n${body}\n${pad}${END}`;
+  return `${pad}${beginMarker(sourceRef)}\n${body}\n${pad}${END}`;
 }
 
 /**
@@ -182,7 +245,7 @@ function renderBlock(inline: Schema, pad: string): string {
  * text with `block`, in place. Returns the new text. Boundaries are found by indentation, the same
  * span technique `scripts/sync-nav.ts` uses, so nothing else in the file is reformatted.
  */
-function spliceSchema(text: string, operationId: string, inline: Schema): string {
+function spliceSchema(text: string, operationId: string, inline: Schema, sourceRef: string): string {
   const opMarker = `operationId: ${operationId}\n`;
   const opAt = text.indexOf(opMarker);
   if (opAt < 0) throw new Error(`operationId not found in text: ${operationId}`);
@@ -213,16 +276,16 @@ function spliceSchema(text: string, operationId: string, inline: Schema): string
     consumed += line.length + 1;
   }
   const valueEnd = afterSchemaLine + consumed;
-  const block = renderBlock(inline, pad);
+  const block = renderBlock(inline, pad, sourceRef);
   return `${text.slice(0, afterSchemaLine)}${block}\n${text.slice(valueEnd)}`;
 }
 
 function generate(text: string): string {
   const parsed = parseYaml(text);
   const doc: Record<string, unknown> = isRecord(parsed) ? parsed : {};
-  const targets = collectTargets(doc);
+  const targets = collectTargets(doc, recordedSources(text));
   let out = text;
-  for (const t of targets) out = spliceSchema(out, t.operationId, t.inline);
+  for (const t of targets) out = spliceSchema(out, t.operationId, t.inline, t.sourceRef);
   return out;
 }
 

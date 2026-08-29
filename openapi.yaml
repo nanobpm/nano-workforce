@@ -2708,7 +2708,8 @@ components:
 #   • `type: object` with inline `properties` (never a bare `$ref` — it is unresolvable in an MCP
 #     client, and the object gets stringified and rejected at the door: nano-ide#501/#502/#503);
 #   • NO `$ref` anywhere in the projected body schema;
-#   • an explicit `example` (graph doors are REQUIRED to carry one);
+#   • the graph doors (`compileDeliveryGraph`/`previewDeliveryGraph`) carry a worked `example` — the
+#     only example the invariant enforces (`test/mcp-tool-schemas.test.ts`); other doors MAY add one;
 #   • a `description` that carries the contract (input shape, side effects, idempotency, next call).
 # You do NOT hand-write the inline body. Author the shape ONCE as a `components.schemas` entry and
 # reference it here as usual (`schema: { $ref: … }` OR keep the generated block); the generator
@@ -2823,7 +2824,7 @@ paths:
         content:
           application/json:
             schema:
-              # BEGIN generated:mcp-body (scripts/inline-mcp-bodies.ts — do not hand-edit)
+              # BEGIN generated:mcp-body source=#/components/schemas/EnrolRequest (scripts/inline-mcp-bodies.ts — do not hand-edit)
               type: object
               description: A worker's enrol request — its declared capability (ADR 0059 revised, per-worker).
               required:
@@ -2853,7 +2854,7 @@ paths:
                   description: The worker instance id, echoed back for provenance (optional).
                 durableResume:
                   type: boolean
-                  description: 'Whether this worker''s harness advertises durable-resume (issue #325, ADR 0062 Slice 5/5) — an ENROLMENT attribute, never a routing token. Recorded per instance so the app emits the world-restore marker only to a fleet with a participant; a harness that omits it (or sets false) redrives a re-leased round from scratch. Recorded only when `instance` is a non-blank string — a missing, empty, or whitespace-only `instance` is echoed back for provenance but the flag is not persisted.'
+                  description: "Whether this worker's harness advertises durable-resume (issue #325, ADR 0062 Slice 5/5) — an ENROLMENT attribute, never a routing token. Recorded per instance so the app emits the world-restore marker only to a fleet with a participant; a harness that omits it (or sets false) redrives a re-leased round from scratch. Recorded only when `instance` is a non-blank string — a missing, empty, or whitespace-only `instance` is echoed back for provenance but the flag is not persisted."
               # END generated:mcp-body
       responses:
         "200":
@@ -3088,7 +3089,7 @@ paths:
         content:
           application/json:
             schema:
-              # BEGIN generated:mcp-body (scripts/inline-mcp-bodies.ts — do not hand-edit)
+              # BEGIN generated:mcp-body source=#/components/schemas/ConvergenceStart (scripts/inline-mcp-bodies.ts — do not hand-edit)
               description: The start-convergence request body. Names the target PR by EXACTLY ONE of `pr` (an `owner/repo#123` reference) or `url` (a bare PR URL) — never both, never neither — with the optional convergence knobs. Modeled as `oneOf` named variants (ADR — Camunda REST v2 pattern) so the runtime rejects an ambiguous or empty target at the edge with a 400 that names the allowed shapes, rather than the delegate silently coalescing `pr ?? url`.
               oneOf:
                 - type: object
@@ -3153,7 +3154,7 @@ paths:
         content:
           application/json:
             schema:
-              # BEGIN generated:mcp-body (scripts/inline-mcp-bodies.ts — do not hand-edit)
+              # BEGIN generated:mcp-body source=#/components/schemas/PlanStart (scripts/inline-mcp-bodies.ts — do not hand-edit)
               description: The start-plan-fanout request body. Names the target issue by EXACTLY ONE of `issue` (an `owner/repo#123` reference) or `url` (a bare issue URL), plus a REQUIRED `baseBranch` (ADR 0003) the fleet branches off — a blank/absent base is a 400. Modeled as `oneOf` named variants (Camunda REST v2 pattern) so an ambiguous or empty target is a 400 at the edge, not a silent `issue ?? url` coalesce in the delegate.
               oneOf:
                 - type: object
@@ -3232,8 +3233,8 @@ paths:
         content:
           application/json:
             schema:
-              # BEGIN generated:mcp-body (scripts/inline-mcp-bodies.ts — do not hand-edit)
-              description: 'The set/batch admission request body (issue #292, slice S2). Submits a SET of epics plus the inter-epic dependency edges between them. `epics` is admitted all-or-nothing through the same `admitPlan` gate as the single-issue door; `deps` declares that a `consumer` epic waits for a `producer` epic''s published `{ package, capabilityRef }` capability. Every edge must connect two epics named in `epics`, and the edge set must be an acyclic DAG — otherwise the whole set is rejected with a 4xx and nothing is persisted.'
+              # BEGIN generated:mcp-body source=#/components/schemas/EpicSetStart (scripts/inline-mcp-bodies.ts — do not hand-edit)
+              description: "The set/batch admission request body (issue #292, slice S2). Submits a SET of epics plus the inter-epic dependency edges between them. `epics` is admitted all-or-nothing through the same `admitPlan` gate as the single-issue door; `deps` declares that a `consumer` epic waits for a `producer` epic's published `{ package, capabilityRef }` capability. Every edge must connect two epics named in `epics`, and the edge set must be an acyclic DAG — otherwise the whole set is rejected with a 4xx and nothing is persisted."
               type: object
               additionalProperties: false
               required:
@@ -3292,7 +3293,7 @@ paths:
                   type: array
                   description: The inter-epic dependency edges. Each declares `consumer` waits for `producer` to publish the `{ package, capabilityRef }` capability. Both endpoints must name epics in `epics`. Omit or pass `[]` for a set of independent (root) epics.
                   items:
-                    description: 'One inter-epic dependency edge: the `consumer` epic waits for the `producer` epic to publish the `{ package, capabilityRef }` capability. `consumer`/`producer` are epic references (`owner/repo#123` or an issue URL) that MUST both appear in the set''s `epics`.'
+                    description: "One inter-epic dependency edge: the `consumer` epic waits for the `producer` epic to publish the `{ package, capabilityRef }` capability. `consumer`/`producer` are epic references (`owner/repo#123` or an issue URL) that MUST both appear in the set's `epics`."
                     type: object
                     additionalProperties: false
                     required:
@@ -3369,7 +3370,7 @@ paths:
         content:
           application/json:
             schema:
-              # BEGIN generated:mcp-body (scripts/inline-mcp-bodies.ts — do not hand-edit)
+              # BEGIN generated:mcp-body source=#/components/schemas/DeliveryGraph (scripts/inline-mcp-bodies.ts — do not hand-edit)
               description: 'An agent-authored delivery graph (ADR 0005) — the SINGLE agent-facing artifact for a heterogeneous, partly-human, cross-repo delivery runbook. It is DATA, never an executable artifact: a JSON DAG whose nodes each name a `kind` from a CLOSED allowlist (`agent`/`wait`/`human`/`connector` — Decision 1/2, the trust boundary) and whose `edges` name DISCOVERED facts (Decision 3). Ingest validates the SHAPE here and the SEMANTICS (acyclicity, edge integrity, fact resolution) in the pure `validateDeliveryGraph` (`app/deliveryGraph.ts`). This slice (S0) defines the vocabulary + validation surface ONLY — no compiler, dispatch, or execution (those land in later slices).'
               type: object
               additionalProperties: false
@@ -3442,7 +3443,7 @@ paths:
                                     - version
                                     - url
                                     - pr
-                                  description: 'The fact''s declared type. `artifact` is a `pkg@version` handle, `version` a bare version string, `url` a location — mirrors the values `capability`/`pr` probes late-bind. `pr` (issue #548) is a PR reference (`owner/repo#N`) an `agent` node emits for the PR it opened, so a downstream `connector[converge*]`/`wait[pr]` node LATE-BINDS its target PR from the fact instead of a hardcoded literal.'
+                                  description: "The fact's declared type. `artifact` is a `pkg@version` handle, `version` a bare version string, `url` a location — mirrors the values `capability`/`pr` probes late-bind. `pr` (issue #548) is a PR reference (`owner/repo#N`) an `agent` node emits for the PR it opened, so a downstream `connector[converge*]`/`wait[pr]` node LATE-BINDS its target PR from the fact instead of a hardcoded literal."
                                 description:
                                   type: string
                                   maxLength: 512
@@ -3471,7 +3472,7 @@ paths:
                                 description: 'OPTIONAL first-class CONVERGE policy (ADR 0006 §3 / S5) — a DECLARED, compiler- validated completion-policy flag on this cell node. It declares that the node''s opened PR is to be driven through the review-convergence loop to green as an edge-gated completion policy; this slice adds and validates the flag, with the delivery-graph execution wiring that consumes it landing in a follow-up slice. It supersedes (in intent) the emergent `feature.bpmn` `gw-converge` gateway and the "un-draft + merge #B" prompt prose a delivery-graph `agent` node used to smuggle. Converge and merge are SEPARABLE phases; a node may converge without merging (stop at green and gate the landing behind a downstream node).'
                               merge:
                                 type: boolean
-                                description: 'OPTIONAL first-class MERGE (land) policy (ADR 0006 §3 / S5) — a DECLARED, compiler-validated flag. When set it declares that the cell lands its PR. REQUIRES `converge: true` — you cannot land a PR you have not driven to green (the validator rejects `merge` without `converge`). This slice adds and validates the flag; the execution wiring that consumes it lands in a follow-up slice. TWO-LEVEL (ADR 0003 base-branch admission): a UNIT node lands onto its epic/graph base branch, never `main` directly; the graph''s final merge-to-`main` is a separate top-level step.'
+                                description: "OPTIONAL first-class MERGE (land) policy (ADR 0006 §3 / S5) — a DECLARED, compiler-validated flag. When set it declares that the cell lands its PR. REQUIRES `converge: true` — you cannot land a PR you have not driven to green (the validator rejects `merge` without `converge`). This slice adds and validates the flag; the execution wiring that consumes it lands in a follow-up slice. TWO-LEVEL (ADR 0003 base-branch admission): a UNIT node lands onto its epic/graph base branch, never `main` directly; the graph's final merge-to-`main` is a separate top-level step."
                               timeout:
                                 type: string
                                 pattern: ^[Pp](?!$)(\d+[Yy])?(\d+[Mm])?(\d+[Ww])?(\d+[Dd])?([Tt](?=\d)(\d+[Hh])?(\d+[Mm])?(\d+[Ss])?)?$
@@ -3513,7 +3514,7 @@ paths:
                                     - version
                                     - url
                                     - pr
-                                  description: 'The fact''s declared type. `artifact` is a `pkg@version` handle, `version` a bare version string, `url` a location — mirrors the values `capability`/`pr` probes late-bind. `pr` (issue #548) is a PR reference (`owner/repo#N`) an `agent` node emits for the PR it opened, so a downstream `connector[converge*]`/`wait[pr]` node LATE-BINDS its target PR from the fact instead of a hardcoded literal.'
+                                  description: "The fact's declared type. `artifact` is a `pkg@version` handle, `version` a bare version string, `url` a location — mirrors the values `capability`/`pr` probes late-bind. `pr` (issue #548) is a PR reference (`owner/repo#N`) an `agent` node emits for the PR it opened, so a downstream `connector[converge*]`/`wait[pr]` node LATE-BINDS its target PR from the fact instead of a hardcoded literal."
                                 description:
                                   type: string
                                   maxLength: 512
@@ -3603,7 +3604,7 @@ paths:
                                     enum:
                                       - merged
                                       - done
-                                    description: 'epic: the declared plan-fanout aggregate state to wait for (default merged) — both mean ''fully merged'' (issue #568).'
+                                    description: "epic: the declared plan-fanout aggregate state to wait for (default merged) — both mean 'fully merged' (issue #568)."
                               poll:
                                 type: object
                                 additionalProperties: false
@@ -3657,7 +3658,7 @@ paths:
                                     - version
                                     - url
                                     - pr
-                                  description: 'The fact''s declared type. `artifact` is a `pkg@version` handle, `version` a bare version string, `url` a location — mirrors the values `capability`/`pr` probes late-bind. `pr` (issue #548) is a PR reference (`owner/repo#N`) an `agent` node emits for the PR it opened, so a downstream `connector[converge*]`/`wait[pr]` node LATE-BINDS its target PR from the fact instead of a hardcoded literal.'
+                                  description: "The fact's declared type. `artifact` is a `pkg@version` handle, `version` a bare version string, `url` a location — mirrors the values `capability`/`pr` probes late-bind. `pr` (issue #548) is a PR reference (`owner/repo#N`) an `agent` node emits for the PR it opened, so a downstream `connector[converge*]`/`wait[pr]` node LATE-BINDS its target PR from the fact instead of a hardcoded literal."
                                 description:
                                   type: string
                                   maxLength: 512
@@ -3714,7 +3715,7 @@ paths:
                                     - version
                                     - url
                                     - pr
-                                  description: 'The fact''s declared type. `artifact` is a `pkg@version` handle, `version` a bare version string, `url` a location — mirrors the values `capability`/`pr` probes late-bind. `pr` (issue #548) is a PR reference (`owner/repo#N`) an `agent` node emits for the PR it opened, so a downstream `connector[converge*]`/`wait[pr]` node LATE-BINDS its target PR from the fact instead of a hardcoded literal.'
+                                  description: "The fact's declared type. `artifact` is a `pkg@version` handle, `version` a bare version string, `url` a location — mirrors the values `capability`/`pr` probes late-bind. `pr` (issue #548) is a PR reference (`owner/repo#N`) an `agent` node emits for the PR it opened, so a downstream `connector[converge*]`/`wait[pr]` node LATE-BINDS its target PR from the fact instead of a hardcoded literal."
                                 description:
                                   type: string
                                   maxLength: 512
@@ -3830,7 +3831,7 @@ paths:
         content:
           application/json:
             schema:
-              # BEGIN generated:mcp-body (scripts/inline-mcp-bodies.ts — do not hand-edit)
+              # BEGIN generated:mcp-body source=#/components/schemas/DeliveryGraphPreviewSubmit (scripts/inline-mcp-bodies.ts — do not hand-edit)
               description: 'The human-facing UI JSON-paste PREVIEW request (issues #386 + #516). The Delivery Graphs page''s "Preview" action cannot submit a structured object, so the operator''s pasted delivery-graph is carried as a raw JSON STRING (`graphJson`), parsed server-side and handed to the SAME pure `compileDeliveryGraph` compiler the agent-facing door uses. Preview compiles WITHOUT persisting. Per-operation schema (not shared with the stage door) so each door''s request stays independently evolvable.'
               type: object
               additionalProperties: false
@@ -3999,7 +4000,7 @@ paths:
         content:
           application/json:
             schema:
-              # BEGIN generated:mcp-body (scripts/inline-mcp-bodies.ts — do not hand-edit)
+              # BEGIN generated:mcp-body source=#/components/schemas/DeliveryGraphProposalBpmnRequest (scripts/inline-mcp-bodies.ts — do not hand-edit)
               description: Request the compiled BPMN of a staged delivery-graph proposal for read-only DI PREVIEW. Carries only the proposal's content `digest`; the door recompiles the staged graph deterministically. No deploy, no dispatch — this reads, it does not launch anything.
               type: object
               additionalProperties: false
@@ -4071,7 +4072,7 @@ paths:
         content:
           application/json:
             schema:
-              # BEGIN generated:mcp-body (scripts/inline-mcp-bodies.ts — do not hand-edit)
+              # BEGIN generated:mcp-body source=#/components/schemas/SaveToLibrarySubmit (scripts/inline-mcp-bodies.ts — do not hand-edit)
               description: 'Save a delivery graph to the reusable library (issue #522). Carries the entry `name` (its slug/hash derive the id) and an optional `description`, PLUS exactly one graph source: either a raw `graphJson` STRING (validated + compiled before persisting, `source: composed`), or the `digest` of an existing staged/dispatched proposal whose already-stored graph is reused (`source: from-staged` / `from-dispatched`). A graph that fails to compile is a clean 400 and nothing is persisted.'
               type: object
               additionalProperties: false
@@ -4127,8 +4128,8 @@ paths:
         content:
           application/json:
             schema:
-              # BEGIN generated:mcp-body (scripts/inline-mcp-bodies.ts — do not hand-edit)
-              description: 'Import a delivery graph into the reusable library FROM A FILE (issue #524, epic #519 S5). The compose App-View''s `<input type=file accept=.json>` reads the selected file''s text client-side and POSTs it here as the raw `graphJson` string. The door validates + compiles it via the SAME `parseAndCompileText` pipeline the preview/stage/save doors use, then persists it with `source: imported`. A file that is not valid JSON, or a graph that fails to compile, is a clean 400 with path-qualified errors and NOTHING is persisted. The entry `name` defaults to the imported graph''s own `name`; an explicit `name` overrides it (an unnamed graph with no override is a clean 400).'
+              # BEGIN generated:mcp-body source=#/components/schemas/ImportToLibrarySubmit (scripts/inline-mcp-bodies.ts — do not hand-edit)
+              description: "Import a delivery graph into the reusable library FROM A FILE (issue #524, epic #519 S5). The compose App-View's `<input type=file accept=.json>` reads the selected file's text client-side and POSTs it here as the raw `graphJson` string. The door validates + compiles it via the SAME `parseAndCompileText` pipeline the preview/stage/save doors use, then persists it with `source: imported`. A file that is not valid JSON, or a graph that fails to compile, is a clean 400 with path-qualified errors and NOTHING is persisted. The entry `name` defaults to the imported graph's own `name`; an explicit `name` overrides it (an unnamed graph with no override is a clean 400)."
               type: object
               additionalProperties: false
               required:
@@ -4264,7 +4265,7 @@ paths:
         content:
           application/json:
             schema:
-              # BEGIN generated:mcp-body (scripts/inline-mcp-bodies.ts — do not hand-edit)
+              # BEGIN generated:mcp-body source=#/components/schemas/FeatureStart (scripts/inline-mcp-bodies.ts — do not hand-edit)
               description: The start-feature request body — a SINGLE-issue feature run. Names the target issue by EXACTLY ONE of `issue` (an `owner/repo#123` reference) or `url` (a bare issue URL), plus a REQUIRED `baseBranch` (ADR 0003, same admission as the epic path), and the two optional follow-on knobs `converge` / `autoMerge`. May also carry an intake-time readiness gate (`readiness` and/or `blockedOn` + `consumerPackage`, per issue 295) that parks the run until the declared upstreams land. Modeled as `oneOf` named variants (Camunda REST v2 pattern) so an ambiguous or empty target is a 400 at the edge.
               oneOf:
                 - type: object
@@ -4382,7 +4383,7 @@ paths:
                                 enum:
                                   - merged
                                   - done
-                                description: 'epic: the declared plan-fanout aggregate state to wait for (default merged) — both mean ''fully merged'' (issue #568).'
+                                description: "epic: the declared plan-fanout aggregate state to wait for (default merged) — both mean 'fully merged' (issue #568)."
                           poll:
                             type: object
                             additionalProperties: false
@@ -4400,7 +4401,7 @@ paths:
                                   - fixed
                                   - exponential
                                 description: Backoff shape between attempts.
-                      description: 'OPTIONAL intake-time readiness gate (issue #295): one or more durable probes the run must ALL satisfy before its implementation agent is dispatched. The run parks (durably, bounded by the gate''s escalating timer) at the leading readiness preflight until every probe goes green. Absent/empty ⇒ the run implements immediately, unchanged.'
+                      description: "OPTIONAL intake-time readiness gate (issue #295): one or more durable probes the run must ALL satisfy before its implementation agent is dispatched. The run parks (durably, bounded by the gate's escalating timer) at the leading readiness preflight until every probe goes green. Absent/empty ⇒ the run implements immediately, unchanged."
                     blockedOn:
                       type: array
                       maxItems: 32
@@ -4527,7 +4528,7 @@ paths:
                                 enum:
                                   - merged
                                   - done
-                                description: 'epic: the declared plan-fanout aggregate state to wait for (default merged) — both mean ''fully merged'' (issue #568).'
+                                description: "epic: the declared plan-fanout aggregate state to wait for (default merged) — both mean 'fully merged' (issue #568)."
                           poll:
                             type: object
                             additionalProperties: false
@@ -4792,10 +4793,10 @@ paths:
         content:
           application/json:
             schema:
-              # BEGIN generated:mcp-body (scripts/inline-mcp-bodies.ts — do not hand-edit)
+              # BEGIN generated:mcp-body source=#/components/schemas/AgentCompleteRequest (scripts/inline-mcp-bodies.ts — do not hand-edit)
               type: object
               additionalProperties: false
-              description: 'Complete an escalation user task AS AN AGENT (epic #156 / ADR 0046). The agent submits the SAME typed form variables a human would through the task inbox; the host routes them through the one canonical attributed completer, records the agent''s identity for the audit trail, and resumes the process. Only the migrated escalation user tasks may be completed this way.'
+              description: "Complete an escalation user task AS AN AGENT (epic #156 / ADR 0046). The agent submits the SAME typed form variables a human would through the task inbox; the host routes them through the one canonical attributed completer, records the agent's identity for the audit trail, and resumes the process. Only the migrated escalation user tasks may be completed this way."
               required:
                 - userTaskKey
                 - agentId
@@ -4854,7 +4855,7 @@ paths:
         content:
           application/json:
             schema:
-              # BEGIN generated:mcp-body (scripts/inline-mcp-bodies.ts — do not hand-edit)
+              # BEGIN generated:mcp-body source=#/components/schemas/RevertCompletionRequest (scripts/inline-mcp-bodies.ts — do not hand-edit)
               type: object
               additionalProperties: false
               description: Revert/override an agent escalation completion (the reversibility guarantee of ADR 0046). A human marks a reversible agent completion reverted so the agent's answer is no longer treated as authoritative; the reverter's identity + timestamp are recorded.
@@ -4959,7 +4960,7 @@ paths:
         content:
           application/json:
             schema:
-              # BEGIN generated:mcp-body (scripts/inline-mcp-bodies.ts — do not hand-edit)
+              # BEGIN generated:mcp-body source=#/components/schemas/BlackboardAppendRequest (scripts/inline-mcp-bodies.ts — do not hand-edit)
               type: object
               description: Append one blackboard entry. Idempotent on (plan, dedupe_key).
               required:

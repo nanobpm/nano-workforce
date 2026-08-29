@@ -127,8 +127,9 @@ graph through MCP. Agents author graphs through the pure `compileDeliveryGraph` 
 **Projected tool schemas are self-contained (epic #605, S0).** The projector copies each
 operation's request-body schema *verbatim* into the tool's `inputSchema.properties.body`
 and does **not** resolve `$ref`s, so every projected (non-`x-mcp`) request-body operation
-in `openapi.yaml` presents an inline `type: object` body with no `$ref` and a worked
-`example` — an agent discovers the body shape (and calls the tool with a real object, not a
+in `openapi.yaml` presents an inline `type: object` body with no `$ref`; the two graph doors
+additionally carry a worked `example` — an agent discovers the body shape (and calls the tool
+with a real object, not a
 stringified one) from the surface alone. The two graph doors split by convention:
 `compileDeliveryGraph` takes the **structured `DeliveryGraph` object** (and *stages*);
 `previewDeliveryGraph` takes the **text shape `{ "graphJson": "<serialized DeliveryGraph>" }`**
