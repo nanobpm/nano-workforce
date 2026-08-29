@@ -27,7 +27,7 @@
     <bpmn:endEvent id="he_end_answered" name="Answered">
       <bpmn:extensionElements>
         <zeebe:ioMapping>
-          <zeebe:output source="=&#34;answer&#34;" target="resolution" />
+          <zeebe:input source="=&#34;answer&#34;" target="resolution" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>he_answer</bpmn:incoming>
@@ -35,7 +35,7 @@
     <bpmn:endEvent id="he_end_abandoned" name="Abandoned">
       <bpmn:extensionElements>
         <zeebe:ioMapping>
-          <zeebe:output source="=&#34;abandon&#34;" target="resolution" />
+          <zeebe:input source="=&#34;abandon&#34;" target="resolution" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>he_abandon</bpmn:incoming>
@@ -43,7 +43,7 @@
     <bpmn:endEvent id="he_end_sla" name="SLA auto-abandon">
       <bpmn:extensionElements>
         <zeebe:ioMapping>
-          <zeebe:output source="=&#34;abandon&#34;" target="resolution" />
+          <zeebe:input source="=&#34;abandon&#34;" target="resolution" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>he_sla</bpmn:incoming>

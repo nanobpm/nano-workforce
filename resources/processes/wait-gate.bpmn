@@ -94,7 +94,7 @@
     <bpmn:endEvent id="gate-ready" name="Ready">
       <bpmn:extensionElements>
         <zeebe:ioMapping>
-          <zeebe:output source="=&#34;ready&#34;" target="gateOutcome" />
+          <zeebe:input source="=&#34;ready&#34;" target="gateOutcome" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>wg_ready</bpmn:incoming>
@@ -103,7 +103,7 @@
     <bpmn:endEvent id="gate-abandoned" name="Abandoned">
       <bpmn:extensionElements>
         <zeebe:ioMapping>
-          <zeebe:output source="=&#34;abandoned&#34;" target="gateOutcome" />
+          <zeebe:input source="=&#34;abandoned&#34;" target="gateOutcome" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>wg_abandon</bpmn:incoming>
