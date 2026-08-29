@@ -95,6 +95,20 @@
         }
       },
       "pollMs": 5000
+    },
+    {
+      "table": "delivery_units",
+      "keyField": "process_key",
+      "statusField": "dispatch_status",
+      "activeStatuses": [
+        "dispatched"
+      ],
+      "onTerminated": {
+        "set": {
+          "dispatch_status": "settled"
+        }
+      },
+      "pollMs": 5000
     }
   ],
   "workers": [
