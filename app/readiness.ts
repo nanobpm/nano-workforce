@@ -56,11 +56,16 @@ export type OnTimeout = "escalate" | "fail" | "continue";
 /** Backoff policy between poll attempts. */
 export type Backoff = "fixed" | "exponential";
 
-const PROBE_KINDS: readonly ProbeKind[] = ["http", "command", "npm", "github-check", "capability", "pr", "epic"];
-const ON_TIMEOUTS: readonly OnTimeout[] = ["escalate", "fail", "continue"];
-const BACKOFFS: readonly Backoff[] = ["fixed", "exponential"];
-const PR_CONDITIONS: readonly PrCondition[] = ["ready", "merged", "mergeable", "checks-green"];
-const EPIC_CONDITIONS: readonly EpicCondition[] = ["merged", "done"];
+// The CLOSED per-field vocabularies `parseProbe` validates against — the single runtime source of
+// truth for "which probe kinds / onTimeout options / conditions are legal". Exported so the
+// delivery-graph vocabulary surface (`app/deliveryGraphVocabulary.ts`, S3/#609) DERIVES its
+// structured description from these exact arrays and a drift test fails the build if a kind/condition
+// is added here without a matching vocabulary entry (AGENTS.md: no drift surfaces).
+export const PROBE_KINDS: readonly ProbeKind[] = ["http", "command", "npm", "github-check", "capability", "pr", "epic"];
+export const ON_TIMEOUTS: readonly OnTimeout[] = ["escalate", "fail", "continue"];
+export const BACKOFFS: readonly Backoff[] = ["fixed", "exponential"];
+export const PR_CONDITIONS: readonly PrCondition[] = ["ready", "merged", "mergeable", "checks-green"];
+export const EPIC_CONDITIONS: readonly EpicCondition[] = ["merged", "done"];
 
 /** The per-kind readiness predicate. Every field is optional; each kind reads only the ones it
  * understands and applies a sensible default when a field is absent (see the matchers below). */

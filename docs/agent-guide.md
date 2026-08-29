@@ -412,6 +412,15 @@ PR #202 → a human does a manual OTP publish → PR #303 consumes the just-publ
 **delivery graph** ([ADR 0005](https://github.com/nanobpm/nano-workforce/blob/main/docs/adr/0005-agent-authored-delivery-graphs.md))
 lets you compose exactly that as **data** and hand it to a generic runner.
 
+> **Discover the vocabulary from the surface.** Everything this section describes — the four
+> node kinds and their body contracts, every `wait` probe kind and **what it observes**, the
+> real-vs-stub connector targets, the `onTimeout` options, the poll-budget trap, and the
+> fact-threading rules — is also available as **structured JSON** from the read tool
+> **`getDeliveryGraphVocabulary`** (`GET __BASE__/delivery-graph/vocabulary`). It is derived
+> from the implementing code (a drift test fails the build if the two disagree), so prose and
+> data can never drift. Fetch it to author against the live vocabulary; this section is the
+> narrative companion.
+
 You author the graph as **JSON — never BPMN or code** (Decision 1: the agent must never
 author the executable artifact; the closed node vocabulary is the trust boundary). Your
 surface ends at **propose → compile → stage**: a single `compile` door validates the JSON,
@@ -741,3 +750,9 @@ Semantics:
   B before its dependency merged. Size `timeoutMs` to how long the epic realistically takes.
 - On a fully-merged match it binds **`prCount`** (how many slice PRs the epic landed) as an
   output fact, so a downstream node can consume it (parity with the `pr` kind's `mergedSha`).
+- **It also gates a single-PR *feature run*, not just a plan-fanout epic.** The gate resolves the
+  lineage thread whose **`rootRequestKey`** matches `target` **regardless of the thread's `kind`**
+  (`feature` | `epic` | `pr` | `delivery`), and `app/lineage.ts` lands a *feature* thread on
+  `stage:"merged"` once its PR merges. So `wait[epic]` targeting a feature/epic **root issue**
+  observes that thread's aggregate frontier and releases on `stage:"merged" && active:false` either
+  way — see `getDeliveryGraphVocabulary` (the `epic` probe entry) for the structured contract.

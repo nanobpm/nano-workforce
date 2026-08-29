@@ -4064,6 +4064,262 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorBody"
+  /delivery-graph/vocabulary:
+    get:
+      operationId: getDeliveryGraphVocabulary
+      summary: The closed delivery-graph vocabulary + wait-probe semantics as structured JSON (ADR 0005).
+      description: >-
+        Read tool (projected onto the MCP surface like `getAgentInstructions`). Returns the CLOSED
+        delivery-graph vocabulary and the non-obvious wait/poll/fact-threading semantics as structured
+        JSON, so you can discover them from the surface instead of reading source. Covers: the four node
+        kinds (`agent`/`wait`/`human`/`connector`) with their per-kind body contracts; every wait probe
+        kind with its `match` fields and — crucially — WHAT it OBSERVES (e.g. `epic` resolves a lineage
+        thread by `rootRequestKey` REGARDLESS of the thread's kind, so it gates plan-fanout epics AND
+        single-PR feature runs alike, ready on `stage:"merged" && active:false`); which connector targets
+        are real (`converge`/`converge-merge`/`merge-main`) vs. forward-declared stubs; the `onTimeout`
+        options; the poll-budget rule (always set a realistic `poll.timeoutMs` on merge/epic gates — the
+        30-minute default is a trap); and the edge/fact-threading rules (a `node.fact` must be threaded by
+        an edge to every consumer, else `unbound-pr`). Derived from the implementing code (a drift test
+        fails the build if a probe kind / connector target is added without a vocabulary entry). Pure,
+        read-only, idempotent — no side effects. Pairs with `compileDeliveryGraph`/`previewDeliveryGraph`:
+        call this first to learn the vocabulary, then author a `DeliveryGraph` and compile it.
+      security:
+        - hookSecret: []
+        - {}
+      responses:
+        "200":
+          description: The full delivery-graph vocabulary.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                description: The closed delivery-graph vocabulary + wait-probe semantics, derived from the compiler/runner code.
+                required:
+                  - adr
+                  - summary
+                  - nodeKinds
+                  - factTypes
+                  - guardScalarTypes
+                  - waitProbeKinds
+                  - connectorTargets
+                  - onTimeout
+                  - pollBudget
+                  - factThreading
+                properties:
+                  adr:
+                    type: string
+                    description: The governing ADR (agent-authored delivery graphs).
+                  summary:
+                    type: string
+                    description: One-paragraph orientation on the graph shape and the propose→compile→stage surface.
+                  nodeKinds:
+                    type: array
+                    description: The closed node-kind allowlist with each kind's config key and body contract.
+                    items:
+                      type: object
+                      additionalProperties: false
+                      required: [kind, configKey, requiredFields, optionalFields, sideEffecting, mayEmit, summary]
+                      properties:
+                        kind:
+                          type: string
+                          description: The node kind (one of agent | wait | human | connector).
+                        configKey:
+                          type: string
+                          description: The per-kind config object key the node must carry.
+                        requiredFields:
+                          type: array
+                          items: { type: string }
+                          description: Required non-empty fields inside the per-kind config.
+                        optionalFields:
+                          type: array
+                          items: { type: string }
+                          description: Optional fields inside the per-kind config.
+                        sideEffecting:
+                          type: boolean
+                          description: Whether the node performs a side effect (agent/connector) vs. read-only (wait/human).
+                        mayEmit:
+                          type: boolean
+                          description: Whether the node may declare typed emits.
+                        summary:
+                          type: string
+                          description: The body contract / semantics of the kind.
+                  factTypes:
+                    type: array
+                    items: { type: string }
+                    description: The closed emitted-fact type allowlist.
+                  guardScalarTypes:
+                    type: array
+                    items: { type: string }
+                    description: The scalar fact types an edge `when` guard may reference.
+                  waitProbeKinds:
+                    type: array
+                    description: Every wait probe kind, its match fields, and what it observes / when it is ready.
+                    items:
+                      type: object
+                      additionalProperties: false
+                      required: [kind, target, matchFields, observes, ready]
+                      properties:
+                        kind:
+                          type: string
+                          description: The probe kind (http | command | npm | github-check | capability | pr | epic).
+                        target:
+                          type: string
+                          description: What the probe's `target` names.
+                        matchFields:
+                          type: array
+                          items: { type: string }
+                          description: The `match` fields this kind reads.
+                        conditions:
+                          type: array
+                          items: { type: string }
+                          description: The closed condition set for pr/epic kinds (else absent).
+                        observes:
+                          type: string
+                          description: The read that decides readiness (what the probe actually observes).
+                        ready:
+                          type: string
+                          description: The condition under which the probe reports ready.
+                        binds:
+                          type: array
+                          items: { type: string }
+                          description: Output facts the probe binds on a ready match.
+                  connectorTargets:
+                    type: array
+                    description: Which connector targets are real (converge-enrollment) vs. forward-declared stubs.
+                    items:
+                      type: object
+                      additionalProperties: false
+                      required: [target, status, summary]
+                      properties:
+                        target:
+                          type: string
+                          description: The connector target literal (or a sentinel for any other target).
+                        status:
+                          type: string
+                          enum: [real, forward-declared]
+                          description: real ⇒ dispatches a real side effect; forward-declared ⇒ a no-op stub.
+                        convergeOnlyDefault:
+                          type: boolean
+                          description: The default `convergeOnly` for a real converge target.
+                        summary:
+                          type: string
+                          description: What the target does.
+                  onTimeout:
+                    type: array
+                    description: The `onTimeout` options for a bounded wait and what each does.
+                    items:
+                      type: object
+                      additionalProperties: false
+                      required: [value, meaning]
+                      properties:
+                        value: { type: string }
+                        meaning: { type: string }
+                  pollBudget:
+                    type: object
+                    additionalProperties: false
+                    required: [defaultTimeoutMs, defaultTimeoutIso, defaultEveryMs, rule]
+                    description: The poll-budget defaults and the "always set poll.timeoutMs on merge/epic gates" rule.
+                    properties:
+                      defaultTimeoutMs: { type: number }
+                      defaultTimeoutIso: { type: string }
+                      defaultEveryMs: { type: number }
+                      rule: { type: string }
+                  factThreading:
+                    type: object
+                    additionalProperties: false
+                    required: [rule, details]
+                    description: The edge/fact-threading rules — a node.fact reaches a consumer only via an edge.
+                    properties:
+                      rule: { type: string }
+                      details:
+                        type: array
+                        items: { type: string }
+                  guideSection:
+                    type: string
+                    description: The operator-guide section this data mirrors (docs/agent-guide.md §9).
+                example:
+                  adr: "ADR 0005 — agent-authored delivery graphs"
+                  summary: "A delivery graph is a JSON DAG an agent authors as DATA; the surface ends at propose → compile → stage."
+                  nodeKinds:
+                    - kind: agent
+                      configKey: agent
+                      requiredFields: [jobType]
+                      optionalFields: [prompt, converge, merge]
+                      sideEffecting: true
+                      mayEmit: true
+                      summary: "A worker runs an agent job type; an agent that opens a PR emits it as a `pr` fact."
+                    - kind: wait
+                      configKey: wait
+                      requiredFields: [kind, target]
+                      optionalFields: [match, poll, onTimeout, credentialEnv]
+                      sideEffecting: false
+                      mayEmit: true
+                      summary: "A durable, bounded, read-only readiness probe (a ReadinessProbe verbatim)."
+                    - kind: connector
+                      configKey: connector
+                      requiredFields: [target]
+                      optionalFields: [dedupeKey, payload]
+                      sideEffecting: true
+                      mayEmit: true
+                      summary: "An automated outbound action; payload for a converge target is { pr, convergeOnly?, dependsOn? }."
+                  factTypes: [string, number, boolean, artifact, version, url, pr]
+                  guardScalarTypes: [string, number, boolean]
+                  waitProbeKinds:
+                    - kind: pr
+                      target: "an owner/repo#N PR (or a <node>.pr fact reference)"
+                      matchFields: [prState]
+                      conditions: [ready, merged, mergeable, checks-green]
+                      observes: "the live GitHub state of one in-flight PR; only OBSERVES, level-triggered."
+                      ready: "the PR reaches match.prState (default merged)."
+                      binds: [mergedSha]
+                    - kind: epic
+                      target: "the epic's durable planKey (owner/repo#NN, the epic issue)"
+                      matchFields: [epicState]
+                      conditions: [merged, done]
+                      observes: "the app's lineage read-model, resolved by rootRequestKey REGARDLESS of thread kind (feature | epic | pr | delivery) — so it gates a single-PR FEATURE RUN just as well as a plan-fanout epic."
+                      ready: 'the lineage thread reaches stage:"merged" && active:false (every opened slice/PR landed).'
+                      binds: [prCount]
+                  connectorTargets:
+                    - target: converge
+                      status: real
+                      convergeOnlyDefault: true
+                      summary: "Converge-only: drive review convergence and stop at converged."
+                    - target: converge-merge
+                      status: real
+                      convergeOnlyDefault: false
+                      summary: "Unit-level land: converge AND merge onto the PR's own base branch."
+                    - target: merge-main
+                      status: real
+                      convergeOnlyDefault: false
+                      summary: "Graph-level top-level land onto main (two-level merge)."
+                    - target: "<any other target>"
+                      status: forward-declared
+                      summary: "Forward-declared stub — returns a deterministic acknowledgement, fires no real I/O."
+                  onTimeout:
+                    - value: escalate
+                      meaning: "park a human escalation when the bounded wait elapses."
+                    - value: fail
+                      meaning: "terminate the gate as failed (NOT yet supported on a wait node — rejected by the compiler)."
+                    - value: continue
+                      meaning: "proceed as if ready when the wait elapses (a soft gate)."
+                  pollBudget:
+                    defaultTimeoutMs: 1800000
+                    defaultTimeoutIso: PT30M
+                    defaultEveryMs: 15000
+                    rule: "An omitted poll.timeoutMs inherits the 30-minute default — a trap for wait[pr, merged]/wait[epic] which wait hours/days. Always set poll.timeoutMs explicitly on a merge/epic gate."
+                  factThreading:
+                    rule: "A node's emitted fact reaches a consumer ONLY via an edge (<nodeId>.<fact>); an unthreaded reference is rejected (unbound-pr)."
+                    details:
+                      - "The referenced fact must be declared in the producer's emits[] with the right type."
+                      - "A connector payload may omit pr to auto-bind the single incoming pr fact."
+                  guideSection: "docs/agent-guide.md §9 (Author and run a delivery graph)"
+        "401":
+          description: Missing/invalid shared secret (only when NANO_PR_WEBHOOK_SECRET is set).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
   /actions/delivery-graph/library/save:
     post:
       operationId: saveToLibrary
