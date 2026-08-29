@@ -342,6 +342,28 @@ test("a cell node may carry first-class `converge`/`merge` policy (S5)", () => {
   );
 });
 
+test("converge-merge-type: `agent.converge`/`agent.merge` must be boolean when present (S5 trust boundary)", () => {
+  // `validateDeliveryGraph` is the trust boundary before `as DeliveryGraph`, so a graph that bypassed
+  // OpenAPI validation must not be able to smuggle a non-boolean `converge`/`merge` past the S5 policy
+  // checks (which compare `=== true`) — a truthy `"true"`/`1` would silently evade merge-requires-converge.
+  for (const bad of ["true", 1, 0, null] as const) {
+    const cErr = hasCode(
+      validateDeliveryGraph({
+        nodes: [{ id: "a", kind: "agent", agent: { jobType: "senior:feature", converge: bad } }],
+      }),
+      "converge-merge-type",
+    );
+    assertEquals(cErr.path, "nodes[0].agent.converge");
+    const mErr = hasCode(
+      validateDeliveryGraph({
+        nodes: [{ id: "a", kind: "agent", agent: { jobType: "senior:feature", converge: true, merge: bad } }],
+      }),
+      "converge-merge-type",
+    );
+    assertEquals(mErr.path, "nodes[0].agent.merge");
+  }
+});
+
 test("merge-requires-converge: `agent.merge` without `agent.converge` is rejected (S5 edge-gate)", () => {
   const errors = validateDeliveryGraph({
     nodes: [{ id: "a", kind: "agent", agent: { jobType: "senior:feature", merge: true } }],

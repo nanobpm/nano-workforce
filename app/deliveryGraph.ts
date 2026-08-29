@@ -93,6 +93,7 @@ export type DeliveryGraphErrorCode =
   | "unsupported-on-timeout"
   | "raw-converge-node"
   | "merge-requires-converge"
+  | "converge-merge-type"
   | "unbound-pr";
 
 /** A single semantic validation failure. `path` is a JSON-path-qualified pointer at the offending
@@ -395,6 +396,25 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
               "(ADR 0006 §3 / S5)",
             code: "raw-converge-node",
           });
+        }
+        // S5 trust boundary: `validateDeliveryGraph` is the gate before `dispatchDeliveryGraphRun`
+        // narrows `graph: unknown` with `as DeliveryGraph`, so a graph that bypassed OpenAPI validation
+        // must not smuggle a non-boolean `converge`/`merge` past the policy checks below (which compare
+        // `=== true`). A truthy `"true"`/`1` would otherwise silently evade merge-requires-converge and
+        // the S5 cell policy. Reject any present-but-non-boolean value path-qualified.
+        if (kind === "agent") {
+          for (const flag of ["converge", "merge"] as const) {
+            const value = config[flag];
+            if (value !== undefined && typeof value !== "boolean") {
+              errors.push({
+                path: `${path}.${configKey}.${flag}`,
+                message:
+                  `\`agent.${flag}\`, when present, must be a boolean — got ${JSON.stringify(value)} ` +
+                  "(the S5 cell policy is edge-gated on strict `true`/`false`, not a truthy value)",
+                code: "converge-merge-type",
+              });
+            }
+          }
         }
         // S5 edge-gate: `merge` presupposes `converge`. Landing a PR you have not driven to green is
         // incoherent (the two are separable phases, but merge REQUIRES converge). Reject `merge: true`
