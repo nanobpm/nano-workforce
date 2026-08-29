@@ -1,3 +1,9 @@
+## [0.153.0](https://github.com/nanobpm/nano-workforce/compare/v0.152.0...v0.153.0) (2026-08-29)
+
+### Features
+
+* **onboarding:** install-script phase 2 — install, scaffold, configure & run the Workforce app ([#598](https://github.com/nanobpm/nano-workforce/issues/598)) ([e86f9ca](https://github.com/nanobpm/nano-workforce/commit/e86f9ca292998481e1fd194859832e9040bf0b51)), closes [nanobpm/nano-workforce#583](https://github.com/nanobpm/nano-workforce/issues/583) [Magikcraft/nano-bpm#1036](https://github.com/Magikcraft/nano-bpm/issues/1036) [#583](https://github.com/nanobpm/nano-workforce/issues/583)
+
 ## [0.152.0](https://github.com/nanobpm/nano-workforce/compare/v0.151.1...v0.152.0) (2026-08-28)
 
 ### Features
