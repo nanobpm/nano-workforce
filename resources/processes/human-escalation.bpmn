@@ -1,0 +1,133 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI" xmlns:dc="http://www.omg.org/spec/DD/20100524/DC" xmlns:di="http://www.omg.org/spec/DD/20100524/DI" xmlns:zeebe="http://camunda.org/schema/zeebe/1.0" xmlns:nano="https://nanobpm.io/schema/shapes/1.0" id="Definitions_nano_workforce_human_escalation" targetNamespace="http://nanobpm.io/nano-workforce">
+  <bpmn:process id="human-escalation" name="Human escalation cell" isExecutable="true">
+    <bpmn:startEvent id="Start" name="Escalated">
+      <bpmn:outgoing>he_toTask</bpmn:outgoing>
+    </bpmn:startEvent>
+    <bpmn:userTask id="escalation" name="Task escalation (human)">
+      <bpmn:extensionElements>
+        <zeebe:formDefinition formId="feature-escalation" />
+        <zeebe:userTask />
+        <zeebe:assignmentDefinition candidateGroups="operators" assignee="=if (is defined(escalationAssignee) and escalationAssignee != null and trim(string(escalationAssignee)) != &#34;&#34;) then escalationAssignee else null" />
+      </bpmn:extensionElements>
+      <bpmn:incoming>he_toTask</bpmn:incoming>
+      <bpmn:outgoing>he_toAnswerGw</bpmn:outgoing>
+    </bpmn:userTask>
+    <bpmn:boundaryEvent id="be_he_sla" name="SLA elapsed" attachedToRef="escalation">
+      <bpmn:outgoing>he_sla</bpmn:outgoing>
+      <bpmn:timerEventDefinition id="ted_he_sla">
+        <bpmn:timeDuration xsi:type="bpmn:tFormalExpression">=escalationSlaTimeout</bpmn:timeDuration>
+      </bpmn:timerEventDefinition>
+    </bpmn:boundaryEvent>
+    <bpmn:exclusiveGateway id="he_gw_answer" name="answer?" default="he_abandon">
+      <bpmn:incoming>he_toAnswerGw</bpmn:incoming>
+      <bpmn:outgoing>he_answer</bpmn:outgoing>
+      <bpmn:outgoing>he_abandon</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:endEvent id="he_end_answered" name="Answered">
+      <bpmn:extensionElements>
+        <zeebe:ioMapping>
+          <zeebe:output source="=&#34;answer&#34;" target="resolution" />
+        </zeebe:ioMapping>
+      </bpmn:extensionElements>
+      <bpmn:incoming>he_answer</bpmn:incoming>
+    </bpmn:endEvent>
+    <bpmn:endEvent id="he_end_abandoned" name="Abandoned">
+      <bpmn:extensionElements>
+        <zeebe:ioMapping>
+          <zeebe:output source="=&#34;abandon&#34;" target="resolution" />
+        </zeebe:ioMapping>
+      </bpmn:extensionElements>
+      <bpmn:incoming>he_abandon</bpmn:incoming>
+    </bpmn:endEvent>
+    <bpmn:endEvent id="he_end_sla" name="SLA auto-abandon">
+      <bpmn:extensionElements>
+        <zeebe:ioMapping>
+          <zeebe:output source="=&#34;abandon&#34;" target="resolution" />
+        </zeebe:ioMapping>
+      </bpmn:extensionElements>
+      <bpmn:incoming>he_sla</bpmn:incoming>
+    </bpmn:endEvent>
+    <bpmn:sequenceFlow id="he_toTask" sourceRef="Start" targetRef="escalation" />
+    <bpmn:sequenceFlow id="he_toAnswerGw" sourceRef="escalation" targetRef="he_gw_answer" />
+    <bpmn:sequenceFlow id="he_answer" name="answer" sourceRef="he_gw_answer" targetRef="he_end_answered">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=resolution = "answer"</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="he_abandon" name="abandon" sourceRef="he_gw_answer" targetRef="he_end_abandoned" />
+    <bpmn:sequenceFlow id="he_sla" name="SLA auto-abandon" sourceRef="be_he_sla" targetRef="he_end_sla" />
+  </bpmn:process>
+  <bpmndi:BPMNDiagram id="BPMNDiagram_human-escalation">
+    <bpmndi:BPMNPlane id="BPMNPlane_human-escalation" bpmnElement="human-escalation">
+      <bpmndi:BPMNShape id="BPMNShape_Start" bpmnElement="Start">
+        <dc:Bounds x="80" y="102" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="64" y="143" width="69" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_escalation" bpmnElement="escalation">
+        <dc:Bounds x="216" y="80" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_he_gw_answer" bpmnElement="he_gw_answer" isMarkerVisible="true">
+        <dc:Bounds x="552" y="95" width="50" height="50" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="549" y="76" width="56" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_he_end_answered" bpmnElement="he_end_answered">
+        <dc:Bounds x="702" y="262" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="688" y="303" width="65" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_he_end_abandoned" bpmnElement="he_end_abandoned">
+        <dc:Bounds x="702" y="102" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="686" y="143" width="69" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_he_end_sla" bpmnElement="he_end_sla">
+        <dc:Bounds x="416" y="262" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="390" y="303" width="88" height="28" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_be_he_sla" bpmnElement="be_he_sla">
+        <dc:Bounds x="248" y="142" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="164" y="183" width="84" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNEdge id="BPMNEdge_he_toTask" bpmnElement="he_toTask">
+        <di:waypoint x="116" y="120" />
+        <di:waypoint x="216" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_he_toAnswerGw" bpmnElement="he_toAnswerGw">
+        <di:waypoint x="316" y="120" />
+        <di:waypoint x="552" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_he_abandon" bpmnElement="he_abandon">
+        <di:waypoint x="602" y="120" />
+        <di:waypoint x="702" y="120" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="626" y="98" width="53" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_he_answer" bpmnElement="he_answer">
+        <di:waypoint x="577" y="145" />
+        <di:waypoint x="577" y="280" />
+        <di:waypoint x="702" y="280" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="582" y="206" width="49" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_he_sla" bpmnElement="he_sla">
+        <di:waypoint x="266" y="178" />
+        <di:waypoint x="266" y="280" />
+        <di:waypoint x="416" y="280" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="271" y="215" width="88" height="28" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+    </bpmndi:BPMNPlane>
+  </bpmndi:BPMNDiagram>
+</bpmn:definitions>

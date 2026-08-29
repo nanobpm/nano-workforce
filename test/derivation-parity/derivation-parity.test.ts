@@ -51,11 +51,16 @@ test("every corpus model is either ported or has a documented blocker", () => {
     "merge-loop",
     "plan-fanout",
     "delivery-human",
+    "implement-cell",
+    "converge-cell",
+    "merge-cell",
+    "wait-gate",
+    "human-escalation",
   ];
   assertEquals(
     PORTS.map((p) => p.model),
     expected,
-    "PORTS must cover all eight goldens in the epic's authoring order",
+    "PORTS must cover all corpus goldens in the epic's authoring order",
   );
   for (const port of PORTS) {
     assert(

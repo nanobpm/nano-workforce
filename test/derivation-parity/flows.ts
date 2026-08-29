@@ -187,4 +187,32 @@ export const PORTS: readonly PortEntry[] = [
     model: "delivery-human",
     blockedReason: `${MULTI_START_END_BLOCK} (delivery-human: 1 start, 2 ends)`,
   },
+  {
+    model: "implement-cell",
+    blockedReason:
+      "blocked (call activity + multi-end): the published @nanobpm/workflow " +
+      "builder emits neither a `callActivity` (this cell delegates escalation to " +
+      "`human-escalation` via `zeebe:calledElement`) nor multiple top-level ends " +
+      "(implement-cell: 1 start, 1 end but a call-activity body); a shared ADR 0006 " +
+      "S4 fine-grained cell composed into feature/plan-fanout by callActivity.",
+  },
+  {
+    model: "converge-cell",
+    blockedReason:
+      "blocked (shared S4 cell): a hand-authored ADR 0006 S4 fine-grained cell " +
+      "(converge handoff) composed into feature by callActivity; not yet ported to " +
+      "a @nanobpm/workflow `defineFlow`.",
+  },
+  {
+    model: "merge-cell",
+    blockedReason: `${MULTI_START_END_BLOCK} (merge-cell: 1 start, 2 ends)`,
+  },
+  {
+    model: "wait-gate",
+    blockedReason: `${MULTI_START_END_BLOCK} (wait-gate: 1 start, 2 ends)`,
+  },
+  {
+    model: "human-escalation",
+    blockedReason: `${MULTI_START_END_BLOCK} (human-escalation: 1 start, 3 ends)`,
+  },
 ];
