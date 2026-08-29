@@ -90,8 +90,8 @@ export function mergeLevelForTarget(target: string): MergeLevel | null {
  * the supplied `baseBranch` (the epic/graph integration branch the unit PR targets); a `graph` merge
  * lands on `main`. The two-level invariant in one place: a unit NEVER lands on `main` directly, and
  * the graph's top-level merge ALWAYS targets `main`. `baseBranch` is required for a unit level (its
- * whole point is "not main"); an absent/empty base for a unit is a caller error surfaced as a throw so
- * a unit can never silently collapse onto `main`. */
+ * whole point is "not main"); an absent/empty base for a unit — or an explicit `main` base — is a
+ * caller error surfaced as a throw so a unit can never silently collapse onto `main`. */
 export const GRAPH_MERGE_BRANCH = "main";
 
 export function mergeBranchForLevel(level: MergeLevel, opts: { baseBranch?: string | null }): string {
@@ -101,6 +101,12 @@ export function mergeBranchForLevel(level: MergeLevel, opts: { baseBranch?: stri
     throw new Error(
       "unit-level merge requires a base branch (ADR 0003 two-level merge: a unit lands onto its " +
         "epic/graph base branch, never `main` directly)",
+    );
+  }
+  if (base === GRAPH_MERGE_BRANCH) {
+    throw new Error(
+      "unit-level merge must not target `main` directly (ADR 0003 two-level merge: a unit lands onto " +
+        "its epic/graph base branch; the graph's top-level `merge-main` is the only path to `main`)",
     );
   }
   return base;

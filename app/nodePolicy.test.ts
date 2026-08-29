@@ -76,3 +76,9 @@ test("mergeBranchForLevel: a unit can NEVER silently collapse onto main — miss
   assertThrows(() => mergeBranchForLevel("unit", { baseBranch: "   " }));
   assertThrows(() => mergeBranchForLevel("unit", {}));
 });
+
+test("mergeBranchForLevel: a unit can NEVER target main directly — explicit main base throws", () => {
+  assertThrows(() => mergeBranchForLevel("unit", { baseBranch: "main" }));
+  assertThrows(() => mergeBranchForLevel("unit", { baseBranch: "  main  " }));
+  assertThrows(() => mergeBranchForLevel("unit", { baseBranch: GRAPH_MERGE_BRANCH }));
+});
