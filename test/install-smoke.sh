@@ -109,7 +109,7 @@ assert_contains "s5: default model => bare adapter command, empty --model" \
 
 # --- Scenario G1: token in env is usable, gh absent → app-fine caveat -------
 OUT=$(NANO_INSTALL_HARNESSES_OVERRIDE="copilot" NANO_INSTALL_GH_STATE="missing" \
-  NANO_INSTALL_TOKEN_STATE="ok" GITHUB_TOKEN="ghp_dummy" \
+  NANO_INSTALL_TOKEN_STATE="ok" GITHUB_TOKEN="fake-usable-token" \
   sh "$SCRIPT" --harness copilot:gpt-5.4:1 --yes --dry-run 2>&1)
 assert_contains "sG1: token detected treated as usable" \
   "GitHub token detected in the environment" "$OUT"
@@ -120,7 +120,7 @@ assert_contains "sG1: token+no-gh caveat about harnesses shelling out to gh" \
 # A non-empty token is not trusted blindly: an expired/revoked/underscoped
 # token is the exact late failure this preflight exists to surface early.
 OUT=$(NANO_INSTALL_HARNESSES_OVERRIDE="copilot" NANO_INSTALL_GH_STATE="missing" \
-  NANO_INSTALL_TOKEN_STATE="bad" GITHUB_TOKEN="ghp_expired" \
+  NANO_INSTALL_TOKEN_STATE="bad" GITHUB_TOKEN="fake-invalid-token" \
   sh "$SCRIPT" --harness copilot:gpt-5.4:1 --yes --dry-run 2>&1)
 assert_contains "sG1b: invalid token reported as failing validation" \
   "failed validation" "$OUT"
@@ -266,11 +266,11 @@ assert_contains "s6b: project name in the run URL" \
   "POST http://localhost:8080/console/api/projects/Fleet/run" "$OUT"
 
 # --- Scenario 6c: GITHUB_TOKEN is redacted in dry-run, never printed --------
-OUT=$(NANO_INSTALL_HARNESSES_OVERRIDE="copilot" GITHUB_TOKEN="ghp_SHOULD_NOT_APPEAR" \
+OUT=$(NANO_INSTALL_HARNESSES_OVERRIDE="copilot" GITHUB_TOKEN="SHOULD-NOT-APPEAR-TOKEN" \
   NANO_INSTALL_TOKEN_STATE="ok" \
   sh "$SCRIPT" --harness copilot:gpt-5.4:1 --yes --dry-run 2>&1)
 assert_contains "s6c: token key present, masked" '"GITHUB_TOKEN":"***"' "$OUT"
-assert_not_contains "s6c: token value never printed" "ghp_SHOULD_NOT_APPEAR" "$OUT"
+assert_not_contains "s6c: token value never printed" "SHOULD-NOT-APPEAR-TOKEN" "$OUT"
 
 # --- Scenario 7: --skip-app runs phase 1 only, emits no console calls -------
 OUT=$(NANO_INSTALL_HARNESSES_OVERRIDE="copilot" \
@@ -413,7 +413,7 @@ CJS
     # newline) must be rejected with a clear error before any JSON config body
     # is emitted, never producing invalid JSON that fails the console API
     # opaquely. The token flows through json_str() unredacted on the live PUT.
-    _ctrl_token="$(printf 'ghp_bad\ntoken')"
+    _ctrl_token="$(printf 'fake-bad\ntoken')"
     export GITHUB_TOKEN="$_ctrl_token"
     run_phase2 happy
     unset GITHUB_TOKEN
