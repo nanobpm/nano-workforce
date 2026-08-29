@@ -1,3 +1,9 @@
+## [0.157.0](https://github.com/nanobpm/nano-workforce/compare/v0.156.0...v0.157.0) (2026-08-29)
+
+### Features
+
+* **cells:** shared implement/converge/merge-cell BPMN + feature converge via callActivity (ADR 0006 S4) ([#603](https://github.com/nanobpm/nano-workforce/issues/603)) ([55a727a](https://github.com/nanobpm/nano-workforce/commit/55a727aae09a026a0b82ec4ebc0c7d8137146bcf)), closes [#591](https://github.com/nanobpm/nano-workforce/issues/591)
+
 ## [0.156.0](https://github.com/nanobpm/nano-workforce/compare/v0.155.0...v0.156.0) (2026-08-29)
 
 ### Features
