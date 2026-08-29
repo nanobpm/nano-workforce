@@ -60,7 +60,7 @@ test("the guide documents the delivery-graph surface (ADR 0005)", async () => {
   // The closed node vocabulary: assert the exact config snippet for each of the four kinds,
   // so the test fails if §9's node-kind table is removed or reworded — not merely if the bare
   // words "agent"/"wait"/"human"/"connector" appear anywhere else in the guide.
-  assert(md.includes("agent: { jobType, prompt? }"), "documents the agent node config");
+  assert(md.includes("agent: { jobType, prompt?, converge?, merge? }"), "documents the agent node config");
   assert(md.includes("wait: <ReadinessProbe>"), "documents the wait node config");
   assert(md.includes("human?: { formKey?, prompt? }"), "documents the human node config");
   assert(md.includes("connector: { target, dedupeKey?, payload? }"), "documents the connector node config");

@@ -132,6 +132,17 @@ test("readConvergeInput: parses pr; convergeOnly defaults from the target; depen
   assertEquals(conv.convergeOnly, true);
 });
 
+test("readConvergeInput: `merge-main` (graph-level two-level merge, S5) parses pr and defaults convergeOnly false", () => {
+  // The graph-level top-level enrollment target drives the merge loop like `converge-merge`,
+  // so its worker-level `readConvergeInput` default must also be `convergeOnly=false`.
+  const mm = readConvergeInput("merge-main", { pr: "owner/repo#7" }, null);
+  assertEquals(mm.parsed.prKey, "owner/repo#7");
+  assertEquals(mm.convergeOnly, false);
+  assertEquals(mm.dependsOn, []);
+  // An explicit payload override still wins over the target default.
+  assertEquals(readConvergeInput("merge-main", { pr: "owner/repo#7", convergeOnly: true }, null).convergeOnly, true);
+});
+
 test("readConvergeInput: an explicit payload.convergeOnly overrides the target default; dependsOn threads through", () => {
   const r = readConvergeInput("converge-merge", { pr: "owner/repo#7", convergeOnly: true, dependsOn: ["owner/repo#5", 42] as unknown as string[] }, null);
   assertEquals(r.convergeOnly, true, "the explicit boolean wins over the target default");

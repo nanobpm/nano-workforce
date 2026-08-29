@@ -20,6 +20,7 @@
 // caller can point the author straight at the offending input.
 
 import { isConvergeTarget } from "./convergeTargets.ts";
+import { isRawConvergeMergeJobType, NODE_COMPLETION_POLICIES } from "./nodePolicy.ts";
 
 /** The CLOSED node-kind allowlist (ADR 0005 Decision 2) — the trust boundary. Extensible only by a
  * deliberate ADR/PR (add the openapi variant + a case here), never by a graph author. Kept as the
@@ -90,6 +91,9 @@ export type DeliveryGraphErrorCode =
   | "non-exhaustive-split"
   | "exclusive-merge-parity"
   | "unsupported-on-timeout"
+  | "raw-converge-node"
+  | "merge-requires-converge"
+  | "converge-merge-type"
   | "unbound-pr";
 
 /** A single semantic validation failure. `path` is a JSON-path-qualified pointer at the offending
@@ -375,6 +379,53 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
               "`onTimeout: fail` on a `wait` node is not yet supported (blocked on engine terminate-end " +
               "execution, Magikcraft/nano-bpm#978); use `escalate` (default) or `continue`",
             code: "unsupported-on-timeout",
+          });
+        }
+        // S5 (ADR 0006 §3): converge/merge are first-class, edge-gated CELL POLICY, not raw nodes.
+        // A raw converge/merge agent job (`senior:converge`, `senior:merge`, or a bare `converge`/
+        // `merge` verb) is retired as user-facing vocabulary — reject it at compile so "a raw converge
+        // node is not expressible" (issue #592). The author expresses convergence/landing via the
+        // cell's `converge?`/`merge?` policy instead. `senior:trial-merge` (the merge-cell's internal
+        // trial body) and every other verb are unaffected (exact-verb match).
+        if (kind === "agent" && typeof config.jobType === "string" && isRawConvergeMergeJobType(config.jobType)) {
+          errors.push({
+            path: `${path}.${configKey}.jobType`,
+            message:
+              `raw converge/merge agent job "${config.jobType}" is not expressible — converge and merge ` +
+              "are first-class cell policy (set `agent.converge`/`agent.merge`), not a raw agent node " +
+              "(ADR 0006 §3 / S5)",
+            code: "raw-converge-node",
+          });
+        }
+        // S5 trust boundary: `validateDeliveryGraph` is the gate before `dispatchDeliveryGraphRun`
+        // narrows `graph: unknown` with `as DeliveryGraph`, so a graph that bypassed OpenAPI validation
+        // must not smuggle a non-boolean `converge`/`merge` past the policy checks below (which compare
+        // `=== true`). A truthy `"true"`/`1` would otherwise silently evade merge-requires-converge and
+        // the S5 cell policy. Reject any present-but-non-boolean value path-qualified.
+        if (kind === "agent") {
+          for (const flag of NODE_COMPLETION_POLICIES) {
+            const value = config[flag];
+            if (value !== undefined && typeof value !== "boolean") {
+              errors.push({
+                path: `${path}.${configKey}.${flag}`,
+                message:
+                  `\`agent.${flag}\`, when present, must be a boolean — got ${JSON.stringify(value)} ` +
+                  "(the S5 cell policy is edge-gated on strict `true`/`false`, not a truthy value)",
+                code: "converge-merge-type",
+              });
+            }
+          }
+        }
+        // S5 edge-gate: `merge` presupposes `converge`. Landing a PR you have not driven to green is
+        // incoherent (the two are separable phases, but merge REQUIRES converge). Reject `merge: true`
+        // without `converge: true` so the enforced policy can't express "land without converging".
+        if (kind === "agent" && config.merge === true && config.converge !== true) {
+          errors.push({
+            path: `${path}.${configKey}.merge`,
+            message:
+              "`agent.merge` requires `agent.converge` — a PR cannot be landed before it is driven to " +
+              "green (ADR 0006 §3 two separable-but-ordered phases / S5)",
+            code: "merge-requires-converge",
           });
         }
         // #548: register a converge-connector / pr-wait as a PR-binding consumer (pass 4 validates the

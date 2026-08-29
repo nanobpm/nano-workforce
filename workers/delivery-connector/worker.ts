@@ -77,9 +77,9 @@ export function safeStringify(value: unknown): string {
 }
 
 /** Parse + validate the converge connector's payload (`{ pr, convergeOnly?, dependsOn? }`) for a
- * `converge` / `converge-merge` target. `pr` is REQUIRED and must parse to a canonical `owner/repo#N`
+ * `converge` / `converge-merge` / `merge-main` target. `pr` is REQUIRED and must parse to a canonical `owner/repo#N`
  * (fail CLOSED — a converge connector with no target PR is meaningless and could never enroll).
- * `convergeOnly` DEFAULTS from the target (`converge` → review-only `true`; `converge-merge` → drive
+ * `convergeOnly` DEFAULTS from the target (`converge` → review-only `true`; `converge-merge`/`merge-main` → drive
  * the merge loop `false`) and may be overridden per-dispatch by an explicit boolean. `dependsOn` is an
  * optional list of PR refs unioned into the enrolled PR's merge-stage dependency set (only non-string
  * entries are dropped; `submitPr` itself ignores unparseable refs). Exported for unit coverage.
