@@ -1,3 +1,9 @@
+## [0.159.1](https://github.com/nanobpm/nano-workforce/compare/v0.159.0...v0.159.1) (2026-08-29)
+
+### Bug Fixes
+
+* **delivery-graph:** read-after-write consistency for listStagedProposals (S2) ([#617](https://github.com/nanobpm/nano-workforce/issues/617)) ([bd0246c](https://github.com/nanobpm/nano-workforce/commit/bd0246cc81241041320aa483b0a0789f5e372031)), closes [#608](https://github.com/nanobpm/nano-workforce/issues/608)
+
 ## [0.159.0](https://github.com/nanobpm/nano-workforce/compare/v0.158.1...v0.159.0) (2026-08-29)
 
 ### Features
