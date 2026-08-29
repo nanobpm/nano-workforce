@@ -1,3 +1,9 @@
+## [0.160.0](https://github.com/nanobpm/nano-workforce/compare/v0.159.1...v0.160.0) (2026-08-29)
+
+### Features
+
+* **delivery-graph:** getDeliveryGraphVocabulary read tool — closed vocabulary + wait semantics as structured data (S3) ([#616](https://github.com/nanobpm/nano-workforce/issues/616)) ([8d3e90a](https://github.com/nanobpm/nano-workforce/commit/8d3e90a294f9ed195c5cc1b7a30cffb1799a053a)), closes [nanobpm/nano-workforce#605](https://github.com/nanobpm/nano-workforce/issues/605) [#609](https://github.com/nanobpm/nano-workforce/issues/609)
+
 ## [0.159.1](https://github.com/nanobpm/nano-workforce/compare/v0.159.0...v0.159.1) (2026-08-29)
 
 ### Bug Fixes
