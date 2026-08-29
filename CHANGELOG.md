@@ -1,3 +1,9 @@
+## [0.158.1](https://github.com/nanobpm/nano-workforce/compare/v0.158.0...v0.158.1) (2026-08-29)
+
+### Bug Fixes
+
+* **cockpit:** derive relay URL from import.meta.url, not location.host ([#600](https://github.com/nanobpm/nano-workforce/issues/600)) ([#612](https://github.com/nanobpm/nano-workforce/issues/612)) ([69923fa](https://github.com/nanobpm/nano-workforce/commit/69923fad688aaa849302be8a1906dd7c6f938c49))
+
 ## [0.158.0](https://github.com/nanobpm/nano-workforce/compare/v0.157.0...v0.158.0) (2026-08-29)
 
 ### Features
