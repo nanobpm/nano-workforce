@@ -1433,20 +1433,26 @@ components:
                 converge:
                   type: boolean
                   description: >-
-                    OPTIONAL first-class CONVERGE policy (ADR 0006 §3 / S5). When true, this cell node
-                    drives its opened PR through the review-convergence loop to green as an enforced,
-                    edge-gated completion policy — replacing the emergent `feature.bpmn` `gw-converge`
-                    gateway and the "un-draft + merge #B" prompt prose a delivery-graph `agent` node
-                    used to smuggle. Converge and merge are SEPARABLE phases; a node may converge
-                    without merging (stop at green and gate the landing behind a downstream node).
+                    OPTIONAL first-class CONVERGE policy (ADR 0006 §3 / S5) — a DECLARED, compiler-
+                    validated completion-policy flag on this cell node. It declares that the node's
+                    opened PR is to be driven through the review-convergence loop to green as an
+                    edge-gated completion policy; this slice adds and validates the flag, with the
+                    delivery-graph execution wiring that consumes it landing in a follow-up slice.
+                    It supersedes (in intent) the emergent `feature.bpmn` `gw-converge` gateway and
+                    the "un-draft + merge #B" prompt prose a delivery-graph `agent` node used to
+                    smuggle. Converge and merge are SEPARABLE phases; a node may converge without
+                    merging (stop at green and gate the landing behind a downstream node).
                 merge:
                   type: boolean
                   description: >-
-                    OPTIONAL first-class MERGE (land) policy (ADR 0006 §3 / S5). When true, the cell
-                    lands its PR. REQUIRES `converge: true` — you cannot land a PR you have not driven
-                    to green (the validator rejects `merge` without `converge`). TWO-LEVEL (ADR 0003
-                    base-branch admission): a UNIT node lands onto its epic/graph base branch, never
-                    `main` directly; the graph's final merge-to-`main` is a separate top-level step.
+                    OPTIONAL first-class MERGE (land) policy (ADR 0006 §3 / S5) — a DECLARED,
+                    compiler-validated flag. When set it declares that the cell lands its PR.
+                    REQUIRES `converge: true` — you cannot land a PR you have not driven to green
+                    (the validator rejects `merge` without `converge`). This slice adds and validates
+                    the flag; the execution wiring that consumes it lands in a follow-up slice.
+                    TWO-LEVEL (ADR 0003 base-branch admission): a UNIT node lands onto its epic/graph
+                    base branch, never `main` directly; the graph's final merge-to-`main` is a
+                    separate top-level step.
                 timeout:
                   type: string
                   pattern: '^[Pp](?!$)(\d+[Yy])?(\d+[Mm])?(\d+[Ww])?(\d+[Dd])?([Tt](?=\d)(\d+[Hh])?(\d+[Mm])?(\d+[Ss])?)?$'

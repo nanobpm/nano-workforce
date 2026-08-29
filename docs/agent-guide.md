@@ -438,7 +438,7 @@ layer schedules, it does not re-implement execution):
 
 | kind | config | what it does | may `emits`? |
 |---|---|---|---|
-| `agent` | `agent: { jobType, prompt?, converge?, merge? }` | a worker runs an agent job type (the fan-out body). **Side-effecting.** First-class **`converge?` / `merge?`** cell policy (§9.4) drives review-convergence / landing (`merge` requires `converge`); a raw `senior:converge`/`senior:merge` job is rejected. | yes |
+| `agent` | `agent: { jobType, prompt?, converge?, merge? }` | a worker runs an agent job type (the fan-out body). **Side-effecting.** First-class **`converge?` / `merge?`** cell policy (§9.4) — a **declared, compiler-validated** completion-policy flag that *declares* review-convergence / landing intent (`merge` requires `converge`); a raw `senior:converge`/`senior:merge` job is rejected. This slice adds + validates the flags; the delivery-graph execution wiring that consumes them lands in a follow-up slice. | yes |
 | `wait` | `wait: <ReadinessProbe>` | a durable, bounded readiness probe — kind ∈ `http`, `command`, `npm`, `github-check`, `capability`, `pr`, `epic`. Read-only. | yes (binds observed facts) |
 | `human` | `human?: { formKey?, prompt? }` | a scheduled user task + form (the Tasks inbox, §3). Blocks dependents, SLA-bounded, answerable by a human **or** an agent. | yes |
 | `connector` | `connector: { target, dedupeKey?, payload? }` | an automated, side-effecting outbound action. Carries a `dedupeKey` (at-least-once safe). Three **real targets** ship today — **`converge`**, **`converge-merge`** (unit → base branch) and **`merge-main`** (graph → `main`, the two-level top-level land) (§9.4); other targets are a forward-declared stub. | yes |

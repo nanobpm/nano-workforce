@@ -33,12 +33,13 @@ export const DELIVERY_CONNECTOR_TASK_TYPE = "pr.delivery-connector";
 export const OUTCOME_CLAIMED = "claimed";
 export const OUTCOME_DELIVERED = "delivered";
 
-/** The two connector `target`s that enroll an agent-opened PR into the app's SHARED convergence /
+/** The three connector `target`s that enroll an agent-opened PR into the app's SHARED convergence /
  * merge doors via `submitPr` (issue #500) — the delivery-graph side of the exact seam the feature
- * cell reuses (`workers/converge-feature`), no duplicated machinery. `converge-merge` drives review
- * convergence AND the merge loop; `converge` stops at `converged` (converge-only). This is the "real
+ * cell reuses (`workers/converge-feature`), no duplicated machinery. `converge-merge` (unit-level) and
+ * `merge-main` (graph-level, ADR 0006 §3 two-level merge) drive review convergence AND the merge loop;
+ * `converge` stops at `converged` (converge-only). This is the "real
  * target dispatch" ADR 0005 deferred as a later slice for the connector I/O surface: a `converge`/
- * `converge-merge` connector IS the "automated, side-effecting outbound action" a connector is
+ * `converge-merge`/`merge-main` connector IS the "automated, side-effecting outbound action" a connector is
  * defined to be. The converge-target vocabulary lives in the dependency-free {@link ./convergeTargets.ts}
  * so the pure validator can share it; re-exported here for the worker's existing import surface. */
 export {
