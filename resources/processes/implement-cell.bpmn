@@ -1,0 +1,136 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI" xmlns:dc="http://www.omg.org/spec/DD/20100524/DC" xmlns:di="http://www.omg.org/spec/DD/20100524/DI" xmlns:zeebe="http://camunda.org/schema/zeebe/1.0" xmlns:nano="https://nanobpm.io/schema/shapes/1.0" id="Definitions_nano_workforce_implement_cell" targetNamespace="http://nanobpm.io/nano-workforce">
+  <bpmn:process id="implement-cell" name="Implement cell" isExecutable="true">
+    <bpmn:startEvent id="Start" name="Task">
+      <bpmn:outgoing>ic_toImplement</bpmn:outgoing>
+    </bpmn:startEvent>
+    <bpmn:serviceTask id="implement-task" name="Implement (agent)">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="senior:feature" />
+        <zeebe:linkedResources>
+          <zeebe:linkedResource resourceId="feature.md" bindingType="latest" resourceType="GenericScript" linkName="prompt" />
+        </zeebe:linkedResources>
+        <zeebe:ioMapping>
+          <zeebe:input source="=&#34;&#10;&#10;---&#10;&#10;&#34; + task.prompt + (if (is defined(baseBranchBrief) and baseBranchBrief != null) then baseBranchBrief else &#34;&#34;) + (if (is defined(blackboardBrief) and blackboardBrief != null) then blackboardBrief else &#34;&#34;) + (if (is defined(resolvedDepsBrief) and resolvedDepsBrief != null) then resolvedDepsBrief else &#34;&#34;) + (if (is defined(resolvedArtifacts) = false or resolvedArtifacts = null or count(resolvedArtifacts[item != null]) = 0) then &#34;&#34; else (&#34;&#10;&#10;---&#10;&#10;**Bound upstream readiness.** Build/install/clone against EXACTLY these resolved published versions (the ones first carrying the awaited capability), and bump the consumer dependency to them — never merely the newest:&#10;&#10;&#34; + string join(resolvedArtifacts[item != null], &#34;&#10;&#34;))) + (if (is defined(customInstructions) = false or customInstructions = null) then &#34;&#34; else &#34;&#10;&#10;---&#10;&#10;## Operator custom instructions&#10;&#10;The operator supplied these instructions for this run — follow them:&#10;&#10;&#34; + customInstructions)" target="appendPrompt" />
+          <zeebe:input source="=if (is defined(transcriptUrlBase)) then transcriptUrlBase else null" target="transcriptUrlBase" />
+          <zeebe:output source="=status" target="status" />
+          <zeebe:output source="=question" target="question" />
+          <zeebe:output source="=if (is defined(transcriptUrl)) then transcriptUrl else null" target="transcriptUrl" />
+        </zeebe:ioMapping>
+      </bpmn:extensionElements>
+      <bpmn:incoming>ic_toImplement</bpmn:incoming>
+      <bpmn:incoming>ic_answerLoop</bpmn:incoming>
+      <bpmn:outgoing>ic_toGw</bpmn:outgoing>
+    </bpmn:serviceTask>
+    <bpmn:exclusiveGateway id="ic_gw" name="clean terminal?" default="ic_escalate">
+      <bpmn:incoming>ic_toGw</bpmn:incoming>
+      <bpmn:outgoing>ic_escalate</bpmn:outgoing>
+      <bpmn:outgoing>ic_done</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:callActivity id="escalate" name="Human escalation">
+      <bpmn:extensionElements>
+        <zeebe:calledElement processId="human-escalation" propagateAllChildVariables="true" />
+      </bpmn:extensionElements>
+      <bpmn:incoming>ic_escalate</bpmn:incoming>
+      <bpmn:outgoing>ic_toAnswerGw</bpmn:outgoing>
+    </bpmn:callActivity>
+    <bpmn:exclusiveGateway id="ic_gw_answer" name="answer?" default="ic_abandon">
+      <bpmn:incoming>ic_toAnswerGw</bpmn:incoming>
+      <bpmn:outgoing>ic_answerLoop</bpmn:outgoing>
+      <bpmn:outgoing>ic_abandon</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:endEvent id="ic_end" name="Task done">
+      <bpmn:incoming>ic_done</bpmn:incoming>
+      <bpmn:incoming>ic_abandon</bpmn:incoming>
+    </bpmn:endEvent>
+    <bpmn:sequenceFlow id="ic_toImplement" sourceRef="Start" targetRef="implement-task" />
+    <bpmn:sequenceFlow id="ic_toGw" sourceRef="implement-task" targetRef="ic_gw" />
+    <bpmn:sequenceFlow id="ic_done" name="done" sourceRef="ic_gw" targetRef="ic_end">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=status = "opened" or status = "blocked" or status = "skipped"</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="ic_escalate" name="escalated" sourceRef="ic_gw" targetRef="escalate" />
+    <bpmn:sequenceFlow id="ic_toAnswerGw" sourceRef="escalate" targetRef="ic_gw_answer" />
+    <bpmn:sequenceFlow id="ic_answerLoop" name="answer" sourceRef="ic_gw_answer" targetRef="implement-task">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=resolution = "answer"</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="ic_abandon" name="abandon" sourceRef="ic_gw_answer" targetRef="ic_end" />
+  </bpmn:process>
+  <bpmndi:BPMNDiagram id="BPMNDiagram_implement-cell">
+    <bpmndi:BPMNPlane id="BPMNPlane_implement-cell" bpmnElement="implement-cell">
+      <bpmndi:BPMNShape id="BPMNShape_Start" bpmnElement="Start">
+        <dc:Bounds x="80" y="102" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="81" y="143" width="34" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_implement-task" bpmnElement="implement-task">
+        <dc:Bounds x="216" y="80" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_ic_gw" bpmnElement="ic_gw" isMarkerVisible="true">
+        <dc:Bounds x="416" y="95" width="50" height="50" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="406" y="62" width="70" height="28" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_escalate" bpmnElement="escalate">
+        <dc:Bounds x="566" y="80" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_ic_gw_answer" bpmnElement="ic_gw_answer" isMarkerVisible="true">
+        <dc:Bounds x="766" y="95" width="50" height="50" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="763" y="76" width="56" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_ic_end" bpmnElement="ic_end">
+        <dc:Bounds x="916" y="102" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="901" y="83" width="66" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNEdge id="BPMNEdge_ic_toImplement" bpmnElement="ic_toImplement">
+        <di:waypoint x="116" y="120" />
+        <di:waypoint x="216" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_ic_toGw" bpmnElement="ic_toGw">
+        <di:waypoint x="316" y="120" />
+        <di:waypoint x="416" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_ic_escalate" bpmnElement="ic_escalate">
+        <di:waypoint x="466" y="120" />
+        <di:waypoint x="566" y="120" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="483" y="128" width="67" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_ic_toAnswerGw" bpmnElement="ic_toAnswerGw">
+        <di:waypoint x="666" y="120" />
+        <di:waypoint x="766" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_ic_abandon" bpmnElement="ic_abandon">
+        <di:waypoint x="816" y="120" />
+        <di:waypoint x="916" y="120" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="840" y="128" width="53" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_ic_done" bpmnElement="ic_done">
+        <di:waypoint x="441" y="145" />
+        <di:waypoint x="441" y="180" />
+        <di:waypoint x="934" y="180" />
+        <di:waypoint x="934" y="138" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="672" y="158" width="32" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_ic_answerLoop" bpmnElement="ic_answerLoop">
+        <di:waypoint x="791" y="145" />
+        <di:waypoint x="791" y="200" />
+        <di:waypoint x="266" y="200" />
+        <di:waypoint x="266" y="160" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="504" y="208" width="49" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+    </bpmndi:BPMNPlane>
+  </bpmndi:BPMNDiagram>
+</bpmn:definitions>

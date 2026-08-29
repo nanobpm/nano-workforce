@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI" xmlns:dc="http://www.omg.org/spec/DD/20100524/DC" xmlns:di="http://www.omg.org/spec/DD/20100524/DI" xmlns:zeebe="http://camunda.org/schema/zeebe/1.0" xmlns:nano="https://nanobpm.io/schema/shapes/1.0" id="Definitions_nano_workforce_converge_cell" targetNamespace="http://nanobpm.io/nano-workforce">
+  <bpmn:process id="converge-cell" name="Converge cell" isExecutable="true">
+    <bpmn:startEvent id="Start" name="PR to converge">
+      <bpmn:outgoing>cc_toConverge</bpmn:outgoing>
+    </bpmn:startEvent>
+    <bpmn:serviceTask id="converge" name="Hand off to convergence loop">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="pr.converge-feature" />
+        <zeebe:properties>
+          <zeebe:property name="io.nanobpm.dataEnvelope.in" value="ConvergeFeatureIn" />
+        </zeebe:properties>
+      </bpmn:extensionElements>
+      <bpmn:incoming>cc_toConverge</bpmn:incoming>
+      <bpmn:outgoing>cc_toEnd</bpmn:outgoing>
+    </bpmn:serviceTask>
+    <bpmn:endEvent id="End" name="Converging">
+      <bpmn:incoming>cc_toEnd</bpmn:incoming>
+    </bpmn:endEvent>
+    <bpmn:sequenceFlow id="cc_toConverge" sourceRef="Start" targetRef="converge" />
+    <bpmn:sequenceFlow id="cc_toEnd" sourceRef="converge" targetRef="End" />
+  </bpmn:process>
+  <bpmndi:BPMNDiagram id="BPMNDiagram_converge-cell">
+    <bpmndi:BPMNPlane id="BPMNPlane_converge-cell" bpmnElement="converge-cell">
+      <bpmndi:BPMNShape id="BPMNShape_Start" bpmnElement="Start">
+        <dc:Bounds x="80" y="102" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="68" y="143" width="60" height="28" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_converge" bpmnElement="converge">
+        <dc:Bounds x="216" y="80" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_End" bpmnElement="End">
+        <dc:Bounds x="416" y="102" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="396" y="143" width="76" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNEdge id="BPMNEdge_cc_toConverge" bpmnElement="cc_toConverge">
+        <di:waypoint x="116" y="120" />
+        <di:waypoint x="216" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_cc_toEnd" bpmnElement="cc_toEnd">
+        <di:waypoint x="316" y="120" />
+        <di:waypoint x="416" y="120" />
+      </bpmndi:BPMNEdge>
+    </bpmndi:BPMNPlane>
+  </bpmndi:BPMNDiagram>
+</bpmn:definitions>

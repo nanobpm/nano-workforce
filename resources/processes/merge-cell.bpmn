@@ -1,0 +1,218 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI" xmlns:dc="http://www.omg.org/spec/DD/20100524/DC" xmlns:di="http://www.omg.org/spec/DD/20100524/DI" xmlns:zeebe="http://camunda.org/schema/zeebe/1.0" xmlns:nano="https://nanobpm.io/schema/shapes/1.0" id="Definitions_nano_workforce_merge_cell" targetNamespace="http://nanobpm.io/nano-workforce">
+  <bpmn:process id="merge-cell" name="Merge cell (trial merge)" isExecutable="true">
+    <bpmn:startEvent id="Start" name="Wave produced">
+      <bpmn:outgoing>mc_toTrial</bpmn:outgoing>
+    </bpmn:startEvent>
+    <bpmn:serviceTask id="trial-merge" name="Trial merge (agent)">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="senior:trial-merge" />
+        <zeebe:linkedResources>
+          <zeebe:linkedResource resourceId="trial-merge.md" bindingType="latest" resourceType="GenericScript" linkName="prompt" />
+        </zeebe:linkedResources>
+        <zeebe:ioMapping>
+          <zeebe:input source="=null" target="result" />
+          <zeebe:input source="=null" target="conflicts" />
+          <zeebe:input source="=null" target="failing" />
+          <zeebe:input source="=null" target="summary" />
+          <zeebe:input source="=null" target="answer" />
+        </zeebe:ioMapping>
+      </bpmn:extensionElements>
+      <bpmn:incoming>mc_toTrial</bpmn:incoming>
+      <bpmn:incoming>mc_rerun</bpmn:incoming>
+      <bpmn:incoming>mc_sla</bpmn:incoming>
+      <bpmn:outgoing>mc_toRecord</bpmn:outgoing>
+    </bpmn:serviceTask>
+    <bpmn:serviceTask id="record-trial-merge" name="Record trial merge">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="pr.record-trial-merge" />
+        <zeebe:properties>
+          <zeebe:property name="io.nanobpm.dataEnvelope.in" value="RecordTrialMergeIn" />
+        </zeebe:properties>
+      </bpmn:extensionElements>
+      <bpmn:incoming>mc_toRecord</bpmn:incoming>
+      <bpmn:outgoing>mc_toGwTrial</bpmn:outgoing>
+    </bpmn:serviceTask>
+    <bpmn:exclusiveGateway id="gw-trial" name="trial red?" default="mc_proceed">
+      <bpmn:incoming>mc_toGwTrial</bpmn:incoming>
+      <bpmn:outgoing>mc_escalate</bpmn:outgoing>
+      <bpmn:outgoing>mc_proceed</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:userTask id="trial-merge-decision" name="Trial-merge decision (human)">
+      <bpmn:extensionElements>
+        <zeebe:formDefinition formId="trial-merge-decision" />
+        <zeebe:userTask />
+        <zeebe:assignmentDefinition candidateGroups="operators" assignee="=if (is defined(escalationAssignee) and escalationAssignee != null and trim(string(escalationAssignee)) != &#34;&#34;) then escalationAssignee else null" />
+      </bpmn:extensionElements>
+      <bpmn:incoming>mc_escalate</bpmn:incoming>
+      <bpmn:outgoing>mc_toResolve</bpmn:outgoing>
+    </bpmn:userTask>
+    <bpmn:boundaryEvent id="be_trial_sla" name="SLA elapsed" attachedToRef="trial-merge-decision">
+      <bpmn:outgoing>mc_sla</bpmn:outgoing>
+      <bpmn:timerEventDefinition id="ted_trial_sla">
+        <bpmn:timeDuration xsi:type="bpmn:tFormalExpression">=escalationSlaTimeout</bpmn:timeDuration>
+      </bpmn:timerEventDefinition>
+    </bpmn:boundaryEvent>
+    <bpmn:serviceTask id="resolve-trial-attention" name="Clear trial attention">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="pr.resolve-trial-attention" />
+        <zeebe:properties>
+          <zeebe:property name="io.nanobpm.dataEnvelope.in" value="ResolveTrialAttentionIn" />
+        </zeebe:properties>
+      </bpmn:extensionElements>
+      <bpmn:incoming>mc_toResolve</bpmn:incoming>
+      <bpmn:outgoing>mc_toAnswerGw</bpmn:outgoing>
+    </bpmn:serviceTask>
+    <bpmn:exclusiveGateway id="gw-trial-answer" name="action?" default="mc_rerun">
+      <bpmn:incoming>mc_toAnswerGw</bpmn:incoming>
+      <bpmn:outgoing>mc_answerProceed</bpmn:outgoing>
+      <bpmn:outgoing>mc_answerAbandon</bpmn:outgoing>
+      <bpmn:outgoing>mc_rerun</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:endEvent id="merge-passed" name="Merge check passed">
+      <bpmn:incoming>mc_proceed</bpmn:incoming>
+      <bpmn:incoming>mc_answerProceed</bpmn:incoming>
+    </bpmn:endEvent>
+    <bpmn:endEvent id="merge-abandoned" name="Abandoned">
+      <bpmn:incoming>mc_answerAbandon</bpmn:incoming>
+    </bpmn:endEvent>
+    <bpmn:sequenceFlow id="mc_toTrial" sourceRef="Start" targetRef="trial-merge" />
+    <bpmn:sequenceFlow id="mc_toRecord" sourceRef="trial-merge" targetRef="record-trial-merge" />
+    <bpmn:sequenceFlow id="mc_toGwTrial" sourceRef="record-trial-merge" targetRef="gw-trial" />
+    <bpmn:sequenceFlow id="mc_escalate" name="suite failed" sourceRef="gw-trial" targetRef="trial-merge-decision">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=trialMergeRed</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="mc_proceed" name="proceed" sourceRef="gw-trial" targetRef="merge-passed" />
+    <bpmn:sequenceFlow id="mc_toResolve" sourceRef="trial-merge-decision" targetRef="resolve-trial-attention" />
+    <bpmn:sequenceFlow id="mc_toAnswerGw" sourceRef="resolve-trial-attention" targetRef="gw-trial-answer" />
+    <bpmn:sequenceFlow id="mc_answerProceed" name="proceed" sourceRef="gw-trial-answer" targetRef="merge-passed">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=action = "proceed"</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="mc_answerAbandon" name="abandon" sourceRef="gw-trial-answer" targetRef="merge-abandoned">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=action = "abandon"</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="mc_rerun" name="rebase" sourceRef="gw-trial-answer" targetRef="trial-merge" />
+    <bpmn:sequenceFlow id="mc_sla" name="SLA auto-rerun" sourceRef="be_trial_sla" targetRef="trial-merge" />
+  </bpmn:process>
+  <bpmndi:BPMNDiagram id="BPMNDiagram_merge-cell">
+    <bpmndi:BPMNPlane id="BPMNPlane_merge-cell" bpmnElement="merge-cell">
+      <bpmndi:BPMNShape id="BPMNShape_Start" bpmnElement="Start">
+        <dc:Bounds x="80" y="102" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="68" y="143" width="60" height="28" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_trial-merge" bpmnElement="trial-merge">
+        <dc:Bounds x="216" y="80" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_record-trial-merge" bpmnElement="record-trial-merge">
+        <dc:Bounds x="416" y="80" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_gw-trial" bpmnElement="gw-trial" isMarkerVisible="true">
+        <dc:Bounds x="616" y="95" width="50" height="50" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="606" y="76" width="71" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_trial-merge-decision" bpmnElement="trial-merge-decision">
+        <dc:Bounds x="766" y="240" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_resolve-trial-attention" bpmnElement="resolve-trial-attention">
+        <dc:Bounds x="966" y="240" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_gw-trial-answer" bpmnElement="gw-trial-answer" isMarkerVisible="true">
+        <dc:Bounds x="1166" y="255" width="50" height="50" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1221" y="273" width="53" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_merge-passed" bpmnElement="merge-passed">
+        <dc:Bounds x="1316" y="102" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1293" y="143" width="82" height="28" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_merge-abandoned" bpmnElement="merge-abandoned">
+        <dc:Bounds x="1316" y="422" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1300" y="463" width="69" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_be_trial_sla" bpmnElement="be_trial_sla">
+        <dc:Bounds x="798" y="302" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="774" y="383" width="84" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNEdge id="BPMNEdge_mc_toTrial" bpmnElement="mc_toTrial">
+        <di:waypoint x="116" y="120" />
+        <di:waypoint x="216" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_mc_toRecord" bpmnElement="mc_toRecord">
+        <di:waypoint x="316" y="120" />
+        <di:waypoint x="416" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_mc_toGwTrial" bpmnElement="mc_toGwTrial">
+        <di:waypoint x="516" y="120" />
+        <di:waypoint x="616" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_mc_proceed" bpmnElement="mc_proceed">
+        <di:waypoint x="666" y="120" />
+        <di:waypoint x="1316" y="120" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="902" y="98" width="53" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_mc_rerun" bpmnElement="mc_rerun">
+        <di:waypoint x="1191" y="305" />
+        <di:waypoint x="1191" y="360" />
+        <di:waypoint x="266" y="360" />
+        <di:waypoint x="266" y="160" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="706" y="338" width="46" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_mc_escalate" bpmnElement="mc_escalate">
+        <di:waypoint x="641" y="145" />
+        <di:waypoint x="641" y="280" />
+        <di:waypoint x="766" y="280" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="646" y="206" width="85" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_mc_answerProceed" bpmnElement="mc_answerProceed">
+        <di:waypoint x="1191" y="255" />
+        <di:waypoint x="1191" y="120" />
+        <di:waypoint x="1316" y="120" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1196" y="181" width="53" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_mc_answerAbandon" bpmnElement="mc_answerAbandon">
+        <di:waypoint x="1191" y="305" />
+        <di:waypoint x="1191" y="440" />
+        <di:waypoint x="1316" y="440" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1196" y="393" width="53" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_mc_toResolve" bpmnElement="mc_toResolve">
+        <di:waypoint x="866" y="280" />
+        <di:waypoint x="966" y="280" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_mc_toAnswerGw" bpmnElement="mc_toAnswerGw">
+        <di:waypoint x="1066" y="280" />
+        <di:waypoint x="1166" y="280" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_mc_sla" bpmnElement="mc_sla">
+        <di:waypoint x="816" y="338" />
+        <di:waypoint x="816" y="358" />
+        <di:waypoint x="266" y="358" />
+        <di:waypoint x="266" y="160" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="504" y="325" width="74" height="28" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+    </bpmndi:BPMNPlane>
+  </bpmndi:BPMNDiagram>
+</bpmn:definitions>
