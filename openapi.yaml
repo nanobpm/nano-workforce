@@ -3427,8 +3427,8 @@ paths:
         be fully merged first.
 
 
-        INPUT — the intent OBJECT `{ behind?: "owner/repo#NN", issues: ["owner/repo#A", …] }` (this is
-        the object-body door). SIDE EFFECTS — impure: a valid intent is STAGED as a proposal.
+        INPUT — the intent OBJECT `{ "issues": ["owner/repo#A", …] }` with an OPTIONAL
+        `"behind": "owner/repo#NN"` gate (this is the object-body door). SIDE EFFECTS — impure: a valid intent is STAGED as a proposal.
         IDEMPOTENCY — content-addressed by the compiled `digest` (an identical intent re-stages the same
         digest). VALIDATION — invalid input (empty `issues`, an unparseable `owner/repo#N` reference, an
         unknown target/probe per the S3 vocabulary) is a `400` with `issues: [{ path, message }]`;

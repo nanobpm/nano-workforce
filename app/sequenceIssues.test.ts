@@ -159,6 +159,11 @@ test("sequenceIssues: an unparseable `behind` ref → rejected at behind", () =>
   assert(issues.some((i) => i.path === "behind"));
 });
 
+test("sequenceIssues: an empty-string `behind` → rejected at behind (not silently ungated)", () => {
+  const issues = rejects({ behind: "", issues: ["acme/repo#1"] });
+  assert(issues.some((i) => i.path === "behind"), `expected behind path, got ${JSON.stringify(issues)}`);
+});
+
 test("sequenceIssues: more than the max issues → rejected", () => {
   const many = Array.from({ length: MAX_SEQUENCE_ISSUES + 1 }, (_, i) => `acme/repo#${i + 1}`);
   const issues = rejects({ issues: many });

@@ -103,9 +103,13 @@ export function buildSequenceGraph(intent: unknown): SequenceIssuesResult {
     });
   }
 
-  // ── `behind` (optional): a parseable ref, when present ───────────────────────────────────────
+  // ── `behind` (optional): a parseable ref, when PRESENT ───────────────────────────────────────
+  // Only an OMITTED gate (`undefined`/`null`) is "no gate"; a present-but-empty `behind: ""` is a
+  // caller mistake (the schema requires `minLength: 1`), not an ungated sequence — reject it rather
+  // than silently dropping the gate the caller asked for (matters most when this builder is invoked
+  // directly, bypassing OpenAPI validation).
   let behindKey: string | null = null;
-  if (rawBehind !== undefined && rawBehind !== null && rawBehind !== "") {
+  if (rawBehind !== undefined && rawBehind !== null) {
     const parsed = typeof rawBehind === "string" ? parseIssue(rawBehind) : null;
     if (!parsed) {
       issues.push({

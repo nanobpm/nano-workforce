@@ -709,7 +709,8 @@ on the agent node is all it takes to publish it (issue #548).
 > **Don't hand-author this shape — generate it.** When your intent is simply "sequence these
 > issues, each implemented → converged → merged (optionally behind a gate)", call the
 > **`sequenceIssues`** door instead of assembling the nodes/edges by hand. Its body is the intent
-> `{ "behind"?: "owner/repo#NN", "issues": ["owner/repo#A", "owner/repo#B", …] }`, and it GENERATES
+> `{ "issues": ["owner/repo#A", "owner/repo#B", …] }` with an optional leading `"behind": "owner/repo#NN"`
+> gate, and it GENERATES
 > exactly the canonical chain above — for each issue `agent` (`senior:feature`, emits `pr`) →
 > `connector[converge-merge]` → `wait[pr, merged]` with a realistic `poll.timeoutMs`, threading the
 > `pr` fact, plus an optional leading `wait[epic]` gate (§9.5) when `behind` is given — then STAGES it
