@@ -46,6 +46,7 @@ export {
   CONVERGE_TARGET,
   convergeOnlyForTarget,
   isConvergeTarget,
+  MERGE_MAIN_TARGET,
 } from "./convergeTargets.ts";
 
 /** One durable dispatch-claim row — the at-most-once ledger entry a connector writes before it acts. */

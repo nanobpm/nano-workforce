@@ -17,6 +17,7 @@ import { bootTestApp, type TestApp } from "@nanobpm/urban-testkit";
 import {
   CONVERGE_MERGE_TARGET,
   CONVERGE_TARGET,
+  MERGE_MAIN_TARGET,
   connectorDedupeKey,
   convergeOnlyForTarget,
   type DeliveryConnectorDispatchRow,
@@ -101,6 +102,14 @@ test("converge targets: `converge`/`converge-merge` are the enrollment targets; 
   // `converge-merge` drives the merge loop (false) — mirroring converge-feature's autoMerge inversion.
   assertEquals(convergeOnlyForTarget("converge"), true);
   assertEquals(convergeOnlyForTarget("converge-merge"), false);
+});
+
+test("two-level merge: `merge-main` is the graph-level enrollment target that drives the merge loop (S5)", () => {
+  assertEquals(MERGE_MAIN_TARGET, "merge-main");
+  // The graph-level top-level merge (graph → main) enrolls via `submitPr` like `converge-merge`.
+  assert(isConvergeTarget("merge-main"));
+  // It drives the merge loop (not review-only), so its `convergeOnly` default is false.
+  assertEquals(convergeOnlyForTarget("merge-main"), false);
 });
 
 test("first dispatch delivers exactly once; a redelivery on the same key dedupes and never re-acts", async () => {

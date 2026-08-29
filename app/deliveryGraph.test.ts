@@ -311,6 +311,45 @@ test("a human node may omit its config (generic-fallback resolution lands in S3)
   assertEquals(validateDeliveryGraph({ nodes: [{ id: "done", kind: "human" }] }), []);
 });
 
+test("raw-converge-node: a raw `senior:converge`/`senior:merge` agent job is not expressible (S5)", () => {
+  for (const jobType of ["senior:converge", "senior:merge", "converge", "merge"]) {
+    const errors = validateDeliveryGraph({ nodes: [{ id: "a", kind: "agent", agent: { jobType } }] });
+    const err = hasCode(errors, "raw-converge-node");
+    assertEquals(err.path, "nodes[0].agent.jobType");
+  }
+});
+
+test("raw-converge-node: `senior:trial-merge` (the merge-cell body) is NOT swept up (exact-verb)", () => {
+  assertEquals(
+    validateDeliveryGraph({ nodes: [{ id: "a", kind: "agent", agent: { jobType: "senior:trial-merge" } }] }),
+    [],
+  );
+});
+
+test("a cell node may carry first-class `converge`/`merge` policy (S5)", () => {
+  assertEquals(
+    validateDeliveryGraph({
+      nodes: [{ id: "a", kind: "agent", agent: { jobType: "senior:feature", converge: true, merge: true } }],
+    }),
+    [],
+  );
+  // converge-only (stop at green) is legal on its own.
+  assertEquals(
+    validateDeliveryGraph({
+      nodes: [{ id: "a", kind: "agent", agent: { jobType: "senior:feature", converge: true } }],
+    }),
+    [],
+  );
+});
+
+test("merge-requires-converge: `agent.merge` without `agent.converge` is rejected (S5 edge-gate)", () => {
+  const errors = validateDeliveryGraph({
+    nodes: [{ id: "a", kind: "agent", agent: { jobType: "senior:feature", merge: true } }],
+  });
+  const err = hasCode(errors, "merge-requires-converge");
+  assertEquals(err.path, "nodes[0].agent.merge");
+});
+
 test("duplicate-fact: two emits sharing a name on one node is rejected", () => {
   const errors = validateDeliveryGraph({
     nodes: [

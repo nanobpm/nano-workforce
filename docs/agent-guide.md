@@ -438,10 +438,10 @@ layer schedules, it does not re-implement execution):
 
 | kind | config | what it does | may `emits`? |
 |---|---|---|---|
-| `agent` | `agent: { jobType, prompt? }` | a worker runs an agent job type (the fan-out body). **Side-effecting.** | yes |
+| `agent` | `agent: { jobType, prompt?, converge?, merge? }` | a worker runs an agent job type (the fan-out body). **Side-effecting.** First-class **`converge?` / `merge?`** cell policy (§9.4) drives review-convergence / landing (`merge` requires `converge`); a raw `senior:converge`/`senior:merge` job is rejected. | yes |
 | `wait` | `wait: <ReadinessProbe>` | a durable, bounded readiness probe — kind ∈ `http`, `command`, `npm`, `github-check`, `capability`, `pr`, `epic`. Read-only. | yes (binds observed facts) |
 | `human` | `human?: { formKey?, prompt? }` | a scheduled user task + form (the Tasks inbox, §3). Blocks dependents, SLA-bounded, answerable by a human **or** an agent. | yes |
-| `connector` | `connector: { target, dedupeKey?, payload? }` | an automated, side-effecting outbound action. Carries a `dedupeKey` (at-least-once safe). Two **real targets** ship today — **`converge`** and **`converge-merge`** (§9.4); other targets are a forward-declared stub. | yes |
+| `connector` | `connector: { target, dedupeKey?, payload? }` | an automated, side-effecting outbound action. Carries a `dedupeKey` (at-least-once safe). Three **real targets** ship today — **`converge`**, **`converge-merge`** (unit → base branch) and **`merge-main`** (graph → `main`, the two-level top-level land) (§9.4); other targets are a forward-declared stub. | yes |
 
 A **`wait` node's `wait` is a `ReadinessProbe` verbatim** (the same shape feature-run
 intake uses): `{ kind, target, onTimeout?, match?, poll? }`, where `poll` is
@@ -578,7 +578,7 @@ publish and records the version → open+merge PR #303 (repo 3) consuming that v
       "wait": { "kind": "pr", "target": "acme/repo-1#101", "match": { "prState": "merged" },
                 "poll": { "everyMs": 300000, "timeoutMs": 259200000 }, "onTimeout": "escalate" } },
     { "id": "undraft-merge-b", "kind": "agent",
-      "agent": { "jobType": "senior:merge", "prompt": "Take draft PR acme/repo-2#202 out of draft and merge it once its required checks are green." } },
+      "agent": { "jobType": "senior:feature", "converge": true, "merge": true, "prompt": "Take draft PR acme/repo-2#202 out of draft; converge it to green and land it." } },
     { "id": "manual-publish", "kind": "human",
       "human": { "prompt": "Run the manual OTP-authenticated `npm publish` for @acme/widget and set up OIDC trusted publishing. Record the exact published version." },
       "emits": [ { "name": "publishedVersion", "type": "version", "description": "The version just published to npm." } ] },
@@ -621,18 +621,30 @@ the consumer a `wait` node with `kind: "capability"` (resolving *which published
 `pkg@version` first carries the change*) fed by the same `manual-publish.publishedVersion`
 fact — the fact-edge syntax is identical.
 
-### 9.4 Connector targets — drive a PR to convergence + merge (`converge` / `converge-merge`)
+### 9.4 Connector targets — drive a PR to convergence + merge (`converge` / `converge-merge` / `merge-main`)
 
-A `connector` node with **`target: "converge-merge"`** (or **`"converge"`**) enrolls an
-agent-opened PR into the app's **shared convergence loop** — the *same* enrollment §1 (a
+A `connector` node with **`target: "converge-merge"`** (or **`"converge"`** / **`"merge-main"`**)
+enrolls an agent-opened PR into the app's **shared convergence loop** — the *same* enrollment §1 (a
 standalone submit) and a feature run use (`submitPr`), no duplicated machinery. This replaces
 the old habit of bridging an `agent`-opened PR to review with a **human `land-*` gate** whose
 only job was "go run convergence yourself".
 
-- **`converge-merge`** — drive review convergence **and then the merge loop** (the PR merges
-  once converged + green). Equivalent to a submit with `convergeOnly: false`.
+- **`converge-merge`** — the **unit-level** land: drive review convergence **and then the merge
+  loop**, landing the PR onto **its own base branch** (for a unit inside an epic that base is the
+  epic integration branch, never `main` directly — ADR 0003 base-branch admission). Equivalent to a
+  submit with `convergeOnly: false`.
+- **`merge-main`** — the **graph-level** top-level land: the second level of the two-level merge
+  (ADR 0006 §3), landing the graph/epic **integration** PR onto **`main`**. Dispatch-identical to
+  `converge-merge` (both enroll + merge); the distinction is the *level*, kept a first-class literal
+  so the two levels are authored explicitly rather than left emergent.
 - **`converge`** — **converge-only**: drive review convergence and stop at `converged`, never
   handing off to the merge loop (equivalent to `convergeOnly: true`).
+
+> **converge/merge are cell POLICY, not raw nodes.** A raw `senior:converge` / `senior:merge`
+> **agent** job is **not expressible** — the compiler rejects it (`raw-converge-node`). Express
+> "get to green, then land" via a cell node's first-class **`agent.converge` / `agent.merge`**
+> policy flags (`merge` requires `converge`), or, for enrolling an already-open PR, the
+> `connector` targets above (ADR 0006 §3 / S5).
 
 **Payload:** `{ pr: "owner/repo#123", convergeOnly?: boolean, dependsOn?: string[] }`. `pr` is
 required (a literal `owner/repo#N`, identical to how a `wait: pr` node targets a known PR).
