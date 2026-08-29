@@ -79,6 +79,8 @@ DRY_RUN=0
 ASSUME_YES=0
 SHELL_OVERRIDE=''
 INSTALL_ADAPTERS=0        # auto-install missing adapters without prompting
+ALLOW_NO_GITHUB=0        # non-interactive: proceed even without usable GitHub access
+GITHUB_DEGRADED=''       # non-empty => the GitHub preflight passed in a degraded state; repeated in the final summary
 SKIP_APP=0               # phase 1 only: bring up engine + workforce, don't install the app
 PROJECT_NAME=''          # console project name for the Nano Workforce app (default: Workforce)
 CLI_HARNESS_SPECS=''      # newline-separated name[:model][:instances] from --harness
@@ -96,6 +98,16 @@ ADAPTERS_PRESENT="${NANO_INSTALL_ADAPTERS_PRESENT:-}"
 # stops being hermetic on a runner image that happens to ship a harness/adapter binary.
 if [ "${NANO_INSTALL_HARNESSES_OVERRIDE+set}" = set ]; then HARNESS_OVERRIDE_SET=1; else HARNESS_OVERRIDE_SET=0; fi
 if [ "${NANO_INSTALL_ADAPTERS_PRESENT+set}" = set ]; then ADAPTERS_PRESENT_SET=1; else ADAPTERS_PRESENT_SET=0; fi
+
+# Test hooks for the GitHub credential preflight (undocumented; keep the smoke
+# test hermetic on runners that may or may not ship an authenticated gh):
+#   NANO_INSTALL_GH_STATE   — force gh state: missing|unauthed|unusable|ok
+#   NANO_INSTALL_GH_SCOPES  — comma/space list of token scopes gh reports
+#   NANO_INSTALL_GIT_STATE  — force git state: missing|present
+# A set-but-empty override still counts as set, so the probe never falls back to
+# the real command -v / gh and the smoke test stays hermetic.
+if [ "${NANO_INSTALL_GH_STATE+set}" = set ]; then GH_STATE_OVERRIDE_SET=1; else GH_STATE_OVERRIDE_SET=0; fi
+if [ "${NANO_INSTALL_GIT_STATE+set}" = set ]; then GIT_STATE_OVERRIDE_SET=1; else GIT_STATE_OVERRIDE_SET=0; fi
 
 CLI=''      # resolved c8ctl / c8 binary
 TTY=''      # /dev/tty if usable, else empty
@@ -219,6 +231,10 @@ Options:
   -y, --yes          Skip the confirmation summary.
   --install-adapters Auto-install a selected harness's missing ACP adapter
                      (claude/pi) instead of prompting/skipping.
+  --allow-no-github  Proceed even when no usable GitHub access is detected. In a
+                     non-interactive run the preflight otherwise fails, since a
+                     workforce with no GitHub credential cannot review, push, or
+                     merge. Interactive runs prompt instead.
   --project-name <name>
                      Console project name for the Nano Workforce app
                      (default: Workforce). [A-Za-z0-9._-] only.
@@ -261,6 +277,7 @@ parse_args() {
         shift ;;
       --yes|-y) ASSUME_YES=1; shift ;;
       --install-adapters) INSTALL_ADAPTERS=1; shift ;;
+      --allow-no-github) ALLOW_NO_GITHUB=1; shift ;;
       --skip-app) SKIP_APP=1; shift ;;
       --project-name)
         [ $# -ge 2 ] || die "--project-name requires a value"
@@ -278,6 +295,172 @@ parse_args() {
 }
 
 # ---------------------------------------------------------------------------
+# GitHub credential preflight (nanobpm/nano-workforce#588)
+#
+# Two consumers need GitHub access and fail differently: the nwf app (review
+# poller + merge stage) and each hired agent worker (shells out to gh/git). The
+# real predicate is "a usable credential exists on this host", not "gh is
+# installed" — a token in GITHUB_TOKEN/GH_TOKEN satisfies both without gh.
+#
+# Detection distinguishes three states beyond present/absent: not installed,
+# installed-but-unauthenticated, and authenticated-but-unusable (a push/PR that
+# 403s only later — expired token, missing scope, SAML SSO, fine-grained PAT
+# without repo access). We prove usability with `gh api user`, never trusting
+# `gh auth status` alone.
+# ---------------------------------------------------------------------------
+gh_present() { # 0 if the gh CLI is available (honours the test hook)
+  if [ "$GH_STATE_OVERRIDE_SET" -eq 1 ]; then
+    case "$NANO_INSTALL_GH_STATE" in missing) return 1 ;; *) return 0 ;; esac
+  fi
+  command -v gh >/dev/null 2>&1
+}
+
+gh_authed() { # 0 if gh auth status succeeds (honours the test hook)
+  if [ "$GH_STATE_OVERRIDE_SET" -eq 1 ]; then
+    case "$NANO_INSTALL_GH_STATE" in missing|unauthed) return 1 ;; *) return 0 ;; esac
+  fi
+  gh auth status >/dev/null 2>&1
+}
+
+gh_usable() { # 0 if gh api user actually works — validates token + network + SSO
+  if [ "$GH_STATE_OVERRIDE_SET" -eq 1 ]; then
+    case "$NANO_INSTALL_GH_STATE" in ok) return 0 ;; *) return 1 ;; esac
+  fi
+  gh api user --jq .login >/dev/null 2>&1
+}
+
+gh_scopes() { # print space-separated token scopes gh reports (honours the test hook)
+  if [ "$GH_STATE_OVERRIDE_SET" -eq 1 ]; then
+    printf '%s' "${NANO_INSTALL_GH_SCOPES:-}" | tr ',' ' '
+    return 0
+  fi
+  # gh auth status prints e.g.:  - Token scopes: 'gist', 'read:org', 'repo', 'workflow'
+  gh auth status 2>&1 | sed -n "s/.*Token scopes:[ ]*//p" | tr -d "'" | tr ',' ' '
+}
+
+git_present() { # 0 if git is available (honours the test hook)
+  if [ "$GIT_STATE_OVERRIDE_SET" -eq 1 ]; then
+    case "$NANO_INSTALL_GIT_STATE" in missing) return 1 ;; *) return 0 ;; esac
+  fi
+  command -v git >/dev/null 2>&1
+}
+
+# Platform-aware install + remediation hint. We print the command; we NEVER run
+# `gh auth login` for the user (it is an interactive device/OAuth flow that
+# should stay in their hands).
+gh_remediation_hint() {
+  note "GitHub access not detected. The workforce cannot review, push, or merge without it."
+  note ""
+  note "  macOS         brew install gh"
+  note "  Debian/Ubuntu sudo apt install gh"
+  note "  Fedora        sudo dnf install gh"
+  note "  Arch          sudo pacman -S gh"
+  note "  other         https://github.com/cli/cli#installation"
+  note ""
+  note "Then:  gh auth login          (or export GITHUB_TOKEN=…)"
+}
+
+# One probe pass. Sets GH_PROBE_MSG (human summary) and returns 0 when a usable
+# credential exists, 1 otherwise. Warns (non-fatal) when the workflow scope is
+# absent, since that only bites on workflow-file changes.
+probe_github() {
+  GH_PROBE_MSG=''
+  # 1. token in env → usable, skip gh entirely (satisfies both consumers).
+  if [ -n "${GITHUB_TOKEN:-${GH_TOKEN:-}}" ]; then
+    if gh_present; then
+      GH_PROBE_MSG="GitHub token detected in the environment (GITHUB_TOKEN/GH_TOKEN); gh CLI also present."
+    else
+      GH_PROBE_MSG="GitHub token detected in the environment (GITHUB_TOKEN/GH_TOKEN)."
+      note "A token is set, so the nwf app is fine (NANO_PR_GITHUB_TRANSPORT=token)."
+      note "But gh is NOT installed on this host — harnesses that shell out to 'gh' still won't work. Install gh too."
+    fi
+    return 0
+  fi
+  # 2. otherwise the host CLI must be present, authenticated, and usable.
+  if ! gh_present; then
+    GH_PROBE_MSG="no gh CLI and no GITHUB_TOKEN/GH_TOKEN in the environment."
+    return 1
+  fi
+  if ! gh_authed; then
+    GH_PROBE_MSG="gh is installed but not authenticated (gh auth status failed)."
+    return 1
+  fi
+  # 3. prove it actually works — don't just trust status.
+  if ! gh_usable; then
+    GH_PROBE_MSG="gh reports authenticated but 'gh api user' failed — the credential is unusable (expired/revoked token, network, or SAML SSO not authorized for the target org)."
+    return 1
+  fi
+  # 4. authenticated + usable: the repo scope is required, workflow only warns.
+  _scopes=$(gh_scopes)
+  case " $_scopes " in
+    *" repo "*) : ;;
+    *)
+      GH_PROBE_MSG="gh is authenticated but the token is missing the 'repo' scope — pushes and PR creation will 403. Re-auth with:  gh auth refresh -s repo"
+      return 1 ;;
+  esac
+  case " $_scopes " in
+    *" workflow "*) : ;;
+    *) warn "gh token is missing the 'workflow' scope — harmless unless agents edit workflow files; add it with:  gh auth refresh -s workflow" ;;
+  esac
+  GH_PROBE_MSG="GitHub access OK via the host gh CLI."
+  return 0
+}
+
+# The full preflight: probe, remediate, and decide whether to continue. Records
+# a degraded state (repeated in the final summary) whenever we proceed without a
+# usable credential, so a degraded install never *looks* complete.
+github_preflight() {
+  info "Checking GitHub access (this host only)"
+
+  # git is needed by every worker (clone/commit/push) — check it alongside gh.
+  if git_present; then
+    ok "git present"
+  else
+    warn "git not found on this host — agents cannot clone, commit, or push without it."
+    note "Install git from https://git-scm.com/downloads, then re-run."
+    GITHUB_DEGRADED="git is not installed on this host"
+  fi
+
+  while : ; do
+    if probe_github; then
+      ok "$GH_PROBE_MSG"
+      note "This check covers THIS host only — remote worker hosts each need their own gh auth / token."
+      break
+    fi
+
+    warn "$GH_PROBE_MSG"
+    gh_remediation_hint
+    note "This check covers THIS host only — remote worker hosts each need their own gh auth / token."
+
+    # Non-interactive (--yes, no /dev/tty, or --dry-run): no prompt is possible.
+    if [ "$ASSUME_YES" -eq 1 ] || [ "$DRY_RUN" -eq 1 ] || [ -z "$TTY" ]; then
+      if [ "$ALLOW_NO_GITHUB" -eq 1 ]; then
+        warn "continuing without GitHub access (--allow-no-github) — the agents will not be able to do GitHub work."
+        GITHUB_DEGRADED="$GH_PROBE_MSG"
+        break
+      fi
+      # Dry-run changes nothing, so never fail on it — just report what a real run would do.
+      if [ "$DRY_RUN" -eq 1 ]; then
+        note "dry-run: not blocking on GitHub access (a real run would fail here without --allow-no-github)."
+        break
+      fi
+      die "GitHub access not detected and running non-interactively — fix it (see above) and re-run, or pass --allow-no-github to proceed anyway."
+    fi
+
+    # Interactive: let the user fix it and re-check without re-running the whole
+    # script, else confirm-to-continue (default no).
+    if confirm "I've set up GitHub access (installed gh / ran gh auth login / exported a token). Re-check now?"; then
+      continue
+    fi
+    if confirm "Continue anyway? The agents won't be able to do GitHub work."; then
+      GITHUB_DEGRADED="$GH_PROBE_MSG"
+      break
+    fi
+    die "aborted — set up GitHub access (see above) and re-run."
+  done
+}
+
+# ---------------------------------------------------------------------------
 # Step 1 — Preflight
 # ---------------------------------------------------------------------------
 preflight() {
@@ -290,18 +473,10 @@ preflight() {
   fi
   ok "node $_nv (>= ${MIN_NODE}), npm present"
 
-  # Non-fatal: agents need GitHub access to do useful work.
-  if [ -z "${GITHUB_TOKEN:-}" ] && [ -z "${GH_TOKEN:-}" ]; then
-    if command -v gh >/dev/null 2>&1; then
-      if ! gh auth status >/dev/null 2>&1; then
-        warn "gh is installed but not authenticated, and no GITHUB_TOKEN/GH_TOKEN is set."
-        note "Agents need GitHub access — run 'gh auth login' or export GITHUB_TOKEN before they start pulling work."
-      fi
-    else
-      warn "no gh CLI and no GITHUB_TOKEN/GH_TOKEN in the environment."
-      note "Agents need GitHub access — install gh (https://cli.github.com) and 'gh auth login', or export GITHUB_TOKEN."
-    fi
-  fi
+  # GitHub access — a workforce with no usable credential can do nothing useful,
+  # so this is a real three-state check with remediation (nanobpm/nano-workforce#588),
+  # not a passing mention. Covers this host only; remote worker hosts need their own.
+  github_preflight
 }
 
 # ---------------------------------------------------------------------------
@@ -939,6 +1114,9 @@ confirm_app() {
   note "project           : ${PROJECT} (from template 'nano-workforce')"
   if [ -n "${GITHUB_TOKEN:-${GH_TOKEN:-}}" ]; then _ghkey='GITHUB_TOKEN'; else _ghkey='NANO_PR_GITHUB_TRANSPORT'; fi
   note "env keys written  : ${_ghkey}, NANOBPMN_BASE_URL, NANO_WORKFORCE_BASE_URL, PR_REVIEW_PORT (values not shown)"
+  if [ -z "${GITHUB_TOKEN:-${GH_TOKEN:-}}" ]; then
+    note "no token in env   : the app relies on the host gh CLI (NANO_PR_GITHUB_TRANSPORT=auto)."
+  fi
   note "app-view URL      : ${APPVIEW_BASE}/"
   if [ "$ASSUME_YES" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
     [ "$DRY_RUN" -eq 1 ] && note "dry-run: not asking for confirmation."
@@ -1147,6 +1325,11 @@ install_app() {
 # Partial-success report
 # ---------------------------------------------------------------------------
 report_and_exit() {
+  # A degraded GitHub-access install must never *look* complete — repeat the
+  # warning here and exit non-zero so the failure is visible, not deferred.
+  if [ -n "$GITHUB_DEGRADED" ] && [ "$DRY_RUN" -eq 0 ]; then
+    record_failure "GitHub access degraded (this host only): ${GITHUB_DEGRADED} — the workforce cannot review, push, or merge until it is fixed"
+  fi
   if [ -n "$FAILURES" ]; then
     warn "Completed with some steps skipped or failed:"
     printf '%s\n' "$FAILURES" | sed '/^$/d' | while IFS= read -r _f; do note "- $_f"; done

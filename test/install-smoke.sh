@@ -100,6 +100,90 @@ assert_contains "s5: default model => bare adapter command, empty --model" \
   "--command 'claude-code-acp' --model ''" "$OUT"
 
 # ===========================================================================
+# GitHub credential preflight — three-state check (nano-workforce#588)
+# ===========================================================================
+# The probe is stubbed hermetically via NANO_INSTALL_GH_STATE / NANO_INSTALL_GH_SCOPES
+# / NANO_INSTALL_GIT_STATE so no real gh/git auth is needed. All run under
+# --dry-run (never blocks) unless a scenario specifically exercises the
+# non-interactive fail path.
+
+# --- Scenario G1: token in env is usable, gh absent → app-fine caveat -------
+OUT=$(NANO_INSTALL_HARNESSES_OVERRIDE="copilot" NANO_INSTALL_GH_STATE="missing" \
+  GITHUB_TOKEN="ghp_dummy" \
+  sh "$SCRIPT" --harness copilot:gpt-5.4:1 --yes --dry-run 2>&1)
+assert_contains "sG1: token detected treated as usable" \
+  "GitHub token detected in the environment" "$OUT"
+assert_contains "sG1: token+no-gh caveat about harnesses shelling out to gh" \
+  "harnesses that shell out to 'gh' still won't work" "$OUT"
+
+# --- Scenario G2: gh missing, no token → not-detected + platform hint -------
+OUT=$(NANO_INSTALL_HARNESSES_OVERRIDE="copilot" NANO_INSTALL_GH_STATE="missing" \
+  sh "$SCRIPT" --harness copilot:gpt-5.4:1 --yes --dry-run 2>&1)
+assert_contains "sG2: no gh + no token reported" \
+  "no gh CLI and no GITHUB_TOKEN/GH_TOKEN" "$OUT"
+assert_contains "sG2: not-detected headline" \
+  "GitHub access not detected" "$OUT"
+assert_contains "sG2: Debian/Ubuntu install hint" "sudo apt install gh" "$OUT"
+assert_contains "sG2: macOS install hint" "brew install gh" "$OUT"
+assert_contains "sG2: gh auth login remediation printed" "gh auth login" "$OUT"
+assert_contains "sG2: this-host-only caveat" "covers THIS host only" "$OUT"
+# The script must NEVER run gh auth login itself — only print it.
+assert_not_contains "sG2: never runs gh auth login (no 'Running' style exec)" \
+  "would run: gh auth login" "$OUT"
+
+# --- Scenario G3: gh present but unauthenticated ---------------------------
+OUT=$(NANO_INSTALL_HARNESSES_OVERRIDE="copilot" NANO_INSTALL_GH_STATE="unauthed" \
+  sh "$SCRIPT" --harness copilot:gpt-5.4:1 --yes --dry-run 2>&1)
+assert_contains "sG3: installed-but-unauthenticated state" \
+  "gh is installed but not authenticated" "$OUT"
+
+# --- Scenario G4: gh authenticated but unusable (gh api user fails) ---------
+OUT=$(NANO_INSTALL_HARNESSES_OVERRIDE="copilot" NANO_INSTALL_GH_STATE="unusable" \
+  sh "$SCRIPT" --harness copilot:gpt-5.4:1 --yes --dry-run 2>&1)
+assert_contains "sG4: authenticated-but-unusable state (gh api user failed)" \
+  "'gh api user' failed" "$OUT"
+assert_contains "sG4: names SAML SSO as a likely cause" "SAML SSO" "$OUT"
+
+# --- Scenario G5: authenticated + usable, missing repo scope FAILS ----------
+OUT=$(NANO_INSTALL_HARNESSES_OVERRIDE="copilot" NANO_INSTALL_GH_STATE="ok" \
+  NANO_INSTALL_GH_SCOPES="gist,read:org" \
+  sh "$SCRIPT" --harness copilot:gpt-5.4:1 --yes --dry-run 2>&1)
+assert_contains "sG5: missing repo scope fails the check" \
+  "missing the 'repo' scope" "$OUT"
+
+# --- Scenario G6: usable with repo but missing workflow scope only WARNS ----
+OUT=$(NANO_INSTALL_HARNESSES_OVERRIDE="copilot" NANO_INSTALL_GH_STATE="ok" \
+  NANO_INSTALL_GH_SCOPES="repo,read:org" \
+  sh "$SCRIPT" --harness copilot:gpt-5.4:1 --yes --dry-run 2>&1)
+assert_contains "sG6: missing workflow scope warns (non-fatal)" \
+  "missing the 'workflow' scope" "$OUT"
+assert_contains "sG6: repo+ passes the check" "GitHub access OK via the host gh CLI" "$OUT"
+
+# --- Scenario G7: git absence is flagged -----------------------------------
+OUT=$(NANO_INSTALL_HARNESSES_OVERRIDE="copilot" NANO_INSTALL_GH_STATE="ok" \
+  NANO_INSTALL_GH_SCOPES="repo,workflow" NANO_INSTALL_GIT_STATE="missing" \
+  sh "$SCRIPT" --harness copilot:gpt-5.4:1 --yes --dry-run 2>&1)
+assert_contains "sG7: git presence checked alongside gh" \
+  "git not found on this host" "$OUT"
+
+# --- Scenario G8: non-interactive (--yes) FAILS without --allow-no-github ----
+if NANO_INSTALL_HARNESSES_OVERRIDE="copilot" NANO_INSTALL_GH_STATE="missing" \
+     sh "$SCRIPT" --harness copilot:gpt-5.4:1 --yes >/dev/null 2>&1; then
+  fail "sG8: non-interactive run with no GitHub access should exit non-zero"
+else
+  pass "sG8: non-interactive run with no GitHub access exits non-zero"
+fi
+
+# --- Scenario G9: --allow-no-github lets a non-interactive run proceed, but --
+# the degraded state is repeated in the final summary. Uses --skip-app so the
+# run reaches the final report without a real engine (bring_up tolerates dry-run
+# only, so exercise the report path under --dry-run + --allow-no-github).
+OUT=$(NANO_INSTALL_HARNESSES_OVERRIDE="copilot" NANO_INSTALL_GH_STATE="missing" \
+  sh "$SCRIPT" --harness copilot:gpt-5.4:1 --yes --dry-run --allow-no-github 2>&1)
+assert_contains "sG9: --allow-no-github continues" \
+  "continuing without GitHub access" "$OUT"
+
+# ===========================================================================
 # Phase 2 — install & run the Nano Workforce app (nano-workforce#583)
 # ===========================================================================
 
