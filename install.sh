@@ -101,13 +101,16 @@ if [ "${NANO_INSTALL_ADAPTERS_PRESENT+set}" = set ]; then ADAPTERS_PRESENT_SET=1
 
 # Test hooks for the GitHub credential preflight (undocumented; keep the smoke
 # test hermetic on runners that may or may not ship an authenticated gh):
-#   NANO_INSTALL_GH_STATE   — force gh state: missing|unauthed|unusable|ok
-#   NANO_INSTALL_GH_SCOPES  — comma/space list of token scopes gh reports
-#   NANO_INSTALL_GIT_STATE  — force git state: missing|present
+#   NANO_INSTALL_GH_STATE    — force gh state: missing|unauthed|unusable|ok
+#   NANO_INSTALL_GH_SCOPES   — comma/space list of token scopes gh reports
+#   NANO_INSTALL_GIT_STATE   — force git state: missing|present
+#   NANO_INSTALL_TOKEN_STATE — force env-token validity: ok|bad (skips the real
+#                              gh/api.github.com probe so tests need no network)
 # A set-but-empty override still counts as set, so the probe never falls back to
 # the real command -v / gh and the smoke test stays hermetic.
 if [ "${NANO_INSTALL_GH_STATE+set}" = set ]; then GH_STATE_OVERRIDE_SET=1; else GH_STATE_OVERRIDE_SET=0; fi
 if [ "${NANO_INSTALL_GIT_STATE+set}" = set ]; then GIT_STATE_OVERRIDE_SET=1; else GIT_STATE_OVERRIDE_SET=0; fi
+if [ "${NANO_INSTALL_TOKEN_STATE+set}" = set ]; then TOKEN_STATE_OVERRIDE_SET=1; else TOKEN_STATE_OVERRIDE_SET=0; fi
 
 CLI=''      # resolved c8ctl / c8 binary
 TTY=''      # /dev/tty if usable, else empty
@@ -329,6 +332,26 @@ gh_usable() { # 0 if gh api user actually works — validates token + network + 
   gh api user --jq .login >/dev/null 2>&1
 }
 
+gh_token_usable() { # 0 if the env GITHUB_TOKEN/GH_TOKEN actually authenticates
+  # An expired/revoked/underscoped token is the *exact* late failure this
+  # preflight exists to catch, so a non-empty token is not trusted blindly — we
+  # prove it works (gh api user, or a raw api.github.com/user probe when gh is
+  # absent). Honours the test hook so the smoke suite needs no network.
+  if [ "$TOKEN_STATE_OVERRIDE_SET" -eq 1 ]; then
+    case "$NANO_INSTALL_TOKEN_STATE" in ok) return 0 ;; *) return 1 ;; esac
+  fi
+  _tok="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
+  if gh_present; then
+    GITHUB_TOKEN="$_tok" GH_TOKEN="$_tok" gh api user --jq .login >/dev/null 2>&1
+  elif command -v curl >/dev/null 2>&1; then
+    curl -fsS -H "Authorization: Bearer $_tok" -H "User-Agent: nano-workforce-install" \
+      https://api.github.com/user >/dev/null 2>&1
+  else
+    # No gh and no curl to validate with — don't block; trust it and caveat.
+    return 0
+  fi
+}
+
 gh_scopes() { # print space-separated token scopes gh reports (honours the test hook)
   if [ "$GH_STATE_OVERRIDE_SET" -eq 1 ]; then
     printf '%s' "${NANO_INSTALL_GH_SCOPES:-}" | tr ',' ' '
@@ -365,8 +388,13 @@ gh_remediation_hint() {
 # absent, since that only bites on workflow-file changes.
 probe_github() {
   GH_PROBE_MSG=''
-  # 1. token in env → usable, skip gh entirely (satisfies both consumers).
+  # 1. token in env → validate it (don't trust a non-empty value), skip gh
+  #    scope checks (a raw token exposes no scopes here) once it authenticates.
   if [ -n "${GITHUB_TOKEN:-${GH_TOKEN:-}}" ]; then
+    if ! gh_token_usable; then
+      GH_PROBE_MSG="a GITHUB_TOKEN/GH_TOKEN is set but it failed validation (gh api user / api.github.com/user) — it is expired, revoked, or lacks access. Fix or unset it."
+      return 1
+    fi
     if gh_present; then
       GH_PROBE_MSG="GitHub token detected in the environment (GITHUB_TOKEN/GH_TOKEN); gh CLI also present."
     else
@@ -409,6 +437,13 @@ probe_github() {
 # The full preflight: probe, remediate, and decide whether to continue. Records
 # a degraded state (repeated in the final summary) whenever we proceed without a
 # usable credential, so a degraded install never *looks* complete.
+add_degraded() { # accumulate a degraded reason so a later one never masks an earlier
+  if [ -n "$GITHUB_DEGRADED" ]; then
+    GITHUB_DEGRADED="${GITHUB_DEGRADED}; $1"
+  else
+    GITHUB_DEGRADED="$1"
+  fi
+}
 github_preflight() {
   info "Checking GitHub access (this host only)"
 
@@ -418,7 +453,7 @@ github_preflight() {
   else
     warn "git not found on this host — agents cannot clone, commit, or push without it."
     note "Install git from https://git-scm.com/downloads, then re-run."
-    GITHUB_DEGRADED="git is not installed on this host"
+    add_degraded "git is not installed on this host"
   fi
 
   while : ; do
@@ -436,7 +471,7 @@ github_preflight() {
     if [ "$ASSUME_YES" -eq 1 ] || [ "$DRY_RUN" -eq 1 ] || [ -z "$TTY" ]; then
       if [ "$ALLOW_NO_GITHUB" -eq 1 ]; then
         warn "continuing without GitHub access (--allow-no-github) — the agents will not be able to do GitHub work."
-        GITHUB_DEGRADED="$GH_PROBE_MSG"
+        add_degraded "$GH_PROBE_MSG"
         break
       fi
       # Dry-run changes nothing, so never fail on it — just report what a real run would do.
@@ -453,7 +488,7 @@ github_preflight() {
       continue
     fi
     if confirm "Continue anyway? The agents won't be able to do GitHub work."; then
-      GITHUB_DEGRADED="$GH_PROBE_MSG"
+      add_degraded "$GH_PROBE_MSG"
       break
     fi
     die "aborted — set up GitHub access (see above) and re-run."

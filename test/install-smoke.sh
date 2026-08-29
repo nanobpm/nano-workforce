@@ -109,12 +109,23 @@ assert_contains "s5: default model => bare adapter command, empty --model" \
 
 # --- Scenario G1: token in env is usable, gh absent → app-fine caveat -------
 OUT=$(NANO_INSTALL_HARNESSES_OVERRIDE="copilot" NANO_INSTALL_GH_STATE="missing" \
-  GITHUB_TOKEN="ghp_dummy" \
+  NANO_INSTALL_TOKEN_STATE="ok" GITHUB_TOKEN="ghp_dummy" \
   sh "$SCRIPT" --harness copilot:gpt-5.4:1 --yes --dry-run 2>&1)
 assert_contains "sG1: token detected treated as usable" \
   "GitHub token detected in the environment" "$OUT"
 assert_contains "sG1: token+no-gh caveat about harnesses shelling out to gh" \
   "harnesses that shell out to 'gh' still won't work" "$OUT"
+
+# --- Scenario G1b: a set-but-invalid token FAILS validation (not trusted) ---
+# A non-empty token is not trusted blindly: an expired/revoked/underscoped
+# token is the exact late failure this preflight exists to surface early.
+OUT=$(NANO_INSTALL_HARNESSES_OVERRIDE="copilot" NANO_INSTALL_GH_STATE="missing" \
+  NANO_INSTALL_TOKEN_STATE="bad" GITHUB_TOKEN="ghp_expired" \
+  sh "$SCRIPT" --harness copilot:gpt-5.4:1 --yes --dry-run 2>&1)
+assert_contains "sG1b: invalid token reported as failing validation" \
+  "failed validation" "$OUT"
+assert_contains "sG1b: invalid token names remediation (fix or unset)" \
+  "expired, revoked, or lacks access" "$OUT"
 
 # --- Scenario G2: gh missing, no token → not-detected + platform hint -------
 OUT=$(NANO_INSTALL_HARNESSES_OVERRIDE="copilot" NANO_INSTALL_GH_STATE="missing" \
@@ -174,13 +185,27 @@ else
   pass "sG8: non-interactive run with no GitHub access exits non-zero"
 fi
 
-# --- Scenario G9: --allow-no-github lets a non-interactive run proceed, but --
-# the degraded state is repeated in the final summary. Uses --skip-app so the
-# run reaches the final report without a real engine (bring_up tolerates dry-run
-# only, so exercise the report path under --dry-run + --allow-no-github).
+# --- Scenario G9: --allow-no-github lets a non-interactive run proceed -------
+# Under --dry-run this exercises the --allow-no-github *continue* decision (the
+# preflight records GITHUB_DEGRADED and breaks instead of dying). The final
+# summary's degraded-failure line is intentionally NOT emitted here: dry-run
+# makes no changes, so report_and_exit() only records the degraded failure when
+# DRY_RUN=0 — that real-run summary path is a deliberate no-op under --dry-run.
 OUT=$(NANO_INSTALL_HARNESSES_OVERRIDE="copilot" NANO_INSTALL_GH_STATE="missing" \
   sh "$SCRIPT" --harness copilot:gpt-5.4:1 --yes --dry-run --allow-no-github 2>&1)
 assert_contains "sG9: --allow-no-github continues" \
+  "continuing without GitHub access" "$OUT"
+
+# --- Scenario G9b: git-missing AND github-missing both surface (no masking) --
+# The GitHub-degraded reason must ACCUMULATE onto the earlier git-missing one,
+# not overwrite it — so a host lacking both never loses the git problem behind
+# the GitHub message. Both warnings must appear in the same run.
+OUT=$(NANO_INSTALL_HARNESSES_OVERRIDE="copilot" NANO_INSTALL_GH_STATE="missing" \
+  NANO_INSTALL_GIT_STATE="missing" \
+  sh "$SCRIPT" --harness copilot:gpt-5.4:1 --yes --dry-run --allow-no-github 2>&1)
+assert_contains "sG9b: git-missing warning still shown alongside github" \
+  "git not found on this host" "$OUT"
+assert_contains "sG9b: github-missing continue also shown" \
   "continuing without GitHub access" "$OUT"
 
 # ===========================================================================
@@ -242,6 +267,7 @@ assert_contains "s6b: project name in the run URL" \
 
 # --- Scenario 6c: GITHUB_TOKEN is redacted in dry-run, never printed --------
 OUT=$(NANO_INSTALL_HARNESSES_OVERRIDE="copilot" GITHUB_TOKEN="ghp_SHOULD_NOT_APPEAR" \
+  NANO_INSTALL_TOKEN_STATE="ok" \
   sh "$SCRIPT" --harness copilot:gpt-5.4:1 --yes --dry-run 2>&1)
 assert_contains "s6c: token key present, masked" '"GITHUB_TOKEN":"***"' "$OUT"
 assert_not_contains "s6c: token value never printed" "ghp_SHOULD_NOT_APPEAR" "$OUT"
