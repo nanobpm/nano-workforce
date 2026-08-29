@@ -17,7 +17,13 @@ import {
   MERGE_LEVEL_TARGET,
   mergeBranchForLevel,
   mergeLevelForTarget,
+  NODE_COMPLETION_POLICIES,
+  RAW_CONVERGE_MERGE_VERBS,
 } from "./nodePolicy.ts";
+
+test("RAW_CONVERGE_MERGE_VERBS is derived from NODE_COMPLETION_POLICIES (single source of truth, no drift)", () => {
+  assertEquals([...RAW_CONVERGE_MERGE_VERBS], [...NODE_COMPLETION_POLICIES]);
+});
 
 test("jobTypeVerb extracts the task verb after the last colon, trimmed + lower-cased", () => {
   assertEquals(jobTypeVerb("senior:feature"), "feature");

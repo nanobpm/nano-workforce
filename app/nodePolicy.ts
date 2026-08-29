@@ -38,8 +38,9 @@ export type NodeCompletionPolicy = (typeof NODE_COMPLETION_POLICIES)[number];
  * exact thing S5 retires: converge/merge are cell POLICY (`converge?`/`merge?`), never a raw agent
  * job. Matched by exact verb equality (case-insensitive) so a legitimately-different verb that merely
  * CONTAINS the word — e.g. `senior:trial-merge` (verb `trial-merge`), the real merge-cell body — is
- * NOT swept up. */
-export const RAW_CONVERGE_MERGE_VERBS: readonly string[] = ["converge", "merge"];
+ * NOT swept up. Derived from {@link NODE_COMPLETION_POLICIES} so the reserved-verb vocabulary and the
+ * cell policy set cannot drift (they are the same closed set, seen from two angles). */
+export const RAW_CONVERGE_MERGE_VERBS: readonly string[] = NODE_COMPLETION_POLICIES;
 
 /** Extract the task verb from an agent `jobType`: the segment after the LAST `:` (`senior:feature` →
  * `feature`), or the whole string when unqualified. Trimmed and lower-cased for a stable compare. */
