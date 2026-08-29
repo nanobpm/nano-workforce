@@ -1,3 +1,9 @@
+## [0.154.0](https://github.com/nanobpm/nano-workforce/compare/v0.153.0...v0.154.0) (2026-08-29)
+
+### Features
+
+* **onboarding:** three-state GitHub credential preflight in install.sh ([#599](https://github.com/nanobpm/nano-workforce/issues/599)) ([7e9f592](https://github.com/nanobpm/nano-workforce/commit/7e9f592632fc85cfea9f89843252c0128cec6c8d)), closes [#588](https://github.com/nanobpm/nano-workforce/issues/588)
+
 ## [0.153.0](https://github.com/nanobpm/nano-workforce/compare/v0.152.0...v0.153.0) (2026-08-29)
 
 ### Features
