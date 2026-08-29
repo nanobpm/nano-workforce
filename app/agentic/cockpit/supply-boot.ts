@@ -314,15 +314,15 @@ class SupplyCockpit implements SupplyCockpitHandle {
     if (mode !== "replay") this.#structuredRegion?.replaceChildren();
   }
 
-  /** Show (or clear) the terminal status note — the "connected, waiting for output" affordance. */
-  #setNote(text: string | undefined): void {
+  /** Show (or clear) the terminal status note — the "connecting" / "waiting for output" affordance. */
+  #setNote(text: string | undefined, state: "connecting" | "waiting" = "waiting"): void {
     if (text === undefined) {
       this.#terminalNote.textContent = "";
       this.#terminalNote.setAttribute("data-terminal-note", "none");
       return;
     }
     this.#terminalNote.textContent = text;
-    this.#terminalNote.setAttribute("data-terminal-note", "waiting");
+    this.#terminalNote.setAttribute("data-terminal-note", state);
   }
 
   async refresh(): Promise<void> {
@@ -528,7 +528,16 @@ class SupplyCockpit implements SupplyCockpitHandle {
       let session: TerminalSession | undefined;
       const client = new RelayChannelClient({
         connect: this.#env.connectRelay,
-        onRelay: (message) => session?.handle(message),
+        onRelay: (message) => {
+          // Promote the note to "waiting for live output" only once the hub ACKs the subscribe. Until
+          // then it honestly reads "connecting", so a socket that never opens/subscribes stops
+          // masquerading as a connected-but-quiet stream (#600). Gate on `!cleared` so a reconnect's
+          // resubscribe ack does not re-arm the note after real output has already flowed.
+          if (!cleared && "op" in message && message.op === "subscribed") {
+            this.#setNote("Waiting for live output…", "waiting");
+          }
+          session?.handle(message);
+        },
         // Re-attach on EVERY (re)connect → resume-from-offset: the terminal survives a cockpit
         // reconnect without losing or double-writing output.
         onOpen: () => session?.attach(),
@@ -544,9 +553,10 @@ class SupplyCockpit implements SupplyCockpitHandle {
       client.open();
       this.#drill = { stream, client };
       this.#setMode("live", stream);
-      // Arm the "waiting for output" note (after #setMode, which clears it): shown until the first
-      // frame is written, so a connected-but-quiet stream reads as "waiting", not "broken".
-      this.#setNote("Connected — waiting for live output…");
+      // Arm the note as "connecting" (after #setMode, which clears it) BEFORE the socket opens. It only
+      // becomes "waiting for live output" when the subscribe is ACKed (onRelay above) and clears on the
+      // first byte, so a dead socket reads as "connecting", never a falsely-"connected" quiet stream (#600).
+      this.#setNote("Connecting…", "connecting");
     } catch (err) {
       // Building the new terminal failed AFTER the prior drill + terminal were already torn down
       // above. Leaving #mode/#shownStream at their prior value would keep the panel showing a stale
