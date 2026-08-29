@@ -1,3 +1,9 @@
+## [0.162.0](https://github.com/nanobpm/nano-workforce/compare/v0.161.0...v0.162.0) (2026-08-29)
+
+### Features
+
+* add sequenceIssues intent door for canonical delivery-graph chains ([#618](https://github.com/nanobpm/nano-workforce/issues/618)) ([698f4bf](https://github.com/nanobpm/nano-workforce/commit/698f4bf5b7e873bd1805ea4c671162db7037de5a)), closes [#605](https://github.com/nanobpm/nano-workforce/issues/605) [#610](https://github.com/nanobpm/nano-workforce/issues/610)
+
 ## [0.161.0](https://github.com/nanobpm/nano-workforce/compare/v0.160.0...v0.161.0) (2026-08-29)
 
 ### Features
