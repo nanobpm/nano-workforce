@@ -1,3 +1,9 @@
+## [0.159.0](https://github.com/nanobpm/nano-workforce/compare/v0.158.1...v0.159.0) (2026-08-29)
+
+### Features
+
+* **openapi:** self-contained, $ref-free projected MCP tool schemas (S0) ([#614](https://github.com/nanobpm/nano-workforce/issues/614)) ([2018020](https://github.com/nanobpm/nano-workforce/commit/2018020a290c2f416e703e3584b27f92ccf27753)), closes [#605](https://github.com/nanobpm/nano-workforce/issues/605) [nano-ide#501](https://github.com/nanobpm/nano-ide/issues/501) [503/#504](https://github.com/503/nano-workforce/issues/504) [#606](https://github.com/nanobpm/nano-workforce/issues/606)
+
 ## [0.158.1](https://github.com/nanobpm/nano-workforce/compare/v0.158.0...v0.158.1) (2026-08-29)
 
 ### Bug Fixes
