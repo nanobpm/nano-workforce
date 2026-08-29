@@ -164,23 +164,47 @@ test("relay output is written to the drilled worker's terminal", async () => {
   assert.deepEqual(r.terminalWrites, ["boot\n"]);
 });
 
-test("a live drill shows a 'waiting for output' note until the first frame, then clears it", async () => {
+test("a live drill reads 'connecting', promotes to 'waiting' on the subscribe ack, then clears on the first frame", async () => {
   const r = rig();
   const cockpit = bootSupplyCockpit(r.env);
   await cockpit.refresh();
   const note = () => r.host.byClass("cockpit-terminal-note")[0];
 
   cockpit.drill("wk-a");
+  // Before the socket opens/subscribes the note honestly reads "connecting" — not a false "connected".
+  assert.equal(note()?.getAttribute("data-terminal-note"), "connecting", "note armed as connecting before the socket opens");
+  assert.match(note()?.textContent ?? "", /connecting/i);
+
   r.sockets[0]?.fireOpen();
-  assert.equal(note()?.getAttribute("data-terminal-note"), "waiting", "note armed on a connected-but-quiet stream");
+  // The hub ACKs the subscribe → the note promotes to "waiting for live output" on a connected-but-quiet stream.
+  r.sockets[0]?.deliver({ lane: "control", family: "relay", seq: 0, payload: { op: "subscribed", stream: "wk-a", gap: false, nextOffset: 0 } });
+  assert.equal(note()?.getAttribute("data-terminal-note"), "waiting", "note promoted to waiting once the subscribe is acked");
   assert.match(note()?.textContent ?? "", /waiting for live output/i);
 
-  r.sockets[0]?.deliver({ lane: "bulk", family: "relay", seq: 0, payload: { stream: "wk-a", offset: 0, chunk: "hi\n" } });
+  r.sockets[0]?.deliver({ lane: "bulk", family: "relay", seq: 1, payload: { stream: "wk-a", offset: 0, chunk: "hi\n" } });
   assert.equal(note()?.getAttribute("data-terminal-note"), "none", "note cleared the instant the first frame is written");
   assert.equal(note()?.textContent, "");
 });
 
-test("switching to a new stream re-arms the 'waiting' note (the prior stream's cleared note does not persist)", async () => {
+test("a drill whose socket never opens surfaces 'connecting', never a false 'connected'/'waiting' (#600)", async () => {
+  const r = rig();
+  const cockpit = bootSupplyCockpit(r.env);
+  await cockpit.refresh();
+  const note = () => r.host.byClass("cockpit-terminal-note")[0];
+
+  // A dead relay target (the #600 symptom: reconnect-looping, never subscribed) — the socket is created
+  // but never fires open, so the subscribe is never acked. The note must NOT claim the stream connected.
+  cockpit.drill("wk-a");
+  assert.equal(note()?.getAttribute("data-terminal-note"), "connecting", "a socket that never opens reads as connecting, not connected");
+  assert.match(note()?.textContent ?? "", /connecting/i);
+  assert.doesNotMatch(
+    note()?.textContent ?? "",
+    /connected|waiting for live output/i,
+    "a dead socket must not masquerade as a connected-but-quiet stream (#600)",
+  );
+});
+
+test("switching to a new stream re-arms the note (the prior stream's cleared note does not persist)", async () => {
   const r = rig();
   const cockpit = bootSupplyCockpit(r.env);
   await cockpit.refresh();
@@ -192,7 +216,7 @@ test("switching to a new stream re-arms the 'waiting' note (the prior stream's c
   assert.equal(note()?.getAttribute("data-terminal-note"), "none");
 
   cockpit.drill("wk-b");
-  assert.equal(note()?.getAttribute("data-terminal-note"), "waiting", "the new drill re-arms the waiting note");
+  assert.equal(note()?.getAttribute("data-terminal-note"), "connecting", "the new drill re-arms the note (connecting), not stuck on the prior stream's cleared none");
 });
 
 test("the terminal survives a list refresh — it is not re-mounted and keeps streaming", async () => {

@@ -542,14 +542,14 @@ export function mountCockpit(host, opts = {}) {
     setNote(undefined);
   }
 
-  function setNote(text) {
+  function setNote(text, state = "waiting") {
     if (text == null) {
       terminalNote.textContent = "";
       terminalNote.setAttribute("data-terminal-note", "none");
       return;
     }
     terminalNote.textContent = text;
-    terminalNote.setAttribute("data-terminal-note", "waiting");
+    terminalNote.setAttribute("data-terminal-note", state);
   }
 
   function teardownTerminal() {
@@ -628,7 +628,14 @@ export function mountCockpit(host, opts = {}) {
       let session;
       const client = new RelayChannelClient({
         connect: connectRelay,
-        onRelay: (message) => session?.handle(message),
+        onRelay: (message) => {
+          // Promote the note to "waiting for live output" only once the hub ACKs the subscribe. Until
+          // then it honestly reads "connecting", so a socket that never opens/subscribes stops
+          // masquerading as a connected-but-quiet stream (#600). Gate on `!cleared` so a reconnect's
+          // resubscribe ack does not re-arm the note after real output has already flowed.
+          if (!cleared && message?.op === "subscribed") setNote("Waiting for live output…", "waiting");
+          session?.handle(message);
+        },
         onOpen: () => session?.attach(),
         onError,
       });
@@ -636,8 +643,10 @@ export function mountCockpit(host, opts = {}) {
       client.open();
       drill = { stream, client };
       setMode("live", stream);
-      // Arm the "waiting for output" note (after setMode, which clears it) until the first frame.
-      setNote("Connected — waiting for live output…");
+      // Arm the note as "connecting" (after setMode, which clears it) BEFORE the socket opens. It only
+      // becomes "waiting for live output" when the subscribe is ACKed (onRelay above) and clears on the
+      // first byte, so a dead socket reads as "connecting", never a falsely-"connected" quiet stream (#600).
+      setNote("Connecting…", "connecting");
     } catch (err) {
       // The new terminal failed to build after the prior one was torn down: reset the region to idle
       // (and drop any partially-built terminal) so the UI never shows a stale "live"/"replay"
@@ -811,7 +820,7 @@ export function mountCockpit(host, opts = {}) {
 }
 
 /**
- * Derive the channel WebSocket URL from the current origin (path `/agentic`).
+ * Derive the channel WebSocket URL module-relatively (path `/agentic`, anchored to import.meta.url).
  *
  * The agentic hub authenticates upgrades with an identity token only
  * (`sharedSecretAuthenticator({ requireCredential: false })`) — no capability credential is required.
@@ -824,10 +833,21 @@ export function mountCockpit(host, opts = {}) {
  * token (or an explicit `relayUrl`) for secured deployments.
  */
 function defaultRelayUrl(token, capability) {
-  const proto = location.protocol === "https:" ? "wss:" : "ws:";
-  const base = `${proto}//${location.host}/agentic`;
-  if (!token) return base;
-  const query = new URLSearchParams({ token });
-  if (capability) query.set("capability", capability);
-  return `${base}?${query}`;
+  // Anchor the relay endpoint to THIS MODULE's url (import.meta.url), NOT location.host — exactly as
+  // the HTTP endpoints (reportUrl/transcriptsUrl) are (#279/#467). mount.js is ALWAYS served at
+  // `<appMount>/cockpit/mount.js`, so `../agentic` resolves to `<appMount>/agentic` on every surface,
+  // then swap the scheme http→ws / https→wss:
+  //   • standalone / local App-View: `ws://<app-origin>/agentic` — byte-identical to the old behaviour.
+  //   • Studio console App-View:      `ws://<console>/console/app-view/<app>/agentic` — the app-view
+  //     -prefixed path the console proxies, NOT the console origin root.
+  // Deriving from `location.host` instead dialed the CONSOLE origin behind the App-View — which has no
+  // `/agentic` route (404) and whose app-view proxy refuses WS upgrades (501, ADR 0057 §3) — leaving
+  // the live terminal permanently dead behind the console (#600). This is the WS hop of the same
+  // failure class the HTTP endpoints already fixed by anchoring to import.meta.url.
+  const url = new URL("../agentic", import.meta.url);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  if (!token) return url.href;
+  url.searchParams.set("token", token);
+  if (capability) url.searchParams.set("capability", capability);
+  return url.href;
 }
