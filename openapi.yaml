@@ -881,6 +881,82 @@ components:
         skill:
           type: string
           description: The full operator skill (SKILL.md) as markdown, including its YAML frontmatter.
+    AgentGuideResponse:
+      type: object
+      description: The addressable operator-guide response served by `getAgentGuide`. Two shapes,
+        discriminated by `kind`. `kind:"toc"` (no `section` argument) carries `sections` — the compact
+        table of contents, one entry per stable section id. `kind:"section"` (a `section` id given)
+        carries `section` — that one section's markdown, with its examples keyed to this instance.
+      additionalProperties: false
+      required:
+        - kind
+        - appVersion
+        - generatedAt
+        - baseUrl
+      properties:
+        kind:
+          type: string
+          description: '"toc" when listing sections (no `section` argument); "section" when returning one.'
+          enum:
+            - toc
+            - section
+        appVersion:
+          type: string
+          nullable: true
+          description: The running app version this guide matches (null when unreadable).
+        generatedAt:
+          type: string
+          description: When this response was rendered (ISO-8601).
+        baseUrl:
+          type: string
+          description: The app control-API base the examples target (e.g. https://host/app/api).
+        engineBase:
+          type: string
+          description: The engine's Camunda-8 v2 REST base this app talks to (present on a section response).
+        sections:
+          type: array
+          description: The table of contents — present when `kind` is "toc". One entry per addressable section.
+          items:
+            type: object
+            additionalProperties: false
+            required:
+              - id
+              - title
+              - summary
+            properties:
+              id:
+                type: string
+                description: The stable section id to pass back as `getAgentGuide(section)`.
+              title:
+                type: string
+                description: The section's heading text (e.g. "9. Author and run a delivery graph (ADR 0005)").
+              summary:
+                type: string
+                description: A one-line summary of what the section covers.
+        section:
+          type: object
+          description: The requested section — present when `kind` is "section".
+          additionalProperties: false
+          required:
+            - id
+            - title
+            - format
+            - instructions
+          properties:
+            id:
+              type: string
+              description: The stable section id that was requested.
+            title:
+              type: string
+              description: The section's heading text.
+            format:
+              type: string
+              description: The `instructions` media format. Always "markdown".
+              enum:
+                - markdown
+            instructions:
+              type: string
+              description: The section's markdown, with example commands keyed to this instance.
     SubmitResult:
       type: object
       required:
@@ -3074,6 +3150,53 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AgentSkill"
+        "401":
+          description: Missing/invalid shared secret (only when NANO_PR_WEBHOOK_SECRET is set).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+  /agent/guide:
+    get:
+      operationId: getAgentGuide
+      summary: The operator guide, ADDRESSABLE — fetch one section instead of the whole ~43KB blob.
+        Read-only, pure, idempotent. Call with NO `section` to get a compact table of contents (every
+        stable section id + a one-line summary); call with `section` set to a TOC id (e.g.
+        `delivery-graphs`) to get ONLY that section's markdown, small enough to fit a typical
+        tool-result limit. This is the MCP-friendly companion to `getAgentInstructions`, which still
+        returns the full guide unchanged for non-MCP callers. Typical flow — first call
+        `getAgentGuide` (no arg) to see the ids, then `getAgentGuide(section=<id>)` for the one you
+        need. An unknown id is rejected with `issues[{path,message}]` that lists the valid ids.
+      security:
+        - hookSecret: []
+        - {}
+      parameters:
+        # Self-contained tool input (epic #605 S0 convention): a single inline `type: string` query
+        # param — no `$ref`, an explicit type and example — so the projected MCP tool schema is
+        # client-usable as-is (no request body; the inline-mcp-bodies generator does not apply here).
+        - name: section
+          in: query
+          required: false
+          schema:
+            type: string
+            example: delivery-graphs
+          description: OPTIONAL stable section id (from the table of contents `getAgentGuide` returns
+            with no argument), e.g. `orient`, `submit-pr`, `submit-epic`, `escalations`, `lifecycle`,
+            `debug`, `debug-models`, `unstick`, `raise-issue`, `delivery-graphs`. Omit it to get the
+            table of contents. An unknown id yields a 400 listing the valid ids.
+      responses:
+        "200":
+          description: Either the table of contents (no `section`) or a single section's markdown.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentGuideResponse"
+        "400":
+          description: The `section` id is not a known section; `issues` lists the valid ids.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
         "401":
           description: Missing/invalid shared secret (only when NANO_PR_WEBHOOK_SECRET is set).
           content:
