@@ -134,6 +134,59 @@ test("DERIVATION PARITY: delivery-graph triggers derive the S1 canonical + dispa
   });
 });
 
+test("FAIL CLOSED: an unknown legacy status yields NULL delivery_status AND NULL dispatch_status (no inconsistent row)", () => {
+  // The legacy `status` columns are plain TEXT NOT NULL without a CHECK, so an unexpected value can
+  // reach the triggers. `dispatch_status` is derived FROM the canonical `delivery_status`, so when the
+  // status is unrecognised (delivery_status → NULL) dispatch_status MUST also be NULL — never a
+  // dangling 'dispatched'/'settled' on a row whose delivery_status is NULL.
+  const db = freshDb();
+  const cases: [string, () => void, string][] = [
+    [
+      "feature",
+      () =>
+        exec(
+          db,
+          `INSERT INTO feature_runs(feature_key,repo,issue_number,issue_url,base_branch,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)`,
+          "o/r#900", "o/r", 900, "u", "main", "bogus-status", NOW, NOW,
+        ),
+      featureUnitId("o/r#900"),
+    ],
+    [
+      "epic",
+      () =>
+        exec(
+          db,
+          `INSERT INTO plans(plan_key,repo,issue_number,issue_url,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?)`,
+          "o/r#901", "o/r", 901, "u", "bogus-status", NOW, NOW,
+        ),
+      epicUnitId("o/r#901"),
+    ],
+    [
+      "delivery-graph",
+      () =>
+        exec(
+          db,
+          `INSERT INTO delivery_graph_runs(run_key,digest,status,created_at,updated_at) VALUES(?,?,?,?,?)`,
+          "dg900", "abc", "bogus-status", NOW, NOW,
+        ),
+      deliveryGraphUnitId("dg900"),
+    ],
+  ];
+  for (const [kind, insert, unitId] of cases) {
+    insert();
+    const u = row(db, "SELECT delivery_status, dispatch_status FROM delivery_units WHERE unit_id=?", unitId);
+    assertEquals(u.delivery_status, null, `${kind} unknown status → NULL delivery_status`);
+    assertEquals(u.dispatch_status, null, `${kind} unknown status → NULL dispatch_status (fail closed)`);
+  }
+
+  // plan-task needs a parent epic row first.
+  exec(db, `INSERT INTO plans(plan_key,repo,issue_number,issue_url,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?)`, "o/r#902", "o/r", 902, "u", "planning", NOW, NOW);
+  exec(db, `INSERT INTO plan_tasks(plan_key,task_index,task_id,status,created_at,updated_at) VALUES(?,?,?,?,?,?)`, "o/r#902", 0, "t0", "bogus-status", NOW, NOW);
+  const pt = row(db, "SELECT delivery_status, dispatch_status FROM delivery_units WHERE unit_id=?", planTaskUnitId("o/r#902", 0));
+  assertEquals(pt.delivery_status, null, "plan-task unknown status → NULL delivery_status");
+  assertEquals(pt.dispatch_status, null, "plan-task unknown status → NULL dispatch_status (fail closed)");
+});
+
 // ── COMPAT-VIEW PARITY — each `<table>__units` VIEW is byte-identical to its base table. ────────────
 const norm = (r: Record<string, unknown>[]) =>
   JSON.stringify(r.map((x) => Object.fromEntries(Object.entries(x).sort())));
