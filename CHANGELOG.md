@@ -1,3 +1,9 @@
+## [0.155.0](https://github.com/nanobpm/nano-workforce/compare/v0.154.0...v0.155.0) (2026-08-29)
+
+### Features
+
+* **delivery-units:** delivery_units aggregate table (ADR 0006 S2, [#589](https://github.com/nanobpm/nano-workforce/issues/589)) ([#601](https://github.com/nanobpm/nano-workforce/issues/601)) ([6949fc4](https://github.com/nanobpm/nano-workforce/commit/6949fc4d3ee567b95497e43391ba15e9367a88e0))
+
 ## [0.154.0](https://github.com/nanobpm/nano-workforce/compare/v0.153.0...v0.154.0) (2026-08-29)
 
 ### Features
