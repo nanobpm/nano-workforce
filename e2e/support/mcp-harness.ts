@@ -202,30 +202,42 @@ export async function bootMcpHarness(opts: BootMcpHarnessOptions = {}): Promise<
     };
   };
 
-  // 1. initialize — capture the runtime-minted session id.
-  const initRes = await rpc("initialize", {
-    protocolVersion: PROTOCOL_VERSION,
-    capabilities: {},
-    clientInfo: { name: "nwf-mcp-e2e-harness", version: "1.0.0" },
-  });
-  if (initRes.httpStatus !== 200) {
+  // Any step of the handshake below can throw — a JSON-parse failure inside `rpc`, a non-200
+  // initialize, a missing session header, or the post-init notification. A single try/catch keeps
+  // failure deterministic: whatever throws, always stop the in-process app and remove the temp DB
+  // dir so a failed boot never leaks host resources into a CI run.
+  const teardown = async (): Promise<void> => {
     await app.stop().catch(() => {});
     rmSync(dbDir, { recursive: true, force: true });
-    throw new Error(
-      `MCP initialize failed (status ${initRes.httpStatus}): ${JSON.stringify(initRes.body)}`,
-    );
-  }
-  const sessionId = initRes.headers[SESSION_HEADER];
-  if (!sessionId) {
-    await app.stop().catch(() => {});
-    rmSync(dbDir, { recursive: true, force: true });
-    throw new Error(
-      `MCP initialize returned no ${SESSION_HEADER} header — headers: ${JSON.stringify(initRes.headers)}`,
-    );
-  }
+  };
 
-  // 2. notifications/initialized — the client's post-init notification (no response expected).
-  await rpc("notifications/initialized", undefined, sessionId);
+  let sessionId: string;
+  try {
+    // 1. initialize — capture the runtime-minted session id.
+    const initRes = await rpc("initialize", {
+      protocolVersion: PROTOCOL_VERSION,
+      capabilities: {},
+      clientInfo: { name: "nwf-mcp-e2e-harness", version: "1.0.0" },
+    });
+    if (initRes.httpStatus !== 200) {
+      throw new Error(
+        `MCP initialize failed (status ${initRes.httpStatus}): ${JSON.stringify(initRes.body)}`,
+      );
+    }
+    const mintedId = initRes.headers[SESSION_HEADER];
+    if (!mintedId) {
+      throw new Error(
+        `MCP initialize returned no ${SESSION_HEADER} header — headers: ${JSON.stringify(initRes.headers)}`,
+      );
+    }
+    sessionId = mintedId;
+
+    // 2. notifications/initialized — the client's post-init notification (no response expected).
+    await rpc("notifications/initialized", undefined, sessionId);
+  } catch (err) {
+    await teardown();
+    throw err;
+  }
 
   let stopped = false;
   const harness: McpHarness = {
