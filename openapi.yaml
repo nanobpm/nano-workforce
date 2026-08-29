@@ -2460,6 +2460,71 @@ components:
           description: >-
             A NAVIGATIONAL cockpit deep-link to the staged proposal (helps the agent hand the human a
             link). It is a pointer only — NOT a dispatch handle; nothing in this response can start a run.
+    SequenceIssuesIntent:
+      description: >-
+        The `sequenceIssues` INTENT (epic nano-workforce#605, S4) — a high-level shape that GENERATES
+        the canonical "implement issue → converge → merge" delivery graph (operator-guide §9.4) instead
+        of making an agent hand-author its node/edge JSON. It names an ordered list of `issues` to
+        sequence (each issue's implementation starts once the PRIOR issue has merged) and an OPTIONAL
+        leading `behind` gate (wait for that issue/epic/feature to be fully merged first, §9.5). The
+        door GENERATES, then STAGES the graph through the same compile+stage flow as
+        `compileDeliveryGraph` — it never dispatches (dispatch is an operator-only cockpit action, ADR
+        0005 Decision 7). For each issue it emits `agent` (`senior:feature`, emits a `pr` fact) →
+        `connector` (`converge-merge`, late-binding that `pr`) → `wait[pr, merged]` (a realistic
+        `poll.timeoutMs`), threading the `pr` fact per §9.4. Invalid input (empty `issues`, an
+        unparseable ref) is a 400 carrying `issues: [{ path, message }]`; nothing is staged.
+      type: object
+      additionalProperties: false
+      example:
+        behind: nanobpm/nano-ide#488
+        issues:
+          - nanobpm/nano-workforce#567
+          - nanobpm/nano-workforce#568
+      required:
+        - issues
+      properties:
+        behind:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: >-
+            OPTIONAL gate — an `owner/repo#NN` issue/epic/feature reference. When present, a leading
+            `wait[epic]` node gates the whole sequence on that reference reaching "fully merged" (every
+            opened slice/PR landed, §9.5) before the first issue's implementation starts.
+        issues:
+          type: array
+          minItems: 1
+          maxItems: 64
+          items:
+            type: string
+            minLength: 1
+            maxLength: 255
+            description: An `owner/repo#N` issue reference to implement + converge + merge, in sequence.
+          description: >-
+            The ordered issues to sequence — each is implemented by a `senior:feature` agent that opens
+            a PR, driven to convergence + merge, and the NEXT issue's implementation starts only once
+            the prior issue has merged. At least one; at most 64 (keeps the generated graph within the
+            compiler's node ceiling).
+    SequenceIssuesRejected:
+      description: >-
+        A rejected `sequenceIssues` intent — the input failed validation (empty/oversized `issues`, an
+        unparseable `owner/repo#N` reference, or an unknown target/probe per the delivery-graph
+        vocabulary). Every failure is path-qualified so the caller can fix the exact offending input.
+        Nothing was generated or staged.
+      type: object
+      additionalProperties: false
+      required:
+        - error
+        - issues
+      properties:
+        error:
+          type: string
+          description: A human-readable summary of why the intent was rejected.
+        issues:
+          type: array
+          items:
+            $ref: "#/components/schemas/DeliveryCompileError"
+          description: The path-qualified validation failures (at least one).
     FeatureStart:
       description: The start-feature request body — a SINGLE-issue feature run. Names the target issue
         by EXACTLY ONE of `issue` (an `owner/repo#123` reference) or `url` (a bare issue URL), plus a
@@ -3492,6 +3557,83 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorBody"
+  /actions/start/sequence-issues:
+    post:
+      operationId: sequenceIssues
+      summary: Generate + STAGE the canonical "implement issue → converge → merge" delivery graph from a high-level intent (never dispatches). (epic #605 / S4)
+      description: >-
+        An INTENT-SHAPED door (epic nano-workforce#605, S4). ADR 0005's delivery graph is a closed
+        vocabulary and operator-guide §9.4 already names the canonical shape for "implement issue →
+        converge → merge", but an agent still had to hand-author the full node/edge JSON — sequencing
+        four issues behind a gate meant constructing 13 nodes and 12 edges by hand. This door takes the
+        high-level intent `{ behind?, issues[] }` and GENERATES that canonical graph, then STAGES it
+        through the SAME compile+stage flow the raw `compileDeliveryGraph` door uses (one compiler, one
+        staging path — idempotency + digest inherited, not re-implemented). It returns a preview and a
+        navigational `reviewUrl` and NOTHING that can trigger a run: dispatch is an OPERATOR action in
+        the cockpit (ADR 0005 Decision 7 / issue #460).
+
+
+        For each issue it emits the canonical chain — `agent` (`senior:feature`, emits a typed `pr`
+        fact) → `connector` (`converge-merge`, late-binding that `pr`) → `wait[pr, merged]` (a realistic
+        `poll.timeoutMs`) — and threads the `pr` fact along fact-qualified edges (§9.4). The issues run
+        in SEQUENCE: each issue's implementation starts once the PRIOR issue has merged. When `behind`
+        is given, a leading `wait[epic]` gate (§9.5) makes the whole sequence wait for that reference to
+        be fully merged first.
+
+
+        INPUT — the intent OBJECT `{ "issues": ["owner/repo#A", …] }` with an OPTIONAL
+        `"behind": "owner/repo#NN"` gate (this is the object-body door). SIDE EFFECTS — impure: a valid intent is STAGED as a proposal.
+        IDEMPOTENCY — content-addressed by the compiled `digest` (an identical intent re-stages the same
+        digest). VALIDATION — invalid input (empty `issues`, an unparseable `owner/repo#N` reference, an
+        unknown target/probe per the S3 vocabulary) is a `400` with `issues: [{ path, message }]`;
+        nothing is staged. NEXT — surface the returned `reviewUrl` to the operator; poll
+        `listStagedProposals` to see the staged digest.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              # BEGIN generated:mcp-body source=#/components/schemas/SequenceIssuesIntent (scripts/inline-mcp-bodies.ts — do not hand-edit)
+              description: 'The `sequenceIssues` INTENT (epic nano-workforce#605, S4) — a high-level shape that GENERATES the canonical "implement issue → converge → merge" delivery graph (operator-guide §9.4) instead of making an agent hand-author its node/edge JSON. It names an ordered list of `issues` to sequence (each issue''s implementation starts once the PRIOR issue has merged) and an OPTIONAL leading `behind` gate (wait for that issue/epic/feature to be fully merged first, §9.5). The door GENERATES, then STAGES the graph through the same compile+stage flow as `compileDeliveryGraph` — it never dispatches (dispatch is an operator-only cockpit action, ADR 0005 Decision 7). For each issue it emits `agent` (`senior:feature`, emits a `pr` fact) → `connector` (`converge-merge`, late-binding that `pr`) → `wait[pr, merged]` (a realistic `poll.timeoutMs`), threading the `pr` fact per §9.4. Invalid input (empty `issues`, an unparseable ref) is a 400 carrying `issues: [{ path, message }]`; nothing is staged.'
+              type: object
+              additionalProperties: false
+              example:
+                behind: nanobpm/nano-ide#488
+                issues:
+                  - nanobpm/nano-workforce#567
+                  - nanobpm/nano-workforce#568
+              required:
+                - issues
+              properties:
+                behind:
+                  type: string
+                  minLength: 1
+                  maxLength: 255
+                  description: OPTIONAL gate — an `owner/repo#NN` issue/epic/feature reference. When present, a leading `wait[epic]` node gates the whole sequence on that reference reaching "fully merged" (every opened slice/PR landed, §9.5) before the first issue's implementation starts.
+                issues:
+                  type: array
+                  minItems: 1
+                  maxItems: 64
+                  items:
+                    type: string
+                    minLength: 1
+                    maxLength: 255
+                    description: An `owner/repo#N` issue reference to implement + converge + merge, in sequence.
+                  description: The ordered issues to sequence — each is implemented by a `senior:feature` agent that opens a PR, driven to convergence + merge, and the NEXT issue's implementation starts only once the prior issue has merged. At least one; at most 64 (keeps the generated graph within the compiler's node ceiling).
+              # END generated:mcp-body
+      responses:
+        "200":
+          description: The intent generated a valid delivery graph — it compiled and is STAGED for operator review; the response carries a preview and a navigational reviewUrl (no dispatch handle).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CompileDeliveryGraphStaged"
+        "400":
+          description: The intent was invalid (empty/oversized issues, an unparseable reference, or an unknown target/probe) — path-qualified issues, nothing generated or staged.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SequenceIssuesRejected"
   /actions/compile-delivery-graph:
     post:
       operationId: compileDeliveryGraph
