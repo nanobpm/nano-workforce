@@ -19,14 +19,17 @@
 import { DatabaseSync } from "node:sqlite";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import type { DataLayer } from "@nanobpm/urban";
 import { applyMigrationSet, readMigrationSetFromDisk } from "#test-migrations";
 import { assert, assertEquals } from "#test-assert";
+import { withTrackingViews } from "../test/trackingViews.ts";
 import {
   DELIVERY_UNITS_TABLE,
   DISPATCH_JOB_TYPE_BY_KIND,
   deliveryUnitKey,
   dispatchGate,
   dispatchJobTypeForKind,
+  resolveDeliveryDispatch,
 } from "./deliveryDispatch.ts";
 import {
   DELIVERY_UNIT_KINDS,
@@ -158,4 +161,88 @@ test("BINDING: the delivery_units__tracking VIEW provisions against the migrated
   assert(names.has("process_key"), "keyField process_key must exist on delivery_units");
   assert(names.has("dispatch_status"), "statusField dispatch_status must exist on delivery_units");
   db.close();
+});
+
+// A fake DataLayer whose `delivery_units` store is keyed on `unit_id` and whose `delivery_units__tracking`
+// derived VIEW is served by `withTrackingViews` (projecting `derived_status := seeded ?? base.dispatch_status`,
+// exactly the ADR-0065 fall-through the real runtime computes). This lets a test seed a base row whose
+// `derived_status` DIVERGES from its base `dispatch_status` — the terminated-executor case the door's
+// derived-view read exists to fold in — without a live engine.
+function memData(): DataLayer {
+  // biome-ignore lint/suspicious/noExplicitAny: test-only fake over dynamic row shapes.
+  const stores: Record<string, any[]> = {};
+  function tbl(name: string, pk = "unit_id") {
+    // biome-ignore lint/suspicious/noExplicitAny: test-only dynamic row store.
+    const rows = (stores[name] ??= [] as any[]);
+    return {
+      // biome-ignore lint/suspicious/noExplicitAny: test-only dynamic row.
+      async insert(row: any) {
+        rows.push({ ...row });
+        return row[pk];
+      },
+      async get(key: unknown) {
+        return rows.find((r) => r[pk] === key);
+      },
+    };
+  }
+  return { table: withTrackingViews((n: string, pk?: string) => tbl(n, pk)) } as any as DataLayer;
+}
+
+async function seedUnit(
+  data: DataLayer,
+  unit_id: string,
+  dispatch_status: string | null,
+  derived_status?: string,
+) {
+  const row: Record<string, unknown> = { unit_id, dispatch_status };
+  if (derived_status !== undefined) row.derived_status = derived_status;
+  await data.table(DELIVERY_UNITS_TABLE, "unit_id").insert(row);
+}
+
+test("DOOR: resolveDeliveryDispatch dispatches a pending unit off the derived VIEW", async () => {
+  const data = memData();
+  await seedUnit(data, deliveryUnitKey("feature", "owner/repo#7"), "pending");
+  const decision = await resolveDeliveryDispatch(data, "feature", "owner/repo#7");
+  assertEquals(decision, {
+    unitId: "feature:owner/repo#7",
+    kind: "feature",
+    dispatch: true,
+    jobType: "senior:feature",
+    reason: "pending",
+  });
+});
+
+test("DOOR: resolveDeliveryDispatch skips a still-dispatched unit as in-flight (at-most-once)", async () => {
+  const data = memData();
+  await seedUnit(data, deliveryUnitKey("plan-task", "plan-1#3"), "dispatched");
+  const decision = await resolveDeliveryDispatch(data, "plan-task", "plan-1#3");
+  assertEquals(decision.dispatch, false);
+  assertEquals(decision.reason, "in-flight");
+  assertEquals(decision.jobType, null);
+});
+
+test("DOOR: resolveDeliveryDispatch reads derived_status, so a terminated executor is settled not stranded dispatched", async () => {
+  // The base row still reads `dispatched` (the worker-owned transient the reconciler no longer
+  // overwrites), but the executor terminated out-of-band so the __tracking VIEW's `derived_status`
+  // is `settled` (the binding's onTerminated edge). Reading the base column would strand the unit as
+  // `in-flight`; the door MUST read `derived_status` and report `settled`. This is the regression the
+  // Copilot review flagged — a guard against reading the base table/statusField instead of the view.
+  const data = memData();
+  await seedUnit(data, deliveryUnitKey("feature", "owner/repo#9"), "dispatched", "settled");
+  const decision = await resolveDeliveryDispatch(data, "feature", "owner/repo#9");
+  assertEquals(decision.reason, "settled", "derived terminal status must win over the base dispatched");
+  assertEquals(decision.dispatch, false);
+  assertEquals(decision.jobType, null);
+});
+
+test("DOOR: resolveDeliveryDispatch refuses to launch a unit the aggregate never recorded", async () => {
+  const data = memData();
+  const decision = await resolveDeliveryDispatch(data, "feature", "owner/repo#404");
+  assertEquals(decision, {
+    unitId: "feature:owner/repo#404",
+    kind: "feature",
+    dispatch: false,
+    jobType: null,
+    reason: "unknown-unit",
+  });
 });
