@@ -1,3 +1,9 @@
+## [0.158.0](https://github.com/nanobpm/nano-workforce/compare/v0.157.0...v0.158.0) (2026-08-29)
+
+### Features
+
+* **delivery-graph:** converge?/merge? as first-class edge-gated node policy; two-level merge (ADR 0006 S5) ([#604](https://github.com/nanobpm/nano-workforce/issues/604)) ([a880bac](https://github.com/nanobpm/nano-workforce/commit/a880baca513328af01e57cc9bcb5c1c6371a858c)), closes [#592](https://github.com/nanobpm/nano-workforce/issues/592)
+
 ## [0.157.0](https://github.com/nanobpm/nano-workforce/compare/v0.156.0...v0.157.0) (2026-08-29)
 
 ### Features
