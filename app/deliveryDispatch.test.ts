@@ -138,7 +138,12 @@ test("BINDING: exactly one new delivery_units binding drives the door", () => {
   assertEquals(b.onTerminated.set, { dispatch_status: "settled" });
   // A settled unit is terminal/resting — listing it active would let the reconciler clobber it.
   assert(!b.activeStatuses?.includes("settled"), "settled must not be an active dispatch status");
-  assertEquals(b.activeStatuses, ["pending", "dispatched"]);
+  // `pending` is NOT instance-tracked: it has no engine instance yet, and some pending rows (e.g.
+  // kind="plan-task") carry a NULL process_key, so a process_key-keyed reconciler would treat them as
+  // "vanished" and wrongly apply onTerminated. Only the instance-backed `dispatched` is tracked —
+  // mirroring the delivery_graph_runs binding's invariant.
+  assert(!b.activeStatuses?.includes("pending"), "pending must not be an active dispatch status");
+  assertEquals(b.activeStatuses, ["dispatched"]);
 });
 
 test("BINDING: the delivery_units__tracking VIEW provisions against the migrated schema", () => {

@@ -101,7 +101,6 @@
       "keyField": "process_key",
       "statusField": "dispatch_status",
       "activeStatuses": [
-        "pending",
         "dispatched"
       ],
       "onTerminated": {

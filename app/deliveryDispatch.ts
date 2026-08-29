@@ -21,16 +21,30 @@
 //      so the one door matches every pre-collapse launcher's short-circuit without re-deriving it.
 //
 // The active/tracking half is wired in `nano.app.json`: a single `delivery_units` `instanceTracking`
-// binding (keyField `process_key`, statusField `dispatch_status`) replaces the per-representation
-// bindings as the SOURCE the door is driven by — `deliveryUnitActiveDispatchStatuses()` reads that one
-// binding, so the door and the framework reconciler can never drift on "what counts as in-flight".
+// binding (keyField `process_key`, statusField `dispatch_status`) is ADDED as the SOURCE the door is
+// driven by — `deliveryUnitActiveDispatchStatuses()` reads that one binding, so the door and the
+// framework reconciler can never drift on "what counts as in-flight". The legacy per-representation
+// bindings (`feature_runs`, `plans`, `delivery_graph_runs`, …) are retained in this slice and retired
+// onto this single binding in the later contract phase, not by this diff.
+//
+// Only `dispatched` is instance-tracked (an executor/engine instance backs it): a `pending` unit has
+// no instance yet — and some `pending` rows (e.g. `kind="plan-task"`) carry a NULL `process_key` — so
+// tracking `pending` would make the `process_key`-keyed reconciler treat those rows as "vanished" and
+// wrongly apply `onTerminated`. `settled` is terminal/resting. This mirrors the `delivery_graph_runs`
+// binding's invariant (only instance-backed statuses are instance-tracked).
 
 import type { DataLayer } from "@nanobpm/urban";
-import { type DeliveryUnitDispatchStatus, type DeliveryUnitKind, deliveryUnits } from "./deliveryUnit.ts";
-import { activeStatusesFor } from "./instanceTracking.ts";
+import type { DeliveryUnitDispatchStatus, DeliveryUnitKind } from "./deliveryUnit.ts";
+import { activeStatusesFor, derivedTrackingTable } from "./instanceTracking.ts";
 
 /** The base table the single dispatch door is keyed on — the S2 aggregate. */
 export const DELIVERY_UNITS_TABLE = "delivery_units";
+
+/** Narrow a raw `derived_status` string to the closed dispatch-status domain (no `as`). Any value
+ * outside the domain — including a missing row / NULL — resolves to `null` (⇒ `unknown-unit`). */
+function asDispatchStatus(value: string | null | undefined): DeliveryUnitDispatchStatus | null {
+  return value === "pending" || value === "dispatched" || value === "settled" ? value : null;
+}
 
 /**
  * The stable `senior:*` dispatch-target verb each delivery-unit KIND dispatches to — the collapse of
@@ -108,9 +122,12 @@ export function dispatchGate(status: DeliveryUnitDispatchStatus | null): { dispa
 }
 
 /**
- * Resolve the single dispatch door for a `(kind, instanceId)`: read the unit's `dispatch_status` off
- * the `delivery_units` aggregate and apply {@link dispatchGate}, returning the stable `senior:*`
- * target verb when a fresh dispatch is due. A row the aggregate never recorded resolves to
+ * Resolve the single dispatch door for a `(kind, instanceId)`: read the unit's EFFECTIVE dispatch
+ * status off the ADR-0065 `delivery_units__tracking` VIEW's `derived_status` (NOT the base
+ * `dispatch_status`, which the reconciler no longer writes) and apply {@link dispatchGate}, returning
+ * the stable `senior:*` target verb when a fresh dispatch is due. Reading `derived_status` folds in the
+ * binding's `onTerminated` edge, so a unit whose executor terminated out-of-band is seen `settled` and
+ * re-dispatchable rather than stranded `dispatched`. A row the aggregate never recorded resolves to
  * `unknown-unit` (no dispatch) — the door never launches blind.
  */
 export async function resolveDeliveryDispatch(
@@ -119,8 +136,13 @@ export async function resolveDeliveryDispatch(
   instanceId: string,
 ): Promise<DispatchDecision> {
   const unitId = deliveryUnitKey(kind, instanceId);
-  const unit = await deliveryUnits(data).get(unitId);
-  const { dispatch, reason } = dispatchGate(unit?.dispatch_status ?? null);
+  const view = derivedTrackingTable<{ unit_id: string; derived_status: string | null }>(
+    data,
+    DELIVERY_UNITS_TABLE,
+    "unit_id",
+  );
+  const unit = await view.get(unitId);
+  const { dispatch, reason } = dispatchGate(asDispatchStatus(unit?.derived_status));
   return {
     unitId,
     kind,
