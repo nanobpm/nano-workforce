@@ -72,6 +72,14 @@ jobs:
       - name: Check contract registry (no synonyms / undeclared keys)
         run: npm run check:contracts
 
+      # MCP tool-schema gate (epic #605, S0): every projected (non-`x-mcp`) request-body operation
+      # must carry a self-contained, `$ref`-free inline `body` schema — the runtime projector copies
+      # it VERBATIM into the tool `inputSchema`, so a leaked `$ref` is unresolvable in a standard MCP
+      # client (nano-ide#502). The inline bodies are DERIVED from `components.schemas` by
+      # scripts/inline-mcp-bodies.ts; this fails if a source component changed without regenerating.
+      - name: Check MCP tool-body schemas (inline, $ref-free)
+        run: npm run check:mcp-bodies
+
       # Runs the full *.test.ts suite under Node's built-in test runner (node:test), which strips
       # TypeScript types on the fly (Node >= 22.6) — no build step.
       - name: Test (Node)

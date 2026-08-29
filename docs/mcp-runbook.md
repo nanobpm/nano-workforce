@@ -124,6 +124,23 @@ cockpit *is* the approval (ADR 0005 Decision 7), so an agent cannot dispatch a d
 graph through MCP. Agents author graphs through the pure `compileDeliveryGraph` /
 `previewDeliveryGraph` doors, which stay exposed.
 
+**Projected tool schemas are self-contained (epic #605, S0).** The projector copies each
+operation's request-body schema *verbatim* into the tool's `inputSchema.properties.body`
+and does **not** resolve `$ref`s, so every projected (non-`x-mcp`) request-body operation
+in `openapi.yaml` presents an inline `type: object` body with no `$ref` and a worked
+`example` — an agent discovers the body shape (and calls the tool with a real object, not a
+stringified one) from the surface alone. The two graph doors split by convention:
+`compileDeliveryGraph` takes the **structured `DeliveryGraph` object** (and *stages*);
+`previewDeliveryGraph` takes the **text shape `{ "graphJson": "<serialized DeliveryGraph>" }`**
+(and is *pure*). Every validation failure returns `issues`/`errors` as `[{ path, message }]`.
+The inline bodies are **derived** from `components.schemas` by
+`scripts/inline-mcp-bodies.ts` (single source of truth; run `npm run gen:mcp-bodies` after
+editing a component), and `npm run check:mcp-bodies` + `test/mcp-tool-schemas.test.ts` (which
+runs the real projector) fail CI if a `$ref` ever re-leaks. The upstream projector fix that
+would make this mitigation unnecessary is tracked in
+[nano-ide#501](https://github.com/nanobpm/nano-ide/issues/501) (#502 self-contained schemas,
+#503 faithful object-body transport, #504 real-spec conformance guard).
+
 ## 5. Fallback
 
 Agents without MCP are unchanged — resolve the instance, then

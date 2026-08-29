@@ -77,6 +77,13 @@ jobs:
       - name: Check navigation index freshness
         run: npm run sync:nav:check
 
+      # Projected MCP tool bodies (openapi.yaml) are a checked-in derived artifact too (epic #605 S0):
+      # each is DERIVED from `components.schemas` by scripts/inline-mcp-bodies.ts. Two branches can
+      # each edit a source component and its inline body in isolation yet leave the merged tree stale;
+      # re-assert freshness on the merged tree so a $ref cannot silently re-leak into the tool surface.
+      - name: Check MCP tool-body schemas freshness
+        run: npm run check:mcp-bodies
+
       # Backstop: catch ANY other committed generated file that the merged sources render stale, even
       # one without its own `--check` script above. A clean tree is the whole-repo invariant.
       - name: No stale committed artifacts on the merged tree

@@ -1295,6 +1295,30 @@ components:
         no compiler, dispatch, or execution (those land in later slices).
       type: object
       additionalProperties: false
+      # Canonical worked example — the §9.5 `wait[epic]`-gated graph from the operator guide
+      # (docs/agent-guide.md). `compileDeliveryGraph` takes THIS structured object directly. The
+      # generator (scripts/inline-mcp-bodies.ts) carries this example into the projected MCP tool
+      # schema so an agent can call the tool from the surface alone.
+      example:
+        name: start #567 once epic #488 has fully merged
+        nodes:
+          - id: gate-epic
+            kind: wait
+            wait:
+              kind: epic
+              target: nanobpm/nano-ide#488
+              match: { epicState: merged }
+              poll: { everyMs: 300000, timeoutMs: 259200000 }
+              onTimeout: escalate
+            emits:
+              - { name: prCount, type: number }
+          - id: start-b
+            kind: agent
+            agent:
+              jobType: senior:feature
+              prompt: Implement nanobpm/nano-workforce#567 and open a PR.
+        edges:
+          - { from: gate-epic, to: start-b }
       required:
         - nodes
       properties:
@@ -1643,6 +1667,12 @@ components:
         evolvable.
       type: object
       additionalProperties: false
+      # Worked example — the SAME canonical §9.5 `wait[epic]`-gated graph as `DeliveryGraph.example`,
+      # but serialised to a JSON STRING (the text-door convention this operation shares with the
+      # cockpit paste). `previewDeliveryGraph` takes `{ "graphJson": "<serialized DeliveryGraph>" }`.
+      example:
+        graphJson: >-
+          {"name":"start #567 once epic #488 has fully merged","nodes":[{"id":"gate-epic","kind":"wait","wait":{"kind":"epic","target":"nanobpm/nano-ide#488","match":{"epicState":"merged"},"poll":{"everyMs":300000,"timeoutMs":259200000},"onTimeout":"escalate"},"emits":[{"name":"prCount","type":"number"}]},{"id":"start-b","kind":"agent","agent":{"jobType":"senior:feature","prompt":"Implement nanobpm/nano-workforce#567 and open a PR."}}],"edges":[{"from":"gate-epic","to":"start-b"}]}
       required:
         - graphJson
       properties:
@@ -2669,6 +2699,25 @@ components:
         abandoned:
           type: boolean
           description: Derived from pull_requests.status; true ⇒ the run was cancelled and the agent must stop.
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+# MCP tool-schema convention (epic nano-workforce#605, S0 — the shared invariant every later slice
+# inherits). The Urban runtime projects THIS document into MCP tools (ADR 0067 — zero MCP server
+# code in nwf). The projector copies each operation's request-body schema VERBATIM into the tool's
+# `inputSchema.properties.body`; it does NOT resolve `$ref`s. So EVERY projected (non-`x-mcp`)
+# request-body operation MUST present a self-contained tool schema:
+#   • `type: object` with inline `properties` (never a bare `$ref` — it is unresolvable in an MCP
+#     client, and the object gets stringified and rejected at the door: nano-ide#501/#502/#503);
+#   • NO `$ref` anywhere in the projected body schema;
+#   • an explicit `example` (graph doors are REQUIRED to carry one);
+#   • a `description` that carries the contract (input shape, side effects, idempotency, next call).
+# You do NOT hand-write the inline body. Author the shape ONCE as a `components.schemas` entry and
+# reference it here as usual (`schema: { $ref: … }` OR keep the generated block); the generator
+# scripts/inline-mcp-bodies.ts DERIVES the `$ref`-free inline body from that component (single source
+# of truth) into a `# BEGIN/END generated:mcp-body` region. Run `npm run gen:mcp-bodies` after
+# changing a source component; `npm run check:mcp-bodies` (CI) + test/mcp-tool-schemas.test.ts (the
+# real projector) fail the build on any drift or re-leaked `$ref`. Operator-only doors opt OUT with
+# `x-mcp: { exclude: true }` (stage/dispatch/dismiss) and are not projected.
+# ─────────────────────────────────────────────────────────────────────────────────────────────
 paths:
   /status:
     get:
@@ -2774,7 +2823,38 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/EnrolRequest"
+              # BEGIN generated:mcp-body (scripts/inline-mcp-bodies.ts — do not hand-edit)
+              type: object
+              description: A worker's enrol request — its declared capability (ADR 0059 revised, per-worker).
+              required:
+                - capability
+              properties:
+                capability:
+                  type: object
+                  description: A worker's declared enrolment capability. NEVER a routing token — it gates enrolment.
+                  properties:
+                    cognition:
+                      type: string
+                      description: The worker's cognition class (e.g. planning / implementation / qa / ci / decide).
+                    weight:
+                      type: number
+                      description: The cognition weight (the one numeric capability field).
+                    family:
+                      type: string
+                      description: The model family (the diversity-SLO seat filler, e.g. frontier / kimi / qwen).
+                    host:
+                      type: string
+                      description: Where the worker runs.
+                host:
+                  type: string
+                  description: Where the worker runs. Folded into `capability.host` when the latter is absent.
+                instance:
+                  type: string
+                  description: The worker instance id, echoed back for provenance (optional).
+                durableResume:
+                  type: boolean
+                  description: 'Whether this worker''s harness advertises durable-resume (issue #325, ADR 0062 Slice 5/5) — an ENROLMENT attribute, never a routing token. Recorded per instance so the app emits the world-restore marker only to a fleet with a participant; a harness that omits it (or sets false) redrives a re-leased round from scratch. Recorded only when `instance` is a non-blank string — a missing, empty, or whitespace-only `instance` is echoed back for provenance but the flag is not persisted.'
+              # END generated:mcp-body
       responses:
         "200":
           description: The resolved SERVE set for the declared capability.
@@ -3008,7 +3088,49 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/ConvergenceStart"
+              # BEGIN generated:mcp-body (scripts/inline-mcp-bodies.ts — do not hand-edit)
+              description: The start-convergence request body. Names the target PR by EXACTLY ONE of `pr` (an `owner/repo#123` reference) or `url` (a bare PR URL) — never both, never neither — with the optional convergence knobs. Modeled as `oneOf` named variants (ADR — Camunda REST v2 pattern) so the runtime rejects an ambiguous or empty target at the edge with a 400 that names the allowed shapes, rather than the delegate silently coalescing `pr ?? url`.
+              oneOf:
+                - type: object
+                  additionalProperties: false
+                  required:
+                    - pr
+                  properties:
+                    pr:
+                      type: string
+                      description: 'PR reference: owner/repo#123.'
+                    dependsOn:
+                      type: array
+                      items:
+                        type: string
+                    maxRounds:
+                      type: integer
+                      minimum: 1
+                      description: Values above 100 are accepted and clamped to 100 by the delegate.
+                    convergeOnly:
+                      type: boolean
+                      description: When true, run convergence only and stop at `converged` — the PR is never handed to the merge-loop even if auto-merge is on globally (`NANO_PR_AUTO_MERGE`). A per-request review-only override; defaults to false (the global auto-merge default applies).
+                - type: object
+                  additionalProperties: false
+                  required:
+                    - url
+                  properties:
+                    url:
+                      type: string
+                      description: A bare PR URL, when no `owner/repo#123` reference is supplied.
+                    dependsOn:
+                      type: array
+                      items:
+                        type: string
+                    maxRounds:
+                      type: integer
+                      minimum: 1
+                      description: Values above 100 are accepted and clamped to 100 by the delegate.
+                    convergeOnly:
+                      type: boolean
+                      description: When true, run convergence only and stop at `converged` — the PR is never handed to the merge-loop even if auto-merge is on globally (`NANO_PR_AUTO_MERGE`). A per-request review-only override; defaults to false (the global auto-merge default applies).
+              type: object
+              # END generated:mcp-body
       responses:
         "202":
           description: The loop was started (or refreshed).
@@ -3031,7 +3153,53 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/PlanStart"
+              # BEGIN generated:mcp-body (scripts/inline-mcp-bodies.ts — do not hand-edit)
+              description: The start-plan-fanout request body. Names the target issue by EXACTLY ONE of `issue` (an `owner/repo#123` reference) or `url` (a bare issue URL), plus a REQUIRED `baseBranch` (ADR 0003) the fleet branches off — a blank/absent base is a 400. Modeled as `oneOf` named variants (Camunda REST v2 pattern) so an ambiguous or empty target is a 400 at the edge, not a silent `issue ?? url` coalesce in the delegate.
+              oneOf:
+                - type: object
+                  additionalProperties: false
+                  required:
+                    - issue
+                    - baseBranch
+                  properties:
+                    issue:
+                      type: string
+                      description: 'Issue reference: owner/repo#123.'
+                    baseBranch:
+                      type: string
+                      minLength: 1
+                      maxLength: 255
+                      pattern: \S
+                      description: 'REQUIRED target branch the fleet branches off and opens every PR against. Every epic launch must name its base explicitly (ADR 0003): a blank/absent value is rejected with a 400, not silently coalesced to the repository default branch. Use it to land an entire epic on a long-lived integration branch (e.g. `epic/agent-protocol`) so nothing reaches the default branch — and any merge-to-default side effect, such as auto-publishing a package — until you deliberately merge the integration branch. NOTE: this slice (B0) only enforces that `baseBranch` is present and a plausible branch name; branch-existence admission (auto-creating a missing `epic/*` base off the default branch HEAD, and rejecting a missing non-`epic/*` base with a 400) is specified by ADR 0003 but NOT yet enforced here — it lands in a later admission slice.'
+                    allowSharedBase:
+                      type: boolean
+                      description: 'Reserved for a later ADR 0003 admission slice — NOT yet enforced in this slice (B0). When implemented it will opt in to sharing a custom integration base branch with another already-active plan: admission will otherwise reject (409) when another active plan already targets the same repo + same custom base branch, to stop two epics interleaving commits on one integration branch (the repository default branch is exempt from that guard). Accepted by the schema today but currently has no runtime effect.'
+                    confirmDefaultBase:
+                      type: boolean
+                      description: 'Reserved for a later ADR 0003 admission slice — NOT yet enforced in this slice (B0). When implemented it will be the required acknowledgement when `baseBranch` names the repository default branch: targeting the default lands every task directly on it with no integration buffer — and fires any merge-to-default side effect per task — so admission will reject (400) unless confirmed with true (no effect for a non-default base). Accepted by the schema today but currently has no runtime effect.'
+                - type: object
+                  additionalProperties: false
+                  required:
+                    - url
+                    - baseBranch
+                  properties:
+                    url:
+                      type: string
+                      description: A bare issue URL, when no `owner/repo#123` reference is supplied.
+                    baseBranch:
+                      type: string
+                      minLength: 1
+                      maxLength: 255
+                      pattern: \S
+                      description: REQUIRED target branch the fleet branches off and opens every PR against. See `PlanStartByIssue.baseBranch`.
+                    allowSharedBase:
+                      type: boolean
+                      description: Reserved for a later ADR 0003 admission slice — NOT yet enforced in this slice (B0). Accepted by the schema today but currently has no runtime effect. When implemented it will opt in to sharing a custom integration base branch with another already-active plan. See `PlanStartByIssue.allowSharedBase`.
+                    confirmDefaultBase:
+                      type: boolean
+                      description: Reserved for a later ADR 0003 admission slice — NOT yet enforced in this slice (B0). Accepted by the schema today but currently has no runtime effect. When implemented it will be the required acknowledgement when `baseBranch` names the repository default branch. See `PlanStartByIssue.confirmDefaultBase`.
+              type: object
+              # END generated:mcp-body
       responses:
         "202":
           description: The plan fan-out was started (or was already running).
@@ -3064,7 +3232,90 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/EpicSetStart"
+              # BEGIN generated:mcp-body (scripts/inline-mcp-bodies.ts — do not hand-edit)
+              description: 'The set/batch admission request body (issue #292, slice S2). Submits a SET of epics plus the inter-epic dependency edges between them. `epics` is admitted all-or-nothing through the same `admitPlan` gate as the single-issue door; `deps` declares that a `consumer` epic waits for a `producer` epic''s published `{ package, capabilityRef }` capability. Every edge must connect two epics named in `epics`, and the edge set must be an acyclic DAG — otherwise the whole set is rejected with a 4xx and nothing is persisted.'
+              type: object
+              additionalProperties: false
+              required:
+                - epics
+              properties:
+                epics:
+                  type: array
+                  minItems: 1
+                  description: The epics to admit as one set. Each is admitted through the `admitPlan` gate.
+                  items:
+                    description: One epic in a submitted set. Names the target issue by EXACTLY ONE of `issue` (`owner/repo#123`) or `url` (a bare issue URL), plus a REQUIRED `baseBranch` and the optional admission acknowledgements — the same per-epic admission inputs as `PlanStart`.
+                    oneOf:
+                      - type: object
+                        additionalProperties: false
+                        required:
+                          - issue
+                          - baseBranch
+                        properties:
+                          issue:
+                            type: string
+                            description: 'Issue reference: owner/repo#123.'
+                          baseBranch:
+                            type: string
+                            minLength: 1
+                            maxLength: 255
+                            pattern: \S
+                            description: REQUIRED integration branch this epic branches off and opens its PRs against, admitted through the same ADR 0003 policy as the single-issue door. See `PlanStartByIssue.baseBranch`.
+                          allowSharedBase:
+                            type: boolean
+                            description: Opt in to sharing a custom integration base with another active epic. See `PlanStartByIssue.allowSharedBase`.
+                          confirmDefaultBase:
+                            type: boolean
+                            description: Acknowledge that `baseBranch` names the repository default branch. See `PlanStartByIssue.confirmDefaultBase`.
+                      - type: object
+                        additionalProperties: false
+                        required:
+                          - url
+                          - baseBranch
+                        properties:
+                          url:
+                            type: string
+                            description: A bare issue URL, when no `owner/repo#123` reference is supplied.
+                          baseBranch:
+                            type: string
+                            minLength: 1
+                            maxLength: 255
+                            pattern: \S
+                            description: REQUIRED integration branch this epic branches off. See `EpicSetMemberByIssue.baseBranch`.
+                          allowSharedBase:
+                            type: boolean
+                            description: Share a custom integration base with another active epic. See `PlanStartByIssue.allowSharedBase`.
+                          confirmDefaultBase:
+                            type: boolean
+                            description: Acknowledge landing on the default branch. See `PlanStartByIssue.confirmDefaultBase`.
+                deps:
+                  type: array
+                  description: The inter-epic dependency edges. Each declares `consumer` waits for `producer` to publish the `{ package, capabilityRef }` capability. Both endpoints must name epics in `epics`. Omit or pass `[]` for a set of independent (root) epics.
+                  items:
+                    description: 'One inter-epic dependency edge: the `consumer` epic waits for the `producer` epic to publish the `{ package, capabilityRef }` capability. `consumer`/`producer` are epic references (`owner/repo#123` or an issue URL) that MUST both appear in the set''s `epics`.'
+                    type: object
+                    additionalProperties: false
+                    required:
+                      - consumer
+                      - producer
+                      - package
+                      - capabilityRef
+                    properties:
+                      consumer:
+                        type: string
+                        description: The dependent epic (waits). An `owner/repo#123` reference or issue URL in the set.
+                      producer:
+                        type: string
+                        description: The producer epic it waits for. An `owner/repo#123` reference or issue URL in the set.
+                      package:
+                        type: string
+                        minLength: 1
+                        description: The producer epic's published package name — the capability probe's target (S3).
+                      capabilityRef:
+                        type: string
+                        minLength: 1
+                        description: The producer epic's issue handle, used to resolve which published pkg@version first carries the capability (S3).
+              # END generated:mcp-body
       responses:
         "202":
           description: The whole set validated; every epic was admitted and every edge staged FK-free (in `admitted_plan_deps`) for S3 to materialize.
@@ -3102,12 +3353,442 @@ paths:
         receives a dispatch handle, there is nothing to replay (closing the self-approval hole the old
         replayable `approvalToken` left open). A malformed graph is a 400 carrying path-qualified errors;
         nothing is staged.
+
+
+        INPUT — the structured `DeliveryGraph` OBJECT directly (`{ nodes[], edges[] }`), NOT a string:
+        this is the object-body door. Its sibling `previewDeliveryGraph` instead takes the
+        text-door shape `{ "graphJson": "<serialized DeliveryGraph>" }` (the same paste the cockpit
+        uses). SIDE EFFECTS — impure: a valid graph is STAGED (persisted as a `staged` proposal),
+        unlike the pure `previewDeliveryGraph` which never persists. IDEMPOTENCY — content-addressed
+        by `digest`: re-compiling an identical graph re-stages the same digest, not a duplicate.
+        VALIDATION — a failure returns `400` with `errors: [{ path, message }]`. NEXT — surface the
+        returned `reviewUrl` to the operator (only a human's cockpit Dispatch runs it); poll
+        `listStagedProposals` to see the staged digest.
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/DeliveryGraph"
+              # BEGIN generated:mcp-body (scripts/inline-mcp-bodies.ts — do not hand-edit)
+              description: 'An agent-authored delivery graph (ADR 0005) — the SINGLE agent-facing artifact for a heterogeneous, partly-human, cross-repo delivery runbook. It is DATA, never an executable artifact: a JSON DAG whose nodes each name a `kind` from a CLOSED allowlist (`agent`/`wait`/`human`/`connector` — Decision 1/2, the trust boundary) and whose `edges` name DISCOVERED facts (Decision 3). Ingest validates the SHAPE here and the SEMANTICS (acyclicity, edge integrity, fact resolution) in the pure `validateDeliveryGraph` (`app/deliveryGraph.ts`). This slice (S0) defines the vocabulary + validation surface ONLY — no compiler, dispatch, or execution (those land in later slices).'
+              type: object
+              additionalProperties: false
+              example:
+                name: start
+                nodes:
+                  - id: gate-epic
+                    kind: wait
+                    wait:
+                      kind: epic
+                      target: nanobpm/nano-ide#488
+                      match:
+                        epicState: merged
+                      poll:
+                        everyMs: 300000
+                        timeoutMs: 259200000
+                      onTimeout: escalate
+                    emits:
+                      - name: prCount
+                        type: number
+                  - id: start-b
+                    kind: agent
+                    agent:
+                      jobType: senior:feature
+                      prompt: Implement nanobpm/nano-workforce#567 and open a PR.
+                edges:
+                  - from: gate-epic
+                    to: start-b
+              required:
+                - nodes
+              properties:
+                name:
+                  type: string
+                  maxLength: 255
+                  description: OPTIONAL human-readable label for the graph (shown in the rendered preview).
+                nodes:
+                  type: array
+                  minItems: 1
+                  maxItems: 256
+                  items:
+                    description: One node in a delivery graph. A discriminated union on `kind` over the CLOSED allowlist; the matching per-kind config object (`agent`/`wait`/`connector`) is REQUIRED and names the engine-native body the node delegates to (Decision 2 — the graph schedules, it does not re-implement execution). The `human` config is the sole exception — it is OPTIONAL (a bare `human` node resolves to a generic emit-capturing form fallback in S3).
+                    oneOf:
+                      - type: object
+                        properties:
+                          id:
+                            type: string
+                          emits:
+                            type: array
+                            items:
+                              description: 'A typed output a node declares it will EMIT (ADR 0005 Decision 3/4 — emitted-fact typing). A downstream edge references it as `from: "<nodeId>.<fact>"`, so a bind is validated against this declaration, not stringly. A "click done" human node or a pass-through node declares no facts (`emits` absent/empty) — the degenerate no-emit case.'
+                              type: object
+                              additionalProperties: false
+                              required:
+                                - name
+                                - type
+                              properties:
+                                name:
+                                  type: string
+                                  minLength: 1
+                                  maxLength: 128
+                                  pattern: ^[A-Za-z_][A-Za-z0-9_]*$
+                                  description: The fact's identifier, referenced downstream as `<nodeId>.<name>`. Must be unique within the node.
+                                type:
+                                  type: string
+                                  enum:
+                                    - string
+                                    - number
+                                    - boolean
+                                    - artifact
+                                    - version
+                                    - url
+                                    - pr
+                                  description: 'The fact''s declared type. `artifact` is a `pkg@version` handle, `version` a bare version string, `url` a location — mirrors the values `capability`/`pr` probes late-bind. `pr` (issue #548) is a PR reference (`owner/repo#N`) an `agent` node emits for the PR it opened, so a downstream `connector[converge*]`/`wait[pr]` node LATE-BINDS its target PR from the fact instead of a hardcoded literal.'
+                                description:
+                                  type: string
+                                  maxLength: 512
+                                  description: OPTIONAL human note describing what the fact carries.
+                            description: 'The typed facts this agent node hands forward (issue #506 — the classifier-emit contract). Each declared fact is appended to the node''s dispatch prompt as an instruction the servicing `senior:*` agent MUST honour: return the fact as an extra TOP-LEVEL field of its result JSON (the same `AGENT_RESULT_FILE` envelope that carries `status`/`summary`/`pr`). The delivery output-mapping publishes that completion variable (named exactly after the fact) so a downstream guarded edge (`when: "<node>.<fact>"` + `equals`) routes on it; an omitted fact takes the split''s `default` branch.'
+                          kind:
+                            type: string
+                            enum:
+                              - agent
+                          agent:
+                            type: object
+                            additionalProperties: false
+                            required:
+                              - jobType
+                            properties:
+                              jobType:
+                                type: string
+                                minLength: 1
+                                description: The agent job type a worker executes for this node (e.g. `senior:feature`).
+                              prompt:
+                                type: string
+                                maxLength: 20000
+                                description: OPTIONAL steering prompt appended to the node's job brief.
+                              converge:
+                                type: boolean
+                                description: 'OPTIONAL first-class CONVERGE policy (ADR 0006 §3 / S5) — a DECLARED, compiler- validated completion-policy flag on this cell node. It declares that the node''s opened PR is to be driven through the review-convergence loop to green as an edge-gated completion policy; this slice adds and validates the flag, with the delivery-graph execution wiring that consumes it landing in a follow-up slice. It supersedes (in intent) the emergent `feature.bpmn` `gw-converge` gateway and the "un-draft + merge #B" prompt prose a delivery-graph `agent` node used to smuggle. Converge and merge are SEPARABLE phases; a node may converge without merging (stop at green and gate the landing behind a downstream node).'
+                              merge:
+                                type: boolean
+                                description: 'OPTIONAL first-class MERGE (land) policy (ADR 0006 §3 / S5) — a DECLARED, compiler-validated flag. When set it declares that the cell lands its PR. REQUIRES `converge: true` — you cannot land a PR you have not driven to green (the validator rejects `merge` without `converge`). This slice adds and validates the flag; the execution wiring that consumes it lands in a follow-up slice. TWO-LEVEL (ADR 0003 base-branch admission): a UNIT node lands onto its epic/graph base branch, never `main` directly; the graph''s final merge-to-`main` is a separate top-level step.'
+                              timeout:
+                                type: string
+                                pattern: ^[Pp](?!$)(\d+[Yy])?(\d+[Mm])?(\d+[Ww])?(\d+[Dd])?([Tt](?=\d)(\d+[Hh])?(\d+[Mm])?(\d+[Ss])?)?$
+                                maxLength: 64
+                                description: OPTIONAL per-node ISO-8601 SLA timeout (#505). Overrides the run-level `nodeTimeout` (and the `PT1H` default) for THIS node's bounded-timeout → escalate boundary timer, so a legitimately-long node (e.g. a full `senior:feature` implementation) can outlast a quick gate without a spurious escalation. Absent → the run/default value.
+                        required:
+                          - id
+                          - kind
+                          - agent
+                        description: An `agent` node — a worker executes an agent job type (the existing fan-out body). Bounded (timeout → escalate) and resumable like every node.
+                        additionalProperties: false
+                      - type: object
+                        properties:
+                          id:
+                            type: string
+                          emits:
+                            type: array
+                            items:
+                              description: 'A typed output a node declares it will EMIT (ADR 0005 Decision 3/4 — emitted-fact typing). A downstream edge references it as `from: "<nodeId>.<fact>"`, so a bind is validated against this declaration, not stringly. A "click done" human node or a pass-through node declares no facts (`emits` absent/empty) — the degenerate no-emit case.'
+                              type: object
+                              additionalProperties: false
+                              required:
+                                - name
+                                - type
+                              properties:
+                                name:
+                                  type: string
+                                  minLength: 1
+                                  maxLength: 128
+                                  pattern: ^[A-Za-z_][A-Za-z0-9_]*$
+                                  description: The fact's identifier, referenced downstream as `<nodeId>.<name>`. Must be unique within the node.
+                                type:
+                                  type: string
+                                  enum:
+                                    - string
+                                    - number
+                                    - boolean
+                                    - artifact
+                                    - version
+                                    - url
+                                    - pr
+                                  description: 'The fact''s declared type. `artifact` is a `pkg@version` handle, `version` a bare version string, `url` a location — mirrors the values `capability`/`pr` probes late-bind. `pr` (issue #548) is a PR reference (`owner/repo#N`) an `agent` node emits for the PR it opened, so a downstream `connector[converge*]`/`wait[pr]` node LATE-BINDS its target PR from the fact instead of a hardcoded literal.'
+                                description:
+                                  type: string
+                                  maxLength: 512
+                                  description: OPTIONAL human note describing what the fact carries.
+                          kind:
+                            type: string
+                            enum:
+                              - wait
+                          wait:
+                            description: 'A single durable readiness probe (issue #258, #295) the feature run must satisfy before its implementation agent is dispatched. `kind` selects the source; `target` + `match` are the per-kind predicate. The `capability` kind resolves "which published `pkg@version` first carries capability C?" from publish provenance and late-binds it into the run. See `app/readiness.ts` for the full per-kind semantics.'
+                            type: object
+                            additionalProperties: false
+                            required:
+                              - kind
+                              - target
+                            properties:
+                              kind:
+                                type: string
+                                enum:
+                                  - http
+                                  - command
+                                  - npm
+                                  - github-check
+                                  - capability
+                                  - pr
+                                  - epic
+                                description: The readiness source. `command` is the escape hatch; `capability` resolves a cross-repo published-artifact edge; `pr` watches an in-flight PR's merge state (ADR 0005 §2); `epic` gates on an nwf plan-fanout epic reaching "fully merged", keyed by its `planKey` (issue
+                              target:
+                                type: string
+                                minLength: 1
+                                description: The kind-specific target (a URL, a shell command, a `pkg@version`, an `owner/repo@ref`, `github-releases:owner/repo`, an `owner/repo#123` PR reference for the `pr` kind, or an `owner/repo#NN` planKey — the epic issue — for the `epic` kind). For a `pr`/`epic` target used in a **delivery-graph `wait` node** it may instead be a `<nodeId>.<fact>` late-binding reference the delivery-graph compiler resolves at dispatch (issue
+                              onTimeout:
+                                type: string
+                                enum:
+                                  - escalate
+                                  - fail
+                                  - continue
+                                description: What the gate does when the bounded wait elapses (default `escalate`).
+                              credentialEnv:
+                                type: string
+                                description: A declared env-contract key supplying a credential (http kind only). Names a key, never a secret value.
+                              match:
+                                type: object
+                                additionalProperties: false
+                                description: The per-kind readiness predicate; every field is optional and read only by the kinds that understand it.
+                                properties:
+                                  status:
+                                    type: integer
+                                    description: 'http: the exact status that means ready (default any 2xx).'
+                                  bodyIncludes:
+                                    type: string
+                                    description: 'http: a substring the response body must contain.'
+                                  exitCode:
+                                    type: integer
+                                    description: 'command: the exit code that means ready (default 0).'
+                                  stdoutIncludes:
+                                    type: string
+                                    description: 'command/npm: a substring stdout must contain.'
+                                  version:
+                                    type: string
+                                    description: 'npm: the version that must be published.'
+                                  conclusion:
+                                    type: string
+                                    description: 'github-check: the conclusion that means ready (default success).'
+                                  checkName:
+                                    type: string
+                                    description: 'github-check: restrict to the named check run.'
+                                  capabilityRef:
+                                    type: string
+                                    description: 'capability: the upstream issue/PR handle the resolved version must carry.'
+                                  package:
+                                    type: string
+                                    description: 'capability: the package whose releases are scanned for provenance.'
+                                  verifyCommand:
+                                    type: string
+                                    description: 'capability: optional empirical verifier run once at the gate boundary.'
+                                  prState:
+                                    type: string
+                                    enum:
+                                      - ready
+                                      - merged
+                                      - mergeable
+                                      - checks-green
+                                    description: 'pr: the declared PR state to wait for (default merged).'
+                                  epicState:
+                                    type: string
+                                    enum:
+                                      - merged
+                                      - done
+                                    description: 'epic: the declared plan-fanout aggregate state to wait for (default merged) — both mean ''fully merged'' (issue #568).'
+                              poll:
+                                type: object
+                                additionalProperties: false
+                                description: The poll cadence (how often to re-probe, how long to keep trying, and the backoff shape).
+                                properties:
+                                  everyMs:
+                                    type: integer
+                                    description: Interval between poll attempts (ms).
+                                  timeoutMs:
+                                    type: integer
+                                    description: Bounded budget (ms) before the gate escalates.
+                                  backoff:
+                                    type: string
+                                    enum:
+                                      - fixed
+                                      - exponential
+                                    description: Backoff shape between attempts.
+                        required:
+                          - id
+                          - kind
+                          - wait
+                        description: A `wait` node — a durable `ReadinessProbe` (ADR 0001 §2) watching an external fact. Reuses the existing `ReadinessProbe` shape verbatim (Decision 3 — never a second wait loop); the `pr` merge-state kind is added to that shape by slice S2 and flows in here automatically. The probe's `poll.timeoutMs` sets THIS node's escalation boundary (how long the gate waits before it acts on `onTimeout`), falling back to the run/default when absent (#462). `onTimeout` `escalate` (default) parks the elapsed gate on a human-completable task; `continue` proceeds past the gate as not-ready with NO human stop (a sharp edge — the downstream side-effecting node then runs without the awaited fact); `fail` is NOT yet supported on a delivery `wait` node (blocked on engine terminate-end execution, Magikcraft/nano-bpm#978) and is rejected at compile with a path-qualified error rather than silently degrading.
+                        additionalProperties: false
+                      - type: object
+                        properties:
+                          id:
+                            type: string
+                          emits:
+                            type: array
+                            items:
+                              description: 'A typed output a node declares it will EMIT (ADR 0005 Decision 3/4 — emitted-fact typing). A downstream edge references it as `from: "<nodeId>.<fact>"`, so a bind is validated against this declaration, not stringly. A "click done" human node or a pass-through node declares no facts (`emits` absent/empty) — the degenerate no-emit case.'
+                              type: object
+                              additionalProperties: false
+                              required:
+                                - name
+                                - type
+                              properties:
+                                name:
+                                  type: string
+                                  minLength: 1
+                                  maxLength: 128
+                                  pattern: ^[A-Za-z_][A-Za-z0-9_]*$
+                                  description: The fact's identifier, referenced downstream as `<nodeId>.<name>`. Must be unique within the node.
+                                type:
+                                  type: string
+                                  enum:
+                                    - string
+                                    - number
+                                    - boolean
+                                    - artifact
+                                    - version
+                                    - url
+                                    - pr
+                                  description: 'The fact''s declared type. `artifact` is a `pkg@version` handle, `version` a bare version string, `url` a location — mirrors the values `capability`/`pr` probes late-bind. `pr` (issue #548) is a PR reference (`owner/repo#N`) an `agent` node emits for the PR it opened, so a downstream `connector[converge*]`/`wait[pr]` node LATE-BINDS its target PR from the fact instead of a hardcoded literal.'
+                                description:
+                                  type: string
+                                  maxLength: 512
+                                  description: OPTIONAL human note describing what the fact carries.
+                          kind:
+                            type: string
+                            enum:
+                              - human
+                          human:
+                            type: object
+                            additionalProperties: false
+                            description: OPTIONAL human-node config. `formKey` explicitly attaches a form (else a form is selected by node category, else a generic emit-capturing fallback — resolved in S3). The node's typed output is declared via the node-level `emits[]`.
+                            properties:
+                              formKey:
+                                type: string
+                                minLength: 1
+                                description: OPTIONAL explicit form to attach at authoring time (specific-else-generic resolution, S3).
+                              prompt:
+                                type: string
+                                maxLength: 20000
+                                description: OPTIONAL instruction shown to the human/agent completing the task ("now do X").
+                        required:
+                          - id
+                          - kind
+                        description: A `human` node — a scheduled user task + form (ADR 0002 machinery promoted from exception to node, Decision 4). Surfaces "now do X" on the Tasks inbox, blocks dependents, is answerable by a human OR an agent, is SLA-bounded, and can EMIT a typed fact its form captures.
+                        additionalProperties: false
+                      - type: object
+                        properties:
+                          id:
+                            type: string
+                          emits:
+                            type: array
+                            items:
+                              description: 'A typed output a node declares it will EMIT (ADR 0005 Decision 3/4 — emitted-fact typing). A downstream edge references it as `from: "<nodeId>.<fact>"`, so a bind is validated against this declaration, not stringly. A "click done" human node or a pass-through node declares no facts (`emits` absent/empty) — the degenerate no-emit case.'
+                              type: object
+                              additionalProperties: false
+                              required:
+                                - name
+                                - type
+                              properties:
+                                name:
+                                  type: string
+                                  minLength: 1
+                                  maxLength: 128
+                                  pattern: ^[A-Za-z_][A-Za-z0-9_]*$
+                                  description: The fact's identifier, referenced downstream as `<nodeId>.<name>`. Must be unique within the node.
+                                type:
+                                  type: string
+                                  enum:
+                                    - string
+                                    - number
+                                    - boolean
+                                    - artifact
+                                    - version
+                                    - url
+                                    - pr
+                                  description: 'The fact''s declared type. `artifact` is a `pkg@version` handle, `version` a bare version string, `url` a location — mirrors the values `capability`/`pr` probes late-bind. `pr` (issue #548) is a PR reference (`owner/repo#N`) an `agent` node emits for the PR it opened, so a downstream `connector[converge*]`/`wait[pr]` node LATE-BINDS its target PR from the fact instead of a hardcoded literal.'
+                                description:
+                                  type: string
+                                  maxLength: 512
+                                  description: OPTIONAL human note describing what the fact carries.
+                          kind:
+                            type: string
+                            enum:
+                              - connector
+                          connector:
+                            type: object
+                            additionalProperties: false
+                            required:
+                              - target
+                            properties:
+                              target:
+                                type: string
+                                minLength: 1
+                                description: The connector action target (forward-declared — the concrete scheme lands in a later slice).
+                              dedupeKey:
+                                type: string
+                                minLength: 1
+                                description: OPTIONAL idempotency key so an at-least-once resume cannot double-fire this side-effecting node (ADR 0005 Decision 7). Author-supplied or graph-derived.
+                              payload:
+                                type: object
+                                additionalProperties: true
+                                description: Minimal forward-declared payload stub — the concrete connector payload schema is deferred (ADR non-goal).
+                              timeout:
+                                type: string
+                                pattern: ^[Pp](?!$)(\d+[Yy])?(\d+[Mm])?(\d+[Ww])?(\d+[Dd])?([Tt](?=\d)(\d+[Hh])?(\d+[Mm])?(\d+[Ss])?)?$
+                                maxLength: 64
+                                description: OPTIONAL per-node ISO-8601 SLA timeout (#505). Overrides the run-level `nodeTimeout` (and the `PT1H` default) for THIS connector node's bounded-timeout → escalate boundary timer. Absent → the run/default value.
+                        required:
+                          - id
+                          - kind
+                          - connector
+                        description: A `connector` node — an automated, side-effecting outbound action (the connector I/O surface). Side-effecting, so it carries a `dedupeKey` and tolerates at-least-once execution. The `payload` schema is a minimal forward-declared stub in this slice (ADR 0005 non-goal — the concrete connector I/O lands later).
+                        additionalProperties: false
+                  description: The graph's nodes. Each carries a unique `id` and a `kind` from the closed allowlist, plus its per-kind config and its typed `emits[]` declaration. Node ids must be unique across the graph (enforced by `validateDeliveryGraph`).
+                edges:
+                  type: array
+                  maxItems: 1024
+                  items:
+                    description: A dependency edge — "`to` proceeds once fact `from` is observable" (ADR 0005 Decision 3). `from` is either a bare `<nodeId>` (wait for the upstream node's completion fact) or a qualified `<nodeId>.<fact>` referencing a declared `emits` fact of that node. Both endpoints must resolve to a node in the graph, the referenced fact must be declared, and the whole edge set must be a DAG — all enforced by `validateDeliveryGraph`. An OPTIONAL `when`/`equals` guard (or a `default` else-branch) makes the edge CONDITIONAL, turning its producer into an exclusive split (ADR 0005 S7) — a node's out-edges are then ALL guarded or ALL unconditional.
+                    type: object
+                    additionalProperties: false
+                    required:
+                      - from
+                      - to
+                    properties:
+                      from:
+                        type: string
+                        minLength: 1
+                        description: The upstream endpoint — `<nodeId>` (completion) or `<nodeId>.<fact>` (a declared emitted fact).
+                      to:
+                        type: string
+                        minLength: 1
+                        description: The dependent node's id — proceeds once `from` is observed.
+                      when:
+                        type: string
+                        minLength: 1
+                        description: 'OPTIONAL guard reference `<nodeId>.<fact>` naming a SCALAR emitted fact (`string`, `number`, or `boolean`) of the `from`-adjacent producer (ADR 0005 S7). Its presence makes this a GUARDED edge and turns the producer into an exclusive-split point: the edge is taken only when that runtime fact `equals` the literal below. Equality-only — no arbitrary expressions (the trust boundary). Mutually exclusive with `default`.'
+                      equals:
+                        description: The literal value `when`'s fact must equal for this guarded edge to be taken (ADR 0005 S7). REQUIRED iff `when` is present, and its JSON type must match the referenced fact's declared type (`string`/`number`/`boolean`).
+                        oneOf:
+                          - type: string
+                          - type: number
+                          - type: boolean
+                      default:
+                        type: boolean
+                        enum:
+                          - true
+                        description: 'OPTIONAL — marks this edge as the ELSE branch of the exclusive split (taken when no guarded edge matches at runtime). A FLAG: only `true` is meaningful, so it is constrained to `true` (omit the field entirely for a non-default edge — `default: false` is not a valid wire value). At most one `default` edge per split node. Mutually exclusive with `when`/`equals` (ADR 0005 S7).'
+                  description: The dependency edges — the graph's discovered-fact topology (Decision 3). Each edge means "`to` proceeds once fact `from` about the upstream node is observable". `from` is either a bare `<nodeId>` (the degenerate "wait for the upstream node's completion" fact) or a qualified `<nodeId>.<fact>` referencing one of that node's declared `emits`. Omit/`[]` for a set of independent (root) nodes. The edge set must be a DAG.
+              # END generated:mcp-body
       responses:
         "200":
           description: The graph validated and compiled — it is STAGED for operator review; the response carries a preview and a navigational reviewUrl (no dispatch handle).
@@ -3135,12 +3816,33 @@ paths:
         interchange) so the page can render the laid-out BPMN in the host explorer without staging. It
         never deploys, stages or dispatches. A blank/invalid JSON string, or a graph that fails
         validation, is a 400 carrying a human `error` (and path-qualified `errors` for a compile failure).
+
+
+        INPUT — the text-door shape `{ "graphJson": "<serialized DeliveryGraph>" }` (a STRING, the
+        same paste the cockpit uses), NOT the structured object; its sibling `compileDeliveryGraph`
+        takes the `DeliveryGraph` OBJECT directly. SIDE EFFECTS — none: PURE preview, nothing is
+        persisted or dispatched (`staged: false`). IDEMPOTENCY — total (a pure function of the input).
+        VALIDATION — a bad string or invalid graph returns `400` with a human `error` and
+        `errors: [{ path, message }]`. NEXT — to actually stage, send the SAME graph as an object to
+        `compileDeliveryGraph`, then have an operator dispatch it from the `reviewUrl`.
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/DeliveryGraphPreviewSubmit"
+              # BEGIN generated:mcp-body (scripts/inline-mcp-bodies.ts — do not hand-edit)
+              description: 'The human-facing UI JSON-paste PREVIEW request (issues #386 + #516). The Delivery Graphs page''s "Preview" action cannot submit a structured object, so the operator''s pasted delivery-graph is carried as a raw JSON STRING (`graphJson`), parsed server-side and handed to the SAME pure `compileDeliveryGraph` compiler the agent-facing door uses. Preview compiles WITHOUT persisting. Per-operation schema (not shared with the stage door) so each door''s request stays independently evolvable.'
+              type: object
+              additionalProperties: false
+              example:
+                graphJson: '{"name":"start #567 once epic #488 has fully merged","nodes":[{"id":"gate-epic","kind":"wait","wait":{"kind":"epic","target":"nanobpm/nano-ide#488","match":{"epicState":"merged"},"poll":{"everyMs":300000,"timeoutMs":259200000},"onTimeout":"escalate"},"emits":[{"name":"prCount","type":"number"}]},{"id":"start-b","kind":"agent","agent":{"jobType":"senior:feature","prompt":"Implement nanobpm/nano-workforce#567 and open a PR."}}],"edges":[{"from":"gate-epic","to":"start-b"}]}'
+              required:
+                - graphJson
+              properties:
+                graphJson:
+                  type: string
+                  description: The pasted delivery-graph JSON (a serialised `DeliveryGraph`), parsed server-side.
+              # END generated:mcp-body
       responses:
         "200":
           description: The pasted graph parsed, validated and compiled — the preview summary and compiled BPMN are returned; nothing is staged.
@@ -3297,7 +3999,17 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/DeliveryGraphProposalBpmnRequest"
+              # BEGIN generated:mcp-body (scripts/inline-mcp-bodies.ts — do not hand-edit)
+              description: Request the compiled BPMN of a staged delivery-graph proposal for read-only DI PREVIEW. Carries only the proposal's content `digest`; the door recompiles the staged graph deterministically. No deploy, no dispatch — this reads, it does not launch anything.
+              type: object
+              additionalProperties: false
+              required:
+                - digest
+              properties:
+                digest:
+                  type: string
+                  description: The staged proposal's content digest — the proposal whose compiled BPMN (with DI) to render.
+              # END generated:mcp-body
       responses:
         "200":
           description: The staged proposal recompiled; the body carries its BPMN (with DI).
@@ -3359,7 +4071,26 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/SaveToLibrarySubmit"
+              # BEGIN generated:mcp-body (scripts/inline-mcp-bodies.ts — do not hand-edit)
+              description: 'Save a delivery graph to the reusable library (issue #522). Carries the entry `name` (its slug/hash derive the id) and an optional `description`, PLUS exactly one graph source: either a raw `graphJson` STRING (validated + compiled before persisting, `source: composed`), or the `digest` of an existing staged/dispatched proposal whose already-stored graph is reused (`source: from-staged` / `from-dispatched`). A graph that fails to compile is a clean 400 and nothing is persisted.'
+              type: object
+              additionalProperties: false
+              required:
+                - name
+              properties:
+                name:
+                  type: string
+                  description: The entry's human name — its slug + short-hash derive the stable library id (re-saving the same name upserts).
+                description:
+                  type: string
+                  description: An optional human note stored alongside the entry.
+                graphJson:
+                  type: string
+                  description: 'A raw `DeliveryGraph` JSON string to validate, compile and save (`source: composed`). Mutually exclusive with `digest`.'
+                digest:
+                  type: string
+                  description: The content digest of an existing staged/dispatched proposal whose stored graph is reused. Mutually exclusive with `graphJson`.
+              # END generated:mcp-body
       responses:
         "200":
           description: The graph validated and the entry was saved (upserted on its name-derived id).
@@ -3396,7 +4127,23 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/ImportToLibrarySubmit"
+              # BEGIN generated:mcp-body (scripts/inline-mcp-bodies.ts — do not hand-edit)
+              description: 'Import a delivery graph into the reusable library FROM A FILE (issue #524, epic #519 S5). The compose App-View''s `<input type=file accept=.json>` reads the selected file''s text client-side and POSTs it here as the raw `graphJson` string. The door validates + compiles it via the SAME `parseAndCompileText` pipeline the preview/stage/save doors use, then persists it with `source: imported`. A file that is not valid JSON, or a graph that fails to compile, is a clean 400 with path-qualified errors and NOTHING is persisted. The entry `name` defaults to the imported graph''s own `name`; an explicit `name` overrides it (an unnamed graph with no override is a clean 400).'
+              type: object
+              additionalProperties: false
+              required:
+                - graphJson
+              properties:
+                graphJson:
+                  type: string
+                  description: The raw `DeliveryGraph` JSON text read from the imported file (validated + compiled before persisting).
+                name:
+                  type: string
+                  description: Optional override for the entry name — its slug + short-hash derive the library id. Defaults to the imported graph's own `name`.
+                description:
+                  type: string
+                  description: An optional human note stored alongside the imported entry.
+              # END generated:mcp-body
       responses:
         "200":
           description: The imported graph validated and the entry was saved (source=imported).
@@ -3517,7 +4264,301 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/FeatureStart"
+              # BEGIN generated:mcp-body (scripts/inline-mcp-bodies.ts — do not hand-edit)
+              description: The start-feature request body — a SINGLE-issue feature run. Names the target issue by EXACTLY ONE of `issue` (an `owner/repo#123` reference) or `url` (a bare issue URL), plus a REQUIRED `baseBranch` (ADR 0003, same admission as the epic path), and the two optional follow-on knobs `converge` / `autoMerge`. May also carry an intake-time readiness gate (`readiness` and/or `blockedOn` + `consumerPackage`, per issue 295) that parks the run until the declared upstreams land. Modeled as `oneOf` named variants (Camunda REST v2 pattern) so an ambiguous or empty target is a 400 at the edge.
+              oneOf:
+                - type: object
+                  additionalProperties: false
+                  required:
+                    - issue
+                    - baseBranch
+                  properties:
+                    issue:
+                      type: string
+                      description: 'Issue reference: owner/repo#123.'
+                    baseBranch:
+                      type: string
+                      minLength: 1
+                      maxLength: 255
+                      pattern: \S
+                      description: 'REQUIRED target branch the agent branches off and opens its PR against. Admitted through the same ADR 0003 policy as the epic path (`admitPlan`): a missing `epic/*` base is auto-created off default HEAD; a non-`epic/*` base must already exist; naming the default branch requires `confirmDefaultBase`.'
+                    converge:
+                      type: boolean
+                      description: When true, hand the opened PR to the convergence loop (review rounds) as a follow-on step. When false (default) the run ends at "PR raised, not reviewed".
+                    autoMerge:
+                      type: boolean
+                      description: When true (and `converge` is true), drive the merge-loop after convergence — mirrors `convergeOnly`/`NANO_PR_AUTO_MERGE` inverted. When false the run stops at `converged`. Moot when `converge` is false.
+                    confirmDefaultBase:
+                      type: boolean
+                      description: Acknowledge that `baseBranch` is the repository default branch (the PR would target it directly). See `PlanStartByIssue.confirmDefaultBase`.
+                    allowSharedBase:
+                      type: boolean
+                      description: Opt in to sharing a custom integration base branch with another already-active epic. See `PlanStartByIssue.allowSharedBase`.
+                    customInstructions:
+                      type: string
+                      maxLength: 8000
+                      description: OPTIONAL free-text steering appended to the implementation agent's prompt for this run (via the implement task's `appendPrompt`). Blank/whitespace is treated as absent. Persists on the instance, so it also applies to the agent's answer-loop redispatch.
+                    readiness:
+                      type: array
+                      maxItems: 32
+                      items:
+                        description: 'A single durable readiness probe (issue #258, #295) the feature run must satisfy before its implementation agent is dispatched. `kind` selects the source; `target` + `match` are the per-kind predicate. The `capability` kind resolves "which published `pkg@version` first carries capability C?" from publish provenance and late-binds it into the run. See `app/readiness.ts` for the full per-kind semantics.'
+                        type: object
+                        additionalProperties: false
+                        required:
+                          - kind
+                          - target
+                        properties:
+                          kind:
+                            type: string
+                            enum:
+                              - http
+                              - command
+                              - npm
+                              - github-check
+                              - capability
+                              - pr
+                              - epic
+                            description: The readiness source. `command` is the escape hatch; `capability` resolves a cross-repo published-artifact edge; `pr` watches an in-flight PR's merge state (ADR 0005 §2); `epic` gates on an nwf plan-fanout epic reaching "fully merged", keyed by its `planKey` (issue
+                          target:
+                            type: string
+                            minLength: 1
+                            description: The kind-specific target (a URL, a shell command, a `pkg@version`, an `owner/repo@ref`, `github-releases:owner/repo`, an `owner/repo#123` PR reference for the `pr` kind, or an `owner/repo#NN` planKey — the epic issue — for the `epic` kind). For a `pr`/`epic` target used in a **delivery-graph `wait` node** it may instead be a `<nodeId>.<fact>` late-binding reference the delivery-graph compiler resolves at dispatch (issue
+                          onTimeout:
+                            type: string
+                            enum:
+                              - escalate
+                              - fail
+                              - continue
+                            description: What the gate does when the bounded wait elapses (default `escalate`).
+                          credentialEnv:
+                            type: string
+                            description: A declared env-contract key supplying a credential (http kind only). Names a key, never a secret value.
+                          match:
+                            type: object
+                            additionalProperties: false
+                            description: The per-kind readiness predicate; every field is optional and read only by the kinds that understand it.
+                            properties:
+                              status:
+                                type: integer
+                                description: 'http: the exact status that means ready (default any 2xx).'
+                              bodyIncludes:
+                                type: string
+                                description: 'http: a substring the response body must contain.'
+                              exitCode:
+                                type: integer
+                                description: 'command: the exit code that means ready (default 0).'
+                              stdoutIncludes:
+                                type: string
+                                description: 'command/npm: a substring stdout must contain.'
+                              version:
+                                type: string
+                                description: 'npm: the version that must be published.'
+                              conclusion:
+                                type: string
+                                description: 'github-check: the conclusion that means ready (default success).'
+                              checkName:
+                                type: string
+                                description: 'github-check: restrict to the named check run.'
+                              capabilityRef:
+                                type: string
+                                description: 'capability: the upstream issue/PR handle the resolved version must carry.'
+                              package:
+                                type: string
+                                description: 'capability: the package whose releases are scanned for provenance.'
+                              verifyCommand:
+                                type: string
+                                description: 'capability: optional empirical verifier run once at the gate boundary.'
+                              prState:
+                                type: string
+                                enum:
+                                  - ready
+                                  - merged
+                                  - mergeable
+                                  - checks-green
+                                description: 'pr: the declared PR state to wait for (default merged).'
+                              epicState:
+                                type: string
+                                enum:
+                                  - merged
+                                  - done
+                                description: 'epic: the declared plan-fanout aggregate state to wait for (default merged) — both mean ''fully merged'' (issue #568).'
+                          poll:
+                            type: object
+                            additionalProperties: false
+                            description: The poll cadence (how often to re-probe, how long to keep trying, and the backoff shape).
+                            properties:
+                              everyMs:
+                                type: integer
+                                description: Interval between poll attempts (ms).
+                              timeoutMs:
+                                type: integer
+                                description: Bounded budget (ms) before the gate escalates.
+                              backoff:
+                                type: string
+                                enum:
+                                  - fixed
+                                  - exponential
+                                description: Backoff shape between attempts.
+                      description: 'OPTIONAL intake-time readiness gate (issue #295): one or more durable probes the run must ALL satisfy before its implementation agent is dispatched. The run parks (durably, bounded by the gate''s escalating timer) at the leading readiness preflight until every probe goes green. Absent/empty ⇒ the run implements immediately, unchanged.'
+                    blockedOn:
+                      type: array
+                      maxItems: 32
+                      items:
+                        type: string
+                        minLength: 1
+                      description: 'OPTIONAL ergonomic shorthand for `readiness` (issue #295): a list of upstream `owner/repo#123` issue/PR handles the run waits to land. With `consumerPackage` each desugars to a `capability` probe (resolve which published `pkg@version` first carries the handle, and late-bind it into the run); without it, to a `command` probe that goes green once the referenced issue/PR is closed/merged.'
+                    consumerPackage:
+                      type: string
+                      minLength: 1
+                      description: OPTIONAL npm package name (e.g. `@nanobpm/engine-wasm`) the `blockedOn` shorthand resolves its handles against — the consumer dependency whose published provenance must carry each awaited upstream. When present, `blockedOn` desugars to `capability` probes and the resolved `pkg@version` is late-bound into the implementation agent's brief.
+                - type: object
+                  additionalProperties: false
+                  required:
+                    - url
+                    - baseBranch
+                  properties:
+                    url:
+                      type: string
+                      description: A bare issue URL, when no `owner/repo#123` reference is supplied.
+                    baseBranch:
+                      type: string
+                      minLength: 1
+                      maxLength: 255
+                      pattern: \S
+                      description: REQUIRED target branch the agent branches off and opens its PR against. See `FeatureStartByIssue.baseBranch`.
+                    converge:
+                      type: boolean
+                      description: When true, hand the opened PR to the convergence loop. See `FeatureStartByIssue.converge`.
+                    autoMerge:
+                      type: boolean
+                      description: When true (with `converge`), drive the merge-loop. See `FeatureStartByIssue.autoMerge`.
+                    confirmDefaultBase:
+                      type: boolean
+                      description: Acknowledge landing on the default branch. See `PlanStartByIssue.confirmDefaultBase`.
+                    allowSharedBase:
+                      type: boolean
+                      description: Share a custom integration base with another active epic. See `PlanStartByIssue.allowSharedBase`.
+                    customInstructions:
+                      type: string
+                      maxLength: 8000
+                      description: OPTIONAL free-text steering appended to the implementation agent's prompt for this run. See `FeatureStartByIssue.customInstructions`.
+                    readiness:
+                      type: array
+                      maxItems: 32
+                      items:
+                        description: 'A single durable readiness probe (issue #258, #295) the feature run must satisfy before its implementation agent is dispatched. `kind` selects the source; `target` + `match` are the per-kind predicate. The `capability` kind resolves "which published `pkg@version` first carries capability C?" from publish provenance and late-binds it into the run. See `app/readiness.ts` for the full per-kind semantics.'
+                        type: object
+                        additionalProperties: false
+                        required:
+                          - kind
+                          - target
+                        properties:
+                          kind:
+                            type: string
+                            enum:
+                              - http
+                              - command
+                              - npm
+                              - github-check
+                              - capability
+                              - pr
+                              - epic
+                            description: The readiness source. `command` is the escape hatch; `capability` resolves a cross-repo published-artifact edge; `pr` watches an in-flight PR's merge state (ADR 0005 §2); `epic` gates on an nwf plan-fanout epic reaching "fully merged", keyed by its `planKey` (issue
+                          target:
+                            type: string
+                            minLength: 1
+                            description: The kind-specific target (a URL, a shell command, a `pkg@version`, an `owner/repo@ref`, `github-releases:owner/repo`, an `owner/repo#123` PR reference for the `pr` kind, or an `owner/repo#NN` planKey — the epic issue — for the `epic` kind). For a `pr`/`epic` target used in a **delivery-graph `wait` node** it may instead be a `<nodeId>.<fact>` late-binding reference the delivery-graph compiler resolves at dispatch (issue
+                          onTimeout:
+                            type: string
+                            enum:
+                              - escalate
+                              - fail
+                              - continue
+                            description: What the gate does when the bounded wait elapses (default `escalate`).
+                          credentialEnv:
+                            type: string
+                            description: A declared env-contract key supplying a credential (http kind only). Names a key, never a secret value.
+                          match:
+                            type: object
+                            additionalProperties: false
+                            description: The per-kind readiness predicate; every field is optional and read only by the kinds that understand it.
+                            properties:
+                              status:
+                                type: integer
+                                description: 'http: the exact status that means ready (default any 2xx).'
+                              bodyIncludes:
+                                type: string
+                                description: 'http: a substring the response body must contain.'
+                              exitCode:
+                                type: integer
+                                description: 'command: the exit code that means ready (default 0).'
+                              stdoutIncludes:
+                                type: string
+                                description: 'command/npm: a substring stdout must contain.'
+                              version:
+                                type: string
+                                description: 'npm: the version that must be published.'
+                              conclusion:
+                                type: string
+                                description: 'github-check: the conclusion that means ready (default success).'
+                              checkName:
+                                type: string
+                                description: 'github-check: restrict to the named check run.'
+                              capabilityRef:
+                                type: string
+                                description: 'capability: the upstream issue/PR handle the resolved version must carry.'
+                              package:
+                                type: string
+                                description: 'capability: the package whose releases are scanned for provenance.'
+                              verifyCommand:
+                                type: string
+                                description: 'capability: optional empirical verifier run once at the gate boundary.'
+                              prState:
+                                type: string
+                                enum:
+                                  - ready
+                                  - merged
+                                  - mergeable
+                                  - checks-green
+                                description: 'pr: the declared PR state to wait for (default merged).'
+                              epicState:
+                                type: string
+                                enum:
+                                  - merged
+                                  - done
+                                description: 'epic: the declared plan-fanout aggregate state to wait for (default merged) — both mean ''fully merged'' (issue #568).'
+                          poll:
+                            type: object
+                            additionalProperties: false
+                            description: The poll cadence (how often to re-probe, how long to keep trying, and the backoff shape).
+                            properties:
+                              everyMs:
+                                type: integer
+                                description: Interval between poll attempts (ms).
+                              timeoutMs:
+                                type: integer
+                                description: Bounded budget (ms) before the gate escalates.
+                              backoff:
+                                type: string
+                                enum:
+                                  - fixed
+                                  - exponential
+                                description: Backoff shape between attempts.
+                      description: OPTIONAL intake-time readiness gate. See `FeatureStartByIssue.readiness`.
+                    blockedOn:
+                      type: array
+                      maxItems: 32
+                      items:
+                        type: string
+                        minLength: 1
+                      description: OPTIONAL readiness shorthand — upstream `owner/repo#123` handles to wait on. See `FeatureStartByIssue.blockedOn`.
+                    consumerPackage:
+                      type: string
+                      minLength: 1
+                      description: OPTIONAL package the `blockedOn` handles resolve against. See `FeatureStartByIssue.consumerPackage`.
+              type: object
+              # END generated:mcp-body
       responses:
         "202":
           description: The feature run was started (or was already running).
@@ -3751,7 +4792,28 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/AgentCompleteRequest"
+              # BEGIN generated:mcp-body (scripts/inline-mcp-bodies.ts — do not hand-edit)
+              type: object
+              additionalProperties: false
+              description: 'Complete an escalation user task AS AN AGENT (epic #156 / ADR 0046). The agent submits the SAME typed form variables a human would through the task inbox; the host routes them through the one canonical attributed completer, records the agent''s identity for the audit trail, and resumes the process. Only the migrated escalation user tasks may be completed this way.'
+              required:
+                - userTaskKey
+                - agentId
+                - variables
+              properties:
+                userTaskKey:
+                  type: string
+                  minLength: 1
+                  description: The engine user-task key of the parked escalation task (from GET /tasks/api/tasks).
+                agentId:
+                  type: string
+                  minLength: 1
+                  description: The completing agent's identity (ADR 0046), recorded for attribution.
+                variables:
+                  type: object
+                  additionalProperties: true
+                  description: The typed form completion variables — the SAME shape a human submits (e.g. `{ resolution, answer }`, `{ directive, notes }`, `{ action, notes }`, or `{ answer }`).
+              # END generated:mcp-body
       responses:
         "200":
           description: The agent completed the escalation task and the process resumed.
@@ -3792,7 +4854,25 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/RevertCompletionRequest"
+              # BEGIN generated:mcp-body (scripts/inline-mcp-bodies.ts — do not hand-edit)
+              type: object
+              additionalProperties: false
+              description: Revert/override an agent escalation completion (the reversibility guarantee of ADR 0046). A human marks a reversible agent completion reverted so the agent's answer is no longer treated as authoritative; the reverter's identity + timestamp are recorded.
+              required:
+                - completionId
+                - reverterId
+              properties:
+                completionId:
+                  type: integer
+                  description: The `task_completions` id returned when the agent completion was recorded.
+                reverterId:
+                  type: string
+                  minLength: 1
+                  description: The human identity overriding the agent completion, recorded for the audit trail.
+                note:
+                  type: string
+                  description: Optional corrective guidance from the human that overrides the agent's answer.
+              # END generated:mcp-body
       responses:
         "200":
           description: The agent completion was reverted.
@@ -3879,7 +4959,34 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/BlackboardAppendRequest"
+              # BEGIN generated:mcp-body (scripts/inline-mcp-bodies.ts — do not hand-edit)
+              type: object
+              description: Append one blackboard entry. Idempotent on (plan, dedupe_key).
+              required:
+                - body
+              properties:
+                author_task:
+                  type: string
+                  description: The authoring task id; defaults to "system" when omitted/blank.
+                kind:
+                  type: string
+                  description: Entry kind (e.g. note, file-claim); normalized by the delegate.
+                files:
+                  type: array
+                  items:
+                    type: string
+                  description: Files this entry concerns (used by advisory file-claim conflict detection).
+                body:
+                  type: string
+                  minLength: 1
+                  description: The note text (required, non-blank).
+                wave:
+                  type: integer
+                  description: Optional plan wave the entry belongs to.
+                dedupe_key:
+                  type: string
+                  description: 'Idempotency key: a retry with the same (plan, dedupe_key) returns the existing entry.'
+              # END generated:mcp-body
       responses:
         "200":
           description: "An idempotent retry: the entry already existed (inserted=false)."

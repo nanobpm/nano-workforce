@@ -49,6 +49,8 @@
     "layout:check": "node --experimental-strip-types scripts/layout-bpmn.ts --check",
     "sync:nav": "node --experimental-strip-types scripts/sync-nav.ts",
     "sync:nav:check": "node --experimental-strip-types scripts/sync-nav.ts --check",
+    "gen:mcp-bodies": "node --experimental-strip-types scripts/inline-mcp-bodies.ts",
+    "check:mcp-bodies": "node --experimental-strip-types scripts/inline-mcp-bodies.ts --check",
     "dev": "urban dev",
     "pretest": "urban gen",
     "test": "node --experimental-strip-types --test",
@@ -73,7 +75,8 @@
     "conventional-changelog-conventionalcommits": "^8.0.0",
     "linkedom": "^0.18.13",
     "semantic-release": "^25.0.0",
-    "typescript": "^5.6.0"
+    "typescript": "^5.6.0",
+    "yaml": "^2.9.0"
   },
   "overrides": {
     "@semantic-release/npm": "^13.1.5"
