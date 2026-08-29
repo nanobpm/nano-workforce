@@ -207,9 +207,25 @@ export async function stageProposal(data: DataLayer, row: DeliveryGraphProposal)
   return toWrite;
 }
 
-/** Load a proposal that is live and dispatchable RIGHT NOW: it exists, is `staged` (not superseded or
- * already dispatched), and has not aged out of its TTL. Returns null otherwise, so the cockpit
- * dispatch action refuses a stale/unknown/already-dispatched digest cleanly. */
+/** The ONE definition of "a live, dispatchable-RIGHT-NOW staged proposal" (issue #608): the row is
+ * `staged` (not superseded / dispatched / expired / dismissed) AND has not aged out of its TTL. This is
+ * the SINGLE SOURCE OF TRUTH the digest read (`getStagedProposal`), the list read
+ * (`listStagedProposals`), and — through them — the cockpit App-View, the dispatch/preview/dismiss
+ * doors, and the MCP `listStagedProposals` tool all resolve liveness through, so no two readers can ever
+ * drift on which rows are live (AGENTS.md "Derivation over duplication"). A read-after-write from
+ * `compileDeliveryGraph` is trustworthy because this predicate is evaluated over the SAME durable
+ * `delivery_graph_proposals` store the compile door commits the row to (the app's single default
+ * `app.data` source) — a freshly staged row (`status: 'staged'`, `expires_at` a full TTL in the future)
+ * is live by construction, with no projection/read-model between the write and the read to lag behind. */
+export function isLiveStaged(row: DeliveryGraphProposal, at: Date = new Date()): boolean {
+  return row.status === "staged" && !isProposalExpired(row.expires_at, at);
+}
+
+/** Load a proposal that is live and dispatchable RIGHT NOW: it exists and satisfies {@link isLiveStaged}
+ * (it is `staged` — not superseded or already dispatched — and has not aged out of its TTL). Returns
+ * null otherwise, so the cockpit dispatch action refuses a stale/unknown/already-dispatched digest
+ * cleanly. Reads the authoritative `delivery_graph_proposals` row by primary key from the same
+ * `app.data` store the compile door stages into — a read-your-writes lookup, no read-model in between. */
 export async function getStagedProposal(
   data: DataLayer,
   digest: string,
@@ -217,24 +233,28 @@ export async function getStagedProposal(
 ): Promise<DeliveryGraphProposal | null> {
   const row = await deliveryGraphProposals(data).get(digest);
   if (!row) return null;
-  if (row.status !== "staged") return null;
-  if (isProposalExpired(row.expires_at, at)) return null;
-  return row;
+  return isLiveStaged(row, at) ? row : null;
 }
 
-/** Every LIVE staged proposal — `status = 'staged'` AND not aged out of its TTL — newest first. The
- * staged App-View (`pages/delivery-graphs/staged.mount.js`) polls this to render the Preview-DI +
- * Dispatch list. Mirrors `getStagedProposal`'s freshness guard (`isProposalExpired`) so an
- * expired-but-not-yet-swept row is never offered for preview/dispatch, unlike a raw
- * `status = 'staged'` datasource filter which cannot express a `expires_at > now` cutoff and so lingers
- * an aged-out row until the sweep realises the TTL. Read-only; no write. */
+/** Every LIVE staged proposal — {@link isLiveStaged} (`status = 'staged'` AND not aged out of its TTL) —
+ * newest first. The staged App-View (`pages/delivery-graphs/staged.mount.js`) and the MCP
+ * `listStagedProposals` tool both poll THIS door to render/answer the Preview-DI + Dispatch list.
+ *
+ * READ-AFTER-WRITE GUARANTEE (issue #608). The list is served by a fresh query against the authoritative
+ * `delivery_graph_proposals` table on the app's single default `app.data` source — the SAME store, in
+ * the SAME scope, the `compileDeliveryGraph`/`stageProposal` write commits to. There is no
+ * projection/read-model or cache between the write and this read, so a digest `compileDeliveryGraph`
+ * just returned is listed on the very next call with NO intervening delay (the write is committed before
+ * the compile door responds). Liveness is decided by the shared {@link isLiveStaged} predicate — NOT a
+ * second `status = 'staged'` datasource filter, which cannot express an `expires_at > now` cutoff and so
+ * would linger an aged-out row until the poller's sweep realises the TTL. Read-only; no write. */
 export async function listStagedProposals(
   data: DataLayer,
   at: Date = new Date(),
 ): Promise<DeliveryGraphProposal[]> {
   const rows = await deliveryGraphProposals(data).find({ status: "staged" });
   return rows
-    .filter((row) => !isProposalExpired(row.expires_at, at))
+    .filter((row) => isLiveStaged(row, at))
     .sort((a, b) => b.created_at.localeCompare(a.created_at));
 }
 

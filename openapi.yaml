@@ -4029,11 +4029,25 @@ paths:
       operationId: listStagedProposals
       summary: List the LIVE staged delivery-graph proposals awaiting dispatch (issue #511), newest first.
       description: >-
-        The read behind the staged-proposals App-View: every `staged` delivery-graph proposal that has
-        not aged out of its TTL, newest first, projected to the Preview-DI + Dispatch metadata (the
-        `graph`/`preview` payloads are omitted — the App-View recompiles by `digest` for the DI preview).
-        Mirrors the `previewProposalBpmn`/`dispatchDeliveryGraph` freshness guard so an expired-but-not-
-        yet-swept row is never listed. Read-only.
+        The read behind the staged-proposals App-View AND the MCP `listStagedProposals` tool: every
+        `staged` delivery-graph proposal that has not aged out of its TTL, newest first, projected to the
+        Preview-DI + Dispatch metadata (the `graph`/`preview` payloads are omitted — the App-View
+        recompiles by `digest` for the DI preview). Mirrors the
+        `previewProposalBpmn`/`dispatchDeliveryGraph` freshness guard so an expired-but-not-yet-swept row
+        is never listed. Read-only.
+
+
+        FRESHNESS / CONSISTENCY (issue #608). This read is READ-AFTER-WRITE consistent with
+        `compileDeliveryGraph`: it is served by a fresh query against the SAME durable
+        `delivery_graph_proposals` store, in the SAME scope, that the compile/stage write commits to (the
+        app's single default data source) — there is no projection, read-model, or cache between the
+        write and this read. So a `digest` that `compileDeliveryGraph` just returned as `status: "ready"`
+        is guaranteed to appear here on the very next call, with NO intervening delay and no polling
+        needed (the row is committed before the compile door responds). The one caveat is scope: the MCP
+        endpoint and the cockpit must resolve the SAME app deployment — point the MCP client at the same
+        instance/mount whose `reviewUrl` the compile door returned, or the read and the write address
+        different databases and disagree. Returns an empty list only when nothing is genuinely staged
+        (or every staged row has aged out of its TTL).
       security:
         - hookSecret: []
         - {}

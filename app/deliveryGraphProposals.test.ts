@@ -15,6 +15,7 @@ import {
   DELIVERY_PROPOSAL_TTL_MS,
   deliveryGraphProposals,
   getStagedProposal,
+  isLiveStaged,
   isProposalExpired,
   markProposalDismissed,
   markProposalDispatched,
@@ -80,6 +81,21 @@ test("isProposalExpired: past → true, future → false, blank/corrupt → true
   assertEquals(isProposalExpired(null, at), true);
   assertEquals(isProposalExpired("", at), true);
   assertEquals(isProposalExpired("garbage", at), true);
+});
+
+test("isLiveStaged: the ONE liveness predicate — only a `staged`, not-yet-expired row is live (#608)", () => {
+  const at = new Date("2024-06-01T00:00:00.000Z");
+  const live = row({ createdAt: "2024-05-31T23:00:00.000Z" }); // staged, TTL a day out → live
+  assertEquals(isLiveStaged(live, at), true);
+  // A future-created staged row is trivially live too (TTL further out).
+  assertEquals(isLiveStaged(row(), new Date()), true);
+  // Every non-`staged` status is NOT live, regardless of TTL.
+  for (const status of ["superseded", "dispatched", "expired", "dismissed"] as const) {
+    assertEquals(isLiveStaged({ ...live, status }, at), false);
+  }
+  // A `staged` row whose TTL has elapsed is NOT live (mirrors isProposalExpired, fail-closed).
+  assertEquals(isLiveStaged({ ...live, expires_at: "2024-05-30T00:00:00.000Z" }, at), false);
+  assertEquals(isLiveStaged({ ...live, expires_at: "" }, at), false);
 });
 
 test("proposalReviewUrl: a navigational deep-link to the cockpit page — NOT a dispatch endpoint", () => {
