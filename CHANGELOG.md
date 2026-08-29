@@ -1,3 +1,9 @@
+## [0.156.0](https://github.com/nanobpm/nano-workforce/compare/v0.155.0...v0.156.0) (2026-08-29)
+
+### Features
+
+* **delivery-units:** single (kind, instanceId) dispatch door on delivery_units (ADR 0006 S3) ([#602](https://github.com/nanobpm/nano-workforce/issues/602)) ([f736b4b](https://github.com/nanobpm/nano-workforce/commit/f736b4bfaf838b4b4b000b0b84d76330a05edf7c)), closes [#590](https://github.com/nanobpm/nano-workforce/issues/590)
+
 ## [0.155.0](https://github.com/nanobpm/nano-workforce/compare/v0.154.0...v0.155.0) (2026-08-29)
 
 ### Features
