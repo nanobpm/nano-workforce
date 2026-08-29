@@ -150,6 +150,22 @@ Agents without MCP are unchanged — resolve the instance, then
 live guide. `GET /app/api/agent` and `GET /app/api/agent/skill` keep working exactly as
 before.
 
+### Addressable guide (MCP) — `getAgentGuide`
+
+The full guide is ~43KB — a single `getAgentInstructions` call can overrun a tool-result
+limit. Over MCP, prefer the **addressable** companion tool `getAgentGuide(section?)`
+(`GET /app/api/agent/guide`):
+
+- **No argument** → a compact **table of contents**: every stable section id
+  (`orient`, `submit-pr`, `submit-epic`, `escalations`, `lifecycle`, `debug`,
+  `debug-models`, `unstick`, `raise-issue`, `delivery-graphs`) with a one-line summary.
+- **`section=<id>`** → **only** that section's markdown, small enough to fit a typical
+  limit. An unknown id is rejected with `issues[{path,message}]` listing the valid ids.
+
+The section ids are the single source of truth in `app/agentGuide.ts` (`GUIDE_SECTIONS`),
+derived-and-checked against the authored `docs/agent-guide.md`. The `getAgentInstructions`
+/ `GET /agent` full-guide door is unchanged — the addressable tool is additive.
+
 ## 6. Regression harness — pin the MCP surface from nwf's side
 
 The MCP projection layer (schema shape, argument encoding, session handshake) is
