@@ -83,41 +83,56 @@ it's the same app and the same behaviour.
 
 If you already have one or more coding-agent CLIs installed (`kimi`, `qwen`,
 `copilot`, `claude`, `pi`), one command takes you from there to a **running Nano
-engine with a supervised workforce of hired agents**:
+Workforce**: engine, a supervised workforce of hired agents, **and the Nano
+Workforce app itself, installed, configured, and running**:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/nanobpm/nano-workforce/main/install.sh | sh
 ```
 
-It installs `@camunda8/cli` and the `c8ctl-plugin-nano` plugin, installs shell
-completion, detects which of your harnesses are installed, lets you multi-select
-which to hire (with a model and an instance count each), hires each with
-`--rank senior --protocol acp --permission yolo`, composes a declarative
-**workforce manifest** (`c8 nano workforce add`), and brings it up
-(`c8 nano start` then `c8 nano workforce start`).
+**Phase 1 — engine + workforce.** It installs `@camunda8/cli` and the
+`c8ctl-plugin-nano` plugin, installs shell completion, detects which of your
+harnesses are installed, lets you multi-select which to hire (with a model and an
+instance count each), hires each with `--rank senior --protocol acp --permission
+yolo`, composes a declarative **workforce manifest** (`c8 nano workforce add`),
+and brings it up (`c8 nano start` then `c8 nano workforce start`).
+
+**Phase 2 — the app.** It then talks to the nano console the engine brought up to
+install the `@nanobpm/nano-workforce` extension, scaffold a **Workforce** project
+from the `nano-workforce` template, write its `ProjectConfig.env` (including
+`NANO_WORKFORCE_BASE_URL` set to the console origin + `/console/app-view/Workforce`
+so the fleet's hooks resolve through the proxy — see [Fleet
+networking](#fleet-networking-remote-workers)), and run it. It confirms readiness
+by polling the app's own `GET /app/api/version` through the proxy, then prints the
+cockpit URL, the Tasks inbox, the Delivery Graphs page, and the `/app/api/agent` +
+`/app/mcp` pointers. Pass `--skip-app` to stop after phase 1.
 
 > ⚠️ The hired agents run **unattended** with `--permission yolo` — full tool
 > access (shell, file writes, network) as your user on this host. The script shows
-> a confirmation summary before it hires anything; pass `--yes` to skip it.
-
-**What it does *not* do:** it stops at "engine up, workforce up, agents polling".
-It does **not** install/deploy/run the Nano Workforce **app** itself — for that,
-use Nano Studio (above) or the manual steps below.
+> a confirmation summary before it hires anything (and before it installs the app);
+> pass `--yes` to skip both.
 
 Prompts read from `/dev/tty`, so the `curl … | sh` pipe works interactively. It is
-also fully scriptable and safe to re-run (it converges rather than duplicating):
+also fully scriptable and safe to re-run (it converges rather than duplicating — an
+existing project is configured and run, never re-scaffolded):
 
 ```sh
 # Non-interactive (CI / re-provisioning); repeatable --harness <name>[:<model>][:<instances>]
 curl -fsSL https://raw.githubusercontent.com/nanobpm/nano-workforce/main/install.sh | sh -s -- --harness copilot:gpt-5.4:5 --harness claude:opus:1 --yes
 
-# Preview every command without changing anything
+# Name the app's project, or stop after phase 1 (engine + workforce only)
+curl -fsSL .../install.sh | sh -s -- --harness copilot:gpt-5.4:5 --yes --project-name Workforce
+curl -fsSL .../install.sh | sh -s -- --harness copilot:gpt-5.4:5 --yes --skip-app
+
+# Preview every command (including the console API calls) without changing anything
 curl -fsSL https://raw.githubusercontent.com/nanobpm/nano-workforce/main/install.sh | sh -s -- --harness copilot:gpt-5.4:1 --dry-run
 ```
 
 `qwen` must always be given an explicit model (it stalls without one). With no
 controlling terminal and no `--harness`, the script exits with usage rather than
-hanging. Because it is served from `main`, a merged change to `install.sh` is live
+hanging. Phase 2 needs the engine's console reachable (the default `c8 nano start`
+`studio` mode); an unreachable console is reported as an early failure that changes
+nothing. Because it is served from `main`, a merged change to `install.sh` is live
 immediately.
 
 ### Prerequisites
