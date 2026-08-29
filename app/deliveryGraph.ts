@@ -20,7 +20,7 @@
 // caller can point the author straight at the offending input.
 
 import { isConvergeTarget } from "./convergeTargets.ts";
-import { isRawConvergeMergeJobType } from "./nodePolicy.ts";
+import { isRawConvergeMergeJobType, NODE_COMPLETION_POLICIES } from "./nodePolicy.ts";
 
 /** The CLOSED node-kind allowlist (ADR 0005 Decision 2) — the trust boundary. Extensible only by a
  * deliberate ADR/PR (add the openapi variant + a case here), never by a graph author. Kept as the
@@ -403,7 +403,7 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
         // `=== true`). A truthy `"true"`/`1` would otherwise silently evade merge-requires-converge and
         // the S5 cell policy. Reject any present-but-non-boolean value path-qualified.
         if (kind === "agent") {
-          for (const flag of ["converge", "merge"] as const) {
+          for (const flag of NODE_COMPLETION_POLICIES) {
             const value = config[flag];
             if (value !== undefined && typeof value !== "boolean") {
               errors.push({
