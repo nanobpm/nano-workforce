@@ -344,7 +344,7 @@ gh_token_usable() { # 0 if the env GITHUB_TOKEN/GH_TOKEN actually authenticates
   if gh_present; then
     GITHUB_TOKEN="$_tok" GH_TOKEN="$_tok" gh api user --jq .login >/dev/null 2>&1
   elif command -v curl >/dev/null 2>&1; then
-    curl -fsS -H "Authorization: Bearer $_tok" -H "User-Agent: nano-workforce-install" \
+    curl -fsS --connect-timeout 5 --max-time 10 -H "Authorization: Bearer $_tok" -H "User-Agent: nano-workforce-install" \
       https://api.github.com/user >/dev/null 2>&1
   else
     # No gh and no curl to validate with — don't block; trust it and caveat.
