@@ -15,7 +15,7 @@
 //
 // The optional shared-secret guard mirrors /agent and /version: enforced HERE only when
 // NANO_PR_WEBHOOK_SECRET is set (the runtime does not enforce OpenAPI `security`).
-import { GUIDE_SECTIONS, guideToc, renderGuideSection, resolveEngineBase } from "../app/agentGuide.ts";
+import { guideToc, renderGuideSection, resolveEngineBase } from "../app/agentGuide.ts";
 import { resolveApiBase } from "../app/resolveApiBase.ts";
 import { buildVersionInfo, envVar } from "../app/version.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
@@ -49,7 +49,15 @@ export default defineOperation("getAgentGuide", ({ query, req }, app) => {
   // A section id → just that section, or a 400 that names the valid ids.
   const instructions = renderGuideSection(section, baseUrl);
   if (instructions === undefined) {
-    const validIds = GUIDE_SECTIONS.map((s) => s.id);
+    // Derive the valid ids from the PARSED table of contents — the sections this deployment can
+    // actually serve — not the static registry. When the guide doc is unreadable (RAW_GUIDE
+    // fallback, no `##` headings) the TOC is empty and NO id is retrievable, so say so explicitly
+    // rather than list registry ids that would themselves 400.
+    const validIds = guideToc().map((s) => s.id);
+    const detail =
+      validIds.length > 0
+        ? `valid ids: ${validIds.join(", ")}`
+        : "no sections are available in this deployment";
     return {
       status: 400,
       body: {
@@ -57,7 +65,7 @@ export default defineOperation("getAgentGuide", ({ query, req }, app) => {
         issues: [
           {
             path: "section",
-            message: `unknown section id "${section}"; valid ids: ${validIds.join(", ")}`,
+            message: `unknown section id "${section}"; ${detail}`,
           },
         ],
       },

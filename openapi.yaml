@@ -35,6 +35,25 @@ components:
       properties:
         error:
           type: string
+    ValidationError:
+      description: >-
+        The uniform validation-error contract: a human-readable `error` plus a path-qualified
+        `issues[]` naming each offending input. Returned by endpoints that reject a bad query/body
+        param (e.g. `GET /agent/guide` with an unknown `section` id).
+      type: object
+      additionalProperties: false
+      required:
+        - error
+        - issues
+      properties:
+        error:
+          type: string
+          description: A human-readable summary of the rejection.
+        issues:
+          type: array
+          items:
+            $ref: "#/components/schemas/DeliveryCompileError"
+          description: The path-qualified `{ path, message }` failures (at least one).
     ActivePr:
       type: object
       description: A tracked PR that is not in a terminal (converged/abandoned) state.
@@ -3196,7 +3215,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ErrorBody"
+                $ref: "#/components/schemas/ValidationError"
         "401":
           description: Missing/invalid shared secret (only when NANO_PR_WEBHOOK_SECRET is set).
           content:
