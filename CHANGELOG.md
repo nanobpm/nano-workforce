@@ -1,3 +1,9 @@
+## [0.161.0](https://github.com/nanobpm/nano-workforce/compare/v0.160.0...v0.161.0) (2026-08-29)
+
+### Features
+
+* addressable operator guide via getAgentGuide(section?) over MCP ([#615](https://github.com/nanobpm/nano-workforce/issues/615)) ([8d59f54](https://github.com/nanobpm/nano-workforce/commit/8d59f541e25478ff7a076debc053d988f1d79b29)), closes [#611](https://github.com/nanobpm/nano-workforce/issues/611)
+
 ## [0.160.0](https://github.com/nanobpm/nano-workforce/compare/v0.159.1...v0.160.0) (2026-08-29)
 
 ### Features
