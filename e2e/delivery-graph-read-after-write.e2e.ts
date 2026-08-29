@@ -31,19 +31,38 @@ const STAGES_A_PROPOSAL = {
   edges: [{ from: "open", to: "cut" }],
 };
 
-/** A second, DIFFERENT-content graph that shares the SAME `name` (logical key) as the first — staging
- *  it supersedes the first for that logical key. The read after it must show the SECOND digest (the one
- *  the compile just returned), never the superseded first. */
-const STAGES_A_PROPOSAL_V2 = {
-  name: "S2 read-after-write A",
+/** A dedicated logical key for the supersede test, distinct from the first test's key so the case is
+ *  SELF-CONTAINED — it stages BOTH its own V1 and V2 in-test and asserts per-logical-key, rather than
+ *  depending on an earlier test having staged a predecessor. */
+const SUPERSEDE_KEY = "S2 supersede key";
+
+/** V1 for the supersede test — the predecessor that staging V2 must retire. */
+const SUPERSEDE_V1 = {
+  name: SUPERSEDE_KEY,
   nodes: [
-    { id: "open", kind: "agent", agent: { jobType: "senior:demo", prompt: "un-draft + merge #B and #C" } },
-    { id: "cut", kind: "agent", agent: { jobType: "senior:demo", prompt: "cut the release with notes" } },
+    { id: "open", kind: "agent", agent: { jobType: "senior:demo", prompt: "un-draft + merge #B" } },
+    { id: "cut", kind: "agent", agent: { jobType: "senior:demo", prompt: "cut the release" } },
   ],
   edges: [{ from: "open", to: "cut" }],
 };
 
-interface StagedRow { digest: string }
+/** V2 — a STRUCTURALLY different graph (an extra node → different compiled BPMN → different content
+ *  digest) sharing the SAME `name` (logical key) as V1, so staging it supersedes V1. The read after it
+ *  must show the SECOND digest (the one the compile just returned), never the superseded first. */
+const SUPERSEDE_V2 = {
+  name: SUPERSEDE_KEY,
+  nodes: [
+    { id: "open", kind: "agent", agent: { jobType: "senior:demo", prompt: "un-draft + merge #B" } },
+    { id: "notes", kind: "agent", agent: { jobType: "senior:demo", prompt: "draft the release notes" } },
+    { id: "cut", kind: "agent", agent: { jobType: "senior:demo", prompt: "cut the release" } },
+  ],
+  edges: [
+    { from: "open", to: "notes" },
+    { from: "notes", to: "cut" },
+  ],
+};
+
+interface StagedRow { digest: string; title: string | null }
 interface ListBody { count: number; proposals: StagedRow[] }
 
 /** Compile a graph over MCP and return the staged digest the door reports (asserting it staged). */
@@ -84,17 +103,30 @@ describe("S2 — listStagedProposals read-after-write is trustworthy (#608)", ()
   });
 
   test("supersede keeps read-after-write honest: the read shows the LATEST returned digest, not the superseded one", async () => {
-    // Stage V2 for the SAME logical key — it supersedes the V1 staged above. The read must reflect the
-    // digest THIS compile returned (the live one), never the now-superseded predecessor.
-    const digestV2 = await compileAndStage(h, STAGES_A_PROPOSAL_V2);
+    // SELF-CONTAINED: stage V1 then V2 for the SAME logical key inside this test — V2 supersedes V1. The
+    // read must reflect the digest THIS compile returned (the live one) and the superseded predecessor
+    // must be gone, with no dependence on any other test having staged first.
+    const digestV1 = await compileAndStage(h, SUPERSEDE_V1);
+    const digestV2 = await compileAndStage(h, SUPERSEDE_V2);
+    assert.notEqual(digestV1, digestV2, "V1 and V2 must differ in content so V2 genuinely supersedes V1");
     const list = await listStaged(h);
     const digests = list.proposals.map((p) => p.digest);
     assert.ok(
       digests.includes(digestV2),
       `after superseding, listStagedProposals must show the latest digest ${digestV2} (got ${JSON.stringify(digests)})`,
     );
-    // Exactly one live proposal per logical key: the superseded predecessor must be gone.
-    const forLogicalKey = list.proposals.length;
-    assert.equal(forLogicalKey, 1, `exactly one live staged proposal must remain for the logical key (got ${forLogicalKey})`);
+    assert.ok(
+      !digests.includes(digestV1),
+      `the superseded predecessor digest ${digestV1} must be gone from listStagedProposals (got ${JSON.stringify(digests)})`,
+    );
+    // Exactly one live proposal FOR THIS logical key — filter by title so the assertion is per-logical-key
+    // and does not couple to how many other proposals exist in the shared store.
+    const forLogicalKey = list.proposals.filter((p) => p.title === SUPERSEDE_KEY);
+    assert.equal(
+      forLogicalKey.length,
+      1,
+      `exactly one live staged proposal must remain for the logical key ${JSON.stringify(SUPERSEDE_KEY)} (got ${JSON.stringify(forLogicalKey.map((p) => p.digest))})`,
+    );
+    assert.equal(forLogicalKey[0]?.digest, digestV2, "the sole remaining live proposal must be the latest digest");
   });
 });
