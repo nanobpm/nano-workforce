@@ -56,7 +56,21 @@ export function resolveEngineAddress(
  * stock Camunda 8 gateway, which returns the same shape without it.
  */
 export interface TopologyProbe {
-  nano?: { engine?: string; version?: string; falconPath?: string } | null;
+  nano?:
+    | {
+        engine?: string;
+        version?: string;
+        falconPath?: string;
+        /** Monotonic incarnation / epoch id the engine stamps at boot and re-mints on a
+         *  reset/restore/rewind (companion to the versioned snapshot envelope,
+         *  Magikcraft/nano-bpm#1068). The app persists the last-seen value; a REGRESSION is the
+         *  robust "engine was reset → reconcile" signal (issue #622, app/reconcile.ts). */
+        incarnation?: number | string;
+        /** Alias for {@link incarnation} — accepted so the app tolerates either spelling the engine
+         *  status endpoint settles on without a code change. */
+        epoch?: number | string;
+      }
+    | null;
   gatewayVersion?: string;
 }
 

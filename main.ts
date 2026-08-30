@@ -22,6 +22,7 @@ import { createNanoSdkEngineClient, runFromEnv, selectHost } from "@nanobpm/urba
 import { type AgenticChannelHandle, mountAgenticChannel } from "./app/agentic/channel.ts";
 import { makeElementInstanceResolver } from "./app/agentic/element-instance.ts";
 import { announceEngine, resolveEngineAddress } from "./app/enginePreflight.ts";
+import { runEngineReconcile } from "./app/reconcile.ts";
 import { MAX_ROUNDS, pollOnce } from "./app/service.ts";
 import { envVar } from "./app/version.ts";
 
@@ -100,6 +101,30 @@ if (httpServer instanceof Server) {
   }
 } else if (!agenticDisabled) {
   app.log.warn("agentic channel not mounted: app.httpServer is not a node:http Server on this host");
+}
+
+// Engine-reset reconciliation (issue #622). On boot, compare the engine's incarnation epoch against
+// the last-seen value; on a REGRESSION (the engine was reset/restored/rewound and re-minted its keys,
+// Magikcraft/nano-bpm#1065) drive every dangling engine-backed inflight row to the defined `orphaned`
+// terminal WITH PROVENANCE — BEFORE the pollers below start projecting off stale, dead instances.
+// Guarded: an unreachable engine is a no-op (it never orphans live work), and any failure degrades to
+// a warn so reconcile can never block boot.
+if (app.data) {
+  try {
+    const reconciled = await runEngineReconcile(
+      app.data,
+      { restAddress: engineAddress.restAddress, token: process.env.CAMUNDA_TOKEN },
+      { log: { info: (m) => app.log.info(m), warn: (m) => app.log.warn(m) } },
+    );
+    if (reconciled.orphanedCount > 0) {
+      app.log.warn(
+        `startup reconcile: engine reset detected — orphaned ${reconciled.orphanedCount} engine-backed ` +
+          `inflight row(s) [run ${reconciled.runId}].`,
+      );
+    }
+  } catch (err) {
+    app.log.warn(`startup reconcile skipped: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 // Review-ready poller. Self-scheduling (not setInterval) so a slow GitHub call can never
