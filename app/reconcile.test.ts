@@ -183,3 +183,40 @@ test("an unreachable engine is a hard no-op — live work is never orphaned", as
   const run = raw.prepare("SELECT reason FROM reconcile_runs WHERE run_id='run-1'").get() as { reason: string };
   assertEquals(run.reason, "engine-unreachable");
 });
+
+test("RED→GREEN: a concurrent terminal transition wins — the guarded UPDATE never clobbers it", async () => {
+  const { data, raw } = freshData();
+  await reconcileEngineBackedWork(data, { reachable: true, epoch: 10 }, { now: AT, runId: "run-0" });
+  seedFeatureRun(raw, "o/r#1", "running", "41");
+
+  // Interpose a writer that flips the row to a newer terminal status AFTER reconcile has SELECTed it
+  // as "running" but BEFORE its UPDATE lands — the exact TOCTOU window. With a blind UPDATE-by-pk the
+  // reset would clobber `merged` back to `orphaned` (and write provenance); the guarded UPDATE (status
+  // re-asserted) sees `res.changed === 0` and leaves the terminal history untouched.
+  const gw = data.open();
+  let raced = false;
+  const wrapTx = (t: { query: (...a: unknown[]) => unknown; exec: (sql: string, params?: unknown[]) => unknown }) => ({
+    query: (...a: unknown[]) => t.query(...a),
+    exec: (sql: string, params?: unknown[]) => {
+      if (!raced && /^UPDATE/.test(sql.trim())) {
+        raced = true;
+        raw.prepare("UPDATE feature_runs SET status='merged' WHERE feature_key='o/r#1'").run();
+      }
+      return t.exec(sql, params);
+    },
+  });
+  const wrappedSrc = {
+    query: (...a: unknown[]) => (gw as { query: (...a: unknown[]) => unknown }).query(...a),
+    exec: (sql: string, params?: unknown[]) => (gw as { exec: (sql: string, params?: unknown[]) => unknown }).exec(sql, params),
+    tx: (fn: (t: unknown) => unknown) => (gw as { tx: (f: (t: unknown) => unknown) => unknown }).tx((t) => fn(wrapTx(t as never))),
+  };
+  const wrapped = { open: () => wrappedSrc } as unknown as DataLayer;
+
+  const res = await reconcileEngineBackedWork(wrapped, { reachable: true, epoch: 2 }, { now: AT, runId: "run-1" });
+
+  assertEquals(raced, true);
+  assertEquals(res.orphanedCount, 0);
+  const row = raw.prepare("SELECT status FROM feature_runs WHERE feature_key='o/r#1'").get() as { status: string };
+  assertEquals(row.status, "merged");
+  assertEquals((raw.prepare("SELECT COUNT(*) c FROM reconcile_provenance").get() as { c: number }).c, 0);
+});

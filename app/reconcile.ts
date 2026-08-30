@@ -58,7 +58,10 @@ const PROVENANCE_TABLE = "reconcile_provenance";
  *  confirmed (network error, or a non-2xx like 401/5xx) — reconcile then does NOTHING, so a
  *  transient outage can never be mistaken for a reset and orphan live work. `reachable:true` with a
  *  null `epoch` means the engine answered but exposes no incarnation id (e.g. a stock Camunda 8
- *  gateway, or before Magikcraft/nano-bpm#1068 ships): reconcile degrades to a no-op. */
+ *  gateway, or before Magikcraft/nano-bpm#1068 ships). That null is a no-op ONLY when no epoch was
+ *  ever recorded; if a concrete epoch WAS recorded, a now-null observation reads as a regression
+ *  ("the epoch disappeared" — the reset signature), so reconcile orphans inflight work. See the
+ *  decision table on {@link reconcileEngineBackedWork}. */
 export interface EngineEpochObservation {
   reachable: boolean;
   epoch: number | null;
@@ -103,7 +106,9 @@ export interface ReconcileOptions {
 
 /** Read the incarnation epoch out of a `/v2/topology` body — `nano.incarnation` (or its `epoch`
  *  alias), coerced from a number or a numeric string. Any other shape (absent, non-numeric) yields
- *  null: "the engine exposes no epoch", which reconcile treats as a no-op, never a reset. */
+ *  null: "the engine exposes no epoch". A null is a no-op ONLY when no epoch was previously recorded;
+ *  when one WAS recorded, reconcile reads a now-null observation as a regression ("epoch disappeared"),
+ *  not a no-op — see the decision table on {@link reconcileEngineBackedWork}. */
 export function parseEngineEpoch(body: TopologyProbe | null | undefined): number | null {
   const raw = body?.nano?.incarnation ?? body?.nano?.epoch;
   if (raw == null) return null;
@@ -194,10 +199,16 @@ async function orphanEngineBackedRows(
       const pk = String(row.__pk);
       const key = row.__key == null ? null : String(row.__key);
       const fromStatus = String(row.__status);
-      await src.exec(
-        `UPDATE ${q(table)} SET ${q(statusField)} = ? WHERE ${q(pkCol)} = ?`,
-        [ORPHANED_STATUS, row.__pk],
+      // GUARDED update: re-assert the exact status we read AND a populated key, so a writer that
+      // flipped the row to a newer terminal status (or cleared its key) between the SELECT above and
+      // this UPDATE wins the race — we never clobber that terminal history back to `orphaned`. Only a
+      // row we actually transitioned (`res.changed > 0`) gets provenance and is counted.
+      const res = await src.exec(
+        `UPDATE ${q(table)} SET ${q(statusField)} = ? ` +
+          `WHERE ${q(pkCol)} = ? AND ${q(statusField)} = ? AND ${q(keyField)} IS NOT NULL`,
+        [ORPHANED_STATUS, row.__pk, fromStatus],
       );
+      if (res.changed <= 0) continue;
       await src.exec(
         `INSERT INTO ${PROVENANCE_TABLE} ` +
           `(run_id, source_table, pk_value, key_value, from_status, to_status, reason, observed_epoch, at) ` +
