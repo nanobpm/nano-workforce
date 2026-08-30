@@ -29,7 +29,7 @@
 //      the deploy no longer substitutes `{{token}}` templates, so such a header would ship a literal
 //      `{{token}}` (or stale frozen text) as the prompt.
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { basename, join } from "node:path";
+import { basename, join, sep } from "node:path";
 
 // The retired header that used to carry an agent's baked base prompt. Its continued presence is a
 // migration regression (the deploy no longer substitutes templates), so we flag it.
@@ -94,6 +94,20 @@ function discoverResources(root: string): string[] {
     }
   }
   return out.sort();
+}
+
+// The deployed `resourceId` a `linkName="prompt"` link must reference. Kept in lock-step with
+// urban's deploy.js: a CONVENTION resource (no `models` block) is keyed by its path relative to
+// `resources/` (POSIX) — `resources/prompts/plan.md` → `prompts/plan.md`; a `models` OVERRIDE
+// resource is keyed by its basename. This is the exact string the engine matches a linkedResource
+// `resourceId` against at activation, so the gate must reason about it (not the bare basename) —
+// otherwise a prompt moved into a sub-directory deploys as `prompts/plan.md` while a stale bare
+// `resourceId="plan.md"` link resolves to nothing and the agent runs prompt-less.
+function deployResourceId(rel: string, byConvention: boolean): string {
+  if (!byConvention) return basename(rel);
+  const posix = rel.split(sep).join("/");
+  const prefix = `${RESOURCES_DIR}/`;
+  return posix.startsWith(prefix) ? posix.slice(prefix.length) : basename(rel);
 }
 
 interface PromptLink {
@@ -167,9 +181,10 @@ export function checkAgentPrompts(root: string): CheckResult {
   //   • `models` globs present → explicit override, used verbatim (the escape hatch for a
   //     non-convention layout). A declared-but-empty `models` is still an override, NOT a fallback
   //     to the convention walk — mirror deployModels, which keys convention off the block's absence.
-  // Either way a deployed resource's name is the file's basename — the same string a
-  // `linkedResource resourceId` must reference — which is what catches a prompt that exists on disk
-  // but is not actually deployed (so it never reaches the engine and the link resolves to nothing).
+  // Either way a deployed resource's id is what a `linkedResource resourceId` must reference — for a
+  // convention resource its path relative to `resources/` (`prompts/plan.md`), for a `models`
+  // override its basename (see deployResourceId) — which is what catches a prompt that exists on
+  // disk but is not actually deployed under the id the link names (so the link resolves to nothing).
   const byConvention = manifest.models === undefined;
   const deployedRels = byConvention
     ? discoverResources(root)
@@ -179,19 +194,20 @@ export function checkAgentPrompts(root: string): CheckResult {
         ...(manifest.models?.forms ?? []),
       ].flatMap((p) => expandGlob(root, p));
 
-  // Keyed by basename (the deployed resource name a `resourceId` references). Two deployables sharing
-  // a basename would silently overwrite here — and clobber each other at the engine — so a
+  // Keyed by the DEPLOYED resourceId a link references: the path relative to `resources/` for a
+  // convention resource, or the basename for a `models` override (see deployResourceId). Two
+  // deployables that would deploy under the same id clobber each other at the engine, so a
   // `resourceId` lookup could resolve to the wrong file (or mask a misconfiguration). Fail fast on
   // the collision so the lookup stays unambiguous.
   const deployedFiles = new Map<string, string>();
   for (const rel of deployedRels) {
-    const name = basename(rel);
+    const name = deployResourceId(rel, byConvention);
     const prior = deployedFiles.get(name);
     if (prior != null && prior !== rel) {
       errors.push(
-        `duplicate deployed resource name "${name}": both "${prior}" and "${rel}" deploy under the ` +
-          `same basename, so a linkName="prompt" resourceId="${name}" would resolve ambiguously — ` +
-          `rename one so deployed resource names stay unique`,
+        `duplicate deployed resource id "${name}": both "${prior}" and "${rel}" deploy under the ` +
+          `same id, so a linkName="prompt" resourceId="${name}" would resolve ambiguously — ` +
+          `rename one so deployed resource ids stay unique`,
       );
       continue;
     }

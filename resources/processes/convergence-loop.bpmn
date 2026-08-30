@@ -101,7 +101,7 @@
       <bpmn:extensionElements>
         <zeebe:taskDefinition type="senior:pr-review" />
         <zeebe:linkedResources>
-          <zeebe:linkedResource resourceId="review-round.md" bindingType="latest" resourceType="GenericScript" linkName="prompt" />
+          <zeebe:linkedResource resourceId="prompts/review-round.md" bindingType="latest" resourceType="GenericScript" linkName="prompt" />
         </zeebe:linkedResources>
         <zeebe:properties>
           <zeebe:property name="io.nanobpm.dataEnvelope.in" value="PrReviewRoundIn" />
@@ -321,7 +321,7 @@
       <bpmn:extensionElements>
         <zeebe:taskDefinition type="senior:scope-classify" />
         <zeebe:linkedResources>
-          <zeebe:linkedResource resourceId="scope-classify.md" bindingType="latest" resourceType="GenericScript" linkName="prompt" />
+          <zeebe:linkedResource resourceId="prompts/scope-classify.md" bindingType="latest" resourceType="GenericScript" linkName="prompt" />
         </zeebe:linkedResources>
         <zeebe:properties>
           <zeebe:property name="io.nanobpm.dataEnvelope.in" value="PrScopeClassifyIn" />

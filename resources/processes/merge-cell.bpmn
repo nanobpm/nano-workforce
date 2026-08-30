@@ -8,7 +8,7 @@
       <bpmn:extensionElements>
         <zeebe:taskDefinition type="senior:trial-merge" />
         <zeebe:linkedResources>
-          <zeebe:linkedResource resourceId="trial-merge.md" bindingType="latest" resourceType="GenericScript" linkName="prompt" />
+          <zeebe:linkedResource resourceId="prompts/trial-merge.md" bindingType="latest" resourceType="GenericScript" linkName="prompt" />
         </zeebe:linkedResources>
         <zeebe:ioMapping>
           <zeebe:input source="=null" target="result" />

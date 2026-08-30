@@ -293,7 +293,7 @@
         <bpmn:extensionElements>
           <zeebe:taskDefinition type="senior:fix-ci" />
           <zeebe:linkedResources>
-            <zeebe:linkedResource resourceId="fix-ci.md" bindingType="latest" resourceType="GenericScript" linkName="prompt" />
+            <zeebe:linkedResource resourceId="prompts/fix-ci.md" bindingType="latest" resourceType="GenericScript" linkName="prompt" />
           </zeebe:linkedResources>
           <zeebe:properties>
             <zeebe:property name="io.nanobpm.dataEnvelope.in" value="FixCiIn" />
@@ -450,7 +450,7 @@
         <bpmn:extensionElements>
           <zeebe:taskDefinition type="senior:rebase" />
           <zeebe:linkedResources>
-            <zeebe:linkedResource resourceId="rebase.md" bindingType="latest" resourceType="GenericScript" linkName="prompt" />
+            <zeebe:linkedResource resourceId="prompts/rebase.md" bindingType="latest" resourceType="GenericScript" linkName="prompt" />
           </zeebe:linkedResources>
           <zeebe:properties>
             <zeebe:property name="io.nanobpm.dataEnvelope.in" value="RebaseIn" />

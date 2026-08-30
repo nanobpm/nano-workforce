@@ -44,7 +44,7 @@
       <bpmn:extensionElements>
         <zeebe:taskDefinition type="senior:conformance" />
         <zeebe:linkedResources>
-          <zeebe:linkedResource resourceId="conformance.md" bindingType="latest" resourceType="GenericScript" linkName="prompt" />
+          <zeebe:linkedResource resourceId="prompts/conformance.md" bindingType="latest" resourceType="GenericScript" linkName="prompt" />
         </zeebe:linkedResources>
         <zeebe:ioMapping>
           <zeebe:input source="=conformanceDigest" target="appendPrompt" />
@@ -92,7 +92,7 @@
       <bpmn:extensionElements>
         <zeebe:taskDefinition type="senior:retro" />
         <zeebe:linkedResources>
-          <zeebe:linkedResource resourceId="retro.md" bindingType="latest" resourceType="GenericScript" linkName="prompt" />
+          <zeebe:linkedResource resourceId="prompts/retro.md" bindingType="latest" resourceType="GenericScript" linkName="prompt" />
         </zeebe:linkedResources>
         <zeebe:ioMapping>
           <zeebe:input source="=retroDigest" target="appendPrompt" />
