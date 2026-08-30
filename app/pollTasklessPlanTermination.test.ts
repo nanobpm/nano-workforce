@@ -17,6 +17,7 @@ import type { DataLayer } from "@nanobpm/urban";
 import { bootTestApp } from "@nanobpm/urban-testkit";
 import { plans } from "./plan.ts";
 import { pollTasklessPlanTermination } from "./service.ts";
+import { withTrackingViews } from "../test/trackingViews.ts";
 
 const APP_ROOT = resolve(import.meta.dirname, "..");
 
@@ -128,4 +129,60 @@ test("pollTasklessPlanTermination never re-touches an already-terminal plan", as
     // `done` is not in EPIC_LIVE_STATUSES, so the pass never queries the engine for it.
     assertEquals(called, false);
   });
+});
+
+// A taskless plan whose instance TERMINATED out of band keeps its base `status = planning` (the
+// worker-owned transient the reconciler no longer overwrites) while the ADR-0065 tracking VIEW folds
+// its `derived_status` to `abandoned`. A base-`status` scan would keep re-querying the engine for that
+// already-dead row every pass forever; the pass MUST read `derived_status` off `plansTracking` and skip
+// it. Modelled with the `withTrackingViews` fake so the base `status` and derived `derived_status`
+// diverge exactly as the real terminated instance produces, without a live engine.
+// biome-ignore lint/suspicious/noExplicitAny: test-only fake over dynamic row shapes.
+function trackedMemData(): DataLayer {
+  // biome-ignore lint/suspicious/noExplicitAny: test-only dynamic row store.
+  const store: any[] = [];
+  const tbl = (_name: string, pk = "plan_key") => ({
+    // biome-ignore lint/suspicious/noExplicitAny: test-only dynamic row.
+    async insert(row: any) {
+      store.push({ ...row });
+      return row[pk];
+    },
+    async get(key: unknown) {
+      return store.find((r) => r[pk] === key);
+    },
+    async find(where: Record<string, unknown>) {
+      return store.filter((r) => Object.entries(where).every(([k, v]) => r[k] === v));
+    },
+    // biome-ignore lint/suspicious/noExplicitAny: test-only patch.
+    async update(key: unknown, patch: any) {
+      const r = store.find((x) => x[pk] === key);
+      if (r) Object.assign(r, patch);
+    },
+  });
+  // biome-ignore lint/suspicious/noExplicitAny: test-only fake DataLayer.
+  return { table: withTrackingViews((n: string, pk?: string) => tbl(n, pk)) } as any as DataLayer;
+}
+
+test("pollTasklessPlanTermination skips a derive-only-terminal (TERMINATED) taskless plan without querying the engine", async () => {
+  const data = trackedMemData();
+  // Base `status` still reads live `planning` (frozen transient), but the instance terminated out of
+  // band so the tracking VIEW's `derived_status` is `abandoned`.
+  await plans(data).insert({
+    plan_key: "owner/repo#7",
+    status: "planning",
+    derived_status: "abandoned",
+    task_count: 0,
+    process_key: "pi-1",
+  } as never);
+  let called = false;
+  const engine = {
+    searchProcessInstances: async () => {
+      called = true;
+      return [{ processInstanceKey: "pi-1", state: "COMPLETED" }];
+    },
+  };
+  await pollTasklessPlanTermination(data, engine as never);
+  // The regression guard: a base-status scan would re-query the engine here forever.
+  assertEquals(called, false);
+  assertEquals((await plans(data).get("owner/repo#7"))?.status, "planning");
 });
