@@ -264,16 +264,18 @@
       <bpmn:outgoing>f_converge</bpmn:outgoing>
       <bpmn:outgoing>f_noConverge</bpmn:outgoing>
     </bpmn:exclusiveGateway>
-    <bpmn:serviceTask id="converge" name="Hand off to convergence loop">
+    <bpmn:callActivity id="converge" name="Converge cell">
       <bpmn:extensionElements>
-        <zeebe:taskDefinition type="pr.converge-feature" />
-        <zeebe:properties>
-          <zeebe:property name="io.nanobpm.dataEnvelope.in" value="ConvergeFeatureIn" />
-        </zeebe:properties>
+        <zeebe:calledElement processId="converge-cell" />
+        <zeebe:ioMapping>
+          <zeebe:input source="=featureKey" target="featureKey" />
+          <zeebe:input source="=prKey" target="prKey" />
+          <zeebe:input source="=autoMerge" target="autoMerge" />
+        </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_converge</bpmn:incoming>
       <bpmn:outgoing>f_toEndConverged</bpmn:outgoing>
-    </bpmn:serviceTask>
+    </bpmn:callActivity>
     <bpmn:endEvent id="End" name="Done">
       <bpmn:incoming>f_noConverge</bpmn:incoming>
       <bpmn:incoming>f_toEndConverged</bpmn:incoming>
