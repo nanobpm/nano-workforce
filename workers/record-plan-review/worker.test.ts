@@ -65,6 +65,24 @@ test("unapproved, non-final round revises (planApproved=false, no escalation)", 
   assertEquals((out as any).planFindings, "fix X");
 });
 
+test("unapproved with EMPTY findings escalates immediately — contentless disapproval is malformed (issue #623)", async () => {
+  // First round of a 3-round cap: NOT the final round, so the old behaviour would revise and loop.
+  // A disapproval with no findings is malformed (findings are required per plan-review.md) and
+  // gives the planner nothing to act on — escalate to a human instead of spinning on re-plan.
+  const app = fakeApp(priorRounds("o/r#2b", 0));
+  const out = await call(app, { planKey: "o/r#2b", approved: false, findings: "" });
+  assertEquals((out as any).planApproved, false);
+  assertEquals((out as any).planEscalated, true);
+  assertEquals((out as any).planReviewRound, 0);
+});
+
+test("unapproved with MISSING findings escalates immediately (issue #623)", async () => {
+  const app = fakeApp(priorRounds("o/r#2c", 0));
+  const out = await call(app, { planKey: "o/r#2c", approved: false });
+  assertEquals((out as any).planApproved, false);
+  assertEquals((out as any).planEscalated, true);
+});
+
 test("unapproved FINAL round escalates instead of throwing or proceeding", async () => {
   // Seed cap-1 prior rounds so this job is the last permitted round; unapproved ⇒ human escalation.
   const app = fakeApp(priorRounds("o/r#3", MAX_PLAN_REVIEW_ROUNDS - 1));
