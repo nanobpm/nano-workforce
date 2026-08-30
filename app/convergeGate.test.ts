@@ -394,7 +394,7 @@ test("classify-scope is an agent task servicing senior:scope-classify with a lin
   const task = flat.match(/<bpmn:serviceTask\b[^>]*\bid="classify-scope"[^>]*>.*?<\/bpmn:serviceTask>/);
   assert(task, "classify-scope service task missing");
   assertStringIncludes(task[0], 'type="senior:scope-classify"');
-  assertStringIncludes(task[0], 'resourceId="scope-classify.md"');
+  assertStringIncludes(task[0], 'resourceId="prompts/scope-classify.md"');
   assertStringIncludes(task[0], 'linkName="prompt"');
   // After honouring (or ignoring) the human's scope answer, it clears the one-shot
   // scopeAnswer so a later round does not re-honour a stale decision.
