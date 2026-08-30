@@ -84,15 +84,19 @@ test("record-plan dispatches a taskful plan and levelizes its tasks (wave progre
   assertEquals(plans[0].wave_label, undefined);
 });
 
-test("record-plan marks a taskless plan done (no wave-progress columns written)", async () => {
+test("record-plan keeps a taskless plan NON-terminal (planning) with an outcome note (issue #624)", async () => {
   const { app, plans } = fakeApp();
   const out = await handler(
     { variables: { planKey: "owner/repo#137", tasks: [], note: "planner emitted no tasks" } } as any,
     app,
   );
-  assertEquals(plans[0].status, "done");
-  // taskCount 0 routes the plan-fanout gateway (`gw-plan-empty`) to the terminal taskless-done arm,
-  // short-circuiting the adversarial plan-review loop that would otherwise livelock (issue #623).
+  // A taskless plan is INTERMEDIATE, not terminal: the plan-fanout instance is still live (may
+  // re-plan / escalate / be cancelled). Terminal `done` follows engine liveness (reconciled by the
+  // poller), never this empty-plan heuristic, so the status stays non-terminal here (issue #624).
+  assertEquals(plans[0].status, "planning");
+  assertEquals(plans[0].task_count, 0);
+  // `taskCount` still drives the plan-fanout gateway (`gw-plan-empty`): zero routes to the operator
+  // empty-plan escalation instead of the adversarial plan-review loop (issues #623/#624).
   assertEquals((out as any).taskCount, 0);
   assertEquals(plans[0].outcome, "planner emitted no tasks");
   assertEquals(plans[0].wave_count, undefined);
