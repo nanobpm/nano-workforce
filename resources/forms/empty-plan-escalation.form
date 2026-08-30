@@ -1,0 +1,31 @@
+{
+  "id": "empty-plan-escalation",
+  "schemaVersion": 18,
+  "type": "default",
+  "components": [
+    {
+      "type": "text",
+      "text": "The planner produced an **empty plan** (no tasks) for this epic. This can be a legitimate no-op (a meta/tracking epic, or one whose sub-issues are all closed) or a planning failure. It is parked here for an operator to decide — it does NOT auto-terminate and does NOT re-enter the adversarial plan-review loop."
+    },
+    {
+      "type": "select",
+      "key": "directive",
+      "label": "Directive",
+      "values": [
+        { "label": "Accept — a legitimate no-op epic; complete the run", "value": "accept" },
+        { "label": "Revise — send it back to the planner to re-plan", "value": "revise" }
+      ],
+      "validate": {
+        "required": true
+      }
+    },
+    {
+      "type": "textarea",
+      "key": "notes",
+      "label": "Revision guidance for the planner",
+      "conditional": {
+        "hide": "=directive != \"revise\""
+      }
+    }
+  ]
+}

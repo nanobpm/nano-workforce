@@ -293,8 +293,25 @@
       <bpmn:outgoing>f_plan_empty</bpmn:outgoing>
       <bpmn:outgoing>f_toReviewPlan</bpmn:outgoing>
     </bpmn:exclusiveGateway>
-    <bpmn:endEvent id="EndTasklessDone" name="Taskless done (no-op epic)">
+    <bpmn:userTask id="empty-plan-escalation" name="Empty plan — operator attention (human)">
+      <bpmn:extensionElements>
+        <zeebe:formDefinition formId="empty-plan-escalation" />
+        <zeebe:userTask />
+        <zeebe:assignmentDefinition candidateGroups="operators" assignee="=escalationAssignee" />
+        <zeebe:ioMapping>
+          <zeebe:output source="=(if planFindings = null then &#34;&#34; else planFindings) + (if (notes = null or notes = &#34;&#34;) then &#34;&#34; else &#34;&#10;&#10;Human guidance:&#10;&#34; + notes)" target="planFindings" />
+        </zeebe:ioMapping>
+      </bpmn:extensionElements>
       <bpmn:incoming>f_plan_empty</bpmn:incoming>
+      <bpmn:outgoing>f_toGwEmptyAnswer</bpmn:outgoing>
+    </bpmn:userTask>
+    <bpmn:exclusiveGateway id="gw-empty-plan-answer" name="accept no-op?" default="f_empty_revise">
+      <bpmn:incoming>f_toGwEmptyAnswer</bpmn:incoming>
+      <bpmn:outgoing>f_empty_accept</bpmn:outgoing>
+      <bpmn:outgoing>f_empty_revise</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:endEvent id="EndTasklessDone" name="Taskless done (no-op epic)">
+      <bpmn:incoming>f_empty_accept</bpmn:incoming>
     </bpmn:endEvent>
     <bpmn:serviceTask id="review-plan" name="Review plan (agent)">
       <bpmn:extensionElements>
@@ -622,9 +639,14 @@
     <bpmn:sequenceFlow id="f_toPlan" sourceRef="ensure-base-branch" targetRef="plan" />
     <bpmn:sequenceFlow id="f_toRecordPlan" sourceRef="plan" targetRef="record-plan" />
     <bpmn:sequenceFlow id="f_toPlanEmptyGw" sourceRef="record-plan" targetRef="gw-plan-empty" />
-    <bpmn:sequenceFlow id="f_plan_empty" name="no tasks" sourceRef="gw-plan-empty" targetRef="EndTasklessDone">
+    <bpmn:sequenceFlow id="f_plan_empty" name="no tasks" sourceRef="gw-plan-empty" targetRef="empty-plan-escalation">
       <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=taskCount = 0</bpmn:conditionExpression>
     </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="f_toGwEmptyAnswer" sourceRef="empty-plan-escalation" targetRef="gw-empty-plan-answer" />
+    <bpmn:sequenceFlow id="f_empty_accept" name="accept (no-op)" sourceRef="gw-empty-plan-answer" targetRef="EndTasklessDone">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=directive = "accept"</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="f_empty_revise" name="revise" sourceRef="gw-empty-plan-answer" targetRef="plan" />
     <bpmn:sequenceFlow id="f_toReviewPlan" name="has tasks" sourceRef="gw-plan-empty" targetRef="review-plan" />
     <bpmn:sequenceFlow id="f_toRecordPlanReview" sourceRef="review-plan" targetRef="record-plan-review" />
     <bpmn:sequenceFlow id="f_toGwPlanReview" sourceRef="record-plan-review" targetRef="gw-plan-review" />
@@ -700,13 +722,22 @@
       <bpmndi:BPMNShape id="BPMNShape_gw-plan-empty" bpmnElement="gw-plan-empty" isMarkerVisible="true">
         <dc:Bounds x="1166" y="284" width="50" height="50" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="1123" y="339" width="57" height="28" />
+          <dc:Bounds x="1163" y="359" width="57" height="28" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_empty-plan-escalation" bpmnElement="empty-plan-escalation">
+        <dc:Bounds x="1316" y="589" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_gw-empty-plan-answer" bpmnElement="gw-empty-plan-answer" isMarkerVisible="true">
+        <dc:Bounds x="1541" y="604" width="50" height="50" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1543" y="571" width="46" height="28" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_EndTasklessDone" bpmnElement="EndTasklessDone">
-        <dc:Bounds x="1348" y="451" width="36" height="36" />
+        <dc:Bounds x="1723" y="611" width="36" height="36" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="1327" y="492" width="78" height="42" />
+          <dc:Bounds x="1702" y="652" width="78" height="42" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_review-plan" bpmnElement="review-plan">
@@ -718,7 +749,7 @@
       <bpmndi:BPMNShape id="BPMNShape_gw-plan-review" bpmnElement="gw-plan-review" isMarkerVisible="true">
         <dc:Bounds x="1716" y="284" width="50" height="50" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="1668" y="339" width="67" height="28" />
+          <dc:Bounds x="1668" y="359" width="67" height="28" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_plan-review-decision" bpmnElement="plan-review-decision">
@@ -727,7 +758,7 @@
       <bpmndi:BPMNShape id="BPMNShape_gw-plan-answer" bpmnElement="gw-plan-answer" isMarkerVisible="true">
         <dc:Bounds x="2066" y="444" width="50" height="50" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="2121" y="455" width="67" height="28" />
+          <dc:Bounds x="2058" y="411" width="67" height="28" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_select-wave" bpmnElement="select-wave">
@@ -844,7 +875,7 @@
         <di:waypoint x="1766" y="309" />
         <di:waypoint x="2216" y="309" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="1899" y="287" width="60" height="14" />
+          <dc:Bounds x="1961" y="287" width="60" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_toImplement" bpmnElement="f_toImplement">
@@ -877,6 +908,15 @@
         <di:waypoint x="6004" y="309" />
         <di:waypoint x="6104" y="309" />
       </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_f_empty_revise" bpmnElement="f_empty_revise">
+        <di:waypoint x="1566" y="654" />
+        <di:waypoint x="1566" y="689" />
+        <di:waypoint x="816" y="689" />
+        <di:waypoint x="816" y="349" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1168" y="667" width="46" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_plan_revise" bpmnElement="f_plan_revise">
         <di:waypoint x="1741" y="284" />
         <di:waypoint x="1741" y="249" />
@@ -892,7 +932,7 @@
         <di:waypoint x="816" y="549" />
         <di:waypoint x="816" y="349" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="1431" y="557" width="46" height="14" />
+          <dc:Bounds x="1431" y="527" width="46" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_toRecordTrialMerge" bpmnElement="f_toRecordTrialMerge">
@@ -930,10 +970,14 @@
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_plan_empty" bpmnElement="f_plan_empty">
         <di:waypoint x="1191" y="334" />
-        <di:waypoint x="1191" y="469" />
-        <di:waypoint x="1348" y="469" />
+        <di:waypoint x="1191" y="354" />
+        <di:waypoint x="2136" y="354" />
+        <di:waypoint x="2136" y="558" />
+        <di:waypoint x="1296" y="558" />
+        <di:waypoint x="1296" y="609" />
+        <di:waypoint x="1316" y="609" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="1196" y="395" width="57" height="14" />
+          <dc:Bounds x="2141" y="489" width="57" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_plan_escalate" bpmnElement="f_plan_escalate">
@@ -945,11 +989,11 @@
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_plan_answer_proceed" bpmnElement="f_plan_answer_proceed">
-        <di:waypoint x="2091" y="444" />
-        <di:waypoint x="2091" y="309" />
-        <di:waypoint x="2216" y="309" />
+        <di:waypoint x="2116" y="469" />
+        <di:waypoint x="2266" y="469" />
+        <di:waypoint x="2266" y="349" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="2096" y="370" width="53" height="14" />
+          <dc:Bounds x="2165" y="447" width="53" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_runTrialMerge" bpmnElement="f_runTrialMerge">
@@ -1005,6 +1049,17 @@
         <di:waypoint x="616" y="469" />
         <di:waypoint x="616" y="349" />
       </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_f_toGwEmptyAnswer" bpmnElement="f_toGwEmptyAnswer">
+        <di:waypoint x="1416" y="629" />
+        <di:waypoint x="1541" y="629" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_f_empty_accept" bpmnElement="f_empty_accept">
+        <di:waypoint x="1591" y="629" />
+        <di:waypoint x="1723" y="629" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1631" y="596" width="53" height="28" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_toGwPlanAnswer" bpmnElement="f_toGwPlanAnswer">
         <di:waypoint x="1966" y="469" />
         <di:waypoint x="2066" y="469" />
@@ -1029,7 +1084,7 @@
         <di:waypoint x="816" y="547" />
         <di:waypoint x="816" y="349" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="1426" y="514" width="81" height="28" />
+          <dc:Bounds x="1326" y="514" width="81" height="28" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_f_trial_sla" bpmnElement="f_trial_sla">

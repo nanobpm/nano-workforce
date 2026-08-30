@@ -68,6 +68,7 @@ import {
   type Plan,
   planReviews,
   plans,
+  plansTracking,
   planTaskDeps,
   planTaskNeeds,
   planTasks,
@@ -2383,6 +2384,57 @@ export async function pollEpicPhase(
   }
 }
 
+/** Poll pass (issue #624): own the taskless plan's COMPLETED → `done` transition from ENGINE truth.
+ *
+ * A taskless plan (`task_count = 0`, the planner emitted no tasks) is NO LONGER collapsed to terminal
+ * `done` by `record-plan` — "the planner produced nothing this pass" is an INTERMEDIATE state, not an
+ * ended process (the plan-fanout instance is still live and may re-plan, escalate, or be cancelled).
+ * So the plan stays non-terminal (`planning`) until its process instance ACTUALLY ends, and terminal
+ * `plans.status` follows engine instance liveness rather than the empty-plan heuristic that rendered
+ * the epic "Done" over a live (in fact looping) instance.
+ *
+ * This pass owns the COMPLETED → `done` edge for such plans, mirroring the delivery-graph
+ * COMPLETED → `done` transition ({@link pollDeliveryGraphPhase}): `instanceTracking`'s `onTerminated`
+ * edge reconciles only TERMINATED (→ `abandoned` on `derived_status`), never COMPLETED, so a taskless
+ * plan whose instance ends GREEN would otherwise stay `planning` forever. A taskful plan reaches
+ * `done` through its own `record-results` finalizer, so this pass is scoped to `task_count = 0` and to
+ * the live rows only. Liveness is read off the ADR-0065 derived tracking VIEW (`plansTracking`'s
+ * `derived_status`), NOT the base `plans.status`: a taskless plan whose instance TERMINATED out of
+ * band keeps base `status = planning`/`dispatched` while `derived_status` folds to `abandoned`, so a
+ * base-status scan would re-query the engine for that already-dead row every pass forever. Skipping
+ * rows whose `derived_status` is no longer live confines the engine read to genuinely-live plans and
+ * never races a worker-owned terminal. Best-effort +
+ * idempotent: writes only on a real COMPLETED read, so a steady-state pass over a still-active
+ * instance is a no-op (the acceptance guarantee — a taskless plan is never terminal while active). */
+export async function pollTasklessPlanTermination(
+  data: DataLayer,
+  engine: Pick<EngineClient, "searchProcessInstances">,
+) {
+  for (const status of EPIC_LIVE_STATUSES) {
+    for (const plan of await plansTracking(data).find({ status })) {
+      if (plan.task_count !== 0 || !plan.process_key) continue;
+      // Base `status` is live, but the instance may have TERMINATED out of band (folding
+      // `derived_status` → `abandoned`); skip such derive-only-terminal rows so the pass only
+      // queries the engine for genuinely-live plans (ADR-0065).
+      if (!EPIC_LIVE_STATUSES.some((s) => s === plan.derived_status)) continue;
+      const processKey = plan.process_key;
+      try {
+        const snapshots = await engine.searchProcessInstances({ processInstanceKeys: [processKey] });
+        const state = snapshots.find((s) => String(s.processInstanceKey) === processKey)?.state ?? null;
+        if (state === "COMPLETED") {
+          await plans(data).update(plan.plan_key, {
+            status: "done",
+            outcome: plan.outcome ?? "planner emitted no tasks",
+            updated_at: now(),
+          });
+        }
+      } catch (err) {
+        console.error(`[poller] taskless plan termination ${plan.plan_key}: ${err}`);
+      }
+    }
+  }
+}
+
 /** Poll pass (ADR 0005 slice S5): reconcile each RUNNING delivery-graph run's derived phase from
  * engine truth, and complete it when its instance ends. A delivery graph is a DYNAMIC compiled
  * process with no happy-path host worker, so — unlike `plans`/`feature_runs`, whose spine workers
@@ -2622,6 +2674,7 @@ export async function pollOnce(
   await pollLineage(data);
   await pollUserTasks(data, engine, engineRest);
   await pollEpicPhase(data, engine);
+  await pollTasklessPlanTermination(data, engine);
   await pollDeliveryGraphPhase(data, engine);
   await pollDeliveryProposals(data);
   if (engineRest) {

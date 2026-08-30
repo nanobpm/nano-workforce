@@ -257,6 +257,35 @@ test("conformance-escalation is HUMAN-completable but NOT agent-completable (iss
   assertEquals(completed[0].variables, { note: "filed follow-up" });
 });
 
+test("empty-plan-escalation is HUMAN-completable but NOT agent-completable (issues #623/#624)", async () => {
+  // The empty-plan operator decision mirrors feature-blocked/conformance: a HUMAN operator adjudicates
+  // whether an empty plan is a legitimate no-op (accept) or needs re-planning (revise), through
+  // `completeEscalationAsHuman`. It stays OUTSIDE the agent surface (`ESCALATION_TASK_ELEMENTS`) — the
+  // fleet must never silently auto-resolve the very "no work was produced" case a human must attend.
+  const stores = { task_completions: { rows: [] as any[], key: "id" } };
+  const data = memData(stores);
+  const { engine, completed } = fakeEngine([{ userTaskKey: "ut-e", elementId: "empty-plan-escalation" }]);
+
+  const asAgent = await completeEscalationAsAgent(data, engine, {
+    userTaskKey: "ut-e",
+    agentId: "bot",
+    variables: { directive: "accept" },
+  });
+  assertEquals(asAgent.ok, false, "the agent completer refuses empty-plan-escalation");
+  assertEquals(asAgent.reason, "not a completable task");
+  assertEquals(completed.length, 0);
+
+  const asHuman = await completeEscalationAsHuman(data, engine, {
+    userTaskKey: "ut-e",
+    operatorId: "alice",
+    variables: { directive: "revise", notes: "look again" },
+  });
+  assertEquals(asHuman.ok, true, "the human completer retires empty-plan-escalation");
+  assertEquals(asHuman.elementId, "empty-plan-escalation");
+  assertEquals(completed.length, 1);
+  assertEquals(completed[0].variables, { directive: "revise", notes: "look again" });
+});
+
 test("human completer refuses a non-escalation user task and is a no-op for an unknown key", async () => {
   const stores = { task_completions: { rows: [] as any[], key: "id" } };
   const data = memData(stores);
@@ -543,6 +572,10 @@ test("validateEscalationVariables derives its contract from the canonical .form 
   // plan-review-decision -> directive required, allowed proceed/revise
   assertEquals(validateEscalationVariables("plan-review-decision", { directive: "proceed" }), null);
   assert(validateEscalationVariables("plan-review-decision", { directive: "" }) !== null);
+  // empty-plan-escalation -> directive required, allowed accept/revise
+  assertEquals(validateEscalationVariables("empty-plan-escalation", { directive: "accept" }), null);
+  assertEquals(validateEscalationVariables("empty-plan-escalation", { directive: "revise" }), null);
+  assert(validateEscalationVariables("empty-plan-escalation", { directive: "" }) !== null);
   // an element with no linked form contract is not enforced
   assertEquals(validateEscalationVariables("some-other-task", { whatever: 1 }), null);
 });

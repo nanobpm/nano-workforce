@@ -10,6 +10,13 @@
 //   • records the task count, moves the plan to `dispatched`, and emits `currentWave = 0`
 //     plus `waveCount` so the wave loop (`select-wave → implement → record-wave`) can run.
 //
+// A TASKLESS plan (the planner emitted no tasks) is NOT terminal here (issue #624): "the planner
+// produced nothing this pass" is an intermediate state, not an ended process — the plan-fanout
+// instance is still live and may re-plan, escalate, or be cancelled. The plan stays NON-terminal
+// (`planning`, with an `outcome` note for observability); terminal `plans.status` follows ENGINE
+// instance liveness, reconciled by the poller (COMPLETED → `done`; TERMINATED → `abandoned`), never
+// this empty-plan heuristic.
+//
 // If the planner emits a malformed DAG (cycle / unknown or self dependency / duplicate id),
 // levelization can't order the tasks. Rather than dead-lock the plan we DEGRADE to the old
 // flat behaviour — a single wave (wave 0) of all tasks, run fully in parallel — and log a
@@ -38,10 +45,13 @@ interface NormalTask {
 interface Out extends Record<string, unknown> {
   currentWave: number;
   waveCount: number;
-  // Task count of the recorded plan. The plan-fanout gateway (`gw-plan-empty`) reads this to
-  // SHORT-CIRCUIT an intentionally-empty plan (`{tasks:[]}`) to a terminal taskless-done arm
-  // BEFORE the adversarial plan-review gate (issue #623). Feeding an empty plan into review
-  // caused a plan↔plan-review livelock — it can neither be approved nor produce findings.
+  // Task count of the recorded plan. The plan-fanout gateway (`gw-plan-empty`) reads this to route
+  // an intentionally-empty plan (`{tasks:[]}`) to the OPERATOR empty-plan escalation
+  // (`empty-plan-escalation`) — a human decides Accept (no-op done) or Revise (re-plan) — instead of
+  // the adversarial plan-review gate (issues #623/#624). Feeding an empty plan into review caused a
+  // plan↔plan-review livelock (it can neither be approved nor produce findings), and auto-terminating
+  // it (issue #625) reached a terminal verdict from an intermediate signal while the instance was
+  // still live; escalating for operator attention resolves both.
   taskCount: number;
 }
 
@@ -143,7 +153,6 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
   }
 
   const patch: Record<string, unknown> = {
-    status: tasks.length > 0 ? "dispatched" : "done",
     task_count: tasks.length,
     // Operator-visibility wave progress (wave_count / current_wave / wave_label) was RETIRED as a
     // stored projection (epic #412) — the epics-index reads it from the `plan_wave_label` /
@@ -151,11 +160,25 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
     // denormalises it onto the `plans` row.
     updated_at: ts,
   };
-  if (tasks.length === 0) patch.outcome = note ? str(note) : "planner emitted no tasks";
+  if (tasks.length > 0) {
+    patch.status = "dispatched";
+  } else {
+    // Taskless plan: DO NOT collapse to terminal `done` (issue #624). "The planner produced nothing
+    // this pass" is an INTERMEDIATE state, NOT an ended process — the plan-fanout instance is still
+    // live and may re-plan, escalate, or be cancelled. Terminal `plans.status` must follow ENGINE
+    // instance liveness, not this per-pass empty-plan heuristic, or the epic renders "Done" over a
+    // still-active (in fact looping) instance. So the plan stays NON-terminal (`planning`) until the
+    // poller sees the instance actually end: COMPLETED → `done` (pollTasklessPlanTermination,
+    // app/service.ts — the same poller that owns the delivery-graph COMPLETED→done transition) or
+    // TERMINATED → `abandoned` (instanceTracking's `onTerminated` derived edge). The outcome note is
+    // still recorded for observability; it is phase/label copy, not a terminal-status signal.
+    patch.status = "planning";
+    patch.outcome = note ? str(note) : "planner emitted no tasks";
+  }
   await plans(app.data).update(planKey, patch);
 
-  // Kick off the wave loop at wave 0. `taskCount` lets the BPMN gateway terminate an empty plan
-  // before the review loop (issue #623).
+  // Kick off the wave loop at wave 0. `taskCount` lets the BPMN gateway (`gw-plan-empty`) route an
+  // empty plan to the operator empty-plan escalation instead of the review loop (issues #623/#624).
   return { currentWave: 0, waveCount, taskCount: tasks.length };
 };
 

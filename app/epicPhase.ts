@@ -107,6 +107,7 @@ const ELEMENT_PHASE: Readonly<Record<string, string>> = {
   "ensure-base-branch": EPIC_PHASE.PLANNING,
   "plan": EPIC_PHASE.PLANNING,
   "record-plan": EPIC_PHASE.REVIEWING,
+  "empty-plan-escalation": EPIC_PHASE.PLANNING,
   "review-plan": EPIC_PHASE.REVIEWING,
   "record-plan-review": EPIC_PHASE.REVIEWING,
   "plan-review-decision": EPIC_PHASE.REVIEWING,
