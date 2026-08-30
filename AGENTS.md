@@ -120,7 +120,8 @@ GENERATED, never hand-edited.**
 ## Deploy by convention: `resources/` (ADR 0062)
 
 **Deployables live under `resources/` and deploy by convention — `nano.app.json`
-declares no `models`.** urban walks `resources/` (shallow, one level deep) and deploys
+declares no `models`.** urban walks `resources/` **recursively (every file at any depth)** and
+deploys
 every file: `resources/processes/*.bpmn`, `resources/forms/*.form`, and one prompt per
 task under `resources/prompts/*.md`.
 

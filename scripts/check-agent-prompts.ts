@@ -29,7 +29,7 @@
 //      the deploy no longer substitutes `{{token}}` templates, so such a header would ship a literal
 //      `{{token}}` (or stale frozen text) as the prompt.
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { basename, join, sep } from "node:path";
+import { basename, join, relative, sep } from "node:path";
 
 // The retired header that used to carry an agent's baked base prompt. Its continued presence is a
 // migration regression (the deploy no longer substitutes templates), so we flag it.
@@ -69,30 +69,32 @@ function expandGlob(root: string, pattern: string): string[] {
     .map((f) => join(dir, f));
 }
 
-// The convention directory (ADR 0062): deploy-only, walked one level deep when the manifest declares
-// no `models`. Must stay in lock-step with urban's `RESOURCES_DIR`/`deployModels`.
+// The convention directory (ADR 0062): deploy-only, walked recursively (every file at any depth)
+// when the manifest declares no `models`. Must stay in lock-step with urban's
+// `RESOURCES_DIR`/`deployModels`.
 const RESOURCES_DIR = "resources";
 
 // Mirror urban's deploy-by-convention walk (ADR 0062): when the manifest declares no `models`, the
-// deployables are every file directly under `resources/` PLUS every file one directory deeper
-// (`resources/<subdir>/*`) — shallow, one level only. Deeper nesting is intentionally NOT swept in:
-// the deploy dedupe key is the basename, so a deep walk would reintroduce cross-directory basename
-// collision risk. Paths come back repo-relative (with `/`), matching `expandGlob`'s output so the
-// two discovery modes are interchangeable downstream.
+// deployables are every file under `resources/` at ANY depth (urban's deploy.js walks it
+// recursively). A convention resource is keyed by its path relative to `resources/`, so files
+// sharing a basename in different sub-directories deploy as distinct resources — no collision — and
+// a deep walk is safe. Paths come back repo-relative (with `/`), matching `expandGlob`'s output so
+// the two discovery modes are interchangeable downstream.
 function discoverResources(root: string): string[] {
   const base = join(root, RESOURCES_DIR);
   if (!existsSync(base)) return [];
   const out: string[] = [];
-  for (const entry of readdirSync(base, { withFileTypes: true })) {
-    if (entry.isFile()) {
-      out.push(join(RESOURCES_DIR, entry.name));
-    } else if (entry.isDirectory()) {
-      const sub = join(base, entry.name);
-      for (const f of readdirSync(sub, { withFileTypes: true })) {
-        if (f.isFile()) out.push(join(RESOURCES_DIR, entry.name, f.name));
+  const walk = (dir: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const abs = join(dir, entry.name);
+      if (entry.isFile()) {
+        out.push(join(RESOURCES_DIR, relative(base, abs)));
+      } else if (entry.isDirectory()) {
+        walk(abs);
       }
     }
-  }
+  };
+  walk(base);
   return out.sort();
 }
 

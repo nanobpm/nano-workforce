@@ -319,7 +319,8 @@ when the engine data is purged, to keep app state and engine state consistent).
 Each agent task's base prompt lives **only** in its `resources/prompts/*.md` side-car,
 deployed as a **generic resource** and **linked** — not baked — into the model (issue
 #169). Under the ADR 0062 `resources/` deploy-by-convention layout, `nano.app.json`
-declares **no `models`**, so `@nanobpm/urban` walks `resources/` and deploys each file as an
+declares **no `models`**, so `@nanobpm/urban` walks `resources/` **recursively (every file at any
+depth)** and deploys each file as an
 `application/octet-stream` resource whose deployed **id is its path relative to `resources/`**
 (`resources/prompts/review-round.md` → resource `prompts/review-round.md`). Each agent service
 task links it by that `resources/`-relative id (a bare basename resolves to nothing and the
