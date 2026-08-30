@@ -242,6 +242,12 @@ async function orphanEngineBackedRows(
  *   • otherwise                                                       → NO-OP (incl. a matching epoch).
  * The epoch is persisted whenever a concrete one was observed (seed, advance, or the fresh
  * post-rewind incarnation), so the very next pass with that same epoch is a pure no-op.
+ *
+ * This surface is deliberately EPOCH-SCOPED: it only ever acts on the epoch signal. An engine that
+ * is reachable but exposes NO epoch and for which none was ever recorded (observed == null AND
+ * recorded == null) is, by contract, an intentional no-op — we have no reset signal to act on, and
+ * we never orphan live work speculatively. Converging engine-backed rows against an engine with no
+ * epoch support (e.g. via a per-instance existence probe) is out of contract for this surface.
  */
 export async function reconcileEngineBackedWork(
   data: DataLayer,
