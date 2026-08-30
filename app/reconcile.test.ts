@@ -220,3 +220,28 @@ test("RED→GREEN: a concurrent terminal transition wins — the guarded UPDATE 
   assertEquals(row.status, "merged");
   assertEquals((raw.prepare("SELECT COUNT(*) c FROM reconcile_provenance").get() as { c: number }).c, 0);
 });
+
+test("RED→GREEN: orphaning stamps updated_at so the transition timestamp isn't left stale", async () => {
+  const { data, raw } = freshData();
+  await reconcileEngineBackedWork(data, { reachable: true, epoch: 10 }, { now: AT, runId: "run-0" });
+  seedFeatureRun(raw, "o/r#1", "running", "41");
+  seedDeliveryGraphRun(raw, "graph-1", "running", "77");
+
+  // The seeded rows carry updated_at='2026-01-01'; AT() (the reconcile clock) is 2026-02-02. A blind
+  // `SET status='orphaned'` would leave updated_at at the stale seed value, misrepresenting when the
+  // row was orphaned to the UI/audits. The transition must refresh updated_at like every other one.
+  const res = await reconcileEngineBackedWork(data, { reachable: true, epoch: 2 }, { now: AT, runId: "run-1" });
+
+  assertEquals(res.orphanedCount, 2);
+  const at = AT().toISOString();
+  const fr = raw
+    .prepare("SELECT status, updated_at FROM feature_runs WHERE feature_key='o/r#1'")
+    .get() as { status: string; updated_at: string };
+  assertEquals(fr.status, ORPHANED_STATUS);
+  assertEquals(fr.updated_at, at);
+  const dg = raw
+    .prepare("SELECT status, updated_at FROM delivery_graph_runs WHERE run_key='graph-1'")
+    .get() as { status: string; updated_at: string };
+  assertEquals(dg.status, ORPHANED_STATUS);
+  assertEquals(dg.updated_at, at);
+});

@@ -53,6 +53,9 @@ export const RECONCILE_ORPHAN_REASON = "engine-reset/epoch-regression";
 const INCARNATION_TABLE = "engine_incarnation";
 const RUNS_TABLE = "reconcile_runs";
 const PROVENANCE_TABLE = "reconcile_provenance";
+/** The conventional last-touched timestamp column stamped on every status transition; orphaning
+ *  refreshes it too, but only on the tables that actually declare it (introspected per binding). */
+const UPDATED_AT_COLUMN = "updated_at";
 
 /** What a `/v2/topology` epoch probe observed. `reachable:false` means the engine could not be
  *  confirmed (network error, or a non-2xx like 401/5xx) — reconcile then does NOTHING, so a
@@ -144,12 +147,13 @@ function q(id: string): string {
   return `"${id.replace(/"/g, '""')}"`;
 }
 
-/** The primary-key column of `table` (the first `pk`-flagged column from `PRAGMA table_info`), or
- *  `rowid` when the table declares none — so provenance always records a stable row identity. */
-async function primaryKeyColumn(src: DataSource, table: string): Promise<string> {
+/** The schema of `table` we need to orphan a row: its primary-key column (the first `pk`-flagged
+ *  column from `PRAGMA table_info`, or `rowid` when the table declares none — so provenance always
+ *  records a stable row identity) and whether it carries an `updated_at` column to stamp. */
+async function tableShape(src: DataSource, table: string): Promise<{ pkCol: string; hasUpdatedAt: boolean }> {
   const cols = await src.query<{ name: string; pk: number }>(`PRAGMA table_info(${q(table)})`);
   const pk = cols.find((c) => Number(c.pk) > 0);
-  return pk?.name ?? "rowid";
+  return { pkCol: pk?.name ?? "rowid", hasUpdatedAt: cols.some((c) => c.name === UPDATED_AT_COLUMN) };
 }
 
 /** The recorded last-seen epoch, or null when none was ever recorded (no row, or a null epoch). */
@@ -188,7 +192,7 @@ async function orphanEngineBackedRows(
     const active = activeStatusesFor(table);
     const statusField = baseStatusFieldFor(table);
     const keyField = keyFieldFor(table);
-    const pkCol = await primaryKeyColumn(src, table);
+    const { pkCol, hasUpdatedAt } = await tableShape(src, table);
     const placeholders = active.map(() => "?").join(", ");
     const rows = await src.query<{ __pk: unknown; __key: unknown; __status: unknown }>(
       `SELECT ${q(pkCol)} AS __pk, ${q(keyField)} AS __key, ${q(statusField)} AS __status ` +
@@ -202,11 +206,17 @@ async function orphanEngineBackedRows(
       // GUARDED update: re-assert the exact status we read AND a populated key, so a writer that
       // flipped the row to a newer terminal status (or cleared its key) between the SELECT above and
       // this UPDATE wins the race — we never clobber that terminal history back to `orphaned`. Only a
-      // row we actually transitioned (`res.changed > 0`) gets provenance and is counted.
+      // row we actually transitioned (`res.changed > 0`) gets provenance and is counted. We also stamp
+      // `updated_at` (when the table has one) so the transition to `orphaned` refreshes the row's
+      // timestamp the same way every other status transition in the codebase does — leaving it stale
+      // would misrepresent the orphaning moment to the UI/audits.
       const res = await src.exec(
-        `UPDATE ${q(table)} SET ${q(statusField)} = ? ` +
-          `WHERE ${q(pkCol)} = ? AND ${q(statusField)} = ? AND ${q(keyField)} IS NOT NULL`,
-        [ORPHANED_STATUS, row.__pk, fromStatus],
+        `UPDATE ${q(table)} SET ${q(statusField)} = ?` +
+          (hasUpdatedAt ? `, ${q(UPDATED_AT_COLUMN)} = ?` : "") +
+          ` WHERE ${q(pkCol)} = ? AND ${q(statusField)} = ? AND ${q(keyField)} IS NOT NULL`,
+        hasUpdatedAt
+          ? [ORPHANED_STATUS, at, row.__pk, fromStatus]
+          : [ORPHANED_STATUS, row.__pk, fromStatus],
       );
       if (res.changed <= 0) continue;
       await src.exec(
