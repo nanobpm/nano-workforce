@@ -17,6 +17,11 @@
 // unhandled incident. Proceeding used to dispatch an un-vetted plan and — when the plan was empty —
 // let the whole epic complete GREEN having done nothing. A missing/ambiguous `approved` is treated
 // as NOT approved (revise until the cap, then escalate).
+//
+// A disapproval with EMPTY findings is malformed (issue #623): plan-review.md REQUIRES findings when
+// `approved` is false. Re-planning against a contentless disapproval gives the planner nothing to
+// act on, so it re-emits the same plan and the loop spins (the plan↔plan-review livelock). This
+// worker escalates such a verdict to a human immediately instead of burning re-plan rounds.
 
 import type { AppJobHandler } from "@nanobpm/urban";
 import {
@@ -109,9 +114,28 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
     };
   }
 
-  // Not approved this round. Escalate once the per-epoch round cap is reached (issue #86):
-  // previously the fan-out PROCEEDED regardless, dispatching an un-vetted plan. The round is
-  // 0-based, so `round + 1 >= cap` is the last permitted round.
+  // Not approved this round. A disapproval with EMPTY findings is malformed (issue #623): per
+  // resources/prompts/plan-review.md, findings are REQUIRED when `approved` is false. Re-planning
+  // against a contentless disapproval gives the planner nothing to act on, so it re-emits the same
+  // plan and the loop spins (plan↔plan-review livelock, esp. for an empty plan). Escalate to a human
+  // immediately rather than burning re-plan rounds on a malformed verdict.
+  if (roundFindings === "") {
+    app.log.warn(`record-plan-review: ${planKey} not approved with EMPTY findings — malformed, escalating`, {
+      epoch: recordedEpoch,
+      round,
+    });
+    return {
+      planApproved: false,
+      planEscalated: true,
+      planFindings: roundFindings,
+      planReviewEpoch: recordedEpoch,
+      planReviewRound: round,
+    };
+  }
+
+  // Escalate once the per-epoch round cap is reached (issue #86): previously the fan-out PROCEEDED
+  // regardless, dispatching an un-vetted plan. The round is 0-based, so `round + 1 >= cap` is the
+  // last permitted round.
   if (round + 1 >= MAX_PLAN_REVIEW_ROUNDS) {
     app.log.warn(`record-plan-review: ${planKey} not approved after ${MAX_PLAN_REVIEW_ROUNDS} round(s)`, {
       epoch: recordedEpoch,

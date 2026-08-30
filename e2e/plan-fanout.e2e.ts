@@ -241,6 +241,43 @@ describe("plan-fanout escalations (U2 — task + plan-review + trial-merge → u
     );
   });
 
+  // Empty-plan short-circuit (issue #623 — regression for Merlin instance-46 / epic #1067). A
+  // planner that legitimately emits `{tasks:[]}` (meta/tracking epic, or all sub-issues closed) must
+  // reach a terminal state WITHOUT entering the adversarial plan-review loop — feeding an empty plan
+  // into review caused a plan↔plan-review livelock (it can neither be approved nor produce findings).
+  test("empty plan short-circuits to the taskless-done end, never entering plan-review (issue #623)", async () => {
+    let reviewCalls = 0;
+    await withApp(
+      {
+        "senior:plan": () => ({ tasks: [], note: "all sub-issues closed" }),
+        // If this ever fires, the short-circuit failed and the empty plan entered the review loop.
+        "senior:plan-review": () => {
+          reviewCalls += 1;
+          return { approved: false, findings: "" };
+        },
+        "senior:feature": () => ({ status: "blocked", summary: "n/a" }),
+      },
+      async ({ app, planKey }) => {
+        const flows = takenFlows(app);
+        assert.ok(
+          flows.includes("gw-plan-empty->EndTasklessDone"),
+          `empty plan routed to the taskless-done end (flows: ${flows.join(", ")})`,
+        );
+        assert.ok(
+          !flows.includes("gw-plan-empty->review-plan"),
+          "the has-tasks flow into plan-review was NOT taken",
+        );
+        assert.equal(reviewCalls, 0, "the plan-review agent must never run for an empty plan");
+
+        const plan = await app.db
+          .table<{ plan_key: string; status: string; outcome: string | null }>("plans", "plan_key")
+          .findOne({ plan_key: planKey });
+        assert.equal(plan?.status, "done", "the empty plan reached a terminal done state");
+        assert.equal(plan?.outcome, "all sub-issues closed", "the planner note was recorded as the outcome");
+      },
+    );
+  });
+
   // A two-task wave whose PRs both open triggers the D3 trial-merge gate; a suite-failed trial
   // parks on the trial-merge decision user task.
   const twoTaskPlan: Stub = () => ({

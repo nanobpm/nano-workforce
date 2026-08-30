@@ -38,6 +38,11 @@ interface NormalTask {
 interface Out extends Record<string, unknown> {
   currentWave: number;
   waveCount: number;
+  // Task count of the recorded plan. The plan-fanout gateway (`gw-plan-empty`) reads this to
+  // SHORT-CIRCUIT an intentionally-empty plan (`{tasks:[]}`) to a terminal taskless-done arm
+  // BEFORE the adversarial plan-review gate (issue #623). Feeding an empty plan into review
+  // caused a plan↔plan-review livelock — it can neither be approved nor produce findings.
+  taskCount: number;
 }
 
 const str = (v: unknown): string => (typeof v === "string" ? v : v == null ? "" : String(v));
@@ -149,8 +154,9 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
   if (tasks.length === 0) patch.outcome = note ? str(note) : "planner emitted no tasks";
   await plans(app.data).update(planKey, patch);
 
-  // Kick off the wave loop at wave 0.
-  return { currentWave: 0, waveCount };
+  // Kick off the wave loop at wave 0. `taskCount` lets the BPMN gateway terminate an empty plan
+  // before the review loop (issue #623).
+  return { currentWave: 0, waveCount, taskCount: tasks.length };
 };
 
 export default handler;
