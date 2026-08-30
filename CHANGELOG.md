@@ -1,3 +1,9 @@
+## [0.163.0](https://github.com/nanobpm/nano-workforce/compare/v0.162.2...v0.163.0) (2026-08-30)
+
+### Features
+
+* **reconcile:** engine-reset reconciliation surface for inflight work ([#622](https://github.com/nanobpm/nano-workforce/issues/622)) ([#627](https://github.com/nanobpm/nano-workforce/issues/627)) ([a10ba65](https://github.com/nanobpm/nano-workforce/commit/a10ba650829b15228e35eb45f08ecef98eff69d8)), closes [Magikcraft/nano-bpm#1065](https://github.com/Magikcraft/nano-bpm/issues/1065)
+
 ## [0.162.2](https://github.com/nanobpm/nano-workforce/compare/v0.162.1...v0.162.2) (2026-08-30)
 
 ### Bug Fixes
