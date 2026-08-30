@@ -8,51 +8,16 @@
 //
 // These run against the REAL migration set (092 applied to an in-memory SQLite via urban's own
 // `makeGateway`), so the tables/columns/indexes reconcile reads and writes are the shipping schema.
-import { readdirSync, readFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
-import { type DataLayer, makeGateway, type SqliteDb } from "@nanobpm/urban";
-import { applyMigrationSet } from "#test-migrations";
 import { assertEquals } from "#test-assert";
+import { freshData } from "../test/reconcileDb.ts";
 import {
   ORPHANED_STATUS,
   parseEngineEpoch,
   RECONCILE_ORPHAN_REASON,
   reconcileEngineBackedWork,
 } from "./reconcile.ts";
-
-const MIGRATIONS_DIR = fileURLToPath(new URL("../db/migrations", import.meta.url));
-
-/** Adapt a raw `node:sqlite` handle to urban's tiny `SqliteDb` seam so `makeGateway` yields the real
- *  record-oriented `DataSource` reconcile binds to (no fakes — the shipping gateway). */
-function sqliteDb(raw: DatabaseSync): SqliteDb {
-  return {
-    exec: (sql) => raw.exec(sql),
-    run: (sql, params = []) => {
-      const r = raw.prepare(sql).run(...(params as never[]));
-      return { changes: Number(r.changes), lastInsertRowid: r.lastInsertRowid };
-    },
-    all: <T = Record<string, unknown>>(sql: string, params: unknown[] = []) =>
-      raw.prepare(sql).all(...(params as never[])) as T[],
-    close: () => raw.close(),
-  };
-}
-
-function readMigrationFiles(): { name: string; sql: string }[] {
-  return readdirSync(MIGRATIONS_DIR)
-    .filter((n) => n.endsWith(".sql"))
-    .map((name) => ({ name, sql: readFileSync(`${MIGRATIONS_DIR}/${name}`, "utf8") }));
-}
-
-/** A DataLayer over a fresh in-memory DB with the whole migration set applied. */
-function freshData(): { data: DataLayer; raw: DatabaseSync } {
-  const raw = new DatabaseSync(":memory:");
-  applyMigrationSet(raw, readMigrationFiles());
-  const gw = makeGateway(sqliteDb(raw));
-  const data = { open: () => gw } as unknown as DataLayer;
-  return { data, raw };
-}
 
 const AT = () => new Date("2026-02-02T00:00:00.000Z");
 
