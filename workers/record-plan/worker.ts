@@ -45,10 +45,13 @@ interface NormalTask {
 interface Out extends Record<string, unknown> {
   currentWave: number;
   waveCount: number;
-  // Task count of the recorded plan. The plan-fanout gateway (`gw-plan-empty`) reads this to
-  // SHORT-CIRCUIT an intentionally-empty plan (`{tasks:[]}`) to a terminal taskless-done arm
-  // BEFORE the adversarial plan-review gate (issue #623). Feeding an empty plan into review
-  // caused a plan↔plan-review livelock — it can neither be approved nor produce findings.
+  // Task count of the recorded plan. The plan-fanout gateway (`gw-plan-empty`) reads this to route
+  // an intentionally-empty plan (`{tasks:[]}`) to the OPERATOR empty-plan escalation
+  // (`empty-plan-escalation`) — a human decides Accept (no-op done) or Revise (re-plan) — instead of
+  // the adversarial plan-review gate (issues #623/#624). Feeding an empty plan into review caused a
+  // plan↔plan-review livelock (it can neither be approved nor produce findings), and auto-terminating
+  // it (issue #625) reached a terminal verdict from an intermediate signal while the instance was
+  // still live; escalating for operator attention resolves both.
   taskCount: number;
 }
 
@@ -174,8 +177,8 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
   }
   await plans(app.data).update(planKey, patch);
 
-  // Kick off the wave loop at wave 0. `taskCount` lets the BPMN gateway terminate an empty plan
-  // before the review loop (issue #623).
+  // Kick off the wave loop at wave 0. `taskCount` lets the BPMN gateway (`gw-plan-empty`) route an
+  // empty plan to the operator empty-plan escalation instead of the review loop (issues #623/#624).
   return { currentWave: 0, waveCount, taskCount: tasks.length };
 };
 

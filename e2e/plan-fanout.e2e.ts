@@ -241,27 +241,30 @@ describe("plan-fanout escalations (U2 — task + plan-review + trial-merge → u
     );
   });
 
-  // Empty-plan short-circuit (issue #623 — regression for Merlin instance-46 / epic #1067). A
+  // Empty-plan escalation (issues #623/#624 — regression for Merlin instance-46 / epic #1067). A
   // planner that legitimately emits `{tasks:[]}` (meta/tracking epic, or all sub-issues closed) must
-  // reach a terminal state WITHOUT entering the adversarial plan-review loop — feeding an empty plan
-  // into review caused a plan↔plan-review livelock (it can neither be approved nor produce findings).
-  test("empty plan short-circuits to the taskless-done end, never entering plan-review (issue #623)", async () => {
+  // NOT enter the adversarial plan-review loop (feeding an empty plan into review caused a
+  // plan↔plan-review livelock — it can neither be approved nor produce findings), and must NOT
+  // auto-terminate from an intermediate signal while the instance is still live (#624). Instead it is
+  // parked for OPERATOR ATTENTION at the `empty-plan-escalation` user task; a human then Accepts
+  // (no-op done) or Revises (re-plan).
+  test("empty plan parks at the operator escalation (non-terminal), never entering plan-review (issues #623/#624)", async () => {
     let reviewCalls = 0;
     await withApp(
       {
         "senior:plan": () => ({ tasks: [], note: "all sub-issues closed" }),
-        // If this ever fires, the short-circuit failed and the empty plan entered the review loop.
+        // If this ever fires, the empty plan wrongly entered the review loop.
         "senior:plan-review": () => {
           reviewCalls += 1;
           return { approved: false, findings: "" };
         },
         "senior:feature": () => ({ status: "blocked", summary: "n/a" }),
       },
-      async ({ app, planKey }) => {
+      async ({ app, planKey, processKey }) => {
         const flows = takenFlows(app);
         assert.ok(
-          flows.includes("gw-plan-empty->EndTasklessDone"),
-          `empty plan routed to the taskless-done end (flows: ${flows.join(", ")})`,
+          flows.includes("gw-plan-empty->empty-plan-escalation"),
+          `empty plan routed to the operator escalation (flows: ${flows.join(", ")})`,
         );
         assert.ok(
           !flows.includes("gw-plan-empty->review-plan"),
@@ -269,11 +272,72 @@ describe("plan-fanout escalations (U2 — task + plan-review + trial-merge → u
         );
         assert.equal(reviewCalls, 0, "the plan-review agent must never run for an empty plan");
 
-        const plan = await app.db
+        // The instance is parked at the operator user task — a completable escalation exists.
+        const task = await openTask(app, processKey, "empty-plan-escalation");
+        assert.ok(task.userTaskKey, "the empty-plan escalation carries a completable userTaskKey");
+
+        // While parked, the plan is NON-terminal: the instance is still live (#624), so terminal
+        // `done` is owned by the poller on COMPLETED, not written here from the empty-plan signal.
+        const parked = await app.db
           .table<{ plan_key: string; status: string; outcome: string | null }>("plans", "plan_key")
           .findOne({ plan_key: planKey });
-        assert.equal(plan?.status, "done", "the empty plan reached a terminal done state");
-        assert.equal(plan?.outcome, "all sub-issues closed", "the planner note was recorded as the outcome");
+        assert.equal(parked?.status, "planning", "a parked empty plan stays non-terminal (planning)");
+        assert.equal(parked?.outcome, "all sub-issues closed", "the planner note was recorded as the outcome");
+      },
+    );
+  });
+
+  test("empty-plan escalation: accept routes to the taskless-done end (no-op epic)", async () => {
+    await withApp(
+      {
+        "senior:plan": () => ({ tasks: [], note: "all sub-issues closed" }),
+        "senior:plan-review": () => ({ approved: true, findings: "" }),
+        "senior:feature": () => ({ status: "blocked", summary: "n/a" }),
+      },
+      async ({ app, processKey }) => {
+        const task = await openTask(app, processKey, "empty-plan-escalation");
+        await app.engine.completeUserTask(task.userTaskKey, { directive: "accept", notes: "meta epic" });
+        await app.settle();
+
+        const flows = takenFlows(app);
+        assert.ok(
+          flows.includes("gw-empty-plan-answer->EndTasklessDone"),
+          `accept routed to the taskless-done end (flows: ${flows.join(", ")})`,
+        );
+        assert.ok(
+          !flows.includes("gw-empty-plan-answer->plan"),
+          "the revise (default) flow was NOT taken",
+        );
+      },
+    );
+  });
+
+  test("empty-plan escalation: revise re-plans, re-parking a still-empty plan at the operator (never auto-terminating)", async () => {
+    let reviewCalls = 0;
+    await withApp(
+      {
+        "senior:plan": () => ({ tasks: [], note: "all sub-issues closed" }),
+        "senior:plan-review": () => {
+          reviewCalls += 1;
+          return { approved: true, findings: "" };
+        },
+        "senior:feature": () => ({ status: "blocked", summary: "n/a" }),
+      },
+      async ({ app, processKey }) => {
+        const task = await openTask(app, processKey, "empty-plan-escalation");
+        await app.engine.completeUserTask(task.userTaskKey, { directive: "revise", notes: "look again" });
+        await app.settle();
+
+        const flows = takenFlows(app);
+        assert.ok(
+          flows.includes("gw-empty-plan-answer->plan"),
+          `revise routed back to the planner (flows: ${flows.join(", ")})`,
+        );
+        // The re-plan is still empty, so it re-parks at a fresh operator escalation — it neither
+        // enters plan-review nor auto-terminates.
+        const reparked = await openTask(app, processKey, "empty-plan-escalation");
+        assert.ok(reparked.userTaskKey, "a still-empty re-plan re-parks at the operator escalation");
+        assert.equal(reviewCalls, 0, "the plan-review agent must never run for an empty plan");
       },
     );
   });

@@ -24,7 +24,7 @@ import { readFileSync } from "node:fs";
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { CONFORMANCE_ESCALATION_ELEMENT } from "./conformance.ts";
 import { DELIVERY_HUMAN_ELEMENT, isDeliveryHumanElement } from "./deliveryHuman.ts";
-import { ACP_PERMISSION_ELEMENT } from "./userTasks.ts";
+import { ACP_PERMISSION_ELEMENT, EMPTY_PLAN_ELEMENT } from "./userTasks.ts";
 
 const now = () => new Date().toISOString();
 
@@ -91,6 +91,14 @@ export const FEATURE_BLOCKED_TASK_ELEMENT = "feature-blocked";
  *  `CONFORMANCE_ESCALATION_ELEMENT` (app/conformance.ts) — one source of truth, no drift surface. */
 export const CONFORMANCE_ESCALATION_TASK_ELEMENT = CONFORMANCE_ESCALATION_ELEMENT;
 
+/** The `empty-plan-escalation` operator user-task element id (plan-fanout.bpmn) — the native decision a
+ *  plan-fanout run parks on when the planner emits an EMPTY plan. Like `feature-blocked` and
+ *  `conformance-escalation` it is a HUMAN-only operator decision (never agent-answerable, or the fleet
+ *  could silently auto-resolve the very "no work was produced" case a human must adjudicate), so it
+ *  lives OUTSIDE `ESCALATION_TASK_ELEMENTS` and only the HUMAN completer accepts it (issues #623/#624).
+ *  Re-exported from the canonical `EMPTY_PLAN_ELEMENT` (app/userTasks.ts) — one source of truth. */
+export const EMPTY_PLAN_TASK_ELEMENT = EMPTY_PLAN_ELEMENT;
+
 /** The user-task `elementId`s a HUMAN operator may complete from the Tasks inbox via the one canonical
  *  `complete-user-task` door: every agent-answerable escalation PLUS the human-only `feature-blocked`
  *  and `conformance-escalation` acknowledgements, PLUS the advisory ACP permission prompt
@@ -104,6 +112,7 @@ export const HUMAN_COMPLETABLE_ELEMENTS: ReadonlySet<string> = new Set([
   ...ESCALATION_TASK_ELEMENTS,
   FEATURE_BLOCKED_TASK_ELEMENT,
   CONFORMANCE_ESCALATION_TASK_ELEMENT,
+  EMPTY_PLAN_TASK_ELEMENT,
   ACP_PERMISSION_ELEMENT,
 ]);
 
@@ -117,6 +126,7 @@ const ESCALATION_FORM_BY_ELEMENT: Readonly<Record<string, string>> = {
   "wait-answer": "pr-escalation",
   "wait-merge-answer": "pr-escalation",
   "feature-blocked": "feature-blocked",
+  [EMPTY_PLAN_TASK_ELEMENT]: "empty-plan-escalation",
   [CONFORMANCE_ESCALATION_TASK_ELEMENT]: "conformance-escalation",
   // NOTE: the delivery-graph `human` node (`DELIVERY_HUMAN_ELEMENT`, ADR 0005 S3) is intentionally
   // ABSENT here. Unlike the fixed-form escalations above, ONE `delivery-human-task` element is DESIGNED

@@ -283,7 +283,7 @@ child grids and a lazily-loaded transcript. The round/escalation grids are
 read-only audit. Open native user-task escalations are additionally resolved
 app-side from the **Tasks** page (`pages/tasks.page.json`, issue #236) — a nav
 tab whose per-kind `dataGrid`s list every open escalation (feature / plan-review
-/ trial-merge / PR review / blocked-run) off the `user_tasks` read-model and
+/ empty-plan / trial-merge / PR review / blocked-run) off the `user_tasks` read-model and
 submit the typed decision to the canonical human completer — so an operator no
 longer depends on Urban's read-only `taskInbox` stub at `/tasks`.
 
@@ -519,7 +519,17 @@ Start(issue) → plan → record-plan → implement (parallel MI) → record-res
 - **`record-plan`** — app worker `pr.record-plan`. Normalizes the tasks (assigns a
   stable `id`/index), writes one `plan_tasks` row each, sets `plans.task_count` and
   status `dispatched`, and **re-emits** the normalized `tasks` so the fan-out
-  iterates the canonical list.
+  iterates the canonical list. It also emits `taskCount`, which the `gw-plan-empty`
+  gateway reads: a taskful plan proceeds to plan-review; an **empty plan**
+  (`{tasks:[]}`) is neither auto-terminated (which rendered "Done" over a still-live
+  instance, #624) nor fed into the adversarial plan-review loop (a plan↔plan-review
+  livelock, #623) — instead it parks at the **`empty-plan-escalation`** operator user
+  task for a human directive: **Accept** a legitimate no-op epic (→ the terminal
+  `EndTasklessDone` end; the poller reconciles the COMPLETED instance to `done`) or
+  **Revise** (→ back to `plan` to re-plan). An empty plan stays NON-terminal
+  (`planning`) with its planner `note` as the `outcome` while parked — terminal
+  status follows engine liveness via `pollTasklessPlanTermination`, never the
+  empty-plan signal (#624).
 - **`implement`** — service task, job type `senior:feature`, **parallel
   multi-instance** over `=tasks` (`inputElement="task"`,
   `outputCollection="results"`). Its base prompt is delivered via the `feature.md`

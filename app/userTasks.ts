@@ -30,6 +30,13 @@ const now = () => new Date().toISOString();
  *  when the adversarial review loop exhausts its budget without approval. */
 export const PLAN_REVIEW_ELEMENT = "plan-review-decision";
 
+/** The empty-plan operator escalation user task (plan-fanout.bpmn) — a human directive (accept/revise)
+ *  when the planner emits an EMPTY plan (`{tasks:[]}`). Instead of auto-terminating the run from an
+ *  intermediate signal (which rendered "Done" over a still-live instance, #624) or feeding the empty
+ *  plan into the adversarial plan-review loop (a plan↔plan-review livelock, #623), the run parks here
+ *  for operator attention: Accept a legitimate no-op epic (→ terminal done) or Revise (→ re-plan). */
+export const EMPTY_PLAN_ELEMENT = "empty-plan-escalation";
+
 /** The trial-merge escalation user task (plan-fanout.bpmn) — a human decision (proceed/rebase/abandon)
  *  when a wave's trial merge comes back red. */
 export const TRIAL_MERGE_ELEMENT = "trial-merge-decision";
@@ -87,6 +94,7 @@ export const USER_TASK_KIND_LABELS: Readonly<Record<string, string>> = {
   [FEATURE_ESCALATION_ELEMENT]: "Feature escalation",
   [FEATURE_BLOCKED_ELEMENT]: "Blocked feature run",
   [PLAN_REVIEW_ELEMENT]: "Plan review",
+  [EMPTY_PLAN_ELEMENT]: "Empty plan",
   [TRIAL_MERGE_ELEMENT]: "Trial merge",
   [PR_WAIT_ANSWER_ELEMENT]: "PR review",
   [PR_WAIT_MERGE_ANSWER_ELEMENT]: "PR merge",

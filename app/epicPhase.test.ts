@@ -15,6 +15,8 @@ test("deriveEpicPhase maps each spine element to its domain phase", () => {
   assertEquals(deriveEpicPhase("review-plan"), EPIC_PHASE.REVIEWING);
   assertEquals(deriveEpicPhase("record-plan-review"), EPIC_PHASE.REVIEWING);
   assertEquals(deriveEpicPhase("plan-review-decision"), EPIC_PHASE.REVIEWING);
+  // The empty-plan operator escalation (gw-plan-empty) is a planning-stage decision (Accept/Revise).
+  assertEquals(deriveEpicPhase("empty-plan-escalation"), EPIC_PHASE.PLANNING);
   // Trial-merge band.
   assertEquals(deriveEpicPhase("trial-merge"), EPIC_PHASE.TRIAL_MERGING);
   assertEquals(deriveEpicPhase("record-trial-merge"), EPIC_PHASE.TRIAL_MERGING);
