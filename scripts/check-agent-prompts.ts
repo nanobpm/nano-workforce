@@ -29,7 +29,7 @@
 //      the deploy no longer substitutes `{{token}}` templates, so such a header would ship a literal
 //      `{{token}}` (or stale frozen text) as the prompt.
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { basename, join } from "node:path";
+import { basename, join, relative, sep } from "node:path";
 
 // The retired header that used to carry an agent's baked base prompt. Its continued presence is a
 // migration regression (the deploy no longer substitutes templates), so we flag it.
@@ -69,31 +69,47 @@ function expandGlob(root: string, pattern: string): string[] {
     .map((f) => join(dir, f));
 }
 
-// The convention directory (ADR 0062): deploy-only, walked one level deep when the manifest declares
-// no `models`. Must stay in lock-step with urban's `RESOURCES_DIR`/`deployModels`.
+// The convention directory (ADR 0062): deploy-only, walked recursively (every file at any depth)
+// when the manifest declares no `models`. Must stay in lock-step with urban's
+// `RESOURCES_DIR`/`deployModels`.
 const RESOURCES_DIR = "resources";
 
 // Mirror urban's deploy-by-convention walk (ADR 0062): when the manifest declares no `models`, the
-// deployables are every file directly under `resources/` PLUS every file one directory deeper
-// (`resources/<subdir>/*`) — shallow, one level only. Deeper nesting is intentionally NOT swept in:
-// the deploy dedupe key is the basename, so a deep walk would reintroduce cross-directory basename
-// collision risk. Paths come back repo-relative (with `/`), matching `expandGlob`'s output so the
-// two discovery modes are interchangeable downstream.
+// deployables are every file under `resources/` at ANY depth (urban's deploy.js walks it
+// recursively). A convention resource is keyed by its path relative to `resources/`, so files
+// sharing a basename in different sub-directories deploy as distinct resources — no collision — and
+// a deep walk is safe. Paths come back repo-relative (with `/`), matching `expandGlob`'s output so
+// the two discovery modes are interchangeable downstream.
 function discoverResources(root: string): string[] {
   const base = join(root, RESOURCES_DIR);
   if (!existsSync(base)) return [];
   const out: string[] = [];
-  for (const entry of readdirSync(base, { withFileTypes: true })) {
-    if (entry.isFile()) {
-      out.push(join(RESOURCES_DIR, entry.name));
-    } else if (entry.isDirectory()) {
-      const sub = join(base, entry.name);
-      for (const f of readdirSync(sub, { withFileTypes: true })) {
-        if (f.isFile()) out.push(join(RESOURCES_DIR, entry.name, f.name));
+  const walk = (dir: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const abs = join(dir, entry.name);
+      if (entry.isFile()) {
+        out.push(join(RESOURCES_DIR, relative(base, abs)));
+      } else if (entry.isDirectory()) {
+        walk(abs);
       }
     }
-  }
+  };
+  walk(base);
   return out.sort();
+}
+
+// The deployed `resourceId` a `linkName="prompt"` link must reference. Kept in lock-step with
+// urban's deploy.js: a CONVENTION resource (no `models` block) is keyed by its path relative to
+// `resources/` (POSIX) — `resources/prompts/plan.md` → `prompts/plan.md`; a `models` OVERRIDE
+// resource is keyed by its basename. This is the exact string the engine matches a linkedResource
+// `resourceId` against at activation, so the gate must reason about it (not the bare basename) —
+// otherwise a prompt moved into a sub-directory deploys as `prompts/plan.md` while a stale bare
+// `resourceId="plan.md"` link resolves to nothing and the agent runs prompt-less.
+function deployResourceId(rel: string, byConvention: boolean): string {
+  if (!byConvention) return basename(rel);
+  const posix = rel.split(sep).join("/");
+  const prefix = `${RESOURCES_DIR}/`;
+  return posix.startsWith(prefix) ? posix.slice(prefix.length) : basename(rel);
 }
 
 interface PromptLink {
@@ -162,14 +178,16 @@ export function checkAgentPrompts(root: string): CheckResult {
   // The resources the app actually DEPLOYS. Under ADR 0062 deploy-by-convention this is derived the
   // SAME way urban's deployModels derives it, so this gate reasons about exactly the file set that
   // ships to the engine:
-  //   • no `models` block → discover by convention: every file under `resources/` (shallow, one
-  //     level deep). This is nwf's blessed layout — prompts live at `resources/prompts/*.md`.
+  //   • no `models` block → discover by convention: every file under `resources/` at any depth
+  //     (recursive, mirroring urban). This is nwf's blessed layout — prompts live at
+  //     `resources/prompts/*.md`.
   //   • `models` globs present → explicit override, used verbatim (the escape hatch for a
   //     non-convention layout). A declared-but-empty `models` is still an override, NOT a fallback
   //     to the convention walk — mirror deployModels, which keys convention off the block's absence.
-  // Either way a deployed resource's name is the file's basename — the same string a
-  // `linkedResource resourceId` must reference — which is what catches a prompt that exists on disk
-  // but is not actually deployed (so it never reaches the engine and the link resolves to nothing).
+  // Either way a deployed resource's id is what a `linkedResource resourceId` must reference — for a
+  // convention resource its path relative to `resources/` (`prompts/plan.md`), for a `models`
+  // override its basename (see deployResourceId) — which is what catches a prompt that exists on
+  // disk but is not actually deployed under the id the link names (so the link resolves to nothing).
   const byConvention = manifest.models === undefined;
   const deployedRels = byConvention
     ? discoverResources(root)
@@ -179,19 +197,20 @@ export function checkAgentPrompts(root: string): CheckResult {
         ...(manifest.models?.forms ?? []),
       ].flatMap((p) => expandGlob(root, p));
 
-  // Keyed by basename (the deployed resource name a `resourceId` references). Two deployables sharing
-  // a basename would silently overwrite here — and clobber each other at the engine — so a
+  // Keyed by the DEPLOYED resourceId a link references: the path relative to `resources/` for a
+  // convention resource, or the basename for a `models` override (see deployResourceId). Two
+  // deployables that would deploy under the same id clobber each other at the engine, so a
   // `resourceId` lookup could resolve to the wrong file (or mask a misconfiguration). Fail fast on
   // the collision so the lookup stays unambiguous.
   const deployedFiles = new Map<string, string>();
   for (const rel of deployedRels) {
-    const name = basename(rel);
+    const name = deployResourceId(rel, byConvention);
     const prior = deployedFiles.get(name);
     if (prior != null && prior !== rel) {
       errors.push(
-        `duplicate deployed resource name "${name}": both "${prior}" and "${rel}" deploy under the ` +
-          `same basename, so a linkName="prompt" resourceId="${name}" would resolve ambiguously — ` +
-          `rename one so deployed resource names stay unique`,
+        `duplicate deployed resource id "${name}": both "${prior}" and "${rel}" deploy under the ` +
+          `same id, so a linkName="prompt" resourceId="${name}" would resolve ambiguously — ` +
+          `rename one so deployed resource ids stay unique`,
       );
       continue;
     }

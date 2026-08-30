@@ -60,7 +60,9 @@ test("passes when every prompt link resolves to a deployed, non-blank, result-em
 test("discovers prompts by the resources/ convention when the manifest declares no models", () => {
   const root = fixture({
     "nano.app.json": MANIFEST_CONVENTION,
-    "resources/processes/loop.bpmn": serviceTask(link("review-round.md")),
+    // Under ADR 0062 deploy-by-convention the resource id is the path relative to resources/, so the
+    // link must reference `prompts/review-round.md` — the exact id urban deploys and the engine resolves.
+    "resources/processes/loop.bpmn": serviceTask(link("prompts/review-round.md")),
     "resources/prompts/review-round.md": "# Round\nDo the thing, then write `$AGENT_RESULT_FILE`.",
     // Docs live OUTSIDE resources/ and must never be swept into the deploy set.
     "docs/agent-guide.md": "# Guide\nnot a deployable",
@@ -69,6 +71,23 @@ test("discovers prompts by the resources/ convention when the manifest declares 
   assertEquals(res.errors, []);
   assert(res.ok);
   assertEquals(res.resolved, ["review-round"]);
+});
+
+test("convention: a bare basename resourceId (pre-ADR-0062) fails — the id must be resources/-relative", () => {
+  // Regression guard for the #241 migration miss: the prompt WAS moved under resources/prompts/, so it
+  // deploys as `prompts/review-round.md`, but the link still names the bare `review-round.md`. The
+  // engine resolves ids exactly, omits the unresolvable link, and the agent runs prompt-less. The gate
+  // MUST catch this, not silently pass as it did before.
+  const root = fixture({
+    "nano.app.json": MANIFEST_CONVENTION,
+    "resources/processes/loop.bpmn": serviceTask(link("review-round.md")),
+    "resources/prompts/review-round.md": "# Round\nWrite `$AGENT_RESULT_FILE`.",
+  });
+  const res = checkAgentPrompts(root);
+  assert(!res.ok);
+  assert(
+    res.errors.some((e) => e.includes('resourceId="review-round.md"') && e.includes("no deployed resource")),
+  );
 });
 
 test("convention walk flags a prompt link that has no deployed resource under resources/", () => {
@@ -236,7 +255,7 @@ test("fails when two deploy globs match files sharing a basename (ambiguous reso
   });
   const res = checkAgentPrompts(root);
   assert(!res.ok);
-  assert(res.errors.some((e) => e.includes("duplicate deployed resource name") && e.includes("review-round.md")));
+  assert(res.errors.some((e) => e.includes("duplicate deployed resource id") && e.includes("review-round.md")));
 });
 
 test("checks the real repo: all committed agent prompts link to deployed resources", () => {

@@ -108,7 +108,7 @@ const retroFlow: DeclarativeFlow = defineFlow(
     w.task("gather", { jobType: "pr.retro-gather" });
     w.task("conformance", {
       jobType: "senior:conformance",
-      prompt: { resourceId: "conformance.md", bindingType: "latest", append: "=conformanceDigest" },
+      prompt: { resourceId: "prompts/conformance.md", bindingType: "latest", append: "=conformanceDigest" },
     });
     w.task("record-conformance", { jobType: "pr.conformance-record" });
     w.branch("hasDeviations = true", {
@@ -130,7 +130,7 @@ const retroFlow: DeclarativeFlow = defineFlow(
     });
     w.task("synthesize", {
       jobType: "senior:retro",
-      prompt: { resourceId: "retro.md", bindingType: "latest", append: "=retroDigest" },
+      prompt: { resourceId: "prompts/retro.md", bindingType: "latest", append: "=retroDigest" },
     });
     w.task("record", { jobType: "pr.retro-record" });
   },

@@ -326,7 +326,7 @@ both live in the source repo, not in the job payload.
   prompt-modularity path:
 
   ```xml
-  <zeebe:linkedResource resourceId="review-round.md" bindingType="latest" resourceType="GenericScript" linkName="prompt"/>
+  <zeebe:linkedResource resourceId="prompts/review-round.md" bindingType="latest" resourceType="GenericScript" linkName="prompt"/>
   ```
 
   that the engine

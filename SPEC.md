@@ -164,7 +164,7 @@ Notes:
 
 The base instructions are **not** a job variable: they are delivered as a
 **linked resource** on the `senior:pr-review` task —
-`<zeebe:linkedResource resourceId="review-round.md" bindingType="latest" resourceType="GenericScript" linkName="prompt"/>`,
+`<zeebe:linkedResource resourceId="prompts/review-round.md" bindingType="latest" resourceType="GenericScript" linkName="prompt"/>`,
 which the engine resolves to the latest deployed `resources/prompts/review-round.md` at job
 activation.
 
@@ -319,14 +319,16 @@ when the engine data is purged, to keep app state and engine state consistent).
 Each agent task's base prompt lives **only** in its `resources/prompts/*.md` side-car,
 deployed as a **generic resource** and **linked** — not baked — into the model (issue
 #169). Under the ADR 0062 `resources/` deploy-by-convention layout, `nano.app.json`
-declares **no `models`**, so `@nanobpm/urban` walks `resources/` (shallow, one level) and
-deploys each file as an `application/octet-stream` resource whose deployed **name is
-the file's basename** (`resources/prompts/review-round.md` → resource `review-round.md`).
-Each agent service task links it:
+declares **no `models`**, so `@nanobpm/urban` walks `resources/` **recursively (every file at any
+depth)** and deploys each file as an
+`application/octet-stream` resource whose deployed **id is its path relative to `resources/`**
+(`resources/prompts/review-round.md` → resource `prompts/review-round.md`). Each agent service
+task links it by that `resources/`-relative id (a bare basename resolves to nothing and the
+engine silently omits the link, leaving the agent prompt-less):
 
 ```xml
 <zeebe:linkedResources>
-  <zeebe:linkedResource resourceId="review-round.md" bindingType="latest" resourceType="GenericScript" linkName="prompt" />
+  <zeebe:linkedResource resourceId="prompts/review-round.md" bindingType="latest" resourceType="GenericScript" linkName="prompt" />
 </zeebe:linkedResources>
 ```
 
