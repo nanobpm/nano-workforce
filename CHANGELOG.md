@@ -1,3 +1,9 @@
+## [0.163.1](https://github.com/nanobpm/nano-workforce/compare/v0.163.0...v0.163.1) (2026-08-30)
+
+### Bug Fixes
+
+* **plan:** taskless plan follows engine liveness, not empty-plan heuristic ([#624](https://github.com/nanobpm/nano-workforce/issues/624)) ([#626](https://github.com/nanobpm/nano-workforce/issues/626)) ([1dbb0d6](https://github.com/nanobpm/nano-workforce/commit/1dbb0d650c955886588a1e4caf3e8af7b150c4ca)), closes [#623](https://github.com/nanobpm/nano-workforce/issues/623) [#623](https://github.com/nanobpm/nano-workforce/issues/623) [#623](https://github.com/nanobpm/nano-workforce/issues/623)
+
 ## [0.163.0](https://github.com/nanobpm/nano-workforce/compare/v0.162.2...v0.163.0) (2026-08-30)
 
 ### Features
