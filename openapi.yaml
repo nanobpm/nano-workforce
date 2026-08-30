@@ -844,6 +844,64 @@ components:
           type: string
         uptimeSeconds:
           type: integer
+    ReconcileReport:
+      type: object
+      description: The result of one engine-reset reconciliation pass (issue #622).
+      additionalProperties: false
+      required:
+        - runId
+        - reason
+        - observedEpoch
+        - recordedEpoch
+        - orphanedCount
+        - orphaned
+      properties:
+        runId:
+          type: string
+          description: The reconcile run id every orphaned transition's provenance is stamped with.
+        reason:
+          type: string
+          description: Why this pass acted (or did not).
+          enum:
+            - epoch-regression
+            - seed-epoch
+            - no-op
+            - engine-unreachable
+        observedEpoch:
+          type: integer
+          nullable: true
+          description: The engine incarnation epoch observed on this pass (null when the engine exposes
+            none, or was unreachable).
+        recordedEpoch:
+          type: integer
+          nullable: true
+          description: The previously-recorded epoch this pass compared against (null on the first run).
+        orphanedCount:
+          type: integer
+          description: How many engine-backed inflight rows were driven to `orphaned`.
+        orphaned:
+          type: array
+          description: The rows orphaned by this pass.
+          items:
+            type: object
+            additionalProperties: false
+            required:
+              - table
+              - pk
+              - key
+              - fromStatus
+            properties:
+              table:
+                type: string
+              pk:
+                type: string
+              key:
+                type: string
+                nullable: true
+                description: The engine instance key (e.g. process_key) the row projected.
+              fromStatus:
+                type: string
+                description: The non-terminal status the row carried before it was orphaned.
     AgentInstructions:
       type: object
       description: The agent operator guide — how to drive (submit PRs/epics, answer escalations)
@@ -3185,6 +3243,40 @@ paths:
                 $ref: "#/components/schemas/ErrorBody"
         "404":
           description: No transcript exists for the given stream.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+  /reconcile:
+    post:
+      operationId: reconcileEngineState
+      summary: Reconcile engine-backed inflight projections after an engine reset/rewind (issue #622).
+      description: >-
+        The explicit operator command for the app-side reconciliation surface. Probes the engine's
+        incarnation epoch (`/v2/topology`) and compares it to the last-seen value: on a REGRESSION (the
+        #1065 reset/rewind signature) every NON-terminal engine-backed app row (an instanceTracking
+        binding whose status is still active and whose engine key is populated) is driven to the
+        defined `orphaned` terminal WITH PROVENANCE. Terminal history and non-engine-backed surfaces
+        (presence, audit) are never touched. Idempotent — a second call with a matching epoch is a
+        no-op — and safe: an unreachable engine orphans nothing. Runs automatically on startup too.
+      security:
+        - hookSecret: []
+        - {}
+      responses:
+        "200":
+          description: The reconcile pass result (what it observed and orphaned).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReconcileReport"
+        "401":
+          description: Missing/invalid shared secret (only when NANO_PR_WEBHOOK_SECRET is set).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+        "503":
+          description: The app has no data source configured, so there is nothing to reconcile.
           content:
             application/json:
               schema:

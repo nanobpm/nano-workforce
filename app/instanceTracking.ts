@@ -63,6 +63,23 @@ export function activeStatusesFor(table: string): readonly string[] {
   return binding.activeStatuses;
 }
 
+/** A tracked table's engine-instance key column (the `keyField` in nano.app.json — e.g.
+ *  `process_key`), the single source of truth the app-side reconcile probes/orphans by so it can
+ *  never drift from the reconciler's notion of "which column holds the engine instance key". */
+export function keyFieldFor(table: string): string {
+  return trackingBindingFor(table).keyField;
+}
+
+/** Every `instanceTracking` binding — the full registry of ENGINE-BACKED base tables (each row is
+ *  projected off a live engine process instance keyed by `keyField`). The app-side engine-reset
+ *  reconcile (app/reconcile.ts) scans exactly this set: a row whose `statusField` is still in the
+ *  binding's `activeStatuses` and whose `keyField` is populated is non-terminal engine-backed work,
+ *  the only surface reconcile may drive to `orphaned`. Terminal rows and non-engine-backed surfaces
+ *  (presence, append-only audit) are, by construction, not in this set and are never touched. */
+export function engineBackedBindings(): readonly InstanceTracking[] {
+  return INSTANCE_TRACKING_BINDINGS;
+}
+
 /** The managed derived read-model VIEW name + effective-status column for a base table, resolved by
  *  urban's OWN target resolver so the app never drifts from the framework's `<table>__tracking` /
  *  `derived_status` naming (ADR 0065). */
