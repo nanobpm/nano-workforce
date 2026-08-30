@@ -1,3 +1,9 @@
+## [0.162.2](https://github.com/nanobpm/nano-workforce/compare/v0.162.1...v0.162.2) (2026-08-30)
+
+### Bug Fixes
+
+* **plan-fanout:** terminate empty plans before the review gate ([#623](https://github.com/nanobpm/nano-workforce/issues/623)) ([#625](https://github.com/nanobpm/nano-workforce/issues/625)) ([02dca9f](https://github.com/nanobpm/nano-workforce/commit/02dca9f02f817bc0c178255a50ef95308318502b)), closes [Magikcraft/nano-bpm#1067](https://github.com/Magikcraft/nano-bpm/issues/1067)
+
 ## [0.162.1](https://github.com/nanobpm/nano-workforce/compare/v0.162.0...v0.162.1) (2026-08-30)
 
 ### Bug Fixes
