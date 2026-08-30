@@ -314,9 +314,13 @@ describe("plan-fanout escalations (U2 — task + plan-review + trial-merge → u
 
   test("empty-plan escalation: revise re-plans, re-parking a still-empty plan at the operator (never auto-terminating)", async () => {
     let reviewCalls = 0;
+    const planPrompts: Array<string | undefined> = [];
     await withApp(
       {
-        "senior:plan": () => ({ tasks: [], note: "all sub-issues closed" }),
+        "senior:plan": (job) => {
+          planPrompts.push((job.variables as Record<string, unknown>).appendPrompt as string | undefined);
+          return { tasks: [], note: "all sub-issues closed" };
+        },
         "senior:plan-review": () => {
           reviewCalls += 1;
           return { approved: true, findings: "" };
@@ -332,6 +336,13 @@ describe("plan-fanout escalations (U2 — task + plan-review + trial-merge → u
         assert.ok(
           flows.includes("gw-empty-plan-answer->plan"),
           `revise routed back to the planner (flows: ${flows.join(", ")})`,
+        );
+        // The operator's revision guidance must actually reach the re-plan: `empty-plan-escalation`
+        // folds `notes` into `planFindings`, which the `plan` task renders into its `appendPrompt`.
+        const rePlanPrompt = planPrompts.at(-1);
+        assert.ok(
+          rePlanPrompt?.includes("look again"),
+          `operator revise notes were delivered to the re-plan appendPrompt (got: ${JSON.stringify(rePlanPrompt)})`,
         );
         // The re-plan is still empty, so it re-parks at a fresh operator escalation — it neither
         // enters plan-review nor auto-terminates.

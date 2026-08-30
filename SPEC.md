@@ -526,7 +526,9 @@ Start(issue) → plan → record-plan → implement (parallel MI) → record-res
   livelock, #623) — instead it parks at the **`empty-plan-escalation`** operator user
   task for a human directive: **Accept** a legitimate no-op epic (→ the terminal
   `EndTasklessDone` end; the poller reconciles the COMPLETED instance to `done`) or
-  **Revise** (→ back to `plan` to re-plan). An empty plan stays NON-terminal
+  **Revise** (→ back to `plan` to re-plan, folding the operator's `notes` into
+  `planFindings` so the guidance reaches the re-plan's `appendPrompt`, mirroring
+  `plan-review-decision`). An empty plan stays NON-terminal
   (`planning`) with its planner `note` as the `outcome` while parked — terminal
   status follows engine liveness via `pollTasklessPlanTermination`, never the
   empty-plan signal (#624).
