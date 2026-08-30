@@ -1,3 +1,9 @@
+## [0.162.1](https://github.com/nanobpm/nano-workforce/compare/v0.162.0...v0.162.1) (2026-08-30)
+
+### Bug Fixes
+
+* **prompts:** reference prompts by resources-relative id so agents get their base prompt ([#628](https://github.com/nanobpm/nano-workforce/issues/628)) ([084e8f8](https://github.com/nanobpm/nano-workforce/commit/084e8f8f4ad842cc9f9e92c25b4ef80d0b0b66e1)), closes [#241](https://github.com/nanobpm/nano-workforce/issues/241)
+
 ## [0.162.0](https://github.com/nanobpm/nano-workforce/compare/v0.161.0...v0.162.0) (2026-08-29)
 
 ### Features
