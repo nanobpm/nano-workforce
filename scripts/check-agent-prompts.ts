@@ -178,8 +178,9 @@ export function checkAgentPrompts(root: string): CheckResult {
   // The resources the app actually DEPLOYS. Under ADR 0062 deploy-by-convention this is derived the
   // SAME way urban's deployModels derives it, so this gate reasons about exactly the file set that
   // ships to the engine:
-  //   • no `models` block → discover by convention: every file under `resources/` (shallow, one
-  //     level deep). This is nwf's blessed layout — prompts live at `resources/prompts/*.md`.
+  //   • no `models` block → discover by convention: every file under `resources/` at any depth
+  //     (recursive, mirroring urban). This is nwf's blessed layout — prompts live at
+  //     `resources/prompts/*.md`.
   //   • `models` globs present → explicit override, used verbatim (the escape hatch for a
   //     non-convention layout). A declared-but-empty `models` is still an override, NOT a fallback
   //     to the convention walk — mirror deployModels, which keys convention off the block's absence.
