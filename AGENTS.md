@@ -131,15 +131,20 @@ task under `resources/prompts/*.md`.
 - **No `models` block.** Rely on the convention; add a `models` override *only* for a
   genuinely non-standard layout (nwf doesn't need one). An explicit `models` is used
   verbatim and skips the convention walk.
-- **Basenames must be unique across the deploy set** — the deploy dedupe key is the
-  filename only, so two files sharing a basename in different dirs collide. `npm run
-  check:prompts` fails loudly on that.
+- **Prompt ids are `resources/`-relative; basenames must be unique only within a
+  `models` override.** A convention resource's deploy id (`resourceId`) is its path
+  **relative to `resources/`** — `resources/prompts/plan.md` → `prompts/plan.md` — so files
+  sharing a basename in different sub-dirs deploy as distinct resources. Only a `models`
+  override keys by basename (and so must avoid basename collisions). `npm run check:prompts`
+  validates each prompt link against the actual deployed id and fails loudly on a mismatch.
 - **Agent prompts: linkedResource is the blessed *and only* path.** Each agent service
   task links its base prompt with
-  `<zeebe:linkedResource resourceId="<token>.md" bindingType="latest" resourceType="GenericScript" linkName="prompt"/>`,
+  `<zeebe:linkedResource resourceId="prompts/<token>.md" bindingType="latest" resourceType="GenericScript" linkName="prompt"/>`,
   which the engine resolves to the latest deployed `resources/prompts/<token>.md` at job
   activation, combined at runtime with the per-task `appendPrompt` FEEL. `bindingType="latest"`
-  lets a prompt update land mid-epic without a process redeploy.
+  lets a prompt update land mid-epic without a process redeploy. **The id is the
+  `resources/`-relative path (`prompts/<token>.md`), NOT the bare basename** — a bare id
+  resolves to nothing and the engine silently omits the link, so the agent runs prompt-less.
 - **Deploy-time `{{token}}` templating is removed — no back-compat.** To inject a per-run
   value (URL, flag) into an agent, pass it as a runtime job variable / `appendPrompt`
   FEEL; never bake it into a model at deploy time.

@@ -499,7 +499,7 @@ agent's base prompt is **not** in the job payload — it is delivered as a
 **linked resource** (likewise `plan.md`, `feature.md`, `fix-ci.md`, …):
 
 ```xml
-<zeebe:linkedResource resourceId="review-round.md" bindingType="latest" resourceType="GenericScript" linkName="prompt"/>
+<zeebe:linkedResource resourceId="prompts/review-round.md" bindingType="latest" resourceType="GenericScript" linkName="prompt"/>
 ```
 
 that the engine resolves to the latest deployed `resources/prompts/*.md` at job
