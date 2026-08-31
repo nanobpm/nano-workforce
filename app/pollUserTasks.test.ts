@@ -765,6 +765,32 @@ test("pollUserTasks (engine-first): does NOT heal an escalated run when the per-
   assertEquals(byKey["o/r#err"].status, "escalated", "a failed per-instance query leaves the run escalated");
 });
 
+test("pollUserTasks (engine-first): does NOT heal a JUST-escalated run inside the grace window before its user task exists (issue #642)", async () => {
+  // `record-feature-escalation` writes `status="escalated"` (stamping `updated_at`) on the `escalated`
+  // arm IMMEDIATELY BEFORE the engine creates the `feature-escalation` user task. A poll landing in that
+  // window sees `openUserTasks` return none and would wrongly flip the fresh escalation back to `running`,
+  // making the just-raised escalation invisible. A short grace window on `updated_at` spares a just-written
+  // escalation while still healing genuinely-stranded (old) rows.
+  const fresh = new Date().toISOString();
+  const stale = new Date(Date.now() - 60 * 60_000).toISOString(); // an hour ago — comfortably past grace
+  const { data, stores } = memData({
+    feature_runs: [
+      { feature_key: "o/r#fresh", status: "escalated", process_key: "fp-fresh", updated_at: fresh, issue_url: null, title: "just escalated", delivery_label: null },
+      { feature_key: "o/r#old", status: "escalated", process_key: "fp-old", updated_at: stale, issue_url: null, title: "genuinely stranded", delivery_label: null },
+    ],
+  });
+  const restore = stubUserTaskSearch([]); // engine reports no open escalation task for either instance
+  const engine = fakeEngine({}); // openUserTasks returns [] for every instance (task not yet created / gone)
+  try {
+    await pollUserTasks(data, engine, REST);
+  } finally {
+    restore();
+  }
+  const byKey = Object.fromEntries((stores.feature_runs ?? []).map((r) => [r.feature_key, r]));
+  assertEquals(byKey["o/r#fresh"].status, "escalated", "a just-escalated run inside the grace window is spared the heal");
+  assertEquals(byKey["o/r#old"].status, "running", "a genuinely-stranded (old) run is still healed");
+});
+
 test("pollUserTasks (typed-seam fallback): self-heals an escalated run with no open feature-escalation task (issue #642)", async () => {
   // The reduced-capability path scans FEATURE_ACTIVE_STATUSES instances (incl. `escalated`) directly,
   // so the per-instance open-task read is just as authoritative for the self-heal.

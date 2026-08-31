@@ -198,6 +198,15 @@ export const MERGEABLE_WAIT_TIMEOUT = mergeableWaitTimeout(
  * to one attempt per window. Set via `NANO_PR_REVIEW_NUDGE_MINUTES` (minutes). */
 export const REVIEW_NUDGE_MS = clampNudgeMinutes(process.env.NANO_PR_REVIEW_NUDGE_MINUTES) * 60_000;
 
+/** Grace window (ms) before the `escalated`→`running` self-heal (below) may act on a row. The sole
+ * writer of `status="escalated"` — `record-feature-escalation` — runs on the `escalated` arm and stamps
+ * `updated_at` IMMEDIATELY BEFORE the engine creates the `feature-escalation` user task. A poll landing
+ * in that window would see `openUserTasks` report none and wrongly heal the just-raised escalation back
+ * to `running`, hiding it until a future write. Only heal rows whose escalation is older than this
+ * window, by when the user task must already be observable — sparing the in-flight transition while
+ * still reconciling genuinely-stranded rows. */
+export const FEATURE_ESCALATION_HEAL_GRACE_MS = 60_000;
+
 /** Whether a converged PR is automatically driven to merge (the merge-loop). Default on; set
  * `NANO_PR_AUTO_MERGE=0` to stop at `converged` (review-only mode). */
 export const AUTO_MERGE = !["0", "false", "off", "no"].includes(
@@ -2693,6 +2702,12 @@ export async function pollUserTasks(
   // is never guessed at.
   for (const run of await featureRuns(data).find({ status: "escalated" })) {
     if (!run.process_key) continue;
+    // A just-written escalation may not have its `feature-escalation` user task yet: the sole writer,
+    // `record-feature-escalation`, stamps `updated_at` immediately BEFORE the engine creates the task.
+    // Skip healing inside the grace window so this pass never races that transition and steals a fresh
+    // escalation; a genuinely-stranded (old, or timestamp-less) row is past the window and still healed.
+    const escalatedAt = Date.parse(run.updated_at ?? "");
+    if (Number.isFinite(escalatedAt) && Date.now() - escalatedAt < FEATURE_ESCALATION_HEAL_GRACE_MS) continue;
     let openTasks: { elementId?: string }[];
     try {
       openTasks = await engine.openUserTasks({ processInstanceKey: run.process_key });
