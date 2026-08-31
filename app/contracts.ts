@@ -420,7 +420,23 @@ export const WIRE_CONTRACTS = {
     owner: "pages/delivery-graphs/mount.js",
     semantics:
       "The INBOUND reuse-fill host-bridge message that loads a saved `DeliveryGraph` JSON into the Delivery Graphs COMPOSE App-View textarea (`#dg-json`) — issue #523, epic #519 S4. The compose mount (consumer) registers a same-origin `window` `message` listener for this shape and routes it through its single `fillComposer()` seam; the producer is the Library App-View **Reuse** action (#523), which posts it across the App-View iframe boundary (the INBOUND twin of the existing OUTBOUND `nano-navigate` DI-preview bridge). The filesystem **Import** control (#524) is NOT a producer of this message — it lives in the same compose mount and fills directly through `fillComposer()`, no cross-frame hop. The `type` string is exported ONCE as `DG_COMPOSE_FILL_MESSAGE` from pages/delivery-graphs/mount.js — the Reuse producer imports it, never re-declares a synonym.",
-    shape: '{ type: "nano-delivery-graph-compose-fill", graphJson: string }',
+    shape: '{ type: "nano-delivery-graph-compose-fill", graphJson: string, token?: string }',
+  },
+  "deliveryGraph.compose.fill.ack": {
+    category: "wire",
+    name: "deliveryGraph.compose.fill.ack",
+    owner: "pages/delivery-graphs/mount.js",
+    semantics:
+      "The ACK half of the reuse-fill host-bridge message (issue #645). The compose App-View posts it back UP to the host — relayed across to the Library sibling App-View by the Urban App-View relay (nano-ide #518) — the moment it has actually filled `#dg-json` from a `deliveryGraph.compose.fill`. It exists to make the Library's success toast EARNED, not optimistic: the Library shows \"✓ Loaded…\" ONLY on this ack (matching its correlation `token`) and a clear \"Couldn't reach the composer\" on a short timeout, closing the #645 false-positive-toast defect. Its `token` echoes the producer's fill `token` so a stale ack from a prior Reuse can't complete a newer one. The `type` string is exported ONCE as `DG_COMPOSE_FILL_ACK_MESSAGE` from pages/delivery-graphs/mount.js — the Library consumer imports it, never re-declares a synonym.",
+    shape: '{ type: "nano-delivery-graph-compose-fill-ack", token: string | null }',
+  },
+  "nano.navigate.ack": {
+    category: "wire",
+    name: "nano.navigate.ack",
+    owner: "pages/delivery-graphs/mount.js",
+    semantics:
+      "The host's acknowledgment of a `nano-navigate` (issue #645). \"Preview generated DI\" posts `nano-navigate` UP to the console (forwarded to the host explorer by the Urban App-View relay, nano-ide #518), but the host does not synchronously confirm it navigated — so the old \"✓ Opening…\" toast printed right after the post claimed success even when the message was dropped (standalone, no relay, a console that never navigated). The compose view now treats Preview as fire-to-host with a bounded budget: a NEUTRAL in-progress status, resolved to \"✓ Opened…\" ONLY on this same-origin ack from the parent for the matching `target`, or to \"Couldn't reach the console explorer\" on a short timeout. Consumed same-origin from `window.parent`; the `type` string is `NANO_NAVIGATE_ACK_MESSAGE` in pages/delivery-graphs/mount.js.",
+    shape: '{ type: "nano-navigate-ack", target?: string }',
   },
   "deliveryGraph.library.import.submit": {
     category: "wire",

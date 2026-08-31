@@ -13,7 +13,13 @@
 // standalone — only the host element and injected endpoint config differ. The app has no browser build
 // step, so this consumes the library doors straight off the wire.
 
-import { DG_COMPOSE_FILL_MESSAGE } from "./mount.js";
+import { DG_COMPOSE_FILL_ACK_MESSAGE, DG_COMPOSE_FILL_MESSAGE } from "./mount.js";
+
+// The bounded budget within which the compose App-View must ACK a Reuse fill before we surface an honest
+// "Couldn't reach the composer" error (issue #645). Mirrors the compose mount's own ACK_TIMEOUT_MS: long
+// enough for the App-View relay round-trip (nano-ide #518), short enough that a dropped fill fails fast
+// instead of leaving a misleading "✓ Loaded…" up. Overridable via config for tests.
+const REUSE_ACK_TIMEOUT_MS = 2000;
 
 // The read behind the list: every saved library entry, newest first. Anchored to THIS MODULE's url
 // (import.meta.url), NOT the document base. The library App-View shell (library-embed.html /
@@ -149,6 +155,8 @@ export function mountDeliveryGraphLibrary(host, config = {}) {
 
   const libraryUrl = config.libraryUrl ?? DEFAULT_LIBRARY_URL;
   const refreshMs = typeof config.refreshMs === "number" && config.refreshMs > 0 ? config.refreshMs : DEFAULT_REFRESH_MS;
+  const ackTimeoutMs =
+    typeof config.ackTimeoutMs === "number" && config.ackTimeoutMs > 0 ? config.ackTimeoutMs : REUSE_ACK_TIMEOUT_MS;
   const headers = (url) => ({
     "content-type": "application/json",
     ...(config.hookSecret && isSameOrigin(url) ? { "x-hook-secret": config.hookSecret } : {}),
@@ -255,7 +263,22 @@ export function mountDeliveryGraphLibrary(host, config = {}) {
   // the host bridge, posting the shared `deliveryGraph.compose.fill` message UP to the console (the
   // INBOUND twin of the outbound `nano-navigate` DI-preview bridge). Standalone (not embedded) there is
   // no console to route it and no compose view to fill, so we say so instead of failing silently.
+  //
+  // The success toast is ACKNOWLEDGED, never optimistic (issue #645): a "✓ Loaded…" printed synchronously
+  // after the post lied whenever the fill was dropped (no relay, wrong origin, an unmounted compose view).
+  // Now we show a NEUTRAL in-progress status, tag the fill with a correlation `token`, and resolve it only
+  // when the compose mount echoes `DG_COMPOSE_FILL_ACK_MESSAGE` for that token — "✓ Loaded…" on the ack,
+  // "Couldn't reach the composer" on a short timeout. A fresh Reuse supersedes any pending one.
   const isEmbedded = typeof window !== "undefined" && window.parent && window.parent !== window;
+  let pendingReuse = null;
+  function clearPendingReuse() {
+    if (pendingReuse && pendingReuse.timer) clearTimeout(pendingReuse.timer);
+    pendingReuse = null;
+  }
+  function newReuseToken() {
+    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") return crypto.randomUUID();
+    return `reuse-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  }
   function doReuse(id) {
     const entry = entries.find((e) => e && e.id === id);
     if (!entry) {
@@ -270,11 +293,37 @@ export function mountDeliveryGraphLibrary(host, config = {}) {
       setStatus("Open this page inside the console to reuse a saved graph in the composer.", "err");
       return;
     }
+    clearPendingReuse();
+    const token = newReuseToken();
     window.parent.postMessage(
-      { type: DG_COMPOSE_FILL_MESSAGE, graphJson: entry.graph },
+      { type: DG_COMPOSE_FILL_MESSAGE, graphJson: entry.graph, token },
       window.location.origin,
     );
+    // NEUTRAL in-progress status (no "✓") — success is only earned on the compose ack below (#645).
+    setStatus("Loading into the composer above\u2026", "");
+    const timer = setTimeout(() => {
+      if (!pendingReuse || pendingReuse.token !== token) return;
+      pendingReuse = null;
+      setStatus("Couldn't reach the composer \u2014 is the composer open above this list?", "err");
+    }, ackTimeoutMs);
+    pendingReuse = { token, timer };
+  }
+  // The compose App-View's acknowledgment that it filled (#645): a same-origin `DG_COMPOSE_FILL_ACK_MESSAGE`
+  // from the parent (the console, which relays it across from the compose sibling) whose `token` matches the
+  // pending Reuse resolves it to success. A foreign origin, a non-parent source, or a stale/mismatched token
+  // is ignored — an unrelated page (or a prior Reuse's late ack) can't forge or misattribute a success toast.
+  function onReuseAck(ev) {
+    if (!ev || typeof window === "undefined") return;
+    if (ev.origin !== window.location.origin) return;
+    if (ev.source !== window.parent) return;
+    const data = ev.data;
+    if (!data || data.type !== DG_COMPOSE_FILL_ACK_MESSAGE) return;
+    if (!pendingReuse || (typeof data.token === "string" && data.token !== pendingReuse.token)) return;
+    clearPendingReuse();
     setStatus("\u2713 Loaded into the composer above \u2014 edit, Preview or Stage it.", "ok");
+  }
+  if (isEmbedded && typeof window !== "undefined" && typeof window.addEventListener === "function") {
+    window.addEventListener("message", onReuseAck);
   }
 
   // "Export": a purely client-side download of a saved entry's graph JSON as `<name>.deliverygraph.json`
@@ -368,6 +417,10 @@ export function mountDeliveryGraphLibrary(host, config = {}) {
 
   return () => {
     disposed = true;
+    clearPendingReuse();
+    if (typeof window !== "undefined" && typeof window.removeEventListener === "function") {
+      window.removeEventListener("message", onReuseAck);
+    }
     clearInterval(timer);
     root.innerHTML = "";
   };

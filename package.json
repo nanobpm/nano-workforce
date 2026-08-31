@@ -61,7 +61,7 @@
   },
   "dependencies": {
     "@nanobpm/agentic": "^0.4.0",
-    "@nanobpm/urban": "^0.87.0",
+    "@nanobpm/urban": "^0.88.1",
     "bpmn-auto-layout": "^2.0.0-alpha.2"
   },
   "devDependencies": {

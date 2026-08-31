@@ -71,7 +71,7 @@ test("#523: Reuse drives the compose fill seam over the shared host-bridge messa
   // Reuse loads the saved graph back into the SEPARATE compose App-View, so it posts the ONE shared
   // fill message (its type imported from ./mount.js, never re-declared) UP over the App-View boundary.
   assert(
-    /import \{ DG_COMPOSE_FILL_MESSAGE \} from "\.\/mount\.js"/.test(LIBRARY_JS),
+    /import \{[^}]*\bDG_COMPOSE_FILL_MESSAGE\b[^}]*\} from "\.\/mount\.js"/.test(LIBRARY_JS),
     "library.mount.js must import DG_COMPOSE_FILL_MESSAGE from ./mount.js (the ONE source of truth for the fill message type)",
   );
   assert(/data-reuse=/.test(LIBRARY_JS), "library.mount.js must render a per-row Reuse affordance carrying the entry id");
