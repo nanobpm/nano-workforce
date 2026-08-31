@@ -1,3 +1,9 @@
+## [0.163.2](https://github.com/nanobpm/nano-workforce/compare/v0.163.1...v0.163.2) (2026-08-31)
+
+### Build System
+
+* **deps:** bump @nanobpm/urban-testkit to ^1.0.0 (native callActivity in e2e) ([#635](https://github.com/nanobpm/nano-workforce/issues/635)) ([2020817](https://github.com/nanobpm/nano-workforce/commit/2020817a2b5baeec347b2c808212720ab58328cb)), closes [#631](https://github.com/nanobpm/nano-workforce/issues/631) [#591](https://github.com/nanobpm/nano-workforce/issues/591) [nano-ide#503](https://github.com/nanobpm/nano-ide/issues/503) [#607](https://github.com/nanobpm/nano-workforce/issues/607) [nano-ide#503](https://github.com/nanobpm/nano-ide/issues/503) [#607](https://github.com/nanobpm/nano-workforce/issues/607) [#503](https://github.com/nanobpm/nano-workforce/issues/503) [#607](https://github.com/nanobpm/nano-workforce/issues/607) [nano-ide#503](https://github.com/nanobpm/nano-ide/issues/503)
+
 ## [0.163.1](https://github.com/nanobpm/nano-workforce/compare/v0.163.0...v0.163.1) (2026-08-30)
 
 ### Bug Fixes
