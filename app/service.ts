@@ -2683,17 +2683,25 @@ export async function pollUserTasks(
   // now stamps `running` (via `record-feature-implementing`). This read-side sweep heals any row that
   // is ALREADY stranded at `escalated` — e.g. runs that escalated before the write-side twin shipped
   // (#632), or any future missed transition — by reconciling against the ENGINE's authoritative
-  // open-escalation set: `desired` IS every open native escalation the sweep observed THIS pass, so a
-  // run whose instance is absent from the open `feature-escalation` set is no longer parked and must
-  // read `running`, not `escalated` (parity with the PR `status="escalated"` contract). Confined to
-  // rows with a known `process_key` so an untracked instance is never guessed at.
-  const openEscalationInstances = new Set(
-    desired
-      .filter((r) => r.element_id === FEATURE_ESCALATION_ELEMENT && r.process_key)
-      .map((r) => r.process_key),
-  );
+  // open-escalation set. But it must NOT decide on absence from THIS pass's `desired` set:
+  // `sweepOpenEscalationTasks` is best-effort and breaks early on a paging/transport error, so a
+  // truncated `desired` would wrongly flip a genuinely-parked run whose task lived on an unreached page.
+  // Confirm each escalated run POSITIVELY, per-instance, against `openUserTasks` (which pins
+  // `state:"CREATED"`), and skip healing when that query errors — durable state is mutated only on
+  // positive evidence that no `feature-escalation` task is open for the instance (parity with the PR
+  // `status="escalated"` contract). Confined to rows with a known `process_key` so an untracked instance
+  // is never guessed at.
   for (const run of await featureRuns(data).find({ status: "escalated" })) {
-    if (run.process_key && !openEscalationInstances.has(run.process_key)) {
+    if (!run.process_key) continue;
+    let openTasks: { elementId?: string }[];
+    try {
+      openTasks = await engine.openUserTasks({ processInstanceKey: run.process_key });
+    } catch (err) {
+      // Negative evidence from a failed query is not proof the run is unparked — leave it for a later pass.
+      console.error(`[poller] escalated-run self-heal (${run.feature_key} @ ${run.process_key}): ${err}`);
+      continue;
+    }
+    if (!openTasks.some((t) => t.elementId === FEATURE_ESCALATION_ELEMENT)) {
       await featureRuns(data).update(run.feature_key, { status: "running", updated_at: at });
     }
   }

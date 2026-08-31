@@ -692,7 +692,7 @@ test("pollUserTasks (engine-first): self-heals an escalated run stranded off its
     { userTaskKey: "ut-parked", elementId: "feature-escalation", processInstanceKey: "fp-77", state: "CREATED" },
   ]);
   try {
-    await pollUserTasks(data, fakeEngine({}), REST);
+    await pollUserTasks(data, fakeEngine({ "fp-77": [{ userTaskKey: "ut-parked", elementId: "feature-escalation" }] }), REST);
   } finally {
     restore();
   }
@@ -700,6 +700,69 @@ test("pollUserTasks (engine-first): self-heals an escalated run stranded off its
   const byKey = Object.fromEntries((stores.feature_runs ?? []).map((r) => [r.feature_key, r]));
   assertEquals(byKey["o/r#632"].status, "running", "the stranded escalated run is healed to running");
   assertEquals(byKey["o/r#77"].status, "escalated", "the genuinely parked run stays escalated");
+});
+
+test("pollUserTasks (engine-first): a TRUNCATED best-effort sweep never heals a genuinely-parked escalated run (issue #642)", async () => {
+  // `sweepOpenEscalationTasks` is explicitly best-effort — it BREAKS early on a paging/transport error
+  // and projects only what it had gathered. Healing `escalated -> running` on ABSENCE from that partial
+  // set is mutating durable state on negative evidence: a genuinely-parked human escalation whose task
+  // lived on an unreached page would be silently stolen. The self-heal must confirm per-instance against
+  // the engine's authoritative open set, NOT the (possibly truncated) global sweep.
+  const { data, stores } = memData({
+    feature_runs: [
+      { feature_key: "o/r#parked", status: "escalated", process_key: "fp-parked", issue_url: null, title: "genuinely parked", delivery_label: null },
+      { feature_key: "o/r#stranded", status: "escalated", process_key: "fp-stranded", issue_url: null, title: "stranded", delivery_label: null },
+    ],
+  });
+  // Page 1 fills the limit (forcing a second page) with unrelated open escalations; page 2 — which WOULD
+  // carry fp-parked's escalation — errors, so the sweep truncates and `desired` never sees fp-parked.
+  const page1: RawTask[] = Array.from({ length: 100 }, (_, i) => ({
+    userTaskKey: `other-${i}`,
+    elementId: "feature-escalation",
+    processInstanceKey: `other-${i}`,
+    state: "CREATED",
+  }));
+  const orig = globalThis.fetch;
+  // biome-ignore lint/suspicious/noExplicitAny: minimal fetch double for the raw-REST search surface
+  globalThis.fetch = (async (url: string | URL, init?: any) => {
+    if (!String(url).endsWith("/user-tasks/search")) return new Response("not found", { status: 404 });
+    const from: number = JSON.parse(init?.body ?? "{}")?.page?.from ?? 0;
+    if (from === 0) {
+      return new Response(JSON.stringify({ items: page1 }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    return new Response("boom", { status: 500 }); // page 2 transport error -> sweep truncates here
+  }) as typeof fetch;
+  // The engine's authoritative per-instance open set: fp-parked IS parked; fp-stranded is not.
+  const engine = fakeEngine({ "fp-parked": [{ userTaskKey: "ut-parked", elementId: "feature-escalation" }] });
+  try {
+    await pollUserTasks(data, engine, REST);
+  } finally {
+    globalThis.fetch = orig;
+  }
+  const byKey = Object.fromEntries((stores.feature_runs ?? []).map((r) => [r.feature_key, r]));
+  assertEquals(byKey["o/r#parked"].status, "escalated", "a genuinely-parked run survives a truncated sweep");
+  assertEquals(byKey["o/r#stranded"].status, "running", "a truly stranded run is still healed");
+});
+
+test("pollUserTasks (engine-first): does NOT heal an escalated run when the per-instance open-task query errors (issue #642)", async () => {
+  // A per-instance query error is not proof the run is unparked — mutating on that negative evidence would
+  // again steal a parked escalation. On query error the run must be left `escalated` for a later pass.
+  const { data, stores } = memData({
+    feature_runs: [{ feature_key: "o/r#err", status: "escalated", process_key: "fp-err", issue_url: null, title: "query errors", delivery_label: null }],
+  });
+  const restore = stubUserTaskSearch([]); // empty sweep -> old code would heal on absence
+  const engine = {
+    searchUserTasks: () => Promise.resolve([]),
+    openUserTasks: (filter?: { processInstanceKey?: string }) =>
+      filter?.processInstanceKey === "fp-err" ? Promise.reject(new Error("engine down")) : Promise.resolve([]),
+  } as unknown as EngineClient;
+  try {
+    await pollUserTasks(data, engine, REST);
+  } finally {
+    restore();
+  }
+  const byKey = Object.fromEntries((stores.feature_runs ?? []).map((r) => [r.feature_key, r]));
+  assertEquals(byKey["o/r#err"].status, "escalated", "a failed per-instance query leaves the run escalated");
 });
 
 test("pollUserTasks (typed-seam fallback): self-heals an escalated run with no open feature-escalation task (issue #642)", async () => {
