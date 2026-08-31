@@ -50,6 +50,32 @@ const DEFAULT_IMPORT_URL = new URL("../app/api/actions/delivery-graph/library/im
 // routes through the single `fillComposer()` seam below; keep new fill sources going through it.
 export const DG_COMPOSE_FILL_MESSAGE = "nano-delivery-graph-compose-fill";
 
+// The ACK half of the reuse-fill bridge (issue #645). An optimistic "✓ Loaded…" toast printed
+// synchronously after the Library posts the fill can never reflect the cross-frame OUTCOME — the fill
+// message is relayed across App-Views (nano-ide #518) and could still be dropped (no relay, wrong
+// origin, a compose view that isn't mounted), yet the toast claimed success regardless (the #645
+// defect). So the delivery is now ACKNOWLEDGED: when THIS compose mount actually fills from a fill
+// message, it posts this ack back UP to the host (relayed across to the Library sibling), echoing the
+// producer's correlation `token`. The Library shows "✓ Loaded…" ONLY on that ack and a clear error on a
+// short timeout — the success is earned, not assumed. The `type` is exported ONCE here as the single
+// source of truth; the Library consumer imports it rather than re-declaring a synonym.
+export const DG_COMPOSE_FILL_ACK_MESSAGE = "nano-delivery-graph-compose-fill-ack";
+
+// The host acknowledgment of a `nano-navigate` (issue #645). "Preview generated DI" posts nano-navigate
+// UP to the console; nano-ide #518 forwards it to the host explorer, but the host does not synchronously
+// confirm, so an optimistic "✓ Opening…" toast printed right after the post claimed success even when the
+// message was dropped (standalone, no relay, a console that never navigated). The compose view now treats
+// Preview as fire-to-host with a bounded budget: it shows a NEUTRAL in-progress status, and only earns a
+// "✓" when the host echoes this ack for the same `target`; if no host ack is observed within the budget it
+// surfaces "Couldn't reach the console explorer" instead. Same-origin, from the parent (the console).
+export const NANO_NAVIGATE_ACK_MESSAGE = "nano-navigate-ack";
+
+// The bounded budget within which a cross-frame delivery (compose-fill relay, or a nano-navigate to the
+// host) must be acknowledged before the producer surfaces an honest "couldn't reach …" error (#645). A
+// couple of seconds is long enough for the App-View relay round-trip yet short enough that a dropped
+// message fails fast instead of leaving a misleading toast up. Overridable via config for tests.
+const ACK_TIMEOUT_MS = 2000;
+
 // A bounded timeout for every door request. Without it a hung endpoint leaves the fetch promise pending
 // forever, so the busy() lock never clears and the UI is stranded (buttons disabled, status stuck) with
 // no way to retry. On timeout the AbortController rejects the fetch, which surfaces as an error banner
@@ -230,6 +256,8 @@ export function mountDeliveryGraphs(host, config = {}) {
   const previewUrl = config.previewUrl ?? DEFAULT_PREVIEW_URL;
   const stageUrl = config.stageUrl ?? DEFAULT_STAGE_URL;
   const importUrl = config.importUrl ?? DEFAULT_IMPORT_URL;
+  const ackTimeoutMs =
+    typeof config.ackTimeoutMs === "number" && config.ackTimeoutMs > 0 ? config.ackTimeoutMs : ACK_TIMEOUT_MS;
   const headers = (url) => ({
     "content-type": "application/json",
     ...(config.hookSecret && isSameOrigin(url) ? { "x-hook-secret": config.hookSecret } : {}),
@@ -324,7 +352,23 @@ export function mountDeliveryGraphs(host, config = {}) {
     if (embedded && ev.source !== window.parent) return;
     const data = ev.data;
     if (!data || data.type !== DG_COMPOSE_FILL_MESSAGE || typeof data.graphJson !== "string") return;
-    fillComposer(data.graphJson, { status: "Reused a saved graph \u2014 Preview or Stage it." });
+    const filled = fillComposer(data.graphJson, { status: "Reused a saved graph \u2014 Preview or Stage it." });
+    // ACK the fill back to the producer (issue #645): the Library shows "✓ Loaded…" ONLY on this ack,
+    // never optimistically. Post UP to the host, which nano-ide #518 relays across to the Library
+    // sibling App-View; echo the correlation `token` so a stale ack from a prior Reuse can't complete a
+    // newer one. Only when actually embedded (there is a parent to relay through) and only when the fill
+    // truly happened — a blank/bad payload earns no ack.
+    if (
+      filled &&
+      embedded &&
+      window.parent &&
+      typeof window.parent.postMessage === "function"
+    ) {
+      window.parent.postMessage(
+        { type: DG_COMPOSE_FILL_ACK_MESSAGE, token: typeof data.token === "string" ? data.token : null },
+        window.location.origin,
+      );
+    }
   }
   if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
     window.addEventListener("message", onFillMessage);
@@ -446,6 +490,17 @@ export function mountDeliveryGraphs(host, config = {}) {
   // the path. Standalone (not embedded) there is no host explorer to drive, so we say so instead of
   // failing silently.
   const isEmbedded = typeof window !== "undefined" && window.parent && window.parent !== window;
+  // A single in-flight Preview→host handshake (issue #645). Posting nano-navigate is fire-to-host: the
+  // console does not synchronously confirm it navigated, so we must not claim success up front. We hold
+  // the pending target + its timeout timer here; a host ack for that target resolves it to "✓ Opened…",
+  // and the timeout resolves it to an honest "Couldn't reach the console explorer". A fresh Preview
+  // supersedes any pending one (its timer is cleared) so only the latest attempt is ever resolved.
+  const DEFINITION_PREVIEW_TARGET = "definitionPreview";
+  let pendingPreview = null;
+  function clearPendingPreview() {
+    if (pendingPreview && pendingPreview.timer) clearTimeout(pendingPreview.timer);
+    pendingPreview = null;
+  }
   function doPreviewDi() {
     if (lastBpmn.trim() === "") {
       setStatus("Preview a graph first — the laid-out BPMN comes from the preview.", "err");
@@ -455,11 +510,40 @@ export function mountDeliveryGraphs(host, config = {}) {
       setStatus("Open this page inside the console cockpit to preview the generated DI.", "err");
       return;
     }
+    clearPendingPreview();
     window.parent.postMessage(
       { type: "nano-navigate", target: "definitionPreview", params: { xml: lastBpmn } },
       window.location.origin,
     );
-    setStatus("\u2713 Opening the generated DI in the process explorer…", "ok");
+    // NEUTRAL in-progress status (no "✓") — the success is only earned on the host ack below (#645).
+    setStatus("Opening the generated DI in the process explorer…", "");
+    const timer = setTimeout(() => {
+      if (!pendingPreview || pendingPreview.target !== DEFINITION_PREVIEW_TARGET) return;
+      pendingPreview = null;
+      setStatus("Couldn't reach the console explorer — is this page open inside the console?", "err");
+    }, ackTimeoutMs);
+    pendingPreview = { target: DEFINITION_PREVIEW_TARGET, timer };
+  }
+  // The host's acknowledgment of a Preview nano-navigate (#645): a same-origin `nano-navigate-ack` from
+  // the parent (the console) for the target we're awaiting resolves the pending Preview to success. A
+  // foreign origin, a non-parent source, or an ack for a different/absent target is ignored — an
+  // unrelated page can't forge a success toast.
+  function onNavAck(ev) {
+    if (!ev || typeof window === "undefined") return;
+    if (ev.origin !== window.location.origin) return;
+    if (ev.source !== window.parent) return;
+    const data = ev.data;
+    if (!data || data.type !== NANO_NAVIGATE_ACK_MESSAGE) return;
+    // Require a string `target` that exactly matches the pending preview. A target-less (or
+    // mismatched) ack must NOT resolve the Preview — otherwise any same-origin parent ack could
+    // forge a "✓ Opened…" toast the target never actually rendered (#645).
+    if (!pendingPreview || typeof data.target !== "string" || data.target !== pendingPreview.target)
+      return;
+    clearPendingPreview();
+    setStatus("\u2713 Opened the generated DI in the process explorer.", "ok");
+  }
+  if (isEmbedded && typeof window !== "undefined" && typeof window.addEventListener === "function") {
+    window.addEventListener("message", onNavAck);
   }
   outputEl.addEventListener("click", (ev) => {
     const btn = ev.target && ev.target.closest ? ev.target.closest("[data-preview-di]") : null;
@@ -469,8 +553,10 @@ export function mountDeliveryGraphs(host, config = {}) {
   });
 
   return () => {
+    clearPendingPreview();
     if (typeof window !== "undefined" && typeof window.removeEventListener === "function") {
       window.removeEventListener("message", onFillMessage);
+      window.removeEventListener("message", onNavAck);
     }
     root.innerHTML = "";
   };
