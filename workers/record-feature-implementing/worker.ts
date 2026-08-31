@@ -31,7 +31,16 @@ const handler: AppJobHandler<In> = async (job, app) => {
   // (`subjectKey` = the epic's `plan_key`) has no `feature_runs` row, so the reset is a guarded no-op
   // there — symmetric with `record-feature-escalation`'s guarded flip — never fabricating a bogus row.
   const subjectKey = job.variables.subjectKey ?? job.variables.featureKey;
-  if (!subjectKey) return {};
+  // Fail fast rather than silently skipping the status reset. Both edges into `implement-task` always
+  // supply exactly one key (`feature.bpmn`'s first entry → `featureKey`; the `implement-cell` answer
+  // loop → `subjectKey`), so a missing key can only mean the BPMN ioMapping/dataEnvelope regressed —
+  // exactly the misconfiguration that reintroduces the stale `status="escalated"` class (#642). Raising
+  // an incident surfaces that regression with a clear trail instead of masking it behind a silent no-op.
+  if (!subjectKey) {
+    throw new Error(
+      "record-feature-implementing: neither subjectKey nor featureKey present — the implement edge's ioMapping/dataEnvelope has regressed (would silently skip the escalated→running reset, #642)",
+    );
+  }
   const runs = featureRuns(app.data);
   if (await runs.get(subjectKey)) {
     await runs.update(subjectKey, {

@@ -4,7 +4,7 @@
 // while parked on the native `feature-escalation` user task. Without it, the answer loop-back left
 // `feature_runs.status` a stale `escalated` through the whole re-implementation (the #632 tear).
 import { test } from "node:test";
-import { assertEquals } from "#test-assert";
+import { assertEquals, assertRejects } from "#test-assert";
 import { noopLog } from "../../test/log.ts";
 import handler from "./worker.ts";
 
@@ -75,4 +75,13 @@ test("record-feature-implementing: a wave subject (no feature_runs row) is a gua
   const out = await handler({ jobKey: "job-w", variables: { subjectKey: "owner/repo#epic-42" } } as never, app);
   assertEquals(out, {});
   assertEquals(rows.length, 0, "no feature_runs row was fabricated for a wave subject");
+});
+
+test("record-feature-implementing: fails fast (incident) when neither subjectKey nor featureKey is present", async () => {
+  // Both edges into `implement-task` always supply exactly one key, so a missing key can only mean the
+  // BPMN ioMapping/dataEnvelope regressed — the misconfiguration that reintroduces the stale
+  // `status="escalated"` class (#642). The worker must raise an incident (throw) rather than silently
+  // skipping the reset and masking the regression.
+  const app = fakeApp([]);
+  await assertRejects(() => handler({ jobKey: "job-x", variables: {} } as never, app));
 });
