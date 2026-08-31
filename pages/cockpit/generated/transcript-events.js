@@ -1,51 +1,50 @@
-// @generated from app/agentic/transcript-events.ts by scripts/build-cockpit-browser.ts — DO NOT EDIT.
+// @generated from node_modules/@nanobpm/agentic/dist/transcript/events.js by scripts/build-cockpit-browser.ts — DO NOT EDIT.
 //
 // Browser ESM derived (type-strip only) from the typed transcript core so pages/cockpit/mount.js
 // renders the agentic transcript from ONE source of truth (#660). Regenerate with:
 //   node --experimental-strip-types scripts/build-cockpit-browser.ts
 
-// nano-workforce — the transcript EVENT vocabulary + the single derive() fold (ADR 0056, #251).
-//
-// This is the "event-sourced session" layer over the H3 transcript store (#146/#222). The store is
-// already append-only and offset-keyed — chunks are appended, never mutated — which is half of the
-// dsh (DeepSeek Harness) event-sourced-session pattern. The gap it left is that chunks are opaque
-// `TEXT`: every richer view (structured message history, tool cards, per-turn boundaries, token
-// accounting) had to re-parse the raw frame bytes ad hoc, a DRIFT SURFACE (two parsers of the same
-// bytes), which our "Derivation Over Duplication" doctrine forbids.
-//
-// This module closes that gap the way dsh does: the append-only log of TYPED events is the single
-// source of truth, and every higher-level view is a DERIVATION of that one log via a single
-// {@link deriveView} fold — "the log IS the state, so divergence is structurally impossible". A raw
-// terminal chunk is retained verbatim as a `stream-chunk` event (byte-level replay fidelity is
-// preserved); a producer that emits a structured, marker-tagged JSON envelope is decoded into the
-// authoritative typed events (message / tool-call / tool-result / turn / step / lifecycle) the derived
-// views fold over — mirroring dsh (raw chunks for token-replay, `assistant/message` authoritative).
-//
-// THE ONE PARSER. {@link parseTranscriptEvent} is the SINGLE place a stored chunk is classified into a
-// typed event; every consumer (cockpit, search, token accounting, export) reads the derived view, not
-// the raw bytes. A drift-guard test (`transcript-events.drift.test.ts`) asserts the event marker — and
-// therefore the raw→event parse — appears in exactly this module, so a second parser cannot creep in.
-//
-// MERGE-EXTENSIBLE. The vocabulary is a small core ({@link CORE_TRANSCRIPT_VOCAB}) authors extend in the
-// same schema with {@link mergeTranscriptVocab} (cribbed from dsh's merge-extensible event taxonomy and
-// the S3 `mergeVocab`), so a new event kind is an additive merge, never a fork of the parser.
-//
-// Pure and side-effect-free: no I/O, unit-testable on Node, and it never touches the engine or a BPMN
-// flow (ADR 0056: app-tier only, advisory).
 /**
- * Runtime-safe UTF-8 byte length. This module is imported by cockpit code that runs in the BROWSER
- * (via `cockpit/transcript-derive.ts`), where Node's `Buffer` global is not available — a bare
- * `Buffer.byteLength` would throw at runtime when deriving the view for a replayed transcript. Prefer
- * `Buffer` when present (Node) and fall back to `TextEncoder` (a Web/Node standard) otherwise, so the
- * single derive fold is portable across both hosts. This is the one canonical UTF-8 byte-length
- * implementation the transcript plane derives from (reused by `transcript-read.ts`).
+ * The transcript EVENT vocabulary + the single derive() fold (ADR 0056, #251).
+ *
+ * This is the "event-sourced session" layer over the S6 transcript store ({@link ./store.ts}). The
+ * store is already append-only and offset-keyed — chunks are appended, never mutated — which is half of
+ * the event-sourced-session pattern. The gap it left is that chunks are opaque `TEXT`: every richer
+ * view (structured message history, tool cards, per-turn boundaries, token accounting) had to re-parse
+ * the raw frame bytes ad hoc, a DRIFT SURFACE (two parsers of the same bytes), which our "Derivation
+ * Over Duplication" doctrine forbids.
+ *
+ * This module closes that gap: the append-only log of TYPED events is the single source of truth, and
+ * every higher-level view is a DERIVATION of that one log via a single {@link deriveView} fold — "the
+ * log IS the state, so divergence is structurally impossible". A raw terminal chunk is retained
+ * verbatim as a `stream-chunk` event (byte-level replay fidelity is preserved); a producer that emits a
+ * structured, marker-tagged JSON envelope is decoded into the authoritative typed events (message /
+ * tool-call / tool-result / turn / step / lifecycle) the derived views fold over.
+ *
+ * THE ONE PARSER. {@link parseTranscriptEvent} is the SINGLE place a stored chunk is classified into a
+ * typed event; every consumer (cockpit, search, token accounting, export) reads the derived view, not
+ * the raw bytes. A drift-guard test (`events.drift.test.ts`) asserts the event marker — and therefore
+ * the raw→event parse — appears in exactly this module, so a second parser cannot creep in.
+ *
+ * MERGE-EXTENSIBLE. The vocabulary is a small core ({@link CORE_TRANSCRIPT_VOCAB}) authors extend in the
+ * same schema with {@link mergeTranscriptVocab}, so a new event kind is an additive merge, never a fork
+ * of the parser. A downstream app (e.g. nano-workforce#559) registers its own `permission` kind this
+ * way without editing this package.
+ *
+ * BROWSER-SAFE. This module is imported by cockpit code that runs in the BROWSER (the cockpit derive),
+ * so it takes no hard dependency on Node's `Buffer` or any Node-only API — {@link utf8ByteLength} uses
+ * the Web/Node standard `TextEncoder`. It is pure and side-effect-free: no I/O, and it never touches the
+ * engine or a BPMN flow (ADR 0056: app-tier only, advisory).
+ */
+/**
+ * Runtime-safe UTF-8 byte length. The one canonical UTF-8 byte-length implementation the transcript
+ * plane derives from. Implemented with `TextEncoder` (a Web/Node standard) rather than Node's `Buffer`,
+ * so the single derive fold is portable across the browser (where `Buffer` is not available) and Node.
  */
 let cachedTextEncoder;
 export function utf8ByteLength(text) {
-    if (typeof Buffer !== "undefined")
-        return Buffer.byteLength(text, "utf8");
-    // Cache one TextEncoder in the browser hot path (folding many stream-chunk events) to avoid
-    // allocating a new encoder — and the GC pressure it creates — on every call.
+    // Cache one TextEncoder in the hot path (folding many stream-chunk events) to avoid allocating a new
+    // encoder — and the GC pressure it creates — on every call.
     cachedTextEncoder ??= new TextEncoder();
     return cachedTextEncoder.encode(text).length;
 }
@@ -53,8 +52,9 @@ export function utf8ByteLength(text) {
  * The reserved marker field that distinguishes a structured transcript-event envelope from raw
  * terminal bytes. A stored chunk is decoded as a typed event ONLY when it is a JSON object carrying
  * this field set to the schema version — otherwise it is retained verbatim as a raw `stream-chunk`, so
- * a raw ANSI frame that happens to be valid JSON is never mis-classified. Namespaced to nano-workforce
- * so it cannot collide with a producer's own payload keys.
+ * a raw ANSI frame that happens to be valid JSON is never mis-classified. Namespaced so it cannot
+ * collide with a producer's own payload keys. This is the canonical single source of truth for the
+ * whole package family — consumers (e.g. the cockpit) import this identifier, never a private copy.
  */
 export const TRANSCRIPT_EVENT_MARKER = "nwfTranscriptEvent";
 /** The current transcript-event envelope schema version (the value {@link TRANSCRIPT_EVENT_MARKER} carries). */
@@ -117,7 +117,7 @@ function decodePermissionOptions(value) {
  * parser. (`stream-chunk` is not decoded here — it is the fallback the parser applies to any chunk
  * that is not a well-formed typed envelope, so raw fidelity needs no decoder.)
  */
-export const CORE_TRANSCRIPT_VOCAB = Object.freeze({
+export const CORE_TRANSCRIPT_VOCAB = Object.freeze(Object.assign(Object.create(null), {
     message: (body, offset) => {
         const text = str(body, "text");
         if (text === undefined)
@@ -148,11 +148,6 @@ export const CORE_TRANSCRIPT_VOCAB = Object.freeze({
             ...(content !== undefined ? { content } : {}),
         };
     },
-    // ACP `plan` mapping: ACP `session/update` plan updates map onto the EXISTING `step`/`turn`
-    // vocabulary rather than a new kind — an ACP plan ENTRY becomes a `step` (its `label` is the plan
-    // entry's title; the entry ordinal is not preserved, as `StepEvent` carries only a `label`), and a
-    // plan/turn BOUNDARY becomes a `turn` (its `index` the ACP turn/plan ordinal). The decoders below
-    // already cope with an ACP-shaped `label` (`step`) / `index` (`turn`), so no new kind is needed.
     turn: (body, offset) => {
         const index = num(body, "index");
         return index !== undefined ? { kind: "turn", offset, index } : { kind: "turn", offset };
@@ -184,6 +179,16 @@ export const CORE_TRANSCRIPT_VOCAB = Object.freeze({
             const toolName = str(body, "toolName");
             const title = str(body, "title");
             const reason = str(body, "reason");
+            // Reject a present-but-non-string optional field rather than silently dropping it, mirroring the
+            // `by` treatment in the resolution path below: a present-but-invalid value is a producer bug, and
+            // swallowing it would make the typed event diverge from the on-wire JSON ("malformed → raw
+            // fallback, never a silent mis-decode").
+            if (body.toolName !== undefined && toolName === undefined)
+                return undefined;
+            if (body.title !== undefined && title === undefined)
+                return undefined;
+            if (body.reason !== undefined && reason === undefined)
+                return undefined;
             const event = { kind: "permission", phase: "request", offset, callId, policy, options };
             return {
                 ...event,
@@ -219,15 +224,28 @@ export const CORE_TRANSCRIPT_VOCAB = Object.freeze({
         }
         return undefined;
     },
-});
+}));
+/** The core event kinds the parser decodes from an envelope (every kind except the raw `stream-chunk`
+ * fallback). Kept as a runtime list so the drift-guard can assert the single fold handles them all. */
+export const CORE_TRANSCRIPT_EVENT_KINDS = Object.freeze([
+    "message",
+    "tool-call",
+    "tool-result",
+    "turn",
+    "step",
+    "lifecycle",
+    "permission",
+]);
 /**
  * Extend a vocabulary additively: later entries win on a key clash, so an author can either register a
- * brand-new kind or deliberately override a core decoder. Returns a NEW frozen vocab — neither input is
- * mutated — so the core stays canonical. (Cribbed from dsh's merge-extensible taxonomy / the S3
- * `mergeVocab`: one schema, extended by merge, never a second parser.)
+ * brand-new kind or deliberately override a core decoder. Returns a NEW frozen, NULL-PROTOTYPE vocab —
+ * neither input is mutated — so the core stays canonical AND `kind in vocab` / `Object.keys(vocab)`
+ * only ever see own decoders (an inherited "toString"/"constructor" key can never masquerade as one).
+ * This is the EXTENSION POINT a downstream app uses to add its own kind (e.g. a synthetic `annotation`
+ * kind) without editing this package: one schema, extended by merge, never a second parser.
  */
 export function mergeTranscriptVocab(base, ...extensions) {
-    return Object.freeze(Object.assign({}, base, ...extensions));
+    return Object.freeze(Object.assign(Object.create(null), base, ...extensions));
 }
 /**
  * THE ONE PARSER. Classify a single stored chunk into a typed {@link TranscriptEvent}.
@@ -247,8 +265,12 @@ export function parseTranscriptEvent(entry, vocab = CORE_TRANSCRIPT_VOCAB) {
     const kind = typeof body.kind === "string" ? body.kind : undefined;
     if (kind === undefined)
         return raw;
-    const decoder = vocab[kind];
-    if (decoder === undefined)
+    // Own-property + typeof-function guard: `kind` is untrusted, so a bare `vocab[kind]` would resolve
+    // inherited members like "constructor"/"toString"/"__proto__" up the prototype chain to a
+    // non-decoder function and call it — a crashable (DoS) / invariant-breaking path. Only an OWN
+    // decoder function is ever invoked; everything else falls back to the raw stream-chunk.
+    const decoder = Object.prototype.hasOwnProperty.call(vocab, kind) ? vocab[kind] : undefined;
+    if (typeof decoder !== "function")
         return raw;
     return decoder(body, entry.offset) ?? raw;
 }
@@ -291,8 +313,10 @@ export function encodeTranscriptEvent(event) {
  * message history, tool cards (each call paired to its result by `callId`, else the most recent open
  * call), raw-byte accounting for replay fidelity, and the session lifecycle. It is a pure reduction of
  * one log: the cockpit, search, token accounting and export all read THIS, so there is never a second
- * parser of the same bytes. Content that precedes the first explicit `turn` event opens an implicit
- * turn 0, so a producer that never emits turn boundaries still derives a coherent single-turn view.
+ * parser of the same bytes. Typed content — a message, tool-call or step — that precedes the first
+ * explicit `turn` event opens an implicit turn 0, so a producer that never emits turn boundaries still
+ * derives a coherent single-turn view. Raw `stream-chunk` events alone open no turn (they only feed the
+ * byte-replay accounting), so a log of only chunks derives zero turns.
  */
 export function deriveView(events) {
     const turns = [];
@@ -318,14 +342,7 @@ export function deriveView(events) {
         eventCount++;
         switch (event.kind) {
             case "turn": {
-                current = {
-                    index: event.index ?? turns.length,
-                    startOffset: event.offset,
-                    messages: [],
-                    tools: [],
-                    permissions: [],
-                    steps: 0,
-                };
+                current = { index: event.index ?? turns.length, startOffset: event.offset, messages: [], tools: [], permissions: [], steps: 0 };
                 turns.push(current);
                 break;
             }
@@ -346,19 +363,22 @@ export function deriveView(events) {
                     ...(event.callId !== undefined ? { callId: event.callId } : {}),
                     ...(event.args !== undefined ? { args: event.args } : {}),
                 };
-                tools.push(tool);
-                ensureTurn(event.offset).tools.push(tool);
+                const toolsIndex = tools.push(tool) - 1;
+                const turn = ensureTurn(event.offset);
+                const turnToolIndex = turn.tools.push(tool) - 1;
+                const pending = { tool, toolsIndex, turn, turnToolIndex };
                 if (event.callId !== undefined)
-                    openTools.set(event.callId, tool);
+                    openTools.set(event.callId, pending);
                 else
-                    anonymousTool = tool;
+                    anonymousTool = pending;
                 break;
             }
             case "tool-result": {
-                const target = event.callId !== undefined ? openTools.get(event.callId) : anonymousTool;
-                if (target !== undefined) {
-                    pairResult(tools, target, event);
-                    pairResultInTurns(turns, target, event);
+                const pending = event.callId !== undefined ? openTools.get(event.callId) : anonymousTool;
+                if (pending !== undefined) {
+                    const resolved = withResult(pending.tool, event);
+                    tools[pending.toolsIndex] = resolved;
+                    pending.turn.tools[pending.turnToolIndex] = resolved;
                     if (event.callId !== undefined)
                         openTools.delete(event.callId);
                     else
@@ -369,7 +389,7 @@ export function deriveView(events) {
             case "permission": {
                 // A `permission` event is one of two phases (same discriminant `kind`); branch on `phase`. A
                 // REQUEST opens a pending DerivedPermission (paired to its turn); a RESOLUTION folds back into
-                // the open request by `callId` — mirroring the tool-call/tool-result open-map pairing above.
+                // the open request by `callId` in O(1) — mirroring the tool-call/tool-result pending-map pairing.
                 if (event.phase === "request") {
                     const permission = {
                         policy: event.policy,
@@ -380,15 +400,17 @@ export function deriveView(events) {
                         ...(event.title !== undefined ? { title: event.title } : {}),
                         ...(event.reason !== undefined ? { reason: event.reason } : {}),
                     };
-                    permissions.push(permission);
-                    ensureTurn(event.offset).permissions.push(permission);
-                    openPermissions.set(event.callId, permission);
+                    const permissionsIndex = permissions.push(permission) - 1;
+                    const turn = ensureTurn(event.offset);
+                    const turnPermissionIndex = turn.permissions.push(permission) - 1;
+                    openPermissions.set(event.callId, { permission, permissionsIndex, turn, turnPermissionIndex });
                 }
                 else {
-                    const target = openPermissions.get(event.callId);
-                    if (target !== undefined) {
-                        pairResolution(permissions, target, event);
-                        pairResolutionInTurns(turns, target, event);
+                    const pending = openPermissions.get(event.callId);
+                    if (pending !== undefined) {
+                        const resolved = withResolution(pending.permission, event);
+                        permissions[pending.permissionsIndex] = resolved;
+                        pending.turn.permissions[pending.turnPermissionIndex] = resolved;
                         openPermissions.delete(event.callId);
                     }
                 }
@@ -406,14 +428,7 @@ export function deriveView(events) {
         }
     }
     return {
-        turns: turns.map((t) => ({
-            index: t.index,
-            startOffset: t.startOffset,
-            messages: t.messages,
-            tools: t.tools,
-            permissions: t.permissions,
-            steps: t.steps,
-        })),
+        turns: turns.map((t) => ({ index: t.index, startOffset: t.startOffset, messages: t.messages, tools: t.tools, permissions: t.permissions, steps: t.steps })),
         messages,
         tools,
         permissions,
@@ -423,46 +438,14 @@ export function deriveView(events) {
         eventCount,
     };
 }
-/** Replace a pending tool with its result in the flat list. A pending tool starts as the same object in
- * both the flat list and its turn (pushed by reference), so {@link pairResultInTurns} locates it there by
- * identity; each list is then replaced independently with its own resolved copy via {@link withResult}. */
-function pairResult(list, target, result) {
-    const idx = list.indexOf(target);
-    if (idx >= 0)
-        list[idx] = withResult(target, result);
-}
-/** Replace a pending tool with its result inside whichever turn holds it. */
-function pairResultInTurns(turns, target, result) {
-    for (const turn of turns) {
-        const idx = turn.tools.indexOf(target);
-        if (idx >= 0) {
-            turn.tools[idx] = withResult(target, result);
-            return;
-        }
-    }
-}
+/** Replace a pending tool with its result: a new resolved card that carries the result payload. */
 function withResult(tool, result) {
     return {
         ...tool,
         result: { ok: result.ok, offset: result.offset, ...(result.content !== undefined ? { content: result.content } : {}) },
     };
 }
-/** Replace a pending permission with its resolution in the flat list (by identity — see {@link pairResult}). */
-function pairResolution(list, target, resolution) {
-    const idx = list.indexOf(target);
-    if (idx >= 0)
-        list[idx] = withResolution(target, resolution);
-}
-/** Replace a pending permission with its resolution inside whichever turn holds it. */
-function pairResolutionInTurns(turns, target, resolution) {
-    for (const turn of turns) {
-        const idx = turn.permissions.indexOf(target);
-        if (idx >= 0) {
-            turn.permissions[idx] = withResolution(target, resolution);
-            return;
-        }
-    }
-}
+/** Replace a pending permission with its resolution: a new card carrying the operator's decision. */
 function withResolution(permission, resolution) {
     return {
         ...permission,
