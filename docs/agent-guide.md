@@ -235,7 +235,10 @@ tool: completeUserTask { "userTaskKey": "<key>",
 ```
 
 ```bash
-# No-MCP fallback — the un-projected engine task-inbox complete door (prefer the tool):
+# No-MCP fallback — the un-projected engine task-inbox complete door (prefer the tool).
+# `variables` must carry the shape THIS task's escalation kind expects (see the per-kind
+# tool forms above): `{ answer }` here is the PR review-loop form — a feature task wants
+# `{ resolution, answer }`, plan-review `{ directive, notes }`, trial-merge `{ action, notes? }`.
 curl -sS -X POST __BASE__/../../tasks/api/complete -H 'content-type: application/json' \
   -d '{ "userTaskKey": "<key>", "variables": { "answer": "Cap retries at 5 and proceed." } }'
 ```
