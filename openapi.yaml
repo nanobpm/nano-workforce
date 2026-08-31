@@ -223,6 +223,93 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/LineageThreadView"
+    PrHistoryRound:
+      type: object
+      description: One convergence round in a PR's timeline (issue #668) — its status transition/outcome, owning worker, and timestamps. Sourced from the `rounds` table the Convergence page reads.
+      additionalProperties: false
+      required:
+        - roundNo
+        - status
+        - worker
+        - summary
+        - startedAt
+        - endedAt
+      properties:
+        roundNo:
+          type: integer
+        status:
+          type: string
+          nullable: true
+          description: The round's result/status transition (converged|addressed|waiting|needs_input|blocked).
+        worker:
+          type: string
+          nullable: true
+          description: The worker that ran this round.
+        summary:
+          type: string
+          nullable: true
+          description: The round outcome summary.
+        startedAt:
+          type: string
+        endedAt:
+          type: string
+          nullable: true
+    PrHistoryEscalation:
+      type: object
+      description: One escalation in a PR's history (issue #668) — its kind, question/answer, status, and timestamps. Sourced from the `escalations` table the Convergence page reads.
+      additionalProperties: false
+      required:
+        - roundNo
+        - kind
+        - worker
+        - question
+        - answer
+        - status
+        - askedAt
+        - answeredAt
+      properties:
+        roundNo:
+          type: integer
+        kind:
+          type: string
+          description: The escalation kind (question|blocker).
+        worker:
+          type: string
+          nullable: true
+          description: The worker that raised this escalation.
+        question:
+          type: string
+        answer:
+          type: string
+          nullable: true
+          description: The human's answer; null while the escalation is still open.
+        status:
+          type: string
+          description: open | answered | stale.
+        askedAt:
+          type: string
+        answeredAt:
+          type: string
+          nullable: true
+    PrHistory:
+      type: object
+      description: A PR's full escalation + round history (issue #668), as surfaced read-only on the Convergence page's PR detail. Empty arrays when the PR has no history (or is unknown).
+      additionalProperties: false
+      required:
+        - prKey
+        - rounds
+        - escalations
+      properties:
+        prKey:
+          type: string
+        rounds:
+          type: array
+          items:
+            $ref: "#/components/schemas/PrHistoryRound"
+        escalations:
+          type: array
+          items:
+            $ref: "#/components/schemas/PrHistoryEscalation"
     AgenticSupplyWorker:
       type: object
       description: One connected worker in the supply mirror (H5 cockpit; sourced from the H1 presence registry).
@@ -2991,6 +3078,45 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/LineageList"
+        "401":
+          description: Missing/invalid shared secret (only when NANO_PR_WEBHOOK_SECRET is set).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+  /prs/history:
+    get:
+      operationId: getPrHistory
+      summary: "A PR's escalation + round history (issue #668): per-round status transitions and outcome, plus each escalation's kind, question/answer, and timestamps — the read that retires the DB-over-ssh fallback. Identify the PR by prKey, or by processKey. Reads the same rounds/escalations tables the Convergence page surfaces."
+      security:
+        - hookSecret: []
+        - {}
+      parameters:
+        - name: prKey
+          in: query
+          required: false
+          schema:
+            type: string
+          description: The PR key ("<owner>/<repo>#<number>"). Provide this or processKey.
+        - name: processKey
+          in: query
+          required: false
+          schema:
+            type: string
+          description: The engine process-instance key driving the PR; resolved to its prKey. Provide this or prKey.
+      responses:
+        "200":
+          description: The PR's round + escalation history (empty arrays when there is none).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PrHistory"
+        "400":
+          description: Neither prKey nor processKey supplied.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
         "401":
           description: Missing/invalid shared secret (only when NANO_PR_WEBHOOK_SECRET is set).
           content:
