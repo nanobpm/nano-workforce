@@ -31,7 +31,7 @@ import { deriveListBucket, deriveStage } from "./stage.ts";
 const MIG = (name: string) => readFileSync(fileURLToPath(new URL(`../db/migrations/${name}`, import.meta.url)), "utf8");
 const PAGE = (name: string) => JSON.parse(readFileSync(fileURLToPath(new URL(`../pages/${name}`, import.meta.url)), "utf8"));
 
-const MIGRATION_LATEST = "081_feature_read_model_derive_terminal.sql";
+const MIGRATION_LATEST = "099_feature_read_model_ack_open.sql";
 
 // The base `feature_runs` shape the VIEW reads, plus the `user_tasks` inbox (034) the `attention`
 // derivation `EXISTS`-reads, plus a stand-in for the managed `feature_runs__tracking` derived VIEW
@@ -118,7 +118,7 @@ function addRun(db: DatabaseSync, feature_key: string, run: SampleRun): void {
 function projection(db: DatabaseSync, feature_key: string): Record<string, unknown> {
   const r = db
     .prepare(
-      "SELECT stage, stage_state, stage_skipped, attention, list_bucket FROM feature_read_model WHERE feature_key = ?",
+      "SELECT stage, stage_state, stage_skipped, attention, list_bucket, ack_open FROM feature_read_model WHERE feature_key = ?",
     )
     .get(feature_key) as Record<string, unknown>;
   return { ...r };
@@ -267,6 +267,7 @@ test("the migration 080 VIEW IGNORES any stale STORED projection columns — it 
     stage_skipped: "Converging Merging",
     attention: null,
     list_bucket: "history",
+    ack_open: 0,
   });
 });
 
@@ -323,7 +324,8 @@ test("RED/GREEN GUARD: a RAW-datasource feature_runs.status write (the instanceT
   assertEquals(row.stage_state, oracle.state);
   assertEquals(row.attention, null, "the stale ⚠ badge is gone");
   assertEquals(row.attention, oracle.attention);
-  assert(row.stage_state != null, "Dismiss is renderable (stage_state is non-null) so the run can be ticked off");
+  assert(row.stage_state != null, "the run is terminal (stage_state is non-null)");
+  assertEquals(row.ack_open, 1, "Dismiss is renderable (ack_open=1) so the run can be ticked off");
   assertEquals(row.list_bucket, "active", "a just-cancelled run sits in Active until dismissed");
   assertEquals(row.list_bucket, deriveListBucket("abandoned", null));
 });
@@ -355,6 +357,7 @@ test("RED/GREEN #503: a DERIVE-ONLY terminated run (base status frozen at 'runni
   assertEquals(row.stage_state, oracle.state);
   assertEquals(row.attention, null, "the stale ⚠ badge is gone once the run is terminated");
   assertEquals(row.list_bucket, "active", "a just-cancelled run sits in Active until dismissed");
+  assertEquals(row.ack_open, 1, "the derive-only terminated run is dismissable (ack_open=1) though base status is frozen non-terminal");
 });
 
 test("the Feature page binds the derived feature_read_model VIEW (not the raw feature_runs table)", () => {
