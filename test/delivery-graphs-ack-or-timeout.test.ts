@@ -143,6 +143,27 @@ test("#645: Reuse renders ✓ Loaded only once the compose acks the matching fil
   }
 });
 
+test("#645: Reuse ignores an ack with a null/absent token — it can't be correlated, so no ✓", async () => {
+  const h = libraryHarness();
+  try {
+    await h.flush();
+    h.click(h.host!.querySelector("[data-reuse]"));
+    const fill = h.posted.find((p) => p.data.type === "nano-delivery-graph-compose-fill");
+    assert(fill, "Reuse must post the compose-fill message");
+    // The compose mount emits `token: null` when a fill arrives without a token; such an ack can't be
+    // correlated to this Reuse and must NOT satisfy it (else the #645 false-positive toast returns).
+    h.emitFromParent({ type: DG_COMPOSE_FILL_ACK_MESSAGE, token: null });
+    assert(!h.status()!.textContent!.includes(CHECK), "a null-token ack must not satisfy this Reuse");
+    h.emitFromParent({ type: DG_COMPOSE_FILL_ACK_MESSAGE });
+    assert(!h.status()!.textContent!.includes(CHECK), "a token-less ack must not satisfy this Reuse");
+    // The real ack (echoing our token) still earns the success toast.
+    h.emitFromParent({ type: DG_COMPOSE_FILL_ACK_MESSAGE, token: fill!.data.token });
+    assert(h.status()!.textContent!.includes(CHECK), "the matching-token ack still resolves the Reuse");
+  } finally {
+    h.teardown();
+  }
+});
+
 test("#645: Reuse surfaces an honest error when the compose never acks (short timeout)", async () => {
   const h = libraryHarness();
   try {
@@ -212,6 +233,24 @@ test("#645: 'Preview generated DI' renders ✓ Opened only once the host acks th
     const s = h.status();
     assert(s!.textContent!.includes(CHECK) && /Opened/.test(s!.textContent!), "on host ack Preview DI renders the ✓ Opened toast");
     assert(/status-ok/.test(s!.className), "the acked Preview status carries the success tone");
+  } finally {
+    h.teardown();
+  }
+});
+
+test("#645: 'Preview generated DI' ignores a target-less nav ack — no forged ✓ Opened", async () => {
+  const h = await composePreviewHarness();
+  try {
+    h.click(h.host!.querySelector("[data-preview-di]"));
+    // An ack that omits `target` (or names a different one) could be any unrelated same-origin parent
+    // ack — it must NOT resolve the pending Preview (else the #645 false-positive toast returns).
+    h.emitFromParent({ type: NANO_NAVIGATE_ACK_MESSAGE });
+    assert(!h.status()!.textContent!.includes(CHECK), "a target-less nav ack must not satisfy the Preview");
+    h.emitFromParent({ type: NANO_NAVIGATE_ACK_MESSAGE, target: "someOtherView" });
+    assert(!h.status()!.textContent!.includes(CHECK), "an ack for a different target must not satisfy the Preview");
+    // The real ack (matching target) still earns the success toast.
+    h.emitFromParent({ type: NANO_NAVIGATE_ACK_MESSAGE, target: "definitionPreview" });
+    assert(h.status()!.textContent!.includes(CHECK), "the matching-target ack still resolves the Preview");
   } finally {
     h.teardown();
   }

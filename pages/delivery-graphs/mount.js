@@ -534,7 +534,11 @@ export function mountDeliveryGraphs(host, config = {}) {
     if (ev.source !== window.parent) return;
     const data = ev.data;
     if (!data || data.type !== NANO_NAVIGATE_ACK_MESSAGE) return;
-    if (!pendingPreview || (data.target && data.target !== pendingPreview.target)) return;
+    // Require a string `target` that exactly matches the pending preview. A target-less (or
+    // mismatched) ack must NOT resolve the Preview — otherwise any same-origin parent ack could
+    // forge a "✓ Opened…" toast the target never actually rendered (#645).
+    if (!pendingPreview || typeof data.target !== "string" || data.target !== pendingPreview.target)
+      return;
     clearPendingPreview();
     setStatus("\u2713 Opened the generated DI in the process explorer.", "ok");
   }

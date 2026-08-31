@@ -318,7 +318,11 @@ export function mountDeliveryGraphLibrary(host, config = {}) {
     if (ev.source !== window.parent) return;
     const data = ev.data;
     if (!data || data.type !== DG_COMPOSE_FILL_ACK_MESSAGE) return;
-    if (!pendingReuse || (typeof data.token === "string" && data.token !== pendingReuse.token)) return;
+    // Require a string `token` that exactly matches the pending Reuse. A null/undefined-token ack
+    // (the compose mount emits `token: null` when a fill arrives without a token) can't be correlated
+    // to this Reuse and must NOT resolve it — otherwise it reintroduces the false-positive "✓ Loaded…"
+    // toast (#645).
+    if (!pendingReuse || typeof data.token !== "string" || data.token !== pendingReuse.token) return;
     clearPendingReuse();
     setStatus("\u2713 Loaded into the composer above \u2014 edit, Preview or Stage it.", "ok");
   }
