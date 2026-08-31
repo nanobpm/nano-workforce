@@ -22,6 +22,11 @@
 import { defineReadModel, type Expr, type ReadModel } from "@nanobpm/urban";
 import { deriveAckOpenExpr, deriveListBucketExpr } from "./listBucket.ts";
 
+/** The read model's VIEW name — the single source of truth for the table an operation queries when it
+ * must gate on the folded/effective status (e.g. `acknowledgePr`, issue #652) rather than re-derive
+ * terminality off the frozen base `pull_requests.status` column. */
+export const PULL_REQUEST_READ_MODEL_NAME = "pull_requests_read_model";
+
 /** The base table the read model reads: the auto-provisioned `pull_requests__tracking` derived VIEW
  * (ADR-0065), NOT the raw `pull_requests` table — so the status-classifying derivations read the
  * terminal-folded `derived_status` and a terminated PR drops to History with no worker write. */
@@ -66,7 +71,7 @@ export type PullRequestReadModelDerivedColumn = (typeof PULL_REQUEST_READ_MODEL_
  * generated from THIS single declaration.
  */
 export const pullRequestReadModel: ReadModel = defineReadModel({
-  name: "pull_requests_read_model",
+  name: PULL_REQUEST_READ_MODEL_NAME,
   baseTable: PULL_REQUEST_READ_MODEL_BASE_TABLE,
   selectBaseColumns: false,
   derive: {
