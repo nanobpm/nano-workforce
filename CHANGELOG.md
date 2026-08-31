@@ -1,3 +1,9 @@
+## [0.170.1](https://github.com/nanobpm/nano-workforce/compare/v0.170.0...v0.170.1) (2026-08-31)
+
+### Documentation
+
+* **agent-guide:** make the operator guide tool-aware + tool↔curl crosswalk (N1) ([#669](https://github.com/nanobpm/nano-workforce/issues/669)) ([44c5937](https://github.com/nanobpm/nano-workforce/commit/44c5937fb3a1cdaa5a106d67ed16225c35d614f6)), closes [#664](https://github.com/nanobpm/nano-workforce/issues/664) [#666](https://github.com/nanobpm/nano-workforce/issues/666) [#667](https://github.com/nanobpm/nano-workforce/issues/667) [#665](https://github.com/nanobpm/nano-workforce/issues/665) [666/#667](https://github.com/666/nano-workforce/issues/667) [#666](https://github.com/nanobpm/nano-workforce/issues/666) [#667](https://github.com/nanobpm/nano-workforce/issues/667) [#665](https://github.com/nanobpm/nano-workforce/issues/665)
+
 ## [0.170.0](https://github.com/nanobpm/nano-workforce/compare/v0.169.0...v0.170.0) (2026-08-31)
 
 ### Features
