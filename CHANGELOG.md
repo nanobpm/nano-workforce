@@ -1,3 +1,9 @@
+## [0.167.4](https://github.com/nanobpm/nano-workforce/compare/v0.167.3...v0.167.4) (2026-08-31)
+
+### Build System
+
+* **deps:** bump @nanobpm/engine-wasm to 0.8.5 (callActivity propagation parity) ([#651](https://github.com/nanobpm/nano-workforce/issues/651)) ([3d7518d](https://github.com/nanobpm/nano-workforce/commit/3d7518d8291fb1ff4432ef98868a5a67b040af96)), closes [Magikcraft/nano-bpm#1059](https://github.com/Magikcraft/nano-bpm/issues/1059) [Magikcraft/nano-bpm#980](https://github.com/Magikcraft/nano-bpm/issues/980) [Magikcraft/nano-bpm#1086](https://github.com/Magikcraft/nano-bpm/issues/1086) [#1085](https://github.com/nanobpm/nano-workforce/issues/1085) [nano-workforce#632](https://github.com/nanobpm/nano-workforce/issues/632) [nano-workforce#633](https://github.com/nanobpm/nano-workforce/issues/633)
+
 ## [0.167.3](https://github.com/nanobpm/nano-workforce/compare/v0.167.2...v0.167.3) (2026-08-31)
 
 ### Bug Fixes
