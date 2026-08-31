@@ -879,11 +879,22 @@ until it does, only the curl door in the third column exists on the deployment:
 |---|---|---|
 | Which code is live (§0) | `getVersion` | `curl __BASE__/version` |
 | Every PR in flight (§0/§5) | `listActivePrs` | `curl __BASE__/status` |
-| List open escalations (§3) | `listEscalations` *(projected by sibling #666; curl door until then)* | `curl __BASE__/status \| jq '.prs[]\|select(.openEscalation!=null)'` / `curl __BASE__/../../tasks/api/tasks` |
+| List open escalations (§3) | `listEscalations` *(projected by sibling #666; curl door until then)* | `curl __BASE__/../../tasks/api/tasks`, or filter `/status` with the jq recipe just below this table |
 | Answer an escalation (§3) | `completeUserTask` (agent-assignee: `agentCompleteEscalation`) | `curl -X POST __BASE__/actions/complete-user-task` |
 | Cancel an instance (record-consistent) (§7) | `cancelInstance` *(projected by sibling #667; curl door until then)* | `curl -X POST __BASE__/../actions/cancel` *(the `/app/actions/cancel` door, outside `__BASE__`)* |
 | Publish a BPMN message (§7) | `postMessage` | `curl -X POST __BASE__/actions/message` |
 | The operator guide itself | `getAgentInstructions` (full) / `getAgentGuide(section?)` (addressable) | `curl __BASE__/agent` / `curl __BASE__/agent/guide` |
+
+The `listEscalations` no-MCP fallback that filters `/status` with `jq` lives here, not inside the
+table cell above: a literal `|` can't be written in a GFM table cell without escaping it as `\|`,
+and this guide is served **raw** (byte-for-byte, `__BASE__`/`__ENGINE__` aside) to no-MCP agents, so
+the escaped form would be copied verbatim and the shell would treat `\|` as a literal argument
+rather than a pipe. Copy it from here:
+
+```sh
+curl __BASE__/status | jq '.prs[] | select(.openEscalation != null)'
+```
+
 
 Framework engine-debug tools (owned by the nano-ide urban runtime, not this app; they front
 the engine's Camunda-8 v2 REST API at `__ENGINE__`). The first three are always projected;
