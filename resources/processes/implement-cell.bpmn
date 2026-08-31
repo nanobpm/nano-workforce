@@ -38,7 +38,14 @@
     </bpmn:exclusiveGateway>
     <bpmn:callActivity id="escalate" name="Human escalation">
       <bpmn:extensionElements>
-        <zeebe:calledElement processId="human-escalation" propagateAllChildVariables="true" />
+        <zeebe:calledElement processId="human-escalation" />
+        <zeebe:ioMapping>
+          <zeebe:input source="=question" target="question" />
+          <zeebe:input source="=if (is defined(escalationAssignee)) then escalationAssignee else null" target="escalationAssignee" />
+          <zeebe:input source="=escalationSlaTimeout" target="escalationSlaTimeout" />
+          <zeebe:output source="=resolution" target="resolution" />
+          <zeebe:output source="=if (is defined(answer)) then answer else null" target="answer" />
+        </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>ic_toEscalate</bpmn:incoming>
       <bpmn:outgoing>ic_toAnswerGw</bpmn:outgoing>
