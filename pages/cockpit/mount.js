@@ -405,7 +405,7 @@ function transcriptSink(host, stream, opts = {}) {
   let nextOffset = 0;
   const draw = () => {
     const entries = [...byOffset.entries()].sort((a, b) => a[0] - b[0]).map(([offset, chunk]) => ({ offset, chunk }));
-    renderDerivedTranscript(host, document, { stream, from: 0, gap, nextOffset, entries }, opts);
+    renderDerivedTranscript(host, host.ownerDocument, { stream, from: 0, gap, nextOffset, entries }, opts);
   };
   return {
     /** Fold in the resume ack (offset/gap metadata) and redraw. */
@@ -665,8 +665,10 @@ export function mountCockpit(host, opts = {}) {
           if (message?.op === "subscribed") {
             if (!cleared) setNote("Waiting for live output…", "waiting");
             rendered.ack(message);
-          } else if (message != null && typeof message.offset === "number" && message.chunk !== undefined) {
+          } else if (message != null && typeof message.offset === "number" && typeof message.chunk === "string") {
             // The first data chunk clears the "waiting" note and folds into the rendered transcript.
+            // Guard on `typeof chunk === "string"`: the derive/parser assumes string chunks (e.g.
+            // `trimStart()`), so a non-string/binary frame is dropped here rather than thrown downstream.
             if (!cleared) {
               cleared = true;
               setNote(undefined);
