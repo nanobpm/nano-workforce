@@ -130,7 +130,9 @@ and does **not** resolve `$ref`s, so every projected (non-`x-mcp`) request-body 
 in `openapi.yaml` presents an inline `type: object` body with no `$ref`; the two graph doors
 additionally carry a worked `example` — an agent discovers the body shape (and calls the tool
 with a real object, not a
-stringified one) from the surface alone. The two graph doors split by convention:
+stringified one) from the surface alone — and should nano-ide#503 not yet be in the
+agent's client, a stringified object body is now **faithfully parsed** by the door rather
+than rejected (see the faithful-transport note below). The two graph doors split by convention:
 `compileDeliveryGraph` takes the **structured `DeliveryGraph` object** (and *stages*);
 `previewDeliveryGraph` takes the **text shape `{ "graphJson": "<serialized DeliveryGraph>" }`**
 (and is *pure*). Every validation failure returns `issues`/`errors` as `[{ path, message }]`.
@@ -138,9 +140,14 @@ The inline bodies are **derived** from `components.schemas` by
 `scripts/inline-mcp-bodies.ts` (single source of truth; run `npm run gen:mcp-bodies` after
 editing a component), and `npm run check:mcp-bodies` + `test/mcp-tool-schemas.test.ts` (which
 runs the real projector) fail CI if a `$ref` ever re-leaks. The upstream projector fix that
-would make this mitigation unnecessary is tracked in
+would make the **schema** mitigation unnecessary is tracked in
 [nano-ide#501](https://github.com/nanobpm/nano-ide/issues/501) (#502 self-contained schemas,
-#503 faithful object-body transport, #504 real-spec conformance guard).
+#504 real-spec conformance guard). **#503 faithful object-body transport has landed** —
+`@nanobpm/urban` 0.87 ships ADR 0067's `normalizeBodyArg`, so the MCP door now **parses** a
+stringified object body and forwards it faithfully instead of rejecting it with `expected object,
+got string`. That retired the nwf-local stringified-body reject mitigation: the e2e guard in
+`e2e/mcp-surface.e2e.ts` now asserts the door faithfully parses a stringified body (the
+`assertObjectBodyAccepted` detector's teeth stay pinned synthetically).
 
 ## 5. Fallback
 
@@ -178,13 +185,16 @@ depends on:
 
 - every projected tool schema is `$ref`-free with an explicit `type` (a leaked
   `$ref` is unresolvable in the MCP context);
-- an object argument arrives **as an object**, never coerced to a string;
+- an object argument arrives **as an object** — and a stringified one is faithfully
+  **parsed** by the door (ADR 0067 / nano-ide#503, `@nanobpm/urban` ≥ 0.87), never
+  rejected as `expected object, got string`;
 - validation failures answer uniformly with `issues[{path,message}]`;
 - side-effecting calls stage nothing, so the suite is safe to re-run.
 
 It runs in CI under `npm run e2e` (hermetic — no socket, no GitHub), so a
-reintroduced `$ref` or a stringified object body fails the build instead of
-reaching an agent.
+reintroduced `$ref` fails the build, and a stringified object body is asserted to be
+faithfully parsed by the door (ADR 0067 / nano-ide#503) instead of reaching an agent
+mis-serialized.
 
 **Extending it (new per-tool case).** Import `bootMcpHarness` from
 `e2e/support/mcp-harness.ts` in your own `e2e/<slice>.e2e.ts` and drive
