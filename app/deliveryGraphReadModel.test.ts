@@ -39,7 +39,7 @@ import { applyMigrationSet, readMigrationSetFromDisk } from "../test/migrations.
 const MIG = (name: string) => readFileSync(fileURLToPath(new URL(`../db/migrations/${name}`, import.meta.url)), "utf8");
 const PAGE = (name: string) => JSON.parse(readFileSync(fileURLToPath(new URL(`../pages/${name}`, import.meta.url)), "utf8"));
 
-const READ_MODEL_MIGRATION = "087_delivery_graph_read_model.sql";
+const READ_MODEL_MIGRATION = "096_delivery_graph_read_model_list_bucket.sql";
 
 // A minimal in-memory DB carrying the base `delivery_graph_runs` / `pull_requests` shapes the VIEW
 // reads, plus stand-ins for the managed `<table>__tracking` derived VIEWs urban provisions at mount
@@ -53,7 +53,7 @@ function viewDb(): DatabaseSync {
        run_key TEXT PRIMARY KEY, process_key TEXT, process_definition_id TEXT, digest TEXT,
        status TEXT, side_effecting INTEGER, node_count INTEGER, human_node_count INTEGER,
        side_effect_count INTEGER, title TEXT, phase TEXT, phase_node_id TEXT, human_labels TEXT,
-       created_at TEXT, updated_at TEXT, derived_status_override TEXT);
+       created_at TEXT, updated_at TEXT, acknowledged_at TEXT, derived_status_override TEXT);
      CREATE TABLE pull_requests (pr_key TEXT PRIMARY KEY, root_request_key TEXT, status TEXT,
        derived_status_override TEXT);`,
   );
@@ -72,6 +72,7 @@ interface SampleRun {
   phase?: string | null;
   phase_node_id?: string | null;
   derived_status_override?: string | null;
+  acknowledged_at?: string | null;
 }
 
 function addRun(db: DatabaseSync, run_key: string, run: SampleRun): void {
@@ -79,8 +80,8 @@ function addRun(db: DatabaseSync, run_key: string, run: SampleRun): void {
     `INSERT INTO delivery_graph_runs
        (run_key, process_key, process_definition_id, digest, status, side_effecting, node_count,
         human_node_count, side_effect_count, title, phase, phase_node_id, human_labels, created_at,
-        updated_at, derived_status_override)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        updated_at, acknowledged_at, derived_status_override)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     run_key,
     `pk-${run_key}`,
@@ -97,6 +98,7 @@ function addRun(db: DatabaseSync, run_key: string, run: SampleRun): void {
     null,
     "2026-01-01T00:00:00Z",
     "2026-01-01T00:00:00Z",
+    run.acknowledged_at ?? null,
     run.derived_status_override ?? null,
   );
 }
@@ -210,10 +212,12 @@ test("FRAMEWORK PARITY GUARD: deliveryGraphReadModel's SQL and TS lowerings agre
   for (const status of ["awaiting-approval", "running", "done", "failed", "abandoned"]) {
     for (const derived_status of [status, "failed"]) {
       for (const prs_in_flight of [0, 1, 3]) {
-        samples.push({
-          baseRow: { run_key: "self", status, derived_status },
-          lookups: { [PR_COUNTS_LOOKUP]: [{ root_request_key: "self", prs_in_flight }] },
-        });
+        for (const acknowledged_at of [null, "2026-02-02T00:00:00Z"]) {
+          samples.push({
+            baseRow: { run_key: "self", status, derived_status, acknowledged_at },
+            lookups: { [PR_COUNTS_LOOKUP]: [{ root_request_key: "self", prs_in_flight }] },
+          });
+        }
       }
     }
   }
@@ -289,6 +293,38 @@ test("park_label carries the actionable 'Parked on human node: <label>' text (on
   // A non-park phase leaves park_label null.
   addRun(db, "run-np", { status: "running", phase: "Running" });
   assertEquals(projection(db, "run-np").park_label, null);
+  db.close();
+});
+
+// ── 3b. ACKNOWLEDGE-TO-DISMISS: list_bucket / ack_open (issue #641) ────────────────────────────────
+
+function bucket(db: DatabaseSync, run_key: string): { list_bucket: string; ack_open: number } {
+  const r = db.prepare("SELECT list_bucket, ack_open FROM delivery_graph_read_model WHERE run_key = ?").get(run_key) as {
+    list_bucket: string;
+    ack_open: number;
+  };
+  return { list_bucket: r.list_bucket, ack_open: r.ack_open };
+}
+
+test("a live run is active with no Dismiss; a terminal-but-unacknowledged run STAYS active and offers Dismiss; once acknowledged it drops to history", () => {
+  const db = viewDb();
+  // Live (running) — active, no dismiss.
+  addRun(db, "live", { status: "running", phase: "Running" });
+  // Terminal, not yet dismissed — the uniform rule keeps it ACTIVE (not History) with the Dismiss flag.
+  addRun(db, "done-open", { status: "done", phase: "Completed" });
+  addRun(db, "failed-open", { status: "failed", phase: "Failed" });
+  addRun(db, "aband-open", { status: "abandoned", phase: "Failed" });
+  // Terminal AND acknowledged — dropped to History, Dismiss retracted.
+  addRun(db, "done-ack", { status: "done", phase: "Completed", acknowledged_at: "2026-03-03T00:00:00Z" });
+  // Derive-only terminated (base frozen 'running', derived 'failed'), unacknowledged — still active/dismissable.
+  addRun(db, "derive-term", { status: "running", phase: "Running", derived_status_override: "failed" });
+
+  assertEquals(bucket(db, "live"), { list_bucket: "active", ack_open: 0 });
+  assertEquals(bucket(db, "done-open"), { list_bucket: "active", ack_open: 1 });
+  assertEquals(bucket(db, "failed-open"), { list_bucket: "active", ack_open: 1 });
+  assertEquals(bucket(db, "aband-open"), { list_bucket: "active", ack_open: 1 });
+  assertEquals(bucket(db, "done-ack"), { list_bucket: "history", ack_open: 0 });
+  assertEquals(bucket(db, "derive-term"), { list_bucket: "active", ack_open: 1 });
   db.close();
 });
 

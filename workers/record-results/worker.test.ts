@@ -78,9 +78,11 @@ test("no opened PRs (empty plan) hard-fails with NO_WORK_DISPATCHED", async () =
   const plan = app._plans.at(-1) as Record<string, unknown>;
   assertEquals(plan.status, "failed");
   assertEquals(plan.outcome, "no work dispatched — the planner produced no tasks");
-  // `list_bucket` is derived by the `plan_read_model` VIEW (074): a failed epic reads as History
-  // (no tick-off needed). Cross-checked against the pure `deriveEpicBucket` oracle the VIEW mirrors.
-  assertEquals(deriveEpicBucket(plan.status as string, null, plan.acknowledged_at as string | null), "history");
+  // `list_bucket` is derived by the `plan_read_model` VIEW: under the uniform acknowledge-to-dismiss
+  // rule (issue #641) a terminal-but-UNACKNOWLEDGED epic — including a `failed` one — STAYS in Active
+  // (offering the operator a Dismiss) until it is acknowledged, rather than vanishing straight to
+  // History. Cross-checked against the pure `deriveEpicBucket` oracle the VIEW mirrors.
+  assertEquals(deriveEpicBucket(plan.status as string, null, plan.acknowledged_at as string | null), "active");
 });
 
 test("tasks present but none opened (all skipped/blocked) hard-fails", async () => {

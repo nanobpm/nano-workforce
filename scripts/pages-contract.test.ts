@@ -319,27 +319,21 @@ test("issue #205: overview is the landing page and first nav item", async () => 
 
   // Four collapsible active-work sections, one per dispatch surface, each with a
   // live count in its header (showCount) and a persisted collapse toggle (collapsible). Each filters
-  // its Active list on a `{field, in:[...]}` predicate. The FEATURE and EPIC surfaces bucket on the
-  // DERIVED `list_bucket` — NOT raw `status` — over their read-model VIEW (features: issue #637 —
-  // fixing a drift where the grid read the vestigial base `feature_runs.status` with an allowlist that
-  // hid every converging feature; epics: issue #298), so a `done`-but-unacknowledged item still
-  // converging does not vanish from its in-flight section the instant `status` reads terminal. Guarding
-  // the field here is the regression guard for that defect class. The feature surface binds the derived
-  // `feature_read_model` VIEW (the single source of truth for the `list_bucket` activeness predicate,
-  // shared byte-for-byte with the Feature tab); the epic surface binds `plan_read_model` (epic #412),
-  // not the raw `plans` table. PRs / delivery graphs still bucket on `status` (see #637 follow-up).
+  // its Active list on a `{field, in:[...]}` predicate. ALL FOUR surfaces now bucket on the DERIVED
+  // `list_bucket` — NOT raw `status` — over their read-model VIEW (features: issue #637; epics: #298;
+  // PRs + delivery graphs: issue #641 — retiring the last two base-`status` allowlists), so a terminal-
+  // but-unacknowledged item stays in its in-flight section until an operator dismisses it, instead of
+  // vanishing the instant `status` reads terminal. Guarding the field here is the regression guard for
+  // that defect class. Each surface binds its declare-once read-model VIEW (the single source of truth
+  // for the `list_bucket` activeness predicate), never a raw base table.
   const expected: Record<string, { field: string; in: string[] }> = {
-    pull_requests: {
-      field: "status",
-      in: ["converging", "waiting_review", "escalated", "waiting_deps", "waiting_merge", "queued", "merging"],
-    },
+    pull_requests_read_model: { field: "list_bucket", in: ["active"] },
     plan_read_model: { field: "list_bucket", in: ["active"] },
     feature_read_model: { field: "list_bucket", in: ["active"] },
-    // The 4th dispatch surface (issue #386) — active delivery graphs. Both in-flight statuses
-    // (`awaiting-approval` parked at the gate, `running` dispatched) show here. Binds the derived
-    // `delivery_graph_read_model` VIEW (S7 / #541 — the single source of truth for the pipeline
-    // projection it also renders), which re-exports every run column plus the effective `status`.
-    delivery_graph_read_model: { field: "status", in: ["awaiting-approval", "running"] },
+    // The 4th dispatch surface (issue #386) — active delivery graphs. Binds the derived
+    // `delivery_graph_read_model` VIEW (S7 / #541), now filtered on `list_bucket` (issue #641) so a
+    // terminal run stays Active until dismissed rather than dropping on its base `status`.
+    delivery_graph_read_model: { field: "list_bucket", in: ["active"] },
   };
   const grids = (overview.nodes ?? []).filter((n: Json) => n.type === "dataGrid");
   for (const [table, { field, in: values }] of Object.entries(expected)) {
@@ -354,6 +348,74 @@ test("issue #205: overview is the landing page and first nav item", async () => 
       `overview "${table}" section must filter ${field} to ${JSON.stringify(values)}`,
     );
   }
+});
+
+
+test("issue #641: no Active/History grid filters a base-`status` allowlist — every dispatch Active list buckets on a derived read-model VIEW", async () => {
+  // The drift class this closes (the last mile of #637): an "Active …" dispatch list that re-encodes
+  // activeness as a hardcoded base-`status` allowlist (`{ field: "status", in: [...] }`) instead of the
+  // declare-once derived `list_bucket` over its read-model VIEW. Such an allowlist silently drops a row
+  // out of Active the instant its `status` leaves the set — with NO operator dismiss — and must be kept
+  // hand-synced with every status rename. #641 retired the last two (PRs + delivery graphs); this guard
+  // makes the whole class a BUILD FAILURE so it can never creep back in on a new/edited grid.
+  //
+  // SCOPE — an "Active/History surface" is a top-level grid that partitions rows into active vs.
+  // finished: either its title starts with "Active " (the Overview sections) OR it carries a `History`
+  // tab (the Feature/Epic/PR/Delivery-Graph/lineage grids). This deliberately EXCLUDES the param-scoped
+  // per-epic slice grids (epic-detail's "Wave state" Active/Skipped/All, "Trial-merge results"
+  // Needs-attention/Clean/All), which legitimately filter a domain `status`/`result` within one epic —
+  // they have no `History` tab and no "Active " title, so they are not activeness partitions.
+  const BASE_TABLES = new Set(["pull_requests", "plans", "feature_runs", "delivery_graph_runs"]);
+  const grids: Json[] = [];
+  const walk = (n: Json): void => {
+    if (Array.isArray(n)) return n.forEach(walk);
+    if (n && typeof n === "object") {
+      if (n.type === "dataGrid") grids.push(n);
+      for (const v of Object.values(n)) walk(v);
+    }
+  };
+  for (const e of readdirSync(`${ROOT}pages`, { withFileTypes: true })) {
+    if (!e.isFile() || !e.name.endsWith(".page.json")) continue;
+    const page = JSON.parse(readFileSync(`${ROOT}pages/${e.name}`, "utf8"));
+    walk(page.nodes ?? page);
+    // Tag each grid with its page for messages.
+    for (const g of grids) if (g.__page === undefined) g.__page = e.name;
+  }
+
+  let surfaces = 0;
+  for (const g of grids) {
+    const props = g.props ?? {};
+    const title: string = typeof props.title === "string" ? props.title : "";
+    const tabs: Json[] = Array.isArray(props.tabs) ? props.tabs : [];
+    const hasHistoryTab = tabs.some((t) => typeof t?.label === "string" && /history/i.test(t.label));
+    const activeTitle = /^active\s/i.test(title);
+    if (!hasHistoryTab && !activeTitle) continue; // not an activeness partition — skip
+    surfaces++;
+
+    const table: string = g.props?.data?.table ?? "";
+    // 1) It must bind a DERIVED read-model relation, never a raw base table (whose only activeness
+    //    signal is the base `status` this guard forbids filtering on).
+    assert(
+      !BASE_TABLES.has(table),
+      `${g.__page}: Active/History grid "${title || tabs.map((t) => t.label).join("/")}" binds the raw base table "${table}" — bind its derived read-model VIEW (…_read_model) so it can filter the declared list_bucket`,
+    );
+
+    // 2) No filter — the grid's main filter OR any tab filter — may re-encode activeness as a
+    //    base-`status` allowlist. (A domain filter on another column is fine; only `status IN […]` is
+    //    the banned drift surface.)
+    const allFilters: Json[] = [g.props?.data?.filter, ...tabs.map((t) => t?.filter)];
+    for (const filter of allFilters) {
+      if (!Array.isArray(filter)) continue;
+      for (const pred of filter) {
+        assert(
+          !(pred?.field === "status" && (Array.isArray(pred.in) || pred.eq !== undefined)),
+          `${g.__page}: Active/History grid "${title || tabs.map((t) => t.label).join("/")}" filters a base-\`status\` allowlist ` +
+            `(${JSON.stringify(pred)}) — bucket on the derived \`list_bucket\` over the read-model VIEW instead (issue #641).`,
+        );
+      }
+    }
+  }
+  assert(surfaces >= 6, `expected to find the dispatch Active/History surfaces, found only ${surfaces}`);
 });
 
 

@@ -43,10 +43,16 @@ test("done + delivery=null (poller-pending / resolved-not-landed) -> Active, ack
   assertEquals(deriveEpicBucket("done", null, "2024-01-01T00:00:00Z"), "history");
 });
 
-test("terminal non-done statuses (failed/abandoned) -> History, not acknowledgeable", () => {
+// Issue #641 (uniform acknowledge-to-dismiss): a terminal-non-`done` epic (`failed`/`abandoned` —
+// cancelled) now ALSO stays Active until the operator dismisses it, instead of dropping straight to
+// History. Its `delivery` is always non-`converging`, so it is immediately acknowledgeable, and a
+// dismiss stamp settles it to History — uniform with `done` epics and the PR / delivery-graph grids.
+test("terminal non-done statuses (failed/abandoned) + unacknowledged -> Active, acknowledgeable (issue #641)", () => {
   for (const status of ["failed", "abandoned"]) {
-    assertEquals(deriveEpicBucket(status, null, null), "history", `status=${status}`);
-    assert(!epicIsAcknowledgeable(status, null), `status=${status}`);
+    assertEquals(deriveEpicBucket(status, null, null), "active", `status=${status}`);
+    assert(epicIsAcknowledgeable(status, null), `status=${status}`);
+    // A dismiss stamp settles it to History, like every other terminal surface.
+    assertEquals(deriveEpicBucket(status, null, "2024-01-01T00:00:00Z"), "history", `status=${status} acknowledged`);
   }
 });
 

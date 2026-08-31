@@ -120,11 +120,11 @@
           "source": "app",
           "table": "delivery_graph_read_model",
           "orderBy": { "field": "updated_at", "dir": "desc" },
-          "filter": [{ "field": "status", "in": ["awaiting-approval", "running"] }]
+          "filter": [{ "field": "list_bucket", "in": ["active"] }]
         },
         "tabs": [
-          { "label": "In-flight", "filter": [{ "field": "status", "in": ["awaiting-approval", "running"] }] },
-          { "label": "History", "filter": [{ "field": "status", "in": ["done", "failed", "abandoned"] }] },
+          { "label": "In-flight", "filter": [{ "field": "list_bucket", "in": ["active"] }] },
+          { "label": "History", "filter": [{ "field": "list_bucket", "in": ["history"] }] },
           { "label": "All", "filter": [] }
         ],
         "columns": [
@@ -170,6 +170,15 @@
             "action": {
               "path": "/app/api/actions/delivery-graph/library/save",
               "body": { "name": "{{row.title}}", "digest": "{{row.digest}}" }
+            }
+          },
+          {
+            "label": "Dismiss",
+            "confirm": "Dismiss this finished delivery graph? It acknowledges the terminal run and files it under History.",
+            "showWhenField": "ack_open",
+            "action": {
+              "path": "/app/api/actions/acknowledge-delivery-graph",
+              "body": { "run_key": "{{row.run_key}}" }
             }
           }
         ]

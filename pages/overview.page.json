@@ -101,22 +101,9 @@
         "data": {
           "kind": "datasource",
           "source": "app",
-          "table": "pull_requests",
+          "table": "pull_requests_read_model",
           "orderBy": { "field": "updated_at", "dir": "desc" },
-          "filter": [
-            {
-              "field": "status",
-              "in": [
-                "converging",
-                "waiting_review",
-                "escalated",
-                "waiting_deps",
-                "waiting_merge",
-                "queued",
-                "merging"
-              ]
-            }
-          ]
+          "filter": [{ "field": "list_bucket", "in": ["active"] }]
         },
         "columns": [
           { "field": "title", "template": "{{title}}", "header": "Item", "subtitleField": "pr_key", "truncate": true, "width": "36%", "link": { "kind": "page", "page": "home", "keyField": "pr_key" } },
@@ -124,6 +111,17 @@
           { "field": "incident_message", "header": "Incident", "truncate": true, "badge": { "tone": "danger", "label": "1" } },
           { "field": "current_round", "template": "{{current_round}} · {{active_worker}}", "header": "Round · Agent" },
           { "field": "updated_at", "header": "Updated", "width": "9rem", "format": "datetime" }
+        ],
+        "rowActions": [
+          {
+            "label": "Dismiss",
+            "confirm": "Dismiss this finished PR? It acknowledges the terminal pull request and files it under History.",
+            "showWhenField": "ack_open",
+            "action": {
+              "path": "/app/api/actions/acknowledge-pr",
+              "body": { "pr_key": "{{row.pr_key}}" }
+            }
+          }
         ]
       }
     },
@@ -220,7 +218,7 @@
           "source": "app",
           "table": "delivery_graph_read_model",
           "orderBy": { "field": "updated_at", "dir": "desc" },
-          "filter": [{ "field": "status", "in": ["awaiting-approval", "running"] }]
+          "filter": [{ "field": "list_bucket", "in": ["active"] }]
         },
         "columns": [
           { "field": "title", "template": "{{title}}", "header": "Item", "subtitleField": "run_key", "truncate": true, "width": "30%", "link": { "kind": "page", "page": "delivery-graph-detail", "keyField": "run_key" } },
@@ -252,7 +250,18 @@
             { "field": "human_node_count", "label": "Human nodes" },
             { "field": "side_effect_count", "label": "Side effects" }
           ]
-        }
+        },
+        "rowActions": [
+          {
+            "label": "Dismiss",
+            "confirm": "Dismiss this finished delivery graph? It acknowledges the terminal run and files it under History.",
+            "showWhenField": "ack_open",
+            "action": {
+              "path": "/app/api/actions/acknowledge-delivery-graph",
+              "body": { "run_key": "{{row.run_key}}" }
+            }
+          }
+        ]
       }
     }
   ]

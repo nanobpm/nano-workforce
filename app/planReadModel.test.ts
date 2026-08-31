@@ -38,9 +38,10 @@ const MIG = (name: string) => readFileSync(fileURLToPath(new URL(`../db/migratio
 const PAGE = (name: string) => JSON.parse(readFileSync(fileURLToPath(new URL(`../pages/${name}`, import.meta.url)), "utf8"));
 
 const ROLLUPS_MIGRATION = "082_plan_rollups_declare_once.sql";
-const READ_MODEL_MIGRATION = "083_plan_read_model_declare_once.sql";
+const READ_MODEL_MIGRATION = "097_plan_read_model_terminal_dismiss.sql";
 // The forward chain whose net effect the end-to-end tests exercise: the original hand-authored VIEWs
-// (059/060/061/074/080) then the declare-once supersessions (082/083). Mirrors the runtime migrator.
+// (059/060/061/074/080), the declare-once supersessions (082/083), then the terminal-dismiss
+// supersession (097). Mirrors the runtime migrator.
 const MIGRATION_CHAIN = [
   "059_plan_wave_summary.sql",
   "060_plan_wave_rollup.sql",
@@ -48,8 +49,9 @@ const MIGRATION_CHAIN = [
   "074_plan_read_model_derive_bucket.sql",
   "080_plan_read_model_derive_terminal.sql",
   ROLLUPS_MIGRATION,
-  READ_MODEL_MIGRATION,
+  "083_plan_read_model_declare_once.sql",
   "084_plan_wave_tasks_effective_status.sql",
+  READ_MODEL_MIGRATION,
 ];
 
 // The base `plans` / `plan_tasks` / `pull_requests` shapes the VIEWs read, plus a stand-in for the
@@ -173,7 +175,7 @@ test("DRIFT GUARD: migration 082 embeds each rollup's VIEW DDL VERBATIM from rol
   }
 });
 
-test("DRIFT GUARD: migration 083 embeds each derived column VERBATIM from planReadModel.sqlSelectFor (the VIEW cannot drift from the declaration)", () => {
+test("DRIFT GUARD: migration 097 embeds each derived column VERBATIM from planReadModel.sqlSelectFor (the VIEW cannot drift from the declaration)", () => {
   const sql = MIG(READ_MODEL_MIGRATION);
   for (const col of PLAN_READ_MODEL_DERIVED) {
     const emitted = planReadModel.sqlSelectFor(col, { baseAlias: PLAN_READ_MODEL_BASE_ALIAS });
@@ -183,29 +185,27 @@ test("DRIFT GUARD: migration 083 embeds each derived column VERBATIM from planRe
         `from app/planReadModel.ts (or add a new superseding migration). Expected to contain:\n  ${emitted} AS ${col}`,
     );
   }
-  // DROP+CREATE that supersedes 080 and folds in (drops) the now-redundant intermediate VIEWs, keeping
+  // DROP+CREATE that supersedes 083's plan_read_model VIEW body (the terminal-dismiss #641 arm), keeping
   // every base column an aliased pass-through so the static pages↔schema contract guard still sees them.
-  assert(/DROP VIEW IF EXISTS plan_read_model;/.test(sql), "083 must DROP the superseded plan_read_model first");
-  assert(/DROP VIEW IF EXISTS plan_delivery;/.test(sql), "083 must fold in (drop) the retired plan_delivery");
-  assert(/DROP VIEW IF EXISTS plan_wave_label;/.test(sql), "083 must fold in (drop) the retired plan_wave_label");
-  assert(/CREATE VIEW plan_read_model AS/.test(sql), "083 must (re)create plan_read_model");
+  assert(/DROP VIEW IF EXISTS plan_read_model;/.test(sql), "097 must DROP the superseded plan_read_model first");
+  assert(/CREATE VIEW plan_read_model AS/.test(sql), "097 must (re)create plan_read_model");
   for (const base of ["plan_key", "repo", "issue_number", "title", "process_key", "epic_phase", "promotion_pr", "promotion_state"]) {
-    assert(sql.includes(`pl.${base} AS ${base}`), `083 must pass base column "${base}" through the VIEW`);
+    assert(sql.includes(`pl.${base} AS ${base}`), `097 must pass base column "${base}" through the VIEW`);
   }
   // The hand-authored display strings (D3 — no TS twin) live in this VIEW over the derived columns.
-  assert(sql.includes("AS delivery_label"), "083 must carry the hand-authored delivery_label display column");
-  assert(sql.includes("AS wave_label"), "083 must carry the hand-authored wave_label display column");
+  assert(sql.includes("AS delivery_label"), "097 must carry the hand-authored delivery_label display column");
+  assert(sql.includes("AS wave_label"), "097 must carry the hand-authored wave_label display column");
   // The FROM/JOIN relation names are DERIVED from the declaration (baseTable + each lookup's rollup name
   // + join keys), not hand-hardcoded — so renaming `baseTable` or a rollup `.name` (which would make 082
-  // create a different-named VIEW) breaks this guard instead of silently leaving 083 pointing at a
+  // create a different-named VIEW) breaks this guard instead of silently leaving 097 pointing at a
   // stale/missing relation.
   const alias = PLAN_READ_MODEL_BASE_ALIAS;
-  assert(sql.includes(`FROM ${planReadModel.decl.baseTable} ${alias}`), `083's FROM must be the declaration's baseTable "${planReadModel.decl.baseTable}" (aliased ${alias})`);
+  assert(sql.includes(`FROM ${planReadModel.decl.baseTable} ${alias}`), `097's FROM must be the declaration's baseTable "${planReadModel.decl.baseTable}" (aliased ${alias})`);
   for (const lk of planReadModel.decl.lookups) {
     const rollupName = lk.rollup.decl.name;
     const on = lk.on.map((k) => `${alias}.${k.base} = ${lk.as}.${k.rollup}`).join(" AND ");
     const join = `LEFT JOIN ${rollupName} ${lk.as} ON ${on}`;
-    assert(sql.includes(join), `083 must LEFT JOIN the declaration's "${rollupName}" lookup exactly as "${join}"`);
+    assert(sql.includes(join), `097 must LEFT JOIN the declaration's "${rollupName}" lookup exactly as "${join}"`);
   }
 });
 
@@ -352,18 +352,28 @@ test("the migration 083 VIEW IGNORES stale STORED list_bucket / ack_open columns
   assertEquals(row.ack_open, 0, "already acknowledged ⇒ no open Dismiss");
 });
 
-test("RED/GREEN #503: a DERIVE-ONLY terminated epic (base status frozen 'dispatched', derived_status='abandoned') drops out of Active with no worker write", () => {
+test("RED/GREEN #503 (+#641): a DERIVE-ONLY terminated epic (base status frozen 'dispatched', derived_status='abandoned') is classified off derived_status — Active+dismissable until acknowledged, then History", () => {
   // ADR-0065: cancel/terminate is DERIVE-ONLY — `plans__tracking.derived_status` recomputes `abandoned`
-  // on READ while the base `plans.status` stays frozen at its last transient. 083 classifies the bucket
-  // off `derived_status`, so a terminated epic renders History (not wedged Active) with no poller pass.
+  // on READ while the base `plans.status` stays frozen at its last transient. The bucket classifies off
+  // `derived_status`, so a terminated epic is handled on engine truth with no poller pass. Under #641
+  // (uniform acknowledge-to-dismiss) a terminated epic now STAYS Active with a Dismiss affordance until
+  // an operator ticks it off — mirroring features/PRs/DGs — rather than dropping straight to History.
   const db = viewDb();
   addPlan(db, "o/r#term", { status: "dispatched", stored: { list_bucket: "active" } });
   assertEquals(readModel(db, "o/r#term").list_bucket, "active", "precondition: a live dispatched epic is Active");
 
   db.prepare("UPDATE plans SET derived_status_override = 'abandoned' WHERE plan_key = ?").run("o/r#term");
   const row = readModel(db, "o/r#term");
-  assertEquals(row.list_bucket, "history", "a derive-only terminated epic is History (the #503 phantom fix)");
+  assertEquals(row.list_bucket, "active", "a derive-only terminated (unacknowledged) epic stays Active until dismissed (#641)");
+  assertEquals(row.ack_open, 1, "…and carries the Dismiss affordance");
   assertEquals(row.list_bucket, deriveEpicBucket("abandoned", row.delivery === "converging" ? "converging" : null, null), "list_bucket tracks derived_status via the VIEW");
+
+  // Acknowledging it (the operator tick-off) settles it to History — the derived_status-driven, no-
+  // worker-write resolution the #503 phantom fix guaranteed, now gated on an explicit dismiss.
+  db.prepare("UPDATE plans SET acknowledged_at = '2026-02-02T00:00:00Z' WHERE plan_key = ?").run("o/r#term");
+  const acked = readModel(db, "o/r#term");
+  assertEquals(acked.list_bucket, "history", "a dismissed terminated epic is History (classified off derived_status, no poller pass)");
+  assertEquals(acked.ack_open, 0, "…and its Dismiss affordance is retracted");
 });
 
 test("REGRESSION (Copilot #493): a DERIVE-ONLY terminated slice PR (base status frozen 'converging', derived_status='abandoned') is counted RESOLVED — the VIEW joins pull_requests__tracking.derived_status", () => {
