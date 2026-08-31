@@ -1,7 +1,8 @@
 // GET /app/api/escalations → operationId `listEscalations` (epic #664, issue #666). Discovery for the
-// escalation-answer path: list EVERY currently-open native user-task escalation — across all four
-// kinds (PR review/merge loop, plan-review, trial-merge, feature/blocked and the shared
-// human-escalation cell) — with the completable `userTaskKey` an agent then answers via
+// escalation-answer path: list EVERY currently-open native user-task escalation — across every
+// surfaced kind (PR review/merge loop, plan-review, empty-plan, trial-merge, conformance-review,
+// delivery human-step, feature/blocked, agent-permission and the shared human-escalation cell) —
+// with the completable `userTaskKey` an agent then answers via
 // `completeUserTask` / `agentCompleteEscalation`. This closes the fallback where an agent had to curl
 // the un-projected `/tasks/api/tasks` inbox to find keys before answering.
 //

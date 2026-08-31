@@ -3077,8 +3077,9 @@ paths:
       operationId: listEscalations
       summary: List every OPEN escalation awaiting a human/agent decision, with the completable userTaskKey.
       description: >-
-        Discovery for the escalation-answer path (epic #664, issue #666): across all four escalation
-        kinds (PR review/merge loop, plan-review, trial-merge, feature/blocked and the shared
+        Discovery for the escalation-answer path (epic #664, issue #666): across every surfaced
+        escalation kind (PR review/merge loop, plan-review, empty-plan, trial-merge,
+        conformance-review, delivery human-step, feature/blocked, agent-permission and the shared
         human-escalation cell), list each currently-open native user-task escalation with the
         completable `userTaskKey` an agent then answers via `completeUserTask` /
         `agentCompleteEscalation` — so a tool-aware agent never has to curl the un-projected
