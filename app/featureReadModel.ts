@@ -152,7 +152,8 @@ export type FeatureReadModelDerivedColumn = (typeof FEATURE_READ_MODEL_DERIVED)[
 
 /**
  * The declare-once `feature_read_model` derived columns. `selectBaseColumns: false` because the base
- * columns are plain identity pass-throughs enumerated in migration 076 (so the static pages↔schema
+ * columns are plain identity pass-throughs enumerated in the latest superseding migration (099, which
+ * re-emits the whole VIEW body — see also 076/081) (so the static pages↔schema
  * contract guard, which reads a VIEW's columns off an aliased select-list, sees them); this model owns
  * only the six real DERIVATIONS. Both the migration VIEW (`sqlSelectFor`, drift-guarded) and the
  * runtime TS oracle (`fnFor`, behind app/stage.ts) are generated from THIS single declaration.

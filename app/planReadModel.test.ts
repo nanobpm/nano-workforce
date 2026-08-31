@@ -29,19 +29,26 @@ import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { assertReadModelParity, assertRollupParity, type ParityDb, type ParitySample, type RollupInputs } from "@nanobpm/urban";
+import type { AppApi } from "@nanobpm/urban";
 import { assert, assertEquals } from "#test-assert";
+import { acknowledgeVia } from "./acknowledge.ts";
 import { deriveDelivery, deriveEpicBucket, epicIsAcknowledgeable } from "./delivery.ts";
 import { planReadModel, PLAN_READ_MODEL_BASE_ALIAS, PLAN_READ_MODEL_DERIVED } from "./planReadModel.ts";
 import { PLAN_ROLLUPS, planDeliveryCounts, planWaveCounts, planWaveProgress } from "./planRollups.ts";
+import { noopLog } from "../test/log.ts";
 
 const MIG = (name: string) => readFileSync(fileURLToPath(new URL(`../db/migrations/${name}`, import.meta.url)), "utf8");
 const PAGE = (name: string) => JSON.parse(readFileSync(fileURLToPath(new URL(`../pages/${name}`, import.meta.url)), "utf8"));
 
 const ROLLUPS_MIGRATION = "082_plan_rollups_declare_once.sql";
 const READ_MODEL_MIGRATION = "097_plan_read_model_terminal_dismiss.sql";
+// Passes `acknowledged_at` through the plan_read_model VIEW (issue #654) — the column the shared
+// `acknowledgeVia` helper reads to tell an already-acknowledged epic (idempotent 200) from a live one
+// (409). Supersedes 097's VIEW body verbatim except for that one added base pass-through.
+const READ_MODEL_ACK_PASSTHROUGH_MIGRATION = "100_plan_read_model_pass_acknowledged_at.sql";
 // The forward chain whose net effect the end-to-end tests exercise: the original hand-authored VIEWs
 // (059/060/061/074/080), the declare-once supersessions (082/083), then the terminal-dismiss
-// supersession (097). Mirrors the runtime migrator.
+// supersession (097), then the `acknowledged_at` pass-through (100). Mirrors the runtime migrator.
 const MIGRATION_CHAIN = [
   "059_plan_wave_summary.sql",
   "060_plan_wave_rollup.sql",
@@ -52,6 +59,7 @@ const MIGRATION_CHAIN = [
   "083_plan_read_model_declare_once.sql",
   "084_plan_wave_tasks_effective_status.sql",
   READ_MODEL_MIGRATION,
+  READ_MODEL_ACK_PASSTHROUGH_MIGRATION,
 ];
 
 // The base `plans` / `plan_tasks` / `pull_requests` shapes the VIEWs read, plus a stand-in for the
@@ -207,6 +215,77 @@ test("DRIFT GUARD: migration 097 embeds each derived column VERBATIM from planRe
     const join = `LEFT JOIN ${rollupName} ${lk.as} ON ${on}`;
     assert(sql.includes(join), `097 must LEFT JOIN the declaration's "${rollupName}" lookup exactly as "${join}"`);
   }
+});
+
+// A minimal `AppApi` over node:sqlite so the shared `acknowledgeVia` helper (app/acknowledge.ts) can be
+// driven against the REAL migration VIEW + base table — not a mock that could paper over a missing VIEW
+// column. `data.table(name, key)` reads/writes `name` keyed on `key`, exactly as urban's does.
+function sqliteApp(db: DatabaseSync): AppApi {
+  return {
+    data: {
+      table: (name: string, key: string) => ({
+        get: async (id: unknown) => db.prepare(`SELECT * FROM ${name} WHERE ${key} = ?`).get(id) ?? undefined,
+        update: async (id: unknown, patch: Record<string, unknown>) => {
+          const cols = Object.keys(patch);
+          const set = cols.map((c) => `${c} = ?`).join(", ");
+          const r = db.prepare(`UPDATE ${name} SET ${set} WHERE ${key} = ?`).run(...(cols.map((c) => patch[c]) as never[]), id as never);
+          return Number(r.changes);
+        },
+      }),
+    },
+    log: noopLog(),
+  } as unknown as AppApi;
+}
+
+const EPIC_ACK_SURFACE = {
+  view: planReadModel.decl.name,
+  baseTable: "plans",
+  keyColumn: "plan_key",
+  label: "epic",
+  notDismissableError: "not terminal",
+} as const;
+
+test("DRIFT GUARD: migration 100 supersedes the plan_read_model VIEW, adding the acknowledged_at pass-through while re-embedding every derived column VERBATIM from planReadModel.sqlSelectFor", () => {
+  const sql = MIG(READ_MODEL_ACK_PASSTHROUGH_MIGRATION);
+  assert(/DROP VIEW IF EXISTS plan_read_model;/.test(sql), "100 must DROP the superseded plan_read_model first");
+  assert(/CREATE VIEW plan_read_model AS/.test(sql), "100 must (re)create plan_read_model");
+  // The one reason this migration exists: expose `acknowledged_at` as a projected column (the shared
+  // acknowledgeVia helper reads it to distinguish an already-acknowledged epic from a live one).
+  assert(sql.includes("pl.acknowledged_at AS acknowledged_at"), "100 must PROJECT the acknowledged_at pass-through");
+  // Every derived column stays byte-identical to the declaration — no drift is smuggled in.
+  for (const col of PLAN_READ_MODEL_DERIVED) {
+    const emitted = planReadModel.sqlSelectFor(col, { baseAlias: PLAN_READ_MODEL_BASE_ALIAS });
+    assert(
+      sql.includes(`${emitted} AS ${col}`),
+      `migration ${READ_MODEL_ACK_PASSTHROUGH_MIGRATION} no longer embeds the declaration's SQL for "${col}" — regenerate it ` +
+        `from app/planReadModel.ts (or add a new superseding migration). Expected to contain:\n  ${emitted} AS ${col}`,
+    );
+  }
+  for (const base of ["plan_key", "repo", "issue_number", "title", "process_key", "epic_phase", "promotion_pr", "promotion_state"]) {
+    assert(sql.includes(`pl.${base} AS ${base}`), `100 must keep base column "${base}" as a pass-through`);
+  }
+});
+
+test("issue #654: the plan_read_model VIEW PROJECTS acknowledged_at so acknowledgeVia can tell an already-acknowledged epic (idempotent 200) from a live one (409)", async () => {
+  const db = viewDb();
+  const stamp = "2026-02-02T00:00:00Z";
+  // A `done` epic already dismissed (its `acknowledged_at` stamped): the VIEW folds it to History with
+  // the Dismiss affordance closed (`ack_open=0`).
+  addPlan(db, "o/r#1", { status: "done", acknowledged_at: stamp });
+  const row = readModel(db, "o/r#1");
+  // The bug (Copilot review, PR #655): `plan_read_model` only READ `acknowledged_at` inside its CASE
+  // bodies and never PROJECTED it — unlike the PR / feature / delivery-graph read models — so the helper
+  // saw `undefined` and could not tell "already acknowledged" from "still live". Assert the projection.
+  assert("acknowledged_at" in row, "plan_read_model must PROJECT acknowledged_at (the helper depends on it)");
+  assertEquals(row.acknowledged_at, stamp);
+  assertEquals(row.ack_open, 0, "an acknowledged terminal epic has ack_open=0");
+
+  // End-to-end: re-dismissing an already-acknowledged epic through the REAL VIEW is an idempotent 200,
+  // NOT a spurious 409 — and it does not re-stamp.
+  const res = await acknowledgeVia(sqliteApp(db), EPIC_ACK_SURFACE, "o/r#1");
+  assertEquals(res.status, 200, "re-dismissing an already-acknowledged epic is an idempotent 200");
+  assertEquals(res.body.ok, true);
+  assertEquals(readModel(db, "o/r#1").acknowledged_at, stamp, "idempotent no-op must NOT re-stamp");
 });
 
 test("FRAMEWORK PARITY GUARD: each plan-family rollup's VIEW and TS reduce agree (assertRollupParity)", () => {
