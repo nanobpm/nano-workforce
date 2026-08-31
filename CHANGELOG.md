@@ -1,3 +1,9 @@
+## [0.169.0](https://github.com/nanobpm/nano-workforce/compare/v0.168.2...v0.169.0) (2026-08-31)
+
+### Features
+
+* add getPrHistory read tool for PR escalation/round history ([#670](https://github.com/nanobpm/nano-workforce/issues/670)) ([22bd6f9](https://github.com/nanobpm/nano-workforce/commit/22bd6f9d28b891a2b4c157d21bad94cb11af1eb4)), closes [#668](https://github.com/nanobpm/nano-workforce/issues/668)
+
 ## [0.168.2](https://github.com/nanobpm/nano-workforce/compare/v0.168.1...v0.168.2) (2026-08-31)
 
 ### Bug Fixes
