@@ -15,10 +15,19 @@
 // It rejects (409) a PR that is NOT terminal (still converging/waiting_review/…), so it can never
 // pre-seed the tick-off on a live PR: were `acknowledged_at` set early, the moment the PR later settled
 // the VIEW would drop it straight into History, skipping the operator dismiss this op exists to
-// require. The terminal check reads the base `status` — the reconciler's `onTerminated` edge persists
-// an out-of-band terminate to base `status` = 'abandoned', so a resolved PR is matched here too.
+// require.
+//
+// TERMINALITY IS READ OFF THE READ MODEL, NOT THE BASE COLUMN (issue #652). PRs are the one surface
+// that folds terminal ON READ: since `app/abandon.ts` moved to ADR-0065 derive-only tracking, the
+// reconciler no longer WRITES 'abandoned' onto the base `pull_requests.status` on an out-of-band
+// terminate — the `pull_requests__tracking` VIEW folds it into `derived_status`, and the
+// `pull_requests_read_model` VIEW exposes that as its effective `status` and lights the Dismiss
+// affordance (`ack_open`). This op therefore consults the SAME source of truth as the affordance — the
+// read model's folded/effective `status` — rather than re-deriving terminality against the frozen base
+// column (which for an abandoned PR still reads its last transient, e.g. 'escalated', and would 409 a
+// row the UI shows Dismiss on). Reading the base column here was the drift #652 fixes.
 
-import { PR_TERMINAL_STATUSES } from "../app/pullRequestReadModel.ts";
+import { PR_TERMINAL_STATUSES, PULL_REQUEST_READ_MODEL_NAME } from "../app/pullRequestReadModel.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
 
 const str = (v: unknown): string => (typeof v === "string" ? v.trim() : "");
@@ -32,28 +41,37 @@ export default defineOperation("acknowledgePr", async ({ body }, app) => {
   const prKey = str(body.pr_key);
   if (!prKey) return { status: 400, body: { ok: false, error: "pr_key is required" } };
 
-  const table = app.data.table<{ pr_key: string; status: string; acknowledged_at: string | null; updated_at: string }>(
-    "pull_requests",
+  // Read the FOLDED row from the read model VIEW — its effective `status` is
+  // `COALESCE(derived_status, status)`, so an out-of-band-terminated PR whose base `status` is frozen
+  // at a transient reads its engine-truth terminal (`abandoned`) here, exactly as the Dismiss
+  // affordance (`ack_open`) does.
+  const readModel = app.data.table<{ pr_key: string; status: string }>(
+    PULL_REQUEST_READ_MODEL_NAME,
     "pr_key",
   );
-  const pr = await table.get(prKey);
-  if (!pr) {
+  const view = await readModel.get(prKey);
+  if (!view) {
     app.log.warn("acknowledge-pr: no such pull request", { prKey });
     return { status: 404, body: { ok: false, error: "no such pull request" } };
   }
 
-  // Guard: only a TERMINAL PR (a `PR_TERMINAL_STATUSES` status — the same set the read model's
-  // `list_bucket` folds to History) carries the Dismiss affordance. Acknowledging a live PR would
-  // pre-seed `acknowledged_at`, so the moment it later settled the VIEW would drop it straight into
-  // History, skipping the operator tick-off this op exists to require.
-  if (!PR_TERMINAL_STATUSES.includes(pr.status)) {
-    app.log.warn("acknowledge-pr rejected: PR is not terminal", { prKey, status: pr.status });
+  // Guard: only a TERMINAL PR (a `PR_TERMINAL_STATUSES` effective status — the same terminal-folded
+  // tier the read model's `list_bucket`/`ack_open` fold to History and gate the Dismiss button on)
+  // carries the Dismiss affordance. Acknowledging a live PR would pre-seed `acknowledged_at`, so the
+  // moment it later settled the VIEW would drop it straight into History, skipping the operator
+  // tick-off this op exists to require.
+  if (!PR_TERMINAL_STATUSES.includes(view.status)) {
+    app.log.warn("acknowledge-pr rejected: PR is not terminal", { prKey, status: view.status });
     return { status: 409, body: { ok: false, error: "pull request is not terminal" } };
   }
 
-  // Stamp the dismissal. `list_bucket` (→ 'history') and `ack_open` (→ 0) are derived by the
-  // `pull_requests_read_model` VIEW from the terminal, now-acknowledged row, so we never hand-set them
-  // here. Idempotent: re-acknowledging re-stamps and stays in History.
+  // Stamp the dismissal on the BASE `pull_requests` row. `list_bucket` (→ 'history') and `ack_open`
+  // (→ 0) are derived by the `pull_requests_read_model` VIEW from the terminal, now-acknowledged row,
+  // so we never hand-set them here. Idempotent: re-acknowledging re-stamps and stays in History.
+  const table = app.data.table<{ pr_key: string; acknowledged_at: string | null; updated_at: string }>(
+    "pull_requests",
+    "pr_key",
+  );
   const now = new Date().toISOString();
   await table.update(prKey, { acknowledged_at: now, updated_at: now });
 
