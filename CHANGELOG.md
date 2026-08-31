@@ -1,3 +1,9 @@
+## [0.170.0](https://github.com/nanobpm/nano-workforce/compare/v0.169.0...v0.170.0) (2026-08-31)
+
+### Features
+
+* **api:** add listEscalations read tool + structured openEscalation ([#672](https://github.com/nanobpm/nano-workforce/issues/672)) ([893d39a](https://github.com/nanobpm/nano-workforce/commit/893d39a644cd18102422186b4baddc6779b3510d)), closes [#666](https://github.com/nanobpm/nano-workforce/issues/666) [#666](https://github.com/nanobpm/nano-workforce/issues/666) [#358](https://github.com/nanobpm/nano-workforce/issues/358) [owner/repo#N](https://github.com/owner/repo/issues/N)
+
 ## [0.169.0](https://github.com/nanobpm/nano-workforce/compare/v0.168.2...v0.169.0) (2026-08-31)
 
 ### Features
