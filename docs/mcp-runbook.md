@@ -106,7 +106,9 @@ the no-MCP fallback only.
 > instance, compare engine truth against the app's projections, and tell me where
 > it's stuck."*
 
-The agent has: instance search, wait states, variables, incidents (engine truth) +
+The agent has: instance search, wait states, incidents (engine truth) — plus
+`variables` where the framework projects the `urban_debug_search_variables` read
+(otherwise via the engine curl fallback) — plus
 the `urban_*` projection reads (app belief) + the operator guide (the
 `getAgentInstructions` tool) for the convergence-loop-specific meaning of each wedge
 shape. A wedge is frequently exactly a disagreement between the two planes. The guide's

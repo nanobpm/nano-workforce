@@ -317,11 +317,13 @@ PK = <processKey from listActivePrs>
 tool: urban_debug_search_process_instances   { "filter": { "processInstanceKey": PK } }
 
 # Where is it parked? — active jobs on the instance (a CREATED senior:pr-review job
-# with a `worker` set means an agent has leased the round; none means it is queued):
-tool: urban_debug_search_jobs                 { "filter": { "processInstanceKey": PK, "state": "CREATED" } }
+# with a `worker` set means an agent has leased the round; none means it is queued).
+# `urban_debug_search_jobs`/`_search_variables` are projected only where the framework
+# offers them (sibling nano-ide epic); else drop to the curl door (see §10 crosswalk):
+tool: urban_debug_search_jobs                 { "filter": { "processInstanceKey": PK, "state": "CREATED" } }   # where projected
 
 # Its variables (the aggregate/job payload the engine holds):
-tool: urban_debug_search_variables           { "filter": { "processInstanceKey": PK } }
+tool: urban_debug_search_variables           { "filter": { "processInstanceKey": PK } }   # where projected
 
 # Is it dead-in-the-water on a technical fault? — active incidents:
 tool: urban_debug_search_incidents           { "filter": { "processInstanceKey": PK, "state": "ACTIVE" } }
@@ -864,13 +866,13 @@ When you drive this instance over MCP, **call the projected tool** — every rec
 leads with it. `curl __BASE__/…`/`curl __ENGINE__/…` is only the **no-MCP fallback** for an
 agent that has no tools (see the runbook, `docs/mcp-runbook.md` §2/§3, and [§5
 Fallback](mcp-runbook.md#5-fallback)). This table maps every guide action to its projected
-tool name and the exact curl door underneath.
+tool name and its no-MCP fallback underneath (usually a curl door; a few rows fall back to reading a repo file instead).
 
 App-owned operations (projected from this app's `openapi.yaml`; the `__BASE__` control API).
 Rows tagged *(projected by sibling #NNN)* name a tool that lands with that sibling task —
 until it does, only the curl door in the third column exists on the deployment:
 
-| Guide action | Projected tool | curl no-MCP fallback |
+| Guide action | Projected tool | No-MCP fallback |
 |---|---|---|
 | Which code is live (§0) | `getVersion` | `curl __BASE__/version` |
 | Every PR in flight (§0/§5) | `listActivePrs` | `curl __BASE__/status` |
@@ -886,7 +888,7 @@ the engine's Camunda-8 v2 REST API at `__ENGINE__`). The first three are always 
 `urban_debug_get_process_definition_xml` are owned by the sibling nano-ide urban epic — use
 them by name where the framework projects them, else drop to the curl door:
 
-| Guide action | Projected tool | curl no-MCP fallback |
+| Guide action | Projected tool | No-MCP fallback |
 |---|---|---|
 | Search process instances (§5) | `urban_debug_search_process_instances` | `curl -X POST __ENGINE__/process-instances/search` |
 | Inspect element/wait states (§5) | `urban_debug_search_element_instance_wait_states` | `curl -X POST __ENGINE__/element-instances/search` |
