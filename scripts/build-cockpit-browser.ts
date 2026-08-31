@@ -30,12 +30,18 @@ interface BundleModule {
 }
 
 // The transcript RENDER path the browser needs is a two-module graph, both pure + DOM-agnostic:
-//   transcript-events.ts   — the ONE parser + derive() fold (no runtime imports).
-//   transcript-derive.ts   — renderDerivedTranscript(): message turns, tool/diff cards, permission prompts.
+//   transcript-events   — the ONE parser + derive() fold (no runtime imports).
+//   transcript-derive.ts — renderDerivedTranscript(): message turns, tool/diff cards, permission prompts.
 // Their only non-type imports are between each other; every type-only import (DocumentLike, ElementLike,
 // TranscriptDataReport) is `import type` and is erased on transpile, so the emitted JS is import-clean.
+//
+// The grammar module is now DEFINED once, in `@nanobpm/agentic/transcript` (issue #676) — nano-workforce
+// no longer forks it. So the browser bundle for the parser+fold is DERIVED from agentic's own published,
+// self-contained ESM (`dist/transcript/events.js` has no runtime imports), the SAME source of truth the
+// Node core re-exports via the `transcript-events.ts` barrel. This keeps "one grammar, no drift surface"
+// true across BOTH hosts: the cockpit renders from agentic's grammar, never a hand-rolled second copy.
 const MODULES: readonly BundleModule[] = [
-  { src: "app/agentic/transcript-events.ts", out: "pages/cockpit/generated/transcript-events.js" },
+  { src: "node_modules/@nanobpm/agentic/dist/transcript/events.js", out: "pages/cockpit/generated/transcript-events.js" },
   {
     src: "app/agentic/cockpit/transcript-derive.ts",
     out: "pages/cockpit/generated/transcript-derive.js",
