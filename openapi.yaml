@@ -3050,6 +3050,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/CancelInstanceResult"
+        "503":
+          description: The app has no data source configured, so the cancel cannot be reconciled into the record.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
   /lineage:
     get:
       operationId: getLineage

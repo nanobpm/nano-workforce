@@ -43,8 +43,19 @@ function req(headers: Record<string, string> = {}) {
 }
 
 // biome-ignore lint/suspicious/noExplicitAny: test-only invocation shim for the delegate.
+async function callHandler(
+  h: typeof handler,
+  app: AppApi,
+  body: unknown,
+  headers: Record<string, string> = {},
+  // biome-ignore lint/suspicious/noExplicitAny: test-only invocation shim for the delegate.
+): Promise<any> {
+  return await h({ req: req(headers) as any, params: {}, query: {}, body } as any, app);
+}
+
+// biome-ignore lint/suspicious/noExplicitAny: test-only invocation shim for the delegate.
 async function call(app: AppApi, body: unknown): Promise<any> {
-  return await handler({ req: req() as any, params: {}, query: {}, body } as any, app);
+  return await callHandler(handler, app, body);
 }
 
 test("a missing processInstanceKey → 400 and never touches the engine", async () => {
@@ -90,4 +101,38 @@ test("an uncommitted cancel (engine throws, instance still ACTIVE) → 502 not-o
   assertEquals(res.status, 502, "an unconfirmed termination must NOT be reported as success");
   assertEquals(res.body.ok, false);
   assert(typeof res.body.error === "string" && res.body.error.length > 0, "carries the failure reason");
+});
+
+test("no data source configured → 503 and never touches the engine (cannot reconcile the record)", async () => {
+  // The record-consistent door refuses to cancel when it has no data source to reconcile the
+  // terminal state into — a live cancel with no derived-status update would leave the record lying.
+  const { app, cancelCalls } = makeApp();
+  // Strip the data source the primitive would reconcile against.
+  (app as unknown as { data?: unknown }).data = undefined;
+  const res = await call(app, { processInstanceKey: "2985" });
+  assertEquals(res.status, 503);
+  assert("error" in res.body, "carries an error reason");
+  assertEquals(cancelCalls.length, 0, "no cancel attempted without a data source");
+});
+
+test("shared-secret guard: when NANO_PR_WEBHOOK_SECRET is set, a missing/wrong secret → 401; the right one passes", async () => {
+  const prev = process.env["NANO_PR_WEBHOOK_SECRET"];
+  process.env["NANO_PR_WEBHOOK_SECRET"] = "s3cr3t";
+  try {
+    // SECRET is captured at module load, so import a cache-busted copy to observe the guard.
+    const mod = await import(`./cancelInstance.ts?guard=${Date.now()}`);
+    const guarded = mod.default as typeof handler;
+    const { app, cancelCalls } = makeApp({ readBackState: "TERMINATED" });
+    const missing = await callHandler(guarded, app, { processInstanceKey: "2985" });
+    assertEquals(missing.status, 401, "no secret header is rejected");
+    const wrong = await callHandler(guarded, app, { processInstanceKey: "2985" }, { "x-hook-secret": "nope" });
+    assertEquals(wrong.status, 401, "a wrong secret is rejected");
+    assertEquals(cancelCalls.length, 0, "a rejected request never reaches the engine");
+    const ok = await callHandler(guarded, app, { processInstanceKey: "2985" }, { "x-hook-secret": "s3cr3t" });
+    assertEquals(ok.status, 200, "the correct secret is accepted");
+    assertEquals(cancelCalls, ["2985"], "only the authorized request issues the engine cancel");
+  } finally {
+    if (prev === undefined) delete process.env["NANO_PR_WEBHOOK_SECRET"];
+    else process.env["NANO_PR_WEBHOOK_SECRET"] = prev;
+  }
 });
