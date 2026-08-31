@@ -130,9 +130,10 @@ and does **not** resolve `$ref`s, so every projected (non-`x-mcp`) request-body 
 in `openapi.yaml` presents an inline `type: object` body with no `$ref`; the two graph doors
 additionally carry a worked `example` — an agent discovers the body shape (and calls the tool
 with a real object, not a
-stringified one) from the surface alone — and should nano-ide#503 not yet be in the
-agent's client, a stringified object body is now **faithfully parsed** by the door rather
-than rejected (see the faithful-transport note below). The two graph doors split by convention:
+stringified one) from the surface alone — and even if an agent's client emits a
+stringified object body, the door itself now **faithfully parses** it rather than
+rejecting it (nano-ide#503, a server-side input-compatibility behavior that needs no
+client upgrade — see the faithful-transport note below). The two graph doors split by convention:
 `compileDeliveryGraph` takes the **structured `DeliveryGraph` object** (and *stages*);
 `previewDeliveryGraph` takes the **text shape `{ "graphJson": "<serialized DeliveryGraph>" }`**
 (and is *pure*). Every validation failure returns `issues`/`errors` as `[{ path, message }]`.
