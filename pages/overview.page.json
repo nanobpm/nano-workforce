@@ -187,6 +187,17 @@
           { "field": "delivery_label", "header": "Delivery" },
           { "field": "updated_at", "header": "Updated", "width": "9rem", "format": "datetime" }
         ],
+        "rowActions": [
+          {
+            "label": "Dismiss",
+            "confirm": "Tick off this finished run? It acknowledges the run as done and files it under History.",
+            "showWhenField": "stage_state",
+            "action": {
+              "path": "/app/api/actions/acknowledge-done",
+              "body": { "feature_key": "{{row.feature_key}}" }
+            }
+          }
+        ],
         "detail": {
           "fields": [
             { "field": "outcome", "label": "Outcome" }
