@@ -1,3 +1,9 @@
+## [0.167.0](https://github.com/nanobpm/nano-workforce/compare/v0.166.0...v0.167.0) (2026-08-31)
+
+### Features
+
+* **active-lists:** uniform active-until-dismissed for PRs, delivery graphs & epics ([#649](https://github.com/nanobpm/nano-workforce/issues/649)) ([9ac7135](https://github.com/nanobpm/nano-workforce/commit/9ac71353335d0c09e9959826d71d5c796e364da1)), closes [#637](https://github.com/nanobpm/nano-workforce/issues/637)
+
 ## [0.166.0](https://github.com/nanobpm/nano-workforce/compare/v0.165.0...v0.166.0) (2026-08-31)
 
 ### Features
