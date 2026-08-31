@@ -91,7 +91,12 @@ family). Ask:
 
 > *"Using workforce-local, show what's in flight and any open escalations."*
 
-The agent should call the status operation tool, not curl.
+The agent should call the status operation tool (`listActivePrs`), not curl. The operator
+guide's **tool↔curl crosswalk** (agent-guide §10, via `getAgentGuide("tool-crosswalk")`)
+maps every guide action to its projected tool name and the curl door underneath — so a
+tool-aware agent leads with the tool (`listActivePrs`, `getVersion`, `listEscalations`,
+`completeUserTask`, `cancelInstance`, the `urban_debug_*` engine reads) and treats curl as
+the no-MCP fallback only.
 
 ## 3. Debug a wedged instance
 
@@ -102,7 +107,13 @@ The agent should call the status operation tool, not curl.
 The agent has: instance search, wait states, variables, incidents (engine truth) +
 the `urban_*` projection reads (app belief) + the operator guide (the
 `getAgentInstructions` tool) for the convergence-loop-specific meaning of each wedge
-shape. A wedge is frequently exactly a disagreement between the two planes.
+shape. A wedge is frequently exactly a disagreement between the two planes. The guide's
+**tool↔curl crosswalk** (agent-guide §10) names each engine-truth tool
+(`urban_debug_search_process_instances` / `urban_debug_search_element_instance_wait_states`
+/ `urban_debug_search_incidents`, and where projected `urban_debug_search_jobs` /
+`urban_debug_search_variables` / `urban_debug_get_process_definition_xml`) so the agent
+reaches for the tool, not the raw `__ENGINE__` curl — and steers cancels to the app-owned
+`cancelInstance`, never the record-desyncing engine-level `urban_debug_cancel_instance`.
 
 ## 4. Guard posture
 
@@ -166,7 +177,8 @@ limit. Over MCP, prefer the **addressable** companion tool `getAgentGuide(sectio
 
 - **No argument** → a compact **table of contents**: every stable section id
   (`orient`, `submit-pr`, `submit-epic`, `escalations`, `lifecycle`, `debug`,
-  `debug-models`, `unstick`, `raise-issue`, `delivery-graphs`) with a one-line summary.
+  `debug-models`, `unstick`, `raise-issue`, `delivery-graphs`, `tool-crosswalk`) with a
+  one-line summary.
 - **`section=<id>`** → **only** that section's markdown, small enough to fit a typical
   limit. An unknown id is rejected with `issues[{path,message}]` listing the valid ids.
 

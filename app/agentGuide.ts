@@ -106,6 +106,7 @@ export const GUIDE_SECTIONS: readonly GuideSectionMeta[] = [
   { id: "unstick", summary: "Unstick a wedged process — publish a correlating message, cancel, or otherwise recover a stalled instance." },
   { id: "raise-issue", summary: "Raise an issue or open a PR against the nano-workforce repository itself." },
   { id: "delivery-graphs", summary: "Author, preview, compile/stage and run an agent-authored delivery graph (ADR 0005): node/wait/connector vocabulary." },
+  { id: "tool-crosswalk", summary: "Tool↔curl crosswalk: map every guide action to its projected MCP tool (status, version, urban_debug_* engine reads, escalation answer, cancel) with the curl no-MCP fallback." },
 ] as const;
 
 /** A parsed section: its stable id + summary (from the registry), the derived heading `title` (the

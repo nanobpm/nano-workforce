@@ -25,18 +25,28 @@ in full so you can tell which are under the control-API base and which are not.
 
 ## 0. Orient yourself first
 
-Before acting, confirm what is running and what is in flight:
+Before acting, confirm what is running and what is in flight. **Prefer the projected
+tools** (`getVersion`, `listActivePrs`); curl is the no-MCP fallback only. Every step in
+this guide that has a tool is mapped in the **tool↔curl crosswalk (§10)** — reach for the
+tool first and drop to curl only when you are not driving this instance over MCP.
 
-```bash
+```text
 # Which code is live (app version, urban version, git sha/branch, uptime):
-curl -sS __BASE__/version | jq
+tool: getVersion            # GET /version
 
 # Every PR currently in flight (not converged/abandoned), with its engine
 # process key, status, round, and any open escalation:
+tool: listActivePrs         # GET /status
+```
+
+```bash
+# No-MCP fallback (agent without the projected tools):
+curl -sS __BASE__/version | jq
 curl -sS __BASE__/status | jq
 ```
 
-`/status` is your primary situational-awareness endpoint. Each entry carries:
+`listActivePrs` (the `/status` endpoint) is your primary situational-awareness surface.
+Each entry carries:
 `prKey` (`owner/repo#123`), `status`, `round`, `processKey` (the **engine process
 instance key** — the bridge to the engine REST API, §5), `openEscalation`,
 `activeWorker`/`leaseUntil` (is an agent actually working the round, or is the job
@@ -152,24 +162,34 @@ A loop escalates only when an agent returns `needs_input`/`blocked`, or a safety
 fires (round cap, a review that never arrives, a merge conflict, an unfixable CI
 failure). The parked process waits for a human answer.
 
-Find the open escalations, then answer them:
+Find the open escalations, then answer them. **Prefer the `listEscalations` tool**
+(the projected read tool that lists every open escalation with the `userTaskKey` and form
+you need to answer it); curl is the no-MCP fallback.
+
+```text
+# Every open escalation waiting for a human, across all four kinds — each with its
+# userTaskKey, prKey, kind (elementId), question/findings/task, and formVariables:
+tool: listEscalations
+```
 
 ```bash
-# Which in-flight PRs have an open escalation waiting for a human?
+# No-MCP fallback: read the open escalations off /status …
 curl -sS __BASE__/status | jq '.prs[] | select(.openEscalation != null)
   | { prKey, status, round, openEscalation }'
 ```
 
 The four decision-required escalation kinds — **PR review-loop**, **implementation
 (feature) task**, **plan-review**, and **trial-merge** — are now native BPMN
-`userTask`s bearing a linked `.form`, all answered the same way through the **task
-inbox** surface. There is no bespoke per-kind webhook or answer page any more.
+`userTask`s bearing a linked `.form`, all answered the same way through the
+`completeUserTask` tool (a human uses the same **task inbox** surface underneath).
+There is no bespoke per-kind webhook or answer page any more.
 
-**List the open escalation tasks.** Each task carries its context (e.g. `prKey` /
-`question` / `findings` / `task`) in its `variables`, and its kind in `elementId`:
+**List the open escalation tasks.** `listEscalations` returns each open task with its
+context (`prKey` / `question` / `findings` / `task`) and its kind in `elementId` /
+`kind`, so you do **not** need to reach for the raw Tasks inbox. No-MCP fallback only:
 
 ```bash
-# Every parked escalation, across all kinds:
+# No-MCP fallback — the un-projected engine task inbox (prefer `listEscalations`):
 curl -sS __BASE__/../../tasks/api/tasks | jq '.[] | { userTaskKey, elementId, variables }'
 
 # Filter to one kind (e.g. plan-review decisions) by elementId:
@@ -187,34 +207,49 @@ answer (assignee/candidate-group and age surface on each task once assignment la
 > node then runs against the unmet dependency. See §9.2 before clearing one.
 
 **Answer a task** by completing it with the typed variables its form expects — the
-completion resumes the parked process:
+completion resumes the parked process. **Prefer the `completeUserTask` tool** (or
+`agentCompleteEscalation` when you answer as an agent assignee, ADR 0046); the
+`curl … /tasks/api/complete` inbox call is the no-MCP fallback.
 
-```bash
+```text
 # PR review-loop (elementId `wait-answer`, pr-escalation form):
-curl -sS -X POST __BASE__/../../tasks/api/complete -H 'content-type: application/json' \
-  -d '{ "userTaskKey": "<key>", "variables": { "answer": "Cap retries at 5 and proceed." } }'
+tool: completeUserTask { "userTaskKey": "<key>",
+                         "variables": { "answer": "Cap retries at 5 and proceed." } }
 
 # Implementation (feature) task (elementId `feature-escalation`):
 #   { "resolution": "answer", "answer": "…" }  to resume, or  { "resolution": "abandon" }
-curl -sS -X POST __BASE__/../../tasks/api/complete -H 'content-type: application/json' \
-  -d '{ "userTaskKey": "<key>", "variables": { "resolution": "answer", "answer": "Use v2." } }'
+tool: completeUserTask { "userTaskKey": "<key>",
+                         "variables": { "resolution": "answer", "answer": "Use v2." } }
 
 # Plan-review (elementId `plan-review-decision`):
 #   { "directive": "revise", "notes": "…" }  (fresh review budget)  or  { "directive": "proceed" }
-curl -sS -X POST __BASE__/../../tasks/api/complete -H 'content-type: application/json' \
-  -d '{ "userTaskKey": "<key>", "variables": { "directive": "revise", "notes": "Make issue-7 the seam." } }'
+tool: completeUserTask { "userTaskKey": "<key>",
+                         "variables": { "directive": "revise", "notes": "Make issue-7 the seam." } }
 
 # Trial-merge (elementId `trial-merge-decision`):
 #   { "action": "proceed" | "rebase" | "abandon", "notes"?: "…" }
+tool: completeUserTask { "userTaskKey": "<key>",
+                         "variables": { "action": "rebase", "notes": "Re-run after the fix." } }
+```
+
+```bash
+# No-MCP fallback — the un-projected engine task-inbox complete door (prefer the tool):
 curl -sS -X POST __BASE__/../../tasks/api/complete -H 'content-type: application/json' \
-  -d '{ "userTaskKey": "<key>", "variables": { "action": "rebase", "notes": "Re-run after the fix." } }'
+  -d '{ "userTaskKey": "<key>", "variables": { "answer": "Cap retries at 5 and proceed." } }'
 ```
 
 **Answer a PR escalation** (both the review-loop `wait-answer` and the merge-loop
 `wait-merge-answer` — both are now native user tasks answered the same way, #256).
-Use the PR key's parked user task and submit the `pr-escalation` form's `{ answer }`:
+Use the PR key's parked user task and submit the `pr-escalation` form's `{ answer }`
+through the `completeUserTask` tool; curl is the no-MCP fallback:
+
+```text
+tool: completeUserTask { "userTaskKey": "<key>",
+                         "variables": { "answer": "Yes — cap the retries at 5 and proceed." } }
+```
 
 ```bash
+# No-MCP fallback:
 curl -sS -X POST __BASE__/actions/complete-user-task \
   -H 'content-type: application/json' \
   -d '{
@@ -223,9 +258,11 @@ curl -sS -X POST __BASE__/actions/complete-user-task \
       }'
 ```
 
-The `userTaskKey` comes from `GET /status` or the Tasks inbox. This is the ONE
-canonical answer door for every escalation kind; the merge loop no longer uses a
-durable `escalation-answered` message catch.
+The `userTaskKey` comes from `listEscalations` (or `GET /status`/the Tasks inbox). This
+is the ONE canonical answer door (`completeUserTask`) for every escalation kind — with
+`agentCompleteEscalation` the agent-assignee variant that records identity for
+attribution (ADR 0046); the merge loop no longer uses a durable `escalation-answered`
+message catch.
 
 If `NANO_PR_WEBHOOK_SECRET` is set on the deployment, add `-H "x-hook-secret: <secret>"`.
 
@@ -266,10 +303,33 @@ The app stores each PR/plan's engine **process instance key** in its `process_ke
 column and surfaces it as `processKey` in `/status`. That key is the join between the
 app's business view and the engine's execution view.
 
-**Find the instance for a PR:** take `processKey` from `/status`, then query the
-engine's Camunda-8 v2 REST API:
+**Find the instance for a PR:** take `processKey` from `listActivePrs` (`/status`), then
+query engine truth. **Prefer the framework `urban_debug_*` engine-debug tools** (owned by
+the nano-ide urban runtime — see the crosswalk in §10); the `curl __ENGINE__/…` engine
+REST calls are the no-MCP fallback:
+
+```text
+PK = <processKey from listActivePrs>
+
+# The instance itself (state, the BPMN process it is running, start time):
+tool: urban_debug_search_process_instances   { "filter": { "processInstanceKey": PK } }
+
+# Where is it parked? — active jobs on the instance (a CREATED senior:pr-review job
+# with a `worker` set means an agent has leased the round; none means it is queued):
+tool: urban_debug_search_jobs                 { "filter": { "processInstanceKey": PK, "state": "CREATED" } }
+
+# Its variables (the aggregate/job payload the engine holds):
+tool: urban_debug_search_variables           { "filter": { "processInstanceKey": PK } }
+
+# Is it dead-in-the-water on a technical fault? — active incidents:
+tool: urban_debug_search_incidents           { "filter": { "processInstanceKey": PK, "state": "ACTIVE" } }
+
+# Which BPMN element/wait-state is it sitting on?
+tool: urban_debug_search_element_instance_wait_states { "filter": { "processInstanceKey": PK } }
+```
 
 ```bash
+# No-MCP fallback — the raw engine Camunda-8 v2 REST API:
 PK=<processKey-from-status>
 
 # The instance itself (state, the BPMN process it is running, start time):
@@ -277,8 +337,7 @@ curl -sS -X POST __ENGINE__/process-instances/search \
   -H 'content-type: application/json' \
   -d "{ \"filter\": { \"processInstanceKey\": \"$PK\" } }" | jq
 
-# Where is it parked? — active jobs on the instance (a CREATED senior:pr-review job
-# with a `worker` set means an agent has leased the round; none means it is queued):
+# Where is it parked? — active jobs on the instance:
 curl -sS -X POST __ENGINE__/jobs/search \
   -H 'content-type: application/json' \
   -d "{ \"filter\": { \"processInstanceKey\": \"$PK\", \"state\": \"CREATED\" } }" | jq
@@ -294,15 +353,23 @@ curl -sS -X POST __ENGINE__/element-instances/search \
   -d "{ \"filter\": { \"processInstanceKey\": \"$PK\" } }" | jq
 ```
 
+> The `urban_debug_search_jobs`, `urban_debug_search_variables` and
+> `urban_debug_get_process_definition_xml` reads are owned by the sibling nano-ide urban
+> epic; where a deployment's framework has not yet projected them, use the curl fallback
+> for that row. The three always-present engine reads are
+> `urban_debug_search_process_instances`, `urban_debug_search_element_instance_wait_states`
+> and `urban_debug_search_incidents`.
+
 The app already mirrors an ACTIVE incident onto the PR row (`incident`/incident
 message), so a PR that shows an incident in the UI is parked on an engine fault —
-inspect it with `incidents/search` above. If the engine is not at the default, the
-deployment's engine base is `__ENGINE__` (set via `NANOBPMN_BASE_URL` or
-`CAMUNDA_REST_ADDRESS`).
+inspect it with `urban_debug_search_incidents` (or `incidents/search`) above. If the
+engine is not at the default, the deployment's engine base is `__ENGINE__` (set via
+`NANOBPMN_BASE_URL` or `CAMUNDA_REST_ADDRESS`).
 
 **Relate an instance back to a PR:** if you have a `processKey` but not the PR, match
-it against `/status` (`.prs[] | select(.processKey == "<PK>")`). A terminal PR is no
-longer in `/status`; its instance has already completed or been cancelled.
+it against `listActivePrs`/`/status` (`.prs[] | select(.processKey == "<PK>")`). A
+terminal PR is no longer in `/status`; its instance has already completed or been
+cancelled.
 
 ---
 
@@ -311,9 +378,15 @@ longer in `/status`; its instance has already completed or been cancelled.
 The behaviour is defined by durable BPMN processes and model-authored agent prompts —
 both live in the source repo, not in the job payload.
 
-- **Processes:** `resources/processes/*.bpmn` — `convergence-loop.bpmn` (review),
-  `merge-loop.bpmn` (merge/CI-fix/rebase), `plan-fanout.bpmn` (planning),
-  `retro.bpmn`. These are the source of truth for routing. To understand *why* an
+- **Processes:** to inspect the model an instance is **actually running**, prefer the
+  framework tool **`urban_debug_get_process_definition_xml`** (owned by the sibling
+  nano-ide urban epic — see §10), which returns the deployed BPMN XML for a process
+  definition; that is engine truth and cannot drift from what is live. The repo copies
+  `resources/processes/*.bpmn` — `convergence-loop.bpmn` (review), `merge-loop.bpmn`
+  (merge/CI-fix/rebase), `plan-fanout.bpmn` (planning), `retro.bpmn` — are the
+  **source of truth in git** for routing, read them from the checkout when you want the
+  authored form (or have no MCP). They can lag a running deployment, so confirm against
+  the deployed XML when *why did this instance route here* matters. To understand *why* an
   instance went where it did, read the gateway conditions (FEEL expressions on the
   sequence flows) for the element it is parked on (§5).
 - **Prompts (agent base instructions):** `resources/prompts/*.md` — `review-round.md`,
@@ -369,11 +442,20 @@ Work through this order:
    `NANO_PR_REVIEW_WAIT_TIMEOUT` (default `PT20M`); the poller also re-nudges the
    reviewer periodically. If the reviewer bot is not provisioned on the repo, no
    review will ever land — that is a repo-config problem, not an app bug.
-5. **Cancel + resubmit** as a last resort. Cancel the instance via the app (the UI's
-   per-row Cancel, `POST /app/actions/cancel { "processInstanceKey": "<PK>" }`), which
-   marks the PR `abandoned`, then re-submit the PR (§1) to start a fresh loop. Do not
-   cancel a raw engine instance out from under the app — go through the app so its
-   record state stays consistent.
+5. **Cancel + resubmit** as a last resort. Cancel through the **app-owned** door —
+   **prefer the `cancelInstance` tool** (`POST /actions/cancel { "processInstanceKey":
+   "<PK>" }`, the same record-consistent path as the UI's per-row Cancel), which cancels
+   the engine instance **and** marks the PR `abandoned` so it drops out of
+   `listActivePrs`. Then re-submit the PR (§1) to start a fresh loop. **Do not** cancel a
+   raw engine instance out from under the app with the engine-level
+   `urban_debug_cancel_instance` tool (or a direct engine REST cancel) — that cancels the
+   token but leaves the PR row inconsistent. Always go through `cancelInstance` /
+   `POST /actions/cancel` so the app's record state stays consistent. No-MCP fallback:
+
+   ```bash
+   curl -sS -X POST __BASE__/actions/cancel -H 'content-type: application/json' \
+     -d '{ "processInstanceKey": "<PK>" }'
+   ```
 
 ---
 
@@ -767,3 +849,46 @@ Semantics:
   `stage:"merged"` once its PR merges. So `wait[epic]` targeting a feature/epic **root issue**
   observes that thread's aggregate frontier and releases on `stage:"merged" && active:false` either
   way — see `getDeliveryGraphVocabulary` (the `epic` probe entry) for the structured contract.
+
+---
+
+## 10. Tool ↔ curl crosswalk (MCP-first, curl is the no-MCP fallback)
+
+When you drive this instance over MCP, **call the projected tool** — every recipe above
+leads with it. `curl __BASE__/…`/`curl __ENGINE__/…` is only the **no-MCP fallback** for an
+agent that has no tools (see the runbook, `docs/mcp-runbook.md` §2/§3, and [§5
+Fallback](mcp-runbook.md#5-fallback)). This table maps every guide action to its projected
+tool name and the exact curl door underneath.
+
+App-owned operations (projected from this app's `openapi.yaml`; the `__BASE__` control API):
+
+| Guide action | Projected tool | curl no-MCP fallback |
+|---|---|---|
+| Which code is live (§0) | `getVersion` | `curl __BASE__/version` |
+| Every PR in flight (§0/§5) | `listActivePrs` | `curl __BASE__/status` |
+| List open escalations (§3) | `listEscalations` | `curl __BASE__/status \| jq '.prs[]\|select(.openEscalation!=null)'` / `curl __BASE__/../../tasks/api/tasks` |
+| Answer an escalation (§3) | `completeUserTask` (agent-assignee: `agentCompleteEscalation`) | `curl -X POST __BASE__/actions/complete-user-task` |
+| Cancel an instance (record-consistent) (§7) | `cancelInstance` | `curl -X POST __BASE__/actions/cancel` |
+| Publish a BPMN message (§7) | `postMessage` | `curl -X POST __BASE__/actions/message` |
+| The operator guide itself | `getAgentInstructions` (full) / `getAgentGuide(section?)` (addressable) | `curl __BASE__/agent` / `curl __BASE__/agent/guide` |
+
+Framework engine-debug tools (owned by the nano-ide urban runtime, not this app; they front
+the engine's Camunda-8 v2 REST API at `__ENGINE__`). The first three are always projected;
+`urban_debug_search_jobs` / `urban_debug_search_variables` /
+`urban_debug_get_process_definition_xml` are owned by the sibling nano-ide urban epic — use
+them by name where the framework projects them, else drop to the curl door:
+
+| Guide action | Projected tool | curl no-MCP fallback |
+|---|---|---|
+| Search process instances (§5) | `urban_debug_search_process_instances` | `curl -X POST __ENGINE__/process-instances/search` |
+| Inspect element/wait states (§5) | `urban_debug_search_element_instance_wait_states` | `curl -X POST __ENGINE__/element-instances/search` |
+| Active incidents (§5) | `urban_debug_search_incidents` | `curl -X POST __ENGINE__/incidents/search` |
+| Jobs on an instance (§5) | `urban_debug_search_jobs` | `curl -X POST __ENGINE__/jobs/search` |
+| Instance variables (§5) | `urban_debug_search_variables` | `curl -X POST __ENGINE__/variables/search` |
+| Deployed BPMN model XML (§6) | `urban_debug_get_process_definition_xml` | read the source copy `resources/processes/*.bpmn` from the checkout |
+| Engine-level cancel — **avoid** (§7) | `urban_debug_cancel_instance` | *(use the app-owned `cancelInstance` instead — engine cancel leaves the PR row inconsistent)* |
+
+**Rule of thumb (agent-guide §5 fallback discipline):** if a row has a projected tool, use
+it; reach for its curl door only when you are genuinely not on MCP. The app-owned cancel door
+(`cancelInstance`) is always preferred over the engine-level `urban_debug_cancel_instance`,
+because only the app door transitions the PR/plan record to `abandoned`.
