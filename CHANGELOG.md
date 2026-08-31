@@ -1,3 +1,9 @@
+## [0.171.0](https://github.com/nanobpm/nano-workforce/compare/v0.170.1...v0.171.0) (2026-08-31)
+
+### Features
+
+* **operations:** app-owned POST /actions/cancel door (cancelInstance) ([#671](https://github.com/nanobpm/nano-workforce/issues/671)) ([835afce](https://github.com/nanobpm/nano-workforce/commit/835afcea6be62fc768979b792217ad5cf246d008)), closes [#605](https://github.com/nanobpm/nano-workforce/issues/605) [#667](https://github.com/nanobpm/nano-workforce/issues/667)
+
 ## [0.170.1](https://github.com/nanobpm/nano-workforce/compare/v0.170.0...v0.170.1) (2026-08-31)
 
 ### Documentation
