@@ -6,11 +6,13 @@
 // per cell instead of copy-pasting the inlined subProcess three ways (#464 "the duplication today").
 //
 // These are STRUCTURAL invariants (the cells exist, keep their engine-native task types, and wire
-// escalation through the shared `human-escalation` cell). The live converge seam on `feature.bpmn`
-// stays an INLINE `pr.converge-feature` serviceTask: the engine (and the urban-testkit WASM engine)
-// treats a callActivity as a pass-through that never runs the called process, so a callActivity
-// converge would never enroll the PR (see `e2e/feature-run.e2e.ts`). This guard pins the
-// decomposition so the shared cells can't silently drift back into per-caller copies.
+// escalation through the shared `human-escalation` cell) plus the live composition seam:
+// `feature.bpmn` composes its converge step via a `callActivity` to the `converge-cell` (with an
+// explicit `zeebe:ioMapping` carrying `ConvergeFeatureIn`), so the inlined `pr.converge-feature`
+// serviceTask no longer sits on the feature path. Native callActivity execution is provided by
+// urban-testkit 1.0.0 (#631) — the earlier "engine pass-through" was the testkit's callActivity
+// rewrite, removed in 1.0.0. This guard pins the decomposition so the shared cells can't silently
+// drift back into per-caller copies.
 import { test } from "node:test";
 import { assert } from "#test-assert";
 import { readFileSync } from "node:fs";
@@ -63,21 +65,37 @@ test("wait-gate is a readiness-probe cell; human-escalation parks on the shared 
   assert(/<zeebe:formDefinition\b[^>]*\bformId="feature-escalation"/.test(he), "human-escalation renders the feature-escalation form");
 });
 
-test("feature.bpmn composes its converge step as an inline pr.converge-feature serviceTask", () => {
-  // The live converge seam must stay INLINE, not a callActivity to converge-cell: the engine
-  // (and the urban-testkit WASM engine the e2e boots) treats a BPMN callActivity as an immediate
-  // pass-through — it never instantiates the called process, so the `pr.converge-feature` worker
-  // would never run and the feature run could never reach `converging` / enroll its PR into the
-  // convergence loop (proven by `e2e/feature-run.e2e.ts` "raise + converge"). The `converge-cell`
-  // process still exists as a standalone, composable cell for future composition seams, but
-  // feature.bpmn hands off converge directly so the behaviour is real.
+test("feature.bpmn composes its converge step via callActivity to converge-cell — no inlined converge serviceTask", () => {
+  // The live converge seam composes the shared `converge-cell` via a `callActivity` with an explicit
+  // `zeebe:ioMapping` (mapping `ConvergeFeatureIn`'s fields into the child's process scope), rather
+  // than an inlined `pr.converge-feature` serviceTask. Native callActivity execution is provided by
+  // urban-testkit 1.0.0 (#631): the child process really instantiates, the `pr.converge-feature`
+  // worker runs, and the feature run reaches `converging` / enrolls its PR (proven by
+  // `e2e/feature-run.e2e.ts` "raise + converge"). The earlier "engine pass-through" was the testkit's
+  // callActivity rewrite, removed in 1.0.0 — not an engine limitation.
   const xml = flat("feature");
   assert(
-    /<bpmn:serviceTask\b[^>]*\bid="converge"[\s\S]*?<zeebe:taskDefinition\b[^>]*\btype="pr.converge-feature"/.test(xml),
-    "feature.bpmn must compose converge as an inline pr.converge-feature serviceTask",
+    /<bpmn:callActivity\b[^>]*\bid="converge"[\s\S]*?<zeebe:calledElement\b[^>]*\bprocessId="converge-cell"/.test(xml),
+    "feature.bpmn must compose converge as a callActivity to converge-cell",
   );
   assert(
-    !/<bpmn:callActivity\b[^>]*\bid="converge"/.test(xml),
-    "feature.bpmn must not route its live converge step through a callActivity (a testkit/engine pass-through)",
+    !/<bpmn:serviceTask\b[^>]*\bid="converge"/.test(xml),
+    "feature.bpmn must not keep an inlined converge serviceTask once the cell is composed",
   );
+  // Pin the explicit `zeebe:ioMapping` itself: without it (or any of its inputs) the child cell
+  // receives no mapped scope and the engine-wasm `propagateAll*` incompatibility this seam avoids
+  // would silently return. Assert against the converge callActivity block alone so an ioMapping on
+  // any other element can't satisfy the guard.
+  const convergeBlock =
+    xml.match(/<bpmn:callActivity\b[^>]*\bid="converge"[\s\S]*?<\/bpmn:callActivity>/)?.[0] ?? "";
+  assert(
+    /<zeebe:ioMapping>[\s\S]*?<\/zeebe:ioMapping>/.test(convergeBlock),
+    "the converge callActivity must carry an explicit zeebe:ioMapping",
+  );
+  for (const field of ["featureKey", "prKey", "autoMerge"]) {
+    assert(
+      new RegExp(`<zeebe:input\\b[^>]*\\btarget="${field}"`).test(convergeBlock),
+      `the converge callActivity ioMapping must map ConvergeFeatureIn.${field} into the child scope`,
+    );
+  }
 });
