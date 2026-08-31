@@ -60,6 +60,17 @@ export const PR_WAIT_MERGE_ANSWER_ELEMENT = "wait-merge-answer";
  *  hire — a `yolo`-policy request never reaches this path (see `app/agentic/permission-bridge.ts`). */
 export const ACP_PERMISSION_ELEMENT = "acp-permission";
 
+/** The shared human-escalation cell's escalation user task (`human-escalation.bpmn`, ADR 0006 S4,
+ *  issue #603/#633). The fine-grained `implement-cell` delegates its escalation to the reusable
+ *  `human-escalation` cell via `callActivity`, so once a wave/slice runs as a child instance the
+ *  agent-stuck escalation parks on THIS element id (`escalation`) inside that child — NOT on the
+ *  parent's inline `feature-escalation`. It renders the SAME `feature-escalation` form and is the same
+ *  agent-answerable task escalation, so the inbox surfaces it under the one "Feature escalation" kind
+ *  and the poller correlates it back to the parent run via the engine's native parent/root instance
+ *  keys (Magikcraft/nano-bpm#977, the #464 option-B decision). Without this the child-instance
+ *  escalation is filtered out by the unknown-kind guard and silently vanishes from the Tasks inbox. */
+export const HUMAN_ESCALATION_ELEMENT = "escalation";
+
 /** One row per currently-open native user-task escalation, denormalised for the Tasks page. Keyed on
  *  the completable `user_task_key` (a task is open at most once). Present iff the engine reports the
  *  task open; `pollUserTasks` deletes it once the task is gone. */
@@ -92,6 +103,7 @@ export const userTasks = (data: DataLayer) => data.table<UserTaskRow>("user_task
  *  ignored by `buildUserTaskRow`, so an arbitrary internal user task can never leak into the inbox. */
 export const USER_TASK_KIND_LABELS: Readonly<Record<string, string>> = {
   [FEATURE_ESCALATION_ELEMENT]: "Feature escalation",
+  [HUMAN_ESCALATION_ELEMENT]: "Feature escalation",
   [FEATURE_BLOCKED_ELEMENT]: "Blocked feature run",
   [PLAN_REVIEW_ELEMENT]: "Plan review",
   [EMPTY_PLAN_ELEMENT]: "Empty plan",

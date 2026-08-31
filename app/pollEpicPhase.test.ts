@@ -157,3 +157,67 @@ test("pollEpicPhase skips a live epic that has no engine instance yet", async ()
     assertEquals(called, false);
   });
 });
+
+/** Stub `globalThis.fetch` so `pollEpicPhase`'s callActivity hierarchy walk (issue #633) reads its
+ *  descendant instances from `childrenByParent` (keyed on the queried `parentProcessInstanceKey`), and
+ *  404s any other path so a stray call is loud. Returns a restore fn. */
+function stubProcessInstanceSearch(childrenByParent: Record<string, string[]>): () => void {
+  const orig = globalThis.fetch;
+  // biome-ignore lint/suspicious/noExplicitAny: minimal fetch double for the raw-REST search surface
+  globalThis.fetch = (async (url: string | URL, init?: any) => {
+    const u = String(url);
+    if (!u.endsWith("/process-instances/search")) return new Response("not found", { status: 404 });
+    const body = JSON.parse(init?.body ?? "{}");
+    const parent: string = body?.filter?.parentProcessInstanceKey ?? "";
+    const items = (childrenByParent[parent] ?? []).map((k) => ({ processInstanceKey: k }));
+    return new Response(JSON.stringify({ items }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  }) as typeof fetch;
+  return () => {
+    globalThis.fetch = orig;
+  };
+}
+
+test("pollEpicPhase derives from an element INSIDE a callActivity CHILD cell via parent/root traversal (issue #633)", async () => {
+  // ADR 0006 S4 (#603/#633): once a wave/slice runs as a callActivity CHILD cell, the furthest-reached
+  // live token can sit INSIDE that child instance ("child-pi"), not on the parent plan-fanout spine
+  // ("pi-1"). The parent instance shows only a settled (COMPLETED) `record-plan`, so a parent-ONLY read
+  // would leave the phase at PLANNING; walking the hierarchy (parent → child) surfaces the child's ACTIVE
+  // `review-plan`, advancing the phase to Reviewing. The pure `deriveEpicPhaseLive` is unchanged — only
+  // its INPUT is widened to the whole instance hierarchy.
+  await withData(async (data) => {
+    await seedPlan(data, { epic_phase: EPIC_PHASE.PLANNING });
+    const engine = {
+      searchElementInstances: async ({ processInstanceKey }: { processInstanceKey: string }) =>
+        processInstanceKey === "child-pi"
+          ? [{ elementInstanceKey: "c1", processInstanceKey: "child-pi", elementId: "review-plan", state: "ACTIVE" }]
+          : [{ elementInstanceKey: "e1", processInstanceKey: "pi-1", elementId: "record-plan", state: "COMPLETED" }],
+    };
+    const restore = stubProcessInstanceSearch({ "pi-1": ["child-pi"], "child-pi": [] });
+    try {
+      await pollEpicPhase(data, engine as never, { restAddress: "http://engine.test/v2" });
+    } finally {
+      restore();
+    }
+    assertEquals((await plans(data).get("owner/repo#7"))?.epic_phase, EPIC_PHASE.REVIEWING);
+  });
+});
+
+test("pollEpicPhase without a raw-REST surface reads the parent instance ALONE (no traversal, pre-#633 behaviour)", async () => {
+  // The typed seam cannot enumerate children, so with no `engineRest` the walk degrades to the parent
+  // plan-fanout instance only — a child-cell token is invisible and the phase stays at PLANNING. This
+  // pins the two-arg (no-REST) call the unit path and degraded hosts use.
+  await withData(async (data) => {
+    await seedPlan(data, { epic_phase: EPIC_PHASE.PLANNING });
+    const engine = {
+      searchElementInstances: async ({ processInstanceKey }: { processInstanceKey: string }) =>
+        processInstanceKey === "child-pi"
+          ? [{ elementInstanceKey: "c1", processInstanceKey: "child-pi", elementId: "review-plan", state: "ACTIVE" }]
+          : [{ elementInstanceKey: "e1", processInstanceKey: "pi-1", elementId: "record-plan", state: "COMPLETED" }],
+    };
+    await pollEpicPhase(data, engine as never);
+    assertEquals((await plans(data).get("owner/repo#7"))?.epic_phase, EPIC_PHASE.PLANNING);
+  });
+});

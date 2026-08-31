@@ -88,6 +88,7 @@ import { clampNudgeMinutes, reviewWaitTimeout } from "./reviewWait.ts";
 import { trialMergeAudits } from "./trialMerge.ts";
 import {
   buildUserTaskRow,
+  HUMAN_ESCALATION_ELEMENT,
   latestFeatureEscalationQuestion,
   latestOpenEscalationQuestion,
   latestPlanReviewFindings,
@@ -2270,6 +2271,14 @@ interface UserTaskSearchItem {
   userTaskKey?: string | number;
   elementId?: string;
   processInstanceKey?: string | number;
+  /** The top-level ancestor process instance in this task's callActivity hierarchy — present for
+   *  hierarchies created on an engine carrying the read-model parent/root keys (Magikcraft/nano-bpm#977,
+   *  engine-wasm ≥ 0.8.4). Equals `processInstanceKey` for a top-level task; for a task parked inside a
+   *  callActivity CHILD instance (the shared `human-escalation`/`implement-cell` cells, ADR 0006 S4) it
+   *  is the PARENT run's instance, so the poller can correlate the child-instance task back to the
+   *  tracked feature/plan subject (issue #633). Absent (`null`) on a pre-#977 engine or a top-level
+   *  task. The wire may send a JSON number or string. */
+  rootProcessInstanceKey?: string | number | null;
   state?: string;
   /** The engine's resolution of the task's `.form` linkage (its `formId="X"`) to the deployed form's
    *  key, attached to the open task. Denormalised onto the row so the collapsed Tasks grid can render
@@ -2282,6 +2291,10 @@ interface OpenUserTask {
   userTaskKey: string;
   elementId: string;
   processInstanceKey: string;
+  /** The top-level ancestor instance key (`""` when the engine did not report one — a pre-#977 engine
+   *  or a top-level task), used to correlate a callActivity child-instance task back to its parent run
+   *  (issue #633). */
+  rootProcessInstanceKey: string;
   /** The engine-reported `formKey`, or "" when the search omitted it (the poller then falls back to the
    *  kind's static `.form` linkage). */
   formKey: string;
@@ -2326,7 +2339,7 @@ async function sweepOpenEscalationTasks(base: string, headers: Record<string, st
       const userTaskKey = it.userTaskKey == null ? "" : String(it.userTaskKey);
       if (!userTaskKey || seen.has(userTaskKey)) continue;
       seen.add(userTaskKey);
-      out.push({ userTaskKey, elementId, processInstanceKey: it.processInstanceKey == null ? "" : String(it.processInstanceKey), formKey: it.formKey == null ? "" : String(it.formKey) });
+      out.push({ userTaskKey, elementId, processInstanceKey: it.processInstanceKey == null ? "" : String(it.processInstanceKey), rootProcessInstanceKey: it.rootProcessInstanceKey == null ? "" : String(it.rootProcessInstanceKey), formKey: it.formKey == null ? "" : String(it.formKey) });
     }
     if (items.length < limit) break; // last page
     from += items.length;
@@ -2360,23 +2373,121 @@ async function sweepOpenEscalationTasks(base: string, headers: Record<string, st
  * completed task's row is deleted (answered here, via the task inbox, or out-of-band) and `showCount`
  * reflects live pending work. Best-effort + idempotent — per-instance failures are isolated so one bad
  * instance never stalls the pass. */
+/** The subset of a Camunda-8 `/v2/process-instances/search` result item this app reads to walk a
+ * callActivity instance hierarchy (issue #633). `processInstanceKey` is the instance; the engine's
+ * read-model parent/root keys (Magikcraft/nano-bpm#977) let a caller relate a child instance to its
+ * ancestors — this pass only needs `processInstanceKey` (it filters BY `parentProcessInstanceKey`, so
+ * every returned row is by construction a child of the queried parent). Keys are stringified
+ * defensively (the wire may send a JSON number or string). */
+interface ProcessInstanceSearchItem {
+  processInstanceKey?: string | number;
+}
+
+/** Enumerate every DESCENDANT process instance of `rootKey` in its callActivity hierarchy (issue #633)
+ * over the raw Camunda-8 `/v2/process-instances/search` surface, walking `parentProcessInstanceKey`
+ * breadth-first. Returns the descendant instance keys (NOT including `rootKey` itself). The engine
+ * exposes a `parentProcessInstanceKey` filter but no `rootProcessInstanceKey` one, so the hierarchy is
+ * walked level by level (parent → children → grandchildren): the fine-grained cells nest two deep
+ * (`plan-fanout` → `implement-cell` → `human-escalation`), and a deeper future graph is covered by the
+ * BFS. Bounded by a total-instance guard so a pathological/looping hierarchy can neither explode nor
+ * spin; best-effort transport — a failed page/level returns what was gathered so far. Deduped so a
+ * re-parented row can't be walked twice. */
+async function searchDescendantInstanceKeys(base: string, headers: Record<string, string>, rootKey: string): Promise<string[]> {
+  const out: string[] = [];
+  const seen = new Set<string>([rootKey]);
+  let frontier = [rootKey];
+  const limit = 100;
+  const MAX_INSTANCES = 1000; // hard cap so a pathological hierarchy can't unbounded-fan-out this pass
+  for (let depth = 0; depth < 64 && frontier.length > 0 && out.length < MAX_INSTANCES; depth++) {
+    const next: string[] = [];
+    for (const parent of frontier) {
+      let from = 0;
+      for (let guard = 0; guard < 1000; guard++) {
+        let items: ProcessInstanceSearchItem[];
+        try {
+          const res = await fetch(`${base}/process-instances/search`, {
+            method: "POST",
+            headers,
+            body: JSON.stringify({ filter: { parentProcessInstanceKey: parent }, page: { from, limit } }),
+          });
+          if (!res.ok) break; // engine unhappy → walk what we have, retry next pass
+          // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+          const body = (await res.json()) as { items?: ProcessInstanceSearchItem[] };
+          items = body.items ?? [];
+        } catch (err) {
+          console.error(`[poller] process-instance hierarchy walk (${parent}): ${err}`);
+          break;
+        }
+        for (const it of items) {
+          const key = it.processInstanceKey == null ? "" : String(it.processInstanceKey);
+          if (!key || seen.has(key)) continue;
+          seen.add(key);
+          out.push(key);
+          next.push(key);
+          if (out.length >= MAX_INSTANCES) break;
+        }
+        if (items.length < limit || out.length >= MAX_INSTANCES) break; // last page / capped
+        from += items.length;
+      }
+    }
+    frontier = next;
+  }
+  return out;
+}
+
+/** Gather the element instances of an epic's plan-fanout instance AND every callActivity DESCENDANT of
+ * it (issue #633) into ONE flat list the canonical `deriveEpicPhaseLive` reads — so once a wave/slice
+ * runs as a child cell instance (ADR 0006 S4) the "furthest-reached live element" derivation still sees
+ * the token position INSIDE the child, not just the parent spine. Extends the derivation's INPUT via the
+ * engine's native parent/root traversal rather than adding a second phase deriver (derivation over
+ * duplication). Without the raw-REST surface (`rest` null — unit tests / a degraded no-REST host) it
+ * degrades to the parent instance alone (the pre-composition behaviour), since the typed seam cannot
+ * enumerate children. */
+async function gatherHierarchyElementInstances(
+  engine: Pick<EngineClient, "searchElementInstances">,
+  rest: { base: string; headers: Record<string, string> } | null,
+  rootKey: string,
+): Promise<Awaited<ReturnType<EngineClient["searchElementInstances"]>>> {
+  const instanceKeys = [rootKey];
+  if (rest) {
+    const descendants = await searchDescendantInstanceKeys(rest.base, rest.headers, rootKey);
+    instanceKeys.push(...descendants);
+  }
+  const all: Awaited<ReturnType<EngineClient["searchElementInstances"]>> = [];
+  for (const key of instanceKeys) {
+    all.push(...(await engine.searchElementInstances({ processInstanceKey: key })));
+  }
+  return all;
+}
+
 /** Poll pass (S8, #542 / ADR 0006 §4b): reconcile each LIVE epic's `plans.epic_phase` from the engine
  * element-instance model — the PURE read-model derivation that RETIRES the write-time stamp the spine
  * workers used to write. For each plan still live (`EPIC_LIVE_STATUSES`) with a running instance, read
- * its element instances (`searchElementInstances`, nano-ide#473) and project the furthest-reached
- * active spine element onto its domain phase (`deriveEpicPhaseLive`, app/epicPhase.ts — the SAME
- * `ELEMENT_PHASE` structural map the stamp used). The wave label rides the `plan_wave_progress` rollup
- * VIEW (the single wave-frontier source, 060/082), so the Implementing band reads `wave n/t` without a
- * second wave derivation. Writes only on a real change (a steady-state pass is a no-op) and leaves the
- * last phase untouched when nothing active marks one (`null`), so a plan parked on non-spine plumbing
- * never clobbers to blank. The terminal `Dispatched` phase is a COMPLETION marker (no ACTIVE token to
- * read once the instance ends), so a second pass derives it from the durable terminal status
+ * its element instances (`searchElementInstances`, nano-ide#473) — the plan-fanout instance AND, once
+ * the raw-REST surface is available, every callActivity CHILD cell instance (ADR 0006 S4, #603/#633),
+ * gathered via the engine's native parent/root traversal (`gatherHierarchyElementInstances`) so the
+ * furthest-reached element INSIDE a child cell is seen — and project the furthest-reached active spine
+ * element onto its domain phase (`deriveEpicPhaseLive`, app/epicPhase.ts — the SAME `ELEMENT_PHASE`
+ * structural map the stamp used). The wave label rides the `plan_wave_progress` rollup VIEW (the single
+ * wave-frontier source, 060/082), so the Implementing band reads `wave n/t` without a second wave
+ * derivation. Writes only on a real change (a steady-state pass is a no-op) and leaves the last phase
+ * untouched when nothing active marks one (`null`), so a plan parked on non-spine plumbing never
+ * clobbers to blank. The terminal `Dispatched` phase is a COMPLETION marker (no ACTIVE token to read
+ * once the instance ends), so a second pass derives it from the durable terminal status
  * (`deriveTerminalEpicPhase` over `done` epics) rather than the fleeting ACTIVE `record-results` token
  * a coarse poll would miss. Best-effort + idempotent — a per-plan failure is isolated. */
 export async function pollEpicPhase(
   data: DataLayer,
   engine: Pick<EngineClient, "searchElementInstances">,
+  engineRest?: { restAddress: string; token?: string },
 ) {
+  const rest = engineRest
+    ? (() => {
+        const headers: Record<string, string> = { "content-type": "application/json" };
+        if (engineRest.token) headers.authorization = `Bearer ${engineRest.token}`;
+        return { base: engineRest.restAddress.replace(/\/+$/, ""), headers };
+      })()
+    : null;
   const waveByPlan = new Map<string, { current: number | null; total: number | null }>();
   for (const w of await data
     .table<{ plan_key: string; wave_count: number | null; current_wave: number | null }>(
@@ -2396,7 +2507,7 @@ export async function pollEpicPhase(
     for (const plan of await plans(data).find({ status })) {
       if (!plan.process_key) continue;
       try {
-        const elements = await engine.searchElementInstances({ processInstanceKey: plan.process_key });
+        const elements = await gatherHierarchyElementInstances(engine, rest, plan.process_key);
         const phase = deriveEpicPhaseLive(elements, waveByPlan.get(plan.plan_key) ?? undefined);
         if (phase !== null && phase !== plan.epic_phase) {
           await plans(data).update(plan.plan_key, { epic_phase: phase, updated_at: now() });
@@ -2535,6 +2646,15 @@ export async function pollUserTasks(
   engineRest?: { restAddress: string; token?: string },
 ) {
   const at = now();
+  // Raw-REST context (present in production; the reduced-capability seam host passes no `engineRest`) —
+  // used by the engine-first sweep AND the escalation self-heal's callActivity-hierarchy confirmation.
+  const rest = engineRest
+    ? (() => {
+        const headers: Record<string, string> = { "content-type": "application/json" };
+        if (engineRest.token) headers.authorization = `Bearer ${engineRest.token}`;
+        return { base: engineRest.restAddress.replace(/\/+$/, ""), headers };
+      })()
+    : null;
 
   // ── Enrichment: subject descriptors keyed by the ENGINE process-instance the task parks on ────────
   // Built from EVERY subject row (regardless of status), so a task on a subject whose row already went
@@ -2578,6 +2698,7 @@ export async function pollUserTasks(
   // when tracking is lost, so the fallback row still buckets correctly on the page.
   const DEFAULT_SUBJECT_TYPE: Readonly<Record<string, "feature" | "plan" | "pr">> = {
     [FEATURE_ESCALATION_ELEMENT]: "feature",
+    [HUMAN_ESCALATION_ELEMENT]: "feature",
     [FEATURE_BLOCKED_ELEMENT]: "feature",
     [PLAN_REVIEW_ELEMENT]: "plan",
     [TRIAL_MERGE_ELEMENT]: "plan",
@@ -2590,9 +2711,17 @@ export async function pollUserTasks(
   // element + the instance it parks on) into its desired-row context, enriching from its subject row
   // when the instance is tracked or a per-kind fallback when it is orphaned. Returns `null` for a
   // non-escalation element (the leak guard) so an arbitrary internal user task can never reach the inbox.
-  const contextFor = async (elementId: string, userTaskKey: string, processInstanceKey: string, formKey: string): Promise<UserTaskContext | null> => {
+  //
+  // Parent/root correlation (#603/#633): a task parked inside a callActivity CHILD instance (the shared
+  // `human-escalation`/`implement-cell` cells, ADR 0006 S4) has a `processInstanceKey` no subject row
+  // tracks — its owning feature/plan run is the PARENT run, tracked under the `rootProcessInstanceKey`
+  // the engine reports (Magikcraft/nano-bpm#977). So the subject resolves off the DIRECT instance first
+  // and falls back to the ROOT (top-level ancestor) instance, correlating the child-instance escalation
+  // back to the parent run rather than stranding it as an orphan.
+  const contextFor = async (elementId: string, userTaskKey: string, processInstanceKey: string, rootProcessInstanceKey: string, formKey: string): Promise<UserTaskContext | null> => {
     if (userTaskKindLabel(elementId) === undefined) return null;
-    const subj = subjectByInstance.get(processInstanceKey);
+    const root = rootProcessInstanceKey.trim();
+    const subj = subjectByInstance.get(processInstanceKey) ?? (root && root !== processInstanceKey ? subjectByInstance.get(root) : undefined);
     // Orphaned-task fallback: the kind implies its aggregate even when no subject row references the
     // instance. A delivery-human node's id is inlined (`delivery-human-task__<node>`), so its bucket is
     // derived from the predicate rather than the static per-element table.
@@ -2606,9 +2735,13 @@ export async function pollUserTasks(
     let question: string | null = null;
     switch (elementId) {
       case FEATURE_ESCALATION_ELEMENT:
+      case HUMAN_ESCALATION_ELEMENT:
         // The escalate arm writes the synthesised question to `feature_escalations` keyed by the subject
         // (a standalone slice's `feature_key`, or the epic's `plan_key` for a plan-embedded slice, which
         // has no standalone `feature_runs` row) — the same key `subjectKey` resolves to for either subject.
+        // The shared `human-escalation` cell (`escalation`) is the same feature-escalation task relocated
+        // into a callActivity child, so it reads the SAME `feature_escalations` log via the correlated
+        // (parent/root) subject.
         question = latestFeatureEscalationQuestion(await featureEscalations(data).find({ feature_key: subjectKey }));
         break;
       case FEATURE_BLOCKED_ELEMENT:
@@ -2634,25 +2767,25 @@ export async function pollUserTasks(
   // Desired set, deduped by completable key (a task is open at most once; guard a page overlap / a
   // subject seen under two statuses mid-pass).
   const desiredByKey = new Map<string, UserTaskRow>();
-  const project = async (elementId: string | undefined, userTaskKey: string, processInstanceKey: string, formKey: string) => {
+  const project = async (elementId: string | undefined, userTaskKey: string, processInstanceKey: string, rootProcessInstanceKey: string, formKey: string) => {
     if (!elementId) return;
     const rowKey = userTaskKey.trim();
     if (!rowKey || desiredByKey.has(rowKey)) return;
-    const ctx = await contextFor(elementId, userTaskKey, processInstanceKey, formKey);
+    const ctx = await contextFor(elementId, userTaskKey, processInstanceKey, rootProcessInstanceKey, formKey);
     if (!ctx) return;
     const row = buildUserTaskRow(ctx, at);
     if (row) desiredByKey.set(rowKey, row);
   };
 
-  if (engineRest) {
-    const base = engineRest.restAddress.replace(/\/+$/, "");
-    const headers: Record<string, string> = { "content-type": "application/json" };
-    if (engineRest.token) headers.authorization = `Bearer ${engineRest.token}`;
-    for (const t of await sweepOpenEscalationTasks(base, headers)) {
-      await project(t.elementId, t.userTaskKey, t.processInstanceKey, t.formKey);
+  if (rest) {
+    for (const t of await sweepOpenEscalationTasks(rest.base, rest.headers)) {
+      await project(t.elementId, t.userTaskKey, t.processInstanceKey, t.rootProcessInstanceKey, t.formKey);
     }
   } else {
     // Reduced-capability fallback (no raw-REST surface): typed-seam per-active-subject scan, tracked-only.
+    // The typed `openUserTasks` seam carries no parent/root key, so a child-instance task cannot be
+    // correlated here — this path reaches a task only THROUGH the tracked subject whose OWN instance it
+    // parks on (root correlation is a no-op, passed as "").
     const seen = new Set<string>();
     const scanInstance = async (processKey: string | null | undefined) => {
       if (!processKey || seen.has(processKey)) return;
@@ -2664,7 +2797,7 @@ export async function pollUserTasks(
         console.error(`[poller] user tasks (${processKey}): ${err}`);
         return;
       }
-      for (const t of tasks) await project(t.elementId, t.userTaskKey, processKey, t.formKey ?? "");
+      for (const t of tasks) await project(t.elementId, t.userTaskKey, processKey, "", t.formKey ?? "");
     };
     for (const status of FEATURE_ACTIVE_STATUSES) for (const run of await featureRuns(data).find({ status })) await scanInstance(run.process_key);
     for (const status of PLAN_ACTIVE_STATUSES) for (const plan of await plans(data).find({ status })) await scanInstance(plan.process_key);
@@ -2702,32 +2835,62 @@ export async function pollUserTasks(
   // is never guessed at.
   //
   // Presence in THIS pass's `desired` set is itself POSITIVE evidence of parking (truncation only ever
-  // DROPS tasks, never invents one), so a run whose `feature-escalation` task was already swept is
-  // genuinely parked — skip its per-instance `openUserTasks` RPC entirely (an avoidable N+1 on every
-  // tick). Only a run NOT confirmed parked by the sweep falls through to the per-instance check below.
-  const sweptParkedEscalations = new Set(
-    desired.filter((r) => r.element_id === FEATURE_ESCALATION_ELEMENT && r.process_key).map((r) => r.process_key),
-  );
+  // DROPS tasks, never invents one), so a run whose escalation task was already swept is genuinely
+  // parked — skip its per-instance `openUserTasks` RPC entirely (an avoidable N+1 on every tick). Only a
+  // run NOT confirmed parked by the sweep falls through to the per-instance check below.
+  //
+  // A run's escalation may park on its OWN inline `feature-escalation` (same instance as `process_key`)
+  // OR — once its implement step runs as a callActivity child cell (ADR 0006 S4, #603/#633) — on the
+  // shared `human-escalation` cell's `escalation` element inside a CHILD instance, correlated back to
+  // the run via the parent/root key (so the desired row's `subject_key` is the run's `feature_key`, not
+  // the child instance). So the swept set is keyed by BOTH the task's own `process_key` AND its
+  // correlated `subject_key`, and a run counts as parked when either matches (`process_key` for the
+  // inline case, `feature_key` for the child-cell case).
+  const sweptParkedEscalations = new Set<string>();
+  for (const r of desired) {
+    if (r.element_id !== FEATURE_ESCALATION_ELEMENT && r.element_id !== HUMAN_ESCALATION_ELEMENT) continue;
+    if (r.subject_type !== "feature") continue;
+    if (r.process_key) sweptParkedEscalations.add(r.process_key);
+    if (r.subject_key) sweptParkedEscalations.add(r.subject_key);
+  }
   for (const run of await featureRuns(data).find({ status: "escalated" })) {
     if (!run.process_key) continue;
-    if (sweptParkedEscalations.has(run.process_key)) continue; // already seen parked this pass — no RPC, no heal
+    if (sweptParkedEscalations.has(run.process_key) || sweptParkedEscalations.has(run.feature_key)) continue; // already seen parked this pass — no RPC, no heal
     // A just-written escalation may not have its `feature-escalation` user task yet: the sole writer,
     // `record-feature-escalation`, stamps `updated_at` immediately BEFORE the engine creates the task.
     // Skip healing inside the grace window so this pass never races that transition and steals a fresh
     // escalation; a genuinely-stranded (old, or timestamp-less) row is past the window and still healed.
     const escalatedAt = Date.parse(run.updated_at ?? "");
     if (Number.isFinite(escalatedAt) && Date.now() - escalatedAt < FEATURE_ESCALATION_HEAL_GRACE_MS) continue;
-    let openTasks: { elementId?: string }[];
-    try {
-      openTasks = await engine.openUserTasks({ processInstanceKey: run.process_key });
-    } catch (err) {
-      // Negative evidence from a failed query is not proof the run is unparked — leave it for a later pass.
-      console.error(`[poller] escalated-run self-heal (${run.feature_key} @ ${run.process_key}): ${err}`);
-      continue;
+    // Confirm across the run's WHOLE callActivity hierarchy, not just its parent instance: a child-cell
+    // escalation (ADR 0006 S4, #603/#633) parks on the shared `human-escalation` cell's `escalation`
+    // element inside a DESCENDANT instance that the parent's `openUserTasks` never reports. Confirming
+    // the parent alone would read "no escalation open" and wrongly flip a genuinely-parked child-cell run
+    // back to `running` whenever THIS pass's sweep missed it (truncated/unavailable, so it is absent from
+    // `desired`). Include the callActivity descendants when the raw-REST surface is available; the
+    // reduced-capability seam (no `rest`) cannot walk the hierarchy, so it stays parent-only (child-cell
+    // correlation is a no-op on that path anyway). Any per-instance query error is negative evidence, not
+    // proof the run is unparked — skip the heal and leave the row for a later pass (parity with before).
+    const confirmInstances = [run.process_key];
+    if (rest) confirmInstances.push(...(await searchDescendantInstanceKeys(rest.base, rest.headers, run.process_key)));
+    let stillParked = false;
+    let queryErrored = false;
+    for (const instanceKey of confirmInstances) {
+      let openTasks: { elementId?: string }[];
+      try {
+        openTasks = await engine.openUserTasks({ processInstanceKey: instanceKey });
+      } catch (err) {
+        console.error(`[poller] escalated-run self-heal (${run.feature_key} @ ${instanceKey}): ${err}`);
+        queryErrored = true;
+        break;
+      }
+      if (openTasks.some((t) => t.elementId === FEATURE_ESCALATION_ELEMENT || t.elementId === HUMAN_ESCALATION_ELEMENT)) {
+        stillParked = true;
+        break;
+      }
     }
-    if (!openTasks.some((t) => t.elementId === FEATURE_ESCALATION_ELEMENT)) {
-      await featureRuns(data).update(run.feature_key, { status: "running", updated_at: at });
-    }
+    if (queryErrored || stillParked) continue;
+    await featureRuns(data).update(run.feature_key, { status: "running", updated_at: at });
   }
 }
 
@@ -2751,7 +2914,7 @@ export async function pollOnce(
   await pollFeatureDelivery(data);
   await pollLineage(data);
   await pollUserTasks(data, engine, engineRest);
-  await pollEpicPhase(data, engine);
+  await pollEpicPhase(data, engine, engineRest);
   await pollTasklessPlanTermination(data, engine);
   await pollDeliveryGraphPhase(data, engine);
   await pollDeliveryProposals(data);
