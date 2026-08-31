@@ -38,11 +38,14 @@ export default defineOperation("cancelInstance", async ({ req, body }, app) => {
     return { status: 503, body: { error: "no data source configured" } };
   }
 
+  // Require a STRING key. Engine instance keys are 64-bit and can exceed JS's safe-integer range,
+  // so a numeric JSON value would already have lost precision before it reached us — accepting it
+  // (and coercing it back to a string) would silently cancel the wrong instance and also contradicts
+  // the OpenAPI `string` contract. Reject a non-string with a 400 rather than coerce.
   const raw = body && typeof body === "object" ? body.processInstanceKey : undefined;
-  const processInstanceKey =
-    typeof raw === "string" ? raw.trim() : typeof raw === "number" ? String(raw) : "";
+  const processInstanceKey = typeof raw === "string" ? raw.trim() : "";
   if (!processInstanceKey) {
-    return { status: 400, body: { error: "processInstanceKey is required" } };
+    return { status: 400, body: { error: "processInstanceKey is required and must be a string" } };
   }
 
   const result = await cancelInstanceReconciling(

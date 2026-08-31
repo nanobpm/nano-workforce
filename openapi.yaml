@@ -2937,7 +2937,7 @@ components:
       properties:
         processInstanceKey:
           type: string
-          description: The engine process-instance key of the run to cancel (the `process_key` column surfaced by `listActivePrs`/the Convergence page). A number is accepted and coerced.
+          description: The engine process-instance key of the run to cancel (the `process_key` column surfaced by `listActivePrs`/the Convergence page). Must be a string — engine keys are 64-bit and a numeric value risks silent JS precision loss.
     CancelInstanceResult:
       type: object
       required:
@@ -3023,7 +3023,7 @@ paths:
               properties:
                 processInstanceKey:
                   type: string
-                  description: The engine process-instance key of the run to cancel (the `process_key` column surfaced by `listActivePrs`/the Convergence page). A number is accepted and coerced.
+                  description: The engine process-instance key of the run to cancel (the `process_key` column surfaced by `listActivePrs`/the Convergence page). Must be a string — engine keys are 64-bit and a numeric value risks silent JS precision loss.
               # END generated:mcp-body
       responses:
         "200":

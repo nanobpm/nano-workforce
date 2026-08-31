@@ -3,7 +3,7 @@
 // The delegate is a thin, record-consistent door over the SAME primitive the UI's per-row Cancel
 // uses (urban's `cancelInstanceReconciling`). These tests drive the REAL primitive through a fake
 // engine — no second source of truth for the cancel-then-reconcile dance — and pin the delegate's
-// own contract: body validation, key coercion, and the ok→200 / not-committed→502 mapping. The
+// own contract: body validation, string-key enforcement, and the ok→200 / not-committed→502 mapping. The
 // `abandoned` transition itself is DERIVED off the instance-state projection the primitive feeds
 // (ADR 0065), so terminating the instance through this door is exactly what makes the PR drop out of
 // `listActivePrs`; that derivation is the framework's, exercised via the shared primitive here.
@@ -74,12 +74,14 @@ test("an accepted cancel whose read model lags at ACTIVE is still trusted → 20
   assertEquals(res.body.ok, true);
 });
 
-test("a numeric processInstanceKey is coerced to a string", async () => {
+test("a numeric processInstanceKey is rejected → 400 and never touches the engine", async () => {
+  // Engine keys are 64-bit and can exceed JS's safe-integer range, so a numeric JSON value has
+  // already lost precision before we see it — the door requires a string (matching the OpenAPI
+  // contract) rather than coercing a possibly-corrupted number.
   const { app, cancelCalls } = makeApp({ readBackState: "TERMINATED" });
   const res = await call(app, { processInstanceKey: 2985 });
-  assertEquals(res.status, 200);
-  assertEquals(res.body.processInstanceKey, "2985");
-  assertEquals(cancelCalls, ["2985"]);
+  assertEquals(res.status, 400);
+  assertEquals(cancelCalls.length, 0, "a non-string key never reaches the engine");
 });
 
 test("an uncommitted cancel (engine throws, instance still ACTIVE) → 502 not-ok with the reason", async () => {
