@@ -6,7 +6,8 @@
 // `e2e/support/mcp-harness.ts` module. It PINS the client-visible contract the S0 defect broke:
 //
 //   • every projected tool schema is `$ref`-free with an explicit `type` (S0 / nano-ide#502);
-//   • an object argument arrives AS AN OBJECT, never coerced to a string (S0 / nano-ide#503);
+//   • an object argument arrives AS AN OBJECT — and a stringified one is faithfully PARSED, not
+//     rejected, now that ADR 0067 / nano-ide#503 landed upstream in @nanobpm/urban 0.87;
 //   • validation failures answer uniformly with `issues[{path,message}]`;
 //   • the reads parse; the mutating framework tools are gated; side-effecting calls leave NO live
 //     staged proposal behind (safe to run repeatedly).
@@ -192,9 +193,14 @@ describe("MCP surface e2e — the runtime-served /app/mcp handshake, per tool (S
     );
   });
 
-  // The falsifiable core (issue #607 acceptance): DELIBERATELY reintroducing either half of the S0
+  // The falsifiable core (issue #607 acceptance): DELIBERATELY reintroducing the SCHEMA half of the S0
   // defect makes the harness fail. These pin the detector's teeth independently of whether S0 has
-  // landed — so the guard cannot silently rot into a no-op.
+  // landed — so the guard cannot silently rot into a no-op. The object-body-stringification half
+  // (nano-ide#503) is now fixed UPSTREAM — @nanobpm/urban 0.87 lands ADR 0067 "faithful object-body
+  // transport" (`normalizeBodyArg`), so the door PARSES a stringified object body and forwards it
+  // faithfully instead of rejecting it. That retired the nwf-local reject mitigation (docs/mcp-runbook.md
+  // §4): the live door can no longer produce the S0 signature to exercise end-to-end, so that half is
+  // now covered by a live faithful-parse assertion plus a synthetic detector-teeth check below.
   describe("reintroducing the S0 defect fails the build", () => {
     test("a $ref in a tool schema is caught by the self-containment assertion", () => {
       const good = { type: "object", properties: { body: { type: "object", properties: { n: { type: "number" } } } } };
@@ -208,17 +214,42 @@ describe("MCP surface e2e — the runtime-served /app/mcp handshake, per tool (S
       assert.throws(() => assertSchemaSelfContained(typeless, "synthetic-typeless"), /type/, "a typeless schema must throw");
     });
 
-    test("a stringified object body is rejected by the door and caught by assertObjectBodyAccepted", async () => {
-      // Simulate the S0 client coercion: send the body as a JSON STRING instead of an object.
-      const res = await h.callTool("compileDeliveryGraph", { body: JSON.stringify(MINIMAL_VALID_GRAPH) });
-      assert.ok(res.isError, "a stringified object body must be rejected by the door");
+    test("a stringified object body is faithfully parsed by the door (ADR 0067 / nano-ide#503)", async () => {
+      // Simulate the old S0 client coercion: send the body as a JSON STRING instead of an object.
+      // @nanobpm/urban 0.87's faithful object-body transport (ADR 0067 `normalizeBodyArg`) now PARSES
+      // it and forwards it faithfully — no longer the "expected object, got string" rejection the
+      // nwf-local S0 mitigation used to raise. Drive the PURE previewDeliveryGraph door so the
+      // parsed-and-compiled graph stages nothing.
+      const res = await h.callTool("previewDeliveryGraph", {
+        body: JSON.stringify({ graphJson: JSON.stringify(MINIMAL_VALID_GRAPH) }),
+      });
+      assert.ok(!res.isError, `the door must faithfully parse a stringified object body: ${res.text}`);
       assert.ok(
-        res.text.includes(STRINGIFIED_BODY_MESSAGE),
-        `the door must report "${STRINGIFIED_BODY_MESSAGE}": ${res.text}`,
+        !res.text.includes(STRINGIFIED_BODY_MESSAGE),
+        `faithful transport must not reject with "${STRINGIFIED_BODY_MESSAGE}": ${res.text}`,
       );
-      // The harness's guard must recognize that signature as a failure.
+      assert.doesNotThrow(
+        () => assertObjectBodyAccepted(res, "previewDeliveryGraph"),
+        "a faithfully parsed object body must pass assertObjectBodyAccepted",
+      );
+      const json = res.json as { ok?: boolean; staged?: boolean } | undefined;
+      assert.equal(json?.ok, true, `previewDeliveryGraph must compile the parsed graph: ${res.text}`);
+      assert.equal(json?.staged, false, "previewDeliveryGraph is PURE — it must never stage");
+    });
+
+    test("assertObjectBodyAccepted still flags an S0 stringified-body signature (detector teeth)", () => {
+      // The live door can no longer produce the S0 signature (fixed upstream, ADR 0067), so pin the
+      // detector's teeth SYNTHETICALLY — mirroring the $ref/typeless guards above — so the helper
+      // cannot rot into a no-op if the signature ever re-surfaces from another surface.
+      const s0Result = {
+        isError: true,
+        text: `validation failed: body: ${STRINGIFIED_BODY_MESSAGE}`,
+        json: undefined,
+        httpStatus: 422,
+        raw: undefined,
+      };
       assert.throws(
-        () => assertObjectBodyAccepted(res, "compileDeliveryGraph"),
+        () => assertObjectBodyAccepted(s0Result, "synthetic-stringified"),
         /stringified/,
         "assertObjectBodyAccepted must flag a stringified-body result",
       );

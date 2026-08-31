@@ -61,12 +61,12 @@
   },
   "dependencies": {
     "@nanobpm/agentic": "^0.4.0",
-    "@nanobpm/urban": "^0.86.0",
+    "@nanobpm/urban": "^0.87.0",
     "bpmn-auto-layout": "^2.0.0-alpha.2"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.11",
-    "@nanobpm/urban-testkit": "^0.14.0",
+    "@nanobpm/urban-testkit": "^1.0.0",
     "@nanobpm/workflow": "^0.14.0",
     "@semantic-release/changelog": "^7.0.0",
     "@semantic-release/git": "^11.0.0",
