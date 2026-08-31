@@ -1,3 +1,9 @@
+## [0.168.0](https://github.com/nanobpm/nano-workforce/compare/v0.167.4...v0.168.0) (2026-08-31)
+
+### Features
+
+* correlate callActivity child-cell escalations & epic phase via parent/root keys ([#633](https://github.com/nanobpm/nano-workforce/issues/633)) ([#657](https://github.com/nanobpm/nano-workforce/issues/657)) ([22b8674](https://github.com/nanobpm/nano-workforce/commit/22b86746548627921a1bc049b7999eeaa8fb5104)), closes [Magikcraft/nano-bpm#977](https://github.com/Magikcraft/nano-bpm/issues/977) [#464](https://github.com/nanobpm/nano-workforce/issues/464) [#591](https://github.com/nanobpm/nano-workforce/issues/591)
+
 ## [0.167.4](https://github.com/nanobpm/nano-workforce/compare/v0.167.3...v0.167.4) (2026-08-31)
 
 ### Build System
