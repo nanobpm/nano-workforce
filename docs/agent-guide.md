@@ -879,7 +879,7 @@ until it does, only the curl door in the third column exists on the deployment:
 |---|---|---|
 | Which code is live (§0) | `getVersion` | `curl __BASE__/version` |
 | Every PR in flight (§0/§5) | `listActivePrs` | `curl __BASE__/status` |
-| List open escalations (§3) | `listEscalations` *(projected by sibling #666; curl door until then)* | `curl __BASE__/../../tasks/api/tasks`, or filter `/status` with the jq recipe just below this table |
+| List open escalations (§3) | `listEscalations` *(projected by sibling #666; curl door until then)* | `curl __BASE__/../../tasks/api/tasks` (the answerable list — carries each `userTaskKey`); `/status` filtered with the jq recipe just below this table is only a quick *indicator* (it surfaces `openEscalation` as a question string, **no `userTaskKey`**, so you can't answer from it) |
 | Answer an escalation (§3) | `completeUserTask` (agent-assignee: `agentCompleteEscalation`) | `curl -X POST __BASE__/actions/complete-user-task` |
 | Cancel an instance (record-consistent) (§7) | `cancelInstance` *(projected by sibling #667; curl door until then)* | `curl -X POST __BASE__/../actions/cancel` *(the `/app/actions/cancel` door, outside `__BASE__`)* |
 | Publish a BPMN message (§7) | `postMessage` | `curl -X POST __BASE__/actions/message` |
@@ -889,10 +889,15 @@ The `listEscalations` no-MCP fallback that filters `/status` with `jq` lives her
 table cell above: a literal `|` can't be written in a GFM table cell without escaping it as `\|`,
 and this guide is served **raw** (byte-for-byte, `__BASE__`/`__ENGINE__` aside) to no-MCP agents, so
 the escaped form would be copied verbatim and the shell would treat `\|` as a literal argument
-rather than a pipe. Copy it from here:
+rather than a pipe. It's only a **quick indicator** — `/status` surfaces `openEscalation` as a
+question string with **no `userTaskKey`**, so to actually *answer* one you still need the tasks
+inbox (`curl __BASE__/../../tasks/api/tasks`) or the `listEscalations` tool for its `userTaskKey`
+(§3). It selects the same `{ prKey, status, round, openEscalation }` fields as the §3 fallback for
+consistency. Copy it from here:
 
 ```sh
-curl __BASE__/status | jq '.prs[] | select(.openEscalation != null)'
+curl __BASE__/status | jq '.prs[] | select(.openEscalation != null)
+  | { prKey, status, round, openEscalation }'
 ```
 
 
