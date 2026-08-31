@@ -38,7 +38,9 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
   // Re-derive ground truth exactly as the poller does (service.ts block 2). Load the repo's merge
   // protocol so the protocol-aware backstop (#392) gates a red DECLARED-required check even when
   // GitHub reports UNSTABLE. Any transport hiccup is treated as "still waiting" — never a spurious
-  // ready/conflict verdict — so a bad read re-arms (bounded by mergeStallMax) rather than misrouting.
+  // ready/conflict verdict — so a bad read is surfaced as `waiting`, which `gw-mergeable` routes to
+  // its not-landable default (human escalation), erring toward a human rather than misrouting the
+  // token to a wrong remediation arm.
   const st = await fetchPrState(repo, prNumber, token).catch(() => null);
   if (st === null) {
     return { mergeState: "waiting", failingChecks: 0, failingChecksList: "" };
