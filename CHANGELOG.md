@@ -1,3 +1,10 @@
+## [0.167.1](https://github.com/nanobpm/nano-workforce/compare/v0.167.0...v0.167.1) (2026-08-31)
+
+### Bug Fixes
+
+* **delivery-graphs:** honest Preview & Reuse toasts (drop optimistic ✓, ack-or-timeout, bump @nanobpm/urban) ([#645](https://github.com/nanobpm/nano-workforce/issues/645)) ([#650](https://github.com/nanobpm/nano-workforce/issues/650)) ([b9cd357](https://github.com/nanobpm/nano-workforce/commit/b9cd357335fc555224bb35c5043b5d5df9cc273d)), closes [#518](https://github.com/nanobpm/nano-workforce/issues/518) [#518](https://github.com/nanobpm/nano-workforce/issues/518)
+* **feature:** reset status to running on answer re-entry to implement-task ([#642](https://github.com/nanobpm/nano-workforce/issues/642)) ([#647](https://github.com/nanobpm/nano-workforce/issues/647)) ([fd636ba](https://github.com/nanobpm/nano-workforce/commit/fd636ba482562269ab64a242c5f29d5c4b1e2020)), closes [#632](https://github.com/nanobpm/nano-workforce/issues/632)
+
 ## [0.167.0](https://github.com/nanobpm/nano-workforce/compare/v0.166.0...v0.167.0) (2026-08-31)
 
 ### Features
