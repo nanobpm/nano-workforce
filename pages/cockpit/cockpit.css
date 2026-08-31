@@ -305,3 +305,121 @@
 .cockpit-terminal[data-terminal-mode="live"] .cockpit-panel-title {
   color: var(--cockpit-green);
 }
+
+/* ── Rendered transcript (#660): the derived message turns + tool/diff/permission cards the Worker ──
+   terminal shows for both a live drill and a past-session replay, in place of a raw nwfTranscriptEvent
+   dump. Mounted into `.cockpit-terminal-host` by renderDerivedTranscript(). */
+
+.cockpit-transcript-derived {
+  display: grid;
+  gap: 12px;
+  padding: 8px;
+  font: 12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  max-height: 60vh;
+  overflow: auto;
+}
+
+.cockpit-transcript-empty {
+  color: var(--cockpit-muted);
+  font-style: italic;
+  padding: 8px;
+}
+
+.cockpit-transcript-turn {
+  display: grid;
+  gap: 8px;
+  border-left: 2px solid var(--cockpit-edge);
+  padding-left: 10px;
+}
+
+.cockpit-transcript-turn-title {
+  font-size: 11px;
+  margin: 0;
+  color: var(--cockpit-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.cockpit-transcript-message {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: rgba(34, 48, 65, 0.35);
+}
+
+.cockpit-transcript-message[data-role="user"] { border-left: 3px solid #58a6ff; }
+.cockpit-transcript-message[data-role="assistant"] { border-left: 3px solid var(--cockpit-green); }
+.cockpit-transcript-message[data-role="system"],
+.cockpit-transcript-message[data-role="tool"] { border-left: 3px solid var(--cockpit-muted); color: var(--cockpit-muted); }
+
+.cockpit-transcript-tool {
+  border: 1px solid var(--cockpit-edge);
+  border-radius: 6px;
+  padding: 8px;
+  background: rgba(19, 26, 34, 0.6);
+}
+
+.cockpit-transcript-tool-name {
+  font-weight: 600;
+  color: #b392f0;
+}
+
+.cockpit-transcript-tool[data-status="error"] .cockpit-transcript-tool-name { color: var(--cockpit-red); }
+.cockpit-transcript-tool[data-status="ok"] .cockpit-transcript-tool-name::after { content: " ✓"; color: var(--cockpit-green); }
+
+.cockpit-transcript-tool-args,
+.cockpit-transcript-tool-result,
+.cockpit-transcript-diff {
+  margin: 6px 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: #05080b;
+  border-radius: 4px;
+  padding: 6px 8px;
+}
+
+.cockpit-transcript-diff-line[data-diff-line="add"] { color: var(--cockpit-green); }
+.cockpit-transcript-diff-line[data-diff-line="del"] { color: var(--cockpit-red); }
+.cockpit-transcript-diff-line[data-diff-line="ctx"] { color: var(--cockpit-muted); }
+
+.cockpit-transcript-permission {
+  border: 1px solid var(--cockpit-amber);
+  border-radius: 6px;
+  padding: 8px;
+  background: rgba(210, 153, 34, 0.08);
+}
+
+.cockpit-transcript-permission-title { font-weight: 600; }
+.cockpit-transcript-permission-reason,
+.cockpit-transcript-permission-note { color: var(--cockpit-muted); font-size: 12px; }
+
+.cockpit-transcript-permission[data-status="allowed"] { border-color: var(--cockpit-green); }
+.cockpit-transcript-permission[data-status="denied"] { border-color: var(--cockpit-red); }
+
+.cockpit-transcript-permission-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.cockpit-transcript-permission-option {
+  cursor: pointer;
+  font: inherit;
+  color: var(--cockpit-text);
+  background: var(--cockpit-panel);
+  border: 1px solid var(--cockpit-edge);
+  border-radius: 6px;
+  padding: 4px 10px;
+}
+
+.cockpit-transcript-permission-option[data-allowed="true"]:hover { border-color: var(--cockpit-green); }
+.cockpit-transcript-permission-option[data-allowed="false"]:hover { border-color: var(--cockpit-red); }
+
+.cockpit-transcript-raw {
+  color: var(--cockpit-muted);
+  font-size: 11px;
+  border-top: 1px solid var(--cockpit-edge);
+  padding-top: 6px;
+}

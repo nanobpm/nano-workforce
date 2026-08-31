@@ -51,6 +51,8 @@
     "sync:nav:check": "node --experimental-strip-types scripts/sync-nav.ts --check",
     "gen:mcp-bodies": "node --experimental-strip-types scripts/inline-mcp-bodies.ts",
     "check:mcp-bodies": "node --experimental-strip-types scripts/inline-mcp-bodies.ts --check",
+    "gen:cockpit-browser": "node --experimental-strip-types scripts/build-cockpit-browser.ts",
+    "check:cockpit-browser": "node --experimental-strip-types scripts/build-cockpit-browser.ts --check",
     "dev": "urban dev",
     "pretest": "urban gen",
     "test": "node --experimental-strip-types --test",
