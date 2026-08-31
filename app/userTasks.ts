@@ -22,6 +22,7 @@ import { CONFORMANCE_ESCALATION_ELEMENT } from "./conformance.ts";
 import { DELIVERY_HUMAN_ELEMENT, isDeliveryHumanElement } from "./deliveryHuman.ts";
 import { FEATURE_BLOCKED_ELEMENT, FEATURE_ESCALATION_ELEMENT, type FeatureEscalationRow } from "./feature.ts";
 import type { PlanReview } from "./plan.ts";
+import { parsePr } from "./prParse.ts";
 import type { TrialMergeAuditRow } from "./trialMerge.ts";
 
 const now = () => new Date().toISOString();
@@ -109,8 +110,11 @@ export interface EscalationView {
   userTaskKey: string;
   kind: string;
   kindLabel: string;
-  /** The PR key when this escalation belongs to a PR (review/merge loop); null for feature / plan /
-   *  delivery / agent subjects. */
+  /** The PR key when this escalation belongs to a PR (review/merge loop): the subject key, but ONLY
+   *  when it is actually PR-key-shaped (`owner/repo#N`). Null for feature / plan / delivery / agent
+   *  subjects — and also null for a PR-subject task whose subject key fell back to a non-PR value
+   *  (`processKey`/`userTaskKey`) for an orphaned/untracked instance (see `buildUserTaskRow`), so
+   *  `prKey` never emits a non-PR key. Use `subjectKey` for raw correlation in that case. */
   prKey: string | null;
   subjectType: string;
   subjectKey: string;
@@ -127,13 +131,16 @@ export interface EscalationView {
 
 /** Pure: project one open `user_tasks` row into its `listEscalations` read-tool entry. Reuses the
  *  read model verbatim (no new query / source of truth). `prKey` is the subject key only when the
- *  subject is a PR. */
+ *  subject is a PR AND the subject key is genuinely PR-key-shaped (`owner/repo#N`, validated by the
+ *  canonical `parsePr`) — an orphaned PR-loop instance whose subject key fell back to a numeric
+ *  `processKey`/`userTaskKey` (see `buildUserTaskRow`) yields `prKey: null`, not a non-PR key that
+ *  would contradict the OpenAPI contract. `subjectKey` still carries the raw value for correlation. */
 export function toEscalationView(row: UserTaskRow): EscalationView {
   return {
     userTaskKey: row.user_task_key,
     kind: row.element_id,
     kindLabel: row.kind_label,
-    prKey: row.subject_type === "pr" ? row.subject_key : null,
+    prKey: row.subject_type === "pr" && parsePr(row.subject_key) ? row.subject_key : null,
     subjectType: row.subject_type,
     subjectKey: row.subject_key,
     subjectTitle: row.subject_title,

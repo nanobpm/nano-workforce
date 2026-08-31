@@ -75,6 +75,7 @@ import {
   planTasks,
 } from "./plan.ts";
 import { derivePromotionState, isEpicIntegrationBranch, isPromotable, promotionPrBody, promotionPrTitle } from "./promotion.ts";
+import { type ParsedPr, parsePr } from "./prParse.ts";
 import {
   defaultProbeExec,
   type ProbeExec,
@@ -316,13 +317,6 @@ const prsTracking = (data: DataLayer) =>
 const escs = (data: DataLayer) => data.table<Escalation>("escalations", "id");
 const deps = (data: DataLayer) => data.table<PrDependency>("pr_dependencies", "pr_key");
 
-export interface ParsedPr {
-  repo: string;
-  number: number;
-  url: string;
-  prKey: string;
-}
-
 /** Canonical GitHub PR URL for a repo + number. Matches the `url` `parsePr` derives, so a
  * reconstructed row is indistinguishable from one registered at submit time. */
 export function canonicalPrUrl(repo: string, number: number): string {
@@ -381,27 +375,10 @@ export async function ensurePr(
   }
 }
 
-/** Parse "owner/repo#123" or a canonical PR URL into its parts. */
-export function parsePr(input: unknown): ParsedPr | null {
-  // Total on any input: a process-variable regression (or an older in-flight instance) can carry a
-  // non-string prKey, and `.trim()` on a non-string throws — turning a should-fail-open caller into
-  // a retrying job. Fail closed to `null` here so every caller resolves safely instead of throwing.
-  if (typeof input !== "string") return null;
-  const s = input.trim();
-  let m = s.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/i);
-  if (m) {
-    const repo = `${m[1]}/${m[2]}`;
-    const number = Number(m[3]);
-    return { repo, number, url: `https://github.com/${repo}/pull/${number}`, prKey: `${repo}#${number}` };
-  }
-  m = s.match(/^([^/]+\/[^#]+)#(\d+)$/);
-  if (m) {
-    const repo = m[1];
-    const number = Number(m[2]);
-    return { repo, number, url: `https://github.com/${repo}/pull/${number}`, prKey: `${repo}#${number}` };
-  }
-  return null;
-}
+/** Parse "owner/repo#123" or a canonical PR URL into its parts. Canonical implementation lives in
+ *  `./prParse.ts` (a leaf module other leaf modules can reuse without cycling through this one); re-exported
+ *  here so existing `import { parsePr } from "./service.ts"` call sites keep resolving. */
+export { type ParsedPr, parsePr };
 
 /** Extract `Depends-on: owner/repo#N[, owner/repo#N …]` (or PR URLs) from a PR body. Multiple
  * `Depends-on:` lines accumulate; each line may list several comma/space-separated refs. Returns
