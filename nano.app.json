@@ -145,6 +145,10 @@
       "handler": "workers/mark-merged/worker.ts"
     },
     {
+      "taskType": "pr.merge-stall-probe",
+      "handler": "workers/merge-stall-probe/worker.ts"
+    },
+    {
       "taskType": "pr.record-dependency",
       "handler": "workers/record-dependency/worker.ts"
     },

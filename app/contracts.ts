@@ -124,6 +124,14 @@ export const ENV_CONTRACTS = {
     semantics: "Maximum transient base/head-moved merge-race retries per PR before escalating.",
     default: "5",
   },
+  NANO_PR_MAX_MERGE_STALL_ROUNDS: {
+    category: "env",
+    name: "NANO_PR_MAX_MERGE_STALL_ROUNDS",
+    owner: "app/service.ts",
+    semantics:
+      "Maximum mergeable-wait-timeout stall-probe re-derivations (dead-poller backstop, #636) before escalating; 0 escalates on the first stall.",
+    default: "3",
+  },
   NANO_PR_REVIEW_WAIT_TIMEOUT: {
     category: "env",
     name: "NANO_PR_REVIEW_WAIT_TIMEOUT",
@@ -142,6 +150,13 @@ export const ENV_CONTRACTS = {
     owner: "app/service.ts",
     semantics:
       "How long the merge loop waits for a queued PR to actually land before escalating (FEEL/ISO-8601 duration).",
+  },
+  NANO_PR_MERGEABLE_WAIT_TIMEOUT: {
+    category: "env",
+    name: "NANO_PR_MERGEABLE_WAIT_TIMEOUT",
+    owner: "app/service.ts",
+    semantics:
+      "How long the merge loop waits for the poller's `merge-ready` before the stall-probe timer arm fires (dead-poller backstop, #636; FEEL/ISO-8601 duration).",
   },
   NANO_PR_AUTO_MERGE: {
     category: "env",

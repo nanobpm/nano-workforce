@@ -42,6 +42,7 @@ const MODEL = readFileSync("resources/processes/merge-loop.bpmn", "utf8");
 
 const AGENT_SLA_MS = 30 * 60 * 1000; // matches the PT30M we start instances with
 const LANDED_WAIT_MS = 30 * 60 * 1000; // matches the PT30M landedWaitTimeout we start instances with
+const MERGEABLE_WAIT_MS = 30 * 60 * 1000; // matches the PT30M mergeableWaitTimeout we start instances with
 
 type Output = Record<string, unknown>;
 type Responder = Output | Output[] | ((job: { variables: Record<string, unknown> }) => Output);
@@ -49,6 +50,7 @@ type Responder = Output | Output[] | ((job: { variables: Record<string, unknown>
 const ALL_JOB_TYPES = [
   "pr.arm-merge",
   "pr.merge",
+  "pr.merge-stall-probe",
   "pr.mark-merged",
   "senior:fix-ci",
   "senior:rebase",
@@ -82,6 +84,9 @@ const DEFAULT_VARS: Record<string, unknown> = {
   mergeRetryRound: 0,
   agentSlaTimeout: "PT30M",
   landedWaitTimeout: "PT30M",
+  mergeableWaitTimeout: "PT30M",
+  mergeStallRounds: 0,
+  mergeStallMax: 3,
   abandonBrief: null,
   failingChecksList: null,
   status: null,
@@ -236,6 +241,112 @@ test("answering the landing-timeout escalation re-arms the merge poller (#556)",
   await assertThatUserTask(engine, { instance: byProcessId("merge-loop"), elementId: "wait-merge-answer" }).isCreated();
   await engine.completeUserTask(await mergeAnswerTaskKey(engine), { answer: "queued it manually, retry" });
   assertThatInstance(engine, byProcessId("merge-loop")).isActive().hasActiveElement("wait-mergeable");
+});
+
+// ---------------------------------------------------------------------------
+// Mergeable-wait bounded-wait backstop (#636) — a stalled poller must never
+// wedge the instance at `waiting_merge` forever. The `gw-merge-wait` event-based
+// gateway races the poller's `merge-ready` message against a `mergeableWaitTimeout`
+// timer; on timeout `merge-stall-probe` re-derives mergeability and the existing
+// `gw-mergeable` routes to the correct arm — or, once `mergeStallMax` is exhausted,
+// to human escalation.
+// ---------------------------------------------------------------------------
+
+test("wait-mergeable races merge-ready against a timer (no bare catch) (#636)", async () => {
+  // After the poller arms the merge, the token forks the event-based gateway: it parks at BOTH the
+  // `merge-ready` catch and the timeout timer. Before the fix, `wait-mergeable` was a bare catch —
+  // no timer sibling — so a dead poller wedged it forever.
+  const engine = await boot();
+  await engine.publishMessage({ name: "deps-cleared", correlationKey: "pr-1" });
+  assertThatInstance(engine, byProcessId("merge-loop"))
+    .isActive()
+    .hasActiveElements("wait-mergeable", "wait-mergeable-timeout");
+});
+
+test("a dead poller's PR is probed on timeout and advances to merge — never wedges (#636)", async () => {
+  // No `merge-ready` is EVER published (the poller is dead). RED (before the fix): the instance sits
+  // at `wait-mergeable` forever. GREEN: the timer fires, `merge-stall-probe` re-derives `ready`, and
+  // the existing `ready` arm merges the PR.
+  const engine = await boot({
+    responses: {
+      "pr.merge-stall-probe": { mergeState: "ready", failingChecks: 0, failingChecksList: "" },
+      "pr.merge": { mergeStatus: "merged" },
+    },
+  });
+  await engine.publishMessage({ name: "deps-cleared", correlationKey: "pr-1" });
+  assertThatInstance(engine, byProcessId("merge-loop")).isActive().hasActiveElement("wait-mergeable");
+  await engine.advanceTime(MERGEABLE_WAIT_MS + 1);
+  assertThatInstance(engine, byProcessId("merge-loop"))
+    .hasCompleted()
+    .hasNoIncident()
+    .hasCompletedElements("merge-stall-probe", "attempt-merge", "mark-merged");
+});
+
+test("a CONFLICTING PR whose poller never signalled reaches the rebase arm via the timeout path (#636)", async () => {
+  // The incident that motivated #636: a `CONFLICTING`/`DIRTY` PR (base advanced under it) parked at
+  // `waiting_merge` because the poller never signalled — the auto-rebase arm was never reached. The
+  // timer path re-derives `conflict` and routes it to the bounded rebase agent.
+  const engine = await boot({
+    responses: {
+      "pr.merge-stall-probe": { mergeState: "conflict", failingChecks: 0, failingChecksList: "" },
+      "senior:rebase": { status: "rebased" },
+    },
+  });
+  await engine.publishMessage({ name: "deps-cleared", correlationKey: "pr-1" });
+  await engine.advanceTime(MERGEABLE_WAIT_MS + 1);
+  assertThatInstance(engine, byProcessId("merge-loop"))
+    .isActive()
+    .hasActiveElement("wait-mergeable")
+    .hasCompletedElements("merge-stall-probe", "rebase") // reached the rebase arm via the timeout path
+    .hasVariable("rebaseRound", 1);
+});
+
+test("a blocked PR probed on timeout reaches the CI-fix arm via the timeout path (#636)", async () => {
+  const engine = await boot({
+    responses: {
+      "pr.merge-stall-probe": { mergeState: "blocked", failingChecks: 1, failingChecksList: "build" },
+      "senior:fix-ci": { status: "fixed" },
+    },
+  });
+  await engine.publishMessage({ name: "deps-cleared", correlationKey: "pr-1" });
+  await engine.advanceTime(MERGEABLE_WAIT_MS + 1);
+  assertThatInstance(engine, byProcessId("merge-loop"))
+    .isActive()
+    .hasActiveElement("wait-mergeable")
+    .hasCompletedElements("merge-stall-probe", "fix-ci")
+    .hasVariable("ciFixRound", 1);
+});
+
+test("the probe advances mergeStallRounds and re-arms within budget (#636)", async () => {
+  // A re-derived `conflict` re-arms after the rebase; the stall counter advanced so a still-dead
+  // poller cannot loop the probe forever — it is bounded by mergeStallMax.
+  const engine = await boot({
+    responses: {
+      "pr.merge-stall-probe": { mergeState: "conflict", failingChecks: 0, failingChecksList: "" },
+      "senior:rebase": { status: "rebased" },
+    },
+  });
+  await engine.publishMessage({ name: "deps-cleared", correlationKey: "pr-1" });
+  await engine.advanceTime(MERGEABLE_WAIT_MS + 1);
+  assertThatInstance(engine, byProcessId("merge-loop")).hasVariable("mergeStallRounds", 1);
+  assert(!completedElementIds(engine).has("merge-esc-conflict"), "a within-budget stall must NOT escalate");
+});
+
+test("the stall-round cap escalates to a human instead of looping forever (#636)", async () => {
+  // `mergeStallMax: 0` — escalate on the first stall. The probe runs once, `gw-merge-stall` finds the
+  // budget exhausted, and routes to `merge-esc-conflict` → the native `wait-merge-answer` user task
+  // rather than re-arming into another timeout round.
+  const engine = await boot({
+    vars: { mergeStallMax: 0 },
+    responses: {
+      "pr.merge-stall-probe": { mergeState: "conflict", failingChecks: 0, failingChecksList: "" },
+    },
+  });
+  await engine.publishMessage({ name: "deps-cleared", correlationKey: "pr-1" });
+  await engine.advanceTime(MERGEABLE_WAIT_MS + 1);
+  await assertThatUserTask(engine, { instance: byProcessId("merge-loop"), elementId: "wait-merge-answer" }).isCreated();
+  assertThatInstance(engine, byProcessId("merge-loop")).hasCompletedElements("merge-stall-probe", "merge-esc-conflict");
+  assert(!completedElementIds(engine).has("mark-merged"), "an exhausted stall must not mark-merged");
 });
 
 test("an evicted queued merge re-arms the poller rather than completing", async () => {
