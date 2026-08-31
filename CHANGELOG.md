@@ -1,3 +1,9 @@
+## [0.163.3](https://github.com/nanobpm/nano-workforce/compare/v0.163.2...v0.163.3) (2026-08-31)
+
+### Bug Fixes
+
+* **overview:** Active Features grid reads the derived read model, not the base-status allowlist ([#639](https://github.com/nanobpm/nano-workforce/issues/639)) ([ed7ddc1](https://github.com/nanobpm/nano-workforce/commit/ed7ddc10c6e99d097e079eb2657e51e572f477df)), closes [#637](https://github.com/nanobpm/nano-workforce/issues/637) [#638](https://github.com/nanobpm/nano-workforce/issues/638)
+
 ## [0.163.2](https://github.com/nanobpm/nano-workforce/compare/v0.163.1...v0.163.2) (2026-08-31)
 
 ### Build System
