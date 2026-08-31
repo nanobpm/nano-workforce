@@ -31,6 +31,7 @@
 // LATER ADR-0065 rollout steps (3/4), deliberately out of scope here.
 
 import { and, caseWhen, col, defineReadModel, type Expr, eq, exists, lit, neq, not, or, pcol, type ReadModel, when } from "@nanobpm/urban";
+import { deriveListBucketExpr } from "./listBucket.ts";
 
 /** The 6 TRULY-terminal statuses that map to the `Done` stage — the single source of truth for the
  * terminal tier of BOTH the pipeline `stage`/`stage_state` derivations and the `list_bucket` history
@@ -128,18 +129,13 @@ const attention: Expr = caseWhen(
   lit(null),
 );
 
-/** `<col> IS NOT NULL` in the closed DSL, which has no dedicated null-test operator: a SELF-equality.
- * `eq` collapses a nullish operand to false in BOTH backends (`COALESCE(x = x, 0)` in SQL, the nullish
- * guard in `compareValues` for TS), and any NON-null value equals itself, so this is true IFF the column
- * is non-NULL — faithful to 073/075's `acknowledged_at IS NOT NULL` and free of the SQLite string→number
- * truthiness coercion a bare `col(...)` boolean predicate would otherwise rely on (e.g. `''`/`'abc'`). */
-const isNotNull = (name: string): Expr => eq(col(name), col(name));
-
 /** The Active/History partition: `history` IFF the row is in a truly-terminal status AND has been
- * acknowledged; otherwise `active` (live runs + terminal-but-UNACKNOWLEDGED runs). `acknowledged_at IS
- * NOT NULL` is expressed via {@link isNotNull} so it stays byte-equivalent to 073/075's VIEW and does
- * not depend on string→number coercion in either backend. */
-const listBucket: Expr = caseWhen([when(and(isDone, isNotNull("acknowledged_at")), lit("history"))], lit("active"));
+ * acknowledged; otherwise `active` (live runs + terminal-but-UNACKNOWLEDGED runs). Delegates to the ONE
+ * shared `deriveListBucketExpr` oracle (app/listBucket.ts, issue #641) parameterised by the feature
+ * terminal set ({@link STAGE_DONE_STATUSES}) so all four "Active …" grids share the identical AST — the
+ * emitted SQL stays byte-equivalent to migration 081's already-merged VIEW body (the shared oracle
+ * reproduces this model's `isDone`/`isNotNull` forms exactly). */
+const listBucket: Expr = deriveListBucketExpr(EFFECTIVE_STATUS_COLUMN, STAGE_DONE_STATUSES);
 
 /** The keys of {@link featureReadModel}'s DERIVED columns, in the order migration 076 emits them.
  * Base columns are identity pass-throughs (not derivations) and are listed in the migration directly. */

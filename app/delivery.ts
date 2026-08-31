@@ -121,10 +121,11 @@ export const EPIC_LIVE_STATUSES = ["planning", "dispatched"] as const;
  *     Dismiss affordance stays closed (see {@link epicIsAcknowledgeable}) so it is never ticked off
  *     mid-flight.
  *
- * It falls to `history` only once truly resolved: a `done` epic the operator has acknowledged, or a
- * terminal non-`done` status (`failed`/`abandoned`, which carry their own incident signal and need no
- * tick-off). Pure and read-only; projected at write time by the `plans` gateway (app/plan.ts) onto
- * `plans.list_bucket`. */
+ * It falls to `history` only once truly resolved AND acknowledged: any TERMINAL epic — `done`,
+ * `failed`, or `abandoned` — that the operator has dismissed (issue #641 made this uniform; before it,
+ * a `failed`/`abandoned` epic dropped straight to History with no tick-off). An unacknowledged terminal
+ * epic of ANY terminal status stays Active until dismissed. Pure and read-only; projected at write time
+ * by the `plans` gateway (app/plan.ts) onto `plans.list_bucket`. */
 export function deriveEpicBucket(
   status: string,
   delivery: string | null | undefined,
@@ -134,15 +135,16 @@ export function deriveEpicBucket(
   return raw === "active" ? "active" : "history";
 }
 
-/** True iff an epic carries the operator "Dismiss" (acknowledge) affordance — a `done` epic whose
- * fan-out has RESOLVED (it is no longer `converging`): every slice PR has reached a terminal state,
- * whether all merged (`delivery = landed` — promote to main, then dismiss) or resolved-not-landed
- * (`delivery = null` — some abandoned/converged). This is the set of Active epics a tick-off may move
- * to History. A live (`planning`/`dispatched`) or still-`converging` epic is genuinely working —
- * nothing to tick off — so its Dismiss stays closed; a `failed`/`abandoned` epic is already in
- * History. The `acknowledgeEpic` operation guards on this (409 otherwise) and the gateway projects it
- * to `plans.ack_open` (1/0) so the page's `showWhenField` Dismiss button renders only for a resolved-
- * but-unacknowledged epic. */
+/** True iff an epic carries the operator "Dismiss" (acknowledge) affordance — a TERMINAL epic whose
+ * fan-out has RESOLVED (it is no longer `converging`): a `done` epic whose every slice PR reached a
+ * terminal state (all merged, `delivery = landed` — promote to main, then dismiss; or resolved-not-
+ * landed, `delivery = null` — some abandoned/converged), OR a `failed`/`abandoned` epic (whose
+ * `delivery` is inherently non-`converging`, so it is dismissable outright — issue #641). This is the
+ * set of Active epics a tick-off may move to History. A live (`planning`/`dispatched`) or still-
+ * `converging` epic is genuinely working — nothing to tick off — so its Dismiss stays closed. The
+ * `acknowledgeEpic` operation guards on this (409 otherwise) and the gateway projects it to
+ * `plans.ack_open` (1/0) so the page's `showWhenField` Dismiss button renders only for a resolved-but-
+ * unacknowledged epic. */
 export function epicIsAcknowledgeable(
   status: string,
   delivery: string | null | undefined,

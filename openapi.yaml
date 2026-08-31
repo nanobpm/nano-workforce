@@ -5436,6 +5436,104 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/MessageResult"
+  /actions/acknowledge-pr:
+    post:
+      operationId: acknowledgePr
+      summary: "Dismiss a TERMINAL pull request (issue #641). Stamps `acknowledged_at` on the
+        `pull_requests` row so the `pull_requests_read_model` VIEW recomputes its `list_bucket` to
+        'history' (and `ack_open` to 0), dropping the finished PR out of the Active convergence list
+        into History. The PR twin of acknowledge-done/acknowledge-epic: a PR is not parked at a user
+        task, so this completes no user task and touches no engine/ledger — it only stamps the row.
+        Keyed on the PR's `pr_key`. Rejects (409) a PR that is not yet terminal (still converging), so a
+        live PR stays visible in Active. Idempotent-safe (re-acknowledging keeps it in History)."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+                - pr_key
+              properties:
+                pr_key:
+                  type: string
+                  minLength: 1
+                  description: The pull request's key (pull_requests.pr_key).
+      responses:
+        "200":
+          description: The terminal PR was acknowledged and moved to History.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResult"
+        "400":
+          description: A required field (pr_key) was missing or invalid.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResult"
+        "404":
+          description: No pull request matches the pr_key.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResult"
+        "409":
+          description: The pull request is not terminal, so it cannot be dismissed yet.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResult"
+  /actions/acknowledge-delivery-graph:
+    post:
+      operationId: acknowledgeDeliveryGraph
+      summary: "Dismiss a TERMINAL delivery-graph run (issue #641). Stamps `acknowledged_at` on the
+        `delivery_graph_runs` row so the `delivery_graph_read_model` VIEW recomputes its `list_bucket`
+        to 'history' (and `ack_open` to 0), dropping the finished run out of the Active delivery-graph
+        list into History. The delivery-graph twin of acknowledge-done/acknowledge-epic/acknowledge-pr:
+        it completes no user task and touches no engine/ledger — it only stamps the row. Keyed on the
+        run's `run_key`. Rejects (409) a run that is not yet terminal (still awaiting-approval/running),
+        so a live run stays visible in Active. Idempotent-safe (re-acknowledging keeps it in History)."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+                - run_key
+              properties:
+                run_key:
+                  type: string
+                  minLength: 1
+                  description: The delivery-graph run's key (delivery_graph_runs.run_key).
+      responses:
+        "200":
+          description: The terminal delivery-graph run was acknowledged and moved to History.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResult"
+        "400":
+          description: A required field (run_key) was missing or invalid.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResult"
+        "404":
+          description: No delivery-graph run matches the run_key.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResult"
+        "409":
+          description: The delivery-graph run is not terminal, so it cannot be dismissed yet.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResult"
   /hooks/agent-complete:
     post:
       operationId: agentCompleteEscalation

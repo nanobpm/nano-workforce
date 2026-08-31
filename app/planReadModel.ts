@@ -29,7 +29,9 @@
 // worker stamps its own BPMN element's phase) with no SQL twin — it is not a per-row function of the
 // plan row, so it stays hand-authored and out of this declaration.
 
-import { and, caseWhen, col, defineReadModel, type Expr, eq, gt, isNull, lit, not, or, type ReadModel, rcol, when } from "@nanobpm/urban";
+import { and, caseWhen, col, defineReadModel, type Expr, eq, gt, lit, not, or, type ReadModel, rcol, when } from "@nanobpm/urban";
+import { deriveAckOpenFromTerminal, deriveListBucketFromTerminal, terminalStatusIn } from "./listBucket.ts";
+import { PLAN_TERMINAL_STATUSES } from "./plan.ts";
 import { planDeliveryCounts, planWaveProgress } from "./planRollups.ts";
 
 /** The base table the read model reads: the auto-provisioned `plans__tracking` derived VIEW (ADR-0065,
@@ -61,7 +63,6 @@ export const EFFECTIVE_STATUS_COLUMN = "derived_status";
  * …)`'s call sites, which pass the base status. */
 const BASE_STATUS_COLUMN = "status";
 
-const ds = col(EFFECTIVE_STATUS_COLUMN);
 const bs = col(BASE_STATUS_COLUMN);
 
 /** The derived epic `delivery` signal — the byte-for-byte twin of the retired `plan_delivery` VIEW's
@@ -82,32 +83,37 @@ const delivery: Expr = caseWhen(
   lit(null),
 );
 
-/** The Active/History partition (`deriveEpicBucket`, app/delivery.ts) — the byte-for-byte twin of the
- * `plan_read_model` VIEW's bucket CASE (074/080). `active` while the epic is LIVE (planning/dispatched)
- * OR `done`-but-still-`converging` (genuinely working) OR `done`-but-unacknowledged (stay actionable
- * until dismissed); `history` once truly resolved (a `done` epic the operator acknowledged, or a
- * terminal non-`done` status). Classifies the status arms on the terminal-folded `derived_status` so a
- * cancelled epic falls to History; the `converging` arm reuses the {@link delivery} sub-expression
- * (base-status-derived) so the two columns can't disagree. */
-const listBucket: Expr = caseWhen(
-  [
-    when(or(eq(ds, lit("planning")), eq(ds, lit("dispatched"))), lit("active")),
-    when(and(eq(ds, lit("done")), eq(delivery, lit("converging"))), lit("active")),
-    when(and(eq(ds, lit("done")), isNull(col("acknowledged_at"))), lit("active")),
-    when(eq(ds, lit("done")), lit("history")),
-  ],
-  lit("history"),
+/** The epic's "dismissable-terminal" predicate — terminal AND actually tick-off-able: the epic's
+ * terminal-folded `derived_status` is in {@link PLAN_TERMINAL_STATUSES} (`done`/`failed`/`abandoned`)
+ * AND its fan-out is NOT still `converging`. This is the epic-specific refinement the shared oracle
+ * (app/listBucket.ts) takes: a `done`-but-still-`converging` epic is terminal by status yet must NOT be
+ * dismissable mid-flight (a stray/premature ack must not drag it to History) — PRs/Delivery-Graphs have
+ * no such mid-flight terminal, so their predicate is just "terminal". `not(eq(delivery, 'converging'))`
+ * is the null-safe `delivery IS NOT 'converging'` (a NULL/`landed` delivery ⇒ resolved ⇒ dismissable)
+ * under the shared "NULL → false" rule. */
+const dismissableTerminal: Expr = and(
+  terminalStatusIn(EFFECTIVE_STATUS_COLUMN, PLAN_TERMINAL_STATUSES),
+  not(eq(delivery, lit("converging"))),
 );
 
-/** The operator "Dismiss" (acknowledge) affordance flag (`epicIsAcknowledgeable` ∧ unacknowledged) —
- * the byte-for-byte twin of the `plan_read_model` VIEW's `ack_open` CASE (074/080): `1` iff the epic is
- * `done`, its fan-out has RESOLVED (`delivery` is not `converging`), and it is not yet acknowledged;
- * else `0`. `not(eq(delivery, 'converging'))` matches the VIEW's null-safe `d.delivery IS NOT
- * 'converging'` (a NULL delivery ⇒ resolved ⇒ acknowledgeable) under the shared "NULL → false" rule. */
-const ackOpen: Expr = caseWhen(
-  [when(and(eq(ds, lit("done")), not(eq(delivery, lit("converging"))), isNull(col("acknowledged_at"))), lit(1))],
-  lit(0),
-);
+/** The Active/History partition (`deriveEpicBucket`, app/delivery.ts) — the ONE shared oracle
+ * (app/listBucket.ts, issue #641) over the epic's {@link dismissableTerminal} predicate, so every
+ * "Active …" grid partitions with the identical acknowledge-to-dismiss rule: `history` IFF the epic is
+ * dismissable-terminal AND acknowledged; otherwise `active` (live `planning`/`dispatched` epics, a
+ * `done`-but-still-`converging` epic — terminal but not dismissable mid-flight, so it stays active — and
+ * the #641 gap this closes: a terminal-non-`done` `failed`/`abandoned` epic that is UNACKNOWLEDGED,
+ * which before fell straight to History skipping the tick-off). Classifies on the terminal-folded
+ * `derived_status` so a cancelled epic is handled on engine truth. */
+const listBucket: Expr = deriveListBucketFromTerminal(dismissableTerminal);
+
+/** The operator "Dismiss" (acknowledge) affordance flag (`epicIsAcknowledgeable` ∧ unacknowledged):
+ * `1` iff the epic is {@link dismissableTerminal} and not yet acknowledged; else `0`. Shares the exact
+ * predicate with {@link listBucket} (a row is dismissable precisely while it would still be `active` on
+ * the terminal branch). Extended from `done`-only to the full terminal set for #641: a `failed`/
+ * `abandoned` epic (whose `delivery` is always non-`converging`) is now dismissable too, so the
+ * terminal-non-`done` arm of {@link listBucket} has a Dismiss affordance to move it to History —
+ * mirroring features/PRs/DGs. */
+const ackOpen: Expr = deriveAckOpenFromTerminal(dismissableTerminal);
 
 /** The wave frontier columns — bare pass-throughs of the `plan_wave_progress` rollup lookup (a
  * taskless plan has no rollup row, so the LEFT-JOIN miss reads NULL, matching the workers' behaviour).

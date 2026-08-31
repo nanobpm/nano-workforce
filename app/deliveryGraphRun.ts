@@ -47,6 +47,10 @@ export interface DeliveryGraphRun {
   human_labels: string | null;
   created_at: string;
   updated_at: string;
+  /** The operator-dismissal stamp (issue #641). Set by `acknowledgeDeliveryGraph` on a TERMINAL run so
+   *  the `delivery_graph_read_model` VIEW folds its `list_bucket` to 'history'; NULL while the run is
+   *  live or terminal-but-undismissed (it stays in Active until an operator ticks it off). */
+  acknowledged_at: string | null;
 }
 
 /** The run lifecycle. `awaiting-approval` is RESERVED but no longer produced (issue #460 moved dispatch
@@ -264,5 +268,6 @@ export function buildDeliveryGraphRunRow(input: {
     human_labels: input.humanLabels ? JSON.stringify(input.humanLabels) : null,
     created_at: input.createdAt ?? at,
     updated_at: at,
+    acknowledged_at: null,
   };
 }

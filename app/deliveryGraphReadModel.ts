@@ -40,7 +40,9 @@
 // single-step graph both reduce trivially to their one branch.
 
 import { and, caseWhen, col, countWhere, defineReadModel, defineRollup, type Expr, eq, fromTable, gt, isNotNull, lit, not, or, type ReadModel, type Rollup, rcol, when } from "@nanobpm/urban";
+import { DELIVERY_GRAPH_TERMINAL_STATUSES } from "./deliveryGraphRun.ts";
 import { TERMINAL_STATUSES } from "./deliveryStatuses.ts";
+import { deriveAckOpenExpr, deriveListBucketExpr } from "./listBucket.ts";
 import { PR_TRACKING_RELATION } from "./planRollups.ts";
 
 /** The slice-PR relation the member-PR rollup folds over: the auto-provisioned
@@ -136,9 +138,22 @@ const stageState: Expr = caseWhen(
 
 /** The keys of {@link deliveryGraphReadModel}'s DERIVED columns, in the order the migration emits them.
  * Base columns are identity pass-throughs (listed in the migration directly); `park_label` is a
- * hand-authored display column over the base `phase`/`phase_node_id` (no TS twin). */
-export const DELIVERY_GRAPH_READ_MODEL_DERIVED = ["stage", "stage_state"] as const;
+ * hand-authored display column over the base `phase`/`phase_node_id` (no TS twin). `list_bucket`/
+ * `ack_open` are the acknowledge-to-dismiss partition + Dismiss-affordance flag (issue #641). */
+export const DELIVERY_GRAPH_READ_MODEL_DERIVED = ["stage", "stage_state", "list_bucket", "ack_open"] as const;
 export type DeliveryGraphReadModelDerivedColumn = (typeof DELIVERY_GRAPH_READ_MODEL_DERIVED)[number];
+
+/** The Active/History partition — `history` IFF the run is terminal AND acknowledged, else `active`
+ * (live runs + terminal-but-UNACKNOWLEDGED runs that stay actionable until dismissed). The ONE shared
+ * oracle (app/listBucket.ts, issue #641) parameterised by {@link DELIVERY_GRAPH_TERMINAL_STATUSES}, so
+ * this grid's activeness predicate is byte-for-byte the same rule Features/Epics/PRs use — retiring the
+ * `status IN ('awaiting-approval','running')` allowlist the pages filtered before. */
+const listBucket: Expr = deriveListBucketExpr(EFFECTIVE_STATUS_COLUMN, DELIVERY_GRAPH_TERMINAL_STATUSES);
+
+/** The operator "Dismiss" affordance flag — `1` IFF the run is terminal AND not yet acknowledged (so
+ * the page's `showWhenField` Dismiss button renders only for a terminal-but-unacknowledged run), else
+ * `0`. */
+const ackOpen: Expr = deriveAckOpenExpr(EFFECTIVE_STATUS_COLUMN, DELIVERY_GRAPH_TERMINAL_STATUSES);
 
 /**
  * The declare-once `delivery_graph_read_model` derived columns. `selectBaseColumns: false` because the
@@ -162,5 +177,7 @@ export const deliveryGraphReadModel: ReadModel = defineReadModel({
   derive: {
     stage,
     stage_state: stageState,
+    list_bucket: listBucket,
+    ack_open: ackOpen,
   },
 });

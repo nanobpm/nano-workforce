@@ -119,23 +119,15 @@
         "data": {
           "kind": "datasource",
           "source": "app",
-          "table": "pull_requests",
+          "table": "pull_requests_read_model",
           "orderBy": {
             "field": "updated_at",
             "dir": "desc"
           },
           "filter": [
             {
-              "field": "status",
-              "in": [
-                "converging",
-                "waiting_review",
-                "escalated",
-                "waiting_deps",
-                "waiting_merge",
-                "queued",
-                "merging"
-              ]
+              "field": "list_bucket",
+              "in": ["active"]
             }
           ]
         },
@@ -144,16 +136,8 @@
             "label": "Active",
             "filter": [
               {
-                "field": "status",
-                "in": [
-                  "converging",
-                  "waiting_review",
-                  "escalated",
-                  "waiting_deps",
-                  "waiting_merge",
-                  "queued",
-                  "merging"
-                ]
+                "field": "list_bucket",
+                "in": ["active"]
               }
             ]
           },
@@ -161,12 +145,8 @@
             "label": "History",
             "filter": [
               {
-                "field": "status",
-                "in": [
-                  "converged",
-                  "merged",
-                  "abandoned"
-                ]
+                "field": "list_bucket",
+                "in": ["history"]
               }
             ]
           }
@@ -222,6 +202,17 @@
               "path": "/app/actions/cancel",
               "body": {
                 "processInstanceKey": "{{row.process_key}}"
+              }
+            }
+          },
+          {
+            "label": "Dismiss",
+            "confirm": "Dismiss this finished PR? It acknowledges the terminal pull request and files it under History.",
+            "showWhenField": "ack_open",
+            "action": {
+              "path": "/app/api/actions/acknowledge-pr",
+              "body": {
+                "pr_key": "{{row.pr_key}}"
               }
             }
           }
