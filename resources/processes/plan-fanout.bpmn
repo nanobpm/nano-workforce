@@ -13,7 +13,7 @@
       </zeebe:properties>
     </bpmn:extensionElements>
   </bpmn:message>
-  <bpmn:process id="plan-fanout" name="Agent Fleet — plan &#38; implement" isExecutable="true">
+  <bpmn:process id="plan-fanout" name="Agent Fleet — plan &amp; implement" isExecutable="true">
     <bpmn:extensionElements>
       <nano:shapes>
         <nano:shape id="EnsureBaseBranchIn" name="Ensure base branch — input">
@@ -269,7 +269,7 @@
           <zeebe:linkedResource resourceId="prompts/plan.md" bindingType="latest" resourceType="GenericScript" linkName="prompt" />
         </zeebe:linkedResources>
         <zeebe:ioMapping>
-          <zeebe:input source="=(if (planFindings = null or planFindings = &#34;&#34;) then &#34;&#34; else &#34;&#10;&#10;---&#10;&#10;A prior review REJECTED your last plan. Address every point, then re-emit the full plan:&#10;&#10;&#34; + planFindings)" target="appendPrompt" />
+          <zeebe:input source="=(if (planFindings = null or planFindings = &quot;&quot;) then &quot;&quot; else &quot;&#10;&#10;---&#10;&#10;A prior review REJECTED your last plan. Address every point, then re-emit the full plan:&#10;&#10;&quot; + planFindings)" target="appendPrompt" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_toPlan</bpmn:incoming>
@@ -278,7 +278,7 @@
       <bpmn:incoming>f_plan_sla</bpmn:incoming>
       <bpmn:outgoing>f_toRecordPlan</bpmn:outgoing>
     </bpmn:serviceTask>
-    <bpmn:serviceTask id="record-plan" name="Record plan &#38; levelize">
+    <bpmn:serviceTask id="record-plan" name="Record plan &amp; levelize">
       <bpmn:extensionElements>
         <zeebe:taskDefinition type="pr.record-plan" />
         <zeebe:properties>
@@ -323,7 +323,7 @@
       <bpmn:incoming>f_toReviewPlan</bpmn:incoming>
       <bpmn:outgoing>f_toRecordPlanReview</bpmn:outgoing>
     </bpmn:serviceTask>
-    <bpmn:serviceTask id="record-plan-review" name="Record review &#38; decide">
+    <bpmn:serviceTask id="record-plan-review" name="Record review &amp; decide">
       <bpmn:extensionElements>
         <zeebe:taskDefinition type="pr.record-plan-review" />
         <zeebe:properties>
@@ -346,7 +346,7 @@
         <zeebe:assignmentDefinition candidateGroups="operators" assignee="=escalationAssignee" />
         <zeebe:ioMapping>
           <zeebe:output source="=(if planReviewEpoch = null then 0 else planReviewEpoch) + 1" target="planReviewEpoch" />
-          <zeebe:output source="=(if planFindings = null then &#34;&#34; else planFindings) + (if (notes = null or notes = &#34;&#34;) then &#34;&#34; else &#34;&#10;&#10;Human guidance:&#10;&#34; + notes)" target="planFindings" />
+          <zeebe:output source="=(if planFindings = null then &quot;&quot; else planFindings) + (if (notes = null or notes = &quot;&quot;) then &quot;&quot; else &quot;&#10;&#10;Human guidance:&#10;&quot; + notes)" target="planFindings" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_plan_escalate</bpmn:incoming>
@@ -431,7 +431,7 @@
       <bpmn:intermediateCatchEvent id="wait-caps-timeout" name="Wait: capability SLA elapsed">
         <bpmn:extensionElements>
           <zeebe:ioMapping>
-            <zeebe:output source="=&#34;A cross-repo capability this task depends on did not resolve within the bounded wait. This usually means a declared capabilityRef names no owner/repo releases source (unresolvable) or the upstream capability never shipped. Correct the plan&#39;s capabilityRef or ship the capability, then answer to retry the task, or abandon it.&#34;" target="question" />
+            <zeebe:output source="=&quot;A cross-repo capability this task depends on did not resolve within the bounded wait. This usually means a declared capabilityRef names no owner/repo releases source (unresolvable) or the upstream capability never shipped. Correct the plan&apos;s capabilityRef or ship the capability, then answer to retry the task, or abandon it.&quot;" target="question" />
           </zeebe:ioMapping>
         </bpmn:extensionElements>
         <bpmn:incoming>w_capsToTimeout</bpmn:incoming>
@@ -447,7 +447,7 @@
             <zeebe:linkedResource resourceId="prompts/feature.md" bindingType="latest" resourceType="GenericScript" linkName="prompt" />
           </zeebe:linkedResources>
           <zeebe:ioMapping>
-            <zeebe:input source="=&#34;&#10;&#10;---&#10;&#10;&#34; + task.prompt + (if (blackboardBrief = null) then &#34;&#34; else blackboardBrief) + (if (baseBranchBrief = null) then &#34;&#34; else baseBranchBrief) + (if (resolvedDepsBrief = null) then &#34;&#34; else resolvedDepsBrief) + (if (resolvedArtifacts = null or count(resolvedArtifacts[item != null]) = 0) then &#34;&#34; else (&#34;&#10;&#10;---&#10;&#10;**Bound producer capabilities (inter-epic gate).** This epic depends on capabilities another epic in the set just published. Build/install/clone against EXACTLY these published versions (the ones first carrying the awaited capability), never merely the newest:&#10;&#10;&#34; + string join(resolvedArtifacts[item != null], &#34;&#10;&#34;)))" target="appendPrompt" />
+            <zeebe:input source="=&quot;&#10;&#10;---&#10;&#10;&quot; + task.prompt + (if (blackboardBrief = null) then &quot;&quot; else blackboardBrief) + (if (baseBranchBrief = null) then &quot;&quot; else baseBranchBrief) + (if (resolvedDepsBrief = null) then &quot;&quot; else resolvedDepsBrief) + (if (resolvedArtifacts = null or count(resolvedArtifacts[item != null]) = 0) then &quot;&quot; else (&quot;&#10;&#10;---&#10;&#10;**Bound producer capabilities (inter-epic gate).** This epic depends on capabilities another epic in the set just published. Build/install/clone against EXACTLY these published versions (the ones first carrying the awaited capability), never merely the newest:&#10;&#10;&quot; + string join(resolvedArtifacts[item != null], &quot;&#10;&quot;)))" target="appendPrompt" />
             <zeebe:output source="=status" target="status" />
             <zeebe:output source="=question" target="question" />
           </zeebe:ioMapping>
@@ -524,7 +524,7 @@
       <bpmn:sequenceFlow id="w_abandon" name="abandon" sourceRef="w_gw_answer" targetRef="w_end" />
       <bpmn:sequenceFlow id="w_sla" name="SLA auto-abandon" sourceRef="be_feature_sla" targetRef="w_end" />
     </bpmn:subProcess>
-    <bpmn:serviceTask id="record-wave" name="Record wave &#38; hand off">
+    <bpmn:serviceTask id="record-wave" name="Record wave &amp; hand off">
       <bpmn:extensionElements>
         <zeebe:taskDefinition type="pr.record-wave" />
         <zeebe:properties>

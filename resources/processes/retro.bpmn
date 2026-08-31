@@ -88,7 +88,7 @@
       <bpmn:incoming>f_toConformanceAck</bpmn:incoming>
       <bpmn:outgoing>f_ackToSynthesize</bpmn:outgoing>
     </bpmn:serviceTask>
-    <bpmn:serviceTask id="synthesize" name="Synthesize &#38; promote (agent)">
+    <bpmn:serviceTask id="synthesize" name="Synthesize &amp; promote (agent)">
       <bpmn:extensionElements>
         <zeebe:taskDefinition type="senior:retro" />
         <zeebe:linkedResources>

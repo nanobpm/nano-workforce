@@ -276,7 +276,7 @@ test("BPMN: humanOutcome is set on BOTH the completion and the SLA-timeout path"
   // escalation path ends with humanOutcome unset and the two outcomes are indistinguishable.
   assertStringIncludes(
     flat,
-    '<zeebe:output source="=&#34;completed&#34;" target="humanOutcome" />',
+    '<zeebe:output source="=&quot;completed&quot;" target="humanOutcome" />',
     "the completion path must set humanOutcome=completed",
   );
   const escalated = flat.match(
@@ -285,7 +285,7 @@ test("BPMN: humanOutcome is set on BOTH the completion and the SLA-timeout path"
   assert(escalated, "the SLA-timeout end event human-escalated must exist");
   assertStringIncludes(
     escalated![0],
-    '<zeebe:input source="=&#34;escalated&#34;" target="humanOutcome" />',
+    '<zeebe:input source="=&quot;escalated&quot;" target="humanOutcome" />',
     "the SLA-timeout path must set humanOutcome=escalated",
   );
 });

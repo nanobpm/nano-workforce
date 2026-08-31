@@ -178,7 +178,7 @@
           <zeebe:property name="io.nanobpm.dataEnvelope.out" value="MergeAttemptOut" />
         </zeebe:properties>
         <zeebe:ioMapping>
-          <zeebe:output source="=if mergeStatus = &#34;retry&#34; then mergeRetryRound + 1 else mergeRetryRound" target="mergeRetryRound" />
+          <zeebe:output source="=if mergeStatus = &quot;retry&quot; then mergeRetryRound + 1 else mergeRetryRound" target="mergeRetryRound" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_m_mReady</bpmn:incoming>
@@ -246,8 +246,8 @@
           <zeebe:property name="io.nanobpm.dataEnvelope.out" value="EscalationOut" />
         </zeebe:properties>
         <zeebe:ioMapping>
-          <zeebe:input source="=&#34;blocked&#34;" target="status" />
-          <zeebe:input source="=if mergeState = &#34;draft&#34; then &#34;This PR is in draft and can&#39;t be merged. Mark it ready (gh pr ready), then reply to retry.&#34; else &#34;This PR is not mergeable (state: &#34; + mergeState + &#34;). Resolve the conflict or failing required check on the branch, then reply to retry.&#34;" target="question" />
+          <zeebe:input source="=&quot;blocked&quot;" target="status" />
+          <zeebe:input source="=if mergeState = &quot;draft&quot; then &quot;This PR is in draft and can&apos;t be merged. Mark it ready (gh pr ready), then reply to retry.&quot; else &quot;This PR is not mergeable (state: &quot; + mergeState + &quot;). Resolve the conflict or failing required check on the branch, then reply to retry.&quot;" target="question" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_m_mBlocked</bpmn:incoming>
@@ -266,8 +266,8 @@
         </zeebe:properties>
         <zeebe:ioMapping>
           <zeebe:input source="=status" target="agentVerdict" />
-          <zeebe:input source="=&#34;This PR cannot be merged and needs a human decision. &#34; + (if mergeState = &#34;conflict&#34; then &#34;The automated rebase agent could not resolve the merge conflicts on this branch. Resolve them manually (or reply with guidance), then reply to retry.&#34; else if mergeStatus = &#34;retry&#34; then &#34;The merge kept losing a race with concurrent updates to the base branch and exhausted its automatic retry budget (&#34; + string(mergeRetryMax) + &#34; retries). This is a repeated transient race, not a conflict, failing check, or permissions block. Reply to retry, or investigate why the base branch keeps moving.&#34; else if mergeState = &#34;ready&#34; then &#34;The merge attempt did not land (merge result: &#34; + mergeStatus + &#34;). Investigate why GitHub refused the merge, then reply to retry.&#34; else if status = &#34;blocked&#34; then &#34;The automated CI-fix agent could not make the required checks green. Fix the failing checks on the branch (or reply with guidance), then reply to retry.&#34; else &#34;The automated CI-fix agent exceeded its time budget (SLA) before the required checks went green. Check its progress or intervene, then reply to retry.&#34;)" target="question" />
-          <zeebe:input source="=&#34;blocked&#34;" target="status" />
+          <zeebe:input source="=&quot;This PR cannot be merged and needs a human decision. &quot; + (if mergeState = &quot;conflict&quot; then &quot;The automated rebase agent could not resolve the merge conflicts on this branch. Resolve them manually (or reply with guidance), then reply to retry.&quot; else if mergeStatus = &quot;retry&quot; then &quot;The merge kept losing a race with concurrent updates to the base branch and exhausted its automatic retry budget (&quot; + string(mergeRetryMax) + &quot; retries). This is a repeated transient race, not a conflict, failing check, or permissions block. Reply to retry, or investigate why the base branch keeps moving.&quot; else if mergeState = &quot;ready&quot; then &quot;The merge attempt did not land (merge result: &quot; + mergeStatus + &quot;). Investigate why GitHub refused the merge, then reply to retry.&quot; else if status = &quot;blocked&quot; then &quot;The automated CI-fix agent could not make the required checks green. Fix the failing checks on the branch (or reply with guidance), then reply to retry.&quot; else &quot;The automated CI-fix agent exceeded its time budget (SLA) before the required checks went green. Check its progress or intervene, then reply to retry.&quot;)" target="question" />
+          <zeebe:input source="=&quot;blocked&quot;" target="status" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_m_gBlocked</bpmn:incoming>
@@ -290,8 +290,8 @@
           <zeebe:property name="io.nanobpm.dataEnvelope.out" value="EscalationOut" />
         </zeebe:properties>
         <zeebe:ioMapping>
-          <zeebe:input source="=&#34;blocked&#34;" target="status" />
-          <zeebe:input source="=&#34;This PR was reported as added to the merge queue but did not land within the merge-queue landing timeout (&#34; + landedWaitTimeout + &#34;). The repository may not have actually enqueued it — e.g. a Mergify repo where a plain merge does not queue and an explicit `@Mergifyio queue` is required, or a native merge queue that dropped it silently. Add the PR to the merge queue (or merge it) manually, then reply to retry.&#34;" target="question" />
+          <zeebe:input source="=&quot;blocked&quot;" target="status" />
+          <zeebe:input source="=&quot;This PR was reported as added to the merge queue but did not land within the merge-queue landing timeout (&quot; + landedWaitTimeout + &quot;). The repository may not have actually enqueued it — e.g. a Mergify repo where a plain merge does not queue and an explicit `@Mergifyio queue` is required, or a native merge queue that dropped it silently. Add the PR to the merge queue (or merge it) manually, then reply to retry.&quot;" target="question" />
         </zeebe:ioMapping>
       </bpmn:extensionElements>
       <bpmn:incoming>f_m_landedStalled</bpmn:incoming>
@@ -347,7 +347,7 @@
             <zeebe:property name="io.nanobpm.dataEnvelope.out" value="FixCiOut" />
           </zeebe:properties>
           <zeebe:ioMapping>
-            <zeebe:input source="=(if (failingChecksList = null or failingChecksList = &#34;&#34;) then &#34;&#34; else &#34;&#10;&#10;Failing checks to make green:&#10;&#34; + failingChecksList) + (if (abandonBrief = null) then &#34;&#34; else abandonBrief)" target="appendPrompt" />
+            <zeebe:input source="=(if (failingChecksList = null or failingChecksList = &quot;&quot;) then &quot;&quot; else &quot;&#10;&#10;Failing checks to make green:&#10;&quot; + failingChecksList) + (if (abandonBrief = null) then &quot;&quot; else abandonBrief)" target="appendPrompt" />
             <zeebe:output source="=ciFixRound + 1" target="ciFixRound" />
           </zeebe:ioMapping>
         </bpmn:extensionElements>
@@ -410,7 +410,7 @@
       <bpmn:endEvent id="end_ci_fixed" name="fixed — re-arm">
         <bpmn:extensionElements>
           <zeebe:ioMapping>
-            <zeebe:output source="=&#34;fixed&#34;" target="ciOutcome" />
+            <zeebe:output source="=&quot;fixed&quot;" target="ciOutcome" />
           </zeebe:ioMapping>
         </bpmn:extensionElements>
         <bpmn:incoming>f_ci_fixed</bpmn:incoming>
@@ -418,7 +418,7 @@
       <bpmn:endEvent id="end_ci_reattempt" name="re-attempt">
         <bpmn:extensionElements>
           <zeebe:ioMapping>
-            <zeebe:output source="=&#34;reattempt&#34;" target="ciOutcome" />
+            <zeebe:output source="=&quot;reattempt&quot;" target="ciOutcome" />
           </zeebe:ioMapping>
         </bpmn:extensionElements>
         <bpmn:incoming>f_ci_reattempt</bpmn:incoming>
@@ -426,7 +426,7 @@
       <bpmn:endEvent id="end_ci_reconcile" name="reconcile from ground truth">
         <bpmn:extensionElements>
           <zeebe:ioMapping>
-            <zeebe:output source="=&#34;reconcile&#34;" target="ciOutcome" />
+            <zeebe:output source="=&quot;reconcile&quot;" target="ciOutcome" />
           </zeebe:ioMapping>
         </bpmn:extensionElements>
         <bpmn:incoming>f_ci_reconcile</bpmn:incoming>
@@ -434,7 +434,7 @@
       <bpmn:endEvent id="end_ci_recheck" name="reconciled — re-check mergeable">
         <bpmn:extensionElements>
           <zeebe:ioMapping>
-            <zeebe:output source="=&#34;recheck&#34;" target="ciOutcome" />
+            <zeebe:output source="=&quot;recheck&quot;" target="ciOutcome" />
           </zeebe:ioMapping>
         </bpmn:extensionElements>
         <bpmn:incoming>f_cib_armed</bpmn:incoming>
@@ -442,7 +442,7 @@
       <bpmn:endEvent id="end_ci_waiting" name="waits on another PR">
         <bpmn:extensionElements>
           <zeebe:ioMapping>
-            <zeebe:output source="=&#34;waiting&#34;" target="ciOutcome" />
+            <zeebe:output source="=&quot;waiting&quot;" target="ciOutcome" />
           </zeebe:ioMapping>
         </bpmn:extensionElements>
         <bpmn:incoming>f_ci_wait</bpmn:incoming>
@@ -450,7 +450,7 @@
       <bpmn:endEvent id="end_ci_esc" name="escalate">
         <bpmn:extensionElements>
           <zeebe:ioMapping>
-            <zeebe:output source="=&#34;escalate&#34;" target="ciOutcome" />
+            <zeebe:output source="=&quot;escalate&quot;" target="ciOutcome" />
           </zeebe:ioMapping>
         </bpmn:extensionElements>
         <bpmn:incoming>f_cib_esc</bpmn:incoming>
@@ -458,7 +458,7 @@
       <bpmn:endEvent id="end_ci_sla" name="SLA — escalate">
         <bpmn:extensionElements>
           <zeebe:ioMapping>
-            <zeebe:output source="=&#34;escalate&#34;" target="ciOutcome" />
+            <zeebe:output source="=&quot;escalate&quot;" target="ciOutcome" />
           </zeebe:ioMapping>
         </bpmn:extensionElements>
         <bpmn:incoming>f_ci_sla</bpmn:incoming>
@@ -504,7 +504,7 @@
             <zeebe:property name="io.nanobpm.dataEnvelope.out" value="RebaseOut" />
           </zeebe:properties>
           <zeebe:ioMapping>
-            <zeebe:input source="=(if (abandonBrief = null) then &#34;&#34; else abandonBrief)" target="appendPrompt" />
+            <zeebe:input source="=(if (abandonBrief = null) then &quot;&quot; else abandonBrief)" target="appendPrompt" />
             <zeebe:output source="=rebaseRound + 1" target="rebaseRound" />
           </zeebe:ioMapping>
         </bpmn:extensionElements>
@@ -539,7 +539,7 @@
       <bpmn:endEvent id="end_reb_rebased" name="rebased — re-arm">
         <bpmn:extensionElements>
           <zeebe:ioMapping>
-            <zeebe:output source="=&#34;rebased&#34;" target="rebaseOutcome" />
+            <zeebe:output source="=&quot;rebased&quot;" target="rebaseOutcome" />
           </zeebe:ioMapping>
         </bpmn:extensionElements>
         <bpmn:incoming>f_reb_rebased</bpmn:incoming>
@@ -547,7 +547,7 @@
       <bpmn:endEvent id="end_reb_reconcile" name="reconcile from ground truth">
         <bpmn:extensionElements>
           <zeebe:ioMapping>
-            <zeebe:output source="=&#34;reconcile&#34;" target="rebaseOutcome" />
+            <zeebe:output source="=&quot;reconcile&quot;" target="rebaseOutcome" />
           </zeebe:ioMapping>
         </bpmn:extensionElements>
         <bpmn:incoming>f_reb_reconcile</bpmn:incoming>
@@ -555,7 +555,7 @@
       <bpmn:endEvent id="end_reb_waiting" name="waits on another PR">
         <bpmn:extensionElements>
           <zeebe:ioMapping>
-            <zeebe:output source="=&#34;waiting&#34;" target="rebaseOutcome" />
+            <zeebe:output source="=&quot;waiting&quot;" target="rebaseOutcome" />
           </zeebe:ioMapping>
         </bpmn:extensionElements>
         <bpmn:incoming>f_reb_wait</bpmn:incoming>
@@ -563,7 +563,7 @@
       <bpmn:endEvent id="end_reb_blocked" name="could not resolve — escalate">
         <bpmn:extensionElements>
           <zeebe:ioMapping>
-            <zeebe:output source="=&#34;escalate-attempt&#34;" target="rebaseOutcome" />
+            <zeebe:output source="=&quot;escalate-attempt&quot;" target="rebaseOutcome" />
           </zeebe:ioMapping>
         </bpmn:extensionElements>
         <bpmn:incoming>f_reb_blocked</bpmn:incoming>
@@ -571,7 +571,7 @@
       <bpmn:endEvent id="end_reb_sla" name="SLA — escalate">
         <bpmn:extensionElements>
           <zeebe:ioMapping>
-            <zeebe:output source="=&#34;escalate-conflict&#34;" target="rebaseOutcome" />
+            <zeebe:output source="=&quot;escalate-conflict&quot;" target="rebaseOutcome" />
           </zeebe:ioMapping>
         </bpmn:extensionElements>
         <bpmn:incoming>f_reb_sla</bpmn:incoming>
