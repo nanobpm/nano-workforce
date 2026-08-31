@@ -1,3 +1,9 @@
+## [0.167.3](https://github.com/nanobpm/nano-workforce/compare/v0.167.2...v0.167.3) (2026-08-31)
+
+### Bug Fixes
+
+* **acknowledge:** gate all four ack ops on read-model ack_open via one shared helper ([#654](https://github.com/nanobpm/nano-workforce/issues/654)) ([#655](https://github.com/nanobpm/nano-workforce/issues/655)) ([598aa80](https://github.com/nanobpm/nano-workforce/commit/598aa80470d307c7499caa26bc9b6137c6daf1fa)), closes [#652](https://github.com/nanobpm/nano-workforce/issues/652)
+
 ## [0.167.2](https://github.com/nanobpm/nano-workforce/compare/v0.167.1...v0.167.2) (2026-08-31)
 
 ### Bug Fixes
