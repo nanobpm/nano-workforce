@@ -143,25 +143,52 @@ test("feature.bpmn composes its implement step via callActivity to implement-cel
   }
 });
 
-test("plan-fanout.bpmn composes its per-wave implement step via an MI callActivity to implement-cell", () => {
-  // The multi-instance implement subProcess (one token per wave task) composes the shared
-  // `implement-cell` via an MI `callActivity`, so the inlined per-wave `senior:feature` serviceTask +
-  // escalation loop no longer sits on the fan-out path ("a wave IS a callActivity", #464/#646). The
-  // capability barrier (caps-prepare / wait-caps) stays in the wave — it is fan-out-specific, not part
-  // of the atomic cell.
+test("plan-fanout.bpmn composes its per-wave implement step via a callActivity to implement-cell", () => {
+  // Per ADR 0006 §2 the composition "replaces the inlined segments, not the surrounding orchestration":
+  // the multi-instance `implement` subProcess (one token per wave task) keeps its fan-out-specific
+  // capability barrier (`caps-prepare` / `wait-caps`) as surrounding orchestration, and its inlined
+  // implement/escalation SEGMENT (the per-wave `senior:feature` serviceTask, the `w_gw` "clean
+  // terminal?" gateway, and the `record-wave-escalation` recorder) collapses into a `callActivity` to
+  // the shared `implement-cell` — the atomic cell now owns the agent loop and its escalation through the
+  // shared `human-escalation` cell ("a wave IS a callActivity", #464/#646). The MI stays on the
+  // subProcess (one token per wave); the cell is invoked once per token.
   const xml = flat("plan-fanout");
-  const implementBlock =
-    xml.match(/<bpmn:callActivity\b[^>]*\bid="implement"[\s\S]*?<\/bpmn:callActivity>/)?.[0] ?? "";
+  // The MI element is the `implement` subProcess (one token per wave), preserved as the caps-barrier
+  // host; assert its multi-instance loop over `waveTasks`.
+  const implementSub =
+    xml.match(/<bpmn:subProcess\b[^>]*\bid="implement"[\s\S]*?<\/bpmn:subProcess>/)?.[0] ?? "";
+  assert(implementSub.length > 0, "plan-fanout.bpmn must keep the per-wave implement subProcess (the caps-barrier host)");
   assert(
-    /<zeebe:calledElement\b[^>]*\bprocessId="implement-cell"/.test(implementBlock),
+    /<bpmn:multiInstanceLoopCharacteristics>[\s\S]*?inputCollection="=waveTasks"/.test(implementSub),
+    "the implement subProcess must be multi-instance — one token per wave task",
+  );
+  // The caps barrier stays in the wave (fan-out-specific, not part of the atomic cell).
+  assert(
+    /<zeebe:taskDefinition\b[^>]*\btype="pr.caps-prepare"/.test(implementSub),
+    "the capability barrier (caps-prepare) stays in the wave as surrounding orchestration",
+  );
+  // The implement/escalation segment is replaced by a callActivity to the shared implement-cell.
+  const cellCall =
+    implementSub.match(/<bpmn:callActivity\b[^>]*\bid="implement-cell-call"[\s\S]*?<\/bpmn:callActivity>/)?.[0] ?? "";
+  assert(
+    /<zeebe:calledElement\b[^>]*\bprocessId="implement-cell"/.test(cellCall),
     "plan-fanout.bpmn must compose the per-wave implement as a callActivity to implement-cell",
   );
   assert(
-    /<bpmn:multiInstanceLoopCharacteristics>/.test(implementBlock),
-    "the implement callActivity must be multi-instance — one token per wave task",
+    /<zeebe:ioMapping>[\s\S]*?<\/zeebe:ioMapping>/.test(cellCall),
+    "the implement-cell callActivity must carry an explicit zeebe:ioMapping (no propagateAll*)",
   );
   assert(
-    /<zeebe:ioMapping>[\s\S]*?<\/zeebe:ioMapping>/.test(implementBlock),
-    "the implement MI callActivity must carry an explicit zeebe:ioMapping",
+    /<zeebe:input\b[^>]*\btarget="task"/.test(cellCall) && /<zeebe:input\b[^>]*\btarget="subjectKey"/.test(cellCall),
+    "the implement-cell callActivity must map the wave task and the plan subject key into the child scope",
+  );
+  // The inlined per-wave agent loop + escalation recorder no longer sit on the fan-out path.
+  assert(
+    !/<bpmn:serviceTask\b[^>]*\bid="implement-task"/.test(implementSub),
+    "plan-fanout.bpmn must not keep an inlined implement-task serviceTask once the cell is composed",
+  );
+  assert(
+    !/type="pr.record-wave-escalation"/.test(xml),
+    "plan-fanout.bpmn must not keep the inlined record-wave-escalation recorder (folded into the cell's recorder)",
   );
 });

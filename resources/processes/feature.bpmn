@@ -9,12 +9,9 @@
           <nano:extend name="pr" type="string" optional="true" />
           <nano:extend name="summary" type="string" optional="true" />
         </nano:shape>
-        <nano:shape id="RecordFeatureEscalationIn" name="Record feature escalation — input">
-          <nano:extend name="featureKey" type="string" />
-          <nano:extend name="question" type="string" optional="true" />
-        </nano:shape>
         <nano:shape id="RecordFeatureImplementingIn" name="Record feature implementing — input">
-          <nano:extend name="featureKey" type="string" />
+          <nano:extend name="featureKey" type="string" optional="true" />
+          <nano:extend name="subjectKey" type="string" optional="true" />
         </nano:shape>
         <nano:shape id="ConvergeFeatureIn" name="Converge feature PR — input">
           <nano:extend name="featureKey" type="string" />
@@ -183,7 +180,7 @@
           <zeebe:input source="=if (is defined(transcriptUrlBase)) then transcriptUrlBase else null" target="transcriptUrlBase" />
           <zeebe:input source="=if (is defined(escalationAssignee)) then escalationAssignee else null" target="escalationAssignee" />
           <zeebe:input source="=escalationSlaTimeout" target="escalationSlaTimeout" />
-          <zeebe:input source="=featureKey" target="featureKey" />
+          <zeebe:input source="=featureKey" target="subjectKey" />
           <zeebe:output source="=status" target="status" />
           <zeebe:output source="=if (is defined(summary)) then summary else null" target="summary" />
           <zeebe:output source="=if (is defined(pr)) then pr else null" target="pr" />

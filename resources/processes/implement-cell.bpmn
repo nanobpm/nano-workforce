@@ -1,6 +1,15 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI" xmlns:dc="http://www.omg.org/spec/DD/20100524/DC" xmlns:di="http://www.omg.org/spec/DD/20100524/DI" xmlns:zeebe="http://camunda.org/schema/zeebe/1.0" xmlns:nano="https://nanobpm.io/schema/shapes/1.0" id="Definitions_nano_workforce_implement_cell" targetNamespace="http://nanobpm.io/nano-workforce">
   <bpmn:process id="implement-cell" name="Implement cell" isExecutable="true">
+    <bpmn:extensionElements>
+      <nano:shapes>
+        <nano:shape id="RecordEscalationIn" name="Record cell escalation — input">
+          <nano:extend name="subjectKey" type="string" />
+          <nano:extend name="status" type="string" optional="true" />
+          <nano:extend name="question" type="string" optional="true" />
+        </nano:shape>
+      </nano:shapes>
+    </bpmn:extensionElements>
     <bpmn:startEvent id="Start" name="Task">
       <bpmn:outgoing>ic_toImplement</bpmn:outgoing>
     </bpmn:startEvent>
@@ -31,14 +40,37 @@
       <bpmn:extensionElements>
         <zeebe:calledElement processId="human-escalation" propagateAllChildVariables="true" />
       </bpmn:extensionElements>
-      <bpmn:incoming>ic_escalate</bpmn:incoming>
+      <bpmn:incoming>ic_toEscalate</bpmn:incoming>
       <bpmn:outgoing>ic_toAnswerGw</bpmn:outgoing>
     </bpmn:callActivity>
+    <bpmn:serviceTask id="record-escalation" name="Record escalation">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="pr.record-feature-escalation" />
+        <zeebe:properties>
+          <zeebe:property name="io.nanobpm.dataEnvelope.in" value="RecordEscalationIn" />
+        </zeebe:properties>
+        <zeebe:ioMapping>
+          <zeebe:output source="=question" target="question" />
+        </zeebe:ioMapping>
+      </bpmn:extensionElements>
+      <bpmn:incoming>ic_escalate</bpmn:incoming>
+      <bpmn:outgoing>ic_toEscalate</bpmn:outgoing>
+    </bpmn:serviceTask>
     <bpmn:exclusiveGateway id="ic_gw_answer" name="answer?" default="ic_abandon">
       <bpmn:incoming>ic_toAnswerGw</bpmn:incoming>
       <bpmn:outgoing>ic_answerLoop</bpmn:outgoing>
       <bpmn:outgoing>ic_abandon</bpmn:outgoing>
     </bpmn:exclusiveGateway>
+    <bpmn:serviceTask id="record-implementing" name="Record implementing (reset)">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="pr.record-feature-implementing" />
+        <zeebe:properties>
+          <zeebe:property name="io.nanobpm.dataEnvelope.in" value="RecordFeatureImplementingIn" />
+        </zeebe:properties>
+      </bpmn:extensionElements>
+      <bpmn:incoming>ic_answerLoop</bpmn:incoming>
+      <bpmn:outgoing>ic_reImplement</bpmn:outgoing>
+    </bpmn:serviceTask>
     <bpmn:endEvent id="ic_end" name="Task done">
       <bpmn:incoming>ic_done</bpmn:incoming>
       <bpmn:incoming>ic_abandon</bpmn:incoming>
@@ -48,11 +80,13 @@
     <bpmn:sequenceFlow id="ic_done" name="done" sourceRef="ic_gw" targetRef="ic_end">
       <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=status = "opened" or status = "blocked" or status = "skipped"</bpmn:conditionExpression>
     </bpmn:sequenceFlow>
-    <bpmn:sequenceFlow id="ic_escalate" name="escalated" sourceRef="ic_gw" targetRef="escalate" />
+    <bpmn:sequenceFlow id="ic_escalate" name="escalated" sourceRef="ic_gw" targetRef="record-escalation" />
+    <bpmn:sequenceFlow id="ic_toEscalate" sourceRef="record-escalation" targetRef="escalate" />
     <bpmn:sequenceFlow id="ic_toAnswerGw" sourceRef="escalate" targetRef="ic_gw_answer" />
-    <bpmn:sequenceFlow id="ic_answerLoop" name="answer" sourceRef="ic_gw_answer" targetRef="implement-task">
+    <bpmn:sequenceFlow id="ic_answerLoop" name="answer" sourceRef="ic_gw_answer" targetRef="record-implementing">
       <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">=resolution = "answer"</bpmn:conditionExpression>
     </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="ic_reImplement" sourceRef="record-implementing" targetRef="implement-task" />
     <bpmn:sequenceFlow id="ic_abandon" name="abandon" sourceRef="ic_gw_answer" targetRef="ic_end" />
   </bpmn:process>
   <bpmndi:BPMNDiagram id="BPMNDiagram_implement-cell">
@@ -73,18 +107,24 @@
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_escalate" bpmnElement="escalate">
+        <dc:Bounds x="766" y="80" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_record-escalation" bpmnElement="record-escalation">
         <dc:Bounds x="566" y="80" width="100" height="80" />
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_ic_gw_answer" bpmnElement="ic_gw_answer" isMarkerVisible="true">
-        <dc:Bounds x="766" y="95" width="50" height="50" />
+        <dc:Bounds x="966" y="95" width="50" height="50" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="763" y="76" width="56" height="14" />
+          <dc:Bounds x="963" y="76" width="56" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BPMNShape_record-implementing" bpmnElement="record-implementing">
+        <dc:Bounds x="1116" y="240" width="100" height="80" />
+      </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="BPMNShape_ic_end" bpmnElement="ic_end">
-        <dc:Bounds x="916" y="102" width="36" height="36" />
+        <dc:Bounds x="1148" y="102" width="36" height="36" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="901" y="83" width="66" height="14" />
+          <dc:Bounds x="1133" y="83" width="66" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
       <bpmndi:BPMNEdge id="BPMNEdge_ic_toImplement" bpmnElement="ic_toImplement">
@@ -102,34 +142,43 @@
           <dc:Bounds x="483" y="128" width="67" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
-      <bpmndi:BPMNEdge id="BPMNEdge_ic_toAnswerGw" bpmnElement="ic_toAnswerGw">
+      <bpmndi:BPMNEdge id="BPMNEdge_ic_toEscalate" bpmnElement="ic_toEscalate">
         <di:waypoint x="666" y="120" />
         <di:waypoint x="766" y="120" />
       </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_ic_toAnswerGw" bpmnElement="ic_toAnswerGw">
+        <di:waypoint x="866" y="120" />
+        <di:waypoint x="966" y="120" />
+      </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_ic_abandon" bpmnElement="ic_abandon">
-        <di:waypoint x="816" y="120" />
-        <di:waypoint x="916" y="120" />
+        <di:waypoint x="1016" y="120" />
+        <di:waypoint x="1148" y="120" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="840" y="128" width="53" height="14" />
+          <dc:Bounds x="1056" y="98" width="53" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="BPMNEdge_ic_answerLoop" bpmnElement="ic_answerLoop">
+        <di:waypoint x="991" y="145" />
+        <di:waypoint x="991" y="280" />
+        <di:waypoint x="1116" y="280" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="996" y="206" width="49" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
       <bpmndi:BPMNEdge id="BPMNEdge_ic_done" bpmnElement="ic_done">
         <di:waypoint x="441" y="145" />
         <di:waypoint x="441" y="180" />
-        <di:waypoint x="934" y="180" />
-        <di:waypoint x="934" y="138" />
+        <di:waypoint x="1166" y="180" />
+        <di:waypoint x="1166" y="138" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="672" y="158" width="32" height="14" />
+          <dc:Bounds x="788" y="188" width="32" height="14" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
-      <bpmndi:BPMNEdge id="BPMNEdge_ic_answerLoop" bpmnElement="ic_answerLoop">
-        <di:waypoint x="791" y="145" />
-        <di:waypoint x="791" y="200" />
-        <di:waypoint x="266" y="200" />
+      <bpmndi:BPMNEdge id="BPMNEdge_ic_reImplement" bpmnElement="ic_reImplement">
+        <di:waypoint x="1166" y="320" />
+        <di:waypoint x="1166" y="340" />
+        <di:waypoint x="266" y="340" />
         <di:waypoint x="266" y="160" />
-        <bpmndi:BPMNLabel>
-          <dc:Bounds x="504" y="208" width="49" height="14" />
-        </bpmndi:BPMNLabel>
       </bpmndi:BPMNEdge>
     </bpmndi:BPMNPlane>
   </bpmndi:BPMNDiagram>

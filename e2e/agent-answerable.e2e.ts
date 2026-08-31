@@ -1,13 +1,14 @@
 // End-to-end proof for agent-answerable escalations (epic #156, slice U6; ADR 0046). Boots the whole
 // app against the WASM engine and drives the REAL plan-fanout.bpmn to the implementation-phase task
-// escalation — the native `feature-escalation` userTask + form the human path (U2) completes — then
+// escalation — the native `escalation` userTask (formId `feature-escalation`) on the `human-escalation`
+// grandchild the shared implement-cell spawns, which the human path (U2) completes — then
 // completes it through the HOST-SIDE AGENT COMPLETER (`completeEscalationAsAgent`) instead of a raw
 // human completion. It proves the three things U6 promises:
 //
 //   1. an AGENT assignee completing the SAME `.form` resumes the process with typed vars IDENTICAL to
 //      a human completion — asserted on the cumulative taken sequence flows: `{resolution:"answer"}`
-//      routes `w_gw_answer -> implement-task`, exactly as the U2 human test asserts (an empty/wrong
-//      completion would take the abandon default);
+//      routes `ic_gw_answer -> record-implementing -> implement-task`, exactly as the U2 human test
+//      asserts (an empty/wrong completion would take the abandon default);
 //   2. attribution is recorded — the `task_completions` ledger row is actor_kind=agent + the agent id
 //      + the submitted variables;
 //   3. the completion is reversible — a human reverts it, and the ledger records who + when.
@@ -111,7 +112,9 @@ describe("agent-answerable escalations (U6 — same form, agent completer, attri
   }
 
   async function openTask(app: TestApp, processKey: string, elementId: string): Promise<InboxTask> {
-    const tasks = await app.engine.searchUserTasks({ processInstanceKey: processKey });
+    // Root-scoped: after the ADR 0006 S4 composition the escalation user task parks on a
+    // `human-escalation` grandchild instance the shared `implement-cell` spawns, not on the parent.
+    const tasks = await app.engine.searchUserTasks({ rootProcessInstanceKey: processKey });
     const match = tasks.find((t) => t.elementId === elementId);
     assert.ok(match, `expected an open ${elementId} user task (open: ${tasks.map((t) => t.elementId).join(", ")})`);
     return match!;
@@ -134,8 +137,8 @@ describe("agent-answerable escalations (U6 — same form, agent completer, attri
         },
       },
       async ({ app, processKey }) => {
-        const task = await openTask(app, processKey, "feature-escalation");
-        assert.ok(task.userTaskKey, "the feature escalation carries a completable userTaskKey");
+        const task = await openTask(app, processKey, "escalation");
+        assert.ok(task.userTaskKey, "the human-escalation cell task carries a completable userTaskKey");
 
         // Complete AS AN AGENT through the host-side completer — the same typed `{resolution, answer}`
         // a human submits through the inbox, only the caller differs.
@@ -145,18 +148,18 @@ describe("agent-answerable escalations (U6 — same form, agent completer, attri
           variables: { resolution: "answer", answer: "use v2" },
         });
         assert.equal(r.ok, true, "the agent completer accepted the escalation completion");
-        assert.equal(r.elementId, "feature-escalation");
+        assert.equal(r.elementId, "escalation");
         await app.settle();
 
         // IDENTICAL resume to the human path (mirrors U2's human test): the typed resolution loops
-        // the child back to re-dispatch the SAME task — NOT the abandon default.
+        // the cell back to re-dispatch the SAME task through its implementing-reset — NOT the abandon default.
         const flows = takenFlows(app);
         assert.ok(
-          flows.includes("w_gw_answer->implement-task"),
-          `agent answer routed back to implement-task (flows: ${flows.join(", ")})`,
+          flows.includes("ic_gw_answer->record-implementing") && flows.includes("record-implementing->implement-task"),
+          `agent answer routed back to implement-task through the cell reset (flows: ${flows.join(", ")})`,
         );
         assert.ok(
-          !flows.includes("w_gw_answer->w_end"),
+          !flows.includes("ic_gw_answer->ic_end"),
           "the abandon (default) flow was NOT taken",
         );
 
@@ -168,7 +171,7 @@ describe("agent-answerable escalations (U6 — same form, agent completer, attri
         const row = completions[0];
         assert.equal(row.actor_kind, "agent");
         assert.equal(row.actor_id, "senior:answer-bot");
-        assert.equal(row.element_id, "feature-escalation");
+        assert.equal(row.element_id, "escalation");
         assert.deepEqual(JSON.parse(row.variables_json), { resolution: "answer", answer: "use v2" });
         assert.equal(row.reversible, 1, "an agent completion is reversible");
         assert.equal(row.reverted, 0);

@@ -56,10 +56,14 @@ function manifestBindings(): Binding[] {
 }
 
 // The deployed process models — scanned for their prompt-bearing agent tasks, the real dispatch
-// corpus the door's verbs must already exist in.
+// corpus the door's verbs must already exist in. Includes the shared S4 atomic cells (ADR 0006): the
+// implement/escalation and trial-merge agent tasks now live in `implement-cell` / `merge-cell`, which
+// `feature.bpmn` and the `plan-fanout` MI body compose by `callActivity`.
 const MODEL_FILES = [
   "feature.bpmn",
   "plan-fanout.bpmn",
+  "implement-cell.bpmn",
+  "merge-cell.bpmn",
   "convergence-loop.bpmn",
   "merge-loop.bpmn",
   "retro.bpmn",
@@ -85,7 +89,7 @@ test("VERB PARITY: every mapped dispatch verb is a real senior:* agent task in t
 });
 
 test("VERB PARITY: the implementation kinds keep the pre-collapse senior:feature target", () => {
-  // feature.bpmn's implement task and plan-fanout.bpmn's per-slice implement task both dispatch
+  // implement-cell.bpmn's agent task (composed by feature.bpmn and the plan-fanout MI body) dispatches
   // senior:feature today — the door preserves that for the single-issue implementation kinds.
   assertEquals(dispatchJobTypeForKind("feature"), "senior:feature");
   assertEquals(dispatchJobTypeForKind("plan-task"), "senior:feature");

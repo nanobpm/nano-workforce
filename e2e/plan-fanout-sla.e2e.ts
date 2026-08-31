@@ -108,7 +108,10 @@ describe("plan-fanout escalation SLA + assignment (U5)", () => {
   }
 
   async function openTask(app: TestApp, processKey: string, elementId: string): Promise<InboxTask> {
-    const tasks = await app.engine.searchUserTasks({ processInstanceKey: processKey });
+    // Root-scoped: the implement-stage escalation now parks on a `human-escalation` grandchild the
+    // shared `implement-cell` spawns (ADR 0006 S4); plan-level tasks (plan-review, trial-merge) still
+    // park on the root instance and remain discoverable under a root-scoped search (superset).
+    const tasks = await app.engine.searchUserTasks({ rootProcessInstanceKey: processKey });
     const match = tasks.find((t) => t.elementId === elementId);
     assert.ok(match, `expected an open ${elementId} user task (open: ${tasks.map((t) => t.elementId).join(", ")})`);
     return match!;
@@ -118,7 +121,7 @@ describe("plan-fanout escalation SLA + assignment (U5)", () => {
    *  filter) and NOT by a bogus group — proving `zeebe:assignmentDefinition candidateGroups` took. */
   async function assertAssignmentFilterable(app: TestApp, processKey: string, elementId: string) {
     const byOperators = await app.engine.searchUserTasks({
-      processInstanceKey: processKey,
+      rootProcessInstanceKey: processKey,
       candidateGroup: "operators",
     });
     assert.ok(
@@ -126,7 +129,7 @@ describe("plan-fanout escalation SLA + assignment (U5)", () => {
       `${elementId} is filterable by the operators candidate group`,
     );
     const byBogus = await app.engine.searchUserTasks({
-      processInstanceKey: processKey,
+      rootProcessInstanceKey: processKey,
       candidateGroup: "nobody-here",
     });
     assert.ok(
@@ -150,20 +153,21 @@ describe("plan-fanout escalation SLA + assignment (U5)", () => {
         }),
       },
       async ({ app, processKey }) => {
-        await openTask(app, processKey, "feature-escalation");
-        await assertAssignmentFilterable(app, processKey, "feature-escalation");
+        await openTask(app, processKey, "escalation");
+        await assertAssignmentFilterable(app, processKey, "escalation");
 
-        // Never answer — let the SLA elapse. The interrupting boundary cancels the parked task and
-        // routes to the task-done end (the safe auto-abandon default).
+        // Never answer — let the SLA elapse. The interrupting boundary (on the human-escalation cell's
+        // `escalation` task) cancels the parked task and routes to its SLA auto-abandon end; the cell
+        // then takes its abandon default (the safe auto-abandon of the slice).
         await advancePastTimer(app, PAST_SLA_MS);
 
         const flows = takenFlows(app);
         assert.ok(
-          flows.includes("be_feature_sla->w_end"),
-          `the SLA boundary auto-abandoned to the task-done end (flows: ${flows.join(", ")})`,
+          flows.includes("be_he_sla->he_end_sla"),
+          `the SLA boundary auto-abandoned to the human-escalation cell's SLA end (flows: ${flows.join(", ")})`,
         );
         assert.ok(
-          !flows.includes("w_gw_answer->implement-task"),
+          !flows.includes("ic_gw_answer->record-implementing"),
           "the human answer loop was NOT taken",
         );
       },

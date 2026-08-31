@@ -66,8 +66,15 @@ test("a never-green producer escalates (bounded) without wedging: probe timeout 
   assert(hasFlow("be_pf_sla", "pf_end"), "an elapsed escalation SLA settles the preflight instead of wedging");
 });
 
-test("the bound resolvedArtifacts version rides the implement task's appendPrompt", () => {
-  const task = flat.match(/<bpmn:serviceTask\b[^>]*\bid="implement-task"[\s\S]*?<\/bpmn:serviceTask>/);
-  assert(task, "implement-task must exist");
-  assertStringIncludes(task![0], "resolvedArtifacts", "the bound pkg@version is threaded into the slice prompt");
+test("the bound resolvedArtifacts version rides the implement cell's appendPrompt", () => {
+  // The per-wave implement/escalation segment is composed into `implement-cell` (ADR 0006 S4), so the
+  // bound `pkg@version`s ride the MI `implement-cell` callActivity's ioMapping into the cell, whose
+  // `implement-task` threads them into the slice prompt's appendPrompt.
+  const call = flat.match(/<bpmn:callActivity\b[^>]*\bid="implement-cell-call"[\s\S]*?<\/bpmn:callActivity>/);
+  assert(call, "the implement-cell callActivity must exist");
+  assertStringIncludes(call![0], "resolvedArtifacts", "the bound pkg@version is threaded into the cell's slice prompt");
+  const cell = readFileSync("resources/processes/implement-cell.bpmn", "utf8").replace(/\s+/g, " ");
+  const task = cell.match(/<bpmn:serviceTask\b[^>]*\bid="implement-task"[\s\S]*?<\/bpmn:serviceTask>/);
+  assert(task, "implement-cell must own the implement-task");
+  assertStringIncludes(task![0], "resolvedArtifacts", "the cell's implement-task appendPrompt consumes the bound pkg@version");
 });
