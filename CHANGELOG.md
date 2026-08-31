@@ -1,3 +1,9 @@
+## [0.167.2](https://github.com/nanobpm/nano-workforce/compare/v0.167.1...v0.167.2) (2026-08-31)
+
+### Bug Fixes
+
+* gate acknowledgePr on the read model's folded status, not the base column ([#653](https://github.com/nanobpm/nano-workforce/issues/653)) ([80446e2](https://github.com/nanobpm/nano-workforce/commit/80446e24af3c62570c041a109eef85eb34f8bb23)), closes [#652](https://github.com/nanobpm/nano-workforce/issues/652)
+
 ## [0.167.1](https://github.com/nanobpm/nano-workforce/compare/v0.167.0...v0.167.1) (2026-08-31)
 
 ### Bug Fixes
