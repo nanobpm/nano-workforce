@@ -1,0 +1,54 @@
+# Refresh the mirrored install script on nanobpm.io the moment install.sh changes.
+#
+# https://nanobpm.io/install.sh is served as the ACTUAL bytes of THIS repo's
+# install.sh (GitHub Pages can't 301-redirect a `curl … | sh` URL). The site is
+# built in a DIFFERENT repo (Magikcraft/nano-bpm) whose Pages workflow re-fetches
+# install.sh on every deploy — but that deploy only triggers on changes to files
+# in that repo, so an edit here would otherwise not reach the published mirror
+# until the nightly backstop cron. This job pokes that repo's Pages deploy via a
+# `repository_dispatch` (event type `install-sh-updated`) so the mirror refreshes
+# within minutes of merging an install.sh change.
+#
+# Requires a token that can write to Magikcraft/nano-bpm — the default
+# GITHUB_TOKEN is scoped to THIS repo only. Store a fine-grained PAT (or GitHub
+# App token) with `Contents: read and write` on Magikcraft/nano-bpm as the repo
+# secret PAGES_DISPATCH_TOKEN. Absent the secret, the job no-ops (the nightly
+# cron on the site keeps the mirror eventually-consistent).
+name: Refresh nanobpm.io install mirror
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'install.sh'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dispatch:
+    name: dispatch install-sh-updated
+    runs-on: ubuntu-latest
+    steps:
+      - name: Notify the nanobpm.io Pages deploy
+        env:
+          DISPATCH_TOKEN: ${{ secrets.PAGES_DISPATCH_TOKEN }}
+        run: |
+          set -eu
+          if [ -z "${DISPATCH_TOKEN:-}" ]; then
+            echo "::warning::PAGES_DISPATCH_TOKEN is not set — skipping. nanobpm.io/install.sh will refresh on its nightly cron instead."
+            exit 0
+          fi
+          code=$(curl -sS -o /dev/null -w '%{http_code}' \
+            -X POST \
+            -H 'Accept: application/vnd.github+json' \
+            -H "Authorization: Bearer ${DISPATCH_TOKEN}" \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            https://api.github.com/repos/Magikcraft/nano-bpm/dispatches \
+            -d '{"event_type":"install-sh-updated"}')
+          if [ "$code" != "204" ]; then
+            echo "::error::repository_dispatch to Magikcraft/nano-bpm returned HTTP ${code} (expected 204). Check PAGES_DISPATCH_TOKEN scope (fine-grained PAT: Contents: read & write)."
+            exit 1
+          fi
+          echo "dispatched install-sh-updated to Magikcraft/nano-bpm (HTTP 204)"
