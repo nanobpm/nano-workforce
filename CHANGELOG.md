@@ -1,3 +1,9 @@
+## [0.164.0](https://github.com/nanobpm/nano-workforce/compare/v0.163.3...v0.164.0) (2026-08-31)
+
+### Features
+
+* **merge-loop:** bound wait-mergeable with a timeout + stall probe ([#636](https://github.com/nanobpm/nano-workforce/issues/636)) ([#640](https://github.com/nanobpm/nano-workforce/issues/640)) ([e12dd04](https://github.com/nanobpm/nano-workforce/commit/e12dd0426d0c7b3defe24d339502397b24b9302c))
+
 ## [0.163.3](https://github.com/nanobpm/nano-workforce/compare/v0.163.2...v0.163.3) (2026-08-31)
 
 ### Bug Fixes
