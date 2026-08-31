@@ -1,3 +1,9 @@
+## [0.165.0](https://github.com/nanobpm/nano-workforce/compare/v0.164.0...v0.165.0) (2026-08-31)
+
+### Features
+
+* **overview:** add Dismiss row action to Active Features grid ([#644](https://github.com/nanobpm/nano-workforce/issues/644)) ([cda5962](https://github.com/nanobpm/nano-workforce/commit/cda59628d31a37faf26e3a749b6443b33f532d7d)), closes [#643](https://github.com/nanobpm/nano-workforce/issues/643)
+
 ## [0.164.0](https://github.com/nanobpm/nano-workforce/compare/v0.163.3...v0.164.0) (2026-08-31)
 
 ### Features
