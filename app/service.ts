@@ -93,12 +93,14 @@ import {
   latestOpenEscalationQuestion,
   latestPlanReviewFindings,
   latestTrialMergeQuestion,
+  type OpenEscalation,
   PLAN_REVIEW_ELEMENT,
   PR_WAIT_ANSWER_ELEMENT,
   PR_WAIT_MERGE_ANSWER_ELEMENT,
   prEscalations,
   reconcileUserTasks,
   TRIAL_MERGE_ELEMENT,
+  toOpenEscalation,
   type UserTaskContext,
   type UserTaskRow,
   userTaskKindLabel,
@@ -785,7 +787,7 @@ export interface ActivePr {
   round: number;
   processKey: string | null;
   waitingSince: string | null;
-  openEscalation: string | null;
+  openEscalation: OpenEscalation | null;
   updatedAt: string;
   /** Leasing worker while an agent is actively working the review round; null when queued
    * (job created, not yet activated) or not at the review-round task. */
@@ -796,15 +798,15 @@ export interface ActivePr {
 
 /** Every tracked PR not in a terminal state (converged/abandoned), newest-updated first. Backs
  * the GET status endpoint so an operator or an external harness can see what is in flight
- * without reading the datasource directly. The open-escalation question is derived from the
- * canonical `escalations` audit row — the single source of truth (no denormalised PR-row
- * pointer). A PR reads `status="escalated"` only while a token is parked awaiting a human answer,
- * and the row it raised carries `status="open"` until that answer is recorded — by the
- * `pr.answer-escalation` step on the `wait-answer` (review loop) or `wait-merge-answer` (merge loop)
- * user-task completion. Both loops now park on a native user task answered through the one canonical
- * `completeUserTask` door (#256), so deriving from the row (not a per-loop wait mechanism) surfaces
- * BOTH loops' escalations uniformly. Once answered the row leaves `open`, so `openEscalation`
- * derives back to null. */
+ * without reading the datasource directly. The structured `openEscalation` pointer (issue #666:
+ * `{ userTaskKey, kind, summary }`) is derived from the canonical `user_tasks` read model — the SAME
+ * user-task surface `listEscalations` and the Convergence/Tasks page consume, so `/status` carries the
+ * completable `userTaskKey` without a denormalised PR-row pointer or a second source of truth. A
+ * `user_tasks` row for a PR subject exists iff its review/merge-loop escalation task is currently OPEN
+ * (parked awaiting a human answer) — the same live-escalation signal a `status="escalated"` PR carries.
+ * Both loops park on a native user task answered through the one canonical `completeUserTask` door
+ * (#256), so deriving from the read model surfaces BOTH loops' escalations uniformly. Once the task is
+ * completed its row is removed, so `openEscalation` derives back to null. */
 export async function activePrs(data: DataLayer): Promise<ActivePr[]> {
   const all = await prsTracking(data).all();
   const active = all
@@ -818,15 +820,20 @@ export async function activePrs(data: DataLayer): Promise<ActivePr[]> {
     // `derived_status === status`.
     .filter((p) => !TERMINAL_STATUSES.includes(p.derived_status))
     .sort((a, b) => (a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0));
-  // Only an `escalated` PR is parked awaiting a human answer (either loop). Surface the question
-  // from its latest still-open `escalations` row; a resubmit retires stale rows and finalize/merge
-  // move the PR off `escalated`, so an open row on an escalated PR is a genuinely live escalation.
-  // Fetch every open row in one query (avoids an N+1 over escalated PRs), then keep the newest per PR.
-  const openEscByPr = new Map<string, string>();
-  const escalatedPrs = new Set(active.filter((p) => p.status === "escalated").map((p) => p.pr_key));
-  for (const e of (await escs(data).find({ status: "open" })).sort((a, b) => b.id - a.id)) {
-    if (!escalatedPrs.has(e.pr_key) || openEscByPr.has(e.pr_key)) continue;
-    if (e.question) openEscByPr.set(e.pr_key, e.question);
+  // Derive the STRUCTURED open-escalation pointer from the ONE `user_tasks` read model (issue #666) —
+  // the same user-task surface `listEscalations` and the Convergence/Tasks page consume — so `/status`
+  // carries the completable `userTaskKey` (plus the escalation `kind` and a one-line `summary`) without
+  // a second source of truth. A `user_tasks` row for a PR subject exists iff its review/merge-loop
+  // escalation task is currently OPEN (parked awaiting a human answer), so its presence is exactly the
+  // live-escalation signal the old `escalations`-table derivation computed — now unified across BOTH
+  // loops. Keep the newest per PR (a PR parks on at most one such task at a time; order by recency for
+  // determinism).
+  const openEscByPr = new Map<string, OpenEscalation>();
+  for (const t of (await userTasks(data).find({ subject_type: "pr" })).sort((a, b) =>
+    a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0,
+  )) {
+    if (openEscByPr.has(t.subject_key)) continue;
+    openEscByPr.set(t.subject_key, toOpenEscalation(t));
   }
   return active.map((p) => ({
     prKey: p.pr_key,

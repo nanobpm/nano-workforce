@@ -46,6 +46,7 @@ const EXPECTED_EXPOSED = [
   "previewDeliveryGraph",
   "listStagedProposals",
   "listActivePrs",
+  "listEscalations",
   "getAgentInstructions",
   "getVersion",
 ];
