@@ -44,6 +44,17 @@ const NO_RESULT_QUESTION =
 
 const handler: AppJobHandler<In, Out> = async (job, app) => {
   const subjectKey = job.variables.subjectKey;
+  // Fail fast rather than keying the `feature_escalations` audit log (and the guarded `feature_runs`
+  // flip) with `undefined`. The cell's `escalated` arm always supplies `subjectKey` (the callActivity
+  // input — a feature run's `feature_key` or a wave slice's `plan_key`), so a missing key can only mean
+  // the `implement-cell` ioMapping/dataEnvelope regressed. Raising an incident surfaces that regression
+  // with a clear trail instead of appending a corrupt `undefined`-keyed audit row and masking it —
+  // symmetric with `record-feature-implementing`'s fail-fast guard (#642).
+  if (!subjectKey) {
+    throw new Error(
+      "record-feature-escalation: subjectKey absent — the implement-cell's escalation-arm ioMapping/dataEnvelope has regressed (would key feature_escalations/feature_runs with undefined)",
+    );
+  }
   const rawQuestion = str(job.variables.question);
   // The agent's own question is authoritative when it declared a real escalation with one; otherwise
   // (a no-machine-readable result, or an escalation with a blank question) synthesise an answerable one

@@ -7,7 +7,7 @@
 // so this is the question's source of truth) and re-emits it, synthesising an answerable one via the
 // #360 no-result net when the agent left none.
 import { test } from "node:test";
-import { assertEquals } from "#test-assert";
+import { assertEquals, assertRejects } from "#test-assert";
 import { noopLog } from "../../test/log.ts";
 import handler, { NO_RESULT_QUESTION } from "./worker.ts";
 
@@ -105,6 +105,16 @@ test("blank-question escalated: still synthesises the #360 question (never a dea
   );
   assertEquals(out, { question: NO_RESULT_QUESTION });
   assertEquals(app.stores.feature_escalations[0].question, NO_RESULT_QUESTION);
+});
+
+test("fails fast (incident) when subjectKey is absent — never appends a corrupt undefined-keyed audit row", async () => {
+  // The cell's escalation arm always supplies `subjectKey` (the callActivity input), so a missing key
+  // can only mean the `implement-cell` ioMapping/dataEnvelope regressed. The worker must raise an
+  // incident (throw) rather than keying `feature_escalations`/`feature_runs` with `undefined` and
+  // masking the regression — symmetric with `record-feature-implementing`'s fail-fast guard (#642).
+  const app = fakeApp([]);
+  await assertRejects(() => handler({ jobKey: "job-x", variables: {} } as never, app));
+  assertEquals(app.stores.feature_escalations, undefined, "no audit row is appended when subjectKey is absent");
 });
 
 test("a retried job (same jobKey) reuses its audit row, never duplicating", async () => {
