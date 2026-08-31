@@ -1,3 +1,9 @@
+## [0.168.2](https://github.com/nanobpm/nano-workforce/compare/v0.168.1...v0.168.2) (2026-08-31)
+
+### Bug Fixes
+
+* **deps:** bump @nanobpm/urban-testkit to ^1.0.1 (engine-wasm 0.8.6) ([#663](https://github.com/nanobpm/nano-workforce/issues/663)) ([872f9bc](https://github.com/nanobpm/nano-workforce/commit/872f9bc28b421e7c8a0db2881692c186963636e3)), closes [Magikcraft/nano-bpm#1095](https://github.com/Magikcraft/nano-bpm/issues/1095)
+
 ## [0.168.1](https://github.com/nanobpm/nano-workforce/compare/v0.168.0...v0.168.1) (2026-08-31)
 
 ### Bug Fixes
