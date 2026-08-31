@@ -7,7 +7,8 @@
 // reset, so `status` stayed a stale `escalated` through the ENTIRE post-answer re-implementation
 // (the #632 tear). Parity with the PR `status="escalated"` contract, which holds only while parked.
 //
-// Idempotent-safe: re-stamping `running` is a no-op, so the at-least-once job can retry freely, and
+// Idempotent-safe: re-stamping `running` is a no-op FOR THE STATUS, so the at-least-once job can retry
+// freely; it does still refresh `updated_at` on every invocation (a confirming timestamp write), and
 // stamping `running` on the very first entry (when the row is already `running` from dispatch) is a
 // harmless confirming write.
 import type { AppJobHandler } from "@nanobpm/urban";

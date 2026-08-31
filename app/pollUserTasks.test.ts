@@ -702,6 +702,40 @@ test("pollUserTasks (engine-first): self-heals an escalated run stranded off its
   assertEquals(byKey["o/r#77"].status, "escalated", "the genuinely parked run stays escalated");
 });
 
+test("pollUserTasks (engine-first): skips the per-instance open-task RPC for an escalated run already seen parked in this pass's sweep (issue #642)", async () => {
+  // Presence in THIS pass's swept `desired` set is POSITIVE evidence the run is genuinely parked — the
+  // best-effort sweep may truncate (drop tasks) but never invents one. Re-confirming such a run with a
+  // per-instance `openUserTasks` RPC is a redundant N+1 query on every poll tick; the self-heal must skip
+  // it. Only a run NOT confirmed parked by the sweep still needs the per-instance check (unchanged).
+  const { data, stores } = memData({
+    feature_runs: [
+      { feature_key: "o/r#parked", status: "escalated", process_key: "fp-parked", issue_url: null, title: "parked", delivery_label: null },
+      { feature_key: "o/r#stranded", status: "escalated", process_key: "fp-stranded", issue_url: null, title: "stranded", delivery_label: null },
+    ],
+  });
+  const restore = stubUserTaskSearch([
+    { userTaskKey: "ut-parked", elementId: "feature-escalation", processInstanceKey: "fp-parked", state: "CREATED" },
+  ]);
+  const openUserTasksCalls: string[] = [];
+  const engine = {
+    searchUserTasks: () => Promise.resolve([]),
+    openUserTasks: (filter?: { processInstanceKey?: string }) => {
+      if (filter?.processInstanceKey) openUserTasksCalls.push(filter.processInstanceKey);
+      return Promise.resolve([]); // no instance reports an open escalation via the per-instance seam
+    },
+  } as unknown as EngineClient;
+  try {
+    await pollUserTasks(data, engine, REST);
+  } finally {
+    restore();
+  }
+  const byKey = Object.fromEntries((stores.feature_runs ?? []).map((r) => [r.feature_key, r]));
+  assertEquals(byKey["o/r#parked"].status, "escalated", "the swept-parked run stays escalated without a per-instance query");
+  assertEquals(byKey["o/r#stranded"].status, "running", "the run absent from the sweep is still confirmed per-instance and healed");
+  assertEquals(openUserTasksCalls.includes("fp-parked"), false, "no redundant per-instance RPC for the already-parked run");
+  assertEquals(openUserTasksCalls.includes("fp-stranded"), true, "the unconfirmed run still needs the per-instance RPC");
+});
+
 test("pollUserTasks (engine-first): a TRUNCATED best-effort sweep never heals a genuinely-parked escalated run (issue #642)", async () => {
   // `sweepOpenEscalationTasks` is explicitly best-effort — it BREAKS early on a paging/transport error
   // and projects only what it had gathered. Healing `escalated -> running` on ABSENCE from that partial

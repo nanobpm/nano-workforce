@@ -2700,8 +2700,17 @@ export async function pollUserTasks(
   // positive evidence that no `feature-escalation` task is open for the instance (parity with the PR
   // `status="escalated"` contract). Confined to rows with a known `process_key` so an untracked instance
   // is never guessed at.
+  //
+  // Presence in THIS pass's `desired` set is itself POSITIVE evidence of parking (truncation only ever
+  // DROPS tasks, never invents one), so a run whose `feature-escalation` task was already swept is
+  // genuinely parked — skip its per-instance `openUserTasks` RPC entirely (an avoidable N+1 on every
+  // tick). Only a run NOT confirmed parked by the sweep falls through to the per-instance check below.
+  const sweptParkedEscalations = new Set(
+    desired.filter((r) => r.element_id === FEATURE_ESCALATION_ELEMENT && r.process_key).map((r) => r.process_key),
+  );
   for (const run of await featureRuns(data).find({ status: "escalated" })) {
     if (!run.process_key) continue;
+    if (sweptParkedEscalations.has(run.process_key)) continue; // already seen parked this pass — no RPC, no heal
     // A just-written escalation may not have its `feature-escalation` user task yet: the sole writer,
     // `record-feature-escalation`, stamps `updated_at` immediately BEFORE the engine creates the task.
     // Skip healing inside the grace window so this pass never races that transition and steals a fresh

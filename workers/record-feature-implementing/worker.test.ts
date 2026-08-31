@@ -44,11 +44,14 @@ test("record-feature-implementing: resets an escalated run back to running on th
   assertEquals(rows[0].updated_at !== "2025-01-01T00:00:00.000Z", true, "updated_at was refreshed");
 });
 
-test("record-feature-implementing: a confirming write on the first entry (already running) is a no-op", async () => {
+test("record-feature-implementing: a confirming write on the first entry (already running) keeps status running and still refreshes updated_at", async () => {
   // On `f_toImplement` (first entry) the row is already `running` from dispatch — re-stamping is a
-  // harmless idempotent confirming write, so a retried at-least-once job never regresses the status.
-  const rows = [{ feature_key: "owner/repo#8", status: "running" }];
+  // harmless idempotent confirming write for the STATUS (a retried at-least-once job never regresses it),
+  // but the worker still refreshes `updated_at` on every invocation, so assert that timestamp write too
+  // (a future refactor must not silently stop stamping it — the self-heal grace window keys on it).
+  const rows = [{ feature_key: "owner/repo#8", status: "running", updated_at: "2025-01-01T00:00:00.000Z" }];
   const app = fakeApp(rows);
   await handler({ jobKey: "job-8", variables: { featureKey: "owner/repo#8" } } as never, app);
   assertEquals(rows[0].status, "running");
+  assertEquals(rows[0].updated_at !== "2025-01-01T00:00:00.000Z", true, "updated_at was refreshed on the confirming write");
 });
