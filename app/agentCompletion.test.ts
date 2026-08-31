@@ -319,7 +319,8 @@ test("readiness-escalation(-pf) is HUMAN-completable but NOT agent-completable (
 });
 
 test("human completer refuses a non-escalation user task and is a no-op for an unknown key", async () => {
-  const stores = { task_completions: { rows: [] as any[], key: "id" } };  const data = memData(stores);
+  const stores = { task_completions: { rows: [] as any[], key: "id" } };
+  const data = memData(stores);
   const { engine, completed } = fakeEngine([{ userTaskKey: "ut-x", elementId: "decide" }]);
 
   const notEsc = await completeEscalationAsHuman(data, engine, {

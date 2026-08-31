@@ -368,8 +368,9 @@ export function latestTrialMergeQuestion(audits: readonly TrialMergeAuditRow[]):
  *  subject row: a plan gated behind a producer capability carries it on `plans.wait_gate_label`
  *  ("waiting on <clause> · re-checks …", app/waitGate.ts), and a feature preflight carries its rollup
  *  on `feature_runs.delivery_label`. Prefer whichever the subject supplies; fall back to a static
- *  readiness-stalled line so the Tasks grid never renders a blank question for a parked gate. */
-export function readinessEscalationQuestion(label?: string | null): string | null {
+ *  readiness-stalled line so the Tasks grid never renders a blank question for a parked gate.
+ *  Always returns a non-empty string — the static fallback guarantees a question is never blank. */
+export function readinessEscalationQuestion(label?: string | null): string {
   const t = typeof label === "string" ? label.trim() : "";
   return (
     t ||

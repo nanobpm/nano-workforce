@@ -50,7 +50,7 @@ function deployedHumanUserTasks(): DeployedUserTask[] {
     const xml = readFileSync(`${PROCESS_DIR}/${file}`, "utf8");
     for (const m of xml.matchAll(/<bpmn:userTask\b[^>]*\bid="([^"]+)"([\s\S]*?)<\/bpmn:userTask>/g)) {
       const [, elementId, body] = m;
-      if (!/<zeebe:userTask\b/.test(body)) continue; // engine job task, not a native human user task
+      if (!/<zeebe:userTask\b/.test(body)) continue; // not a native human user task (no <zeebe:userTask/>)
       const form = body.match(/<zeebe:formDefinition\b[^>]*\bformId="([^"]+)"/);
       out.push({ file, elementId, formId: form ? form[1] : null });
     }
