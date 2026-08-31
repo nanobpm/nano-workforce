@@ -1,3 +1,9 @@
+## [0.166.0](https://github.com/nanobpm/nano-workforce/compare/v0.165.0...v0.166.0) (2026-08-31)
+
+### Features
+
+* **cells:** s4 composition — feature/plan-fanout waves as callActivity ([#632](https://github.com/nanobpm/nano-workforce/issues/632)) ([#634](https://github.com/nanobpm/nano-workforce/issues/634)) ([44065ff](https://github.com/nanobpm/nano-workforce/commit/44065ff55ba7637ecaec31a6ef911a8464d65c63)), closes [#631](https://github.com/nanobpm/nano-workforce/issues/631) [#631](https://github.com/nanobpm/nano-workforce/issues/631)
+
 ## [0.165.0](https://github.com/nanobpm/nano-workforce/compare/v0.164.0...v0.165.0) (2026-08-31)
 
 ### Features
