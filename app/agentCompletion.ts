@@ -24,7 +24,7 @@ import { readFileSync } from "node:fs";
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { CONFORMANCE_ESCALATION_ELEMENT } from "./conformance.ts";
 import { DELIVERY_HUMAN_ELEMENT, isDeliveryHumanElement } from "./deliveryHuman.ts";
-import { ACP_PERMISSION_ELEMENT, EMPTY_PLAN_ELEMENT } from "./userTasks.ts";
+import { ACP_PERMISSION_ELEMENT, EMPTY_PLAN_ELEMENT, READINESS_ESCALATION_ELEMENT, READINESS_ESCALATION_PF_ELEMENT } from "./userTasks.ts";
 
 const now = () => new Date().toISOString();
 
@@ -101,6 +101,16 @@ export const CONFORMANCE_ESCALATION_TASK_ELEMENT = CONFORMANCE_ESCALATION_ELEMEN
  *  Re-exported from the canonical `EMPTY_PLAN_ELEMENT` (app/userTasks.ts) — one source of truth. */
 export const EMPTY_PLAN_TASK_ELEMENT = EMPTY_PLAN_ELEMENT;
 
+/** The readiness/preflight escalation user-task element ids (`readiness-escalation-pf` in feature.bpmn's
+ *  readiness preflight + plan-fanout.bpmn's producer-capability preflight; `readiness-escalation` in
+ *  readiness-gate.bpmn / wait-gate.bpmn). Like `feature-blocked`, `conformance-escalation` and
+ *  `empty-plan-escalation` these are HUMAN-only decisions — an agent must never auto-answer a readiness
+ *  gate (that would silently defeat the "is upstream actually ready?" adjudication the gate exists for),
+ *  so they live OUTSIDE `ESCALATION_TASK_ELEMENTS` and only the HUMAN completer accepts them (issue
+ *  #674). Re-exported from the canonical constants in app/userTasks.ts — one source of truth. */
+export const READINESS_ESCALATION_PF_TASK_ELEMENT = READINESS_ESCALATION_PF_ELEMENT;
+export const READINESS_ESCALATION_TASK_ELEMENT = READINESS_ESCALATION_ELEMENT;
+
 /** The user-task `elementId`s a HUMAN operator may complete from the Tasks inbox via the one canonical
  *  `complete-user-task` door: every agent-answerable escalation PLUS the human-only `feature-blocked`
  *  and `conformance-escalation` acknowledgements, PLUS the advisory ACP permission prompt
@@ -115,6 +125,8 @@ export const HUMAN_COMPLETABLE_ELEMENTS: ReadonlySet<string> = new Set([
   FEATURE_BLOCKED_TASK_ELEMENT,
   CONFORMANCE_ESCALATION_TASK_ELEMENT,
   EMPTY_PLAN_TASK_ELEMENT,
+  READINESS_ESCALATION_PF_TASK_ELEMENT,
+  READINESS_ESCALATION_TASK_ELEMENT,
   ACP_PERMISSION_ELEMENT,
 ]);
 
@@ -131,6 +143,8 @@ const ESCALATION_FORM_BY_ELEMENT: Readonly<Record<string, string>> = {
   "feature-blocked": "feature-blocked",
   [EMPTY_PLAN_TASK_ELEMENT]: "empty-plan-escalation",
   [CONFORMANCE_ESCALATION_TASK_ELEMENT]: "conformance-escalation",
+  [READINESS_ESCALATION_PF_TASK_ELEMENT]: "readiness-escalation",
+  [READINESS_ESCALATION_TASK_ELEMENT]: "readiness-escalation",
   // NOTE: the delivery-graph `human` node (`DELIVERY_HUMAN_ELEMENT`, ADR 0005 S3) is intentionally
   // ABSENT here. Unlike the fixed-form escalations above, ONE `delivery-human-task` element is DESIGNED
   // to render DIFFERENT forms per node (explicit → category → generic → agent-router, `app/deliveryHuman.ts`

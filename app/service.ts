@@ -99,6 +99,9 @@ import {
   PR_WAIT_ANSWER_ELEMENT,
   PR_WAIT_MERGE_ANSWER_ELEMENT,
   prEscalations,
+  READINESS_ESCALATION_ELEMENT,
+  READINESS_ESCALATION_PF_ELEMENT,
+  readinessEscalationQuestion,
   reconcileUserTasks,
   TRIAL_MERGE_ELEMENT,
   toOpenEscalation,
@@ -2652,15 +2655,19 @@ export async function pollUserTasks(
     url?: string | null;
     deliveryLabel?: string | null;
     conformanceSummary?: string | null;
+    /** The subject's at-a-glance "waiting on <capability> · …" rollup, denormalised for the readiness
+     *  escalation question (issue #674): the wait-gate projection on `plans.wait_gate_label`, or the
+     *  feature run's `delivery_label` for the inline preflight. */
+    waitGateLabel?: string | null;
   }
   const subjectByInstance = new Map<string, Subject>();
   for (const run of await featureRuns(data).all()) {
     if (run.process_key) {
-      subjectByInstance.set(run.process_key, { type: "feature", key: run.feature_key, title: run.title, url: run.issue_url, deliveryLabel: run.delivery_label });
+      subjectByInstance.set(run.process_key, { type: "feature", key: run.feature_key, title: run.title, url: run.issue_url, deliveryLabel: run.delivery_label, waitGateLabel: run.delivery_label });
     }
   }
   for (const plan of await plans(data).all()) {
-    if (plan.process_key) subjectByInstance.set(plan.process_key, { type: "plan", key: plan.plan_key, title: plan.title, url: plan.issue_url });
+    if (plan.process_key) subjectByInstance.set(plan.process_key, { type: "plan", key: plan.plan_key, title: plan.title, url: plan.issue_url, waitGateLabel: plan.wait_gate_label });
   }
   for (const pr of await prs(data).all()) {
     if (pr.process_key) subjectByInstance.set(pr.process_key, { type: "pr", key: pr.pr_key, title: pr.title, url: pr.url });
@@ -2687,6 +2694,8 @@ export async function pollUserTasks(
     [PLAN_REVIEW_ELEMENT]: "plan",
     [TRIAL_MERGE_ELEMENT]: "plan",
     [CONFORMANCE_ESCALATION_ELEMENT]: "plan",
+    [READINESS_ESCALATION_PF_ELEMENT]: "feature",
+    [READINESS_ESCALATION_ELEMENT]: "plan",
     [PR_WAIT_ANSWER_ELEMENT]: "pr",
     [PR_WAIT_MERGE_ANSWER_ELEMENT]: "pr",
   };
@@ -2743,6 +2752,13 @@ export async function pollUserTasks(
         break;
       case CONFORMANCE_ESCALATION_ELEMENT:
         question = conformanceEscalationQuestion(subj ? { summary: subj.conformanceSummary } : undefined);
+        break;
+      case READINESS_ESCALATION_PF_ELEMENT:
+      case READINESS_ESCALATION_ELEMENT:
+        // The leading readiness/capability gate stalled: surface WHAT it is waiting on. The wait-gate
+        // projection already rendered that clause on the subject row (`plans.wait_gate_label`, or the
+        // feature preflight's `delivery_label`), with a static readiness-stalled fallback (#674).
+        question = readinessEscalationQuestion(subj?.waitGateLabel ?? null);
         break;
     }
     return { userTaskKey, elementId, subjectType, subjectKey, subjectTitle: subj?.title ?? null, subjectUrl: subj?.url ?? null, question, processKey: processInstanceKey, formKey: resolvedFormKey };
