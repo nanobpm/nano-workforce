@@ -3,8 +3,8 @@
 // This is the ONE wiring both the standalone shell and the console App-View embed call — they differ
 // only in the host element they pass, so the supply cockpit renders identically embedded and
 // standalone. It supplies the browser capabilities the injection-based core needs: the real
-// `document`, a `fetch`-based supply report source, a `WebSocket` relay socket factory, and an
-// xterm.js terminal sink.
+// `document`, a `fetch`-based supply report source, a `WebSocket` relay socket factory, and a
+// rendered-transcript sink (message turns + tool/diff/permission cards) over the relay stream.
 //
 // The genuinely reusable, correctness-critical parts — the relay client and the resume-from-offset
 // terminal session — are REUSED from `@nanobpm/agentic/cockpit` (resolved via the host page's import
@@ -16,8 +16,16 @@
 //
 // It renders the SUPPLY worker list ONLY — NOT the packaged demand×supply matrix / missing-agent reds
 // / diversity-SLO light (deferred to enrolment epic #152).
+//
+// The transcript is RENDERED, not dumped (#660): both the live drill and the past-session replay feed
+// their `nwfTranscriptEvent` chunks through `renderDerivedTranscript` — the SAME parse→derive→render
+// path the typed core uses — so the operator sees readable message turns + tool/diff/permission cards
+// instead of raw event JSON. That renderer is NOT re-copied here (the drift that caused #660): it is
+// imported from `./generated/transcript-derive.js`, a build-step emit of the ONE typed core
+// (`app/agentic/cockpit/transcript-derive.ts` + `app/agentic/transcript-events.ts`) that a drift-guard
+// test keeps byte-identical to its source.
 import { RelayChannelClient, TerminalSession } from "@nanobpm/agentic/cockpit";
-import { Terminal } from "@xterm/xterm";
+import { renderDerivedTranscript } from "./generated/transcript-derive.js";
 
 const DEFAULT_REFRESH_MS = 2000;
 const DEFAULT_STALE_AFTER_MS = 15_000;
@@ -382,22 +390,47 @@ function renderTranscripts(host, doc, view, onReplay, activeStream, title = "Pas
   host.appendChild(root);
 }
 
-/** Feed a fetched transcript's stored chunks through a resume-from-offset TerminalSession (static playback). */
-function replayTranscript(session, data) {
-  session.handle({ op: "subscribed", stream: data.stream, gap: data.gap, nextOffset: data.nextOffset });
-  for (const entry of data.entries ?? []) {
-    session.handle({ stream: data.stream, offset: entry.offset, chunk: entry.chunk });
-  }
+// ── transcript rendering (#660) ────────────────────────────────────────────────────────────────
+//
+// A rendered-transcript sink over `host`: it accumulates the relay stream's `{offset, chunk}` entries
+// and (re-)draws them through the shared `renderDerivedTranscript` — the SAME parse→derive→render path
+// the typed core uses — so the operator sees readable message turns + tool/diff/permission cards, never
+// the raw `nwfTranscriptEvent` envelopes. Chunks are keyed by offset, so a resume-from-offset reconnect
+// that re-delivers a chunk coalesces instead of doubling it (mirrors TerminalSession's own dedup). The
+// derive/render logic is NOT re-copied here — that hand-copy was the #660 drift; this only collects
+// offsets and hands the whole page to the imported renderer, which parses + folds it exactly once.
+function transcriptSink(host, stream, opts = {}) {
+  const byOffset = new Map();
+  let gap = false;
+  let nextOffset = 0;
+  const draw = () => {
+    const entries = [...byOffset.entries()].sort((a, b) => a[0] - b[0]).map(([offset, chunk]) => ({ offset, chunk }));
+    renderDerivedTranscript(host, document, { stream, from: 0, gap, nextOffset, entries }, opts);
+  };
+  return {
+    /** Fold in the resume ack (offset/gap metadata) and redraw. */
+    ack: (message) => {
+      if (typeof message?.nextOffset === "number") nextOffset = message.nextOffset;
+      if (typeof message?.gap === "boolean") gap = message.gap;
+      draw();
+    },
+    /** Fold in one relay data chunk (deduped by offset) and redraw. */
+    add: (offset, chunk) => {
+      byOffset.set(offset, chunk);
+      draw();
+    },
+    /** Render a whole fetched transcript page in one pass (static replay). */
+    replace: (data) => {
+      byOffset.clear();
+      gap = Boolean(data.gap);
+      nextOffset = data.nextOffset ?? 0;
+      for (const entry of data.entries ?? []) byOffset.set(entry.offset, entry.chunk);
+      draw();
+    },
+  };
 }
 
 // ── boot orchestration (mirrors app/agentic/cockpit/supply-boot.ts) ────────────────────────────
-
-/** An xterm.js-backed terminal sink mounted into `host`. */
-function xtermSink(host) {
-  const term = new Terminal({ convertEol: true, fontFamily: "ui-monospace, monospace", fontSize: 13 });
-  term.open(host);
-  return { write: (chunk) => term.write(chunk), dispose: () => term.dispose() };
-}
 
 /** A WebSocket relay socket factory for the agentic channel at `url`. */
 function relaySocketFactory(url) {
@@ -487,9 +520,11 @@ export function mountCockpit(host, opts = {}) {
     return headers;
   };
 
-  // Stable skeleton: a volatile supply-list region + a volatile "past sessions" region the poll
-  // re-renders, and a PERSISTENT terminal region a refresh never touches (so a drilled-in/replayed
-  // terminal survives a list refresh). The terminal panel title distinguishes live vs replayed.
+  // Stable skeleton: a volatile supply-list region the poll re-renders, then the PERSISTENT terminal
+  // region a refresh never touches (so a drilled-in/replayed transcript survives a list refresh), then
+  // the volatile "past sessions" region. Ordered so the rendered transcript sits DIRECTLY BENEATH the
+  // "Workers — supply" table (#660), with past-sessions relocated below it. The terminal panel title
+  // distinguishes live vs replayed.
   host.replaceChildren();
   const shell = el(doc, "div", "cockpit-shell");
   const listRegion = el(doc, "div", "cockpit-supply-region");
@@ -508,8 +543,8 @@ export function mountCockpit(host, opts = {}) {
   terminalNote.setAttribute("data-terminal-note", "none");
   terminalPanel.appendChild(terminalNote);
   shell.appendChild(listRegion);
-  shell.appendChild(pastRegion);
   shell.appendChild(terminalPanel);
+  shell.appendChild(pastRegion);
   host.appendChild(shell);
 
   let running = false;
@@ -517,7 +552,7 @@ export function mountCockpit(host, opts = {}) {
   let timer;
   let generation = 0;
   let drill; // { stream, client }
-  let terminal; // the current xterm sink
+  let terminal; // the current rendered-transcript sink
   let mode; // "live" | "replay" | undefined
   let shownStream;
   let route = parseCockpitRoute(location.hash);
@@ -557,6 +592,7 @@ export function mountCockpit(host, opts = {}) {
     drill = undefined;
     terminal?.dispose?.();
     terminal = undefined;
+    terminalHost.replaceChildren();
   }
 
   function routeInstance() {
@@ -612,19 +648,12 @@ export function mountCockpit(host, opts = {}) {
     teardownTerminal();
     try {
       terminalHost.replaceChildren();
-      const rawSink = xtermSink(terminalHost);
-      terminal = rawSink;
-      // Wrap the sink so the first byte of live output clears the "waiting" note (mirrors supply-boot).
+      // Render the LIVE stream through the shared derive+render path (#660): each relay chunk is folded
+      // into a rendered transcript (message turns + tool/diff/permission cards), never dumped as raw
+      // `nwfTranscriptEvent` JSON. The sink accumulates offsets and redraws via `renderDerivedTranscript`.
+      const rendered = transcriptSink(terminalHost, stream);
+      terminal = rendered;
       let cleared = false;
-      const sink = {
-        write: (chunk) => {
-          if (!cleared) {
-            cleared = true;
-            setNote(undefined);
-          }
-          rawSink.write(chunk);
-        },
-      };
       let session;
       const client = new RelayChannelClient({
         connect: connectRelay,
@@ -633,13 +662,26 @@ export function mountCockpit(host, opts = {}) {
           // then it honestly reads "connecting", so a socket that never opens/subscribes stops
           // masquerading as a connected-but-quiet stream (#600). Gate on `!cleared` so a reconnect's
           // resubscribe ack does not re-arm the note after real output has already flowed.
-          if (!cleared && message?.op === "subscribed") setNote("Waiting for live output…", "waiting");
+          if (message?.op === "subscribed") {
+            if (!cleared) setNote("Waiting for live output…", "waiting");
+            rendered.ack(message);
+          } else if (message != null && typeof message.offset === "number" && message.chunk !== undefined) {
+            // The first data chunk clears the "waiting" note and folds into the rendered transcript.
+            if (!cleared) {
+              cleared = true;
+              setNote(undefined);
+            }
+            rendered.add(message.offset, message.chunk);
+          }
+          // Still drive the TerminalSession so its subscribe/credit/resume-from-offset protocol runs
+          // (it is what makes the relay deliver chunks and survive a reconnect); its sink is a no-op
+          // because the rendered transcript above — not a byte terminal — is the operator's view.
           session?.handle(message);
         },
         onOpen: () => session?.attach(),
         onError,
       });
-      session = new TerminalSession({ stream, sink, send: (message) => client.sendRelay(message) });
+      session = new TerminalSession({ stream, sink: { write: () => {} }, send: (message) => client.sendRelay(message) });
       client.open();
       drill = { stream, client };
       setMode("live", stream);
@@ -689,10 +731,12 @@ export function mountCockpit(host, opts = {}) {
     if (disposed || token !== opToken) return;
     try {
       terminalHost.replaceChildren();
-      const sink = xtermSink(terminalHost);
-      terminal = sink;
-      const session = new TerminalSession({ stream, sink, send: () => {}, from: data.from ?? 0 });
-      replayTranscript(session, data);
+      // Render the fetched past-session transcript through the SAME derive+render path as the live
+      // drill (#660): the stored `nwfTranscriptEvent` chunks become message turns + tool/diff/permission
+      // cards, never a raw JSON dump.
+      const rendered = transcriptSink(terminalHost, stream);
+      terminal = rendered;
+      rendered.replace(data);
       setMode("replay", stream);
       void refreshPast(routeInstance());
     } catch (err) {
