@@ -82,4 +82,20 @@ test("feature.bpmn composes its converge step via callActivity to converge-cell 
     !/<bpmn:serviceTask\b[^>]*\bid="converge"/.test(xml),
     "feature.bpmn must not keep an inlined converge serviceTask once the cell is composed",
   );
+  // Pin the explicit `zeebe:ioMapping` itself: without it (or any of its inputs) the child cell
+  // receives no mapped scope and the engine-wasm `propagateAll*` incompatibility this seam avoids
+  // would silently return. Assert against the converge callActivity block alone so an ioMapping on
+  // any other element can't satisfy the guard.
+  const convergeBlock =
+    xml.match(/<bpmn:callActivity\b[^>]*\bid="converge"[\s\S]*?<\/bpmn:callActivity>/)?.[0] ?? "";
+  assert(
+    /<zeebe:ioMapping>[\s\S]*?<\/zeebe:ioMapping>/.test(convergeBlock),
+    "the converge callActivity must carry an explicit zeebe:ioMapping",
+  );
+  for (const field of ["featureKey", "prKey", "autoMerge"]) {
+    assert(
+      new RegExp(`<zeebe:input\\b[^>]*\\btarget="${field}"`).test(convergeBlock),
+      `the converge callActivity ioMapping must map ConvergeFeatureIn.${field} into the child scope`,
+    );
+  }
 });
