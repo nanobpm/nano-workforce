@@ -370,7 +370,7 @@ test("pollUserTasks: an instance whose only task is COMPLETED surfaces no row", 
 
 /** A single task as the raw Camunda-8 `/v2/user-tasks/search` reports it — carries `processInstanceKey`
  *  (the typed seam omits it) so the sweep can map a task back to its subject for enrichment. */
-type RawTask = { userTaskKey: string; elementId?: string; processInstanceKey?: string; state?: string; formKey?: string | number | null };
+type RawTask = { userTaskKey: string; elementId?: string; processInstanceKey?: string; rootProcessInstanceKey?: string | number | null; state?: string; formKey?: string | number | null };
 
 /** Stub `globalThis.fetch` so `pollUserTasks`' engine-first sweep reads its open tasks from `tasks`.
  *  Honours the `page.from`/`page.limit` pagination the sweep drives, and 404s any other path so a stray
@@ -444,7 +444,6 @@ test("pollUserTasks (engine-first): orphaned plan-review and PR-wait escalations
 });
 
 test("pollUserTasks (engine-first): a TRACKED task is still fully enriched from its subject row (no regression)", async () => {
-  // Enrich, don't gate: when a subject row DOES reference the task's instance, title/url/question come
   // from it exactly as the per-subject scan produced — the sweep maps by `processInstanceKey`.
   const { data, stores } = memData({
     feature_runs: [
@@ -477,6 +476,40 @@ test("pollUserTasks (engine-first): a TRACKED task is still fully enriched from 
   assertEquals(byKey["ut-feat"].question, "which framework?");
   assertEquals(byKey["ut-plan"].subject_title, "Broaden the epic scope");
   assertEquals(byKey["ut-plan"].question, "scope too broad");
+});
+
+test("pollUserTasks (engine-first): a child-cell escalation correlates to its PARENT run via rootProcessInstanceKey (issue #633)", async () => {
+  // ADR 0006 S4 (#603/#633): once a slice's implement step runs as a callActivity CHILD cell, the
+  // agent-stuck escalation parks on the shared `human-escalation` cell's `escalation` element inside a
+  // CHILD instance ("child-pi") whose key NO subject row tracks — the owning feature run is tracked under
+  // the PARENT/root instance ("fp-10") the engine reports as `rootProcessInstanceKey`. The poller must
+  // correlate the child-instance task back to the parent run (subject + question + kind), not strand it
+  // as an orphan keyed to the raw child instance.
+  const { data, stores } = memData({
+    feature_runs: [
+      { feature_key: "o/r#10", status: "escalated", process_key: "fp-10", issue_url: "https://github.com/o/r/issues/10", title: "Add the framework selector", delivery_label: null },
+    ],
+    feature_escalations: [
+      { id: 1, feature_key: "o/r#10", question: "which framework?", created_at: "2025-01-01T00:00:00.000Z", job_key: "j1" },
+    ],
+  });
+  const restore = stubUserTaskSearch([
+    { userTaskKey: "ut-child", elementId: "escalation", processInstanceKey: "child-pi", rootProcessInstanceKey: "fp-10", state: "CREATED" },
+  ]);
+  try {
+    await pollUserTasks(data, fakeEngine({}), REST);
+  } finally {
+    restore();
+  }
+
+  const byKey = Object.fromEntries((stores.user_tasks ?? []).map((r) => [r.user_task_key, r]));
+  assertEquals(Object.keys(byKey), ["ut-child"]);
+  assertEquals(byKey["ut-child"].element_id, "escalation");
+  assertEquals(byKey["ut-child"].kind_label, "Feature escalation");
+  assertEquals(byKey["ut-child"].subject_type, "feature");
+  assertEquals(byKey["ut-child"].subject_key, "o/r#10"); // correlated to the PARENT run, not the child instance
+  assertEquals(byKey["ut-child"].subject_title, "Add the framework selector");
+  assertEquals(byKey["ut-child"].question, "which framework?"); // same feature_escalations log via the parent subject
 });
 
 test("pollUserTasks (engine-first): never leaks a non-escalation element nor a non-CREATED task", async () => {

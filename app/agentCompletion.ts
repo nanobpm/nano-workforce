@@ -68,6 +68,8 @@ export const taskCompletions = (data: DataLayer) =>
  *  agent path is scoped to escalations — it can never complete an arbitrary internal user task. */
 export const ESCALATION_TASK_ELEMENTS: ReadonlySet<string> = new Set([
   "feature-escalation",
+  "escalation", // shared human-escalation cell (human-escalation.bpmn, ADR 0006 S4 #603/#633) — the same
+  //              agent-answerable feature-escalation task, relocated into a callActivity child cell
   "plan-review-decision",
   "trial-merge-decision",
   "wait-answer", // PR review-loop escalation (convergence-loop.bpmn, U3)
@@ -121,6 +123,7 @@ export const HUMAN_COMPLETABLE_ELEMENTS: ReadonlySet<string> = new Set([
  *  validates against the SAME `.form` the task inbox renders — one contract, no second field list. */
 const ESCALATION_FORM_BY_ELEMENT: Readonly<Record<string, string>> = {
   "feature-escalation": "feature-escalation",
+  "escalation": "feature-escalation", // shared human-escalation cell renders the SAME feature-escalation form (#603/#633)
   "plan-review-decision": "plan-review-decision",
   "trial-merge-decision": "trial-merge-decision",
   "wait-answer": "pr-escalation",
