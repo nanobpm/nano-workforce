@@ -53,6 +53,7 @@ import {
 } from "./github.ts";
 import { activeStatusesFor, derivedTrackingTable } from "./instanceTracking.ts";
 import { pollLineage } from "./lineage.ts";
+import { mergeableWaitTimeout } from "./mergeableWait.ts";
 import { mergeLanes, readExclusions } from "./mergeExclusion.ts";
 import { mergeLandedWaitTimeout } from "./mergeLandedWait.ts";
 import {
@@ -143,6 +144,15 @@ export const MAX_REBASE_ROUNDS = clampCiFixBudget(process.env.NANO_PR_MAX_REBASE
  * retry (a race escalates immediately). Reuses the CI-fix budget clamp (allows 0 = disable). */
 export const MAX_MERGE_RETRIES = clampCiFixBudget(process.env.NANO_PR_MAX_MERGE_RETRIES, 5);
 
+/** How many times the mergeable-wait timeout backstop (`merge-stall-probe`) will re-derive
+ * mergeability from ground truth and re-arm the merge stage before giving up and escalating to a
+ * human. Bounds the timer arm of the `gw-merge-wait` event-based gateway so a dead in-process poller
+ * (the #636 wedge) can never loop the probe forever: once the cap is exhausted, `gw-merge-stall`
+ * routes to `merge-esc-conflict` (human escalation) instead of re-arming. Default 3; set
+ * `NANO_PR_MAX_MERGE_STALL_ROUNDS=0` to escalate on the first stall. Reuses the CI-fix budget clamp
+ * (allows 0 = escalate immediately, ceiling-capped). */
+export const MAX_MERGE_STALL_ROUNDS = clampCiFixBudget(process.env.NANO_PR_MAX_MERGE_STALL_ROUNDS, 3);
+
 /** How long a merge-loop AGENT service task (rebase / fix-ci) may sit without completing before its
  * interrupting timer boundary fires and the PR escalates for human attention. Seeded as the
  * `agentSlaTimeout` process variable at merge start and evaluated by those tasks' boundary timers.
@@ -168,6 +178,19 @@ export const REVIEW_WAIT_TIMEOUT = reviewWaitTimeout(process.env.NANO_PR_REVIEW_
  * default so an uninterpretable timer is never deployed. */
 export const MERGE_LANDED_WAIT_TIMEOUT = mergeLandedWaitTimeout(
   process.env.NANO_PR_MERGE_LANDED_WAIT_TIMEOUT,
+);
+
+/** How long the merge loop waits for the in-process poller to publish `merge-ready` before the timer
+ * arm of the `gw-merge-wait` event-based gateway fires and `merge-stall-probe` re-derives
+ * mergeability from ground truth. Seeded as the `mergeableWaitTimeout` process variable at merge
+ * start and evaluated by the merge-loop's `wait-mergeable-timeout` timer catch. `wait-mergeable` was
+ * the only long-lived wait in the merge loop with NO bounded-wait timer, so a stalled poller (dead
+ * across a redeploy, errored on a PR, or a skipped verdict) parked the instance at `waiting_merge`
+ * forever with no timeout and no escalation (issue #636). ISO-8601 duration; a malformed
+ * `NANO_PR_MERGEABLE_WAIT_TIMEOUT` falls back to the default so an uninterpretable timer is never
+ * deployed. */
+export const MERGEABLE_WAIT_TIMEOUT = mergeableWaitTimeout(
+  process.env.NANO_PR_MERGEABLE_WAIT_TIMEOUT,
 );
 
 /** Cooldown (ms) between the poller's automatic Copilot re-request nudges for a single waiting PR.
@@ -723,6 +746,9 @@ export async function startMerge(
       mergeRetryMax: MAX_MERGE_RETRIES,
       agentSlaTimeout: AGENT_SLA_TIMEOUT,
       landedWaitTimeout: MERGE_LANDED_WAIT_TIMEOUT,
+      mergeableWaitTimeout: MERGEABLE_WAIT_TIMEOUT,
+      mergeStallRounds: 0,
+      mergeStallMax: MAX_MERGE_STALL_ROUNDS,
       // Lineage (issue #245): thread the origin identity onto the merge instance (see startMerge).
       rootRequestKey,
       abandonUrl: abUrl,
