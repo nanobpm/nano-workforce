@@ -675,3 +675,45 @@ test("pollUserTasks (typed-seam fallback): denormalises the engine form_key from
   const byKey = Object.fromEntries((stores.user_tasks ?? []).map((r) => [r.user_task_key, r]));
   assertEquals(byKey["ut-plan"].form_key, "form-77");
 });
+
+test("pollUserTasks (engine-first): self-heals an escalated run stranded off its parked task, sparing a genuinely parked one (issue #642)", async () => {
+  // `status="escalated"` must hold ONLY while a `feature-escalation` task is open (parity with the PR
+  // contract). A run whose instance the engine no longer reports parked (its escalation was answered,
+  // or it predates the write-side reset — the #632 tear) is reconciled to `running`; a run whose task
+  // IS still open is left escalated. The engine's open set is the authority, not the raw status column.
+  const { data, stores } = memData({
+    feature_runs: [
+      { feature_key: "o/r#632", status: "escalated", process_key: "fp-632", issue_url: null, title: "stranded", delivery_label: null },
+      { feature_key: "o/r#77", status: "escalated", process_key: "fp-77", issue_url: null, title: "still parked", delivery_label: null },
+    ],
+  });
+  const restore = stubUserTaskSearch([
+    // Only fp-77 is genuinely parked; the engine reports NO open task on fp-632.
+    { userTaskKey: "ut-parked", elementId: "feature-escalation", processInstanceKey: "fp-77", state: "CREATED" },
+  ]);
+  try {
+    await pollUserTasks(data, fakeEngine({}), REST);
+  } finally {
+    restore();
+  }
+
+  const byKey = Object.fromEntries((stores.feature_runs ?? []).map((r) => [r.feature_key, r]));
+  assertEquals(byKey["o/r#632"].status, "running", "the stranded escalated run is healed to running");
+  assertEquals(byKey["o/r#77"].status, "escalated", "the genuinely parked run stays escalated");
+});
+
+test("pollUserTasks (typed-seam fallback): self-heals an escalated run with no open feature-escalation task (issue #642)", async () => {
+  // The reduced-capability path scans FEATURE_ACTIVE_STATUSES instances (incl. `escalated`) directly,
+  // so the per-instance open-task read is just as authoritative for the self-heal.
+  const { data, stores } = memData({
+    feature_runs: [
+      { feature_key: "o/r#632", status: "escalated", process_key: "fp-632", issue_url: null, title: "stranded", delivery_label: null },
+    ],
+  });
+  const engine = fakeEngine({ "fp-632": [] }); // instance active at implement-task, no open user task
+
+  await pollUserTasks(data, engine); // no engineRest → typed-seam fallback
+
+  const byKey = Object.fromEntries((stores.feature_runs ?? []).map((r) => [r.feature_key, r]));
+  assertEquals(byKey["o/r#632"].status, "running", "the stranded escalated run is healed to running");
+});

@@ -2677,6 +2677,26 @@ export async function pollUserTasks(
     await userTasks(data).update(user_task_key, { ...patch, updated_at: at });
   }
   for (const key of deletes) await userTasks(data).delete(key);
+
+  // ── Self-heal: `escalated` holds ONLY while parked (issue #642) ──────────────────────────────────
+  // `record-feature-escalation` is the sole writer of `status="escalated"`, but the answer loop-back
+  // now stamps `running` (via `record-feature-implementing`). This read-side sweep heals any row that
+  // is ALREADY stranded at `escalated` — e.g. runs that escalated before the write-side twin shipped
+  // (#632), or any future missed transition — by reconciling against the ENGINE's authoritative
+  // open-escalation set: `desired` IS every open native escalation the sweep observed THIS pass, so a
+  // run whose instance is absent from the open `feature-escalation` set is no longer parked and must
+  // read `running`, not `escalated` (parity with the PR `status="escalated"` contract). Confined to
+  // rows with a known `process_key` so an untracked instance is never guessed at.
+  const openEscalationInstances = new Set(
+    desired
+      .filter((r) => r.element_id === FEATURE_ESCALATION_ELEMENT && r.process_key)
+      .map((r) => r.process_key),
+  );
+  for (const run of await featureRuns(data).find({ status: "escalated" })) {
+    if (run.process_key && !openEscalationInstances.has(run.process_key)) {
+      await featureRuns(data).update(run.feature_key, { status: "running", updated_at: at });
+    }
+  }
 }
 
 /** One full poll pass: advance the review stage, the merge stage, the wave-merge barrier, and
