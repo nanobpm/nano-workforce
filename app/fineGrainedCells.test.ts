@@ -99,3 +99,69 @@ test("feature.bpmn composes its converge step via callActivity to converge-cell 
     );
   }
 });
+
+test("feature.bpmn composes its implement step via callActivity to implement-cell — no inlined implement serviceTask", () => {
+  // The implement seam (deferred out of #632, tracked in #646) composes the shared `implement-cell`
+  // via a `callActivity` with an explicit `zeebe:ioMapping`, rather than an inlined `senior:feature`
+  // serviceTask plus a per-caller escalation loop. The atomic cell owns its own escalation retry
+  // (through the shared `human-escalation` cell), so the parent no longer carries the
+  // `record-feature-escalation` / `feature-escalation` / answer-loop gateways.
+  const xml = flat("feature");
+  assert(
+    /<bpmn:callActivity\b[^>]*\bid="implement"[\s\S]*?<zeebe:calledElement\b[^>]*\bprocessId="implement-cell"/.test(xml),
+    "feature.bpmn must compose implement as a callActivity to implement-cell",
+  );
+  assert(
+    !/<bpmn:serviceTask\b[^>]*\bid="implement-task"/.test(xml),
+    "feature.bpmn must not keep an inlined implement-task serviceTask once the cell is composed",
+  );
+  // The inlined escalation loop is relocated into the atomic cell — the parent path must not keep it.
+  assert(
+    !/<bpmn:serviceTask\b[^>]*\bid="record-feature-escalation"/.test(xml),
+    "feature.bpmn must not keep the inlined record-feature-escalation serviceTask once the cell owns escalation",
+  );
+  assert(
+    !/<bpmn:userTask\b[^>]*\bid="feature-escalation"/.test(xml),
+    "feature.bpmn must not keep the inlined feature-escalation userTask once the cell owns escalation",
+  );
+  // Pin the explicit `zeebe:ioMapping` on the implement callActivity block alone (no `propagateAll*`).
+  const implementBlock =
+    xml.match(/<bpmn:callActivity\b[^>]*\bid="implement"[\s\S]*?<\/bpmn:callActivity>/)?.[0] ?? "";
+  assert(
+    /<zeebe:ioMapping>[\s\S]*?<\/zeebe:ioMapping>/.test(implementBlock),
+    "the implement callActivity must carry an explicit zeebe:ioMapping",
+  );
+  assert(
+    /<zeebe:input\b[^>]*\btarget="task"/.test(implementBlock),
+    "the implement callActivity ioMapping must map the task slice into the child scope",
+  );
+  for (const field of ["status", "summary", "pr"]) {
+    assert(
+      new RegExp(`<zeebe:output\\b[^>]*\\btarget="${field}"`).test(implementBlock),
+      `the implement callActivity ioMapping must map the child result field ${field} back into the parent scope`,
+    );
+  }
+});
+
+test("plan-fanout.bpmn composes its per-wave implement step via an MI callActivity to implement-cell", () => {
+  // The multi-instance implement subProcess (one token per wave task) composes the shared
+  // `implement-cell` via an MI `callActivity`, so the inlined per-wave `senior:feature` serviceTask +
+  // escalation loop no longer sits on the fan-out path ("a wave IS a callActivity", #464/#646). The
+  // capability barrier (caps-prepare / wait-caps) stays in the wave — it is fan-out-specific, not part
+  // of the atomic cell.
+  const xml = flat("plan-fanout");
+  const implementBlock =
+    xml.match(/<bpmn:callActivity\b[^>]*\bid="implement"[\s\S]*?<\/bpmn:callActivity>/)?.[0] ?? "";
+  assert(
+    /<zeebe:calledElement\b[^>]*\bprocessId="implement-cell"/.test(implementBlock),
+    "plan-fanout.bpmn must compose the per-wave implement as a callActivity to implement-cell",
+  );
+  assert(
+    /<bpmn:multiInstanceLoopCharacteristics>/.test(implementBlock),
+    "the implement callActivity must be multi-instance — one token per wave task",
+  );
+  assert(
+    /<zeebe:ioMapping>[\s\S]*?<\/zeebe:ioMapping>/.test(implementBlock),
+    "the implement MI callActivity must carry an explicit zeebe:ioMapping",
+  );
+});
