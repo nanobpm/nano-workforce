@@ -92,10 +92,12 @@ family). Ask:
 > *"Using workforce-local, show what's in flight and any open escalations."*
 
 The agent should call the status operation tool (`listActivePrs`), not curl. The operator
-guide's **tool↔curl crosswalk** (agent-guide §10, via `getAgentGuide("tool-crosswalk")`)
+guide's **tool↔curl crosswalk** (agent-guide §10, via `getAgentGuide(section="tool-crosswalk")`)
 maps every guide action to its projected tool name and the curl door underneath — so a
-tool-aware agent leads with the tool (`listActivePrs`, `getVersion`, `listEscalations`,
-`completeUserTask`, `cancelInstance`, the `urban_debug_*` engine reads) and treats curl as
+tool-aware agent leads with the tool (`listActivePrs`, `getVersion`, `completeUserTask`,
+the `urban_debug_*` engine reads — plus `listEscalations` and `cancelInstance` *where the
+deployment projects them*; those two are sibling tasks #666/#667 and are not on a
+deployment that predates them, so fall back to the curl door there) and treats curl as
 the no-MCP fallback only.
 
 ## 3. Debug a wedged instance
@@ -113,7 +115,8 @@ shape. A wedge is frequently exactly a disagreement between the two planes. The 
 / `urban_debug_search_incidents`, and where projected `urban_debug_search_jobs` /
 `urban_debug_search_variables` / `urban_debug_get_process_definition_xml`) so the agent
 reaches for the tool, not the raw `__ENGINE__` curl — and steers cancels to the app-owned
-`cancelInstance`, never the record-desyncing engine-level `urban_debug_cancel_instance`.
+`cancelInstance` (projected by sibling #667; until it lands, the `/app/actions/cancel`
+door the UI's Cancel uses), never the record-desyncing engine-level `urban_debug_cancel_instance`.
 
 ## 4. Guard posture
 

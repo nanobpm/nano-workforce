@@ -163,7 +163,9 @@ fires (round cap, a review that never arrives, a merge conflict, an unfixable CI
 failure). The parked process waits for a human answer.
 
 Find the open escalations, then answer them. **Prefer the `listEscalations` tool**
-(the projected read tool that lists every open escalation with the `userTaskKey` and form
+(the projected read tool that lists every open escalation with the `userTaskKey` and form —
+tracked by sibling #666; on a deployment that predates it, use the `/status` / task-inbox
+curl fallback below —
 you need to answer it); curl is the no-MCP fallback.
 
 ```text
@@ -443,17 +445,21 @@ Work through this order:
    reviewer periodically. If the reviewer bot is not provisioned on the repo, no
    review will ever land — that is a repo-config problem, not an app bug.
 5. **Cancel + resubmit** as a last resort. Cancel through the **app-owned** door —
-   **prefer the `cancelInstance` tool** (`POST /actions/cancel { "processInstanceKey":
-   "<PK>" }`, the same record-consistent path as the UI's per-row Cancel), which cancels
+   **prefer the `cancelInstance` tool** (projected by sibling #667; the same
+   record-consistent path as the UI's per-row Cancel, `POST /app/actions/cancel
+   { "processInstanceKey": "<PK>" }`), which cancels
    the engine instance **and** marks the PR `abandoned` so it drops out of
    `listActivePrs`. Then re-submit the PR (§1) to start a fresh loop. **Do not** cancel a
    raw engine instance out from under the app with the engine-level
    `urban_debug_cancel_instance` tool (or a direct engine REST cancel) — that cancels the
    token but leaves the PR row inconsistent. Always go through `cancelInstance` /
-   `POST /actions/cancel` so the app's record state stays consistent. No-MCP fallback:
+   `POST /app/actions/cancel` so the app's record state stays consistent. Note the door
+   sits at `/app/actions/cancel`, **outside** the `__BASE__` control-API base (ADR 0059) —
+   until #667 projects `cancelInstance`, that curl door is the only cancel path. No-MCP
+   fallback:
 
    ```bash
-   curl -sS -X POST __BASE__/actions/cancel -H 'content-type: application/json' \
+   curl -sS -X POST __BASE__/../actions/cancel -H 'content-type: application/json' \
      -d '{ "processInstanceKey": "<PK>" }'
    ```
 
@@ -860,15 +866,17 @@ agent that has no tools (see the runbook, `docs/mcp-runbook.md` §2/§3, and [§
 Fallback](mcp-runbook.md#5-fallback)). This table maps every guide action to its projected
 tool name and the exact curl door underneath.
 
-App-owned operations (projected from this app's `openapi.yaml`; the `__BASE__` control API):
+App-owned operations (projected from this app's `openapi.yaml`; the `__BASE__` control API).
+Rows tagged *(projected by sibling #NNN)* name a tool that lands with that sibling task —
+until it does, only the curl door in the third column exists on the deployment:
 
 | Guide action | Projected tool | curl no-MCP fallback |
 |---|---|---|
 | Which code is live (§0) | `getVersion` | `curl __BASE__/version` |
 | Every PR in flight (§0/§5) | `listActivePrs` | `curl __BASE__/status` |
-| List open escalations (§3) | `listEscalations` | `curl __BASE__/status \| jq '.prs[]\|select(.openEscalation!=null)'` / `curl __BASE__/../../tasks/api/tasks` |
+| List open escalations (§3) | `listEscalations` *(projected by sibling #666; curl door until then)* | `curl __BASE__/status \| jq '.prs[]\|select(.openEscalation!=null)'` / `curl __BASE__/../../tasks/api/tasks` |
 | Answer an escalation (§3) | `completeUserTask` (agent-assignee: `agentCompleteEscalation`) | `curl -X POST __BASE__/actions/complete-user-task` |
-| Cancel an instance (record-consistent) (§7) | `cancelInstance` | `curl -X POST __BASE__/actions/cancel` |
+| Cancel an instance (record-consistent) (§7) | `cancelInstance` *(projected by sibling #667; curl door until then)* | `curl -X POST __BASE__/../actions/cancel` *(the `/app/actions/cancel` door, outside `__BASE__`)* |
 | Publish a BPMN message (§7) | `postMessage` | `curl -X POST __BASE__/actions/message` |
 | The operator guide itself | `getAgentInstructions` (full) / `getAgentGuide(section?)` (addressable) | `curl __BASE__/agent` / `curl __BASE__/agent/guide` |
 
@@ -889,6 +897,8 @@ them by name where the framework projects them, else drop to the curl door:
 | Engine-level cancel — **avoid** (§7) | `urban_debug_cancel_instance` | *(use the app-owned `cancelInstance` instead — engine cancel leaves the PR row inconsistent)* |
 
 **Rule of thumb (agent-guide §5 fallback discipline):** if a row has a projected tool, use
-it; reach for its curl door only when you are genuinely not on MCP. The app-owned cancel door
-(`cancelInstance`) is always preferred over the engine-level `urban_debug_cancel_instance`,
+it; reach for its curl door only when you are genuinely not on MCP (or the tool's sibling
+task has not yet landed — see the *(projected by sibling #NNN)* tags above). The app-owned
+cancel door (`cancelInstance`, #667) is always preferred over the engine-level
+`urban_debug_cancel_instance`,
 because only the app door transitions the PR/plan record to `abandoned`.

@@ -3370,7 +3370,7 @@ paths:
             example: delivery-graphs
           description: OPTIONAL stable section id (from the table of contents `getAgentGuide` returns
             with no argument), e.g. `orient`, `submit-pr`, `submit-epic`, `escalations`, `lifecycle`,
-            `debug`, `debug-models`, `unstick`, `raise-issue`, `delivery-graphs`. Omit it to get the
+            `debug`, `debug-models`, `unstick`, `raise-issue`, `delivery-graphs`, `tool-crosswalk`. Omit it to get the
             table of contents. An unknown id yields a 400 listing the valid ids.
       responses:
         "200":
