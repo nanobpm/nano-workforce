@@ -211,7 +211,7 @@ answer (assignee/candidate-group and age surface on each task once assignment la
 **Answer a task** by completing it with the typed variables its form expects — the
 completion resumes the parked process. **Prefer the `completeUserTask` tool** (or
 `agentCompleteEscalation` when you answer as an agent assignee, ADR 0046); the
-`curl … /tasks/api/complete` inbox call is the no-MCP fallback.
+`curl … /actions/complete-user-task` app-owned door is the no-MCP fallback.
 
 ```text
 # PR review-loop (elementId `wait-answer`, pr-escalation form):
@@ -235,11 +235,11 @@ tool: completeUserTask { "userTaskKey": "<key>",
 ```
 
 ```bash
-# No-MCP fallback — the un-projected engine task-inbox complete door (prefer the tool).
+# No-MCP fallback — the app-owned complete-user-task door (prefer the tool).
 # `variables` must carry the shape THIS task's escalation kind expects (see the per-kind
 # tool forms above): `{ answer }` here is the PR review-loop form — a feature task wants
 # `{ resolution, answer }`, plan-review `{ directive, notes }`, trial-merge `{ action, notes? }`.
-curl -sS -X POST __BASE__/../../tasks/api/complete -H 'content-type: application/json' \
+curl -sS -X POST __BASE__/actions/complete-user-task -H 'content-type: application/json' \
   -d '{ "userTaskKey": "<key>", "variables": { "answer": "Cap retries at 5 and proceed." } }'
 ```
 
