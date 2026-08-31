@@ -1,3 +1,9 @@
+## [0.171.1](https://github.com/nanobpm/nano-workforce/compare/v0.171.0...v0.171.1) (2026-08-31)
+
+### Code Refactoring
+
+* **agentic:** consume @nanobpm/agentic/transcript, drop the duplicated grammar ([#677](https://github.com/nanobpm/nano-workforce/issues/677)) ([8c8d3fc](https://github.com/nanobpm/nano-workforce/commit/8c8d3fc393134862557a65e2aab2dd9e16292c66)), closes [#676](https://github.com/nanobpm/nano-workforce/issues/676)
+
 ## [0.171.0](https://github.com/nanobpm/nano-workforce/compare/v0.170.1...v0.171.0) (2026-08-31)
 
 ### Features
