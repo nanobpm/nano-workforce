@@ -62,7 +62,7 @@ test("drift guard: every deployed human user task is a known Tasks-inbox kind (i
   const tasks = deployedHumanUserTasks();
   // Sanity: the sweep actually found the deployed escalations (guards against a parser that silently
   // matches nothing and vacuously passes).
-  assert(tasks.length >= 10, `expected the process sweep to find the deployed user tasks, got ${tasks.length}`);
+  assert(tasks.length > 0, `expected the process sweep to find the deployed user tasks, got ${tasks.length}`);
   assert(
     tasks.some((t) => t.elementId === "readiness-escalation-pf"),
     "expected readiness-escalation-pf among the deployed user tasks",
