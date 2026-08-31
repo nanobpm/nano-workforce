@@ -1,3 +1,9 @@
+## [0.168.1](https://github.com/nanobpm/nano-workforce/compare/v0.168.0...v0.168.1) (2026-08-31)
+
+### Bug Fixes
+
+* **cockpit:** render the agentic transcript beneath the supply table ([#660](https://github.com/nanobpm/nano-workforce/issues/660)) ([#662](https://github.com/nanobpm/nano-workforce/issues/662)) ([ed2c041](https://github.com/nanobpm/nano-workforce/commit/ed2c041e0e4508e825324ed2b398bf64b5c66c37))
+
 ## [0.168.0](https://github.com/nanobpm/nano-workforce/compare/v0.167.4...v0.168.0) (2026-08-31)
 
 ### Features
