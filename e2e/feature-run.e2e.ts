@@ -245,13 +245,67 @@ describe("single-issue feature run (#172 — feature.bpmn)", () => {
 
         const flows = takenFlows(app);
         assert.ok(
-          flows.includes("w_gw_answer->implement-task"),
-          `answer re-dispatched the same implement task (flows: ${flows.join(", ")})`,
+          flows.includes("w_gw_answer->record-feature-implementing"),
+          `answer re-dispatched through the implementing-reset task (flows: ${flows.join(", ")})`,
+        );
+        assert.ok(
+          flows.includes("record-feature-implementing->implement-task"),
+          `the reset task re-enters the same implement task (flows: ${flows.join(", ")})`,
         );
         assert.ok(!flows.includes("w_gw_answer->record-feature"), "the abandon (default) flow was NOT taken");
         assert.equal(calls, 2, "the implementation agent was re-dispatched exactly once after the answer");
       },
     );
+  });
+
+  test("escalate + answer: the run reads `running` (not a stale escalated) through the post-answer re-implementation (issue #642)", async () => {
+    // The write-side twin of `record-feature-escalation`: `record-feature-implementing` sits on the
+    // answer loop-back and stamps `running` BEFORE implement-task re-runs, so `feature_runs.status` no
+    // longer holds a stale `escalated` for the entire re-implementation (the #632 tear). Assert the
+    // agent observes `running` at the moment it is re-dispatched. Boots inline (not `withApp`) so the
+    // re-implementation stub can read the row through `app.db`.
+    const dbDir = mkdtempSync(join(tmpdir(), "nwf-f642-"));
+    const app = await bootTestApp(APP_ROOT, { env: { NANO_APP_DB_URL: `file:${join(dbDir, "app.db")}` } });
+    try {
+      let calls = 0;
+      let statusDuringReimpl: string | undefined;
+      await app.engine.registerWorker("senior:feature", async () => {
+        calls += 1;
+        if (calls === 1) {
+          return { status: "escalated", question: "Which API should I use?", summary: "parked for a human" };
+        }
+        const run = await app.db
+          .table<FeatureRow>("feature_runs", "feature_key")
+          .findOne({ feature_key: "owner/repo#7" });
+        statusDuringReimpl = run?.status;
+        return { status: "opened", pr: "owner/repo#642", summary: "resumed and opened" };
+      });
+      const featureKey = "owner/repo#7";
+      const started = await app.api?.call("startFeature", { body: { issue: featureKey, baseBranch: "epic/e2e" } });
+      assert.equal(started?.status, 202, "startFeature accepted the issue");
+      await app.settle();
+
+      const parked = await featureRow(app, featureKey);
+      assert.equal(parked.status, "escalated", "the run parks at escalated while awaiting the answer");
+      assert.ok(parked.process_key, "the parked run carries its engine process-instance key");
+
+      const tasks = await app.engine.searchUserTasks({ processInstanceKey: parked.process_key! });
+      const task = tasks.find((t) => t.elementId === "feature-escalation") as InboxTask | undefined;
+      assert.ok(task?.userTaskKey, "the feature escalation parked a completable native user task");
+
+      await app.engine.completeUserTask(task!.userTaskKey, { resolution: "answer", answer: "use v2" });
+      await app.settle();
+
+      assert.equal(
+        statusDuringReimpl,
+        "running",
+        "the reset task stamped `running` before implement-task re-ran — no stale escalated",
+      );
+      assert.equal(calls, 2, "the implementation agent was re-dispatched exactly once after the answer");
+    } finally {
+      await app.stop();
+      rmSync(dbDir, { recursive: true, force: true });
+    }
   });
 
   test("escalate + abandon: abandoning routes to record-feature (default flow)", async () => {
@@ -273,7 +327,7 @@ describe("single-issue feature run (#172 — feature.bpmn)", () => {
           flows.includes("w_gw_answer->record-feature"),
           `abandon routed to record-feature (flows: ${flows.join(", ")})`,
         );
-        assert.ok(!flows.includes("w_gw_answer->implement-task"), "the answer loop was NOT taken");
+        assert.ok(!flows.includes("w_gw_answer->record-feature-implementing"), "the answer loop was NOT taken");
       },
     );
   });
@@ -322,8 +376,9 @@ describe("single-issue feature run (#172 — feature.bpmn)", () => {
 
         const flows = takenFlows(app);
         assert.ok(
-          flows.includes("w_gw_answer->implement-task"),
-          `the answer re-dispatched the same implement task (flows: ${flows.join(", ")})`,
+          flows.includes("w_gw_answer->record-feature-implementing") &&
+            flows.includes("record-feature-implementing->implement-task"),
+          `the answer re-dispatched the same implement task through the reset (flows: ${flows.join(", ")})`,
         );
         assert.equal(calls, 2, "the implementation agent was re-dispatched exactly once after the answer");
 

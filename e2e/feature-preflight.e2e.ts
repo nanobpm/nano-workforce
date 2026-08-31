@@ -157,7 +157,8 @@ describe("single-issue feature intake readiness gate (feature.bpmn, issue #295)"
         "the green gate leads into the fan-out head",
       );
       assert.ok(
-        flows.includes("ensure-base-branch->implement-task"),
+        flows.includes("ensure-base-branch->record-feature-implementing") &&
+          flows.includes("record-feature-implementing->implement-task"),
         `the run reaches the implement agent only after the gate (flows: ${flows.join(", ")})`,
       );
       // A green probe never escalates.
@@ -189,7 +190,7 @@ describe("single-issue feature intake readiness gate (feature.bpmn, issue #295)"
       );
       assert.ok(!flows.includes("gw-readiness->readiness-preflight"), "an ungated feature never enters the preflight");
       assert.ok(
-        flows.includes("ensure-base-branch->implement-task"),
+        flows.includes("record-feature-implementing->implement-task"),
         "an ungated feature reaches the implement agent",
       );
     } finally {

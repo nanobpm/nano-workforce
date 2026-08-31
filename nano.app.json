@@ -235,6 +235,10 @@
     {
       "taskType": "pr.delivery-connector",
       "handler": "workers/delivery-connector/worker.ts"
+    },
+    {
+      "taskType": "pr.record-feature-implementing",
+      "handler": "workers/record-feature-implementing/worker.ts"
     }
   ],
   "externalTaskTypes": [
