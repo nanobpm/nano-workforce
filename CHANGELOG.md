@@ -1,3 +1,21 @@
+## [0.170.1](https://github.com/nanobpm/nano-workforce/compare/v0.170.0...v0.170.1) (2026-08-31)
+
+### Documentation
+
+* **agent-guide:** make the operator guide tool-aware + tool↔curl crosswalk (N1) ([#669](https://github.com/nanobpm/nano-workforce/issues/669)) ([44c5937](https://github.com/nanobpm/nano-workforce/commit/44c5937fb3a1cdaa5a106d67ed16225c35d614f6)), closes [#664](https://github.com/nanobpm/nano-workforce/issues/664) [#666](https://github.com/nanobpm/nano-workforce/issues/666) [#667](https://github.com/nanobpm/nano-workforce/issues/667) [#665](https://github.com/nanobpm/nano-workforce/issues/665) [666/#667](https://github.com/666/nano-workforce/issues/667) [#666](https://github.com/nanobpm/nano-workforce/issues/666) [#667](https://github.com/nanobpm/nano-workforce/issues/667) [#665](https://github.com/nanobpm/nano-workforce/issues/665)
+
+## [0.170.0](https://github.com/nanobpm/nano-workforce/compare/v0.169.0...v0.170.0) (2026-08-31)
+
+### Features
+
+* **api:** add listEscalations read tool + structured openEscalation ([#672](https://github.com/nanobpm/nano-workforce/issues/672)) ([893d39a](https://github.com/nanobpm/nano-workforce/commit/893d39a644cd18102422186b4baddc6779b3510d)), closes [#666](https://github.com/nanobpm/nano-workforce/issues/666) [#666](https://github.com/nanobpm/nano-workforce/issues/666) [#358](https://github.com/nanobpm/nano-workforce/issues/358) [owner/repo#N](https://github.com/owner/repo/issues/N)
+
+## [0.169.0](https://github.com/nanobpm/nano-workforce/compare/v0.168.2...v0.169.0) (2026-08-31)
+
+### Features
+
+* add getPrHistory read tool for PR escalation/round history ([#670](https://github.com/nanobpm/nano-workforce/issues/670)) ([22bd6f9](https://github.com/nanobpm/nano-workforce/commit/22bd6f9d28b891a2b4c157d21bad94cb11af1eb4)), closes [#668](https://github.com/nanobpm/nano-workforce/issues/668)
+
 ## [0.168.2](https://github.com/nanobpm/nano-workforce/compare/v0.168.1...v0.168.2) (2026-08-31)
 
 ### Bug Fixes

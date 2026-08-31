@@ -28,6 +28,8 @@ import { dirname, join, resolve } from "node:path";
 import { after, before, describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { bootTestApp, type TestApp } from "@nanobpm/urban-testkit";
+import { pollUserTasks } from "../app/service.ts";
+import { asEngineClient } from "./support/engine-client.ts";
 
 const APP_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const DB_DIR = mkdtempSync(join(tmpdir(), "nwf-u4-"));
@@ -49,7 +51,11 @@ interface InboxTask {
 }
 
 interface StatusBody {
-  prs: Array<{ prKey: string; status: string; openEscalation: string | null }>;
+  prs: Array<{
+    prKey: string;
+    status: string;
+    openEscalation: { userTaskKey: string; kind: string; summary: string | null } | null;
+  }>;
 }
 
 interface TakenFlow {
@@ -149,17 +155,20 @@ describe("nano-workforce PR review-loop escalation (U4 userTask)", () => {
     assert.equal(task.elementId, "wait-answer", "the open task is the review-loop escalation userTask");
     assert.ok(task.userTaskKey, "the task carries a completable userTaskKey");
 
-    // The open escalation is DERIVED from the durable `escalations` audit row on the status
-    // endpoint — no denormalised `open_escalation_*` pointer is written or read.
+    // The open escalation is DERIVED from the `user_tasks` read model on the status endpoint — no
+    // denormalised `open_escalation_*` pointer is written or read. That read model is projected by
+    // `pollUserTasks` (part of the imperative main.ts poll loop the testkit does not run), so drive it
+    // explicitly (mirrors feature-run.e2e.ts) to project the parked `wait-answer` task first.
+    await pollUserTasks(app.db, asEngineClient(app.engine));
     const status = await app.callRoute<StatusBody>({ method: "GET", path: "/app/api/status" });
     assert.equal(status.status, 200, "the status endpoint responds");
     const statusRow = status.body.prs.find((p) => p.prKey === prKey);
     assert.ok(statusRow, "the escalated PR is listed as active");
     assert.equal(statusRow?.status, "escalated", "the PR reads as escalated");
     assert.equal(
-      statusRow?.openEscalation,
+      statusRow?.openEscalation?.summary,
       "Which retry cap?",
-      "the open escalation question is derived from the open escalations row",
+      "the open escalation question is derived from the user_tasks read model",
     );
 
     // Complete the escalation through the taskInbox completion route with the typed `answer`.
@@ -185,8 +194,11 @@ describe("nano-workforce PR review-loop escalation (U4 userTask)", () => {
     assert.equal(reviewCalls, 2, "the review agent ran a second round after the answer");
     assert.equal(capturedAnswer, answer, "the typed answer reached the resumed review round");
 
-    // The escalations row was retired to `answered` (the single source of truth the status endpoint
-    // derives from), so no open escalation lingers on the status endpoint once answered + resumed.
+    // The escalations row was retired to `answered` and the completed task's `user_tasks` row
+    // reconciles away, so no open escalation lingers on the status endpoint once answered + resumed.
+    // Re-run the projection (as the durable poller would) so the closed task's read-model row is
+    // deleted before re-reading /status.
+    await pollUserTasks(app.db, asEngineClient(app.engine));
     const afterStatus = await app.callRoute<StatusBody>({ method: "GET", path: "/app/api/status" });
     const afterRow = afterStatus.body.prs.find((p) => p.prKey === prKey);
     if (afterRow) {

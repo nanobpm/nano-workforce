@@ -22,6 +22,7 @@ import { CONFORMANCE_ESCALATION_ELEMENT } from "./conformance.ts";
 import { DELIVERY_HUMAN_ELEMENT, isDeliveryHumanElement } from "./deliveryHuman.ts";
 import { FEATURE_BLOCKED_ELEMENT, FEATURE_ESCALATION_ELEMENT, type FeatureEscalationRow } from "./feature.ts";
 import type { PlanReview } from "./plan.ts";
+import { parsePr } from "./prParse.ts";
 import type { TrialMergeAuditRow } from "./trialMerge.ts";
 
 const now = () => new Date().toISOString();
@@ -97,6 +98,80 @@ export interface UserTaskRow {
 }
 
 export const userTasks = (data: DataLayer) => data.table<UserTaskRow>("user_tasks", "user_task_key");
+
+/** The read-tool projection of ONE open escalation user task (issue #666, epic #664 — retire the
+ *  `/tasks/api/tasks` inbox curl). Sourced from the SAME `user_tasks` read model the Tasks inbox and
+ *  Convergence page consume — NOT a second source of truth. It carries the completable `userTaskKey`
+ *  an agent answers via `completeUserTask` / `agentCompleteEscalation`, the escalation `kind` (the
+ *  BPMN `elementId`), the denormalised decision text (`question` — the question / findings / task the
+ *  loop or agent raised, uniform across all four kinds), and the deployed-form context so a tool-aware
+ *  agent can discover and answer an escalation without curling the un-projected task inbox. */
+export interface EscalationView {
+  userTaskKey: string;
+  kind: string;
+  kindLabel: string;
+  /** The PR key when this escalation belongs to a PR (review/merge loop): the subject key, but ONLY
+   *  when it is actually PR-key-shaped (`owner/repo#N`). Null for feature / plan / delivery / agent
+   *  subjects — and also null for a PR-subject task whose subject key fell back to a non-PR value
+   *  (`processKey`/`userTaskKey`) for an orphaned/untracked instance (see `buildUserTaskRow`), so
+   *  `prKey` never emits a non-PR key. Use `subjectKey` for raw correlation in that case. */
+  prKey: string | null;
+  subjectType: string;
+  subjectKey: string;
+  subjectTitle: string;
+  subjectUrl: string | null;
+  question: string | null;
+  formKey: string | null;
+  processKey: string | null;
+  /** The denormalised decision/form context the Tasks inbox renders for this task (the same
+   *  `question` + subject the deployed `.form` is seeded with). The typed answer fields an agent
+   *  submits depend on `kind` (e.g. a PR `{ answer }`, a plan-review `{ directive, notes }`). */
+  formVariables: Record<string, unknown>;
+}
+
+/** Pure: project one open `user_tasks` row into its `listEscalations` read-tool entry. Reuses the
+ *  read model verbatim (no new query / source of truth). `prKey` is the subject key only when the
+ *  subject is a PR AND the subject key is genuinely PR-key-shaped (`owner/repo#N`, validated by the
+ *  canonical `parsePr`) — an orphaned PR-loop instance whose subject key fell back to a numeric
+ *  `processKey`/`userTaskKey` (see `buildUserTaskRow`) yields `prKey: null`, not a non-PR key that
+ *  would contradict the OpenAPI contract. `subjectKey` still carries the raw value for correlation. */
+export function toEscalationView(row: UserTaskRow): EscalationView {
+  return {
+    userTaskKey: row.user_task_key,
+    kind: row.element_id,
+    kindLabel: row.kind_label,
+    prKey: row.subject_type === "pr" && parsePr(row.subject_key) ? row.subject_key : null,
+    subjectType: row.subject_type,
+    subjectKey: row.subject_key,
+    subjectTitle: row.subject_title,
+    subjectUrl: row.subject_url,
+    question: row.question,
+    formKey: row.form_key,
+    processKey: row.process_key,
+    formVariables: {
+      question: row.question,
+      subjectTitle: row.subject_title,
+      subjectUrl: row.subject_url,
+      formKey: row.form_key,
+    },
+  };
+}
+
+/** The structured open-escalation pointer surfaced on each active PR by `/status` (issue #666): the
+ *  completable `userTaskKey`, the escalation `kind` (BPMN `elementId`), and a one-line `summary` (the
+ *  raised question / findings). Derived from the SAME `user_tasks` read model as `listEscalations`
+ *  (no denormalised PR-row pointer, no second source of truth); the field is null when the PR is not
+ *  parked on an open escalation. */
+export interface OpenEscalation {
+  userTaskKey: string;
+  kind: string;
+  summary: string | null;
+}
+
+/** Pure: the structured `/status` open-escalation pointer for one open PR user-task row. */
+export function toOpenEscalation(row: UserTaskRow): OpenEscalation {
+  return { userTaskKey: row.user_task_key, kind: row.element_id, summary: row.question };
+}
 
 /** Human-readable label per escalation element. The set of keys is the closed set of user-task
  *  elements the Tasks inbox surfaces — an element absent from here is not an escalation and is

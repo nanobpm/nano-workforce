@@ -108,8 +108,31 @@ components:
           type: string
           nullable: true
         openEscalation:
-          type: string
+          type: object
           nullable: true
+          additionalProperties: false
+          description: >-
+            The structured pointer to this PR's OPEN escalation when it is parked awaiting a human/agent
+            answer (issue #666), else null. Derived from the same `user_tasks` read model as
+            `listEscalations`, so `userTaskKey` is the completable key an agent answers via
+            `completeUserTask` / `agentCompleteEscalation` (no `/tasks/api/tasks` curl needed). `kind`
+            is the BPMN escalation elementId (e.g. `wait-answer`, `wait-merge-answer`); `summary` is the
+            raised question/findings (null when none was recorded).
+          required:
+            - userTaskKey
+            - kind
+            - summary
+          properties:
+            userTaskKey:
+              type: string
+              description: The completable engine user-task key (answer via completeUserTask / agentCompleteEscalation).
+            kind:
+              type: string
+              description: The BPMN escalation elementId (the escalation kind).
+            summary:
+              type: string
+              nullable: true
+              description: The raised question / findings, denormalised for display; null when none.
         updatedAt:
           type: string
         activeWorker:
@@ -130,6 +153,85 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/ActivePr"
+    Escalation:
+      type: object
+      description: >-
+        One OPEN native user-task escalation awaiting a human/agent decision (issue #666), projected
+        from the `user_tasks` read model. `userTaskKey` is the completable key an agent answers via
+        `completeUserTask` / `agentCompleteEscalation`; `kind` is the BPMN escalation elementId.
+      additionalProperties: false
+      required:
+        - userTaskKey
+        - kind
+        - kindLabel
+        - prKey
+        - subjectType
+        - subjectKey
+        - subjectTitle
+        - subjectUrl
+        - question
+        - formKey
+        - processKey
+        - formVariables
+      properties:
+        userTaskKey:
+          type: string
+          description: The completable engine user-task key (answer via completeUserTask / agentCompleteEscalation).
+        kind:
+          type: string
+          description: The BPMN escalation elementId (e.g. wait-answer, wait-merge-answer, plan-review-decision, trial-merge-decision, feature-escalation).
+        kindLabel:
+          type: string
+          description: Human-readable kind label (e.g. "PR review", "Plan review", "Trial merge").
+        prKey:
+          type: string
+          nullable: true
+          description: The PR key when this escalation belongs to a PR (review/merge loop); null for feature / plan / delivery / agent subjects.
+        subjectType:
+          type: string
+          description: The domain subject kind — feature | plan | pr | delivery | agent.
+        subjectKey:
+          type: string
+          description: The subject aggregate key (feature_key / plan_key / pr_key).
+        subjectTitle:
+          type: string
+          description: The subject's human-readable title (coalesced to subjectKey when unknown).
+        subjectUrl:
+          type: string
+          nullable: true
+          description: An optional external link (the issue/PR URL); null when none.
+        question:
+          type: string
+          nullable: true
+          description: The raised question / findings / task text the loop or agent recorded; null when none.
+        formKey:
+          type: string
+          nullable: true
+          description: The deployed `.form` key of the parked user task, for rendering/answering; null when unresolved.
+        processKey:
+          type: string
+          nullable: true
+          description: The owning engine process-instance key; null when unknown.
+        formVariables:
+          type: object
+          additionalProperties: true
+          description: >-
+            The denormalised decision/form context the Tasks inbox renders for this task (the same
+            question + subject the deployed form is seeded with). The typed answer fields an agent
+            submits depend on `kind` (e.g. a PR `{ answer }`, a plan-review `{ directive, notes }`).
+    EscalationList:
+      type: object
+      additionalProperties: false
+      required:
+        - count
+        - escalations
+      properties:
+        count:
+          type: integer
+        escalations:
+          type: array
+          items:
+            $ref: "#/components/schemas/Escalation"
     LineagePrView:
       type: object
       description: A member PR of a lineage thread (issue #245).
@@ -223,6 +325,93 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/LineageThreadView"
+    PrHistoryRound:
+      type: object
+      description: One convergence round in a PR's timeline (issue #668) — its status transition/outcome, owning worker, and timestamps. Sourced from the `rounds` table the Convergence page reads.
+      additionalProperties: false
+      required:
+        - roundNo
+        - status
+        - worker
+        - summary
+        - startedAt
+        - endedAt
+      properties:
+        roundNo:
+          type: integer
+        status:
+          type: string
+          nullable: true
+          description: The round's result/status transition (converged|addressed|waiting|needs_input|blocked).
+        worker:
+          type: string
+          nullable: true
+          description: The worker that ran this round.
+        summary:
+          type: string
+          nullable: true
+          description: The round outcome summary.
+        startedAt:
+          type: string
+        endedAt:
+          type: string
+          nullable: true
+    PrHistoryEscalation:
+      type: object
+      description: One escalation in a PR's history (issue #668) — its kind, question/answer, status, and timestamps. Sourced from the `escalations` table the Convergence page reads.
+      additionalProperties: false
+      required:
+        - roundNo
+        - kind
+        - worker
+        - question
+        - answer
+        - status
+        - askedAt
+        - answeredAt
+      properties:
+        roundNo:
+          type: integer
+        kind:
+          type: string
+          description: The escalation kind (question|blocker).
+        worker:
+          type: string
+          nullable: true
+          description: The worker that raised this escalation.
+        question:
+          type: string
+        answer:
+          type: string
+          nullable: true
+          description: The human's answer; null while the escalation is still open.
+        status:
+          type: string
+          description: open | answered | stale.
+        askedAt:
+          type: string
+        answeredAt:
+          type: string
+          nullable: true
+    PrHistory:
+      type: object
+      description: A PR's full escalation + round history (issue #668), as surfaced read-only on the Convergence page's PR detail. Empty arrays when the PR has no history (or is unknown).
+      additionalProperties: false
+      required:
+        - prKey
+        - rounds
+        - escalations
+      properties:
+        prKey:
+          type: string
+        rounds:
+          type: array
+          items:
+            $ref: "#/components/schemas/PrHistoryRound"
+        escalations:
+          type: array
+          items:
+            $ref: "#/components/schemas/PrHistoryEscalation"
     AgenticSupplyWorker:
       type: object
       description: One connected worker in the supply mirror (H5 cockpit; sourced from the H1 presence registry).
@@ -3056,6 +3245,36 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorBody"
+  /escalations:
+    get:
+      operationId: listEscalations
+      summary: List every OPEN escalation awaiting a human/agent decision, with the completable userTaskKey.
+      description: >-
+        Discovery for the escalation-answer path (epic #664, issue #666): across every surfaced
+        escalation kind (PR review/merge loop, plan-review, empty-plan, trial-merge,
+        conformance-review, delivery human-step, feature/blocked, agent-permission and the shared
+        human-escalation cell), list each currently-open native user-task escalation with the
+        completable `userTaskKey` an agent then answers via `completeUserTask` /
+        `agentCompleteEscalation` — so a tool-aware agent never has to curl the un-projected
+        `/tasks/api/tasks` inbox to find keys. Read-only projection over the ONE `user_tasks` read
+        model the Tasks inbox and Convergence page consume (no second source of truth); a row is
+        present iff its task is open, so the list reflects live pending work.
+      security:
+        - hookSecret: []
+        - {}
+      responses:
+        "200":
+          description: The open escalations.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EscalationList"
+        "401":
+          description: Missing/invalid shared secret (only when NANO_PR_WEBHOOK_SECRET is set).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
   /lineage:
     get:
       operationId: getLineage
@@ -3077,6 +3296,45 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/LineageList"
+        "401":
+          description: Missing/invalid shared secret (only when NANO_PR_WEBHOOK_SECRET is set).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+  /prs/history:
+    get:
+      operationId: getPrHistory
+      summary: "A PR's escalation + round history (issue #668): per-round status transitions and outcome, plus each escalation's kind, question/answer, and timestamps — the read that retires the DB-over-ssh fallback. Identify the PR by prKey, or by processKey. Reads the same rounds/escalations tables the Convergence page surfaces."
+      security:
+        - hookSecret: []
+        - {}
+      parameters:
+        - name: prKey
+          in: query
+          required: false
+          schema:
+            type: string
+          description: The PR key ("<owner>/<repo>#<number>"). Provide this or processKey.
+        - name: processKey
+          in: query
+          required: false
+          schema:
+            type: string
+          description: The engine process-instance key driving the PR; resolved to its prKey. Provide this or prKey.
+      responses:
+        "200":
+          description: The PR's round + escalation history (empty arrays when there is none).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PrHistory"
+        "400":
+          description: Neither prKey nor processKey supplied.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
         "401":
           description: Missing/invalid shared secret (only when NANO_PR_WEBHOOK_SECRET is set).
           content:
@@ -3456,7 +3714,7 @@ paths:
             example: delivery-graphs
           description: OPTIONAL stable section id (from the table of contents `getAgentGuide` returns
             with no argument), e.g. `orient`, `submit-pr`, `submit-epic`, `escalations`, `lifecycle`,
-            `debug`, `debug-models`, `unstick`, `raise-issue`, `delivery-graphs`. Omit it to get the
+            `debug`, `debug-models`, `unstick`, `raise-issue`, `delivery-graphs`, `tool-crosswalk`. Omit it to get the
             table of contents. An unknown id yields a 400 listing the valid ids.
       responses:
         "200":

@@ -19,6 +19,7 @@ import {
   latestTrialMergeQuestion,
   type PrEscalationRow,
   reconcileUserTasks,
+  toEscalationView,
   TRIAL_MERGE_ELEMENT,
   userTaskKindLabel,
   type UserTaskRow,
@@ -336,4 +337,39 @@ test("latestFeatureEscalationQuestion: picks the newest audit row (highest id), 
 
 test("latestFeatureEscalationQuestion: null when the feature has no recorded escalation", () => {
   assertEquals(latestFeatureEscalationQuestion([]), null);
+});
+
+// toEscalationView.prKey must be a genuine PR key (owner/repo#N), never a subject key that fell back
+// to a non-PR value. `buildUserTaskRow` coalesces a blank subjectKey to `processKey`/`userTaskKey`
+// for an orphaned/untracked instance (#358); for a PR-subject task that yields `subject_key` = a
+// numeric engine key, which must NOT be emitted as `prKey` (OpenAPI: prKey is the PR key only when
+// known). Copilot review suppressed advisory app/userTasks.ts:136.
+const escRow = (over: Partial<UserTaskRow>): UserTaskRow => ({
+  user_task_key: "ut-1",
+  element_id: PR_WAIT_ANSWER_ELEMENT,
+  kind_label: "PR review",
+  subject_type: "pr",
+  subject_key: "o/r#7",
+  subject_title: "o/r#7",
+  subject_url: null,
+  question: null,
+  process_key: null,
+  form_key: null,
+  created_at: AT,
+  updated_at: AT,
+  ...over,
+});
+
+test("toEscalationView: PR-subject row with a PR-shaped subject key emits it as prKey", () => {
+  assertEquals(toEscalationView(escRow({ subject_key: "o/r#7" })).prKey, "o/r#7");
+});
+
+test("toEscalationView: PR-subject row whose subject key fell back to a non-PR value yields prKey null (still correlatable via subjectKey)", () => {
+  const view = toEscalationView(escRow({ subject_key: "19153" }));
+  assertEquals(view.prKey, null);
+  assertEquals(view.subjectKey, "19153");
+});
+
+test("toEscalationView: non-PR subject always yields prKey null", () => {
+  assertEquals(toEscalationView(escRow({ subject_type: "plan", subject_key: "o/r#7" })).prKey, null);
 });
