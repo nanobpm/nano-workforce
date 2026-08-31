@@ -173,10 +173,6 @@
       "handler": "workers/record-wave/worker.ts"
     },
     {
-      "taskType": "pr.record-wave-escalation",
-      "handler": "workers/record-wave-escalation/worker.ts"
-    },
-    {
       "taskType": "pr.record-feature",
       "handler": "workers/record-feature/worker.ts"
     },

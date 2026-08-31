@@ -3,8 +3,9 @@
 //   • raise-only — the agent opens a PR, `converge` is off → the run ends at `opened`, no hand-off;
 //   • raise + converge — with `converge` on, the opened PR is enrolled into the convergence loop
 //     (a `pull_requests` row appears) and the feature_run lands `converging`;
-//   • escalate + resume — the agent escalates, a native `feature-escalation` user task parks the
-//     run, and answering re-dispatches the SAME implement task (mirrors the epic slice).
+//   • escalate + resume — the agent escalates, the shared implement-cell spawns a `human-escalation`
+//     grandchild whose native `escalation` user task parks the run, and answering re-dispatches the
+//     SAME implement task inside the cell (mirrors the epic slice).
 //
 // The gateway assertions are the falsifiable core: the WASM engine folds a completed instance's
 // variables away, so we assert on the cumulative taken sequence flows (an empty/wrong result takes a
@@ -236,23 +237,26 @@ describe("single-issue feature run (#172 — feature.bpmn)", () => {
       },
       { baseBranch: "epic/e2e" },
       async ({ app, processKey }) => {
-        const tasks = await app.engine.searchUserTasks({ processInstanceKey: processKey });
-        const task = tasks.find((t) => t.elementId === "feature-escalation") as InboxTask | undefined;
-        assert.ok(task?.userTaskKey, "the feature escalation parked a completable native user task");
+        // The escalation user task now lives on a `human-escalation` grandchild instance the shared
+        // `implement-cell` spawns (ADR 0006 S4), so it is found root-scoped, by the cell's `escalation`
+        // element — not `feature-escalation` on the parent (that inline task no longer exists).
+        const tasks = await app.engine.searchUserTasks({ rootProcessInstanceKey: processKey });
+        const task = tasks.find((t) => t.elementId === "escalation") as InboxTask | undefined;
+        assert.ok(task?.userTaskKey, "the human-escalation cell parked a completable native user task on a child instance");
 
         await app.engine.completeUserTask(task!.userTaskKey, { resolution: "answer", answer: "use v2" });
         await app.settle();
 
         const flows = takenFlows(app);
         assert.ok(
-          flows.includes("w_gw_answer->record-feature-implementing"),
-          `answer re-dispatched through the implementing-reset task (flows: ${flows.join(", ")})`,
+          flows.includes("ic_gw_answer->record-implementing"),
+          `answer re-dispatched through the cell's implementing-reset task (flows: ${flows.join(", ")})`,
         );
         assert.ok(
-          flows.includes("record-feature-implementing->implement-task"),
-          `the reset task re-enters the same implement task (flows: ${flows.join(", ")})`,
+          flows.includes("record-implementing->implement-task"),
+          `the reset task re-enters the same implement task inside the cell (flows: ${flows.join(", ")})`,
         );
-        assert.ok(!flows.includes("w_gw_answer->record-feature"), "the abandon (default) flow was NOT taken");
+        assert.ok(!flows.includes("ic_gw_answer->ic_end"), "the abandon (default) flow was NOT taken");
         assert.equal(calls, 2, "the implementation agent was re-dispatched exactly once after the answer");
       },
     );
@@ -289,9 +293,9 @@ describe("single-issue feature run (#172 — feature.bpmn)", () => {
       assert.equal(parked.status, "escalated", "the run parks at escalated while awaiting the answer");
       assert.ok(parked.process_key, "the parked run carries its engine process-instance key");
 
-      const tasks = await app.engine.searchUserTasks({ processInstanceKey: parked.process_key! });
-      const task = tasks.find((t) => t.elementId === "feature-escalation") as InboxTask | undefined;
-      assert.ok(task?.userTaskKey, "the feature escalation parked a completable native user task");
+      const tasks = await app.engine.searchUserTasks({ rootProcessInstanceKey: parked.process_key! });
+      const task = tasks.find((t) => t.elementId === "escalation") as InboxTask | undefined;
+      assert.ok(task?.userTaskKey, "the human-escalation cell parked a completable native user task on a child instance");
 
       await app.engine.completeUserTask(task!.userTaskKey, { resolution: "answer", answer: "use v2" });
       await app.settle();
@@ -315,19 +319,24 @@ describe("single-issue feature run (#172 — feature.bpmn)", () => {
       },
       { baseBranch: "epic/e2e" },
       async ({ app, processKey }) => {
-        const tasks = await app.engine.searchUserTasks({ processInstanceKey: processKey });
-        const task = tasks.find((t) => t.elementId === "feature-escalation") as InboxTask | undefined;
-        assert.ok(task?.userTaskKey, "the feature escalation parked a completable native user task");
+        const tasks = await app.engine.searchUserTasks({ rootProcessInstanceKey: processKey });
+        const task = tasks.find((t) => t.elementId === "escalation") as InboxTask | undefined;
+        assert.ok(task?.userTaskKey, "the human-escalation cell parked a completable native user task on a child instance");
 
         await app.engine.completeUserTask(task!.userTaskKey, { resolution: "abandon" });
         await app.settle();
 
         const flows = takenFlows(app);
         assert.ok(
-          flows.includes("w_gw_answer->record-feature"),
-          `abandon routed to record-feature (flows: ${flows.join(", ")})`,
+          flows.includes("ic_gw_answer->ic_end"),
+          `abandon took the cell's default abandon flow to the task-done end (flows: ${flows.join(", ")})`,
         );
-        assert.ok(!flows.includes("w_gw_answer->record-feature-implementing"), "the answer loop was NOT taken");
+        assert.ok(!flows.includes("ic_gw_answer->record-implementing"), "the answer loop was NOT taken");
+        // The abandoned cell completes and the parent routes to its terminal recorder exactly once.
+        assert.ok(
+          flows.includes("implement->record-feature"),
+          `the completed cell routes the parent to record-feature (flows: ${flows.join(", ")})`,
+        );
       },
     );
   });
@@ -345,16 +354,19 @@ describe("single-issue feature run (#172 — feature.bpmn)", () => {
       },
       { baseBranch: "epic/e2e" },
       async ({ app, featureKey, processKey }) => {
-        // The `record-feature-escalation` service task runs on the escalated arm (before the user task),
+        // The cell's `record-escalation` service task runs on the escalated arm (before the human task),
         // so the row already carries the flipped status when the run parks, and the agent's question is
         // recorded in the `feature_escalations` audit log the poller reads (issue #332 dropped the
         // denormalised `feature_runs.escalation_question` column).
         const parked = await featureRow(app, featureKey);
         assert.equal(parked.status, "escalated", "the escalated status is surfaced on the read model");
 
-        const tasks = await app.engine.searchUserTasks({ processInstanceKey: processKey });
-        const task = tasks.find((t) => t.elementId === "feature-escalation") as InboxTask | undefined;
-        assert.ok(task?.userTaskKey, "the feature escalation parked a completable native user task");
+        // The escalation parks on a `human-escalation` grandchild instance (ADR 0006 S4), so it is found
+        // root-scoped, by the cell's `escalation` element — the reduced-path poller correlates that
+        // grandchild task back to the feature subject via its rootProcessInstanceKey (real child execution).
+        const tasks = await app.engine.searchUserTasks({ rootProcessInstanceKey: processKey });
+        const task = tasks.find((t) => t.elementId === "escalation") as InboxTask | undefined;
+        assert.ok(task?.userTaskKey, "the human-escalation cell parked a completable native user task on a child instance");
 
         // The poller projects the parked task onto the Tasks inbox `user_tasks` read-model by reading
         // the engine directly, sourcing the question from the `feature_escalations` audit log.
@@ -376,9 +388,9 @@ describe("single-issue feature run (#172 — feature.bpmn)", () => {
 
         const flows = takenFlows(app);
         assert.ok(
-          flows.includes("w_gw_answer->record-feature-implementing") &&
-            flows.includes("record-feature-implementing->implement-task"),
-          `the answer re-dispatched the same implement task through the reset (flows: ${flows.join(", ")})`,
+          flows.includes("ic_gw_answer->record-implementing") &&
+            flows.includes("record-implementing->implement-task"),
+          `the answer re-dispatched the same implement task through the cell's reset (flows: ${flows.join(", ")})`,
         );
         assert.equal(calls, 2, "the implementation agent was re-dispatched exactly once after the answer");
 

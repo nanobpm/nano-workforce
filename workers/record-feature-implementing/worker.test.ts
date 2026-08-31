@@ -4,7 +4,7 @@
 // while parked on the native `feature-escalation` user task. Without it, the answer loop-back left
 // `feature_runs.status` a stale `escalated` through the whole re-implementation (the #632 tear).
 import { test } from "node:test";
-import { assertEquals } from "#test-assert";
+import { assertEquals, assertRejects } from "#test-assert";
 import { noopLog } from "../../test/log.ts";
 import handler from "./worker.ts";
 
@@ -54,4 +54,34 @@ test("record-feature-implementing: a confirming write on the first entry (alread
   await handler({ jobKey: "job-8", variables: { featureKey: "owner/repo#8" } } as never, app);
   assertEquals(rows[0].status, "running");
   assertEquals(rows[0].updated_at !== "2025-01-01T00:00:00.000Z", true, "updated_at was refreshed on the confirming write");
+});
+
+test("record-feature-implementing: keyed by `subjectKey` when composed inside the implement-cell answer loop", async () => {
+  // ADR 0006 S4 — inside the shared `implement-cell` the reset runs on `ic_answerLoop` keyed by
+  // `subjectKey` (the callActivity input), NOT `featureKey`. A standalone feature run's `subjectKey`
+  // IS its `feature_key`, so the escalated row resets to `running` before re-implementation.
+  const rows = [{ feature_key: "owner/repo#7", status: "escalated", updated_at: "2025-01-01T00:00:00.000Z" }];
+  const app = fakeApp(rows);
+  await handler({ jobKey: "job-s", variables: { subjectKey: "owner/repo#7" } } as never, app);
+  assertEquals(rows[0].status, "running");
+});
+
+test("record-feature-implementing: a wave subject (no feature_runs row) is a guarded no-op — never fabricates a row", async () => {
+  // A plan-embedded wave slice composes the same cell with `subjectKey` = the epic's `plan_key`, which
+  // has NO standalone `feature_runs` row. The reset must be a guarded no-op there (symmetric with
+  // `record-feature-escalation`'s guarded flip) rather than creating a bogus row.
+  const rows: Record<string, unknown>[] = [];
+  const app = fakeApp(rows);
+  const out = await handler({ jobKey: "job-w", variables: { subjectKey: "owner/repo#epic-42" } } as never, app);
+  assertEquals(out, {});
+  assertEquals(rows.length, 0, "no feature_runs row was fabricated for a wave subject");
+});
+
+test("record-feature-implementing: fails fast (incident) when neither subjectKey nor featureKey is present", async () => {
+  // Both edges into `implement-task` always supply exactly one key, so a missing key can only mean the
+  // BPMN ioMapping/dataEnvelope regressed — the misconfiguration that reintroduces the stale
+  // `status="escalated"` class (#642). The worker must raise an incident (throw) rather than silently
+  // skipping the reset and masking the regression.
+  const app = fakeApp([]);
+  await assertRejects(() => handler({ jobKey: "job-x", variables: {} } as never, app));
 });

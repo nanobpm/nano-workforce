@@ -2782,22 +2782,36 @@ export async function pollUserTasks(
       await project(t.elementId, t.userTaskKey, t.processInstanceKey, t.rootProcessInstanceKey, t.formKey);
     }
   } else {
-    // Reduced-capability fallback (no raw-REST surface): typed-seam per-active-subject scan, tracked-only.
-    // The typed `openUserTasks` seam carries no parent/root key, so a child-instance task cannot be
-    // correlated here — this path reaches a task only THROUGH the tracked subject whose OWN instance it
-    // parks on (root correlation is a no-op, passed as "").
+    // Reduced-capability fallback (no raw-REST surface): typed-seam per-active-subject scan. The typed
+    // seam now carries the parent/root keys (`@nanobpm/urban` ≥ 0.90 / `@nanobpm/engine-wasm` ≥ 0.8.6,
+    // Magikcraft/nano-bpm#977), so — unlike the pre-#646 tracked-only path — a task parked inside a
+    // callActivity CHILD instance (the shared `human-escalation`/`implement-cell` cells, ADR 0006 S4)
+    // correlates back to this tracked subject too: each subject instance is scanned BOTH directly (its
+    // own top-level escalations) AND across its whole callActivity hierarchy via the `rootProcessInstanceKey`
+    // filter (its native-child cell escalations), so an `implement-cell` → `human-escalation` grandchild
+    // escalation surfaces on this path exactly as it does on the raw-REST sweep (issue #633/#646). Deduped
+    // by `userTaskKey` in `project`, so the direct + hierarchy passes never double-project a shared task.
     const seen = new Set<string>();
     const scanInstance = async (processKey: string | null | undefined) => {
       if (!processKey || seen.has(processKey)) return;
       seen.add(processKey);
-      let tasks: { userTaskKey: string; elementId?: string; formKey?: string }[];
+      let direct: { userTaskKey: string; elementId?: string; formKey?: string }[];
+      let hierarchy: { userTaskKey: string; elementId?: string; processInstanceKey?: string; rootProcessInstanceKey?: string; formKey?: string }[];
       try {
-        tasks = await engine.openUserTasks({ processInstanceKey: processKey });
+        [direct, hierarchy] = await Promise.all([
+          engine.openUserTasks({ processInstanceKey: processKey }),
+          engine.openUserTasks({ rootProcessInstanceKey: processKey }),
+        ]);
       } catch (err) {
         console.error(`[poller] user tasks (${processKey}): ${err}`);
         return;
       }
-      for (const t of tasks) await project(t.elementId, t.userTaskKey, processKey, "", t.formKey ?? "");
+      // Direct tasks park on the subject's OWN instance, so their process/root instance IS `processKey`.
+      for (const t of direct) await project(t.elementId, t.userTaskKey, processKey, processKey, t.formKey ?? "");
+      // Hierarchy tasks carry their own (child) `processInstanceKey` and the shared `rootProcessInstanceKey`
+      // (= this subject) the engine reports, so `contextFor` correlates the child-instance task to the
+      // tracked subject via the root rather than stranding it as an orphan.
+      for (const t of hierarchy) await project(t.elementId, t.userTaskKey, t.processInstanceKey ?? processKey, t.rootProcessInstanceKey ?? processKey, t.formKey ?? "");
     };
     for (const status of FEATURE_ACTIVE_STATUSES) for (const run of await featureRuns(data).find({ status })) await scanInstance(run.process_key);
     for (const status of PLAN_ACTIVE_STATUSES) for (const plan of await plans(data).find({ status })) await scanInstance(plan.process_key);
@@ -2867,27 +2881,32 @@ export async function pollUserTasks(
     // element inside a DESCENDANT instance that the parent's `openUserTasks` never reports. Confirming
     // the parent alone would read "no escalation open" and wrongly flip a genuinely-parked child-cell run
     // back to `running` whenever THIS pass's sweep missed it (truncated/unavailable, so it is absent from
-    // `desired`). Include the callActivity descendants when the raw-REST surface is available; the
-    // reduced-capability seam (no `rest`) cannot walk the hierarchy, so it stays parent-only (child-cell
-    // correlation is a no-op on that path anyway). Any per-instance query error is negative evidence, not
-    // proof the run is unparked — skip the heal and leave the row for a later pass (parity with before).
-    const confirmInstances = [run.process_key];
-    if (rest) confirmInstances.push(...(await searchDescendantInstanceKeys(rest.base, rest.headers, run.process_key)));
+    // `desired`). The typed seam now carries the parent/root keys (`@nanobpm/urban` ≥ 0.90, #646), so BOTH
+    // surfaces walk the hierarchy: the raw-REST surface enumerates descendant instances, and the
+    // reduced-capability seam (no `rest`) confirms via the `rootProcessInstanceKey` filter — a
+    // root-scoped `openUserTasks` reports every open task across the run's whole tree in one query. Any
+    // query error is negative evidence, not proof the run is unparked — skip the heal and leave the row
+    // for a later pass (parity with before).
     let stillParked = false;
     let queryErrored = false;
-    for (const instanceKey of confirmInstances) {
-      let openTasks: { elementId?: string }[];
-      try {
-        openTasks = await engine.openUserTasks({ processInstanceKey: instanceKey });
-      } catch (err) {
-        console.error(`[poller] escalated-run self-heal (${run.feature_key} @ ${instanceKey}): ${err}`);
-        queryErrored = true;
-        break;
+    try {
+      if (rest) {
+        const confirmInstances = [run.process_key, ...(await searchDescendantInstanceKeys(rest.base, rest.headers, run.process_key))];
+        for (const instanceKey of confirmInstances) {
+          const openTasks = await engine.openUserTasks({ processInstanceKey: instanceKey });
+          if (openTasks.some((t) => t.elementId === FEATURE_ESCALATION_ELEMENT || t.elementId === HUMAN_ESCALATION_ELEMENT)) {
+            stillParked = true;
+            break;
+          }
+        }
+      } else {
+        // Reduced path: one root-scoped query covers the parent AND every callActivity descendant.
+        const openTasks = await engine.openUserTasks({ rootProcessInstanceKey: run.process_key });
+        stillParked = openTasks.some((t) => t.elementId === FEATURE_ESCALATION_ELEMENT || t.elementId === HUMAN_ESCALATION_ELEMENT);
       }
-      if (openTasks.some((t) => t.elementId === FEATURE_ESCALATION_ELEMENT || t.elementId === HUMAN_ESCALATION_ELEMENT)) {
-        stillParked = true;
-        break;
-      }
+    } catch (err) {
+      console.error(`[poller] escalated-run self-heal (${run.feature_key} @ ${run.process_key}): ${err}`);
+      queryErrored = true;
     }
     if (queryErrored || stillParked) continue;
     await featureRuns(data).update(run.feature_key, { status: "running", updated_at: at });

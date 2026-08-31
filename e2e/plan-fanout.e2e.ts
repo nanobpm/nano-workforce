@@ -106,7 +106,11 @@ describe("plan-fanout escalations (U2 — task + plan-review + trial-merge → u
   }
 
   async function openTask(app: TestApp, processKey: string, elementId: string): Promise<InboxTask> {
-    const tasks = await app.engine.searchUserTasks({ processInstanceKey: processKey });
+    // Root-scoped: the implement-stage escalation now parks on a `human-escalation` grandchild the
+    // shared `implement-cell` spawns (ADR 0006 S4); plan-level tasks (plan-review, empty-plan,
+    // trial-merge, the caps-timeout `feature-escalation`) still park on the root and remain
+    // discoverable under a root-scoped search (a superset of the parent's own tasks).
+    const tasks = await app.engine.searchUserTasks({ rootProcessInstanceKey: processKey });
     const match = tasks.find((t) => t.elementId === elementId);
     assert.ok(match, `expected an open ${elementId} user task (open: ${tasks.map((t) => t.elementId).join(", ")})`);
     return match!;
@@ -131,20 +135,20 @@ describe("plan-fanout escalations (U2 — task + plan-review + trial-merge → u
         },
       },
       async ({ app, processKey }) => {
-        const task = await openTask(app, processKey, "feature-escalation");
-        assert.ok(task.userTaskKey, "the feature escalation carries a completable userTaskKey");
+        const task = await openTask(app, processKey, "escalation");
+        assert.ok(task.userTaskKey, "the human-escalation cell task carries a completable userTaskKey");
 
-        // Answer it: the typed resolution loops the child back to re-dispatch the SAME task.
+        // Answer it: the typed resolution loops the cell back to re-dispatch the SAME task.
         await app.engine.completeUserTask(task.userTaskKey, { resolution: "answer", answer: "use v2" });
         await app.settle();
 
         const flows = takenFlows(app);
         assert.ok(
-          flows.includes("w_gw_answer->implement-task"),
-          `answer routed back to implement-task (flows: ${flows.join(", ")})`,
+          flows.includes("ic_gw_answer->record-implementing") && flows.includes("record-implementing->implement-task"),
+          `answer routed back to implement-task through the cell reset (flows: ${flows.join(", ")})`,
         );
         assert.ok(
-          !flows.includes("w_gw_answer->w_end"),
+          !flows.includes("ic_gw_answer->ic_end"),
           "the abandon (default) flow was NOT taken",
         );
       },
@@ -163,17 +167,17 @@ describe("plan-fanout escalations (U2 — task + plan-review + trial-merge → u
         }),
       },
       async ({ app, processKey }) => {
-        const task = await openTask(app, processKey, "feature-escalation");
+        const task = await openTask(app, processKey, "escalation");
         await app.engine.completeUserTask(task.userTaskKey, { resolution: "abandon" });
         await app.settle();
 
         const flows = takenFlows(app);
         assert.ok(
-          flows.includes("w_gw_answer->w_end"),
-          `abandon routed to the task-done end (flows: ${flows.join(", ")})`,
+          flows.includes("ic_gw_answer->ic_end"),
+          `abandon routed to the cell's task-done end (flows: ${flows.join(", ")})`,
         );
         assert.ok(
-          !flows.includes("w_gw_answer->implement-task"),
+          !flows.includes("ic_gw_answer->record-implementing"),
           "the answer loop was NOT taken",
         );
       },
@@ -454,7 +458,7 @@ describe("plan-fanout escalations (U2 — task + plan-review + trial-merge → u
           `task with needs routed through the barrier gateway to wait-caps-resolved (flows: ${parked.join(", ")})`,
         );
         assert.ok(
-          !parked.includes("w_gw_needs->implement-task"),
+          !parked.includes("w_gw_needs->implement-cell-call"),
           "the no-needs shortcut was NOT taken for a task that declares needs",
         );
         assert.equal(featureBrief, undefined, "the agent has not been dispatched while parked at the barrier");
@@ -471,8 +475,8 @@ describe("plan-fanout escalations (U2 — task + plan-review + trial-merge → u
 
         const flows = takenFlows(app);
         assert.ok(
-          flows.includes("wait-caps-resolved->implement-task"),
-          `caps-resolved released the barrier into implement-task (flows: ${flows.join(", ")})`,
+          flows.includes("wait-caps-resolved->implement-cell-call") && flows.includes("Start->implement-task"),
+          `caps-resolved released the barrier into the implement cell (flows: ${flows.join(", ")})`,
         );
         assert.equal(
           featureBrief,
@@ -534,15 +538,16 @@ describe("plan-fanout escalations (U2 — task + plan-review + trial-merge → u
           `the caps bound escalated the parked task to the operator (flows: ${flows.join(", ")})`,
         );
         assert.ok(
-          !flows.includes("wait-caps-resolved->implement-task"),
+          !flows.includes("wait-caps-resolved->implement-cell-call"),
           "the resolve arm was withdrawn — the token did not also proceed as if resolved",
         );
         assert.equal(featureRan, false, "the agent was NOT dispatched — the unresolved task escalated instead");
 
-        // The escalation is a genuine, operable operator decision point: answering it loops the
-        // child back to re-dispatch the task (the operator having unblocked/decided), exactly like an
-        // agent-raised escalation — proving this is a real bounded wait + operator escalation, not a
-        // dead end.
+        // The escalation is a genuine, operable operator decision point: answering it releases the
+        // caps barrier into the implement cell (the operator having unblocked/decided), proving this is
+        // a real bounded wait + operator escalation, not a dead end. This is the plan-fanout's OWN
+        // caps-timeout `feature-escalation` task (the fan-out-specific barrier is surrounding
+        // orchestration, retained per ADR 0006 S4), distinct from the implement cell's `escalation`.
         const task = await openTask(app, processKey, "feature-escalation");
         assert.ok(task.userTaskKey, "the caps-timeout escalation carries a completable userTaskKey");
         await app.engine.completeUserTask(task.userTaskKey, { resolution: "answer", answer: "shipped it manually" });
@@ -550,8 +555,8 @@ describe("plan-fanout escalations (U2 — task + plan-review + trial-merge → u
 
         const answered = takenFlows(app);
         assert.ok(
-          answered.includes("w_gw_answer->implement-task"),
-          `answering the caps escalation routed back to implement-task (flows: ${answered.join(", ")})`,
+          answered.includes("w_gw_answer->implement-cell-call") && answered.includes("Start->implement-task"),
+          `answering the caps escalation released the barrier into the implement cell (flows: ${answered.join(", ")})`,
         );
         assert.equal(featureRan, true, "the agent was dispatched once the operator answered the caps escalation");
       },
