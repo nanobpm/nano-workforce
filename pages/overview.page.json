@@ -189,7 +189,7 @@
           {
             "label": "Dismiss",
             "confirm": "Tick off this finished run? It acknowledges the run as done and files it under History.",
-            "showWhenField": "stage_state",
+            "showWhenField": "ack_open",
             "action": {
               "path": "/app/api/actions/acknowledge-done",
               "body": { "feature_key": "{{row.feature_key}}" }

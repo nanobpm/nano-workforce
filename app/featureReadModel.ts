@@ -31,7 +31,7 @@
 // LATER ADR-0065 rollout steps (3/4), deliberately out of scope here.
 
 import { and, caseWhen, col, defineReadModel, type Expr, eq, exists, lit, neq, not, or, pcol, type ReadModel, when } from "@nanobpm/urban";
-import { deriveListBucketExpr } from "./listBucket.ts";
+import { deriveAckOpenExpr, deriveListBucketExpr } from "./listBucket.ts";
 
 /** The 6 TRULY-terminal statuses that map to the `Done` stage — the single source of truth for the
  * terminal tier of BOTH the pipeline `stage`/`stage_state` derivations and the `list_bucket` history
@@ -137,16 +137,25 @@ const attention: Expr = caseWhen(
  * reproduces this model's `isDone`/`isNotNull` forms exactly). */
 const listBucket: Expr = deriveListBucketExpr(EFFECTIVE_STATUS_COLUMN, STAGE_DONE_STATUSES);
 
-/** The keys of {@link featureReadModel}'s DERIVED columns, in the order migration 076 emits them.
+/** The operator "Dismiss" (tick-off) affordance flag — `1` IFF the run is terminal AND not yet
+ * acknowledged (so the page's `showWhenField` Dismiss button renders only for a terminal-but-
+ * unacknowledged run), else `0`. The feature twin of the PR/Delivery-Graph/Epic `ack_open`, from the
+ * ONE shared oracle (app/listBucket.ts, issue #641) parameterised by the SAME {@link
+ * STAGE_DONE_STATUSES} terminal set `list_bucket` uses — so the Dismiss button and the
+ * `acknowledgeDone` guard consume the identical predicate and cannot drift (issue #654). */
+const ackOpen: Expr = deriveAckOpenExpr(EFFECTIVE_STATUS_COLUMN, STAGE_DONE_STATUSES);
+
+/** The keys of {@link featureReadModel}'s DERIVED columns, in the order migration 099 emits them.
  * Base columns are identity pass-throughs (not derivations) and are listed in the migration directly. */
-export const FEATURE_READ_MODEL_DERIVED = ["stage", "stage_state", "stage_skipped", "attention", "list_bucket"] as const;
+export const FEATURE_READ_MODEL_DERIVED = ["stage", "stage_state", "stage_skipped", "attention", "list_bucket", "ack_open"] as const;
 export type FeatureReadModelDerivedColumn = (typeof FEATURE_READ_MODEL_DERIVED)[number];
 
 /**
  * The declare-once `feature_read_model` derived columns. `selectBaseColumns: false` because the base
- * columns are plain identity pass-throughs enumerated in migration 076 (so the static pages↔schema
+ * columns are plain identity pass-throughs enumerated in the latest superseding migration (099, which
+ * re-emits the whole VIEW body — see also 076/081) (so the static pages↔schema
  * contract guard, which reads a VIEW's columns off an aliased select-list, sees them); this model owns
- * only the five real DERIVATIONS. Both the migration VIEW (`sqlSelectFor`, drift-guarded) and the
+ * only the six real DERIVATIONS. Both the migration VIEW (`sqlSelectFor`, drift-guarded) and the
  * runtime TS oracle (`fnFor`, behind app/stage.ts) are generated from THIS single declaration.
  */
 export const featureReadModel: ReadModel = defineReadModel({
@@ -159,6 +168,7 @@ export const featureReadModel: ReadModel = defineReadModel({
     stage_skipped: stageSkipped,
     attention,
     list_bucket: listBucket,
+    ack_open: ackOpen,
   },
 });
 
