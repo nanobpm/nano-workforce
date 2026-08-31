@@ -1,3 +1,9 @@
+## [0.171.2](https://github.com/nanobpm/nano-workforce/compare/v0.171.1...v0.171.2) (2026-08-31)
+
+### Bug Fixes
+
+* surface + complete readiness/preflight escalations in the Tasks inbox ([#675](https://github.com/nanobpm/nano-workforce/issues/675)) ([9d874e8](https://github.com/nanobpm/nano-workforce/commit/9d874e889f3155b7887bb48032e39c5f78e33ce3)), closes [#674](https://github.com/nanobpm/nano-workforce/issues/674)
+
 ## [0.171.1](https://github.com/nanobpm/nano-workforce/compare/v0.171.0...v0.171.1) (2026-08-31)
 
 ### Code Refactoring
