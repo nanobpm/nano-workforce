@@ -2646,6 +2646,15 @@ export async function pollUserTasks(
   engineRest?: { restAddress: string; token?: string },
 ) {
   const at = now();
+  // Raw-REST context (present in production; the reduced-capability seam host passes no `engineRest`) —
+  // used by the engine-first sweep AND the escalation self-heal's callActivity-hierarchy confirmation.
+  const rest = engineRest
+    ? (() => {
+        const headers: Record<string, string> = { "content-type": "application/json" };
+        if (engineRest.token) headers.authorization = `Bearer ${engineRest.token}`;
+        return { base: engineRest.restAddress.replace(/\/+$/, ""), headers };
+      })()
+    : null;
 
   // ── Enrichment: subject descriptors keyed by the ENGINE process-instance the task parks on ────────
   // Built from EVERY subject row (regardless of status), so a task on a subject whose row already went
@@ -2768,11 +2777,8 @@ export async function pollUserTasks(
     if (row) desiredByKey.set(rowKey, row);
   };
 
-  if (engineRest) {
-    const base = engineRest.restAddress.replace(/\/+$/, "");
-    const headers: Record<string, string> = { "content-type": "application/json" };
-    if (engineRest.token) headers.authorization = `Bearer ${engineRest.token}`;
-    for (const t of await sweepOpenEscalationTasks(base, headers)) {
+  if (rest) {
+    for (const t of await sweepOpenEscalationTasks(rest.base, rest.headers)) {
       await project(t.elementId, t.userTaskKey, t.processInstanceKey, t.rootProcessInstanceKey, t.formKey);
     }
   } else {
@@ -2856,17 +2862,35 @@ export async function pollUserTasks(
     // escalation; a genuinely-stranded (old, or timestamp-less) row is past the window and still healed.
     const escalatedAt = Date.parse(run.updated_at ?? "");
     if (Number.isFinite(escalatedAt) && Date.now() - escalatedAt < FEATURE_ESCALATION_HEAL_GRACE_MS) continue;
-    let openTasks: { elementId?: string }[];
-    try {
-      openTasks = await engine.openUserTasks({ processInstanceKey: run.process_key });
-    } catch (err) {
-      // Negative evidence from a failed query is not proof the run is unparked — leave it for a later pass.
-      console.error(`[poller] escalated-run self-heal (${run.feature_key} @ ${run.process_key}): ${err}`);
-      continue;
+    // Confirm across the run's WHOLE callActivity hierarchy, not just its parent instance: a child-cell
+    // escalation (ADR 0006 S4, #603/#633) parks on the shared `human-escalation` cell's `escalation`
+    // element inside a DESCENDANT instance that the parent's `openUserTasks` never reports. Confirming
+    // the parent alone would read "no escalation open" and wrongly flip a genuinely-parked child-cell run
+    // back to `running` whenever THIS pass's sweep missed it (truncated/unavailable, so it is absent from
+    // `desired`). Include the callActivity descendants when the raw-REST surface is available; the
+    // reduced-capability seam (no `rest`) cannot walk the hierarchy, so it stays parent-only (child-cell
+    // correlation is a no-op on that path anyway). Any per-instance query error is negative evidence, not
+    // proof the run is unparked — skip the heal and leave the row for a later pass (parity with before).
+    const confirmInstances = [run.process_key];
+    if (rest) confirmInstances.push(...(await searchDescendantInstanceKeys(rest.base, rest.headers, run.process_key)));
+    let stillParked = false;
+    let queryErrored = false;
+    for (const instanceKey of confirmInstances) {
+      let openTasks: { elementId?: string }[];
+      try {
+        openTasks = await engine.openUserTasks({ processInstanceKey: instanceKey });
+      } catch (err) {
+        console.error(`[poller] escalated-run self-heal (${run.feature_key} @ ${instanceKey}): ${err}`);
+        queryErrored = true;
+        break;
+      }
+      if (openTasks.some((t) => t.elementId === FEATURE_ESCALATION_ELEMENT || t.elementId === HUMAN_ESCALATION_ELEMENT)) {
+        stillParked = true;
+        break;
+      }
     }
-    if (!openTasks.some((t) => t.elementId === FEATURE_ESCALATION_ELEMENT || t.elementId === HUMAN_ESCALATION_ELEMENT)) {
-      await featureRuns(data).update(run.feature_key, { status: "running", updated_at: at });
-    }
+    if (queryErrored || stillParked) continue;
+    await featureRuns(data).update(run.feature_key, { status: "running", updated_at: at });
   }
 }
 

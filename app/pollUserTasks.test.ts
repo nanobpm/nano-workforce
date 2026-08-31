@@ -858,6 +858,47 @@ test("pollUserTasks (engine-first): does NOT heal a JUST-escalated run inside th
   assertEquals(byKey["o/r#old"].status, "running", "a genuinely-stranded (old) run is still healed");
 });
 
+test("pollUserTasks (engine-first): does NOT heal an escalated run parked in a callActivity CHILD instance the sweep missed (issue #633)", async () => {
+  // A run's escalation can park inside a callActivity CHILD instance on the shared `human-escalation`
+  // cell's `escalation` element (ADR 0006 S4, #633), correlated back to the parent run via the root key.
+  // When this pass's engine-first sweep is truncated/unavailable, that child task is absent from `desired`,
+  // so the run falls through to the per-instance confirmation. Confirming ONLY the parent `process_key`
+  // (whose own open tasks are empty — the escalation lives in the CHILD instance) would read "no
+  // escalation open" and wrongly flip a genuinely-parked run back to `running`. The confirmation must
+  // include the callActivity descendants when the raw-REST surface is available.
+  const stale = new Date(Date.now() - 60 * 60_000).toISOString(); // past the heal grace window
+  const { data, stores } = memData({
+    feature_runs: [
+      { feature_key: "o/r#child", status: "escalated", process_key: "fp-parent", updated_at: stale, issue_url: null, title: "parked in child cell", delivery_label: null },
+    ],
+  });
+  // The sweep is unavailable (returns empty), so fp-parent is NOT confirmed parked via `desired`; the
+  // descendant walk over `/process-instances/search` surfaces the child instance carrying the escalation.
+  const orig = globalThis.fetch;
+  // biome-ignore lint/suspicious/noExplicitAny: minimal fetch double for the raw-REST search surfaces
+  globalThis.fetch = (async (url: string | URL, init?: any) => {
+    const u = String(url);
+    if (u.endsWith("/user-tasks/search")) {
+      return new Response(JSON.stringify({ items: [] }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    if (u.endsWith("/process-instances/search")) {
+      const parent = JSON.parse(init?.body ?? "{}")?.filter?.parentProcessInstanceKey;
+      const items = parent === "fp-parent" ? [{ processInstanceKey: "child-1" }] : [];
+      return new Response(JSON.stringify({ items }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    return new Response("not found", { status: 404 });
+  }) as typeof fetch;
+  // The escalation is parked in the CHILD instance on the `escalation` element, not on the parent.
+  const engine = fakeEngine({ "fp-parent": [], "child-1": [{ userTaskKey: "ut-child", elementId: "escalation" }] });
+  try {
+    await pollUserTasks(data, engine, REST);
+  } finally {
+    globalThis.fetch = orig;
+  }
+  const byKey = Object.fromEntries((stores.feature_runs ?? []).map((r) => [r.feature_key, r]));
+  assertEquals(byKey["o/r#child"].status, "escalated", "a run parked in a callActivity child cell survives when the sweep missed it");
+});
+
 test("pollUserTasks (typed-seam fallback): self-heals an escalated run with no open feature-escalation task (issue #642)", async () => {
   // The reduced-capability path scans FEATURE_ACTIVE_STATUSES instances (incl. `escalated`) directly,
   // so the per-instance open-task read is just as authoritative for the self-heal.
