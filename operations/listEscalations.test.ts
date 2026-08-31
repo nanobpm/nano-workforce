@@ -8,7 +8,7 @@
 // The headline round-trip test proves the acceptance criterion: an open escalation is listed by
 // `listEscalations` with the EXACT `userTaskKey` that `completeUserTask` then resolves.
 import { test } from "node:test";
-import { assertEquals } from "#test-assert";
+import { assert, assertEquals } from "#test-assert";
 import type { AppApi } from "@nanobpm/urban";
 import { noopLog } from "../test/log.ts";
 import completeHandler from "./completeUserTask.ts";
@@ -184,4 +184,32 @@ test("listEscalations: empty when no open escalations", async () => {
   const res = await callList(app);
   assertEquals(res.status, 200);
   assertEquals(res.body, { count: 0, escalations: [] });
+});
+
+// The optional shared-secret guard is captured at module load from NANO_PR_WEBHOOK_SECRET, so
+// cache-bust re-import the handler with the env set to exercise both the rejected (401, missing
+// header) and authorized (200, correct header) paths deterministically — mirrors the read-door
+// guard tests on sibling ops (listActivePrs, listLibrary).
+test("listEscalations: shared-secret guard — 401 without x-hook-secret, 200 with it", async () => {
+  const prev = process.env["NANO_PR_WEBHOOK_SECRET"];
+  process.env["NANO_PR_WEBHOOK_SECRET"] = "s3cr3t";
+  try {
+    const mod = await import(`./listEscalations.ts?guard=${Date.now()}`);
+    const guarded = mod.default as typeof listHandler;
+    const { app } = memApp([], []);
+    // biome-ignore lint/suspicious/noExplicitAny: test harness cast, mirrors sibling op tests
+    const bad = (await guarded({ req: { headers: new Headers() } as any, params: {}, query: {}, body: undefined } as any, app)) as any;
+    assertEquals(bad.status, 401);
+    const ok = (await guarded(
+      // biome-ignore lint/suspicious/noExplicitAny: test harness cast, mirrors sibling op tests
+      { req: { headers: new Headers({ "x-hook-secret": "s3cr3t" }) } as any, params: {}, query: {}, body: undefined } as any,
+      app,
+      // biome-ignore lint/suspicious/noExplicitAny: test harness cast, mirrors sibling op tests
+    )) as any;
+    assertEquals(ok.status, 200);
+    assert("count" in ok.body);
+  } finally {
+    if (prev === undefined) delete process.env["NANO_PR_WEBHOOK_SECRET"];
+    else process.env["NANO_PR_WEBHOOK_SECRET"] = prev;
+  }
 });
