@@ -48,7 +48,7 @@ jobs:
             https://api.github.com/repos/Magikcraft/nano-bpm/dispatches \
             -d '{"event_type":"install-sh-updated"}')
           if [ "$code" != "204" ]; then
-            echo "::error::repository_dispatch to Magikcraft/nano-bpm returned HTTP ${code} (expected 204). Check PAGES_DISPATCH_TOKEN scope (Contents: write)."
+            echo "::error::repository_dispatch to Magikcraft/nano-bpm returned HTTP ${code} (expected 204). Check PAGES_DISPATCH_TOKEN scope (fine-grained PAT: Contents: read & write)."
             exit 1
           fi
           echo "dispatched install-sh-updated to Magikcraft/nano-bpm (HTTP 204)"
