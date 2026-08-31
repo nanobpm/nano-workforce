@@ -64,7 +64,16 @@ function harness(
   const origWindow = Reflect.get(globalThis, "window");
   Reflect.set(globalThis, "window", fakeWindow);
 
-  const dispose = mountFn(host, config);
+  // Restore the mutated globals if the mount itself throws, so a failing mount can't
+  // leak `fetch`/`window` into later tests and make them fail in confusing ways.
+  let dispose: () => void;
+  try {
+    dispose = mountFn(host, config);
+  } catch (err) {
+    if (fetchImpl) globalThis.fetch = origFetch;
+    Reflect.set(globalThis, "window", origWindow);
+    throw err;
+  }
 
   const teardown = () => {
     dispose();

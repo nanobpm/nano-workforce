@@ -436,7 +436,7 @@ export const WIRE_CONTRACTS = {
     owner: "pages/delivery-graphs/mount.js",
     semantics:
       "The host's acknowledgment of a `nano-navigate` (issue #645). \"Preview generated DI\" posts `nano-navigate` UP to the console (forwarded to the host explorer by the Urban App-View relay, nano-ide #518), but the host does not synchronously confirm it navigated — so the old \"✓ Opening…\" toast printed right after the post claimed success even when the message was dropped (standalone, no relay, a console that never navigated). The compose view now treats Preview as fire-to-host with a bounded budget: a NEUTRAL in-progress status, resolved to \"✓ Opened…\" ONLY on this same-origin ack from the parent for the matching `target`, or to \"Couldn't reach the console explorer\" on a short timeout. Consumed same-origin from `window.parent`; the `type` string is `NANO_NAVIGATE_ACK_MESSAGE` in pages/delivery-graphs/mount.js.",
-    shape: '{ type: "nano-navigate-ack", target?: string }',
+    shape: '{ type: "nano-navigate-ack", target: string }',
   },
   "deliveryGraph.library.import.submit": {
     category: "wire",
