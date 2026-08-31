@@ -317,21 +317,24 @@ test("issue #205: overview is the landing page and first nav item", async () => 
     );
   }
 
-  // Three collapsible active-work sections, one per dispatch surface, each with a
+  // Four collapsible active-work sections, one per dispatch surface, each with a
   // live count in its header (showCount) and a persisted collapse toggle (collapsible). Each filters
-  // its Active list on a `{field, in:[...]}` predicate: the PR / feature surfaces on `status`, but the
-  // EPIC surface buckets on the DERIVED `list_bucket` (issue #298) — NOT raw `status` — so a `done`
-  // epic still converging, or landed-but-unpromoted, does not vanish from the in-flight Epics section
-  // the instant `status=done`. Guarding the field here is the regression guard for that defect class.
-  // The epic surface binds the derived `plan_read_model` VIEW (epic #412 — the single source of truth
-  // for the wave/delivery projections it also renders), not the raw `plans` table.
+  // its Active list on a `{field, in:[...]}` predicate. The FEATURE and EPIC surfaces bucket on the
+  // DERIVED `list_bucket` — NOT raw `status` — over their read-model VIEW (features: issue #637 —
+  // fixing a drift where the grid read the vestigial base `feature_runs.status` with an allowlist that
+  // hid every converging feature; epics: issue #298), so a `done`-but-unacknowledged item still
+  // converging does not vanish from its in-flight section the instant `status` reads terminal. Guarding
+  // the field here is the regression guard for that defect class. The feature surface binds the derived
+  // `feature_read_model` VIEW (the single source of truth for the `list_bucket` activeness predicate,
+  // shared byte-for-byte with the Feature tab); the epic surface binds `plan_read_model` (epic #412),
+  // not the raw `plans` table. PRs / delivery graphs still bucket on `status` (see #637 follow-up).
   const expected: Record<string, { field: string; in: string[] }> = {
     pull_requests: {
       field: "status",
       in: ["converging", "waiting_review", "escalated", "waiting_deps", "waiting_merge", "queued", "merging"],
     },
     plan_read_model: { field: "list_bucket", in: ["active"] },
-    feature_runs: { field: "status", in: ["running", "escalated", "awaiting_operator"] },
+    feature_read_model: { field: "list_bucket", in: ["active"] },
     // The 4th dispatch surface (issue #386) — active delivery graphs. Both in-flight statuses
     // (`awaiting-approval` parked at the gate, `running` dispatched) show here. Binds the derived
     // `delivery_graph_read_model` VIEW (S7 / #541 — the single source of truth for the pipeline
@@ -459,5 +462,61 @@ test("issue #521: the Delivery Graphs History tab surfaces dispatch time + the i
   assert(
     instance.link?.keyField === "process_key",
     "the Instance cell's processExplorer link must key on `process_key`",
+  );
+});
+
+test("issue #637: the Overview 'Active Features' grid buckets on the derived read model, in parity with the Feature tab", async () => {
+  // The bug: Overview's "Active Features" grid read the VESTIGIAL base `feature_runs.status` column
+  // with a hand-maintained allowlist (`running`/`escalated`/`awaiting_operator` — not even a valid
+  // feature-status set: those are delivery-graph statuses cloned from the "Active Delivery Graphs"
+  // grid). A feature only ever surfaced there if it happened to be `escalated`; its whole convergence
+  // life (`converging`/`waiting_review`/`waiting_merge`/…) was invisible on Overview while the SAME
+  // feature showed on the dedicated Feature tab — a state-tear between two surfaces that must agree.
+  //
+  // The fix repoints the grid at the derived `feature_read_model` VIEW filtered on the canonical
+  // `list_bucket IN ('active')` activeness predicate — the single declare-once column (app/
+  // featureReadModel.ts, guarded byte-for-byte by check:derivation-parity) that the Feature tab's
+  // "Feature runs" grid already uses. This test pins that parity so the tear can't silently return.
+  const overview = JSON.parse(readFileSync(`${ROOT}pages/overview.page.json`, "utf8"));
+  const feature = JSON.parse(readFileSync(`${ROOT}pages/feature.page.json`, "utf8"));
+
+  const ovGrid = (overview.nodes ?? []).find(
+    (n: Json) => n.type === "dataGrid" && n.props?.title === "Active Features",
+  );
+  assert(ovGrid, "overview.page.json must have an 'Active Features' grid");
+
+  // It must bind the derived read-model VIEW, never the vestigial base `feature_runs` table.
+  assert(
+    ovGrid.props?.data?.table === "feature_read_model",
+    "the Overview 'Active Features' grid must bind the derived feature_read_model VIEW, not the base feature_runs table",
+  );
+
+  // And it must filter on the canonical `list_bucket IN ('active')` activeness predicate — never a
+  // base-`status` allowlist.
+  const ovFilters: Json[] = ovGrid.props?.data?.filter ?? [];
+  assert(
+    !ovFilters.some((f: Json) => f.field === "status"),
+    "the Overview 'Active Features' grid must NOT re-encode activeness as a base-`status` allowlist",
+  );
+  const ovBucket = ovFilters.find((f: Json) => f.field === "list_bucket");
+  assert(
+    ovBucket && JSON.stringify(ovBucket.in) === JSON.stringify(["active"]),
+    "the Overview 'Active Features' grid must filter `list_bucket IN ['active']`",
+  );
+
+  // Parity: the Feature tab's "Feature runs" grid answers "is this feature active?" identically —
+  // same VIEW, same activeness predicate — so the two surfaces show the same active-feature set.
+  const featGrid = (feature.nodes ?? []).find(
+    (n: Json) => n.type === "dataGrid" && n.props?.title === "Feature runs",
+  );
+  assert(featGrid, "feature.page.json must have a 'Feature runs' grid");
+  assert(
+    featGrid.props?.data?.table === ovGrid.props?.data?.table,
+    "the Overview and Feature-tab feature grids must bind the SAME table (feature_read_model)",
+  );
+  const featBucket = (featGrid.props?.data?.filter ?? []).find((f: Json) => f.field === "list_bucket");
+  assert(
+    featBucket && JSON.stringify(featBucket.in) === JSON.stringify(ovBucket.in),
+    "the Overview and Feature-tab feature grids must apply the IDENTICAL list_bucket activeness predicate",
   );
 });

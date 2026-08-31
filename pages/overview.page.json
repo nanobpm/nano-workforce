@@ -177,9 +177,9 @@
         "data": {
           "kind": "datasource",
           "source": "app",
-          "table": "feature_runs",
+          "table": "feature_read_model",
           "orderBy": { "field": "updated_at", "dir": "desc" },
-          "filter": [{ "field": "status", "in": ["running", "escalated", "awaiting_operator"] }]
+          "filter": [{ "field": "list_bucket", "in": ["active"] }]
         },
         "columns": [
           { "field": "title", "template": "{{title}}", "header": "Item", "subtitleField": "feature_key", "truncate": true, "width": "36%", "link": { "kind": "page", "page": "feature", "keyField": "feature_key" } },
