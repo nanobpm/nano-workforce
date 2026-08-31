@@ -161,6 +161,69 @@ test("pollUserTasks: projects a feature-escalation that lands on a plan-fanout p
   assertEquals(byKey["ut-embedded-feat"].question, "the agent returned no machine-readable result — enrol the PR?");
 });
 
+test("pollUserTasks: projects a readiness-escalation-pf preflight task on a feature run (issue #674)", async () => {
+  // The leading readiness preflight (feature.bpmn `pf_*` embedded subprocess) parks on the run's OWN
+  // engine instance when it times out before its ReadinessProbe goes green. Before #674 the element id
+  // was absent from USER_TASK_KIND_LABELS, so `contextFor`'s leak guard dropped it and the parked run
+  // was invisible + uncompletable in the Tasks surface. It must now project as an "Upstream readiness
+  // stalled" row on the feature subject, carrying the run's wait rollup as the question.
+  const { data, stores } = memData({
+    feature_runs: [
+      {
+        feature_key: "o/r#674",
+        status: "running",
+        process_key: "fp-674",
+        issue_url: "https://github.com/o/r/issues/674",
+        title: "Ship the widget",
+        delivery_label: "waiting on @scope/upstream@1.2.0 · re-checks every 30s",
+      },
+    ],
+  });
+  const engine = fakeEngine({ "fp-674": [{ userTaskKey: "ut-readiness-pf", elementId: "readiness-escalation-pf", formKey: "26" }] });
+
+  await pollUserTasks(data, engine);
+
+  const byKey = Object.fromEntries((stores.user_tasks ?? []).map((r) => [r.user_task_key, r]));
+  assertEquals(Object.keys(byKey), ["ut-readiness-pf"]);
+  assertEquals(byKey["ut-readiness-pf"].element_id, "readiness-escalation-pf");
+  assertEquals(byKey["ut-readiness-pf"].kind_label, "Upstream readiness stalled");
+  assertEquals(byKey["ut-readiness-pf"].subject_type, "feature");
+  assertEquals(byKey["ut-readiness-pf"].subject_key, "o/r#674");
+  assertEquals(byKey["ut-readiness-pf"].subject_title, "Ship the widget");
+  assertEquals(byKey["ut-readiness-pf"].question, "waiting on @scope/upstream@1.2.0 · re-checks every 30s");
+  assertEquals(byKey["ut-readiness-pf"].form_key, "26");
+});
+
+test("pollUserTasks: projects a readiness-escalation wait-gate task on a plan, with the wait-gate label as question (issue #674)", async () => {
+  // The standalone inter-epic wait-gate cell (readiness-gate.bpmn / wait-gate.bpmn) parks a dependent
+  // epic on `readiness-escalation` when its bounded capability wait elapses. It surfaces on the plan
+  // subject; the question derivation leans on the wait-gate projection (`plans.wait_gate_label`).
+  const { data, stores } = memData({
+    plans: [
+      {
+        plan_key: "o/r#700",
+        status: "dispatched",
+        process_key: "pp-700",
+        issue_url: "https://github.com/o/r/issues/700",
+        title: "Dependent epic",
+        wait_gate: "escalated",
+        wait_gate_label: "escalated · still waiting on @scope/producer@2.0.0 after 24h",
+      },
+    ],
+  });
+  const engine = fakeEngine({ "pp-700": [{ userTaskKey: "ut-readiness", elementId: "readiness-escalation" }] });
+
+  await pollUserTasks(data, engine);
+
+  const byKey = Object.fromEntries((stores.user_tasks ?? []).map((r) => [r.user_task_key, r]));
+  assertEquals(Object.keys(byKey), ["ut-readiness"]);
+  assertEquals(byKey["ut-readiness"].element_id, "readiness-escalation");
+  assertEquals(byKey["ut-readiness"].kind_label, "Readiness escalation");
+  assertEquals(byKey["ut-readiness"].subject_type, "plan");
+  assertEquals(byKey["ut-readiness"].subject_key, "o/r#700");
+  assertEquals(byKey["ut-readiness"].question, "escalated · still waiting on @scope/producer@2.0.0 after 24h");
+});
+
 test("pollUserTasks: projects a merge-loop wait-merge-answer escalation into user_tasks as \"PR merge\"", async () => {
   // During the merge phase a PR's process_key points at its merge-loop instance; the merge escalation
   // parks on a native `wait-merge-answer` userTask (#256) and writes the SAME `escalations` row the

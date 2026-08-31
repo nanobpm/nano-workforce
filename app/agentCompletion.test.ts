@@ -286,6 +286,38 @@ test("empty-plan-escalation is HUMAN-completable but NOT agent-completable (issu
   assertEquals(completed[0].variables, { directive: "revise", notes: "look again" });
 });
 
+test("readiness-escalation(-pf) is HUMAN-completable but NOT agent-completable (issue #674)", async () => {
+  // A readiness/preflight gate adjudicates whether upstream is ACTUALLY ready (proceed) or the gate
+  // should be abandoned. Like feature-blocked/conformance/empty-plan it is a HUMAN operator decision —
+  // an agent must never auto-answer it, or the fleet would silently defeat the very readiness gate the
+  // task exists to enforce. So both ids stay OUTSIDE `ESCALATION_TASK_ELEMENTS` (agent-refused) but are
+  // retired by the HUMAN completer via the one canonical `complete-user-task` door.
+  for (const elementId of ["readiness-escalation-pf", "readiness-escalation"] as const) {
+    const stores = { task_completions: { rows: [] as any[], key: "id" } };
+    const data = memData(stores);
+    const { engine, completed } = fakeEngine([{ userTaskKey: "ut-r", elementId }]);
+
+    const asAgent = await completeEscalationAsAgent(data, engine, {
+      userTaskKey: "ut-r",
+      agentId: "bot",
+      variables: { resolution: "acknowledge" },
+    });
+    assertEquals(asAgent.ok, false, `the agent completer refuses ${elementId}`);
+    assertEquals(asAgent.reason, "not a completable task");
+    assertEquals(completed.length, 0);
+
+    const asHuman = await completeEscalationAsHuman(data, engine, {
+      userTaskKey: "ut-r",
+      operatorId: "alice",
+      variables: { resolution: "abandon", answer: "upstream never published" },
+    });
+    assertEquals(asHuman.ok, true, `the human completer retires ${elementId}`);
+    assertEquals(asHuman.elementId, elementId);
+    assertEquals(completed.length, 1);
+    assertEquals(completed[0].variables, { resolution: "abandon", answer: "upstream never published" });
+  }
+});
+
 test("human completer refuses a non-escalation user task and is a no-op for an unknown key", async () => {
   const stores = { task_completions: { rows: [] as any[], key: "id" } };
   const data = memData(stores);

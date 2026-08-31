@@ -72,6 +72,24 @@ export const ACP_PERMISSION_ELEMENT = "acp-permission";
  *  escalation is filtered out by the unknown-kind guard and silently vanishes from the Tasks inbox. */
 export const HUMAN_ESCALATION_ELEMENT = "escalation";
 
+/** The readiness/preflight escalation user task parked when a LEADING readiness/capability PREFLIGHT
+ *  times out before its `ReadinessProbe` went green — a human decision (acknowledge/proceed vs abandon).
+ *  This is the `pf_*` embedded-subprocess variant that appears both in `feature.bpmn` (the feature-run
+ *  readiness preflight) and `plan-fanout.bpmn` (the producer-capability preflight). It parks on the
+ *  run's OWN engine instance (an embedded subprocess, not a callActivity child), renders the deployed
+ *  `readiness-escalation` `.form`, and is HUMAN-only: an agent must NOT auto-answer a readiness gate
+ *  (that would silently defeat the very "is upstream actually ready?" decision the gate exists to make),
+ *  so it lives in `HUMAN_COMPLETABLE_ELEMENTS`, never in `ESCALATION_TASK_ELEMENTS`. Without this the
+ *  task's kind is `undefined`, the poller's leak guard drops it, and the run wedges invisibly + unanswerably
+ *  (issue #674). */
+export const READINESS_ESCALATION_PF_ELEMENT = "readiness-escalation-pf";
+
+/** The readiness/wait-gate escalation user task (`readiness-gate.bpmn`, `wait-gate.bpmn`) — the same
+ *  human readiness decision on the standalone inter-epic wait-gate cell rather than the inline preflight.
+ *  Same `readiness-escalation` `.form`, same HUMAN-only policy as `READINESS_ESCALATION_PF_ELEMENT`
+ *  (issue #674). */
+export const READINESS_ESCALATION_ELEMENT = "readiness-escalation";
+
 /** One row per currently-open native user-task escalation, denormalised for the Tasks page. Keyed on
  *  the completable `user_task_key` (a task is open at most once). Present iff the engine reports the
  *  task open; `pollUserTasks` deletes it once the task is gone. */
@@ -186,6 +204,8 @@ export const USER_TASK_KIND_LABELS: Readonly<Record<string, string>> = {
   [PR_WAIT_ANSWER_ELEMENT]: "PR review",
   [PR_WAIT_MERGE_ANSWER_ELEMENT]: "PR merge",
   [CONFORMANCE_ESCALATION_ELEMENT]: "Conformance review",
+  [READINESS_ESCALATION_PF_ELEMENT]: "Upstream readiness stalled",
+  [READINESS_ESCALATION_ELEMENT]: "Readiness escalation",
   [DELIVERY_HUMAN_ELEMENT]: "Delivery: human step",
   [ACP_PERMISSION_ELEMENT]: "Agent permission",
 };
@@ -342,8 +362,21 @@ export function latestTrialMergeQuestion(audits: readonly TrialMergeAuditRow[]):
   return latest?.summary ?? null;
 }
 
-/** One PR review-loop escalation (001_init.sql `escalations`). `status` is open | answered; the poller
- *  reads the OPEN row's `question`. */
+/** Pure: the "what is the run waiting on" question line for a readiness/preflight escalation
+ *  (`readiness-escalation-pf` / `readiness-escalation`, issue #674) — the unresolved probe/capability
+ *  the leading readiness gate stalled on. The wait-gate projection already renders that clause on the
+ *  subject row: a plan gated behind a producer capability carries it on `plans.wait_gate_label`
+ *  ("waiting on <clause> · re-checks …", app/waitGate.ts), and a feature preflight carries its rollup
+ *  on `feature_runs.delivery_label`. Prefer whichever the subject supplies; fall back to a static
+ *  readiness-stalled line so the Tasks grid never renders a blank question for a parked gate.
+ *  Always returns a non-empty string — the static fallback guarantees a question is never blank. */
+export function readinessEscalationQuestion(label?: string | null): string {
+  const t = typeof label === "string" ? label.trim() : "";
+  return (
+    t ||
+    "The readiness preflight timed out before its ReadinessProbe went green. Proceed against the (now-published) upstream, or abandon the gate."
+  );
+}
 export interface PrEscalationRow {
   id: number;
   pr_key: string;
