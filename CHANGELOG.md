@@ -1,3 +1,9 @@
+## [0.171.3](https://github.com/nanobpm/nano-workforce/compare/v0.171.2...v0.171.3) (2026-08-31)
+
+### Code Refactoring
+
+* compose implement → implement-cell (feature + plan-fanout) ([#646](https://github.com/nanobpm/nano-workforce/issues/646)) ([#656](https://github.com/nanobpm/nano-workforce/issues/656)) ([caca54e](https://github.com/nanobpm/nano-workforce/commit/caca54e42caf0a1db83a8f15092c7c834e05e81f)), closes [#642](https://github.com/nanobpm/nano-workforce/issues/642) [#360](https://github.com/nanobpm/nano-workforce/issues/360) [#642](https://github.com/nanobpm/nano-workforce/issues/642) [#642](https://github.com/nanobpm/nano-workforce/issues/642)
+
 ## [0.171.2](https://github.com/nanobpm/nano-workforce/compare/v0.171.1...v0.171.2) (2026-08-31)
 
 ### Bug Fixes
