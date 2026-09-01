@@ -694,6 +694,7 @@ test("#661 engineReconcileMs: defaults, disables on a non-positive/non-finite va
   assertEquals(engineReconcileMs(Number.NaN), undefined, "a non-finite value disables the pass");
   assertEquals(engineReconcileMs(Number.POSITIVE_INFINITY), undefined, "infinity disables the pass");
   assertEquals(engineReconcileMs(2 ** 32), 2_147_483_647, "a huge value is capped at the Node timer ceiling");
+  assertEquals(engineReconcileMs(0.5), 1, "a sub-millisecond positive value floors to 1ms, never 0 (no busy setInterval(0))");
 });
 
 /**

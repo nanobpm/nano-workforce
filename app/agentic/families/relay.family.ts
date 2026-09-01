@@ -77,13 +77,14 @@ export function sweepIntervalMs(ephemeralRetentionMs: number): number {
  * The defensive engine-reconcile cadence (ms) for a given config (#661), or `undefined` to DISABLE the
  * pass. An omitted config uses {@link DEFAULT_ENGINE_RECONCILE_MS}; a non-finite or non-positive value
  * (a broken config, or a deliberate opt-out) disables the pass rather than degrading into a 1ms busy
- * loop; a finite positive value is capped at {@link MAX_TIMER_MS} so a large window cannot overflow
- * Node's 32-bit timer.
+ * loop; a finite positive value is floored at 1ms (so a sub-millisecond config like 0.5 cannot floor
+ * to 0 and degrade into a busy `setInterval(0)`) and capped at {@link MAX_TIMER_MS} so a large window
+ * cannot overflow Node's 32-bit timer.
  */
 export function engineReconcileMs(configuredMs?: number): number | undefined {
   const value = configuredMs ?? DEFAULT_ENGINE_RECONCILE_MS;
   if (!Number.isFinite(value) || value <= 0) return undefined;
-  return Math.min(MAX_TIMER_MS, Math.floor(value));
+  return Math.min(MAX_TIMER_MS, Math.max(1, Math.floor(value)));
 }
 
 /** Read a property off an unknown value without an unsafe `as` cast (mirrors the loader's helper). */
