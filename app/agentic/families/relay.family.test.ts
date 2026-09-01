@@ -153,6 +153,7 @@ function mkCorrelatedService(
     attributionForInstance?: (instance: string) => { identity?: string; host?: string } | undefined;
     correlationStore?: AgenticCorrelationStore;
     resolveElementInstance?: (jobKey: string, processInstanceKey?: string) => Promise<string | undefined>;
+    isInstanceLive?: (instance: string) => boolean;
     now?: () => string;
   } = {},
 ): { service: RelayTranscriptService; hub: CapturingHub } {
@@ -167,6 +168,7 @@ function mkCorrelatedService(
     attributionForInstance: extra.attributionForInstance,
     correlationStore: extra.correlationStore,
     resolveElementInstance: extra.resolveElementInstance,
+    isInstanceLive: extra.isInstanceLive,
     now: extra.now,
   });
   return { service, hub };
@@ -882,6 +884,75 @@ test("H6 correlation write-side: a producer disconnect releases its job correlat
   hub.handler?.(grant(0), other.conn);
   assertEquals(correlation.jobKeysFor("worker-B"), [], "disconnect releases the job");
   assertEquals(correlation.count(), 0);
+  service.teardown();
+});
+
+test("#689 mid-job reconnect: a stale producer whose instance is still live keeps its job correlation", () => {
+  const registry = new ConnectionRegistry();
+  const correlation = new CorrelationRegistry();
+  const byConnection = new Map([["conn-old", "worker-L"]]);
+  // Derive liveness from REAL connections exactly as production's PresenceRegistry.isInstanceLive
+  // does — an instance is live iff some connection attributed to it is still open in the registry —
+  // rather than a static stub decoupled from the connection churn. This makes the test exercise the
+  // very reconnect race the seam guards: the instance is live only while a real live connection
+  // (conn-old, then conn-new) backs it.
+  const isInstanceLive = (instance: string): boolean => {
+    for (const [connId, inst] of byConnection) {
+      if (inst === instance && registry.has(connId)) return true;
+    }
+    return false;
+  };
+  const { service, hub } = mkCorrelatedService(registry, memoryDb(), correlation, byConnection, {
+    isInstanceLive,
+  });
+  const p = connect("conn-old", registry);
+  hub.handler?.(produce(jobStream("5749"), 1, "booting agent"), p.conn);
+  assertEquals(correlation.jobKeysFor("worker-L"), ["5749"], "the job is linked on first produce");
+
+  // The producer's WS connection blips (client reconnects). Model the reconnect faithfully: the new
+  // connection re-registers under the SAME instance BEFORE the reconcile frame, so there is never a
+  // gap where the instance is not live — presence keeps worker-L live across the churn. The old
+  // producer connection then drops. A subsequent frame drives #reconcile — which, seeing the instance
+  // still live via conn-new, must NOT archive the still-active job.
+  byConnection.set("conn-new", "worker-L");
+  const p2 = connect("conn-new", registry);
+  registry.remove("conn-old");
+  const other = connect("cons", registry);
+  hub.handler?.(grant(0), other.conn);
+  assertEquals(correlation.jobKeysFor("worker-L"), ["5749"], "a mid-job reconnect keeps the correlation");
+  assertEquals(service.transcriptOf(jobStream("5749")), undefined, "the still-active stream is NOT archived");
+
+  // The worker resumes producing on the SAME job over its already-open NEW connection → re-attributed,
+  // still one job, transcript still live (not terminal).
+  hub.handler?.(produce(jobStream("5749"), 1, "resumed output"), p2.conn);
+  assertEquals(correlation.jobKeysFor("worker-L"), ["5749"], "the resumed producer stays linked to the same job");
+  assertEquals(service.liveFallback(jobStream("5749"))?.ring !== undefined, true, "the transcript is still live, not completed");
+
+  // Only once the worker truly EXITS (all its connections gone → isInstanceLive false) does a later
+  // reconcile complete the stream and release the correlation.
+  registry.remove("conn-new");
+  hub.handler?.(grant(0), other.conn);
+  assertEquals(correlation.jobKeysFor("worker-L"), [], "a true worker-exit completes + releases the job");
+  assertEquals(service.transcriptOf(jobStream("5749"))?.status, "completed", "the exited worker's stream is archived");
+  service.teardown();
+});
+
+test("#689 mid-job reconnect: with no isInstanceLive wired, a producer disconnect completes as before", () => {
+  const registry = new ConnectionRegistry();
+  const correlation = new CorrelationRegistry();
+  const byConnection = new Map([["prod", "worker-N"]]);
+  // Default seam (isInstanceLive omitted → () => false): a producer disconnect completes the stream,
+  // preserving the prior always-complete-on-disconnect behaviour for callers that don't wire presence.
+  const { service, hub } = mkCorrelatedService(registry, memoryDb(), correlation, byConnection);
+  const p = connect("prod", registry);
+  hub.handler?.(produce(jobStream("kN"), 1, "x"), p.conn);
+  assertEquals(correlation.jobKeysFor("worker-N"), ["kN"]);
+
+  registry.remove("prod");
+  const other = connect("cons", registry);
+  hub.handler?.(grant(0), other.conn);
+  assertEquals(correlation.jobKeysFor("worker-N"), [], "disconnect completes + releases when liveness is unknown");
+  assertEquals(service.transcriptOf(jobStream("kN"))?.status, "completed");
   service.teardown();
 });
 

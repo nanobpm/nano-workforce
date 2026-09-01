@@ -138,6 +138,22 @@ test("instanceForConnection: resolves the worker instance owning a connection (H
   assertEquals(registry.instanceForConnection(""), undefined, "empty connection → undefined");
 });
 
+test("isInstanceLive: an instance is live while ANY of its connections is open — survives a reconnect (#689)", () => {
+  const store = createPresenceStore(memSqlite());
+  store.ensureSchema();
+  // worker-L reconnected: its OLD connection (cOld) is closed, a NEW one (cNew) is open. Presence is
+  // keyed by instance, so both rows exist; only cNew is live.
+  store.register({ instance: "worker-L", connectionId: "cOld", identity: "leaf", capability: {} });
+  store.register({ instance: "worker-L", connectionId: "cNew", identity: "leaf", capability: {} });
+  store.register({ instance: "worker-Gone", connectionId: "cGone", identity: "leaf", capability: {} });
+  const registry = new PresenceRegistry(store, () => new Set(["cNew"]));
+
+  assertEquals(registry.isInstanceLive("worker-L"), true, "live via its new connection despite the old one dropping");
+  assertEquals(registry.isInstanceLive("worker-Gone"), false, "no live connection → not live");
+  assertEquals(registry.isInstanceLive("unknown"), false, "unknown instance → not live");
+  assertEquals(registry.isInstanceLive(""), false, "empty instance → not live");
+});
+
 test("attributionOf: resolves a worker instance's durable identity + host for job attribution (#485)", () => {
   const store = createPresenceStore(memSqlite());
   store.ensureSchema();
