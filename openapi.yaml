@@ -24,9 +24,16 @@ components:
       type: apiKey
       in: header
       name: x-hook-secret
-      description: Optional shared secret. Enforced by the delegate (NOT the runtime) only when
-        NANO_PR_WEBHOOK_SECRET is set; unset means the endpoint is open. Declared here for
-        documentation.
+      x-nano-secret-env: NANO_PR_WEBHOOK_SECRET
+      description: Shared secret. Enforced by the delegate (NOT the runtime) on this app's own
+        operations only when NANO_PR_WEBHOOK_SECRET is set; unset means those endpoints are open.
+        The `x-nano-secret-env` extension additionally makes this the app's canonical shared-secret
+        scheme for the Urban runtime's framework mutation guard (`authorizeMutation`), so the
+        framework-owned mutating `urban_debug_*` MCP tools (set_variables, retry_job,
+        resolve_incident, cancel_instance) are authorizable on a remote-exposed instance by
+        presenting the `x-hook-secret` header set to NANO_PR_WEBHOOK_SECRET. One shared secret, one
+        header, for both app-operation reads/mutations and framework mutations. Must remain the sole
+        apiKey scheme carrying `x-nano-secret-env` — the runtime throws on ambiguity.
   schemas:
     ErrorBody:
       type: object

@@ -133,6 +133,41 @@ header on **both reads and mutations** — read endpoints like `GET /app/api/age
 `/app/mcp` follows the same `network.bind` manifest setting as the rest of the app's
 HTTP surface.
 
+### Framework mutation guard — `urban_debug_*` mutations need `x-hook-secret` too
+
+The framework-owned **mutating** `urban_debug_*` tools (`set_variables`, `retry_job`,
+`resolve_incident`, `cancel_instance`) are gated by the Urban runtime's *own* mutation
+guard (`authorizeMutation`), which is separate from nwf's app-operation guard above. It
+authorizes a mutation one of two ways:
+
+1. **Loopback bypass** — `URBAN_MCP_ALLOW_MUTATIONS=true` **and** `mcp.allowRemote` off.
+   This is the credential-free, local-only path; it is disabled the moment the surface is
+   remote-exposed (`allowRemote` on), by design — the guard never drops for a non-loopback
+   caller.
+2. **Shared-secret scheme** — an apiKey *header* security scheme that declares an
+   `x-nano-secret-env` extension naming the env var holding the secret. nwf declares this
+   on **`hookSecret`** (`x-nano-secret-env: NANO_PR_WEBHOOK_SECRET`), so a mutating
+   `urban_debug_*` call carrying `x-hook-secret: <NANO_PR_WEBHOOK_SECRET>` is authorized on
+   a remote-exposed instance.
+
+This is the **same secret and same header** as nwf's app-operation guard (both key on
+`NANO_PR_WEBHOOK_SECRET` via `x-hook-secret`), so reads and mutations — app-operation and
+framework — share one credential. The MCP server entry's `headers` already carries it (§1);
+nothing extra is needed for `urban_debug_*` mutations once the secret is set.
+
+**Fail-closed caveat.** When `NANO_PR_WEBHOOK_SECRET` is **unset** there is no credential to
+present, so on a remote-exposed instance (`allowRemote` on) framework mutations remain
+**closed** — this is correct fail-closed behavior, not a regression. Because the scheme is now
+*declared* (it names the env var) but the secret is absent, the runtime surfaces the attempt as a
+`500` *security-misconfigured* ("secret env `NANO_PR_WEBHOOK_SECRET` is not set") rather than a
+plain refusal — either way no mutation occurs. An operator who needs remote mutation repair (e.g.
+patching a wedged instance's variable + retrying a `JOB_NO_RETRIES` job) must set
+`NANO_PR_WEBHOOK_SECRET`; then a `urban_debug_*` mutation carrying `x-hook-secret: <secret>`
+succeeds, while a missing or wrong header `401`s. The loopback bypass
+(`URBAN_MCP_ALLOW_MUTATIONS=true` with `allowRemote` off) remains the credential-free
+local-only alternative. Only `hookSecret` may carry `x-nano-secret-env` — the runtime
+throws on more than one shared-secret scheme.
+
 **Operator-only doors stay operator-only.** The staged delivery-graph lifecycle —
 `stageDeliveryGraph`, `dispatchDeliveryGraph`, `dismissProposal` — is `x-mcp`-excluded
 from the projected tool surface (ADR 0067 §2): the human clicking **Dispatch** in the
