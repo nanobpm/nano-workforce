@@ -253,6 +253,17 @@ export interface RelayTranscriptServiceOptions {
    */
   readonly instanceForConnection?: (connectionId: string) => string | undefined;
   /**
+   * Whether a worker instance is still live on any hub connection (#689). Wired to the presence
+   * registry's {@link PresenceRegistry.isInstanceLive}. The disconnect-driven reconcile uses it to
+   * spare a still-active job's stream when its worker merely RECONNECTED mid-job (old producer
+   * connection dropped, a new one re-registered under the same instance): completing then would
+   * archive a live job's transcript and release its correlation, wedging the cockpit (the reconnected
+   * worker's produce frames hit a terminal `completed` stream and are ignored) while the harness
+   * keeps the engine lease. Omitted (`() => false`) → the prior always-complete-on-disconnect
+   * behaviour (a true worker-exit still completes: presence drops the instance, so this returns false).
+   */
+  readonly isInstanceLive?: (instance: string) => boolean;
+  /**
    * Resolve a producing worker instance's durable identity attributes (identity / host) — read at
    * job-completion time and persisted with the attribution so a PAST session stays attributable to a
    * worker after it exits (#485). {@link createRelayFamily} wires it to the presence registry; omitted
@@ -317,6 +328,8 @@ export class RelayTranscriptService {
   readonly #correlation: () => CorrelationLink | undefined;
   /** The connection → producing-instance resolver (H6, #149). */
   readonly #instanceForConnection: (connectionId: string) => string | undefined;
+  /** Whether a worker instance is still live on any connection (#689) — gates disconnect completion. */
+  readonly #isInstanceLive: (instance: string) => boolean;
   /** Resolve a worker instance's durable identity attributes for attribution (#485). */
   readonly #attributionForInstance: (instance: string) => WorkerAttribution | undefined;
   /** The durable worker-attribution store, or undefined when unpersisted (#485). */
@@ -331,6 +344,7 @@ export class RelayTranscriptService {
     this.#log = options.log;
     this.#correlation = options.correlation ?? currentCorrelation;
     this.#instanceForConnection = options.instanceForConnection ?? (() => undefined);
+    this.#isInstanceLive = options.isInstanceLive ?? (() => false);
     this.#attributionForInstance = options.attributionForInstance ?? (() => undefined);
     this.#resolveElementInstance = options.resolveElementInstance;
     this.#now = options.now ?? (() => new Date().toISOString());
@@ -718,6 +732,19 @@ export class RelayTranscriptService {
   #reconcile(): void {
     for (const [stream, state] of this.#streams) {
       if (state.producer !== undefined && !this.#registry.has(state.producer)) {
+        // Producer connection gone. Normally that means the job it was relaying ended — release the
+        // correlation and flush+complete its ephemeral transcript. BUT a worker that merely
+        // RECONNECTED mid-job (#689) also loses its old producer connection while its job keeps
+        // running (the harness holds the engine lease and extends it). Presence re-registers the SAME
+        // instance under the new connection, so the instance stays live even though this specific
+        // producer connection is gone. Completing then would archive a still-active job's transcript
+        // to `historical` and drop its correlation — and because a completed stream is terminal
+        // (`#observe` ignores later frames), the reconnected worker could NEVER re-correlate: the
+        // cockpit shows the worker idle with a frozen transcript while the job is genuinely running.
+        // So spare the stream while its instance is still live; the next `produce` re-attributes the
+        // live connection (via `#observe`), a NEW job supersedes it (via `#link`), or — once the
+        // worker truly exits — presence drops the instance and a later reconcile completes it.
+        if (state.instance !== undefined && this.#isInstanceLive(state.instance)) continue;
         // Producer connection gone → the job it was relaying ended: release its correlation.
         this.#unlink(stream, state);
         // ...and flush+complete an ephemeral, not-yet-completed transcript exactly as before.
@@ -857,6 +884,11 @@ export function createRelayFamily(options: {
         // are read per call, so this works regardless of family mount order (relay may mount before
         // presence/correlation). Absent registries → no linking, still advisory-correct.
         instanceForConnection: (connectionId) => currentPresenceRegistry()?.instanceForConnection(connectionId),
+        // #689: is the producing worker instance still live on ANY connection? Gates the
+        // disconnect-driven reconcile so a mid-job RECONNECT (old producer connection dropped, the
+        // same instance re-registered) does not archive a still-active job's stream and wedge its
+        // correlation. Read per call for the same mount-order independence as the resolvers above.
+        isInstanceLive: (instance) => currentPresenceRegistry()?.isInstanceLive(instance) ?? false,
         // #485: resolve a completed job's worker attribution (presence identity/host) from the live
         // presence registry, read per call for the same mount-order independence. Absent → attribution
         // records instance only.

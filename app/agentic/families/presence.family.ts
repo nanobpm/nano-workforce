@@ -149,6 +149,25 @@ export class PresenceRegistry {
   }
 
   /**
+   * Whether a worker instance currently has a LIVE hub connection — i.e. the worker is present now,
+   * on any connection. Used by the relay slice to distinguish a worker that merely RECONNECTED
+   * mid-job (its old producer connection dropped, a new one re-registered under the SAME instance,
+   * so the instance is still live) from a worker that truly EXITED (all its connections gone, so the
+   * instance is no longer live). The former must NOT complete/archive its still-active job stream on
+   * the stale-producer reconcile; the latter must. Presence is keyed by instance across reconnects,
+   * so this survives the connection churn that a single-connection liveness check cannot. An empty or
+   * unknown instance is not live.
+   */
+  isInstanceLive(instance: string): boolean {
+    if (instance === "") return false;
+    const live = this.#liveConnectionIds();
+    for (const row of this.#store.list()) {
+      if (row.instance === instance && live.has(row.connectionId)) return true;
+    }
+    return false;
+  }
+
+  /**
    * Resolve a worker instance's durable identity attributes (presence identity + host) for job
    * attribution (#485). Returns the most recently registered matching row's attributes, or undefined
    * when the instance is unknown (e.g. it already deregistered).
