@@ -704,6 +704,7 @@ export function parsePrView(payload: unknown): PrObservation {
     checkConclusions: checkConclusions(rollup),
     isDraft: j.isDraft === true,
     headRefOid: str(j.headRefOid).trim() || null,
+    mergeQueueEntry: null, // readiness probe doesn't read native-queue membership (merge-loop-only signal)
     mergedSha,
     pendingChecks: pending.length,
   };

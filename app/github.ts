@@ -522,6 +522,20 @@ export interface PrState {
   isDraft: boolean;
   /** Current head commit. Used to scope one-shot merge-protocol nudges to a landing attempt. */
   headRefOid: string | null;
+  /** GROUND-TRUTH native-merge-queue membership, populated only when `fetchPrState` is called with
+   * `{ withMergeQueue: true }` (the block-4 queued-PR reconciliation) — otherwise `null`. It lets the
+   * poller OBSERVE a queue eviction instead of inferring "still queued" from `mergeStateStatus`
+   * alone (which cannot see a CI-on-`merge_group` eviction — the head reverts to BLOCKED/UNSTABLE/
+   * CLEAN, never DIRTY). Tri-state:
+   *   • `true`  — the PR is currently enrolled in the repo's native GitHub merge queue.
+   *   • `false` — the base branch HAS a native merge queue but the PR is NO LONGER in it (a genuine
+   *     eviction: CI failed on the speculative `merge_group` commit, the base moved, or a manual
+   *     dequeue). `queuedVerdict` turns this into `evicted` → `arm-merge` re-drives the mergeable gate.
+   *   • `null`  — indeterminate: not probed, no usable transport, a transport error, OR the base
+   *     branch has no native merge queue at all (a Mergify/plain-merge repo — see #556). A
+   *     perpetually-null entry on such a repo must NOT read as an eviction, so the classifier stays
+   *     conservative and leaves the `landedWaitTimeout` human backstop to cover a never-lands wedge. */
+  mergeQueueEntry: boolean | null;
 }
 
 /** Map GitHub's REST `mergeable_state` (lower-case) onto the GraphQL `mergeStateStatus`
@@ -686,10 +700,92 @@ export function isNotAPullRequestError(err: unknown): boolean {
   return /could not resolve to a pullrequest/i.test(msg) || /\bgithub 404\b/i.test(msg);
 }
 
+/** GraphQL response for the merge-queue membership probe. Both transports (`gh api graphql` and the
+ * raw GraphQL endpoint) wrap the payload in a top-level `data`. */
+interface MergeQueueMembershipResponse {
+  data?: {
+    repository?: {
+      mergeQueue?: { id?: string } | null;
+      pullRequest?: { mergeQueueEntry?: { id?: string } | null } | null;
+    } | null;
+  } | null;
+}
+
+/** Read GROUND-TRUTH native-merge-queue membership for a PR the merge loop enqueued (parked at
+ * `wait-landed`), so an eviction is OBSERVED rather than inferred from `mergeStateStatus` (which
+ * cannot see a CI-on-`merge_group` eviction — the head reverts to BLOCKED/UNSTABLE/CLEAN, never
+ * DIRTY). Returns:
+ *   • `true`  — the PR is currently enrolled in the base branch's native GitHub merge queue.
+ *   • `false` — the base branch HAS a native merge queue but the PR is NO LONGER in it (a genuine
+ *     eviction: CI failed on the speculative `merge_group` commit, the base moved, or a manual
+ *     dequeue).
+ *   • `null`  — indeterminate: no usable transport / a transport error, OR the base branch has no
+ *     native merge queue at all (a Mergify/plain-merge repo whose "queued" classification came from
+ *     an ambiguous signal — #556). We gate on `repository.mergeQueue` existing first so a
+ *     perpetually-null `mergeQueueEntry` on such a repo is never mistaken for an eviction; the
+ *     `landedWaitTimeout` human backstop covers the genuinely-never-lands case there.
+ * Never throws — any failure degrades to `null` so the poller keeps waiting rather than falsely
+ * evicting a still-legitimately-queuing PR. */
+export async function fetchMergeQueueMembership(
+  repo: string,
+  number: number | string,
+  baseBranch: string,
+  token: string,
+): Promise<boolean | null> {
+  if (!baseBranch) return null; // can't scope `mergeQueue(branch:)` without the base ref → stay conservative
+  const [owner, name] = repo.split("/");
+  const query =
+    "query($o:String!,$r:String!,$n:Int!,$b:String!){repository(owner:$o,name:$r){" +
+    "mergeQueue(branch:$b){id}pullRequest(number:$n){mergeQueueEntry{id}}}}";
+  const mode = githubTransport();
+  const useGhHere = mode === "gh" || (mode === "auto" && (await isGhAvailable()));
+  if (!useGhHere && !token) return null;
+  try {
+    let payload: MergeQueueMembershipResponse;
+    if (useGhHere) {
+      const out = await runGh([
+        "api",
+        "graphql",
+        "-f",
+        `query=${query}`,
+        "-f",
+        `o=${owner}`,
+        "-f",
+        `r=${name}`,
+        "-F",
+        `n=${number}`,
+        "-f",
+        `b=${baseBranch}`,
+      ]);
+      // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+      payload = JSON.parse(out) as MergeQueueMembershipResponse;
+    } else {
+      const r = await fetch("https://api.github.com/graphql", {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ query, variables: { o: owner, r: name, n: Number(number), b: baseBranch } }),
+      });
+      if (!r.ok) return null;
+      // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+      payload = (await r.json()) as MergeQueueMembershipResponse;
+    }
+    const repository = payload.data?.repository;
+    if (!repository) return null; // unreadable / GraphQL error → indeterminate
+    // No native merge queue on this base branch → an eviction is unobservable here (Mergify/plain).
+    if (!repository.mergeQueue) return null;
+    // Native queue exists: enrolled iff the PR still carries a live queue entry.
+    return repository.pullRequest?.mergeQueueEntry != null;
+  } catch {
+    // A transport/parse failure must not falsely evict — stay conservative.
+    return null;
+  }
+}
+
 export async function fetchPrState(
   repo: string,
   number: number | string,
   token: string,
+  opts?: { withMergeQueue?: boolean },
 ): Promise<PrState | null> {
   if (await useGh()) {
     const out = await runGh([
@@ -699,7 +795,7 @@ export async function fetchPrState(
       "--repo",
       repo,
       "--json",
-      "state,mergedAt,mergeStateStatus,statusCheckRollup,isDraft,headRefOid",
+      "state,mergedAt,mergeStateStatus,statusCheckRollup,isDraft,headRefOid,baseRefName",
     ]);
     // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
     const j = JSON.parse(out) as {
@@ -709,10 +805,16 @@ export async function fetchPrState(
       statusCheckRollup?: RollupEntry[];
       isDraft?: boolean;
       headRefOid?: string | null;
+      baseRefName?: string | null;
     };
     const rollup = j.statusCheckRollup ?? [];
     const names = failingCheckNames(rollup);
     const merged = j.state === "MERGED" || !!j.mergedAt;
+    // Probe native-queue membership only for the queued-PR reconciliation (block 4) — it is an extra
+    // GraphQL round-trip, so every other caller leaves `mergeQueueEntry` null (unprobed).
+    const mergeQueueEntry = opts?.withMergeQueue
+      ? await fetchMergeQueueMembership(repo, number, j.baseRefName ?? "", token)
+      : null;
     return {
       merged,
       state: merged ? "merged" : (j.state ?? "").toUpperCase() === "CLOSED" ? "closed" : "open",
@@ -725,6 +827,7 @@ export async function fetchPrState(
       checkConclusions: checkConclusions(rollup),
       isDraft: !!j.isDraft,
       headRefOid: j.headRefOid ?? null,
+      mergeQueueEntry,
     };
   }
   if (!token) return null;
@@ -740,8 +843,12 @@ export async function fetchPrState(
     mergeable_state?: string;
     draft?: boolean;
     head?: { sha?: string | null };
+    base?: { ref?: string | null };
   };
   const restMerged = !!j.merged || !!j.merged_at;
+  const mergeQueueEntry = opts?.withMergeQueue
+    ? await fetchMergeQueueMembership(repo, number, j.base?.ref ?? "", token)
+    : null;
   return {
     // The single-PR GET returns a `merged` boolean (unlike the list endpoint); we also honour
     // `merged_at` so this mirrors the gh branch's `state === "MERGED" || mergedAt` rule.
@@ -758,6 +865,7 @@ export async function fetchPrState(
     checkConclusions: {}, // …no per-check conclusions → protocol-aware gate falls through in token mode
     isDraft: !!j.draft,
     headRefOid: j.head?.sha ?? null,
+    mergeQueueEntry, // native-queue membership (GraphQL), probed only for block-4 reconciliation
   };
 }
 
