@@ -96,6 +96,14 @@ export const ENV_CONTRACTS = {
     semantics: "Poller cadence in milliseconds for the self-scheduling reconciliation loop.",
     default: "60000",
   },
+  NANO_PR_CLONE_TIMEOUT_MS: {
+    category: "env",
+    name: "NANO_PR_CLONE_TIMEOUT_MS",
+    owner: "app/repoEnvelope.ts",
+    semantics:
+      "Clone timeout in milliseconds emitted as `repository.cloneTimeoutMs` in the agent-task envelope so the c8ctl harness raises its 120s default for large-repo provisioning (branch-scoped blobless clones of big monorepos still approach/exceed 120s; issue #694). Inherited by both the review-round and merge paths via the one `repoEnvelopeVars` builder.",
+    default: "600000",
+  },
   NANO_PR_MAX_ROUNDS: {
     category: "env",
     name: "NANO_PR_MAX_ROUNDS",
@@ -384,9 +392,9 @@ export const WIRE_CONTRACTS = {
     name: "io.nanobpm.agentTask.repository",
     owner: "app/repoEnvelope.ts",
     semantics:
-      "Repo-provisioning envelope the app emits as a `createInstance` process variable (`repoEnvelopeVars`, app/repoEnvelope.ts) and the c8ctl worker harness consumes to provision an isolated clone — instead of the agent inheriting the worker's launch dir (issue #684). `ref` is the branch checked out: the PR HEAD branch on the PR-based paths (review-round / fix-ci / rebase), or — on the PRE-PR implementation path (feature.bpmn / plan-fanout's `implement-cell`, issue #684; the delivery-graph runner's agent cells, issue #686) — the BASE branch, off which the harness cuts a new feature branch named by the optional `branch.create` (the deterministic `feat/<task.id>`, emitted only for a single-task feature run; the epic seed AND the delivery-graph run-root seed omit it so each fan-out slice's agent branches per node/MI child). Beyond `{provider,url,ref}`, it carries clone-shaping fields for large monorepos (issue #287): `singleBranch:true` + `filter:\"blob:none\"` (a branch-scoped, blobless partial clone — trees fetched up-front, blobs lazily, no `--depth 1` so the merge-base/3-dot diff stays valid) and an optional `baseRef` (the PR base branch, emitted only when resolvable, so the harness fetches its tip and keeps `origin/<base>` reachable). World-restore (issue #324, ADR 0062 Slice 4/5): an optional `commitSha` — the last durable push-checkpoint — is emitted so a REPLACEMENT activation on a fresh worktree reconstructs the tree to the EXACT pushed SHA (inverting the round's `git push` into `git fetch && git checkout <sha>`), omitted when the PR has no checkpoint yet. Gated on c8ctl provisioner support (jwulf/c8ctl-plugin-nano#91).",
+      "Repo-provisioning envelope the app emits as a `createInstance` process variable (`repoEnvelopeVars`, app/repoEnvelope.ts) and the c8ctl worker harness consumes to provision an isolated clone — instead of the agent inheriting the worker's launch dir (issue #684). `ref` is the branch checked out: the PR HEAD branch on the PR-based paths (review-round / fix-ci / rebase), or — on the PRE-PR implementation path (feature.bpmn / plan-fanout's `implement-cell`, issue #684; the delivery-graph runner's agent cells, issue #686) — the BASE branch, off which the harness cuts a new feature branch named by the optional `branch.create` (the deterministic `feat/<task.id>`, emitted only for a single-task feature run; the epic seed AND the delivery-graph run-root seed omit it so each fan-out slice's agent branches per node/MI child). Beyond `{provider,url,ref}`, it carries clone-shaping fields for large monorepos (issue #287): `singleBranch:true` + `filter:\"blob:none\"` (a branch-scoped, blobless partial clone — trees fetched up-front, blobs lazily, no `--depth 1` so the merge-base/3-dot diff stays valid) and an optional `baseRef` (the PR base branch, emitted only when resolvable, so the harness fetches its tip and keeps `origin/<base>` reachable) and a `cloneTimeoutMs` (from `NANO_PR_CLONE_TIMEOUT_MS`, default 600000 = 10 min) that raises the harness's 120s default so a large monorepo's blobless single-branch clone provisions instead of dying at 120s (issue #694). World-restore (issue #324, ADR 0062 Slice 4/5): an optional `commitSha` — the last durable push-checkpoint — is emitted so a REPLACEMENT activation on a fresh worktree reconstructs the tree to the EXACT pushed SHA (inverting the round's `git push` into `git fetch && git checkout <sha>`), omitted when the PR has no checkpoint yet. Gated on c8ctl provisioner support (jwulf/c8ctl-plugin-nano#91).",
     shape:
-      '{ provider: "github", url: string, ref: string, singleBranch: true, filter: "blob:none", baseRef?: string, commitSha?: string, branch?: { create: string } }',
+      '{ provider: "github", url: string, ref: string, singleBranch: true, filter: "blob:none", cloneTimeoutMs: number, baseRef?: string, commitSha?: string, branch?: { create: string } }',
   },
   "epicSet.submit": {
     category: "wire",

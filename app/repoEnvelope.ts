@@ -8,6 +8,7 @@
 // rebase) and the PRE-PR implementation dispatch (`feature.ts`: `startFeature`; `plan.ts`:
 // `startPlan` → the epic's `implement-cell`) derive from this single implementation without a
 // `plan.ts ↔ service.ts` import cycle (AGENTS.md "derivation over duplication — no drift surfaces").
+import { readEnvOr } from "./contracts.ts";
 import { isCommitSha } from "./world/index.ts";
 
 /** The reserved namespace key the c8ctl nano worker harness reads the agent-task envelope from
@@ -76,6 +77,13 @@ export function repoEnvelopeVars(
         // has a valid merge-base. Gated on c8ctl provisioner support (jwulf/c8ctl-plugin-nano#91).
         singleBranch: true,
         filter: "blob:none",
+        // Raise the harness's 120s default clone timeout for large-repo provisioning (issue #694).
+        // A branch-scoped blobless clone of a 24.6k-file monorepo (`camunda/camunda`) still
+        // approaches/exceeds 120s, so we emit `cloneTimeoutMs` (default 600000 = 10 min, via the
+        // `NANO_PR_CLONE_TIMEOUT_MS` knob) rather than let the harness fall back to its 120000ms
+        // default. Emitted on ALL paths from this one builder, so BOTH the review-round path
+        // (`service.ts` `submitPr`) and the merge path (`service.ts` `startMerge`) inherit it.
+        cloneTimeoutMs: cloneTimeoutMs(),
         // The base branch this PR targets — emitted so the harness fetches its tip alongside the
         // single-branch head, keeping `origin/<base>` reachable for the diff. Omitted when unknown.
         ...(baseRef ? { baseRef } : {}),
@@ -100,3 +108,16 @@ export function repoEnvelopeVars(
     },
   };
 }
+
+/** Resolve the clone timeout (ms) the harness applies to provisioning, from the one typed knob
+ * `NANO_PR_CLONE_TIMEOUT_MS` (default 600000 = 10 min; issue #694). A branch-scoped blobless clone
+ * of a large monorepo still approaches/exceeds the harness's 120s default, so we raise it here. A
+ * non-numeric or non-positive override degrades to the registered default rather than emitting a
+ * bogus (0 / NaN) timeout the harness would then treat as "use the 120s default". */
+function cloneTimeoutMs(): number {
+  const raw = Number(readEnvOr("NANO_PR_CLONE_TIMEOUT_MS"));
+  return Number.isFinite(raw) && raw > 0 ? raw : Number(envDefaultCloneTimeoutMs);
+}
+
+/** The registered default, resolved once from the schema so the fallback stays single-sourced. */
+const envDefaultCloneTimeoutMs = readEnvOr("NANO_PR_CLONE_TIMEOUT_MS", "600000", {});
