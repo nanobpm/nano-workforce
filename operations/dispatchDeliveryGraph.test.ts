@@ -247,4 +247,35 @@ describe("dispatchDeliveryGraph — operator dispatch by staged-proposal digest"
     assert.equal((await deliveryGraphRuns(app.db).all()).length, 1);
     assert.equal((await deliveryGraphProposals(app.db).get(staged.body.digest))?.status, "dispatched");
   });
+
+  test("a malformed `repository` is rejected at submit → 400, nothing launched (#684/#686)", async () => {
+    const app = await boot();
+    assert.ok(app.api);
+    const api = app.api;
+    const staged = await api.call<{ digest: string }>("compileDeliveryGraph", { body: HUMAN_ONLY });
+    // Not an `owner/repo` reference — refused at submit (by the edge `pattern` or the door's own guard),
+    // rather than silently dropped into a bogus clone URL. Nothing launches; the proposal stays staged.
+    const res = await api.call<{ ok?: boolean; error?: string }>("dispatchDeliveryGraph", {
+      body: { digest: staged.body.digest, repository: "not a repo!", baseBranch: "main" },
+    });
+    assert.equal(res.status, 400);
+    assert.equal((await deliveryGraphRuns(app.db).all()).length, 0);
+    assert.equal((await deliveryGraphProposals(app.db).get(staged.body.digest))?.status, "staged");
+  });
+
+  test("a valid repository + baseBranch dispatches the run for isolated provisioning → 202 running (#684/#686)", async () => {
+    const app = await boot();
+    assert.ok(app.api);
+    const api = app.api;
+    const staged = await api.call<{ digest: string }>("compileDeliveryGraph", { body: HUMAN_ONLY });
+    const res = await api.call<{ ok: boolean; status: string }>("dispatchDeliveryGraph", {
+      body: { digest: staged.body.digest, repository: "owner/repo", baseBranch: "main" },
+    });
+    assert.equal(res.status, 202);
+    assert.equal(res.body.ok, true);
+    assert.equal(res.body.status, "running");
+    await app.settle();
+    assert.equal((await deliveryGraphRuns(app.db).all()).length, 1);
+    assert.equal((await deliveryGraphProposals(app.db).get(staged.body.digest))?.status, "dispatched");
+  });
 });

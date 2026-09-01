@@ -2090,6 +2090,24 @@ components:
           description: >-
             OPTIONAL run-level ISO-8601 SLA for `human` nodes (#505) before they record an `escalated`
             outcome. Absent → the `P1D` default. An invalid duration is rejected at submit.
+        repository:
+          type: string
+          maxLength: 255
+          pattern: '^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$'
+          description: >-
+            OPTIONAL `owner/repo` the run's `agent` nodes implement against (#684/#686). When supplied
+            together with `baseBranch`, the runner seeds the canonical `io.nanobpm.agentTask.repository`
+            provisioning envelope (`repoEnvelopeVars`) as a run-root process variable so every agent
+            node's servicing `senior:*` job gets an ISOLATED throwaway clone instead of inheriting the
+            worker's launch dir. Absent → no envelope (legacy launch-dir behaviour, unchanged). A value
+            that is not exactly `owner/repo` is rejected at submit.
+        baseBranch:
+          type: string
+          maxLength: 255
+          description: >-
+            OPTIONAL base branch the run's `agent` nodes branch off (#684/#686) — the `ref` the harness
+            checks out in the isolated clone (the PRE-PR shape: each agent cuts its own `feat/<node.id>`
+            branch off this base). Only consulted when `repository` is also set; absent → no envelope.
     DeliveryGraphDismissRequest:
       description: >-
         The OPERATOR dismiss request (#520). The cockpit's staged-proposals grid posts the content

@@ -19,6 +19,7 @@ import type { DeliveryFact, DeliveryGraph, DeliveryNode } from "../nano-generate
 import { TRANSCRIPT_URL_BASE_VAR, transcriptUrlBaseFor } from "./agentic/transcript-url.ts";
 import { assertNever, compileDeliveryGraph, DELIVERY_GRAPH_PROCESS_ID } from "./deliveryGraphCompiler.ts";
 import { DEFAULT_EVERY_MS, msToIsoDuration, parseProbe, readinessPollEvery, readinessTimeout } from "./readiness.ts";
+import { repoEnvelopeVars } from "./repoEnvelope.ts";
 import { isoDuration } from "./reviewWait.ts";
 
 /** The content digest of a compiled graph — `sha256(bpmn)[:12]` — the single source of truth for the
@@ -52,6 +53,18 @@ export interface DeliveryRunOptions extends DeliveryRunTimeouts {
    * cross-correlate. Pass an explicit `runKey` only when you need a reproducible/externally-owned gate
    * scope. */
   runKey?: string;
+  /** OPTIONAL `owner/repo` the run's `agent` nodes implement against. When supplied together with
+   * `baseBranch`, the runner seeds the canonical repository-provisioning envelope
+   * (`io.nanobpm.agentTask.repository`, via `repoEnvelopeVars`) as a run-root `createInstance` process
+   * variable so each `agent` cell's servicing `senior:*` job provisions an ISOLATED throwaway clone
+   * instead of inheriting the worker's launch dir (issue #684/#686 — the same isolation the legacy
+   * feature/plan paths got in #685). Absent/unresolved → NO envelope is emitted and the harness falls
+   * back to the legacy launch-dir behaviour, so today's repo-less graphs are unchanged. */
+  repository?: string | null;
+  /** OPTIONAL base branch the run's `agent` nodes branch off — the `ref` the harness checks out in the
+   * isolated clone (the PRE-PR shape: no PR head exists yet, so the agent cuts its own `feat/<node.id>`
+   * branch off this base inside the clone). Only consulted when `repository` is also set. */
+  baseBranch?: string | null;
 }
 
 const DEFAULTS: Required<Omit<DeliveryRunTimeouts, "escalationAssignee">> = {
@@ -146,6 +159,8 @@ export async function runDeliveryGraph(
   const { processDefinitionId, bpmn, nodeInputs } = prep.prepared;
 
   await engine.deployResources([{ name: `${processDefinitionId}.bpmn`, content: bpmn, contentType: "application/xml" }]);
+  const base = typeof options.baseBranch === "string" && options.baseBranch.trim() !== "" ? options.baseBranch.trim() : null;
+  const repo = typeof options.repository === "string" && options.repository.trim() !== "" ? options.repository.trim() : null;
   const { processInstanceKey } = await engine.createInstance({
     processDefinitionId,
     variables: {
@@ -155,6 +170,20 @@ export async function runDeliveryGraph(
       // node ioMapping in deliveryGraphCompiler). Seeded once at the run root — the same value for
       // every node — and read down into each agent job via `=transcriptUrlBase`.
       [TRANSCRIPT_URL_BASE_VAR]: transcriptUrlBaseFor(),
+      // Host-git provisioning (c8ctl, issue #684/#686): deliver the ONE canonical repository envelope
+      // (`repoEnvelopeVars`, app/repoEnvelope.ts) so every `agent` node's servicing `senior:*` job gets
+      // an ISOLATED throwaway clone instead of inheriting the worker's launch dir — otherwise several
+      // copilot workers on one host share (and clobber) a single checkout, the exact field failure #684
+      // described. This is the delivery-graph analog of the whole-epic seed in `app/plan.ts`: a single
+      // run-root `createInstance` process variable that propagates through each agent cell's subProcess
+      // into its job. Like plan.ts's fan-out seed it carries `ref = base` but NO `branchCreate` — a run
+      // fans out to MANY agent nodes, each needing its own deterministic `feat/<node.id>` branch, so a
+      // single run-level envelope can't name one; each agent cuts its own branch off `base` inside the
+      // isolated clone (the agent-guide's `feat/*` convention, kept idempotent by the #551 preflight).
+      // `baseRef = base` too, so the harness keeps `origin/<base>` reachable for the review 3-dot diff.
+      // Spread last so an unresolved repo/base (`{}`) leaves the other run-root vars untouched — a
+      // repo-less graph is then dispatched exactly as before (legacy launch-dir behaviour).
+      ...repoEnvelopeVars(repo ?? "", base, base),
     },
   });
   // The engine can yield a numeric key; `DeliveryRunHandle.processInstanceKey` is typed `string` and

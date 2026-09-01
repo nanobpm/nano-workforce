@@ -363,6 +363,62 @@ test("runDeliveryGraph coerces a numeric engine processInstanceKey to a string h
   assertEquals(typeof r.handle.processInstanceKey, "string");
 });
 
+// Host-git provisioning (issue #684/#686): the delivery-graph runner must seed the canonical
+// `io.nanobpm.agentTask.repository` isolation envelope (`repoEnvelopeVars`) as a run-root process
+// variable so every agent cell's servicing `senior:*` job provisions an ISOLATED throwaway clone
+// instead of mutating the worker's launch dir — the delivery-graph analog of the plan.ts epic seed.
+// These pin the createInstance variables the harness (headers ∪ variables) reads.
+function captureCreateInstanceVars(): { engine: Parameters<typeof runDeliveryGraph>[0]; seen: () => Record<string, unknown> } {
+  let captured: Record<string, unknown> = {};
+  const engine = {
+    deployResources: async () => [],
+    createInstance: async (req: { variables?: Record<string, unknown> }) => {
+      captured = req.variables ?? {};
+      return { processInstanceKey: "1" };
+    },
+  };
+  return { engine, seen: () => captured };
+}
+
+test("runDeliveryGraph seeds the repository isolation envelope when repository + baseBranch are supplied (#684/#686)", async () => {
+  const { engine, seen } = captureCreateInstanceVars();
+  const r = await runDeliveryGraph(engine, GRAPH, { repository: "owner/repo", baseBranch: "main" });
+  assert(r.ok, `expected ok:true, got ${JSON.stringify(r)}`);
+  const env = (seen() as Record<string, { repository?: Record<string, unknown> }>)["io.nanobpm.agentTask"];
+  assert(env?.repository, `expected the run-root vars to carry io.nanobpm.agentTask.repository, got ${JSON.stringify(seen())}`);
+  const repo = env.repository as Record<string, unknown>;
+  // PRE-PR shape: `ref = base` (the harness checks out the base; each agent cuts its own feat/<node.id>).
+  assertEquals(repo.ref, "main");
+  assertEquals(repo.url, "https://github.com/owner/repo.git");
+  assertEquals(repo.provider, "github");
+  // Branch-scoped blobless clone (#287) so large monorepos provision within the clone timeout.
+  assertEquals(repo.singleBranch, true);
+  assertEquals(repo.filter, "blob:none");
+  // baseRef = base too, so `origin/<base>` stays reachable for the review 3-dot diff.
+  assertEquals(repo.baseRef, "main");
+  // NO branch.create at the run root — a run fans out to many agent nodes, each needing its own
+  // feat/<node.id>, so a single run-level envelope names none (mirrors the plan.ts epic seed).
+  assertEquals("branch" in repo, false);
+});
+
+test("runDeliveryGraph emits NO envelope when repository/baseBranch are absent — repo-less graphs unchanged (#686)", async () => {
+  for (const options of [{}, { repository: "owner/repo" }, { baseBranch: "main" }, { repository: "  ", baseBranch: "main" }]) {
+    const { engine, seen } = captureCreateInstanceVars();
+    const r = await runDeliveryGraph(engine, GRAPH, options);
+    assert(r.ok, `expected ok:true for ${JSON.stringify(options)}, got ${JSON.stringify(r)}`);
+    assertEquals("io.nanobpm.agentTask" in seen(), false, `no envelope expected for ${JSON.stringify(options)}`);
+  }
+});
+
+test("runDeliveryGraph drops a malformed repository rather than emitting a bogus clone URL (#686)", async () => {
+  const { engine, seen } = captureCreateInstanceVars();
+  // A value that is not exactly `owner/repo` (a trailing `.git`) must degrade to NO envelope — the
+  // helper's defence-in-depth guard — never a double-suffixed `…/owner/repo.git.git` clone URL.
+  const r = await runDeliveryGraph(engine, GRAPH, { repository: "owner/repo.git", baseBranch: "main" });
+  assert(r.ok, `expected ok:true, got ${JSON.stringify(r)}`);
+  assertEquals("io.nanobpm.agentTask" in seen(), false);
+});
+
 test("the canonical `agent → converge-merge → wait[pr merged]` graph DISPATCHES with a fact-bound wait target (#570)", async () => {
   // Regression for #570: a `wait[pr]` node whose `target` is a fact reference (`open.pr`, the #548
   // late-binding shape the guide documents as canonical) COMPILED+staged but threw at dispatch —
