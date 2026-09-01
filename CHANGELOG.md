@@ -1,3 +1,9 @@
+## [0.173.0](https://github.com/nanobpm/nano-workforce/compare/v0.172.1...v0.173.0) (2026-09-01)
+
+### Features
+
+* **mcp:** add a deployed "Connect over MCP" console page ([#701](https://github.com/nanobpm/nano-workforce/issues/701)) ([dd2b998](https://github.com/nanobpm/nano-workforce/commit/dd2b99861ec4e2c8d46fc7e69397ac71954cf27c)), closes [#698](https://github.com/nanobpm/nano-workforce/issues/698) [#698](https://github.com/nanobpm/nano-workforce/issues/698) [#699](https://github.com/nanobpm/nano-workforce/issues/699)
+
 ## [0.172.1](https://github.com/nanobpm/nano-workforce/compare/v0.172.0...v0.172.1) (2026-09-01)
 
 ### Bug Fixes
