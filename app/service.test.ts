@@ -483,6 +483,38 @@ test("repoEnvelopeVars emits the repository envelope keyed on the PR head branch
   assertEquals(env.repository.filter, "blob:none");
   // The base branch is emitted so the harness fetches its tip, keeping `origin/<base>` reachable.
   assertEquals(env.repository.baseRef, "main");
+  // The clone timeout is raised above the harness's 120s default for large-repo provisioning (#694).
+  assertEquals(env.repository.cloneTimeoutMs, 600000);
+});
+
+test("repoEnvelopeVars emits cloneTimeoutMs from NANO_PR_CLONE_TIMEOUT_MS, default 600000 (#694)", () => {
+  // Default (knob unset): 600000ms = 10 min, raising the harness's 120000ms default so a
+  // branch-scoped blobless clone of a large monorepo provisions instead of dying at 120s.
+  const prev = process.env.NANO_PR_CLONE_TIMEOUT_MS;
+  delete process.env.NANO_PR_CLONE_TIMEOUT_MS;
+  try {
+    const def = (repoEnvelopeVars("owner/repo", "feat/x", "main") as any)["io.nanobpm.agentTask"];
+    assertEquals(def.repository.cloneTimeoutMs, 600000);
+    // Override wins.
+    process.env.NANO_PR_CLONE_TIMEOUT_MS = "900000";
+    const over = (repoEnvelopeVars("owner/repo", "feat/x", "main") as any)["io.nanobpm.agentTask"];
+    assertEquals(over.repository.cloneTimeoutMs, 900000);
+    // A non-positive / non-numeric override degrades to the registered default rather than emitting
+    // a bogus 0/NaN the harness would treat as "use the 120s default".
+    process.env.NANO_PR_CLONE_TIMEOUT_MS = "0";
+    assertEquals(
+      ((repoEnvelopeVars("owner/repo", "feat/x", "main") as any)["io.nanobpm.agentTask"]).repository.cloneTimeoutMs,
+      600000,
+    );
+    process.env.NANO_PR_CLONE_TIMEOUT_MS = "notanumber";
+    assertEquals(
+      ((repoEnvelopeVars("owner/repo", "feat/x", "main") as any)["io.nanobpm.agentTask"]).repository.cloneTimeoutMs,
+      600000,
+    );
+  } finally {
+    if (prev === undefined) delete process.env.NANO_PR_CLONE_TIMEOUT_MS;
+    else process.env.NANO_PR_CLONE_TIMEOUT_MS = prev;
+  }
 });
 
 test("repoEnvelopeVars omits baseRef when the base branch is unresolved", () => {
@@ -492,6 +524,8 @@ test("repoEnvelopeVars omits baseRef when the base branch is unresolved", () => 
   assertEquals(env.repository.filter, "blob:none");
   // …but `baseRef` is omitted entirely rather than emitted as null (no key at all).
   assertEquals("baseRef" in env.repository, false);
+  // The clone timeout is still emitted (it's base-ref-independent).
+  assertEquals(env.repository.cloneTimeoutMs, 600000);
 });
 
 test("repoEnvelopeVars emits nothing when the head branch is unresolved", () => {
