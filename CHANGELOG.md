@@ -1,3 +1,9 @@
+## [0.171.9](https://github.com/nanobpm/nano-workforce/compare/v0.171.8...v0.171.9) (2026-09-01)
+
+### Bug Fixes
+
+* **agentic:** spare a still-active job's relay stream on a mid-job reconnect ([#690](https://github.com/nanobpm/nano-workforce/issues/690)) ([e0bb51e](https://github.com/nanobpm/nano-workforce/commit/e0bb51e5cb4a2e1c92f3760a3a4e9c70b8ef3803)), closes [661/#688](https://github.com/661/nano-workforce/issues/688) [#reconcile](https://github.com/nanobpm/nano-workforce/issues/reconcile) [#689](https://github.com/nanobpm/nano-workforce/issues/689) [#689](https://github.com/nanobpm/nano-workforce/issues/689) [#689](https://github.com/nanobpm/nano-workforce/issues/689)
+
 ## [0.171.8](https://github.com/nanobpm/nano-workforce/compare/v0.171.7...v0.171.8) (2026-09-01)
 
 ### Bug Fixes
