@@ -91,6 +91,28 @@ against the wrong base will not be merged into the epic.
    pointing at an issue).
 5. Clean up any scratch clone/worktree you created outside the commit.
 
+## Build hygiene — warm up once, then build module-scoped; never a cold `-am` reactor build
+
+Before you iterate on a build in the target repo,
+**read its `AGENTS.md` / `CONTRIBUTING.md` build section** and run the prescribed
+**dependency warm-up exactly once** right after checkout, then scope every
+subsequent build to the module you changed. Do **not** run a cold whole-reactor /
+all-modules build on each iteration — a stateless worker that skips the warm-up
+pays the upstream reactor-compile tax inline on every run, which can block for
+many minutes.
+
+- **Warm up once (blocking, right after branching).** For a Maven monorepo that
+  ships this fast path (e.g. camunda), that is
+  `./mvnw install -Dquickly -T1C` — it installs every reactor SNAPSHOT into
+  `~/.m2` so later module builds resolve them instead of recompiling them.
+- **Then build only the changed module, offline, without `-am`.** e.g.
+  `./mvnw -Dquickly -o -pl <module> test-compile`. Dropping `-am` after the
+  warm-up is what keeps each iteration to seconds; a per-iteration
+  `-am <goals>` (e.g. `-am clean test-compile`) re-compiles the upstream modules from source.
+- **The recipe lives in the target repo, not here.** Always defer to that repo's
+  own `AGENTS.md` / `CONTRIBUTING.md` build section for the exact commands — the
+  Maven lines above are the common case, not a substitute for reading it.
+
 ## Closing keywords vs. scope splits — don't close a broader-scoped parent
 
 The convergence loop runs a **scope-integrity classifier** on your PR before it

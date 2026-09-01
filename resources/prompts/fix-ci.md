@@ -50,6 +50,14 @@ the PR's checks yourself (`gh pr checks`, `gh run view`).
 3. Apply the **minimal, correct** fix. Keep it scoped to what the failing checks
    demand — do not refactor unrelated code.
 4. Run the relevant check locally to confirm it now passes.
+   **Build module-scoped, not cold.** Before iterating, read the target repo's
+   `AGENTS.md` / `CONTRIBUTING.md` build section and run its prescribed
+   **dependency warm-up once** (for a Maven monorepo that ships it, e.g. camunda,
+   `./mvnw install -Dquickly -T1C`), then scope the build to the changed module
+   and drop `-am` (`./mvnw -Dquickly -o -pl <module> <goals>`). Never run a cold
+   whole-reactor `-am` build per iteration — a stateless worker that skips the
+   warm-up pays the upstream reactor-compile tax inline and can block for many
+   minutes.
 5. Commit (sign off with `-s` if the repo enforces DCO) and push to the branch.
 6. **Make CI re-validate your fix.** Some repos deliberately run CI only when a
    PR is *opened* (to keep review cheap), so a follow-up push does **not**
