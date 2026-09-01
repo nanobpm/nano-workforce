@@ -1,3 +1,9 @@
+## [0.171.8](https://github.com/nanobpm/nano-workforce/compare/v0.171.7...v0.171.8) (2026-09-01)
+
+### Bug Fixes
+
+* **agentic:** release job⇄worker correlation on terminal lifecycle event ([#688](https://github.com/nanobpm/nano-workforce/issues/688)) ([58dde6c](https://github.com/nanobpm/nano-workforce/commit/58dde6cf1c91f75828c8a38de52fef9409e3484c)), closes [#661](https://github.com/nanobpm/nano-workforce/issues/661) [#544](https://github.com/nanobpm/nano-workforce/issues/544) [#661](https://github.com/nanobpm/nano-workforce/issues/661)
+
 ## [0.171.7](https://github.com/nanobpm/nano-workforce/compare/v0.171.6...v0.171.7) (2026-09-01)
 
 ### Bug Fixes
