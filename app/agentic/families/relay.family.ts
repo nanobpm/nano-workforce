@@ -87,6 +87,27 @@ export function engineReconcileMs(configuredMs?: number): number | undefined {
   return Math.min(MAX_TIMER_MS, Math.max(1, Math.floor(value)));
 }
 
+/**
+ * Wrap an async pass in an in-flight guard so a periodic `setInterval` never fires OVERLAPPING runs
+ * (#661). A single pass of {@link RelayTranscriptService.reconcileEngineCorrelations} awaits an engine
+ * read per linked job, so a pass can outlast its interval (a small configured cadence, or a slow/large
+ * engine read-model); an unguarded `setInterval` would then stack concurrent passes, piling up engine
+ * reads and log volume. While a pass is still pending, every subsequent tick is skipped; the next tick
+ * after it settles starts a fresh pass. The wrapped `pass` must never reject (settle its own errors),
+ * so the guard always clears — mirrors the "one pass at a time" discipline the main poll loop enforces
+ * by self-scheduling. Returns the tick callback to hand to `setInterval`.
+ */
+export function guardOverlappingPasses(pass: () => Promise<void>): () => void {
+  let inFlight = false;
+  return () => {
+    if (inFlight) return;
+    inFlight = true;
+    void pass().finally(() => {
+      inFlight = false;
+    });
+  };
+}
+
 /** Read a property off an unknown value without an unsafe `as` cast (mirrors the loader's helper). */
 function readProp(value: unknown, key: string): unknown {
   if (!value || typeof value !== "object") return undefined;
@@ -867,11 +888,18 @@ export function createRelayFamily(options: {
       if (ctx.resolveElementInstance !== undefined) {
         const reconcileInterval = engineReconcileMs(options.engineReconcileIntervalMs);
         if (reconcileInterval !== undefined) {
-          engineReconcileTimer = setInterval(() => {
-            void service?.reconcileEngineCorrelations().catch((err: unknown) => {
+          // In-flight guard: `reconcileEngineCorrelations()` is async and awaits an engine read per
+          // linked job, so a pass can outlast `reconcileInterval` (a small interval, or a slow/large
+          // engine read-model). Without a guard, `setInterval` would fire overlapping passes that pile
+          // up concurrent engine reads and log volume. {@link guardOverlappingPasses} skips a tick while
+          // the previous pass is still running so only one reconcile runs at a time — the same "one pass
+          // at a time" discipline the main poll loop enforces by self-scheduling.
+          const reconcileTick = guardOverlappingPasses(() =>
+            (service?.reconcileEngineCorrelations() ?? Promise.resolve()).catch((err: unknown) => {
               ctx.log.warn("agentic relay engine-reconcile failed", { err: String(err) });
-            });
-          }, reconcileInterval);
+            }),
+          );
+          engineReconcileTimer = setInterval(reconcileTick, reconcileInterval);
           engineReconcileTimer.unref?.();
         }
       }

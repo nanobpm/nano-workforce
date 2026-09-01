@@ -28,6 +28,7 @@ import {
   currentRelayTranscriptService,
   engineReconcileMs,
   family as relayFamily,
+  guardOverlappingPasses,
   RELAY_FAMILY_NAME,
   RelayTranscriptService,
   sweepIntervalMs,
@@ -695,6 +696,56 @@ test("#661 engineReconcileMs: defaults, disables on a non-positive/non-finite va
   assertEquals(engineReconcileMs(Number.POSITIVE_INFINITY), undefined, "infinity disables the pass");
   assertEquals(engineReconcileMs(2 ** 32), 2_147_483_647, "a huge value is capped at the Node timer ceiling");
   assertEquals(engineReconcileMs(0.5), 1, "a sub-millisecond positive value floors to 1ms, never 0 (no busy setInterval(0))");
+});
+
+test("#661 guardOverlappingPasses: a tick while a pass is in flight is skipped; only one pass runs at a time", async () => {
+  let starts = 0;
+  let active = 0;
+  let maxActive = 0;
+  let release!: () => void;
+  // A pass that blocks until we release it, so we can hold one "in flight" while further ticks fire.
+  const pass = () => {
+    starts++;
+    active++;
+    maxActive = Math.max(maxActive, active);
+    return new Promise<void>((resolve) => {
+      release = () => {
+        active--;
+        resolve();
+      };
+    });
+  };
+  const tick = guardOverlappingPasses(pass);
+
+  tick(); // first tick starts a pass — now in flight
+  tick(); // skipped while the first pass is still pending
+  tick(); // skipped
+  assertEquals(starts, 1, "overlapping ticks are dropped while a pass is in flight");
+  assertEquals(maxActive, 1, "never more than one pass runs concurrently");
+
+  release(); // let the first pass settle
+  await new Promise((r) => setImmediate(r)); // flush the `finally` that clears the in-flight flag
+
+  tick(); // a tick after the previous pass settled starts a fresh pass
+  assertEquals(starts, 2, "a tick after the in-flight pass settles starts a new pass");
+  assertEquals(maxActive, 1, "still only ever one pass at a time");
+  release();
+});
+
+test("#661 guardOverlappingPasses: a rejecting pass would leave the guard stuck — the reconcile wrapper never rejects", async () => {
+  // Documents the guard's contract: the guard only clears via `.finally`, so it relies on the pass
+  // settling. The mount wraps `reconcileEngineCorrelations()` with a `.catch`, so its pass always
+  // resolves; here we assert a resolving pass re-arms the guard tick over tick.
+  let starts = 0;
+  const tick = guardOverlappingPasses(() => {
+    starts++;
+    return Promise.resolve();
+  });
+  tick();
+  await new Promise((r) => setImmediate(r));
+  tick();
+  await new Promise((r) => setImmediate(r));
+  assertEquals(starts, 2, "a pass that settles re-arms the guard for the next tick");
 });
 
 /**
