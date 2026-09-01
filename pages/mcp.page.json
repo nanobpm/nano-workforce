@@ -74,7 +74,7 @@
       "type": "text",
       "id": "intro",
       "props": {
-        "text": "Point a coding agent (Copilot, Claude, Cursor \u2026) at this running instance so the workforce's operations become native tools \u2014 submit work, answer escalations, read status, and debug a wedged instance without curl. The Urban runtime serves a Streamable-HTTP MCP endpoint at /app/mcp for this app and projects its openapi.yaml into tools, with zero MCP code in nwf. Register ONE server entry per instance; its tools are namespaced under the name you give it, so naming the instance targets the right one and makes the wrong-instance mistake structurally impossible. Use the copyable recipes below \u2014 each URL is already rendered for THIS instance's address (including any reverse-proxy prefix).",
+        "text": "Point a coding agent (Copilot, Claude, Cursor \u2026) at this running instance so the workforce's operations become native tools \u2014 submit work, answer escalations, read status, and debug a wedged instance without curl. The Urban runtime serves a Streamable-HTTP MCP endpoint for this app at the /app/mcp path \u2014 behind a reverse-proxy prefix the reachable URL carries that prefix, as the recipes below render \u2014 and projects its openapi.yaml into tools, with zero MCP code in nwf. Register ONE server entry per instance; its tools are namespaced under the name you give it, so naming the instance targets the right one and makes the wrong-instance mistake very hard to hit (a server pointed at the wrong URL can still misfire). Use the copyable recipes below \u2014 each URL is already rendered for THIS instance's address (including any reverse-proxy prefix).",
         "variant": "sub"
       }
     },
@@ -100,7 +100,7 @@
         "variant": "ghost",
         "modal": {
           "title": "Add from the terminal",
-          "description": "The config path has no header flag, so a guarded instance needs the --header form (second command).",
+          "description": "For a guarded instance (NANO_PR_WEBHOOK_SECRET set), pass the shared-secret header with the --header form (the second command); an unguarded instance needs only the first.",
           "copyLabel": "Copy commands",
           "copyText": "# This instance if unguarded (no NANO_PR_WEBHOOK_SECRET set):\ncopilot mcp add --transport http workforce-local {{appBase}}app/mcp\n\n# This instance if guarded (NANO_PR_WEBHOOK_SECRET set) \u2014 present the shared secret header:\ncopilot mcp add --transport http workforce-local {{appBase}}app/mcp \\\n  --header \"x-hook-secret: $NANO_PR_WEBHOOK_SECRET\""
         }
@@ -115,7 +115,7 @@
       "type": "text",
       "id": "secret-body",
       "props": {
-        "text": "When this instance sets NANO_PR_WEBHOOK_SECRET, the guard is NOT mutation-only \u2014 it also covers reads, so read endpoints like GET /app/api/agent and GET /app/api/version return 401 without the x-hook-secret header, just as guarded mutations do. It is not blanket, though: a few doors stay intentionally unguarded even when the secret is set (e.g. the declarative Save-to-library page action, which structurally cannot attach the header). The mcp-config.json config path has no header flag, so add a headers block alongside url on the server entry (copy it below) or omitting it yields 401s. Put the secret in the server entry's headers, never in chat. When NANO_PR_WEBHOOK_SECRET is unset, the app guard is off entirely \u2014 reads and mutations both work with no credential from wherever this instance is reachable (with network.bind \"all\" that is the LAN, not just loopback), so unset it only where that exposure is acceptable. Note the runtime-served /app/mcp surface is an exception to that reachability: it is loopback-only by default and refuses non-loopback peers with a 403 even when network.bind is \"all\", until you also set URBAN_MCP_ALLOW_REMOTE=true \u2014 LAN/remote MCP clients need that knob in addition to a wide bind.",
+        "text": "When this instance sets NANO_PR_WEBHOOK_SECRET, the guard is NOT mutation-only \u2014 it also covers reads, so read endpoints like GET /app/api/agent and GET /app/api/version return 401 without the x-hook-secret header, just as guarded mutations do. It is not blanket, though: a few doors stay intentionally unguarded even when the secret is set (e.g. the declarative Save-to-library page action, which structurally cannot attach the header). The mcp-config.json path takes the shared secret as a headers block, not a flag, so add a headers block alongside url on the server entry (copy it below); omitting it yields 401s. Put the secret in the server entry's headers, never in chat. When NANO_PR_WEBHOOK_SECRET is unset, the app guard is off entirely \u2014 reads and mutations both work with no credential from wherever this instance is reachable (with network.bind \"all\" that is the LAN, not just loopback), so unset it only where that exposure is acceptable. Note the runtime-served /app/mcp surface is an exception to that reachability: it is loopback-only by default and refuses non-loopback peers with a 403 even when network.bind is \"all\", until you also set URBAN_MCP_ALLOW_REMOTE=true \u2014 LAN/remote MCP clients need that knob in addition to a wide bind.",
         "variant": "sub"
       }
     },
