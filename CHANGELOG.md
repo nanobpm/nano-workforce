@@ -1,3 +1,9 @@
+## [0.171.7](https://github.com/nanobpm/nano-workforce/compare/v0.171.6...v0.171.7) (2026-09-01)
+
+### Bug Fixes
+
+* **agentic:** seed repository isolation envelope on delivery-graph agent cells ([#687](https://github.com/nanobpm/nano-workforce/issues/687)) ([8c96a7d](https://github.com/nanobpm/nano-workforce/commit/8c96a7db34a6e389d09d5b9968fbcbc362d85cd5)), closes [#686](https://github.com/nanobpm/nano-workforce/issues/686) [#684](https://github.com/nanobpm/nano-workforce/issues/684) [#685](https://github.com/nanobpm/nano-workforce/issues/685) [#551](https://github.com/nanobpm/nano-workforce/issues/551) [#686](https://github.com/nanobpm/nano-workforce/issues/686)
+
 ## [0.171.6](https://github.com/nanobpm/nano-workforce/compare/v0.171.5...v0.171.6) (2026-09-01)
 
 ### Bug Fixes
