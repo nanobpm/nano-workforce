@@ -1,3 +1,9 @@
+## [0.171.4](https://github.com/nanobpm/nano-workforce/compare/v0.171.3...v0.171.4) (2026-09-01)
+
+### Bug Fixes
+
+* **cockpit:** remove nested transcript scrollbar inside App-View iframe ([#680](https://github.com/nanobpm/nano-workforce/issues/680)) ([2660f38](https://github.com/nanobpm/nano-workforce/commit/2660f382386665f44308f1e719cee253e81fc891)), closes [#679](https://github.com/nanobpm/nano-workforce/issues/679)
+
 ## [0.171.3](https://github.com/nanobpm/nano-workforce/compare/v0.171.2...v0.171.3) (2026-08-31)
 
 ### Code Refactoring
