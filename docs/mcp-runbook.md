@@ -139,9 +139,12 @@ is not blanket, though — a few doors stay intentionally unguarded even when th
 secret is set (e.g. the declarative Save-to-library page action, which
 structurally cannot attach the header). Put it in the server entry's
 `headers`, never in chat. For a remote fleet,
-`NANO_WORKFORCE_BASE_URL` reachability rules apply unchanged, and LAN exposure of
-`/app/mcp` follows the same `network.bind` manifest setting as the rest of the app's
-HTTP surface.
+`NANO_WORKFORCE_BASE_URL` reachability rules apply unchanged. The rest of the app's
+HTTP surface follows the `network.bind` manifest setting, but the runtime-served
+`/app/mcp` surface is an exception: it is **loopback-only by default** and refuses
+non-loopback peers with a `403` even when `network.bind` is `"all"`, until you
+*also* set `URBAN_MCP_ALLOW_REMOTE=true` (see `e2e/support/mcp-harness.ts`).
+LAN/remote MCP clients therefore need that knob in addition to a wide bind.
 
 **Operator-only doors stay operator-only.** The staged delivery-graph lifecycle —
 `stageDeliveryGraph`, `dispatchDeliveryGraph`, `dismissProposal` — is `x-mcp`-excluded
