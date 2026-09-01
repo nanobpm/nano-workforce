@@ -732,20 +732,23 @@ test("#661 guardOverlappingPasses: a tick while a pass is in flight is skipped; 
   release();
 });
 
-test("#661 guardOverlappingPasses: a rejecting pass would leave the guard stuck — the reconcile wrapper never rejects", async () => {
-  // Documents the guard's contract: the guard only clears via `.finally`, so it relies on the pass
-  // settling. The mount wraps `reconcileEngineCorrelations()` with a `.catch`, so its pass always
-  // resolves; here we assert a resolving pass re-arms the guard tick over tick.
+test("#661 guardOverlappingPasses: a pass whose work rejects but is self-caught still re-arms the guard", async () => {
+  // The guard clears its in-flight flag via `.finally`, so it re-arms whether the pass resolves OR
+  // rejects — a rejection does NOT wedge the guard. The real hazard of a rejecting pass is an
+  // *unhandled rejection* (the tick voids the returned promise), which is why the mount wraps
+  // `reconcileEngineCorrelations()` in `.catch`. Here the pass's work rejects but is self-caught
+  // (mirroring that wrapper), so there is no unhandled rejection, and we assert the guard re-arms.
   let starts = 0;
   const tick = guardOverlappingPasses(() => {
     starts++;
-    return Promise.resolve();
+    // Work that rejects but settles its own error — exactly like the mount's `.catch` wrapper.
+    return Promise.reject(new Error("pass work failed")).catch(() => {});
   });
   tick();
   await new Promise((r) => setImmediate(r));
   tick();
   await new Promise((r) => setImmediate(r));
-  assertEquals(starts, 2, "a pass that settles re-arms the guard for the next tick");
+  assertEquals(starts, 2, "a self-caught rejecting pass settles and re-arms the guard for the next tick");
 });
 
 /**

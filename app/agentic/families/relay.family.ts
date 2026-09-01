@@ -93,9 +93,14 @@ export function engineReconcileMs(configuredMs?: number): number | undefined {
  * read per linked job, so a pass can outlast its interval (a small configured cadence, or a slow/large
  * engine read-model); an unguarded `setInterval` would then stack concurrent passes, piling up engine
  * reads and log volume. While a pass is still pending, every subsequent tick is skipped; the next tick
- * after it settles starts a fresh pass. The wrapped `pass` must never reject (settle its own errors),
- * so the guard always clears — mirrors the "one pass at a time" discipline the main poll loop enforces
- * by self-scheduling. Returns the tick callback to hand to `setInterval`.
+ * after it settles — whether it resolves OR rejects, since the guard clears via `.finally` — starts a
+ * fresh pass. Two caller obligations follow from the tick `void`-ing (not awaiting) the returned
+ * promise: (1) `pass` must not throw *synchronously*, because a synchronous throw escapes before
+ * `.finally` is attached and would leave the guard wedged (in-flight, never re-arming); (2) `pass` must
+ * settle its own rejections — an unhandled rejection is the real hazard of a rejecting pass here (the
+ * guard itself always clears), so the mount wraps `reconcileEngineCorrelations()` in `.catch`. Mirrors
+ * the "one pass at a time" discipline the main poll loop enforces by self-scheduling. Returns the tick
+ * callback to hand to `setInterval`.
  */
 export function guardOverlappingPasses(pass: () => Promise<void>): () => void {
   let inFlight = false;
