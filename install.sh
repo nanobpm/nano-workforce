@@ -1124,6 +1124,25 @@ build_config_body() { # $1 = redact? ("redact" to mask the token)
     "$_gh" "$(json_str "$CONSOLE_ORIGIN")" "$(json_str "$APPVIEW_BASE")" "$(json_str "${PR_REVIEW_PORT:-3000}")"
 }
 
+# Merge our env object into the project's FULL ProjectConfig and print the
+# merged object. `PUT /console/api/projects/<name>/config` is a whole-object
+# replace: it deserializes the body into the complete ProjectConfig (which
+# requires `name`, `main`, `platforms`, `lang`, …), so a partial {"env":{…}}
+# body fails with HTTP 422 "missing field name" (nanobpm/nano-workforce#692).
+# We therefore fetch the live config and set its `.env` instead of hand-building
+# a minimal body. Values are passed via the environment (not argv) so quoting is
+# never an issue; node is a hard preflight requirement so it is always present.
+# Prints the merged JSON on success; returns non-zero (empty stdout) if either
+# input is not parseable.
+merge_config_env() { # $1 = current ProjectConfig JSON, $2 = {"env":{…}} JSON
+  NWF_CFG_JSON=$1 NWF_ENV_JSON=$2 node -e '
+    const cfg = JSON.parse(process.env.NWF_CFG_JSON);
+    const env = JSON.parse(process.env.NWF_ENV_JSON).env || {};
+    cfg.env = env;
+    process.stdout.write(JSON.stringify(cfg));
+  ' 2>/dev/null
+}
+
 # Step 9 — the console must be reachable before we mutate anything.
 app_preflight() {
   info "Preflighting the console at ${CONSOLE_ORIGIN}/console"
@@ -1245,18 +1264,39 @@ app_provision() {
     esac
   fi
 
-  # 11.5 — write ProjectConfig.env (token redacted in dry-run output).
+  # 11.5 — write ProjectConfig.env (token redacted in dry-run output). The
+  # config endpoint is a whole-object replace, so we GET the current config and
+  # merge our env into it; a partial {"env":{…}} body 422s (#692).
   info "Configuring project '$PROJECT' (ProjectConfig.env)"
-  _cfg_body=$(build_config_body) || {
+  _env_body=$(build_config_body) || {
     record_failure "app: invalid ProjectConfig.env value (control characters)"
     return 1
   }
-  _cfg_show=$(build_config_body redact) || {
+  _env_show=$(build_config_body redact) || {
     record_failure "app: invalid ProjectConfig.env value (control characters)"
     return 1
   }
-  api PUT "/console/api/projects/${PROJECT}/config" "$_cfg_body" "$_cfg_show"
-  if [ "$DRY_RUN" -eq 0 ]; then
+  if [ "$DRY_RUN" -eq 1 ]; then
+    # No live config to fetch under --dry-run: show the env we would merge in.
+    api PUT "/console/api/projects/${PROJECT}/config" "$_env_body" "$_env_show"
+  else
+    api GET "/console/api/projects/${PROJECT}/config"
+    case "$API_STATUS" in
+      2*) : ;;
+      *)  err "GET project config -> $(api_outcome)"
+          [ -n "$API_BODY" ] && note "$API_BODY"
+          record_failure "app: GET config $(api_outcome)"
+          return 1 ;;
+    esac
+    _cur_cfg=$API_BODY
+    _cfg_body=$(merge_config_env "$_cur_cfg" "$_env_body") || {
+      err "could not merge env into the current ProjectConfig (unparseable config?)."
+      [ -n "$_cur_cfg" ] && note "$_cur_cfg"
+      record_failure "app: merge ProjectConfig.env"
+      return 1
+    }
+    _cfg_show=$(merge_config_env "$_cur_cfg" "$_env_show") || _cfg_show=$_cfg_body
+    api PUT "/console/api/projects/${PROJECT}/config" "$_cfg_body" "$_cfg_show"
     case "$API_STATUS" in
       2*) ok "config written (NANO_WORKFORCE_BASE_URL=${APPVIEW_BASE})" ;;
       *)  err "PUT project config -> $(api_outcome)"
