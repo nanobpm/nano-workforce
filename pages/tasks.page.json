@@ -9,12 +9,34 @@
         "variant": "bar",
         "title": "Nano Workforce",
         "items": [
-          { "label": "Overview", "page": "overview" },
-          { "label": "Lineage", "page": "lineage" },
-          { "label": "Convergence", "page": "home" },
-          { "label": "Epics", "page": "epic" },
-          { "label": "Feature", "page": "feature" },
-          { "label": "Delivery Graphs", "page": "delivery-graphs" },
+          {
+            "label": "Overview",
+            "page": "overview"
+          },
+          {
+            "label": "Connect over MCP",
+            "page": "mcp"
+          },
+          {
+            "label": "Lineage",
+            "page": "lineage"
+          },
+          {
+            "label": "Convergence",
+            "page": "home"
+          },
+          {
+            "label": "Epics",
+            "page": "epic"
+          },
+          {
+            "label": "Feature",
+            "page": "feature"
+          },
+          {
+            "label": "Delivery Graphs",
+            "page": "delivery-graphs"
+          },
           {
             "label": "Tasks",
             "page": "tasks",
@@ -27,9 +49,18 @@
               "hideWhenZero": true
             }
           },
-          { "label": "Cockpit", "page": "cockpit" },
-          { "label": "Board", "page": "board" },
-          { "label": "Velocity", "page": "velocity" }
+          {
+            "label": "Cockpit",
+            "page": "cockpit"
+          },
+          {
+            "label": "Board",
+            "page": "board"
+          },
+          {
+            "label": "Velocity",
+            "page": "velocity"
+          }
         ],
         "sticky": true
       }

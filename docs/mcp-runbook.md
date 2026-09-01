@@ -24,6 +24,11 @@ MCP is a **third door**, not a replacement: `GET /app/api/agent` (the live guide
 `GET /app/api/agent/skill` are unchanged for agents without MCP — see
 [§5 Fallback](#5-fallback).
 
+> **Served summary:** a running instance also exposes a nav-linked **"Connect over
+> MCP"** console page (`pages/mcp.page.json`) with copyable config recipes rendered
+> for that instance's own address. It is the short, always-reachable digest; this
+> runbook is the deeper source of truth. Keep the two in sync.
+
 ## 1. One MCP server entry per instance
 
 In `~/.copilot/mcp-config.json` (user-wide) or `.mcp.json` (repo-scoped):
@@ -122,16 +127,24 @@ door the UI's Cancel uses), never the record-desyncing engine-level `urban_debug
 
 ## 4. Guard posture
 
-When `NANO_PR_WEBHOOK_SECRET` is **unset**, both reads (status, instances, incidents,
-projections, the operator guide) and mutations (cancel/retry/resolve, `start/*`
-operations, answering escalations) work from loopback with no credential. When it **is
-set**, the guard is not mutation-only: that secret is required as an `x-hook-secret`
-header on **both reads and mutations** — read endpoints like `GET /app/api/agent` and
-`GET /app/api/version` also return `401` without it. Put it in the server entry's
+When `NANO_PR_WEBHOOK_SECRET` is **unset**, the app guard is off entirely: both reads
+(status, instances, incidents, projections, the operator guide) and mutations
+(cancel/retry/resolve, `start/*` operations, answering escalations) work with no
+credential **from wherever this instance is reachable** — with `network.bind: "all"`
+that is the LAN, not just loopback, so leave it unset only where that exposure is
+acceptable. When it **is set**, the guard is not mutation-only: it also covers
+reads, so read endpoints like `GET /app/api/agent` and `GET /app/api/version`
+return `401` without the `x-hook-secret` header, just as guarded mutations do. It
+is not blanket, though — a few doors stay intentionally unguarded even when the
+secret is set (e.g. the declarative Save-to-library page action, which
+structurally cannot attach the header). Put it in the server entry's
 `headers`, never in chat. For a remote fleet,
-`NANO_WORKFORCE_BASE_URL` reachability rules apply unchanged, and LAN exposure of
-`/app/mcp` follows the same `network.bind` manifest setting as the rest of the app's
-HTTP surface.
+`NANO_WORKFORCE_BASE_URL` reachability rules apply unchanged. The rest of the app's
+HTTP surface follows the `network.bind` manifest setting, but the runtime-served
+`/app/mcp` surface is an exception: it is **loopback-only by default** and refuses
+non-loopback peers with a `403` even when `network.bind` is `"all"`, until you
+*also* set `URBAN_MCP_ALLOW_REMOTE=true` (see `e2e/support/mcp-harness.ts`).
+LAN/remote MCP clients therefore need that knob in addition to a wide bind.
 
 ### Framework mutation guard — `urban_debug_*` mutations need `x-hook-secret` too
 
