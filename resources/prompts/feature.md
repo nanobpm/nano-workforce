@@ -93,12 +93,13 @@ against the wrong base will not be merged into the epic.
 
 ## Build hygiene — warm up once, then build module-scoped; never a cold `-am` reactor build
 
-Before you iterate on a build in the target repo, **read its `AGENTS.md` /
-`CONTRIBUTING.md` build section** and run the prescribed **dependency warm-up
-exactly once** right after checkout, then scope every subsequent build to the
-module you changed. Do **not** run a cold whole-reactor / all-modules build on
-each iteration — a stateless worker that skips the warm-up pays the upstream
-reactor-compile tax inline on every run, which can block for many minutes.
+Before you iterate on a build in the target repo,
+**read its `AGENTS.md` / `CONTRIBUTING.md` build section** and run the prescribed
+**dependency warm-up exactly once** right after checkout, then scope every
+subsequent build to the module you changed. Do **not** run a cold whole-reactor /
+all-modules build on each iteration — a stateless worker that skips the warm-up
+pays the upstream reactor-compile tax inline on every run, which can block for
+many minutes.
 
 - **Warm up once (blocking, right after branching).** For a Maven monorepo that
   ships this fast path (e.g. camunda), that is
