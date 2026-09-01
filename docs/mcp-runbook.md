@@ -132,10 +132,12 @@ When `NANO_PR_WEBHOOK_SECRET` is **unset**, the app guard is off entirely: both 
 (cancel/retry/resolve, `start/*` operations, answering escalations) work with no
 credential **from wherever this instance is reachable** — with `network.bind: "all"`
 that is the LAN, not just loopback, so leave it unset only where that exposure is
-acceptable. When it **is set**, the guard is not mutation-only: that secret is required
-as an `x-hook-secret`
-header on **both reads and mutations** — read endpoints like `GET /app/api/agent` and
-`GET /app/api/version` also return `401` without it. Put it in the server entry's
+acceptable. When it **is set**, the guard is not mutation-only: it also covers
+reads, so read endpoints like `GET /app/api/agent` and `GET /app/api/version`
+return `401` without the `x-hook-secret` header, just as guarded mutations do. It
+is not blanket, though — a few doors stay intentionally unguarded even when the
+secret is set (e.g. the declarative Save-to-library page action, which
+structurally cannot attach the header). Put it in the server entry's
 `headers`, never in chat. For a remote fleet,
 `NANO_WORKFORCE_BASE_URL` reachability rules apply unchanged, and LAN exposure of
 `/app/mcp` follows the same `network.bind` manifest setting as the rest of the app's
