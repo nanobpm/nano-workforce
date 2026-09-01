@@ -12,6 +12,7 @@
 
 import { dispatchDeliveryGraphRun } from "../app/deliveryGraphDispatch.ts";
 import { getStagedProposal, markProposalDispatched, markProposalExpired } from "../app/deliveryGraphProposals.ts";
+import { isPlausibleBranchName } from "../app/plan.ts";
 import { isValidIsoDuration } from "../app/reviewWait.ts";
 import type { DeliveryGraphTextResult } from "../nano-generated/api-io.d.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
@@ -92,7 +93,20 @@ export default defineOperation("dispatchDeliveryGraph", async ({ body }, app) =>
     repository = repoRaw;
   }
   const baseRaw = body && typeof body === "object" && "baseBranch" in body && typeof body.baseBranch === "string" ? body.baseBranch.trim() : "";
-  const baseBranch = baseRaw !== "" && baseRaw.length <= 255 ? baseRaw : undefined;
+  let baseBranch: string | undefined;
+  if (baseRaw !== "") {
+    // `baseBranch` becomes the isolation envelope's `ref` — a real Git ref the harness checks out and
+    // branches off. Gate it with the canonical conservative branch-name allowlist (`app/plan.ts`,
+    // shared with the epic/feature launch paths) so whitespace, shell metacharacters, newlines, a
+    // leading `-`, `..`/`//`, etc. are a clean 400 rather than an invalid-ref/argument-parsing edge
+    // case in a downstream git invocation.
+    if (baseRaw.length > 255 || !isPlausibleBranchName(baseRaw)) {
+      const shown = truncateForEcho(baseRaw);
+      app.log.warn("dispatch-delivery-graph rejected: invalid baseBranch", { value: shown });
+      return { status: 400, body: { ok: false, error: `\`baseBranch\` must be a plausible git branch name; got \`${shown}\`` } };
+    }
+    baseBranch = baseRaw;
+  }
 
   // Load the live staged proposal for this digest — refuses an unknown/expired/superseded/already-
   // dispatched digest cleanly (no run is launched).

@@ -513,7 +513,7 @@ export class MissingBaseBranchError extends Error {
  * purpose: only `[A-Za-z0-9._/-]`, no leading `/`/`.`/`-` (a leading dash reads as a CLI flag),
  * no trailing `/`/`.`, no `..`/`//`, no empty or `.lock`-suffixed path component, bounded length.
  * This rejects whitespace, shell metacharacters, command substitution, and newlines outright. */
-function isPlausibleBranchName(s: string): boolean {
+export function isPlausibleBranchName(s: string): boolean {
   if (s.length === 0 || s.length > 255) return false;
   if (!/^[A-Za-z0-9._/-]+$/.test(s)) return false;
   if (/^[/.-]/.test(s) || /[/.]$/.test(s)) return false;
