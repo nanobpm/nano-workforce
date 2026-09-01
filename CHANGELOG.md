@@ -1,3 +1,9 @@
+## [0.172.0](https://github.com/nanobpm/nano-workforce/compare/v0.171.11...v0.172.0) (2026-09-01)
+
+### Features
+
+* **service:** emit repository.cloneTimeoutMs in the agent-task envelope ([#697](https://github.com/nanobpm/nano-workforce/issues/697)) ([0d8a358](https://github.com/nanobpm/nano-workforce/commit/0d8a3582769f6561d647563168a8a50d0d54f3df)), closes [#694](https://github.com/nanobpm/nano-workforce/issues/694)
+
 ## [0.171.11](https://github.com/nanobpm/nano-workforce/compare/v0.171.10...v0.171.11) (2026-09-01)
 
 ### Bug Fixes
