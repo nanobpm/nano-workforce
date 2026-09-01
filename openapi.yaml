@@ -2104,13 +2104,15 @@ components:
         baseBranch:
           type: string
           maxLength: 255
-          pattern: '^(?![/.-])(?!.*[/.]$)(?!.*\.\.)(?!.*//)[A-Za-z0-9._/-]+$'
+          pattern: '^(?![/.-])(?!.*[/.]$)(?!.*\.\.)(?!.*//)(?!.*/\.)(?!.*\.lock(?:/|$))[A-Za-z0-9._/-]+$'
           description: >-
             OPTIONAL base branch the run's `agent` nodes branch off (#684/#686) — the `ref` the harness
             checks out in the isolated clone (the PRE-PR shape: each agent cuts its own `feat/<node.id>`
             branch off this base). Only consulted when `repository` is also set; absent → no envelope. A
             value that is not a plausible git branch name (whitespace, shell metacharacters, a leading
-            `-`, `..`/`//`, etc.) is rejected at submit.
+            `-`, `..`/`//`, a path segment starting with `.` or ending in `.lock`, etc.) is rejected at
+            submit. This pattern mirrors the authoritative server-side gate (`isPlausibleBranchName`,
+            app/baseBranch.ts) so the documented contract and the door agree.
     DeliveryGraphDismissRequest:
       description: >-
         The OPERATOR dismiss request (#520). The cockpit's staged-proposals grid posts the content

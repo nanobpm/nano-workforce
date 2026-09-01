@@ -10,9 +10,9 @@
 // re-dispatch of an already-running run short-circuits with `alreadyRunning`. An unknown / expired /
 // superseded / already-dispatched digest is a clean 400.
 
+import { isPlausibleBranchName } from "../app/baseBranch.ts";
 import { dispatchDeliveryGraphRun } from "../app/deliveryGraphDispatch.ts";
 import { getStagedProposal, markProposalDispatched, markProposalExpired } from "../app/deliveryGraphProposals.ts";
-import { isPlausibleBranchName } from "../app/plan.ts";
 import { isValidIsoDuration } from "../app/reviewWait.ts";
 import type { DeliveryGraphTextResult } from "../nano-generated/api-io.d.ts";
 import { defineOperation } from "../nano-generated/operations.ts";

@@ -278,6 +278,22 @@ describe("dispatchDeliveryGraph — operator dispatch by staged-proposal digest"
     assert.equal((await deliveryGraphProposals(app.db).get(staged.body.digest))?.status, "staged");
   });
 
+  test("a `.lock`-suffixed `baseBranch` segment is rejected at submit → 400, nothing launched (#684/#686)", async () => {
+    const app = await boot();
+    assert.ok(app.api);
+    const api = app.api;
+    const staged = await api.call<{ digest: string }>("compileDeliveryGraph", { body: HUMAN_ONLY });
+    // A path segment ending in `.lock` (or one starting with `.`) is a valid-looking ref the loose
+    // charset would admit but `isPlausibleBranchName` rejects — the door must refuse it, matching the
+    // (now tightened) OpenAPI `baseBranch` pattern rather than seeding an invalid-ref envelope.
+    const res = await api.call<{ ok?: boolean; error?: string }>("dispatchDeliveryGraph", {
+      body: { digest: staged.body.digest, repository: "owner/repo", baseBranch: "feat/x.lock" },
+    });
+    assert.equal(res.status, 400);
+    assert.equal((await deliveryGraphRuns(app.db).all()).length, 0);
+    assert.equal((await deliveryGraphProposals(app.db).get(staged.body.digest))?.status, "staged");
+  });
+
   test("a valid repository + baseBranch dispatches the run for isolated provisioning → 202 running (#684/#686)", async () => {
     const app = await boot();
     assert.ok(app.api);
