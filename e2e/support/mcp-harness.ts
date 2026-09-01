@@ -125,8 +125,9 @@ export interface McpHarness {
   readonly sessionId: string;
   /** `tools/list` — the projected tool catalogue (app operations + framework debug tools). */
   listTools(): Promise<McpTool[]>;
-  /** `tools/call` — invoke a tool by name with its argument object. */
-  callTool(name: string, args?: Record<string, unknown>): Promise<McpToolResult>;
+  /** `tools/call` — invoke a tool by name with its argument object. Optional `extraHeaders` are
+   *  overlaid on the POST (e.g. an `x-hook-secret` shared-secret credential for a gated mutation). */
+  callTool(name: string, args?: Record<string, unknown>, extraHeaders?: Record<string, string>): Promise<McpToolResult>;
   /** A raw JSON-RPC request against `/app/mcp` (escape hatch for a bespoke case). `params` omitted →
    *  no `params` field; a `notifications/*` method is sent as a notification (no `id`, no response). */
   rpc(method: string, params?: unknown): Promise<McpRpcResult>;
@@ -175,13 +176,22 @@ export async function bootMcpHarness(opts: BootMcpHarnessOptions = {}): Promise<
   }
 
   let idCounter = 0;
-  const rpc = async (method: string, params?: unknown, sessionId?: string): Promise<McpRpcResult> => {
+  const rpc = async (
+    method: string,
+    params?: unknown,
+    sessionId?: string,
+    extraHeaders?: Record<string, string>,
+  ): Promise<McpRpcResult> => {
     const headers: Record<string, string> = {
       "content-type": "application/json",
       // The Streamable-HTTP transport inspects Accept; a real client offers both even when the
       // server answers JSON (the runtime sets `enableJsonResponse`).
       accept: "application/json, text/event-stream",
     };
+    // Apply caller-supplied overlay headers FIRST so the session header stays authoritative — a
+    // caller passing auth headers (e.g. `x-hook-secret`) must not be able to clobber `mcp-session-id`
+    // and break the MCP handshake for this request.
+    if (extraHeaders) Object.assign(headers, extraHeaders);
     if (sessionId) headers[SESSION_HEADER] = sessionId;
     const isNotification = method.startsWith("notifications/");
     const message: Record<string, unknown> = { jsonrpc: "2.0", method };
@@ -252,8 +262,8 @@ export async function bootMcpHarness(opts: BootMcpHarnessOptions = {}): Promise<
       }
       return body.result.tools;
     },
-    async callTool(name, args = {}): Promise<McpToolResult> {
-      const res = await rpc("tools/call", { name, arguments: args }, sessionId);
+    async callTool(name, args = {}, extraHeaders): Promise<McpToolResult> {
+      const res = await rpc("tools/call", { name, arguments: args }, sessionId, extraHeaders);
       const body = res.body as
         | { result?: { isError?: boolean; content?: Array<{ type: string; text?: string }> }; error?: { message?: string } }
         | undefined;

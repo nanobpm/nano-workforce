@@ -184,12 +184,18 @@ describe("MCP surface e2e — the runtime-served /app/mcp handshake, per tool (S
   });
 
   test("mutating framework tools are gated without the shared secret (set-variables)", async () => {
+    // This harness boots WITHOUT `NANO_PR_WEBHOOK_SECRET`. Since #698 declares the `hookSecret`
+    // shared-secret scheme (`x-nano-secret-env`), a remote-exposed mutation now fails CLOSED
+    // DETERMINISTICALLY as a misconfiguration ("secret env … is not set") — the credential the guard
+    // requires cannot exist until the operator sets the env var. Pin exactly that new shape (NOT the
+    // pre-#698 no-scheme "shared secret"/"allowMutations" refusal), so the test actually proves #698's
+    // `x-nano-secret-env` declaration took effect rather than accepting the old behavior.
     const res = await h.callTool("urban_debug_set_variables", { processInstanceKey: "1", variables: {} });
     assert.ok(res.isError, "urban_debug_set_variables must refuse a credential-free mutation");
     assert.match(
       res.text,
-      /shared secret|allowMutations/i,
-      `the refusal must name the guard: ${res.text}`,
+      /secret env .* is not set|misconfigured/i,
+      `the refusal must be the #698 misconfiguration shape: ${res.text}`,
     );
   });
 
@@ -262,5 +268,73 @@ describe("MCP surface e2e — the runtime-served /app/mcp handshake, per tool (S
     const json = res.json as { count?: number; proposals?: unknown[] } | undefined;
     assert.equal(json?.count, 0, `the harness must stage nothing: ${res.text}`);
     assert.deepEqual(json?.proposals, [], "no live staged proposals may remain");
+  });
+});
+
+// Framework mutation-guard authorization (issue #698).
+// --------------------------------------------------------------------------
+// The framework-owned mutating `urban_debug_*` tools (set_variables/retry_job/resolve_incident/
+// cancel_instance) are gated by @nanobpm/urban's OWN mutation guard (`authorizeMutation`), distinct
+// from nwf's app-operation guard. On a REMOTE-exposed instance (the harness always boots with
+// `URBAN_MCP_ALLOW_REMOTE: "true"`) the loopback bypass is off, so the ONLY door left is the
+// shared-secret apiKey scheme — which the guard recognizes only when an apiKey *header* scheme
+// declares `x-nano-secret-env`. nwf now declares `x-nano-secret-env: NANO_PR_WEBHOOK_SECRET` on the
+// `hookSecret` scheme (this issue), so a mutating call carrying `x-hook-secret: <secret>` is
+// authorized past the guard, while a missing/wrong header stays 401. This pins that contract.
+const HOOK_SECRET = "issue-698-shared-secret";
+
+describe("MCP surface e2e — framework mutation guard authorizes with the shared secret (#698)", () => {
+  let h: McpHarness;
+
+  before(async () => {
+    // Remote-exposed (harness default) + a shared secret set: the exact condition of #698, where the
+    // loopback bypass is off and the shared-secret scheme is the only authorization door.
+    h = await bootMcpHarness({ env: { NANO_PR_WEBHOOK_SECRET: HOOK_SECRET } });
+  });
+
+  after(async () => {
+    await h?.stop();
+  });
+
+  test("a mutating urban_debug_* call is refused WITHOUT the shared-secret header", async () => {
+    const res = await h.callTool("urban_debug_set_variables", { processInstanceKey: "1", variables: {} });
+    assert.ok(res.isError, "a credential-free mutation must be refused on a remote-exposed instance");
+    assert.match(
+      res.text,
+      /unauthorized|401/i,
+      `a missing shared-secret header must 401: ${res.text}`,
+    );
+  });
+
+  test("a mutating urban_debug_* call is refused WITH A WRONG shared-secret header", async () => {
+    const res = await h.callTool(
+      "urban_debug_set_variables",
+      { processInstanceKey: "1", variables: {} },
+      { "x-hook-secret": "not-the-secret" },
+    );
+    assert.ok(res.isError, "a wrong-secret mutation must still be refused");
+    assert.match(
+      res.text,
+      /unauthorized|401/i,
+      `a wrong shared-secret header must 401: ${res.text}`,
+    );
+  });
+
+  test("a mutating urban_debug_* call carrying the correct x-hook-secret is authorized past the guard", async () => {
+    const res = await h.callTool(
+      "urban_debug_set_variables",
+      { processInstanceKey: "1", variables: {} },
+      { "x-hook-secret": HOOK_SECRET },
+    );
+    // The correct credential clears the shared-secret guard. The call may still fail downstream (the
+    // hermetic engine has no instance `1`), but it must NO LONGER be the shared-secret refusal NOR a
+    // generic authorization failure (401/unauthorized) — excluding those is the falsifiable proof the
+    // `x-nano-secret-env` declaration made the scheme authorizable (rather than the credential silently
+    // still being rejected).
+    assert.doesNotMatch(
+      res.text,
+      /shared secret|allowMutations|NO_SHARED_SECRET|unauthorized|401/i,
+      `the authorized call must clear the shared-secret guard, got: ${res.text}`,
+    );
   });
 });
