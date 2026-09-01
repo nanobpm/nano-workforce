@@ -1,3 +1,9 @@
+## [0.171.10](https://github.com/nanobpm/nano-workforce/compare/v0.171.9...v0.171.10) (2026-09-01)
+
+### Bug Fixes
+
+* **service:** emit world-restore SHA under harness-read `sha` key ([#696](https://github.com/nanobpm/nano-workforce/issues/696)) ([9794994](https://github.com/nanobpm/nano-workforce/commit/97949948913087c84f79bf0fcaa283c85a7cab0e)), closes [#324](https://github.com/nanobpm/nano-workforce/issues/324) [#695](https://github.com/nanobpm/nano-workforce/issues/695)
+
 ## [0.171.9](https://github.com/nanobpm/nano-workforce/compare/v0.171.8...v0.171.9) (2026-09-01)
 
 ### Bug Fixes
