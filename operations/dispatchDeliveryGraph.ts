@@ -10,6 +10,7 @@
 // re-dispatch of an already-running run short-circuits with `alreadyRunning`. An unknown / expired /
 // superseded / already-dispatched digest is a clean 400.
 
+import { isPlausibleBranchName } from "../app/baseBranch.ts";
 import { dispatchDeliveryGraphRun } from "../app/deliveryGraphDispatch.ts";
 import { getStagedProposal, markProposalDispatched, markProposalExpired } from "../app/deliveryGraphProposals.ts";
 import { isValidIsoDuration } from "../app/reviewWait.ts";
@@ -75,6 +76,38 @@ export default defineOperation("dispatchDeliveryGraph", async ({ body }, app) =>
     if (parsed.value !== undefined) timeouts[field] = parsed.value;
   }
 
+  // Host-git provisioning override (#684/#686) — the OPTIONAL `owner/repo` + base branch the run's
+  // `agent` nodes implement against. When both are present the runner seeds the canonical
+  // `io.nanobpm.agentTask.repository` isolation envelope (`repoEnvelopeVars`) onto every agent cell's
+  // job so it provisions a throwaway clone instead of mutating the worker's launch dir. `repository` is
+  // shape-validated here (mirrors `repoEnvelopeVars`' own `owner/repo` allowlist) so a malformed value
+  // is a clean 400 rather than a silently-dropped envelope; both absent → no envelope (legacy behaviour).
+  const repoRaw = body && typeof body === "object" && "repository" in body && typeof body.repository === "string" ? body.repository.trim() : "";
+  let repository: string | undefined;
+  if (repoRaw !== "") {
+    if (repoRaw.length > 255 || !/^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/.test(repoRaw) || /\.git$/i.test(repoRaw)) {
+      const shown = truncateForEcho(repoRaw);
+      app.log.warn("dispatch-delivery-graph rejected: invalid repository", { value: shown });
+      return { status: 400, body: { ok: false, error: `\`repository\` must be an \`owner/repo\` reference; got \`${shown}\`` } };
+    }
+    repository = repoRaw;
+  }
+  const baseRaw = body && typeof body === "object" && "baseBranch" in body && typeof body.baseBranch === "string" ? body.baseBranch.trim() : "";
+  let baseBranch: string | undefined;
+  if (baseRaw !== "") {
+    // `baseBranch` becomes the isolation envelope's `ref` — a real Git ref the harness checks out and
+    // branches off. Gate it with the canonical conservative branch-name allowlist (`app/plan.ts`,
+    // shared with the epic/feature launch paths) so whitespace, shell metacharacters, newlines, a
+    // leading `-`, `..`/`//`, etc. are a clean 400 rather than an invalid-ref/argument-parsing edge
+    // case in a downstream git invocation.
+    if (baseRaw.length > 255 || !isPlausibleBranchName(baseRaw)) {
+      const shown = truncateForEcho(baseRaw);
+      app.log.warn("dispatch-delivery-graph rejected: invalid baseBranch", { value: shown });
+      return { status: 400, body: { ok: false, error: `\`baseBranch\` must be a plausible git branch name; got \`${shown}\`` } };
+    }
+    baseBranch = baseRaw;
+  }
+
   // Load the live staged proposal for this digest — refuses an unknown/expired/superseded/already-
   // dispatched digest cleanly (no run is launched).
   const proposal = await getStagedProposal(app.data, digest);
@@ -98,7 +131,7 @@ export default defineOperation("dispatchDeliveryGraph", async ({ body }, app) =>
     return { status: 400, body: { ok: false, error: `staged proposal ${digest} is corrupt: ${err instanceof Error ? err.message : String(err)}` } };
   }
 
-  const dispatched = await dispatchDeliveryGraphRun(app, graph, { runKey: idempotencyKey, title: proposal.title, ...timeouts });
+  const dispatched = await dispatchDeliveryGraphRun(app, graph, { runKey: idempotencyKey, title: proposal.title, repository, baseBranch, ...timeouts });
   if (!dispatched.ok) {
     app.log.warn("dispatch-delivery-graph refused: compile", { digest, errors: dispatched.errors.length });
     const outBody: DeliveryGraphTextResult = {

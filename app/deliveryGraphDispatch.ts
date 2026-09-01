@@ -49,7 +49,7 @@ export type DispatchDeliveryGraphResult =
 export async function dispatchDeliveryGraphRun(
   app: Pick<AppApi, "data" | "engine" | "log">,
   graph: unknown,
-  options: { runKey?: string | null; title?: string | null } & DeliveryRunTimeouts = {},
+  options: { runKey?: string | null; title?: string | null; repository?: string | null; baseBranch?: string | null } & DeliveryRunTimeouts = {},
 ): Promise<DispatchDeliveryGraphResult> {
   const validationErrors = validateDeliveryGraph(graph);
   if (validationErrors.length > 0) {
@@ -140,6 +140,11 @@ export async function dispatchDeliveryGraphRun(
       escalationSlaTimeout: options.escalationSlaTimeout,
       probePollEvery: options.probePollEvery,
       escalationAssignee: options.escalationAssignee,
+      // Host-git provisioning (#684/#686): forward the run-level repo/base so the runner seeds the
+      // `io.nanobpm.agentTask.repository` isolation envelope onto every agent cell's job (absent → the
+      // runner emits no envelope and the harness keeps its legacy launch-dir behaviour).
+      repository: options.repository,
+      baseBranch: options.baseBranch,
     });
   } catch (err) {
     await markClaimFailed();
