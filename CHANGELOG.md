@@ -1,3 +1,9 @@
+## [0.172.1](https://github.com/nanobpm/nano-workforce/compare/v0.172.0...v0.172.1) (2026-09-01)
+
+### Bug Fixes
+
+* **onboarding:** send full ProjectConfig on env write (install.sh Phase 2 HTTP 422) ([#693](https://github.com/nanobpm/nano-workforce/issues/693)) ([cea5a13](https://github.com/nanobpm/nano-workforce/commit/cea5a133fe2e53299432e8f61b81c8eadbf9f1ed)), closes [nanobpm/nano-workforce#692](https://github.com/nanobpm/nano-workforce/issues/692) [#692](https://github.com/nanobpm/nano-workforce/issues/692)
+
 ## [0.172.0](https://github.com/nanobpm/nano-workforce/compare/v0.171.11...v0.172.0) (2026-09-01)
 
 ### Features
