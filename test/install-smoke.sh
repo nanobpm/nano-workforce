@@ -302,6 +302,13 @@ const srv = http.createServer((req, res) => {
     if (m === 'POST' && url === '/console/api/extensions/install') return json(201, { id: 'nano-workforce' });
     if (m === 'POST' && url === '/console/api/projects') return mode === 'exists' ? json(409, { error: 'exists' }) : json(201, { name: 'Workforce' });
     if (m === 'PUT' && url === '/console/api/projects/Workforce/config') return json(200, { ok: true });
+    if (m === 'GET' && url === '/console/api/projects/Workforce/config') {
+      // The whole-object ProjectConfig install.sh fetches before merging `.env`
+      // and PUTting it back (nanobpm/nano-workforce#692). Must carry the required
+      // top-level fields (name, main, platforms, lang) so merge_config_env has a
+      // full object to set `.env` on.
+      return json(200, { name: 'Workforce', main: 'nano-workforce', platforms: ['console'], lang: 'ts', env: {} });
+    }
     if (m === 'POST' && url === '/console/api/projects/Workforce/run') { ran = true; return json(200, { state: 'running' }); }
     if (m === 'GET' && url === '/console/app-view/Workforce/app/api/version') {
       if (mode === 'timeout') return json(404, {});
