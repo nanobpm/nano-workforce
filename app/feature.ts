@@ -19,6 +19,7 @@ import { TRANSCRIPT_URL_BASE_VAR, transcriptUrlBaseFor } from "./agentic/transcr
 import { coalesceTitle, fetchIssueTitle } from "./github.ts";
 import { ESCALATION_SLA_TIMEOUT, normalizeBaseBranch, type ParsedIssue, renderBaseBranchBrief } from "./plan.ts";
 import type { ReadinessProbe } from "./readiness.ts";
+import { repoEnvelopeVars } from "./repoEnvelope.ts";
 
 /** Optional intake-time readiness gate for a feature run (issue #295): the `capability`/`command`/…
  * probes the run must ALL satisfy before its implementation agent is dispatched (parked, durably, at
@@ -336,6 +337,10 @@ export async function startFeature(
       updated_at: ts,
     });
   }
+  const taskId = featureTaskId(parsed.number);
+  // Pre-PR feature branch (issue #684): the deterministic `feat/<task.id>` the harness creates off the
+  // base for the implementation agent (the agent-guide's `feat/*` convention), matching `task.id`.
+  const prePrBranch = `feat/${taskId}`;
   const { processInstanceKey } = await engine.createInstance({
     processDefinitionId: FEATURE_PROCESS_ID,
     variables: {
@@ -349,7 +354,7 @@ export async function startFeature(
       // (resources/prompts/feature.md); `task.id` fixes its deterministic branch `feat/<task.id>` across a
       // resume. Unlike an epic, there is no planner — the whole issue IS the slice.
       task: {
-        id: featureTaskId(parsed.number),
+        id: taskId,
         title: parsed.planKey,
         prompt:
           `Implement the GitHub issue ${parsed.planKey} end to end. Read it in full first ` +
@@ -406,6 +411,15 @@ export async function startFeature(
       // links this feature run to its agent transcript in Nano Explorer (feature.bpmn `implement-task`
       // ioMapping). Read down into the job via `=transcriptUrlBase`.
       [TRANSCRIPT_URL_BASE_VAR]: transcriptUrlBaseFor(),
+      // Host-git provisioning (c8ctl, issue #684): deliver the repository envelope so the
+      // `senior:feature` implementation agent gets an ISOLATED throwaway clone instead of inheriting
+      // the worker's launch dir (which, with several copilot workers on one host, means concurrent
+      // implementation jobs share — and clobber — one checkout, violating the durable-resume design).
+      // A feature run is PRE-PR: there is no head branch yet, so the harness checks out the BASE
+      // branch (`ref = base`) and creates the deterministic `feat/<task.id>` feature branch itself
+      // (`branchCreate`), matching the agent-guide's `feat/*` convention. Spread last so an unresolved
+      // repo (`{}`) leaves the other vars untouched.
+      ...repoEnvelopeVars(parsed.repo, base, null, null, prePrBranch),
     },
   });
   const processKey = processInstanceKey == null ? null : String(processInstanceKey);

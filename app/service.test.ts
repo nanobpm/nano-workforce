@@ -550,6 +550,34 @@ test("repoEnvelopeVars emits commitSha only for a well-formed 40-hex SHA (world-
   assertEquals("commitSha" in none, false);
 });
 
+// Pre-PR provisioning (issue #684): the implementation path has no head branch yet, so it passes
+// `ref = base` + a `branchCreate` so the harness clones the base and cuts the deterministic
+// `feat/<task.id>` feature branch off it. `branch.create` is emitted only for a non-blank branch and
+// is absent on the PR-based paths (which check out an existing head).
+test("repoEnvelopeVars emits branch.create only for a non-blank pre-PR branch (#684)", () => {
+  const repo = (repoEnvelopeVars("owner/repo", "main", null, null, "feat/issue-7") as any)["io.nanobpm.agentTask"]
+    .repository;
+  assertEquals(repo.ref, "main", "the pre-PR envelope checks out the BASE branch as its ref");
+  assertEquals(repo.branch.create, "feat/issue-7", "the harness cuts the deterministic feature branch off the base");
+  // Still branch-scoped and blobless like the PR-based envelope.
+  assertEquals(repo.singleBranch, true);
+  assertEquals(repo.filter, "blob:none");
+  // A whitespace-tainted branch is trimmed; a blank/absent one omits the `branch` key entirely so the
+  // PR-based paths (and any caller that doesn't pre-create a branch) are unaffected.
+  assertEquals(
+    (repoEnvelopeVars("owner/repo", "main", null, null, "  feat/issue-9  ") as any)["io.nanobpm.agentTask"].repository
+      .branch.create,
+    "feat/issue-9",
+  );
+  for (const blank of [null, undefined, "", "   "]) {
+    const r = (repoEnvelopeVars("owner/repo", "main", null, null, blank as any) as any)["io.nanobpm.agentTask"]
+      .repository;
+    assertEquals("branch" in r, false, `expected no branch key for ${JSON.stringify(blank)}`);
+  }
+  // The default (4-arg) PR-based call never emits a branch.create.
+  assertEquals("branch" in (repoEnvelopeVars("owner/repo", "feat/x", "main") as any)["io.nanobpm.agentTask"].repository, false);
+});
+
 // Durable-resume enrolment gate (issue #325, ADR 0062 Slice 5/5): `worldRestoreSha` — the seam
 // `submitPr`/`startMerge` thread into `repoEnvelopeVars` — hands the harness the last push-checkpoint
 // ONLY when the enrolled fleet advertises `durable-resume`. With no participant it degrades to null,

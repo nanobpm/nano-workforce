@@ -85,6 +85,12 @@ import {
   readinessPollEvery,
   readinessTimeout,
 } from "./readiness.ts";
+// The repository-provisioning envelope builder lives in its own module (app/repoEnvelope.ts) so the
+// PRE-PR implementation dispatch (`feature.ts`/`plan.ts`) can reuse the ONE canonical implementation
+// without a `plan.ts ↔ service.ts` import cycle (issue #684). Imported for the PR-based callers
+// (submitPr/startMerge) and re-exported below so the long-standing `import { repoEnvelopeVars } from
+// "./service.ts"` call sites (and its tests) keep resolving.
+import { repoEnvelopeVars } from "./repoEnvelope.ts";
 import { clampNudgeMinutes, reviewWaitTimeout } from "./reviewWait.ts";
 import { trialMergeAudits } from "./trialMerge.ts";
 import {
@@ -112,7 +118,7 @@ import {
 } from "./userTasks.ts";
 import { deriveWaitGate } from "./waitGate.ts";
 import { waveMergeTargets } from "./waves.ts";
-import { isCommitSha, WorldStore } from "./world/index.ts";
+import { WorldStore } from "./world/index.ts";
 
 /** The BPMN process that drives review convergence (`resources/processes/convergence-loop.bpmn`). */
 export const PROCESS_ID = "convergence-loop";
@@ -413,77 +419,10 @@ async function registerDependencies(data: DataLayer, prKey: string, depKeys: str
   }
 }
 
-/** The reserved namespace key the c8ctl nano worker harness reads the agent-task envelope from
- * (headers ∪ variables, deep-merged). See c8ctl `normalizeTaskEnvelope`. */
-const AGENT_TASK_NS = "io.nanobpm.agentTask";
-
-/** Build the repository slice of the agent-task envelope for a PR-based agent job (review-round,
- * fix-ci, rebase). Delivered as a *process variable* under the reserved `io.nanobpm.agentTask`
- * key so the harness provisions an isolated clone checked out on the PR's head branch — instead of
- * the agent inheriting whatever directory the worker was launched from (which only happened to be
- * a usable checkout for repos already present locally). `ref` MUST be the PR head branch; when it
- * is unresolved we emit nothing (no `repository.url`) so the harness falls back to the legacy
- * launch-dir behavior rather than silently cloning the repo's default branch. The static
- * `task.prompt` header on the service task deep-merges with this over the same namespace.
- *
- * The clone is requested **branch-scoped and blobless** (`singleBranch: true` + `filter:
- * "blob:none"`) so large monorepos (e.g. `camunda/camunda`, ~1.16 GB) provision within the c8ctl
- * clone timeout instead of full-cloning the whole history (issue #287). `blob:none` is a *blobless*
- * partial clone (trees are still fetched up-front — a *treeless* clone would be `--filter=tree:0`); it
- * keeps the full *commit graph* (so `git merge-base` / the review 3-dot diff stays correct) while
- * fetching file blobs lazily — small upfront, correct diffs. `--depth 1` is deliberately NOT used:
- * it would drop the merge-base and break `git diff origin/<base>...HEAD`. When the PR base branch
- * is known we also emit `baseRef` so the harness fetches the base tip alongside the head, keeping
- * that base reachable for the diff.
- *
- * World-restore (issue #324, ADR 0062 Slice 4/5): when a PR already has a durable push-checkpoint,
- * `commitSha` is emitted so a REPLACEMENT activation (a fresh worktree after a lease loss)
- * reconstructs the working tree to the EXACT pushed SHA — the inversion of the round's outbound
- * `git push` into an inbound `git fetch && git checkout <sha>` — rather than to a branch tip that may
- * have moved. Omitted (no key) when the PR has no checkpoint yet, so a first activation clones the
- * head branch normally. */
-export function repoEnvelopeVars(
-  repo: string,
-  ref: string | null,
-  baseRef: string | null = null,
-  commitSha: string | null = null,
-): Record<string, unknown> {
-  if (!ref) return {};
-  // Defence in depth: every current caller derives `repo` from parsePr/parseIssue (regex-bounded to
-  // `owner/repo`), but this is an exported helper the fan-out epic gives many new callers. A repo
-  // that is not exactly `owner/repo` would build a bogus clone URL, so emit nothing (the harness
-  // then falls back to the launch-dir behaviour) rather than handing the harness a malformed URL.
-  // The owner is a GitHub login (alphanumeric + hyphen); the repo-name segment additionally allows
-  // `.` and `_`. A trailing `.git` is rejected outright so we never emit a double-suffixed
-  // `…/owner/repo.git.git`, and the anchored allowlist bars query/fragment/host-injection chars.
-  if (!/^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/.test(repo) || /\.git$/i.test(repo)) return {};
-  return {
-    [AGENT_TASK_NS]: {
-      repository: {
-        provider: "github",
-        url: `https://github.com/${repo}.git`,
-        ref,
-        // Branch-scoped, blobless partial clone (issue #287): fetch only the head branch with lazy
-        // blobs so large monorepos provision within the clone timeout. Single-branch + blob:none
-        // (not --depth 1) preserves the commit graph so the review's `git diff origin/<base>...HEAD`
-        // has a valid merge-base. Gated on c8ctl provisioner support (jwulf/c8ctl-plugin-nano#91).
-        singleBranch: true,
-        filter: "blob:none",
-        // The base branch this PR targets — emitted so the harness fetches its tip alongside the
-        // single-branch head, keeping `origin/<base>` reachable for the diff. Omitted when unknown.
-        ...(baseRef ? { baseRef } : {}),
-        // World-restore (issue #324): the last pushed SHA a replacement activation reconstructs the
-        // working tree to (inverting the round's push into a fetch+checkout). Only emitted when it is
-        // a well-formed 40-hex commit SHA: `commitSha` is forwarded to the harness as an EXACT
-        // checkout target, so a non-SHA ref or a whitespace-tainted value could reconstruct to an
-        // unintended ref (a moved branch tip) or fail provisioning. A malformed value degrades to
-        // omission — the harness then clones the head branch tip, the pre-#324 behaviour. Omitted too
-        // when the PR has no durable push-checkpoint yet.
-        ...(isCommitSha(commitSha) ? { commitSha } : {}),
-      },
-    },
-  };
-}
+// The repository-provisioning envelope builder now lives in its own module (app/repoEnvelope.ts);
+// re-export it here so the long-standing `import { repoEnvelopeVars } from "./service.ts"` call
+// sites (and its tests) keep resolving (issue #684).
+export { repoEnvelopeVars };
 
 /** The last durable push-checkpoint SHA for a PR (issue #324, ADR 0062 Slice 4/5), or `null` when it
  * has none yet. Threaded into `repoEnvelopeVars` so a replacement activation reconstructs the exact

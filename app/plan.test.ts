@@ -241,6 +241,15 @@ test("startPlan pins the base branch: persisted on the row + seeded as baseBranc
   // Process variables the implement-task consumes.
   assertEquals(seen.baseBranch, "epic/agent-protocol");
   assertEquals(seen.baseBranchBrief.includes("gh pr create --base epic/agent-protocol"), true);
+  // Host-git provisioning (#684): the whole-epic repository envelope so each slice's implementation
+  // agent gets an isolated clone. The epic seed checks out the BASE branch (`ref`) — each slice's
+  // `feat/<task.id>` branch differs per MI child, so NO `branch.create` here (the agent branches).
+  const repo = seen["io.nanobpm.agentTask"].repository;
+  assertEquals(repo.url, "https://github.com/owner/repo.git");
+  assertEquals(repo.ref, "epic/agent-protocol");
+  assertEquals("branch" in repo, false);
+  assertEquals(repo.singleBranch, true);
+  assertEquals(repo.filter, "blob:none");
 });
 
 test("startPlan renders baseBranchBrief unconditionally now that base is required", async () => {
