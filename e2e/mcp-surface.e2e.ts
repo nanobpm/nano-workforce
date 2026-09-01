@@ -185,16 +185,17 @@ describe("MCP surface e2e — the runtime-served /app/mcp handshake, per tool (S
 
   test("mutating framework tools are gated without the shared secret (set-variables)", async () => {
     // This harness boots WITHOUT `NANO_PR_WEBHOOK_SECRET`. Since #698 declares the `hookSecret`
-    // shared-secret scheme (`x-nano-secret-env`), a remote-exposed mutation now fails CLOSED as a
-    // misconfiguration ("secret env … is not set") rather than the pre-#698 no-scheme refusal — the
-    // credential the guard requires cannot exist until the operator sets the env var. Either fail-closed
-    // shape is a valid "gated" outcome; both keep the mutation refused.
+    // shared-secret scheme (`x-nano-secret-env`), a remote-exposed mutation now fails CLOSED
+    // DETERMINISTICALLY as a misconfiguration ("secret env … is not set") — the credential the guard
+    // requires cannot exist until the operator sets the env var. Pin exactly that new shape (NOT the
+    // pre-#698 no-scheme "shared secret"/"allowMutations" refusal), so the test actually proves #698's
+    // `x-nano-secret-env` declaration took effect rather than accepting the old behavior.
     const res = await h.callTool("urban_debug_set_variables", { processInstanceKey: "1", variables: {} });
     assert.ok(res.isError, "urban_debug_set_variables must refuse a credential-free mutation");
     assert.match(
       res.text,
-      /shared secret|allowMutations|secret env .* is not set|misconfigured/i,
-      `the refusal must name the guard: ${res.text}`,
+      /secret env .* is not set|misconfigured/i,
+      `the refusal must be the #698 misconfiguration shape: ${res.text}`,
     );
   });
 
@@ -326,11 +327,13 @@ describe("MCP surface e2e — framework mutation guard authorizes with the share
       { "x-hook-secret": HOOK_SECRET },
     );
     // The correct credential clears the shared-secret guard. The call may still fail downstream (the
-    // hermetic engine has no instance `1`), but it must NO LONGER be the shared-secret refusal — that
-    // is the falsifiable proof the `x-nano-secret-env` declaration made the scheme authorizable.
+    // hermetic engine has no instance `1`), but it must NO LONGER be the shared-secret refusal NOR a
+    // generic authorization failure (401/unauthorized) — excluding those is the falsifiable proof the
+    // `x-nano-secret-env` declaration made the scheme authorizable (rather than the credential silently
+    // still being rejected).
     assert.doesNotMatch(
       res.text,
-      /shared secret|allowMutations|NO_SHARED_SECRET/i,
+      /shared secret|allowMutations|NO_SHARED_SECRET|unauthorized|401/i,
       `the authorized call must clear the shared-secret guard, got: ${res.text}`,
     );
   });

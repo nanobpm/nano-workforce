@@ -188,8 +188,11 @@ export async function bootMcpHarness(opts: BootMcpHarnessOptions = {}): Promise<
       // server answers JSON (the runtime sets `enableJsonResponse`).
       accept: "application/json, text/event-stream",
     };
-    if (sessionId) headers[SESSION_HEADER] = sessionId;
+    // Apply caller-supplied overlay headers FIRST so the session header stays authoritative — a
+    // caller passing auth headers (e.g. `x-hook-secret`) must not be able to clobber `mcp-session-id`
+    // and break the MCP handshake for this request.
     if (extraHeaders) Object.assign(headers, extraHeaders);
+    if (sessionId) headers[SESSION_HEADER] = sessionId;
     const isNotification = method.startsWith("notifications/");
     const message: Record<string, unknown> = { jsonrpc: "2.0", method };
     if (params !== undefined) message.params = params;
