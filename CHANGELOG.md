@@ -1,3 +1,9 @@
+## [0.171.5](https://github.com/nanobpm/nano-workforce/compare/v0.171.4...v0.171.5) (2026-09-01)
+
+### Performance Improvements
+
+* **agents:** warm the build cache once, then build module-scoped — never a cold `-am` reactor build ([#682](https://github.com/nanobpm/nano-workforce/issues/682)) ([338057b](https://github.com/nanobpm/nano-workforce/commit/338057b7f65cbf4e61cf4d74efaa596b3422532b)), closes [#681](https://github.com/nanobpm/nano-workforce/issues/681)
+
 ## [0.171.4](https://github.com/nanobpm/nano-workforce/compare/v0.171.3...v0.171.4) (2026-09-01)
 
 ### Bug Fixes
