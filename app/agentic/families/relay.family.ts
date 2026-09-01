@@ -24,6 +24,7 @@ import type { ConnectionRegistry } from "@nanobpm/agentic/channel";
 import type { Frame } from "@nanobpm/agentic/protocol";
 import { RELAY_FAMILY, RelayHub, type RelayHubOptions } from "@nanobpm/agentic/relay";
 import {
+  parseTranscriptEvent,
   type SqliteDb,
   type TranscriptLifecycle,
   type TranscriptRing,
@@ -51,6 +52,14 @@ const SWEEP_DIVISOR = 4;
 const MAX_TIMER_MS = 2_147_483_647;
 
 /**
+ * Default cadence (ms) of the defensive engine-reconcile pass (#661) — the safety net that releases a
+ * correlation whose engine JOB park is gone but whose terminal `lifecycle` event never arrived (an
+ * unclean worker exit). 30s trades a small staleness bound for a light engine-read load; the precise,
+ * immediate release stays the terminal-lifecycle path, so this only ever mops up unclean exits.
+ */
+const DEFAULT_ENGINE_RECONCILE_MS = 30_000;
+
+/**
  * The retention-sweep cadence (ms) for a given ephemeral-retention window: a fraction of the window,
  * floored at 1ms and — crucially — capped at {@link MAX_TIMER_MS} so a large retention config (e.g.
  * a multi-month window) cannot overflow Node's 32-bit timer and degrade the sweep into a busy loop.
@@ -64,10 +73,73 @@ export function sweepIntervalMs(ephemeralRetentionMs: number): number {
   return Math.min(MAX_TIMER_MS, Math.max(1, interval));
 }
 
+/**
+ * The defensive engine-reconcile cadence (ms) for a given config (#661), or `undefined` to DISABLE the
+ * pass. An omitted config uses {@link DEFAULT_ENGINE_RECONCILE_MS}; a non-finite or non-positive value
+ * (a broken config, or a deliberate opt-out) disables the pass rather than degrading into a 1ms busy
+ * loop; a finite positive value is floored at 1ms (so a sub-millisecond config like 0.5 cannot floor
+ * to 0 and degrade into a busy `setInterval(0)`) and capped at {@link MAX_TIMER_MS} so a large window
+ * cannot overflow Node's 32-bit timer.
+ */
+export function engineReconcileMs(configuredMs?: number): number | undefined {
+  const value = configuredMs ?? DEFAULT_ENGINE_RECONCILE_MS;
+  if (!Number.isFinite(value) || value <= 0) return undefined;
+  return Math.min(MAX_TIMER_MS, Math.max(1, Math.floor(value)));
+}
+
+/**
+ * Wrap an async pass in an in-flight guard so a periodic `setInterval` never fires OVERLAPPING runs
+ * (#661). A single pass of {@link RelayTranscriptService.reconcileEngineCorrelations} awaits an engine
+ * read per linked job, so a pass can outlast its interval (a small configured cadence, or a slow/large
+ * engine read-model); an unguarded `setInterval` would then stack concurrent passes, piling up engine
+ * reads and log volume. While a pass is still pending, every subsequent tick is skipped; the next tick
+ * after it settles — whether it resolves OR rejects, since the guard clears via `.finally` — starts a
+ * fresh pass. The guard clears on BOTH failure modes so it can never wedge in-flight: (1) a
+ * *synchronous* throw from `pass` escapes before `.finally` is attached, so it is caught here — the
+ * guard is re-armed and the fault is re-thrown so it stays loud rather than being silently swallowed;
+ * (2) an async rejection is cleared by `.finally`, but the tick `void`s (does not await) the returned
+ * promise, so `pass` must still settle its own rejections or an unhandled rejection results — which is
+ * why the mount wraps `reconcileEngineCorrelations()` in `.catch`. Making the guard resilient to (1)
+ * removes a subtle footgun for a future caller (or refactor) that returns a non-`async` `pass`. Mirrors
+ * the "one pass at a time" discipline the main poll loop enforces by self-scheduling. Returns the tick
+ * callback to hand to `setInterval`.
+ */
+export function guardOverlappingPasses(pass: () => Promise<void>): () => void {
+  let inFlight = false;
+  return () => {
+    if (inFlight) return;
+    inFlight = true;
+    try {
+      void pass().finally(() => {
+        inFlight = false;
+      });
+    } catch (err) {
+      // A synchronous throw never attaches the `.finally`; re-arm the guard so it does not wedge,
+      // then re-throw so a contract violation still surfaces instead of being silently swallowed.
+      inFlight = false;
+      throw err;
+    }
+  };
+}
+
 /** Read a property off an unknown value without an unsafe `as` cast (mirrors the loader's helper). */
 function readProp(value: unknown, key: string): unknown {
   if (!value || typeof value !== "object") return undefined;
   return Object.hasOwn(value, key) ? Object.getOwnPropertyDescriptor(value, key)?.value : undefined;
+}
+
+/**
+ * Decode a single relay chunk through the ONE canonical transcript parser and report whether it is a
+ * TERMINAL `lifecycle` event (`phase` `completed`/`exited`) — the authoritative "job end" signal a
+ * clean agent run emits on its transcript stream (#661). Anything else — raw terminal bytes, a
+ * non-envelope JSON value, a `phase: "open"` lifecycle, any other event kind — is not terminal.
+ * Reusing {@link parseTranscriptEvent} keeps transcript-vocab knowledge out of the content-agnostic
+ * relay ring and off any forked decoder (Derivation Over Duplication): the ring still sees opaque
+ * bytes; only this narrow seam classifies them.
+ */
+function isTerminalLifecycleChunk(chunk: string): boolean {
+  const event = parseTranscriptEvent({ offset: 0, chunk });
+  return event.kind === "lifecycle" && (event.phase === "completed" || event.phase === "exited");
 }
 
 /**
@@ -424,11 +496,41 @@ export class RelayTranscriptService {
     this.#streams.clear();
   }
 
-  /** Handle one inbound `relay` frame: reconcile dead producers, observe ownership, then delegate. */
+  /** Handle one inbound `relay` frame: reconcile dead producers, observe ownership, delegate, then
+   * release on a terminal `lifecycle` event (#661 — AFTER the hub appended the chunk, so the terminal
+   * event itself is captured in the flushed transcript). */
   #onFrame(frame: Frame, conn: RelayConnectionCtx): void {
     this.#reconcile();
     this.#observe(frame, conn);
     this.relay.handle(frame, conn);
+    this.#observeTerminalLifecycle(frame);
+  }
+
+  /**
+   * Primary job-end release (#661): when a `produce` frame carries the terminal `lifecycle` event
+   * (`phase` `completed`/`exited`), complete its stream so the worker's job⇄instance correlation is
+   * released the moment the job ends — even though the worker's relay connection stays open across jobs
+   * (the disconnect/supersede release paths miss that idle-after-last-job tail, so an idle worker's
+   * finished job would otherwise linger as a phantom active job on its supply row). Runs AFTER the hub
+   * appends the chunk to the ring, so the terminal event is part of the flushed transcript. A narrow,
+   * self-contained decode at the correlation seam that reuses the ONE canonical
+   * {@link parseTranscriptEvent} — the content-agnostic relay ring keeps treating chunks as opaque
+   * bytes, and no transcript-vocab knowledge is forked into it. Non-terminal chunks (raw bytes, a
+   * `phase: "open"` lifecycle, any other event kind) never complete a live stream, so a genuinely
+   * active job is never cleared. Advisory — never throws into the frame handler.
+   */
+  #observeTerminalLifecycle(frame: Frame): void {
+    if (readProp(frame.payload, "op") !== "produce") return;
+    const stream = readProp(frame.payload, "stream");
+    if (typeof stream !== "string" || stream === "") return;
+    const chunk = readProp(frame.payload, "chunk");
+    if (typeof chunk !== "string" || chunk === "") return;
+    const state = this.#streams.get(stream);
+    // Idempotent: an unknown or already-completed stream needs no (further) release — a second terminal
+    // event, or a late one after the disconnect/supersede path already completed the stream, is a no-op.
+    if (state === undefined || state.completed) return;
+    if (!isTerminalLifecycleChunk(chunk)) return;
+    this.completeStream(stream);
   }
 
   /** Record `produce` ownership so a producer disconnect can drive ephemeral completion. */
@@ -625,6 +727,61 @@ export class RelayTranscriptService {
   }
 
   /**
+   * Defensive engine-reconcile safety net (#661): release any linked jobKey whose engine JOB park is
+   * no longer live. The precise, fast release is the terminal `lifecycle` event
+   * ({@link #observeTerminalLifecycle}), but an UNCLEAN worker exit (crash/kill) can skip that event —
+   * and because the worker's relay connection is persistent across jobs, the disconnect release never
+   * fires either, so the finished job would linger as a phantom active job on the worker's supply row.
+   * This periodic pass asks the engine read model (the same {@link ElementInstanceResolver} the link
+   * path uses at #544) whether each linked job is still parked; a job the engine no longer parks
+   * (resolver returns `undefined`) is released and its transcript completed. Bounds staleness regardless
+   * of whether the worker emitted a clean terminal event — and also covers a worker that emitted nothing
+   * and merely went quiet.
+   *
+   * Advisory and best-effort: a no-op with no resolver wired, and a resolver THROW / REJECTION for a
+   * given job is treated as "unknown — keep it linked" (never a false release of a genuinely active
+   * job). The linked set is snapshotted before any await so a concurrent completion (a terminal
+   * lifecycle event landing mid-pass) cannot corrupt iteration, and each release re-checks the current
+   * stream state so a job already released between snapshot and resolution is not double-completed.
+   */
+  async reconcileEngineCorrelations(): Promise<void> {
+    const resolve = this.#resolveElementInstance;
+    if (resolve === undefined) return;
+    const linked: { stream: string; jobKey: string; processInstanceKey?: string }[] = [];
+    for (const [stream, state] of this.#streams) {
+      if (!state.linked || state.completed) continue;
+      const jobKey = jobKeyOfStream(stream);
+      if (jobKey === undefined) continue;
+      const processInstanceKey = this.#correlation()?.resolve?.(jobKey)?.processInstanceKey;
+      linked.push({ stream, jobKey, processInstanceKey });
+    }
+    for (const { stream, jobKey, processInstanceKey } of linked) {
+      let activeKey: string | undefined;
+      try {
+        activeKey = await resolve(jobKey, processInstanceKey);
+      } catch (err) {
+        // A transient engine read failure must NOT be read as "job gone" — leave the job linked; a
+        // later pass (or the terminal lifecycle event) releases it. Advisory, never a false release.
+        this.#log.warn("agentic relay engine-reconcile read failed — leaving correlation linked", {
+          stream,
+          jobKey,
+          err: String(err),
+        });
+        continue;
+      }
+      // A live JOB park (a resolved element-instance key) means the job is genuinely active — keep it.
+      if (activeKey !== undefined) continue;
+      // The engine no longer parks this job → it ended (possibly via an unclean exit that skipped the
+      // terminal lifecycle event). Re-check the current state — a concurrent completion may already
+      // have released it — then release its correlation and flush its transcript.
+      const current = this.#streams.get(stream);
+      if (current === undefined || current.completed || !current.linked) continue;
+      this.#log.info("agentic relay engine-reconcile released a stale correlation", { stream, jobKey });
+      this.completeStream(stream);
+    }
+  }
+
+  /**
    * The still-live relay ring for a stream, for the read path to serve BEFORE a durable flush (#486).
    *
    * A multiplexing worker relays every job over one long-lived connection, one job at a time, so an
@@ -670,11 +827,18 @@ export function createRelayFamily(options: {
   readonly relay?: RelayHubOptions;
   readonly transcript?: TranscriptStoreOptions;
   readonly ensureSchema?: boolean;
+  /**
+   * Cadence (ms) of the defensive engine-reconcile pass (#661). Defaults to
+   * {@link DEFAULT_ENGINE_RECONCILE_MS}. Clamped to Node's 32-bit timer ceiling; a non-positive /
+   * non-finite value disables the pass (the terminal-lifecycle release path still runs).
+   */
+  readonly engineReconcileIntervalMs?: number;
   /** Called with the live service once mounted, so a driver can drive completion/reattach. */
   readonly onMounted?: (service: RelayTranscriptService) => void;
 } = {}): AgenticFamily {
   let service: RelayTranscriptService | undefined;
   let sweepTimer: ReturnType<typeof setInterval> | undefined;
+  let engineReconcileTimer: ReturnType<typeof setInterval> | undefined;
   return {
     name: RELAY_FAMILY_NAME,
     mount(ctx: AgenticContext): void {
@@ -729,12 +893,41 @@ export function createRelayFamily(options: {
         tick();
       }
 
+      // Defensive engine-reconcile safety net (#661): periodically release any linked correlation
+      // whose engine JOB park is gone but whose terminal `lifecycle` event never arrived (an unclean
+      // worker exit), so a crashed worker's finished job stops showing as a phantom active job. Only
+      // useful when an element-instance resolver is wired (engine read-model access); harmless no-op
+      // otherwise. Advisory — a reconcile fault is logged, never thrown, and never keeps the process
+      // alive on its own.
+      if (ctx.resolveElementInstance !== undefined) {
+        const reconcileInterval = engineReconcileMs(options.engineReconcileIntervalMs);
+        if (reconcileInterval !== undefined) {
+          // In-flight guard: `reconcileEngineCorrelations()` is async and awaits an engine read per
+          // linked job, so a pass can outlast `reconcileInterval` (a small interval, or a slow/large
+          // engine read-model). Without a guard, `setInterval` would fire overlapping passes that pile
+          // up concurrent engine reads and log volume. {@link guardOverlappingPasses} skips a tick while
+          // the previous pass is still running so only one reconcile runs at a time — the same "one pass
+          // at a time" discipline the main poll loop enforces by self-scheduling.
+          const reconcileTick = guardOverlappingPasses(() =>
+            (service?.reconcileEngineCorrelations() ?? Promise.resolve()).catch((err: unknown) => {
+              ctx.log.warn("agentic relay engine-reconcile failed", { err: String(err) });
+            }),
+          );
+          engineReconcileTimer = setInterval(reconcileTick, reconcileInterval);
+          engineReconcileTimer.unref?.();
+        }
+      }
+
       options.onMounted?.(service);
     },
     teardown(): void {
       if (sweepTimer !== undefined) {
         clearInterval(sweepTimer);
         sweepTimer = undefined;
+      }
+      if (engineReconcileTimer !== undefined) {
+        clearInterval(engineReconcileTimer);
+        engineReconcileTimer = undefined;
       }
       service?.teardown();
       if (currentService === service) setCurrentRelayTranscriptService(undefined);

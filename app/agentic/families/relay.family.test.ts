@@ -16,16 +16,19 @@ import { fileURLToPath } from "node:url";
 import { ConnectionRegistry } from "@nanobpm/agentic/channel";
 import type { Frame } from "@nanobpm/agentic/protocol";
 import { RELAY_FAMILY } from "@nanobpm/agentic/relay";
-import { type SqliteDb, TRANSCRIPT_SCHEMA_SQL } from "@nanobpm/agentic/transcript";
-import { assert, assertEquals } from "#test-assert";
+import { encodeTranscriptEvent, type SqliteDb, TRANSCRIPT_SCHEMA_SQL } from "@nanobpm/agentic/transcript";
+import { assert, assertEquals, assertThrows } from "#test-assert";
 import { noopLog } from "../../../test/log.ts";
 import { CorrelationRegistry, jobStream } from "../correlation.ts";
 import { AgenticCorrelationStore } from "../correlation-store.ts";
+import { createPresenceStore, PresenceRegistry } from "./presence.family.ts";
 import {
   type CorrelationLink,
   createRelayFamily,
   currentRelayTranscriptService,
+  engineReconcileMs,
   family as relayFamily,
+  guardOverlappingPasses,
   RELAY_FAMILY_NAME,
   RelayTranscriptService,
   sweepIntervalMs,
@@ -540,6 +543,227 @@ test("#544 element-instance enrichment: an unresolved job (never parked) leaves 
   assert(durable !== undefined, "the session is still attributed");
   assertEquals(durable?.elementInstanceKey, undefined, "no element-instance key when the job was not resolvable");
   service.teardown();
+});
+
+/** A `produce` frame whose chunk is a typed transcript LIFECYCLE event at `phase` (#661). */
+const lifecycle = (stream: string, incarnation: number, phase: "open" | "completed" | "exited"): Frame =>
+  produce(stream, incarnation, encodeTranscriptEvent({ kind: "lifecycle", phase, offset: 0 }));
+
+test("#661 primary release: a terminal lifecycle event clears an idle-but-connected worker's finished job", () => {
+  const registry = new ConnectionRegistry();
+  const correlation = new CorrelationRegistry();
+  const byConnection = new Map([["prod", "worker-A"]]);
+  const { service, hub } = mkCorrelatedService(registry, memoryDb(), correlation, byConnection);
+  const p = connect("prod", registry);
+
+  // The worker relays its job's terminal → linked as active.
+  hub.handler?.(produce(jobStream("k1"), 1, "job-1 line"), p.conn);
+  assertEquals(correlation.jobKeysFor("worker-A"), ["k1"], "the job is active while it runs");
+  assertEquals(correlation.count(), 1);
+
+  // The job ends: the worker emits the terminal `lifecycle` event on the SAME live connection and then
+  // goes idle — it does NOT disconnect and does NOT take a new job (no supersede). Before this fix that
+  // finished job lingered forever as a phantom active job; now the terminal event releases it.
+  hub.handler?.(lifecycle(jobStream("k1"), 1, "completed"), p.conn);
+  assertEquals(correlation.jobKeysFor("worker-A"), [], "the finished job is released on the terminal event");
+  assertEquals(correlation.count(), 0, "count() drops — no phantom active job");
+
+  // Assert the RENDERED supply row clears too (not just the registry): the presence snapshot seeds
+  // per-worker jobKeys from the correlation registry, so an idle-but-connected worker shows no job.
+  const store = createPresenceStore(memoryDb());
+  store.ensureSchema();
+  store.register({ instance: "worker-A", connectionId: "prod", identity: "leaf", capability: {} });
+  const presence = new PresenceRegistry(store, () => new Set(["prod"]));
+  const row = presence.snapshot({ jobKeysFor: (i) => correlation.jobKeysFor(i) }).workers[0];
+  assertEquals(row.jobKeys, [], "the supply row shows no active job for the idle worker");
+  assert(row.live, "the worker is still connected — the connection persists across jobs");
+
+  // The terminal event itself is captured in the flushed transcript (release runs AFTER the ring append).
+  const meta = service.transcriptOf(jobStream("k1"));
+  assertEquals(meta?.status, "completed", "the finished job becomes a completed past session");
+  assertEquals(service.reattach(jobStream("k1"), 0)?.entries.length, 2, "the terminal event is part of the transcript");
+  service.teardown();
+});
+
+test("#661 primary release: an `exited` lifecycle also releases; a non-terminal `open` does not", () => {
+  const registry = new ConnectionRegistry();
+  const correlation = new CorrelationRegistry();
+  const byConnection = new Map([["prod", "worker-A"]]);
+  const { service, hub } = mkCorrelatedService(registry, memoryDb(), correlation, byConnection);
+  const p = connect("prod", registry);
+
+  hub.handler?.(produce(jobStream("k1"), 1, "job-1 line"), p.conn);
+  // A `phase: "open"` lifecycle is NOT terminal — a genuinely active job must not be cleared.
+  hub.handler?.(lifecycle(jobStream("k1"), 1, "open"), p.conn);
+  assertEquals(correlation.jobKeysFor("worker-A"), ["k1"], "an open lifecycle keeps the active job");
+  assertEquals(correlation.count(), 1);
+
+  // An `exited` lifecycle (a crash/kill the worker still managed to report) IS terminal → released.
+  hub.handler?.(lifecycle(jobStream("k1"), 1, "exited"), p.conn);
+  assertEquals(correlation.jobKeysFor("worker-A"), [], "an exited lifecycle releases the job");
+  assertEquals(correlation.count(), 0);
+  service.teardown();
+});
+
+test("#661 no-regression: an ordinary (non-lifecycle) chunk never clears a genuinely active job", () => {
+  const registry = new ConnectionRegistry();
+  const correlation = new CorrelationRegistry();
+  const byConnection = new Map([["prod", "worker-A"]]);
+  const { service, hub } = mkCorrelatedService(registry, memoryDb(), correlation, byConnection);
+  const p = connect("prod", registry);
+
+  hub.handler?.(produce(jobStream("k1"), 1, "job-1 line"), p.conn);
+  // Ordinary terminal output (raw bytes, not a typed envelope) must NOT be read as a job-end signal.
+  for (let i = 0; i < 5; i++) hub.handler?.(produce(jobStream("k1"), 1, `output ${i}`), p.conn);
+  assertEquals(correlation.jobKeysFor("worker-A"), ["k1"], "a running job stays active across ordinary output");
+  assertEquals(correlation.count(), 1);
+  assertEquals(service.transcriptOf(jobStream("k1")), undefined, "the live job is not completed");
+  service.teardown();
+});
+
+test("#661 defensive reconcile: an unclean exit (no lifecycle) whose engine job is gone is dropped by the reconcile pass", async () => {
+  const registry = new ConnectionRegistry();
+  const correlation = new CorrelationRegistry();
+  const byConnection = new Map([["prod", "worker-A"]]);
+  // The engine reports job k1 as a live JOB park (element instance ei-1) — until the worker exits
+  // UNCLEANLY (crash/kill): it emits no terminal lifecycle event, keeps no connection to reconcile,
+  // and the engine park is gone → the resolver returns undefined.
+  let parked = true;
+  const resolveElementInstance = (jobKey: string) =>
+    Promise.resolve(parked && jobKey === "k1" ? "ei-1" : undefined);
+  const { service, hub } = mkCorrelatedService(registry, memoryDb(), correlation, byConnection, {
+    resolveElementInstance,
+  });
+  const p = connect("prod", registry);
+
+  hub.handler?.(produce(jobStream("k1"), 1, "job-1 line"), p.conn);
+  assertEquals(correlation.jobKeysFor("worker-A"), ["k1"], "the job links while it runs");
+
+  // While the engine still parks the job, the reconcile pass leaves a genuinely active job alone.
+  await service.reconcileEngineCorrelations();
+  assertEquals(correlation.jobKeysFor("worker-A"), ["k1"], "a genuinely active job is NOT cleared by the safety net");
+  assertEquals(correlation.count(), 1);
+
+  // The worker exits uncleanly (no lifecycle event) — its engine park vanishes. The next reconcile
+  // pass drops the stale correlation even though nothing on the wire signalled job end.
+  parked = false;
+  await service.reconcileEngineCorrelations();
+  assertEquals(correlation.jobKeysFor("worker-A"), [], "the reconcile pass drops the stale correlation");
+  assertEquals(correlation.count(), 0, "no phantom active job survives an unclean exit");
+  service.teardown();
+});
+
+test("#661 defensive reconcile: a transient engine read failure never falsely releases a job", async () => {
+  const registry = new ConnectionRegistry();
+  const correlation = new CorrelationRegistry();
+  const byConnection = new Map([["prod", "worker-A"]]);
+  // The engine read throws (unavailable) — a transient fault must be treated as "unknown, keep it",
+  // NEVER as "job gone", or a live job would be wrongly cleared on every engine blip.
+  const resolveElementInstance = () => Promise.reject(new Error("engine unavailable"));
+  const { service, hub } = mkCorrelatedService(registry, memoryDb(), correlation, byConnection, {
+    resolveElementInstance,
+  });
+  const p = connect("prod", registry);
+  hub.handler?.(produce(jobStream("k1"), 1, "job-1 line"), p.conn);
+
+  await service.reconcileEngineCorrelations();
+  assertEquals(correlation.jobKeysFor("worker-A"), ["k1"], "a transient engine failure leaves the job linked");
+  assertEquals(correlation.count(), 1);
+  service.teardown();
+});
+
+test("#661 defensive reconcile: a no-op when no engine resolver is wired", async () => {
+  const registry = new ConnectionRegistry();
+  const correlation = new CorrelationRegistry();
+  const byConnection = new Map([["prod", "worker-A"]]);
+  const { service, hub } = mkCorrelatedService(registry, memoryDb(), correlation, byConnection);
+  const p = connect("prod", registry);
+  hub.handler?.(produce(jobStream("k1"), 1, "job-1 line"), p.conn);
+
+  // With no element-instance resolver (engine-less host), the safety net cannot query the engine —
+  // it must be an inert no-op, leaving the correlation exactly as the primary path manages it.
+  await service.reconcileEngineCorrelations();
+  assertEquals(correlation.jobKeysFor("worker-A"), ["k1"], "no resolver → the reconcile pass is inert");
+  service.teardown();
+});
+
+test("#661 engineReconcileMs: defaults, disables on a non-positive/non-finite value, caps at the timer max", () => {
+  assertEquals(engineReconcileMs(), 30_000, "an omitted config uses the default cadence");
+  assertEquals(engineReconcileMs(5_000), 5_000, "a finite positive value is honoured");
+  assertEquals(engineReconcileMs(0), undefined, "zero disables the pass");
+  assertEquals(engineReconcileMs(-1), undefined, "a negative value disables the pass");
+  assertEquals(engineReconcileMs(Number.NaN), undefined, "a non-finite value disables the pass");
+  assertEquals(engineReconcileMs(Number.POSITIVE_INFINITY), undefined, "infinity disables the pass");
+  assertEquals(engineReconcileMs(2 ** 32), 2_147_483_647, "a huge value is capped at the Node timer ceiling");
+  assertEquals(engineReconcileMs(0.5), 1, "a sub-millisecond positive value floors to 1ms, never 0 (no busy setInterval(0))");
+});
+
+test("#661 guardOverlappingPasses: a tick while a pass is in flight is skipped; only one pass runs at a time", async () => {
+  let starts = 0;
+  let active = 0;
+  let maxActive = 0;
+  let release!: () => void;
+  // A pass that blocks until we release it, so we can hold one "in flight" while further ticks fire.
+  const pass = () => {
+    starts++;
+    active++;
+    maxActive = Math.max(maxActive, active);
+    return new Promise<void>((resolve) => {
+      release = () => {
+        active--;
+        resolve();
+      };
+    });
+  };
+  const tick = guardOverlappingPasses(pass);
+
+  tick(); // first tick starts a pass — now in flight
+  tick(); // skipped while the first pass is still pending
+  tick(); // skipped
+  assertEquals(starts, 1, "overlapping ticks are dropped while a pass is in flight");
+  assertEquals(maxActive, 1, "never more than one pass runs concurrently");
+
+  release(); // let the first pass settle
+  await new Promise((r) => setImmediate(r)); // flush the `finally` that clears the in-flight flag
+
+  tick(); // a tick after the previous pass settled starts a fresh pass
+  assertEquals(starts, 2, "a tick after the in-flight pass settles starts a new pass");
+  assertEquals(maxActive, 1, "still only ever one pass at a time");
+  release();
+});
+
+test("#661 guardOverlappingPasses: a pass whose work rejects but is self-caught still re-arms the guard", async () => {
+  // The guard clears its in-flight flag via `.finally`, so it re-arms whether the pass resolves OR
+  // rejects — a rejection does NOT wedge the guard. The real hazard of a rejecting pass is an
+  // *unhandled rejection* (the tick voids the returned promise), which is why the mount wraps
+  // `reconcileEngineCorrelations()` in `.catch`. Here the pass's work rejects but is self-caught
+  // (mirroring that wrapper), so there is no unhandled rejection, and we assert the guard re-arms.
+  let starts = 0;
+  const tick = guardOverlappingPasses(() => {
+    starts++;
+    // Work that rejects but settles its own error — exactly like the mount's `.catch` wrapper.
+    return Promise.reject(new Error("pass work failed")).catch(() => {});
+  });
+  tick();
+  await new Promise((r) => setImmediate(r));
+  tick();
+  await new Promise((r) => setImmediate(r));
+  assertEquals(starts, 2, "a self-caught rejecting pass settles and re-arms the guard for the next tick");
+});
+
+test("#661 guardOverlappingPasses: a pass that throws SYNCHRONOUSLY re-arms the guard (no wedge) and stays loud", () => {
+  // A synchronous throw from `pass` escapes before `.finally` is attached, so the guard must catch it,
+  // re-arm, and re-throw — otherwise a future non-`async` caller/refactor would wedge the guard
+  // permanently in-flight. We assert both: the throw propagates (stays loud, not swallowed) AND the
+  // next tick starts a fresh pass (the guard re-armed rather than sticking at in-flight).
+  let starts = 0;
+  const tick = guardOverlappingPasses(() => {
+    starts++;
+    throw new Error("synchronous boom"); // violates the "must not throw synchronously" contract
+  });
+  assertThrows(() => tick(), Error, "synchronous boom");
+  assertThrows(() => tick(), Error, "synchronous boom");
+  assertEquals(starts, 2, "the guard re-armed after a synchronous throw, so the next tick ran the pass");
 });
 
 /**
