@@ -37,10 +37,12 @@ const AGENT_TASK_NS = "io.nanobpm.agentTask";
  * that base reachable for the diff.
  *
  * World-restore (issue #324, ADR 0062 Slice 4/5): when a PR already has a durable push-checkpoint,
- * `commitSha` is emitted so a REPLACEMENT activation (a fresh worktree after a lease loss)
- * reconstructs the working tree to the EXACT pushed SHA — the inversion of the round's outbound
- * `git push` into an inbound `git fetch && git checkout <sha>` — rather than to a branch tip that may
- * have moved. Omitted (no key) when the PR has no checkpoint yet, so a first activation clones the
+ * the last pushed SHA is emitted under the `sha` key so a REPLACEMENT activation (a fresh worktree
+ * after a lease loss) reconstructs the working tree to the EXACT pushed SHA — the inversion of the
+ * round's outbound `git push` into an inbound `git fetch && git checkout <sha>` — rather than to a
+ * branch tip that may have moved. The key is `sha` (not `commitSha`) because that is the field the
+ * c8ctl worker harness actually reads to drive the checkout; the earlier `commitSha` key was a silent
+ * no-op (issue #695). Omitted (no key) when the PR has no checkpoint yet, so a first activation clones the
  * head branch normally.
  *
  * Pre-PR provisioning (issue #684): the implementation path (feature.bpmn / plan-fanout's
@@ -88,13 +90,16 @@ export function repoEnvelopeVars(
         // single-branch head, keeping `origin/<base>` reachable for the diff. Omitted when unknown.
         ...(baseRef ? { baseRef } : {}),
         // World-restore (issue #324): the last pushed SHA a replacement activation reconstructs the
-        // working tree to (inverting the round's push into a fetch+checkout). Only emitted when it is
-        // a well-formed 40-hex commit SHA: `commitSha` is forwarded to the harness as an EXACT
-        // checkout target, so a non-SHA ref or a whitespace-tainted value could reconstruct to an
-        // unintended ref (a moved branch tip) or fail provisioning. A malformed value degrades to
+        // working tree to (inverting the round's push into a fetch+checkout). Emitted under the key
+        // `sha` — the field the c8ctl worker harness actually reads (`provisionRepo` normalizes
+        // `repo.sha` and drives `git fetch origin <sha>` + `git checkout --detach <sha>` off it); a
+        // prior `commitSha` key was a silent no-op the harness never read (issue #695). Only emitted
+        // when the value is a well-formed 40-hex commit SHA: it is forwarded to the harness as an
+        // EXACT checkout target, so a non-SHA ref or a whitespace-tainted value could reconstruct to
+        // an unintended ref (a moved branch tip) or fail provisioning. A malformed value degrades to
         // omission — the harness then clones the head branch tip, the pre-#324 behaviour. Omitted too
         // when the PR has no durable push-checkpoint yet.
-        ...(isCommitSha(commitSha) ? { commitSha } : {}),
+        ...(isCommitSha(commitSha) ? { sha: commitSha } : {}),
         // Pre-PR provisioning (issue #684): the implementation path (feature.bpmn / plan-fanout's
         // implement-cell) dispatches its agent BEFORE any PR exists, so `ref` is the BASE branch, not a
         // head. `branchCreate` asks the harness to cut the deterministic `feat/<task.id>` feature branch

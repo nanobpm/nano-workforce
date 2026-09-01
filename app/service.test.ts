@@ -568,20 +568,24 @@ test("repoEnvelopeVars emits nothing for a malformed repo (not owner/repo)", () 
   }
 });
 
-test("repoEnvelopeVars emits commitSha only for a well-formed 40-hex SHA (world-restore, #324)", () => {
+test("repoEnvelopeVars emits the push-checkpoint under the harness-read `sha` key, only for a well-formed 40-hex SHA (world-restore, #324/#695)", () => {
   const sha = "77ee0993cc6ad4493da0f7551212ef16722135db";
   const env = (repoEnvelopeVars("owner/repo", "feat/x", "main", sha) as any)["io.nanobpm.agentTask"];
-  assertEquals(env.repository.commitSha, sha, "a valid 40-hex SHA is threaded through as the exact checkout target");
-  // A non-SHA ref, an abbreviated SHA, or a whitespace-tainted value is dropped (no `commitSha` key):
-  // it is forwarded to the harness as an EXACT checkout target, so a bad value could reconstruct to a
-  // moved branch tip or fail provisioning. Omission degrades to the pre-#324 head-branch-tip clone.
+  // The emitted key MUST be `sha` — the field the c8ctl harness `provisionRepo` reads to drive
+  // `git fetch origin <sha>` + `git checkout --detach <sha>`. A prior `commitSha` key was a silent
+  // no-op the harness never read (issue #695), so guard the exact wire name here, not just presence.
+  assertEquals(env.repository.sha, sha, "a valid 40-hex SHA is threaded through under the harness-read `sha` key");
+  assertEquals("commitSha" in env.repository, false, "the retired `commitSha` key must never be emitted (silent no-op, #695)");
+  // A non-SHA ref, an abbreviated SHA, or a whitespace-tainted value is dropped (no `sha` key): it is
+  // forwarded to the harness as an EXACT checkout target, so a bad value could reconstruct to a moved
+  // branch tip or fail provisioning. Omission degrades to the pre-#324 head-branch-tip clone.
   for (const bad of ["main", "feat/x", "77ee099", `${sha} `, ` ${sha}`, `${sha}\n`, "z".repeat(40), `${sha}0`, ""]) {
     const r = (repoEnvelopeVars("owner/repo", "feat/x", "main", bad) as any)["io.nanobpm.agentTask"].repository;
-    assertEquals("commitSha" in r, false, `expected no commitSha for "${JSON.stringify(bad)}"`);
+    assertEquals("sha" in r, false, `expected no sha for "${JSON.stringify(bad)}"`);
   }
   // Omitted entirely when there is no checkpoint SHA at all (the common first-activation case).
   const none = (repoEnvelopeVars("owner/repo", "feat/x", "main") as any)["io.nanobpm.agentTask"].repository;
-  assertEquals("commitSha" in none, false);
+  assertEquals("sha" in none, false);
 });
 
 // Pre-PR provisioning (issue #684): the implementation path has no head branch yet, so it passes
