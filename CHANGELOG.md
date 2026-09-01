@@ -1,3 +1,9 @@
+## [0.171.6](https://github.com/nanobpm/nano-workforce/compare/v0.171.5...v0.171.6) (2026-09-01)
+
+### Bug Fixes
+
+* **agentic:** emit the repository envelope on implementation jobs so they run in an isolated clone ([#685](https://github.com/nanobpm/nano-workforce/issues/685)) ([be98081](https://github.com/nanobpm/nano-workforce/commit/be980818321f18e101d0fbef85b30b75d6a6fd15)), closes [#684](https://github.com/nanobpm/nano-workforce/issues/684)
+
 ## [0.171.5](https://github.com/nanobpm/nano-workforce/compare/v0.171.4...v0.171.5) (2026-09-01)
 
 ### Performance Improvements
