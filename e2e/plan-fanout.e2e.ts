@@ -121,6 +121,34 @@ describe("plan-fanout escalations (U2 — task + plan-review + trial-merge → u
   const singleTaskPlan: Stub = () => ({ tasks: [{ id: "t1", title: "T1", prompt: "do t1" }] });
   const approveReview: Stub = () => ({ approved: true, findings: "" });
 
+  test("host-git provisioning: each slice's implement-cell agent job carries the repository envelope (#684)", async () => {
+    // The whole-epic seed emits `io.nanobpm.agentTask.repository` so every slice's `senior:feature`
+    // agent gets an ISOLATED clone instead of clobbering the worker's launch dir. The process variable
+    // rides down through the wave subprocess + `implement-cell-call` callActivity into each agent job.
+    // The epic seed carries the BASE branch as `ref` but NO `branch.create` — each slice's
+    // `feat/<task.id>` differs per MI child, so the agent cuts its own branch inside the clone.
+    let agentRepo: any = null;
+    await withApp(
+      {
+        "senior:plan": singleTaskPlan,
+        "senior:plan-review": approveReview,
+        "senior:feature": (job) => {
+          agentRepo = (job.variables as Record<string, any>)["io.nanobpm.agentTask"]?.repository ?? null;
+          return { status: "blocked", summary: "n/a" };
+        },
+      },
+      async ({ app }) => {
+        await app.settle();
+        assert.ok(agentRepo, "the epic slice's senior:feature job carried the io.nanobpm.agentTask envelope");
+        assert.equal(agentRepo.url, "https://github.com/owner/repo.git", "the harness clones the target repo");
+        assert.equal(agentRepo.ref, "epic/e2e", "the epic seed checks out the BASE (integration) branch");
+        assert.equal("branch" in agentRepo, false, "the epic seed omits branch.create — the agent branches per slice");
+        assert.equal(agentRepo.singleBranch, true, "the blobless/single-branch monorepo shaping rides along");
+        assert.equal(agentRepo.filter, "blob:none");
+      },
+    );
+  });
+
   test("task escalation: a native userTask parks the child; answering routes back to implement-task", async () => {
     let featureCalls = 0;
     await withApp(

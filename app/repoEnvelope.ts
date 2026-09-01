@@ -1,0 +1,102 @@
+// nano-workforce — the repository-provisioning envelope (`io.nanobpm.agentTask.repository`).
+//
+// The ONE canonical builder of the agent-task repository envelope the c8ctl nano worker harness
+// consumes to provision an ISOLATED clone for an agent job — instead of the agent inheriting
+// whatever directory the worker was launched from (which, with several copilot workers on one host,
+// means concurrent jobs share — and clobber — one checkout; see issue #684). It lives in its own
+// module (not service.ts) so BOTH the PR-based dispatch (`service.ts`: review-round / fix-ci /
+// rebase) and the PRE-PR implementation dispatch (`feature.ts`: `startFeature`; `plan.ts`:
+// `startPlan` → the epic's `implement-cell`) derive from this single implementation without a
+// `plan.ts ↔ service.ts` import cycle (AGENTS.md "derivation over duplication — no drift surfaces").
+import { isCommitSha } from "./world/index.ts";
+
+/** The reserved namespace key the c8ctl nano worker harness reads the agent-task envelope from
+ * (headers ∪ variables, deep-merged). See c8ctl `normalizeTaskEnvelope`. */
+const AGENT_TASK_NS = "io.nanobpm.agentTask";
+
+/** Build the repository slice of the agent-task envelope for an agent job. Delivered as a *process
+ * variable* under the reserved `io.nanobpm.agentTask` key so the harness provisions an isolated
+ * clone — instead of the agent inheriting whatever directory the worker was launched from (which
+ * only happened to be a usable checkout for repos already present locally). `ref` is the branch the
+ * harness checks out: the PR HEAD branch on the PR-based paths (review-round / fix-ci / rebase), or —
+ * on the PRE-PR implementation path (`branchCreate` set) — the BASE branch, off which the harness
+ * cuts the new feature branch. When `ref` is unresolved we emit nothing (no `repository.url`) so the
+ * harness falls back to the legacy launch-dir behavior rather than silently cloning the repo's
+ * default branch. The static `task.prompt` header on the service task deep-merges with this over the
+ * same namespace.
+ *
+ * The clone is requested **branch-scoped and blobless** (`singleBranch: true` + `filter:
+ * "blob:none"`) so large monorepos (e.g. `camunda/camunda`, ~1.16 GB) provision within the c8ctl
+ * clone timeout instead of full-cloning the whole history (issue #287). `blob:none` is a *blobless*
+ * partial clone (trees are still fetched up-front — a *treeless* clone would be `--filter=tree:0`); it
+ * keeps the full *commit graph* (so `git merge-base` / the review 3-dot diff stays correct) while
+ * fetching file blobs lazily — small upfront, correct diffs. `--depth 1` is deliberately NOT used:
+ * it would drop the merge-base and break `git diff origin/<base>...HEAD`. When the PR base branch
+ * is known we also emit `baseRef` so the harness fetches the base tip alongside the head, keeping
+ * that base reachable for the diff.
+ *
+ * World-restore (issue #324, ADR 0062 Slice 4/5): when a PR already has a durable push-checkpoint,
+ * `commitSha` is emitted so a REPLACEMENT activation (a fresh worktree after a lease loss)
+ * reconstructs the working tree to the EXACT pushed SHA — the inversion of the round's outbound
+ * `git push` into an inbound `git fetch && git checkout <sha>` — rather than to a branch tip that may
+ * have moved. Omitted (no key) when the PR has no checkpoint yet, so a first activation clones the
+ * head branch normally.
+ *
+ * Pre-PR provisioning (issue #684): the implementation path (feature.bpmn / plan-fanout's
+ * `implement-cell`) dispatches its agent BEFORE any PR exists, so it passes `ref = base` and a
+ * `branchCreate` naming the deterministic `feat/<task.id>` feature branch the harness cuts off that
+ * base itself (the agent-guide's `feat/*` convention) — instead of the agent branching by hand — so
+ * the isolated clone lands on the right branch deterministically across a resume. `branchCreate` is
+ * omitted on the PR-based paths, which check out an existing head. */
+export function repoEnvelopeVars(
+  repo: string,
+  ref: string | null,
+  baseRef: string | null = null,
+  commitSha: string | null = null,
+  branchCreate: string | null = null,
+): Record<string, unknown> {
+  if (!ref) return {};
+  // Defence in depth: every current caller derives `repo` from parsePr/parseIssue (regex-bounded to
+  // `owner/repo`), but this is an exported helper the fan-out epic gives many new callers. A repo
+  // that is not exactly `owner/repo` would build a bogus clone URL, so emit nothing (the harness
+  // then falls back to the launch-dir behaviour) rather than handing the harness a malformed URL.
+  // The owner is a GitHub login (alphanumeric + hyphen); the repo-name segment additionally allows
+  // `.` and `_`. A trailing `.git` is rejected outright so we never emit a double-suffixed
+  // `…/owner/repo.git.git`, and the anchored allowlist bars query/fragment/host-injection chars.
+  if (!/^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/.test(repo) || /\.git$/i.test(repo)) return {};
+  return {
+    [AGENT_TASK_NS]: {
+      repository: {
+        provider: "github",
+        url: `https://github.com/${repo}.git`,
+        ref,
+        // Branch-scoped, blobless partial clone (issue #287): fetch only the head branch with lazy
+        // blobs so large monorepos provision within the clone timeout. Single-branch + blob:none
+        // (not --depth 1) preserves the commit graph so the review's `git diff origin/<base>...HEAD`
+        // has a valid merge-base. Gated on c8ctl provisioner support (jwulf/c8ctl-plugin-nano#91).
+        singleBranch: true,
+        filter: "blob:none",
+        // The base branch this PR targets — emitted so the harness fetches its tip alongside the
+        // single-branch head, keeping `origin/<base>` reachable for the diff. Omitted when unknown.
+        ...(baseRef ? { baseRef } : {}),
+        // World-restore (issue #324): the last pushed SHA a replacement activation reconstructs the
+        // working tree to (inverting the round's push into a fetch+checkout). Only emitted when it is
+        // a well-formed 40-hex commit SHA: `commitSha` is forwarded to the harness as an EXACT
+        // checkout target, so a non-SHA ref or a whitespace-tainted value could reconstruct to an
+        // unintended ref (a moved branch tip) or fail provisioning. A malformed value degrades to
+        // omission — the harness then clones the head branch tip, the pre-#324 behaviour. Omitted too
+        // when the PR has no durable push-checkpoint yet.
+        ...(isCommitSha(commitSha) ? { commitSha } : {}),
+        // Pre-PR provisioning (issue #684): the implementation path (feature.bpmn / plan-fanout's
+        // implement-cell) dispatches its agent BEFORE any PR exists, so `ref` is the BASE branch, not a
+        // head. `branchCreate` asks the harness to cut the deterministic `feat/<task.id>` feature branch
+        // off that base itself (the agent-guide's `feat/*` convention) instead of the agent branching by
+        // hand — making the isolated clone land on the right branch deterministically across a resume.
+        // Omitted (no key) on the PR-based paths (review/fix-ci/rebase), which check out an existing head.
+        ...(typeof branchCreate === "string" && branchCreate.trim() !== ""
+          ? { branch: { create: branchCreate.trim() } }
+          : {}),
+      },
+    },
+  };
+}

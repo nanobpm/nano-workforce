@@ -24,6 +24,7 @@ import {
 import { derivedTrackingTable } from "./instanceTracking.ts";
 import { clearExclusions } from "./mergeExclusion.ts";
 import type { ReadinessProbe } from "./readiness.ts";
+import { repoEnvelopeVars } from "./repoEnvelope.ts";
 import { clearTaskDeltas } from "./taskDelta.ts";
 
 /** The BPMN process this module drives (resources/processes/plan-fanout.bpmn). */
@@ -1074,6 +1075,16 @@ export async function startPlan(
       // instance. A ROOT never runs the preflight, so its `gateKey` stays `null`, unused.
       gateKey: probes ? `preflight:${parsed.planKey}` : null,
       resolvedArtifacts: null,
+      // Host-git provisioning (c8ctl, issue #684): deliver the repository envelope so each epic slice's
+      // `senior:feature` implementation agent (plan-fanout's per-wave `implement-cell`) gets an
+      // ISOLATED throwaway clone instead of inheriting the worker's launch dir — otherwise several
+      // copilot workers on one host share (and clobber) a single checkout, violating the durable-resume
+      // design. This is the whole-epic seed, so it carries `ref = base` (the epic integration branch)
+      // but NO `branchCreate`: each slice's deterministic `feat/<task.id>` branch differs per MI child,
+      // so the agent cuts its own branch inside the isolated clone (per resources/prompts/feature.md).
+      // The process-level variable propagates through the wave subprocess + `implement-cell` callActivity
+      // into each agent job. Spread last so an unresolved repo (`{}`) leaves the other vars untouched.
+      ...repoEnvelopeVars(parsed.repo, base),
     },
   });
   const processKey = processInstanceKey == null ? null : String(processInstanceKey);
