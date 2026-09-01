@@ -94,11 +94,13 @@ export function engineReconcileMs(configuredMs?: number): number | undefined {
  * engine read-model); an unguarded `setInterval` would then stack concurrent passes, piling up engine
  * reads and log volume. While a pass is still pending, every subsequent tick is skipped; the next tick
  * after it settles — whether it resolves OR rejects, since the guard clears via `.finally` — starts a
- * fresh pass. Two caller obligations follow from the tick `void`-ing (not awaiting) the returned
- * promise: (1) `pass` must not throw *synchronously*, because a synchronous throw escapes before
- * `.finally` is attached and would leave the guard wedged (in-flight, never re-arming); (2) `pass` must
- * settle its own rejections — an unhandled rejection is the real hazard of a rejecting pass here (the
- * guard itself always clears), so the mount wraps `reconcileEngineCorrelations()` in `.catch`. Mirrors
+ * fresh pass. The guard clears on BOTH failure modes so it can never wedge in-flight: (1) a
+ * *synchronous* throw from `pass` escapes before `.finally` is attached, so it is caught here — the
+ * guard is re-armed and the fault is re-thrown so it stays loud rather than being silently swallowed;
+ * (2) an async rejection is cleared by `.finally`, but the tick `void`s (does not await) the returned
+ * promise, so `pass` must still settle its own rejections or an unhandled rejection results — which is
+ * why the mount wraps `reconcileEngineCorrelations()` in `.catch`. Making the guard resilient to (1)
+ * removes a subtle footgun for a future caller (or refactor) that returns a non-`async` `pass`. Mirrors
  * the "one pass at a time" discipline the main poll loop enforces by self-scheduling. Returns the tick
  * callback to hand to `setInterval`.
  */
@@ -107,9 +109,16 @@ export function guardOverlappingPasses(pass: () => Promise<void>): () => void {
   return () => {
     if (inFlight) return;
     inFlight = true;
-    void pass().finally(() => {
+    try {
+      void pass().finally(() => {
+        inFlight = false;
+      });
+    } catch (err) {
+      // A synchronous throw never attaches the `.finally`; re-arm the guard so it does not wedge,
+      // then re-throw so a contract violation still surfaces instead of being silently swallowed.
       inFlight = false;
-    });
+      throw err;
+    }
   };
 }
 

@@ -17,7 +17,7 @@ import { ConnectionRegistry } from "@nanobpm/agentic/channel";
 import type { Frame } from "@nanobpm/agentic/protocol";
 import { RELAY_FAMILY } from "@nanobpm/agentic/relay";
 import { encodeTranscriptEvent, type SqliteDb, TRANSCRIPT_SCHEMA_SQL } from "@nanobpm/agentic/transcript";
-import { assert, assertEquals } from "#test-assert";
+import { assert, assertEquals, assertThrows } from "#test-assert";
 import { noopLog } from "../../../test/log.ts";
 import { CorrelationRegistry, jobStream } from "../correlation.ts";
 import { AgenticCorrelationStore } from "../correlation-store.ts";
@@ -749,6 +749,21 @@ test("#661 guardOverlappingPasses: a pass whose work rejects but is self-caught 
   tick();
   await new Promise((r) => setImmediate(r));
   assertEquals(starts, 2, "a self-caught rejecting pass settles and re-arms the guard for the next tick");
+});
+
+test("#661 guardOverlappingPasses: a pass that throws SYNCHRONOUSLY re-arms the guard (no wedge) and stays loud", () => {
+  // A synchronous throw from `pass` escapes before `.finally` is attached, so the guard must catch it,
+  // re-arm, and re-throw — otherwise a future non-`async` caller/refactor would wedge the guard
+  // permanently in-flight. We assert both: the throw propagates (stays loud, not swallowed) AND the
+  // next tick starts a fresh pass (the guard re-armed rather than sticking at in-flight).
+  let starts = 0;
+  const tick = guardOverlappingPasses(() => {
+    starts++;
+    throw new Error("synchronous boom"); // violates the "must not throw synchronously" contract
+  });
+  assertThrows(() => tick(), Error, "synchronous boom");
+  assertThrows(() => tick(), Error, "synchronous boom");
+  assertEquals(starts, 2, "the guard re-armed after a synchronous throw, so the next tick ran the pass");
 });
 
 /**
