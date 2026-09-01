@@ -1,0 +1,217 @@
+{
+  "schemaVersion": "1.0",
+  "title": "Connect over MCP",
+  "nodes": [
+    {
+      "type": "nav",
+      "id": "nav",
+      "props": {
+        "variant": "bar",
+        "title": "Nano Workforce",
+        "items": [
+          {
+            "label": "Overview",
+            "page": "overview"
+          },
+          {
+            "label": "Connect over MCP",
+            "page": "mcp"
+          },
+          {
+            "label": "Lineage",
+            "page": "lineage"
+          },
+          {
+            "label": "Convergence",
+            "page": "home"
+          },
+          {
+            "label": "Epics",
+            "page": "epic"
+          },
+          {
+            "label": "Feature",
+            "page": "feature"
+          },
+          {
+            "label": "Delivery Graphs",
+            "page": "delivery-graphs"
+          },
+          {
+            "label": "Tasks",
+            "page": "tasks",
+            "badge": {
+              "source": "app",
+              "table": "user_tasks",
+              "filter": [],
+              "tone": "danger",
+              "refreshMs": 5000,
+              "hideWhenZero": true
+            }
+          },
+          {
+            "label": "Cockpit",
+            "page": "cockpit"
+          },
+          {
+            "label": "Board",
+            "page": "board"
+          },
+          {
+            "label": "Velocity",
+            "page": "velocity"
+          }
+        ],
+        "sticky": true
+      }
+    },
+    {
+      "type": "text",
+      "id": "title",
+      "props": { "text": "Connect over MCP", "variant": "heading" }
+    },
+    {
+      "type": "text",
+      "id": "intro",
+      "props": {
+        "text": "Point a coding agent (Copilot, Claude, Cursor \u2026) at this running instance so the workforce's operations become native tools \u2014 submit work, answer escalations, read status, and debug a wedged instance without curl. The Urban runtime serves a Streamable-HTTP MCP endpoint at /app/mcp for this app and projects its openapi.yaml into tools, with zero MCP code in nwf. Register ONE server entry per instance; its tools are namespaced under the name you give it, so naming the instance targets the right one and makes the wrong-instance mistake structurally impossible. Use the copyable recipes below \u2014 each URL is already rendered for THIS instance's address (including any reverse-proxy prefix).",
+        "variant": "sub"
+      }
+    },
+    {
+      "type": "button",
+      "id": "recipe-config",
+      "props": {
+        "label": "\ud83d\udccb Config recipe \u2014 local / LAN / remote (mcp-config.json)",
+        "variant": "ghost",
+        "modal": {
+          "title": "One server entry per instance",
+          "description": "Add to ~/.copilot/mcp-config.json (user-wide) or .mcp.json (repo-scoped). The workforce-local entry is pre-filled with THIS instance's URL; the merlin/remote entries show the LAN and ngrok shapes \u2014 give each node its own named entry. MCP servers register at host startup, so add the entry, THEN start a new session for its tools to load.",
+          "copyLabel": "Copy config",
+          "copyText": "{\n  \"mcpServers\": {\n    \"workforce-local\": {\n      \"type\": \"http\",\n      \"url\": \"{{appBase}}app/mcp\",\n      \"tools\": [\"*\"]\n    },\n    \"workforce-merlin\": {\n      \"type\": \"http\",\n      \"url\": \"http://merlin.local:3000/app/mcp\",\n      \"headers\": { \"x-hook-secret\": \"$NANO_PR_WEBHOOK_SECRET\" },\n      \"tools\": [\"*\"]\n    },\n    \"workforce-remote\": {\n      \"type\": \"http\",\n      \"url\": \"https://<subdomain>.ngrok.app/app/mcp\",\n      \"headers\": { \"x-hook-secret\": \"$NANO_PR_WEBHOOK_SECRET\" },\n      \"tools\": [\"*\"]\n    }\n  }\n}"
+        }
+      }
+    },
+    {
+      "type": "button",
+      "id": "recipe-cli",
+      "props": {
+        "label": "\ud83d\udccb CLI form (copilot mcp add)",
+        "variant": "ghost",
+        "modal": {
+          "title": "Add from the terminal",
+          "description": "The config path has no header flag, so a guarded instance needs the --header form (second command).",
+          "copyLabel": "Copy commands",
+          "copyText": "# This instance (local, unguarded):\ncopilot mcp add --transport http workforce-local {{appBase}}app/mcp\n\n# A guarded instance \u2014 present the shared secret header:\ncopilot mcp add --transport http workforce-merlin http://merlin.local:3000/app/mcp \\\n  --header \"x-hook-secret: $NANO_PR_WEBHOOK_SECRET\""
+        }
+      }
+    },
+    {
+      "type": "text",
+      "id": "secret-heading",
+      "props": { "text": "Shared-secret setup (x-hook-secret)", "variant": "heading" }
+    },
+    {
+      "type": "text",
+      "id": "secret-body",
+      "props": {
+        "text": "When this instance sets NANO_PR_WEBHOOK_SECRET, the guard is NOT mutation-only \u2014 that secret is required as an x-hook-secret header on BOTH reads and mutations, so read endpoints like GET /app/api/agent and GET /app/api/version also return 401 without it. The mcp-config.json config path has no header flag, so add a headers block alongside url on the server entry (copy it below) or omitting it yields 401s. Put the secret in the server entry's headers, never in chat. When NANO_PR_WEBHOOK_SECRET is unset, reads and mutations both work from loopback with no credential.",
+        "variant": "sub"
+      }
+    },
+    {
+      "type": "button",
+      "id": "recipe-secret",
+      "props": {
+        "label": "\ud83d\udccb Shared-secret header block",
+        "variant": "ghost",
+        "modal": {
+          "title": "Add the x-hook-secret header",
+          "description": "Drop this headers entry alongside url on the guarded server's config-form entry.",
+          "copyLabel": "Copy headers",
+          "copyText": "\"headers\": { \"x-hook-secret\": \"$NANO_PR_WEBHOOK_SECRET\" }"
+        }
+      }
+    },
+    {
+      "type": "text",
+      "id": "basic-auth-heading",
+      "props": { "text": "Basic-Auth-fronted instances (reverse proxy)", "variant": "heading" }
+    },
+    {
+      "type": "text",
+      "id": "basic-auth-body",
+      "props": {
+        "text": "These are two different layers. x-hook-secret is the app's own guard, checked by nwf. Basic Auth is enforced by whatever fronts the instance (ngrok edge, console proxy) and 401s before the request ever reaches nwf. A Basic-Auth-fronted instance therefore needs BOTH headers on the connection: Authorization: Basic \u2026 for the proxy AND x-hook-secret for the app. Generate the blob with printf '%s' 'user:pass' | base64 (echo appends a newline and yields the wrong value); Base64 is encoding, not encryption \u2014 only use Basic Auth over HTTPS.",
+        "variant": "sub"
+      }
+    },
+    {
+      "type": "button",
+      "id": "recipe-basic-auth",
+      "props": {
+        "label": "\ud83d\udccb Basic-Auth + secret (both headers)",
+        "variant": "ghost",
+        "modal": {
+          "title": "Both headers, two different layers",
+          "description": "Proxy layer (Authorization) plus app layer (x-hook-secret) on the same server entry.",
+          "copyLabel": "Copy headers",
+          "copyText": "\"headers\": {\n  \"Authorization\": \"Basic <base64(user:pass)>\",\n  \"x-hook-secret\": \"$NANO_PR_WEBHOOK_SECRET\"\n}"
+        }
+      }
+    },
+    {
+      "type": "text",
+      "id": "mutation-guard-heading",
+      "props": { "text": "urban_debug_* mutation-guard caveat", "variant": "heading" }
+    },
+    {
+      "type": "text",
+      "id": "mutation-guard-body",
+      "props": {
+        "text": "The framework's mutating engine-debug tools (set_variables / retry_job / resolve_incident / cancel_instance) require the app's shared-secret scheme (or the loopback-only allowMutations opt-in when allowRemote is off). Until issue #698 declares x-nano-secret-env, remote mutations are refused on any allowRemote-on instance even with reads open \u2014 that is the current posture, tracked in #698. The read tools (urban_debug_search_process_instances / _element_instance_wait_states / _incidents, and where projected _jobs / _variables) work under the same x-hook-secret as the rest of the surface. Operator-only doors stay operator-only: the delivery-graph stage / dispatch / dismiss lifecycle is x-mcp-excluded from the tool surface \u2014 the human clicking Dispatch in the cockpit IS the approval \u2014 so an agent cannot dispatch a delivery graph through MCP (it authors graphs through the pure compileDeliveryGraph / previewDeliveryGraph doors, which stay exposed).",
+        "variant": "sub"
+      }
+    },
+    {
+      "type": "text",
+      "id": "fallback-heading",
+      "props": { "text": "Fallback \u2014 no MCP client", "variant": "heading" }
+    },
+    {
+      "type": "text",
+      "id": "fallback-body",
+      "props": {
+        "text": "Agents without an MCP client are unchanged \u2014 fetch and follow this instance's live operator guide over curl (the response is JSON with a skill markdown field). Add -H \"x-hook-secret: <secret>\" (and -u user:pass for a Basic-Auth-fronted instance) if this instance is guarded. That skill bootstraps you to the same live guide MCP exposes as the getAgentInstructions tool \u2014 or, over MCP, its addressable companion getAgentGuide(section?), which the runbook recommends over the ~43KB blob to avoid a tool-result overrun.",
+        "variant": "sub"
+      }
+    },
+    {
+      "type": "button",
+      "id": "recipe-fallback",
+      "props": {
+        "label": "\ud83d\udccb Fallback curl (no MCP client)",
+        "variant": "ghost",
+        "modal": {
+          "title": "The curl door is unchanged",
+          "description": "Fetch this instance's live guide directly; add the header(s) if guarded.",
+          "copyLabel": "Copy curl",
+          "copyText": "curl -sS {{appBase}}app/api/agent/skill\n# guarded instance \u2014 add the shared secret (and Basic Auth if fronted):\ncurl -sS {{appBase}}app/api/agent/skill \\\n  -H \"x-hook-secret: <secret>\""
+        }
+      }
+    },
+    {
+      "type": "text",
+      "id": "runbook-heading",
+      "props": { "text": "Deeper reference", "variant": "heading" }
+    },
+    {
+      "type": "text",
+      "id": "runbook-body",
+      "props": {
+        "text": "This served page is the short, always-reachable summary. The full runbook \u2014 discovery, debugging a wedged instance, guard posture, the projected-tool-schema notes and the regression harness \u2014 lives in the repo at docs/mcp-runbook.md (https://github.com/nanobpm/nano-workforce/blob/main/docs/mcp-runbook.md), with README.md \u00a7\"Configure an agent over MCP\" as its companion. Keep the two in sync: the runbook is the source of truth, this page is the served digest.",
+        "variant": "sub"
+      }
+    }
+  ]
+}

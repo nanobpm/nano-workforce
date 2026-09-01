@@ -24,6 +24,11 @@ MCP is a **third door**, not a replacement: `GET /app/api/agent` (the live guide
 `GET /app/api/agent/skill` are unchanged for agents without MCP — see
 [§5 Fallback](#5-fallback).
 
+> **Served summary:** a running instance also exposes a nav-linked **"Connect over
+> MCP"** console page (`pages/mcp.page.json`) with copyable config recipes rendered
+> for that instance's own address. It is the short, always-reachable digest; this
+> runbook is the deeper source of truth. Keep the two in sync.
+
 ## 1. One MCP server entry per instance
 
 In `~/.copilot/mcp-config.json` (user-wide) or `.mcp.json` (repo-scoped):

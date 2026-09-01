@@ -6,6 +6,7 @@
     "title": "Nano Workforce",
     "items": [
       { "label": "Overview", "page": "overview" },
+      { "label": "Connect over MCP", "page": "mcp" },
       { "label": "Lineage", "page": "lineage" },
       { "label": "Convergence", "page": "home" },
       { "label": "Epics", "page": "epic" },
