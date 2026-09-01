@@ -259,8 +259,10 @@ export interface RelayTranscriptServiceOptions {
    * connection dropped, a new one re-registered under the same instance): completing then would
    * archive a live job's transcript and release its correlation, wedging the cockpit (the reconnected
    * worker's produce frames hit a terminal `completed` stream and are ignored) while the harness
-   * keeps the engine lease. Omitted (`() => false`) → the prior always-complete-on-disconnect
-   * behaviour (a true worker-exit still completes: presence drops the instance, so this returns false).
+   * keeps the engine lease. When wired to presence, a true worker-exit still completes: presence
+   * has dropped the instance, so this returns false. Omitted (`() => false`, the static default) →
+   * the prior always-complete-on-disconnect behaviour — every disconnect completes, reconnect
+   * included (the seam never consults presence, so its value does not vary).
    */
   readonly isInstanceLive?: (instance: string) => boolean;
   /**
