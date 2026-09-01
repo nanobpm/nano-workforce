@@ -54,7 +54,7 @@ the PR's checks yourself (`gh pr checks`, `gh run view`).
    `AGENTS.md` / `CONTRIBUTING.md` build section and run its prescribed
    **dependency warm-up once** (for a Maven monorepo that ships it, e.g. camunda,
    `./mvnw install -Dquickly -T1C`), then scope the build to the changed module
-   and drop `-am` (`./mvnw -Dquickly -o -pl <module> …`). Never run a cold
+   and drop `-am` (`./mvnw -Dquickly -o -pl <module> <goals>`). Never run a cold
    whole-reactor `-am` build per iteration — a stateless worker that skips the
    warm-up pays the upstream reactor-compile tax inline and can block for many
    minutes.

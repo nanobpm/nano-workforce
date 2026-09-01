@@ -169,7 +169,7 @@ agent to, **before iterating on a build in the target repo**:
    monorepo that ships the fast path (e.g. camunda), that is
    `./mvnw install -Dquickly -T1C` — it installs every reactor SNAPSHOT into `~/.m2`.
 3. **Then build only the changed module, offline, without `-am`** —
-   `./mvnw -Dquickly -o -pl <module> …`. Never run a cold `-am` reactor build per
+   `./mvnw -Dquickly -o -pl <module> <goals>`. Never run a cold `-am` reactor build per
    iteration.
 
 The repo-agnostic infra levers behind this — a host-persisted `~/.m2` and a shared

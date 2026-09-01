@@ -107,7 +107,7 @@ reactor-compile tax inline on every run, which can block for many minutes.
 - **Then build only the changed module, offline, without `-am`.** e.g.
   `./mvnw -Dquickly -o -pl <module> test-compile`. Dropping `-am` after the
   warm-up is what keeps each iteration to seconds; a per-iteration
-  `-am … clean test-compile` re-compiles the upstream modules from source.
+  `-am <goals>` (e.g. `-am clean test-compile`) re-compiles the upstream modules from source.
 - **The recipe lives in the target repo, not here.** Always defer to that repo's
   own `AGENTS.md` / `CONTRIBUTING.md` build section for the exact commands — the
   Maven lines above are the common case, not a substitute for reading it.
