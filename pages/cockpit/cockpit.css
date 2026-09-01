@@ -310,13 +310,15 @@
    terminal shows for both a live drill and a past-session replay, in place of a raw nwfTranscriptEvent
    dump. Mounted into `.cockpit-terminal-host` by renderDerivedTranscript(). */
 
+/* No own scroll container: the transcript grows with its content and the single
+   outer scroller — the `appView` iframe viewport (fill: min(80vh,48rem)), or the
+   phone page in the standalone shell — scrolls it. A `max-height`/`overflow` here
+   nested a second scrollbar inside the already-bounded iframe (scroll-in-scroll). */
 .cockpit-transcript-derived {
   display: grid;
   gap: 12px;
   padding: 8px;
   font: 12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
-  max-height: 60vh;
-  overflow: auto;
 }
 
 .cockpit-transcript-empty {
