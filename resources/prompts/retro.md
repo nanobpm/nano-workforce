@@ -44,7 +44,11 @@ You have `gh` / git authenticated for the target repository.
 4. **Choose the right home for each promoted lesson** — the whole point is to make the knowledge
    *load-bearing*, not just written down:
    - **`AGENTS.md`** (or `CONTRIBUTING.md`) — a convention, a "before you build, run X", a
-     non-obvious constraint. The default home.
+     non-obvious constraint. The default home. A **build recipe** is the textbook case:
+     a durable "warm the dependency cache once, then build module-scoped — never a cold
+     whole-reactor build" lesson (e.g. Maven's `./mvnw install -Dquickly -T1C` warm-up,
+     then `-pl <module>` without `-am`) belongs in the *target repo's* `AGENTS.md`
+     build section, never duplicated into nano-workforce.
    - **A script** — if the lesson is "always run these steps in this order", encode it as a
      script (or a `make`/`npm`/`deno task` target) so it can't be forgotten.
    - **A CI step** — if the lesson is "this class of mistake should never merge", add a guard/gate

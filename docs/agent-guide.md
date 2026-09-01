@@ -154,6 +154,30 @@ Track a plan the same way you track PRs — its `process_key` is an engine insta
 can inspect in §5, and the PRs it opens show up in `/status` as ordinary convergence
 loops.
 
+### Build hygiene — implementation agents warm up once, then build module-scoped
+
+Implementation and CI-fix agents run on **stateless / ephemeral workers**: the
+workspace (and its build outputs) is thrown away between runs, so each worker pays any
+cold whole-reactor build tax independently. To keep iterations fast, the implementation
+prompts (`resources/prompts/feature.md`, `resources/prompts/fix-ci.md`) instruct every
+agent to, **before iterating on a build in the target repo**:
+
+1. **Read the target repo's own `AGENTS.md` / `CONTRIBUTING.md` build section** — the
+   recipe is authored there, never duplicated into nano-workforce (a per-repo copy here
+   would rot as the target's build changes).
+2. **Run the prescribed dependency warm-up once**, right after checkout. For a Maven
+   monorepo that ships the fast path (e.g. camunda), that is
+   `./mvnw install -Dquickly -T1C` — it installs every reactor SNAPSHOT into `~/.m2`.
+3. **Then build only the changed module, offline, without `-am`** —
+   `./mvnw -Dquickly -o -pl <module> …`. Never run a cold `-am` reactor build per
+   iteration.
+
+The repo-agnostic infra levers behind this — a host-persisted `~/.m2` and a shared
+remote Maven build cache for JVM-capable worker hosts — live in worker-host config, not
+in per-repo files here. The retro loop (`resources/prompts/retro.md`) promotes any
+durable "warm the cache, then build module-scoped" lesson into the *target repo's*
+`AGENTS.md`, keeping each target's recipe sharp without nano-workforce owning it.
+
 ---
 
 ## 3. Answer escalations (unblock a human-in-the-loop wait)
