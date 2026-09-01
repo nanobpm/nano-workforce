@@ -127,10 +127,13 @@ door the UI's Cancel uses), never the record-desyncing engine-level `urban_debug
 
 ## 4. Guard posture
 
-When `NANO_PR_WEBHOOK_SECRET` is **unset**, both reads (status, instances, incidents,
-projections, the operator guide) and mutations (cancel/retry/resolve, `start/*`
-operations, answering escalations) work from loopback with no credential. When it **is
-set**, the guard is not mutation-only: that secret is required as an `x-hook-secret`
+When `NANO_PR_WEBHOOK_SECRET` is **unset**, the app guard is off entirely: both reads
+(status, instances, incidents, projections, the operator guide) and mutations
+(cancel/retry/resolve, `start/*` operations, answering escalations) work with no
+credential **from wherever this instance is reachable** — with `network.bind: "all"`
+that is the LAN, not just loopback, so leave it unset only where that exposure is
+acceptable. When it **is set**, the guard is not mutation-only: that secret is required
+as an `x-hook-secret`
 header on **both reads and mutations** — read endpoints like `GET /app/api/agent` and
 `GET /app/api/version` also return `401` without it. Put it in the server entry's
 `headers`, never in chat. For a remote fleet,

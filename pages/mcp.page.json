@@ -86,7 +86,7 @@
         "variant": "ghost",
         "modal": {
           "title": "One server entry per instance",
-          "description": "Add to ~/.copilot/mcp-config.json (user-wide) or .mcp.json (repo-scoped). The workforce-local entry is pre-filled with THIS instance's URL; the merlin/remote entries show the LAN and ngrok shapes \u2014 give each node its own named entry. MCP servers register at host startup, so add the entry, THEN start a new session for its tools to load.",
+          "description": "Add to ~/.copilot/mcp-config.json (user-wide) or .mcp.json (repo-scoped). The workforce-local entry is pre-filled with THIS instance's URL; the merlin/remote entries show the LAN and ngrok shapes \u2014 give each node its own named entry. If THIS instance is guarded (NANO_PR_WEBHOOK_SECRET set), add the same \"headers\": { \"x-hook-secret\": \"$NANO_PR_WEBHOOK_SECRET\" } block to workforce-local too, or its calls 401. MCP servers register at host startup, so add the entry, THEN start a new session for its tools to load.",
           "copyLabel": "Copy config",
           "copyText": "{\n  \"mcpServers\": {\n    \"workforce-local\": {\n      \"type\": \"http\",\n      \"url\": \"{{appBase}}app/mcp\",\n      \"tools\": [\"*\"]\n    },\n    \"workforce-merlin\": {\n      \"type\": \"http\",\n      \"url\": \"http://merlin.local:3000/app/mcp\",\n      \"headers\": { \"x-hook-secret\": \"$NANO_PR_WEBHOOK_SECRET\" },\n      \"tools\": [\"*\"]\n    },\n    \"workforce-remote\": {\n      \"type\": \"http\",\n      \"url\": \"https://<subdomain>.ngrok.app/app/mcp\",\n      \"headers\": { \"x-hook-secret\": \"$NANO_PR_WEBHOOK_SECRET\" },\n      \"tools\": [\"*\"]\n    }\n  }\n}"
         }
@@ -102,7 +102,7 @@
           "title": "Add from the terminal",
           "description": "The config path has no header flag, so a guarded instance needs the --header form (second command).",
           "copyLabel": "Copy commands",
-          "copyText": "# This instance (local, unguarded):\ncopilot mcp add --transport http workforce-local {{appBase}}app/mcp\n\n# A guarded instance \u2014 present the shared secret header:\ncopilot mcp add --transport http workforce-merlin http://merlin.local:3000/app/mcp \\\n  --header \"x-hook-secret: $NANO_PR_WEBHOOK_SECRET\""
+          "copyText": "# This instance if unguarded (no NANO_PR_WEBHOOK_SECRET set):\ncopilot mcp add --transport http workforce-local {{appBase}}app/mcp\n\n# This instance if guarded (NANO_PR_WEBHOOK_SECRET set) \u2014 present the shared secret header:\ncopilot mcp add --transport http workforce-local {{appBase}}app/mcp \\\n  --header \"x-hook-secret: $NANO_PR_WEBHOOK_SECRET\""
         }
       }
     },
@@ -115,7 +115,7 @@
       "type": "text",
       "id": "secret-body",
       "props": {
-        "text": "When this instance sets NANO_PR_WEBHOOK_SECRET, the guard is NOT mutation-only \u2014 that secret is required as an x-hook-secret header on BOTH reads and mutations, so read endpoints like GET /app/api/agent and GET /app/api/version also return 401 without it. The mcp-config.json config path has no header flag, so add a headers block alongside url on the server entry (copy it below) or omitting it yields 401s. Put the secret in the server entry's headers, never in chat. When NANO_PR_WEBHOOK_SECRET is unset, reads and mutations both work from loopback with no credential.",
+        "text": "When this instance sets NANO_PR_WEBHOOK_SECRET, the guard is NOT mutation-only \u2014 that secret is required as an x-hook-secret header on BOTH reads and mutations, so read endpoints like GET /app/api/agent and GET /app/api/version also return 401 without it. The mcp-config.json config path has no header flag, so add a headers block alongside url on the server entry (copy it below) or omitting it yields 401s. Put the secret in the server entry's headers, never in chat. When NANO_PR_WEBHOOK_SECRET is unset, the app guard is off entirely \u2014 reads and mutations both work with no credential from wherever this instance is reachable (with network.bind \"all\" that is the LAN, not just loopback), so unset it only where that exposure is acceptable.",
         "variant": "sub"
       }
     },
