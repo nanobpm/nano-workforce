@@ -1,3 +1,9 @@
+## [0.171.11](https://github.com/nanobpm/nano-workforce/compare/v0.171.10...v0.171.11) (2026-09-01)
+
+### Bug Fixes
+
+* **mcp:** declare x-nano-secret-env on hookSecret so urban_debug_* mutations authorize remotely ([#700](https://github.com/nanobpm/nano-workforce/issues/700)) ([bd46ac6](https://github.com/nanobpm/nano-workforce/commit/bd46ac6e235fc9a13cab27351108cea9570f387b)), closes [#698](https://github.com/nanobpm/nano-workforce/issues/698) [#698](https://github.com/nanobpm/nano-workforce/issues/698) [#698](https://github.com/nanobpm/nano-workforce/issues/698) [pre-#698](https://github.com/nanobpm/pre-/issues/698)
+
 ## [0.171.10](https://github.com/nanobpm/nano-workforce/compare/v0.171.9...v0.171.10) (2026-09-01)
 
 ### Bug Fixes
