@@ -157,7 +157,7 @@ loops.
 ### Build hygiene — implementation agents warm up once, then build module-scoped
 
 Implementation and CI-fix agents run on **stateless / ephemeral workers**: the
-workspace (and its build outputs) is thrown away between runs, so each worker pays any
+workspace, including its build outputs, is thrown away between runs, so each worker pays any
 cold whole-reactor build tax independently. To keep iterations fast, the implementation
 prompts (`resources/prompts/feature.md`, `resources/prompts/fix-ci.md`) instruct every
 agent to, **before iterating on a build in the target repo**:

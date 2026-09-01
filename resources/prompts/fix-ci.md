@@ -49,8 +49,8 @@ the PR's checks yourself (`gh pr checks`, `gh run view`).
    retry-and-hope). A flaky failure is still a defect: diagnose it.
 3. Apply the **minimal, correct** fix. Keep it scoped to what the failing checks
    demand — do not refactor unrelated code.
-4. Run the relevant check locally to confirm it now passes. **Build
-   module-scoped, not cold.** Before iterating, read the target repo's
+4. Run the relevant check locally to confirm it now passes.
+   **Build module-scoped, not cold.** Before iterating, read the target repo's
    `AGENTS.md` / `CONTRIBUTING.md` build section and run its prescribed
    **dependency warm-up once** (for a Maven monorepo that ships it, e.g. camunda,
    `./mvnw install -Dquickly -T1C`), then scope the build to the changed module
