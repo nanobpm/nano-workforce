@@ -1,3 +1,9 @@
+## [0.177.0](https://github.com/nanobpm/nano-workforce/compare/v0.176.1...v0.177.0) (2026-09-02)
+
+### Features
+
+* **agentic:** explicit claim registry drives cockpit jobKeys visibility ([#714](https://github.com/nanobpm/nano-workforce/issues/714)) ([173ae9f](https://github.com/nanobpm/nano-workforce/commit/173ae9f61ec23f1d5807517e24afe62d034de727)), closes [nano-ide#542](https://github.com/nanobpm/nano-ide/issues/542) [#713](https://github.com/nanobpm/nano-workforce/issues/713)
+
 ## [0.176.1](https://github.com/nanobpm/nano-workforce/compare/v0.176.0...v0.176.1) (2026-09-02)
 
 ### Bug Fixes
