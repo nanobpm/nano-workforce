@@ -1,3 +1,9 @@
+## [0.174.1](https://github.com/nanobpm/nano-workforce/compare/v0.174.0...v0.174.1) (2026-09-02)
+
+### Bug Fixes
+
+* **reconcile:** fold vanished engine instances to orphaned, unwedging inflight runs ([#706](https://github.com/nanobpm/nano-workforce/issues/706)) ([68461da](https://github.com/nanobpm/nano-workforce/commit/68461dae90fba5ab6caaa8eef595e63f3995dc88)), closes [#2](https://github.com/nanobpm/nano-workforce/issues/2) [#630](https://github.com/nanobpm/nano-workforce/issues/630) [#627](https://github.com/nanobpm/nano-workforce/issues/627)
+
 ## [0.174.0](https://github.com/nanobpm/nano-workforce/compare/v0.173.0...v0.174.0) (2026-09-02)
 
 ### Features
