@@ -322,12 +322,16 @@ async function orphanEngineBackedRows(
 
 /** Whether a row's `updated_at` is younger than the grace window — i.e. it was (re)dispatched too
  *  recently to have been projected into `_urban_instance_state` yet, so it must NOT be folded. A
- *  null/unparseable timestamp is treated as "old enough" (not within grace): a dispatched row with no
- *  usable age and no backing instance is genuinely vanished. */
+ *  null/unparseable timestamp is treated as "within grace" (spared): when we cannot establish a row's
+ *  age we must NOT orphan it — a nullable `updated_at` (e.g. `delivery_units.updated_at`,
+ *  db/migrations/088_delivery_units.sql) would otherwise fold a live row. Erring toward sparing at
+ *  worst leaves a genuinely-vanished ageless row for a later pass once it carries a usable timestamp;
+ *  erring the other way wedges/destroys a live run, so we choose the safe default. */
 function withinGrace(updated: unknown, nowMs: number, graceMs: number): boolean {
-  if (updated == null) return false;
+  if (updated == null) return true;
   const t = Date.parse(String(updated));
-  return Number.isFinite(t) && nowMs - t < graceMs;
+  if (!Number.isFinite(t)) return true;
+  return nowMs - t < graceMs;
 }
 
 /** Orphan every NON-terminal, engine-backed row whose `keyField` (process instance key) has NO
@@ -533,10 +537,12 @@ async function recordRun(
 /** Probe the engine's incarnation epoch, then reconcile — the wiring both startup (main.ts) and the
  *  `reconcileEngineState` operator command share, so the two paths can never diverge. Runs BOTH the
  *  epoch-regression pass (engine reset/rewind) and the vanished-instance pass (an inflight run whose
- *  instance is absent/unknown in `_urban_instance_state` — issue #630), returning ONE merged result:
- *  the epoch decision drives the reason unless only the vanished pass acted, and `orphanedCount` /
- *  `orphaned` cover both. The two passes never double-fold a row: once the epoch pass orphans a row it
- *  leaves `activeStatuses`, so the vanished pass no longer selects it. */
+ *  instance is absent/unknown in `_urban_instance_state` — issue #630), returning ONE merged result.
+ *  Reason precedence: `epoch-regression` always wins; otherwise, if the vanished pass orphaned any
+ *  rows the reason is `instance-vanished` (even when the epoch pass reported a non-regression state
+ *  such as `engine-unreachable`); otherwise the epoch pass's reason stands. `orphanedCount` /
+ *  `orphaned` cover both passes. The two passes never double-fold a row: once the epoch pass orphans a
+ *  row it leaves `activeStatuses`, so the vanished pass no longer selects it. */
 export async function runEngineReconcile(
   data: DataLayer,
   engineRest: { restAddress: string; token?: string },

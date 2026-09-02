@@ -323,6 +323,26 @@ test("a still-starting run within the grace window is NOT prematurely folded", a
   assertEquals(DEFAULT_VANISHED_GRACE_MS >= 60_000, true);
 });
 
+test("RED→GREEN: a row whose updated_at is null/unparseable is spared, never orphaned", async () => {
+  const { data, raw } = freshData();
+  ensureInstanceState(raw);
+  // A tracked table's `updated_at` can be nullable (e.g. delivery_units.updated_at,
+  // db/migrations/088_delivery_units.sql) or carry an unparseable value. Its instance is absent from
+  // the read model, so without a usable age we cannot tell a genuinely-vanished row from a live one.
+  // RED (pre-fix): withinGrace treated an unestablishable age as "old enough" and folded the row.
+  // GREEN: we err toward sparing — an ageless row is treated as within grace and left untouched.
+  seedFeatureRun(raw, "o/r#ageless", "running", "888", "not-a-timestamp");
+
+  const res = await reconcileVanishedInstances(data, { now: AT, runId: "van-1" });
+
+  assertEquals(res.orphanedCount, 0);
+  const row = raw.prepare("SELECT status FROM feature_runs WHERE feature_key='o/r#ageless'").get() as {
+    status: string;
+  };
+  assertEquals(row.status, "running");
+  assertEquals((raw.prepare("SELECT COUNT(*) c FROM reconcile_provenance").get() as { c: number }).c, 0);
+});
+
 test("terminal history, keyless rows, and rows with a live instance are never folded as vanished", async () => {
   const { data, raw } = freshData();
   ensureInstanceState(raw);
