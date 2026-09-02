@@ -10,7 +10,9 @@
 import { test } from "node:test";
 import { assert, assertEquals } from "#test-assert";
 import type { AppApi } from "@nanobpm/urban";
+import { memBlackboardSource } from "../test/blackboardDb.ts";
 import { noopLog } from "../test/log.ts";
+import { withTrackingViews } from "../test/trackingViews.ts";
 import handler from "./cancelInstance.ts";
 
 interface FakeEngineOpts {
@@ -135,4 +137,158 @@ test("shared-secret guard: when NANO_PR_WEBHOOK_SECRET is set, a missing/wrong s
     if (prev === undefined) delete process.env["NANO_PR_WEBHOOK_SECRET"];
     else process.env["NANO_PR_WEBHOOK_SECRET"] = prev;
   }
+});
+
+// --- Record-type routing + a truthful reconciled result (issue #705) ----------------------------
+//
+// #667 shipped this door reconciling the pull_requests / plans aggregates, but a `processInstanceKey`
+// belonging to a FEATURE RUN reported `reconciled:0` and left the `feature_runs` row inconsistent.
+// These tests drive the delegate against a data layer whose derived tracking VIEWs are served off
+// in-memory base stores (`withTrackingViews`, exactly as the feature/PR domain tests) plus a REAL
+// SQLite `source()` so the shared primitive's absent-safe projection feed has a handle to write. They
+// pin the delegate's OWN additions: it resolves the record type across every engine-backed binding,
+// 404s a key that maps to none, and reports `reconciled` off the record's derived terminal edge.
+
+// biome-ignore lint/suspicious/noExplicitAny: test-only in-memory table over dynamic row shapes.
+function memTable(rows: any[], key: string) {
+  // biome-ignore lint/suspicious/noExplicitAny: test-only predicate over dynamic row shapes.
+  const matches = (r: any, q: any) => Object.entries(q).every(([f, v]) => r[f] === v);
+  return {
+    // biome-ignore lint/suspicious/noExplicitAny: test-only.
+    get: (k: any) => Promise.resolve(rows.find((r) => r[key] === k) ?? null),
+    // biome-ignore lint/suspicious/noExplicitAny: test-only.
+    find: (q: any = {}) => Promise.resolve(rows.filter((r) => matches(r, q))),
+    // biome-ignore lint/suspicious/noExplicitAny: test-only.
+    findOne: (q: any = {}) => Promise.resolve(rows.find((r) => matches(r, q)) ?? null),
+    // biome-ignore lint/suspicious/noExplicitAny: test-only.
+    insert: (r: any) => {
+      rows.push(r);
+      return Promise.resolve(r);
+    },
+    // biome-ignore lint/suspicious/noExplicitAny: test-only.
+    update: (k: any, patch: any) => {
+      const r = rows.find((x) => x[key] === k);
+      if (r) Object.assign(r, patch);
+      return Promise.resolve(r);
+    },
+  };
+}
+
+// biome-ignore lint/suspicious/noExplicitAny: test-only store map over dynamic row shapes.
+function makeRecordApp(
+  stores: Record<string, { rows: any[]; key: string }>,
+  opts: FakeEngineOpts = {},
+): { app: AppApi; cancelCalls: string[] } {
+  const cancelCalls: string[] = [];
+  const engine = {
+    async cancelInstance({ processInstanceKey }: { processInstanceKey: string }) {
+      cancelCalls.push(processInstanceKey);
+      if (opts.cancelThrows) throw new Error("engine refused");
+    },
+    async searchProcessInstances() {
+      return opts.readBackState ? [{ state: opts.readBackState }] : [];
+    },
+  };
+  const bb = memBlackboardSource();
+  const data = {
+    hasDefaultSource: () => true,
+    source: bb.source,
+    table: withTrackingViews((name: string, key: string) =>
+      memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key),
+    ),
+  };
+  const app = { engine, data, log: noopLog() } as unknown as AppApi;
+  return { app, cancelCalls };
+}
+
+test("a key that maps to NO tracked record → 404 no-op and never touches the engine", async () => {
+  // The record-type resolver finds no binding row for this key: a clean 404, NOT a silent
+  // reconciled:0 success — and we never terminate an instance we don't track.
+  const { app, cancelCalls } = makeRecordApp({ feature_runs: { rows: [], key: "feature_key" } });
+  const res = await call(app, { processInstanceKey: "does-not-exist" });
+  assertEquals(res.status, 404);
+  assertEquals(res.body.ok, false);
+  assertEquals(res.body.reconciled, 0);
+  assert(typeof res.body.error === "string" && res.body.error.length > 0, "carries a reason");
+  assertEquals(cancelCalls.length, 0, "an untracked key never reaches the engine");
+});
+
+test("a feature-run key whose derived record is terminal → 200 ok reconciled:1 (resubmittable)", async () => {
+  // The live repro: the engine instance is already TERMINATED, so its `feature_runs` row derives to
+  // `abandoned` (base `status` frozen at its last transient — the ADR-0065 divergence, seeded here).
+  // The shared primitive writes nothing new (already terminal), yet the delegate must report the
+  // record's REAL terminal state, not the projection-write delta of 0.
+  const { app, cancelCalls } = makeRecordApp(
+    {
+      feature_runs: {
+        rows: [
+          {
+            feature_key: "Magikcraft/nano-bpm#1099",
+            process_key: "5654",
+            status: "running",
+            derived_status: "abandoned",
+          },
+        ],
+        key: "feature_key",
+      },
+    },
+    { cancelThrows: true, readBackState: "TERMINATED" },
+  );
+  const res = await call(app, { processInstanceKey: "5654" });
+  assertEquals(res.status, 200);
+  assertEquals(res.body.ok, true);
+  assertEquals(res.body.reconciled, 1, "the lagging feature_runs record is reported reconciled");
+  assertEquals(cancelCalls, ["5654"], "the door still issued the idempotent engine cancel");
+});
+
+test("a feature-run key committed-cancelled whose record went terminal → 200 ok reconciled:1", async () => {
+  const { app } = makeRecordApp(
+    {
+      feature_runs: {
+        rows: [{ feature_key: "o/r#7", process_key: "900", status: "running", derived_status: "abandoned" }],
+        key: "feature_key",
+      },
+    },
+    { readBackState: "TERMINATED" },
+  );
+  const res = await call(app, { processInstanceKey: "900" });
+  assertEquals(res.status, 200);
+  assertEquals(res.body.ok, true);
+  assertEquals(res.body.reconciled, 1);
+});
+
+test("engine terminates but the record stays ACTIVE → 502 ok:false (not an unqualified success)", async () => {
+  // A resolved record whose derived edge did NOT leave `activeStatuses` (e.g. a projection write that
+  // failed) must not be reported as a clean cancel: reconciled:0 and a non-ok 502.
+  const { app } = makeRecordApp(
+    {
+      feature_runs: {
+        // No seeded derived_status ⇒ the VIEW folds `derived_status := status` = "running" (still active).
+        rows: [{ feature_key: "o/r#8", process_key: "901", status: "running" }],
+        key: "feature_key",
+      },
+    },
+    { readBackState: "TERMINATED" },
+  );
+  const res = await call(app, { processInstanceKey: "901" });
+  assertEquals(res.status, 502, "a terminated instance whose record didn't reconcile is not ok:true");
+  assertEquals(res.body.ok, false);
+  assertEquals(res.body.reconciled, 0);
+  assert(typeof res.body.error === "string" && res.body.error.length > 0, "explains the un-reconciled record");
+});
+
+test("record routing also covers PR/plan aggregates (a resolved pull_requests key reconciles)", async () => {
+  const { app } = makeRecordApp(
+    {
+      pull_requests: {
+        rows: [{ pr_key: "o/r#3", process_key: "300", status: "converging", derived_status: "abandoned" }],
+        key: "pr_key",
+      },
+    },
+    { readBackState: "TERMINATED" },
+  );
+  const res = await call(app, { processInstanceKey: "300" });
+  assertEquals(res.status, 200);
+  assertEquals(res.body.ok, true);
+  assertEquals(res.body.reconciled, 1);
 });
