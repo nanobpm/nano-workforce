@@ -1,3 +1,9 @@
+## [0.174.0](https://github.com/nanobpm/nano-workforce/compare/v0.173.0...v0.174.0) (2026-09-02)
+
+### Features
+
+* **merge-loop:** auto-recover PRs evicted from the merge queue by CI failure, not just conflicts ([#703](https://github.com/nanobpm/nano-workforce/issues/703)) ([45a3051](https://github.com/nanobpm/nano-workforce/commit/45a3051e37767195c75940347af7197f999c3d30)), closes [#556](https://github.com/nanobpm/nano-workforce/issues/556) [#702](https://github.com/nanobpm/nano-workforce/issues/702)
+
 ## [0.173.0](https://github.com/nanobpm/nano-workforce/compare/v0.172.1...v0.173.0) (2026-09-01)
 
 ### Features
