@@ -16,7 +16,13 @@ import { fileURLToPath } from "node:url";
 import { ConnectionRegistry } from "@nanobpm/agentic/channel";
 import type { Frame } from "@nanobpm/agentic/protocol";
 import { RELAY_FAMILY } from "@nanobpm/agentic/relay";
-import { encodeTranscriptEvent, type SqliteDb, TRANSCRIPT_SCHEMA_SQL } from "@nanobpm/agentic/transcript";
+import {
+  encodeTranscriptEvent,
+  type SqliteDb,
+  TRANSCRIPT_EVENT_MARKER,
+  TRANSCRIPT_EVENT_VERSION,
+  TRANSCRIPT_SCHEMA_SQL,
+} from "@nanobpm/agentic/transcript";
 import { assert, assertEquals, assertThrows } from "#test-assert";
 import { noopLog } from "../../../test/log.ts";
 import { CorrelationRegistry, jobStream } from "../correlation.ts";
@@ -551,6 +557,21 @@ test("#544 element-instance enrichment: an unresolved job (never parked) leaves 
 const lifecycle = (stream: string, incarnation: number, phase: "open" | "completed" | "exited"): Frame =>
   produce(stream, incarnation, encodeTranscriptEvent({ kind: "lifecycle", phase, offset: 0 }));
 
+/**
+ * A `produce` frame carrying the harness's job-end `phase:"close"` transcript lifecycle marker
+ * (#710 / jwulf/c8ctl-plugin-nano#150) — the closing twin of the `phase:"open"` RELAY_OPEN_CHUNK the
+ * harness emits at relay-session open. The typed `encodeTranscriptEvent` cannot express the `close`
+ * phase (the agentic `LifecycleEvent` union is `open|completed|exited`), so the on-wire envelope is
+ * built through the SAME marker/version constants the encoder stamps — mirroring exactly what the
+ * harness's untyped `encodeTranscriptEvent({ kind: "lifecycle", phase: "close" })` puts on the wire,
+ * without a forked wire shape. */
+const closeMarker = JSON.stringify({
+  [TRANSCRIPT_EVENT_MARKER]: TRANSCRIPT_EVENT_VERSION,
+  kind: "lifecycle",
+  phase: "close",
+});
+const close = (stream: string, incarnation: number): Frame => produce(stream, incarnation, closeMarker);
+
 test("#661 primary release: a terminal lifecycle event clears an idle-but-connected worker's finished job", () => {
   const registry = new ConnectionRegistry();
   const correlation = new CorrelationRegistry();
@@ -604,6 +625,79 @@ test("#661 primary release: an `exited` lifecycle also releases; a non-terminal 
   hub.handler?.(lifecycle(jobStream("k1"), 1, "exited"), p.conn);
   assertEquals(correlation.jobKeysFor("worker-A"), [], "an exited lifecycle releases the job");
   assertEquals(correlation.count(), 0);
+  service.teardown();
+});
+
+test("#710 close release: a job-end `phase:close` marker flushes the durable transcript with ALL bytes (no truncated tail)", () => {
+  const registry = new ConnectionRegistry();
+  const correlation = new CorrelationRegistry();
+  const byConnection = new Map([["prod", "worker-A"]]);
+  const { service, hub } = mkCorrelatedService(registry, memoryDb(), correlation, byConnection);
+  const p = connect("prod", registry);
+
+  // The worker relays N job frames on a live connection → linked as active. It then goes idle after the
+  // job WITHOUT a supersede (no next job) and WITHOUT a disconnect (the channel persists across jobs),
+  // so the ONLY job-end signal is the harness's drained `phase:close` marker.
+  const N = 4;
+  for (let i = 0; i < N; i++) hub.handler?.(produce(jobStream("k1"), 1, `job-1 line ${i}`), p.conn);
+  assertEquals(correlation.jobKeysFor("worker-A"), ["k1"], "the job is active while it runs");
+  assertEquals(service.transcriptOf(jobStream("k1")), undefined, "not flushed while the job runs");
+
+  // The job completes: the harness drains its outbound relay buffer and emits `phase:close` on the SAME
+  // live connection, then goes idle. Before #710 this was NOT a flush trigger — the durable transcript
+  // was snapshotted late (or not at all) by a later supersede/disconnect, truncating the tail. Now the
+  // close event flushes it deterministically at job-completion time.
+  hub.handler?.(close(jobStream("k1"), 1), p.conn);
+
+  assertEquals(correlation.jobKeysFor("worker-A"), [], "the finished job is released on the close marker");
+  assertEquals(correlation.count(), 0, "no phantom active job after close");
+
+  const meta = service.transcriptOf(jobStream("k1"));
+  assertEquals(meta?.status, "completed", "the job becomes a completed past session at close time");
+  // ALL N produced frames PLUS the close marker itself are in the durable transcript — no truncated
+  // tail (the close event rides the ring append before the release, like the #661 terminal path).
+  assertEquals(
+    service.reattach(jobStream("k1"), 0)?.entries.length,
+    N + 1,
+    "every relayed byte (and the close marker) is flushed — the tail is not truncated",
+  );
+  service.teardown();
+});
+
+test("#710 idempotent: a close then a duplicate close then a producer disconnect neither double-flushes nor throws", () => {
+  const registry = new ConnectionRegistry();
+  const correlation = new CorrelationRegistry();
+  const byConnection = new Map([["prod", "worker-A"]]);
+  const { service, hub } = mkCorrelatedService(registry, memoryDb(), correlation, byConnection);
+  const p = connect("prod", registry);
+
+  hub.handler?.(produce(jobStream("k1"), 1, "job-1 line"), p.conn);
+  hub.handler?.(close(jobStream("k1"), 1), p.conn);
+  const afterClose = service.reattach(jobStream("k1"), 0)?.entries.length;
+  assertEquals(service.transcriptOf(jobStream("k1"))?.status, "completed", "flushed on the first close");
+  assertEquals(correlation.count(), 0, "correlation released on the first close");
+
+  // A late DUPLICATE close (a harness retry, or a redelivered frame) is a no-op — the completed stream
+  // is terminal, so it neither re-flushes nor throws.
+  hub.handler?.(close(jobStream("k1"), 1), p.conn);
+  assertEquals(
+    service.reattach(jobStream("k1"), 0)?.entries.length,
+    afterClose,
+    "a duplicate close does not append or re-flush",
+  );
+
+  // The producer later disconnects (the belt-and-suspenders fallback). #reconcile runs on the next
+  // inbound frame; the already-completed stream is skipped, so the fallback neither double-flushes nor
+  // throws — the additive close trigger composes cleanly with the disconnect fallback.
+  registry.remove("prod");
+  const q = connect("other", registry);
+  hub.handler?.(produce(jobStream("k2"), 1, "unrelated"), q.conn);
+  assertEquals(
+    service.reattach(jobStream("k1"), 0)?.entries.length,
+    afterClose,
+    "the disconnect fallback does not re-flush the already-closed stream",
+  );
+  assertEquals(service.transcriptOf(jobStream("k1"))?.status, "completed", "still exactly one completed past session");
   service.teardown();
 });
 
