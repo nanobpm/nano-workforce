@@ -1,3 +1,9 @@
+## [0.175.0](https://github.com/nanobpm/nano-workforce/compare/v0.174.1...v0.175.0) (2026-09-02)
+
+### Features
+
+* **agentic:** engine/poller-owned relay transcript completion (retire the presence heuristic) ([#708](https://github.com/nanobpm/nano-workforce/issues/708)) ([74f42f6](https://github.com/nanobpm/nano-workforce/commit/74f42f6fa3f1b07a6608ccf50979693eecb8ead4)), closes [689/#690](https://github.com/689/nano-workforce/issues/690) [#661](https://github.com/nanobpm/nano-workforce/issues/661) [#691](https://github.com/nanobpm/nano-workforce/issues/691) [#691](https://github.com/nanobpm/nano-workforce/issues/691) [#691](https://github.com/nanobpm/nano-workforce/issues/691) [#unlink](https://github.com/nanobpm/nano-workforce/issues/unlink)
+
 ## [0.174.1](https://github.com/nanobpm/nano-workforce/compare/v0.174.0...v0.174.1) (2026-09-02)
 
 ### Bug Fixes
