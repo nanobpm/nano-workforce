@@ -112,3 +112,46 @@ export function derivedTrackingTable<T extends object>(
 ): Table<T> {
   return data.table<T>(trackingTargetFor(table).view, pk);
 }
+
+/** A tracked record resolved from an engine process-instance key: which binding's base table owns it,
+ *  its ADR-0065 `derived_status` (the terminal edge folded over the base transient), and whether that
+ *  derived status is still ACTIVE (in the binding's `activeStatuses`). `active === false` means the
+ *  record has LEFT Active — it is at a terminal edge (`abandoned`/`failed`/`reviewed`/…) and
+ *  resubmittable. */
+export interface ResolvedTrackedInstance {
+  table: string;
+  keyField: string;
+  derivedStatus: string;
+  active: boolean;
+}
+
+/** Resolve which tracked record (if any) an engine process-instance key belongs to, scanning every
+ *  engine-backed binding and matching the key against each binding's `keyField` on its DERIVED
+ *  tracking VIEW — so the answer reflects the ADR-0065 terminal edge, not the frozen base transient.
+ *  This is the cancel door's record-type resolver (issue #705): it lets the door route a key to the
+ *  correct aggregate (PR vs plan vs feature run vs …) and report a TRUTHFUL reconciled result, and
+ *  distinguishes a key that maps to a tracked record (reconcile it) from one that maps to NONE (a
+ *  clean no-op, never a silent success). Returns `undefined` when no binding has a row for the key.
+ *  Reads only — the terminal transition itself is DERIVED (recorded through the shared
+ *  `reconcileTerminatedKey` seam), never hand-written here. */
+export async function resolveTrackedInstance(
+  data: DataLayer,
+  processInstanceKey: string,
+): Promise<ResolvedTrackedInstance | undefined> {
+  for (const binding of engineBackedBindings()) {
+    const table = binding.table;
+    const keyField = keyFieldFor(table);
+    const row = await derivedTrackingTable<Record<string, unknown>>(data, table, keyField).findOne({
+      [keyField]: processInstanceKey,
+    });
+    if (!row) continue;
+    const statusColumn = trackingTargetFor(table).statusColumn;
+    const derivedStatus = String(row[statusColumn] ?? "");
+    // Classify against the manifest-enforced active set (throws on a binding whose `activeStatuses`
+    // is missing/empty) rather than a silent `?? []` — an empty fallback would misclassify EVERY
+    // resolved record as terminal (`active:false`) and let the cancel door report a false success.
+    const active = activeStatusesFor(table).some((s) => s === derivedStatus);
+    return { table, keyField, derivedStatus, active };
+  }
+  return undefined;
+}
