@@ -956,6 +956,198 @@ test("#689 mid-job reconnect: with no isInstanceLive wired, a producer disconnec
   service.teardown();
 });
 
+test("#691 engine-owned disconnect: a mid-job reconnect whose engine job is still parked keeps the correlation live", async () => {
+  const registry = new ConnectionRegistry();
+  const correlation = new CorrelationRegistry();
+  const byConnection = new Map([["conn-old", "worker-E"]]);
+  // The engine is the completion authority (#691): while the harness holds the lease the job stays
+  // parked (resolver returns an element-instance key), so a producer disconnect must NOT complete it.
+  let parked = true;
+  const resolveElementInstance = (jobKey: string) =>
+    Promise.resolve(parked && jobKey === "9001" ? "ei-9001" : undefined);
+  // isInstanceLive is deliberately NOT wired (static () => false): the engine job-state — not the
+  // presence heuristic — must be what spares the reconnect, proving presence is no longer the authority.
+  const { service, hub } = mkCorrelatedService(registry, memoryDb(), correlation, byConnection, {
+    resolveElementInstance,
+  });
+  const p = connect("conn-old", registry);
+  hub.handler?.(produce(jobStream("9001"), 1, "booting agent"), p.conn);
+  assertEquals(correlation.jobKeysFor("worker-E"), ["9001"], "the job links on first produce");
+
+  // The producer WS blips: the old connection drops (no new one yet — presence would report the
+  // instance NOT live). A frame drives #reconcile → drops the dead producer + kicks the engine reconcile.
+  registry.remove("conn-old");
+  const other = connect("cons", registry);
+  hub.handler?.(grant(0), other.conn);
+  await tick(); // let the fire-and-forget engine reconcile settle
+  assertEquals(correlation.jobKeysFor("worker-E"), ["9001"], "a still-parked job survives the disconnect");
+  assertEquals(service.transcriptOf(jobStream("9001")), undefined, "the still-active stream is NOT archived");
+  assertEquals(service.liveFallback(jobStream("9001"))?.ring !== undefined, true, "the transcript is still live");
+
+  // The worker resumes producing on a NEW connection over the same job → re-attributed, still one job.
+  byConnection.set("conn-new", "worker-E");
+  const p2 = connect("conn-new", registry);
+  hub.handler?.(produce(jobStream("9001"), 1, "resumed output"), p2.conn);
+  assertEquals(correlation.jobKeysFor("worker-E"), ["9001"], "the resumed producer stays linked to the same job");
+
+  // The job genuinely ends: the engine park vanishes. The periodic backstop pass completes + archives it.
+  parked = false;
+  await service.reconcileEngineCorrelations();
+  assertEquals(correlation.jobKeysFor("worker-E"), [], "the ended job is released");
+  assertEquals(service.transcriptOf(jobStream("9001"))?.status, "completed", "and its transcript is archived");
+  service.teardown();
+});
+
+test("#691 engine-owned disconnect: a true exit whose engine job is gone completes + archives the stream", async () => {
+  const registry = new ConnectionRegistry();
+  const correlation = new CorrelationRegistry();
+  const byConnection = new Map([["prod", "worker-X"]]);
+  // The engine reports the job GONE at disconnect time (a clean completion whose terminal lifecycle
+  // event was missed, or an unclean exit): the disconnect-driven engine reconcile completes it.
+  const resolveElementInstance = () => Promise.resolve(undefined);
+  const { service, hub } = mkCorrelatedService(registry, memoryDb(), correlation, byConnection, {
+    resolveElementInstance,
+  });
+  const p = connect("prod", registry);
+  hub.handler?.(produce(jobStream("kX"), 1, "x"), p.conn);
+  assertEquals(correlation.jobKeysFor("worker-X"), ["kX"]);
+
+  registry.remove("prod");
+  const other = connect("cons", registry);
+  hub.handler?.(grant(0), other.conn);
+  await tick(); // the fire-and-forget engine reconcile resolves "gone" → completes
+  assertEquals(correlation.jobKeysFor("worker-X"), [], "a truly-ended job is released on disconnect");
+  assertEquals(service.transcriptOf(jobStream("kX"))?.status, "completed", "and its transcript is archived");
+  service.teardown();
+});
+
+test("#691 engine-owned disconnect: an UNLINKED job stream (register/produce race) whose engine job is still parked is NOT archived on disconnect", async () => {
+  const registry = new ConnectionRegistry();
+  const correlation = new CorrelationRegistry();
+  // The connection→instance map is deliberately EMPTY at first produce: the producer's presence
+  // instance is not yet resolvable (the documented register/produce race), so #link leaves the job
+  // stream UNLINKED (`state.linked` stays false) even though it IS a job stream and a resolver is
+  // wired. The engine — not `state.linked` — must own the disconnect completion decision, otherwise
+  // a mid-job reconnect that raced the link would wrongly fall through to the presence fallback and
+  // archive a still-parked job.
+  const byConnection = new Map<string, string>();
+  let parked = true;
+  const resolveElementInstance = (jobKey: string) =>
+    Promise.resolve(parked && jobKey === "7742" ? "ei-7742" : undefined);
+  const { service, hub } = mkCorrelatedService(registry, memoryDb(), correlation, byConnection, {
+    resolveElementInstance,
+  });
+  const p = connect("conn-old", registry);
+  hub.handler?.(produce(jobStream("7742"), 1, "booting agent"), p.conn);
+  assertEquals(correlation.count(), 0, "the stream did NOT link — the instance was not resolvable at produce time");
+
+  // The old producer connection blips before a later produce could retry the link. A frame drives
+  // #reconcile → it must defer to the engine (job still parked) rather than archive on presence.
+  registry.remove("conn-old");
+  const other = connect("cons", registry);
+  hub.handler?.(grant(0), other.conn);
+  await tick(); // let the fire-and-forget engine reconcile settle
+  assertEquals(
+    service.transcriptOf(jobStream("7742")),
+    undefined,
+    "an unlinked-but-still-parked job is NOT archived on disconnect",
+  );
+  assertEquals(service.liveFallback(jobStream("7742"))?.ring !== undefined, true, "its transcript is still live");
+
+  // The worker resumes on a NEW connection; the instance now resolves → the late link finally lands.
+  byConnection.set("conn-new", "worker-R");
+  const p2 = connect("conn-new", registry);
+  hub.handler?.(produce(jobStream("7742"), 1, "resumed output"), p2.conn);
+  assertEquals(correlation.jobKeysFor("worker-R"), ["7742"], "the late link succeeds on reconnect once the instance resolves");
+
+  // The job genuinely ends: the engine park vanishes → the backstop pass completes + archives it.
+  parked = false;
+  await service.reconcileEngineCorrelations();
+  assertEquals(correlation.jobKeysFor("worker-R"), [], "the ended job is released");
+  assertEquals(service.transcriptOf(jobStream("7742"))?.status, "completed", "and its transcript is archived");
+  service.teardown();
+});
+
+test("#708 periodic backstop covers an UNLINKED job stream: an unlinked-but-parked disconnect that never reconnects is completed once the engine park ends", async () => {
+  const registry = new ConnectionRegistry();
+  const correlation = new CorrelationRegistry();
+  // Same register/produce race as #691: the connection→instance map is empty, so #link leaves the
+  // job stream UNLINKED. The producer then drops while the engine job is still parked, so the
+  // disconnect path keeps the stream live and clears `state.producer` (so #reconcile does not
+  // re-trigger). Critically the worker NEVER reconnects — no later `produce` ever links it. The
+  // periodic backstop is now the ONLY actor that can retire it, so it must include unlinked job
+  // streams in its reconcile snapshot; otherwise the stream leaks live forever once the engine job
+  // becomes terminal.
+  const byConnection = new Map<string, string>();
+  let parked = true;
+  const resolveElementInstance = (jobKey: string) =>
+    Promise.resolve(parked && jobKey === "7708" ? "ei-7708" : undefined);
+  const { service, hub } = mkCorrelatedService(registry, memoryDb(), correlation, byConnection, {
+    resolveElementInstance,
+  });
+  const p = connect("conn-old", registry);
+  hub.handler?.(produce(jobStream("7708"), 1, "booting agent"), p.conn);
+  assertEquals(correlation.count(), 0, "the stream did NOT link — the instance was not resolvable at produce time");
+
+  // Producer blips; the disconnect engine-reconcile keeps the still-parked stream live and clears
+  // the producer so #reconcile will not revisit it on later frames.
+  registry.remove("conn-old");
+  const other = connect("cons", registry);
+  hub.handler?.(grant(0), other.conn);
+  await tick();
+  assertEquals(
+    service.transcriptOf(jobStream("7708")),
+    undefined,
+    "an unlinked-but-still-parked job is NOT archived on disconnect",
+  );
+
+  // The engine job genuinely ends. With NO reconnect to link it, only the periodic backstop can
+  // retire it — and it must, even though the stream is unlinked.
+  parked = false;
+  await service.reconcileEngineCorrelations();
+  assertEquals(
+    service.transcriptOf(jobStream("7708"))?.status,
+    "completed",
+    "the periodic backstop completes an unlinked job stream once the engine park disappears",
+  );
+  assertEquals(service.liveFallback(jobStream("7708")), undefined, "and its live ring is retired");
+  service.teardown();
+});
+
+test("#691 engine-owned disconnect: a transient engine read at disconnect never falsely completes; the backstop retries", async () => {
+  const registry = new ConnectionRegistry();
+  const correlation = new CorrelationRegistry();
+  const byConnection = new Map([["prod", "worker-T"]]);
+  // The disconnect-time engine read throws (unavailable). A transient fault must be treated as
+  // "unknown — keep it linked", NEVER as "job gone": the stream stays live until a later pass resolves.
+  let failing = true;
+  let gone = false;
+  const resolveElementInstance = () => {
+    if (failing) return Promise.reject(new Error("engine unavailable"));
+    return Promise.resolve(gone ? undefined : "ei-T");
+  };
+  const { service, hub } = mkCorrelatedService(registry, memoryDb(), correlation, byConnection, {
+    resolveElementInstance,
+  });
+  const p = connect("prod", registry);
+  hub.handler?.(produce(jobStream("kT"), 1, "x"), p.conn);
+
+  registry.remove("prod");
+  const other = connect("cons", registry);
+  hub.handler?.(grant(0), other.conn);
+  await tick(); // the engine read rejects → the stream must stay linked, not complete
+  assertEquals(correlation.jobKeysFor("worker-T"), ["kT"], "a transient engine failure leaves the job linked");
+  assertEquals(service.transcriptOf(jobStream("kT")), undefined, "and its transcript is NOT archived");
+
+  // The engine recovers and now reports the job gone: the periodic backstop pass completes it.
+  failing = false;
+  gone = true;
+  await service.reconcileEngineCorrelations();
+  assertEquals(correlation.jobKeysFor("worker-T"), [], "the backstop pass releases the ended job");
+  assertEquals(service.transcriptOf(jobStream("kT"))?.status, "completed", "and archives its transcript");
+  service.teardown();
+});
+
 test("H6 correlation write-side: non-job streams are never linked; a link retries until the instance resolves", () => {
   const registry = new ConnectionRegistry();
   const correlation = new CorrelationRegistry();
