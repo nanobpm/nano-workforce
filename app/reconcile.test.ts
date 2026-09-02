@@ -1,4 +1,4 @@
-// Red/green coverage for the app-side engine-reset reconciliation surface (issue #622).
+// Red/green coverage for the app-side engine-reset reconciliation surface (issues #622 and #630).
 //
 // The core scenario the incident (Magikcraft/nano-bpm#1065) demanded a supported remedy for: the
 // engine is reset and its incarnation epoch REGRESSES, while `app.db` still projects engine-backed
@@ -13,21 +13,54 @@ import { test } from "node:test";
 import { assertEquals } from "#test-assert";
 import { freshData } from "../test/reconcileDb.ts";
 import {
+  DEFAULT_VANISHED_GRACE_MS,
   ORPHANED_STATUS,
   parseEngineEpoch,
   RECONCILE_ORPHAN_REASON,
+  RECONCILE_VANISHED_REASON,
   reconcileEngineBackedWork,
+  reconcileVanishedInstances,
 } from "./reconcile.ts";
 
 const AT = () => new Date("2026-02-02T00:00:00.000Z");
 
-function seedFeatureRun(raw: DatabaseSync, key: string, status: string, processKey: string | null): void {
+/** The canonical `_urban_instance_state` DDL (urban's framework projection, `_urban_`-prefixed so it
+ *  is provisioned by the runtime — NOT our migrations). Mirrors `InstanceStateStore`'s schema so the
+ *  vanished-instance reconcile is exercised against exactly the table it reads in production. */
+function ensureInstanceState(raw: DatabaseSync): void {
+  raw.exec(
+    `CREATE TABLE IF NOT EXISTS _urban_instance_state (
+       process_instance_key TEXT NOT NULL,
+       state                TEXT NOT NULL,
+       waiting_on_human     INTEGER NOT NULL DEFAULT 0,
+       updated_at           TEXT NOT NULL,
+       PRIMARY KEY (process_instance_key)
+     );`,
+  );
+}
+
+function seedInstanceState(raw: DatabaseSync, processKey: string, state: string): void {
+  raw
+    .prepare(
+      `INSERT INTO _urban_instance_state (process_instance_key, state, waiting_on_human, updated_at)
+       VALUES (?, ?, 0, '2026-01-15')`,
+    )
+    .run(processKey, state);
+}
+
+function seedFeatureRun(
+  raw: DatabaseSync,
+  key: string,
+  status: string,
+  processKey: string | null,
+  updatedAt = "2026-01-01",
+): void {
   raw
     .prepare(
       `INSERT INTO feature_runs (feature_key, repo, issue_number, issue_url, base_branch, status, process_key, created_at, updated_at)
-       VALUES (?, 'o/r', 1, 'https://x', 'main', ?, ?, '2026-01-01', '2026-01-01')`,
+       VALUES (?, 'o/r', 1, 'https://x', 'main', ?, ?, '2026-01-01', ?)`,
     )
-    .run(key, status, processKey);
+    .run(key, status, processKey, updatedAt);
 }
 
 function seedDeliveryGraphRun(raw: DatabaseSync, runKey: string, status: string, processKey: string | null): void {
@@ -209,4 +242,132 @@ test("RED→GREEN: orphaning stamps updated_at so the transition timestamp isn't
     .get() as { status: string; updated_at: string };
   assertEquals(dg.status, ORPHANED_STATUS);
   assertEquals(dg.updated_at, at);
+});
+
+// --- Vanished-instance reconciliation (issue #630) --------------------------------------------
+// The "instance absent/unknown" gap, DISTINCT from the epoch-regression reset above: when an engine
+// instance VANISHES from the read model (`_urban_instance_state` row pruned/never re-created after a
+// clean reset), the derived terminal edge has no `TERMINATED` row to match, so the run freezes at its
+// last worker-owned status (`escalated`) and wedges Active forever. `reconcileVanishedInstances`
+// drives those orphaned-in-truth rows to `orphaned` WITH PROVENANCE — gated on a grace window so a
+// still-starting run (not yet projected) is spared.
+
+test("RED→GREEN: a vanished instance (no _urban_instance_state row, past grace) is orphaned", async () => {
+  const { data, raw } = freshData();
+  ensureInstanceState(raw);
+  // The pre-reset orphan from the incident: escalated, keyed on a HIGH pre-reset process_key whose
+  // instance is absent from the current read model. Its updated_at is ~32 days before AT() (past grace).
+  seedFeatureRun(raw, "Magikcraft/nano-bpm#1051", "escalated", "71506");
+  // A live sibling: still ACTIVE in the projection — must be left untouched.
+  seedFeatureRun(raw, "o/r#live", "running", "200");
+  seedInstanceState(raw, "200", "ACTIVE");
+
+  // RED (pre-fix): the orphan reads `escalated` (Active) indefinitely — no terminal edge fires.
+  const before = raw.prepare("SELECT status FROM feature_runs WHERE feature_key='Magikcraft/nano-bpm#1051'").get() as {
+    status: string;
+  };
+  assertEquals(before.status, "escalated");
+
+  const res = await reconcileVanishedInstances(data, { now: AT, runId: "van-1" });
+
+  assertEquals(res.reason, "instance-vanished");
+  assertEquals(res.orphanedCount, 1);
+
+  const orphan = raw
+    .prepare("SELECT status, updated_at FROM feature_runs WHERE feature_key='Magikcraft/nano-bpm#1051'")
+    .get() as { status: string; updated_at: string };
+  assertEquals(orphan.status, ORPHANED_STATUS);
+  // The transition refreshes updated_at like every other status transition (not left stale).
+  assertEquals(orphan.updated_at, AT().toISOString());
+
+  // The live instance (ACTIVE row present) is never touched.
+  const live = raw.prepare("SELECT status FROM feature_runs WHERE feature_key='o/r#live'").get() as { status: string };
+  assertEquals(live.status, "running");
+
+  const prov = raw
+    .prepare("SELECT * FROM reconcile_provenance WHERE source_table='feature_runs'")
+    .get() as Record<string, unknown>;
+  assertEquals(prov.to_status, ORPHANED_STATUS);
+  assertEquals(prov.from_status, "escalated");
+  assertEquals(prov.reason, RECONCILE_VANISHED_REASON);
+  assertEquals(prov.key_value, "71506");
+  assertEquals(prov.run_id, "van-1");
+  assertEquals(prov.observed_epoch, null);
+
+  const run = raw.prepare("SELECT reason, orphaned_count FROM reconcile_runs WHERE run_id='van-1'").get() as {
+    reason: string;
+    orphaned_count: number;
+  };
+  assertEquals(run.reason, "instance-vanished");
+  assertEquals(run.orphaned_count, 1);
+});
+
+test("a still-starting run within the grace window is NOT prematurely folded", async () => {
+  const { data, raw } = freshData();
+  ensureInstanceState(raw);
+  // Dispatched moments ago — its process_key is set but the reconciler has not yet projected the
+  // instance into _urban_instance_state. updated_at is 30s before AT(), inside the grace window.
+  const justNow = new Date(AT().getTime() - 30_000).toISOString();
+  seedFeatureRun(raw, "o/r#starting", "running", "999", justNow);
+
+  const res = await reconcileVanishedInstances(data, { now: AT, runId: "van-1" });
+
+  assertEquals(res.orphanedCount, 0);
+  const row = raw.prepare("SELECT status FROM feature_runs WHERE feature_key='o/r#starting'").get() as {
+    status: string;
+  };
+  assertEquals(row.status, "running");
+  assertEquals((raw.prepare("SELECT COUNT(*) c FROM reconcile_provenance").get() as { c: number }).c, 0);
+  // A generous grace window is the point — the default comfortably exceeds a poll cycle.
+  assertEquals(DEFAULT_VANISHED_GRACE_MS >= 60_000, true);
+});
+
+test("terminal history, keyless rows, and rows with a live instance are never folded as vanished", async () => {
+  const { data, raw } = freshData();
+  ensureInstanceState(raw);
+  seedFeatureRun(raw, "term#1", "merged", "88"); // terminal — not in activeStatuses
+  seedFeatureRun(raw, "nokeed#1", "running", null); // active but never dispatched (no engine key)
+  seedFeatureRun(raw, "live#1", "escalated", "89"); // active, but its instance is still present
+  seedInstanceState(raw, "89", "ACTIVE");
+
+  const res = await reconcileVanishedInstances(data, { now: AT, runId: "van-1" });
+
+  assertEquals(res.orphanedCount, 0);
+  const statuses = raw.prepare("SELECT feature_key, status FROM feature_runs ORDER BY feature_key").all() as {
+    feature_key: string;
+    status: string;
+  }[];
+  assertEquals(statuses.find((r) => r.feature_key === "term#1")?.status, "merged");
+  assertEquals(statuses.find((r) => r.feature_key === "nokeed#1")?.status, "running");
+  assertEquals(statuses.find((r) => r.feature_key === "live#1")?.status, "escalated");
+  assertEquals((raw.prepare("SELECT COUNT(*) c FROM reconcile_provenance").get() as { c: number }).c, 0);
+});
+
+test("no-op when the _urban_instance_state projection is absent (never orphan on its absence)", async () => {
+  const { data, raw } = freshData();
+  // NOTE: no ensureInstanceState — the framework projection has not been provisioned.
+  seedFeatureRun(raw, "o/r#1", "escalated", "71506");
+
+  const res = await reconcileVanishedInstances(data, { now: AT, runId: "van-1" });
+
+  assertEquals(res.reason, "no-op");
+  assertEquals(res.orphanedCount, 0);
+  const row = raw.prepare("SELECT status FROM feature_runs WHERE feature_key='o/r#1'").get() as { status: string };
+  assertEquals(row.status, "escalated");
+  const run = raw.prepare("SELECT reason FROM reconcile_runs WHERE run_id='van-1'").get() as { reason: string };
+  assertEquals(run.reason, "no-op");
+});
+
+test("idempotent: a second vanished pass is a no-op (the orphaned row left activeStatuses)", async () => {
+  const { data, raw } = freshData();
+  ensureInstanceState(raw);
+  seedFeatureRun(raw, "o/r#1", "escalated", "71506");
+
+  const first = await reconcileVanishedInstances(data, { now: AT, runId: "van-1" });
+  assertEquals(first.orphanedCount, 1);
+
+  const second = await reconcileVanishedInstances(data, { now: AT, runId: "van-2" });
+  assertEquals(second.reason, "no-op");
+  assertEquals(second.orphanedCount, 0);
+  assertEquals((raw.prepare("SELECT COUNT(*) c FROM reconcile_provenance").get() as { c: number }).c, 1);
 });

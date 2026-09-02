@@ -103,12 +103,14 @@ if (httpServer instanceof Server) {
   app.log.warn("agentic channel not mounted: app.httpServer is not a node:http Server on this host");
 }
 
-// Engine-reset reconciliation (issue #622). On boot, compare the engine's incarnation epoch against
-// the last-seen value; on a REGRESSION (the engine was reset/restored/rewound and re-minted its keys,
-// Magikcraft/nano-bpm#1065) drive every dangling engine-backed inflight row to the defined `orphaned`
-// terminal WITH PROVENANCE — BEFORE the pollers below start projecting off stale, dead instances.
-// Guarded: an unreachable engine is a no-op (it never orphans live work), and any failure degrades to
-// a warn so reconcile can never block boot.
+// Engine-reset reconciliation (issues #622, #630). On boot, compare the engine's incarnation epoch
+// against the last-seen value; on a REGRESSION (the engine was reset/restored/rewound and re-minted
+// its keys, Magikcraft/nano-bpm#1065) drive every dangling engine-backed inflight row to the defined
+// `orphaned` terminal WITH PROVENANCE. A second pass also folds any run whose engine instance has
+// VANISHED from the read model (no `_urban_instance_state` row, past a grace window — issue #630),
+// which the epoch signal alone can't catch — BEFORE the pollers below start projecting off stale,
+// dead instances. Guarded: an unreachable engine / an absent projection is a no-op (never orphans
+// live work), and any failure degrades to a warn so reconcile can never block boot.
 if (app.data) {
   try {
     const reconciled = await runEngineReconcile(

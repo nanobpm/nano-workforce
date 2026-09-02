@@ -1042,7 +1042,7 @@ components:
           type: integer
     ReconcileReport:
       type: object
-      description: The result of one engine-reset reconciliation pass (issue #622).
+      description: The result of one engine-reset reconciliation pass (issues #622, #630).
       additionalProperties: false
       required:
         - runId
@@ -1057,12 +1057,14 @@ components:
           description: The reconcile run id every orphaned transition's provenance is stamped with.
         reason:
           type: string
-          description: Why this pass acted (or did not).
+          description: Why this pass acted (or did not). `instance-vanished` — a run whose engine
+            instance is absent/unknown in the read model was orphaned (issue #630).
           enum:
             - epoch-regression
             - seed-epoch
             - no-op
             - engine-unreachable
+            - instance-vanished
         observedEpoch:
           type: integer
           nullable: true
