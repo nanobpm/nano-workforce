@@ -24,6 +24,8 @@ import type { ConnectionRegistry } from "@nanobpm/agentic/channel";
 import type { Frame } from "@nanobpm/agentic/protocol";
 import { RELAY_FAMILY, RelayHub, type RelayHubOptions } from "@nanobpm/agentic/relay";
 import {
+  CORE_TRANSCRIPT_VOCAB,
+  mergeTranscriptVocab,
   parseTranscriptEvent,
   type SqliteDb,
   type TranscriptLifecycle,
@@ -32,6 +34,7 @@ import {
   TranscriptStore,
   type TranscriptStoreOptions,
   type TranscriptStream,
+  type TranscriptVocab,
 } from "@nanobpm/agentic/transcript";
 import type { Logger } from "@nanobpm/urban";
 import { currentCorrelation, type JobContext, type JobCorrelation, jobKeyOfStream } from "../correlation.ts";
@@ -129,16 +132,49 @@ function readProp(value: unknown, key: string): unknown {
 }
 
 /**
+ * The harness's job-end lifecycle phase (#710 / jwulf/c8ctl-plugin-nano#150): the closing twin of the
+ * `phase:"open"` `RELAY_OPEN_CHUNK` the harness emits at relay-session open. The harness emits it —
+ * through agentic's own `encodeTranscriptEvent`, never hand-rolled — right before `job.complete`/
+ * `job.fail`, once it has DRAINED its outbound relay buffer, so it is the deterministic "this job's
+ * bytes are all here, it is done" signal that supersede/disconnect only ever approximated.
+ */
+const HARNESS_CLOSE_PHASE = "close";
+
+/**
+ * The relay family's terminal-detection vocabulary: the ONE canonical transcript vocab, additively
+ * EXTENDED (via the sanctioned {@link mergeTranscriptVocab} extension point, never a forked parser) to
+ * ALSO classify the harness's job-end `phase:"close"` marker (#710). The agentic `LifecycleEvent`
+ * contract's phases are `open|completed|exited` — `close` is a fourth, job-scoped termination marker
+ * agentic 0.10.0 does not yet know, so the core `lifecycle` decoder drops it to a raw `stream-chunk`.
+ * This override recognizes it and maps it onto the contract's terminal `completed` phase, so
+ * {@link parseTranscriptEvent} classifies a close envelope as a terminal lifecycle WITHOUT a second
+ * wire shape. It is scoped to {@link isTerminalLifecycleChunk} (the correlation-release detector); the
+ * cockpit derive/read fold keeps using the CORE vocab, so the close chunk stays byte-faithful in the
+ * durable transcript and this remap never leaks into the derived view.
+ */
+const RELAY_TERMINAL_VOCAB: TranscriptVocab = mergeTranscriptVocab(CORE_TRANSCRIPT_VOCAB, {
+  lifecycle: (body, offset) => {
+    const phase = typeof body.phase === "string" ? body.phase : undefined;
+    if (phase === "open" || phase === "completed" || phase === "exited") return { kind: "lifecycle", offset, phase };
+    if (phase === HARNESS_CLOSE_PHASE) return { kind: "lifecycle", offset, phase: "completed" };
+    return undefined;
+  },
+});
+
+/**
  * Decode a single relay chunk through the ONE canonical transcript parser and report whether it is a
- * TERMINAL `lifecycle` event (`phase` `completed`/`exited`) — the authoritative "job end" signal a
- * clean agent run emits on its transcript stream (#661). Anything else — raw terminal bytes, a
- * non-envelope JSON value, a `phase: "open"` lifecycle, any other event kind — is not terminal.
- * Reusing {@link parseTranscriptEvent} keeps transcript-vocab knowledge out of the content-agnostic
- * relay ring and off any forked decoder (Derivation Over Duplication): the ring still sees opaque
- * bytes; only this narrow seam classifies them.
+ * TERMINAL `lifecycle` event — the authoritative "job end" signal that flushes the durable transcript
+ * and releases correlation. Two shapes are terminal: the agent run's own `phase` `completed`/`exited`
+ * (#661), and the harness's drained job-end `phase:"close"` marker (#710), which
+ * {@link RELAY_TERMINAL_VOCAB} decodes onto the contract's `completed` phase. Anything else — raw
+ * terminal bytes, a non-envelope JSON value, a `phase: "open"` lifecycle, any other event kind — is
+ * not terminal. Reusing {@link parseTranscriptEvent} (with the additively-extended vocab) keeps
+ * transcript-vocab knowledge out of the content-agnostic relay ring and off any forked decoder
+ * (Derivation Over Duplication): the ring still sees opaque bytes; only this narrow seam classifies
+ * them.
  */
 function isTerminalLifecycleChunk(chunk: string): boolean {
-  const event = parseTranscriptEvent({ offset: 0, chunk });
+  const event = parseTranscriptEvent({ offset: 0, chunk }, RELAY_TERMINAL_VOCAB);
   return event.kind === "lifecycle" && (event.phase === "completed" || event.phase === "exited");
 }
 
@@ -516,8 +552,8 @@ export class RelayTranscriptService {
   }
 
   /** Handle one inbound `relay` frame: reconcile dead producers, observe ownership, delegate, then
-   * release on a terminal `lifecycle` event (#661 — AFTER the hub appended the chunk, so the terminal
-   * event itself is captured in the flushed transcript). */
+   * release on a terminal `lifecycle` event (#661/#710 — AFTER the hub appended the chunk, so the
+   * terminal event itself is captured in the flushed transcript). */
   #onFrame(frame: Frame, conn: RelayConnectionCtx): void {
     this.#reconcile();
     this.#observe(frame, conn);
@@ -526,17 +562,23 @@ export class RelayTranscriptService {
   }
 
   /**
-   * Primary job-end release (#661): when a `produce` frame carries the terminal `lifecycle` event
-   * (`phase` `completed`/`exited`), complete its stream so the worker's job⇄instance correlation is
-   * released the moment the job ends — even though the worker's relay connection stays open across jobs
-   * (the disconnect/supersede release paths miss that idle-after-last-job tail, so an idle worker's
-   * finished job would otherwise linger as a phantom active job on its supply row). Runs AFTER the hub
-   * appends the chunk to the ring, so the terminal event is part of the flushed transcript. A narrow,
-   * self-contained decode at the correlation seam that reuses the ONE canonical
-   * {@link parseTranscriptEvent} — the content-agnostic relay ring keeps treating chunks as opaque
-   * bytes, and no transcript-vocab knowledge is forked into it. Non-terminal chunks (raw bytes, a
-   * `phase: "open"` lifecycle, any other event kind) never complete a live stream, so a genuinely
-   * active job is never cleared. Advisory — never throws into the frame handler.
+   * Primary job-end release (#661, #710): when a `produce` frame carries a terminal `lifecycle` event —
+   * the agent run's own `phase` `completed`/`exited` (#661), OR the harness's drained job-end
+   * `phase:"close"` marker (#710) — complete its stream so the worker's job⇄instance correlation is
+   * released, and the durable "past session" transcript is flushed, the moment the job ends. This runs
+   * even though the worker's relay connection stays open across jobs (the disconnect/supersede release
+   * paths miss that idle-after-last-job tail, so an idle worker's finished job would otherwise linger as
+   * a phantom active job on its supply row, and its transcript would be snapshotted late → truncated
+   * tail). The `close` trigger is ADDITIVE — supersede + disconnect remain as belt-and-suspenders
+   * fallbacks for a harness that predates the close event or a crash that never sends one — and the
+   * `state.completed` guard below makes a close-then-later-disconnect (or a duplicate close) an
+   * idempotent no-op. Runs AFTER the hub appends the chunk to the ring, so the terminal event is part
+   * of the flushed transcript. A narrow, self-contained decode at the correlation seam that reuses the
+   * ONE canonical {@link parseTranscriptEvent} ({@link isTerminalLifecycleChunk}) — the content-agnostic
+   * relay ring keeps treating chunks as opaque bytes, and no transcript-vocab knowledge is forked into
+   * it. Non-terminal chunks (raw bytes, a `phase: "open"` lifecycle, any other event kind) never
+   * complete a live stream, so a genuinely active job is never cleared. Advisory — never throws into
+   * the frame handler.
    */
   #observeTerminalLifecycle(frame: Frame): void {
     if (readProp(frame.payload, "op") !== "produce") return;

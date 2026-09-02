@@ -463,6 +463,14 @@ export const WIRE_CONTRACTS = {
     shape:
       '{ nwfTranscriptEvent: 1, kind: "permission", phase: "request", callId: string, policy: "escalate"|"yolo", options: [{ optionId: string, name: string, kind: "allow-once"|"allow-always"|"reject-once"|"reject-always" }, ...Array<{ optionId: string, name: string, kind: "allow-once"|"allow-always"|"reject-once"|"reject-always" }>], toolName?: string, title?: string, reason?: string } | { nwfTranscriptEvent: 1, kind: "permission", phase: "resolution", callId: string, optionId: string, allowed: boolean, by?: "operator"|"auto" }',
   },
+  "transcript.lifecycleClose": {
+    category: "wire",
+    name: "transcript.lifecycleClose",
+    owner: "app/agentic/families/relay.family.ts",
+    semantics:
+      "The harness's job-end `phase:\"close\"` transcript `lifecycle` event (issue #710, harness half jwulf/c8ctl-plugin-nano#150) — the closing twin of the `phase:\"open\"` RELAY_OPEN_CHUNK the harness emits at relay-session open. The harness emits it on the `job:<jobKey>` relay stream through agentic's own `encodeTranscriptEvent` (never hand-rolled), right before `job.complete`/`job.fail` and AFTER draining its outbound relay buffer, so it is the deterministic \"all this job's bytes are here, it is done\" signal. The app recognizes it in `isTerminalLifecycleChunk` (relay.family.ts) to `completeStream()` — flush the durable past-session transcript and release job⇄instance correlation — at job-completion time, fixing the truncated-tail defect where the flush waited for a supersede/disconnect. `close` is NOT a core agentic `LifecycleEvent` phase (the contract's phases are open|completed|exited); the app decodes it via an ADDITIVE `mergeTranscriptVocab` extension (`RELAY_TERMINAL_VOCAB`) that maps it onto the terminal `completed` phase — never a forked wire shape, and scoped to the relay job-end detector so the cockpit derive (CORE vocab) keeps the close chunk byte-faithful. The `close` trigger is ADDITIVE: supersede + disconnect remain as fallbacks and the `state.completed` guard keeps a close-then-disconnect (or duplicate close) idempotent. Consume this ONE marker — do not re-declare a synonym or a second job-end signal.",
+    shape: '{ nwfTranscriptEvent: 1, kind: "lifecycle", phase: "close" }',
+  },
 } as const satisfies Record<string, WireContract>;
 
 export const TYPE_CONTRACTS = {
