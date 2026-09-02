@@ -1281,15 +1281,29 @@ components:
       type: object
       required:
         - featureKey
+        - outcome
       properties:
         featureKey:
           type: string
+        outcome:
+          type: string
+          enum:
+            - started
+            - already-active
+            - noop-terminal
+          description: >-
+            Discriminated intake outcome (issue #704). `started` — a fresh engine instance was
+            dispatched (`processKey` set). `already-active` — a non-terminal prior run for this issue is
+            still live, so the start short-circuited (no new instance; `processKey` is the live run's).
+            `noop-terminal` — the engine returned no instance key, so NOTHING was dispatched; the
+            operation surfaces this as a 502 (never on a 202 body), so a submit that dispatched no
+            instance is never reported as success.
         processKey:
           type: string
           nullable: true
         alreadyRunning:
           type: boolean
-          description: True when a non-terminal feature run for this issue already exists; no new instance was started.
+          description: True iff a non-terminal feature run for this issue already existed and short-circuited the start (outcome `already-active`); no new instance was started.
     EpicSetStart:
       description: >-
         The set/batch admission request body (issue #292, slice S2). Submits a SET of epics plus the
@@ -5614,6 +5628,15 @@ paths:
                 $ref: "#/components/schemas/ErrorBody"
         "409":
           description: The base branch is already in use by another active epic.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+        "502":
+          description: >-
+            The engine accepted the start but returned no instance key — nothing was dispatched (issue
+            #704). A submit that starts no instance is surfaced here as a distinct non-success, never a
+            green 202.
           content:
             application/json:
               schema:

@@ -177,14 +177,31 @@ export default defineOperation("startFeature", async ({ body }, app) => {
     customInstructions,
     { probes: readiness.probes, probeTimeout: readiness.probeTimeout, probePollEvery: readiness.probePollEvery },
   );
-  app.log.info("feature run started", {
+  app.log.info("feature run intake", {
     featureKey: parsed.planKey,
     requestedBaseBranch: normalizedBase,
     converge,
     autoMerge,
     hasCustomInstructions: typeof customInstructions === "string" && customInstructions.trim() !== "",
     readinessProbes: readiness.probes.length,
-    alreadyRunning: "alreadyRunning" in result && result.alreadyRunning === true,
+    outcome: result.outcome,
+    alreadyRunning: result.alreadyRunning,
   });
+  // Discriminated intake outcome (issue #704): a `noop-terminal` means the engine accepted the start
+  // but returned no instance key, so NOTHING was dispatched. That is not a success — surface it as a
+  // 502 so the feature page renders "nothing started" distinctly (a red error banner), never a bare
+  // green success for a submit that started no instance. `started` / `already-active` are both
+  // legitimate 202s (the latter short-circuited a genuinely-live run).
+  if (result.outcome === "noop-terminal") {
+    app.log.error("feature run intake dispatched no engine instance", { featureKey: parsed.planKey });
+    return {
+      status: 502,
+      body: {
+        error:
+          `feature run for ${parsed.planKey} started no engine instance — the engine returned no ` +
+          `instance key, so nothing was dispatched. Retry, or check the engine.`,
+      },
+    };
+  }
   return { status: 202, body: result };
 });

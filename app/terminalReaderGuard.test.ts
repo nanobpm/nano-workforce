@@ -1,4 +1,4 @@
-// Class guard for the ADR-0065 terminal-edge reader migration (issue #503).
+// Class guard for the ADR-0065 terminal-edge reader migration (issues #503, #704).
 //
 // Since ADR-0065 (`@nanobpm/urban@0.81.0`) the `instanceTracking` reconciler is a SOURCE, not a
 // writer: on cancel/terminate it feeds urban's instance projection and the terminal edge
@@ -6,14 +6,20 @@
 // the terminal (`abandoned`/`failed`/`reviewed`) onto the base `status` column. A classifying reader
 // that inspects the BASE `status` column of a DERIVE-ONLY tracked table therefore sees a row frozen at
 // its last worker-owned transient after the instance ends → phantom-active / wedged-idempotency bugs
-// (the #497 / #503 class).
+// (the #497 / #503 / #704 class).
 //
-// This is a SOURCE-SCAN guard over the defect CLASS, not a single instance: it asserts that every
-// terminal/active classification (`TERMINAL_STATUSES.includes` / `=== ABANDONED_STATUS` /
-// `PLAN_TERMINAL_STATUSES` / the feature read model's status DSL) for the three derive-only tracked
-// tables (`pull_requests`, `plans`, `feature_runs`) reads the DERIVED effective status
-// (`.derived_status`), never the frozen base `.status`. A future reader that silently re-drifts onto
-// the base column fails here.
+// This is a SOURCE-SCAN guard over the defect CLASS, not a single instance. It is PARAMETRIZED over
+// the three derive-only tracked tables and their admission/idempotency/classifier readers
+// (derivation-over-duplication in the test itself, so the whole class is unrepresentable):
+//   - `pull_requests` → service.ts, `TERMINAL_STATUSES` (submitPr idempotency, activePrs, incidents,
+//     merge lanes, wave gates)
+//   - `plans`         → plan.ts,    `PLAN_TERMINAL_STATUSES` (startPlan re-admission, active-by-base)
+//   - `feature_runs`  → feature.ts, `FEATURE_TERMINAL_STATUSES` (startFeature INTAKE idempotency — the
+//     reader #503 omitted, closed by #704)
+// Every terminal-set classification (both the `.includes(x)` and `.some((s) => s === x)` forms) MUST
+// read the DERIVED effective status (`.derived_status`), never the frozen base `.status`. A future
+// reader — on ANY of the three tables — that silently re-drifts onto the base column fails here; the
+// pre-#704 feature intake (`FEATURE_TERMINAL_STATUSES.includes(existing.status)`) would have been red.
 //
 // Worker-owned terminals that PASS THROUGH the derive edge unchanged (`merged`) are exempt: a base
 // `=== "merged"` read is legitimate (see `isDepMerged` / `classifyWaveTarget` / `mergeLaneDecisionForPr`
@@ -36,23 +42,61 @@ function stripComments(src: string): string {
   return src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
 }
 
-test("class guard: every TERMINAL_STATUSES classification in service.ts reads derived_status, not base status", () => {
-  const code = stripComments(SRC("service.ts"));
-  const calls = [...code.matchAll(/TERMINAL_STATUSES\.includes\(([^)]*)\)/g)];
-  assert(calls.length > 0, "expected TERMINAL_STATUSES.includes classifications in service.ts");
-  for (const m of calls) {
-    const arg = m[1];
-    assert(
-      /\.derived_status\b/.test(arg),
-      `TERMINAL_STATUSES.includes(${arg}) classifies on the BASE status of a derive-only tracked table — ` +
-        `route it through prsTracking and read \`.derived_status\` (ADR-0065, #503)`,
-    );
-    assert(
-      !/[A-Za-z0-9_)\]]\.status\b/.test(arg),
-      `TERMINAL_STATUSES.includes(${arg}) still reads a base \`.status\` — the terminal edge is derive-only (#503)`,
-    );
+/** Every expression a `<SET>_TERMINAL_STATUSES` classifies, across BOTH idioms the app uses:
+ *  `SET.includes(<expr>)` and `SET.some((s) => s === <expr>)` (and the mirrored `<expr> === s`). One
+ *  extractor for both forms so a reader can't dodge the guard by switching idiom. For the `.some`
+ *  form we capture the CLASSIFIED OPERAND — the side of `===` that is NOT the arrow parameter — on
+ *  either orientation, and assert against that operand rather than the whole arrow body, so an
+ *  incidental `.derived_status` reference elsewhere in the body can't mask a base-`.status`
+ *  classification. */
+function classifiedExprs(code: string, setName: string): string[] {
+  const exprs: string[] = [];
+  for (const m of code.matchAll(new RegExp(`${setName}\\.includes\\(([^)]*)\\)`, "g"))) {
+    exprs.push(m[1]);
   }
-});
+  for (const m of code.matchAll(new RegExp(`${setName}\\.some\\(\\(\\s*(\\w+)\\s*\\)\\s*=>\\s*([^)]*)\\)`, "g"))) {
+    const param = m[1]; // the arrow parameter, e.g. `s`
+    const body = m[2]; // `s === <expr>` or the mirrored `<expr> === s`
+    const sides = body.split("===").map((x) => x.trim());
+    // Capture the operand compared against the loop parameter, on either side of `===`; fall back to
+    // the whole body for any shape we don't recognise so the guard errs toward stricter, not looser.
+    if (sides.length === 2 && (sides[0] === param || sides[1] === param)) {
+      exprs.push(sides[0] === param ? sides[1] : sides[0]);
+    } else {
+      exprs.push(body);
+    }
+  }
+  return exprs;
+}
+
+/** The derive-only tracked tables and the reader module + terminal-status set that classifies each.
+ * ONE registry drives the whole guard so adding a fourth derive-only admission reader is a one-line
+ * change, never a copy-pasted test. */
+const DERIVE_ONLY_READERS = [
+  { table: "pull_requests", file: "service.ts", set: "TERMINAL_STATUSES" },
+  { table: "plans", file: "plan.ts", set: "PLAN_TERMINAL_STATUSES" },
+  { table: "feature_runs", file: "feature.ts", set: "FEATURE_TERMINAL_STATUSES" },
+] as const;
+
+for (const { table, file, set } of DERIVE_ONLY_READERS) {
+  test(`class guard: every ${set} classification (${table} admission/idempotency) reads derived_status, not base status`, () => {
+    const code = stripComments(SRC(file));
+    const exprs = classifiedExprs(code, set);
+    assert(exprs.length > 0, `expected ${set} classifications in ${file}`);
+    for (const expr of exprs) {
+      assert(
+        /\.derived_status\b/.test(expr),
+        `${set} classifies on \`${expr}\` — the BASE status of the derive-only tracked table \`${table}\`. ` +
+          `Route it through the derived tracking view and read \`.derived_status\` (ADR-0065, #503/#704)`,
+      );
+      assert(
+        !/[A-Za-z0-9_)\]]\.status\b/.test(expr),
+        `${set} classifies on \`${expr}\` which still reads a base \`.status\` — the terminal edge is ` +
+          `derive-only for \`${table}\` (ADR-0065, #503/#704)`,
+      );
+    }
+  });
+}
 
 test("class guard: no base `.status === ABANDONED_STATUS` / `.status === \"abandoned\"` read classification in service.ts", () => {
   const code = stripComments(SRC("service.ts"));
@@ -69,21 +113,6 @@ test("class guard: no base `.status === ABANDONED_STATUS` / `.status === \"aband
     `a base \`.status\` is compared to the derive-only \`abandoned\` terminal — read \`.derived_status\` off ` +
       `prsTracking instead (ADR-0065, #503): ${bad.map((m) => m[0]).join(", ")}`,
   );
-});
-
-test("class guard: every PLAN_TERMINAL_STATUSES classification in plan.ts reads derived_status, not base status", () => {
-  const code = stripComments(SRC("plan.ts"));
-  // Match the `.some((s) => s === <ref>)` classification form used at both admission sites.
-  const calls = [...code.matchAll(/PLAN_TERMINAL_STATUSES\.some\(\([^)]*\)\s*=>\s*[^)]*===\s*([A-Za-z0-9_.]+)\)/g)];
-  assert(calls.length > 0, "expected PLAN_TERMINAL_STATUSES classifications in plan.ts");
-  for (const m of calls) {
-    const ref = m[1];
-    assert(
-      /\.derived_status$/.test(ref),
-      `PLAN_TERMINAL_STATUSES classification reads \`${ref}\` — route it through plansTracking and read ` +
-        `\`.derived_status\` so a derive-only-terminated epic is seen terminal (ADR-0065, #503)`,
-    );
-  }
 });
 
 test("class guard: the feature read model classifies on derived_status, never the base status column", () => {

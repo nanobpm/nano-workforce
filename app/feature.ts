@@ -17,6 +17,7 @@
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
 import { TRANSCRIPT_URL_BASE_VAR, transcriptUrlBaseFor } from "./agentic/transcript-url.ts";
 import { coalesceTitle, fetchIssueTitle } from "./github.ts";
+import { derivedTrackingTable } from "./instanceTracking.ts";
 import { ESCALATION_SLA_TIMEOUT, normalizeBaseBranch, type ParsedIssue, renderBaseBranchBrief } from "./plan.ts";
 import type { ReadinessProbe } from "./readiness.ts";
 import { repoEnvelopeVars } from "./repoEnvelope.ts";
@@ -235,6 +236,50 @@ export const FEATURE_BLOCKED_ELEMENT = "feature-blocked";
  * that reproduces the reconciler bypass). */
 export const featureRuns = (data: DataLayer) => data.table<FeatureRun>("feature_runs", "feature_key");
 
+/** A `feature_runs` row as seen through its derived tracking VIEW (`feature_runs__tracking`): the base
+ * columns plus urban's ADR-0065 `derived_status`, which FOLDS the reconciler's terminal edge
+ * (out-of-band terminate / in-app cancel → `abandoned`) over the worker-owned transient. Since urban
+ * 0.81.0 the `instanceTracking` reconciler is a SOURCE, not a writer: it no longer stamps the terminal
+ * onto base `status` on cancel/terminate — the terminal is recomputed on read as `derived_status`. */
+export type TrackedFeatureRun = FeatureRun & { derived_status: string };
+
+/** Read-only accessor over the feature-run derived tracking VIEW (`feature_runs__tracking`). Use this —
+ * and read `derived_status`, NOT the base `status` — for the intake/admission idempotency
+ * classification (issue #704), so a run whose engine instance was terminated out-of-band (base row
+ * frozen at its last transient `running`/`escalated`/`awaiting_operator`) is correctly seen as
+ * `abandoned` and RESUBMITTABLE. The view name + `derived_status` column resolve through
+ * `derivedTrackingTable` (app/instanceTracking.ts), never a hard-coded name — mirroring `prsTracking`
+ * (app/service.ts) and `plansTracking` (app/plan.ts). Writes stay on `featureRuns`. */
+export const featureRunsTracking = (data: DataLayer) =>
+  derivedTrackingTable<TrackedFeatureRun>(data, "feature_runs", "feature_key");
+
+/** The discriminated outcome of a feature-run intake (issue #704). It distinguishes a genuine dispatch
+ * from a short-circuit and from a no-op, so a submit that started NOTHING can never render as a bare
+ * green success:
+ *  - `started` — a fresh engine instance was dispatched (`processKey` set).
+ *  - `already-active` — a non-terminal prior run for the same issue is still live, so the start
+ *    short-circuited; no new instance was created and `processKey` is the live run's.
+ *  - `noop-terminal` — the intake attempted a start but the engine returned NO instance key, so
+ *    nothing was dispatched. Surfaced by the operation as a distinct non-success (a submit that
+ *    dispatches no instance is not "Done"). */
+export type FeatureStartOutcome = "started" | "already-active" | "noop-terminal";
+
+/** The result of {@link startFeature} — a discriminated intake outcome (issue #704). `alreadyRunning`
+ * is retained as a back-compat flag for existing callers/telemetry (true iff `outcome` is
+ * `already-active`). A `type` alias (not an `interface`) because an object-literal type alias — with a
+ * fully-known, final set of properties — is assignable to the generated OpenAPI response shape's index
+ * signature, whereas an `interface` (open to declaration-merging) is not; this mirrors the inferred
+ * sibling results. */
+export type StartFeatureResult = {
+  featureKey: string;
+  outcome: FeatureStartOutcome;
+  /** The dispatched instance key (`started`), the live run's key (`already-active`), or null
+   * (`noop-terminal`). */
+  processKey: string | null;
+  /** True iff a non-terminal prior run short-circuited the start (`outcome === "already-active"`). */
+  alreadyRunning: boolean;
+};
+
 /** The deterministic task id for a single-issue run — the implementation agent branches
  * `feat/<task.id>` (see resources/prompts/feature.md), so it MUST be derivable from the issue alone
  * and stable across a resume. The PR is opened on the target repo, so the issue number
@@ -257,7 +302,7 @@ export async function startFeature(
   autoMerge: boolean,
   customInstructions: string | null = null,
   readiness: FeatureReadinessOptions = {},
-) {
+): Promise<StartFeatureResult> {
   // Intake-time readiness gate (issue #295): the probes the run must satisfy before it implements,
   // and the bound its preflight escalation timers fire off. Both are load-bearing together —
   // `pr.readiness-probe` rejects a blank `probeTimeout` and the preflight timers read `=probeTimeout`
@@ -286,9 +331,38 @@ export async function startFeature(
     ? customInstructions.trim()
     : null;
   const table = featureRuns(data);
-  const existing = await table.get(parsed.planKey);
-  if (existing && !FEATURE_TERMINAL_STATUSES.includes(existing.status)) {
-    return { featureKey: parsed.planKey, alreadyRunning: true, processKey: existing.process_key };
+  // ADR-0065: classify "already running" on the DERIVED terminal edge, not the base transient. A
+  // feature run whose engine instance was terminated out-of-band (or by an ordinary in-app cancel —
+  // derive-only under urban 0.81.0) has a base row frozen at its last worker transient
+  // (`running`/`escalated`/`awaiting_operator`) but a `feature_runs__tracking.derived_status` of
+  // `abandoned`. Reading the base `status` here wedged a terminated run `alreadyRunning` forever —
+  // returning a green success while dispatching NO instance (issue #704, the feature-side twin of the
+  // `submitPr` / epic re-admission wedges #503 fixed; this intake reader was the one #503 omitted).
+  // Route the idempotency gate through the derived view so a terminated run is correctly seen terminal
+  // and RESUBMITTABLE; a non-terminal derived edge still short-circuits (a genuinely-live run cannot
+  // be double-started). ONE read through the tracking VIEW serves both this classification and the
+  // insert-vs-update decision below: it re-exports every base column (so it doubles as the "exists?"
+  // check and the `process_key` source) plus `derived_status`, so a second base-table round trip is
+  // redundant.
+  const trackedExisting = await featureRunsTracking(data).get(parsed.planKey);
+  // A row with a null `process_key` never had an engine instance dispatched, so it is NEVER a live
+  // run — treat it as non-active for admission. This is load-bearing for the `noop-terminal` path
+  // (issue #704): a start the engine accepted without returning an instance key leaves a base row at
+  // `running`/`process_key: null` whose `derived_status` folds to the non-terminal base `running`
+  // (there is no terminated instance to fold to `abandoned`). Without this guard that phantom row
+  // would short-circuit every retry as `already-active`, wedging resubmission forever even though
+  // nothing was ever dispatched.
+  if (
+    trackedExisting &&
+    trackedExisting.process_key != null &&
+    !FEATURE_TERMINAL_STATUSES.some((s) => s === trackedExisting.derived_status)
+  ) {
+    return {
+      featureKey: parsed.planKey,
+      outcome: "already-active",
+      processKey: trackedExisting.process_key,
+      alreadyRunning: true,
+    };
   }
   const base = normalizeBaseBranch(baseBranch);
   const ts = now();
@@ -300,7 +374,7 @@ export async function startFeature(
     await fetchIssueTitle(parsed.repo, parsed.number, process.env.GITHUB_TOKEN ?? ""),
     parsed.planKey,
   );
-  if (existing) {
+  if (trackedExisting) {
     await table.update(parsed.planKey, {
       status: "running",
       base_branch: base,
@@ -425,6 +499,10 @@ export async function startFeature(
   const processKey = processInstanceKey == null ? null : String(processInstanceKey);
   if (processKey != null) {
     await table.update(parsed.planKey, { process_key: processKey, updated_at: now() });
+    return { featureKey: parsed.planKey, outcome: "started", processKey, alreadyRunning: false };
   }
-  return { featureKey: parsed.planKey, processKey };
+  // The engine accepted the start but returned NO instance key — nothing was actually dispatched.
+  // Report a discriminated no-op (issue #704) so the caller can surface it as a distinct non-success
+  // instead of a bare green "Done": a submit that dispatches no instance is not "started".
+  return { featureKey: parsed.planKey, outcome: "noop-terminal", processKey: null, alreadyRunning: false };
 }
