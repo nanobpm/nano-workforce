@@ -148,5 +148,16 @@ down), instead of silently printing an error body with exit 0.
   try to complete the job is EXPECTED after a cancel — do not treat it as an error to retry.
 - **Proceed** only when the command **succeeds** AND reports \`"abandoned": false\` — and re-check
   right before the push, since a cancel can land at any moment. Checking as late as possible keeps
-  the window tiny.`;
+  the window tiny.
+
+**Run this check yourself, inline, with your own shell tool.** Do **not** delegate it to a
+sub-agent, helper, or a separate "run this command" task: a sub-agent may have **no shell**, in which
+case it cannot run \`curl\`, produces no output, and the worker's idle timeout will kill the round.
+One inline \`curl\` in your own turn is all this needs.
+
+**If you have no way to run a shell command at all, SKIP this check and proceed.** This check is a
+best-effort optimisation, not a hard gate: a separate orchestrator layer **independently enforces
+cancellation** (it fences your job's completion on a cancelled run), so skipping the check only
+widens a tiny race — it never creates an orphaned run. Never stall, thrash, or fail the round trying
+to run \`curl\` through a tool you do not have; a skipped check is strictly better than a hung one.`;
 }

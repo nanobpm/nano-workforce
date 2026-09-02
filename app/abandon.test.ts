@@ -83,6 +83,25 @@ test("renderAbandonBrief embeds the concrete URL and the stop contract", () => {
   assertEquals(brief.includes("curl -fsS"), true);
 });
 
+test("renderAbandonBrief forbids delegating the check to a sub-agent (issue #678)", () => {
+  // A non-Claude agent (e.g. qwen) that hands this shell command to a shell-less
+  // `general-purpose` sub-agent deadlocks: the sub-agent has no shell, produces no
+  // output, and the worker's idle timeout kills the round. The brief must steer the
+  // agent to run the check inline with its OWN shell and never delegate it.
+  const brief = renderAbandonBrief("https://host/app/api/hooks/abandon?token=tok");
+  assertEquals(/sub-?agent/i.test(brief), true, "mentions sub-agent delegation");
+  assertEquals(/inline/i.test(brief), true, "tells the agent to run it inline");
+});
+
+test("renderAbandonBrief degrades gracefully when the agent has no shell (issue #678)", () => {
+  // The check is ADVISORY over an airtight harness job-fence (issue #76 layer 2). An
+  // agent that cannot run a shell command at all must be told to SKIP and proceed
+  // rather than thrash/hang — the orchestrator independently enforces cancellation.
+  const brief = renderAbandonBrief("https://host/app/api/hooks/abandon?token=tok");
+  assertEquals(/skip this check/i.test(brief), true, "offers a skip path");
+  assertEquals(/independently/i.test(brief), true, "explains the independent enforcement");
+});
+
 test("prKeyForAbandonToken resolves a known token and rejects unknowns", async () => {
   const data = memData();
   await seedPr(data, "o/r#1", "tok", "converging");
