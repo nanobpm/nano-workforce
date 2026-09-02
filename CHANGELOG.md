@@ -1,3 +1,9 @@
+## [0.175.1](https://github.com/nanobpm/nano-workforce/compare/v0.175.0...v0.175.1) (2026-09-02)
+
+### Bug Fixes
+
+* **intake:** route feature-run admission idempotency through derived_status ([#707](https://github.com/nanobpm/nano-workforce/issues/707)) ([eab2c9c](https://github.com/nanobpm/nano-workforce/commit/eab2c9ce3d4b22bad38da62170f13fda647eb21f)), closes [#503](https://github.com/nanobpm/nano-workforce/issues/503) [#503](https://github.com/nanobpm/nano-workforce/issues/503) [#503](https://github.com/nanobpm/nano-workforce/issues/503) [#704](https://github.com/nanobpm/nano-workforce/issues/704)
+
 ## [0.175.0](https://github.com/nanobpm/nano-workforce/compare/v0.174.1...v0.175.0) (2026-09-02)
 
 ### Features
