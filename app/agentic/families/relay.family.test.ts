@@ -956,6 +956,105 @@ test("#689 mid-job reconnect: with no isInstanceLive wired, a producer disconnec
   service.teardown();
 });
 
+test("#691 engine-owned disconnect: a mid-job reconnect whose engine job is still parked keeps the correlation live", async () => {
+  const registry = new ConnectionRegistry();
+  const correlation = new CorrelationRegistry();
+  const byConnection = new Map([["conn-old", "worker-E"]]);
+  // The engine is the completion authority (#691): while the harness holds the lease the job stays
+  // parked (resolver returns an element-instance key), so a producer disconnect must NOT complete it.
+  let parked = true;
+  const resolveElementInstance = (jobKey: string) =>
+    Promise.resolve(parked && jobKey === "9001" ? "ei-9001" : undefined);
+  // isInstanceLive is deliberately NOT wired (static () => false): the engine job-state — not the
+  // presence heuristic — must be what spares the reconnect, proving presence is no longer the authority.
+  const { service, hub } = mkCorrelatedService(registry, memoryDb(), correlation, byConnection, {
+    resolveElementInstance,
+  });
+  const p = connect("conn-old", registry);
+  hub.handler?.(produce(jobStream("9001"), 1, "booting agent"), p.conn);
+  assertEquals(correlation.jobKeysFor("worker-E"), ["9001"], "the job links on first produce");
+
+  // The producer WS blips: the old connection drops (no new one yet — presence would report the
+  // instance NOT live). A frame drives #reconcile → drops the dead producer + kicks the engine reconcile.
+  registry.remove("conn-old");
+  const other = connect("cons", registry);
+  hub.handler?.(grant(0), other.conn);
+  await tick(); // let the fire-and-forget engine reconcile settle
+  assertEquals(correlation.jobKeysFor("worker-E"), ["9001"], "a still-parked job survives the disconnect");
+  assertEquals(service.transcriptOf(jobStream("9001")), undefined, "the still-active stream is NOT archived");
+  assertEquals(service.liveFallback(jobStream("9001"))?.ring !== undefined, true, "the transcript is still live");
+
+  // The worker resumes producing on a NEW connection over the same job → re-attributed, still one job.
+  byConnection.set("conn-new", "worker-E");
+  const p2 = connect("conn-new", registry);
+  hub.handler?.(produce(jobStream("9001"), 1, "resumed output"), p2.conn);
+  assertEquals(correlation.jobKeysFor("worker-E"), ["9001"], "the resumed producer stays linked to the same job");
+
+  // The job genuinely ends: the engine park vanishes. The periodic backstop pass completes + archives it.
+  parked = false;
+  await service.reconcileEngineCorrelations();
+  assertEquals(correlation.jobKeysFor("worker-E"), [], "the ended job is released");
+  assertEquals(service.transcriptOf(jobStream("9001"))?.status, "completed", "and its transcript is archived");
+  service.teardown();
+});
+
+test("#691 engine-owned disconnect: a true exit whose engine job is gone completes + archives the stream", async () => {
+  const registry = new ConnectionRegistry();
+  const correlation = new CorrelationRegistry();
+  const byConnection = new Map([["prod", "worker-X"]]);
+  // The engine reports the job GONE at disconnect time (a clean completion whose terminal lifecycle
+  // event was missed, or an unclean exit): the disconnect-driven engine reconcile completes it.
+  const resolveElementInstance = () => Promise.resolve(undefined);
+  const { service, hub } = mkCorrelatedService(registry, memoryDb(), correlation, byConnection, {
+    resolveElementInstance,
+  });
+  const p = connect("prod", registry);
+  hub.handler?.(produce(jobStream("kX"), 1, "x"), p.conn);
+  assertEquals(correlation.jobKeysFor("worker-X"), ["kX"]);
+
+  registry.remove("prod");
+  const other = connect("cons", registry);
+  hub.handler?.(grant(0), other.conn);
+  await tick(); // the fire-and-forget engine reconcile resolves "gone" → completes
+  assertEquals(correlation.jobKeysFor("worker-X"), [], "a truly-ended job is released on disconnect");
+  assertEquals(service.transcriptOf(jobStream("kX"))?.status, "completed", "and its transcript is archived");
+  service.teardown();
+});
+
+test("#691 engine-owned disconnect: a transient engine read at disconnect never falsely completes; the backstop retries", async () => {
+  const registry = new ConnectionRegistry();
+  const correlation = new CorrelationRegistry();
+  const byConnection = new Map([["prod", "worker-T"]]);
+  // The disconnect-time engine read throws (unavailable). A transient fault must be treated as
+  // "unknown — keep it linked", NEVER as "job gone": the stream stays live until a later pass resolves.
+  let failing = true;
+  let gone = false;
+  const resolveElementInstance = () => {
+    if (failing) return Promise.reject(new Error("engine unavailable"));
+    return Promise.resolve(gone ? undefined : "ei-T");
+  };
+  const { service, hub } = mkCorrelatedService(registry, memoryDb(), correlation, byConnection, {
+    resolveElementInstance,
+  });
+  const p = connect("prod", registry);
+  hub.handler?.(produce(jobStream("kT"), 1, "x"), p.conn);
+
+  registry.remove("prod");
+  const other = connect("cons", registry);
+  hub.handler?.(grant(0), other.conn);
+  await tick(); // the engine read rejects → the stream must stay linked, not complete
+  assertEquals(correlation.jobKeysFor("worker-T"), ["kT"], "a transient engine failure leaves the job linked");
+  assertEquals(service.transcriptOf(jobStream("kT")), undefined, "and its transcript is NOT archived");
+
+  // The engine recovers and now reports the job gone: the periodic backstop pass completes it.
+  failing = false;
+  gone = true;
+  await service.reconcileEngineCorrelations();
+  assertEquals(correlation.jobKeysFor("worker-T"), [], "the backstop pass releases the ended job");
+  assertEquals(service.transcriptOf(jobStream("kT"))?.status, "completed", "and archives its transcript");
+  service.teardown();
+});
+
 test("H6 correlation write-side: non-job streams are never linked; a link retries until the instance resolves", () => {
   const registry = new ConnectionRegistry();
   const correlation = new CorrelationRegistry();

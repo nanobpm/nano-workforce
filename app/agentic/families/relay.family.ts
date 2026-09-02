@@ -254,15 +254,17 @@ export interface RelayTranscriptServiceOptions {
   readonly instanceForConnection?: (connectionId: string) => string | undefined;
   /**
    * Whether a worker instance is still live on any hub connection (#689). Wired to the presence
-   * registry's {@link PresenceRegistry.isInstanceLive}. The disconnect-driven reconcile uses it to
-   * spare a still-active job's stream when its worker merely RECONNECTED mid-job (old producer
-   * connection dropped, a new one re-registered under the same instance): completing then would
-   * archive a live job's transcript and release its correlation, wedging the cockpit (the reconnected
-   * worker's produce frames hit a terminal `completed` stream and are ignored) while the harness
-   * keeps the engine lease. When wired to presence, a true worker-exit still completes: presence
-   * has dropped the instance, so this returns false. Omitted (`() => false`, the static default) →
-   * the prior always-complete-on-disconnect behaviour — every disconnect completes, reconnect
-   * included (the seam never consults presence, so its value does not vary).
+   * registry's {@link PresenceRegistry.isInstanceLive}. Since #691 the disconnect-driven reconcile
+   * defers to the engine job-state (the poller-owned completion authority) whenever an engine view
+   * ({@link resolveElementInstance}) is wired, so this presence signal is consulted ONLY as the
+   * engine-less fallback: on a host with no engine read-model (or a non-job/unlinked stream with no
+   * engine job to reconcile against) it spares a still-active job's stream when its worker merely
+   * RECONNECTED mid-job (old producer connection dropped, a new one re-registered under the same
+   * instance) — completing then would archive a live job's transcript and release its correlation,
+   * wedging the cockpit (the reconnected worker's produce frames hit a terminal `completed` stream and
+   * are ignored). A true worker-exit still completes (presence has dropped the instance → false).
+   * Omitted (`() => false`, the static default) → the prior always-complete-on-disconnect behaviour in
+   * that fallback path.
    */
   readonly isInstanceLive?: (instance: string) => boolean;
   /**
@@ -725,27 +727,45 @@ export class RelayTranscriptService {
   }
 
   /**
-   * Flush + complete every ephemeral stream whose producer connection is no longer live (the S1
-   * registry dropped it on close or liveness timeout), and release its job correlation (H6, #149).
-   * Lazy, like the relay hub's own dead-subscriber prune: it runs on each inbound frame, and shutdown
-   * covers the quiescent tail via {@link teardown}. The correlation release is store-independent (it
-   * runs even for an unpersisted relay), so a dropped worker's `jobKeys` always clear.
+   * Reconcile every ephemeral stream whose producer connection is no longer live (the S1 registry
+   * dropped it on close or liveness timeout). For a LINKED job stream with an engine view wired this
+   * defers the completion decision to the engine job-state (#691) — the poller-owned authority — so a
+   * mid-job reconnect never archives a still-active job; for an engine-less host (or a non-job/unlinked
+   * stream) it flushes + completes the ephemeral stream and releases its correlation (H6, #149), with
+   * presence liveness (#689/#690) sparing a still-live instance as the only fallback signal. Lazy, like
+   * the relay hub's own dead-subscriber prune: it runs on each inbound frame, and shutdown covers the
+   * quiescent tail via {@link teardown}. The correlation release is store-independent (it runs even for
+   * an unpersisted relay), so a dropped worker's `jobKeys` always clear.
    */
   #reconcile(): void {
     for (const [stream, state] of this.#streams) {
       if (state.producer !== undefined && !this.#registry.has(state.producer)) {
-        // Producer connection gone. Normally that means the job it was relaying ended — release the
-        // correlation and flush+complete its ephemeral transcript. BUT a worker that merely
-        // RECONNECTED mid-job (#689) also loses its old producer connection while its job keeps
-        // running (the harness holds the engine lease and extends it). Presence re-registers the SAME
-        // instance under the new connection, so the instance stays live even though this specific
-        // producer connection is gone. Completing then would archive a still-active job's transcript
-        // to `historical` and drop its correlation — and because a completed stream is terminal
-        // (`#observe` ignores later frames), the reconnected worker could NEVER re-correlate: the
-        // cockpit shows the worker idle with a frozen transcript while the job is genuinely running.
-        // So spare the stream while its instance is still live; the next `produce` re-attributes the
-        // live connection (via `#observe`), a NEW job supersedes it (via `#link`), or — once the
-        // worker truly exits — presence drops the instance and a later reconcile completes it.
+        // Producer connection gone. Normally that means the job it was relaying ended — but a worker
+        // that merely RECONNECTED mid-job (#689) also loses its old producer connection while its job
+        // keeps running (the harness holds the engine lease and extends it). Inferring job-end from the
+        // relay-connection layer (the old presence heuristic, #690) conflates two independent liveness
+        // signals (engine lease vs. WS connection); the authoritative one is the engine job-state the
+        // poller already reconciles (#691).
+        if (state.linked && this.#resolveElementInstance !== undefined && jobKeyOfStream(stream) !== undefined) {
+          // Engine/poller-owned completion (#691): drop the dead producer so `#reconcile` does not
+          // re-trigger on every subsequent frame, then reconcile THIS stream against the engine's view
+          // of its job (fire-and-forget — the sync frame handler must not await an engine read). A
+          // reconnected worker's job is still parked → kept live (the reconnect's next `produce`
+          // re-attributes the live connection via `#observe`); a genuine exit's job is gone →
+          // completed + archived. The periodic {@link reconcileEngineCorrelations} pass is the backstop
+          // if this read faults transiently. Presence liveness is no longer consulted here — the
+          // engine job-state is the sole completion authority whenever an engine view is wired.
+          state.producer = undefined;
+          void this.#reconcileStreamAgainstEngine(stream).catch((err: unknown) => {
+            this.#log.warn("agentic relay disconnect engine-reconcile failed", { stream, err: String(err) });
+          });
+          continue;
+        }
+        // Engine-less fallback (no engine view wired — e.g. an engine-less host, or a non-job/unlinked
+        // stream with no engine job to reconcile against): presence-liveness spares a still-live
+        // instance's stream (#689/#690) and a truly-gone instance completes. Presence remains a
+        // completion signal ONLY in this degraded path where there is no engine job-state to consult —
+        // never the sole authority on the engine-wired path above.
         if (state.instance !== undefined && this.#isInstanceLive(state.instance)) continue;
         // Producer connection gone → the job it was relaying ended: release its correlation.
         this.#unlink(stream, state);
@@ -774,40 +794,66 @@ export class RelayTranscriptService {
    * stream state so a job already released between snapshot and resolution is not double-completed.
    */
   async reconcileEngineCorrelations(): Promise<void> {
-    const resolve = this.#resolveElementInstance;
-    if (resolve === undefined) return;
-    const linked: { stream: string; jobKey: string; processInstanceKey?: string }[] = [];
+    if (this.#resolveElementInstance === undefined) return;
+    // Snapshot the linked stream ids BEFORE any await so a concurrent completion (a terminal lifecycle
+    // event, a supersede, or a disconnect-triggered engine reconcile landing mid-pass) cannot corrupt
+    // iteration; the per-stream helper re-reads live state, so a job released between snapshot and
+    // resolution is not double-completed.
+    const streams: string[] = [];
     for (const [stream, state] of this.#streams) {
       if (!state.linked || state.completed) continue;
-      const jobKey = jobKeyOfStream(stream);
-      if (jobKey === undefined) continue;
-      const processInstanceKey = this.#correlation()?.resolve?.(jobKey)?.processInstanceKey;
-      linked.push({ stream, jobKey, processInstanceKey });
+      if (jobKeyOfStream(stream) === undefined) continue;
+      streams.push(stream);
     }
-    for (const { stream, jobKey, processInstanceKey } of linked) {
-      let activeKey: string | undefined;
-      try {
-        activeKey = await resolve(jobKey, processInstanceKey);
-      } catch (err) {
-        // A transient engine read failure must NOT be read as "job gone" — leave the job linked; a
-        // later pass (or the terminal lifecycle event) releases it. Advisory, never a false release.
-        this.#log.warn("agentic relay engine-reconcile read failed — leaving correlation linked", {
-          stream,
-          jobKey,
-          err: String(err),
-        });
-        continue;
-      }
-      // A live JOB park (a resolved element-instance key) means the job is genuinely active — keep it.
-      if (activeKey !== undefined) continue;
-      // The engine no longer parks this job → it ended (possibly via an unclean exit that skipped the
-      // terminal lifecycle event). Re-check the current state — a concurrent completion may already
-      // have released it — then release its correlation and flush its transcript.
-      const current = this.#streams.get(stream);
-      if (current === undefined || current.completed || !current.linked) continue;
-      this.#log.info("agentic relay engine-reconcile released a stale correlation", { stream, jobKey });
-      this.completeStream(stream);
+    for (const stream of streams) await this.#reconcileStreamAgainstEngine(stream);
+  }
+
+  /**
+   * Reconcile ONE `job:<jobKey>` stream against the engine's view of its job (the poller-owned
+   * completion authority, #691). Asks the engine read model (the {@link ElementInstanceResolver} the
+   * #544 link path uses) whether the job is still parked: still parked → genuinely active, kept live;
+   * gone → ended (a clean completion whose terminal lifecycle event was missed, or an unclean exit) →
+   * released + its transcript flushed/archived. This is the single canonical engine-reconcile step,
+   * shared by BOTH the periodic safety-net pass ({@link reconcileEngineCorrelations}) and the
+   * disconnect-driven `#reconcile` — so a producer disconnect no longer completes a stream by inferring
+   * job-end from relay-connection/presence liveness (#689/#690), but by the authoritative engine
+   * job-state. A no-op with no resolver wired, and a resolver THROW / REJECTION is treated as
+   * "unknown — keep it linked" so a transient engine read never falsely releases a genuinely active
+   * job (a later pass, or the terminal lifecycle event, releases it). Re-reads live state before
+   * completing so a job released between the read and the completion is not double-completed.
+   */
+  async #reconcileStreamAgainstEngine(stream: string): Promise<void> {
+    const resolve = this.#resolveElementInstance;
+    if (resolve === undefined) return;
+    const before = this.#streams.get(stream);
+    if (before === undefined || before.completed || !before.linked) return;
+    const jobKey = jobKeyOfStream(stream);
+    if (jobKey === undefined) return;
+    const processInstanceKey = this.#correlation()?.resolve?.(jobKey)?.processInstanceKey;
+    let activeKey: string | undefined;
+    try {
+      activeKey = await resolve(jobKey, processInstanceKey);
+    } catch (err) {
+      // A transient engine read failure must NOT be read as "job gone" — leave the job linked; a
+      // later pass (or the terminal lifecycle event) releases it. Advisory, never a false release.
+      this.#log.warn("agentic relay engine-reconcile read failed — leaving correlation linked", {
+        stream,
+        jobKey,
+        err: String(err),
+      });
+      return;
     }
+    // A live JOB park (a resolved element-instance key) means the job is genuinely active — keep it.
+    // This is what spares a mid-job RECONNECT: the harness still holds the engine lease, so the job is
+    // still parked even though the old producer connection dropped.
+    if (activeKey !== undefined) return;
+    // The engine no longer parks this job → it ended (possibly via an unclean exit that skipped the
+    // terminal lifecycle event). Re-check the current state — a concurrent completion may already
+    // have released it — then release its correlation and flush its transcript.
+    const current = this.#streams.get(stream);
+    if (current === undefined || current.completed || !current.linked) return;
+    this.#log.info("agentic relay engine-reconcile released a stale correlation", { stream, jobKey });
+    this.completeStream(stream);
   }
 
   /**
@@ -886,10 +932,11 @@ export function createRelayFamily(options: {
         // are read per call, so this works regardless of family mount order (relay may mount before
         // presence/correlation). Absent registries → no linking, still advisory-correct.
         instanceForConnection: (connectionId) => currentPresenceRegistry()?.instanceForConnection(connectionId),
-        // #689: is the producing worker instance still live on ANY connection? Gates the
-        // disconnect-driven reconcile so a mid-job RECONNECT (old producer connection dropped, the
-        // same instance re-registered) does not archive a still-active job's stream and wedge its
-        // correlation. Read per call for the same mount-order independence as the resolvers above.
+        // #689/#691: is the producing worker instance still live on ANY connection? Since #691 the
+        // disconnect-driven reconcile decides completion by the engine job-state (below) whenever the
+        // element-instance resolver is wired; this presence signal is the engine-LESS fallback that
+        // spares a mid-job RECONNECT's still-active stream where no engine view is available. Read per
+        // call for the same mount-order independence as the resolvers around it.
         isInstanceLive: (instance) => currentPresenceRegistry()?.isInstanceLive(instance) ?? false,
         // #485: resolve a completed job's worker attribution (presence identity/host) from the live
         // presence registry, read per call for the same mount-order independence. Absent → attribution
