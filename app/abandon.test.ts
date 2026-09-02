@@ -98,7 +98,9 @@ test("renderAbandonBrief forbids delegating the check to a sub-agent (issue #678
 test("renderAbandonBrief degrades gracefully when the agent has no shell (issue #678)", () => {
   // The check is ADVISORY over an airtight harness job-fence (issue #76 layer 2). An
   // agent that cannot run a shell command at all must be told to SKIP and proceed
-  // rather than thrash/hang — the orchestrator independently enforces cancellation.
+  // rather than thrash/hang — the harness job-fence (issue #76 layer 2) still fences
+  // a cancelled run, so a skipped check degrades safely rather than promising full
+  // independent enforcement.
   const brief = renderAbandonBrief("https://host/app/api/hooks/abandon?token=tok");
   assertEquals(/skip this check/i.test(brief), true, "offers a skip path");
   // Assert the actual anti-deadlock contract, not an explanatory word: a shell-less agent must be
