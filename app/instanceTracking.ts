@@ -147,7 +147,10 @@ export async function resolveTrackedInstance(
     if (!row) continue;
     const statusColumn = trackingTargetFor(table).statusColumn;
     const derivedStatus = String(row[statusColumn] ?? "");
-    const active = (binding.activeStatuses ?? []).some((s) => s === derivedStatus);
+    // Classify against the manifest-enforced active set (throws on a binding whose `activeStatuses`
+    // is missing/empty) rather than a silent `?? []` — an empty fallback would misclassify EVERY
+    // resolved record as terminal (`active:false`) and let the cancel door report a false success.
+    const active = activeStatusesFor(table).some((s) => s === derivedStatus);
     return { table, keyField, derivedStatus, active };
   }
   return undefined;

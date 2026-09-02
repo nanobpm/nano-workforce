@@ -208,6 +208,7 @@ test("a key that maps to NO tracked record → 404 no-op and never touches the e
   const res = await call(app, { processInstanceKey: "does-not-exist" });
   assertEquals(res.status, 404);
   assertEquals(res.body.ok, false);
+  assertEquals(res.body.state, "gone");
   assertEquals(res.body.reconciled, 0);
   assert(typeof res.body.error === "string" && res.body.error.length > 0, "carries a reason");
   assertEquals(cancelCalls.length, 0, "an untracked key never reaches the engine");

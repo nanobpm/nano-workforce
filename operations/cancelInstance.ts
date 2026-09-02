@@ -81,6 +81,9 @@ export default defineOperation("cancelInstance", async ({ req, body }, app) => {
         body: {
           ok: false,
           processInstanceKey,
+          // No tracked record owns this key, so from the door's aggregates the run is `gone`. Carry a
+          // `state` so the body is a full CancelInstanceResult (uniform shape for clients/projection).
+          state: "gone",
           reconciled: 0,
           error: "no tracked record for processInstanceKey",
         },
