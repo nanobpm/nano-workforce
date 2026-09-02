@@ -44,15 +44,27 @@ function stripComments(src: string): string {
 
 /** Every expression a `<SET>_TERMINAL_STATUSES` classifies, across BOTH idioms the app uses:
  *  `SET.includes(<expr>)` and `SET.some((s) => s === <expr>)` (and the mirrored `<expr> === s`). One
- *  extractor for both forms so a reader can't dodge the guard by switching idiom. */
+ *  extractor for both forms so a reader can't dodge the guard by switching idiom. For the `.some`
+ *  form we capture the CLASSIFIED OPERAND — the side of `===` that is NOT the arrow parameter — on
+ *  either orientation, and assert against that operand rather than the whole arrow body, so an
+ *  incidental `.derived_status` reference elsewhere in the body can't mask a base-`.status`
+ *  classification. */
 function classifiedExprs(code: string, setName: string): string[] {
   const exprs: string[] = [];
   for (const m of code.matchAll(new RegExp(`${setName}\\.includes\\(([^)]*)\\)`, "g"))) {
     exprs.push(m[1]);
   }
-  for (const m of code.matchAll(new RegExp(`${setName}\\.some\\(\\([^)]*\\)\\s*=>\\s*([^)]*)\\)`, "g"))) {
-    // The `.some` arrow body is `s === <expr>`; capture it and assert the classified side is derived.
-    exprs.push(m[1]);
+  for (const m of code.matchAll(new RegExp(`${setName}\\.some\\(\\(\\s*(\\w+)\\s*\\)\\s*=>\\s*([^)]*)\\)`, "g"))) {
+    const param = m[1]; // the arrow parameter, e.g. `s`
+    const body = m[2]; // `s === <expr>` or the mirrored `<expr> === s`
+    const sides = body.split("===").map((x) => x.trim());
+    // Capture the operand compared against the loop parameter, on either side of `===`; fall back to
+    // the whole body for any shape we don't recognise so the guard errs toward stricter, not looser.
+    if (sides.length === 2 && (sides[0] === param || sides[1] === param)) {
+      exprs.push(sides[0] === param ? sides[1] : sides[0]);
+    } else {
+      exprs.push(body);
+    }
   }
   return exprs;
 }

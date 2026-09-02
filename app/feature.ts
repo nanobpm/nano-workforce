@@ -329,7 +329,6 @@ export async function startFeature(
     ? customInstructions.trim()
     : null;
   const table = featureRuns(data);
-  const existing = await table.get(parsed.planKey);
   // ADR-0065: classify "already running" on the DERIVED terminal edge, not the base transient. A
   // feature run whose engine instance was terminated out-of-band (or by an ordinary in-app cancel —
   // derive-only under urban 0.81.0) has a base row frozen at its last worker transient
@@ -339,9 +338,23 @@ export async function startFeature(
   // `submitPr` / epic re-admission wedges #503 fixed; this intake reader was the one #503 omitted).
   // Route the idempotency gate through the derived view so a terminated run is correctly seen terminal
   // and RESUBMITTABLE; a non-terminal derived edge still short-circuits (a genuinely-live run cannot
-  // be double-started).
-  const trackedExisting = existing ? await featureRunsTracking(data).get(parsed.planKey) : undefined;
-  if (trackedExisting && !FEATURE_TERMINAL_STATUSES.some((s) => s === trackedExisting.derived_status)) {
+  // be double-started). ONE read through the tracking VIEW serves both this classification and the
+  // insert-vs-update decision below: it re-exports every base column (so it doubles as the "exists?"
+  // check and the `process_key` source) plus `derived_status`, so a second base-table round trip is
+  // redundant.
+  const trackedExisting = await featureRunsTracking(data).get(parsed.planKey);
+  // A row with a null `process_key` never had an engine instance dispatched, so it is NEVER a live
+  // run — treat it as non-active for admission. This is load-bearing for the `noop-terminal` path
+  // (issue #704): a start the engine accepted without returning an instance key leaves a base row at
+  // `running`/`process_key: null` whose `derived_status` folds to the non-terminal base `running`
+  // (there is no terminated instance to fold to `abandoned`). Without this guard that phantom row
+  // would short-circuit every retry as `already-active`, wedging resubmission forever even though
+  // nothing was ever dispatched.
+  if (
+    trackedExisting &&
+    trackedExisting.process_key != null &&
+    !FEATURE_TERMINAL_STATUSES.some((s) => s === trackedExisting.derived_status)
+  ) {
     return {
       featureKey: parsed.planKey,
       outcome: "already-active",
@@ -359,7 +372,7 @@ export async function startFeature(
     await fetchIssueTitle(parsed.repo, parsed.number, process.env.GITHUB_TOKEN ?? ""),
     parsed.planKey,
   );
-  if (existing) {
+  if (trackedExisting) {
     await table.update(parsed.planKey, {
       status: "running",
       base_branch: base,

@@ -405,6 +405,34 @@ test("startFeature: a start that dispatches no instance reports noop-terminal (n
   assertEquals(result.alreadyRunning, false);
 });
 
+// #704 follow-up (review): a `noop-terminal` start leaves a `feature_runs` row at base `running` with
+// `process_key: null` — NO engine instance was ever dispatched. That phantom row's `derived_status`
+// folds to the non-terminal base `running` (there is no terminated instance to fold to `abandoned`),
+// so without the null-`process_key` admission guard a retry would short-circuit `already-active` and
+// wedge resubmission forever. Assert the retry stays RESUBMITTABLE and re-dispatches.
+test("startFeature: retry after a noop-terminal re-dispatches (a null process_key row is not already-active)", async () => {
+  const stores = { feature_runs: { rows: [] as any[], key: "feature_key" } };
+  // Round 1: the engine dispatches nothing → noop-terminal, leaving a running/process_key:null row.
+  const noopEngine = { createInstance: () => Promise.resolve({ processInstanceKey: null }) } as any;
+  const first = await startFeature(memData(stores), noopEngine, PARSED, "main", false, false);
+  assertEquals(first.outcome, "noop-terminal");
+  assertEquals(stores.feature_runs.rows[0].status, "running");
+  assertEquals(stores.feature_runs.rows[0].process_key, null);
+  // Round 2: a healthy engine now dispatches — the retry must NOT wedge as already-active.
+  let created = 0;
+  const engine = {
+    createInstance: () => {
+      created += 1;
+      return Promise.resolve({ processInstanceKey: "PI-RETRY" });
+    },
+  } as any;
+  const second = await startFeature(memData(stores), engine, PARSED, "main", false, false);
+  assertEquals(created, 1);
+  assertEquals(second.outcome, "started");
+  assertEquals(second.alreadyRunning, false);
+  assertEquals(second.processKey, "PI-RETRY");
+});
+
 // `title` — the fetched issue title when available, else the `owner/repo#N` key — on BOTH the insert
 // (new run) and update (in-place restart) paths, so the title-led grid never renders a blank cell.
 test("startFeature: coalesces title to the key when the fetch yields nothing (insert path)", async () => {
