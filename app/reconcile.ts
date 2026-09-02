@@ -29,12 +29,24 @@
 //     engine is a no-op too: reconcile NEVER orphans when it could not confirm a reset (a 401/5xx or
 //     a network error yields `reachable:false`, not a false "engine missing").
 //
+// A second, complementary pass covers the "instance absent/unknown" gap (issue #630) the epoch signal
+// alone cannot: an inflight run whose engine instance has VANISHED from the read model — its
+// `keyField` (process_key) has NO `_urban_instance_state` row at all (engine clean-reset, cluster
+// rebuild, or read-model pruning removed it), so the derived tracking edge has no `TERMINATED` row to
+// match and the run freezes at its last worker-owned status, wedging Active forever with no
+// reconciliation path (the observed pre-reset orphan `Magikcraft/nano-bpm#1051`, process_key 71506).
+// `reconcileVanishedInstances` drives every such row — active, dispatched, its key absent from
+// `_urban_instance_state`, and PAST A GRACE WINDOW (so a still-starting run not yet projected is
+// spared) — to the same `orphaned` terminal, with a DISTINCT provenance reason so an operator can
+// tell a vanished-instance orphan apart from an epoch-regression one. `runEngineReconcile` runs BOTH
+// passes, so startup and the operator command converge both failure modes in one call.
+//
 // The provenance is app-owned (not urban's `_urban_write_provenance`, which is a domain-free
 // insert-join sidecar written only inside a job): reconcile runs at boot / over HTTP, outside any
 // job, and needs to record the REASON + epoch + run id — which the app-owned `reconcile_provenance`
 // table carries, and the existing `app.db` backup convention makes the whole mutation reversible.
 
-import type { DataLayer, GatewayDataSource as DataSource } from "@nanobpm/urban";
+import type { DataLayer, GatewayDataSource as DataSource, InstanceTracking } from "@nanobpm/urban";
 import type { TopologyProbe } from "./enginePreflight.ts";
 import { activeStatusesFor, baseStatusFieldFor, engineBackedBindings, keyFieldFor } from "./instanceTracking.ts";
 
@@ -48,6 +60,28 @@ export const ORPHANED_STATUS = "orphaned";
 /** The provenance reason stamped on every orphaned transition: the engine was reset/rewound and the
  *  recorded incarnation epoch regressed (the #1065 signature). */
 export const RECONCILE_ORPHAN_REASON = "engine-reset/epoch-regression";
+
+/** The provenance reason stamped when a row is orphaned because its engine instance VANISHED from the
+ *  read model — the run's `keyField` (process_key) has NO `_urban_instance_state` row at all, so the
+ *  instance is absent/unknown in engine truth (engine clean-reset, cluster rebuild, or read-model
+ *  pruning removed the instance-state row entirely — issue #630). Deliberately DISTINCT from
+ *  {@link RECONCILE_ORPHAN_REASON} so an operator can tell an epoch-regression orphan apart from a
+ *  vanished-instance orphan, even though both land on the same `orphaned` terminal. */
+export const RECONCILE_VANISHED_REASON = "engine-instance/vanished";
+
+/** The default grace window (ms) a dispatched-but-instance-less row is spared before it is considered
+ *  vanished. A run dispatched moments ago (its `process_key` set) has not yet been polled into
+ *  `_urban_instance_state` by the instanceTracking reconciler (`pollMs` 5s + engine search latency),
+ *  so it transiently looks "vanished". This window (comfortably larger than a poll cycle) keeps a
+ *  legitimately-still-starting run from being folded to terminal prematurely (issue #630 AC #2). */
+export const DEFAULT_VANISHED_GRACE_MS = 5 * 60_000;
+
+/** The framework's canonical per-instance engine-lifecycle projection table (urban's
+ *  `_urban_instance_state`, keyed by `process_instance_key`). The vanished-instance reconcile joins
+ *  each engine-backed row's `keyField` against it: a run whose key has NO row here has no backing
+ *  instance in engine truth. `_urban_` prefixed (framework bookkeeping) so it is provisioned by the
+ *  runtime, not our migrations — the reconcile guards on its existence before acting. */
+const INSTANCE_STATE_TABLE = "_urban_instance_state";
 
 /** The single-row epoch ledger + its append-only run/provenance sidecars (migration 092). */
 const INCARNATION_TABLE = "engine_incarnation";
@@ -71,7 +105,12 @@ export interface EngineEpochObservation {
 }
 
 /** Why a reconcile pass acted (or did not). */
-export type ReconcileReason = "epoch-regression" | "seed-epoch" | "no-op" | "engine-unreachable";
+export type ReconcileReason =
+  | "epoch-regression"
+  | "seed-epoch"
+  | "no-op"
+  | "engine-unreachable"
+  | "instance-vanished";
 
 /** One orphaned engine-backed row. */
 export interface OrphanedRow {
@@ -105,6 +144,14 @@ export interface ReconcileOptions {
   /** The data source name to reconcile (defaults to the DataLayer's default source). */
   sourceName?: string;
   log?: ReconcileLog;
+}
+
+/** Options for the vanished-instance reconcile pass ({@link reconcileVanishedInstances}). */
+export interface VanishedReconcileOptions extends ReconcileOptions {
+  /** How long (ms) a dispatched-but-instance-less row is spared before it is folded to terminal, so a
+   *  still-starting run (not yet projected into `_urban_instance_state`) is not orphaned prematurely.
+   *  Defaults to {@link DEFAULT_VANISHED_GRACE_MS}. */
+  graceMs?: number;
 }
 
 /** Read the incarnation epoch out of a `/v2/topology` body — `nano.incarnation` (or its `epoch`
@@ -175,6 +222,78 @@ async function persistEpoch(src: DataSource, epoch: number, at: string): Promise
   );
 }
 
+/** The resolved schema + tracking selectors for one engine-backed binding, or `null` when the binding
+ *  carries no `activeStatuses` selector (it cannot classify "in-flight", so it is skipped). */
+interface BindingShape {
+  table: string;
+  active: readonly string[];
+  statusField: string;
+  keyField: string;
+  pkCol: string;
+  hasUpdatedAt: boolean;
+}
+
+/** The shape of a row selected for possible orphaning. */
+interface OrphanCandidate {
+  __pk: unknown;
+  __key: unknown;
+  __status: unknown;
+  __updated?: unknown;
+}
+
+/** Resolve a binding's tracking selectors + physical schema, or `null` to skip a selector-less
+ *  binding (activeStatusesFor would throw; we tolerate it here). */
+async function resolveShape(src: DataSource, binding: InstanceTracking): Promise<BindingShape | null> {
+  if (!binding.activeStatuses?.length) return null;
+  const table = binding.table;
+  const { pkCol, hasUpdatedAt } = await tableShape(src, table);
+  return {
+    table,
+    active: activeStatusesFor(table),
+    statusField: baseStatusFieldFor(table),
+    keyField: keyFieldFor(table),
+    pkCol,
+    hasUpdatedAt,
+  };
+}
+
+/** Drive ONE candidate row to `orphaned` with provenance, GUARDED: the UPDATE re-asserts the exact
+ *  status read AND a populated key (plus any `extraGuardSql`, e.g. the still-vanished re-check), so a
+ *  writer that flipped the row to a newer terminal status (or an instance that reappeared) between the
+ *  SELECT and this UPDATE wins the race — we never clobber that history back to `orphaned`. Only a row
+ *  we actually transitioned (`res.changed > 0`) gets provenance and is returned. `updated_at` is
+ *  stamped (when the table has one) so the transition refreshes the row's timestamp like every other
+ *  status transition in the codebase. Runs inside the caller's transaction. */
+async function orphanRow(
+  src: DataSource,
+  shape: BindingShape,
+  row: OrphanCandidate,
+  reason: string,
+  observedEpoch: number | null,
+  runId: string,
+  at: string,
+  extraGuardSql = "",
+): Promise<OrphanedRow | null> {
+  const { table, pkCol, statusField, keyField, hasUpdatedAt } = shape;
+  const pk = String(row.__pk);
+  const key = row.__key == null ? null : String(row.__key);
+  const fromStatus = String(row.__status);
+  const res = await src.exec(
+    `UPDATE ${q(table)} SET ${q(statusField)} = ?` +
+      (hasUpdatedAt ? `, ${q(UPDATED_AT_COLUMN)} = ?` : "") +
+      ` WHERE ${q(pkCol)} = ? AND ${q(statusField)} = ? AND ${q(keyField)} IS NOT NULL${extraGuardSql}`,
+    hasUpdatedAt ? [ORPHANED_STATUS, at, row.__pk, fromStatus] : [ORPHANED_STATUS, row.__pk, fromStatus],
+  );
+  if (res.changed <= 0) return null;
+  await src.exec(
+    `INSERT INTO ${PROVENANCE_TABLE} ` +
+      `(run_id, source_table, pk_value, key_value, from_status, to_status, reason, observed_epoch, at) ` +
+      `VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [runId, table, pk, key, fromStatus, ORPHANED_STATUS, reason, observedEpoch, at],
+  );
+  return { table, pk, key, fromStatus };
+}
+
 /** Orphan every NON-terminal, engine-backed row across all instanceTracking bindings, recording one
  *  `reconcile_provenance` row per transition. Runs inside the caller's transaction. */
 async function orphanEngineBackedRows(
@@ -185,50 +304,85 @@ async function orphanEngineBackedRows(
 ): Promise<OrphanedRow[]> {
   const orphaned: OrphanedRow[] = [];
   for (const binding of engineBackedBindings()) {
-    const table = binding.table;
-    // A binding with no active-status selector cannot classify "in-flight" — skip it rather than
-    // guess (activeStatusesFor would throw; we tolerate a selector-less binding).
-    if (!binding.activeStatuses?.length) continue;
-    const active = activeStatusesFor(table);
-    const statusField = baseStatusFieldFor(table);
-    const keyField = keyFieldFor(table);
-    const { pkCol, hasUpdatedAt } = await tableShape(src, table);
-    const placeholders = active.map(() => "?").join(", ");
-    const rows = await src.query<{ __pk: unknown; __key: unknown; __status: unknown }>(
-      `SELECT ${q(pkCol)} AS __pk, ${q(keyField)} AS __key, ${q(statusField)} AS __status ` +
-        `FROM ${q(table)} WHERE ${q(statusField)} IN (${placeholders}) AND ${q(keyField)} IS NOT NULL`,
-      [...active],
+    const shape = await resolveShape(src, binding);
+    if (!shape) continue;
+    const placeholders = shape.active.map(() => "?").join(", ");
+    const rows = await src.query<OrphanCandidate>(
+      `SELECT ${q(shape.pkCol)} AS __pk, ${q(shape.keyField)} AS __key, ${q(shape.statusField)} AS __status ` +
+        `FROM ${q(shape.table)} WHERE ${q(shape.statusField)} IN (${placeholders}) AND ${q(shape.keyField)} IS NOT NULL`,
+      [...shape.active],
     );
     for (const row of rows) {
-      const pk = String(row.__pk);
-      const key = row.__key == null ? null : String(row.__key);
-      const fromStatus = String(row.__status);
-      // GUARDED update: re-assert the exact status we read AND a populated key, so a writer that
-      // flipped the row to a newer terminal status (or cleared its key) between the SELECT above and
-      // this UPDATE wins the race — we never clobber that terminal history back to `orphaned`. Only a
-      // row we actually transitioned (`res.changed > 0`) gets provenance and is counted. We also stamp
-      // `updated_at` (when the table has one) so the transition to `orphaned` refreshes the row's
-      // timestamp the same way every other status transition in the codebase does — leaving it stale
-      // would misrepresent the orphaning moment to the UI/audits.
-      const res = await src.exec(
-        `UPDATE ${q(table)} SET ${q(statusField)} = ?` +
-          (hasUpdatedAt ? `, ${q(UPDATED_AT_COLUMN)} = ?` : "") +
-          ` WHERE ${q(pkCol)} = ? AND ${q(statusField)} = ? AND ${q(keyField)} IS NOT NULL`,
-        hasUpdatedAt
-          ? [ORPHANED_STATUS, at, row.__pk, fromStatus]
-          : [ORPHANED_STATUS, row.__pk, fromStatus],
-      );
-      if (res.changed <= 0) continue;
-      await src.exec(
-        `INSERT INTO ${PROVENANCE_TABLE} ` +
-          `(run_id, source_table, pk_value, key_value, from_status, to_status, reason, observed_epoch, at) ` +
-          `VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [runId, table, pk, key, fromStatus, ORPHANED_STATUS, RECONCILE_ORPHAN_REASON, observedEpoch, at],
-      );
-      orphaned.push({ table, pk, key, fromStatus });
+      const o = await orphanRow(src, shape, row, RECONCILE_ORPHAN_REASON, observedEpoch, runId, at);
+      if (o) orphaned.push(o);
     }
   }
   return orphaned;
+}
+
+/** Whether a row's `updated_at` is younger than the grace window — i.e. it was (re)dispatched too
+ *  recently to have been projected into `_urban_instance_state` yet, so it must NOT be folded. A
+ *  null/unparseable timestamp is treated as "within grace" (spared): when we cannot establish a row's
+ *  age we must NOT orphan it — a nullable `updated_at` (e.g. `delivery_units.updated_at`,
+ *  db/migrations/088_delivery_units.sql) would otherwise fold a live row. Erring toward sparing at
+ *  worst leaves a genuinely-vanished ageless row for a later pass once it carries a usable timestamp;
+ *  erring the other way wedges/destroys a live run, so we choose the safe default. */
+function withinGrace(updated: unknown, nowMs: number, graceMs: number): boolean {
+  if (updated == null) return true;
+  const t = Date.parse(String(updated));
+  if (!Number.isFinite(t)) return true;
+  return nowMs - t < graceMs;
+}
+
+/** Orphan every NON-terminal, engine-backed row whose `keyField` (process instance key) has NO
+ *  `_urban_instance_state` row — the instance is absent/unknown in engine truth (vanished, issue
+ *  #630) — and whose last transition is older than the grace window. Records one
+ *  `reconcile_provenance` row per transition (reason {@link RECONCILE_VANISHED_REASON}). Runs inside
+ *  the caller's transaction. */
+async function orphanVanishedRows(
+  src: DataSource,
+  runId: string,
+  at: string,
+  nowMs: number,
+  graceMs: number,
+): Promise<OrphanedRow[]> {
+  const orphaned: OrphanedRow[] = [];
+  for (const binding of engineBackedBindings()) {
+    const shape = await resolveShape(src, binding);
+    if (!shape) continue;
+    const placeholders = shape.active.map(() => "?").join(", ");
+    const updatedSel = shape.hasUpdatedAt ? `, ${q(UPDATED_AT_COLUMN)} AS __updated` : "";
+    // Active, dispatched (key populated) rows whose engine instance key has NO matching
+    // `_urban_instance_state` row — absent/unknown in engine truth.
+    const rows = await src.query<OrphanCandidate>(
+      `SELECT ${q(shape.pkCol)} AS __pk, ${q(shape.keyField)} AS __key, ${q(shape.statusField)} AS __status${updatedSel} ` +
+        `FROM ${q(shape.table)} b WHERE ${q(shape.statusField)} IN (${placeholders}) AND ${q(shape.keyField)} IS NOT NULL ` +
+        `AND NOT EXISTS (SELECT 1 FROM ${q(INSTANCE_STATE_TABLE)} s WHERE s.process_instance_key = b.${q(shape.keyField)})`,
+      [...shape.active],
+    );
+    // Re-assert "still no instance-state row" in the guarded UPDATE too, so an instance that reappears
+    // (the poller records it) between the SELECT above and the UPDATE wins the race.
+    const stillVanishedGuard =
+      ` AND NOT EXISTS (SELECT 1 FROM ${q(INSTANCE_STATE_TABLE)} s ` +
+      `WHERE s.process_instance_key = ${q(shape.table)}.${q(shape.keyField)})`;
+    for (const row of rows) {
+      if (shape.hasUpdatedAt && withinGrace(row.__updated, nowMs, graceMs)) continue;
+      const o = await orphanRow(src, shape, row, RECONCILE_VANISHED_REASON, null, runId, at, stillVanishedGuard);
+      if (o) orphaned.push(o);
+    }
+  }
+  return orphaned;
+}
+
+/** Whether the framework `_urban_instance_state` projection exists in this source. When it does NOT,
+ *  the vanished-instance pass is a hard no-op: without the projection every dispatched row would look
+ *  "vanished", so we must never orphan on its absence. */
+async function instanceStateTableExists(src: DataSource): Promise<boolean> {
+  const rows = await src.query<{ n: number }>(
+    `SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = ?`,
+    [INSTANCE_STATE_TABLE],
+  );
+  return rows.length > 0 && Number(rows[0].n) > 0;
 }
 
 /**
@@ -300,6 +454,75 @@ export async function reconcileEngineBackedWork(
   return { runId, reason: result.reason, observedEpoch, recordedEpoch, orphanedCount: result.orphaned.length, orphaned: result.orphaned };
 }
 
+/**
+ * Reconcile engine-backed inflight work against the framework's canonical per-instance projection
+ * (`_urban_instance_state`) — the "instance absent/unknown" gap (issue #630), DISTINCT from the
+ * epoch-regression reset the {@link reconcileEngineBackedWork} pass handles.
+ *
+ * When an engine instance VANISHES from the read model — engine clean-reset, cluster rebuild, or
+ * read-model pruning removes the `_urban_instance_state` row entirely — there is no `TERMINATED` row
+ * for the derived tracking edge to match, so the run freezes at its last worker-owned status
+ * (`escalated`/`awaiting_operator`) and wedges the Active list forever with no reconciliation path.
+ * "The instance backing this run no longer exists in engine truth" is a terminal condition: this pass
+ * drives every such row (active, dispatched, its `keyField` absent from `_urban_instance_state`, and
+ * past the grace window) to the defined `orphaned` terminal WITH PROVENANCE.
+ *
+ * Safety:
+ *   • GRACE WINDOW — a just-dispatched run has not yet been polled into `_urban_instance_state`; only
+ *     rows whose last transition is older than `graceMs` are folded, so a still-starting run is never
+ *     prematurely orphaned (AC #2).
+ *   • PROJECTION-PRESENT — if `_urban_instance_state` does not exist (the runtime has not provisioned
+ *     it), every dispatched row would look vanished, so the pass is a hard no-op.
+ *   • GUARDED — the same status-re-assert as the epoch pass, plus a still-vanished re-check, so a
+ *     concurrent terminal write or a reappearing instance wins the race.
+ *   • This pass reads the app's OWN last-known projection, not a live probe, so it acts correctly on a
+ *     genuinely-vanished instance regardless of transient engine reachability (a live instance keeps
+ *     its persisted ACTIVE row across a restart, so it is never mistaken for vanished).
+ */
+export async function reconcileVanishedInstances(
+  data: DataLayer,
+  opts: VanishedReconcileOptions = {},
+): Promise<ReconcileResult> {
+  const src = data.open(opts.sourceName);
+  const clock = opts.now?.() ?? new Date();
+  const at = clock.toISOString();
+  const nowMs = clock.getTime();
+  const runId = opts.runId ?? crypto.randomUUID();
+  const graceMs = opts.graceMs ?? DEFAULT_VANISHED_GRACE_MS;
+
+  // Without the framework projection we cannot tell a vanished instance from a live one — every
+  // dispatched row would look vanished. NO-OP rather than orphan live work.
+  if (!(await instanceStateTableExists(src))) {
+    await recordRun(src, { runId, at, observedEpoch: null, recordedEpoch: null, reason: "no-op", orphanedCount: 0 });
+    opts.log?.info(`reconcile(vanished): instance-state projection absent — no-op [run ${runId}].`);
+    return { runId, reason: "no-op", observedEpoch: null, recordedEpoch: null, orphanedCount: 0, orphaned: [] };
+  }
+
+  const orphaned = await src.tx(async (t) => {
+    const rows = await orphanVanishedRows(t, runId, at, nowMs, graceMs);
+    const reason: ReconcileReason = rows.length > 0 ? "instance-vanished" : "no-op";
+    await recordRun(t, { runId, at, observedEpoch: null, recordedEpoch: null, reason, orphanedCount: rows.length });
+    return rows;
+  });
+
+  if (orphaned.length > 0) {
+    opts.log?.warn(
+      `reconcile(vanished): orphaned ${orphaned.length} inflight row(s) whose engine instance ` +
+        `vanished from the read model [run ${runId}].`,
+    );
+  } else {
+    opts.log?.info(`reconcile(vanished): no vanished instances — no-op [run ${runId}].`);
+  }
+  return {
+    runId,
+    reason: orphaned.length > 0 ? "instance-vanished" : "no-op",
+    observedEpoch: null,
+    recordedEpoch: null,
+    orphanedCount: orphaned.length,
+    orphaned,
+  };
+}
+
 async function recordRun(
   src: DataSource,
   run: { runId: string; at: string; observedEpoch: number | null; recordedEpoch: number | null; reason: ReconcileReason; orphanedCount: number },
@@ -312,15 +535,47 @@ async function recordRun(
 }
 
 /** Probe the engine's incarnation epoch, then reconcile — the wiring both startup (main.ts) and the
- *  `reconcileEngineState` operator command share, so the two paths can never diverge. */
+ *  `reconcileEngineState` operator command share, so the two paths can never diverge. Runs BOTH the
+ *  epoch-regression pass (engine reset/rewind) and the vanished-instance pass (an inflight run whose
+ *  instance is absent/unknown in `_urban_instance_state` — issue #630), returning ONE merged result.
+ *  Reason precedence: `epoch-regression` always wins; otherwise, if the vanished pass orphaned any
+ *  rows the reason is `instance-vanished` (even when the epoch pass reported a non-regression state
+ *  such as `engine-unreachable`); otherwise the epoch pass's reason stands. `orphanedCount` /
+ *  `orphaned` cover both passes. The two passes never double-fold a row: once the epoch pass orphans a
+ *  row it leaves `activeStatuses`, so the vanished pass no longer selects it. */
 export async function runEngineReconcile(
   data: DataLayer,
   engineRest: { restAddress: string; token?: string },
-  opts: ReconcileOptions & { fetchImpl?: typeof fetch } = {},
+  opts: VanishedReconcileOptions & { fetchImpl?: typeof fetch } = {},
 ): Promise<ReconcileResult> {
   const observation = await probeEngineEpoch(engineRest.restAddress, {
     token: engineRest.token,
     fetchImpl: opts.fetchImpl,
   });
-  return reconcileEngineBackedWork(data, observation, opts);
+  const epoch = await reconcileEngineBackedWork(data, observation, opts);
+  // A distinct run id so the vanished pass's `reconcile_runs`/provenance rows never collide with the
+  // epoch pass's (run_id is a PRIMARY KEY). DERIVE it from the epoch pass's resolved run id — which is
+  // also the merged result's `runId` — so it is `<runId>-vanished` on EVERY path, including the boot
+  // path where `opts.runId` is omitted (a bare random UUID here would be non-correlatable to the
+  // returned `runId`). Operators can always locate the vanished pass's provenance from the reported id.
+  const vanished = await reconcileVanishedInstances(data, {
+    ...opts,
+    runId: `${epoch.runId}-vanished`,
+  });
+
+  const orphaned = [...epoch.orphaned, ...vanished.orphaned];
+  const reason: ReconcileReason =
+    epoch.reason === "epoch-regression"
+      ? "epoch-regression"
+      : vanished.orphanedCount > 0
+        ? "instance-vanished"
+        : epoch.reason;
+  return {
+    runId: epoch.runId,
+    reason,
+    observedEpoch: epoch.observedEpoch,
+    recordedEpoch: epoch.recordedEpoch,
+    orphanedCount: orphaned.length,
+    orphaned,
+  };
 }
