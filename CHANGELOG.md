@@ -1,3 +1,9 @@
+## [0.175.2](https://github.com/nanobpm/nano-workforce/compare/v0.175.1...v0.175.2) (2026-09-02)
+
+### Bug Fixes
+
+* **abandon:** don't let the cancel-check deadlock a shell-less agent ([#678](https://github.com/nanobpm/nano-workforce/issues/678)) ([#709](https://github.com/nanobpm/nano-workforce/issues/709)) ([f5fed93](https://github.com/nanobpm/nano-workforce/commit/f5fed93bdd0e98cbb24f7dff4b0f9a650c235a69)), closes [#76](https://github.com/nanobpm/nano-workforce/issues/76) [#76](https://github.com/nanobpm/nano-workforce/issues/76)
+
 ## [0.175.1](https://github.com/nanobpm/nano-workforce/compare/v0.175.0...v0.175.1) (2026-09-02)
 
 ### Bug Fixes
