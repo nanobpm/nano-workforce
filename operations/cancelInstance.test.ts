@@ -193,7 +193,7 @@ function makeRecordApp(
   const data = {
     hasDefaultSource: () => true,
     source: bb.source,
-    table: withTrackingViews((name: string, key: string) =>
+    table: withTrackingViews((name: string, key = "id") =>
       memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key),
     ),
   };
