@@ -257,8 +257,9 @@ export interface RelayTranscriptServiceOptions {
    * registry's {@link PresenceRegistry.isInstanceLive}. Since #691 the disconnect-driven reconcile
    * defers to the engine job-state (the poller-owned completion authority) whenever an engine view
    * ({@link resolveElementInstance}) is wired, so this presence signal is consulted ONLY as the
-   * engine-less fallback: on a host with no engine read-model (or a non-job/unlinked stream with no
-   * engine job to reconcile against) it spares a still-active job's stream when its worker merely
+   * engine-less fallback: on a host with no engine read-model (or a non-job stream — no jobKey, so
+   * nothing for the engine to reconcile against; an unlinked *job* stream still has a jobKey and DOES
+   * reconcile against the engine since #691) it spares a still-active job's stream when its worker merely
    * RECONNECTED mid-job (old producer connection dropped, a new one re-registered under the same
    * instance) — completing then would archive a live job's transcript and release its correlation,
    * wedging the cockpit (the reconnected worker's produce frames hit a terminal `completed` stream and
@@ -787,8 +788,8 @@ export class RelayTranscriptService {
   }
 
   /**
-   * Defensive engine-reconcile safety net (#661): release any linked jobKey whose engine JOB park is
-   * no longer live. The precise, fast release is the terminal `lifecycle` event
+   * Defensive engine-reconcile safety net (#661): release any job stream — linked OR unlinked (#708) —
+   * whose engine JOB park is no longer live. The precise, fast release is the terminal `lifecycle` event
    * ({@link #observeTerminalLifecycle}), but an UNCLEAN worker exit (crash/kill) can skip that event —
    * and because the worker's relay connection is persistent across jobs, the disconnect release never
    * fires either, so the finished job would linger as a phantom active job on the worker's supply row.
@@ -859,9 +860,9 @@ export class RelayTranscriptService {
     try {
       activeKey = await resolve(jobKey, processInstanceKey);
     } catch (err) {
-      // A transient engine read failure must NOT be read as "job gone" — leave the job linked; a
+      // A transient engine read failure must NOT be read as "job gone" — keep the stream live; a
       // later pass (or the terminal lifecycle event) releases it. Advisory, never a false release.
-      this.#log.warn("agentic relay engine-reconcile read failed — leaving correlation linked", {
+      this.#log.warn("agentic relay engine-reconcile read failed — keeping stream live", {
         stream,
         jobKey,
         err: String(err),
