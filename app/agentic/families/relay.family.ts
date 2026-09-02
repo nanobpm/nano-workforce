@@ -793,27 +793,35 @@ export class RelayTranscriptService {
    * and because the worker's relay connection is persistent across jobs, the disconnect release never
    * fires either, so the finished job would linger as a phantom active job on the worker's supply row.
    * This periodic pass asks the engine read model (the same {@link ElementInstanceResolver} the link
-   * path uses at #544) whether each linked job is still parked; a job the engine no longer parks
+   * path uses at #544) whether each job is still parked; a job the engine no longer parks
    * (resolver returns `undefined`) is released and its transcript completed. Bounds staleness regardless
    * of whether the worker emitted a clean terminal event — and also covers a worker that emitted nothing
-   * and merely went quiet.
+   * and merely went quiet. It covers UNLINKED job streams too (#708): the disconnect path (#691)
+   * can leave a job stream unlinked-but-still-parked with no producer, and jobKey alone resolves
+   * terminality, so this backstop is the only actor that can retire one whose worker never reconnects.
    *
    * Advisory and best-effort: a no-op with no resolver wired, and a resolver THROW / REJECTION for a
-   * given job is treated as "unknown — keep it linked" (never a false release of a genuinely active
-   * job). The linked set is snapshotted before any await so a concurrent completion (a terminal
+   * given job is treated as "unknown — keep it" (never a false release of a genuinely active
+   * job). The job-stream set is snapshotted before any await so a concurrent completion (a terminal
    * lifecycle event landing mid-pass) cannot corrupt iteration, and each release re-checks the current
    * stream state so a job already released between snapshot and resolution is not double-completed.
    */
   async reconcileEngineCorrelations(): Promise<void> {
     if (this.#resolveElementInstance === undefined) return;
-    // Snapshot the linked stream ids BEFORE any await so a concurrent completion (a terminal lifecycle
+    // Snapshot the job-stream ids BEFORE any await so a concurrent completion (a terminal lifecycle
     // event, a supersede, or a disconnect-triggered engine reconcile landing mid-pass) cannot corrupt
     // iteration; the per-stream helper re-reads live state, so a job released between snapshot and
     // resolution is not double-completed.
     const streams: string[] = [];
     for (const [stream, state] of this.#streams) {
-      if (!state.linked || state.completed) continue;
+      if (state.completed) continue;
       if (jobKeyOfStream(stream) === undefined) continue;
+      // Include UNLINKED job streams too (#708). The disconnect path (#691) routes an unlinked
+      // job stream through the engine reconcile and clears `state.producer`, so if the engine
+      // reports "still parked" at disconnect (or the read faults transiently) and the worker never
+      // reconnects to `produce` a link, this periodic pass is the ONLY actor left that can retire
+      // it. jobKey alone resolves terminality (as at link time), so gating this snapshot on
+      // `state.linked` would leak such a stream live forever once its engine job becomes terminal.
       streams.push(stream);
     }
     for (const stream of streams) await this.#reconcileStreamAgainstEngine(stream);
