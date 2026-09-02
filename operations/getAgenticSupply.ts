@@ -3,11 +3,14 @@
 // worker list — family, host, current jobs, liveness — grouped by leaf token, sourced from the H1
 // presence registry (#144). Read-only projection; it NEVER gates control flow (advisory-only, ADR 0056).
 //
-// H6 (#149) closes the loop: the correlation registry (`app/agentic/correlation.ts`) supplies the
-// `jobKeysFor` resolver the presence snapshot exposes as a seam, so each worker's current jobKeys light
-// up; each worker's drill `stream` is repointed at its jobKey-scoped relay stream (`job:<jobKey>`); and
-// the report carries the `correlations` — the process-instance / plan context for every current job —
-// so the cockpit lines a worker's terminal up with "that process instance / this plan".
+// H6/#713 closes the loop with an EXPLICIT claim registry (`app/agentic/claim-registry.ts`): it is the
+// AUTHORITATIVE source the presence snapshot's `jobKeysFor` seam resolves against, so each worker's
+// current jobKeys light up from `claim` frames — not inferred from the relay terminal — and appear even
+// with ZERO transcript. Each worker's drill `stream` is repointed at its claimed jobKey-scoped relay
+// stream (`job:<jobKey>`), keyed by the CLAIM (explicit instance+jobKey), not by a connection. The
+// relay correlation registry is DEMOTED to drill-in context only: it still supplies the `correlations`
+// — the process-instance / plan context for a job's terminal — so the cockpit lines a worker's terminal
+// up with "that process instance / this plan", but it is no longer the visibility source.
 //
 // This is the supply half of the visibility plane only. The demand×supply matrix, missing-agent-type
 // reds, and diversity-SLO lights are DE-SCOPED to the enrolment epic #152 — this report carries no
@@ -16,7 +19,8 @@
 // The optional shared-secret guard stays HERE (the runtime does not enforce OpenAPI `security`): when
 // NANO_PR_WEBHOOK_SECRET is set, callers must present it via the x-hook-secret header. Unset → open.
 
-import { type CorrelationRegistry, currentCorrelation, type JobCorrelation } from "../app/agentic/correlation.ts";
+import { type ClaimRegistry, currentClaimRegistry } from "../app/agentic/claim-registry.ts";
+import { currentCorrelation, type JobCorrelation } from "../app/agentic/correlation.ts";
 import { currentPresenceRegistry, type SupplyWorker } from "../app/agentic/families/presence.family.ts";
 import { envVar } from "../app/version.ts";
 import type { AgenticJobCorrelation, AgenticSupplyReport, AgenticSupplyWorker } from "../nano-generated/api-io.d.ts";
@@ -27,13 +31,14 @@ import { defineOperation } from "../nano-generated/operations.ts";
 const SECRET = envVar("NANO_PR_WEBHOOK_SECRET") ?? "";
 
 // Project a presence-registry row to the wire worker. The drill `stream` defaults to the worker
-// instance (H5) but is repointed at the worker's jobKey-scoped relay stream (`job:<jobKey>`) when the
-// correlation registry knows a current job for it (H6) — so drilling in opens the LIVE job's terminal.
-function toWorker(w: SupplyWorker, correlation: CorrelationRegistry | undefined): AgenticSupplyWorker {
+// instance (H5) but is repointed at the worker's claimed jobKey-scoped relay stream (`job:<jobKey>`)
+// when the claim registry knows a current claim for it (#713) — keyed by the CLAIM, not by the
+// connection — so drilling in opens the LIVE job's terminal even before any transcript lands.
+function toWorker(w: SupplyWorker, claims: ClaimRegistry | undefined): AgenticSupplyWorker {
   const out: AgenticSupplyWorker = {
     instance: w.instance,
     identity: w.identity,
-    stream: correlation?.primaryStreamFor(w.instance) ?? w.instance,
+    stream: claims?.primaryStreamFor(w.instance) ?? w.instance,
     jobKeys: [...w.jobKeys],
     live: w.live,
     staleMs: w.staleMs,
@@ -67,15 +72,19 @@ export default defineOperation("getAgenticSupply", async ({ req }, app) => {
     return { status: 200, body: empty };
   }
 
-  // Thread the H6 correlation registry (if mounted) as the presence snapshot's jobKeysFor resolver so a
-  // worker's current jobKeys populate; absent → jobKeys stay empty (advisory, never an error).
+  // #713: the CLAIM registry (if mounted) is the authoritative `jobKeysFor` source the presence
+  // snapshot resolves against — a worker's current jobKeys come from explicit `claim` frames, not the
+  // relay terminal, so they populate with zero transcript. Absent → jobKeys stay empty (advisory).
+  const claims = currentClaimRegistry();
+  // The correlation registry is demoted to drill-in context only: it still carries the per-job
+  // process-instance / plan context surfaced in `correlations`, but no longer feeds visibility.
   const correlation = currentCorrelation();
-  const snapshot = registry.snapshot(correlation ? { jobKeysFor: (instance) => correlation.jobKeysFor(instance) } : {});
+  const snapshot = registry.snapshot(claims ? { jobKeysFor: (instance) => claims.jobKeysFor(instance) } : {});
   const report: AgenticSupplyReport = {
     count: snapshot.count,
     generatedAt: new Date().toISOString(),
-    workers: snapshot.workers.map((w) => toWorker(w, correlation)),
-    leaves: snapshot.leaves.map((leaf) => ({ token: leaf.token, workers: leaf.workers.map((w) => toWorker(w, correlation)) })),
+    workers: snapshot.workers.map((w) => toWorker(w, claims)),
+    leaves: snapshot.leaves.map((leaf) => ({ token: leaf.token, workers: leaf.workers.map((w) => toWorker(w, claims)) })),
     correlations: correlation ? correlation.snapshot().correlations.map(toCorrelation) : [],
   };
   return { status: 200, body: report };

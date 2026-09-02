@@ -12,7 +12,9 @@ import { encodeFrame, type Frame } from "@nanobpm/agentic/protocol";
 import type { SqliteDb } from "@nanobpm/agentic/presence";
 import type { AppApi, DataLayer } from "@nanobpm/urban";
 import { assert, assertEquals } from "#test-assert";
+import { currentClaimRegistry } from "../app/agentic/claim-registry.ts";
 import { currentCorrelation } from "../app/agentic/correlation.ts";
+import { family as claimFamily } from "../app/agentic/families/claim.family.ts";
 import { family as correlationFamily } from "../app/agentic/families/correlation.family.ts";
 import { family } from "../app/agentic/families/presence.family.ts";
 import type { AgenticContext } from "../app/agentic/registry.ts";
@@ -154,7 +156,32 @@ test("shared-secret guard rejects a missing secret when configured", async () =>
   }
 });
 
-test("H6: with the correlation family mounted, jobKeys populate, stream repoints, and correlations are reported", async () => {
+test("#713: a claim populates jobKeys and repoints the drill stream with ZERO transcript (claim is the visibility source)", async () => {
+  const hub = await mountPresence(memSqlite());
+  const ctx: AgenticContext = { hub, registry: hub.registry, transport: undefined as never, data: undefined, log: noopLog() };
+  claimFamily.mount(ctx);
+  const claims = currentClaimRegistry();
+  assert(claims !== undefined, "the claim family installs the singleton");
+  // An explicit claim — no relay produce frame, no correlation link, zero transcript.
+  claims.claim("wk-a", "8420");
+  try {
+    const res = (await handler(input(), app)) as {
+      status: number;
+      body: { workers: Array<Record<string, unknown>>; correlations: unknown[] };
+    };
+    assertEquals(res.status, 200);
+    const w = res.body.workers[0];
+    assertEquals(w.jobKeys, ["8420"], "the claim registry feeds the jobKeys seam");
+    assertEquals(w.stream, "job:8420", "the drill stream repoints at the claimed job, keyed by the claim");
+    assertEquals(res.body.correlations.length, 0, "no correlation context until a terminal lands (drill-in only)");
+  } finally {
+    claimFamily.teardown?.();
+    family.teardown?.();
+    await hub.close();
+  }
+});
+
+test("#713: the correlation registry is demoted to drill-in context — a link alone no longer feeds jobKeys", async () => {
   const hub = await mountPresence(memSqlite());
   correlationFamily.mount({
     hub,
@@ -165,6 +192,7 @@ test("H6: with the correlation family mounted, jobKeys populate, stream repoints
   });
   const correlation = currentCorrelation();
   assert(correlation !== undefined, "the correlation family installs the singleton");
+  // A correlation link (drill-in context) WITHOUT a claim: visibility must NOT light up from it.
   correlation.link("wk-a", "6494", { processInstanceKey: "4612", bpmnProcessId: "plan-fanout", elementId: "implement-task", planKey: "o/r#142" });
   try {
     const res = (await handler(input(), app)) as {
@@ -176,8 +204,9 @@ test("H6: with the correlation family mounted, jobKeys populate, stream repoints
     };
     assertEquals(res.status, 200);
     const w = res.body.workers[0];
-    assertEquals(w.jobKeys, ["6494"], "the correlation registry feeds the jobKeys seam");
-    assertEquals(w.stream, "job:6494", "the drill stream repoints at the live job's stream");
+    assertEquals(w.jobKeys, [], "correlation alone no longer feeds jobKeys (relay demoted)");
+    assertEquals(w.stream, "wk-a", "the drill stream stays instance-keyed without a claim");
+    // The correlation context is still reported for drill-in.
     assertEquals(res.body.correlations.length, 1);
     const c = res.body.correlations[0];
     assertEquals(c.jobKey, "6494");
