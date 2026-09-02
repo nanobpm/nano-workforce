@@ -83,6 +83,32 @@ test("renderAbandonBrief embeds the concrete URL and the stop contract", () => {
   assertEquals(brief.includes("curl -fsS"), true);
 });
 
+test("renderAbandonBrief forbids delegating the check to a sub-agent (issue #678)", () => {
+  // A non-Claude agent (e.g. qwen) that hands this shell command to a shell-less
+  // `general-purpose` sub-agent deadlocks: the sub-agent has no shell, produces no
+  // output, and the worker's idle timeout kills the round. The brief must steer the
+  // agent to run the check inline with its OWN shell and never delegate it.
+  const brief = renderAbandonBrief("https://host/app/api/hooks/abandon?token=tok");
+  // Not merely that it *mentions* sub-agents/inline — it must explicitly PROHIBIT delegation, so a
+  // future edit that softened the brief into *encouraging* delegation would fail this test.
+  assertEquals(/do \*\*not\*\* delegate it to a\s+sub-?agent/i.test(brief), true, "explicitly forbids delegating to a sub-agent");
+  assertEquals(/inline/i.test(brief), true, "tells the agent to run it inline");
+});
+
+test("renderAbandonBrief degrades gracefully when the agent has no shell (issue #678)", () => {
+  // The check is ADVISORY over an airtight harness job-fence (issue #76 layer 2). An
+  // agent that cannot run a shell command at all must be told to SKIP and proceed
+  // rather than thrash/hang — the harness job-fence (issue #76 layer 2) still fences
+  // a cancelled run, so a skipped check degrades safely rather than promising full
+  // independent enforcement.
+  const brief = renderAbandonBrief("https://host/app/api/hooks/abandon?token=tok");
+  assertEquals(/skip this check/i.test(brief), true, "offers a skip path");
+  // Assert the actual anti-deadlock contract, not an explanatory word: a shell-less agent must be
+  // told its lack of a shell is NOT a failed check, and must be forbidden from stalling/hanging.
+  assertEquals(/not (a )?failed check/i.test(brief), true, "no shell is not treated as a failed check");
+  assertEquals(/never stall,.*hang/i.test(brief), true, "forbids stalling/hanging when it can't run curl");
+});
+
 test("prKeyForAbandonToken resolves a known token and rejects unknowns", async () => {
   const data = memData();
   await seedPr(data, "o/r#1", "tok", "converging");
