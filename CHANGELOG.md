@@ -1,3 +1,9 @@
+## [0.176.1](https://github.com/nanobpm/nano-workforce/compare/v0.176.0...v0.176.1) (2026-09-02)
+
+### Bug Fixes
+
+* **cancel:** reconcile feature_runs in the app cancel door with a truthful result ([#712](https://github.com/nanobpm/nano-workforce/issues/712)) ([810979b](https://github.com/nanobpm/nano-workforce/commit/810979b3708a247b2ab4ee068c211abd5478363a)), closes [#667](https://github.com/nanobpm/nano-workforce/issues/667) [#705](https://github.com/nanobpm/nano-workforce/issues/705)
+
 ## [0.176.0](https://github.com/nanobpm/nano-workforce/compare/v0.175.2...v0.176.0) (2026-09-02)
 
 ### Features
