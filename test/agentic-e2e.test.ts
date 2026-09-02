@@ -154,6 +154,7 @@ test("E2E: the whole visibility plane wires up — presence, correlation, supply
   assert(names.includes("presence"), "H1 presence family is discovered by the H0 seam");
   assert(names.includes("relay"), "H3 relay family is discovered by the H0 seam");
   assert(names.includes("correlation"), "H6 correlation family is discovered by the H0 seam");
+  assert(names.includes("claim"), "#713 claim family is discovered by the H0 seam");
 
   // ── H1: a worker connects and REGISTERs; a live presence row appears with its family/host. ──
   const worker = conn("wk-conn-1", "leafA");
@@ -162,7 +163,14 @@ test("E2E: the whole visibility plane wires up — presence, correlation, supply
   worker.feed({ lane: "control", family: "register", seq: 1, payload: { instance: "wk-a", capability: { family: "opus", host: "boxA" } } });
   await flush();
 
-  // ── H6: the orchestrator links the worker's active jobKey to its process instance / plan. ──
+  // ── #713: the worker CLAIMs its active jobKey — the authoritative visibility source (explicit
+  // instance, no relay/connection inference). This is what lights up jobKeys, even before any
+  // transcript lands. ──
+  worker.feed({ lane: "control", family: "claim", seq: 2, payload: { instance: "wk-a", jobKey: JOB } });
+  await flush();
+
+  // ── H6: the orchestrator links the worker's active jobKey to its process instance / plan (drill-in
+  // context only, since #713 — no longer the visibility source). ──
   const correlation = currentCorrelation();
   assert(correlation !== undefined, "the correlation family installed the singleton");
   correlation.link("wk-a", JOB, { processInstanceKey: "4612", bpmnProcessId: "plan-fanout", elementId: "implement-task", planKey: "nanobpm/nano-workforce#142" });
@@ -179,8 +187,8 @@ test("E2E: the whole visibility plane wires up — presence, correlation, supply
     assertEquals(w.instance, "wk-a");
     assertEquals(w.family, "opus");
     assertEquals(w.host, "boxA");
-    assertEquals(w.jobKeys, [JOB], "H1×H6: the correlation registry feeds the presence jobKeys seam");
-    assertEquals(w.stream, STREAM, "H6: the drill stream repoints at the live job's stream");
+    assertEquals(w.jobKeys, [JOB], "#713: the claim registry feeds the presence jobKeys seam");
+    assertEquals(w.stream, STREAM, "#713: the drill stream repoints at the claimed job's stream");
     assertEquals(res.body.correlations.length, 1);
     const c = res.body.correlations[0];
     assertEquals(c.jobKey, JOB);
