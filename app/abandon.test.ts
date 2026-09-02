@@ -89,7 +89,9 @@ test("renderAbandonBrief forbids delegating the check to a sub-agent (issue #678
   // output, and the worker's idle timeout kills the round. The brief must steer the
   // agent to run the check inline with its OWN shell and never delegate it.
   const brief = renderAbandonBrief("https://host/app/api/hooks/abandon?token=tok");
-  assertEquals(/sub-?agent/i.test(brief), true, "mentions sub-agent delegation");
+  // Not merely that it *mentions* sub-agents/inline — it must explicitly PROHIBIT delegation, so a
+  // future edit that softened the brief into *encouraging* delegation would fail this test.
+  assertEquals(/do \*\*not\*\* delegate it to a\s+sub-?agent/i.test(brief), true, "explicitly forbids delegating to a sub-agent");
   assertEquals(/inline/i.test(brief), true, "tells the agent to run it inline");
 });
 
@@ -99,7 +101,10 @@ test("renderAbandonBrief degrades gracefully when the agent has no shell (issue 
   // rather than thrash/hang — the orchestrator independently enforces cancellation.
   const brief = renderAbandonBrief("https://host/app/api/hooks/abandon?token=tok");
   assertEquals(/skip this check/i.test(brief), true, "offers a skip path");
-  assertEquals(/independently/i.test(brief), true, "explains the independent enforcement");
+  // Assert the actual anti-deadlock contract, not an explanatory word: a shell-less agent must be
+  // told its lack of a shell is NOT a failed check, and must be forbidden from stalling/hanging.
+  assertEquals(/not (a )?failed check/i.test(brief), true, "no shell is not treated as a failed check");
+  assertEquals(/never stall,.*hang/i.test(brief), true, "forbids stalling/hanging when it can't run curl");
 });
 
 test("prKeyForAbandonToken resolves a known token and rejects unknowns", async () => {

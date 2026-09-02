@@ -155,9 +155,11 @@ sub-agent, helper, or a separate "run this command" task: a sub-agent may have *
 case it cannot run \`curl\`, produces no output, and the worker's idle timeout will kill the round.
 One inline \`curl\` in your own turn is all this needs.
 
-**If you have no way to run a shell command at all, SKIP this check and proceed.** This check is a
-best-effort optimisation, not a hard gate: a separate orchestrator layer **independently enforces
-cancellation** (it fences your job's completion on a cancelled run), so skipping the check only
-widens a tiny race — it never creates an orphaned run. Never stall, thrash, or fail the round trying
-to run \`curl\` through a tool you do not have; a skipped check is strictly better than a hung one.`;
+**Having no way to run a shell command at all is NOT a failed check — SKIP this check and proceed.**
+The "abort on non-zero exit" rule above is about \`curl\` *running and reporting* a torn-down run; it
+does **not** mean "abort because you have no shell to run \`curl\` with". This check is a best-effort
+optimisation, not a hard gate: the harness that runs your job also fences a cancelled run's
+completion, so a skipped check only widens a tiny race — it does not by itself create an orphaned
+run. Never stall, thrash, hang, or fail the round trying to run \`curl\` through a tool you do not
+have; a skipped check is strictly better than a hung one.`;
 }
