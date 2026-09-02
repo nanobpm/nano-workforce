@@ -3195,10 +3195,10 @@ components:
         state:
           type: string
           enum: [ACTIVE, COMPLETED, TERMINATED, gone]
-          description: The instance state read back from the engine after the cancel attempt. `gone` ⇒ the engine has no record of the key (already cleaned up / never existed) OR no tracked record owns the key (the 404 no-op).
+          description: The instance state after the cancel attempt. For a tracked key, this is read back from the engine — `ACTIVE`/`COMPLETED`/`TERMINATED` reflect that post-cancel engine read. `gone` ⇒ EITHER the engine has no record of the key (already cleaned up / never existed) OR no tracked record owns the key (the 404 no-op, in which case the engine is never contacted, so `gone` is not an engine read).
         reconciled:
           type: integer
-          description: 1 when the tracked record's derived status has left its active set (become terminal → the PR/plan/feature-run row flips to `abandoned` and drops out of `listActivePrs`), else 0.
+          description: 1 when the tracked record's derived status has left its active set (become terminal → the tracked PR/plan/feature-run row derives as `abandoned`; for a PR that additionally means it drops out of `listActivePrs`, which lists PRs only — plans and feature runs are not surfaced there), else 0.
         error:
           type: string
           description: Present on a non-terminal failure — the reason the cancel did not take, the tracked record was not reconciled, or no tracked record owns the key.
