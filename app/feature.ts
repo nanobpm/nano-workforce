@@ -266,8 +266,10 @@ export type FeatureStartOutcome = "started" | "already-active" | "noop-terminal"
 
 /** The result of {@link startFeature} — a discriminated intake outcome (issue #704). `alreadyRunning`
  * is retained as a back-compat flag for existing callers/telemetry (true iff `outcome` is
- * `already-active`). A `type` alias (not an `interface`) so it carries an implicit index signature and
- * is assignable to the generated OpenAPI response shape, mirroring the inferred sibling results. */
+ * `already-active`). A `type` alias (not an `interface`) because an object-literal type alias — with a
+ * fully-known, final set of properties — is assignable to the generated OpenAPI response shape's index
+ * signature, whereas an `interface` (open to declaration-merging) is not; this mirrors the inferred
+ * sibling results. */
 export type StartFeatureResult = {
   featureKey: string;
   outcome: FeatureStartOutcome;
