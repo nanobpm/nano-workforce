@@ -1316,35 +1316,41 @@ export async function pollMerges(data: DataLayer, engine: EngineClient, token: s
   //
   // A PR enqueued by `attempt-merge` (mergeStatus="queued") parks the process at `wait-landed`.
   // Two things can end that wait: the queue lands the PR (→ `merge-landed`), or the PR is EVICTED
-  // from the queue because its base moved under it and it now conflicts (`DIRTY`). Without the
-  // eviction path a conflicted-after-enqueue PR waits forever (nothing ever publishes
-  // `merge-landed`), which is exactly how #727/instance 729 wedged. We must NOT treat a merely
-  // "not yet landed" PR as evicted: while it is legitimately queuing GitHub often reports it as
-  // BLOCKED (a pending queue check) or UNSTABLE, which `classifyMergeability` calls not-ready. Only
-  // a genuine merge CONFLICT (`DIRTY`) means it has dropped out — evict on that alone and re-arm the
-  // merge poller (`merge-evicted` → `arm-merge`), which re-runs the mergeable gate so the existing
-  // auto-rebase / escalate machinery resolves the conflict.
+  // from the queue. An eviction has two observable flavours: a merge CONFLICT after its base moved
+  // (`DIRTY` — how #727/instance 729 wedged), OR — the #702 wedge — required checks FAILED on the
+  // speculative `merge_group` commit (the ALLGREEN-batch invalidation), which leaves the
+  // conflict-free head NOT `DIRTY` (it reverts to BLOCKED/UNSTABLE/CLEAN). The latter is invisible to
+  // `mergeStateStatus` alone, so we read GROUND-TRUTH native-queue membership (`withMergeQueue: true`
+  // → GraphQL `mergeQueueEntry`) and let `queuedVerdict` evict on a definitive drop. Without an
+  // eviction path an evicted PR waits out the full `landedWaitTimeout` (default PT1H) then escalates
+  // to a human instead of auto-re-driving `fix-ci`/`rebase`. We must NOT treat a merely "not yet
+  // landed" PR as evicted: while it is legitimately queuing GitHub reports it BLOCKED/UNSTABLE and
+  // `mergeQueueEntry` stays `true`, so `queuedVerdict` keeps waiting. Eviction re-arms the merge
+  // poller (`merge-evicted` → `arm-merge`), re-running the mergeable gate so the existing
+  // auto-rebase / fix-ci / re-enqueue machinery resolves whatever dropped it.
   for (const pr of await prs(data).find({ status: "queued" })) {
     const { repo, number, pr_key: prKey } = pr;
     try {
-      const st = await fetchPrState(repo, number, token);
+      const st = await fetchPrState(repo, number, token, { withMergeQueue: true });
       if (st === null) continue; // no transport → skip this PR (others may still advance)
       // Out-of-band terminal FIRST (reusing `st`): a queued PR merged out-of-band lands
       // (`merge-landed` → mark-merged); one CLOSED out-of-band without merging can never land, so the
       // pre-check re-arms it (`merge-evicted` → arm-merge) and block 2 abandons it — a closed queued
       // PR would otherwise wedge, since `queuedVerdict` calls a non-DIRTY closed PR merely "waiting"
-      // (#368). The DIRTY-while-open eviction below still handles a live-but-conflicted queue drop.
+      // (#368). The eviction check below still handles a live queue drop (conflict or CI-on-merge_group).
       if (await advanceIfTerminalOutOfBand(data, engine, pr, token, st)) continue;
       // Terminal states (merged/closed) are handled by the shared pre-check above; here the PR is
-      // still open, so the only remaining reason to leave `wait-landed` is a live queue DROP — a real
-      // merge CONFLICT (`DIRTY`). `queuedVerdict` stays the canonical classifier for that.
+      // still open, so the only remaining reason to leave `wait-landed` is a live queue DROP — a merge
+      // CONFLICT (`DIRTY`) or a ground-truth `mergeQueueEntry === false`. `queuedVerdict` is the
+      // canonical classifier for both.
       if (queuedVerdict(st) === "evicted") {
         await flipToMergingThenPublish(data, engine, prKey, "queued", {
           name: "merge-evicted",
           correlationKey: prKey,
           variables: {},
         });
-        console.log(`[poller] queued PR evicted (conflict) -> ${prKey}`);
+        const reason = st.mergeStateStatus === "DIRTY" ? "conflict" : "dropped from queue";
+        console.log(`[poller] queued PR evicted (${reason}) -> ${prKey}`);
       }
       // otherwise: still legitimately in the queue — keep waiting.
     } catch (err) {
@@ -1356,14 +1362,27 @@ export async function pollMerges(data: DataLayer, engine: EngineClient, token: s
 /** Decide what to do with a PR the process enqueued (parked at `wait-landed`), from its current
  *  GitHub merge state:
  *   • `landed`  — the queue merged it → publish `merge-landed` (advance to mark-merged).
- *   • `evicted` — it fell out of the queue with a real merge CONFLICT (`DIRTY`) → publish
- *     `merge-evicted` so the process re-arms the merge poller and the mergeable gate re-runs
- *     (auto-rebase / escalate). Without this a conflicted-after-enqueue PR waits forever.
- *   • `waiting` — still legitimately in the queue. Crucially, a queuing PR is frequently reported
- *     BLOCKED/UNSTABLE (a pending queue check), which is NOT eviction — only `DIRTY` is. */
+ *   • `evicted` — it fell out of the queue → publish `merge-evicted` so the process re-arms the
+ *     merge poller and the mergeable gate re-runs (auto-rebase for a conflict, `fix-ci` for a red
+ *     required check, re-enqueue otherwise). Two independent signals mean "evicted": a live merge
+ *     CONFLICT (`DIRTY`) — observable even in token mode — OR ground-truth `mergeQueueEntry === false`,
+ *     i.e. the base branch has a native GitHub merge queue but the PR is no longer enrolled in it.
+ *     The latter is what catches the #702 wedge: a PR evicted because required checks FAILED on the
+ *     speculative `merge_group` commit is NOT `DIRTY` (its head reverts to BLOCKED/UNSTABLE/CLEAN),
+ *     so inferring from `mergeStateStatus` alone kept it waiting out the full `landedWaitTimeout`
+ *     then pulled in a human, instead of auto-re-driving `fix-ci`.
+ *   • `waiting` — still legitimately in the queue. A queuing PR is frequently reported
+ *     BLOCKED/UNSTABLE (a pending queue check) — that is NOT eviction. `mergeQueueEntry` is only
+ *     `false` when the queue definitively dropped it; `null` (unprobed / token GraphQL error / a
+ *     Mergify/plain repo with no native queue) leaves the #556 `landedWaitTimeout` backstop to
+ *     handle a genuinely-never-lands wedge, so we never falsely evict there. */
 export function queuedVerdict(st: PrState): "landed" | "evicted" | "waiting" {
   if (st.merged) return "landed";
+  // A live conflict is an eviction (works in token mode, where `mergeQueueEntry` is unprobed).
   if (st.mergeStateStatus === "DIRTY") return "evicted";
+  // Ground-truth: enrolled in a native merge queue and now gone → evicted for ANY reason (a red
+  // `merge_group` build, base moved, manual dequeue), not just a conflict (#702).
+  if (st.mergeQueueEntry === false) return "evicted";
   return "waiting";
 }
 

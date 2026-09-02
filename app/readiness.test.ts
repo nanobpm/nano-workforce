@@ -624,6 +624,7 @@ function prObs(over: Partial<PrObservation> = {}): PrObservation {
     headRefOid: "abc123",
     mergedSha: null,
     pendingChecks: 0,
+    mergeQueueEntry: null,
     ...over,
   };
 }

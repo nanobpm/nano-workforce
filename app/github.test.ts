@@ -446,6 +446,7 @@ function prState(over: Partial<PrState>): PrState {
     totalChecks: 0,
     isDraft: false,
     headRefOid: null,
+    mergeQueueEntry: null,
     ...over,
   };
 }
@@ -493,6 +494,7 @@ function mergePrState(over: Partial<PrState> & { rollup?: { name: string; conclu
     checkConclusions: {},
     isDraft: false,
     headRefOid: "abc123",
+    mergeQueueEntry: null,
   };
   if (rollup) {
     const bad = new Set(["FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE", "ERROR"]);
