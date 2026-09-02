@@ -11,6 +11,7 @@
 import { test } from "node:test";
 import { assertEquals } from "#test-assert";
 import type { DataLayer, EngineClient } from "@nanobpm/urban";
+import { fetchMergeQueueMembership } from "./github.ts";
 import { pollMerges } from "./service.ts";
 
 function memData(): { data: DataLayer; stores: Record<string, any[]> } {
@@ -174,4 +175,49 @@ test("#702: a repo with NO native merge queue (Mergify/plain) never falsely evic
 
   assertEquals(messages.length, 0, "no native queue → indeterminate membership → keep waiting");
   assertEquals(stores["pull_requests"][0].status, "queued");
+});
+
+// #703 (suppressed-advisory follow-up): `fetchMergeQueueMembership` must stay conservative when the
+// GraphQL payload carries a native `mergeQueue` but the `pullRequest` node is missing (partial
+// `data` alongside `errors`, or an unreadable PR). A null `pullRequest` is INDETERMINATE (`null`),
+// never a definitive eviction (`false`) — otherwise a transport hiccup would thrash `arm-merge`.
+async function withProbeFetch<T>(body: unknown, fn: () => Promise<T>): Promise<T> {
+  const prevMode = process.env["NANO_PR_GITHUB_TRANSPORT"];
+  const prevFetch = globalThis.fetch;
+  process.env["NANO_PR_GITHUB_TRANSPORT"] = "token";
+  globalThis.fetch = ((): Promise<Response> =>
+    Promise.resolve(
+      new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } }),
+    )) as typeof fetch;
+  try {
+    return await fn();
+  } finally {
+    globalThis.fetch = prevFetch;
+    if (prevMode === undefined) delete process.env["NANO_PR_GITHUB_TRANSPORT"];
+    else process.env["NANO_PR_GITHUB_TRANSPORT"] = prevMode;
+  }
+}
+
+test("#703: a native queue with a MISSING pullRequest node reads indeterminate (null), not evicted", async () => {
+  const membership = await withProbeFetch(
+    { data: { repository: { mergeQueue: { id: "MQ_1" }, pullRequest: null } } },
+    () => fetchMergeQueueMembership("o/r", 100, "main", "tok"),
+  );
+  assertEquals(membership, null, "missing pullRequest must be indeterminate, never a false eviction");
+});
+
+test("#703: a native queue with a live pullRequest entry reads enrolled (true)", async () => {
+  const membership = await withProbeFetch(
+    { data: { repository: { mergeQueue: { id: "MQ_1" }, pullRequest: { mergeQueueEntry: { id: "MQE_1" } } } } },
+    () => fetchMergeQueueMembership("o/r", 100, "main", "tok"),
+  );
+  assertEquals(membership, true);
+});
+
+test("#703: a native queue with a present PR but no entry reads a genuine eviction (false)", async () => {
+  const membership = await withProbeFetch(
+    { data: { repository: { mergeQueue: { id: "MQ_1" }, pullRequest: { mergeQueueEntry: null } } } },
+    () => fetchMergeQueueMembership("o/r", 100, "main", "tok"),
+  );
+  assertEquals(membership, false);
 });

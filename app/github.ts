@@ -773,8 +773,12 @@ export async function fetchMergeQueueMembership(
     if (!repository) return null; // unreadable / GraphQL error → indeterminate
     // No native merge queue on this base branch → an eviction is unobservable here (Mergify/plain).
     if (!repository.mergeQueue) return null;
-    // Native queue exists: enrolled iff the PR still carries a live queue entry.
-    return repository.pullRequest?.mergeQueueEntry != null;
+    // A missing `pullRequest` (partial GraphQL `data` alongside `errors`, or an unreadable PR) is
+    // NOT an eviction — treat it as indeterminate so a transport hiccup can't thrash `arm-merge`.
+    const pr = repository.pullRequest;
+    if (pr == null) return null;
+    // Native queue exists and the PR is readable: enrolled iff it still carries a live queue entry.
+    return pr.mergeQueueEntry != null;
   } catch {
     // A transport/parse failure must not falsely evict — stay conservative.
     return null;
