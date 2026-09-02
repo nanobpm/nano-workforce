@@ -3188,7 +3188,7 @@ components:
       properties:
         ok:
           type: boolean
-          description: True when the engine confirmed the instance is terminated AND its tracked record reconciled to a terminal edge (the record is now — or derives as — `abandoned`). False ⇒ either the engine did NOT stop the instance, or it stopped it but the tracked record did not settle to a terminal edge (both surfaced as a 502), or no tracked record owns the key (404).
+          description: True when the engine confirmed the instance is terminated AND its tracked record reconciled to a terminal edge (the record is now — or derives as — `abandoned`). False ⇒ either the engine did NOT stop the instance, or it stopped it but the tracked record did not settle to a terminal edge (both surfaced as a 502), or no tracked record owns the key (404). NOTE — record reconciliation is only verified when the deployment has a readable default source; in a no-default-source deployment (e.g. `mount.data:false`) there is no derived view to reconcile against, so `ok:true` reflects ENGINE TERMINATION ONLY (the primitive-only path) and does not by itself guarantee a tracked record reconciled.
         processInstanceKey:
           type: string
           description: The cancelled instance key, echoed back.
@@ -3198,7 +3198,7 @@ components:
           description: The instance state after the cancel attempt. For a tracked key, this is read back from the engine — `ACTIVE`/`COMPLETED`/`TERMINATED` reflect that post-cancel engine read. NOTE — this readback can LAG — a committed cancel is acknowledged asynchronously, so the engine may still report `ACTIVE` for a short window even though the cancel has been accepted. Therefore `ok:true` can coincide with `state:ACTIVE` (see the "accepted cancel whose read model lags at ACTIVE is still trusted → 200 ok" case); do NOT treat `ok:true` + `state:ACTIVE` as contradictory — `ok`/`reconciled` are the authoritative signal that the cancel took, not `state`. `gone` ⇒ EITHER the engine has no record of the key (already cleaned up / never existed) OR no tracked record owns the key (the 404 no-op, in which case the engine is never contacted, so `gone` is not an engine read).
         reconciled:
           type: integer
-          description: 1 when the tracked record's derived status has left its active set (become terminal → the tracked PR/plan/feature-run row derives as `abandoned`; for a PR that additionally means it drops out of `listActivePrs`, which lists PRs only — plans and feature runs are not surfaced there), else 0.
+          description: 1 when the tracked record's derived status has left its active set (become terminal → the tracked PR/plan/feature-run row derives as `abandoned`; for a PR that additionally means it drops out of `listActivePrs`, which lists PRs only — plans and feature runs are not surfaced there), else 0. NOTE — with no readable default source there is no derived record to re-read, so this carries the primitive's own reconciliation count rather than a record-derived terminal edge.
         error:
           type: string
           description: Present on a non-terminal failure — the reason the cancel did not take, the tracked record was not reconciled, or no tracked record owns the key.
