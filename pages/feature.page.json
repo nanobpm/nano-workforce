@@ -84,7 +84,7 @@
       "props": {
         "title": "Implement one issue",
         "submitLabel": "Implement & raise PR",
-        "action": { "path": "/app/api/actions/start/feature", "body": "{{form}}" },
+        "action": { "path": "/app/api/actions/start/feature", "body": "{{form}}", "successLabel": "Feature run dispatched \u2014 track it in the runs below. (A run already live for this issue is re-used, not double-started; if nothing is dispatched you\u2019ll see an error here, never a silent success.)" },
         "fields": [
           { "key": "issue", "label": "owner/repo#123 or a GitHub issue URL", "type": "text", "required": true, "requiredMessage": "An issue reference is required (owner/repo#123 or an issue URL)" },
           { "key": "baseBranch", "label": "Base branch: the branch the PR targets, e.g. main. A missing epic/* branch is auto-created off default HEAD; a non-epic/* branch must already exist.", "type": "text", "required": true, "requiredMessage": "Name the branch the PR targets (e.g. main or epic/agent-protocol)" },

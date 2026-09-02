@@ -7,6 +7,7 @@
 // process variables (the single `task` slice + the base-branch brief).
 import { after, test } from "node:test";
 import { assertEquals } from "#test-assert";
+import { withTrackingViews } from "../test/trackingViews.ts";
 import { FEATURE_PROCESS_ID, FEATURE_TERMINAL_STATUSES, featureTaskId, startFeature } from "./feature.ts";
 
 // `startFeature` now fetches the issue title (issue #248) via the GitHub transport. Force the token
@@ -49,7 +50,11 @@ function memTable(rows: any[], key: string) {
 
 function memData(stores: Record<string, { rows: any[]; key: string }>) {
   return {
-    table: (name: string, key: string) => memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key),
+    // Serve the ADR-0065 derived tracking VIEW (`feature_runs__tracking`) off the base store so the
+    // intake idempotency reader (which reads `derived_status`, issue #704) resolves against the same
+    // rows — a base row with no explicitly-seeded `derived_status` folds `derived_status := status`.
+    table: withTrackingViews((name: string, key: string) =>
+      memTable(stores[name]?.rows ?? [], stores[name]?.key ?? key)),
   } as any;
 }
 
@@ -74,6 +79,8 @@ test("startFeature: inserts a running feature_runs row and persists the process 
 
   assertEquals(result.featureKey, "owner/repo#42");
   assertEquals(result.processKey, "PI-9");
+  assertEquals(result.outcome, "started");
+  assertEquals(result.alreadyRunning, false);
   const row = stores.feature_runs.rows[0];
   assertEquals(row.feature_key, "owner/repo#42");
   assertEquals(row.repo, "owner/repo");
@@ -214,6 +221,7 @@ test("startFeature: an already-running run short-circuits (no new instance)", as
   const result = await startFeature(memData(stores), engine, PARSED, "main", false, false);
   assertEquals(created, 0);
   assertEquals("alreadyRunning" in result && (result as any).alreadyRunning, true);
+  assertEquals(result.outcome, "already-active");
   assertEquals(result.processKey, "PI-OLD");
 });
 
@@ -293,7 +301,110 @@ test("startFeature: an in-place restart clears a stale acknowledged_at (re-earn 
   assertEquals(row.acknowledged_at, null);
 });
 
-// Issue #248: the human-readable identity for the feature grids. Every start persists a non-blank
+// Issue #704 (RED first): the feature-side twin of the #503 `submitPr`/epic re-admission wedges. Under
+// urban 0.81.0 the `instanceTracking` reconciler is a SOURCE, not a writer: on cancel/terminate it no
+// longer stamps the terminal `abandoned` onto base `feature_runs.status` — the terminal is recomputed
+// on read as `feature_runs__tracking.derived_status`. A terminated run therefore keeps its base
+// `status` frozen at its last worker transient (`running`/`escalated`/`awaiting_operator`) while
+// `derived_status` reads `abandoned`. The intake idempotency reader MUST classify on `derived_status`,
+// or a terminated run wedges `already-active` forever — a green success that dispatches NO instance.
+//
+// (a) present + TERMINATED: base row present, `status` frozen, `derived_status: "abandoned"` → the
+// resubmit dispatches a FRESH instance and reports `started` with a new processKey.
+test("startFeature: resubmits a derive-only-terminated run (base 'running', derived 'abandoned') — started, not already-active", async () => {
+  const stores = {
+    feature_runs: {
+      rows: [{
+        feature_key: "owner/repo#42",
+        repo: "owner/repo",
+        issue_number: 42,
+        status: "running", // base transient FROZEN — the reconciler no longer writes the terminal
+        derived_status: "abandoned", // ADR-0065 derive-only terminal
+        process_key: "PI-DEAD",
+        pr_key: null,
+        converge: 0,
+        auto_merge: 0,
+      }],
+      key: "feature_key",
+    },
+  };
+  let created = 0;
+  const engine = {
+    createInstance: () => {
+      created += 1;
+      return Promise.resolve({ processInstanceKey: "PI-FRESH" });
+    },
+  } as any;
+  const result = await startFeature(memData(stores), engine, PARSED, "main", false, false);
+  assertEquals(created, 1); // NOT wedged — a fresh incarnation was dispatched
+  assertEquals(result.outcome, "started");
+  assertEquals(result.alreadyRunning, false);
+  assertEquals(result.processKey, "PI-FRESH"); // a NEW instance key, not the dead PI-DEAD
+  const row = stores.feature_runs.rows[0];
+  assertEquals(row.status, "running"); // restarted in place
+  assertEquals(row.process_key, "PI-FRESH");
+});
+
+// (b) vanished instance (feature_runs row absent — a clean reset dropped it): the intake sees no prior
+// run at all and inserts a fresh one. Resubmit dispatches a fresh instance and reports `started`.
+// (The present-but-instance-state-vanished shape — where derived_status cannot fold — is #630's edge;
+// this asserts the row-absent boundary is resubmittable here.)
+test("startFeature: resubmits when the prior run row has vanished (row absent) — started", async () => {
+  const stores = { feature_runs: { rows: [] as any[], key: "feature_key" } };
+  let created = 0;
+  const engine = {
+    createInstance: () => {
+      created += 1;
+      return Promise.resolve({ processInstanceKey: "PI-REBORN" });
+    },
+  } as any;
+  const result = await startFeature(memData(stores), engine, PARSED, "main", false, false);
+  assertEquals(created, 1);
+  assertEquals(result.outcome, "started");
+  assertEquals(result.processKey, "PI-REBORN");
+  assertEquals(stores.feature_runs.rows[0].process_key, "PI-REBORN");
+});
+
+// A genuinely-live prior run (non-terminal derived edge) still short-circuits `already-active` — a
+// live run cannot be double-started.
+test("startFeature: a non-terminal derived run still short-circuits (already-active, no new instance)", async () => {
+  const stores = {
+    feature_runs: {
+      rows: [{
+        feature_key: "owner/repo#42",
+        status: "running",
+        derived_status: "running", // still live
+        process_key: "PI-LIVE",
+      }],
+      key: "feature_key",
+    },
+  };
+  let created = 0;
+  const engine = {
+    createInstance: () => {
+      created += 1;
+      return Promise.resolve({ processInstanceKey: "PI-NEW" });
+    },
+  } as any;
+  const result = await startFeature(memData(stores), engine, PARSED, "main", false, false);
+  assertEquals(created, 0);
+  assertEquals(result.outcome, "already-active");
+  assertEquals(result.alreadyRunning, true);
+  assertEquals(result.processKey, "PI-LIVE");
+});
+
+// The silent-success contract (#704 fix #3): when the engine returns NO instance key the intake
+// dispatched nothing — it must report `noop-terminal` (a distinct non-success), never a green
+// `started`. The operation maps this to a 502 so the page renders "nothing started" distinctly.
+test("startFeature: a start that dispatches no instance reports noop-terminal (not a green success)", async () => {
+  const stores = { feature_runs: { rows: [] as any[], key: "feature_key" } };
+  const engine = { createInstance: () => Promise.resolve({ processInstanceKey: null }) } as any;
+  const result = await startFeature(memData(stores), engine, PARSED, "main", false, false);
+  assertEquals(result.outcome, "noop-terminal");
+  assertEquals(result.processKey, null);
+  assertEquals(result.alreadyRunning, false);
+});
+
 // `title` — the fetched issue title when available, else the `owner/repo#N` key — on BOTH the insert
 // (new run) and update (in-place restart) paths, so the title-led grid never renders a blank cell.
 test("startFeature: coalesces title to the key when the fetch yields nothing (insert path)", async () => {
