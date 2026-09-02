@@ -48,7 +48,8 @@ function readString(value: unknown, key: string): string | undefined {
 
 interface MountState {
   readonly registry: ClaimRegistry;
-  readonly timer: ReturnType<typeof setInterval> | undefined;
+  timer: ReturnType<typeof setTimeout> | undefined;
+  stopped: boolean;
 }
 
 let state: MountState | undefined;
@@ -95,33 +96,50 @@ export const family: AgenticFamily = {
     });
 
     // Bounded-memory reconcile: drop claims whose owning instance no longer has a presence row (a
-    // dropped supervisor / aged-out worker). Read per tick, so it is independent of family mount order
-    // and works whether presence mounts before or after this family. Advisory — a fault is logged,
-    // never thrown, and the tick never keeps the process alive on its own.
-    const presenceTtl = currentPresenceRegistry()?.ttlMs;
-    const interval = Math.max(1, Math.floor((presenceTtl ?? DEFAULT_RECONCILE_MS) / SWEEP_DIVISOR));
+    // dropped supervisor / aged-out worker). BOTH the drop-set AND the cadence are recomputed per
+    // tick from the live presence registry via a self-rescheduling timer, so the reconcile is truly
+    // independent of family mount order: whether presence mounts before or after this family, once it
+    // is present each tick reclaims absent instances' claims AND adjusts its cadence to the real TTL
+    // (a fixed-at-mount interval would stay pinned to the fallback cadence when claim mounts first).
+    // Advisory — a fault is logged, never thrown, and the tick never keeps the process alive on its
+    // own.
+    const reconcileMs = (): number => {
+      const presenceTtl = currentPresenceRegistry()?.ttlMs;
+      return Math.max(1, Math.floor((presenceTtl ?? DEFAULT_RECONCILE_MS) / SWEEP_DIVISOR));
+    };
+    const schedule = (): void => {
+      if (!state || state.stopped) return;
+      const timer = setTimeout(tick, reconcileMs());
+      timer.unref?.();
+      state.timer = timer;
+    };
     const tick = () => {
       try {
         const presence = currentPresenceRegistry();
-        if (!presence) return; // no presence source → keep claims until one mounts (resync repopulates)
-        const present = new Set(presence.registeredWorkers().map((w) => w.instance));
-        const released = registry.reconcile(present);
-        if (released.length > 0) {
-          ctx.log.info("agentic claim reconcile released absent instances", { released: released.length });
+        if (presence) {
+          const present = new Set(presence.registeredWorkers().map((w) => w.instance));
+          const released = registry.reconcile(present);
+          if (released.length > 0) {
+            ctx.log.info("agentic claim reconcile released absent instances", { released: released.length });
+          }
         }
+        // else: no presence source → keep claims until one mounts (resync repopulates)
       } catch (err) {
         ctx.log.warn("agentic claim reconcile failed", { err: String(err) });
       }
+      schedule();
     };
-    const timer = setInterval(tick, interval);
-    timer.unref?.();
 
-    state = { registry, timer };
+    state = { registry, timer: undefined, stopped: false };
+    schedule();
     ctx.log.info("agentic claim family mounted", { families: [CLAIM_FAMILY, RELEASE_FAMILY] });
   },
 
   teardown(): void {
-    if (state?.timer !== undefined) clearInterval(state.timer);
+    if (state) {
+      state.stopped = true;
+      if (state.timer !== undefined) clearTimeout(state.timer);
+    }
     state = undefined;
     setCurrentClaimRegistry(undefined);
   },
