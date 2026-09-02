@@ -1,3 +1,9 @@
+## [0.176.0](https://github.com/nanobpm/nano-workforce/compare/v0.175.2...v0.176.0) (2026-09-02)
+
+### Features
+
+* **agentic:** flush durable transcript on a worker phase:close event (fixes truncated tails) ([#711](https://github.com/nanobpm/nano-workforce/issues/711)) ([e02ff9b](https://github.com/nanobpm/nano-workforce/commit/e02ff9b4f8c2b7452dc40b0b8532736c5d418cc0)), closes [#710](https://github.com/nanobpm/nano-workforce/issues/710)
+
 ## [0.175.2](https://github.com/nanobpm/nano-workforce/compare/v0.175.1...v0.175.2) (2026-09-02)
 
 ### Bug Fixes
