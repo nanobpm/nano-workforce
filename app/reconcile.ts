@@ -548,10 +548,13 @@ export async function runEngineReconcile(
   });
   const epoch = await reconcileEngineBackedWork(data, observation, opts);
   // A distinct run id so the vanished pass's `reconcile_runs`/provenance rows never collide with the
-  // epoch pass's (run_id is a PRIMARY KEY) while staying relatable to the same reconcile invocation.
+  // epoch pass's (run_id is a PRIMARY KEY). DERIVE it from the epoch pass's resolved run id — which is
+  // also the merged result's `runId` — so it is `<runId>-vanished` on EVERY path, including the boot
+  // path where `opts.runId` is omitted (a bare random UUID here would be non-correlatable to the
+  // returned `runId`). Operators can always locate the vanished pass's provenance from the reported id.
   const vanished = await reconcileVanishedInstances(data, {
     ...opts,
-    runId: opts.runId ? `${opts.runId}-vanished` : undefined,
+    runId: `${epoch.runId}-vanished`,
   });
 
   const orphaned = [...epoch.orphaned, ...vanished.orphaned];

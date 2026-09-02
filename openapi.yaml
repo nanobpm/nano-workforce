@@ -1042,7 +1042,10 @@ components:
           type: integer
     ReconcileReport:
       type: object
-      description: The result of one engine-reset reconciliation pass (issues #622, #630).
+      description: "The merged result of the engine-reconcile invocation — an aggregate of both the
+        epoch-regression (engine reset/rewind) pass and the vanished-instance pass (issues #622 and
+        #630). `runId` is the epoch pass's run id; the vanished pass records its own provenance under
+        the derived id `<runId>-vanished`."
       additionalProperties: false
       required:
         - runId
@@ -1054,7 +1057,9 @@ components:
       properties:
         runId:
           type: string
-          description: The reconcile run id every orphaned transition's provenance is stamped with.
+          description: The reconcile run id the epoch pass's orphaned-transition provenance is stamped
+            with. The vanished-instance pass's provenance is stamped with the derived, deterministic id
+            `<runId>-vanished`, so operators can locate the provenance rows for either pass from this id.
         reason:
           type: string
           description: Why this pass acted (or did not). `instance-vanished` — a run whose engine

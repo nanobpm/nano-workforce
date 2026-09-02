@@ -20,6 +20,7 @@ import {
   RECONCILE_VANISHED_REASON,
   reconcileEngineBackedWork,
   reconcileVanishedInstances,
+  runEngineReconcile,
 } from "./reconcile.ts";
 
 const AT = () => new Date("2026-02-02T00:00:00.000Z");
@@ -370,4 +371,52 @@ test("idempotent: a second vanished pass is a no-op (the orphaned row left activ
   assertEquals(second.reason, "no-op");
   assertEquals(second.orphanedCount, 0);
   assertEquals((raw.prepare("SELECT COUNT(*) c FROM reconcile_provenance").get() as { c: number }).c, 1);
+});
+
+// --- Merged seam: runEngineReconcile (both passes, one result) --------------------------------
+// The operator/startup seam merges the epoch-regression and vanished-instance passes into ONE
+// result. This guards the merged behavior the two per-pass suites above don't reach: run-id
+// correlation (the vanished pass's provenance must be locatable from the returned `runId`) and
+// `reason` selection when the epoch pass is `engine-unreachable` yet vanished instances are orphaned.
+
+test("runEngineReconcile: engine-unreachable epoch pass still folds vanished instances, with a correlatable run id", async () => {
+  const { data, raw } = freshData();
+  ensureInstanceState(raw);
+  // A vanished orphan (escalated, past grace, instance absent from the read model).
+  seedFeatureRun(raw, "Magikcraft/nano-bpm#1051", "escalated", "71506");
+
+  // The engine is unreachable — the epoch probe fails, so the epoch pass reports `engine-unreachable`
+  // and orphans nothing; the vanished pass must still act.
+  const fetchImpl = (() => Promise.reject(new Error("ECONNREFUSED"))) as unknown as typeof fetch;
+  const res = await runEngineReconcile(
+    data,
+    { restAddress: "http://engine.invalid" },
+    { now: AT, fetchImpl },
+  );
+
+  // The vanished pass acted even though the epoch pass could not reach the engine.
+  assertEquals(res.reason, "instance-vanished");
+  assertEquals(res.orphanedCount, 1);
+  const orphan = raw
+    .prepare("SELECT status FROM feature_runs WHERE feature_key='Magikcraft/nano-bpm#1051'")
+    .get() as { status: string };
+  assertEquals(orphan.status, ORPHANED_STATUS);
+
+  // The vanished pass's provenance is stamped with the DERIVED, correlatable id `<runId>-vanished`
+  // (the boot path omits opts.runId, so a bare random UUID would be non-locatable from the result).
+  const prov = raw
+    .prepare("SELECT run_id FROM reconcile_provenance WHERE source_table='feature_runs'")
+    .get() as { run_id: string };
+  assertEquals(prov.run_id, `${res.runId}-vanished`);
+
+  // Both passes recorded their own reconcile_runs row under correlatable ids.
+  const epochRun = raw.prepare("SELECT reason FROM reconcile_runs WHERE run_id=?").get(res.runId) as
+    | { reason: string }
+    | undefined;
+  assertEquals(epochRun?.reason, "engine-unreachable");
+  const vanishedRun = raw
+    .prepare("SELECT reason, orphaned_count FROM reconcile_runs WHERE run_id=?")
+    .get(`${res.runId}-vanished`) as { reason: string; orphaned_count: number } | undefined;
+  assertEquals(vanishedRun?.reason, "instance-vanished");
+  assertEquals(vanishedRun?.orphaned_count, 1);
 });
