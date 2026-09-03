@@ -1,3 +1,9 @@
+## [0.178.4](https://github.com/nanobpm/nano-workforce/compare/v0.178.3...v0.178.4) (2026-09-03)
+
+### Bug Fixes
+
+* **mcp:** align session-selfheal e2e with urban 0.90.1 spec-conformant 404/-32001 ([#724](https://github.com/nanobpm/nano-workforce/issues/724)) ([5f54f3c](https://github.com/nanobpm/nano-workforce/commit/5f54f3ce42bbcbf30715bf17829e3f9ddd9cf793)), closes [#715](https://github.com/nanobpm/nano-workforce/issues/715)
+
 ## [0.178.3](https://github.com/nanobpm/nano-workforce/compare/v0.178.2...v0.178.3) (2026-09-03)
 
 ### Bug Fixes
