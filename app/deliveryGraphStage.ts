@@ -2,7 +2,7 @@
 // delivery graph (epic nano-workforce#605). Extracted from `operations/compileDeliveryGraph.ts` (S0)
 // so the intent-shaped generator doors (S4 — `sequenceIssues`) hand their CONSTRUCTED graph to the
 // EXACT same deterministic compile → validate → stage path the raw `compileDeliveryGraph` door uses:
-// one compiler (`compileDeliveryGraph`), one staging path (`stageProposal`), one idempotency/digest
+// one compiler (`compileDeliveryGraphSemantic`), one staging path (`stageProposal`), one idempotency/digest
 // semantics (content-addressed by `deliveryGraphDigest`). Per AGENTS.md "Derivation over duplication:
 // no drift surfaces", a generator MUST NOT re-implement a second runner or a second staging path —
 // it only produces the `DeliveryGraph` and delegates here.
