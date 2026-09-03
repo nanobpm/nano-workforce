@@ -3,11 +3,11 @@
   "extends": ["config:recommended"],
   "packageRules": [
     {
-      "description": "Auto-merge non-major @nanobpm/* updates once CI is green. These are first-party packages we publish from nano-ide; CI (typecheck + test) is the gate. For 0.x pins a caret range locks the minor, so Renovate's range bump is what actually pulls a new minor through; automerging it keeps nwf on the latest urban without manual PRs. platformAutomerge is off because main is unprotected, so Renovate waits for its own green branch status before merging.",
+      "description": "Auto-merge non-major @nanobpm/* updates once CI is green. These are first-party packages we publish from nano-ide; CI (typecheck + test) is the gate. For 0.x pins a caret range locks the minor, so Renovate's range bump is what actually pulls a new minor through; automerging it keeps nwf on the latest agentic/urban without manual PRs. platformAutomerge is ON because main is now protected by an active ruleset with a GitHub merge queue (merge_queue rule): a direct self-merge is rejected by the queue, so Renovate must enable GitHub-native auto-merge, which ENQUEUES the PR and lets it land when the queue's speculative checks pass. (Historically this was false when main was unprotected; leaving it false silently wedged green update PRs open — e.g. the agentic 0.11->0.12 bump sat unmerged for weeks.)",
       "matchPackageNames": ["/^@nanobpm//"],
       "matchUpdateTypes": ["minor", "patch"],
       "automerge": true,
-      "platformAutomerge": false
+      "platformAutomerge": true
     },
     {
       "description": "Major @nanobpm/* updates may be breaking - require a human to review and merge.",

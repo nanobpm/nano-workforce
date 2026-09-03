@@ -3,17 +3,18 @@ name: Renovate
 # Self-hosted Renovate (issue #406). renovate.json declares the policy — auto-merge
 # non-major @nanobpm/* updates once CI is green, majors need a human — but nothing was
 # ever running it, so the config sat dormant and nwf stayed pinned to old @nanobpm/urban.
-# This workflow IS the runner: on a schedule (and on demand) it opens update PRs and, on a
-# later pass once the PR's CI is green, merges the automerge ones itself. We self-host via
-# GitHub Actions rather than the Mend hosted app so the whole capability is in-repo and
-# reproducible, with no external app-install state to drift.
+# This workflow IS the runner: on a schedule (and on demand) it opens update PRs and enables
+# GitHub-native auto-merge on the automerge ones, which ENQUEUES them into main's merge queue so
+# they land when the queue's speculative checks pass. We self-host via GitHub Actions rather than
+# the Mend hosted app so the whole capability is in-repo and reproducible, with no external
+# app-install state to drift.
 on:
   schedule:
-    # Every 3 hours. Renovate needs to run periodically not just to DISCOVER new versions,
-    # but to COME BACK and merge automerge PRs: renovate.json sets platformAutomerge:false
-    # (main is unprotected, so GitHub-native auto-merge is unavailable), which means Renovate
-    # performs the merge itself on a subsequent run once the PR's branch status is green.
-    # A few-hourly cadence keeps that merge latency low without burning Actions minutes.
+    # Every 3 hours. Renovate needs to run periodically to DISCOVER new versions and open/refresh
+    # update PRs. Once main went behind a merge queue, Renovate no longer self-merges; it enables
+    # GitHub-native auto-merge (platformAutomerge:true) which enqueues the PR, and the queue lands it
+    # when its checks pass. A few-hourly cadence keeps discovery latency low without burning Actions
+    # minutes.
     - cron: "0 */3 * * *"
   # On-demand runs for immediate pickup (e.g. right after a new urban publishes) and for
   # debugging with a raised log level.
