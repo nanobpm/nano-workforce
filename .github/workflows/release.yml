@@ -7,6 +7,16 @@ on:
   workflow_run:
     workflows: ["CI", "Whole-repo invariants (merge-skew guard)"]
     types: [completed]
+  # Manual escape hatch. The automatic path above depends on the post-merge
+  # `push:main` event that normally follows a merge-queue landing. That event can
+  # go MISSING when an out-of-band bypass push to `main` (a `chore(release)
+  # [skip ci]` commit from the release App) races the queue's merge — the merged
+  # commit then lands with only its `merge_group` run and no `push` run, so the
+  # `workflow_run` trigger never sees `event == 'push'` and the release wedges
+  # with no way to retrigger. Dispatching runs the SAME green-gate against
+  # `main`'s HEAD (the merge_group checks are attached to that commit), so a
+  # manual recovery still never ships from a red `main`.
+  workflow_dispatch:
 
 # Prevent overlapping releases from racing on the same branch.
 concurrency:
@@ -26,9 +36,10 @@ jobs:
     name: release gate
     runs-on: ubuntu-latest
     if: >-
-      github.event.workflow_run.event == 'push' &&
-      github.event.workflow_run.head_branch == 'main' &&
-      github.event.workflow_run.conclusion == 'success'
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.conclusion == 'success')
     permissions:
       checks: read
       contents: read
@@ -39,7 +50,7 @@ jobs:
         id: gate
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SHA: ${{ github.event.workflow_run.head_sha }}
+          SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
@@ -96,7 +107,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.workflow_run.head_sha }} # release the exact gated commit
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }} # release the exact gated commit
           fetch-depth: 0 # semantic-release needs full history + tags
           persist-credentials: true # let @semantic-release/git push the release commit
           token: ${{ steps.app-token.outputs.token }} # push as the bypass-actor App
