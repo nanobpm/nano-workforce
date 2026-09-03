@@ -142,8 +142,10 @@ export interface McpHarness {
   /** End a session server-side via the transport's `DELETE` (the spec session-termination verb). With
    *  no argument, ends the harness's current session; pass an id to end a specific one. After this the
    *  ended id is unknown to the server, so a subsequent {@link McpHarness.callToolAs} with it is
-   *  refused `-32000`. Returns the DELETE's transport status. */
-  deleteSession(sessionId?: string): Promise<number>;
+   *  refused `-32000`. Optional `extraHeaders` are overlaid on the DELETE (e.g. an `x-hook-secret`
+   *  shared-secret credential) exactly as {@link McpHarness.callTool} does, so this helper stays
+   *  usable on a shared-secret-guarded surface. Returns the DELETE's transport status. */
+  deleteSession(sessionId?: string, extraHeaders?: Record<string, string>): Promise<number>;
   /** A raw JSON-RPC request against `/app/mcp` (escape hatch for a bespoke case). `params` omitted →
    *  no `params` field; a `notifications/*` method is sent as a notification (no `id`, no response). */
   rpc(method: string, params?: unknown): Promise<McpRpcResult>;
@@ -318,11 +320,18 @@ export async function bootMcpHarness(opts: BootMcpHarnessOptions = {}): Promise<
       currentSessionId = await doInitialize();
       return currentSessionId;
     },
-    async deleteSession(sessionId = currentSessionId): Promise<number> {
+    async deleteSession(sessionId = currentSessionId, extraHeaders): Promise<number> {
+      const headers: Record<string, string> = {
+        accept: "application/json, text/event-stream",
+      };
+      // Overlay caller headers FIRST, then set the session header authoritatively — a caller passing
+      // auth headers (e.g. `x-hook-secret`) must not clobber the `mcp-session-id` being terminated.
+      if (extraHeaders) Object.assign(headers, extraHeaders);
+      headers[SESSION_HEADER] = sessionId;
       const res = await app.ui.call({
         method: "DELETE",
         path: MCP_PATH,
-        headers: { [SESSION_HEADER]: sessionId, accept: "application/json, text/event-stream" },
+        headers,
         body: "",
       });
       return res.status ?? 200;
