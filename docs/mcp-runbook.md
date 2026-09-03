@@ -94,7 +94,7 @@ CI runs) fails if the block below drifts from the source. Never hand-edit it; ed
 
 <!-- BEGIN GENERATED: curated-tools (npm run sync:mcp-curated) -->
 ```json
-"tools": [
+[
   "startConvergenceLoop",
   "startPlanFanout",
   "startEpicSet",

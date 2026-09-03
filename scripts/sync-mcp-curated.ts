@@ -10,6 +10,7 @@
 //   node --experimental-strip-types scripts/sync-mcp-curated.ts --check  # verify (CI) — non-zero on drift
 import { readFileSync, writeFileSync } from "node:fs";
 import process from "node:process";
+import { pathToFileURL } from "node:url";
 import { CURATED_MCP_TOOLS } from "../app/mcpToolSurface.ts";
 
 const ROOT = decodeURIComponent(new URL("../", import.meta.url).pathname);
@@ -18,13 +19,13 @@ export const RUNBOOK_PATH = `${ROOT}docs/mcp-runbook.md`;
 const BEGIN = "<!-- BEGIN GENERATED: curated-tools (npm run sync:mcp-curated) -->";
 const END = "<!-- END GENERATED: curated-tools -->";
 
-/** The generated block: a fenced JSON `"tools"` array, one tool per line, in authored order. */
+/** The generated block: a fenced JSON array of curated tool names, one per line, in authored order. */
 export function renderBlock(): string {
   const lines = CURATED_MCP_TOOLS.map((name, i) => {
     const comma = i === CURATED_MCP_TOOLS.length - 1 ? "" : ",";
     return `  ${JSON.stringify(name)}${comma}`;
   });
-  return ["```json", '"tools": [', ...lines, "]", "```"].join("\n");
+  return ["```json", "[", ...lines, "]", "```"].join("\n");
 }
 
 export function replaceBetweenSentinels(source: string, block: string): string {
@@ -71,6 +72,6 @@ function main(): void {
 }
 
 // Run as a CLI only when invoked directly (not when imported by the drift test).
-if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main();
 }
