@@ -108,6 +108,32 @@
     },
     {
       "type": "text",
+      "id": "tractable-heading",
+      "props": { "text": "Import a curated tool set (tractable surface)", "variant": "heading" }
+    },
+    {
+      "type": "text",
+      "id": "tractable-body",
+      "props": {
+        "text": "The full projected surface is ~56 tools / ~79 KB of tools/list (app operations plus the framework urban_debug_* engine family) \u2014 large enough that a coding-agent harness may defer the whole set behind a tool-search gate, and \"tools\": [\"*\"] imports every one eagerly. Prefer a curated allowlist of the tools you actually drive and read with: set the server entry's \"tools\" to the curated subset instead of [\"*\"]. The curated list is maintained as the single source of truth in the repo (app/mcpToolSurface.ts, CURATED_MCP_TOOLS) and rendered as a copyable JSON block in the runbook \u2014 see docs/mcp-runbook.md \u00a7\"Import a curated subset\". [\"*\"] still works where the client does not defer; the full surface stays reachable either way.",
+        "variant": "sub"
+      }
+    },
+    {
+      "type": "text",
+      "id": "session-recovery-heading",
+      "props": { "text": "Recover a lost session (re-initialize on -32000)", "variant": "heading" }
+    },
+    {
+      "type": "text",
+      "id": "session-recovery-body",
+      "props": {
+        "text": "The /app/mcp transport is stateful streamable-HTTP: every tool call carries an mcp-session-id, and a call with a missing / stale / idle-dropped / proxy-reset / evicted session id is refused with -32000 \"no valid session id, and not an initialize request.\" A client that does not re-handshake then sees the whole surface report \"tool does not exist\" until it re-initializes \u2014 a single hiccup (notably a heavy-tool timeout) can brick every tool. The self-heal is a fresh initialize handshake, which mints a new session and restores the entire catalogue in one round trip; a well-behaved MCP client does this automatically on a -32000. A stateless/resumable transport that removes the session dependency is tracked upstream (nano-ide#488).",
+        "variant": "sub"
+      }
+    },
+    {
+      "type": "text",
       "id": "secret-heading",
       "props": { "text": "Shared-secret setup (x-hook-secret)", "variant": "heading" }
     },

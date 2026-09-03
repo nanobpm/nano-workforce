@@ -69,6 +69,82 @@ copilot mcp add --transport http workforce-merlin http://merlin.local:3000/app/m
 Tool calls are namespaced per server entry, so the instance you name is the instance
 you drive.
 
+### Import a curated subset, not `["*"]` (tractable surface — issue #715)
+
+The full projected surface is **~56 tools / ~79 KB** of `tools/list` (app operations + the
+framework `urban_debug_*` engine family). That is large enough that a coding-agent harness
+**defers the whole set behind a tool-search gate**, and `"tools": ["*"]` imports every one of
+them eagerly — so an agent may not see nwf's tools until it searches. Until the runtime shrinks
+the framework tool family behind a mode (tracked upstream, nano-ide#488), the workforce-side lever
+is to import a **curated allowlist** of the tools you actually drive/read with, instead of `["*"]`:
+
+```json
+"workforce-local": {
+  "type": "http",
+  "url": "http://localhost:3000/app/mcp",
+  "tools": <curated list below>
+}
+```
+
+The curated list is the single source of truth in **`app/mcpToolSurface.ts`**
+(`CURATED_MCP_TOOLS`) — `e2e/mcp-tractability.e2e.ts` asserts every entry projects onto the live
+surface, and `npm run sync:mcp-curated:check` (also asserted by a drift test under `npm test`, which
+CI runs) fails if the block below drifts from the source. Never hand-edit it; edit
+`app/mcpToolSurface.ts` and run `npm run sync:mcp-curated`.
+
+<!-- BEGIN GENERATED: curated-tools (npm run sync:mcp-curated) -->
+```json
+[
+  "startConvergenceLoop",
+  "startPlanFanout",
+  "startEpicSet",
+  "startFeature",
+  "compileDeliveryGraph",
+  "previewDeliveryGraph",
+  "sequenceIssues",
+  "agentCompleteEscalation",
+  "completeUserTask",
+  "cancelInstance",
+  "appendBlackboard",
+  "readBlackboard",
+  "getVersion",
+  "getAgentInstructions",
+  "getAgentGuide",
+  "listActivePrs",
+  "listStagedProposals",
+  "listEscalations",
+  "getLineage",
+  "getPrHistory",
+  "urban_debug_search_process_instances",
+  "urban_debug_search_element_instance_wait_states",
+  "urban_debug_search_incidents",
+  "urban_debug_search_variables",
+  "urban_debug_search_jobs",
+  "urban_debug_instance_state",
+  "urban_debug_open_user_tasks"
+]
+```
+<!-- END GENERATED: curated-tools -->
+
+Keeping `["*"]` still works and is fine on a client that does not defer — the curated import is the
+recommended default for a harness that gates on tool count. The full surface (including any
+`urban_debug_*` tool not in the curated set) stays reachable; drop back to `["*"]`, or add the
+specific extra tool name to the entry, whenever you need one outside the curated set.
+
+### Recover a lost session — re-`initialize` on `-32000` (issue #715, gap 1)
+
+The `/app/mcp` transport is **stateful streamable-HTTP**: every `tools/call` carries an
+`mcp-session-id`, and a call with a missing / stale / idle-dropped / proxy-reset / LRU-evicted
+session id is refused with `-32000 "Bad Request: no valid session id, and not an initialize
+request."` A client that does not re-handshake then sees the **whole surface** report "tool does not
+exist" until it re-`initialize`s — a single hiccup (notably a heavy-tool timeout, gap 4 below) can
+brick every tool. The **self-heal** is a fresh `initialize` handshake, which mints a new session and
+restores the entire catalogue in one round trip; a well-behaved MCP client does this automatically on
+a `-32000`. The stateless/resumable transport that would remove the session dependency entirely is
+tracked upstream (nano-ide#488); `e2e/mcp-session-selfheal.e2e.ts` pins the workforce-visible
+requirement — a killed session (stale id **and** a server-side `DELETE`) bricks a call `-32000`, and
+one re-`initialize` brings the full surface back.
+
 ### Instance behind Basic Auth? You need *both* headers
 
 Two different layers. `x-hook-secret` is the **app's own** guard (checked by nwf in

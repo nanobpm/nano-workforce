@@ -121,13 +121,31 @@ export interface McpHarness {
   /** The underlying booted app — exposed for a slice that needs to seed/inspect the app DB or drive
    *  an operator-only (`x-mcp`-excluded) cleanup route the MCP surface does not expose. */
   readonly app: TestApp;
-  /** The negotiated MCP session id (the captured `Mcp-Session-Id`). */
+  /** The CURRENT negotiated MCP session id (the captured `Mcp-Session-Id`). Tracks the live session,
+   *  so after {@link McpHarness.reinitialize} it reflects the NEW id, not the original. */
   readonly sessionId: string;
   /** `tools/list` — the projected tool catalogue (app operations + framework debug tools). */
   listTools(): Promise<McpTool[]>;
   /** `tools/call` — invoke a tool by name with its argument object. Optional `extraHeaders` are
    *  overlaid on the POST (e.g. an `x-hook-secret` shared-secret credential for a gated mutation). */
   callTool(name: string, args?: Record<string, unknown>, extraHeaders?: Record<string, string>): Promise<McpToolResult>;
+  /** `tools/call` against an EXPLICIT session id (not the harness's live one) — used to exercise the
+   *  session-loss path: a call carrying a stale/unknown/deleted `mcp-session-id` must be refused with
+   *  the runtime's `-32000` "no valid session id" error (issue #715, gap 1 self-heal regression). */
+  callToolAs(sessionId: string, name: string, args?: Record<string, unknown>): Promise<McpToolResult>;
+  /** Re-run the full client handshake (`initialize` → `notifications/initialized`), minting a FRESH
+   *  session and adopting it as the harness's live session. This is the client-side SELF-HEAL a real
+   *  MCP client performs after its session is lost (timeout, idle drop, proxy reset, LRU eviction):
+   *  the pinned runtime is session-stateful (a stateless/resumable transport is tracked upstream in
+   *  nano-ide#488), so re-initialising is how a client recovers the surface. Returns the new id. */
+  reinitialize(): Promise<string>;
+  /** End a session server-side via the transport's `DELETE` (the spec session-termination verb). With
+   *  no argument, ends the harness's current session; pass an id to end a specific one. After this the
+   *  ended id is unknown to the server, so a subsequent {@link McpHarness.callToolAs} with it is
+   *  refused `-32000`. Optional `extraHeaders` are overlaid on the DELETE (e.g. an `x-hook-secret`
+   *  shared-secret credential) exactly as {@link McpHarness.callTool} does, so this helper stays
+   *  usable on a shared-secret-guarded surface. Returns the DELETE's transport status. */
+  deleteSession(sessionId?: string, extraHeaders?: Record<string, string>): Promise<number>;
   /** A raw JSON-RPC request against `/app/mcp` (escape hatch for a bespoke case). `params` omitted →
    *  no `params` field; a `notifications/*` method is sent as a notification (no `id`, no response). */
   rpc(method: string, params?: unknown): Promise<McpRpcResult>;
@@ -221,9 +239,11 @@ export async function bootMcpHarness(opts: BootMcpHarnessOptions = {}): Promise<
     rmSync(dbDir, { recursive: true, force: true });
   };
 
-  let sessionId: string;
-  try {
-    // 1. initialize — capture the runtime-minted session id.
+  /** Run the full client handshake against the live surface and return the freshly-minted session id:
+   *  `initialize` (capture the `Mcp-Session-Id`) → `notifications/initialized`. Reused by the initial
+   *  boot AND by {@link McpHarness.reinitialize} so the self-heal path exercises the SAME real
+   *  handshake, never a shortcut. */
+  const doInitialize = async (): Promise<string> => {
     const initRes = await rpc("initialize", {
       protocolVersion: PROTOCOL_VERSION,
       capabilities: {},
@@ -240,10 +260,36 @@ export async function bootMcpHarness(opts: BootMcpHarnessOptions = {}): Promise<
         `MCP initialize returned no ${SESSION_HEADER} header — headers: ${JSON.stringify(initRes.headers)}`,
       );
     }
-    sessionId = mintedId;
+    // notifications/initialized — the client's post-init notification (no response expected).
+    await rpc("notifications/initialized", undefined, mintedId);
+    return mintedId;
+  };
 
-    // 2. notifications/initialized — the client's post-init notification (no response expected).
-    await rpc("notifications/initialized", undefined, sessionId);
+  /** Parse a `tools/call` JSON-RPC envelope into the client-visible {@link McpToolResult}. Shared by
+   *  `callTool` and `callToolAs` so both surface a JSON-RPC-level error (e.g. `-32000` no-session) and
+   *  a tool-level `isError` identically. */
+  const parseCallResult = (res: McpRpcResult): McpToolResult => {
+    const body = res.body as
+      | { result?: { isError?: boolean; content?: Array<{ type: string; text?: string }> }; error?: { message?: string } }
+      | undefined;
+    if (body?.error) {
+      const text = body.error.message ?? JSON.stringify(body.error);
+      return { isError: true, text, json: safeParse(text), httpStatus: res.httpStatus, raw: body };
+    }
+    const first = body?.result?.content?.find((c) => c.type === "text");
+    const text = first?.text ?? "";
+    return {
+      isError: body?.result?.isError === true,
+      text,
+      json: safeParse(text),
+      httpStatus: res.httpStatus,
+      raw: body,
+    };
+  };
+
+  let currentSessionId: string;
+  try {
+    currentSessionId = await doInitialize();
   } catch (err) {
     await teardown();
     throw err;
@@ -252,10 +298,12 @@ export async function bootMcpHarness(opts: BootMcpHarnessOptions = {}): Promise<
   let stopped = false;
   const harness: McpHarness = {
     app,
-    sessionId,
-    rpc: (method, params) => rpc(method, params, sessionId),
+    get sessionId(): string {
+      return currentSessionId;
+    },
+    rpc: (method, params) => rpc(method, params, currentSessionId),
     async listTools(): Promise<McpTool[]> {
-      const res = await rpc("tools/list", {}, sessionId);
+      const res = await rpc("tools/list", {}, currentSessionId);
       const body = res.body as { result?: { tools?: McpTool[] }; error?: unknown } | undefined;
       if (!body?.result?.tools) {
         throw new Error(`tools/list returned no result.tools: ${JSON.stringify(body)}`);
@@ -263,25 +311,30 @@ export async function bootMcpHarness(opts: BootMcpHarnessOptions = {}): Promise<
       return body.result.tools;
     },
     async callTool(name, args = {}, extraHeaders): Promise<McpToolResult> {
-      const res = await rpc("tools/call", { name, arguments: args }, sessionId, extraHeaders);
-      const body = res.body as
-        | { result?: { isError?: boolean; content?: Array<{ type: string; text?: string }> }; error?: { message?: string } }
-        | undefined;
-      if (body?.error) {
-        // A JSON-RPC-level error (e.g. an unknown tool name / protocol error) — distinct from a
-        // tool-level `isError` door failure. Surface it as an errored result carrying the message.
-        const text = body.error.message ?? JSON.stringify(body.error);
-        return { isError: true, text, json: safeParse(text), httpStatus: res.httpStatus, raw: body };
-      }
-      const first = body?.result?.content?.find((c) => c.type === "text");
-      const text = first?.text ?? "";
-      return {
-        isError: body?.result?.isError === true,
-        text,
-        json: safeParse(text),
-        httpStatus: res.httpStatus,
-        raw: body,
+      return parseCallResult(await rpc("tools/call", { name, arguments: args }, currentSessionId, extraHeaders));
+    },
+    async callToolAs(sessionId, name, args = {}): Promise<McpToolResult> {
+      return parseCallResult(await rpc("tools/call", { name, arguments: args }, sessionId));
+    },
+    async reinitialize(): Promise<string> {
+      currentSessionId = await doInitialize();
+      return currentSessionId;
+    },
+    async deleteSession(sessionId = currentSessionId, extraHeaders): Promise<number> {
+      const headers: Record<string, string> = {
+        accept: "application/json, text/event-stream",
       };
+      // Overlay caller headers FIRST, then set the session header authoritatively — a caller passing
+      // auth headers (e.g. `x-hook-secret`) must not clobber the `mcp-session-id` being terminated.
+      if (extraHeaders) Object.assign(headers, extraHeaders);
+      headers[SESSION_HEADER] = sessionId;
+      const res = await app.ui.call({
+        method: "DELETE",
+        path: MCP_PATH,
+        headers,
+        body: "",
+      });
+      return res.status ?? 200;
     },
     async stop(): Promise<void> {
       if (stopped) return;
