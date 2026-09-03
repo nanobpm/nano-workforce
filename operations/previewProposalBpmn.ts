@@ -81,7 +81,7 @@ export default defineOperation("previewProposalBpmn", async ({ body }, app) => {
   // Determinism guard: the recompiled BPMN must content-address back to the requested digest. A mismatch
   // means the stored graph drifted from its digest — refuse rather than serve a diagram that doesn't
   // match the proposal the operator is about to dispatch.
-  const recompiledDigest = deliveryGraphDigest(compiled.bpmn);
+  const recompiledDigest = deliveryGraphDigest(compiled.semanticBpmn);
   if (recompiledDigest !== digest) {
     app.log.error("preview-proposal-bpmn: digest drift", { digest, recompiledDigest });
     return {

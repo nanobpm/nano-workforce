@@ -127,7 +127,7 @@ export async function parseAndCompileText(
       },
     };
   }
-  const digest = deliveryGraphDigest(compiled.bpmn);
+  const digest = deliveryGraphDigest(compiled.semanticBpmn);
   const name =
     typeof compiled.resolved.name === "string" && compiled.resolved.name.trim() !== ""
       ? compiled.resolved.name.trim()

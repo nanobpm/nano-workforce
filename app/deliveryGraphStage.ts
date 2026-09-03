@@ -2,7 +2,7 @@
 // delivery graph (epic nano-workforce#605). Extracted from `operations/compileDeliveryGraph.ts` (S0)
 // so the intent-shaped generator doors (S4 — `sequenceIssues`) hand their CONSTRUCTED graph to the
 // EXACT same deterministic compile → validate → stage path the raw `compileDeliveryGraph` door uses:
-// one compiler (`compileDeliveryGraph`), one staging path (`stageProposal`), one idempotency/digest
+// one compiler (`compileDeliveryGraphSemantic`), one staging path (`stageProposal`), one idempotency/digest
 // semantics (content-addressed by `deliveryGraphDigest`). Per AGENTS.md "Derivation over duplication:
 // no drift surfaces", a generator MUST NOT re-implement a second runner or a second staging path —
 // it only produces the `DeliveryGraph` and delegates here.
@@ -14,7 +14,7 @@
 // semantic validation. Nothing is staged on a rejected compile.
 import type { DataLayer } from "@nanobpm/urban";
 import type { CompileDeliveryGraphErrors, CompileDeliveryGraphStaged } from "../nano-generated/api-io.d.ts";
-import { compileDeliveryGraph } from "./deliveryGraphCompiler.ts";
+import { compileDeliveryGraphSemantic } from "./deliveryGraphCompiler.ts";
 import {
   buildProposalPreview,
   buildProposalRow,
@@ -64,12 +64,12 @@ export async function compileAndStageDeliveryGraph(
   graphJson: string,
   origin: string,
 ): Promise<StagedResult | StageErrors> {
-  const result = await compileDeliveryGraph(graph);
+  const result = await compileDeliveryGraphSemantic(graph);
   if (!result.ok) {
     return { ok: false, status: 400, body: result };
   }
 
-  const digest = deliveryGraphDigest(result.bpmn);
+  const digest = deliveryGraphDigest(result.semanticBpmn);
   const name =
     typeof result.resolved.name === "string" && result.resolved.name.trim() !== ""
       ? result.resolved.name.trim()

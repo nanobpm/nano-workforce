@@ -6,7 +6,8 @@
 // runs it); its whole job is deploy + seed + start.
 //
 // Definition lifecycle (the ADR open question, resolved here): the deployed process id is
-// CONTENT-ADDRESSED — `delivery-graph-<sha256(bpmn)[:12]>`. Identical graphs compile byte-identically
+// CONTENT-ADDRESSED — `delivery-graph-<sha256(semanticBpmn)[:12]>` (the pre-layout semantic model, NOT
+// the laid-out `bpmn` — issue #716). Identical graphs compile byte-identically
 // (S1 determinism) → identical id → an idempotent redeploy (the engine versions the same id, never a
 // duplicate definition per run); different graphs get different ids and never collide; and because the
 // id ENCODES its content, a stale one-shot definition is GC-identifiable by a later sweeper (out of
@@ -22,13 +23,21 @@ import { DEFAULT_EVERY_MS, msToIsoDuration, parseProbe, readinessPollEvery, read
 import { repoEnvelopeVars } from "./repoEnvelope.ts";
 import { isoDuration } from "./reviewWait.ts";
 
-/** The content digest of a compiled graph — `sha256(bpmn)[:12]` — the single source of truth for the
- * content-addressed deploy id (`delivery-graph-<digest>`) AND the dispatch fence's default idempotency
- * key + the staged-proposal primary key. The runner (deploy id), `app/deliveryGraphDispatch` (dedupe
- * key), and `app/deliveryGraphProposals` (proposal digest) all derive from THIS one function so they
- * can never drift on how a graph is addressed. */
-export function deliveryGraphDigest(bpmn: string): string {
-  return createHash("sha256").update(bpmn).digest("hex").slice(0, 12);
+/** The content digest of a compiled graph — `sha256(semanticBpmn)[:12]` — the single source of truth
+ * for the content-addressed deploy id (`delivery-graph-<digest>`) AND the dispatch fence's default
+ * idempotency key + the staged-proposal primary key. The runner (deploy id),
+ * `app/deliveryGraphDispatch` (dedupe key), and `app/deliveryGraphProposals` (proposal digest) all
+ * derive from THIS one function so they can never drift on how a graph is addressed.
+ *
+ * The digest is taken over the graph's SEMANTIC BPMN (the pre-layout `compileDeliveryGraphSemantic`
+ * output), NOT the laid-out `bpmn` (issue #716). The diagram interchange is DERIVED deterministically
+ * from the semantic model, so the semantic BPMN is the true canonical content of a graph — and, unlike
+ * the laid-out BPMN, it is available WITHOUT the CPU-bound `layoutBpmn` pass. This lets the agent-facing
+ * compile+stage doors content-address (and stage) a graph on the fast path while the expensive layout is
+ * deferred to the operator's preview/dispatch. Every caller MUST pass a `semanticBpmn` so the address
+ * stays consistent across staging, preview, dispatch, and deploy. */
+export function deliveryGraphDigest(semanticBpmn: string): string {
+  return createHash("sha256").update(semanticBpmn).digest("hex").slice(0, 12);
 }
 
 /** The bounded-timeout / SLA envelope every node inherits (Decision: bounded → escalate). ISO-8601
@@ -120,7 +129,7 @@ export async function prepareDeliveryGraph(
   const compiled = await compileDeliveryGraph(graph);
   if (!compiled.ok) return { ok: false, errors: compiled.errors };
 
-  const digest = deliveryGraphDigest(compiled.bpmn);
+  const digest = deliveryGraphDigest(compiled.semanticBpmn);
   const processDefinitionId = `${DELIVERY_GRAPH_PROCESS_ID}-${digest}`;
   const bpmn = rewriteProcessId(compiled.bpmn, processDefinitionId);
 

@@ -63,7 +63,7 @@ export async function dispatchDeliveryGraphRun(
     return { ok: false, errors: compiled.errors };
   }
 
-  const digest = deliveryGraphDigest(compiled.bpmn);
+  const digest = deliveryGraphDigest(compiled.semanticBpmn);
   const runKey = computeRunKey(options.runKey, digest);
   const sideEffecting = compiled.sideEffects.length > 0;
   const explicitTitle = typeof options.title === "string" && options.title.trim() !== "" ? options.title.trim() : "";
