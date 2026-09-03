@@ -17,6 +17,18 @@ on:
   # `main`'s HEAD (the merge_group checks are attached to that commit), so a
   # manual recovery still never ships from a red `main`.
   workflow_dispatch:
+  # Self-heal a dropped `push:main` event (#725). The `push`→`workflow_run` chain
+  # is the ONLY automatic release path, so a single dropped event (a transient
+  # Actions delivery hiccup, or the release-App bypass push racing the queue —
+  # both hit #722/#723) wedges the release until a human dispatches. This periodic
+  # tick re-runs the SAME green-gate against `main` HEAD (`github.sha`) and lets
+  # `semantic-release` — which is idempotent (no-ops when nothing is releasable,
+  # never republishes an existing version) — backfill the missed run automatically.
+  # It never ships from a red `main` (same required-check gate) and the gate's
+  # schedule-scoped dedup below runs `semantic-release` at most once per HEAD SHA,
+  # so a healthy `main` costs only the tiny gate job per tick.
+  schedule:
+    - cron: "*/15 * * * *"
 
 # Prevent overlapping releases from racing on the same branch.
 concurrency:
@@ -37,10 +49,12 @@ jobs:
     runs-on: ubuntu-latest
     if: >-
       github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'schedule' ||
       (github.event.workflow_run.event == 'push' &&
        github.event.workflow_run.head_branch == 'main' &&
        github.event.workflow_run.conclusion == 'success')
     permissions:
+      actions: read # schedule dedup: list this workflow's prior runs for the HEAD SHA
       checks: read
       contents: read
     outputs:
@@ -52,6 +66,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
           REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
         run: |
           set -euo pipefail
           # These must ALL be `success` on the release commit before we ship.
@@ -77,6 +92,25 @@ jobs:
             echo "gate: '$name' = ${concl:-missing}"
             [ "${concl:-missing}" = "success" ] || should=false
           done
+          # Schedule-scoped dedup (#725). The scheduled tick exists ONLY to backfill a
+          # release whose `push:main` trigger was dropped. If any prior Release run has
+          # already reached a terminal `success` for this exact HEAD SHA, the analyzer
+          # already ran (via `push`/`workflow_dispatch`, or an earlier tick) — the tree
+          # is unchanged, so re-running would just spin an idempotent no-op every tick
+          # (e.g. when HEAD is a green no-release `chore:`/`ci:` commit). This dedup is
+          # gated to `schedule` so it never perturbs the push path's two-trigger race,
+          # where the neutral early trigger also concludes `success` and the LATE
+          # trigger must still be allowed to release. The in-progress current run is not
+          # yet `success`, so it never counts itself out.
+          if [ "$EVENT" = "schedule" ] && [ "$should" = "true" ]; then
+            handled="$(gh api \
+              "repos/$REPO/actions/workflows/release.yml/runs?head_sha=$SHA&status=completed&per_page=100" \
+              --jq '[.workflow_runs[] | select(.conclusion=="success")] | length')"
+            if [ "${handled:-0}" -gt 0 ]; then
+              echo "gate: HEAD $SHA already analysed by a prior successful Release run — nothing to backfill."
+              should=false
+            fi
+          fi
           echo "should_release=$should" >> "$GITHUB_OUTPUT"
 
   release:
