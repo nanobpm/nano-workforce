@@ -64,7 +64,7 @@
     "lint:fix": "biome check --write app operations workers pages components scripts e2e main.ts"
   },
   "dependencies": {
-    "@nanobpm/agentic": "^0.11.0",
+    "@nanobpm/agentic": "^0.12.0",
     "@nanobpm/urban": "^0.90.0",
     "bpmn-auto-layout": "^2.0.0-alpha.2"
   },
