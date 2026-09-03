@@ -260,23 +260,47 @@ function mustGet<K, V>(map: ReadonlyMap<K, V>, key: K): V {
   return value;
 }
 
+/** The compiler result BEFORE diagram-interchange layout: everything the generated
+ * `CompileDeliveryGraphResult` carries EXCEPT the laid-out `bpmn`, plus the `semanticBpmn` (the
+ * pre-layout, DI-less BPMN). `compileDeliveryGraphSemantic` produces this cheaply (no
+ * `layoutBpmn`); `compileDeliveryGraph` layers the CPU-bound DI layout on top. Because the DI is
+ * DERIVED deterministically from `semanticBpmn`, `semanticBpmn` is the canonical content of a graph —
+ * the source `deliveryGraphDigest` content-addresses (issue #716). */
+export interface CompiledDeliveryGraphSemantic {
+  ok: true;
+  /** A human-readable mermaid `flowchart` of the resolved graph. */
+  diagram: string;
+  /** The compiled one-shot BPMN process definition WITHOUT diagram interchange — the canonical,
+   * layout-independent content of the graph. Deterministic: same input graph → byte-identical XML. */
+  semanticBpmn: string;
+  resolved: CompileDeliveryGraphResult["resolved"];
+  humanNodes: CompileDeliveryGraphResult["humanNodes"];
+  sideEffects: CompileDeliveryGraphResult["sideEffects"];
+}
+
+/** A fully-compiled graph — the generated wire result (`diagram`, laid-out `bpmn`, …) PLUS the
+ * pre-layout `semanticBpmn` the content digest is taken over. */
+export type CompiledDeliveryGraph = CompileDeliveryGraphResult & { semanticBpmn: string };
+
 /**
- * Validate + compile a delivery graph into a PURE preview (ADR 0005 slice S1). Returns
- * `{ ok:true, diagram, bpmn, resolved, humanNodes, sideEffects }` for a well-formed graph, or
- * `{ ok:false, errors }` (each error path-qualified) for a malformed one. NEVER deploys, dispatches,
- * or mutates anything — safe to call repeatedly. Deterministic: identical input JSON yields
- * byte-identical output.
+ * Validate + compile a delivery graph into a PURE preview WITHOUT the CPU-bound diagram-interchange
+ * layout (issue #716). Returns `{ ok:true, diagram, semanticBpmn, resolved, humanNodes, sideEffects }`
+ * for a well-formed graph, or `{ ok:false, errors }` (each error path-qualified) for a malformed one.
+ * NEVER deploys, dispatches, or mutates anything — safe to call repeatedly. Deterministic: identical
+ * input JSON yields byte-identical output.
  *
- * ASYNC because the final step attaches DIAGRAM INTERCHANGE (`bpmndi:BPMNDiagram`) via the toolkit
- * autolayout (`layoutBpmn` — `bpmn-auto-layout`), the SAME pass every AUTHORED process gets from
- * `npm run layout` (`scripts/layout-bpmn.ts`). This is the one BPMN in the system generated at
- * runtime, so without this it was the only one shipping DI-less — unrenderable in the process
- * explorer (#440). `layoutBpmn` is itself deterministic given identical semantic input, so
- * "same JSON → byte-identical XML" still holds with the diagram included.
+ * This is the fast path the agent-facing compile/stage doors (`compileDeliveryGraph` /
+ * `sequenceIssues` → `compileAndStageDeliveryGraph`) take: staging needs only the content digest (taken
+ * over `semanticBpmn`), the mermaid `diagram`, and the resolved model — NOT the laid-out `bpmn`. Skipping
+ * `layoutBpmn` (`bpmn-auto-layout`, superlinear in node/edge count — minutes on a 256-node/1024-edge
+ * graph) keeps a cold MCP tool call well under the client's per-call timeout instead of tripping a
+ * `-32001` that poisons the stateful session (#715). The laid-out `bpmn` is generated lazily, only at the
+ * OPERATOR's preview/dispatch time (`previewProposalBpmn` / `dispatchDeliveryGraph`), which is a cockpit
+ * action, not an MCP call, and so is not timeout-bound.
  */
-export async function compileDeliveryGraph(
+export async function compileDeliveryGraphSemantic(
   graph: unknown,
-): Promise<CompileDeliveryGraphResult | CompileDeliveryGraphErrors> {
+): Promise<CompiledDeliveryGraphSemantic | CompileDeliveryGraphErrors> {
   const validationErrors: DeliveryGraphError[] = validateDeliveryGraph(graph);
   if (validationErrors.length > 0) {
     // Forward every semantic failure verbatim as a wire `{ path, message }` (the stable `code` stays
@@ -509,13 +533,40 @@ export async function compileDeliveryGraph(
   }
 
   const semanticBpmn = renderBpmn(typed, wirings, numberedFlows, startForkGateway, endJoinGateway, boundInputsByElement);
-  const bpmn = await layoutDeliveryDiagram(semanticBpmn);
   const diagram = renderMermaid(typed, wirings, resolvedEdges, elementById);
   const resolved = buildResolved(typed, wirings, resolvedEdges, producersById);
   const humanNodes = buildHumanNodes(nodes);
   const sideEffects = buildSideEffects(nodes);
 
-  return { ok: true, diagram, bpmn, resolved, humanNodes, sideEffects };
+  return { ok: true, diagram, semanticBpmn, resolved, humanNodes, sideEffects };
+}
+
+/**
+ * Validate + compile a delivery graph into a PURE preview INCLUDING diagram interchange (ADR 0005
+ * slice S1). Returns the generated `CompileDeliveryGraphResult` shape (`diagram`, laid-out `bpmn`,
+ * `resolved`, `humanNodes`, `sideEffects`) PLUS the pre-layout `semanticBpmn`, or `{ ok:false, errors }`
+ * for a malformed graph. NEVER deploys, dispatches, or mutates anything. Deterministic: identical input
+ * JSON yields byte-identical output.
+ *
+ * ASYNC because the final step attaches DIAGRAM INTERCHANGE (`bpmndi:BPMNDiagram`) via the toolkit
+ * autolayout (`layoutBpmn` — `bpmn-auto-layout`), the SAME pass every AUTHORED process gets from
+ * `npm run layout` (`scripts/layout-bpmn.ts`). This is the one BPMN in the system generated at
+ * runtime, so without this it was the only one shipping DI-less — unrenderable in the process
+ * explorer (#440). `layoutBpmn` is itself deterministic given identical semantic input, so
+ * "same JSON → byte-identical XML" still holds with the diagram included.
+ *
+ * Callers that only need the content digest / preview (the agent-facing compile+STAGE doors) should
+ * use the cheaper {@link compileDeliveryGraphSemantic} instead — layout here is CPU-bound and
+ * superlinear (issue #716), so it belongs only on the operator's preview/dispatch/deploy paths that
+ * genuinely render or run the BPMN.
+ */
+export async function compileDeliveryGraph(
+  graph: unknown,
+): Promise<CompiledDeliveryGraph | CompileDeliveryGraphErrors> {
+  const semantic = await compileDeliveryGraphSemantic(graph);
+  if (!semantic.ok) return semantic;
+  const bpmn = await layoutDeliveryDiagram(semantic.semanticBpmn);
+  return { ...semantic, bpmn };
 }
 
 /** Attach diagram interchange (`bpmndi:BPMNDiagram`) to the semantic-only compiled BPMN via the

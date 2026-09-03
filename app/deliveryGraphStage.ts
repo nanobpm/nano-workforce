@@ -14,7 +14,7 @@
 // semantic validation. Nothing is staged on a rejected compile.
 import type { DataLayer } from "@nanobpm/urban";
 import type { CompileDeliveryGraphErrors, CompileDeliveryGraphStaged } from "../nano-generated/api-io.d.ts";
-import { compileDeliveryGraph } from "./deliveryGraphCompiler.ts";
+import { compileDeliveryGraphSemantic } from "./deliveryGraphCompiler.ts";
 import {
   buildProposalPreview,
   buildProposalRow,
@@ -64,12 +64,12 @@ export async function compileAndStageDeliveryGraph(
   graphJson: string,
   origin: string,
 ): Promise<StagedResult | StageErrors> {
-  const result = await compileDeliveryGraph(graph);
+  const result = await compileDeliveryGraphSemantic(graph);
   if (!result.ok) {
     return { ok: false, status: 400, body: result };
   }
 
-  const digest = deliveryGraphDigest(result.bpmn);
+  const digest = deliveryGraphDigest(result.semanticBpmn);
   const name =
     typeof result.resolved.name === "string" && result.resolved.name.trim() !== ""
       ? result.resolved.name.trim()

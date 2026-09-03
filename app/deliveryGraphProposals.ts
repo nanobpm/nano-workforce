@@ -105,8 +105,12 @@ export function isProposalExpired(expiresAtIso: string | null | undefined, at: D
 
 /** Extract the operator-facing preview from a successful compile — the diagram, the side effects a
  * dispatch authorises, and the human stop-points. No BPMN, no digest handle beyond the content
- * address; a preview, not a dispatch affordance. */
-export function buildProposalPreview(compiled: CompileDeliveryGraphResult): DeliveryProposalPreview {
+ * address; a preview, not a dispatch affordance. Accepts either the full compile result or the
+ * layout-free {@link compileDeliveryGraphSemantic} result — the preview reads only `diagram`,
+ * `sideEffects`, and `humanNodes`, none of which need the laid-out `bpmn` (issue #716). */
+export function buildProposalPreview(
+  compiled: Pick<CompileDeliveryGraphResult, "diagram" | "humanNodes" | "sideEffects">,
+): DeliveryProposalPreview {
   return {
     diagram: compiled.diagram,
     sideEffects: compiled.sideEffects,

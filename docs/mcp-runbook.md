@@ -214,6 +214,21 @@ got string`. That retired the nwf-local stringified-body reject mitigation: the 
 `e2e/mcp-surface.e2e.ts` now asserts the door faithfully parses a stringified body (the
 `assertObjectBodyAccepted` detector's teeth stay pinned synthetically).
 
+**Heavy compile/stage tools stay under the client timeout (issue #716).** Compiling a large
+delivery graph to laid-out BPMN (`layoutBpmn` / `bpmn-auto-layout`) is CPU-bound and superlinear —
+minutes on a 256-node / 1024-edge graph — so running it inline once tripped a cold
+`sequenceIssues` / `compileDeliveryGraph` call past the client's per-call MCP timeout (`-32001
+Request timed out`, which then poisoned the stateful session, #715). The compile+STAGE hot path
+(`compileAndStageDeliveryGraph`) therefore runs the **layout-free** `compileDeliveryGraphSemantic`:
+staging needs only the content **digest**, the mermaid `diagram`, and the resolved model, so it
+returns in milliseconds. The digest is taken over the deterministic **semantic** BPMN (the diagram
+interchange is derived from it, so it is the canonical content of a graph) — one content address
+shared across staging, `previewProposalBpmn`, `dispatchDeliveryGraph`, and the deploy id, so they
+never drift. The expensive `layoutBpmn` is deferred to the **operator's** preview/dispatch
+(`previewProposalBpmn` recompiles the laid-out BPMN with DI on demand) — a cockpit action, not a
+timeout-bound MCP call. `app/deliveryGraphStage.test.ts` and `e2e/heavy-tool-progress.e2e.ts` pin
+that a large/dense graph stages fast rather than timing out.
+
 ## 5. Fallback
 
 Agents without MCP are unchanged — resolve the instance, then
