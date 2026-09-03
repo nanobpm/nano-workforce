@@ -1,3 +1,9 @@
+## [0.178.5](https://github.com/nanobpm/nano-workforce/compare/v0.178.4...v0.178.5) (2026-09-03)
+
+### Bug Fixes
+
+* **ci:** self-heal a dropped push:main event via a scheduled release gate ([#726](https://github.com/nanobpm/nano-workforce/issues/726)) ([3e09ec5](https://github.com/nanobpm/nano-workforce/commit/3e09ec50b1ebd71c19f5bde3daf3771a660ba5c2)), closes [722/#723](https://github.com/722/nano-workforce/issues/723) [#725](https://github.com/nanobpm/nano-workforce/issues/725)
+
 ## [0.178.4](https://github.com/nanobpm/nano-workforce/compare/v0.178.3...v0.178.4) (2026-09-03)
 
 ### Bug Fixes
