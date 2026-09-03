@@ -1,3 +1,14 @@
+## [0.178.3](https://github.com/nanobpm/nano-workforce/compare/v0.178.2...v0.178.3) (2026-09-03)
+
+### Bug Fixes
+
+* **ci:** add manual workflow_dispatch escape hatch to the release pipeline ([#723](https://github.com/nanobpm/nano-workforce/issues/723)) ([4d06f25](https://github.com/nanobpm/nano-workforce/commit/4d06f259aee7a5689844ddd0dfe3f68253c9fc37))
+* **ci:** retry OIDC publish when the release publish 401s; reclaim v0.178.3 ([#722](https://github.com/nanobpm/nano-workforce/issues/722)) ([208c02d](https://github.com/nanobpm/nano-workforce/commit/208c02dd1936c70635a5108887f452143a8dbc26))
+
+### Documentation
+
+* refresh stale --version pin example in the upgrade guide ([#721](https://github.com/nanobpm/nano-workforce/issues/721)) ([75dbcec](https://github.com/nanobpm/nano-workforce/commit/75dbcecc93b4adef3bb4d6a05f6010ed44ea74dd))
+
 ## [0.178.2](https://github.com/nanobpm/nano-workforce/compare/v0.178.1...v0.178.2) (2026-09-03)
 
 ### Bug Fixes
