@@ -6,7 +6,8 @@
 // runs it); its whole job is deploy + seed + start.
 //
 // Definition lifecycle (the ADR open question, resolved here): the deployed process id is
-// CONTENT-ADDRESSED — `delivery-graph-<sha256(bpmn)[:12]>`. Identical graphs compile byte-identically
+// CONTENT-ADDRESSED — `delivery-graph-<sha256(semanticBpmn)[:12]>` (the pre-layout semantic model, NOT
+// the laid-out `bpmn` — issue #716). Identical graphs compile byte-identically
 // (S1 determinism) → identical id → an idempotent redeploy (the engine versions the same id, never a
 // duplicate definition per run); different graphs get different ids and never collide; and because the
 // id ENCODES its content, a stale one-shot definition is GC-identifiable by a later sweeper (out of
