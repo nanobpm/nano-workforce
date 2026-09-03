@@ -1,3 +1,9 @@
+## [0.178.0](https://github.com/nanobpm/nano-workforce/compare/v0.177.0...v0.178.0) (2026-09-03)
+
+### Features
+
+* **mcp:** pin the workforce-visible MCP surface — session self-heal, tractable-surface budget, heavy-tool latency ([#717](https://github.com/nanobpm/nano-workforce/issues/717)) ([de55daa](https://github.com/nanobpm/nano-workforce/commit/de55daa1b5fa134c7fc0e08c96041113fecd1481)), closes [488/#501](https://github.com/488/nano-workforce/issues/501) [#715](https://github.com/nanobpm/nano-workforce/issues/715)
+
 ## [0.177.0](https://github.com/nanobpm/nano-workforce/compare/v0.176.1...v0.177.0) (2026-09-02)
 
 ### Features
