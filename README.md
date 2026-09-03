@@ -185,7 +185,7 @@ and runs the review-ready poller.
 ```sh
 npm run upgrade                              # dry-run against @latest
 npm run upgrade -- --apply                   # apply the overlay, preserving app.db
-npm run upgrade -- --version 0.26.0 --apply  # pin a specific version
+npm run upgrade -- --version 0.178.2 --apply  # pin a specific version
 npm run upgrade -- --from ./pkg.tgz --apply  # from a local tarball (offline)
 ```
 
