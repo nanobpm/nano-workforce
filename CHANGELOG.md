@@ -1,3 +1,9 @@
+## [0.178.1](https://github.com/nanobpm/nano-workforce/compare/v0.178.0...v0.178.1) (2026-09-03)
+
+### Bug Fixes
+
+* **mcp:** stage delivery graphs on a layout-free fast path so cold heavy tools don't time out ([#718](https://github.com/nanobpm/nano-workforce/issues/718)) ([c94ab00](https://github.com/nanobpm/nano-workforce/commit/c94ab00f091dbc5e529138e6818365c5794a1e25)), closes [#715](https://github.com/nanobpm/nano-workforce/issues/715) [nanobpm/nano-ide#488](https://github.com/nanobpm/nano-ide/issues/488) [#716](https://github.com/nanobpm/nano-workforce/issues/716) [#716](https://github.com/nanobpm/nano-workforce/issues/716) [#716](https://github.com/nanobpm/nano-workforce/issues/716)
+
 ## [0.178.0](https://github.com/nanobpm/nano-workforce/compare/v0.177.0...v0.178.0) (2026-09-03)
 
 ### Features
