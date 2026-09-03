@@ -1,3 +1,9 @@
+## [0.178.3](https://github.com/nanobpm/nano-workforce/compare/v0.178.2...v0.178.3) (2026-09-03)
+
+### Documentation
+
+* refresh stale --version pin example in the upgrade guide ([#721](https://github.com/nanobpm/nano-workforce/issues/721)) ([75dbcec](https://github.com/nanobpm/nano-workforce/commit/75dbcecc93b4adef3bb4d6a05f6010ed44ea74dd))
+
 ## [0.178.2](https://github.com/nanobpm/nano-workforce/compare/v0.178.1...v0.178.2) (2026-09-03)
 
 ### Bug Fixes
