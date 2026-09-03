@@ -78,7 +78,7 @@ jobs:
       # done with the release App token below — it is the ruleset bypass actor. The
       # job's own GITHUB_TOKEN only needs OIDC for npm Trusted Publishing.
       contents: read
-      id-token: write # OIDC token for npm Trusted Publishing (no NPM_TOKEN)
+      id-token: write # OIDC for npm Trusted Publishing + provenance (the only auth path)
     steps:
       # Mint a short-lived token for the dedicated release GitHub App. This App is
       # the ruleset's bypass actor, so @semantic-release/git can push the version
@@ -129,8 +129,63 @@ jobs:
         run: npm ci
 
       - name: Release
+        id: release
+        # OIDC Trusted Publishing is the ONLY automated auth path: npm has retired
+        # automation tokens that bypass 2FA, so there is no CI token fallback — it is
+        # OIDC or a human `npm publish` locally. OIDC is intermittently flaky, though:
+        # npm has returned `401 … Failed to generate Web Auth URLs … token is invalid`
+        # mid-publish. @semantic-release/git pushes the tag + release commit in the
+        # `prepare` step BEFORE @semantic-release/npm `publish`, so an OIDC publish
+        # failure orphans a git tag with no npm package (the v0.178.3 phantom).
+        # Don't fail the job here — let the OIDC publish-retry step below recover it.
+        continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }} # bypass-actor App token
-          # No NPM_TOKEN / NODE_AUTH_TOKEN: publishing uses OIDC Trusted Publishing.
+          # No NPM_TOKEN / NODE_AUTH_TOKEN: publishing is OIDC Trusted Publishing only.
           NPM_CONFIG_PROVENANCE: "true"
         run: npx semantic-release
+
+      # Recovery: if the OIDC publish 401s, semantic-release has already bumped
+      # package.json + pushed the tag/release commit, but npm never got the tarball.
+      # The failure is INTERMITTENT (a prior version published fine), so retry the
+      # OIDC publish of the just-prepared version a few times with backoff — still no
+      # token, still OIDC + provenance via the job's id-token. This step is a NO-OP
+      # when the release step succeeded or when the version is already on npm, so it
+      # can never double-publish. If OIDC stays down through every retry, fail loudly:
+      # a human must `npm publish` the pushed tag locally (npm login with 2FA, then
+      # `git checkout vX.Y.Z && npm ci && npm publish --provenance --access public`).
+      - name: Retry OIDC publish if the release publish failed
+        if: steps.release.outcome == 'failure'
+        env:
+          NPM_CONFIG_PROVENANCE: "true"
+          GH_TOKEN: ${{ steps.app-token.outputs.token }} # to create the skipped GitHub Release
+        run: |
+          set -uo pipefail
+          PKG="$(node -p "require('./package.json').name")"
+          VERSION="$(node -p "require('./package.json').version")"
+          if npm view "${PKG}@${VERSION}" version >/dev/null 2>&1; then
+            echo "${PKG}@${VERSION} is already on npm — nothing to recover."
+            exit 0
+          fi
+          echo "semantic-release prepared + tagged ${PKG}@${VERSION} but the OIDC publish failed; retrying."
+          published=false
+          for attempt in 1 2 3; do
+            echo "OIDC publish attempt ${attempt}/3 for ${PKG}@${VERSION}"
+            if npm publish --provenance --access public; then
+              echo "Published ${PKG}@${VERSION} on retry ${attempt}."
+              published=true
+              break
+            fi
+            sleep $((attempt * 30))
+          done
+          if [ "$published" != true ]; then
+            echo "::error::OIDC publish of ${PKG}@${VERSION} still failing after retries. The git tag v${VERSION} is pushed but npm has no tarball. Publish it locally: 'git fetch --tags && git checkout v${VERSION} && npm ci && npm publish --provenance --access public' (npm login with 2FA first)."
+            exit 1
+          fi
+          # semantic-release aborts before @semantic-release/github when the npm
+          # publish throws, so the GitHub Release was never created — create it now.
+          if ! gh release view "v${VERSION}" >/dev/null 2>&1; then
+            echo "Creating the GitHub Release skipped by the aborted semantic-release run."
+            gh release create "v${VERSION}" --verify-tag --generate-notes --title "v${VERSION}" || \
+              echo "::warning::Published to npm but failed to create GitHub Release v${VERSION}; create it manually."
+          fi
