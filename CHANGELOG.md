@@ -1,3 +1,9 @@
+## [0.178.2](https://github.com/nanobpm/nano-workforce/compare/v0.178.1...v0.178.2) (2026-09-03)
+
+### Bug Fixes
+
+* **ci:** enqueue Renovate @nanobpm/* automerge via the merge queue ([#720](https://github.com/nanobpm/nano-workforce/issues/720)) ([a788c3c](https://github.com/nanobpm/nano-workforce/commit/a788c3cc664ee7324c0706bf5182d180b8a17c0e)), closes [#421](https://github.com/nanobpm/nano-workforce/issues/421)
+
 ## [0.178.1](https://github.com/nanobpm/nano-workforce/compare/v0.178.0...v0.178.1) (2026-09-03)
 
 ### Bug Fixes
