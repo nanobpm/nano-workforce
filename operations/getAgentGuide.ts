@@ -22,14 +22,17 @@ import { defineOperation } from "../nano-generated/operations.ts";
 
 const SECRET = envVar("NANO_PR_WEBHOOK_SECRET") ?? "";
 
-/** Parse a `start`/`length` pagination query param: a present value must be a non-negative integer
- *  (`length` additionally >= 1). Returns the parsed number, `undefined` when absent, or a
+/** Parse a `start`/`length` pagination query param: a present value must be a non-negative SAFE
+ *  integer (`length` additionally >= 1). `Number.isSafeInteger` (not `Number.isInteger`) is required
+ *  because these values are used as character cursors: an integer beyond `Number.MAX_SAFE_INTEGER`
+ *  (e.g. `9007199254740993`) loses precision, so accepting it would silently misinterpret the
+ *  caller's requested window. Returns the parsed number, `undefined` when absent, or a
  *  path-qualified validation issue. */
 function parsePageArg(raw: unknown, path: string, min: number): { value?: number; issue?: { path: string; message: string } } {
   if (raw === undefined || raw === null || (typeof raw === "string" && raw.trim() === "")) return {};
   const s = typeof raw === "string" ? raw.trim() : String(raw);
   const n = Number(s);
-  if (!Number.isInteger(n) || n < min) {
+  if (!Number.isSafeInteger(n) || n < min) {
     return { issue: { path, message: `\`${path}\` must be an integer >= ${min} (character offset); got "${s}"` } };
   }
   return { value: n };
