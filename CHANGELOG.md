@@ -1,3 +1,9 @@
+## [0.182.1](https://github.com/nanobpm/nano-workforce/compare/v0.182.0...v0.182.1) (2026-09-04)
+
+### Bug Fixes
+
+* **deps:** update dependency @nanobpm/urban to ^0.92.0 ([#573](https://github.com/nanobpm/nano-workforce/issues/573)) ([a7acb21](https://github.com/nanobpm/nano-workforce/commit/a7acb214bc36752149ce8be51a907ff74acb073d))
+
 ## [0.182.0](https://github.com/nanobpm/nano-workforce/compare/v0.181.0...v0.182.0) (2026-09-04)
 
 ### Features
