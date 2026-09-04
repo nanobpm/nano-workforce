@@ -228,6 +228,10 @@ export function renderGuideSectionChunk(
     start: from,
     length: slice.length,
     totalLength: total,
-    nextStart: end < total ? end : null,
+    // Only advance when this page actually consumed characters. A zero-length window (`length <= 0`)
+    // returns an empty page that made NO progress, so it must terminate the cursor (`null`) rather
+    // than hand back a `nextStart` equal to `start` — a non-advancing cursor would loop a caller
+    // that pages until `nextStart` is null forever.
+    nextStart: slice.length > 0 && end < total ? end : null,
   };
 }

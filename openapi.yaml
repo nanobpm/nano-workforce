@@ -2989,7 +2989,9 @@ components:
             The ordered issues to sequence — each is implemented by a `senior:feature` agent that opens
             a PR, driven to convergence + merge, and the NEXT issue's implementation starts only once
             the prior issue has merged (and any interleaved gate has gone green). At least one; at most
-            64 (keeps the generated graph within the compiler's node ceiling).
+            64. The compiler's node ceiling is enforced SEPARATELY by a node-budget guard (interleaved
+            gates each add nodes, so a fully-gated 64-issue sequence can exceed the ceiling and is
+            rejected there) — `maxItems: 64` bounds the entry count, not the generated node count.
     SequenceIssuesRejected:
       description: >-
         A rejected `sequenceIssues` intent — the input failed validation (empty/oversized `issues`, an

@@ -157,6 +157,20 @@ test("renderGuideSectionChunk: the first page of a fitting section equals the wh
   assertEquals(chunk.nextStart, null);
 });
 
+test("renderGuideSectionChunk: a zero-length window on a non-empty section terminates (nextStart null, no loop)", () => {
+  const base = "https://x/app/api";
+  const full = renderGuideSection("delivery-graphs", base)!;
+  assert(Array.from(full).length > 0, "precondition: the section has content");
+  // A caller (or a direct invoker bypassing the op's `length >= 1` validation) that asks for a
+  // zero-length window gets an empty page — but `nextStart` MUST be null so a "page until nextStart
+  // is null" loop cannot spin forever on a cursor that never advances.
+  const chunk = renderGuideSectionChunk("delivery-graphs", base, 0, 0)!;
+  assertEquals(chunk.start, 0);
+  assertEquals(chunk.length, 0);
+  assertEquals(chunk.instructions, "");
+  assertEquals(chunk.nextStart, null);
+});
+
 test("renderGuideSectionChunk: an unknown section id is undefined (the op turns that into a 400)", () => {
   assertEquals(renderGuideSectionChunk("does-not-exist", "https://x/app/api", 0, 100), undefined);
 });
