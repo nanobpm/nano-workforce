@@ -1068,7 +1068,7 @@ function agentContractContextFeel(nodeId: string, descriptor: string, requiredEm
       `self-report a terminal-success status (${statuses}) and populate every emit a downstream node requires ` +
       "before its result routes onward. Reported status=",
   );
-  let feel = `=${head} + (if (is defined(status)) then string(status) else "(none)") + "."`;
+  let feel = `=${head} + (if (is defined(status) and status != null) then string(status) else "(none)") + "."`;
   for (const f of requiredEmits) {
     const present = `(is defined(${f.name}) and ${f.name} != null)`;
     feel += ` + " Required emit '${f.name}': " + (if ${present} then "present" else "MISSING (null)") + "."`;
