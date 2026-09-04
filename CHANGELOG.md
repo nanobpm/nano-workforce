@@ -1,3 +1,9 @@
+## [0.179.2](https://github.com/nanobpm/nano-workforce/compare/v0.179.1...v0.179.2) (2026-09-04)
+
+### Code Refactoring
+
+* drop redundant testkit engine-client shim in e2e ([#734](https://github.com/nanobpm/nano-workforce/issues/734)) ([8ea7ccd](https://github.com/nanobpm/nano-workforce/commit/8ea7ccd5c38a2b0e363cac74b126dd86bee0f0b1)), closes [#336](https://github.com/nanobpm/nano-workforce/issues/336)
+
 ## [0.179.1](https://github.com/nanobpm/nano-workforce/compare/v0.179.0...v0.179.1) (2026-09-04)
 
 ### Bug Fixes
