@@ -18,9 +18,9 @@ import { createHash, randomUUID } from "node:crypto";
 import type { EngineClient } from "@nanobpm/urban";
 import type { DeliveryFact, DeliveryGraph, DeliveryNode } from "../nano-generated/api-io.d.ts";
 import { TRANSCRIPT_URL_BASE_VAR, transcriptUrlBaseFor } from "./agentic/transcript-url.ts";
-import { assertNever, compileDeliveryGraph, DELIVERY_GRAPH_PROCESS_ID } from "./deliveryGraphCompiler.ts";
+import { AGENT_REPO_SPEC_HEADER, assertNever, compileDeliveryGraph, DELIVERY_GRAPH_PROCESS_ID } from "./deliveryGraphCompiler.ts";
 import { DEFAULT_EVERY_MS, msToIsoDuration, parseProbe, readinessPollEvery, readinessTimeout } from "./readiness.ts";
-import { RepoEnvelopeConflictError, requireRepoEnvelopeVars } from "./repoEnvelope.ts";
+import { agentNodeRepoEnvelope, flattenAgentTaskEnvelope, isResolvableRepo, RepoEnvelopeConflictError, RepoEnvelopeUnresolvedError } from "./repoEnvelope.ts";
 import { isoDuration } from "./reviewWait.ts";
 
 /** The content digest of a compiled graph — `sha256(semanticBpmn)[:12]` — the single source of truth
@@ -62,26 +62,34 @@ export interface DeliveryRunOptions extends DeliveryRunTimeouts {
    * cross-correlate. Pass an explicit `runKey` only when you need a reproducible/externally-owned gate
    * scope. */
   runKey?: string;
-  /** OPTIONAL `owner/repo` the run's `agent` nodes implement against. Together with `baseBranch` the
-   * runner seeds the canonical repository-provisioning envelope (`io.nanobpm.agentTask.repository`, via
-   * `requireRepoEnvelopeVars`) as a run-root `createInstance` process variable so each `agent` cell's
-   * servicing `senior:*` job provisions an ISOLATED throwaway clone instead of inheriting the worker's
-   * launch dir (issue #684/#686 — the same isolation the legacy feature/plan paths got in #685).
+  /** OPTIONAL run-level `owner/repo` DEFAULT for `agent` nodes that do not declare their own
+   * `repository`. Per issue #739 the repository-provisioning envelope
+   * (`io.nanobpm.agentTask.repository`) is seeded PER agent cell from that node's own declared
+   * `repository`/`baseBranch` (`injectAgentRepoEnvelopes`, POST-digest, onto each service task's
+   * `<zeebe:taskHeaders>`), with this run-level value as the FALLBACK when a node omits it — so a
+   * heterogeneous cross-repo graph (each node a different repo) needs no run-level repo at all. Each
+   * cell's servicing `senior:*` job provisions an ISOLATED throwaway clone instead of inheriting the
+   * worker's launch dir (issue #684/#686 — the same isolation the legacy feature/plan paths got in
+   * #685).
    *
-   * Issue #729: the envelope is now REQUIRED unless the run is EXPLICITLY `repoless`. A run that is not
-   * `repoless` but supplies an unresolved/missing `repository`/`baseBranch` throws
-   * `RepoEnvelopeUnresolvedError` at seed time (a loud launch failure) rather than silently degrading to
-   * the shared launch-dir behaviour that let concurrent fan-out workers clobber one checkout. */
+   * Issue #729/#739: the envelope is REQUIRED (per node) unless the run is EXPLICITLY `repoless`. A run
+   * that is not `repoless` but has an `agent` node whose repository resolves to neither a declared value
+   * nor this run-level fallback throws `RepoEnvelopeUnresolvedError` at seed time (a loud launch failure)
+   * rather than silently degrading to the shared launch-dir behaviour that let concurrent fan-out
+   * workers clobber one checkout. */
   repository?: string | null;
-  /** OPTIONAL base branch the run's `agent` nodes branch off — the `ref` the harness checks out in the
-   * isolated clone (the PRE-PR shape: no PR head exists yet, so the agent cuts its own `feat/<node.id>`
-   * branch off this base inside the clone). Required (with `repository`) unless the run is `repoless`. */
+  /** OPTIONAL run-level base-branch DEFAULT for `agent` nodes that declare a `repository` but no
+   * `baseBranch` — the `ref` the harness checks out in the isolated clone (the PRE-PR shape: no PR head
+   * exists yet, so the agent cuts its own `feat/<node.id>` branch off this base inside the clone). A
+   * node with a resolvable repository but no base clones the repo's default branch, so this is a
+   * convenience default, not a hard requirement. */
   baseBranch?: string | null;
   /** EXPLICIT opt-out of repository provisioning (issue #729). `true` → the run is dispatched with NO
-   * isolation envelope (the legacy launch-dir behaviour), for a genuinely repo-less graph (e.g. one with
-   * no `agent` nodes that touch a checkout). This must be a CONSCIOUS choice at the dispatch door so the
-   * default can never silently share a checkout: when it is not set, `repository` + `baseBranch` are
-   * mandatory and an unresolved pair is a hard launch failure, not a silent no-envelope fallback. */
+   * isolation envelope on ANY node (the per-node headers are stripped, the legacy launch-dir behaviour),
+   * for a genuinely repo-less graph (e.g. one with no `agent` nodes that touch a checkout). This must be
+   * a CONSCIOUS choice at the dispatch door so the default can never silently share a checkout: when it
+   * is not set, every `agent` node must resolve a repository (its own or the run-level fallback) and an
+   * unresolved node is a hard launch failure, not a silent no-envelope fallback. */
   repoless?: boolean;
 }
 
@@ -140,7 +148,15 @@ export async function prepareDeliveryGraph(
 
   const digest = deliveryGraphDigest(compiled.semanticBpmn);
   const processDefinitionId = `${DELIVERY_GRAPH_PROCESS_ID}-${digest}`;
-  const bpmn = rewriteProcessId(compiled.bpmn, processDefinitionId);
+  // Per-node repository isolation (#739): resolve each agent cell's EFFECTIVE repository/base (its own
+  // declared `repository`/`baseBranch`, else the run-level fallback) and INJECT the flattened
+  // `io.nanobpm.agentTask.*` envelope task headers onto each agent service task POST-digest, replacing
+  // the compiler's digest-stable `__repoSpec` marker. This runs after `rewriteProcessId` and is a pure
+  // string transform of the laid-out BPMN (the digest is taken over the pre-injection semantic model,
+  // so the env-dependent `cloneTimeoutMs` and the run-level fallback never enter the content address).
+  // Throws `RepoEnvelopeUnresolvedError` when some agent cell resolves to NO repository and the run is
+  // not `repoless` — a loud launch failure, never a silent launch-dir share (#684/#729).
+  const bpmn = injectAgentRepoEnvelopes(rewriteProcessId(compiled.bpmn, processDefinitionId), graph, options);
 
   const runKey = options.runKey?.trim() || randomUUID();
   // Normalize the run-level timeouts through isoDuration so a programmatic caller that bypasses the
@@ -177,39 +193,14 @@ export async function runDeliveryGraph(
   const { processDefinitionId, bpmn, nodeInputs } = prep.prepared;
 
   await engine.deployResources([{ name: `${processDefinitionId}.bpmn`, content: bpmn, contentType: "application/xml" }]);
-  const base = typeof options.baseBranch === "string" && options.baseBranch.trim() !== "" ? options.baseBranch.trim() : null;
-  const repo = typeof options.repository === "string" && options.repository.trim() !== "" ? options.repository.trim() : null;
-  // Host-git provisioning (c8ctl, issue #684/#686/#729): resolve the ONE canonical repository envelope
-  // (`app/repoEnvelope.ts`) BEFORE seeding so every `agent` node's servicing `senior:*` job gets an
-  // ISOLATED throwaway clone instead of inheriting the worker's launch dir — otherwise several copilot
-  // workers on one host share (and clobber) a single checkout, the exact field failure #684 described.
-  // This is the delivery-graph analog of the whole-epic seed in `app/plan.ts`: a single run-root
-  // `createInstance` process variable that propagates through each agent cell's subProcess into its job.
-  // Like plan.ts's fan-out seed it carries `ref = base` but NO `branchCreate` — a run fans out to MANY
-  // agent nodes, each needing its own deterministic `feat/<node.id>` branch, so a single run-level
-  // envelope can't name one; each agent cuts its own branch off `base` inside the isolated clone (the
-  // agent-guide's `feat/*` convention, kept idempotent by the #551 preflight). `baseRef = base` too, so
-  // the harness keeps `origin/<base>` reachable for the review 3-dot diff.
-  //
-  // Issue #729: the envelope is REQUIRED here unless the run is EXPLICITLY `repoless`. A run that is not
-  // `repoless` but whose `repository`/`baseBranch` are unresolved throws `RepoEnvelopeUnresolvedError`
-  // (a loud launch failure the dispatch door surfaces as a 400 and `dispatchDeliveryGraphRun` marks the
-  // run `failed`) rather than silently emitting `{}` and degrading every agent to the shared launch dir.
-  // Only an explicit `repoless: true` (a conscious operator opt-in for a genuinely repo-less graph)
-  // dispatches with no envelope.
-  //
-  // `repoless: true` is MUTUALLY EXCLUSIVE with `repository`/`baseBranch`: the dispatch door already
-  // rejects the conflicting shape with a 400, but a PROGRAMMATIC caller (test/internal) that bypasses
-  // the door could pass both — and silently disable isolation (the `repoless` arm just drops the
-  // repo/base and emits `{}`). Re-enforce the exclusivity HERE too (defense-in-depth, mirroring the
-  // door) so a conflicting-but-well-meant call fails LOUDLY at seed time rather than quietly degrading
-  // to the shared launch dir it named a repo to avoid.
-  if (options.repoless === true && (repo !== null || base !== null)) {
-    throw new RepoEnvelopeConflictError(
-      `repoless run also named repository=${JSON.stringify(repo)} baseBranch=${JSON.stringify(base)}`,
-    );
-  }
-  const repoVars = options.repoless === true ? {} : requireRepoEnvelopeVars(repo ?? "", base, base);
+  // Per-node repository isolation (#739): the `io.nanobpm.agentTask.repository` envelope is now seeded
+  // PER agent cell as a task header (injected into `bpmn` by `prepareDeliveryGraph` →
+  // `injectAgentRepoEnvelopes`), NOT as a single run-root `createInstance` variable. A uniform run-root
+  // variable would resolve to ONE repository for every cell (wrong for a cross-repo graph) AND — because
+  // the harness lets a variable WIN over a header — would clobber each cell's per-node header. So NO
+  // repository variable is seeded here; the resolution + loud-failure invariant (unresolved agent cell
+  // on a non-`repoless` run) and the `repoless`/repo-base conflict guard all live in
+  // `injectAgentRepoEnvelopes`, which the prepare step above already ran (throwing before deploy).
   const { processInstanceKey } = await engine.createInstance({
     processDefinitionId,
     variables: {
@@ -219,9 +210,6 @@ export async function runDeliveryGraph(
       // node ioMapping in deliveryGraphCompiler). Seeded once at the run root — the same value for
       // every node — and read down into each agent job via `=transcriptUrlBase`.
       [TRANSCRIPT_URL_BASE_VAR]: transcriptUrlBaseFor(),
-      // Spread the resolved repository-isolation envelope (empty `{}` only on an explicit `repoless`
-      // run — see above) LAST so it never clobbers the other run-root vars.
-      ...repoVars,
     },
   });
   // The engine can yield a numeric key; `DeliveryRunHandle.processInstanceKey` is typed `string` and
@@ -243,6 +231,117 @@ function rewriteProcessId(bpmn: string, processDefinitionId: string): string {
   return bpmn
     .replace(`id="${DELIVERY_GRAPH_PROCESS_ID}"`, `id="${processDefinitionId}"`)
     .replace(`bpmnElement="${DELIVERY_GRAPH_PROCESS_ID}"`, `bpmnElement="${processDefinitionId}"`);
+}
+
+/** The EFFECTIVE repository/base resolved for one delivery-graph `agent` cell (#739): its OWN declared
+ * `repository`/`baseBranch`, falling back to the run-level dispatch value for either that it omits. */
+export interface ResolvedAgentRepo {
+  /** The agent node's id (for diagnostics / the unresolved-node error). */
+  nodeId: string;
+  /** The effective `owner/repo` — the node's declared `repository`, else the run-level fallback, else null. */
+  repository: string | null;
+  /** The effective base branch — the node's declared `baseBranch`, else the run-level fallback, else null. */
+  baseBranch: string | null;
+}
+
+/** Trim a caller/authored string to a non-empty value or null (a blank/whitespace/absent field is "not
+ * declared", so it falls back to the run level). */
+function trimOrNull(value: unknown): string | null {
+  return typeof value === "string" && value.trim() !== "" ? value.trim() : null;
+}
+
+/** Resolve every `agent` node's EFFECTIVE repository + base (#739): the node's own declared
+ * `repository`/`baseBranch` wins, else the run-level dispatch `repository`/`baseBranch` is the fallback
+ * default. Non-agent nodes carry no repository, so they are excluded. This is the ONE resolution rule
+ * the injection AND the unresolved-node invariant both derive from, so the two can never disagree on
+ * what a cell resolves to. */
+export function resolveAgentNodeRepos(graph: DeliveryGraph, options: Pick<DeliveryRunOptions, "repository" | "baseBranch">): ResolvedAgentRepo[] {
+  const runRepo = trimOrNull(options.repository);
+  const runBase = trimOrNull(options.baseBranch);
+  const out: ResolvedAgentRepo[] = [];
+  for (const node of graph.nodes) {
+    if (node.kind !== "agent") continue;
+    out.push({
+      nodeId: node.id,
+      repository: trimOrNull(node.agent.repository) ?? runRepo,
+      baseBranch: trimOrNull(node.agent.baseBranch) ?? runBase,
+    });
+  }
+  return out;
+}
+
+/** The ids of every `agent` node that resolves to NO usable repository (#739) — it declared none AND no
+ * run-level fallback applies (or the resolved value is not a plain `owner/repo`). On a non-`repoless`
+ * run these are the cells that would silently share the worker's launch dir, so the runner throws when
+ * this is non-empty (issue #684/#729). A graph in which EVERY agent node resolves a repository (declared
+ * or defaulted) is fully node-provisioned and needs neither a run-level repository nor `repoless`. */
+export function unresolvedAgentRepoNodes(graph: DeliveryGraph, options: Pick<DeliveryRunOptions, "repository" | "baseBranch">): string[] {
+  return resolveAgentNodeRepos(graph, options)
+    .filter((r) => !isResolvableRepo(r.repository))
+    .map((r) => r.nodeId);
+}
+
+/** Escape a scalar value for an XML double-quote attribute (the injected `<zeebe:header>` value). The
+ * envelope values are URLs / `owner/repo` / `blob:none` / stringified booleans+numbers — none carry
+ * XML-hostile characters — but escape defensively so the injected BPMN is always well-formed. */
+function xmlAttr(value: string): string {
+  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+/** Replace each `agent` service task's digest-stable `__repoSpec` marker task header (emitted by the
+ * compiler, carrying the node's DECLARED `{ repository, baseBranch }`) with the flattened, EFFECTIVE
+ * `io.nanobpm.agentTask.*` repository-isolation headers (#739) — the per-CELL channel the c8ctl harness
+ * reads (headers ∪ variables). The effective repo/base is the marker's declared value, else the
+ * run-level fallback in `options`. This is a PURE post-digest string transform of the laid-out BPMN
+ * (the marker is env-free graph content in the digest; the injected `cloneTimeoutMs` + run-level
+ * fallback are NOT), so the content address is unaffected.
+ *
+ * Invariants (issue #684/#729), enforced here so a run that cannot isolate fails LOUDLY before deploy:
+ *   • `repoless: true` is mutually exclusive with a run-level `repository`/`baseBranch` — a caller that
+ *     bypasses the dispatch door and passes both throws `RepoEnvelopeConflictError` (never silently
+ *     disables isolation).
+ *   • On a non-`repoless` run, ANY agent cell that resolves to no repository throws
+ *     `RepoEnvelopeUnresolvedError` (never a silent launch-dir share).
+ * On a `repoless` run every marker is stripped (no envelope — the conscious checkout-less opt-out). */
+function injectAgentRepoEnvelopes(bpmn: string, graph: DeliveryGraph, options: DeliveryRunOptions): string {
+  const repoless = options.repoless === true;
+  const runRepo = trimOrNull(options.repository);
+  const runBase = trimOrNull(options.baseBranch);
+  if (repoless && (runRepo !== null || runBase !== null)) {
+    throw new RepoEnvelopeConflictError(
+      `repoless run also named repository=${JSON.stringify(runRepo)} baseBranch=${JSON.stringify(runBase)}`,
+    );
+  }
+  if (!repoless) {
+    const unresolved = unresolvedAgentRepoNodes(graph, options);
+    if (unresolved.length > 0) {
+      throw new RepoEnvelopeUnresolvedError(
+        `agent node(s) resolve to no repository and the run is not repoless: ${unresolved.join(", ")} — ` +
+          "declare each node's `repository`, supply a run-level `repository`/`baseBranch` fallback, or dispatch `repoless: true`",
+      );
+    }
+  }
+  const markerKey = AGENT_REPO_SPEC_HEADER.replace(/[.]/g, "\\.");
+  // The compiler emits the marker as a single `<zeebe:taskHeaders>` block per agent task; match the whole
+  // block (with its indentation) so a stripped cell leaves no empty `<zeebe:taskHeaders/>` behind.
+  const blockRe = new RegExp(
+    `([ \\t]*)<zeebe:taskHeaders>\\r?\\n[ \\t]*<zeebe:header key="${markerKey}" value=(?:'([^']*)'|"([^"]*)")\\s*/>\\r?\\n[ \\t]*</zeebe:taskHeaders>(\\r?\\n)`,
+    "g",
+  );
+  return bpmn.replace(blockRe, (_full, indent: string, sq: string | undefined, dq: string | undefined, tail: string) => {
+    const raw = sq ?? (dq ?? "").replace(/&apos;/g, "'").replace(/&quot;/g, '"').replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+    const declared: { repository: string | null; baseBranch: string | null } = JSON.parse(raw);
+    // `repoless` → strip the block entirely (no isolation envelope, the launch-dir fallback).
+    if (repoless) return "";
+    const effRepo = trimOrNull(declared.repository) ?? runRepo;
+    const effBase = trimOrNull(declared.baseBranch) ?? runBase;
+    // The unresolved invariant above guarantees a resolvable repo here on a non-repoless run.
+    const envelope = agentNodeRepoEnvelope(effRepo ?? "", effBase);
+    const flat = flattenAgentTaskEnvelope(envelope);
+    const headerLines = Object.entries(flat).map(([k, v]) => `${indent}  <zeebe:header key="${xmlAttr(k)}" value="${xmlAttr(v)}" />`);
+    if (headerLines.length === 0) return "";
+    return `${indent}<zeebe:taskHeaders>\n${headerLines.join("\n")}\n${indent}</zeebe:taskHeaders>${tail}`;
+  });
 }
 
 /** The idempotency preflight prepended to EVERY `agent` node's `appendPrompt` (issue #551). A delivery

@@ -19,8 +19,10 @@
 // Every error carries a JSON-path-qualified `path` (`nodes[2].kind`, `edges[1].from`, …) so the
 // caller can point the author straight at the offending input.
 
+import { isPlausibleBranchName } from "./baseBranch.ts";
 import { isConvergeTarget } from "./convergeTargets.ts";
 import { isRawConvergeMergeJobType, NODE_COMPLETION_POLICIES } from "./nodePolicy.ts";
+import { isResolvableRepo } from "./repoEnvelope.ts";
 
 /** The CLOSED node-kind allowlist (ADR 0005 Decision 2) — the trust boundary. Extensible only by a
  * deliberate ADR/PR (add the openapi variant + a case here), never by a graph author. Kept as the
@@ -94,6 +96,8 @@ export type DeliveryGraphErrorCode =
   | "raw-converge-node"
   | "merge-requires-converge"
   | "converge-merge-type"
+  | "invalid-node-repository"
+  | "invalid-node-base-branch"
   | "unbound-pr";
 
 /** A single semantic validation failure. `path` is a JSON-path-qualified pointer at the offending
@@ -426,6 +430,31 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
               "`agent.merge` requires `agent.converge` — a PR cannot be landed before it is driven to " +
               "green (ADR 0006 §3 two separable-but-ordered phases / S5)",
             code: "merge-requires-converge",
+          });
+        }
+        // #739: an `agent` node may declare its OWN `repository` (`owner/repo`) + `baseBranch`, so a
+        // cross-repo graph provisions each cell's isolation envelope from that node's own repo (no
+        // uniform run-level repo, no `repoless`). Both are OPTIONAL (absent → the run-level fallback),
+        // but a PRESENT value must pass the SAME allowlists the dispatch door / `repoEnvelopeVars` apply
+        // — a plain `owner/repo` (no `.git`, no host/query chars) and a plausible git branch name — so a
+        // graph that bypassed OpenAPI shape validation cannot smuggle a malformed clone URL / ref past
+        // this gate into the per-node envelope. Rejected path-qualified rather than silently dropped.
+        if (kind === "agent" && config.repository !== undefined && !isResolvableRepo(config.repository)) {
+          errors.push({
+            path: `${path}.${configKey}.repository`,
+            message:
+              "`agent.repository`, when present, must be an `owner/repo` reference (no trailing `.git`, no " +
+              `host/query characters) — got ${JSON.stringify(config.repository)} (#739)`,
+            code: "invalid-node-repository",
+          });
+        }
+        if (kind === "agent" && config.baseBranch !== undefined && (typeof config.baseBranch !== "string" || !isPlausibleBranchName(config.baseBranch))) {
+          errors.push({
+            path: `${path}.${configKey}.baseBranch`,
+            message:
+              "`agent.baseBranch`, when present, must be a plausible git branch name (no whitespace, shell " +
+              `metacharacters, leading \`-\`, \`..\`/\`//\`, etc.) — got ${JSON.stringify(config.baseBranch)} (#739)`,
+            code: "invalid-node-base-branch",
           });
         }
         // #548: register a converge-connector / pr-wait as a PR-binding consumer (pass 4 validates the

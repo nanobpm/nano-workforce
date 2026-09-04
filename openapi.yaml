@@ -1849,6 +1849,30 @@ components:
                   type: string
                   maxLength: 20000
                   description: OPTIONAL steering prompt appended to the node's job brief.
+                repository:
+                  type: string
+                  maxLength: 255
+                  pattern: '^[A-Za-z0-9-]+/(?!.*\.[Gg][Ii][Tt]$)[A-Za-z0-9._-]+$'
+                  description: >-
+                    OPTIONAL per-node `owner/repo` this agent node implements against (#739). A delivery
+                    graph provisions the `io.nanobpm.agentTask.repository` isolation envelope PER agent
+                    cell from THIS field, so a genuinely cross-repo graph (each node a different repo)
+                    isolates correctly without the operator ticking `repoless`. Absent → the node falls
+                    back to the run-level dispatch `repository`. When set it must be exactly `owner/repo`
+                    (a trailing `.git` and any non-`owner/repo` shape are rejected at submit), the same
+                    allowlist `repoEnvelopeVars`/the dispatch door apply. The `sequenceIssues` generator
+                    populates this automatically from the `owner/repo#N` each node implements.
+                baseBranch:
+                  type: string
+                  maxLength: 255
+                  pattern: '^(?![/.-])(?!.*[/.]$)(?!.*\.\.)(?!.*//)(?!.*/\.)(?!.*\.lock(?:/|$))[A-Za-z0-9._/-]+$'
+                  description: >-
+                    OPTIONAL per-node base branch this agent node branches off (#739) — the `ref` the
+                    harness checks out in the isolated clone (the pre-PR shape: the agent cuts its own
+                    `feat/<node.id>` branch off this base). Absent → the run-level dispatch `baseBranch`
+                    (else the node's repository default branch). A value that is not a plausible git
+                    branch name is rejected at submit; the pattern mirrors the authoritative server-side
+                    gate (`isPlausibleBranchName`, app/baseBranch.ts).
                 converge:
                   type: boolean
                   description: >-
@@ -2098,17 +2122,20 @@ components:
         action — this request carries NO graph and NO token (the graph is already staged; the operator's
         click is the approval).
 
-        Repository provisioning is REQUIRED by default (#729): the run either names EXACTLY the
-        `repository` + `baseBranch` its `agent` nodes implement against, OR opts out with `repoless: true`
-        for a genuinely checkout-less graph — never both, never neither. Modeled as `oneOf` named variants
-        (Camunda REST v2 pattern, as the convergence/plan/feature start bodies are) so the runtime rejects
-        the "neither/nor" and "both" shapes AT THE EDGE with a 400 that names the allowed shapes, rather
-        than the delegate being the only thing that enforces the mutual exclusivity. Dispatching without
-        either would silently share the worker's launch dir across concurrent fan-out agents (the issue
-        #684 field failure).
+        Repository provisioning is REQUIRED by default (#729) unless the graph is FULLY node-provisioned
+        (#739). The run EITHER names the run-level `repository` + `baseBranch` its `agent` nodes fall back
+        to, OR opts out with `repoless: true` for a genuinely checkout-less graph, OR — when EVERY `agent`
+        node declares its OWN `repository` (a cross-repo graph, #739) — supplies NEITHER (the node-
+        provisioned shape). Modeled as `oneOf` named variants (Camunda REST v2 pattern, as the
+        convergence/plan/feature start bodies are) so the runtime rejects the "both" shape AT THE EDGE
+        with a 400 that names the allowed shapes. The remaining invariant — that no `agent` node resolves
+        to NO repository on a non-`repoless` run — is enforced after the staged graph is loaded (the door
+        has the graph; the request alone does not), so a graph with an unprovisioned node still fails
+        loudly rather than silently sharing the worker's launch dir (the issue #684 field failure).
       oneOf:
         - $ref: "#/components/schemas/DeliveryGraphDispatchWithRepository"
         - $ref: "#/components/schemas/DeliveryGraphDispatchRepoless"
+        - $ref: "#/components/schemas/DeliveryGraphDispatchNodeProvisioned"
     DeliveryGraphDispatchWithRepository:
       description: >-
         The repository-provisioned dispatch shape (#729): names the `repository` + `baseBranch` the run's
@@ -2228,6 +2255,52 @@ components:
             fields are not members of this variant, so supplying either alongside `repoless: true` fails
             `oneOf` matching and is a 400. To provision a repository, use the repository variant (supply
             `repository` + `baseBranch`) and omit `repoless` entirely.
+    DeliveryGraphDispatchNodeProvisioned:
+      description: >-
+        The FULLY node-provisioned dispatch shape (#739): supplies NEITHER a run-level `repository`/
+        `baseBranch` NOR `repoless`, for a cross-repo graph in which EVERY `agent` node declares its own
+        `repository` (so the run needs no uniform fallback and no checkout-less opt-out). The runner
+        seeds each agent cell's `io.nanobpm.agentTask.repository` isolation envelope from that node's own
+        declared repository. The post-load invariant still holds: if ANY `agent` node resolves to no
+        repository under this shape (it declared none and there is no run-level fallback), the dispatch
+        fails loudly with a 400 rather than silently sharing the launch dir — so this shape is only valid
+        for a graph whose every agent node is self-provisioned. `repository`/`baseBranch`/`repoless` are
+        not members of this variant (`additionalProperties: false`), so supplying any of them selects a
+        different variant instead.
+      type: object
+      additionalProperties: false
+      required:
+        - digest
+      properties:
+        digest:
+          type: string
+          description: The staged proposal's content digest (its primary key) — the proposal to dispatch.
+        idempotencyKey:
+          type: string
+          maxLength: 255
+          description: OPTIONAL idempotency key. A re-dispatch with the same key (or, when omitted, the same digest) does not double-launch. Blank/whitespace is treated as absent.
+        nodeTimeout:
+          type: string
+          pattern: '^[Pp](?!$)(\d+[Yy])?(\d+[Mm])?(\d+[Ww])?(\d+[Dd])?([Tt](?=\d)(\d+[Hh])?(\d+[Mm])?(\d+[Ss])?)?$'
+          maxLength: 64
+          description: >-
+            OPTIONAL run-level ISO-8601 SLA timeout for `agent`/`connector` nodes (#505) — the
+            bounded-timeout → escalate boundary bound every such node inherits unless it declares its own
+            per-node `timeout`. Absent → the `PT1H` default. An invalid duration is rejected at submit.
+        probeTimeout:
+          type: string
+          pattern: '^[Pp](?!$)(\d+[Yy])?(\d+[Mm])?(\d+[Ww])?(\d+[Dd])?([Tt](?=\d)(\d+[Hh])?(\d+[Mm])?(\d+[Ss])?)?$'
+          maxLength: 64
+          description: >-
+            OPTIONAL run-level ISO-8601 poll budget for `wait` gates (#505) before they escalate. Absent →
+            the `PT30M` default. An invalid duration is rejected at submit.
+        escalationSlaTimeout:
+          type: string
+          pattern: '^[Pp](?!$)(\d+[Yy])?(\d+[Mm])?(\d+[Ww])?(\d+[Dd])?([Tt](?=\d)(\d+[Hh])?(\d+[Mm])?(\d+[Ss])?)?$'
+          maxLength: 64
+          description: >-
+            OPTIONAL run-level ISO-8601 SLA for `human` nodes (#505) before they record an `escalated`
+            outcome. Absent → the `P1D` default. An invalid duration is rejected at submit.
     DeliveryGraphDismissRequest:
       description: >-
         The OPERATOR dismiss request (#520). The cockpit's staged-proposals grid posts the content
@@ -4528,6 +4601,16 @@ paths:
                                 type: string
                                 maxLength: 20000
                                 description: OPTIONAL steering prompt appended to the node's job brief.
+                              repository:
+                                type: string
+                                maxLength: 255
+                                pattern: ^[A-Za-z0-9-]+/(?!.*\.[Gg][Ii][Tt]$)[A-Za-z0-9._-]+$
+                                description: OPTIONAL per-node `owner/repo` this agent node implements against (#739). A delivery graph provisions the `io.nanobpm.agentTask.repository` isolation envelope PER agent cell from THIS field, so a genuinely cross-repo graph (each node a different repo) isolates correctly without the operator ticking `repoless`. Absent → the node falls back to the run-level dispatch `repository`. When set it must be exactly `owner/repo` (a trailing `.git` and any non-`owner/repo` shape are rejected at submit), the same allowlist `repoEnvelopeVars`/the dispatch door apply. The `sequenceIssues` generator populates this automatically from the `owner/repo#N` each node implements.
+                              baseBranch:
+                                type: string
+                                maxLength: 255
+                                pattern: ^(?![/.-])(?!.*[/.]$)(?!.*\.\.)(?!.*//)(?!.*/\.)(?!.*\.lock(?:/|$))[A-Za-z0-9._/-]+$
+                                description: "OPTIONAL per-node base branch this agent node branches off (#739) — the `ref` the harness checks out in the isolated clone (the pre-PR shape: the agent cuts its own `feat/<node.id>` branch off this base). Absent → the run-level dispatch `baseBranch` (else the node's repository default branch). A value that is not a plausible git branch name is rejected at submit; the pattern mirrors the authoritative server-side gate (`isPlausibleBranchName`, app/baseBranch.ts)."
                               converge:
                                 type: boolean
                                 description: 'OPTIONAL first-class CONVERGE policy (ADR 0006 §3 / S5) — a DECLARED, compiler- validated completion-policy flag on this cell node. It declares that the node''s opened PR is to be driven through the review-convergence loop to green as an edge-gated completion policy; this slice adds and validates the flag, with the delivery-graph execution wiring that consumes it landing in a follow-up slice. It supersedes (in intent) the emergent `feature.bpmn` `gw-converge` gateway and the "un-draft + merge #B" prompt prose a delivery-graph `agent` node used to smuggle. Converge and merge are SEPARABLE phases; a node may converge without merging (stop at green and gate the landing behind a downstream node).'

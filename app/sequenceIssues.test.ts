@@ -35,7 +35,9 @@ function handAuthored(behind: string | null, issues: string[]): AnyGraph {
     nodes.push({
       id: `open-${n}`,
       kind: "agent",
-      agent: { jobType: "senior:feature", prompt: `Implement ${issue} and open a PR.` },
+      // #739: the generator stamps each agent cell with the issue's OWN repository, so a multi-repo
+      // sequence provisions each cell's isolation envelope from that issue's repo.
+      agent: { jobType: "senior:feature", prompt: `Implement ${issue} and open a PR.`, repository: issue.split("#")[0] },
       emits: [{ name: "pr", type: "pr" }],
     });
     nodes.push({ id: `land-${n}`, kind: "connector", connector: { target: "converge-merge", payload: { pr: `open-${n}.pr` } } });
@@ -104,6 +106,15 @@ test("sequenceIssues: each issue emits agent(senior:feature,emits pr) → connec
   // The pr fact is threaded to BOTH consumers by fact-qualified edges (§9.4).
   assert(graph.edges.some((e) => e.from === "open-1.pr" && e.to === "land-1"));
   assert(graph.edges.some((e) => e.from === "open-1.pr" && e.to === "merged-1"));
+});
+
+test("sequenceIssues: each agent cell is stamped with its OWN issue's repository — a cross-repo sequence (#739)", () => {
+  // Two issues in DIFFERENT repos → each `open-*` agent node declares that issue's repository, so the
+  // delivery runner provisions each cell's isolation envelope from its own repo (no uniform run-level
+  // repository, no `repoless`). This is the generator half of #739.
+  const graph = ok({ issues: ["acme/one#1", "beta/two#2"] });
+  assertEquals(graph.nodes.find((n) => n.id === "open-1").agent.repository, "acme/one");
+  assertEquals(graph.nodes.find((n) => n.id === "open-2").agent.repository, "beta/two");
 });
 
 test("sequenceIssues: merge/epic gates carry a realistic poll budget (not the 30-min default trap)", () => {
