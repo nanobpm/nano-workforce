@@ -1,3 +1,9 @@
+## [0.179.1](https://github.com/nanobpm/nano-workforce/compare/v0.179.0...v0.179.1) (2026-09-04)
+
+### Bug Fixes
+
+* **tasks:** route Tasks-page completion through the canonical complete-user-task door ([#732](https://github.com/nanobpm/nano-workforce/issues/732)) ([98b59a5](https://github.com/nanobpm/nano-workforce/commit/98b59a5a30fb6c6038466da9ec71fc0557eb72e5)), closes [461/#484](https://github.com/461/nano-workforce/issues/484) [nano-ide#552](https://github.com/nanobpm/nano-ide/issues/552) [#728](https://github.com/nanobpm/nano-workforce/issues/728)
+
 ## [0.179.0](https://github.com/nanobpm/nano-workforce/compare/v0.178.5...v0.179.0) (2026-09-04)
 
 ### Features
