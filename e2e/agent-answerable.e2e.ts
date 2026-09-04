@@ -26,7 +26,6 @@ import { fileURLToPath } from "node:url";
 import type { EngineJob } from "@nanobpm/urban/runtime";
 import { bootTestApp, type TestApp } from "@nanobpm/urban-testkit";
 import { admitGithubState, installAdmitGithub } from "./support/github-admit.ts";
-import { asEngineClient } from "./support/engine-client.ts";
 import {
   completeEscalationAsAgent,
   latestCompletion,
@@ -142,7 +141,7 @@ describe("agent-answerable escalations (U6 — same form, agent completer, attri
 
         // Complete AS AN AGENT through the host-side completer — the same typed `{resolution, answer}`
         // a human submits through the inbox, only the caller differs.
-        const r = await completeEscalationAsAgent(app.db, asEngineClient(app.engine), {
+        const r = await completeEscalationAsAgent(app.db, app.engine, {
           userTaskKey: task.userTaskKey,
           agentId: "senior:answer-bot",
           variables: { resolution: "answer", answer: "use v2" },

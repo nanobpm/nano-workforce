@@ -26,7 +26,6 @@ import { after, before, describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { bootTestApp, type TestApp } from "@nanobpm/urban-testkit";
 import { pollUserTasks } from "../app/service.ts";
-import { asEngineClient } from "./support/engine-client.ts";
 
 const APP_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const DB_DIR = mkdtempSync(join(tmpdir(), "nwf-u7-"));
@@ -237,7 +236,7 @@ describe("retire escalation subsystem (U7 — destructive contract phase)", () =
     // written. That read model is projected by `pollUserTasks` (part of the imperative main.ts poll
     // loop the testkit does not run), so drive it explicitly (mirrors feature-run.e2e.ts) to project
     // the parked `wait-answer` task before reading /status.
-    await pollUserTasks(app.db, asEngineClient(app.engine));
+    await pollUserTasks(app.db, app.engine);
     const status = await app.callRoute<StatusBody>({ method: "GET", path: "/app/api/status" });
     const statusRow = status.body.prs.find((p) => p.prKey === prKey);
     assert.equal(statusRow?.status, "escalated", "the PR reads as escalated");
@@ -265,7 +264,7 @@ describe("retire escalation subsystem (U7 — destructive contract phase)", () =
     // No addressed escalation lingers — the completed task's `user_tasks` row reconciles away. Re-run
     // the projection (as the durable poller would) so the closed task's read-model row is deleted
     // before re-reading /status.
-    await pollUserTasks(app.db, asEngineClient(app.engine));
+    await pollUserTasks(app.db, app.engine);
     const afterStatus = await app.callRoute<StatusBody>({ method: "GET", path: "/app/api/status" });
     const afterRow = afterStatus.body.prs.find((p) => p.prKey === prKey);
     if (afterRow) {
