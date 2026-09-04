@@ -244,12 +244,18 @@ export async function stageProposal(data: DataLayer, row: DeliveryGraphProposal)
   // leaving ours superseded — is reported honestly). `siblingsStaged` = OTHER live staged proposals
   // with a DIFFERENT logical key that remain (the orphaned-sibling footgun: a re-stage under a changed
   // `name` never supersedes them).
-  // Intersect the pre-stage staged siblings with the rows that are ACTUALLY `superseded` post-reconcile
-  // (one `find`, not an N+1 `get` loop). Matching on `status !== "staged"` would misreport a sibling
-  // that concurrently went `dispatched`/`dismissed`/`expired` — only rows this reconcile flipped to
-  // `superseded` count.
-  const supersededDigests = new Set((await table.find({ status: "superseded" })).map((r) => r.digest));
-  const superseded = priorSameKey.filter((prev) => supersededDigests.has(prev.digest)).map((prev) => prev.digest);
+  // Re-check ONLY the pre-stage staged siblings captured above (typically zero or a handful of
+  // concurrently-live same-key rows), reporting exactly those this reconcile flipped to `superseded`.
+  // Re-reading each `priorSameKey` digest keeps staging O(live same-key siblings) — a global
+  // `find({ status: "superseded" })` scans EVERY superseded row ever written (proposals are never
+  // deleted) and grows without bound. Matching strictly on `status === "superseded"` (not merely
+  // `!== "staged"`) avoids misreporting a sibling that concurrently went `dispatched`/`dismissed`/
+  // `expired`.
+  const superseded: string[] = [];
+  for (const prev of priorSameKey) {
+    const after = await table.get(prev.digest);
+    if (after?.status === "superseded") superseded.push(prev.digest);
+  }
   const siblingsStaged = (await listStagedProposals(data)).filter((r) => r.logical_key !== row.logical_key).length;
 
   return { row: toWrite, superseded, siblingsStaged };
