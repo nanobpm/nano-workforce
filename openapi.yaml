@@ -1248,7 +1248,20 @@ components:
                 - markdown
             instructions:
               type: string
-              description: The section's markdown, with example commands keyed to this instance.
+              description: The section's markdown (or a bounded page of it when paginating), with example commands keyed to this instance.
+            start:
+              type: integer
+              description: The CHARACTER offset this page starts at (present only when paginating, issue #740).
+            length:
+              type: integer
+              description: The number of characters returned in this page (present only when paginating).
+            totalLength:
+              type: integer
+              description: The total number of characters in the fully-rendered section (present only when paginating).
+            nextStart:
+              type: integer
+              nullable: true
+              description: The `start` to pass for the next page, or null when this is the last page (present only when paginating).
     SubmitResult:
       type: object
       required:
@@ -2832,6 +2845,95 @@ components:
           description: >-
             A NAVIGATIONAL cockpit deep-link to the staged proposal (helps the agent hand the human a
             link). It is a pointer only — NOT a dispatch handle; nothing in this response can start a run.
+        superseded:
+          type: array
+          items:
+            type: string
+          description: >-
+            Digests of prior staged proposals sharing this graph's LOGICAL key (derived from its `name`)
+            that this stage replaced — flipped to `superseded` (issue #740). Empty on a first stage. Lets
+            the agent tell the operator precisely which proposals it retired.
+        siblingsStaged:
+          type: integer
+          description: >-
+            How many OTHER live staged proposals remain after this stage (a DIFFERENT logical key from
+            this one) — i.e. proposals this stage did NOT supersede (issue #740). A non-zero count flags
+            potential ORPHANED SIBLINGS (e.g. an earlier stage of the "same" runbook under a different
+            `name`, which supersede does not catch) cluttering the operator's Delivery Graphs list, so
+            the agent can name them for cleanup.
+    SequenceGate:
+      description: >-
+        An interleaved `wait` GATE (issue #740) that must go green before a given issue's agent starts
+        — reusing the exact probe schema `wait` nodes accept (`npm`/`github-check`/`http`/`command`/
+        `capability`/`pr`/`epic`). It lets an author splice e.g. "wait for `@nanobpm/agentic@0.13.0` to
+        publish" between two sequence steps without hand-authoring raw node/edge JSON.
+      type: object
+      additionalProperties: false
+      required:
+        - kind
+        - target
+      properties:
+        kind:
+          type: string
+          minLength: 1
+          description: >-
+            The wait-probe kind — one of the S3 vocabulary kinds (`npm`, `github-check`, `http`,
+            `command`, `capability`, `pr`, `epic`). An unknown kind is a 400.
+        target:
+          type: string
+          minLength: 1
+          description: >-
+            The probe target — kind-specific: `pkg@version` for `npm`, `owner/repo@ref` for
+            `github-check`, a URL for `http`, an `owner/repo#N` PR for `pr`, etc.
+        match:
+          type: object
+          description: >-
+            OPTIONAL kind-specific readiness match fields (e.g. `{ version }` for `npm`,
+            `{ conclusion, checkName }` for `github-check`).
+        poll:
+          type: object
+          additionalProperties: false
+          description: >-
+            OPTIONAL poll budget. Defaults to the bounded merge-gate budget (re-probe every 5 minutes,
+            budget 3 days) so a gate never falls into the 30-minute default trap.
+          properties:
+            everyMs:
+              type: integer
+              minimum: 1
+              description: How often to re-probe (milliseconds).
+            timeoutMs:
+              type: integer
+              minimum: 1
+              description: The total budget before the gate escalates/continues (milliseconds).
+        onTimeout:
+          type: string
+          enum:
+            - escalate
+            - continue
+          description: >-
+            What to do when the gate never goes green within its budget — `escalate` (default) parks on
+            a human; `continue` proceeds anyway. `fail` is not supported on a `wait` node.
+        credentialEnv:
+          type: string
+          minLength: 1
+          description: OPTIONAL env-key name supplying a credential for the probe (`http`/`capability`).
+    SequenceIssueEntry:
+      description: >-
+        One `issues[]` entry with an OPTIONAL leading gate (issue #740) — an object form of a sequence
+        step. The `issue` is implemented + converged + merged like a bare-string entry; the optional
+        `gate` must go green (in addition to the prior issue merging) before this issue's agent starts.
+      type: object
+      additionalProperties: false
+      required:
+        - issue
+      properties:
+        gate:
+          $ref: "#/components/schemas/SequenceGate"
+        issue:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: An `owner/repo#N` issue reference to implement + converge + merge, in sequence.
     SequenceIssuesIntent:
       description: >-
         The `sequenceIssues` INTENT (epic nano-workforce#605, S4) — a high-level shape that GENERATES
@@ -2843,15 +2945,21 @@ components:
         `compileDeliveryGraph` — it never dispatches (dispatch is an operator-only cockpit action, ADR
         0005 Decision 7). For each issue it emits `agent` (`senior:feature`, emits a `pr` fact) →
         `connector` (`converge-merge`, late-binding that `pr`) → `wait[pr, merged]` (a realistic
-        `poll.timeoutMs`), threading the `pr` fact per §9.4. Invalid input (empty `issues`, an
-        unparseable ref) is a 400 carrying `issues: [{ path, message }]`; nothing is staged.
+        `poll.timeoutMs`), threading the `pr` fact per §9.4. An `issues[]` entry may be a bare
+        `owner/repo#N` string OR a `{ gate?, issue }` object that interleaves a `wait` gate (the
+        `npm`/`github-check`/… vocabulary) before that issue's agent (issue #740). Invalid input (empty
+        `issues`, an unparseable ref, an unknown gate kind) is a 400 carrying `issues: [{ path, message
+        }]`; nothing is staged.
       type: object
       additionalProperties: false
       example:
-        behind: nanobpm/nano-ide#488
         issues:
-          - nanobpm/nano-workforce#567
-          - nanobpm/nano-workforce#568
+          - nanobpm/nano-ide#557
+          - gate:
+              kind: npm
+              target: "@nanobpm/agentic@0.13.0"
+            issue: jwulf/c8ctl-plugin-nano#186
+          - nanobpm/nano-workforce#738
       required:
         - issues
       properties:
@@ -2868,15 +2976,20 @@ components:
           minItems: 1
           maxItems: 64
           items:
-            type: string
-            minLength: 1
-            maxLength: 255
-            description: An `owner/repo#N` issue reference to implement + converge + merge, in sequence.
+            oneOf:
+              - type: string
+                minLength: 1
+                maxLength: 255
+                description: A bare `owner/repo#N` issue reference (no gate) — today's behaviour, byte-for-byte.
+              - $ref: "#/components/schemas/SequenceIssueEntry"
+            description: >-
+              A sequence step — a bare `owner/repo#N` string, or a `{ gate?, issue }` object that
+              interleaves a `wait` gate before that issue's agent (issue #740).
           description: >-
             The ordered issues to sequence — each is implemented by a `senior:feature` agent that opens
             a PR, driven to convergence + merge, and the NEXT issue's implementation starts only once
-            the prior issue has merged. At least one; at most 64 (keeps the generated graph within the
-            compiler's node ceiling).
+            the prior issue has merged (and any interleaved gate has gone green). At least one; at most
+            64 (keeps the generated graph within the compiler's node ceiling).
     SequenceIssuesRejected:
       description: >-
         A rejected `sequenceIssues` intent — the input failed validation (empty/oversized `issues`, an
@@ -3847,6 +3960,31 @@ paths:
             with no argument), e.g. `orient`, `submit-pr`, `submit-epic`, `escalations`, `lifecycle`,
             `debug`, `debug-models`, `unstick`, `raise-issue`, `delivery-graphs`, `tool-crosswalk`. Omit it to get the
             table of contents. An unknown id yields a 400 listing the valid ids.
+        - name: start
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            example: 0
+          description: >-
+            OPTIONAL pagination cursor (issue #740) — the CHARACTER offset into a `section`'s markdown to
+            start at. Passing `start` and/or `length` engages bounded-chunk retrieval so a large section
+            (e.g. `delivery-graphs`) can be paged through without overflowing a tool-result limit; the
+            response echoes `start`, `length`, `totalLength`, and a `nextStart` cursor (null on the last
+            page). Ignored when no `section` is given. Omit both `start` and `length` to get the whole
+            section unchanged.
+        - name: length
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            example: 12000
+          description: >-
+            OPTIONAL pagination window (issue #740) — the maximum number of CHARACTERS to return for a
+            `section`. Defaults to a bounded page size when `start` is given without `length`. Pair with
+            `start`/`nextStart` to page through an oversized section.
       responses:
         "200":
           description: Either the table of contents (no `section`) or a single section's markdown.
@@ -4161,14 +4299,17 @@ paths:
           application/json:
             schema:
               # BEGIN generated:mcp-body source=#/components/schemas/SequenceIssuesIntent (scripts/inline-mcp-bodies.ts — do not hand-edit)
-              description: 'The `sequenceIssues` INTENT (epic nano-workforce#605, S4) — a high-level shape that GENERATES the canonical "implement issue → converge → merge" delivery graph (operator-guide §9.4) instead of making an agent hand-author its node/edge JSON. It names an ordered list of `issues` to sequence (each issue''s implementation starts once the PRIOR issue has merged) and an OPTIONAL leading `behind` gate (wait for that issue/epic/feature to be fully merged first, §9.5). The door GENERATES, then STAGES the graph through the same compile+stage flow as `compileDeliveryGraph` — it never dispatches (dispatch is an operator-only cockpit action, ADR 0005 Decision 7). For each issue it emits `agent` (`senior:feature`, emits a `pr` fact) → `connector` (`converge-merge`, late-binding that `pr`) → `wait[pr, merged]` (a realistic `poll.timeoutMs`), threading the `pr` fact per §9.4. Invalid input (empty `issues`, an unparseable ref) is a 400 carrying `issues: [{ path, message }]`; nothing is staged.'
+              description: 'The `sequenceIssues` INTENT (epic nano-workforce#605, S4) — a high-level shape that GENERATES the canonical "implement issue → converge → merge" delivery graph (operator-guide §9.4) instead of making an agent hand-author its node/edge JSON. It names an ordered list of `issues` to sequence (each issue''s implementation starts once the PRIOR issue has merged) and an OPTIONAL leading `behind` gate (wait for that issue/epic/feature to be fully merged first, §9.5). The door GENERATES, then STAGES the graph through the same compile+stage flow as `compileDeliveryGraph` — it never dispatches (dispatch is an operator-only cockpit action, ADR 0005 Decision 7). For each issue it emits `agent` (`senior:feature`, emits a `pr` fact) → `connector` (`converge-merge`, late-binding that `pr`) → `wait[pr, merged]` (a realistic `poll.timeoutMs`), threading the `pr` fact per §9.4. An `issues[]` entry may be a bare `owner/repo#N` string OR a `{ gate?, issue }` object that interleaves a `wait` gate (the `npm`/`github-check`/… vocabulary) before that issue''s agent (issue #740). Invalid input (empty `issues`, an unparseable ref, an unknown gate kind) is a 400 carrying `issues: [{ path, message }]`; nothing is staged.'
               type: object
               additionalProperties: false
               example:
-                behind: nanobpm/nano-ide#488
                 issues:
-                  - nanobpm/nano-workforce#567
-                  - nanobpm/nano-workforce#568
+                  - nanobpm/nano-ide#557
+                  - gate:
+                      kind: npm
+                      target: '@nanobpm/agentic@0.13.0'
+                    issue: jwulf/c8ctl-plugin-nano#186
+                  - nanobpm/nano-workforce#738
               required:
                 - issues
               properties:
@@ -4182,11 +4323,66 @@ paths:
                   minItems: 1
                   maxItems: 64
                   items:
-                    type: string
-                    minLength: 1
-                    maxLength: 255
-                    description: An `owner/repo#N` issue reference to implement + converge + merge, in sequence.
-                  description: The ordered issues to sequence — each is implemented by a `senior:feature` agent that opens a PR, driven to convergence + merge, and the NEXT issue's implementation starts only once the prior issue has merged. At least one; at most 64 (keeps the generated graph within the compiler's node ceiling).
+                    oneOf:
+                      - type: string
+                        minLength: 1
+                        maxLength: 255
+                        description: A bare `owner/repo#N` issue reference (no gate) — today's behaviour, byte-for-byte.
+                      - description: "One `issues[]` entry with an OPTIONAL leading gate (issue #740) — an object form of a sequence step. The `issue` is implemented + converged + merged like a bare-string entry; the optional `gate` must go green (in addition to the prior issue merging) before this issue's agent starts."
+                        type: object
+                        additionalProperties: false
+                        required:
+                          - issue
+                        properties:
+                          gate:
+                            description: 'An interleaved `wait` GATE (issue #740) that must go green before a given issue''s agent starts — reusing the exact probe schema `wait` nodes accept (`npm`/`github-check`/`http`/`command`/ `capability`/`pr`/`epic`). It lets an author splice e.g. "wait for `@nanobpm/agentic@0.13.0` to publish" between two sequence steps without hand-authoring raw node/edge JSON.'
+                            type: object
+                            additionalProperties: false
+                            required:
+                              - kind
+                              - target
+                            properties:
+                              kind:
+                                type: string
+                                minLength: 1
+                                description: The wait-probe kind — one of the S3 vocabulary kinds (`npm`, `github-check`, `http`, `command`, `capability`, `pr`, `epic`). An unknown kind is a 400.
+                              target:
+                                type: string
+                                minLength: 1
+                                description: 'The probe target — kind-specific: `pkg@version` for `npm`, `owner/repo@ref` for `github-check`, a URL for `http`, an `owner/repo#N` PR for `pr`, etc.'
+                              match:
+                                type: object
+                                description: OPTIONAL kind-specific readiness match fields (e.g. `{ version }` for `npm`, `{ conclusion, checkName }` for `github-check`).
+                              poll:
+                                type: object
+                                additionalProperties: false
+                                description: OPTIONAL poll budget. Defaults to the bounded merge-gate budget (re-probe every 5 minutes, budget 3 days) so a gate never falls into the 30-minute default trap.
+                                properties:
+                                  everyMs:
+                                    type: integer
+                                    minimum: 1
+                                    description: How often to re-probe (milliseconds).
+                                  timeoutMs:
+                                    type: integer
+                                    minimum: 1
+                                    description: The total budget before the gate escalates/continues (milliseconds).
+                              onTimeout:
+                                type: string
+                                enum:
+                                  - escalate
+                                  - continue
+                                description: What to do when the gate never goes green within its budget — `escalate` (default) parks on a human; `continue` proceeds anyway. `fail` is not supported on a `wait` node.
+                              credentialEnv:
+                                type: string
+                                minLength: 1
+                                description: OPTIONAL env-key name supplying a credential for the probe (`http`/`capability`).
+                          issue:
+                            type: string
+                            minLength: 1
+                            maxLength: 255
+                            description: An `owner/repo#N` issue reference to implement + converge + merge, in sequence.
+                    description: "A sequence step — a bare `owner/repo#N` string, or a `{ gate?, issue }` object that interleaves a `wait` gate before that issue's agent (issue #740)."
+                  description: The ordered issues to sequence — each is implemented by a `senior:feature` agent that opens a PR, driven to convergence + merge, and the NEXT issue's implementation starts only once the prior issue has merged (and any interleaved gate has gone green). At least one; at most 64 (keeps the generated graph within the compiler's node ceiling).
               # END generated:mcp-body
       responses:
         "200":

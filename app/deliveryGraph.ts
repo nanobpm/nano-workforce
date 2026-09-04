@@ -164,7 +164,7 @@ const GRAPH_NAME_MAX_LENGTH = 255;
  * like the library import/save doors' `graphJson`, where the schema never touches the parsed value)
  * would otherwise let an oversized-but-compilable graph reach the layout/compiler and be persisted —
  * both violating the declared contract and exposing the import path to avoidable CPU/memory growth. */
-const GRAPH_MAX_NODES = 256;
+export const GRAPH_MAX_NODES = 256;
 const GRAPH_MAX_EDGES = 1024;
 const NODE_MAX_EMITS = 32;
 

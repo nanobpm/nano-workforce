@@ -178,6 +178,47 @@ test("stageProposal: proposals with DIFFERENT logical keys coexist — supersede
   });
 });
 
+// ── StageOutcome visibility (issue #740) ────────────────────────────────────────────────────────
+test("stageProposal outcome: a FIRST stage reports nothing superseded and no live siblings", async () => {
+  await withData(async (data) => {
+    const outcome = await stageProposal(data, row({ digest: "d1" }));
+    assertEquals(outcome.row.digest, "d1");
+    assertEquals(outcome.superseded, []);
+    assertEquals(outcome.siblingsStaged, 0);
+  });
+});
+
+test("stageProposal outcome: a same-logical-key re-stage reports the retired digest in `superseded`", async () => {
+  await withData(async (data) => {
+    await stageProposal(data, row({ digest: "d1" }));
+    const outcome = await stageProposal(data, row({ digest: "d2" })); // same logical_key "runbook"
+    assertEquals(outcome.row.digest, "d2");
+    assertEquals(outcome.superseded, ["d1"], "the prior same-key staged digest was retired");
+    assertEquals(outcome.siblingsStaged, 0, "no OTHER-logical-key live proposal exists");
+  });
+});
+
+test("stageProposal outcome: an idempotent re-stage of the SAME live digest supersedes nothing", async () => {
+  await withData(async (data) => {
+    await stageProposal(data, row({ digest: "d1", createdAt: "2999-01-01T00:00:00.000Z" }));
+    const outcome = await stageProposal(data, row({ digest: "d1", createdAt: "2999-01-01T00:00:00.000Z" }));
+    assertEquals(outcome.row.digest, "d1");
+    assertEquals(outcome.superseded, [], "re-staging the identical live digest retires nothing");
+    assertEquals(outcome.siblingsStaged, 0);
+  });
+});
+
+test("stageProposal outcome: an orphan sibling under a DIFFERENT logical key is counted in `siblingsStaged`", async () => {
+  await withData(async (data) => {
+    // The footgun: a renamed graph stages under a new logical key without superseding the old one.
+    await stageProposal(data, row({ digest: "d1", logicalKey: "runbook-old" }));
+    const outcome = await stageProposal(data, row({ digest: "d2", logicalKey: "runbook-new" }));
+    assertEquals(outcome.row.digest, "d2");
+    assertEquals(outcome.superseded, [], "a different logical key supersedes nothing");
+    assertEquals(outcome.siblingsStaged, 1, "the still-live orphan under the old key is visible");
+  });
+});
+
 test("stageProposal: reconciles to EXACTLY ONE live proposal — an older stage whose supersede pass runs AFTER a newer stage neither clobbers it (zero) nor coexists with it (two)", async () => {
   await withData(async (data) => {
     const table = deliveryGraphProposals(data);

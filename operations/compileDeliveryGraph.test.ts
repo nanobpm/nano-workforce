@@ -127,6 +127,10 @@ test("compile-delivery-graph: a changed graph with the same name SUPERSEDES the 
     assert(a.body.digest !== b.body.digest, "the changed graph has a new digest");
     assertEquals((await deliveryGraphProposals(data).get(a.body.digest))?.status, "superseded");
     assertEquals((await deliveryGraphProposals(data).get(b.body.digest))?.status, "staged");
+    // The supersede is surfaced in the compile result body so the operator sees the retirement (#740).
+    assertEquals(b.body.superseded, [a.body.digest]);
+    assertEquals(b.body.siblingsStaged, 0);
+    assertEquals(a.body.superseded, []); // the first stage retired nothing
   });
 });
 
