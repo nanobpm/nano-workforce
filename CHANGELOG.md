@@ -1,3 +1,9 @@
+## [0.180.0](https://github.com/nanobpm/nano-workforce/compare/v0.179.2...v0.180.0) (2026-09-04)
+
+### Features
+
+* **delivery-graph:** gate agent-node completion on producer status + required emits ([#735](https://github.com/nanobpm/nano-workforce/issues/735)) ([a765e93](https://github.com/nanobpm/nano-workforce/commit/a765e937dc16f3b8f9dd1e1dedb489be697435e0)), closes [#731](https://github.com/nanobpm/nano-workforce/issues/731) [#731](https://github.com/nanobpm/nano-workforce/issues/731) [#731](https://github.com/nanobpm/nano-workforce/issues/731)
+
 ## [0.179.2](https://github.com/nanobpm/nano-workforce/compare/v0.179.1...v0.179.2) (2026-09-04)
 
 ### Code Refactoring
