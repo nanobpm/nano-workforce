@@ -244,11 +244,12 @@ export async function stageProposal(data: DataLayer, row: DeliveryGraphProposal)
   // leaving ours superseded — is reported honestly). `siblingsStaged` = OTHER live staged proposals
   // with a DIFFERENT logical key that remain (the orphaned-sibling footgun: a re-stage under a changed
   // `name` never supersedes them).
-  const superseded: string[] = [];
-  for (const prev of priorSameKey) {
-    const after = await table.get(prev.digest);
-    if (after && after.status !== "staged") superseded.push(prev.digest);
-  }
+  // Intersect the pre-stage staged siblings with the rows that are ACTUALLY `superseded` post-reconcile
+  // (one `find`, not an N+1 `get` loop). Matching on `status !== "staged"` would misreport a sibling
+  // that concurrently went `dispatched`/`dismissed`/`expired` — only rows this reconcile flipped to
+  // `superseded` count.
+  const supersededDigests = new Set((await table.find({ status: "superseded" })).map((r) => r.digest));
+  const superseded = priorSameKey.filter((prev) => supersededDigests.has(prev.digest)).map((prev) => prev.digest);
   const siblingsStaged = (await listStagedProposals(data)).filter((r) => r.logical_key !== row.logical_key).length;
 
   return { row: toWrite, superseded, siblingsStaged };
