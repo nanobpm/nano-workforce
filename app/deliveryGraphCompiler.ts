@@ -558,7 +558,8 @@ export async function compileDeliveryGraphSemantic(
   // `<producerElement>_<fact>` wiring `boundInputsByElement` derives, keyed by the PRODUCER element so a
   // node can gate its own completion on populating every fact a sibling depends on. A ROUTING emit
   // (referenced only by an edge `when` guard, never as a fact-qualified `from`) is deliberately absent
-  // here — those stay optional (omit ⇒ default branch). Grouped and sorted for determinism.
+  // here — those stay optional (omit ⇒ default branch). Grouped by producer element; only set
+  // membership is ever queried downstream, so the sets carry no ordering guarantee.
   const requiredEmitsByElement = new Map<string, Set<string>>();
   for (const edge of resolvedEdges) {
     if (edge.fromFact === undefined) continue;
