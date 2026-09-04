@@ -125,7 +125,7 @@ describe("delivery-graph runner — engine-native execution (S4)", () => {
       ],
     };
 
-    const run = await runDeliveryGraph(app.engine, graph, { probeTimeout: "PT2S" });
+    const run = await runDeliveryGraph(app.engine, graph, { probeTimeout: "PT2S", repoless: true });
     assert.ok(run.ok, `graph should deploy + run, got ${JSON.stringify(run)}`);
     await app.settle();
 
@@ -174,7 +174,7 @@ describe("delivery-graph runner — engine-native execution (S4)", () => {
       edges: [{ from: "a.cmd", to: "w" }],
     };
 
-    const run = await runDeliveryGraph(app.engine, graph, { probeTimeout: "PT2S" });
+    const run = await runDeliveryGraph(app.engine, graph, { probeTimeout: "PT2S", repoless: true });
     assert.ok(run.ok, `graph should deploy + run, got ${JSON.stringify(run)}`);
     await app.settle();
 
@@ -209,7 +209,7 @@ describe("delivery-graph runner — engine-native execution (S4)", () => {
       ],
       edges: [],
     };
-    const run = await runDeliveryGraph(app.engine, graph, { probeTimeout: "PT2S", probePollEvery: "PT1S", escalationSlaTimeout: "PT1H" });
+    const run = await runDeliveryGraph(app.engine, graph, { probeTimeout: "PT2S", probePollEvery: "PT1S", escalationSlaTimeout: "PT1H", repoless: true });
     assert.ok(run.ok, `graph should deploy + run, got ${JSON.stringify(run)}`);
     await app.settle();
 

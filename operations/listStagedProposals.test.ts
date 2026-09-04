@@ -115,7 +115,7 @@ describe("listStagedProposals — the live staged-proposals list", () => {
     const digest = staged.body.digest;
     assert.equal((await api.call<ListResponse>("listStagedProposals", {})).body.count, 1);
 
-    const dispatched = await api.call<{ ok: boolean }>("dispatchDeliveryGraph", { body: { digest } });
+    const dispatched = await api.call<{ ok: boolean }>("dispatchDeliveryGraph", { body: { digest, repoless: true } });
     assert.equal(dispatched.body.ok, true);
 
     const after = await api.call<ListResponse>("listStagedProposals", {});

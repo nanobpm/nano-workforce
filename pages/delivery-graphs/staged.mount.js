@@ -3,8 +3,10 @@
 // has staged: it lists every LIVE staged proposal and, per row, offers
 //   • Preview DI  — recompile the proposal's BPMN (with diagram interchange) and hand it UP to the host
 //     console's process explorer over the `nano-navigate` bridge, rendered read-only BEFORE dispatch;
-//   • Dispatch    — the operator's launch action (#460): POST the proposal's `digest` to the dispatch
-//     door. Clicking Dispatch IS the approval, content-addressed to exactly the graph previewed.
+//   • Dispatch    — the operator's launch action (#460): POST the proposal's `digest` — plus the
+//     repository-isolation envelope (`repository` + `baseBranch`, or an explicit `repoless` opt-out,
+//     #729) the operator supplies inline — to the dispatch door. Clicking Dispatch IS the approval,
+//     content-addressed to exactly the graph previewed.
 //
 // It REPLACES the old declarative `dataGrid` (a grid row-action can POST but cannot take the recompiled
 // BPMN and `postMessage` it to the explorer — so a staged proposal had a Dispatch button but no way to
@@ -97,10 +99,23 @@ function isPending(pending, kind, digest) {
 // The Dispatch affordance for a row: normally a single button; while its inline confirmation is open,
 // an in-DOM "Confirm dispatch / Cancel" pair (NOT a native window.confirm, suppressed in the sandboxed
 // App-View iframe — #569). Clicking "Confirm dispatch" IS the operator approval (#460).
+//
+// The dispatch door (issue #729) now REQUIRES a repository-isolation envelope: the operator must supply
+// BOTH `repository` (`owner/repo`) and `baseBranch`, OR explicitly opt out with `repoless` for a
+// checkout-less graph — dispatching with neither would silently share the worker's launch dir across
+// agents. A staged proposal carries no repository metadata, so the operator provides it HERE at
+// dispatch time via the inline fields below. Ticking "checkout-less" disables the repo/base inputs.
 function dispatchControl(p, pending) {
   if (isPending(pending, "dispatch", p.digest)) {
+    const repository = typeof pending.repository === "string" ? pending.repository : "";
+    const baseBranch = typeof pending.baseBranch === "string" ? pending.baseBranch : "";
+    const repoless = pending.repoless === true;
+    const provDisabled = repoless ? " disabled" : "";
     return `<span class="confirm" data-confirm="dispatch">
       <span class="confirm-msg">${esc(DISPATCH_CONFIRM)}</span>
+      <label class="confirm-field">Repository <input class="confirm-input" type="text" data-dispatch-repository="${esc(p.digest)}" value="${esc(repository)}" placeholder="owner/repo" aria-label="Repository (owner/repo)"${provDisabled} /></label>
+      <label class="confirm-field">Base branch <input class="confirm-input" type="text" data-dispatch-base="${esc(p.digest)}" value="${esc(baseBranch)}" placeholder="main" aria-label="Base branch"${provDisabled} /></label>
+      <label class="confirm-check"><input type="checkbox" data-dispatch-repoless="${esc(p.digest)}"${repoless ? " checked" : ""} /> Dispatch checkout-less (no repository)</label>
       <button class="btn btn-primary" type="button" data-dispatch-confirm="${esc(p.digest)}">Confirm dispatch</button>
       <button class="btn btn-ghost" type="button" data-dispatch-cancel="${esc(p.digest)}">Cancel</button>
     </span>`;
@@ -230,9 +245,11 @@ export function mountStagedProposals(host, config = {}) {
   // click can re-render the SAME list synchronously (without waiting for the next poll).
   let currentProposals = [];
   // The single open in-DOM confirmation, or null. Shape: { kind: "dispatch"|"dismiss"|"save",
-  // digest: string, name?: string }. This REPLACES the native window.confirm/window.prompt the console's
-  // sandboxed App-View iframe suppresses (#569): the operator approval is an inline two-step control
-  // (Confirm/Cancel) or an inline name input, rendered by renderProposal from this state.
+  // digest: string, name?: string, repository?: string, baseBranch?: string, repoless?: boolean }. This
+  // REPLACES the native window.confirm/window.prompt the console's sandboxed App-View iframe suppresses
+  // (#569): the operator approval is an inline two-step control (Confirm/Cancel), an inline name input
+  // (Save), or — for Dispatch — the repository/baseBranch/repoless envelope fields (#729), all rendered
+  // by renderProposal from this state so a background poll re-render preserves what the operator typed.
   let pending = null;
   // A re-render (renderList → new buttons) resets every button to enabled, so the disabled state is
   // NOT stored on the elements — it is derived from busyCount and re-applied after each render (below)
@@ -352,13 +369,26 @@ export function mountStagedProposals(host, config = {}) {
   // the click handler, #569) — by the time we're here the operator has clicked "Confirm dispatch", so we
   // POST the digest to the dispatch door; on success the proposal flips to `dispatched` and drops off
   // the list on the next poll — refresh immediately so the operator sees it leave.
-  async function doDispatch(digest) {
+  async function doDispatch(digest, opts) {
     const staged = typeof digest === "string" ? digest.trim() : "";
     if (staged === "") return;
+    const options = opts && typeof opts === "object" ? opts : {};
+    const repoless = options.repoless === true;
+    const repository = typeof options.repository === "string" ? options.repository.trim() : "";
+    const baseBranch = typeof options.baseBranch === "string" ? options.baseBranch.trim() : "";
+    // The dispatch door (issue #729) requires an isolation envelope: BOTH `repository` + `baseBranch`,
+    // or an explicit `repoless: true` opt-out. Guard here so the operator gets an inline hint instead of
+    // a bare 400 from the door (the confirm has already been closed by the click handler on a valid one).
+    if (!repoless && (repository === "" || baseBranch === "")) {
+      setStatus("Provide both a repository (owner/repo) and a base branch, or tick “Dispatch checkout-less”.", "err");
+      return;
+    }
+    // Mirror the door's mutual-exclusivity contract: pass EITHER the repo envelope OR `repoless`, never both.
+    const payload = repoless ? { digest: staged, repoless: true } : { digest: staged, repository, baseBranch };
     busy(true);
     setStatus("Dispatching…");
     try {
-      const { status, body } = await post(dispatchUrl, { digest: staged });
+      const { status, body } = await post(dispatchUrl, payload);
       if ((status === 202 || status === 200) && body.ok) {
         setStatus("\u2713 Dispatched — the run is now in flight.", "ok");
         await refresh();
@@ -431,7 +461,7 @@ export function mountStagedProposals(host, config = {}) {
   function openConfirm(kind, digest, name) {
     const staged = typeof digest === "string" ? digest.trim() : "";
     if (staged === "") return;
-    pending = { kind, digest: staged, name: typeof name === "string" ? name : "" };
+    pending = { kind, digest: staged, name: typeof name === "string" ? name : "", repository: "", baseBranch: "", repoless: false };
     rerender();
     // Move focus into the name input so the operator can type immediately (best-effort; not all hosts
     // implement focus()).
@@ -459,12 +489,49 @@ export function mountStagedProposals(host, config = {}) {
     return input && typeof input.value === "string" ? input.value : "";
   }
 
-  // Keep pending.name in sync as the operator types, so a background poll re-render (or a later confirm)
-  // preserves what they've entered.
+  // Read the current text of an inline Dispatch envelope field (`repository`/`base`) for `digest`.
+  function readDispatchField(digest, which) {
+    const attr = which === "repository" ? "data-dispatch-repository" : "data-dispatch-base";
+    const input = listEl.querySelector(`[${attr}="${cssAttr(digest)}"]`);
+    return input && typeof input.value === "string" ? input.value : "";
+  }
+
+  // Read the current state of the inline "Dispatch checkout-less" checkbox for `digest`.
+  function readRepoless(digest) {
+    const box = listEl.querySelector(`[data-dispatch-repoless="${cssAttr(digest)}"]`);
+    return !!(box && box.checked);
+  }
+
+  // Keep pending in sync as the operator types, so a background poll re-render (or a later confirm)
+  // preserves what they've entered — the library name (Save) and the repo/base envelope fields (Dispatch).
   listEl.addEventListener("input", (ev) => {
-    const input = ev.target && ev.target.closest ? ev.target.closest("[data-library-name]") : null;
-    if (input && pending != null && pending.kind === "save") {
-      pending.name = typeof input.value === "string" ? input.value : "";
+    const target = ev.target && ev.target.closest ? ev.target : null;
+    if (target == null || pending == null) return;
+    if (pending.kind === "save") {
+      const input = target.closest("[data-library-name]");
+      if (input) pending.name = typeof input.value === "string" ? input.value : "";
+      return;
+    }
+    if (pending.kind === "dispatch") {
+      const repoInput = target.closest("[data-dispatch-repository]");
+      if (repoInput) {
+        pending.repository = typeof repoInput.value === "string" ? repoInput.value : "";
+        return;
+      }
+      const baseInput = target.closest("[data-dispatch-base]");
+      if (baseInput) pending.baseBranch = typeof baseInput.value === "string" ? baseInput.value : "";
+    }
+  });
+
+  // The "Dispatch checkout-less" checkbox toggles the repo/base inputs (disabled when checkout-less), so
+  // re-render on change — first hoisting the live text values into pending so the toggle doesn't drop them.
+  listEl.addEventListener("change", (ev) => {
+    const box = ev.target && ev.target.closest ? ev.target.closest("[data-dispatch-repoless]") : null;
+    if (box && pending != null && pending.kind === "dispatch") {
+      pending.repository = readDispatchField(pending.digest, "repository");
+      pending.baseBranch = readDispatchField(pending.digest, "base");
+      pending.repoless = !!box.checked;
+      rerender();
     }
   });
 
@@ -490,8 +557,20 @@ export function mountStagedProposals(host, config = {}) {
     if (dispatchConfirmBtn) {
       ev.preventDefault();
       const digest = dispatchConfirmBtn.getAttribute("data-dispatch-confirm");
+      const isThisPending = pending != null && pending.kind === "dispatch" && pending.digest === digest;
+      // `pending.repoless` is the durable source of truth (synced on the checkbox `change`); fall back to
+      // the live DOM checkbox so a confirm without a prior toggle still reads correctly.
+      const repoless = readRepoless(digest) || (isThisPending && pending.repoless === true);
+      const repository = readDispatchField(digest, "repository").trim();
+      const baseBranch = readDispatchField(digest, "base").trim();
+      // Keep the inline confirmation OPEN on an incomplete envelope so the operator can fix it in place
+      // (issue #729) — closing it would drop the fields they'd started filling.
+      if (!repoless && (repository === "" || baseBranch === "")) {
+        setStatus("Provide both a repository (owner/repo) and a base branch, or tick “Dispatch checkout-less”.", "err");
+        return;
+      }
       closeConfirm();
-      doDispatch(digest);
+      doDispatch(digest, { repository, baseBranch, repoless });
       return;
     }
     const dispatchCancelBtn = closest("[data-dispatch-cancel]");

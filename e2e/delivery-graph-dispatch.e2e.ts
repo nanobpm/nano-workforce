@@ -100,7 +100,7 @@ describe("delivery-graph dispatch — agent compiles→stages, operator dispatch
     assert.equal(proposal?.status, "staged");
 
     // ── Operator dispatch: dispatch the digest → deploys + runs engine-natively ───────────────────
-    const dispatched = await api.call<DispatchResult>("dispatchDeliveryGraph", { body: { digest } });
+    const dispatched = await api.call<DispatchResult>("dispatchDeliveryGraph", { body: { digest, repoless: true } });
     assert.equal(dispatched.status, 202, "dispatching a staged digest launches the run");
     assert.equal(dispatched.body.status, "running");
     assert.equal(dispatched.body.alreadyRunning, false);
@@ -122,7 +122,7 @@ describe("delivery-graph dispatch — agent compiles→stages, operator dispatch
     assert.match(String(phased?.phase), /^Parked on human node:/, `phase shows the parked human node, got ${phased?.phase}`);
 
     // ── No replay: the consumed proposal cannot re-launch ─────────────────────────────────────────
-    const replay = await api.call<DispatchResult>("dispatchDeliveryGraph", { body: { digest } });
+    const replay = await api.call<DispatchResult>("dispatchDeliveryGraph", { body: { digest, repoless: true } });
     assert.equal(replay.status, 400, "an already-dispatched digest cannot be re-dispatched");
     await app.settle();
     assert.equal(agentFired, 1, "the agent side effect STILL fired only once (no double-launch)");
@@ -146,7 +146,7 @@ describe("delivery-graph dispatch — agent compiles→stages, operator dispatch
     const graph: DeliveryGraph = { name: "manual gate", nodes: [{ id: "ack", kind: "human", human: { prompt: "click done" } }] };
     const staged = await api.call<StagedResult>("compileDeliveryGraph", { body: graph });
     assert.equal(staged.status, 200);
-    const res = await api.call<DispatchResult>("dispatchDeliveryGraph", { body: { digest: staged.body.digest } });
+    const res = await api.call<DispatchResult>("dispatchDeliveryGraph", { body: { digest: staged.body.digest, repoless: true } });
     assert.equal(res.status, 202, "dispatching a human-only graph runs it");
     assert.equal(res.body.status, "running");
     assert.equal(res.body.sideEffecting, false);

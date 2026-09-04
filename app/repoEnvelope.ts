@@ -15,6 +15,49 @@ import { isCommitSha } from "./world/index.ts";
  * (headers ∪ variables, deep-merged). See c8ctl `normalizeTaskEnvelope`. */
 const AGENT_TASK_NS = "io.nanobpm.agentTask";
 
+/** The ONE canonical `owner/repo` allowlist, shared by `repoEnvelopeVars` (which degrades to `{}` on a
+ * miss) and `requireRepoEnvelopeVars` (which throws on a miss) so the two can never drift apart. The
+ * owner is a GitHub login (alphanumeric + hyphen); the repo-name segment additionally allows `.` and
+ * `_`. A trailing `.git` is rejected outright so we never emit a double-suffixed `…/owner/repo.git.git`,
+ * and the anchored allowlist bars query/fragment/host-injection chars. */
+const OWNER_REPO_RE = /^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/;
+function isPlainOwnerRepo(repo: string): boolean {
+  return OWNER_REPO_RE.test(repo) && !/\.git$/i.test(repo);
+}
+
+/** Raised by `requireRepoEnvelopeVars` when the repository-isolation envelope is REQUIRED on a fan-out
+ * path but its inputs are unresolved (a blank base/head `ref`, or a `repo` that is not a plain
+ * `owner/repo`). Issue #729: the fan-out dispatch paths must fail loudly here rather than let
+ * `repoEnvelopeVars` silently emit `{}` and degrade to the shared launch-dir behaviour (issue #684's
+ * field failure re-opened as a silent fallback). The API edge maps this to a clean 400 / launch error;
+ * a caller that legitimately wants no clone must opt in EXPLICITLY (never reach this helper) so the
+ * default can never silently share a checkout. */
+export class RepoEnvelopeUnresolvedError extends Error {
+  readonly reason: string;
+  constructor(reason: string) {
+    super(`repository-isolation envelope is required but its input is unresolved: ${reason}`);
+    this.name = "RepoEnvelopeUnresolvedError";
+    this.reason = reason;
+  }
+}
+
+/** Raised when a fan-out dispatch supplies a repository-isolation envelope (`repository`/`baseBranch`)
+ * AND an explicit `repoless: true` opt-out at the same time (issue #729). The two are mutually
+ * exclusive: `repoless: true` means "dispatch a genuinely checkout-less graph with NO envelope", so a
+ * caller that also names a repo/base is contradictory. The dispatch door already rejects this shape
+ * with a 400, but a PROGRAMMATIC caller that bypasses the door could still pass both — and silently
+ * disable the very isolation the envelope guards (the runner would drop the repo/base and emit `{}`).
+ * Failing loudly here too keeps the mutual exclusivity enforced at the seed point, not only at the HTTP
+ * edge, so isolation can never be silently disabled by a conflicting-but-well-meant call. */
+export class RepoEnvelopeConflictError extends Error {
+  readonly reason: string;
+  constructor(reason: string) {
+    super(`repository-isolation envelope conflicts with an explicit repoless opt-out: ${reason}`);
+    this.name = "RepoEnvelopeConflictError";
+    this.reason = reason;
+  }
+}
+
 /** Build the repository slice of the agent-task envelope for an agent job. Delivered as a *process
  * variable* under the reserved `io.nanobpm.agentTask` key so the harness provisions an isolated
  * clone — instead of the agent inheriting whatever directory the worker was launched from (which
@@ -63,10 +106,7 @@ export function repoEnvelopeVars(
   // `owner/repo`), but this is an exported helper the fan-out epic gives many new callers. A repo
   // that is not exactly `owner/repo` would build a bogus clone URL, so emit nothing (the harness
   // then falls back to the launch-dir behaviour) rather than handing the harness a malformed URL.
-  // The owner is a GitHub login (alphanumeric + hyphen); the repo-name segment additionally allows
-  // `.` and `_`. A trailing `.git` is rejected outright so we never emit a double-suffixed
-  // `…/owner/repo.git.git`, and the anchored allowlist bars query/fragment/host-injection chars.
-  if (!/^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/.test(repo) || /\.git$/i.test(repo)) return {};
+  if (!isPlainOwnerRepo(repo)) return {};
   return {
     [AGENT_TASK_NS]: {
       repository: {
@@ -112,6 +152,37 @@ export function repoEnvelopeVars(
       },
     },
   };
+}
+
+/** The REQUIRED-envelope guard for the fan-out dispatch paths (issue #729). Same signature and output
+ * as `repoEnvelopeVars`, but THROWS `RepoEnvelopeUnresolvedError` on an unresolved input (a blank
+ * base/head `ref`, or a `repo` that is not a plain `owner/repo`) instead of degrading to the silent
+ * `{}` that leaves the agent job inheriting the worker's launch dir. Every fan-out seed
+ * (`app/deliveryRunner.ts` `runDeliveryGraph`, `app/plan.ts` `startPlan`, `app/feature.ts`
+ * `startFeature`) MUST route through this helper so a run that can't be isolated fails LOUDLY at seed
+ * time — never silently shares (and clobbers) one checkout across concurrent workers on a host (issue
+ * #684, re-opened as a silent fallback). A dispatch that legitimately wants no clone must opt in
+ * EXPLICITLY at its door (e.g. delivery-graph `repoless: true`) and simply never call this. */
+export function requireRepoEnvelopeVars(
+  repo: string,
+  ref: string | null,
+  baseRef: string | null = null,
+  commitSha: string | null = null,
+  branchCreate: string | null = null,
+): Record<string, unknown> {
+  if (typeof ref !== "string" || ref.trim() === "") {
+    throw new RepoEnvelopeUnresolvedError("base/head ref is blank — the harness has no branch to check out");
+  }
+  if (!isPlainOwnerRepo(repo)) {
+    throw new RepoEnvelopeUnresolvedError(`repo is not an \`owner/repo\` reference: ${JSON.stringify(repo)}`);
+  }
+  const vars = repoEnvelopeVars(repo, ref, baseRef, commitSha, branchCreate);
+  // repoEnvelopeVars degrades to `{}` on exactly the two conditions rejected above, so a non-empty
+  // envelope is guaranteed here. Assert it so the degrade-vs-throw pair can never silently drift.
+  if (Object.keys(vars).length === 0) {
+    throw new RepoEnvelopeUnresolvedError(`envelope resolved empty for repo=${JSON.stringify(repo)} ref=${JSON.stringify(ref)}`);
+  }
+  return vars;
 }
 
 /** Resolve the clone timeout (ms) the harness applies to provisioning, from the one typed knob

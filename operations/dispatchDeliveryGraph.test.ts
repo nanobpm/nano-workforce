@@ -50,7 +50,10 @@ describe("dispatchDeliveryGraph — operator dispatch by staged-proposal digest"
   test("a missing/blank digest → 400 with a human error, nothing launched", async () => {
     const app = await boot();
     assert.ok(app.api);
-    const res = await app.api.call<{ ok: boolean; error?: string }>("dispatchDeliveryGraph", { body: { digest: "  " } });
+    // Carry a valid `repoless: true` variant so the body clears the edge `oneOf` and reaches the door's
+    // own blank-digest guard (the concern under test) rather than being rejected earlier as a shapeless
+    // request — a blank digest is still a clean 400 with a human error, launching nothing.
+    const res = await app.api.call<{ ok: boolean; error?: string }>("dispatchDeliveryGraph", { body: { digest: "  ", repoless: true } });
     assert.equal(res.status, 400);
     assert.equal(res.body.ok, false);
     assert.ok(typeof res.body.error === "string" && res.body.error.length > 0);
@@ -60,7 +63,7 @@ describe("dispatchDeliveryGraph — operator dispatch by staged-proposal digest"
   test("an unknown / never-staged digest → 400, nothing launched", async () => {
     const app = await boot();
     assert.ok(app.api);
-    const res = await app.api.call<{ ok: boolean; error?: string }>("dispatchDeliveryGraph", { body: { digest: "deadbeef0000" } });
+    const res = await app.api.call<{ ok: boolean; error?: string }>("dispatchDeliveryGraph", { body: { digest: "deadbeef0000", repoless: true } });
     assert.equal(res.status, 400);
     assert.equal(res.body.ok, false);
     assert.ok(/no staged proposal/.test(res.body.error ?? ""));
@@ -82,7 +85,7 @@ describe("dispatchDeliveryGraph — operator dispatch by staged-proposal digest"
     // The operator dispatches that digest.
     const res = await api.call<{ ok: boolean; status: string; runKey: string; alreadyRunning?: boolean }>(
       "dispatchDeliveryGraph",
-      { body: { digest } },
+      { body: { digest, repoless: true } },
     );
     assert.equal(res.status, 202);
     assert.equal(res.body.ok, true);
@@ -107,7 +110,7 @@ describe("dispatchDeliveryGraph — operator dispatch by staged-proposal digest"
 
     const staged = await api.call<{ digest: string }>("compileDeliveryGraph", { body: SIDE_EFFECTING });
     const res = await api.call<{ ok: boolean; status: string; sideEffecting: boolean }>("dispatchDeliveryGraph", {
-      body: { digest: staged.body.digest },
+      body: { digest: staged.body.digest, repoless: true },
     });
     assert.equal(res.status, 202);
     assert.equal(res.body.ok, true);
@@ -122,9 +125,9 @@ describe("dispatchDeliveryGraph — operator dispatch by staged-proposal digest"
     assert.ok(app.api);
     const api = app.api;
     const staged = await api.call<{ digest: string }>("compileDeliveryGraph", { body: HUMAN_ONLY });
-    await api.call("dispatchDeliveryGraph", { body: { digest: staged.body.digest } });
+    await api.call("dispatchDeliveryGraph", { body: { digest: staged.body.digest, repoless: true } });
     await app.settle();
-    const again = await api.call<{ ok: boolean }>("dispatchDeliveryGraph", { body: { digest: staged.body.digest } });
+    const again = await api.call<{ ok: boolean }>("dispatchDeliveryGraph", { body: { digest: staged.body.digest, repoless: true } });
     assert.equal(again.status, 400);
     assert.equal(again.body.ok, false);
     // Still exactly one run — the consumed proposal cannot re-launch.
@@ -143,7 +146,7 @@ describe("dispatchDeliveryGraph — operator dispatch by staged-proposal digest"
 
     // Dispatch graph A under a shared idempotencyKey — it launches and stays running (parks on a human).
     const first = await api.call<{ ok: boolean; status: string }>("dispatchDeliveryGraph", {
-      body: { digest: a.body.digest, idempotencyKey: "shared-key" },
+      body: { digest: a.body.digest, idempotencyKey: "shared-key", repoless: true },
     });
     assert.equal(first.status, 202);
     await app.settle();
@@ -151,7 +154,7 @@ describe("dispatchDeliveryGraph — operator dispatch by staged-proposal digest"
     // Dispatch graph B under the SAME idempotencyKey — it short-circuits onto A's run. B's graph was
     // never launched, so B must NOT be consumed: refuse with 409 and leave B staged.
     const second = await api.call<{ ok: boolean; error?: string }>("dispatchDeliveryGraph", {
-      body: { digest: b.body.digest, idempotencyKey: "shared-key" },
+      body: { digest: b.body.digest, idempotencyKey: "shared-key", repoless: true },
     });
     assert.equal(second.status, 409);
     assert.equal(second.body.ok, false);
@@ -174,7 +177,7 @@ describe("dispatchDeliveryGraph — operator dispatch by staged-proposal digest"
     assert.equal((await deliveryGraphProposals(app.db).get(digest))?.status, "staged");
     await deliveryGraphProposals(app.db).update(digest, { graph: "{not-json" });
 
-    const res = await api.call<{ ok: boolean; error?: string }>("dispatchDeliveryGraph", { body: { digest } });
+    const res = await api.call<{ ok: boolean; error?: string }>("dispatchDeliveryGraph", { body: { digest, repoless: true } });
     assert.equal(res.status, 400);
     assert.equal(res.body.ok, false);
     assert.ok(/corrupt/.test(res.body.error ?? ""));
@@ -238,7 +241,7 @@ describe("dispatchDeliveryGraph — operator dispatch by staged-proposal digest"
     const api = app.api;
     const staged = await api.call<{ digest: string }>("compileDeliveryGraph", { body: HUMAN_ONLY });
     const res = await api.call<{ ok: boolean; status: string }>("dispatchDeliveryGraph", {
-      body: { digest: staged.body.digest, nodeTimeout: "PT2H" },
+      body: { digest: staged.body.digest, nodeTimeout: "PT2H", repoless: true },
     });
     assert.equal(res.status, 202);
     assert.equal(res.body.ok, true);
@@ -308,5 +311,128 @@ describe("dispatchDeliveryGraph — operator dispatch by staged-proposal digest"
     await app.settle();
     assert.equal((await deliveryGraphRuns(app.db).all()).length, 1);
     assert.equal((await deliveryGraphProposals(app.db).get(staged.body.digest))?.status, "dispatched");
+  });
+
+  // Issue #729: the fan-out dispatch door must REQUIRE repository provisioning — either a resolvable
+  // `repository` + `baseBranch`, or an EXPLICIT `repoless: true` opt-out — so it can never silently
+  // dispatch envelope-less and let concurrent fan-out agents share (and clobber) the worker's launch
+  // dir (issue #684's field failure re-opened as a silent fallback). This "neither/nor" shape is now
+  // rejected at the EDGE by the request `oneOf` (the two allowed variants), not only inside the door.
+  test("a dispatch with NEITHER repository/baseBranch NOR repoless is rejected at submit → 400, nothing launched (#729)", async () => {
+    const app = await boot();
+    assert.ok(app.api);
+    const api = app.api;
+    const staged = await api.call<{ digest: string }>("compileDeliveryGraph", { body: HUMAN_ONLY });
+    const res = await api.call<{ ok?: boolean; error?: string }>("dispatchDeliveryGraph", {
+      body: { digest: staged.body.digest },
+    });
+    assert.equal(res.status, 400);
+    // The `oneOf` edge validator names the two allowed shapes — the neither/nor body matches neither.
+    assert.ok(typeof res.body.error === "string" && res.body.error.length > 0);
+    // Loud, not silent: nothing launched and the proposal stays staged (re-dispatchable once a repo /
+    // repoless choice is supplied).
+    assert.equal((await deliveryGraphRuns(app.db).all()).length, 0);
+    assert.equal((await deliveryGraphProposals(app.db).get(staged.body.digest))?.status, "staged");
+  });
+
+  test("a dispatch with ONLY repository (no baseBranch) is rejected → 400, nothing launched (#729)", async () => {
+    const app = await boot();
+    assert.ok(app.api);
+    const api = app.api;
+    const staged = await api.call<{ digest: string }>("compileDeliveryGraph", { body: HUMAN_ONLY });
+    const res = await api.call<{ ok?: boolean }>("dispatchDeliveryGraph", {
+      body: { digest: staged.body.digest, repository: "owner/repo" },
+    });
+    assert.equal(res.status, 400);
+    assert.equal((await deliveryGraphRuns(app.db).all()).length, 0);
+    assert.equal((await deliveryGraphProposals(app.db).get(staged.body.digest))?.status, "staged");
+  });
+
+  test("a dispatch with ONLY baseBranch (no repository) is rejected → 400, nothing launched (#729)", async () => {
+    const app = await boot();
+    assert.ok(app.api);
+    const api = app.api;
+    const staged = await api.call<{ digest: string }>("compileDeliveryGraph", { body: HUMAN_ONLY });
+    const res = await api.call<{ ok?: boolean }>("dispatchDeliveryGraph", {
+      body: { digest: staged.body.digest, baseBranch: "main" },
+    });
+    assert.equal(res.status, 400);
+    assert.equal((await deliveryGraphRuns(app.db).all()).length, 0);
+    assert.equal((await deliveryGraphProposals(app.db).get(staged.body.digest))?.status, "staged");
+  });
+
+  test("an EXPLICIT repoless: true dispatches a checkout-less graph → 202 running (#729)", async () => {
+    const app = await boot();
+    assert.ok(app.api);
+    const api = app.api;
+    const staged = await api.call<{ digest: string }>("compileDeliveryGraph", { body: HUMAN_ONLY });
+    const res = await api.call<{ ok: boolean; status: string }>("dispatchDeliveryGraph", {
+      body: { digest: staged.body.digest, repoless: true },
+    });
+    assert.equal(res.status, 202);
+    assert.equal(res.body.ok, true);
+    assert.equal(res.body.status, "running");
+    await app.settle();
+    assert.equal((await deliveryGraphRuns(app.db).all()).length, 1);
+    assert.equal((await deliveryGraphProposals(app.db).get(staged.body.digest))?.status, "dispatched");
+  });
+
+  test("repoless: true is mutually exclusive with repository/baseBranch → 400, nothing launched (#729)", async () => {
+    const app = await boot();
+    assert.ok(app.api);
+    const api = app.api;
+    const staged = await api.call<{ digest: string }>("compileDeliveryGraph", { body: HUMAN_ONLY });
+    const res = await api.call<{ ok?: boolean }>("dispatchDeliveryGraph", {
+      body: { digest: staged.body.digest, repoless: true, repository: "owner/repo", baseBranch: "main" },
+    });
+    assert.equal(res.status, 400);
+    assert.equal((await deliveryGraphRuns(app.db).all()).length, 0);
+    assert.equal((await deliveryGraphProposals(app.db).get(staged.body.digest))?.status, "staged");
+  });
+
+  test("a non-boolean repoless is rejected at submit → 400, nothing launched (#729)", async () => {
+    const app = await boot();
+    assert.ok(app.api);
+    const api = app.api;
+    const staged = await api.call<{ digest: string }>("compileDeliveryGraph", { body: HUMAN_ONLY });
+    const res = await api.call<{ ok?: boolean }>("dispatchDeliveryGraph", {
+      body: { digest: staged.body.digest, repoless: "yes" },
+    });
+    assert.equal(res.status, 400);
+    assert.equal((await deliveryGraphRuns(app.db).all()).length, 0);
+    assert.equal((await deliveryGraphProposals(app.db).get(staged.body.digest))?.status, "staged");
+  });
+
+  // `repoless` is a `true`-only opt-out (OpenAPI `oneOf`: `enum: [true]` on the repoless variant, absent
+  // from the repository variant with `additionalProperties: false`). An explicit `repoless: false` — with
+  // OR without a repository envelope — must be a clean 400 at the contract boundary, never silently folded
+  // into the "not repoless" path. The edge schema rejects it end-to-end here; the door's own guard
+  // (dispatchDeliveryGraph.ts) mirrors it as defense-in-depth for any non-schema-validated caller.
+  test("an explicit repoless: false (bare) is rejected at submit → 400, nothing launched (#729)", async () => {
+    const app = await boot();
+    assert.ok(app.api);
+    const api = app.api;
+    const staged = await api.call<{ digest: string }>("compileDeliveryGraph", { body: HUMAN_ONLY });
+    const res = await api.call<{ ok?: boolean; error?: string }>("dispatchDeliveryGraph", {
+      body: { digest: staged.body.digest, repoless: false },
+    });
+    assert.equal(res.status, 400);
+    assert.ok(typeof res.body.error === "string" && res.body.error.length > 0);
+    assert.equal((await deliveryGraphRuns(app.db).all()).length, 0);
+    assert.equal((await deliveryGraphProposals(app.db).get(staged.body.digest))?.status, "staged");
+  });
+
+  test("an explicit repoless: false alongside a repository envelope is rejected → 400, nothing launched (#729)", async () => {
+    const app = await boot();
+    assert.ok(app.api);
+    const api = app.api;
+    const staged = await api.call<{ digest: string }>("compileDeliveryGraph", { body: HUMAN_ONLY });
+    const res = await api.call<{ ok?: boolean; error?: string }>("dispatchDeliveryGraph", {
+      body: { digest: staged.body.digest, repository: "owner/repo", baseBranch: "main", repoless: false },
+    });
+    assert.equal(res.status, 400);
+    assert.ok(typeof res.body.error === "string" && res.body.error.length > 0);
+    assert.equal((await deliveryGraphRuns(app.db).all()).length, 0);
+    assert.equal((await deliveryGraphProposals(app.db).get(staged.body.digest))?.status, "staged");
   });
 });

@@ -49,7 +49,7 @@ export type DispatchDeliveryGraphResult =
 export async function dispatchDeliveryGraphRun(
   app: Pick<AppApi, "data" | "engine" | "log">,
   graph: unknown,
-  options: { runKey?: string | null; title?: string | null; repository?: string | null; baseBranch?: string | null } & DeliveryRunTimeouts = {},
+  options: { runKey?: string | null; title?: string | null; repository?: string | null; baseBranch?: string | null; repoless?: boolean } & DeliveryRunTimeouts = {},
 ): Promise<DispatchDeliveryGraphResult> {
   const validationErrors = validateDeliveryGraph(graph);
   if (validationErrors.length > 0) {
@@ -140,11 +140,14 @@ export async function dispatchDeliveryGraphRun(
       escalationSlaTimeout: options.escalationSlaTimeout,
       probePollEvery: options.probePollEvery,
       escalationAssignee: options.escalationAssignee,
-      // Host-git provisioning (#684/#686): forward the run-level repo/base so the runner seeds the
-      // `io.nanobpm.agentTask.repository` isolation envelope onto every agent cell's job (absent → the
-      // runner emits no envelope and the harness keeps its legacy launch-dir behaviour).
+      // Host-git provisioning (#684/#686/#729): forward the run-level repo/base so the runner seeds the
+      // `io.nanobpm.agentTask.repository` isolation envelope onto every agent cell's job. The envelope is
+      // REQUIRED unless the run is EXPLICITLY `repoless` — an unresolved repo/base on a non-`repoless`
+      // run is a hard launch failure (marked `failed` below via the catch), never a silent no-envelope
+      // fallback to the shared launch dir. The dispatch door enforces the same contract at submit (400).
       repository: options.repository,
       baseBranch: options.baseBranch,
+      repoless: options.repoless,
     });
   } catch (err) {
     await markClaimFailed();

@@ -30,7 +30,7 @@ import {
 import { derivedTrackingTable } from "./instanceTracking.ts";
 import { clearExclusions } from "./mergeExclusion.ts";
 import type { ReadinessProbe } from "./readiness.ts";
-import { repoEnvelopeVars } from "./repoEnvelope.ts";
+import { requireRepoEnvelopeVars } from "./repoEnvelope.ts";
 import { clearTaskDeltas } from "./taskDelta.ts";
 
 /** The BPMN process this module drives (resources/processes/plan-fanout.bpmn). */
@@ -1048,8 +1048,11 @@ export async function startPlan(
       // but NO `branchCreate`: each slice's deterministic `feat/<task.id>` branch differs per MI child,
       // so the agent cuts its own branch inside the isolated clone (per resources/prompts/feature.md).
       // The process-level variable propagates through the wave subprocess + `implement-cell` callActivity
-      // into each agent job. Spread last so an unresolved repo (`{}`) leaves the other vars untouched.
-      ...repoEnvelopeVars(parsed.repo, base),
+      // into each agent job. This is a fan-out seed, so it is REQUIRED (issue #729): `parsed.repo` is
+      // regex-bound (`parseIssue`) and `base` is `normalizeBaseBranch`-validated non-blank, so the
+      // `requireRepoEnvelopeVars` guard never trips here — but it makes an unresolved repo/base a HARD
+      // launch failure rather than a silent `{}` that would degrade every slice to the shared launch dir.
+      ...requireRepoEnvelopeVars(parsed.repo, base),
     },
   });
   const processKey = processInstanceKey == null ? null : String(processInstanceKey);
