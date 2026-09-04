@@ -90,6 +90,26 @@ function escalationTaskElement(element: string): string {
   return `${DELIVERY_HUMAN_ELEMENT}__${element}__esc`;
 }
 
+/** The BPMN element id an `agent` node's PRODUCER-CONTRACT escalation user task carries (issue #731) —
+ * distinct from the `__esc` timeout twin so a node can carry both a bounded-timeout escalation AND a
+ * post-completion contract-gate escalation without an id collision. Same human-completable convention
+ * (`delivery-human-task__…` → recognised by `isDeliveryHumanElement`, routed onto the Tasks inbox), so
+ * a producer that finishes without doing its job escalates AT that node and is answerable by a human
+ * OR an agent. */
+function contractEscalationTaskElement(element: string): string {
+  return `${DELIVERY_HUMAN_ELEMENT}__${element}__contract`;
+}
+
+/** The self-reported completion statuses an `agent` node's job may return that count as a TERMINAL
+ * SUCCESS and are allowed to route their result onward (issue #731). Everything else — the pathological
+ * `in_progress` an agent that delegated/returned-before-finishing reports (instance 10746), a `blocked`/
+ * `failed`/`escalated` give-up, or any unrecognised free-formed status — fails the producer status gate
+ * and escalates AT the node instead of threading an incomplete result into a downstream consumer. An
+ * ABSENT/null status passes the gate (a status-less completion — an older fleet worker or a bare test
+ * stub — is not itself the failure mode; the required-emit gate still catches a missing data fact).
+ * Sorted for the compiler's byte-identical-output determinism. */
+const AGENT_TERMINAL_SUCCESS_STATUSES: readonly string[] = ["done", "opened", "skipped"];
+
 /** A never-reached exhaustiveness guard: `compileNode`'s `switch` covers every allowlisted kind, so
  * the closed union narrows to `never` here. If a future kind is added to the vocabulary without a
  * compiler arm, `tsc` flags this call — the compile-time half of the trust bound. */
@@ -532,7 +552,23 @@ export async function compileDeliveryGraphSemantic(
     list.sort((a, b) => byCodeUnit(a.producerElement, b.producerElement) || byCodeUnit(a.fact, b.fact));
   }
 
-  const semanticBpmn = renderBpmn(typed, wirings, numberedFlows, startForkGateway, endJoinGateway, boundInputsByElement);
+  // Producer-side required-emit gate (issue #731): the set of a producer's declared emit names that are
+  // consumed as a REQUIRED DATA DEPENDENCY downstream — i.e. threaded on a FACT-QUALIFIED edge
+  // (`from: "<node>.<fact>"`) into a consumer's connector `payload`/probe `target`. This is the SAME
+  // `<producerElement>_<fact>` wiring `boundInputsByElement` derives, keyed by the PRODUCER element so a
+  // node can gate its own completion on populating every fact a sibling depends on. A ROUTING emit
+  // (referenced only by an edge `when` guard, never as a fact-qualified `from`) is deliberately absent
+  // here — those stay optional (omit ⇒ default branch). Grouped and sorted for determinism.
+  const requiredEmitsByElement = new Map<string, Set<string>>();
+  for (const edge of resolvedEdges) {
+    if (edge.fromFact === undefined) continue;
+    const producerEl = mustGet(elementById, edge.fromNode);
+    const set = requiredEmitsByElement.get(producerEl) ?? new Set<string>();
+    set.add(edge.fromFact);
+    requiredEmitsByElement.set(producerEl, set);
+  }
+
+  const semanticBpmn = renderBpmn(typed, wirings, numberedFlows, startForkGateway, endJoinGateway, boundInputsByElement, requiredEmitsByElement);
   const diagram = renderMermaid(typed, wirings, resolvedEdges, elementById);
   const resolved = buildResolved(typed, wirings, resolvedEdges, producersById);
   const humanNodes = buildHumanNodes(nodes);
@@ -707,6 +743,7 @@ function renderBpmn(
   startForkGateway: string | undefined,
   endJoinGateway: string | undefined,
   boundInputsByElement: ReadonlyMap<string, BoundInput[]>,
+  requiredEmitsByElement: ReadonlyMap<string, ReadonlySet<string>>,
 ): string {
   // Precompute incoming/outgoing flow-id maps once (single pass over flows) so BPMN rendering stays
   // linear in the number of flows instead of O(elements * flows) from repeated full-array filtering.
@@ -779,7 +816,15 @@ function renderBpmn(
     if (w.joinGateway) {
       lines.push(...gateway(w.joinGateway, w.joinExclusive, `join into ${w.node.id}`));
     }
-    lines.push(renderNodeElement(w, incoming(w.element), outgoing(w.element), boundInputsByElement.get(w.element) ?? []));
+    lines.push(
+      renderNodeElement(
+        w,
+        incoming(w.element),
+        outgoing(w.element),
+        boundInputsByElement.get(w.element) ?? [],
+        requiredEmitsByElement.get(w.element) ?? new Set<string>(),
+      ),
+    );
     if (w.forkGateway) {
       lines.push(...gateway(w.forkGateway, w.forkExclusive, `fan out of ${w.node.id}`));
     }
@@ -835,6 +880,7 @@ function renderNodeElement(
   incoming: readonly string[],
   outgoing: readonly string[],
   boundInputs: readonly BoundInput[],
+  requiredEmits: ReadonlySet<string>,
 ): string {
   const el = w.element;
   const name = escapeXml(`${w.node.kind}: ${w.node.id}`);
@@ -843,7 +889,7 @@ function renderNodeElement(
     ...outgoing.map((id) => `      <bpmn:outgoing>${id}</bpmn:outgoing>`),
   ];
   const io = ioMappingLines(w, boundInputs);
-  const inner = innerBodyLines(w);
+  const inner = innerBodyLines(w, requiredEmits);
   const lines = [
     `    <bpmn:subProcess id="${el}" name="${name}">`,
     ...flowRefs,
@@ -965,12 +1011,18 @@ function ioMappingLines(w: NodeWiring, boundInputs: readonly BoundInput[]): stri
  * the S3 scheduled user-task + generic form + SLA. Each is a single-entry / single-exit subgraph with
  * a bounded timeout that escalates onto a human-completable user task (or, for `human`, records an
  * escalated outcome). */
-function innerBodyLines(w: NodeWiring): string[] {
+function innerBodyLines(w: NodeWiring, requiredEmits: ReadonlySet<string>): string[] {
   const el = w.element;
   const node = w.node;
   switch (node.kind) {
-    case "agent":
-      return serviceBodyLines(el, node.id, attr("type", node.agent.jobType), [], node.agent.jobType);
+    case "agent": {
+      // Issue #731: an `agent` node gates its own completion on a producer contract — a terminal-success
+      // self-reported `status` AND a non-null value for every declared emit a downstream consumer binds
+      // as a required data dependency. A broken producer (returns `in_progress`, or omits a required
+      // emit) escalates AT this node instead of threading an incomplete result onward.
+      const contractGate = { requiredEmits: normaliseEmits(node).filter((f) => requiredEmits.has(f.name)) };
+      return serviceBodyLines(el, node.id, attr("type", node.agent.jobType), [], node.agent.jobType, contractGate);
+    }
     case "connector":
       return serviceBodyLines(el, node.id, `type="${DELEGATE_TASK_TYPE.connector}"`, [], `connector → ${node.connector.target}`);
     case "wait":
@@ -986,12 +1038,57 @@ function innerBodyLines(w: NodeWiring): string[] {
  * escalates the stalled node onto a human-completable user task. `taskDefAttr` is the pre-rendered
  * `type="…"` attribute; `taskProps` are optional `<zeebe:property>` envelope lines; `descriptor`
  * names the stalled work (job type / connector target) for the escalation task's context line (#499). */
+/** The FEEL boolean an `agent` node's producer-contract gate (issue #731) evaluates on its `_gate`
+ * exclusive split's SUCCESS flow: the completion proceeds onward only when the self-reported `status`
+ * is a terminal success (or absent/null) AND every required-data-dependency emit is populated non-null.
+ * Reads the job's returned variables from the subProcess scope (the emit source var for an agent fact
+ * is the fact's own name — see {@link factSourceVar}). When it is false the split's DEFAULT flow routes
+ * to the contract-escalation task instead. */
+function agentContractProceedCondition(requiredEmits: readonly DeliveryFact[]): string {
+  const statusList = `[${AGENT_TERMINAL_SUCCESS_STATUSES.map((s) => feelStr(s)).join(", ")}]`;
+  const statusOk = `(not(is defined(status)) or status = null or list contains(${statusList}, status))`;
+  const emitClauses = requiredEmits.map((f) => `(is defined(${f.name}) and ${f.name} != null)`);
+  return `=${[statusOk, ...emitClauses].join(" and ")}`;
+}
+
+/** The read-only context line seeded onto an `agent` node's producer-contract escalation (issue #731),
+ * so the human/agent unsticking it sees WHY it parked — the node, its job type, the actual reported
+ * status, and, per required emit, whether it arrived. Turns the instance-10746 failure (a silent null
+ * thread + two mis-attributed CONSUMER incidents) into one correctly-attributed PRODUCER escalation. */
+function agentContractContextFeel(nodeId: string, descriptor: string, requiredEmits: readonly DeliveryFact[]): string {
+  const statuses = AGENT_TERMINAL_SUCCESS_STATUSES.join("/");
+  const head = feelStr(
+    `Node ${nodeId} (${descriptor}) completed but did not satisfy its producer contract — a producer must ` +
+      `self-report a terminal-success status (${statuses}) and populate every emit a downstream node requires ` +
+      "before its result routes onward. Reported status=",
+  );
+  let feel = `=${head} + (if (is defined(status)) then string(status) else "(none)") + "."`;
+  for (const f of requiredEmits) {
+    const present = `(is defined(${f.name}) and ${f.name} != null)`;
+    feel += ` + " Required emit '${f.name}': " + (if ${present} then "present" else "MISSING (null)") + "."`;
+  }
+  return feel;
+}
+
+/** `agent`/`connector` body: `start → serviceTask → end`, with a bounded `=nodeTimeout` boundary that
+ * escalates the stalled node onto a human-completable user task. `taskDefAttr` is the pre-rendered
+ * `type="…"` attribute; `taskProps` are optional `<zeebe:property>` envelope lines; `descriptor`
+ * names the stalled work (job type / connector target) for the escalation task's context line (#499).
+ *
+ * `contractGate` (agent only, issue #731) inserts a PRODUCER post-condition between the task and the
+ * end: an exclusive split whose SUCCESS flow ({@link agentContractProceedCondition}) proceeds only on a
+ * terminal-success `status` AND non-null required emits, and whose DEFAULT flow parks a broken producer
+ * on a SECOND (contract) escalation task — distinct from the `__esc` timeout twin. That escalation is
+ * RESUMABLE with the node's required emits (a human/agent supplies the missing fact, which the
+ * subProcess output mapping then publishes as `<el>_<fact>`), mirroring the #514 Defect-B wait resume.
+ * Omitted for a `connector` (no self-reported status contract), whose body stays `task → end`. */
 function serviceBodyLines(
   el: string,
   nodeId: string,
   taskDefAttr: string,
   taskProps: readonly string[],
   descriptor: string,
+  contractGate?: { requiredEmits: readonly DeliveryFact[] },
 ): string[] {
   const esc = escalationTaskElement(el);
   const taskExt =
@@ -1009,7 +1106,19 @@ function serviceBodyLines(
           `          <zeebe:taskDefinition ${taskDefAttr} />`,
           "        </bpmn:extensionElements>",
         ];
-  return [
+  const timeoutEscalation = escalationTaskLines(
+    esc,
+    nodeId,
+    [`${el}_i2`],
+    `${el}_i3`,
+    escalationContextFeel(
+      nodeId,
+      descriptor,
+      "nodeTimeout",
+      "; in-flight work may already exist — check for a draft PR or partial state before retrying or reassigning.",
+    ),
+  );
+  const head = [
     `      <bpmn:startEvent id="${el}_start"><bpmn:outgoing>${el}_i0</bpmn:outgoing></bpmn:startEvent>`,
     `      <bpmn:serviceTask id="${el}_task" name="${escapeXml(nodeId)}">`,
     ...taskExt,
@@ -1020,21 +1129,49 @@ function serviceBodyLines(
     `        <bpmn:outgoing>${el}_i2</bpmn:outgoing>`,
     `        <bpmn:timerEventDefinition id="${el}_ted"><bpmn:timeDuration xsi:type="bpmn:tFormalExpression">=nodeTimeout</bpmn:timeDuration></bpmn:timerEventDefinition>`,
     "      </bpmn:boundaryEvent>",
-    ...escalationTaskLines(
-      esc,
-      nodeId,
-      [`${el}_i2`],
-      `${el}_i3`,
-      escalationContextFeel(
-        nodeId,
-        descriptor,
-        "nodeTimeout",
-        "; in-flight work may already exist — check for a draft PR or partial state before retrying or reassigning.",
-      ),
-    ),
-    `      <bpmn:endEvent id="${el}_end"><bpmn:incoming>${el}_i1</bpmn:incoming><bpmn:incoming>${el}_i3</bpmn:incoming></bpmn:endEvent>`,
+    ...timeoutEscalation,
+  ];
+
+  if (contractGate === undefined) {
+    return [
+      ...head,
+      `      <bpmn:endEvent id="${el}_end"><bpmn:incoming>${el}_i1</bpmn:incoming><bpmn:incoming>${el}_i3</bpmn:incoming></bpmn:endEvent>`,
+      flow(`${el}_i0`, `${el}_start`, `${el}_task`),
+      flow(`${el}_i1`, `${el}_task`, `${el}_end`),
+      flow(`${el}_i2`, `${el}_be`, esc),
+      flow(`${el}_i3`, esc, `${el}_end`),
+    ];
+  }
+
+  // Producer-contract gate (issue #731): task → gate → (proceed | contract-escalation) → end.
+  const contractEsc = contractEscalationTaskElement(el);
+  const emits = contractGate.requiredEmits;
+  const proceedCondition = agentContractProceedCondition(emits);
+  const contractEscalation = escalationTaskLines(
+    contractEsc,
+    nodeId,
+    [`${el}_g1`],
+    `${el}_g2`,
+    agentContractContextFeel(nodeId, descriptor, emits),
+    // Resumable when the producer owes a required emit: a human/agent supplies the missing fact, which
+    // the subProcess output ioMapping then publishes as `<el>_<fact>` (agent emit source = fact name),
+    // so the downstream consumer late-binds a real value instead of the null that poisoned it (#731).
+    emits.length > 0 ? { resume: { kind: "agent" as const, emits } } : undefined,
+  );
+  return [
+    ...head,
+    `      <bpmn:exclusiveGateway id="${el}_gate" name="producer contract met?" default="${el}_g1">`,
+    `        <bpmn:incoming>${el}_i1</bpmn:incoming>`,
+    `        <bpmn:outgoing>${el}_g0</bpmn:outgoing>`,
+    `        <bpmn:outgoing>${el}_g1</bpmn:outgoing>`,
+    "      </bpmn:exclusiveGateway>",
+    ...contractEscalation,
+    `      <bpmn:endEvent id="${el}_end"><bpmn:incoming>${el}_g0</bpmn:incoming><bpmn:incoming>${el}_i3</bpmn:incoming><bpmn:incoming>${el}_g2</bpmn:incoming></bpmn:endEvent>`,
     flow(`${el}_i0`, `${el}_start`, `${el}_task`),
-    flow(`${el}_i1`, `${el}_task`, `${el}_end`),
+    flow(`${el}_i1`, `${el}_task`, `${el}_gate`),
+    `      <bpmn:sequenceFlow id="${el}_g0" name="contract met" sourceRef="${el}_gate" targetRef="${el}_end"><bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">${proceedCondition}</bpmn:conditionExpression></bpmn:sequenceFlow>`,
+    `      <bpmn:sequenceFlow id="${el}_g1" name="contract broken" sourceRef="${el}_gate" targetRef="${contractEsc}" />`,
+    flow(`${el}_g2`, contractEsc, `${el}_end`),
     flow(`${el}_i2`, `${el}_be`, esc),
     flow(`${el}_i3`, esc, `${el}_end`),
   ];
