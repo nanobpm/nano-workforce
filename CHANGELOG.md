@@ -1,3 +1,9 @@
+## [0.181.0](https://github.com/nanobpm/nano-workforce/compare/v0.180.0...v0.181.0) (2026-09-04)
+
+### Features
+
+* delivery-graph MCP DX — interleaved sequence gates, paginated guide sections, stage-supersede visibility ([#741](https://github.com/nanobpm/nano-workforce/issues/741)) ([6f10e8a](https://github.com/nanobpm/nano-workforce/commit/6f10e8a25721645af4e5f932f2cbaa9ad6025b70)), closes [#740](https://github.com/nanobpm/nano-workforce/issues/740) [#460](https://github.com/nanobpm/nano-workforce/issues/460) [#740](https://github.com/nanobpm/nano-workforce/issues/740)
+
 ## [0.180.0](https://github.com/nanobpm/nano-workforce/compare/v0.179.2...v0.180.0) (2026-09-04)
 
 ### Features
