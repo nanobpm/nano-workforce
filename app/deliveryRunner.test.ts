@@ -10,8 +10,9 @@
 // The engine-native EXECUTION of a prepared graph (deploy + run + gate + fan-in + late-bind + dedupe) is
 // proven end-to-end in `e2e/delivery-graph.e2e.ts`.
 import { test } from "node:test";
-import { assert, assertEquals } from "#test-assert";
+import { assert, assertEquals, assertRejects } from "#test-assert";
 import { prepareDeliveryGraph, renderIdempotencyPreamble, runDeliveryGraph } from "./deliveryRunner.ts";
+import { RepoEnvelopeUnresolvedError } from "./repoEnvelope.ts";
 import type { DeliveryGraph } from "../nano-generated/api-io.d.ts";
 
 const GRAPH: DeliveryGraph = {
@@ -357,7 +358,7 @@ test("runDeliveryGraph coerces a numeric engine processInstanceKey to a string h
     deployResources: async () => [],
     createInstance: async () => ({ processInstanceKey: 987654321 as unknown as string }),
   };
-  const r = await runDeliveryGraph(engine, GRAPH);
+  const r = await runDeliveryGraph(engine, GRAPH, { repoless: true });
   assert(r.ok, `expected ok:true, got ${JSON.stringify(r)}`);
   assertEquals(r.handle.processInstanceKey, "987654321");
   assertEquals(typeof r.handle.processInstanceKey, "string");
@@ -401,22 +402,36 @@ test("runDeliveryGraph seeds the repository isolation envelope when repository +
   assertEquals("branch" in repo, false);
 });
 
-test("runDeliveryGraph emits NO envelope when repository/baseBranch are absent — repo-less graphs unchanged (#686)", async () => {
+test("runDeliveryGraph seeds NO envelope ONLY on an EXPLICIT repoless run — the conscious opt-out (#729)", async () => {
+  const { engine, seen } = captureCreateInstanceVars();
+  const r = await runDeliveryGraph(engine, GRAPH, { repoless: true });
+  assert(r.ok, `expected ok:true for an explicit repoless run, got ${JSON.stringify(r)}`);
+  assertEquals("io.nanobpm.agentTask" in seen(), false, "an explicit repoless run must emit no envelope");
+});
+
+test("runDeliveryGraph THROWS on an unresolved repo/base when NOT repoless — never a silent shared launch dir (#729)", async () => {
+  // Issue #729: the fan-out seed is REQUIRED. Dispatching without a resolvable repository + base branch
+  // (and without the explicit `repoless` opt-out) must fail LOUDLY at seed time rather than silently
+  // emit `{}` and degrade every agent job to the worker's shared launch dir (issue #684's field failure
+  // re-opened as a silent fallback). Missing both, or only one of the pair, is unresolved.
   for (const options of [{}, { repository: "owner/repo" }, { baseBranch: "main" }, { repository: "  ", baseBranch: "main" }]) {
-    const { engine, seen } = captureCreateInstanceVars();
-    const r = await runDeliveryGraph(engine, GRAPH, options);
-    assert(r.ok, `expected ok:true for ${JSON.stringify(options)}, got ${JSON.stringify(r)}`);
-    assertEquals("io.nanobpm.agentTask" in seen(), false, `no envelope expected for ${JSON.stringify(options)}`);
+    const { engine } = captureCreateInstanceVars();
+    await assertRejects(
+      () => runDeliveryGraph(engine, GRAPH, options),
+      RepoEnvelopeUnresolvedError,
+    );
   }
 });
 
-test("runDeliveryGraph drops a malformed repository rather than emitting a bogus clone URL (#686)", async () => {
-  const { engine, seen } = captureCreateInstanceVars();
-  // A value that is not exactly `owner/repo` (a trailing `.git`) must degrade to NO envelope — the
-  // helper's defence-in-depth guard — never a double-suffixed `…/owner/repo.git.git` clone URL.
-  const r = await runDeliveryGraph(engine, GRAPH, { repository: "owner/repo.git", baseBranch: "main" });
-  assert(r.ok, `expected ok:true, got ${JSON.stringify(r)}`);
-  assertEquals("io.nanobpm.agentTask" in seen(), false);
+test("runDeliveryGraph THROWS on a malformed repository rather than emitting a bogus clone URL (#729)", async () => {
+  const { engine } = captureCreateInstanceVars();
+  // A value that is not exactly `owner/repo` (a trailing `.git`) is an UNRESOLVED input on the required
+  // path — it must throw, never degrade to a double-suffixed `…/owner/repo.git.git` clone URL nor to a
+  // silent no-envelope launch-dir fallback.
+  await assertRejects(
+    () => runDeliveryGraph(engine, GRAPH, { repository: "owner/repo.git", baseBranch: "main" }),
+    RepoEnvelopeUnresolvedError,
+  );
 });
 
 test("the canonical `agent → converge-merge → wait[pr merged]` graph DISPATCHES with a fact-bound wait target (#570)", async () => {
@@ -444,7 +459,7 @@ test("the canonical `agent → converge-merge → wait[pr merged]` graph DISPATC
     deployResources: async () => [],
     createInstance: async () => ({ processInstanceKey: "555" }),
   };
-  const r = await runDeliveryGraph(engine, graph);
+  const r = await runDeliveryGraph(engine, graph, { repoless: true });
   assert(r.ok, `expected the canonical fact-bound wait[pr] graph to launch, got ${JSON.stringify(r)}`);
   assertEquals(r.handle.processInstanceKey, "555");
 });

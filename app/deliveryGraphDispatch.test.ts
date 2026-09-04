@@ -91,7 +91,7 @@ const SIDE_EFFECTING = {
 
 test("dispatchDeliveryGraphRun: a human-only graph launches straight away (running), one engine instance", async () => {
   const { app, started, runs } = makeApp();
-  const res = await dispatchDeliveryGraphRun(app, HUMAN_ONLY);
+  const res = await dispatchDeliveryGraphRun(app, HUMAN_ONLY, { repoless: true });
   assertEquals(res.ok, true);
   if (!res.ok) return;
   assertEquals(res.status, "running");
@@ -103,7 +103,7 @@ test("dispatchDeliveryGraphRun: a human-only graph launches straight away (runni
 
 test("dispatchDeliveryGraphRun: a side-effecting graph dispatches with NO approval token — the operator seam IS the approval", async () => {
   const { app, started, runs } = makeApp();
-  const res = await dispatchDeliveryGraphRun(app, SIDE_EFFECTING);
+  const res = await dispatchDeliveryGraphRun(app, SIDE_EFFECTING, { repoless: true });
   assertEquals(res.ok, true);
   if (!res.ok) return;
   assertEquals(res.status, "running");
@@ -114,9 +114,9 @@ test("dispatchDeliveryGraphRun: a side-effecting graph dispatches with NO approv
 
 test("dispatchDeliveryGraphRun: a re-dispatch of a still-running run short-circuits (alreadyRunning) — the side effect launches at most once", async () => {
   const { app, started } = makeApp();
-  const first = await dispatchDeliveryGraphRun(app, SIDE_EFFECTING);
+  const first = await dispatchDeliveryGraphRun(app, SIDE_EFFECTING, { repoless: true });
   assert(first.ok);
-  const second = await dispatchDeliveryGraphRun(app, SIDE_EFFECTING);
+  const second = await dispatchDeliveryGraphRun(app, SIDE_EFFECTING, { repoless: true });
   assertEquals(second.ok, true);
   if (!second.ok) return;
   assertEquals(second.alreadyRunning, true);
@@ -125,8 +125,8 @@ test("dispatchDeliveryGraphRun: a re-dispatch of a still-running run short-circu
 
 test("dispatchDeliveryGraphRun: an explicit idempotency key forces a distinct run row", async () => {
   const { app, started } = makeApp();
-  await dispatchDeliveryGraphRun(app, HUMAN_ONLY);
-  await dispatchDeliveryGraphRun(app, HUMAN_ONLY, { runKey: "second-run" });
+  await dispatchDeliveryGraphRun(app, HUMAN_ONLY, { repoless: true });
+  await dispatchDeliveryGraphRun(app, HUMAN_ONLY, { runKey: "second-run", repoless: true });
   assertEquals(started.length, 2);
 });
 

@@ -20,7 +20,7 @@ import { coalesceTitle, fetchIssueTitle } from "./github.ts";
 import { derivedTrackingTable } from "./instanceTracking.ts";
 import { ESCALATION_SLA_TIMEOUT, normalizeBaseBranch, type ParsedIssue, renderBaseBranchBrief } from "./plan.ts";
 import type { ReadinessProbe } from "./readiness.ts";
-import { repoEnvelopeVars } from "./repoEnvelope.ts";
+import { requireRepoEnvelopeVars } from "./repoEnvelope.ts";
 
 /** Optional intake-time readiness gate for a feature run (issue #295): the `capability`/`command`/…
  * probes the run must ALL satisfy before its implementation agent is dispatched (parked, durably, at
@@ -491,9 +491,12 @@ export async function startFeature(
       // implementation jobs share — and clobber — one checkout, violating the durable-resume design).
       // A feature run is PRE-PR: there is no head branch yet, so the harness checks out the BASE
       // branch (`ref = base`) and creates the deterministic `feat/<task.id>` feature branch itself
-      // (`branchCreate`), matching the agent-guide's `feat/*` convention. Spread last so an unresolved
-      // repo (`{}`) leaves the other vars untouched.
-      ...repoEnvelopeVars(parsed.repo, base, null, null, prePrBranch),
+      // (`branchCreate`), matching the agent-guide's `feat/*` convention. This is a fan-out seed, so it
+      // is REQUIRED (issue #729): `parsed.repo` is regex-bound (`parseIssue`) and `base` is
+      // `normalizeBaseBranch`-validated non-blank, so the `requireRepoEnvelopeVars` guard never trips
+      // here — but it turns an unresolved repo/base into a HARD launch failure rather than a silent `{}`
+      // that would degrade the agent to the shared launch dir.
+      ...requireRepoEnvelopeVars(parsed.repo, base, null, null, prePrBranch),
     },
   });
   const processKey = processInstanceKey == null ? null : String(processInstanceKey);

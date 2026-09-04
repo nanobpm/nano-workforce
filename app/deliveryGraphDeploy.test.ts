@@ -68,7 +68,7 @@ test("deploy+advance: a well-formed graph deploys through the real engine and ev
     await engine.registerWorker("pr.readiness-probe", async () => ({ ready: true, mergedSha: "deadbeefcafe" }));
     await engine.registerWorker(DELIVERY_CONNECTOR_TASK_TYPE, async () => ({}));
 
-    const run = await runDeliveryGraph(engine, MATRIX_GRAPH);
+    const run = await runDeliveryGraph(engine, MATRIX_GRAPH, { repoless: true });
     assert(run.ok, `runDeliveryGraph failed: ${JSON.stringify(run)}`);
     const key = run.handle.processInstanceKey;
 
@@ -120,7 +120,7 @@ test("deploy+advance: a stalled service node escalates on its node-timeout bound
     };
     // Short node timeout so the boundary fires within one virtual-clock advance; a long SLA so the
     // human node's own escalation boundary never fires during the drive.
-    const run = await runDeliveryGraph(engine, graph, { nodeTimeout: "PT1M", escalationSlaTimeout: "PT1H" });
+    const run = await runDeliveryGraph(engine, graph, { nodeTimeout: "PT1M", escalationSlaTimeout: "PT1H", repoless: true });
     assert(run.ok, `runDeliveryGraph failed: ${JSON.stringify(run)}`);
     const key = run.handle.processInstanceKey;
 
@@ -256,7 +256,7 @@ test("#543 transcript correlation: a completed agent job exposes a resolvable in
       ],
       edges: [{ from: "impl", to: "review" }],
     };
-    const run = await runDeliveryGraph(engine, graph);
+    const run = await runDeliveryGraph(engine, graph, { repoless: true });
     assert(run.ok, `runDeliveryGraph failed: ${JSON.stringify(run)}`);
     const key = run.handle.processInstanceKey;
 
@@ -324,7 +324,7 @@ async function driveGuarded(outcome: "breaking" | "green"): Promise<{ state: str
       return {};
     });
 
-    const run = await runDeliveryGraph(engine, GUARDED_ADOPT);
+    const run = await runDeliveryGraph(engine, GUARDED_ADOPT, { repoless: true });
     assert(run.ok, `runDeliveryGraph failed: ${JSON.stringify(run)}`);
     const key = run.handle.processInstanceKey;
 
@@ -425,7 +425,7 @@ async function driveGuardedRealAgent(outcome: "breaking" | "compatible"): Promis
       return {};
     });
 
-    const run = await runDeliveryGraph(engine, GUARDED_ADOPT_REAL);
+    const run = await runDeliveryGraph(engine, GUARDED_ADOPT_REAL, { repoless: true });
     assert(run.ok, `runDeliveryGraph failed: ${JSON.stringify(run)}`);
     const key = run.handle.processInstanceKey;
 
@@ -487,7 +487,7 @@ test("S7 deploy+route: mutually-exclusive leaves join End on an exclusive merge 
         doneRan = true;
         return {};
       });
-      const run = await runDeliveryGraph(engine, graph, { escalationSlaTimeout: "PT1H" });
+      const run = await runDeliveryGraph(engine, graph, { escalationSlaTimeout: "PT1H", repoless: true });
       assert(run.ok, `runDeliveryGraph failed: ${JSON.stringify(run)}`);
       const key = run.handle.processInstanceKey;
       let state = "?";
@@ -516,7 +516,7 @@ test("S7 deploy+route: mutually-exclusive leaves join End on an exclusive merge 
         doneRan = true;
         return {};
       });
-      const run = await runDeliveryGraph(engine, graph, { escalationSlaTimeout: "PT1H" });
+      const run = await runDeliveryGraph(engine, graph, { escalationSlaTimeout: "PT1H", repoless: true });
       assert(run.ok, `runDeliveryGraph failed: ${JSON.stringify(run)}`);
       const key = run.handle.processInstanceKey;
       let parked = "";

@@ -108,6 +108,42 @@ export default defineOperation("dispatchDeliveryGraph", async ({ body }, app) =>
     baseBranch = baseRaw;
   }
 
+  // Repository provisioning is REQUIRED on this fan-out door (issue #729): a delivery-graph run whose
+  // `agent` nodes implement against a repo MUST be dispatched with a resolvable `repository` + base
+  // branch so every `senior:*` job provisions an ISOLATED clone. Silently dispatching envelope-less
+  // (issue #684's field failure, re-opened as a silent fallback) let concurrent fan-out workers on one
+  // host share — and clobber — a single launch-dir checkout. So the operator must EITHER supply BOTH
+  // `repository` and `baseBranch`, OR explicitly opt out with `repoless: true` for a genuinely
+  // checkout-less graph — the default can never silently share a checkout.
+  const hasRepoless = body !== null && typeof body === "object" && "repoless" in body;
+  const repolessRaw = hasRepoless ? body.repoless : undefined;
+  if (hasRepoless && typeof repolessRaw !== "boolean") {
+    app.log.warn("dispatch-delivery-graph rejected: non-boolean repoless");
+    return { status: 400, body: { ok: false, error: "`repoless` must be a boolean (`true` to dispatch a checkout-less graph)" } };
+  }
+  const repoless = repolessRaw === true;
+  if (repoless && (repository !== undefined || baseBranch !== undefined)) {
+    app.log.warn("dispatch-delivery-graph rejected: repoless with repository/baseBranch");
+    return {
+      status: 400,
+      body: { ok: false, error: "`repoless: true` is mutually exclusive with `repository`/`baseBranch` — pass one or the other, not both" },
+    };
+  }
+  if (!repoless && (repository === undefined || baseBranch === undefined)) {
+    app.log.warn("dispatch-delivery-graph rejected: missing repository/baseBranch (no repoless opt-in)", {
+      hasRepository: repository !== undefined,
+      hasBaseBranch: baseBranch !== undefined,
+    });
+    return {
+      status: 400,
+      body: {
+        ok: false,
+        error:
+          "a delivery-graph dispatch must provision an isolated checkout: supply BOTH `repository` (`owner/repo`) and `baseBranch`, or set `repoless: true` to dispatch a checkout-less graph — dispatching without either would silently share the worker's launch dir across agents (issue #729)",
+      },
+    };
+  }
+
   // Load the live staged proposal for this digest — refuses an unknown/expired/superseded/already-
   // dispatched digest cleanly (no run is launched).
   const proposal = await getStagedProposal(app.data, digest);
@@ -131,7 +167,7 @@ export default defineOperation("dispatchDeliveryGraph", async ({ body }, app) =>
     return { status: 400, body: { ok: false, error: `staged proposal ${digest} is corrupt: ${err instanceof Error ? err.message : String(err)}` } };
   }
 
-  const dispatched = await dispatchDeliveryGraphRun(app, graph, { runKey: idempotencyKey, title: proposal.title, repository, baseBranch, ...timeouts });
+  const dispatched = await dispatchDeliveryGraphRun(app, graph, { runKey: idempotencyKey, title: proposal.title, repository, baseBranch, repoless, ...timeouts });
   if (!dispatched.ok) {
     app.log.warn("dispatch-delivery-graph refused: compile", { digest, errors: dispatched.errors.length });
     const outBody: DeliveryGraphTextResult = {

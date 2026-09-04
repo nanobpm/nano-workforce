@@ -2123,24 +2123,35 @@ components:
           maxLength: 255
           pattern: '^[A-Za-z0-9-]+/(?!.*\.[Gg][Ii][Tt]$)[A-Za-z0-9._-]+$'
           description: >-
-            OPTIONAL `owner/repo` the run's `agent` nodes implement against (#684/#686). When supplied
-            together with `baseBranch`, the runner seeds the canonical `io.nanobpm.agentTask.repository`
-            provisioning envelope (`repoEnvelopeVars`) as a run-root process variable so every agent
-            node's servicing `senior:*` job gets an ISOLATED throwaway clone instead of inheriting the
-            worker's launch dir. Absent → no envelope (legacy launch-dir behaviour, unchanged). A value
-            that is not exactly `owner/repo` is rejected at submit.
+            The `owner/repo` the run's `agent` nodes implement against (#684/#686). REQUIRED together with
+            `baseBranch` UNLESS `repoless: true` is set (#729): the runner seeds the canonical
+            `io.nanobpm.agentTask.repository` provisioning envelope (`repoEnvelopeVars`) as a run-root
+            process variable so every agent node's servicing `senior:*` job gets an ISOLATED throwaway
+            clone instead of inheriting — and clobbering — the worker's launch dir. A dispatch that omits
+            it (and does not set `repoless: true`) is a clean 400, never a silent launch-dir fallback. A
+            value that is not exactly `owner/repo` is rejected at submit.
         baseBranch:
           type: string
           maxLength: 255
           pattern: '^(?![/.-])(?!.*[/.]$)(?!.*\.\.)(?!.*//)(?!.*/\.)(?!.*\.lock(?:/|$))[A-Za-z0-9._/-]+$'
           description: >-
-            OPTIONAL base branch the run's `agent` nodes branch off (#684/#686) — the `ref` the harness
-            checks out in the isolated clone (the PRE-PR shape: each agent cuts its own `feat/<node.id>`
-            branch off this base). Only consulted when `repository` is also set; absent → no envelope. A
+            The base branch the run's `agent` nodes branch off (#684/#686) — the `ref` the harness checks
+            out in the isolated clone (the PRE-PR shape: each agent cuts its own `feat/<node.id>` branch
+            off this base). REQUIRED together with `repository` UNLESS `repoless: true` is set (#729). A
             value that is not a plausible git branch name (whitespace, shell metacharacters, a leading
             `-`, `..`/`//`, a path segment starting with `.` or ending in `.lock`, etc.) is rejected at
             submit. This pattern mirrors the authoritative server-side gate (`isPlausibleBranchName`,
             app/baseBranch.ts) so the documented contract and the door agree.
+        repoless:
+          type: boolean
+          description: >-
+            EXPLICIT opt-out of repository provisioning (#729). Set `true` to dispatch a genuinely
+            checkout-less graph (e.g. one whose nodes touch no repository) with NO isolation envelope — the
+            legacy launch-dir behaviour, but now a CONSCIOUS choice rather than a silent fallback.
+            Mutually exclusive with `repository`/`baseBranch` (supplying either alongside `repoless: true`
+            is a 400). When omitted/false, `repository` + `baseBranch` are MANDATORY: dispatching without
+            either would silently share the worker's launch dir across concurrent fan-out agents (the
+            issue #684 field failure), so it is rejected with a 400.
     DeliveryGraphDismissRequest:
       description: >-
         The OPERATOR dismiss request (#520). The cockpit's staged-proposals grid posts the content
