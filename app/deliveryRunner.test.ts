@@ -12,7 +12,7 @@
 import { test } from "node:test";
 import { assert, assertEquals, assertRejects } from "#test-assert";
 import { prepareDeliveryGraph, renderIdempotencyPreamble, runDeliveryGraph } from "./deliveryRunner.ts";
-import { RepoEnvelopeUnresolvedError } from "./repoEnvelope.ts";
+import { RepoEnvelopeConflictError, RepoEnvelopeUnresolvedError } from "./repoEnvelope.ts";
 import type { DeliveryGraph } from "../nano-generated/api-io.d.ts";
 
 const GRAPH: DeliveryGraph = {
@@ -432,6 +432,25 @@ test("runDeliveryGraph THROWS on a malformed repository rather than emitting a b
     () => runDeliveryGraph(engine, GRAPH, { repository: "owner/repo.git", baseBranch: "main" }),
     RepoEnvelopeUnresolvedError,
   );
+});
+
+test("runDeliveryGraph THROWS when repoless is combined with repository/baseBranch — never silently disables isolation (#729)", async () => {
+  // `repoless: true` is mutually exclusive with `repository`/`baseBranch`. The dispatch door rejects the
+  // conflicting shape with a 400, but a PROGRAMMATIC caller that bypasses the door could pass both — and
+  // the runner would silently drop the repo/base and emit no envelope, re-disabling the exact isolation
+  // the repo/base named. The runner must fail LOUDLY too (defense-in-depth), so isolation can never be
+  // silently disabled by a conflicting call. Either half of the pair alongside `repoless` is a conflict.
+  for (const options of [
+    { repoless: true, repository: "owner/repo", baseBranch: "main" },
+    { repoless: true, repository: "owner/repo" },
+    { repoless: true, baseBranch: "main" },
+  ]) {
+    const { engine } = captureCreateInstanceVars();
+    await assertRejects(
+      () => runDeliveryGraph(engine, GRAPH, options),
+      RepoEnvelopeConflictError,
+    );
+  }
 });
 
 test("the canonical `agent → converge-merge → wait[pr merged]` graph DISPATCHES with a fact-bound wait target (#570)", async () => {

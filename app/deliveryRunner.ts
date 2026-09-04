@@ -20,7 +20,7 @@ import type { DeliveryFact, DeliveryGraph, DeliveryNode } from "../nano-generate
 import { TRANSCRIPT_URL_BASE_VAR, transcriptUrlBaseFor } from "./agentic/transcript-url.ts";
 import { assertNever, compileDeliveryGraph, DELIVERY_GRAPH_PROCESS_ID } from "./deliveryGraphCompiler.ts";
 import { DEFAULT_EVERY_MS, msToIsoDuration, parseProbe, readinessPollEvery, readinessTimeout } from "./readiness.ts";
-import { requireRepoEnvelopeVars } from "./repoEnvelope.ts";
+import { RepoEnvelopeConflictError, requireRepoEnvelopeVars } from "./repoEnvelope.ts";
 import { isoDuration } from "./reviewWait.ts";
 
 /** The content digest of a compiled graph — `sha256(semanticBpmn)[:12]` — the single source of truth
@@ -197,6 +197,18 @@ export async function runDeliveryGraph(
   // run `failed`) rather than silently emitting `{}` and degrading every agent to the shared launch dir.
   // Only an explicit `repoless: true` (a conscious operator opt-in for a genuinely repo-less graph)
   // dispatches with no envelope.
+  //
+  // `repoless: true` is MUTUALLY EXCLUSIVE with `repository`/`baseBranch`: the dispatch door already
+  // rejects the conflicting shape with a 400, but a PROGRAMMATIC caller (test/internal) that bypasses
+  // the door could pass both — and silently disable isolation (the `repoless` arm just drops the
+  // repo/base and emits `{}`). Re-enforce the exclusivity HERE too (defense-in-depth, mirroring the
+  // door) so a conflicting-but-well-meant call fails LOUDLY at seed time rather than quietly degrading
+  // to the shared launch dir it named a repo to avoid.
+  if (options.repoless === true && (repo !== null || base !== null)) {
+    throw new RepoEnvelopeConflictError(
+      `repoless run also named repository=${JSON.stringify(repo)} baseBranch=${JSON.stringify(base)}`,
+    );
+  }
   const repoVars = options.repoless === true ? {} : requireRepoEnvelopeVars(repo ?? "", base, base);
   const { processInstanceKey } = await engine.createInstance({
     processDefinitionId,

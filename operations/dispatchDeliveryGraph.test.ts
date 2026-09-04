@@ -50,7 +50,10 @@ describe("dispatchDeliveryGraph — operator dispatch by staged-proposal digest"
   test("a missing/blank digest → 400 with a human error, nothing launched", async () => {
     const app = await boot();
     assert.ok(app.api);
-    const res = await app.api.call<{ ok: boolean; error?: string }>("dispatchDeliveryGraph", { body: { digest: "  " } });
+    // Carry a valid `repoless: true` variant so the body clears the edge `oneOf` and reaches the door's
+    // own blank-digest guard (the concern under test) rather than being rejected earlier as a shapeless
+    // request — a blank digest is still a clean 400 with a human error, launching nothing.
+    const res = await app.api.call<{ ok: boolean; error?: string }>("dispatchDeliveryGraph", { body: { digest: "  ", repoless: true } });
     assert.equal(res.status, 400);
     assert.equal(res.body.ok, false);
     assert.ok(typeof res.body.error === "string" && res.body.error.length > 0);
@@ -313,7 +316,8 @@ describe("dispatchDeliveryGraph — operator dispatch by staged-proposal digest"
   // Issue #729: the fan-out dispatch door must REQUIRE repository provisioning — either a resolvable
   // `repository` + `baseBranch`, or an EXPLICIT `repoless: true` opt-out — so it can never silently
   // dispatch envelope-less and let concurrent fan-out agents share (and clobber) the worker's launch
-  // dir (issue #684's field failure re-opened as a silent fallback).
+  // dir (issue #684's field failure re-opened as a silent fallback). This "neither/nor" shape is now
+  // rejected at the EDGE by the request `oneOf` (the two allowed variants), not only inside the door.
   test("a dispatch with NEITHER repository/baseBranch NOR repoless is rejected at submit → 400, nothing launched (#729)", async () => {
     const app = await boot();
     assert.ok(app.api);
@@ -323,7 +327,8 @@ describe("dispatchDeliveryGraph — operator dispatch by staged-proposal digest"
       body: { digest: staged.body.digest },
     });
     assert.equal(res.status, 400);
-    assert.equal(res.body.ok, false);
+    // The `oneOf` edge validator names the two allowed shapes — the neither/nor body matches neither.
+    assert.ok(typeof res.body.error === "string" && res.body.error.length > 0);
     // Loud, not silent: nothing launched and the proposal stays staged (re-dispatchable once a repo /
     // repoless choice is supplied).
     assert.equal((await deliveryGraphRuns(app.db).all()).length, 0);

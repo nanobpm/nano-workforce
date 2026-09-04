@@ -41,6 +41,23 @@ export class RepoEnvelopeUnresolvedError extends Error {
   }
 }
 
+/** Raised when a fan-out dispatch supplies a repository-isolation envelope (`repository`/`baseBranch`)
+ * AND an explicit `repoless: true` opt-out at the same time (issue #729). The two are mutually
+ * exclusive: `repoless: true` means "dispatch a genuinely checkout-less graph with NO envelope", so a
+ * caller that also names a repo/base is contradictory. The dispatch door already rejects this shape
+ * with a 400, but a PROGRAMMATIC caller that bypasses the door could still pass both — and silently
+ * disable the very isolation the envelope guards (the runner would drop the repo/base and emit `{}`).
+ * Failing loudly here too keeps the mutual exclusivity enforced at the seed point, not only at the HTTP
+ * edge, so isolation can never be silently disabled by a conflicting-but-well-meant call. */
+export class RepoEnvelopeConflictError extends Error {
+  readonly reason: string;
+  constructor(reason: string) {
+    super(`repository-isolation envelope conflicts with an explicit repoless opt-out: ${reason}`);
+    this.name = "RepoEnvelopeConflictError";
+    this.reason = reason;
+  }
+}
+
 /** Build the repository slice of the agent-task envelope for an agent job. Delivered as a *process
  * variable* under the reserved `io.nanobpm.agentTask` key so the harness provisions an isolated
  * clone — instead of the agent inheriting whatever directory the worker was launched from (which
