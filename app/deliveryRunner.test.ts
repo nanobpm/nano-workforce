@@ -31,7 +31,11 @@ const GRAPH: DeliveryGraph = {
 };
 
 async function prepareOk(graph: DeliveryGraph, options = {}) {
-  const r = await prepareDeliveryGraph(graph, options);
+  // Default to a resolvable run-level repository/baseBranch fallback (#739) so the many timeout/id/DI
+  // tests below — which don't care about repo provisioning — need not restate it; the per-node
+  // repository tests pass their own `options` (declared node repos, `repoless`, unresolved, …).
+  const opts = "repoless" in options || "repository" in options ? options : { repository: "owner/repo", baseBranch: "main", ...options };
+  const r = await prepareDeliveryGraph(graph, opts);
   assert(r.ok, `expected ok:true, got ${JSON.stringify(r)}`);
   return r.prepared;
 }
@@ -364,90 +368,148 @@ test("runDeliveryGraph coerces a numeric engine processInstanceKey to a string h
   assertEquals(typeof r.handle.processInstanceKey, "string");
 });
 
-// Host-git provisioning (issue #684/#686): the delivery-graph runner must seed the canonical
-// `io.nanobpm.agentTask.repository` isolation envelope (`repoEnvelopeVars`) as a run-root process
-// variable so every agent cell's servicing `senior:*` job provisions an ISOLATED throwaway clone
-// instead of mutating the worker's launch dir — the delivery-graph analog of the plan.ts epic seed.
-// These pin the createInstance variables the harness (headers ∪ variables) reads.
-function captureCreateInstanceVars(): { engine: Parameters<typeof runDeliveryGraph>[0]; seen: () => Record<string, unknown> } {
-  let captured: Record<string, unknown> = {};
-  const engine = {
-    deployResources: async () => [],
-    createInstance: async (req: { variables?: Record<string, unknown> }) => {
-      captured = req.variables ?? {};
-      return { processInstanceKey: "1" };
-    },
-  };
-  return { engine, seen: () => captured };
+// Per-node repository isolation (issue #739): the delivery-graph runner seeds the canonical
+// `io.nanobpm.agentTask.repository` isolation envelope PER agent cell as flattened `<zeebe:taskHeaders>`
+// (`io.nanobpm.agentTask.repository.url`, …) injected into the deployable BPMN — NOT as a single
+// run-root process variable. Each agent node's effective repository is its own declared `agent.repository`
+// (`agent.baseBranch`), else the run-level `repository`/`baseBranch` fallback. This lets one graph fan out
+// across DIFFERENT repos (each cell its own isolated clone) without forcing `repoless`. These pin the
+// per-node headers the harness reads and the loud-failure invariants (#729 preserved/strengthened).
+function agentHeaders(bpmn: string): string[] {
+  return (bpmn.match(/io\.nanobpm\.agentTask\.[^\n]*/g) ?? []).map((s) => s.trim());
 }
 
-test("runDeliveryGraph seeds the repository isolation envelope when repository + baseBranch are supplied (#684/#686)", async () => {
-  const { engine, seen } = captureCreateInstanceVars();
-  const r = await runDeliveryGraph(engine, GRAPH, { repository: "owner/repo", baseBranch: "main" });
+test("prepareDeliveryGraph injects the repository envelope PER agent cell from the run-level fallback (#684/#686/#739)", async () => {
+  const p = await prepareOk(GRAPH, { repository: "owner/repo", baseBranch: "main" });
+  const headers = agentHeaders(p.bpmn);
+  // The run's single agent cell (`open-b`) carries the flattened envelope headers.
+  assert(headers.some((h) => h.includes('repository.url" value="https://github.com/owner/repo.git"')), `expected a repository.url header, got ${JSON.stringify(headers)}`);
+  assert(headers.some((h) => h.includes('repository.ref" value="main"')), "ref = base branch");
+  assert(headers.some((h) => h.includes('repository.baseRef" value="main"')), "baseRef = base branch");
+  assert(headers.some((h) => h.includes('repository.provider" value="github"')), "provider header");
+  assert(headers.some((h) => h.includes('repository.singleBranch" value="true"')), "branch-scoped blobless clone (#287)");
+  assert(headers.some((h) => h.includes('repository.filter" value="blob:none"')), "blobless filter");
+  // No `__repoSpec` marker survives injection — it is the compiler's digest-stable anchor only.
+  assert(!p.bpmn.includes("__repoSpec"), "the __repoSpec marker is fully replaced");
+  // No run-root `io.nanobpm.agentTask` variable — the envelope rides headers now, not a run variable.
+});
+
+test("a node's DECLARED repository/baseBranch WINS over the run-level fallback; a bare node falls back (#739)", async () => {
+  const graph: DeliveryGraph = {
+    name: "cross-repo fan-out",
+    nodes: [
+      { id: "own", kind: "agent", agent: { jobType: "senior:feature", prompt: "own repo", repository: "acme/widget", baseBranch: "develop" } },
+      { id: "fallback", kind: "agent", agent: { jobType: "senior:feature", prompt: "run repo" } },
+    ],
+    edges: [{ from: "own", to: "fallback" }],
+  };
+  const p = await prepareOk(graph, { repository: "owner/repo", baseBranch: "main" });
+  const headers = agentHeaders(p.bpmn);
+  // The declared node points at its OWN repo + base…
+  assert(headers.some((h) => h.includes('repository.url" value="https://github.com/acme/widget.git"')), "declared repo wins");
+  assert(headers.some((h) => h.includes('repository.ref" value="develop"')), "declared base wins");
+  // …while the bare node inherits the run-level fallback.
+  assert(headers.some((h) => h.includes('repository.url" value="https://github.com/owner/repo.git"')), "bare node falls back to run repo");
+  assert(headers.some((h) => h.includes('repository.ref" value="main"')), "bare node falls back to run base");
+});
+
+test("a fully NODE-PROVISIONED cross-repo graph dispatches with NO run-level repository and NO repoless (#739)", async () => {
+  const graph: DeliveryGraph = {
+    name: "self-provisioned",
+    nodes: [
+      { id: "a", kind: "agent", agent: { jobType: "senior:feature", prompt: "a", repository: "acme/one" } },
+      { id: "b", kind: "agent", agent: { jobType: "senior:feature", prompt: "b", repository: "acme/two" } },
+    ],
+    edges: [{ from: "a", to: "b" }],
+  };
+  // Neither a run-level repository/baseBranch NOR repoless — every node self-provisions.
+  const p = await prepareOk(graph, {});
+  const headers = agentHeaders(p.bpmn);
+  assert(headers.some((h) => h.includes("acme/one.git")), "node a → acme/one");
+  assert(headers.some((h) => h.includes("acme/two.git")), "node b → acme/two");
+});
+
+test("a declared repository WITHOUT a base branch omits ref/baseRef — the harness clones the default branch (#739)", async () => {
+  const graph: DeliveryGraph = {
+    name: "no base",
+    nodes: [{ id: "a", kind: "agent", agent: { jobType: "senior:feature", prompt: "a", repository: "acme/one" } }],
+    edges: [],
+  };
+  // Call the runner DIRECTLY with no run-level fallback (the shared `prepareOk` helper would inject one),
+  // so the node's declared repo is the sole source and its base is genuinely unknown.
+  const r = await prepareDeliveryGraph(graph, {});
   assert(r.ok, `expected ok:true, got ${JSON.stringify(r)}`);
-  const env = (seen() as Record<string, { repository?: Record<string, unknown> }>)["io.nanobpm.agentTask"];
-  assert(env?.repository, `expected the run-root vars to carry io.nanobpm.agentTask.repository, got ${JSON.stringify(seen())}`);
-  const repo = env.repository as Record<string, unknown>;
-  // PRE-PR shape: `ref = base` (the harness checks out the base; each agent cuts its own feat/<node.id>).
-  assertEquals(repo.ref, "main");
-  assertEquals(repo.url, "https://github.com/owner/repo.git");
-  assertEquals(repo.provider, "github");
-  // Branch-scoped blobless clone (#287) so large monorepos provision within the clone timeout.
-  assertEquals(repo.singleBranch, true);
-  assertEquals(repo.filter, "blob:none");
-  // baseRef = base too, so `origin/<base>` stays reachable for the review 3-dot diff.
-  assertEquals(repo.baseRef, "main");
-  // NO branch.create at the run root — a run fans out to many agent nodes, each needing its own
-  // feat/<node.id>, so a single run-level envelope names none (mirrors the plan.ts epic seed).
-  assertEquals("branch" in repo, false);
+  const headers = agentHeaders(r.prepared.bpmn);
+  assert(headers.some((h) => h.includes('repository.url" value="https://github.com/acme/one.git"')), "url present");
+  assert(!headers.some((h) => h.includes("repository.ref")), "no ref → clone the repo default branch");
+  assert(!headers.some((h) => h.includes("repository.baseRef")), "no baseRef either");
 });
 
-test("runDeliveryGraph seeds NO envelope ONLY on an EXPLICIT repoless run — the conscious opt-out (#729)", async () => {
-  const { engine, seen } = captureCreateInstanceVars();
-  const r = await runDeliveryGraph(engine, GRAPH, { repoless: true });
-  assert(r.ok, `expected ok:true for an explicit repoless run, got ${JSON.stringify(r)}`);
-  assertEquals("io.nanobpm.agentTask" in seen(), false, "an explicit repoless run must emit no envelope");
+test("prepareDeliveryGraph seeds NO envelope ONLY on an EXPLICIT repoless run — the conscious opt-out (#729)", async () => {
+  const p = await prepareOk(GRAPH, { repoless: true });
+  assert(!p.bpmn.includes("io.nanobpm.agentTask.repository"), "an explicit repoless run must emit no repository envelope");
+  assert(!p.bpmn.includes("__repoSpec"), "the marker is stripped on a repoless run too");
 });
 
-test("runDeliveryGraph THROWS on an unresolved repo/base when NOT repoless — never a silent shared launch dir (#729)", async () => {
-  // Issue #729: the fan-out seed is REQUIRED. Dispatching without a resolvable repository + base branch
-  // (and without the explicit `repoless` opt-out) must fail LOUDLY at seed time rather than silently
-  // emit `{}` and degrade every agent job to the worker's shared launch dir (issue #684's field failure
-  // re-opened as a silent fallback). Missing both, or only one of the pair, is unresolved.
-  for (const options of [{}, { repository: "owner/repo" }, { baseBranch: "main" }, { repository: "  ", baseBranch: "main" }]) {
-    const { engine } = captureCreateInstanceVars();
+test("prepareDeliveryGraph THROWS on an unresolved repo/base when NOT repoless — never a silent shared launch dir (#729/#739)", async () => {
+  // Issue #729: the fan-out seed is REQUIRED. An agent cell that declares no repository AND has no
+  // run-level repository fallback (and no explicit `repoless` opt-out) must fail LOUDLY at prepare time
+  // rather than silently degrade to the worker's shared launch dir (issue #684's field failure). GRAPH's
+  // `open-b` node declares no repository. A run-level repository WITHOUT a base is NOT unresolved (#739:
+  // the cell clones the repo's default branch) — only a missing/blank repository is unresolved.
+  for (const options of [{}, { baseBranch: "main" }, { repository: "  ", baseBranch: "main" }]) {
     await assertRejects(
-      () => runDeliveryGraph(engine, GRAPH, options),
+      () => prepareDeliveryGraph(GRAPH, options),
       RepoEnvelopeUnresolvedError,
     );
   }
 });
 
-test("runDeliveryGraph THROWS on a malformed repository rather than emitting a bogus clone URL (#729)", async () => {
-  const { engine } = captureCreateInstanceVars();
-  // A value that is not exactly `owner/repo` (a trailing `.git`) is an UNRESOLVED input on the required
-  // path — it must throw, never degrade to a double-suffixed `…/owner/repo.git.git` clone URL nor to a
-  // silent no-envelope launch-dir fallback.
+test("a run-level repository WITHOUT a base branch RESOLVES every bare cell — the default-branch clone (#739)", async () => {
+  // The #739 relaxation: an issue ref carries only `owner/repo`, no branch. A run-level repository with
+  // no base is a legitimate fallback — each bare cell clones that repo's DEFAULT branch, no ref header.
+  const r = await prepareDeliveryGraph(GRAPH, { repository: "owner/repo" });
+  assert(r.ok, `expected ok:true, got ${JSON.stringify(r)}`);
+  const headers = agentHeaders(r.prepared.bpmn);
+  assert(headers.some((h) => h.includes('repository.url" value="https://github.com/owner/repo.git"')), "bare cell inherits run repo");
+  assert(!headers.some((h) => h.includes("repository.ref")), "no run base → clone the default branch");
+});
+
+test("prepareDeliveryGraph THROWS on a malformed run-level repository rather than emitting a bogus clone URL (#729)", async () => {
+  // A value that is not exactly `owner/repo` (a trailing `.git`) is an UNRESOLVED fallback — it must
+  // throw, never degrade to a double-suffixed `…/owner/repo.git.git` clone URL.
   await assertRejects(
-    () => runDeliveryGraph(engine, GRAPH, { repository: "owner/repo.git", baseBranch: "main" }),
+    () => prepareDeliveryGraph(GRAPH, { repository: "owner/repo.git", baseBranch: "main" }),
     RepoEnvelopeUnresolvedError,
   );
 });
 
-test("runDeliveryGraph THROWS when repoless is combined with repository/baseBranch — never silently disables isolation (#729)", async () => {
+test("a malformed NODE-declared repository is REJECTED at validation (#739)", async () => {
+  const graph: DeliveryGraph = {
+    name: "bad node repo",
+    nodes: [{ id: "a", kind: "agent", agent: { jobType: "senior:feature", prompt: "a", repository: "acme/one.git" } }],
+    edges: [],
+  };
+  // A node whose declared repository is malformed (a trailing `.git`) is caught by the semantic validator
+  // as `invalid-node-repository` — the graph never compiles, so it can never inject a bogus clone URL
+  // nor silently fall back to the run level (which would mask the operator's typo).
+  const r = await prepareDeliveryGraph(graph, { repository: "owner/repo", baseBranch: "main" });
+  assert(!r.ok, "a malformed node repository fails to prepare");
+  assert(r.errors.some((e) => e.path === "nodes[0].agent.repository"), `expected an invalid-node-repository error, got ${JSON.stringify(r.errors)}`);
+});
+
+test("prepareDeliveryGraph THROWS when repoless is combined with repository/baseBranch — never silently disables isolation (#729)", async () => {
   // `repoless: true` is mutually exclusive with `repository`/`baseBranch`. The dispatch door rejects the
   // conflicting shape with a 400, but a PROGRAMMATIC caller that bypasses the door could pass both — and
   // the runner would silently drop the repo/base and emit no envelope, re-disabling the exact isolation
-  // the repo/base named. The runner must fail LOUDLY too (defense-in-depth), so isolation can never be
-  // silently disabled by a conflicting call. Either half of the pair alongside `repoless` is a conflict.
+  // the repo/base named. The runner must fail LOUDLY too (defense-in-depth).
   for (const options of [
     { repoless: true, repository: "owner/repo", baseBranch: "main" },
     { repoless: true, repository: "owner/repo" },
     { repoless: true, baseBranch: "main" },
   ]) {
-    const { engine } = captureCreateInstanceVars();
     await assertRejects(
-      () => runDeliveryGraph(engine, GRAPH, options),
+      () => prepareDeliveryGraph(GRAPH, options),
       RepoEnvelopeConflictError,
     );
   }

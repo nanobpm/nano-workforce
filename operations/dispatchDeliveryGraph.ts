@@ -11,10 +11,12 @@
 // superseded / already-dispatched digest is a clean 400.
 
 import { isPlausibleBranchName } from "../app/baseBranch.ts";
+import { validateDeliveryGraph } from "../app/deliveryGraph.ts";
 import { dispatchDeliveryGraphRun } from "../app/deliveryGraphDispatch.ts";
 import { getStagedProposal, markProposalDispatched, markProposalExpired } from "../app/deliveryGraphProposals.ts";
+import { unresolvedAgentRepoNodes } from "../app/deliveryRunner.ts";
 import { isValidIsoDuration } from "../app/reviewWait.ts";
-import type { DeliveryGraphTextResult } from "../nano-generated/api-io.d.ts";
+import type { DeliveryGraph, DeliveryGraphTextResult } from "../nano-generated/api-io.d.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
 
 /** Cap an untrusted, rejected duration string before it is echoed into logs/response bodies. `openapi.yaml`
@@ -108,28 +110,27 @@ export default defineOperation("dispatchDeliveryGraph", async ({ body }, app) =>
     baseBranch = baseRaw;
   }
 
-  // Repository provisioning is REQUIRED on this fan-out door (issue #729): a delivery-graph run whose
-  // `agent` nodes implement against a repo MUST be dispatched with a resolvable `repository` + base
-  // branch so every `senior:*` job provisions an ISOLATED clone. Silently dispatching envelope-less
-  // (issue #684's field failure, re-opened as a silent fallback) let concurrent fan-out workers on one
-  // host share — and clobber — a single launch-dir checkout. So the operator must EITHER supply BOTH
-  // `repository` and `baseBranch`, OR explicitly opt out with `repoless: true` for a genuinely
-  // checkout-less graph — the default can never silently share a checkout.
+  // Repository provisioning (issue #729 / #739): a delivery-graph run whose `agent` nodes implement
+  // against a repo MUST provision an ISOLATED clone per cell — silently dispatching envelope-less (issue
+  // #684's field failure) let concurrent fan-out workers on one host share and clobber a single launch
+  // dir. The operator supplies EITHER a run-level `repository` + `baseBranch` (the fallback default for
+  // nodes that don't declare their own), OR `repoless: true` for a genuinely checkout-less graph, OR —
+  // when every agent node declares its OWN `repository` (#739) — NEITHER. The remaining invariant (no
+  // agent node resolves to NO repository on a non-`repoless` run) is checked AFTER the staged graph is
+  // loaded below, since the request alone cannot see whether every node is self-provisioned.
   const hasRepoless = body !== null && typeof body === "object" && "repoless" in body;
   const repolessRaw = hasRepoless ? body.repoless : undefined;
   // `repoless` is a `true`-ONLY opt-out, exactly as the OpenAPI `oneOf` models it: it is `enum: [true]`
-  // on the repoless variant and NOT a member of the repository variant (`additionalProperties: false`).
+  // on the repoless variant and NOT a member of the other variants (`additionalProperties: false`).
   // So reject any present-but-not-`true` value — `false`, `"yes"`, `0`, … — rather than silently folding
-  // `repoless: false` into the "not repoless" path. Otherwise a caller that bypasses schema validation
-  // could send `{ digest, repository, baseBranch, repoless: false }` (or `{ digest, repoless: false }`)
-  // and slip through with a confusing tri-state the `oneOf` contract never permits.
+  // `repoless: false` into the "not repoless" path.
   if (hasRepoless && repolessRaw !== true) {
     app.log.warn("dispatch-delivery-graph rejected: repoless is a true-only opt-out", { type: typeof repolessRaw });
     return {
       status: 400,
       body: {
         ok: false,
-        error: "`repoless` is a `true`-only opt-out — omit it to provision a repository (with `repository` + `baseBranch`), or set `repoless: true` to dispatch a checkout-less graph",
+        error: "`repoless` is a `true`-only opt-out — omit it to provision a repository (with `repository` + `baseBranch`, or per-node declared repositories), or set `repoless: true` to dispatch a checkout-less graph",
       },
     };
   }
@@ -139,20 +140,6 @@ export default defineOperation("dispatchDeliveryGraph", async ({ body }, app) =>
     return {
       status: 400,
       body: { ok: false, error: "`repoless: true` is mutually exclusive with `repository`/`baseBranch` — pass one or the other, not both" },
-    };
-  }
-  if (!repoless && (repository === undefined || baseBranch === undefined)) {
-    app.log.warn("dispatch-delivery-graph rejected: missing repository/baseBranch (no repoless opt-in)", {
-      hasRepository: repository !== undefined,
-      hasBaseBranch: baseBranch !== undefined,
-    });
-    return {
-      status: 400,
-      body: {
-        ok: false,
-        error:
-          "a delivery-graph dispatch must provision an isolated checkout: supply BOTH `repository` (`owner/repo`) and `baseBranch`, or set `repoless: true` to dispatch a checkout-less graph — dispatching without either would silently share the worker's launch dir across agents (issue #729)",
-      },
     };
   }
 
@@ -177,6 +164,36 @@ export default defineOperation("dispatchDeliveryGraph", async ({ body }, app) =>
     // leaving an undismissable `staged` row that fails every dispatch attempt the same way.
     await markProposalExpired(app.data, digest);
     return { status: 400, body: { ok: false, error: `staged proposal ${digest} is corrupt: ${err instanceof Error ? err.message : String(err)}` } };
+  }
+
+  // Per-node provisioning invariant (#739): now that the graph is loaded, reject a non-`repoless` run
+  // in which some `agent` node resolves to NO repository — it declared none AND no run-level fallback
+  // was supplied. Such a cell would silently share the worker's launch dir (issue #684), so fail loudly
+  // with a clean 400 here rather than surfacing later as a launch-time throw (a 500). A graph in which
+  // EVERY agent node resolves a repository (declared, or defaulted from the run level) passes — a fully
+  // node-provisioned cross-repo graph needs neither a run-level repository nor `repoless`. The runner
+  // re-enforces this at seed time (defense in depth). Guarded on a well-formed graph; a malformed one
+  // falls through to `dispatchDeliveryGraphRun`'s own validation below.
+  if (!repoless) {
+    const graphErrors = validateDeliveryGraph(graph);
+    if (graphErrors.length === 0) {
+      // biome-ignore lint/plugin: validated staged graph narrowed to its contract after validateDeliveryGraph
+      const typedGraph = graph as DeliveryGraph;
+      const unresolved = unresolvedAgentRepoNodes(typedGraph, { repository, baseBranch });
+      if (unresolved.length > 0) {
+        app.log.warn("dispatch-delivery-graph rejected: unprovisioned agent node(s)", { digest, unresolved });
+        return {
+          status: 400,
+          body: {
+            ok: false,
+            error:
+              `${unresolved.length} agent node(s) resolve to no repository (${unresolved.join(", ")}): each must declare its own ` +
+              "`repository`, or the dispatch must supply a run-level `repository` + `baseBranch` fallback, or set `repoless: true` " +
+              "for a genuinely checkout-less graph — dispatching an unprovisioned node would silently share the worker's launch dir (issue #684/#739)",
+          },
+        };
+      }
+    }
   }
 
   const dispatched = await dispatchDeliveryGraphRun(app, graph, { runKey: idempotencyKey, title: proposal.title, repository, baseBranch, repoless, ...timeouts });

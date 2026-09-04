@@ -318,21 +318,67 @@ describe("dispatchDeliveryGraph — operator dispatch by staged-proposal digest"
   // dispatch envelope-less and let concurrent fan-out agents share (and clobber) the worker's launch
   // dir (issue #684's field failure re-opened as a silent fallback). This "neither/nor" shape is now
   // rejected at the EDGE by the request `oneOf` (the two allowed variants), not only inside the door.
-  test("a dispatch with NEITHER repository/baseBranch NOR repoless is rejected at submit → 400, nothing launched (#729)", async () => {
+  test("a bare dispatch of a graph with an UNPROVISIONED agent node is rejected → 400, nothing launched (#729/#739)", async () => {
     const app = await boot();
     assert.ok(app.api);
     const api = app.api;
-    const staged = await api.call<{ digest: string }>("compileDeliveryGraph", { body: HUMAN_ONLY });
+    // SIDE_EFFECTING's `open-b` agent node declares NO repository, and this bare dispatch supplies no
+    // run-level fallback and no `repoless` — so the cell would silently share the worker's launch dir.
+    // The door rejects it LOUDLY (#729) rather than launching or degrading (#684).
+    const staged = await api.call<{ digest: string }>("compileDeliveryGraph", { body: SIDE_EFFECTING });
     const res = await api.call<{ ok?: boolean; error?: string }>("dispatchDeliveryGraph", {
       body: { digest: staged.body.digest },
     });
     assert.equal(res.status, 400);
-    // The `oneOf` edge validator names the two allowed shapes — the neither/nor body matches neither.
-    assert.ok(typeof res.body.error === "string" && res.body.error.length > 0);
+    assert.ok(typeof res.body.error === "string" && res.body.error.includes("open-b"), `error should name the unprovisioned node, got ${res.body.error}`);
     // Loud, not silent: nothing launched and the proposal stays staged (re-dispatchable once a repo /
     // repoless choice is supplied).
     assert.equal((await deliveryGraphRuns(app.db).all()).length, 0);
     assert.equal((await deliveryGraphProposals(app.db).get(staged.body.digest))?.status, "staged");
+  });
+
+  test("a bare dispatch of a HUMAN-ONLY graph (nothing to provision) SUCCEEDS → 202 running (#739)", async () => {
+    const app = await boot();
+    assert.ok(app.api);
+    const api = app.api;
+    // A graph with no `agent` nodes needs neither a run-level repository nor `repoless` — there is nothing
+    // to isolate. Under #739 a bare `{ digest }` dispatch (the node-provisioned variant) launches cleanly.
+    const staged = await api.call<{ digest: string }>("compileDeliveryGraph", { body: HUMAN_ONLY });
+    const res = await api.call<{ ok: boolean; status: string }>("dispatchDeliveryGraph", {
+      body: { digest: staged.body.digest },
+    });
+    assert.equal(res.status, 202);
+    assert.equal(res.body.ok, true);
+    assert.equal(res.body.status, "running");
+    await app.settle();
+    assert.equal((await deliveryGraphRuns(app.db).all()).length, 1);
+    assert.equal((await deliveryGraphProposals(app.db).get(staged.body.digest))?.status, "dispatched");
+  });
+
+  test("a bare dispatch of a fully NODE-PROVISIONED agent graph SUCCEEDS → 202 running (#739)", async () => {
+    const app = await boot();
+    assert.ok(app.api);
+    const api = app.api;
+    // Every agent node declares its OWN repository, so the graph self-provisions each cell's isolation
+    // envelope — no run-level repository, no `repoless`. This is the cross-repo delivery graph #739 enables.
+    const NODE_PROVISIONED = {
+      name: "cross-repo",
+      nodes: [
+        { id: "open-b", kind: "agent", agent: { jobType: "senior:demo", prompt: "implement", repository: "acme/one" } },
+        { id: "publish", kind: "human", human: { prompt: "publish" } },
+      ],
+      edges: [{ from: "open-b", to: "publish" }],
+    };
+    const staged = await api.call<{ digest: string }>("compileDeliveryGraph", { body: NODE_PROVISIONED });
+    const res = await api.call<{ ok: boolean; status: string }>("dispatchDeliveryGraph", {
+      body: { digest: staged.body.digest },
+    });
+    assert.equal(res.status, 202);
+    assert.equal(res.body.ok, true);
+    assert.equal(res.body.status, "running");
+    await app.settle();
+    assert.equal((await deliveryGraphRuns(app.db).all()).length, 1);
+    assert.equal((await deliveryGraphProposals(app.db).get(staged.body.digest))?.status, "dispatched");
   });
 
   test("a dispatch with ONLY repository (no baseBranch) is rejected → 400, nothing launched (#729)", async () => {

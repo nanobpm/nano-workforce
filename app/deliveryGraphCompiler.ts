@@ -45,6 +45,18 @@ import {
   validateDeliveryGraph,
 } from "./deliveryGraph.ts";
 import { DELIVERY_HUMAN_ELEMENT, GENERIC_HUMAN_FORM } from "./deliveryHuman.ts";
+import { AGENT_TASK_NS } from "./repoEnvelope.ts";
+
+/** The task-header key that carries an `agent` node's DECLARED per-node repository spec (#739) into the
+ * compiled BPMN. It is a DIGEST-STABLE, env-free marker — pure graph content — so two graphs differing
+ * only in a node's declared `repository`/`baseBranch` content-address differently (they are different
+ * graphs), while the env-dependent parts of the real envelope (`cloneTimeoutMs`) and the run-level
+ * FALLBACK repo are NOT baked here (they are injected by the runner POST-digest, so the same graph in
+ * two environments / two runs still shares one id). The runner replaces this single marker header on
+ * every agent service task with the flattened EFFECTIVE `io.nanobpm.agentTask.*` envelope headers
+ * (declared ?? run-level), or strips it for an unresolved/`repoless` cell. The `__` prefix marks it as
+ * an internal marker the harness never reads. */
+export const AGENT_REPO_SPEC_HEADER = `${AGENT_TASK_NS}.__repoSpec`;
 
 /** The engine-native BODY every node kind delegates to (Decision 2 — the graph SCHEDULES, it does not
  * re-implement execution). Each node compiles to an EMBEDDED `bpmn:subProcess` (call activities are a
@@ -1027,7 +1039,7 @@ function innerBodyLines(w: NodeWiring, requiredEmits: ReadonlySet<string>): stri
       // as a required data dependency. A broken producer (returns `in_progress`, or omits a required
       // emit) escalates AT this node instead of threading an incomplete result onward.
       const contractGate = { requiredEmits: normaliseEmits(node).filter((f) => requiredEmits.has(f.name)) };
-      return serviceBodyLines(el, node.id, attr("type", node.agent.jobType), [], node.agent.jobType, contractGate);
+      return serviceBodyLines(el, node.id, attr("type", node.agent.jobType), [], node.agent.jobType, contractGate, agentRepoSpecHeaderLines(node));
     }
     case "connector":
       return serviceBodyLines(el, node.id, `type="${DELEGATE_TASK_TYPE.connector}"`, [], `connector → ${node.connector.target}`);
@@ -1040,11 +1052,25 @@ function innerBodyLines(w: NodeWiring, requiredEmits: ReadonlySet<string>): stri
   }
 }
 
+/** Render the DECLARED per-node repository-spec marker task header (#739) for an `agent` node — a single
+ * `<zeebe:taskHeaders>` block carrying {@link AGENT_REPO_SPEC_HEADER} with a compact JSON of the node's
+ * DECLARED `{ repository, baseBranch }` (each `null` when absent). It is emitted on EVERY agent service
+ * task (even one with no declared repo → `{"repository":null,"baseBranch":null}`) so the runner has a
+ * single, uniform anchor to replace with the effective envelope on every cell. Digest-stable and
+ * env-free — only the declared values (pure graph content) appear here; the run-level fallback and the
+ * env-dependent `cloneTimeoutMs` are injected by the runner POST-digest. Declared values pass the
+ * `owner/repo` + branch-name allowlists (validator/OpenAPI), so the JSON carries no XML-hostile chars. */
+function agentRepoSpecHeaderLines(node: Extract<DeliveryNode, { kind: "agent" }>): string[] {
+  const trimOrNull = (v: unknown): string | null => (typeof v === "string" && v.trim() !== "" ? v.trim() : null);
+  const spec = JSON.stringify({ repository: trimOrNull(node.agent.repository), baseBranch: trimOrNull(node.agent.baseBranch) });
+  return [
+    "          <zeebe:taskHeaders>",
+    `            <zeebe:header key="${AGENT_REPO_SPEC_HEADER}" ${attr("value", spec)} />`,
+    "          </zeebe:taskHeaders>",
+  ];
+}
+
 /** `agent`/`connector` body: `start → serviceTask → end`, with a bounded `=nodeTimeout` boundary that
- * escalates the stalled node onto a human-completable user task. `taskDefAttr` is the pre-rendered
- * `type="…"` attribute; `taskProps` are optional `<zeebe:property>` envelope lines; `descriptor`
- * names the stalled work (job type / connector target) for the escalation task's context line (#499). */
-/** The FEEL boolean an `agent` node's producer-contract gate (issue #731) evaluates on its `_gate`
  * exclusive split's SUCCESS flow: the completion proceeds onward only when the self-reported `status`
  * is a terminal success (or absent/null) AND every required-data-dependency emit is populated non-null.
  * Reads the job's returned variables from the subProcess scope (the emit source var for an agent fact
@@ -1095,23 +1121,16 @@ function serviceBodyLines(
   taskProps: readonly string[],
   descriptor: string,
   contractGate?: { requiredEmits: readonly DeliveryFact[] },
+  taskHeaders: readonly string[] = [],
 ): string[] {
   const esc = escalationTaskElement(el);
-  const taskExt =
-    taskProps.length > 0
-      ? [
-          "        <bpmn:extensionElements>",
-          `          <zeebe:taskDefinition ${taskDefAttr} />`,
-          "          <zeebe:properties>",
-          ...taskProps,
-          "          </zeebe:properties>",
-          "        </bpmn:extensionElements>",
-        ]
-      : [
-          "        <bpmn:extensionElements>",
-          `          <zeebe:taskDefinition ${taskDefAttr} />`,
-          "        </bpmn:extensionElements>",
-        ];
+  const taskExt = [
+    "        <bpmn:extensionElements>",
+    `          <zeebe:taskDefinition ${taskDefAttr} />`,
+    ...(taskProps.length > 0 ? ["          <zeebe:properties>", ...taskProps, "          </zeebe:properties>"] : []),
+    ...taskHeaders,
+    "        </bpmn:extensionElements>",
+  ];
   const timeoutEscalation = escalationTaskLines(
     esc,
     nodeId,

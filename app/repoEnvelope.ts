@@ -13,7 +13,7 @@ import { isCommitSha } from "./world/index.ts";
 
 /** The reserved namespace key the c8ctl nano worker harness reads the agent-task envelope from
  * (headers ∪ variables, deep-merged). See c8ctl `normalizeTaskEnvelope`. */
-const AGENT_TASK_NS = "io.nanobpm.agentTask";
+export const AGENT_TASK_NS = "io.nanobpm.agentTask";
 
 /** The ONE canonical `owner/repo` allowlist, shared by `repoEnvelopeVars` (which degrades to `{}` on a
  * miss) and `requireRepoEnvelopeVars` (which throws on a miss) so the two can never drift apart. The
@@ -23,6 +23,47 @@ const AGENT_TASK_NS = "io.nanobpm.agentTask";
 const OWNER_REPO_RE = /^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/;
 function isPlainOwnerRepo(repo: string): boolean {
   return OWNER_REPO_RE.test(repo) && !/\.git$/i.test(repo);
+}
+
+/** Exported predicate mirroring the internal `owner/repo` allowlist (the ONE shared by
+ * `repoEnvelopeVars`/`requireRepoEnvelopeVars`), so a caller that must resolve a per-node effective
+ * repository BEFORE seeding an envelope (delivery-graph per-node isolation, #739) uses exactly the same
+ * gate — a node whose declared/defaulted repository is not a plain `owner/repo` is "unresolved" by the
+ * identical rule the seed helper throws on, never a second divergent check. */
+export function isResolvableRepo(repo: unknown): repo is string {
+  return typeof repo === "string" && isPlainOwnerRepo(repo.trim());
+}
+
+/** Flatten a repository-isolation envelope object (as built by {@link repoEnvelopeVars} —
+ * `{ "io.nanobpm.agentTask": { repository: { … } } }`) into the FLAT, dotted `io.nanobpm.agentTask.*`
+ * key → string-value pairs the c8ctl worker harness reads from a service task's `<zeebe:taskHeaders>`
+ * (the same channel the retired `io.nanobpm.agentTask.task.prompt` header used; the harness deep-merges
+ * headers ∪ variables and reconstructs the nested envelope from dotted keys — see `normalizeTaskEnvelope`).
+ *
+ * Header VALUES are strings (a Camunda job header is `string → string`), so scalar leaves are stringified
+ * (`true`/`600000`/`https://…`); the harness coerces them back at the point of use. This is the ONLY
+ * per-CELL delivery channel for the envelope: a `createInstance` variable can only seed the reserved
+ * `io.nanobpm.agentTask` key ONCE at the run root (uniform for every cell), and a `<zeebe:ioMapping>`
+ * target with dots creates a NESTED `{io:{nanobpm:{agentTask:…}}}` object the flat-key harness never
+ * reads — so per-node isolation (#739) rides task headers, injected by the runner post-digest. Returns an
+ * empty map for an empty/`{}` envelope (an unresolved/`repoless` cell → no headers, the launch-dir
+ * fallback). */
+export function flattenAgentTaskEnvelope(envelope: Record<string, unknown>): Record<string, string> {
+  const out: Record<string, string> = {};
+  const walk = (prefix: string, value: unknown): void => {
+    if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+      for (const [k, v] of Object.entries(value)) {
+        walk(prefix === "" ? k : `${prefix}.${k}`, v);
+      }
+      return;
+    }
+    // Scalar leaf — a taskHeader value is a string, so stringify booleans/numbers verbatim; the harness
+    // coerces (`singleBranch` truthy, `cloneTimeoutMs` numeric) at the point of use.
+    if (typeof value === "string") out[prefix] = value;
+    else if (typeof value === "number" || typeof value === "boolean") out[prefix] = String(value);
+  };
+  walk("", envelope);
+  return out;
 }
 
 /** Raised by `requireRepoEnvelopeVars` when the repository-isolation envelope is REQUIRED on a fan-out
@@ -149,6 +190,37 @@ export function repoEnvelopeVars(
         ...(typeof branchCreate === "string" && branchCreate.trim() !== ""
           ? { branch: { create: branchCreate.trim() } }
           : {}),
+      },
+    },
+  };
+}
+
+/** Build the repository-isolation envelope for ONE delivery-graph `agent` cell (#739), keyed under the
+ * reserved {@link AGENT_TASK_NS} namespace exactly like {@link repoEnvelopeVars}, but with the delivery
+ * per-node semantics: the `repository.url` is emitted whenever `repo` is a plain `owner/repo` (so the
+ * harness clones it) EVEN WHEN no base branch is known, and `ref`/`baseRef` are emitted only when `base`
+ * is present. This is the key difference from {@link repoEnvelopeVars} (which emits NOTHING without a
+ * `ref`): a cross-repo graph node carries only its `owner/repo` (an issue ref names no branch), so when
+ * neither the node nor the run declares a base the cell must still provision an isolated clone — of the
+ * repository's DEFAULT branch. The harness `provisionRepo` omits `--branch` when `ref` is blank, so a
+ * `ref`-less envelope clones the default branch (each agent then cuts its own `feat/<node.id>` branch
+ * inside the isolated clone, unchanged). Returns `{}` for a `repo` that is not a plain `owner/repo` (an
+ * unresolved cell — the runner's invariant rejects the run before this degrades to a launch-dir share).
+ * Blobless single-branch shaping + `cloneTimeoutMs` (issues #287/#694) are emitted on every cell. */
+export function agentNodeRepoEnvelope(repo: string, base: string | null): Record<string, unknown> {
+  if (!isPlainOwnerRepo(repo)) return {};
+  const ref = typeof base === "string" && base.trim() !== "" ? base.trim() : null;
+  return {
+    [AGENT_TASK_NS]: {
+      repository: {
+        provider: "github",
+        url: `https://github.com/${repo}.git`,
+        singleBranch: true,
+        filter: "blob:none",
+        cloneTimeoutMs: cloneTimeoutMs(),
+        // A per-node base (declared, or defaulted from the run level) — the branch the agent cuts its
+        // `feat/<node.id>` off. Omitted when unknown so the harness clones the repo's default branch.
+        ...(ref ? { ref, baseRef: ref } : {}),
       },
     },
   };

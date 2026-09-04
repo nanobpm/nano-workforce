@@ -107,9 +107,10 @@ interface BuiltGate {
   credentialEnv?: string;
 }
 
-/** A parsed `issues[]` entry: the normalised issue plan-key plus its optional interleaved gate. */
+/** A parsed `issues[]` entry: the parsed issue (carrying its `owner/repo#N` target, used to stamp the
+ * generated agent node's own `repository` — issue #739) plus its optional interleaved gate (#740). */
 interface ParsedEntry {
-  issueKey: string;
+  issue: ParsedIssue;
   gate: BuiltGate | null;
 }
 
@@ -279,7 +280,7 @@ export function buildSequenceGraph(intent: unknown): SequenceIssuesResult {
         issues.push(...parsedGate.errors);
         gate = parsedGate.gate ?? null;
       }
-      parsedEntries.push({ issueKey: parsed.planKey, gate });
+      parsedEntries.push({ issue: parsed, gate });
     });
   }
 
@@ -338,7 +339,8 @@ export function buildSequenceGraph(intent: unknown): SequenceIssuesResult {
 /** Assemble the canonical node/edge chain for the (already-validated) parsed entries + optional gate.
  * Each entry emits `agent → connector[converge-merge] → wait[pr, merged]`; an entry with an
  * interleaved `gate` gets a leading `wait[<gate.kind>]` node spliced between the prior sequence step
- * and its agent, so the agent starts only once the prior issue merged AND the gate went green. */
+ * and its agent, so the agent starts only once the prior issue merged AND the gate went green. Each
+ * agent node is stamped with its own `repository` (issue #739) from the issue it implements. */
 function assembleGraph(entries: ParsedEntry[], behindKey: string | null): DeliveryGraph {
   const nodes: DeliveryNode[] = [];
   const edges: DeliveryEdge[] = [];
@@ -361,12 +363,13 @@ function assembleGraph(entries: ParsedEntry[], behindKey: string | null): Delive
   }
 
   entries.forEach((entry, i) => {
+    const issue = entry.issue;
     const n = i + 1;
     const openId = `open-${n}`;
     const landId = `land-${n}`;
     const mergedId = `merged-${n}`;
     const prRef = `${openId}.pr`;
-    const issueKey = entry.issueKey;
+    const issueKey = issue.planKey;
 
     // The sequence predecessor whose completion releases THIS issue: the prior issue's merge, else the
     // leading epic gate for the first issue (null when the first issue is ungated by `behind`).
@@ -395,11 +398,14 @@ function assembleGraph(entries: ParsedEntry[], behindKey: string | null): Delive
       agentPredecessor = gateId;
     }
 
-    // agent → opens the PR, emits it as a typed `pr` fact the downstream nodes late-bind.
+    // agent → opens the PR, emits it as a typed `pr` fact the downstream nodes late-bind. Stamp the
+    // node's OWN `repository` (#739) from the `owner/repo#N` it implements, so a cross-repo sequence
+    // provisions each cell's isolation envelope node-locally — no uniform run-level repo, no `repoless`.
+    // The base branch is left to the run-level fallback (an issue ref names no branch — issue #739 Notes).
     nodes.push({
       id: openId,
       kind: "agent",
-      agent: { jobType: AGENT_JOB_TYPE, prompt: `Implement ${issueKey} and open a PR.` },
+      agent: { jobType: AGENT_JOB_TYPE, prompt: `Implement ${issueKey} and open a PR.`, repository: issue.repo },
       emits: [{ ...PR_EMIT }],
     });
     // connector[converge-merge] → drive the opened PR through review convergence + the merge loop.
@@ -433,7 +439,7 @@ function assembleGraph(entries: ParsedEntry[], behindKey: string | null): Delive
   const gateCount = entries.filter((e) => e.gate).length;
   const name =
     entries.length === 1
-      ? `sequence ${entries[0].issueKey}`
+      ? `sequence ${entries[0].issue.planKey}`
       : `sequence ${entries.length} issues${gateCount > 0 ? ` with ${gateCount} gate${gateCount === 1 ? "" : "s"}` : ""}${behindKey ? ` behind ${behindKey}` : ""}`;
 
   return { name, nodes, edges };
