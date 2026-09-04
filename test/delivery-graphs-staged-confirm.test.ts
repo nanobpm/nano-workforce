@@ -91,13 +91,15 @@ function harness() {
   };
   const click = (el: { dispatchEvent: (ev: unknown) => boolean }) =>
     el.dispatchEvent(new domWindow.Event("click", { bubbles: true, cancelable: true }));
+  const fire = (el: { dispatchEvent: (ev: unknown) => boolean }, type: string) =>
+    el.dispatchEvent(new domWindow.Event(type, { bubbles: true, cancelable: true }));
 
-  return { host, calls, teardown, flush, click };
+  return { host, calls, teardown, flush, click, fire };
 }
 
 const posts = (calls: FetchCall[], url: string) => calls.filter((c) => c.method === "POST" && c.url === url);
 
-test("#569: Dispatch dispatches via the in-DOM confirmation even when native window.confirm is suppressed", async () => {
+test("#569/#729: Dispatch dispatches via the in-DOM confirmation with the repo envelope even when native window.confirm is suppressed", async () => {
   const h = harness();
   try {
     await h.flush();
@@ -105,7 +107,8 @@ test("#569: Dispatch dispatches via the in-DOM confirmation even when native win
     assert(dispatchBtn, "the mount must render a Dispatch button for the staged proposal");
 
     // Click Dispatch — with a suppressed native confirm, the PRE-FIX mount POSTs nothing; the fixed
-    // mount instead reveals an in-DOM "Confirm dispatch" step and has NOT yet POSTed.
+    // mount instead reveals an in-DOM "Confirm dispatch" step (with the #729 envelope fields) and has
+    // NOT yet POSTed.
     h.click(dispatchBtn);
     await h.flush();
     assertEquals(posts(h.calls, DISPATCH_URL).length, 0, "Dispatch must not POST before the operator confirms in-DOM");
@@ -113,12 +116,67 @@ test("#569: Dispatch dispatches via the in-DOM confirmation even when native win
     assert(confirmBtn, "clicking Dispatch must reveal an in-DOM Confirm-dispatch control (#569), not call window.confirm");
     assert(!h.host.querySelector("[data-dispatch]"), "the plain Dispatch button is replaced by the inline confirmation while it is open");
 
-    // Confirm — the digest is POSTed to the dispatch door, with no reliance on a native modal.
+    // The operator supplies the repository-isolation envelope the door now requires (#729): a staged
+    // proposal carries no repo metadata, so the cockpit collects it here.
+    const repoInput = h.host.querySelector("[data-dispatch-repository]");
+    const baseInput = h.host.querySelector("[data-dispatch-base]");
+    assert(repoInput && baseInput, "the Dispatch confirmation must expose repository + base-branch fields (#729)");
+    repoInput.value = "acme/widgets";
+    baseInput.value = "main";
+
+    // Confirm — the digest AND the envelope are POSTed to the dispatch door, with no reliance on a native modal.
     h.click(confirmBtn);
     await h.flush();
     const dispatched = posts(h.calls, DISPATCH_URL);
     assertEquals(dispatched.length, 1, "confirming in-DOM must POST exactly once to the dispatch door");
-    assertEquals(JSON.parse(dispatched[0].body), { digest: PROPOSAL.digest }, "the dispatch POST carries the staged digest");
+    assertEquals(
+      JSON.parse(dispatched[0].body),
+      { digest: PROPOSAL.digest, repository: "acme/widgets", baseBranch: "main" },
+      "the dispatch POST carries the staged digest and the operator-supplied repo envelope",
+    );
+  } finally {
+    h.teardown();
+  }
+});
+
+test("#729: Dispatch checkout-less posts `repoless: true` (no repo envelope) instead of repository/baseBranch", async () => {
+  const h = harness();
+  try {
+    await h.flush();
+    h.click(h.host.querySelector("[data-dispatch]"));
+    await h.flush();
+    const box = h.host.querySelector("[data-dispatch-repoless]");
+    assert(box, "the Dispatch confirmation must expose a checkout-less (repoless) opt-out (#729)");
+    box.checked = true;
+    h.fire(box, "change");
+    await h.flush();
+
+    h.click(h.host.querySelector("[data-dispatch-confirm]"));
+    await h.flush();
+    const dispatched = posts(h.calls, DISPATCH_URL);
+    assertEquals(dispatched.length, 1, "confirming a checkout-less dispatch must POST exactly once");
+    assertEquals(
+      JSON.parse(dispatched[0].body),
+      { digest: PROPOSAL.digest, repoless: true },
+      "a checkout-less dispatch posts `repoless: true` and omits repository/baseBranch (mutually exclusive, #729)",
+    );
+  } finally {
+    h.teardown();
+  }
+});
+
+test("#729: confirming a dispatch with neither the repo envelope nor checkout-less does NOT POST (keeps the confirmation open)", async () => {
+  const h = harness();
+  try {
+    await h.flush();
+    h.click(h.host.querySelector("[data-dispatch]"));
+    await h.flush();
+    // Confirm with blank repository/baseBranch and checkout-less unticked — the door would 400, so the
+    // mount guards client-side: no POST, and the confirmation stays open so the operator can fix it.
+    h.click(h.host.querySelector("[data-dispatch-confirm]"));
+    await h.flush();
+    assertEquals(posts(h.calls, DISPATCH_URL).length, 0, "an incomplete envelope must not POST to the dispatch door (#729)");
+    assert(h.host.querySelector("[data-dispatch-confirm]"), "the confirmation stays open so the operator can supply the envelope");
   } finally {
     h.teardown();
   }

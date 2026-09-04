@@ -206,6 +206,33 @@
   min-width: 200px;
 }
 
+/* The inline Dispatch envelope fields (issue #729): the operator supplies `repository` + `baseBranch`
+   (or ticks "checkout-less") before confirming a dispatch, since a staged proposal carries no repo
+   metadata. A disabled repo/base input (dimmed) reads as inactive while checkout-less is ticked. */
+.dg .confirm-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #d7e0ea;
+  font-size: 13px;
+}
+
+.dg .confirm-field .confirm-input {
+  min-width: 160px;
+}
+
+.dg .confirm-input:disabled {
+  opacity: 0.5;
+}
+
+.dg .confirm-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #d7e0ea;
+  font-size: 13px;
+}
+
 /* The filesystem Import control (issue #524): a <label class="btn"> wrapping a visually-hidden native
    <input type=file>, so the file picker reads as a button consistent with the other actions. The label
    dims while its input is disabled (busy) via :has(), mirroring .btn:disabled. */
