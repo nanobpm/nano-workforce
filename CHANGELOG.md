@@ -1,3 +1,9 @@
+## [0.182.0](https://github.com/nanobpm/nano-workforce/compare/v0.181.0...v0.182.0) (2026-09-04)
+
+### Features
+
+* stamp each agent node's repository for per-node delivery-graph isolation ([#742](https://github.com/nanobpm/nano-workforce/issues/742)) ([e8dcdfc](https://github.com/nanobpm/nano-workforce/commit/e8dcdfce2122bdb2a7e881a0900ca1f607d6d402)), closes [#739](https://github.com/nanobpm/nano-workforce/issues/739)
+
 ## [0.181.0](https://github.com/nanobpm/nano-workforce/compare/v0.180.0...v0.181.0) (2026-09-04)
 
 ### Features
