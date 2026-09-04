@@ -74,7 +74,7 @@
       "type": "text",
       "id": "subtitle",
       "props": {
-        "text": "Every open native user-task escalation awaiting a human decision — feature runs, epics, PR review/merge loops, conformance reviews, and delivery-graph human/escalation gates — in one list. The \"Type\" column tells them apart; open a row to complete it via the process's own deployed form, on the same canonical path Urban's task inbox uses. This list is exactly the set the nav badge counts, so a badge always maps to a visible, completable row. Rows disappear once completed (here, via the inbox, or out-of-band).",
+        "text": "Every open native user-task escalation awaiting a human decision — feature runs, epics, PR review/merge loops, conformance reviews, and delivery-graph human/escalation gates — in one list. The \"Type\" column tells them apart; open a row to complete it via the process's own deployed form, through the nwf canonical completion door (operations/completeUserTask.ts) — recording who answered and dropping the row immediately. This list is exactly the set the nav badge counts, so a badge always maps to a visible, completable row. Rows disappear once completed (here, or out-of-band).",
         "variant": "sub"
       }
     },
@@ -116,7 +116,8 @@
           ],
           "engineForm": {
             "formKeyField": "form_key",
-            "userTaskKeyField": "user_task_key"
+            "userTaskKeyField": "user_task_key",
+            "completePath": "/app/api/actions/complete-user-task"
           }
         },
         "refreshMs": 5000

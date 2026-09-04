@@ -39,6 +39,11 @@ test("Tasks grid completes each row via its engine-declared form (nano-ide#457),
   assert(detail?.engineForm, "the grid detail must opt into engineForm rendering");
   assertEquals(detail.engineForm.formKeyField, "form_key");
   assertEquals(detail.engineForm.userTaskKeyField, "user_task_key");
+  // Completion routes through nwf's canonical completion door (operations/completeUserTask.ts,
+  // issue #728 / nano-ide#552) — NOT the runtime's generic `/app/actions/complete` seam — so it
+  // records `task_completions` attribution, enforces HUMAN_COMPLETABLE_ELEMENTS, and drops the
+  // answered `user_tasks` row immediately instead of after a poll cycle.
+  assertEquals(detail.engineForm.completePath, "/app/api/actions/complete-user-task");
   // The seven bespoke per-type detail.form blocks (each a copy of a deployed `.form`) are gone.
   for (const g of grids) assert(!g.props.detail?.form, "no grid may carry a page-local detail.form");
 });
