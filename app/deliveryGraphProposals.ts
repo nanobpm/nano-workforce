@@ -153,16 +153,6 @@ export function buildProposalRow(input: {
   };
 }
 
-/** Persist a compiled graph as a `staged` proposal and SUPERSEDE any prior staged proposal for the
-* same logical graph. Idempotent on `digest` (a re-stage of an identical, still-live digest refreshes
-* `updated_at` but preserves `created_at`, so the TTL stays anchored to the first stage; a re-stage of
-* a digest that has already aged out re-anchors the TTL to now so it is dispatchable again). After the
-* upsert, every
- * OTHER `staged` proposal sharing this `logical_key` is flipped to `superseded` — so the cockpit shows
- * exactly one live proposal per logical graph (the latest digest the operator would dispatch). The
- * supersede RECONCILES to the globally-newest staged row (`updated_at`, `digest`-tie-broken) rather than
- * flipping only rows older than the just-written one, so concurrent stages of two different digests
- * converge to EXACTLY ONE live proposal — never zero, and never two — regardless of arrival order. */
 /** The outcome of a {@link stageProposal} — the written row PLUS a supersede/sibling summary the stage
  * doors surface so an agent can warn the operator precisely about what its stage did to the cockpit's
  * Delivery Graphs list (issue #740). Supersede keys on the LOGICAL graph key (derived from the graph

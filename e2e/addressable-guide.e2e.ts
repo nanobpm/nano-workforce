@@ -112,7 +112,8 @@ describe("S5 — the addressable operator guide over MCP (#611)", () => {
     assert(body.issues!.some((i) => i.path.includes("start")), "the issue must name the `start` argument");
   });
 
-  test("an unknown section id is rejected with issues[{path,message}]", async () => {    const res = await h.callTool("getAgentGuide", { section: "no-such-section" });
+  test("an unknown section id is rejected with issues[{path,message}]", async () => {
+    const res = await h.callTool("getAgentGuide", { section: "no-such-section" });
     assert(res.isError, "an unknown section id must surface as a tool-level error");
     const body = res.json as { issues?: { path: string; message: string }[] };
     assert(Array.isArray(body.issues) && body.issues.length >= 1, "must answer with issues[]");
