@@ -1,3 +1,9 @@
+## [0.179.0](https://github.com/nanobpm/nano-workforce/compare/v0.178.5...v0.179.0) (2026-09-04)
+
+### Features
+
+* **fan-out:** require the repository-isolation envelope on fan-out dispatch ([#730](https://github.com/nanobpm/nano-workforce/issues/730)) ([f94425d](https://github.com/nanobpm/nano-workforce/commit/f94425db5d447260a0e4c9f31b120695f8d18a7c)), closes [#729](https://github.com/nanobpm/nano-workforce/issues/729)
+
 ## [0.178.5](https://github.com/nanobpm/nano-workforce/compare/v0.178.4...v0.178.5) (2026-09-03)
 
 ### Bug Fixes
