@@ -23,7 +23,6 @@ import { fileURLToPath } from "node:url";
 import type { EngineJob } from "@nanobpm/urban/runtime";
 import { bootTestApp, type TestApp } from "@nanobpm/urban-testkit";
 import { admitGithubState, installAdmitGithub } from "./support/github-admit.ts";
-import { asEngineClient } from "./support/engine-client.ts";
 import { pollUserTasks } from "../app/service.ts";
 
 const APP_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -208,7 +207,7 @@ describe("single-issue feature run (#172 — feature.bpmn)", () => {
         // read-model (issue #332 dropped the denormalised `feature_runs.blocked_user_task_key` pointer),
         // so `pollUserTasks` projects the parked `feature-blocked` task onto `user_tasks` by reading the
         // engine directly — no per-run column write.
-        await pollUserTasks(app.db, asEngineClient(app.engine));
+        await pollUserTasks(app.db, app.engine);
         const inboxRow = await app.db
           .table<{ user_task_key: string; element_id: string }>("user_tasks", "user_task_key")
           .findOne({ user_task_key: task!.userTaskKey });
@@ -233,7 +232,7 @@ describe("single-issue feature run (#172 — feature.bpmn)", () => {
 
         // A further poll pass is an idempotent no-op — the task is completed, so the read-model row is
         // reconciled away and a terminal run is not a candidate.
-        await pollUserTasks(app.db, asEngineClient(app.engine));
+        await pollUserTasks(app.db, app.engine);
         assert.equal((await featureRow(app, featureKey)).status, "blocked");
       },
     );
@@ -385,7 +384,7 @@ describe("single-issue feature run (#172 — feature.bpmn)", () => {
 
         // The poller projects the parked task onto the Tasks inbox `user_tasks` read-model by reading
         // the engine directly, sourcing the question from the `feature_escalations` audit log.
-        await pollUserTasks(app.db, asEngineClient(app.engine));
+        await pollUserTasks(app.db, app.engine);
         const inboxRow = await app.db
           .table<{ user_task_key: string; element_id: string; question: string | null }>("user_tasks", "user_task_key")
           .findOne({ user_task_key: task!.userTaskKey });
@@ -414,7 +413,7 @@ describe("single-issue feature run (#172 — feature.bpmn)", () => {
         assert.equal(settled.status, "opened", "the resumed run opened its PR");
 
         // A further poll pass reconciles the completed task's read-model row away.
-        await pollUserTasks(app.db, asEngineClient(app.engine));
+        await pollUserTasks(app.db, app.engine);
         const gone = await app.db
           .table<{ user_task_key: string }>("user_tasks", "user_task_key")
           .findOne({ user_task_key: task!.userTaskKey });
