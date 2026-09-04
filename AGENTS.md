@@ -441,7 +441,16 @@ agents:
   releasable commit (`git commit --allow-empty -s -m "feat(scope): …"`) to release
   the accumulated changes.
 - **Feature work in a worktree** off `origin/main`, one branch per change; open a
-  PR and reference the closing issue (`Closes #NN`).
+  PR and reference the closing issue (`Closes #NN`). **Never author or commit from
+  the primary checkout in a fan-out.** In a multi-agent wave the primary working
+  tree is *shared*: sibling agents concurrently leave uncommitted edits (e.g.
+  `app/service.ts`, `app/userTasks.ts`, new `operations/*.ts`) and switch its
+  branch out from under you, so a commit from there sweeps up foreign files and
+  produces a dirty, un-reviewable PR. Add your own worktree instead —
+  `git worktree add ../worktrees/<id> -b feat/<id> origin/main` — and author,
+  commit, and push only your files there. A fresh worktree has **no
+  `node_modules`**; symlink the primary checkout's so tooling runs without a
+  reinstall: `ln -s <primary-checkout>/node_modules node_modules`.
 - **Never `git push --force` on `main`;** use `--force-with-lease` on feature
   branches.
 
