@@ -161,7 +161,8 @@ export function buildProposalRow(input: {
  * silent) lets the agent tell the operator exactly which digests it retired and how many other live
  * proposals remain (potential orphaned siblings). */
 export interface StageOutcome {
-  /** The row this stage wrote (the freshly-staged proposal). */
+  /** The row this stage wrote, RE-READ after the supersede reconcile so it reflects the actually-
+   * persisted state (a concurrent newer stage can leave this digest `superseded` immediately). */
   row: DeliveryGraphProposal;
   /** Digests of OTHER proposals sharing this row's logical key that this stage flipped to
    * `superseded` — the same-logical-graph proposals it cleanly replaced. Empty on a first stage. */
@@ -258,7 +259,14 @@ export async function stageProposal(data: DataLayer, row: DeliveryGraphProposal)
   }
   const siblingsStaged = (await listStagedProposals(data)).filter((r) => r.logical_key !== row.logical_key).length;
 
-  return { row: toWrite, superseded, siblingsStaged };
+  // Re-read the just-written row AFTER the reconcile so `row` reports the ACTUALLY-persisted state, not
+  // the pre-reconcile `toWrite`: a concurrent newer stage of a different digest can flip THIS digest to
+  // `superseded` in the reconcile above, so returning `toWrite` (still `staged`) would report a status
+  // that doesn't match the DB. Fall back to `toWrite` only if the row somehow vanished (it shouldn't —
+  // we just wrote it), keeping the return non-null.
+  const persisted = (await table.get(toWrite.digest)) ?? toWrite;
+
+  return { row: persisted, superseded, siblingsStaged };
 }
 
 /** The ONE definition of "a live, dispatchable-RIGHT-NOW staged proposal" (issue #608): the row is

@@ -241,6 +241,25 @@ test("stageProposal: reconciles to EXACTLY ONE live proposal — an older stage 
   });
 });
 
+test("stageProposal outcome: `row` reflects the POST-reconcile status — a stage immediately superseded by a newer sibling reports its own row as `superseded`, not the pre-reconcile `staged`", async () => {
+  await withData(async (data) => {
+    const table = deliveryGraphProposals(data);
+    // A newer staged sibling (d2) is already committed for logical_key "runbook".
+    const newer = row({ digest: "d2" });
+    newer.updated_at = "2999-01-01T00:00:00.000Z";
+    await table.insert(newer);
+    // The older stage (d1) runs last; the reconcile immediately supersedes its own row.
+    const outcome = await stageProposal(data, row({ digest: "d1" }));
+    assertEquals(outcome.row.digest, "d1");
+    assertEquals(
+      outcome.row.status,
+      "superseded",
+      "the returned row is re-read post-reconcile, matching what is actually persisted",
+    );
+    assertEquals((await table.get("d1"))?.status, "superseded");
+  });
+});
+
 test("getStagedProposal: an EXPIRED staged proposal is not live", async () => {
   await withData(async (data) => {
     await stageProposal(data, row());
