@@ -734,6 +734,11 @@ function buildSideEffects(nodes: readonly DeliveryNode[]): DeliverySideEffect[] 
   return effects;
 }
 
+/** Shared empty required-emits set for nodes with no required emits — reused instead of allocating a
+ * fresh `new Set()` per such node while rendering. Safe because `requiredEmits` is only ever read
+ * (`ReadonlySet`). */
+const EMPTY_REQUIRED_EMITS: ReadonlySet<string> = new Set<string>();
+
 /** Render the compiled one-shot BPMN process definition (compile-to-native). Deterministic — element
  * order is fixed (start, gateways, nodes sorted, end) and every id is positional. */
 function renderBpmn(
@@ -822,7 +827,7 @@ function renderBpmn(
         incoming(w.element),
         outgoing(w.element),
         boundInputsByElement.get(w.element) ?? [],
-        requiredEmitsByElement.get(w.element) ?? new Set<string>(),
+        requiredEmitsByElement.get(w.element) ?? EMPTY_REQUIRED_EMITS,
       ),
     );
     if (w.forkGateway) {
