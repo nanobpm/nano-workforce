@@ -140,14 +140,21 @@ function parseGate(raw: unknown, path: string, probeKinds: Set<string>): { gate?
     return { errors: [{ path, message: "`gate` must be an object carrying a `wait` probe (`{ kind, target, … }`)." }] };
   }
 
+  // Trim before validating AND before persisting: harmless surrounding whitespace must neither
+  // trip a confusing "unknown kind" rejection nor survive into the generated `wait` node, where a
+  // stray trailing space silently probes the wrong target (`pkg@1.0.0 ` → a gate that never goes
+  // green). The persisted value is always the trimmed one.
   let validKind: ReadinessProbe["kind"] | null = null;
   const kind = raw.kind;
   if (typeof kind !== "string" || kind.trim() === "") {
     errors.push({ path: `${path}.kind`, message: "`gate.kind` is required and must be a non-empty wait-probe kind." });
-  } else if (!isProbeKind(kind, probeKinds)) {
-    errors.push({ path: `${path}.kind`, message: `wait-probe kind \`${kind}\` is not in the delivery-graph vocabulary.` });
   } else {
-    validKind = kind;
+    const trimmedKind = kind.trim();
+    if (!isProbeKind(trimmedKind, probeKinds)) {
+      errors.push({ path: `${path}.kind`, message: `wait-probe kind \`${trimmedKind}\` is not in the delivery-graph vocabulary.` });
+    } else {
+      validKind = trimmedKind;
+    }
   }
 
   let validTarget: string | null = null;
@@ -155,7 +162,7 @@ function parseGate(raw: unknown, path: string, probeKinds: Set<string>): { gate?
   if (typeof target !== "string" || target.trim() === "") {
     errors.push({ path: `${path}.target`, message: "`gate.target` is required and must be a non-empty string." });
   } else {
-    validTarget = target;
+    validTarget = target.trim();
   }
 
   let match: Record<string, unknown> | undefined;

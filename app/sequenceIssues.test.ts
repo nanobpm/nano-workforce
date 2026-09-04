@@ -234,6 +234,16 @@ test("sequenceIssues: a gated first issue with NO behind gate starts the gate im
   assert(graph.edges.some((e) => e.from === "gate-1" && e.to === "open-1"), "the agent waits on the gate");
 });
 
+test("sequenceIssues: a gate's `kind`/`target` are trimmed before validation AND persistence (no whitespace-poisoned probe)", () => {
+  // Surrounding whitespace must neither trip a confusing "unknown kind" rejection nor survive into
+  // the generated `wait` node, where a stray trailing space silently probes the wrong target.
+  const graph = ok({ issues: [{ gate: { kind: " npm ", target: " pkg@1.0.0 " }, issue: "acme/repo#1" }] });
+  const gate = graph.nodes.find((n) => n.id === "gate-1");
+  assert(gate, "the interleaved gate node must exist");
+  assertEquals(gate.wait.kind, "npm");
+  assertEquals(gate.wait.target, "pkg@1.0.0");
+});
+
 test("sequenceIssues: an object entry accepts optional gate fields (match, poll, onTimeout, credentialEnv)", () => {
   const graph = ok({
     issues: [
