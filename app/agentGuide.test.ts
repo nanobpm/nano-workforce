@@ -10,9 +10,11 @@ import { test } from "node:test";
 import { assert, assertEquals } from "#test-assert";
 import {
   GUIDE_SECTIONS,
+  GUIDE_SECTION_PAGE_DEFAULT,
   guideToc,
   renderAgentGuide,
   renderGuideSection,
+  renderGuideSectionChunk,
   splitGuideSections,
 } from "./agentGuide.ts";
 
@@ -103,6 +105,91 @@ test("every registry id resolves to a non-empty section whose heading matches it
 
 test("an unknown section id resolves to undefined (the op turns that into a 400)", () => {
   assertEquals(renderGuideSection("does-not-exist", "https://x/app/api"), undefined);
+});
+
+// ── Paginated section retrieval (issue #740) ────────────────────────────────────────────────────
+
+test("renderGuideSectionChunk: paging through a section reassembles it exactly, chunk by chunk", () => {
+  const base = "https://x/app/api";
+  const full = renderGuideSection("delivery-graphs", base)!;
+  const totalChars = Array.from(full).length;
+  const PAGE = 4000;
+  let start = 0;
+  let assembled = "";
+  let pages = 0;
+  let lastTotal = -1;
+  // Follow the nextStart cursor until it is null — the classic pagination loop.
+  for (;;) {
+    const chunk = renderGuideSectionChunk("delivery-graphs", base, start, PAGE)!;
+    assert(chunk, "a known section must page");
+    assert(Array.from(chunk.instructions).length <= PAGE, "a page must be bounded by the window");
+    assertEquals(chunk.start, start);
+    assertEquals(chunk.totalLength, totalChars);
+    if (lastTotal !== -1) assertEquals(chunk.totalLength, lastTotal);
+    lastTotal = chunk.totalLength;
+    assembled += chunk.instructions;
+    pages++;
+    if (chunk.nextStart === null) break;
+    start = chunk.nextStart;
+    assert(pages < 100, "pagination must terminate");
+  }
+  assert(pages > 1, "a large section must span multiple pages at this window");
+  assertEquals(assembled, full, "the reassembled pages must equal the whole section");
+});
+
+test("renderGuideSectionChunk: a window past the end returns an empty last page with nextStart null", () => {
+  const base = "https://x/app/api";
+  const full = renderGuideSection("orient", base)!;
+  const total = Array.from(full).length;
+  const chunk = renderGuideSectionChunk("orient", base, total + 500, 100)!;
+  assertEquals(chunk.start, total);
+  assertEquals(chunk.length, 0);
+  assertEquals(chunk.instructions, "");
+  assertEquals(chunk.nextStart, null);
+});
+
+test("renderGuideSectionChunk: the first page of a fitting section equals the whole section (nextStart null)", () => {
+  const base = "https://x/app/api";
+  const full = renderGuideSection("orient", base)!;
+  const chunk = renderGuideSectionChunk("orient", base, 0, GUIDE_SECTION_PAGE_DEFAULT)!;
+  // `orient` fits well under the default page, so one page carries it whole with no continuation.
+  assertEquals(chunk.instructions, full);
+  assertEquals(chunk.nextStart, null);
+});
+
+test("renderGuideSectionChunk: a zero-length window on a non-empty section terminates (nextStart null, no loop)", () => {
+  const base = "https://x/app/api";
+  const full = renderGuideSection("delivery-graphs", base)!;
+  assert(Array.from(full).length > 0, "precondition: the section has content");
+  // A caller (or a direct invoker bypassing the op's `length >= 1` validation) that asks for a
+  // zero-length window gets an empty page — but `nextStart` MUST be null so a "page until nextStart
+  // is null" loop cannot spin forever on a cursor that never advances.
+  const chunk = renderGuideSectionChunk("delivery-graphs", base, 0, 0)!;
+  assertEquals(chunk.start, 0);
+  assertEquals(chunk.length, 0);
+  assertEquals(chunk.instructions, "");
+  assertEquals(chunk.nextStart, null);
+});
+
+test("renderGuideSectionChunk: an unknown section id is undefined (the op turns that into a 400)", () => {
+  assertEquals(renderGuideSectionChunk("does-not-exist", "https://x/app/api", 0, 100), undefined);
+});
+
+test("renderGuideSectionChunk: chunk boundaries never split a multi-byte character", () => {
+  const base = "https://x/app/api";
+  const full = renderGuideSection("delivery-graphs", base)!;
+  // Page at every 1-char window across a stretch that contains the guide's arrows/emoji; each
+  // reassembled result must round-trip losslessly (no U+FFFD replacement from a split code point).
+  let assembled = "";
+  let start = 0;
+  for (let i = 0; i < 200 && start < Array.from(full).length; i++) {
+    const chunk = renderGuideSectionChunk("delivery-graphs", base, start, 7)!;
+    assembled += chunk.instructions;
+    if (chunk.nextStart === null) break;
+    start = chunk.nextStart;
+  }
+  assert(!assembled.includes("\uFFFD"), "no replacement characters — code points were never split");
+  assertEquals(assembled, Array.from(full).slice(0, Array.from(assembled).length).join(""));
 });
 
 test("no content regression: each section body is a verbatim slice of the raw guide", () => {

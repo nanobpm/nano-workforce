@@ -184,3 +184,134 @@ test("sequenceIssues: more than the max issues → rejected", () => {
   const issues = rejects({ issues: many });
   assert(issues.some((i) => i.path === "issues"));
 });
+
+// ── Interleaved gates (issue #740) ──────────────────────────────────────────────────────────────
+
+test("sequenceIssues: the issue's example — an npm gate between two issues generates a wait[npm] node gating the agent on prior merge AND publish", () => {
+  const graph = ok({
+    issues: [
+      "nanobpm/nano-ide#557",
+      { gate: { kind: "npm", target: "@nanobpm/agentic@0.13.0" }, issue: "jwulf/c8ctl-plugin-nano#186" },
+      "nanobpm/nano-workforce#738",
+    ],
+  });
+  // 3 issues × 3 canonical nodes + 1 interleaved gate node = 10.
+  assertEquals(graph.nodes.length, 10);
+  const gate = graph.nodes.find((n) => n.id === "gate-2");
+  assert(gate, "the interleaved gate node must exist");
+  assertEquals(gate.kind, "wait");
+  assertEquals(gate.wait.kind, "npm");
+  assertEquals(gate.wait.target, "@nanobpm/agentic@0.13.0");
+  // The gate carries the bounded default budget (not the 30-min trap).
+  assertEquals(gate.wait.poll, { everyMs: 300_000, timeoutMs: 259_200_000 });
+  assertEquals(gate.wait.onTimeout, "escalate");
+  // Gated on the prior merge: merged-1 → gate-2. Gated on the publish → the agent waits on the gate:
+  // gate-2 → open-2. Together the agent (open-2) starts only after issue-1 merged AND the npm publish.
+  assert(graph.edges.some((e) => e.from === "merged-1" && e.to === "gate-2"), "gate waits on the prior merge");
+  assert(graph.edges.some((e) => e.from === "gate-2" && e.to === "open-2"), "the agent waits on the gate");
+  // No direct merged-1 → open-2 edge — the gate is spliced in between.
+  assert(!graph.edges.some((e) => e.from === "merged-1" && e.to === "open-2"), "the gate replaces the direct sequence edge");
+  // The third (ungated) issue still sequences directly off the second's merge.
+  assert(graph.edges.some((e) => e.from === "merged-2" && e.to === "open-3"), "an ungated issue keeps the direct sequence edge");
+});
+
+test("sequenceIssues: a gate on the FIRST issue behind an epic gate chains gate-epic → gate-1 → open-1", () => {
+  const graph = ok({
+    behind: "acme/repo#100",
+    issues: [{ gate: { kind: "github-check", target: "acme/repo@main" }, issue: "acme/repo#1" }],
+  });
+  assert(graph.nodes.some((n) => n.id === "gate-epic"), "the leading epic gate exists");
+  assert(graph.nodes.some((n) => n.id === "gate-1"), "the interleaved first-issue gate exists");
+  assert(graph.edges.some((e) => e.from === "gate-epic" && e.to === "gate-1"), "epic gate → interleaved gate");
+  assert(graph.edges.some((e) => e.from === "gate-1" && e.to === "open-1"), "interleaved gate → agent");
+  assert(!graph.edges.some((e) => e.from === "gate-epic" && e.to === "open-1"), "the interleaved gate is spliced before the agent");
+});
+
+test("sequenceIssues: a gated first issue with NO behind gate starts the gate immediately (no predecessor edge)", () => {
+  const graph = ok({ issues: [{ gate: { kind: "npm", target: "pkg@1.0.0" }, issue: "acme/repo#1" }] });
+  // No inbound edge to gate-1 (nothing precedes it); the agent still waits on the gate.
+  assert(!graph.edges.some((e) => e.to === "gate-1"), "an ungated-first gate has no predecessor edge");
+  assert(graph.edges.some((e) => e.from === "gate-1" && e.to === "open-1"), "the agent waits on the gate");
+});
+
+test("sequenceIssues: a gate's `kind`/`target` are trimmed before validation AND persistence (no whitespace-poisoned probe)", () => {
+  // Surrounding whitespace must neither trip a confusing "unknown kind" rejection nor survive into
+  // the generated `wait` node, where a stray trailing space silently probes the wrong target.
+  const graph = ok({ issues: [{ gate: { kind: " npm ", target: " pkg@1.0.0 " }, issue: "acme/repo#1" }] });
+  const gate = graph.nodes.find((n) => n.id === "gate-1");
+  assert(gate, "the interleaved gate node must exist");
+  assertEquals(gate.wait.kind, "npm");
+  assertEquals(gate.wait.target, "pkg@1.0.0");
+});
+
+test("sequenceIssues: an object entry accepts optional gate fields (match, poll, onTimeout, credentialEnv)", () => {
+  const graph = ok({
+    issues: [
+      {
+        gate: {
+          kind: "http",
+          target: "https://example.test/ready",
+          match: { status: 200 },
+          poll: { everyMs: 1000, timeoutMs: 60000 },
+          onTimeout: "continue",
+          credentialEnv: "MY_TOKEN",
+        },
+        issue: "acme/repo#1",
+      },
+    ],
+  });
+  const gate = graph.nodes.find((n) => n.id === "gate-1");
+  assertEquals(gate.wait.match, { status: 200 });
+  assertEquals(gate.wait.poll, { everyMs: 1000, timeoutMs: 60000 });
+  assertEquals(gate.wait.onTimeout, "continue");
+  assertEquals(gate.wait.credentialEnv, "MY_TOKEN");
+});
+
+test("sequenceIssues: a bare-string entry is byte-for-byte identical to the object form without a gate", () => {
+  const bare = ok({ issues: ["acme/repo#1", "acme/repo#2"] });
+  const objs = ok({ issues: [{ issue: "acme/repo#1" }, { issue: "acme/repo#2" }] });
+  assertEquals(objs.nodes, bare.nodes);
+  assertEquals(objs.edges, bare.edges);
+});
+
+test("sequenceIssues: a graph with an interleaved gate passes validateDeliveryGraph AND compiles", async () => {
+  const graph = ok({
+    issues: [
+      "acme/repo#1",
+      { gate: { kind: "npm", target: "@scope/pkg@2.0.0" }, issue: "acme/repo#2" },
+    ],
+  });
+  assertEquals(validateDeliveryGraph(graph), []);
+  const compiled = await compileDeliveryGraph(graph);
+  assert(compiled.ok, `expected the gated graph to compile, got ${JSON.stringify(compiled)}`);
+});
+
+test("sequenceIssues: an unknown gate kind → rejected at issues[i].gate.kind", () => {
+  const issues = rejects({ issues: [{ gate: { kind: "no-such-probe", target: "x" }, issue: "acme/repo#1" }] });
+  assert(issues.some((i) => i.path === "issues[0].gate.kind"), `expected issues[0].gate.kind, got ${JSON.stringify(issues)}`);
+});
+
+test("sequenceIssues: a gate missing its target → rejected at issues[i].gate.target", () => {
+  const issues = rejects({ issues: [{ gate: { kind: "npm" }, issue: "acme/repo#1" }] });
+  assert(issues.some((i) => i.path === "issues[0].gate.target"), `expected issues[0].gate.target, got ${JSON.stringify(issues)}`);
+});
+
+test("sequenceIssues: a gate with onTimeout:fail → rejected at issues[i].gate.onTimeout", () => {
+  const issues = rejects({ issues: [{ gate: { kind: "npm", target: "pkg@1", onTimeout: "fail" }, issue: "acme/repo#1" }] });
+  assert(issues.some((i) => i.path === "issues[0].gate.onTimeout"), `expected issues[0].gate.onTimeout, got ${JSON.stringify(issues)}`);
+});
+
+test("sequenceIssues: an object entry missing `issue` → rejected at issues[i].issue", () => {
+  const issues = rejects({ issues: [{ gate: { kind: "npm", target: "pkg@1" } }] });
+  assert(issues.some((i) => i.path === "issues[0].issue"), `expected issues[0].issue, got ${JSON.stringify(issues)}`);
+});
+
+test("sequenceIssues: a fully-gated max-length sequence behind an epic gate exceeds the node ceiling → rejected", () => {
+  const many = Array.from({ length: MAX_SEQUENCE_ISSUES }, (_, i) => ({
+    gate: { kind: "npm", target: `pkg@${i + 1}` },
+    issue: `acme/repo#${i + 1}`,
+  }));
+  // 64 × 4 nodes + 1 epic gate = 257 > 256.
+  const issues = rejects({ behind: "acme/repo#999", issues: many });
+  assert(issues.some((i) => i.path === "issues" && /too many nodes/.test(i.message)), `expected a node-ceiling rejection, got ${JSON.stringify(issues)}`);
+});

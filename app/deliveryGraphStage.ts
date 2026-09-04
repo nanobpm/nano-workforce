@@ -39,6 +39,10 @@ export interface StagedResult {
   nodeCount: number;
   humanNodeCount: number;
   sideEffectCount: number;
+  /** Digests of same-logical-graph proposals this stage superseded (issue #740). */
+  superseded: string[];
+  /** How many OTHER live staged proposals remain after this stage — potential orphaned siblings. */
+  siblingsStaged: number;
 }
 
 /** A rejected compile — the `CompileDeliveryGraphErrors` body, verbatim from the compiler. */
@@ -75,7 +79,7 @@ export async function compileAndStageDeliveryGraph(
       ? result.resolved.name.trim()
       : null;
   const preview = buildProposalPreview(result);
-  await stageProposal(
+  const outcome = await stageProposal(
     data,
     buildProposalRow({
       digest,
@@ -99,10 +103,16 @@ export async function compileAndStageDeliveryGraph(
       digest,
       preview,
       reviewUrl: proposalReviewUrl(digest, origin),
+      // Supersede/sibling visibility (issue #740): the agent surfaces these so the operator learns
+      // precisely which prior proposals this stage retired and whether other live proposals remain.
+      superseded: outcome.superseded,
+      siblingsStaged: outcome.siblingsStaged,
     },
     digest,
     nodeCount: result.resolved.nodes.length,
     humanNodeCount: result.humanNodes.length,
     sideEffectCount: result.sideEffects.length,
+    superseded: outcome.superseded,
+    siblingsStaged: outcome.siblingsStaged,
   };
 }

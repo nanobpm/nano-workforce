@@ -82,6 +82,19 @@ test("blank/whitespace section is treated as no section (TOC)", async () => {
   assertEquals(r.body.kind, "toc");
 });
 
+test("a pagination cursor beyond MAX_SAFE_INTEGER → 400 (unsafe integers lose precision)", async () => {
+  // 9007199254740993 === 9007199254740992 in IEEE-754 double, so `Number.isInteger` accepts it
+  // while it no longer represents the caller's requested character offset. It must be rejected.
+  const unsafe = "9007199254740993";
+  const rStart = (await handler(input({ section: "delivery-graphs", start: unsafe }), app)) as any;
+  assertEquals(rStart.status, 400);
+  assert(Array.isArray(rStart.body.issues) && rStart.body.issues.some((i: any) => i.path === "start"));
+
+  const rLength = (await handler(input({ section: "delivery-graphs", length: unsafe }), app)) as any;
+  assertEquals(rLength.status, 400);
+  assert(Array.isArray(rLength.body.issues) && rLength.body.issues.some((i: any) => i.path === "length"));
+});
+
 test("shared-secret guard: rejects when the secret is set and header is wrong", async () => {
   const prev = process.env.NANO_PR_WEBHOOK_SECRET;
   process.env.NANO_PR_WEBHOOK_SECRET = "s3cr3t";

@@ -153,6 +153,27 @@ export function buildProposalRow(input: {
   };
 }
 
+/** The outcome of a {@link stageProposal} — the written row PLUS a supersede/sibling summary the stage
+ * doors surface so an agent can warn the operator precisely about what its stage did to the cockpit's
+ * Delivery Graphs list (issue #740). Supersede keys on the LOGICAL graph key (derived from the graph
+ * `name`), so re-staging the "same" runbook under a CHANGED `name` creates a sibling with a different
+ * logical key that is NOT superseded — a silent footgun. Making the collision VISIBLE here (rather than
+ * silent) lets the agent tell the operator exactly which digests it retired and how many other live
+ * proposals remain (potential orphaned siblings). */
+export interface StageOutcome {
+  /** The row this stage wrote, RE-READ after the supersede reconcile so it reflects the actually-
+   * persisted state (a concurrent newer stage can leave this digest `superseded` immediately). */
+  row: DeliveryGraphProposal;
+  /** Digests of OTHER proposals sharing this row's logical key that this stage flipped to
+   * `superseded` — the same-logical-graph proposals it cleanly replaced. Empty on a first stage. */
+  superseded: string[];
+  /** How many OTHER live `staged` proposals remain after this stage (a DIFFERENT logical key from this
+   * row) — i.e. proposals this stage did NOT supersede. A non-zero count flags possible orphaned
+   * siblings (e.g. an earlier stage of the same runbook under a different `name`) cluttering the
+   * operator's list, so the agent can name them for cleanup. */
+  siblingsStaged: number;
+}
+
 /** Persist a compiled graph as a `staged` proposal and SUPERSEDE any prior staged proposal for the
 * same logical graph. Idempotent on `digest` (a re-stage of an identical, still-live digest refreshes
 * `updated_at` but preserves `created_at`, so the TTL stays anchored to the first stage; a re-stage of
@@ -162,10 +183,20 @@ export function buildProposalRow(input: {
  * exactly one live proposal per logical graph (the latest digest the operator would dispatch). The
  * supersede RECONCILES to the globally-newest staged row (`updated_at`, `digest`-tie-broken) rather than
  * flipping only rows older than the just-written one, so concurrent stages of two different digests
- * converge to EXACTLY ONE live proposal — never zero, and never two — regardless of arrival order. */
-export async function stageProposal(data: DataLayer, row: DeliveryGraphProposal): Promise<DeliveryGraphProposal> {
+ * converge to EXACTLY ONE live proposal — never zero, and never two — regardless of arrival order.
+ *
+ * Returns a {@link StageOutcome} — the written row plus the supersede/sibling summary (issue #740) the
+ * stage doors surface so an agent can warn the operator precisely about siblings it did / did not
+ * retire. */
+export async function stageProposal(data: DataLayer, row: DeliveryGraphProposal): Promise<StageOutcome> {
   const table = deliveryGraphProposals(data);
   const existing = await table.get(row.digest);
+  // Capture the same-logical-key staged siblings that exist BEFORE this stage writes (excluding our own
+  // digest) — the supersede reconcile below normally flips them all to `superseded`; we re-read them
+  // after to report exactly which digests this stage retired.
+  const priorSameKey = (await table.find({ status: "staged" })).filter(
+    (r) => r.logical_key === row.logical_key && r.digest !== row.digest && isLiveStaged(r),
+  );
   const toWrite = existing
     ? buildProposalRow({
         digest: row.digest,
@@ -208,7 +239,34 @@ export async function stageProposal(data: DataLayer, row: DeliveryGraphProposal)
       `UPDATE "delivery_graph_proposals" SET "status" = 'superseded', "updated_at" = ? WHERE "logical_key" = ? AND "status" = 'staged' AND EXISTS (SELECT 1 FROM "delivery_graph_proposals" AS "newer" WHERE "newer"."logical_key" = "delivery_graph_proposals"."logical_key" AND "newer"."status" = 'staged' AND ("newer"."updated_at" > "delivery_graph_proposals"."updated_at" OR ("newer"."updated_at" = "delivery_graph_proposals"."updated_at" AND "newer"."digest" > "delivery_graph_proposals"."digest")))`,
       [now(), row.logical_key],
     );
-  return toWrite;
+
+  // Report what the stage did to siblings (issue #740). `superseded` = the same-logical-key proposals
+  // this stage retired (re-read post-reconcile so a concurrent newer stage that kept ITS row live —
+  // leaving ours superseded — is reported honestly). `siblingsStaged` = OTHER live staged proposals
+  // with a DIFFERENT logical key that remain (the orphaned-sibling footgun: a re-stage under a changed
+  // `name` never supersedes them).
+  // Re-check ONLY the pre-stage staged siblings captured above (typically zero or a handful of
+  // concurrently-live same-key rows), reporting exactly those this reconcile flipped to `superseded`.
+  // Re-reading each `priorSameKey` digest keeps staging O(live same-key siblings) — a global
+  // `find({ status: "superseded" })` scans EVERY superseded row ever written (proposals are never
+  // deleted) and grows without bound. Matching strictly on `status === "superseded"` (not merely
+  // `!== "staged"`) avoids misreporting a sibling that concurrently went `dispatched`/`dismissed`/
+  // `expired`.
+  const superseded: string[] = [];
+  for (const prev of priorSameKey) {
+    const after = await table.get(prev.digest);
+    if (after?.status === "superseded") superseded.push(prev.digest);
+  }
+  const siblingsStaged = (await listStagedProposals(data)).filter((r) => r.logical_key !== row.logical_key).length;
+
+  // Re-read the just-written row AFTER the reconcile so `row` reports the ACTUALLY-persisted state, not
+  // the pre-reconcile `toWrite`: a concurrent newer stage of a different digest can flip THIS digest to
+  // `superseded` in the reconcile above, so returning `toWrite` (still `staged`) would report a status
+  // that doesn't match the DB. Fall back to `toWrite` only if the row somehow vanished (it shouldn't —
+  // we just wrote it), keeping the return non-null.
+  const persisted = (await table.get(toWrite.digest)) ?? toWrite;
+
+  return { row: persisted, superseded, siblingsStaged };
 }
 
 /** The ONE definition of "a live, dispatchable-RIGHT-NOW staged proposal" (issue #608): the row is

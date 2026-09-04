@@ -69,6 +69,49 @@ describe("S5 — the addressable operator guide over MCP (#611)", () => {
     assert(res.text.length < 30000, "one section must fit a typical tool-result budget in a single call");
   });
 
+  test("section pagination: start/length pages a section and nextStart walks it to completion (#740)", async () => {
+    const whole = await h.callTool("getAgentGuide", { section: "delivery-graphs" });
+    const wholeSection = (whole.json as { section?: { instructions: string } }).section!;
+    const wholeChars = Array.from(wholeSection.instructions);
+
+    const PAGE = 4000;
+    let start = 0;
+    let assembled = "";
+    let pages = 0;
+    let total = -1;
+    for (;;) {
+      const res = await h.callTool("getAgentGuide", { section: "delivery-graphs", start, length: PAGE });
+      assert(!res.isError, `a paged fetch must not error: ${res.text}`);
+      const body = res.json as {
+        kind?: string;
+        section?: { id: string; instructions: string; start: number; length: number; totalLength: number; nextStart: number | null };
+      };
+      assert.equal(body.kind, "section");
+      const s = body.section!;
+      assert.equal(s.id, "delivery-graphs");
+      assert(Array.from(s.instructions).length <= PAGE, "a page must be bounded by `length`");
+      assert.equal(s.start, start);
+      if (total !== -1) assert.equal(s.totalLength, total, "totalLength is stable across pages");
+      total = s.totalLength;
+      assembled += s.instructions;
+      pages++;
+      if (s.nextStart === null) break;
+      start = s.nextStart;
+      assert(pages < 100, "pagination must terminate");
+    }
+    assert(pages > 1, "a large section must span multiple pages at this window");
+    assert.equal(total, wholeChars.length, "totalLength equals the full section length");
+    assert.equal(assembled, wholeSection.instructions, "the reassembled pages equal the whole section");
+  });
+
+  test("section pagination: a non-integer/negative start is a uniform issues[{path,message}] 400 (#740)", async () => {
+    const res = await h.callTool("getAgentGuide", { section: "delivery-graphs", start: -5 });
+    assert(res.isError, "an invalid pagination arg must surface as a tool-level error");
+    const body = res.json as { issues?: { path: string; message: string }[] };
+    assert(Array.isArray(body.issues) && body.issues.length >= 1, "must answer with issues[]");
+    assert(body.issues!.some((i) => i.path.includes("start")), "the issue must name the `start` argument");
+  });
+
   test("an unknown section id is rejected with issues[{path,message}]", async () => {
     const res = await h.callTool("getAgentGuide", { section: "no-such-section" });
     assert(res.isError, "an unknown section id must surface as a tool-level error");

@@ -174,3 +174,64 @@ export function renderGuideSection(id: string, apiBase: string): string | undefi
   const base = apiBase.replace(/\/+$/, "");
   return section.body.replaceAll("__BASE__", base).replaceAll("__ENGINE__", resolveEngineBase());
 }
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// Paginated section retrieval (issue #740).
+//
+// The addressable guide exists to avoid the ~43KB monolith, but a single section can ITSELF overflow
+// a typical MCP tool-result limit — `delivery-graphs` alone renders to ~25KB, the one section an
+// author most needs. So a section is additionally retrievable in BOUNDED CHUNKS via a `start`/`length`
+// window with a `nextStart` continuation cursor. Offsets are UNICODE CHARACTER (code-point) offsets —
+// NOT raw byte offsets — so a chunk boundary never splits a multi-byte character (the arrows/emoji in
+// the guide) into mojibake. A plain `renderGuideSection` (no window) is untouched, so existing
+// `section=<id>` calls that already fit stay byte-for-byte identical.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/** The default window size (characters) when a caller engages pagination without an explicit
+ *  `length` — comfortably under a typical MCP tool-result limit so a single page never overflows. */
+export const GUIDE_SECTION_PAGE_DEFAULT = 12_000;
+
+/** One page of a section's markdown: the `instructions` slice plus the cursor state so a caller can
+ *  page through with `nextStart` until it is `null`. Offsets/lengths are CHARACTER counts. */
+export interface GuideSectionChunk {
+  readonly instructions: string;
+  /** The (clamped) character offset this page starts at. */
+  readonly start: number;
+  /** The number of characters actually returned in this page. */
+  readonly length: number;
+  /** The total number of characters in the fully-rendered section. */
+  readonly totalLength: number;
+  /** The character offset to pass as `start` for the next page, or `null` when this is the last page. */
+  readonly nextStart: number | null;
+}
+
+/** Render a bounded WINDOW of a single section's markdown for a given app control-API base, with
+ *  `__BASE__`/`__ENGINE__` substituted exactly as {@link renderGuideSection} does. `start` and
+ *  `length` are CHARACTER offsets (clamped to the section bounds; a non-positive `length` yields an
+ *  empty page). Returns `undefined` for an unknown id (the caller turns that into a 400). */
+export function renderGuideSectionChunk(
+  id: string,
+  apiBase: string,
+  start: number,
+  length: number,
+): GuideSectionChunk | undefined {
+  const full = renderGuideSection(id, apiBase);
+  if (full === undefined) return undefined;
+  const chars = Array.from(full);
+  const total = chars.length;
+  const from = Math.min(Math.max(0, Math.trunc(start)), total);
+  const take = Math.max(0, Math.trunc(length));
+  const slice = chars.slice(from, from + take);
+  const end = from + slice.length;
+  return {
+    instructions: slice.join(""),
+    start: from,
+    length: slice.length,
+    totalLength: total,
+    // Only advance when this page actually consumed characters. A zero-length window (`length <= 0`)
+    // returns an empty page that made NO progress, so it must terminate the cursor (`null`) rather
+    // than hand back a `nextStart` equal to `start` — a non-advancing cursor would loop a caller
+    // that pages until `nextStart` is null forever.
+    nextStart: slice.length > 0 && end < total ? end : null,
+  };
+}
