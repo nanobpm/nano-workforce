@@ -117,9 +117,21 @@ export default defineOperation("dispatchDeliveryGraph", async ({ body }, app) =>
   // checkout-less graph — the default can never silently share a checkout.
   const hasRepoless = body !== null && typeof body === "object" && "repoless" in body;
   const repolessRaw = hasRepoless ? body.repoless : undefined;
-  if (hasRepoless && typeof repolessRaw !== "boolean") {
-    app.log.warn("dispatch-delivery-graph rejected: non-boolean repoless");
-    return { status: 400, body: { ok: false, error: "`repoless` must be a boolean (`true` to dispatch a checkout-less graph)" } };
+  // `repoless` is a `true`-ONLY opt-out, exactly as the OpenAPI `oneOf` models it: it is `enum: [true]`
+  // on the repoless variant and NOT a member of the repository variant (`additionalProperties: false`).
+  // So reject any present-but-not-`true` value — `false`, `"yes"`, `0`, … — rather than silently folding
+  // `repoless: false` into the "not repoless" path. Otherwise a caller that bypasses schema validation
+  // could send `{ digest, repository, baseBranch, repoless: false }` (or `{ digest, repoless: false }`)
+  // and slip through with a confusing tri-state the `oneOf` contract never permits.
+  if (hasRepoless && repolessRaw !== true) {
+    app.log.warn("dispatch-delivery-graph rejected: repoless is a true-only opt-out", { type: typeof repolessRaw });
+    return {
+      status: 400,
+      body: {
+        ok: false,
+        error: "`repoless` is a `true`-only opt-out — omit it to provision a repository (with `repository` + `baseBranch`), or set `repoless: true` to dispatch a checkout-less graph",
+      },
+    };
   }
   const repoless = repolessRaw === true;
   if (repoless && (repository !== undefined || baseBranch !== undefined)) {

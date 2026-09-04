@@ -402,4 +402,37 @@ describe("dispatchDeliveryGraph — operator dispatch by staged-proposal digest"
     assert.equal((await deliveryGraphRuns(app.db).all()).length, 0);
     assert.equal((await deliveryGraphProposals(app.db).get(staged.body.digest))?.status, "staged");
   });
+
+  // `repoless` is a `true`-only opt-out (OpenAPI `oneOf`: `enum: [true]` on the repoless variant, absent
+  // from the repository variant with `additionalProperties: false`). An explicit `repoless: false` — with
+  // OR without a repository envelope — must be a clean 400 at the contract boundary, never silently folded
+  // into the "not repoless" path. The edge schema rejects it end-to-end here; the door's own guard
+  // (dispatchDeliveryGraph.ts) mirrors it as defense-in-depth for any non-schema-validated caller.
+  test("an explicit repoless: false (bare) is rejected at submit → 400, nothing launched (#729)", async () => {
+    const app = await boot();
+    assert.ok(app.api);
+    const api = app.api;
+    const staged = await api.call<{ digest: string }>("compileDeliveryGraph", { body: HUMAN_ONLY });
+    const res = await api.call<{ ok?: boolean; error?: string }>("dispatchDeliveryGraph", {
+      body: { digest: staged.body.digest, repoless: false },
+    });
+    assert.equal(res.status, 400);
+    assert.ok(typeof res.body.error === "string" && res.body.error.length > 0);
+    assert.equal((await deliveryGraphRuns(app.db).all()).length, 0);
+    assert.equal((await deliveryGraphProposals(app.db).get(staged.body.digest))?.status, "staged");
+  });
+
+  test("an explicit repoless: false alongside a repository envelope is rejected → 400, nothing launched (#729)", async () => {
+    const app = await boot();
+    assert.ok(app.api);
+    const api = app.api;
+    const staged = await api.call<{ digest: string }>("compileDeliveryGraph", { body: HUMAN_ONLY });
+    const res = await api.call<{ ok?: boolean; error?: string }>("dispatchDeliveryGraph", {
+      body: { digest: staged.body.digest, repository: "owner/repo", baseBranch: "main", repoless: false },
+    });
+    assert.equal(res.status, 400);
+    assert.ok(typeof res.body.error === "string" && res.body.error.length > 0);
+    assert.equal((await deliveryGraphRuns(app.db).all()).length, 0);
+    assert.equal((await deliveryGraphProposals(app.db).get(staged.body.digest))?.status, "staged");
+  });
 });
