@@ -30,12 +30,13 @@ async function compileFail(graph: unknown) {
 }
 
 /** The sub-process element id of the PLANNED human user task in a compiled graph — i.e. the
- * delivery-human-task element that is NOT a bounded node's __esc timeout twin. Returns "" if none. */
+ * delivery-human-task element that is NOT a bounded node's escalation twin (`__esc` timeout or
+ * `__contract` producer-gate, issue #731). Returns "" if none. */
 function humanTaskSubEl(bpmn: string): string {
   const parts = bpmn.split('<bpmn:userTask id="delivery-human-task__');
   for (let k = 1; k < parts.length; k++) {
     const id = parts[k].slice(0, parts[k].indexOf('"'));
-    if (!id.endsWith("__esc")) return id;
+    if (!id.endsWith("__esc") && !id.endsWith("__contract")) return id;
   }
   return "";
 }
@@ -288,6 +289,15 @@ function elementForNode(bpmn: string, nodeId: string): string {
 /** Slice a compiled BPMN to a node's escalation user task body. */
 function escBlockForNode(bpmn: string, nodeId: string): string {
   const esc = `delivery-human-task__${elementForNode(bpmn, nodeId)}__esc`;
+  const start = bpmn.indexOf(`<bpmn:userTask id="${esc}"`);
+  assert(start !== -1, `escalation task ${esc} for node ${nodeId} exists`);
+  return bpmn.slice(start, bpmn.indexOf("</bpmn:userTask>", start));
+}
+
+/** Slice a compiled BPMN to a node's escalation user task body by twin suffix (`esc` timeout or
+ * `contract` producer-gate, issue #731). */
+function escBlockForNodeSuffix(bpmn: string, nodeId: string, suffix: "esc" | "contract"): string {
+  const esc = `delivery-human-task__${elementForNode(bpmn, nodeId)}__${suffix}`;
   const start = bpmn.indexOf(`<bpmn:userTask id="${esc}"`);
   assert(start !== -1, `escalation task ${esc} for node ${nodeId} exists`);
   return bpmn.slice(start, bpmn.indexOf("</bpmn:userTask>", start));
@@ -774,4 +784,93 @@ test("a wait node's onTimeout: fail is rejected at compile with a path-qualified
   const hit = errors.find((e) => e.path === "nodes[0].wait.onTimeout");
   assert(hit, `expected a path-qualified onTimeout error, got ${JSON.stringify(errors)}`);
   assert(hit?.message.includes("#978"), `the error names the blocking engine issue, got ${hit?.message}`);
+});
+
+// Issue #731 — the producer-contract gate. An `agent` node's job completing is NOT the node
+// succeeding: a producer that returns a non-terminal `status` (the instance-10746 `in_progress`) or
+// omits a declared emit consumed downstream as a required data dependency must escalate AT the
+// producer, not thread a null/incomplete result into a consumer two nodes downstream. The routing-only
+// emit (referenced only by an edge `when` guard) stays optional — omit ⇒ default branch.
+
+// The canonical `agent → connector[converge-merge]` shape: `open` opens the PR and emits `pr`, which
+// `land` binds as its connector `payload.pr` (a required DATA dependency, threaded on the fact edge).
+const PRODUCER_GATE = {
+  name: "producer gate",
+  nodes: [
+    { id: "open", kind: "agent", agent: { jobType: "senior:feature" }, emits: [{ name: "pr", type: "pr" }] },
+    { id: "land", kind: "connector", connector: { target: "converge-merge", payload: { pr: "open.pr" }, dedupeKey: "land-1" } },
+  ],
+  edges: [{ from: "open.pr", to: "land" }],
+};
+
+test("#731 producer status gate: an agent node inserts a post-completion contract gate that escalates a non-terminal status AT the producer", async () => {
+  const r = await compileOk(PRODUCER_GATE);
+  const el = elementForNode(r.bpmn, "open");
+  // The agent body is no longer `task → end`: the task feeds an exclusive `_gate` whose default routes
+  // a broken producer to a SECOND (contract) escalation task distinct from the `__esc` timeout twin.
+  assert(
+    r.bpmn.includes(`<bpmn:exclusiveGateway id="${el}_gate" name="producer contract met?" default="${el}_g1">`),
+    "the agent task feeds a producer-contract exclusive gate",
+  );
+  assert(r.bpmn.includes(`<bpmn:sequenceFlow id="${el}_i1" sourceRef="${el}_task" targetRef="${el}_gate" />`), "the task flows into the gate, not straight to end");
+  assert(r.bpmn.includes(`<bpmn:userTask id="delivery-human-task__${el}__contract"`), "a producer-contract escalation task exists, distinct from the __esc timeout twin");
+  assert(
+    r.bpmn.includes(`<bpmn:sequenceFlow id="${el}_g1" name="contract broken" sourceRef="${el}_gate" targetRef="delivery-human-task__${el}__contract" />`),
+    "the gate's default (contract-broken) flow parks the producer on its contract escalation",
+  );
+  // The success flow proceeds only on a terminal-success status (or an absent/null status); an
+  // `in_progress`/`blocked`/`failed` self-report falls through to the default → escalation.
+  const g0 = r.bpmn.match(new RegExp(`<bpmn:sequenceFlow id="${el}_g0"[^>]*>(.*?)</bpmn:sequenceFlow>`, "s"));
+  assert(g0, "the contract-met success flow exists");
+  assert(g0![1].includes('list contains(["done", "opened", "skipped"], status)'), "the success flow gates on the terminal-success status allowlist");
+  assert(g0![1].includes("not(is defined(status)) or status = null"), "an absent/null status is not itself the failure mode — it still proceeds");
+  // The contract escalation's read-only context names the node and its reported status (#731).
+  const esc = escBlockForNodeSuffix(r.bpmn, "open", "contract");
+  assert(esc.includes("did not satisfy its producer contract"), "the contract escalation explains WHY it parked");
+  assert(esc.includes("Reported status="), "the context surfaces the actual reported status");
+});
+
+test("#731 required-emit gate: a producer's declared emit consumed as a required data dependency adds a non-null gate clause and a resumable escalation NAMING the fact", async () => {
+  const r = await compileOk(PRODUCER_GATE);
+  const el = elementForNode(r.bpmn, "open");
+  const g0 = r.bpmn.match(new RegExp(`<bpmn:sequenceFlow id="${el}_g0"[^>]*>(.*?)</bpmn:sequenceFlow>`, "s"));
+  assert(g0, "the contract-met success flow exists");
+  // `pr` is threaded to `land`'s connector payload as a required data dependency — so the gate proceeds
+  // only when it is actually populated non-null (a null `pr`, as in instance 10746, escalates here).
+  assert(g0![1].includes("(is defined(pr) and pr != null)"), "a required-emit non-null clause gates the success flow on the populated fact");
+  const esc = escBlockForNodeSuffix(r.bpmn, "open", "contract");
+  assert(esc.includes("Required emit &apos;pr&apos;"), "the escalation NAMES the required fact that was not emitted");
+  // Resumable (#514 Defect-B mirror): a human/agent supplies the missing fact, mapped onto the agent
+  // emit source var (fact name), so the subProcess output ioMapping republishes `<el>_pr` non-null.
+  assert(esc.includes('="typed"') && esc.includes('target="emitMode"'), "the contract escalation PRESENTS its value field (resumable)");
+  assert(/source="=if \(is defined\(value\)\) then value else null" target="pr"/.test(esc), "the operator's value maps onto the required emit's source var");
+});
+
+test("#731 routing-only emits stay optional: a fact referenced ONLY by an edge `when` guard is NOT gated as a required emit (omit ⇒ default branch)", async () => {
+  // `classify` emits `result` used ONLY for guarded routing (`when`/`equals` + a default) — never
+  // threaded as a fact-qualified `from` data dependency. The producer gate must NOT require it non-null.
+  const graph = {
+    name: "routing only",
+    nodes: [
+      { id: "classify", kind: "agent", agent: { jobType: "senior:feature" }, emits: [{ name: "result", type: "string" }] },
+      { id: "migrate", kind: "connector", connector: { target: "npm:install", dedupeKey: "m-1" } },
+      { id: "release", kind: "connector", connector: { target: "npm:publish", dedupeKey: "r-1" } },
+    ],
+    edges: [
+      { from: "classify", to: "migrate", when: "classify.result", equals: "breaking" },
+      { from: "classify", to: "release", default: true },
+    ],
+  };
+  const r = await compileOk(graph);
+  const el = elementForNode(r.bpmn, "classify");
+  const g0 = r.bpmn.match(new RegExp(`<bpmn:sequenceFlow id="${el}_g0"[^>]*>(.*?)</bpmn:sequenceFlow>`, "s"));
+  assert(g0, "the contract-met success flow exists");
+  // The status gate is still present, but there is NO `result` non-null clause — routing stays optional.
+  assert(g0![1].includes("list contains"), "the status gate is still present for the agent node");
+  assert(!g0![1].includes("result"), `a routing-only emit is NOT gated as a required data dependency, got: ${g0![1]}`);
+  // The contract escalation for a status-only gate is inert (no emit resume field).
+  const esc = escBlockForNodeSuffix(r.bpmn, "classify", "contract");
+  assert(esc.includes('="none"') && esc.includes('target="emitMode"'), "a status-only contract escalation keeps its emit field hidden");
+  // The guarded split that routes `result` downstream is untouched (default branch preserved).
+  assert(r.bpmn.includes('=classify_result = "breaking"') || r.bpmn.includes(`${el}_result = "breaking"`), "the routing guard on the emitted fact is preserved");
 });

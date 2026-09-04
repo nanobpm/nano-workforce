@@ -185,6 +185,67 @@ describe("delivery-graph runner — engine-native execution (S4)", () => {
     assert.ok(takenFlows(app).some((f) => f.endsWith("->End")), "the late-bound wait resolved and the graph reached End");
   });
 
+  test("#731 producer contract gate: an agent that completes with status=in_progress and a null required emit escalates AT the producer, does NOT thread null downstream, and resumes", async () => {
+    const app = track(await boot(freshDir()));
+
+    // The instance-10746 failure mode: the agent's job COMPLETES, but it broke its node contract —
+    // it self-reports `status: "in_progress"` and never opened the PR, so its required `pr` emit is
+    // null. Before #731 this threaded `open_pr = null` through to the connector, which then failed with
+    // a mis-attributed CONSUMER incident. The producer gate must instead park THIS node.
+    let agentFired = 0;
+    await app.engine.registerWorker("senior:demo", async () => {
+      agentFired++;
+      return { status: "in_progress", summary: "delegated to a background agent; PR not opened." };
+    });
+    let connectorFired = 0;
+    await app.engine.registerWorker(
+      "pr.delivery-connector",
+      async (job) => {
+        connectorFired++;
+        const vars = job.variables as Record<string, unknown>;
+        const { target, payload, boundFacts } = readConnectorInput(vars as Parameters<typeof readConnectorInput>[0]);
+        const dedupeKey = connectorDedupeKey({
+          dedupeKey: (vars.dedupeKey as string | null | undefined) ?? null,
+          processInstanceKey: job.processInstanceKey ?? null,
+          elementId: job.elementId ?? null,
+        });
+        return await dispatchConnector(app.db, { dedupeKey: dedupeKey ?? "x", target, payload, boundFacts }, new Date().toISOString());
+      },
+      { fetchVariables: ["boundFacts", "target", "dedupeKey", "payload"] },
+    );
+
+    const graph: DeliveryGraph = {
+      name: "e2e producer gate",
+      nodes: [
+        { id: "open", kind: "agent", agent: { jobType: "senior:demo" }, emits: [{ name: "pr", type: "pr" }] },
+        { id: "land", kind: "connector", connector: { target: "slack", payload: { pr: "open.pr" }, dedupeKey: "land-731" } },
+      ],
+      edges: [{ from: "open.pr", to: "land" }],
+    };
+
+    const run = await runDeliveryGraph(app.engine, graph, { escalationSlaTimeout: "PT1H", repoless: true });
+    assert.ok(run.ok, `graph should deploy + run, got ${JSON.stringify(run)}`);
+    await app.settle();
+
+    // The agent job fired and COMPLETED — but the node did NOT succeed: it parked on its producer
+    // contract escalation, the graph never reached End, and the downstream connector never fired on null.
+    assert.equal(agentFired, 1, "the agent node's job fired and completed");
+    assert.ok(!takenFlows(app).some((f) => f.endsWith("->End")), "the broken producer did NOT thread its result to End");
+    assert.equal(connectorFired, 0, "the downstream connector never fired on a null required emit");
+    const open = await app.engine.searchUserTasks({ state: "CREATED" });
+    const contract = open.find((t) => t.elementId?.startsWith("delivery-human-task__") && t.elementId?.endsWith("__contract"));
+    assert.ok(contract, `the producer escalates AT its node on its __contract task, got ${JSON.stringify(open.map((t) => t.elementId))}`);
+
+    // Resumable (the issue's manual unblock): a human/agent supplies the eventually-created PR on the
+    // contract task; the subProcess output mapping republishes `open_pr` non-null and the connector runs.
+    await app.engine.completeUserTask(contract.userTaskKey, { value: "owner/repo#42", humanOutcome: "completed" });
+    await app.settle();
+    assert.equal(connectorFired, 1, "resuming the contract escalation with the missing PR unblocks the downstream connector");
+    const rows = await deliveryConnectorDispatches(app.db).find({ dedupe_key: "land-731" });
+    assert.equal(rows.length, 1, "the connector fired exactly once after resume");
+    assert.ok(takenFlows(app).some((f) => f.endsWith("->End")), "the resumed producer's result reaches End");
+  });
+
   test("resume never double-fires: an at-least-once redelivery of the connector dedupes", async () => {
     const app = track(await boot(freshDir()));
     // The connector fired once above's-style; here prove the idempotency directly against the ledger a
