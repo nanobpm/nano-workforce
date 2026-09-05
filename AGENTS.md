@@ -82,6 +82,35 @@ time:
   synonyms / contradictions / mock-vs-real skew (advisory). `npm run check:contracts` is the hard,
   registry-only gate (also in CI).
 
+## MCP tool surface: `openapi.yaml` projects self-contained tool schemas (ADR 0067, epic #605)
+
+There is **zero MCP server code** in this repo. The Urban runtime *projects* `openapi.yaml` into the
+agent-facing MCP tools served at `/app/mcp`. That projection is naive, and two properties of it are
+load-bearing conventions every door-adding slice inherits — get them wrong and the tool is silently
+unusable by a standard MCP client (the exact defect epic #605 existed to fix; the projector copied a
+`$ref` body verbatim, the client coerced the object argument to a string, and the door rejected it at
+runtime with `expected object, got string`).
+
+- **Projected request bodies MUST be `$ref`-free inline.** The projector copies `requestBodySchema`
+  **verbatim** into the MCP tool `inputSchema.body` **without resolving `$ref`.** So every projected
+  (non-`x-mcp`) request-body operation must carry a self-contained `type: object` body with inline
+  `properties`, an explicit `example`, and a contract-carrying `description`. A hand-authored `$ref`
+  body arrives opaque to the agent.
+- **`components.schemas` stays the single source of truth — do NOT hand-author the inline body.**
+  Edit the source component, then run **`npm run gen:mcp-bodies`** to regenerate the inline block
+  (delimited by `# BEGIN/END generated:mcp-body` sentinels via `scripts/inline-mcp-bodies.ts`).
+  **`npm run check:mcp-bodies`** (CI, in both `ci.yml` and `invariants.yml`) plus the real-projector
+  guard `test/mcp-tool-schemas.test.ts` fail the build on a stale inline block or a reintroduced
+  `$ref` — but that is *after* the mistake; author it right up front.
+- **Regression-test new/changed tools through the shared MCP e2e harness.** Do not re-implement the
+  `initialize → notifications/initialized → tools/list → tools/call` handshake. Import
+  `bootMcpHarness` from `e2e/support/mcp-harness.ts` and add a per-tool case in your own
+  `e2e/<slice>.e2e.ts` (extension seam documented in the module header + `docs/mcp-runbook.md`). The
+  in-process harness boots with `URBAN_MCP_ALLOW_REMOTE=true` because the MCP surface is loopback-only
+  and `bootTestApp` carries no real peer address, so it otherwise 403s every in-process request.
+
+Operator-only doors (`stage`/`dispatch`/`dismiss`) stay `x-mcp`-excluded and are not projected.
+
 ## BPMN: author the semantic model, generate the diagram
 
 **The `.bpmn` files under `resources/processes/` are hand-authored semantic
@@ -395,11 +424,12 @@ npm run layout:check                                  # BPMN diagram freshness (
 npm run check:prompts                                 # agent-prompt linkedResource resolution
 npm run check:migrations                              # migration prefixes + immutability (no rename/delete/edit of a merged migration)
 npm run check:contracts                               # contract registry (no synonyms / undeclared env keys)
+npm run check:mcp-bodies                              # projected MCP tool bodies are $ref-free inline & fresh (see ADR 0067 section)
 npm test                                              # unit tests (node --test)
 ```
 
 CI (`.github/workflows/ci.yml`) gates lint, typecheck, `urban check`, `layout:check`,
-the prompt check, the migration-prefix check, the contract-registry check, and the Node test suite. Run `npm run layout <file.bpmn>` after
+the prompt check, the migration-prefix check, the contract-registry check, the MCP-body freshness check, and the Node test suite. Run `npm run layout <file.bpmn>` after
 any BPMN flow change and commit the regenerated diagram — the `layout:check`
 gate fails the build otherwise.
 
