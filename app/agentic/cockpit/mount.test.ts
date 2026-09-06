@@ -70,12 +70,14 @@ function installEnv(fetchImpl: (url: string) => Promise<unknown>): () => void {
 
 const SUPPLY = { leaves: [], correlations: [] };
 
-/** A fetch stub answering the supply poll, the past-sessions list, and a single-stream replay. */
+/** A fetch stub answering the supply poll, the past-sessions list, and a single-stream replay. The
+ * replay READ is matched by its `stream` query param — the proxy-safe form (#744) the deployed
+ * client builds; a slash-bearing id must never appear as a path segment. */
 function fetchStub(replay?: unknown) {
   return (url: string): Promise<unknown> => {
     const ok = (body: unknown) => Promise.resolve({ ok: true, status: 200, json: async () => body });
     if (url.includes("/supply")) return ok(SUPPLY);
-    if (replay !== undefined && /\/transcripts\/[^/]+$/.test(url)) return ok(replay);
+    if (replay !== undefined && /[?&]stream=/.test(url)) return ok(replay);
     if (url.includes("/transcripts")) return ok({ sessions: [] });
     return Promise.resolve({ ok: false, status: 404, json: async () => ({}) });
   };
@@ -156,6 +158,57 @@ test("replay renders a past session's transcript — never a raw nwfTranscriptEv
     assert(!(host?.textContent ?? "").includes(TRANSCRIPT_EVENT_MARKER), "the raw nwfTranscriptEvent marker is never shown");
     assertEquals(document.querySelector(".cockpit-terminal")?.getAttribute("data-terminal-mode"), "replay");
     handle.dispose();
+  } finally {
+    restore();
+  }
+});
+
+// #744 — the deployed cockpit's replay READ must be proxy-safe: the stream id rides the QUERY
+// (`?stream=`), never a path segment. A worker-instance stream id contains a real `/`
+// (`34:<instance>/<jobKey>`); the console gateway decodes an encoded %2F in a PATH segment back
+// to `/` before the app routes, splitting the id into an extra segment → 404 {"error":"no such
+// operation"} → replayInto's fetch throws → the terminal region renders empty ("nothing").
+test("#744: replay fetches the proxy-safe ?stream= query form — a slash-bearing id never lands in a path segment", async () => {
+  const stream = "34:joshs-macbook-pro-copilot-3d6ee882/13859";
+  const replay = {
+    stream,
+    from: 0,
+    gap: false,
+    nextOffset: 1,
+    entries: [{ offset: 0, chunk: envChunk("message", { role: "user", text: "past session bytes" }) }],
+  };
+  const urls: string[] = [];
+  const stub = fetchStub(replay);
+  const restore = installEnv((url) => {
+    urls.push(url);
+    return stub(url);
+  });
+  try {
+    const { mountCockpit } = await import("../../../pages/cockpit/mount.js");
+    const handle = mountCockpit(document.getElementById("root"), OPTS);
+    // Dispose in a finally: mountCockpit auto-starts a poll whose next-tick timer (refreshMs) is a
+    // live handle — a mid-test assertion failure that skipped dispose would hold the event loop
+    // open and hang the whole test runner.
+    try {
+      await handle.replay(stream);
+
+      // The auto-started supply poll and the past-sessions list also hit the wire; the READ fetch is
+      // the only one carrying the stream id (in either URL form — that's what's under test).
+      const readUrl = urls.find((u) => u.includes(encodeURIComponent(stream)) || u.includes(stream));
+      assert(readUrl !== undefined, `the replay fetched a transcript read URL for the stream (saw: ${urls.join(", ")})`);
+      const parsed = new URL(readUrl);
+      // The pathname STAYS the collection route: no %-encoded (or raw) slash-bearing id segment the
+      // gateway peel could split — this is the structural fix for the whole failure class, not just
+      // this one stream shape.
+      assertEquals(parsed.pathname, "/app/api/agentic/transcripts");
+      assertEquals(parsed.searchParams.get("stream"), stream, "the slash-bearing id round-trips intact as a query value");
+      // And the fetched bytes still render through the derive path.
+      const host = document.querySelector('[data-terminal="host"]');
+      assert((host?.textContent ?? "").includes("past session bytes"), "the past session rendered");
+      assertEquals(document.querySelector(".cockpit-terminal")?.getAttribute("data-terminal-mode"), "replay");
+    } finally {
+      handle.dispose();
+    }
   } finally {
     restore();
   }

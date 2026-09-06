@@ -48,7 +48,36 @@ export function transcriptUrlBaseFor(base: string = publicBaseUrl()): string {
  * The full durable transcript URL for a completed job's `jobKey` — the value a worker emits on
  * {@link TRANSCRIPT_URL_VAR}. Derived from {@link transcriptUrlBaseFor} + {@link jobStream} so it can
  * never disagree with the base the dispatcher seeds or the endpoint route it resolves to.
+ *
+ * The path-segment form is proxy-safe HERE because a `job:<jobKey>` id structurally never contains a
+ * slash (the jobKey is an engine key) — the #744 gateway-peel failure only bites slash-bearing ids.
+ * Any client that reads an ARBITRARY stream (e.g. the cockpit's past-session replay, whose
+ * worker-instance ids look like `34:<instance>/<jobKey>`) MUST use {@link transcriptReadUrlFor}
+ * instead.
  */
 export function transcriptUrlForJob(jobKey: string, base: string = publicBaseUrl()): string {
   return `${transcriptUrlBaseFor(base)}${jobStream(jobKey)}`;
+}
+
+/**
+ * The proxy-safe single-stream READ URL (#744): `<transcriptsEndpoint>?stream=<id>[&from=<n>]` —
+ * the query form of `GET /agentic/transcripts` (operation `listAgenticTranscripts`), answering with
+ * the same bytes the legacy `GET /agentic/transcripts/{stream}` path form serves.
+ *
+ * The stream id rides a QUERY value, never a path segment: the Nano Console gateway proxy peels
+ * exactly one percent-encoding layer before the app routes, so an encoded slash (%2F) in a PATH
+ * segment arrives as a real / and splits a slash-bearing id (`34:<instance>/<jobKey>`) into an extra
+ * segment — no route matches and the read 404s. A / inside a query value is never a separator, so
+ * this form survives the peel intact (the whole failure class, not just one stream shape).
+ *
+ * `transcriptsEndpoint` is the collection-route URL (`<base>/app/api/agentic/transcripts` — the same
+ * string the cockpit carries as its `transcriptsUrl`). This is the SINGLE SOURCE OF TRUTH for the
+ * query form: the cockpit's browser adapter (`pages/cockpit/mount.js`, which cannot import server
+ * modules) carries a hand-maintained twin of this builder — keep the two in lockstep.
+ */
+export function transcriptReadUrlFor(transcriptsEndpoint: string, stream: string, from?: number): string {
+  const url = new URL(transcriptsEndpoint);
+  url.searchParams.set("stream", stream);
+  if (from !== undefined) url.searchParams.set("from", String(from));
+  return url.href;
 }

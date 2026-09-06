@@ -468,7 +468,9 @@ function relaySocketFactory(url) {
  * @param {string} [opts.transcriptsUrl] — the captured-session list endpoint backing the always-on
  *   "past sessions" history + replay (default
  *   `new URL("../app/api/agentic/transcripts", import.meta.url).href`, module-anchored so it
- *   resolves to the app root `<appMount>/app/api/agentic/transcripts`, not the `/cockpit/` shell base).
+ *   resolves to the app root `<appMount>/app/api/agentic/transcripts`, not the `/cockpit/` shell
+ *   base). The per-session replay read uses the proxy-safe `?stream=` query form on this same URL
+ *   (#744 — never a `/…/<id>` path segment, which a decoding gateway splits on encoded slashes).
  * @returns a handle with `.dispose()`.
  */
 export function mountCockpit(host, opts = {}) {
@@ -718,7 +720,8 @@ export function mountCockpit(host, opts = {}) {
       abortTimer.unref?.();
       let res;
       try {
-        res = await fetch(`${transcriptsUrl}/${encodeURIComponent(stream)}`, { headers: jsonHeaders(), signal: controller.signal });
+        // Proxy-safe read URL (#744): the stream id rides the QUERY (?stream=), never a path segment.
+        res = await fetch(transcriptReadUrl(stream), { headers: jsonHeaders(), signal: controller.signal });
       } finally {
         clearTimeout(abortTimer);
       }
@@ -750,6 +753,19 @@ export function mountCockpit(host, opts = {}) {
     if (instance == null) return transcriptsUrl;
     const url = new URL(transcriptsUrl, location.href);
     url.searchParams.set("instance", instance);
+    return url.href;
+  }
+
+  // The proxy-safe single-stream READ URL (#744) — the browser twin of `transcriptReadUrlFor` in
+  // app/agentic/transcript-url.ts (mount.js cannot import the server module; keep the two in
+  // lockstep). The stream id rides a QUERY value, never a path segment: the console gateway peels
+  // one percent-encoding layer before the app routes, so an encoded slash (%2F) in a PATH segment
+  // arrives as a real / and splits a slash-bearing worker-instance id (`34:<instance>/<jobKey>`)
+  // into an extra segment — the app matches no route and answers 404, which left the past-session
+  // replay silently empty behind the proxy. A / inside a query value is never a separator.
+  function transcriptReadUrl(stream) {
+    const url = new URL(transcriptsUrl, location.href);
+    url.searchParams.set("stream", stream);
     return url.href;
   }
 

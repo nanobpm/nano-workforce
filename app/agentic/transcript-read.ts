@@ -15,9 +15,10 @@
 // unit-testable on the injected env (Node, no browser), and never touches the engine or a BPMN flow.
 
 import type { TranscriptChunk, TranscriptRing, TranscriptStore, TranscriptStream } from "@nanobpm/agentic/transcript";
-import type { AgenticTranscript, AgenticTranscriptData } from "../../nano-generated/api-io.d.ts";
+import type { AgenticTranscript, AgenticTranscriptData, ErrorBody } from "../../nano-generated/api-io.d.ts";
 import { type CorrelationRegistry, jobKeyOfStream } from "./correlation.ts";
 import type { AgenticCorrelationStore } from "./correlation-store.ts";
+import type { RelayTranscriptService } from "./families/relay.family.ts";
 import { utf8ByteLength } from "./transcript-events.ts";
 
 /** Total captured bytes across a set of retained chunks (UTF-8, the on-the-wire terminal encoding). */
@@ -241,4 +242,48 @@ export function readTranscriptFrom(
   if (fields.identity !== undefined) out.identity = fields.identity;
   if (fields.host !== undefined) out.host = fields.host;
   return out;
+}
+
+/** The single-stream read result both transcript READ routes share (#744): the bytes on 200, the
+ * same 400 (malformed `from`) / 404 (no such stream, or no service mounted) outcomes on failure. */
+export type SingleTranscriptResult =
+  | { status: 200; body: AgenticTranscriptData }
+  | { status: 400; body: ErrorBody }
+  | { status: 404; body: ErrorBody };
+
+/**
+ * The ONE canonical single-stream transcript read, shared by BOTH routes that serve it (#744):
+ * `GET /agentic/transcripts?stream=<id>&from=<n>` (the proxy-safe QUERY form the cockpit clients
+ * build — a gateway that peels one percent-encoding layer before routing splits an encoded slash
+ * in a PATH segment into an extra segment and 404s, while a query value survives intact) and
+ * `GET /agentic/transcripts/{stream}` (the legacy path form the worker-emitted `transcriptUrl`
+ * resolves — safe there because `job:<jobKey>` ids structurally never contain a slash). One
+ * implementation so the two addressings can never answer differently for the same stream/from.
+ */
+export function readSingleTranscript(
+  stream: string,
+  from: number | undefined,
+  service: RelayTranscriptService | undefined,
+  correlation: CorrelationRegistry | undefined,
+): SingleTranscriptResult {
+  const offset = from ?? 0;
+  if (!Number.isSafeInteger(offset) || offset < 0) {
+    return { status: 400, body: { error: "invalid from: expected a non-negative integer offset" } };
+  }
+  if (!service) {
+    // No relay/transcript service mounted at all - nothing to replay.
+    return { status: 404, body: { error: "no transcript for stream" } };
+  }
+  const data = readTranscriptFrom(
+    stream,
+    offset,
+    service.store,
+    correlation,
+    service.correlationStore,
+    service.liveFallback(stream),
+  );
+  if (data === undefined) {
+    return { status: 404, body: { error: "no transcript for stream" } };
+  }
+  return { status: 200, body: data };
 }

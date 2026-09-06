@@ -2,8 +2,12 @@
 //
 // Fetch a stored transcript's bytes, range/offset-based (?from=<offset>, default 0) so the cockpit
 // terminal replays a closed stream through the SAME resume-from-offset renderer it uses for a live one
-// (static playback of an exited agent). Sourced from the mounted relay/transcript service's
-// TranscriptStore over `app.data`, correlated best-effort via `app/agentic/correlation.ts`.
+// (static playback of an exited agent). The PATH form of the single-stream read, kept for back-compat
+// (the worker-emitted `transcriptUrl` and Explorer links resolve here — safe because `job:<jobKey>`
+// ids never contain a slash); proxy-exposed clients use the `?stream=` QUERY form on the collection
+// route instead (#744 — a gateway that decodes %2F in a path segment 404s this route). Both forms run
+// the ONE canonical read (`readSingleTranscript` in app/agentic/transcript-read.ts), so they can never
+// answer differently for the same stream/from.
 //
 // Advisory read-only (ADR 0056): it NEVER gates a BPMN sequence flow. Unknown stream -> 404; a
 // malformed `from` -> 400. Shared-secret guard mirrors getAgenticSupply (x-hook-secret when
@@ -11,7 +15,7 @@
 
 import { currentCorrelation } from "../app/agentic/correlation.ts";
 import { currentRelayTranscriptService } from "../app/agentic/families/relay.family.ts";
-import { readTranscriptFrom } from "../app/agentic/transcript-read.ts";
+import { readSingleTranscript } from "../app/agentic/transcript-read.ts";
 import { envVar } from "../app/version.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
 
@@ -23,29 +27,5 @@ export default defineOperation("getAgenticTranscript", async ({ params, query, r
     return { status: 401, body: { error: "unauthorized" } };
   }
 
-  const from = query.from ?? 0;
-  if (!Number.isSafeInteger(from) || from < 0) {
-    return { status: 400, body: { error: "invalid from: expected a non-negative integer offset" } };
-  }
-
-  const service = currentRelayTranscriptService();
-  if (!service) {
-    // No relay/transcript service mounted at all - nothing to replay.
-    return { status: 404, body: { error: "no transcript for stream" } };
-  }
-
-  // Read the durable store first, falling back to the still-live relay ring (#486) so a `transcriptUrl`
-  // emitted by a job on a still-live multiplexing worker is readable before its ring is flushed.
-  const data = readTranscriptFrom(
-    params.stream,
-    from,
-    service.store,
-    currentCorrelation(),
-    service.correlationStore,
-    service.liveFallback(params.stream),
-  );
-  if (data === undefined) {
-    return { status: 404, body: { error: "no transcript for stream" } };
-  }
-  return { status: 200, body: data };
+  return readSingleTranscript(params.stream, query.from, currentRelayTranscriptService(), currentCorrelation());
 });

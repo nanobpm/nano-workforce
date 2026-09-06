@@ -92,8 +92,14 @@ export const MCP_TOOL_COUNT_BUDGET = 60;
  * client must parse). The deployed surface measures ~78,962 bytes (issue #715); this ceiling forbids
  * meaningful growth so a fat new schema cannot silently re-inflate the surface past the harness
  * deferral point.
+ *
+ * RAISE PROVENANCE — 84_000 → 84_500 (#744): the proxy-safe single-stream transcript read adds two
+ * input-schema properties (`stream`/`from`) to `listAgenticTranscripts` plus one summary line on
+ * each of the two transcript tools, keeping the `?stream=` form discoverable from the tool surface
+ * alone (measured +219 bytes serialized, 83,824 → 84,043 — over the old ceiling's 176-byte
+ * headroom). Deliberate, documented growth — not schema fat.
  */
-export const MCP_SURFACE_BYTES_BUDGET = 84_000;
+export const MCP_SURFACE_BYTES_BUDGET = 84_500;
 
 /**
  * The eagerly-loaded curated subset MUST stay materially smaller than the full surface — otherwise it
