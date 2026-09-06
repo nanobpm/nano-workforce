@@ -1,22 +1,29 @@
 // Tests for the engine-native AgentTask marker (issue #745, umbrella #746 — Camunda 8.10 parity),
 // including the defect-class regression guard: every deployed prompt-bearing `senior:*` agent task
-// must carry `<zeebe:agentDefinition agentType="external"/>` alongside its `<zeebe:taskDefinition>`,
+// must carry `<zeebe:agentDefinition agentType="external" />` alongside its `<zeebe:taskDefinition>`,
 // so the worker harness mints an engine-native AgentInstance for it. A newly-added agent task that
 // forgets the marker never persists durable AgentHistory — so it fails CI here instead of silently
 // drifting.
 import { readFileSync, readdirSync } from "node:fs";
 import { test } from "node:test";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { assert, assertEquals } from "#test-assert";
 import { agentTaskTypesMissingExternalMarker, promptBearingTaskTypes } from "./job-types.ts";
 
 const PROCESSES_DIR = join(dirname(fileURLToPath(import.meta.url)), "../../../resources/processes");
 
+// urban deploys `resources/` recursively (every file at any depth), so a process
+// model added under a subdirectory would still deploy — walk recursively here too,
+// or the guard would miss it and let an unmarked agent task slip through.
 function bpmnFiles(): string[] {
-  return readdirSync(PROCESSES_DIR)
-    .filter((f) => f.endsWith(".bpmn"))
-    .sort();
+  const walk = (dir: string): string[] =>
+    readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) return walk(full);
+      return entry.name.endsWith(".bpmn") ? [relative(PROCESSES_DIR, full)] : [];
+    });
+  return walk(PROCESSES_DIR).sort();
 }
 
 test("agentTaskTypesMissingExternalMarker flags a prompt-bearing agent task with no external marker", () => {
