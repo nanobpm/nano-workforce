@@ -25,11 +25,18 @@ export interface TranscriptReadResult {
 }
 
 /**
- * Resolve one stored transcript's bytes from offset `from` (inclusive, default 0). A malformed `from`
- * is a 400; no mounted service / unknown stream is a 404; otherwise 200 with the range/offset payload
- * the cockpit terminal replays through the SAME resume-from-offset renderer it uses for a live stream.
+ * Resolve one stored transcript's bytes from offset `from` (inclusive, default 0). An empty/blank
+ * `stream` or a malformed `from` is a 400; no mounted service / unknown stream is a 404; otherwise 200
+ * with the range/offset payload the cockpit terminal replays through the SAME resume-from-offset
+ * renderer it uses for a live stream.
  */
 export function resolveTranscriptRead(stream: string, fromRaw: number | undefined): TranscriptReadResult {
+  // A blank stream id (`?stream=` or whitespace) is a MALFORMED request, not an unknown-stream 404:
+  // conflating the two would mask a client bug that drops the id (issue #744 query form). Reject it up
+  // front so a genuine 404 only ever means "this id resolved to no stored transcript".
+  if (stream.trim() === "") {
+    return { status: 400, body: { error: "invalid stream: expected a non-empty stream id" } };
+  }
   const from = fromRaw ?? 0;
   if (!Number.isSafeInteger(from) || from < 0) {
     return { status: 400, body: { error: "invalid from: expected a non-negative integer offset" } };

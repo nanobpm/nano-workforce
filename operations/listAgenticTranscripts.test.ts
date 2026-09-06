@@ -226,6 +226,19 @@ test("?stream= with a malformed from offset is a 400", async () => {
   }
 });
 
+test("?stream= with an empty/blank id is a 400, not a 404 (malformed request, not unknown stream)", async () => {
+  relayFamily.mount(mountCtx(memSqlite()));
+  try {
+    for (const stream of ["", "   "]) {
+      const res = (await handler(input({ stream }), app)) as { status: number; body: { error?: string } };
+      assertEquals(res.status, 400, `?stream=${JSON.stringify(stream)} should be a 400`);
+      assert(typeof res.body.error === "string" && res.body.error.includes("stream"), "the 400 names the bad stream param");
+    }
+  } finally {
+    relayFamily.teardown?.();
+  }
+});
+
 test("shared-secret guard rejects a missing secret when configured", async () => {
   const prev = process.env["NANO_PR_WEBHOOK_SECRET"];
   process.env["NANO_PR_WEBHOOK_SECRET"] = "s3cr3t";
