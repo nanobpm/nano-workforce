@@ -75,7 +75,7 @@ export function promptBearingTaskTypes(xml: string): string[] {
 
 /**
  * Scan one BPMN document for the job types of PROMPT-BEARING agent service tasks that are MISSING the
- * engine-native AgentTask marker `<zeebe:agentDefinition agentType="external">` (issue #745). Every
+ * engine-native AgentTask marker `<zeebe:agentDefinition agentType="external" />` (issue #745). Every
  * deployed `senior:*` agent task must carry the marker so the worker harness mints an AgentInstance
  * for it; a newly-added agent task that forgets it is a silent drift surface (its run never persists
  * durable AgentHistory), so the regression guard fails CI. Returns the offending task types in
