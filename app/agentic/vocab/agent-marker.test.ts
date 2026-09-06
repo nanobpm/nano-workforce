@@ -66,7 +66,7 @@ test("DEFECT-CLASS GUARD: every deployed prompt-bearing agent task carries the e
     const missing = agentTaskTypesMissingExternalMarker(xml);
     assert(
       missing.length === 0,
-      `${file}: agent task(s) missing <zeebe:agentDefinition agentType="external"> — ${missing.join(", ")}`,
+      `${file}: agent task(s) missing <zeebe:agentDefinition agentType="external" /> — ${missing.join(", ")}`,
     );
   }
   // Sanity: the models really do declare agent tasks (guard is not vacuously green).
