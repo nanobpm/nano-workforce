@@ -3821,9 +3821,11 @@ paths:
           required: false
           schema:
             type: integer
+            minimum: 0
           description: >-
             Only meaningful with stream — resume the returned transcript bytes from this offset (inclusive).
-            Default 0 (the whole retained transcript). Ignored when listing.
+            Default 0 (the whole retained transcript). Ignored when listing. Must be a non-negative integer;
+            a negative or otherwise malformed offset is a 400 (matching resolveTranscriptRead).
         - name: jobKey
           in: query
           required: false

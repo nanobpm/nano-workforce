@@ -2,7 +2,7 @@
 // URL it emits must derive from ONE path string and the ONE jobStream() encoder, so the seed the
 // dispatcher hands each agent job, the endpoint route, and the tests can never drift apart.
 import { test } from "node:test";
-import { assert, assertEquals } from "#test-assert";
+import { assert, assertEquals, assertThrows } from "#test-assert";
 import { jobStream } from "./correlation.ts";
 import {
   TRANSCRIPT_URL_BASE_VAR,
@@ -65,4 +65,12 @@ test("transcriptReadUrl: a positive `from` offset is appended; 0/undefined is om
   assertEquals(transcriptReadUrl(READ_ENDPOINT, "job:1", 42), `${READ_ENDPOINT}?stream=job%3A1&from=42`);
   assertEquals(transcriptReadUrl(READ_ENDPOINT, "job:1", 0), `${READ_ENDPOINT}?stream=job%3A1`);
   assertEquals(transcriptReadUrl(READ_ENDPOINT, "job:1", undefined), `${READ_ENDPOINT}?stream=job%3A1`);
+});
+
+test("transcriptReadUrl: a provided-but-invalid `from` fails fast, never silently degrading to from=0", () => {
+  // A negative, non-integer, or NaN offset is a caller bug and the server rejects it with a 400. The URL
+  // builder must not silently omit it (which would quietly change semantics to `from=0` and mask the bug).
+  for (const bad of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+    assertThrows(() => transcriptReadUrl(READ_ENDPOINT, "job:1", bad), RangeError, "invalid from");
+  }
 });

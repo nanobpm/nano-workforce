@@ -23,11 +23,21 @@
  * embedded `/` survives any gateway proxy intact) and the optional resume offset as `from`. `from` is
  * omitted when it is undefined or 0 (the whole retained transcript — the endpoint's default), keeping
  * the common case a bare `?stream=<enc>`.
+ *
+ * When `from` is provided it must be a non-negative safe integer — the same constraint the server
+ * enforces (`resolveTranscriptRead` returns 400 on a malformed/negative offset). A provided-but-invalid
+ * `from` (e.g. -1, NaN, 1.5) is a caller bug, so we THROW rather than silently omit it (which would
+ * quietly change the semantics to `from=0` and mask the bug).
  */
 export function transcriptReadUrl(endpoint: string, stream: string, from?: number): string {
   const params = new URLSearchParams({ stream });
-  if (from !== undefined && Number.isSafeInteger(from) && from > 0) {
-    params.set("from", String(from));
+  if (from !== undefined) {
+    if (!Number.isSafeInteger(from) || from < 0) {
+      throw new RangeError(`invalid from: expected a non-negative integer offset, got ${from}`);
+    }
+    if (from > 0) {
+      params.set("from", String(from));
+    }
   }
   return `${endpoint}?${params.toString()}`;
 }
