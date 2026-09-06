@@ -242,3 +242,14 @@ test("#744: ?stream= 404s (not an empty list) when no relay/transcript family is
   const res = (await handler(input({ stream: "job:1" }), app)) as { status: number };
   assertEquals(res.status, 404);
 });
+
+test("#744: `from` without `stream` is a 400 (not a silently-ignored list read)", async () => {
+  relayFamily.mount(mountCtx(memSqlite()));
+  try {
+    const res = (await handler(input({ from: 0 }), app)) as { status: number; body: { error: string } };
+    assertEquals(res.status, 400);
+    assert(res.body.error.includes("stream"));
+  } finally {
+    relayFamily.teardown?.();
+  }
+});

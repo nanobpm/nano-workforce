@@ -42,6 +42,12 @@ export default defineOperation("listAgenticTranscripts", async ({ query, req }, 
     return readSingleTranscript(query.stream, query.from, currentRelayTranscriptService(), currentCorrelation());
   }
 
+  // `from` addresses an offset WITHIN one stream, so it is only meaningful with `?stream=`. Reject it
+  // rather than silently returning the list, so the API can never quietly ignore a caller's intent.
+  if (query.from !== undefined) {
+    return { status: 400, body: { error: "invalid from: only valid together with stream" } };
+  }
+
   if (badInstant(query.since) || badInstant(query.until)) {
     return { status: 400, body: { error: "invalid since/until: expected an ISO-8601 instant" } };
   }
