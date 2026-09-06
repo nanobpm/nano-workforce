@@ -3795,11 +3795,33 @@ paths:
       operationId: listAgenticTranscripts
       summary: List captured agent sessions (H3/#146) — the durable transcripts an ephemeral agent flushed
         on job completion, readable AFTER it exited. Optional filters by jobKey / process instance / plan /
-        time. Advisory read-only; never gates control flow. Feeds the cockpit "past sessions" view.
+        time. Also serves the proxy-safe single-stream READ form `?stream=` (#744). Advisory read-only;
+        never gates control flow. Feeds the cockpit "past sessions" view.
       security:
         - hookSecret: []
         - {}
       parameters:
+        - name: stream
+          in: query
+          required: false
+          schema:
+            type: string
+          description: >-
+            Single-stream READ form (#744, proxy-safe): when present, the response is that ONE
+            stream's transcript bytes (`AgenticTranscriptData` — the payload
+            `GET /agentic/transcripts/{stream}` serves), NOT the list, and the filters below are
+            ignored. The id rides a query value, so slash-bearing worker-instance ids
+            (`34:<instance>/<jobKey>`) survive gateways that decode %2F in path segments before
+            routing. Prefer this form over the path form behind any proxy.
+        - name: from
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+          description: Only with `stream` — resume from this offset (inclusive). Default 0. Rejected with 400
+            when supplied without `stream`.
         - name: jobKey
           in: query
           required: false
@@ -3846,13 +3868,17 @@ paths:
           description: Return only sessions created at or before this ISO-8601 instant.
       responses:
         "200":
-          description: The captured session list.
+          description: The captured session list — or, in the single-stream form (`?stream=`), that
+            stream's stored transcript bytes (#744).
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/AgenticTranscriptList"
+                oneOf:
+                  - $ref: "#/components/schemas/AgenticTranscriptList"
+                  - $ref: "#/components/schemas/AgenticTranscriptData"
         "400":
-          description: A malformed filter (e.g. an unparseable since/until).
+          description: A malformed filter (e.g. an unparseable since/until), or — in the single-stream
+            form — a malformed `from` offset.
           content:
             application/json:
               schema:
@@ -3863,12 +3889,19 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorBody"
+        "404":
+          description: Single-stream form only — no transcript exists for the given `stream`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
   /agentic/transcripts/{stream}:
     get:
       operationId: getAgenticTranscript
       summary: Fetch a stored transcript's bytes (H3/#146), range/offset-based so the cockpit terminal
-        replays it through the same resume-from-offset renderer it uses for a live stream. Advisory
-        read-only; never gates control flow.
+        replays it through the same resume-from-offset renderer it uses for a live stream. PATH form
+        of the single-stream read (back-compat; a slash-bearing id 404s behind a decoding proxy —
+        prefer the `?stream=` query form there, #744). Advisory read-only; never gates control flow.
       security:
         - hookSecret: []
         - {}
@@ -3878,7 +3911,9 @@ paths:
           required: true
           schema:
             type: string
-          description: The relay stream id to fetch (`job:<jobKey>` for a job stream).
+          description: The relay stream id to fetch (`job:<jobKey>` for a job stream). CAVEAT (#744) —
+            a gateway that decodes %2F in a path segment splits a slash-bearing id and this route
+            404s; such ids must use the `?stream=` query form. Slash-free ids are safe in either.
         - name: from
           in: query
           required: false

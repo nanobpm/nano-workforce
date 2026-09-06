@@ -167,3 +167,89 @@ test("shared-secret guard rejects a missing secret when configured", async () =>
     else process.env["NANO_PR_WEBHOOK_SECRET"] = prev;
   }
 });
+
+// #744 — the proxy-safe single-stream read form: `?stream=` on the collection route returns that
+// transcript's BYTES (the AgenticTranscriptData payload GET /{stream} serves), NOT the session
+// list. Worker-instance stream ids contain a slash (`34:<instance>/<jobKey>`); behind the console
+// gateway — which decodes %2F in a path segment back to a real / before the app routes — the
+// legacy path form 404s, so the cockpit reads a single stream through this query form.
+test("#744: ?stream= returns the single transcript's bytes for a slash-bearing id (not the list)", async () => {
+  relayFamily.mount(mountCtx(memSqlite()));
+  const store = currentRelayTranscriptService()?.store;
+  assert(store !== undefined);
+  const stream = "34:joshs-macbook-pro-copilot-3d6ee882/13859";
+  store.flush(
+    stream,
+    { since: () => ({ entries: [{ offset: 0, chunk: "aa" }, { offset: 1, chunk: "bb" }] }), nextOffset: 2 },
+    "ephemeral",
+  );
+  try {
+    const res = (await handler(input({ stream }), app)) as {
+      status: number;
+      body: {
+        stream: string;
+        from: number;
+        gap: boolean;
+        nextOffset: number;
+        chunkCount: number;
+        byteLength: number;
+        entries: Array<{ offset: number; chunk: string }>;
+      };
+    };
+    assertEquals(res.status, 200);
+    assertEquals(res.body.stream, stream);
+    assertEquals(res.body.from, 0);
+    assertEquals(res.body.gap, false);
+    assertEquals(res.body.nextOffset, 2);
+    assertEquals(res.body.chunkCount, 2);
+    assertEquals(res.body.byteLength, 4);
+    assertEquals(res.body.entries.map((e) => e.chunk), ["aa", "bb"]);
+  } finally {
+    relayFamily.teardown?.();
+  }
+});
+
+test("#744: ?stream= honors from, 404s an unknown stream, and 400s a malformed from", async () => {
+  relayFamily.mount(mountCtx(memSqlite()));
+  const store = currentRelayTranscriptService()?.store;
+  assert(store !== undefined);
+  store.flush(
+    "job:6494",
+    { since: () => ({ entries: [{ offset: 0, chunk: "aa" }, { offset: 1, chunk: "bb" }] }), nextOffset: 2 },
+    "ephemeral",
+  );
+  try {
+    const resume = (await handler(input({ stream: "job:6494", from: 1 }), app)) as {
+      status: number;
+      body: { from: number; chunkCount: number; entries: Array<{ chunk: string }> };
+    };
+    assertEquals(resume.status, 200);
+    assertEquals(resume.body.from, 1);
+    assertEquals(resume.body.entries.map((e) => e.chunk), ["bb"]);
+
+    const unknown = (await handler(input({ stream: "job:nope" }), app)) as { status: number };
+    assertEquals(unknown.status, 404);
+
+    const bad = (await handler(input({ stream: "job:6494", from: -1 }), app)) as { status: number };
+    assertEquals(bad.status, 400);
+  } finally {
+    relayFamily.teardown?.();
+  }
+});
+
+test("#744: ?stream= 404s (not an empty list) when no relay/transcript family is mounted", async () => {
+  relayFamily.teardown?.();
+  const res = (await handler(input({ stream: "job:1" }), app)) as { status: number };
+  assertEquals(res.status, 404);
+});
+
+test("#744: `from` without `stream` is a 400 (not a silently-ignored list read)", async () => {
+  relayFamily.mount(mountCtx(memSqlite()));
+  try {
+    const res = (await handler(input({ from: 0 }), app)) as { status: number; body: { error: string } };
+    assertEquals(res.status, 400);
+    assert(res.body.error.includes("stream"));
+  } finally {
+    relayFamily.teardown?.();
+  }
+});

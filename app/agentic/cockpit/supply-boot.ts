@@ -61,7 +61,11 @@ export interface SupplyCockpitEnv {
    */
   readonly fetchTranscripts?: (instance?: string) => Promise<TranscriptListReport>;
   /**
-   * Fetches a stored transcript's bytes (`GET /agentic/transcripts/{stream}`) for static replay.
+   * Fetches a stored transcript's bytes for static replay. Production wiring hits the proxy-safe
+   * query form `GET /agentic/transcripts?stream=<id>&from=<n>` (#744 — see `transcriptReadUrlFor`
+   * in app/agentic/transcript-url.ts and its browser twin in pages/cockpit/mount.js): a
+   * slash-bearing stream id in a PATH segment (`GET /agentic/transcripts/{stream}`) is split by
+   * gateway proxies that decode %2F before routing, 404ing the read.
    * Required for the "past sessions" replay to work; must be provided together with {@link fetchTranscripts}.
    */
   readonly fetchTranscript?: (stream: string, from?: number) => Promise<TranscriptDataReport>;

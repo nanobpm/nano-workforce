@@ -6,13 +6,19 @@
 // correlated via `app/agentic/correlation.ts` (best-effort — jobKey is always recovered from the stream
 // id, engine context only while the job is still live). Feeds the cockpit "past sessions" view.
 //
+// Also serves the proxy-safe single-stream READ form (#744): `?stream=<id>&from=<n>` switches this route
+// from the session list to that ONE stream's bytes — the same payload GET /{stream} serves, through the
+// same canonical read (`readSingleTranscript`). The id rides a QUERY value so a slash-bearing stream id
+// (`34:<instance>/<jobKey>`) survives gateway proxies that decode %2F in a PATH segment back to a real /
+// before routing (the cockpit replay 404'd silently behind the Nano Console).
+//
 // Advisory read-only (ADR 0056): it NEVER gates a BPMN sequence flow. Optional filters (jobKey / process
 // instance / plan / time) narrow the feed. The optional shared-secret guard mirrors getAgenticSupply:
 // when NANO_PR_WEBHOOK_SECRET is set, callers must present it via the x-hook-secret header; unset -> open.
 
 import { currentCorrelation } from "../app/agentic/correlation.ts";
 import { currentRelayTranscriptService } from "../app/agentic/families/relay.family.ts";
-import { listTranscripts, type TranscriptFilter } from "../app/agentic/transcript-read.ts";
+import { listTranscripts, readSingleTranscript, type TranscriptFilter } from "../app/agentic/transcript-read.ts";
 import { envVar } from "../app/version.ts";
 import type { AgenticTranscriptList } from "../nano-generated/api-io.d.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
@@ -28,6 +34,18 @@ export default defineOperation("listAgenticTranscripts", async ({ query, req }, 
   if (SECRET && req.headers.get("x-hook-secret") !== SECRET) {
     app.log.warn("listAgenticTranscripts rejected: missing/invalid shared secret");
     return { status: 401, body: { error: "unauthorized" } };
+  }
+
+  // #744: the single-stream READ form takes precedence — `?stream=` addresses ONE transcript's bytes,
+  // not the list, so the list filters below do not apply.
+  if (query.stream !== undefined) {
+    return readSingleTranscript(query.stream, query.from, currentRelayTranscriptService(), currentCorrelation());
+  }
+
+  // `from` addresses an offset WITHIN one stream, so it is only meaningful with `?stream=`. Reject it
+  // rather than silently returning the list, so the API can never quietly ignore a caller's intent.
+  if (query.from !== undefined) {
+    return { status: 400, body: { error: "invalid from: only valid together with stream" } };
   }
 
   if (badInstant(query.since) || badInstant(query.until)) {
