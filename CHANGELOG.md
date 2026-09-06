@@ -1,3 +1,9 @@
+## [0.182.3](https://github.com/nanobpm/nano-workforce/compare/v0.182.2...v0.182.3) (2026-09-06)
+
+### Bug Fixes
+
+* cockpit historical transcript replay 404s through console gateway (encoded slash in stream-id path) ([#750](https://github.com/nanobpm/nano-workforce/issues/750)) ([8dd5e61](https://github.com/nanobpm/nano-workforce/commit/8dd5e619d664a50f513347f3b6f090d190495070)), closes [#744](https://github.com/nanobpm/nano-workforce/issues/744) [#744](https://github.com/nanobpm/nano-workforce/issues/744)
+
 ## [0.182.2](https://github.com/nanobpm/nano-workforce/compare/v0.182.1...v0.182.2) (2026-09-04)
 
 ### Bug Fixes
