@@ -16,6 +16,7 @@
     <bpmn:serviceTask id="implement-task" name="Implement (agent)">
       <bpmn:extensionElements>
         <zeebe:taskDefinition type="senior:feature" />
+        <zeebe:agentDefinition agentType="external" />
         <zeebe:linkedResources>
           <zeebe:linkedResource resourceId="prompts/feature.md" bindingType="latest" resourceType="GenericScript" linkName="prompt" />
         </zeebe:linkedResources>

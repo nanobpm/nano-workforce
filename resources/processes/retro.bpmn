@@ -43,6 +43,7 @@
     <bpmn:serviceTask id="conformance" name="Verify implementation vs spec (agent)">
       <bpmn:extensionElements>
         <zeebe:taskDefinition type="senior:conformance" />
+        <zeebe:agentDefinition agentType="external" />
         <zeebe:linkedResources>
           <zeebe:linkedResource resourceId="prompts/conformance.md" bindingType="latest" resourceType="GenericScript" linkName="prompt" />
         </zeebe:linkedResources>
@@ -91,6 +92,7 @@
     <bpmn:serviceTask id="synthesize" name="Synthesize &#38; promote (agent)">
       <bpmn:extensionElements>
         <zeebe:taskDefinition type="senior:retro" />
+        <zeebe:agentDefinition agentType="external" />
         <zeebe:linkedResources>
           <zeebe:linkedResource resourceId="prompts/retro.md" bindingType="latest" resourceType="GenericScript" linkName="prompt" />
         </zeebe:linkedResources>

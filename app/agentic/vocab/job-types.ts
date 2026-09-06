@@ -49,6 +49,10 @@ export function jobTypeToRoutingToken(jobType: string): string | undefined {
 const SERVICE_TASK = /<(?:\w+:)?serviceTask\b[\s\S]*?<\/(?:\w+:)?serviceTask>/g;
 const TASK_DEFINITION_TYPE = /<(?:\w+:)?taskDefinition\b[^>]*\btype="([^"]*)"/;
 const PROMPT_LINK = /<(?:\w+:)?linkedResource\b[^>]*\blinkName="prompt"/;
+// The engine-native AgentTask marker (issue #745): a `<zeebe:agentDefinition agentType="external">`
+// sibling of the `<zeebe:taskDefinition>` inside a `senior:*` agent task's extensionElements. It is
+// what makes the element eligible for engine-native AgentInstance minting by the worker harness.
+const EXTERNAL_AGENT_MARKER = /<(?:\w+:)?agentDefinition\b[^>]*\bagentType="external"/;
 
 /**
  * Scan one BPMN document for the job types of its PROMPT-BEARING service tasks — the deployed fleet
@@ -67,4 +71,26 @@ export function promptBearingTaskTypes(xml: string): string[] {
     types.push(type);
   }
   return types;
+}
+
+/**
+ * Scan one BPMN document for the job types of PROMPT-BEARING agent service tasks that are MISSING the
+ * engine-native AgentTask marker `<zeebe:agentDefinition agentType="external">` (issue #745). Every
+ * deployed `senior:*` agent task must carry the marker so the worker harness mints an AgentInstance
+ * for it; a newly-added agent task that forgets it is a silent drift surface (its run never persists
+ * durable AgentHistory), so the regression guard fails CI. Returns the offending task types in
+ * first-occurrence order (empty when every agent task is marked).
+ */
+export function agentTaskTypesMissingExternalMarker(xml: string): string[] {
+  const seen = new Set<string>();
+  const missing: string[] = [];
+  for (const [block] of xml.matchAll(SERVICE_TASK)) {
+    if (!PROMPT_LINK.test(block)) continue;
+    if (EXTERNAL_AGENT_MARKER.test(block)) continue;
+    const type = block.match(TASK_DEFINITION_TYPE)?.[1];
+    if (type === undefined || type.length === 0 || seen.has(type)) continue;
+    seen.add(type);
+    missing.push(type);
+  }
+  return missing;
 }

@@ -7,6 +7,7 @@
     <bpmn:serviceTask id="trial-merge" name="Trial merge (agent)">
       <bpmn:extensionElements>
         <zeebe:taskDefinition type="senior:trial-merge" />
+        <zeebe:agentDefinition agentType="external" />
         <zeebe:linkedResources>
           <zeebe:linkedResource resourceId="prompts/trial-merge.md" bindingType="latest" resourceType="GenericScript" linkName="prompt" />
         </zeebe:linkedResources>
