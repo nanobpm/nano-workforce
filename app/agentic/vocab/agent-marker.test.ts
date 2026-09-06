@@ -14,7 +14,9 @@ import { agentTaskTypesMissingExternalMarker, promptBearingTaskTypes } from "./j
 const PROCESSES_DIR = join(dirname(fileURLToPath(import.meta.url)), "../../../resources/processes");
 
 function bpmnFiles(): string[] {
-  return readdirSync(PROCESSES_DIR).filter((f) => f.endsWith(".bpmn"));
+  return readdirSync(PROCESSES_DIR)
+    .filter((f) => f.endsWith(".bpmn"))
+    .sort();
 }
 
 test("agentTaskTypesMissingExternalMarker flags a prompt-bearing agent task with no external marker", () => {

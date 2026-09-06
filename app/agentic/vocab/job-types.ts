@@ -49,7 +49,7 @@ export function jobTypeToRoutingToken(jobType: string): string | undefined {
 const SERVICE_TASK = /<(?:\w+:)?serviceTask\b[\s\S]*?<\/(?:\w+:)?serviceTask>/g;
 const TASK_DEFINITION_TYPE = /<(?:\w+:)?taskDefinition\b[^>]*\btype="([^"]*)"/;
 const PROMPT_LINK = /<(?:\w+:)?linkedResource\b[^>]*\blinkName="prompt"/;
-// The engine-native AgentTask marker (issue #745): a `<zeebe:agentDefinition agentType="external">`
+// The engine-native AgentTask marker (issue #745): a `<zeebe:agentDefinition agentType="external" />`
 // sibling of the `<zeebe:taskDefinition>` inside a `senior:*` agent task's extensionElements. It is
 // what makes the element eligible for engine-native AgentInstance minting by the worker harness.
 const EXTERNAL_AGENT_MARKER = /<(?:\w+:)?agentDefinition\b[^>]*\bagentType="external"/;
