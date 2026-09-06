@@ -763,9 +763,15 @@ export function mountCockpit(host, opts = {}) {
   // arrives as a real / and splits a slash-bearing worker-instance id (`34:<instance>/<jobKey>`)
   // into an extra segment — the app matches no route and answers 404, which left the past-session
   // replay silently empty behind the proxy. A / inside a query value is never a separator.
-  function transcriptReadUrl(stream) {
+  //
+  // Mirrors the server SSOT's optional `from` offset (`transcriptReadUrlFor(endpoint, stream, from?)`):
+  // omitted -> no `from` param (read from the start); a numeric offset appends `&from=<n>` so a
+  // resume-from-offset replay can fetch from a non-zero position and the two twins stay structurally
+  // in lockstep.
+  function transcriptReadUrl(stream, from) {
     const url = new URL(transcriptsUrl, location.href);
     url.searchParams.set("stream", stream);
+    if (from !== undefined) url.searchParams.set("from", String(from));
     return url.href;
   }
 
