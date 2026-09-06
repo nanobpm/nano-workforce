@@ -3794,11 +3794,10 @@ paths:
     get:
       operationId: listAgenticTranscripts
       summary: >-
-        List captured agent sessions (H3/#146) — the durable transcripts an ephemeral agent flushed on job
-        completion, readable AFTER it exited. Optional filters by jobKey / process instance / plan / time.
-        When the stream query parameter is given it instead returns ONE transcript's range/offset bytes —
-        the proxy-safe query form of the path read (issue #744). Advisory read-only; never gates control
-        flow. Feeds the cockpit "past sessions" view.
+        List captured agent sessions (H3/#146) — durable transcripts an ephemeral agent flushed on job
+        completion, readable AFTER it exited. Filters: jobKey / process instance / plan / time; or pass
+        stream to read ONE transcript (optionally from a byte offset) — the proxy-safe form of the path
+        read (#744). Never gates control flow.
       security:
         - hookSecret: []
         - {}
@@ -3810,12 +3809,10 @@ paths:
             type: string
             minLength: 1
           description: >-
-            Fetch ONE stored transcript's bytes for this relay stream id (a job:jobKey stream, or a
-            slash-bearing past-session id) instead of listing. Carried as a QUERY parameter, not a path
-            segment, so an embedded slash (percent-encoded) survives the Nano Console gateway proxy intact
-            (issue #744) — the path form under transcripts/streamId 404s behind the proxy for such ids.
-            When present the response is an AgenticTranscriptData (with an optional from offset), not the list.
-            An empty/blank value (?stream=) is a malformed request → 400, NOT a 404 "unknown stream".
+            Relay stream id (a job:jobKey stream, or a slash-bearing past-session id) whose stored transcript
+            to return instead of the list. A QUERY parameter, not a path segment, so a percent-encoded slash
+            survives the Nano Console gateway proxy (issue #744) — the path form 404s behind it for such ids.
+            The response is then an AgenticTranscriptData. Blank (?stream=) is malformed → 400, not a 404.
         - name: from
           in: query
           required: false
@@ -3823,9 +3820,8 @@ paths:
             type: integer
             minimum: 0
           description: >-
-            Only meaningful with stream — resume the returned transcript bytes from this offset (inclusive).
-            Default 0 (the whole retained transcript). Ignored when listing. Must be a non-negative integer;
-            a negative or otherwise malformed offset is a 400 (matching resolveTranscriptRead).
+            With stream only — resume the transcript from this byte offset (inclusive); default 0, ignored
+            when listing. A negative or malformed offset is a 400 (matching resolveTranscriptRead).
         - name: jobKey
           in: query
           required: false
