@@ -6,6 +6,14 @@
 // correlated via `app/agentic/correlation.ts` (best-effort — jobKey is always recovered from the stream
 // id, engine context only while the job is still live). Feeds the cockpit "past sessions" view.
 //
+// PROXY-SAFE single-transcript read (issue #744): when `?stream=<enc>` is present this same endpoint
+// returns ONE stored transcript's range/offset bytes (optionally from `?from=<offset>`), the SAME
+// payload as the path form `GET .../agentic/transcripts/{stream}`. Carrying the stream id as a QUERY
+// parameter (not a path segment) is what keeps a slash-bearing past-session id
+// (e.g. `34:host/13859`) resolvable behind the Nano Console gateway proxy, which would otherwise decode
+// the `%2F` in a path segment back to a real `/` and 404. Both forms resolve through the ONE shared
+// reader (`resolveTranscriptRead`) so they can never drift.
+//
 // Advisory read-only (ADR 0056): it NEVER gates a BPMN sequence flow. Optional filters (jobKey / process
 // instance / plan / time) narrow the feed. The optional shared-secret guard mirrors getAgenticSupply:
 // when NANO_PR_WEBHOOK_SECRET is set, callers must present it via the x-hook-secret header; unset -> open.
@@ -13,6 +21,7 @@
 import { currentCorrelation } from "../app/agentic/correlation.ts";
 import { currentRelayTranscriptService } from "../app/agentic/families/relay.family.ts";
 import { listTranscripts, type TranscriptFilter } from "../app/agentic/transcript-read.ts";
+import { resolveTranscriptRead } from "../app/agentic/transcript-read-op.ts";
 import { envVar } from "../app/version.ts";
 import type { AgenticTranscriptList } from "../nano-generated/api-io.d.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
@@ -28,6 +37,12 @@ export default defineOperation("listAgenticTranscripts", async ({ query, req }, 
   if (SECRET && req.headers.get("x-hook-secret") !== SECRET) {
     app.log.warn("listAgenticTranscripts rejected: missing/invalid shared secret");
     return { status: 401, body: { error: "unauthorized" } };
+  }
+
+  // Proxy-safe single-transcript read (#744): `?stream=<enc>` selects ONE transcript's bytes instead of
+  // the list, so a slash-bearing past-session stream id never rides a path segment a gateway can split.
+  if (query.stream !== undefined) {
+    return resolveTranscriptRead(query.stream, query.from);
   }
 
   if (badInstant(query.since) || badInstant(query.until)) {

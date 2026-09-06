@@ -152,6 +152,80 @@ test("rejects a malformed since/until with a 400", async () => {
   }
 });
 
+test("?stream=<enc> returns ONE transcript's bytes — the proxy-safe query form of the path read (#744)", async () => {
+  relayFamily.mount(mountCtx(memSqlite()));
+  const store = currentRelayTranscriptService()?.store;
+  assert(store !== undefined);
+  store.flush(
+    "job:6494",
+    { since: () => ({ entries: [{ offset: 0, chunk: "aa" }, { offset: 1, chunk: "bb" }] }), nextOffset: 2 },
+    "ephemeral",
+  );
+  try {
+    const res = (await handler(input({ stream: "job:6494" }), app)) as {
+      status: number;
+      body: { stream: string; from: number; chunkCount: number; entries: Array<{ offset: number; chunk: string }> };
+    };
+    // Not the list shape — the single-transcript DATA shape (from/entries), same as GET .../{stream}.
+    assertEquals(res.status, 200);
+    assertEquals(res.body.stream, "job:6494");
+    assertEquals(res.body.from, 0);
+    assertEquals(res.body.chunkCount, 2);
+    assertEquals(res.body.entries.map((e) => e.chunk), ["aa", "bb"]);
+
+    const resume = (await handler(input({ stream: "job:6494", from: 1 }), app)) as {
+      body: { from: number; entries: Array<{ chunk: string }> };
+    };
+    assertEquals(resume.body.from, 1);
+    assertEquals(resume.body.entries.map((e) => e.chunk), ["bb"]);
+  } finally {
+    relayFamily.teardown?.();
+  }
+});
+
+test("?stream= resolves a SLASH-BEARING past-session id the path form cannot carry behind a proxy (#744)", async () => {
+  // The exact failure class from #744: a stream id with an embedded `/`. The path form
+  // (`.../transcripts/<%2F-encoded id>`) 404s behind the console gateway proxy (it decodes `%2F` to a
+  // real `/` → an extra path segment). The query form carries the id as a value, so the app reads it whole.
+  relayFamily.mount(mountCtx(memSqlite()));
+  const store = currentRelayTranscriptService()?.store;
+  assert(store !== undefined);
+  const stream = "34:joshs-macbook-pro-copilot-3d6ee882/13859";
+  store.flush(stream, { since: () => ({ entries: [{ offset: 0, chunk: "hi" }] }), nextOffset: 1 }, "ephemeral");
+  try {
+    const res = (await handler(input({ stream }), app)) as {
+      status: number;
+      body: { stream: string; chunkCount: number; entries: Array<{ chunk: string }> };
+    };
+    assertEquals(res.status, 200);
+    assertEquals(res.body.stream, stream);
+    assertEquals(res.body.chunkCount, 1);
+    assertEquals(res.body.entries.map((e) => e.chunk), ["hi"]);
+  } finally {
+    relayFamily.teardown?.();
+  }
+});
+
+test("?stream= for an unknown stream is a 404 (not an empty list)", async () => {
+  relayFamily.mount(mountCtx(memSqlite()));
+  try {
+    const res = (await handler(input({ stream: "job:nope" }), app)) as { status: number };
+    assertEquals(res.status, 404);
+  } finally {
+    relayFamily.teardown?.();
+  }
+});
+
+test("?stream= with a malformed from offset is a 400", async () => {
+  relayFamily.mount(mountCtx(memSqlite()));
+  try {
+    const res = (await handler(input({ stream: "job:1", from: -1 }), app)) as { status: number };
+    assertEquals(res.status, 400);
+  } finally {
+    relayFamily.teardown?.();
+  }
+});
+
 test("shared-secret guard rejects a missing secret when configured", async () => {
   const prev = process.env["NANO_PR_WEBHOOK_SECRET"];
   process.env["NANO_PR_WEBHOOK_SECRET"] = "s3cr3t";

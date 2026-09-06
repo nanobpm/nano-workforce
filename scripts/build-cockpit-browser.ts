@@ -47,6 +47,9 @@ const MODULES: readonly BundleModule[] = [
     out: "pages/cockpit/generated/transcript-derive.js",
     rewrites: [["../transcript-events.ts", "./transcript-events.js"]],
   },
+  // The proxy-safe transcript READ-URL scheme (#744) — dependency-free, so mount.js derives the exact
+  // same query-param URL as the Node core instead of hand-rolling (and drifting from) it.
+  { src: "app/agentic/transcript-read-url.ts", out: "pages/cockpit/generated/transcript-read-url.js" },
 ];
 
 function banner(src: string): string {

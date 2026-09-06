@@ -18,6 +18,13 @@
 import { publicBaseUrl } from "../blackboard.ts";
 import { jobStream } from "./correlation.ts";
 
+// Re-export the proxy-safe client READ-URL helper (issue #744) so this module stays the ONE place the
+// transcript-URL scheme is authored: the worker-emitted (path-form) URL below, and the cockpit read
+// (query-form) URL both derive from here. The read helper is kept in its own dependency-free module so
+// the deployed browser adapter can consume a type-stripped copy without pulling in this module's
+// engine/blackboard imports.
+export { transcriptReadUrl } from "./transcript-read-url.ts";
+
 /** The job-output variable a completed agent job carries its transcript URL on (rendered by Explorer). */
 export const TRANSCRIPT_URL_VAR = "transcriptUrl";
 

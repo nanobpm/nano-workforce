@@ -26,6 +26,7 @@
 // test keeps byte-identical to its source.
 import { RelayChannelClient, TerminalSession } from "@nanobpm/agentic/cockpit";
 import { renderDerivedTranscript } from "./generated/transcript-derive.js";
+import { transcriptReadUrl } from "./generated/transcript-read-url.js";
 
 const DEFAULT_REFRESH_MS = 2000;
 const DEFAULT_STALE_AFTER_MS = 15_000;
@@ -718,7 +719,10 @@ export function mountCockpit(host, opts = {}) {
       abortTimer.unref?.();
       let res;
       try {
-        res = await fetch(`${transcriptsUrl}/${encodeURIComponent(stream)}`, { headers: jsonHeaders(), signal: controller.signal });
+        // Carry the stream id as a QUERY PARAMETER, not a path segment (#744): a past-session id can
+        // embed a `/` (e.g. `34:host/13859`); an encoded `%2F` in a path segment is decoded back to a
+        // real `/` by the Nano Console gateway proxy and 404s. The query form survives the proxy intact.
+        res = await fetch(transcriptReadUrl(transcriptsUrl, stream), { headers: jsonHeaders(), signal: controller.signal });
       } finally {
         clearTimeout(abortTimer);
       }

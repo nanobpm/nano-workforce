@@ -71,11 +71,17 @@ function installEnv(fetchImpl: (url: string) => Promise<unknown>): () => void {
 const SUPPLY = { leaves: [], correlations: [] };
 
 /** A fetch stub answering the supply poll, the past-sessions list, and a single-stream replay. */
-function fetchStub(replay?: unknown) {
+function fetchStub(replay?: unknown, seen?: string[]) {
   return (url: string): Promise<unknown> => {
+    seen?.push(url);
     const ok = (body: unknown) => Promise.resolve({ ok: true, status: 200, json: async () => body });
     if (url.includes("/supply")) return ok(SUPPLY);
-    if (replay !== undefined && /\/transcripts\/[^/]+$/.test(url)) return ok(replay);
+    // The proxy-safe replay read (#744): the stream id rides the `stream` QUERY param, so the pathname
+    // is the bare transcripts collection — the id (even a slash-bearing one) is NEVER a path segment.
+    const parsed = new URL(url);
+    if (replay !== undefined && parsed.pathname.endsWith("/transcripts") && parsed.searchParams.has("stream")) {
+      return ok(replay);
+    }
     if (url.includes("/transcripts")) return ok({ sessions: [] });
     return Promise.resolve({ ok: false, status: 404, json: async () => ({}) });
   };
@@ -155,6 +161,36 @@ test("replay renders a past session's transcript — never a raw nwfTranscriptEv
     assert(host?.querySelector('[data-tool="grep"]') != null, "the tool card is rendered");
     assert(!(host?.textContent ?? "").includes(TRANSCRIPT_EVENT_MARKER), "the raw nwfTranscriptEvent marker is never shown");
     assertEquals(document.querySelector(".cockpit-terminal")?.getAttribute("data-terminal-mode"), "replay");
+    handle.dispose();
+  } finally {
+    restore();
+  }
+});
+
+test("replay fetches a SLASH-BEARING past-session id via a proxy-safe query URL, not a path segment (#744)", async () => {
+  // Regression for #744: a past-session stream id containing a `/` must be carried as a `stream` query
+  // param so an encoded `%2F` is never decoded into an extra path segment by the console gateway proxy
+  // (which 404s the path form). Assert mount.js's replay fetch keeps the id out of the URL path.
+  const stream = "34:joshs-macbook-pro-copilot-3d6ee882/13859";
+  const replay = { stream, from: 0, gap: false, nextOffset: 1, entries: [{ offset: 0, chunk: envChunk("message", { role: "user", text: "past turn" }) }] };
+  const seen: string[] = [];
+  const restore = installEnv(fetchStub(replay, seen));
+  try {
+    const { mountCockpit } = await import("../../../pages/cockpit/mount.js");
+    const handle = mountCockpit(document.getElementById("root"), OPTS);
+    await handle.replay(stream);
+
+    const replayUrl = seen.find((u) => u.includes("stream="));
+    assert(replayUrl !== undefined, "the replay issued a query-param transcript fetch");
+    const parsed = new URL(replayUrl);
+    assertEquals(parsed.pathname, "/app/api/agentic/transcripts", "the stream id is NOT in the URL path");
+    assert(!parsed.pathname.includes("13859"), "the slash-bearing id must not leak into the path");
+    assertEquals(parsed.searchParams.get("stream"), stream, "the id round-trips intact via the query param");
+    assert(replayUrl.includes("%2F"), "the embedded slash is percent-encoded in the query string");
+
+    const host = document.querySelector('[data-terminal="host"]');
+    assert(host?.querySelector(".cockpit-transcript-derived") != null, "the derived transcript still renders");
+    assert((host?.textContent ?? "").includes("past turn"), "the message text is rendered");
     handle.dispose();
   } finally {
     restore();

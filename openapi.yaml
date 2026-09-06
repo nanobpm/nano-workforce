@@ -3793,13 +3793,35 @@ paths:
   /agentic/transcripts:
     get:
       operationId: listAgenticTranscripts
-      summary: List captured agent sessions (H3/#146) — the durable transcripts an ephemeral agent flushed
-        on job completion, readable AFTER it exited. Optional filters by jobKey / process instance / plan /
-        time. Advisory read-only; never gates control flow. Feeds the cockpit "past sessions" view.
+      summary: >-
+        List captured agent sessions (H3/#146) — the durable transcripts an ephemeral agent flushed on job
+        completion, readable AFTER it exited. Optional filters by jobKey / process instance / plan / time.
+        When the stream query parameter is given it instead returns ONE transcript's range/offset bytes —
+        the proxy-safe query form of the path read (issue #744). Advisory read-only; never gates control
+        flow. Feeds the cockpit "past sessions" view.
       security:
         - hookSecret: []
         - {}
       parameters:
+        - name: stream
+          in: query
+          required: false
+          schema:
+            type: string
+          description: >-
+            Fetch ONE stored transcript's bytes for this relay stream id (a job:jobKey stream, or a
+            slash-bearing past-session id) instead of listing. Carried as a QUERY parameter, not a path
+            segment, so an embedded slash (percent-encoded) survives the Nano Console gateway proxy intact
+            (issue #744) — the path form under transcripts/streamId 404s behind the proxy for such ids.
+            When present the response is an AgenticTranscriptData (with an optional from offset), not the list.
+        - name: from
+          in: query
+          required: false
+          schema:
+            type: integer
+          description: >-
+            Only meaningful with stream — resume the returned transcript bytes from this offset (inclusive).
+            Default 0 (the whole retained transcript). Ignored when listing.
         - name: jobKey
           in: query
           required: false
@@ -3846,19 +3868,27 @@ paths:
           description: Return only sessions created at or before this ISO-8601 instant.
       responses:
         "200":
-          description: The captured session list.
+          description: The captured session list, or — when stream is given — one transcript's bytes.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/AgenticTranscriptList"
+                oneOf:
+                  - $ref: "#/components/schemas/AgenticTranscriptList"
+                  - $ref: "#/components/schemas/AgenticTranscriptData"
         "400":
-          description: A malformed filter (e.g. an unparseable since/until).
+          description: A malformed filter (e.g. an unparseable since/until) or a malformed from offset.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorBody"
         "401":
           description: Missing/invalid shared secret (only when NANO_PR_WEBHOOK_SECRET is set).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+        "404":
+          description: No transcript exists for the given stream (only when the stream parameter is provided).
           content:
             application/json:
               schema:
