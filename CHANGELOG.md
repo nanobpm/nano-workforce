@@ -1,3 +1,9 @@
+## [0.184.0](https://github.com/nanobpm/nano-workforce/compare/v0.183.2...v0.184.0) (2026-09-07)
+
+### Features
+
+* **agent:** consume engine-native AgentInstance/AgentHistory for cockpit history ([#756](https://github.com/nanobpm/nano-workforce/issues/756)) ([555463f](https://github.com/nanobpm/nano-workforce/commit/555463fb4b65f3aaf3aa27a36b518855dddce5b8)), closes [#745](https://github.com/nanobpm/nano-workforce/issues/745) [#747](https://github.com/nanobpm/nano-workforce/issues/747) [#755](https://github.com/nanobpm/nano-workforce/issues/755) [jwulf/c8ctl-plugin-nano#195](https://github.com/jwulf/c8ctl-plugin-nano/issues/195) [#194](https://github.com/nanobpm/nano-workforce/issues/194) [745/#747](https://github.com/745/nano-workforce/issues/747) [#refreshAgentHistory](https://github.com/nanobpm/nano-workforce/issues/refreshAgentHistory) [745/#747](https://github.com/745/nano-workforce/issues/747)
+
 ## [0.183.2](https://github.com/nanobpm/nano-workforce/compare/v0.183.1...v0.183.2) (2026-09-07)
 
 ### Bug Fixes
