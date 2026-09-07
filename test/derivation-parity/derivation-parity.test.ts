@@ -9,18 +9,19 @@
 // and linked resources — with a legible red/green diff on mismatch.
 //
 // Ported models run a real `assertDerivationParity`; parked models (see
-// `./flows.ts`) are reported as skipped WITH their precise reason, in two
+// `./flows.ts`) are reported as skipped WITH their precise reason, in three
 // blocker classes — class 1: multiple top-level start/end events; class 2:
-// arbitrary control-flow graph (`convergence-loop`). Companion diagnostics prove
-// each blocker is real against the goldens themselves. No golden is modified to
+// arbitrary control-flow graph (`convergence-loop`); class 3: the engine-native
+// agent-task marker (`retro`, issue #745). Companion diagnostics prove each
+// blocker is real against the goldens themselves. No golden is modified to
 // force a match — the derivation must reproduce the checked-in file.
 
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
 import { assert, assertEquals } from "#test-assert";
-import { assertDerivationParity, normalize } from "@nanobpm/workflow/test-support";
+import { assertDerivationParity, diffModels, modelsEqual, normalize } from "@nanobpm/workflow/test-support";
 import { declarativeToBpmn, defineFlow } from "@nanobpm/workflow";
-import { PORTS } from "./flows.ts";
+import { PORTS, retroFlow } from "./flows.ts";
 
 const ROOT = decodeURIComponent(new URL("../../", import.meta.url).pathname);
 const goldenPath = (model: string): string => `${ROOT}resources/processes/${model}.bpmn`;
@@ -98,8 +99,9 @@ test("class-1 blocked goldens genuinely have multiple top-level start/end events
   }
 
   // The two single-start/single-end goldens (retro, convergence-loop) clear
-  // class 1; retro is a GREEN whole-model parity port (it runs through
-  // `assertDerivationParity` above), convergence-loop is class-2 blocked (below).
+  // class 1; each is blocked on a LATER class instead — retro on the class-3
+  // agent-task marker (proven below), convergence-loop on its class-2 arbitrary
+  // graph.
   for (const model of ["retro", "convergence-loop"]) {
     const xml = readFileSync(goldenPath(model), "utf8");
     assertEquals(countTag(xml, "startEvent"), 1, `${model} should have one start event`);
@@ -155,5 +157,40 @@ test("loop() inserts a gateway head, so back-edges cannot merge into a task", ()
   assert(
     tasks.every((n) => inDegree(n) <= 1),
     "the loop-body task cannot itself be the back-edge merge (it stays in<=1)",
+  );
+});
+
+// CLASS 3 — retro has a single top-level start/end (clears class 1) and a fully
+// structured topology (clears class 2), but issue #745 added the engine-native
+// AgentTask marker `<zeebe:agentDefinition agentType="external" />` to its two
+// prompt-bearing `senior:*` tasks and the published compiler cannot emit it.
+// Prove the blocker is real AND that it is the ONLY divergence, so the parked
+// entry is a complete, verified port held ready — not an abandoned one.
+test("retro's complete port differs from its golden by ONLY the agent-task marker", () => {
+  const golden = readFileSync(goldenPath("retro"), "utf8");
+  const derived = declarativeToBpmn(retroFlow);
+  const markers = (xml: string): number =>
+    (xml.match(/<(?:\w+:)?agentDefinition\b[^>]*\bagentType="external"/g) ?? []).length;
+
+  // (a) the golden really carries the marker, on BOTH of its agent tasks — and it
+  //     cannot simply be dropped: app/agentic/vocab/agent-marker.test.ts is a
+  //     defect-class guard requiring it on every deployed prompt-bearing agent task.
+  assertEquals(markers(golden), 2, "retro's golden should mark senior:conformance and senior:retro");
+
+  // (b) the published compiler emits none of it — the blocker is real, not a guess.
+  //     When this starts failing, upstream task() grew marker support: un-park retro
+  //     by threading `retroFlow` back into its PORTS entry in ./flows.ts.
+  assertEquals(markers(derived), 0, "@nanobpm/workflow can now emit <zeebe:agentDefinition/> — un-park retro");
+
+  // (c) strip exactly the marker lines from the golden and the port derives the
+  //     WHOLE model green, through the shared harness's own normalize/equality —
+  //     so nothing but the marker diverges.
+  const unmarked = golden.replace(/^[ \t]*<(?:\w+:)?agentDefinition\b[^>]*\/>[ \t]*\r?\n/gm, "");
+  assertEquals(markers(unmarked), 0, "the strip must remove every marker line");
+  const expected = normalize(unmarked);
+  const actual = normalize(derived);
+  assert(
+    modelsEqual(expected, actual),
+    `retro's port must derive its golden once the agent-task marker is stripped — residual drift:\n${diffModels(expected, actual)}`,
   );
 });
