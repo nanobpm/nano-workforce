@@ -581,7 +581,7 @@ function agentTurnBlock(doc, t) {
   if (t.toolCalls.length > 0) {
     const tools = el(doc, "ul", "cockpit-agent-turn-tools");
     for (const call of t.toolCalls) {
-      const li = el(doc, "li", "cockpit-agent-turn-tool", call.elementId != null ? `${call.toolName} (${call.elementId})` : call.toolName);
+      const li = el(doc, "li", "cockpit-agent-turn-tool", call.elementId != null && call.elementId !== "" ? `${call.toolName} (${call.elementId})` : call.toolName);
       li.setAttribute("data-tool-call-id", call.toolCallId);
       tools.appendChild(li);
     }
