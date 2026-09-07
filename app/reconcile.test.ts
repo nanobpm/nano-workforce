@@ -10,10 +10,12 @@
 // `makeGateway`), so the tables/columns/indexes reconcile reads and writes are the shipping schema.
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
-import { assertEquals } from "#test-assert";
+import type { DataLayer, GatewayDataSource as DataSource } from "@nanobpm/urban";
+import { assertEquals, assertNotEquals } from "#test-assert";
 import { freshData } from "../test/reconcileDb.ts";
 import {
   DEFAULT_VANISHED_GRACE_MS,
+  makeEngineActiveProbe,
   ORPHANED_STATUS,
   parseEngineEpoch,
   RECONCILE_ORPHAN_REASON,
@@ -542,4 +544,163 @@ test("runEngineReconcile #736: an UNREACHABLE engine spares vanished candidates 
   };
   assertEquals(row.status, "escalated");
   assertEquals((raw.prepare("SELECT COUNT(*) c FROM reconcile_provenance").get() as { c: number }).c, 0);
+});
+
+// --- Hardening the cross-check itself (#736 review) ---------------------------------------------
+// Two defects of the SAME class the first cut still carried — "never orphan a row we could not
+// positively confirm is gone" — plus the lock-hold the cross-check introduced:
+//   1. a MATCHING search item whose `state` was missing or outside the engine's lifecycle enum read as
+//      `false` ("gone"), so a malformed/partial engine answer folded live work;
+//   2. the probe (network I/O) was awaited INSIDE `src.tx(...)`, so a slow or unreachable engine held
+//      the SQLite write transaction open for the probe's full timeout PER CANDIDATE ROW — stalling
+//      every other writer, including boot — and an injected probe that threw aborted the whole pass.
+
+/** Answer `/v2/process-instances/search` with exactly `items` (200), so a probe's classification can
+ *  be read off one wire shape varying only in the item's `state`. */
+function searchItemsFetch(items: { processInstanceKey?: string | number; state?: string }[]): typeof fetch {
+  return (async () => new Response(JSON.stringify({ items }), { status: 200 })) as unknown as typeof fetch;
+}
+
+/** Probe the key `11644` against a stubbed engine search answer of `items`. */
+function probeAgainst(items: { processInstanceKey?: string | number; state?: string }[]): Promise<boolean | null> {
+  const probe = makeEngineActiveProbe({ restAddress: "http://engine.local/v2" }, { fetchImpl: searchItemsFetch(items) });
+  return probe("11644");
+}
+
+test("#736: the probe answers `true` for ACTIVE and `false` ONLY for a known-terminal engine state", async () => {
+  assertEquals(await probeAgainst([{ processInstanceKey: "11644", state: "ACTIVE" }]), true);
+  // The wire may carry the key as a JSON number and the state in any casing.
+  assertEquals(await probeAgainst([{ processInstanceKey: 11644, state: "active" }]), true);
+  for (const state of ["COMPLETED", "TERMINATED", "CANCELED", "FAILED"]) {
+    assertEquals(await probeAgainst([{ processInstanceKey: "11644", state }]), false, `${state} is a positive "gone"`);
+  }
+  // Absent from the read model is STILL a positive "gone": the engine answered and does not know it.
+  assertEquals(await probeAgainst([]), false);
+});
+
+test("RED→GREEN #736: a MISSING or UNRECOGNIZED engine state is UNKNOWN truth (`null` → spare), never `false`", async () => {
+  // RED (pre-fix): the probe answered `String(match.state ?? "").toUpperCase() === "ACTIVE"`, so a
+  // partial item (no `state`) or a state outside the enum this app knows read as "gone" and folded the
+  // row — contradicting the probe's own contract that malformed engine truth degrades to `null`.
+  assertEquals(await probeAgainst([{ processInstanceKey: "11644" }]), null, "a missing state is not a confirmed death");
+  assertEquals(await probeAgainst([{ processInstanceKey: "11644", state: "" }]), null);
+  assertEquals(await probeAgainst([{ processInstanceKey: "11644", state: "SUSPENDED" }]), null);
+  // An item for a DIFFERENT key is no match for this one, so that stays "absent" (gone), not unknown.
+  assertEquals(await probeAgainst([{ processInstanceKey: "99999" }]), false);
+});
+
+test("RED→GREEN #736: a malformed search item (no `state`) spares the candidate end-to-end", async () => {
+  const { data, raw } = freshData();
+  ensureInstanceState(raw);
+  // Past grace, no projection row, and the engine ANSWERS — but its item carries no lifecycle state, so
+  // engine truth is unestablished and the row must survive (RED pre-fix: folded to `orphaned`).
+  seedFeatureRun(raw, "nanobpm/nano-workforce#731", "escalated", "11644");
+  const fetchImpl = engineFetch({ nano: { engine: "merlin" } }, [{ processInstanceKey: "11644" }]);
+
+  const res = await runEngineReconcile(data, { restAddress: "http://engine.local/v2" }, { now: AT, fetchImpl });
+
+  assertEquals(res.orphanedCount, 0);
+  const row = raw.prepare("SELECT status FROM feature_runs WHERE feature_key='nanobpm/nano-workforce#731'").get() as {
+    status: string;
+  };
+  assertEquals(row.status, "escalated");
+  assertEquals((raw.prepare("SELECT COUNT(*) c FROM reconcile_provenance").get() as { c: number }).c, 0);
+});
+
+test("RED→GREEN #736: a probe that THROWS is unknown truth — it spares the row instead of aborting the pass", async () => {
+  const { data, raw } = freshData();
+  ensureInstanceState(raw);
+  seedFeatureRun(raw, "o/r#boom", "escalated", "71506");
+  // `engineActive` is injectable: an implementation that rejects means truth could NOT be established
+  // (spare), and must not bubble out of the pass.
+  const engineActive = async (): Promise<boolean | null> => {
+    throw new Error("engine exploded");
+  };
+
+  const res = await reconcileVanishedInstances(data, { now: AT, runId: "van-1", engineActive });
+
+  assertEquals(res.reason, "no-op");
+  assertEquals(res.orphanedCount, 0);
+  const row = raw.prepare("SELECT status FROM feature_runs WHERE feature_key='o/r#boom'").get() as { status: string };
+  assertEquals(row.status, "escalated");
+  // The pass COMPLETED and recorded its run — pre-fix the throw escaped the transaction and rejected the
+  // whole reconcile, so no `reconcile_runs` row was written at all.
+  const run = raw.prepare("SELECT reason, orphaned_count FROM reconcile_runs WHERE run_id='van-1'").get() as
+    | { reason: string; orphaned_count: number }
+    | undefined;
+  assertEquals(run?.reason, "no-op");
+  assertEquals(run?.orphaned_count, 0);
+});
+
+test("RED→GREEN #736: the probe (network I/O) is never awaited INSIDE the write transaction", async () => {
+  const { data, raw } = freshData();
+  ensureInstanceState(raw);
+  seedFeatureRun(raw, "o/r#tx", "escalated", "71506");
+
+  // Wrap the gateway so the probe can report how deep in `src.tx(...)` it was awaited. RED (pre-fix):
+  // depth 1 — every candidate row held the SQLite write transaction open across a network round trip
+  // (up to the probe's full timeout on a slow/unreachable engine), delaying every other writer and
+  // slowing/locking boot. GREEN: depth 0 — the probes finish first, and only the guarded UPDATE +
+  // provenance writes run in a short transaction.
+  let depth = 0;
+  const observed: number[] = [];
+  const inner = data.open();
+  const tracked = {
+    open: () => ({
+      query: (sql: string, params?: unknown[]) => inner.query(sql, params),
+      exec: (sql: string, params?: unknown[]) => inner.exec(sql, params),
+      schema: () => inner.schema(),
+      table: (name: string, pk?: string) => inner.table(name, pk),
+      tx: async <T>(fn: (t: DataSource) => Promise<T>): Promise<T> => {
+        depth += 1;
+        try {
+          return await inner.tx(fn);
+        } finally {
+          depth -= 1;
+        }
+      },
+    }),
+  } as unknown as DataLayer;
+
+  const engineActive = async (): Promise<boolean | null> => {
+    observed.push(depth);
+    return false;
+  };
+
+  const res = await reconcileVanishedInstances(tracked, { now: AT, runId: "van-tx", engineActive });
+
+  // Exactly one entry: the seeded row also mirrors into `delivery_units` (same `process_key`), and one
+  // instance is probed once (see the next test) — at depth 0, outside any open write transaction.
+  assertEquals(observed, [0], "the engine-truth probe must be awaited outside any open write transaction");
+  // Hoisting the probe out of the transaction must not weaken the pass: a confirmed-gone row still folds.
+  assertEquals(res.orphanedCount, 1);
+  const row = raw.prepare("SELECT status FROM feature_runs WHERE feature_key='o/r#tx'").get() as { status: string };
+  assertEquals(row.status, ORPHANED_STATUS);
+});
+
+test("#736: one instance backing several tracked rows is probed ONCE (engine truth is per instance)", async () => {
+  const { data, raw } = freshData();
+  ensureInstanceState(raw);
+  // A `feature_runs` row is ALSO mirrored into the `delivery_units` aggregate by DB trigger
+  // (db/migrations/089), carrying the same `process_key` — so one vanished instance yields TWO
+  // candidates. Engine truth is per instance, so it must be asked once, not once per row (each probe
+  // can block for its full timeout on a slow engine).
+  seedFeatureRun(raw, "o/r#mirror", "escalated", "71506");
+  const probed: string[] = [];
+  const engineActive = async (key: string): Promise<boolean | null> => {
+    probed.push(key);
+    return false;
+  };
+
+  const res = await reconcileVanishedInstances(data, { now: AT, runId: "van-mirror", engineActive });
+
+  assertEquals(probed, ["71506"], "one probe per distinct instance key");
+  // Folding the base row re-projects its mirror (the sync trigger clears `dispatch_status`), so the
+  // mirror is not folded a second time for the same instance — no duplicate provenance.
+  assertEquals(res.orphaned.map((o) => o.table), ["feature_runs"]);
+  assertEquals(res.orphanedCount, 1);
+  const mirror = raw.prepare("SELECT dispatch_status FROM delivery_units WHERE legacy_key='o/r#mirror'").get() as {
+    dispatch_status: string | null;
+  };
+  assertNotEquals(mirror.dispatch_status, "dispatched");
 });
