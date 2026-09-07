@@ -98,8 +98,15 @@ export const MCP_TOOL_COUNT_BUDGET = 60;
  * each of the two transcript tools, keeping the `?stream=` form discoverable from the tool surface
  * alone (measured +219 bytes serialized, 83,824 → 84,043 — over the old ceiling's 176-byte
  * headroom). Deliberate, documented growth — not schema fat.
+ *
+ * RAISE PROVENANCE — 84_500 → 86_500 (#745/#747, umbrella #746): the engine-native agent-history
+ * read surface adds two GET tools — `listAgentInstances` and `getAgentInstanceHistory` — that read
+ * the durable AgentInstance / AgentHistory channels for wedge triage (kept on the surface per the
+ * `x-mcp` convention that read/orient doors stay exposed; only operator-only control doors are
+ * excluded, see app/mcpExclusions.test.ts). Measured +1,846 bytes serialized (84,043 → 85,889 —
+ * over the old ceiling's 457-byte headroom). Deliberate, documented growth — not schema fat.
  */
-export const MCP_SURFACE_BYTES_BUDGET = 84_500;
+export const MCP_SURFACE_BYTES_BUDGET = 86_500;
 
 /**
  * The eagerly-loaded curated subset MUST stay materially smaller than the full surface — otherwise it

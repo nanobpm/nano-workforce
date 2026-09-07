@@ -430,6 +430,192 @@ function transcriptSink(host, stream, opts = {}) {
   };
 }
 
+// ── engine agent-history projection + render (mirrors app/agentic/cockpit/agent-history-view.ts + -render.ts) ──
+//
+// The CONSUMER half of the durable-agent-transcript work (issue #745/#747): the SETTLED agent-run list +
+// a selected run's ordered conversation turns + metrics, sourced from the engine read model
+// (`GET /agentic/agent-instances` + `…/{agentInstanceKey}/history`, served from `@nanobpm/urban`'s
+// EngineClient `searchAgentInstances` / `searchAgentInstanceHistory`), keyed by agentInstanceKey — NOT
+// a relay stream id (#744 moot for historical reads). The relay past-sessions panel above stays the
+// LIVE overlay only. Kept a faithful hand-twin of the server view/render modules (mount.js cannot
+// import them); the server modules carry the Node-tested SSOT.
+
+function humanCount(n) {
+  if (!Number.isFinite(n) || n < 0) return "0";
+  if (n < 1000) return String(n);
+  if (n < 1_000_000) return `${(n / 1000).toFixed(1)}k`;
+  return `${(n / 1_000_000).toFixed(1)}M`;
+}
+
+function humanMs(ms) {
+  if (ms == null || !Number.isFinite(ms) || ms <= 0) return undefined;
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  return `${(ms / 1000).toFixed(1)}s`;
+}
+
+function instanceLabel(i) {
+  const parts = [];
+  if (i.processDefinitionId != null && i.processDefinitionId !== "") parts.push(i.processDefinitionId);
+  if (i.elementId != null && i.elementId !== "") parts.push(i.elementId);
+  if (i.processInstanceKey != null && i.processInstanceKey !== "") parts.push(`inst ${i.processInstanceKey}`);
+  if (parts.length > 0) return parts.join(" \u00b7 ");
+  return i.agentInstanceKey;
+}
+
+function instanceMetrics(m) {
+  if (m == null) return undefined;
+  return `${humanCount(m.inputTokens)} in \u00b7 ${humanCount(m.outputTokens)} out \u00b7 ${m.modelCalls} calls \u00b7 ${m.toolCalls} tools`;
+}
+
+function agentSessionView(i) {
+  const capturedAt = i.completionDate ?? i.lastUpdatedDate ?? i.creationDate;
+  return {
+    agentInstanceKey: i.agentInstanceKey,
+    label: instanceLabel(i),
+    status: i.status,
+    metrics: instanceMetrics(i.metrics),
+    capturedAt: capturedAt != null && capturedAt !== "" ? capturedAt : undefined,
+  };
+}
+
+function agentSessionsView(report) {
+  const sessions = (report.instances ?? [])
+    .map(agentSessionView)
+    .sort((a, b) => {
+      const byTime = String(b.capturedAt ?? "").localeCompare(String(a.capturedAt ?? ""));
+      return byTime !== 0 ? byTime : a.agentInstanceKey.localeCompare(b.agentInstanceKey);
+    });
+  return { sessions, count: sessions.length };
+}
+
+function turnText(r) {
+  return (r.content ?? [])
+    .filter((b) => b.contentType === "TEXT" && b.text != null && b.text !== "")
+    .map((b) => b.text)
+    .join("\n");
+}
+
+function turnMetrics(m) {
+  if (m == null) return undefined;
+  const dur = humanMs(m.durationMs);
+  const base = `${humanCount(m.inputTokens)} in \u00b7 ${humanCount(m.outputTokens)} out`;
+  return dur != null ? `${base} \u00b7 ${dur}` : base;
+}
+
+function agentHistoryView(report) {
+  const turns = (report.records ?? []).map((r) => ({
+    historyItemKey: r.historyItemKey,
+    loopIteration: r.loopIteration,
+    role: r.role,
+    text: turnText(r),
+    toolCalls: (r.toolCalls ?? []).map((c) => ({ toolCallId: c.toolCallId, toolName: c.toolName, elementId: c.elementId })),
+    metrics: turnMetrics(r.metrics),
+  }));
+  return {
+    agentInstanceKey: report.agentInstanceKey,
+    instance: report.instance != null ? agentSessionView(report.instance) : undefined,
+    turns,
+    count: turns.length,
+  };
+}
+
+function agentSessionRow(doc, s, onSelect, activeInstanceKey) {
+  const row = el(doc, "tr", "cockpit-agent-session");
+  row.setAttribute("data-agent-instance-key", s.agentInstanceKey);
+  row.setAttribute("data-status", s.status);
+  if (activeInstanceKey === s.agentInstanceKey) row.setAttribute("data-active", "true");
+  const nameCell = el(doc, "td", "cockpit-td cockpit-agent-name");
+  const button = el(doc, "button", "cockpit-agent-select", s.label);
+  button.setAttribute("type", "button");
+  button.setAttribute("data-agent-instance-key", s.agentInstanceKey);
+  if (onSelect) button.addEventListener("click", () => onSelect(s.agentInstanceKey));
+  nameCell.appendChild(button);
+  row.appendChild(nameCell);
+  row.appendChild(el(doc, "td", "cockpit-td cockpit-agent-status", s.status));
+  row.appendChild(el(doc, "td", "cockpit-td cockpit-agent-metrics", s.metrics ?? ""));
+  row.appendChild(el(doc, "td", "cockpit-td cockpit-agent-captured", s.capturedAt ?? ""));
+  return row;
+}
+
+function renderAgentSessions(host, doc, view, onSelect, activeInstanceKey) {
+  host.replaceChildren();
+  const root = el(doc, "div", "cockpit-agent-history");
+  root.setAttribute("data-session-count", String(view.count));
+  const header = el(doc, "header", "cockpit-agent-header");
+  header.appendChild(el(doc, "h2", "cockpit-agent-title", "Agent history"));
+  const summary = el(doc, "span", "cockpit-agent-summary", String(view.count));
+  summary.setAttribute("data-summary", "agent-history");
+  header.appendChild(summary);
+  root.appendChild(header);
+  if (view.count === 0) {
+    const empty = el(doc, "div", "cockpit-agent-empty", "No agent runs recorded yet.");
+    empty.setAttribute("data-empty", "true");
+    root.appendChild(empty);
+    host.appendChild(root);
+    return;
+  }
+  const table = el(doc, "table", "cockpit-agent-table");
+  const thead = el(doc, "thead", "cockpit-agent-thead");
+  const head = el(doc, "tr", "cockpit-agent-head");
+  for (const label of ["run", "status", "metrics", "captured"]) head.appendChild(el(doc, "th", "cockpit-th", label));
+  thead.appendChild(head);
+  table.appendChild(thead);
+  const tbody = el(doc, "tbody", "cockpit-agent-tbody");
+  for (const s of view.sessions) tbody.appendChild(agentSessionRow(doc, s, onSelect, activeInstanceKey));
+  table.appendChild(tbody);
+  root.appendChild(table);
+  host.appendChild(root);
+}
+
+function agentTurnBlock(doc, t) {
+  const block = el(doc, "div", "cockpit-agent-turn");
+  block.setAttribute("data-history-item-key", t.historyItemKey);
+  block.setAttribute("data-role", t.role);
+  block.setAttribute("data-loop-iteration", String(t.loopIteration));
+  const meta = el(doc, "div", "cockpit-agent-turn-meta");
+  meta.appendChild(el(doc, "span", "cockpit-agent-turn-role", t.role));
+  meta.appendChild(el(doc, "span", "cockpit-agent-turn-iter", `#${t.loopIteration}`));
+  if (t.metrics != null) meta.appendChild(el(doc, "span", "cockpit-agent-turn-metrics", t.metrics));
+  block.appendChild(meta);
+  if (t.text !== "") block.appendChild(el(doc, "pre", "cockpit-agent-turn-text", t.text));
+  if (t.toolCalls.length > 0) {
+    const tools = el(doc, "ul", "cockpit-agent-turn-tools");
+    for (const call of t.toolCalls) {
+      const li = el(doc, "li", "cockpit-agent-turn-tool", call.elementId != null && call.elementId !== "" ? `${call.toolName} (${call.elementId})` : call.toolName);
+      li.setAttribute("data-tool-call-id", call.toolCallId);
+      tools.appendChild(li);
+    }
+    block.appendChild(tools);
+  }
+  return block;
+}
+
+function renderAgentHistory(host, doc, view) {
+  host.replaceChildren();
+  const root = el(doc, "div", "cockpit-agent-transcript");
+  root.setAttribute("data-agent-instance-key", view.agentInstanceKey);
+  root.setAttribute("data-turn-count", String(view.count));
+  const header = el(doc, "header", "cockpit-agent-transcript-header");
+  header.appendChild(el(doc, "h3", "cockpit-agent-transcript-title", view.instance?.label ?? view.agentInstanceKey));
+  if (view.instance?.metrics != null) {
+    const m = el(doc, "span", "cockpit-agent-transcript-metrics", view.instance.metrics);
+    m.setAttribute("data-summary", "agent-instance-metrics");
+    header.appendChild(m);
+  }
+  root.appendChild(header);
+  if (view.count === 0) {
+    const empty = el(doc, "div", "cockpit-agent-transcript-empty", "No history for this run.");
+    empty.setAttribute("data-empty", "true");
+    root.appendChild(empty);
+    host.appendChild(root);
+    return;
+  }
+  const turns = el(doc, "div", "cockpit-agent-turns");
+  for (const t of view.turns) turns.appendChild(agentTurnBlock(doc, t));
+  root.appendChild(turns);
+  host.appendChild(root);
+}
+
 // ── boot orchestration (mirrors app/agentic/cockpit/supply-boot.ts) ────────────────────────────
 
 /** A WebSocket relay socket factory for the agentic channel at `url`. */
@@ -463,14 +649,19 @@ function relaySocketFactory(url) {
  * @param {number} [opts.refreshMs] — poll interval (default 2000).
  * @param {number} [opts.staleAfterMs] — a worker is rendered "stale" once its last heartbeat is at
  *   least this many ms old (default 15000).
- * @param {number} [opts.pastFetchTimeoutMs] — upper bound (ms) on a single past-sessions transcripts
- *   fetch; the fetch is aborted past this so a hung endpoint can't wedge the past panel (default 15000).
+ * @param {number} [opts.pastFetchTimeoutMs] — upper bound (ms) on a single bounded engine JSON fetch:
+ *   both a past-sessions transcripts fetch AND (via `boundedJson`) an engine agent-history fetch are
+ *   aborted past this so a hung endpoint can't wedge the past or agent-history panel (default 15000).
  * @param {string} [opts.transcriptsUrl] — the captured-session list endpoint backing the always-on
  *   "past sessions" history + replay (default
  *   `new URL("../app/api/agentic/transcripts", import.meta.url).href`, module-anchored so it
  *   resolves to the app root `<appMount>/app/api/agentic/transcripts`, not the `/cockpit/` shell
  *   base). The per-session replay read uses the proxy-safe `?stream=` query form on this same URL
  *   (#744 — never a `/…/<id>` path segment, which a decoding gateway splits on encoded slashes).
+ * @param {string} [opts.agentInstancesUrl] — the engine-native SETTLED agent-history list endpoint
+ *   (default `new URL("../app/api/agentic/agent-instances", import.meta.url).href`, module-anchored
+ *   like the others). Selecting a run reads `…/agent-instances/{agentInstanceKey}/history` off this
+ *   same base (issue #745/#747). Keyed by agentInstanceKey — the engine read seam, not a relay stream.
  * @returns a handle with `.dispose()`.
  */
 export function mountCockpit(host, opts = {}) {
@@ -494,6 +685,7 @@ export function mountCockpit(host, opts = {}) {
   // injects window.__NANO_APP_VIEW__, so this default is what actually runs there too.
   const reportUrl = opts.reportUrl ?? new URL("../app/api/agentic/supply", import.meta.url).href;
   const transcriptsUrl = opts.transcriptsUrl ?? new URL("../app/api/agentic/transcripts", import.meta.url).href;
+  const agentInstancesUrl = opts.agentInstancesUrl ?? new URL("../app/api/agentic/agent-instances", import.meta.url).href;
   const hookSecret = opts.hookSecret;
   const relayUrl = opts.relayUrl ?? defaultRelayUrl(opts.relayToken, opts.relayCapability);
   const refreshMs = opts.refreshMs ?? DEFAULT_REFRESH_MS;
@@ -531,6 +723,11 @@ export function mountCockpit(host, opts = {}) {
   const shell = el(doc, "div", "cockpit-shell");
   const listRegion = el(doc, "div", "cockpit-supply-region");
   const pastRegion = el(doc, "div", "cockpit-past-region");
+  // The engine-native SETTLED agent-history panel (issue #745): a list region + a detail region,
+  // sourced from the engine read model and keyed by agentInstanceKey (distinct from the relay
+  // past-sessions overlay above).
+  const agentRegion = el(doc, "div", "cockpit-agent-region");
+  const agentDetailRegion = el(doc, "div", "cockpit-agent-detail-region");
   const terminalPanel = el(doc, "section", "cockpit-terminal");
   terminalPanel.setAttribute("data-terminal-mode", "idle");
   const terminalTitle = el(doc, "h2", "cockpit-panel-title", "Worker terminal");
@@ -547,6 +744,8 @@ export function mountCockpit(host, opts = {}) {
   shell.appendChild(listRegion);
   shell.appendChild(terminalPanel);
   shell.appendChild(pastRegion);
+  shell.appendChild(agentRegion);
+  shell.appendChild(agentDetailRegion);
   host.appendChild(shell);
 
   let running = false;
@@ -566,6 +765,11 @@ export function mountCockpit(host, opts = {}) {
   // against a slow/hung transcripts endpoint.
   let pastRefreshing = false;
   let pastRefreshPending = false;
+  // Single-flight latch for the engine agent-history list refresh (mirrors pastRefreshing), and the
+  // agent instance whose settled history is currently shown in the detail region.
+  let agentRefreshing = false;
+  let agentRefreshPending = false;
+  let shownAgentInstanceKey;
 
   function setMode(next, stream) {
     mode = next;
@@ -851,6 +1055,85 @@ export function mountCockpit(host, opts = {}) {
     }
     // Fire-and-forget: a hung transcripts endpoint must never stall the supply poll's next tick.
     void refreshPast(routeInstance());
+    // Same discipline for the engine agent-history list (issue #745): single-flight + bounded.
+    void refreshAgentHistory();
+  }
+
+  // The engine-native SETTLED agent-history endpoints (issue #745/#747), anchored module-relatively
+  // like the other API URLs. The per-instance history rides a PATH segment — an engine agent-instance
+  // key is a plain (slash-free) key, so unlike the slash-bearing relay stream id (#744) it is
+  // proxy-safe as a path segment; encode it defensively all the same.
+  function agentHistoryReadUrl(agentInstanceKey) {
+    const base = new URL(agentInstancesUrl, location.href);
+    base.pathname = `${base.pathname.replace(/\/$/, "")}/${encodeURIComponent(agentInstanceKey)}/history`;
+    return base.href;
+  }
+
+  // Shared bounded-fetch helper for the engine JSON read endpoints (agent-instances list +
+  // per-instance agent-history). Reuses `pastFetchTimeoutMs` as the abort bound — the same discipline
+  // as the past-sessions fetches — so a hung engine read endpoint can't wedge the agent-history panel.
+  async function boundedJson(url) {
+    const controller = new AbortController();
+    const abortTimer = setTimeout(() => controller.abort(), pastFetchTimeoutMs);
+    abortTimer.unref?.();
+    try {
+      const res = await fetch(url, { headers: jsonHeaders(), signal: controller.signal });
+      if (!res.ok) throw new Error(`fetch failed: ${res.status} (${url})`);
+      return await res.json();
+    } finally {
+      clearTimeout(abortTimer);
+    }
+  }
+
+  async function refreshAgentHistory() {
+    // Single-flight (mirrors refreshPast): a slow/hung engine read endpoint never stacks fetches nor
+    // gates the supply poll. The list is engine-global (settled AgentInstances), so it is not route-filtered.
+    if (agentRefreshing) {
+      agentRefreshPending = true;
+      return;
+    }
+    agentRefreshing = true;
+    try {
+      let report;
+      try {
+        report = await boundedJson(agentInstancesUrl);
+      } catch (err) {
+        onError(err);
+        return;
+      }
+      if (disposed) return;
+      try {
+        renderAgentSessions(agentRegion, doc, agentSessionsView(report), viewAgentHistory, shownAgentInstanceKey);
+      } catch (err) {
+        onError(err);
+      }
+    } finally {
+      agentRefreshing = false;
+      if (agentRefreshPending && !disposed) {
+        agentRefreshPending = false;
+        void refreshAgentHistory();
+      }
+    }
+  }
+
+  async function viewAgentHistory(agentInstanceKey) {
+    if (disposed) return;
+    let report;
+    try {
+      report = await boundedJson(agentHistoryReadUrl(agentInstanceKey));
+    } catch (err) {
+      onError(err);
+      return;
+    }
+    if (disposed) return;
+    try {
+      shownAgentInstanceKey = agentInstanceKey;
+      renderAgentHistory(agentDetailRegion, doc, agentHistoryView(report));
+      // Re-render the list so the just-selected run shows as active (best-effort).
+      void refreshAgentHistory();
+    } catch (err) {
+      onError(err);
+    }
   }
 
   function tick(gen) {
@@ -884,7 +1167,7 @@ export function mountCockpit(host, opts = {}) {
   }
 
   start();
-  return { start, stop, dispose, refresh, drill: drillInto, replay: replayInto };
+  return { start, stop, dispose, refresh, drill: drillInto, replay: replayInto, viewAgentHistory };
 }
 
 /**

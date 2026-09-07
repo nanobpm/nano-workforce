@@ -5,6 +5,27 @@
 //
 // The DEMAND×supply matrix, missing-agent-type reds, and diversity-SLO lights are OUT OF SCOPE for
 // this epic (#142) and deferred to the paired enrolment epic #152.
+
+export {
+  type AgentHistoryDom,
+  type AgentSessionsDom,
+  type RenderAgentSessionsOptions,
+  renderAgentHistory,
+  renderAgentSessions,
+} from "./agent-history-render.ts";
+export {
+  type AgentHistoryReport,
+  type AgentHistoryView,
+  type AgentInstanceListReport,
+  type AgentSessionsView,
+  type AgentSessionView,
+  type AgentTurnToolCallView,
+  type AgentTurnView,
+  agentHistoryView,
+  agentSessionsView,
+  agentSessionView,
+  agentTurnView,
+} from "./agent-history-view.ts";
 export {
   type CockpitRoute,
   parseCockpitRoute,

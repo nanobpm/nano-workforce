@@ -78,6 +78,7 @@ function fetchStub(replay?: unknown) {
     const ok = (body: unknown) => Promise.resolve({ ok: true, status: 200, json: async () => body });
     if (url.includes("/supply")) return ok(SUPPLY);
     if (replay !== undefined && /[?&]stream=/.test(url)) return ok(replay);
+    if (url.includes("/agent-instances")) return ok({ count: 0, instances: [] });
     if (url.includes("/transcripts")) return ok({ sessions: [] });
     return Promise.resolve({ ok: false, status: 404, json: async () => ({}) });
   };
@@ -97,7 +98,13 @@ test("the rendered transcript region sits directly beneath the Workers — suppl
     const handle = mountCockpit(document.getElementById("root"), OPTS);
     const shell = document.querySelector(".cockpit-shell");
     const order = [...(shell?.children ?? [])].map((c: { className: string }) => c.className);
-    assertEquals(order, ["cockpit-supply-region", "cockpit-terminal", "cockpit-past-region"]);
+    assertEquals(order, [
+      "cockpit-supply-region",
+      "cockpit-terminal",
+      "cockpit-past-region",
+      "cockpit-agent-region",
+      "cockpit-agent-detail-region",
+    ]);
     handle.dispose();
   } finally {
     restore();
@@ -206,6 +213,131 @@ test("#744: replay fetches the proxy-safe ?stream= query form — a slash-bearin
       const host = document.querySelector('[data-terminal="host"]');
       assert((host?.textContent ?? "").includes("past session bytes"), "the past session rendered");
       assertEquals(document.querySelector(".cockpit-terminal")?.getAttribute("data-terminal-mode"), "replay");
+    } finally {
+      handle.dispose();
+    }
+  } finally {
+    restore();
+  }
+});
+
+// Engine-native SETTLED agent-history panel (issue #745/#747): the browser twin renders the run list
+// from /agent-instances and a selected run's turns from /agent-instances/{key}/history, keyed by the
+// agent-instance key — never a relay stream id. mount.js has no byte-drift guard, so this behaviour
+// test is the browser twin's coverage.
+test("agent-history panel renders the engine run list and a selected run's turns", async () => {
+  const instances = {
+    count: 1,
+    instances: [
+      {
+        agentInstanceKey: "ai-42",
+        status: "COMPLETED",
+        processInstanceKey: "pi-1",
+        elementId: "implement-task",
+        completionDate: "2024-01-01T00:00:00Z",
+        metrics: { inputTokens: 1500, outputTokens: 340, modelCalls: 3, toolCalls: 2 },
+      },
+    ],
+  };
+  const history = {
+    agentInstanceKey: "ai-42",
+    count: 1,
+    instance: instances.instances[0],
+    records: [
+      {
+        historyItemKey: "h-0",
+        agentInstanceKey: "ai-42",
+        loopIteration: 0,
+        role: "ASSISTANT",
+        commitStatus: "COMMITTED",
+        content: [{ contentType: "TEXT", text: "did the thing" }],
+        toolCalls: [{ toolCallId: "t-1", toolName: "grep", elementId: "tool", arguments: {} }],
+        metrics: { inputTokens: 12, outputTokens: 4, reasoningTokenCount: 0, cacheCreationTokenCount: 0, cacheReadTokenCount: 0, durationMs: 900 },
+      },
+    ],
+  };
+  const requested: string[] = [];
+  const restore = installEnv((url) => {
+    const ok = (body: unknown) => Promise.resolve({ ok: true, status: 200, json: async () => body });
+    if (url.includes("/supply")) return ok(SUPPLY);
+    if (/\/agent-instances\/[^/]+\/history/.test(url)) {
+      requested.push(url);
+      return ok(history);
+    }
+    if (url.includes("/agent-instances")) return ok(instances);
+    if (url.includes("/transcripts")) return ok({ sessions: [] });
+    return Promise.resolve({ ok: false, status: 404, json: async () => ({}) });
+  });
+  try {
+    const { mountCockpit } = await import("../../../pages/cockpit/mount.js");
+    const handle = mountCockpit(document.getElementById("root"), OPTS);
+    try {
+      await handle.refresh();
+      // refresh() kicks the agent-history list fetch fire-and-forget; let it settle.
+      await new Promise((r) => setTimeout(r, 0));
+      const row = document.querySelector('.cockpit-agent-session[data-agent-instance-key="ai-42"]');
+      assert(row != null, "the engine agent run is listed");
+
+      await handle.viewAgentHistory("ai-42");
+      assert(requested.some((u) => u.includes("/agent-instances/ai-42/history")), `history fetched by key (saw: ${requested.join(", ")})`);
+      const transcript = document.querySelector('.cockpit-agent-transcript[data-agent-instance-key="ai-42"]');
+      assert(transcript != null, "the selected run's history rendered");
+      assert((transcript?.textContent ?? "").includes("did the thing"), "the turn text rendered");
+      assert((transcript?.textContent ?? "").includes("grep"), "the tool call rendered");
+    } finally {
+      handle.dispose();
+    }
+  } finally {
+    restore();
+  }
+});
+
+// #745 — the browser twin must treat an empty-string tool-call elementId as ABSENT (matching the
+// server SSOT `present()` in app/agentic/agent-history.ts, which drops empty elementIds), rendering
+// just the tool name — never `toolName ()`.
+test("agent-history tool call with an empty-string elementId renders no empty () suffix", async () => {
+  const instances = {
+    count: 1,
+    instances: [{ agentInstanceKey: "ai-77", status: "COMPLETED", processInstanceKey: "pi-1", elementId: "impl" }],
+  };
+  const history = {
+    agentInstanceKey: "ai-77",
+    count: 1,
+    instance: instances.instances[0],
+    records: [
+      {
+        historyItemKey: "h-0",
+        agentInstanceKey: "ai-77",
+        loopIteration: 0,
+        role: "ASSISTANT",
+        commitStatus: "COMMITTED",
+        content: [{ contentType: "TEXT", text: "did the thing" }],
+        toolCalls: [
+          { toolCallId: "t-1", toolName: "grep", elementId: "", arguments: {} },
+          { toolCallId: "t-2", toolName: "view", elementId: "tool", arguments: {} },
+        ],
+      },
+    ],
+  };
+  const restore = installEnv((url) => {
+    const ok = (body: unknown) => Promise.resolve({ ok: true, status: 200, json: async () => body });
+    if (url.includes("/supply")) return ok(SUPPLY);
+    if (/\/agent-instances\/[^/]+\/history/.test(url)) return ok(history);
+    if (url.includes("/agent-instances")) return ok(instances);
+    if (url.includes("/transcripts")) return ok({ sessions: [] });
+    return Promise.resolve({ ok: false, status: 404, json: async () => ({}) });
+  });
+  try {
+    const { mountCockpit } = await import("../../../pages/cockpit/mount.js");
+    const handle = mountCockpit(document.getElementById("root"), OPTS);
+    try {
+      await handle.refresh();
+      await new Promise((r) => setTimeout(r, 0));
+      await handle.viewAgentHistory("ai-77");
+      const tools = [...document.querySelectorAll(".cockpit-agent-turn-tool")].map((n) => n.textContent ?? "");
+      assert(tools.includes("grep"), `empty elementId renders bare tool name (saw: ${tools.join(", ")})`);
+      assert(!tools.some((t) => t.includes("()")), `no empty () suffix rendered (saw: ${tools.join(", ")})`);
+      assert(tools.includes("view (tool)"), `a present elementId still renders its suffix (saw: ${tools.join(", ")})`);
     } finally {
       handle.dispose();
     }
