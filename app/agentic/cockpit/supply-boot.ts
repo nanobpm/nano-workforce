@@ -335,11 +335,14 @@ class SupplyCockpit implements SupplyCockpitHandle {
     this.#terminalNote.className = "cockpit-terminal-note";
     this.#terminalNote.setAttribute("data-terminal-note", "none");
     this.#terminalPanel.appendChild(this.#terminalNote);
+    // Order MUST match the browser twin (pages/cockpit/mount.js) and its tests: the terminal sits
+    // directly beneath the supply list, since cockpit.css keys layout off DOM order (no grid areas).
+    // supply list → terminal → past sessions → agent list → agent detail.
     shell.appendChild(this.#listRegion);
+    shell.appendChild(this.#terminalPanel);
     if (this.#pastRegion !== undefined) shell.appendChild(this.#pastRegion);
     if (this.#agentRegion !== undefined) shell.appendChild(this.#agentRegion);
     if (this.#agentDetailRegion !== undefined) shell.appendChild(this.#agentDetailRegion);
-    shell.appendChild(this.#terminalPanel);
     env.host.appendChild(shell);
   }
 

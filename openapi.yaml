@@ -4272,8 +4272,8 @@ paths:
           schema:
             type: string
             enum: [USER, ASSISTANT, TOOL_RESULT, CONFIGURATION, UNSPECIFIED]
-          description: Only turns with this conversation role (only the engine-side subset
-            USER / ASSISTANT / TOOL_RESULT is forwarded as a filter).
+          description: Only turns with this conversation role. Any value from the enum is
+            forwarded verbatim to the engine as the filter.
         - name: loopIteration
           in: query
           required: false

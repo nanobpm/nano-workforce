@@ -113,6 +113,19 @@ test("clicking a run button drives viewAgentHistory", async () => {
   assert.equal(cockpit.currentAgentInstanceKey, "ai-old");
 });
 
+test("the embedded shell renders the terminal directly beneath the supply list, matching mount.js", async () => {
+  const r = rig();
+  bootSupplyCockpit(r.env);
+  const shell = r.host.byClass("cockpit-shell")[0];
+  const order = (shell?.children ?? []).map((c) => c.className);
+  assert.deepEqual(order, [
+    "cockpit-supply-region",
+    "cockpit-terminal",
+    "cockpit-agent-region",
+    "cockpit-agent-detail-region",
+  ]);
+});
+
 test("no agent-history panel is rendered when the engine read endpoints are unwired", async () => {
   const r = rig(false);
   const cockpit = bootSupplyCockpit(r.env);
