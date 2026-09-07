@@ -38,8 +38,13 @@
 // `reconcileVanishedInstances` drives every such row — active, dispatched, its key absent from
 // `_urban_instance_state`, and PAST A GRACE WINDOW (so a still-starting run not yet projected is
 // spared) — to the same `orphaned` terminal, with a DISTINCT provenance reason so an operator can
-// tell a vanished-instance orphan apart from an epoch-regression one. `runEngineReconcile` runs BOTH
-// passes, so startup and the operator command converge both failure modes in one call.
+// tell a vanished-instance orphan apart from an epoch-regression one. Because `_urban_instance_state`
+// is an app-side projection that can lag / be pruned / be rebuilt while the instance is still ACTIVE
+// on the engine, "no projection row" is NOT proof the instance vanished — so before folding, the pass
+// CROSS-CHECKS ENGINE TRUTH (`/v2/process-instances/search`, issue #736): an instance the engine still
+// reports ACTIVE (or whose truth cannot be established) is SPARED, closing the false-orphan class on
+// deployments whose engine omits the incarnation epoch. `runEngineReconcile` runs BOTH passes, so
+// startup and the operator command converge both failure modes in one call.
 //
 // The provenance is app-owned (not urban's `_urban_write_provenance`, which is a domain-free
 // insert-join sidecar written only inside a job): reconcile runs at boot / over HTTP, outside any
@@ -152,6 +157,15 @@ export interface VanishedReconcileOptions extends ReconcileOptions {
    *  still-starting run (not yet projected into `_urban_instance_state`) is not orphaned prematurely.
    *  Defaults to {@link DEFAULT_VANISHED_GRACE_MS}. */
   graceMs?: number;
+  /** Cross-check against ENGINE TRUTH before orphaning a candidate row (issue #736). Given the row's
+   *  `keyField` (process instance key), it reports whether the engine still considers the instance
+   *  ACTIVE. An ACTIVE instance is NEVER orphaned — the app-side `_urban_instance_state` projection is
+   *  merely lagging — and an instance whose truth could not be established (`null`) is spared too (we
+   *  never orphan what we could not confirm dead). Only a row the engine positively confirms is gone
+   *  (`false`) is folded. When omitted the pass falls back to projection-only behaviour (no live
+   *  cross-check); production always wires one via {@link runEngineReconcile}. See
+   *  {@link makeEngineActiveProbe}. */
+  engineActive?: EngineActiveProbe;
 }
 
 /** Read the incarnation epoch out of a `/v2/topology` body — `nano.incarnation` (or its `epoch`
@@ -187,6 +201,63 @@ export async function probeEngineEpoch(
   } catch {
     return { reachable: false, epoch: null };
   }
+}
+
+/** A cross-check against ENGINE TRUTH for one process instance key, used to spare a live instance from
+ *  the vanished-instance pass. Returns:
+ *   • `true`  — the engine reports the instance ACTIVE. It is live; the app-side `_urban_instance_state`
+ *               projection is merely lagging/pruned/rebuilding, so the row MUST NOT be orphaned.
+ *   • `false` — the engine answered and the instance is NOT active (absent from the read model, or
+ *               COMPLETED/CANCELED/TERMINATED). It is genuinely gone in engine truth → orphan-eligible.
+ *   • `null`  — engine truth could NOT be established (unreachable, non-2xx, malformed). We never orphan
+ *               a row we could not confirm dead, so the caller spares it (a transient outage must never
+ *               fold live work). */
+export type EngineActiveProbe = (processKey: string) => Promise<boolean | null>;
+
+/** One item of a `/v2/process-instances/search` result, narrowed to what the engine-truth cross-check
+ *  reads: the instance key (to match the row we probed for) and its lifecycle `state`. Keys are
+ *  stringified defensively (the wire may send a JSON number or string); `state` is the engine's
+ *  lifecycle enum (`ACTIVE`/`COMPLETED`/`CANCELED`/…). */
+interface InstanceSearchStateItem {
+  processInstanceKey?: string | number;
+  state?: string;
+}
+
+/** Build an {@link EngineActiveProbe} that queries the engine's own `/v2/process-instances/search` for
+ *  a single process instance key and reports whether the engine still considers it ACTIVE. This is the
+ *  authoritative engine-truth check the vanished-instance pass consults before orphaning: an ACTIVE
+ *  engine instance must NEVER be orphaned regardless of the app-side projection (issue #736), so a
+ *  merlin-style deployment whose `_urban_instance_state` lags no longer false-orphans live work.
+ *  Never throws — every transport/parse failure degrades to `null` ("unknown"), which the caller
+ *  treats as "spare" (we never orphan what we could not confirm dead). */
+export function makeEngineActiveProbe(
+  engineRest: { restAddress: string; token?: string },
+  opts: { fetchImpl?: typeof fetch; timeoutMs?: number } = {},
+): EngineActiveProbe {
+  const fetchImpl = opts.fetchImpl ?? fetch;
+  const base = engineRest.restAddress.replace(/\/+$/, "");
+  const headers: Record<string, string> = { accept: "application/json", "content-type": "application/json" };
+  if (engineRest.token) headers.authorization = `Bearer ${engineRest.token}`;
+  return async (processKey: string): Promise<boolean | null> => {
+    try {
+      const res = await fetchImpl(`${base}/process-instances/search`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ filter: { processInstanceKey: processKey }, page: { from: 0, limit: 10 } }),
+        signal: AbortSignal.timeout(opts.timeoutMs ?? 3000),
+      });
+      if (!res.ok) return null;
+      // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+      const body = (await res.json()) as { items?: InstanceSearchStateItem[] };
+      const items = body.items ?? [];
+      const match = items.find((it) => it.processInstanceKey != null && String(it.processInstanceKey) === processKey);
+      // Engine answered but the instance is absent from the read model → genuinely gone (not active).
+      if (!match) return false;
+      return String(match.state ?? "").toUpperCase() === "ACTIVE";
+    } catch {
+      return null;
+    }
+  };
 }
 
 /** Double-quote a SQL identifier (table/column) so a manifest-declared name is safe to interpolate. */
@@ -345,6 +416,7 @@ async function orphanVanishedRows(
   at: string,
   nowMs: number,
   graceMs: number,
+  engineActive?: EngineActiveProbe,
 ): Promise<OrphanedRow[]> {
   const orphaned: OrphanedRow[] = [];
   for (const binding of engineBackedBindings()) {
@@ -367,6 +439,19 @@ async function orphanVanishedRows(
       `WHERE s.process_instance_key = ${q(shape.table)}.${q(shape.keyField)})`;
     for (const row of rows) {
       if (shape.hasUpdatedAt && withinGrace(row.__updated, nowMs, graceMs)) continue;
+      // ENGINE-TRUTH cross-check (issue #736): the `_urban_instance_state` projection is an app-side
+      // read model that can lag / be pruned / be rebuilt while the instance is still ACTIVE on the
+      // engine — "no projection row" is NOT "instance vanished". Before folding, confirm against engine
+      // truth: an ACTIVE instance (`true`) is spared, and an instance whose truth we could not
+      // establish (`null`, e.g. engine unreachable) is spared too — we never orphan a row we could not
+      // positively confirm is gone. Only a `false` (engine confirms absent/terminated) proceeds.
+      if (engineActive) {
+        const key = row.__key == null ? null : String(row.__key);
+        if (key != null) {
+          const active = await engineActive(key);
+          if (active !== false) continue;
+        }
+      }
       const o = await orphanRow(src, shape, row, RECONCILE_VANISHED_REASON, null, runId, at, stillVanishedGuard);
       if (o) orphaned.push(o);
     }
@@ -475,9 +560,13 @@ export async function reconcileEngineBackedWork(
  *     it), every dispatched row would look vanished, so the pass is a hard no-op.
  *   • GUARDED — the same status-re-assert as the epoch pass, plus a still-vanished re-check, so a
  *     concurrent terminal write or a reappearing instance wins the race.
- *   • This pass reads the app's OWN last-known projection, not a live probe, so it acts correctly on a
- *     genuinely-vanished instance regardless of transient engine reachability (a live instance keeps
- *     its persisted ACTIVE row across a restart, so it is never mistaken for vanished).
+ *   • ENGINE-TRUTH CROSS-CHECK (issue #736) — the `_urban_instance_state` projection is an app-side
+ *     read model that can lag / be pruned / be rebuilt for an instance that is still ACTIVE on the
+ *     engine, so "no projection row" is NOT "instance vanished". Before folding, the pass consults
+ *     `opts.engineActive` (production wires one from the live engine via {@link makeEngineActiveProbe};
+ *     {@link runEngineReconcile}): an instance the engine reports ACTIVE — or whose truth could not be
+ *     established (engine unreachable) — is SPARED. Only an instance the engine positively confirms is
+ *     gone is orphaned. Without a cross-check (omitted) the pass falls back to projection-only.
  */
 export async function reconcileVanishedInstances(
   data: DataLayer,
@@ -499,7 +588,7 @@ export async function reconcileVanishedInstances(
   }
 
   const orphaned = await src.tx(async (t) => {
-    const rows = await orphanVanishedRows(t, runId, at, nowMs, graceMs);
+    const rows = await orphanVanishedRows(t, runId, at, nowMs, graceMs, opts.engineActive);
     const reason: ReconcileReason = rows.length > 0 ? "instance-vanished" : "no-op";
     await recordRun(t, { runId, at, observedEpoch: null, recordedEpoch: null, reason, orphanedCount: rows.length });
     return rows;
@@ -561,6 +650,12 @@ export async function runEngineReconcile(
   const vanished = await reconcileVanishedInstances(data, {
     ...opts,
     runId: `${epoch.runId}-vanished`,
+    // Cross-check ENGINE TRUTH before orphaning any vanished-instance candidate (issue #736): an
+    // instance the engine still reports ACTIVE is spared even when its `_urban_instance_state`
+    // projection is absent (the merlin false-orphan: the projection lags, the instance is live). A
+    // caller-supplied `engineActive` wins (tests inject a deterministic one); otherwise build one from
+    // the same engine address/token the epoch probe used.
+    engineActive: opts.engineActive ?? makeEngineActiveProbe(engineRest, { fetchImpl: opts.fetchImpl }),
   });
 
   const orphaned = [...epoch.orphaned, ...vanished.orphaned];

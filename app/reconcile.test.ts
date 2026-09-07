@@ -393,28 +393,115 @@ test("idempotent: a second vanished pass is a no-op (the orphaned row left activ
   assertEquals((raw.prepare("SELECT COUNT(*) c FROM reconcile_provenance").get() as { c: number }).c, 1);
 });
 
+// --- Engine-truth cross-check before orphaning a "vanished" row (issue #736) -------------------
+// The `_urban_instance_state` projection is an app-side read model that can lag / be pruned / be
+// rebuilt while the instance is still ACTIVE on the engine. "No projection row" is therefore NOT
+// "instance vanished": on merlin (whose engine exposes no incarnation epoch, so the robust epoch
+// detector is disabled) this false-orphaned 3 concurrently-LIVE instances in one pass. The vanished
+// pass now cross-checks ENGINE TRUTH via `engineActive` before folding — an ACTIVE instance is spared.
+
+test("RED→GREEN #736: an engine-ACTIVE instance with no _urban_instance_state row (past grace) is NOT orphaned", async () => {
+  const { data, raw } = freshData();
+  ensureInstanceState(raw);
+  // The merlin repro: an inflight run past grace whose projection row is absent (lagging/pruned) but
+  // whose instance the engine still reports ACTIVE. RED (pre-fix): folded to `orphaned`. GREEN: spared.
+  seedFeatureRun(raw, "nanobpm/nano-workforce#336", "running", "11625");
+  // Engine truth says ACTIVE for this key.
+  const engineActive = async (key: string) => (key === "11625" ? true : false);
+
+  const res = await reconcileVanishedInstances(data, { now: AT, runId: "van-1", engineActive });
+
+  assertEquals(res.reason, "no-op");
+  assertEquals(res.orphanedCount, 0);
+  const row = raw.prepare("SELECT status FROM feature_runs WHERE feature_key='nanobpm/nano-workforce#336'").get() as {
+    status: string;
+  };
+  assertEquals(row.status, "running");
+  assertEquals((raw.prepare("SELECT COUNT(*) c FROM reconcile_provenance").get() as { c: number }).c, 0);
+});
+
+test("#736: an engine-CONFIRMED-gone instance (engineActive=false) IS still orphaned", async () => {
+  const { data, raw } = freshData();
+  ensureInstanceState(raw);
+  seedFeatureRun(raw, "Magikcraft/nano-bpm#1051", "escalated", "71506");
+  // Engine answered and the instance is absent/terminated — genuinely gone in engine truth.
+  const engineActive = async () => false;
+
+  const res = await reconcileVanishedInstances(data, { now: AT, runId: "van-1", engineActive });
+
+  assertEquals(res.reason, "instance-vanished");
+  assertEquals(res.orphanedCount, 1);
+  const row = raw.prepare("SELECT status FROM feature_runs WHERE feature_key='Magikcraft/nano-bpm#1051'").get() as {
+    status: string;
+  };
+  assertEquals(row.status, ORPHANED_STATUS);
+});
+
+test("#736: an instance whose engine truth is UNKNOWN (engineActive=null) is spared — never orphan unconfirmed", async () => {
+  const { data, raw } = freshData();
+  ensureInstanceState(raw);
+  seedFeatureRun(raw, "o/r#unknown", "escalated", "71506");
+  // The engine truth could not be established (unreachable / non-2xx / malformed) — we must NOT orphan.
+  const engineActive = async () => null;
+
+  const res = await reconcileVanishedInstances(data, { now: AT, runId: "van-1", engineActive });
+
+  assertEquals(res.reason, "no-op");
+  assertEquals(res.orphanedCount, 0);
+  const row = raw.prepare("SELECT status FROM feature_runs WHERE feature_key='o/r#unknown'").get() as {
+    status: string;
+  };
+  assertEquals(row.status, "escalated");
+});
+
 // --- Merged seam: runEngineReconcile (both passes, one result) --------------------------------
 // The operator/startup seam merges the epoch-regression and vanished-instance passes into ONE
 // result. This guards the merged behavior the two per-pass suites above don't reach: run-id
-// correlation (the vanished pass's provenance must be locatable from the returned `runId`) and
-// `reason` selection when the epoch pass is `engine-unreachable` yet vanished instances are orphaned.
+// correlation (the vanished pass's provenance must be locatable from the returned `runId`), the
+// engine-truth cross-check the seam wires from the live engine (#736), and `reason` selection.
 
-test("runEngineReconcile: engine-unreachable epoch pass still folds vanished instances, with a correlatable run id", async () => {
+/** A `/v2` fetch stub: `/topology` answers `topologyBody` (200), and `/process-instances/search`
+ *  answers with `searchItems` (200) — the engine-truth cross-check the vanished pass runs (#736). */
+function engineFetch(
+  topologyBody: unknown,
+  searchItems: { processInstanceKey?: string | number; state?: string }[],
+): typeof fetch {
+  return (async (url: string, init?: { method?: string }) => {
+    const u = String(url);
+    if (u.endsWith("/topology")) return new Response(JSON.stringify(topologyBody), { status: 200 });
+    if (u.endsWith("/process-instances/search") && init?.method === "POST") {
+      return new Response(JSON.stringify({ items: searchItems }), { status: 200 });
+    }
+    return new Response("not found", { status: 404 });
+  }) as unknown as typeof fetch;
+}
+
+test("runEngineReconcile #736: a reachable engine reporting the instance ACTIVE spares it (no false-orphan)", async () => {
   const { data, raw } = freshData();
   ensureInstanceState(raw);
-  // A vanished orphan (escalated, past grace, instance absent from the read model).
+  // No projection row, past grace — but the engine (reachable, no epoch, like merlin) reports ACTIVE.
+  seedFeatureRun(raw, "nanobpm/nano-workforce#731", "escalated", "11644");
+  const fetchImpl = engineFetch({ nano: { engine: "merlin" } }, [{ processInstanceKey: "11644", state: "ACTIVE" }]);
+
+  const res = await runEngineReconcile(data, { restAddress: "http://engine.local/v2" }, { now: AT, fetchImpl });
+
+  assertEquals(res.orphanedCount, 0);
+  const row = raw.prepare("SELECT status FROM feature_runs WHERE feature_key='nanobpm/nano-workforce#731'").get() as {
+    status: string;
+  };
+  assertEquals(row.status, "escalated");
+  assertEquals((raw.prepare("SELECT COUNT(*) c FROM reconcile_provenance").get() as { c: number }).c, 0);
+});
+
+test("runEngineReconcile #736: a reachable engine that no longer knows the instance folds it, with a correlatable run id", async () => {
+  const { data, raw } = freshData();
+  ensureInstanceState(raw);
+  // A genuinely-vanished orphan (escalated, past grace); the engine answers but the instance is absent.
   seedFeatureRun(raw, "Magikcraft/nano-bpm#1051", "escalated", "71506");
+  const fetchImpl = engineFetch({ nano: { engine: "merlin" } }, []);
 
-  // The engine is unreachable — the epoch probe fails, so the epoch pass reports `engine-unreachable`
-  // and orphans nothing; the vanished pass must still act.
-  const fetchImpl = (() => Promise.reject(new Error("ECONNREFUSED"))) as unknown as typeof fetch;
-  const res = await runEngineReconcile(
-    data,
-    { restAddress: "http://engine.invalid" },
-    { now: AT, fetchImpl },
-  );
+  const res = await runEngineReconcile(data, { restAddress: "http://engine.local/v2" }, { now: AT, fetchImpl });
 
-  // The vanished pass acted even though the epoch pass could not reach the engine.
   assertEquals(res.reason, "instance-vanished");
   assertEquals(res.orphanedCount, 1);
   const orphan = raw
@@ -429,14 +516,30 @@ test("runEngineReconcile: engine-unreachable epoch pass still folds vanished ins
     .get() as { run_id: string };
   assertEquals(prov.run_id, `${res.runId}-vanished`);
 
-  // Both passes recorded their own reconcile_runs row under correlatable ids.
-  const epochRun = raw.prepare("SELECT reason FROM reconcile_runs WHERE run_id=?").get(res.runId) as
-    | { reason: string }
-    | undefined;
-  assertEquals(epochRun?.reason, "engine-unreachable");
   const vanishedRun = raw
     .prepare("SELECT reason, orphaned_count FROM reconcile_runs WHERE run_id=?")
     .get(`${res.runId}-vanished`) as { reason: string; orphaned_count: number } | undefined;
   assertEquals(vanishedRun?.reason, "instance-vanished");
   assertEquals(vanishedRun?.orphaned_count, 1);
+});
+
+test("runEngineReconcile #736: an UNREACHABLE engine spares vanished candidates (truth unconfirmed → never orphan)", async () => {
+  const { data, raw } = freshData();
+  ensureInstanceState(raw);
+  // A candidate that looks vanished (escalated, past grace, no projection row) — but with the engine
+  // unreachable we cannot confirm it is gone, so it MUST be spared (issue #736): the old projection-only
+  // behavior would have orphaned it, potentially false-orphaning a live instance mid-outage.
+  seedFeatureRun(raw, "Magikcraft/nano-bpm#1051", "escalated", "71506");
+
+  const fetchImpl = (() => Promise.reject(new Error("ECONNREFUSED"))) as unknown as typeof fetch;
+  const res = await runEngineReconcile(data, { restAddress: "http://engine.invalid" }, { now: AT, fetchImpl });
+
+  // The epoch pass could not reach the engine, and the vanished pass could not confirm death → no-op.
+  assertEquals(res.reason, "engine-unreachable");
+  assertEquals(res.orphanedCount, 0);
+  const row = raw.prepare("SELECT status FROM feature_runs WHERE feature_key='Magikcraft/nano-bpm#1051'").get() as {
+    status: string;
+  };
+  assertEquals(row.status, "escalated");
+  assertEquals((raw.prepare("SELECT COUNT(*) c FROM reconcile_provenance").get() as { c: number }).c, 0);
 });
