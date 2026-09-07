@@ -10,8 +10,12 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import type { SqliteDb } from "@nanobpm/agentic/transcript";
 import { assert, assertEquals } from "#test-assert";
-import { jobStream } from "./correlation.ts";
+import { composeStreamId } from "@nanobpm/agentic/emit";
 import { AGENTIC_CORRELATION_SCHEMA_SQL, AgenticCorrelationStore } from "./correlation-store.ts";
+
+/** The instance-scoped transcript stream id a job's terminal is stored under (issue #738). The
+ *  worker instance is fixed here — `byStream` only recovers the jobKey (the stream part) from it. */
+const st = (jobKey: string): string => composeStreamId("worker-A", jobKey);
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -85,7 +89,7 @@ test("record + get round-trips full attribution, and byStream decodes the jobKey
   const store = new AgenticCorrelationStore(memoryDb());
   store.record({
     jobKey: "job-1",
-    stream: jobStream("job-1"),
+    stream: st("job-1"),
     instance: "worker-A",
     identity: "leaf:token",
     host: "merlin.local",
@@ -105,7 +109,7 @@ test("record + get round-trips full attribution, and byStream decodes the jobKey
   assertEquals(got?.planKey, "owner/repo#142");
   assertEquals(got?.completedAt, "2026-08-23T00:05:00.000Z");
   // The same row is reachable from the stream id.
-  assertEquals(store.byStream(jobStream("job-1"))?.instance, "worker-A");
+  assertEquals(store.byStream(st("job-1"))?.instance, "worker-A");
 });
 
 test("byElementInstance keys per-occupancy, distinguishing a looping/retried activity's iterations", () => {
@@ -115,7 +119,7 @@ test("byElementInstance keys per-occupancy, distinguishing a looping/retried act
   // element-instance key each resolves to its own attribution (the whole point of #544).
   store.record({
     jobKey: "job-iter-1",
-    stream: jobStream("job-iter-1"),
+    stream: st("job-iter-1"),
     instance: "worker-A",
     processInstanceKey: "pi-9",
     elementId: "agent",
@@ -124,7 +128,7 @@ test("byElementInstance keys per-occupancy, distinguishing a looping/retried act
   });
   store.record({
     jobKey: "job-iter-2",
-    stream: jobStream("job-iter-2"),
+    stream: st("job-iter-2"),
     instance: "worker-A",
     processInstanceKey: "pi-9",
     elementId: "agent",
@@ -147,7 +151,7 @@ test("optional context columns are omitted (not null) when unknown", () => {
   const store = new AgenticCorrelationStore(memoryDb());
   store.record({
     jobKey: "job-2",
-    stream: jobStream("job-2"),
+    stream: st("job-2"),
     instance: "worker-B",
     completedAt: "2026-08-23T01:00:00.000Z",
   });
@@ -159,7 +163,7 @@ test("optional context columns are omitted (not null) when unknown", () => {
 
 test("record is an upsert: re-recording a jobKey is last-write-wins", () => {
   const store = new AgenticCorrelationStore(memoryDb());
-  const base = { jobKey: "job-3", stream: jobStream("job-3"), completedAt: "2026-08-23T02:00:00.000Z" };
+  const base = { jobKey: "job-3", stream: st("job-3"), completedAt: "2026-08-23T02:00:00.000Z" };
   store.record({ ...base, instance: "worker-C" });
   store.record({ ...base, instance: "worker-C", host: "second.local", completedAt: "2026-08-23T02:10:00.000Z" });
   const got = store.get("job-3");
@@ -169,7 +173,7 @@ test("record is an upsert: re-recording a jobKey is last-write-wins", () => {
 
 test("record preserves an existing element_instance_key when a later re-record omits it (monotonic)", () => {
   const store = new AgenticCorrelationStore(memoryDb());
-  const base = { jobKey: "job-4", stream: jobStream("job-4"), completedAt: "2026-08-23T02:00:00.000Z" };
+  const base = { jobKey: "job-4", stream: st("job-4"), completedAt: "2026-08-23T02:00:00.000Z" };
   // The durable backfill path (or a first record that carried the resolved key).
   store.record({ ...base, instance: "worker-D", elementInstanceKey: "ei-777" });
   // A later best-effort re-record that does NOT know the key must not wipe it back to NULL.
@@ -178,9 +182,9 @@ test("record preserves an existing element_instance_key when a later re-record o
   assertEquals(got?.host, "later.local");
   assertEquals(got?.elementInstanceKey, "ei-777");
   // setElementInstanceKey backfill then a bare re-record likewise survives.
-  store.record({ jobKey: "job-5", stream: jobStream("job-5"), completedAt: "2026-08-23T03:00:00.000Z", instance: "worker-E" });
+  store.record({ jobKey: "job-5", stream: st("job-5"), completedAt: "2026-08-23T03:00:00.000Z", instance: "worker-E" });
   store.setElementInstanceKey("job-5", "ei-888");
-  store.record({ jobKey: "job-5", stream: jobStream("job-5"), completedAt: "2026-08-23T03:05:00.000Z", instance: "worker-E" });
+  store.record({ jobKey: "job-5", stream: st("job-5"), completedAt: "2026-08-23T03:05:00.000Z", instance: "worker-E" });
   assertEquals(store.get("job-5")?.elementInstanceKey, "ei-888");
 });
 

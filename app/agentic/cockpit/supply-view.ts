@@ -53,7 +53,7 @@ export interface SupplyLeafReport {
 export interface SupplyCorrelationReport {
   /** The Camunda-8 job key. */
   readonly jobKey: string;
-  /** The relay stream the job's terminal is on (`job:<jobKey>`). */
+  /** The relay stream the job's terminal is on (`composeStreamId(instance, jobKey)`, issue #738). */
   readonly stream: string;
   /** The owning process instance key, if known. */
   readonly processInstanceKey?: string;
@@ -113,8 +113,8 @@ export interface SupplyWorkerView {
   readonly jobs: number;
   /**
    * Whether this worker has a LIVE terminal to drill into. True only while it holds a current job:
-   * a worker relays its terminal on the jobKey-scoped `job:<jobKey>` stream, and the supply endpoint
-   * repoints {@link stream} at it. An IDLE worker (no jobs) has its `stream` default back to the bare
+   * a worker relays its terminal on the instance-scoped `composeStreamId(instance, jobKey)` stream
+   * (issue #738), and the supply endpoint repoints {@link stream} at it. An IDLE worker (no jobs) has its `stream` default back to the bare
    * instance id — a stream NO producer ever writes to — so drilling it opens a permanently blank
    * "live" terminal. The renderer suppresses the drill affordance when this is false.
    */

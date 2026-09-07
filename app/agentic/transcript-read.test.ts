@@ -8,9 +8,16 @@ import { test } from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import type { SqliteDb, TranscriptRing, TranscriptStore, TranscriptStream } from "@nanobpm/agentic/transcript";
 import { assert, assertEquals } from "#test-assert";
+import { composeStreamId } from "@nanobpm/agentic/emit";
 import { AgenticCorrelationStore } from "./correlation-store.ts";
-import { CorrelationRegistry } from "./correlation.ts";
-import { correlationFieldsFor, listTranscripts, readTranscriptFrom } from "./transcript-read.ts";
+import { CorrelationRegistry, jobStream } from "./correlation.ts";
+import type { RelayTranscriptService } from "./families/relay.family.ts";
+import { correlationFieldsFor, listTranscripts, readSingleTranscript, readTranscriptFrom } from "./transcript-read.ts";
+
+/** The instance-scoped transcript stream id a job's terminal is stored under (issue #738); the jobKey
+ *  is the stream part `parseStreamId` recovers. The worker instance is fixed here where it is immaterial
+ *  to the assertion (the durable filters key off the recorded row's instance, not the stream's). */
+const s = (jobKey: string): string => composeStreamId("w", jobKey);
 
 /** A read-only TranscriptStore double: list() returns the seeded metas; read() has no retained chunks. */
 function fakeStore(metas: TranscriptStream[]): TranscriptStore {
@@ -90,7 +97,7 @@ test("durable fallback: a released (past) job is attributed from the durable sto
   const durable = new AgenticCorrelationStore(memoryStore());
   durable.record({
     jobKey: "k1",
-    stream: "job:k1",
+    stream: s("k1"),
     instance: "worker-A",
     identity: "gpu-box-7",
     host: "us-east-1a",
@@ -99,7 +106,7 @@ test("durable fallback: a released (past) job is attributed from the durable sto
     completedAt: mid,
   });
 
-  const fields = correlationFieldsFor("job:k1", undefined, durable);
+  const fields = correlationFieldsFor(s("k1"), undefined, durable);
   assertEquals(fields.jobKey, "k1");
   assertEquals(fields.instance, "worker-A");
   assertEquals(fields.identity, "gpu-box-7");
@@ -111,16 +118,16 @@ test("durable fallback: a released (past) job is attributed from the durable sto
 test("#544: the durable element-instance key surfaces on the read projection and its filter", () => {
   const durable = new AgenticCorrelationStore(memoryStore());
   // Two iterations of the SAME static element (`agent`) — distinct element instances, distinct jobKeys.
-  durable.record({ jobKey: "k1", stream: "job:k1", instance: "worker-A", elementId: "agent", elementInstanceKey: "ei-1", completedAt: early });
-  durable.record({ jobKey: "k2", stream: "job:k2", instance: "worker-A", elementId: "agent", elementInstanceKey: "ei-2", completedAt: late });
+  durable.record({ jobKey: "k1", stream: s("k1"), instance: "worker-A", elementId: "agent", elementInstanceKey: "ei-1", completedAt: early });
+  durable.record({ jobKey: "k2", stream: s("k2"), instance: "worker-A", elementId: "agent", elementInstanceKey: "ei-2", completedAt: late });
 
   // The key surfaces on the correlation fields (durable fallback, live registry empty).
-  assertEquals(correlationFieldsFor("job:k1", undefined, durable).elementInstanceKey, "ei-1");
+  assertEquals(correlationFieldsFor(s("k1"), undefined, durable).elementInstanceKey, "ei-1");
 
-  const store = fakeStore([meta("job:k1", early), meta("job:k2", late)]);
+  const store = fakeStore([meta(s("k1"), early), meta(s("k2"), late)]);
   // The elementInstanceKey filter resolves a session to ONE occupancy, where the elementId cannot.
   const out = listTranscripts(store, undefined, { elementInstanceKey: "ei-2" }, durable);
-  assertEquals(out.map((t) => t.stream), ["job:k2"], "only the ei-2 occupancy matches");
+  assertEquals(out.map((t) => t.stream), [s("k2")], "only the ei-2 occupancy matches");
   assertEquals(out[0].elementInstanceKey, "ei-2", "the projection carries the element-instance key");
 });
 
@@ -129,22 +136,22 @@ test("#544: the live correlation's element-instance key takes precedence over th
   registry.link("worker-A", "k1", { elementId: "agent" });
   registry.attachElementInstance("k1", "ei-live");
   const durable = new AgenticCorrelationStore(memoryStore());
-  durable.record({ jobKey: "k1", stream: "job:k1", instance: "worker-A", elementInstanceKey: "ei-old", completedAt: mid });
+  durable.record({ jobKey: "k1", stream: s("k1"), instance: "worker-A", elementInstanceKey: "ei-old", completedAt: mid });
 
-  assertEquals(correlationFieldsFor("job:k1", registry, durable).elementInstanceKey, "ei-live");
+  assertEquals(correlationFieldsFor(s("k1"), registry, durable).elementInstanceKey, "ei-live");
 });
 
 test("listTranscripts: the instance filter returns only sessions the durable store attributes to that worker", () => {
-  const store = fakeStore([meta("job:k1", early), meta("job:k2", mid), meta("job:k3", late)]);
+  const store = fakeStore([meta(s("k1"), early), meta(s("k2"), mid), meta(s("k3"), late)]);
   const durable = new AgenticCorrelationStore(memoryStore());
-  durable.record({ jobKey: "k1", stream: "job:k1", instance: "worker-A", completedAt: early });
-  durable.record({ jobKey: "k2", stream: "job:k2", instance: "worker-B", completedAt: mid });
-  durable.record({ jobKey: "k3", stream: "job:k3", instance: "worker-A", completedAt: late });
+  durable.record({ jobKey: "k1", stream: s("k1"), instance: "worker-A", completedAt: early });
+  durable.record({ jobKey: "k2", stream: s("k2"), instance: "worker-B", completedAt: mid });
+  durable.record({ jobKey: "k3", stream: s("k3"), instance: "worker-A", completedAt: late });
 
   const out = listTranscripts(store, undefined, { instance: "worker-A" }, durable);
   assertEquals(
     out.map((t) => t.stream),
-    ["job:k3", "job:k1"],
+    [s("k3"), s("k1")],
     "only worker-A's sessions, newest-first",
   );
   assert(out.every((t) => t.instance === "worker-A"), "each row is attributed to worker-A");
@@ -183,7 +190,7 @@ test("readTranscriptFrom: falls back to the live ring when the durable store has
     { offset: 0, chunk: "hello " },
     { offset: 1, chunk: "world" },
   ]);
-  const out = readTranscriptFrom("job:live1", 0, getStore(undefined), undefined, undefined, {
+  const out = readTranscriptFrom(s("live1"), 0, getStore(undefined), undefined, undefined, {
     ring,
     createdAt: mid,
   });
@@ -241,4 +248,88 @@ test("readTranscriptFrom: prefers the durable store once the ring has been flush
 test("readTranscriptFrom: returns undefined when neither the store nor a live ring has the stream", () => {
   const out = readTranscriptFrom("job:gone", 0, getStore(undefined), undefined, undefined, undefined);
   assertEquals(out, undefined);
+});
+
+// --- #738: the Stage-0 `job:<jobKey>` transcript URL still resolves after the data-plane moved to the
+//     instance-scoped `composeStreamId(instance, jobKey)` stream ---
+//
+// The Explorer Stage-0 `transcriptUrl` (app/agentic/transcript-url.ts, #543) addresses a job by the bare
+// `job:<jobKey>` alias — the worker cannot know its own instance at output-mapping time. The transcript is
+// now STORED under the instance-scoped id, so a Stage-0 read must map the alias back to that id (via the
+// live registry while linked, else the durable store) or it would 404 the URL it just emitted.
+
+/** A keyed TranscriptStore double: `get`/`since` resolve only for the exact stream id seeded (unlike
+ *  {@link getStore}, which returns its row for ANY id) — so a test can prove the alias was RESOLVED. */
+function keyedStore(rows: Record<string, { meta: TranscriptStream; entries: { offset: number; chunk: string }[] }>): TranscriptStore {
+  return {
+    get: (stream: string) => rows[stream]?.meta,
+    since: (stream: string, from: number) => ({
+      entries: (rows[stream]?.entries ?? []).filter((e) => e.offset >= from),
+      gap: false,
+      nextOffset: rows[stream]?.meta.nextOffset ?? 0,
+    }),
+    list: () => Object.values(rows).map((r) => r.meta),
+    read: () => [],
+  } as unknown as TranscriptStore;
+}
+
+/** A RelayTranscriptService double exposing only the surface {@link readSingleTranscript} reads. */
+function fakeService(
+  store: TranscriptStore | undefined,
+  correlationStore: AgenticCorrelationStore | undefined,
+  rings: Record<string, { ring: TranscriptRing; createdAt: string }> = {},
+): RelayTranscriptService {
+  return {
+    store,
+    correlationStore,
+    liveFallback: (stream: string) => rings[stream],
+  } as unknown as RelayTranscriptService;
+}
+
+test("readSingleTranscript: a Stage-0 job:<jobKey> alias resolves to the instance-scoped stored stream via the durable store (#738)", () => {
+  const durable = new AgenticCorrelationStore(memoryStore());
+  durable.record({ jobKey: "j1", stream: s("j1"), instance: "w", planKey: "acme/repo#1", completedAt: mid });
+  const store = keyedStore({
+    [s("j1")]: {
+      meta: { stream: s("j1"), lifecycle: "ephemeral", status: "completed", createdAt: early, completedAt: late, nextOffset: 1 },
+      entries: [{ offset: 0, chunk: "durable-bytes" }],
+    },
+  });
+  const res = readSingleTranscript(jobStream("j1"), 0, fakeService(store, durable), undefined);
+  assertEquals(res.status, 200, "the alias resolves to the instance-scoped row, not a 404");
+  assert(res.status === 200);
+  assertEquals(res.body.stream, s("j1"), "served under the instance-scoped id the bytes are stored on");
+  assertEquals(res.body.entries.map((e) => e.chunk).join(""), "durable-bytes");
+  assertEquals(res.body.jobKey, "j1");
+  assertEquals(res.body.planKey, "acme/repo#1", "durable attribution still surfaces through the alias read");
+});
+
+test("readSingleTranscript: a Stage-0 job:<jobKey> alias resolves via the LIVE registry while the job is still linked (#738)", () => {
+  const registry = new CorrelationRegistry();
+  registry.link("w", "j2", { planKey: "acme/repo#2" });
+  const store = keyedStore({
+    [s("j2")]: {
+      meta: { stream: s("j2"), lifecycle: "ephemeral", status: "open", createdAt: mid, nextOffset: 1 },
+      entries: [{ offset: 0, chunk: "live-row" }],
+    },
+  });
+  const res = readSingleTranscript(jobStream("j2"), 0, fakeService(store, undefined), registry);
+  assertEquals(res.status, 200);
+  assert(res.status === 200);
+  assertEquals(res.body.entries.map((e) => e.chunk).join(""), "live-row");
+  assertEquals(res.body.planKey, "acme/repo#2");
+});
+
+test("readSingleTranscript: an unresolvable job:<jobKey> alias still 404s (no correlation anywhere)", () => {
+  const res = readSingleTranscript(jobStream("ghost"), 0, fakeService(keyedStore({}), undefined), undefined);
+  assertEquals(res.status, 404);
+});
+
+test("correlationFieldsFor: decodes the jobKey from a bare job:<jobKey> Stage-0 alias too (#738)", () => {
+  const durable = new AgenticCorrelationStore(memoryStore());
+  durable.record({ jobKey: "j3", stream: s("j3"), instance: "worker-Z", planKey: "acme/repo#3", completedAt: mid });
+  const fields = correlationFieldsFor(jobStream("j3"), undefined, durable);
+  assertEquals(fields.jobKey, "j3", "the alias decodes its jobKey rather than yielding an empty projection");
+  assertEquals(fields.instance, "worker-Z");
+  assertEquals(fields.planKey, "acme/repo#3");
 });

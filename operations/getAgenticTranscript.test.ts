@@ -9,6 +9,7 @@ import type { Frame } from "@nanobpm/agentic/protocol";
 import type { SqliteDb } from "@nanobpm/agentic/transcript";
 import type { AppApi, DataLayer } from "@nanobpm/urban";
 import { assert, assertEquals } from "#test-assert";
+import { composeStreamId } from "@nanobpm/agentic/emit";
 import { createRelayFamily, currentRelayTranscriptService } from "../app/agentic/families/relay.family.ts";
 import type { AgenticContext } from "../app/agentic/registry.ts";
 import { noopLog } from "../test/log.ts";
@@ -82,17 +83,17 @@ test("returns the whole transcript from offset 0, then a resume slice from a lat
   const store = currentRelayTranscriptService()?.store;
   assert(store !== undefined);
   store.flush(
-    "job:6494",
+    composeStreamId("wk", "6494"),
     { since: () => ({ entries: [{ offset: 0, chunk: "aa" }, { offset: 1, chunk: "bb" }, { offset: 2, chunk: "cc" }] }), nextOffset: 3 },
     "ephemeral",
   );
   try {
-    const whole = (await handler(input("job:6494"), app)) as {
+    const whole = (await handler(input(composeStreamId("wk", "6494")), app)) as {
       status: number;
       body: { stream: string; from: number; gap: boolean; nextOffset: number; chunkCount: number; byteLength: number; entries: Array<{ offset: number; chunk: string }>; jobKey?: string };
     };
     assertEquals(whole.status, 200);
-    assertEquals(whole.body.stream, "job:6494");
+    assertEquals(whole.body.stream, composeStreamId("wk", "6494"));
     assertEquals(whole.body.jobKey, "6494");
     assertEquals(whole.body.from, 0);
     assertEquals(whole.body.gap, false);
@@ -101,7 +102,7 @@ test("returns the whole transcript from offset 0, then a resume slice from a lat
     assertEquals(whole.body.byteLength, 6);
     assertEquals(whole.body.entries.map((e) => e.offset), [0, 1, 2]);
 
-    const resume = (await handler(input("job:6494", { from: 2 }), app)) as {
+    const resume = (await handler(input(composeStreamId("wk", "6494"), { from: 2 }), app)) as {
       body: { from: number; chunkCount: number; entries: Array<{ offset: number; chunk: string }> };
     };
     assertEquals(resume.body.from, 2);

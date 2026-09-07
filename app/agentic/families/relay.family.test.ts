@@ -24,6 +24,7 @@ import {
   TRANSCRIPT_SCHEMA_SQL,
 } from "@nanobpm/agentic/transcript";
 import { assert, assertEquals, assertThrows } from "#test-assert";
+import { composeStreamId } from "@nanobpm/agentic/emit";
 import { noopLog } from "../../../test/log.ts";
 import { CorrelationRegistry, jobStream } from "../correlation.ts";
 import { AgenticCorrelationStore } from "../correlation-store.ts";
@@ -349,15 +350,15 @@ test("H6 correlation write-side: a produce on job:<k> links instance→[k]; stre
   const { service, hub } = mkCorrelatedService(registry, memoryDb(), correlation, byConnection);
   const p = connect("prod", registry);
 
-  // The first `produce` for a job-scoped stream links the producing worker instance → jobKey, from
+  // The first `produce` for an instance-scoped stream links the producing worker instance → jobKey, from
   // data already crossing the wire (jobKey decoded from the stream id; instance from the connection).
-  hub.handler?.(produce(jobStream("k1"), 1, "chunk"), p.conn);
+  hub.handler?.(produce(composeStreamId("worker-A", "k1"), 1, "chunk"), p.conn);
   assertEquals(correlation.jobKeysFor("worker-A"), ["k1"], "instance → [jobKey] is now linked");
-  assertEquals(correlation.resolve("k1")?.stream, jobStream("k1"), "context carries the job-scoped stream");
+  assertEquals(correlation.resolve("k1")?.stream, composeStreamId("worker-A", "k1"), "context carries the instance-scoped stream");
   assertEquals(correlation.count(), 1);
 
   // Job end (stream completion) releases the correlation, so the worker's supply row clears it.
-  service.completeStream(jobStream("k1"));
+  service.completeStream(composeStreamId("worker-A", "k1"));
   assertEquals(correlation.jobKeysFor("worker-A"), [], "completion releases the job");
   assertEquals(correlation.resolve("k1"), undefined);
   assertEquals(correlation.count(), 0);
@@ -373,10 +374,10 @@ test("H6 correlation write-side: an unpersisted stream completion releases its j
   // producer — otherwise #reconcile keeps re-completing the stream on every subsequent frame.
   const { service, hub } = mkCorrelatedService(registry, undefined, correlation, byConnection);
   const p = connect("prod", registry);
-  hub.handler?.(produce(jobStream("kU"), 1, "x"), p.conn);
+  hub.handler?.(produce(composeStreamId("worker-U", "kU"), 1, "x"), p.conn);
   assertEquals(correlation.jobKeysFor("worker-U"), ["kU"]);
 
-  service.completeStream(jobStream("kU"));
+  service.completeStream(composeStreamId("worker-U", "kU"));
   assertEquals(correlation.jobKeysFor("worker-U"), [], "unpersisted completion releases the job");
   assertEquals(correlation.count(), 0);
 
@@ -393,16 +394,16 @@ test("H6 correlation write-side: a late produce after completion does not resurr
   const byConnection = new Map([["prod", "worker-R"]]);
   const { service, hub } = mkCorrelatedService(registry, undefined, correlation, byConnection);
   const p = connect("prod", registry);
-  hub.handler?.(produce(jobStream("kR"), 1, "x"), p.conn);
+  hub.handler?.(produce(composeStreamId("worker-R", "kR"), 1, "x"), p.conn);
   assertEquals(correlation.jobKeysFor("worker-R"), ["kR"]);
 
   // Job end completes the stream and releases the correlation.
-  service.completeStream(jobStream("kR"));
+  service.completeStream(composeStreamId("worker-R", "kR"));
   assertEquals(correlation.count(), 0, "completion releases the job");
 
   // A late `produce` frame for the same, still-live producer must NOT re-link/re-own the completed
   // stream — otherwise it resurrects a jobKey after it was released.
-  hub.handler?.(produce(jobStream("kR"), 1, "late"), p.conn);
+  hub.handler?.(produce(composeStreamId("worker-R", "kR"), 1, "late"), p.conn);
   assertEquals(correlation.count(), 0, "a late produce does not resurrect a completed stream");
   assertEquals(correlation.jobKeysFor("worker-R"), [], "released jobKey stays released after a late produce");
   service.teardown();
@@ -420,20 +421,20 @@ test("H6 correlation write-side: a worker starting a NEW job over its live conne
   const p = connect("prod", registry);
 
   // Job 1: the worker relays k1's terminal → linked.
-  hub.handler?.(produce(jobStream("k1"), 1, "job-1 line"), p.conn);
+  hub.handler?.(produce(composeStreamId("worker-A", "k1"), 1, "job-1 line"), p.conn);
   assertEquals(correlation.jobKeysFor("worker-A"), ["k1"], "job 1 is the current job");
 
   // Job 2 begins on the SAME live connection (no disconnect). The worker relaying k2's terminal PROVES
   // k1 finished (one job at a time) → k1 is superseded: released AND flushed to a durable past session.
-  hub.handler?.(produce(jobStream("k2"), 1, "job-2 line"), p.conn);
+  hub.handler?.(produce(composeStreamId("worker-A", "k2"), 1, "job-2 line"), p.conn);
   assertEquals(correlation.jobKeysFor("worker-A"), ["k2"], "the supply row shows ONLY the current job — no accumulation");
   assertEquals(correlation.resolve("k1"), undefined, "the prior job's correlation is released");
   assertEquals(correlation.count(), 1);
 
   // The superseded job is not lost — its transcript is flushed and completed, i.e. a replayable past session.
-  const priorMeta = service.transcriptOf(jobStream("k1"));
+  const priorMeta = service.transcriptOf(composeStreamId("worker-A", "k1"));
   assertEquals(priorMeta?.status, "completed", "the superseded job becomes a completed past session");
-  assertEquals(service.reattach(jobStream("k1"), 0)?.entries.length, 1, "the past session replays its captured terminal");
+  assertEquals(service.reattach(composeStreamId("worker-A", "k1"), 0)?.entries.length, 1, "the past session replays its captured terminal");
   service.teardown();
 });
 
@@ -456,15 +457,15 @@ test("H6 durable attribution: completing/superseding a job persists the worker's
 
   // Job 1 runs, then the worker starts job 2 on the same live connection → job 1 is superseded and
   // released. Its attribution must be durably recorded BEFORE the live correlation forgets it.
-  hub.handler?.(produce(jobStream("k1"), 1, "job-1 line"), p.conn);
-  hub.handler?.(produce(jobStream("k2"), 1, "job-2 line"), p.conn);
+  hub.handler?.(produce(composeStreamId("worker-A", "k1"), 1, "job-1 line"), p.conn);
+  hub.handler?.(produce(composeStreamId("worker-A", "k2"), 1, "job-2 line"), p.conn);
 
   const durable = store.get("k1");
   assert(durable !== undefined, "the superseded job's attribution is persisted");
   assertEquals(durable?.instance, "worker-A");
   assertEquals(durable?.identity, "gpu-box-7");
   assertEquals(durable?.host, "us-east-1a");
-  assertEquals(durable?.stream, jobStream("k1"));
+  assertEquals(durable?.stream, composeStreamId("worker-A", "k1"));
   assertEquals(durable?.completedAt, "2024-01-02T03:04:05.000Z");
   // The still-active job is NOT yet recorded (attribution is written on completion, not on link).
   assertEquals(store.get("k2"), undefined, "the active job has no completion attribution yet");
@@ -489,13 +490,13 @@ test("#544 element-instance enrichment: link-time resolution keys the completed 
   const p = connect("prod", registry);
 
   // First produce links the job and fires the (async) element-instance resolution.
-  hub.handler?.(produce(jobStream("k1"), 1, "job-1 line"), p.conn);
+  hub.handler?.(produce(composeStreamId("worker-A", "k1"), 1, "job-1 line"), p.conn);
   await tick();
   // The live correlation context is enriched while the job runs.
   assertEquals(correlation.resolve("k1")?.elementInstanceKey, "ei-1", "the live context carries the element instance");
 
   // Superseding with a new job completes k1 → its attribution persists WITH the element-instance key.
-  hub.handler?.(produce(jobStream("k2"), 1, "job-2 line"), p.conn);
+  hub.handler?.(produce(composeStreamId("worker-A", "k2"), 1, "job-2 line"), p.conn);
   const durable = store.get("k1");
   assertEquals(durable?.elementInstanceKey, "ei-1", "the completed session is keyed on the element instance");
   service.teardown();
@@ -521,8 +522,8 @@ test("#544 element-instance enrichment: a resolution that lands AFTER completion
 
   // Link job k1 (fires the still-pending resolution), then supersede it → k1 completes and persists
   // its attribution BEFORE the element instance is known.
-  hub.handler?.(produce(jobStream("k1"), 1, "job-1 line"), p.conn);
-  hub.handler?.(produce(jobStream("k2"), 1, "job-2 line"), p.conn);
+  hub.handler?.(produce(composeStreamId("worker-A", "k1"), 1, "job-1 line"), p.conn);
+  hub.handler?.(produce(composeStreamId("worker-A", "k2"), 1, "job-2 line"), p.conn);
   assertEquals(store.get("k1")?.elementInstanceKey, undefined, "persisted before the element instance resolved");
   assertEquals(correlation.resolve("k1"), undefined, "k1's live correlation was already released");
 
@@ -544,9 +545,9 @@ test("#544 element-instance enrichment: an unresolved job (never parked) leaves 
     resolveElementInstance: () => Promise.resolve(undefined),
   });
   const p = connect("prod", registry);
-  hub.handler?.(produce(jobStream("k1"), 1, "job-1 line"), p.conn);
+  hub.handler?.(produce(composeStreamId("worker-A", "k1"), 1, "job-1 line"), p.conn);
   await tick();
-  hub.handler?.(produce(jobStream("k2"), 1, "job-2 line"), p.conn);
+  hub.handler?.(produce(composeStreamId("worker-A", "k2"), 1, "job-2 line"), p.conn);
   const durable = store.get("k1");
   assert(durable !== undefined, "the session is still attributed");
   assertEquals(durable?.elementInstanceKey, undefined, "no element-instance key when the job was not resolvable");
@@ -580,14 +581,14 @@ test("#661 primary release: a terminal lifecycle event clears an idle-but-connec
   const p = connect("prod", registry);
 
   // The worker relays its job's terminal → linked as active.
-  hub.handler?.(produce(jobStream("k1"), 1, "job-1 line"), p.conn);
+  hub.handler?.(produce(composeStreamId("worker-A", "k1"), 1, "job-1 line"), p.conn);
   assertEquals(correlation.jobKeysFor("worker-A"), ["k1"], "the job is active while it runs");
   assertEquals(correlation.count(), 1);
 
   // The job ends: the worker emits the terminal `lifecycle` event on the SAME live connection and then
   // goes idle — it does NOT disconnect and does NOT take a new job (no supersede). Before this fix that
   // finished job lingered forever as a phantom active job; now the terminal event releases it.
-  hub.handler?.(lifecycle(jobStream("k1"), 1, "completed"), p.conn);
+  hub.handler?.(lifecycle(composeStreamId("worker-A", "k1"), 1, "completed"), p.conn);
   assertEquals(correlation.jobKeysFor("worker-A"), [], "the finished job is released on the terminal event");
   assertEquals(correlation.count(), 0, "count() drops — no phantom active job");
 
@@ -602,9 +603,9 @@ test("#661 primary release: a terminal lifecycle event clears an idle-but-connec
   assert(row.live, "the worker is still connected — the connection persists across jobs");
 
   // The terminal event itself is captured in the flushed transcript (release runs AFTER the ring append).
-  const meta = service.transcriptOf(jobStream("k1"));
+  const meta = service.transcriptOf(composeStreamId("worker-A", "k1"));
   assertEquals(meta?.status, "completed", "the finished job becomes a completed past session");
-  assertEquals(service.reattach(jobStream("k1"), 0)?.entries.length, 2, "the terminal event is part of the transcript");
+  assertEquals(service.reattach(composeStreamId("worker-A", "k1"), 0)?.entries.length, 2, "the terminal event is part of the transcript");
   service.teardown();
 });
 
@@ -615,14 +616,14 @@ test("#661 primary release: an `exited` lifecycle also releases; a non-terminal 
   const { service, hub } = mkCorrelatedService(registry, memoryDb(), correlation, byConnection);
   const p = connect("prod", registry);
 
-  hub.handler?.(produce(jobStream("k1"), 1, "job-1 line"), p.conn);
+  hub.handler?.(produce(composeStreamId("worker-A", "k1"), 1, "job-1 line"), p.conn);
   // A `phase: "open"` lifecycle is NOT terminal — a genuinely active job must not be cleared.
-  hub.handler?.(lifecycle(jobStream("k1"), 1, "open"), p.conn);
+  hub.handler?.(lifecycle(composeStreamId("worker-A", "k1"), 1, "open"), p.conn);
   assertEquals(correlation.jobKeysFor("worker-A"), ["k1"], "an open lifecycle keeps the active job");
   assertEquals(correlation.count(), 1);
 
   // An `exited` lifecycle (a crash/kill the worker still managed to report) IS terminal → released.
-  hub.handler?.(lifecycle(jobStream("k1"), 1, "exited"), p.conn);
+  hub.handler?.(lifecycle(composeStreamId("worker-A", "k1"), 1, "exited"), p.conn);
   assertEquals(correlation.jobKeysFor("worker-A"), [], "an exited lifecycle releases the job");
   assertEquals(correlation.count(), 0);
   service.teardown();
@@ -639,25 +640,25 @@ test("#710 close release: a job-end `phase:close` marker flushes the durable tra
   // job WITHOUT a supersede (no next job) and WITHOUT a disconnect (the channel persists across jobs),
   // so the ONLY job-end signal is the harness's drained `phase:close` marker.
   const N = 4;
-  for (let i = 0; i < N; i++) hub.handler?.(produce(jobStream("k1"), 1, `job-1 line ${i}`), p.conn);
+  for (let i = 0; i < N; i++) hub.handler?.(produce(composeStreamId("worker-A", "k1"), 1, `job-1 line ${i}`), p.conn);
   assertEquals(correlation.jobKeysFor("worker-A"), ["k1"], "the job is active while it runs");
-  assertEquals(service.transcriptOf(jobStream("k1")), undefined, "not flushed while the job runs");
+  assertEquals(service.transcriptOf(composeStreamId("worker-A", "k1")), undefined, "not flushed while the job runs");
 
   // The job completes: the harness drains its outbound relay buffer and emits `phase:close` on the SAME
   // live connection, then goes idle. Before #710 this was NOT a flush trigger — the durable transcript
   // was snapshotted late (or not at all) by a later supersede/disconnect, truncating the tail. Now the
   // close event flushes it deterministically at job-completion time.
-  hub.handler?.(close(jobStream("k1"), 1), p.conn);
+  hub.handler?.(close(composeStreamId("worker-A", "k1"), 1), p.conn);
 
   assertEquals(correlation.jobKeysFor("worker-A"), [], "the finished job is released on the close marker");
   assertEquals(correlation.count(), 0, "no phantom active job after close");
 
-  const meta = service.transcriptOf(jobStream("k1"));
+  const meta = service.transcriptOf(composeStreamId("worker-A", "k1"));
   assertEquals(meta?.status, "completed", "the job becomes a completed past session at close time");
   // ALL N produced frames PLUS the close marker itself are in the durable transcript — no truncated
   // tail (the close event rides the ring append before the release, like the #661 terminal path).
   assertEquals(
-    service.reattach(jobStream("k1"), 0)?.entries.length,
+    service.reattach(composeStreamId("worker-A", "k1"), 0)?.entries.length,
     N + 1,
     "every relayed byte (and the close marker) is flushed — the tail is not truncated",
   );
@@ -708,12 +709,12 @@ test("#661 no-regression: an ordinary (non-lifecycle) chunk never clears a genui
   const { service, hub } = mkCorrelatedService(registry, memoryDb(), correlation, byConnection);
   const p = connect("prod", registry);
 
-  hub.handler?.(produce(jobStream("k1"), 1, "job-1 line"), p.conn);
+  hub.handler?.(produce(composeStreamId("worker-A", "k1"), 1, "job-1 line"), p.conn);
   // Ordinary terminal output (raw bytes, not a typed envelope) must NOT be read as a job-end signal.
-  for (let i = 0; i < 5; i++) hub.handler?.(produce(jobStream("k1"), 1, `output ${i}`), p.conn);
+  for (let i = 0; i < 5; i++) hub.handler?.(produce(composeStreamId("worker-A", "k1"), 1, `output ${i}`), p.conn);
   assertEquals(correlation.jobKeysFor("worker-A"), ["k1"], "a running job stays active across ordinary output");
   assertEquals(correlation.count(), 1);
-  assertEquals(service.transcriptOf(jobStream("k1")), undefined, "the live job is not completed");
+  assertEquals(service.transcriptOf(composeStreamId("worker-A", "k1")), undefined, "the live job is not completed");
   service.teardown();
 });
 
@@ -732,7 +733,7 @@ test("#661 defensive reconcile: an unclean exit (no lifecycle) whose engine job 
   });
   const p = connect("prod", registry);
 
-  hub.handler?.(produce(jobStream("k1"), 1, "job-1 line"), p.conn);
+  hub.handler?.(produce(composeStreamId("worker-A", "k1"), 1, "job-1 line"), p.conn);
   assertEquals(correlation.jobKeysFor("worker-A"), ["k1"], "the job links while it runs");
 
   // While the engine still parks the job, the reconcile pass leaves a genuinely active job alone.
@@ -760,7 +761,7 @@ test("#661 defensive reconcile: a transient engine read failure never falsely re
     resolveElementInstance,
   });
   const p = connect("prod", registry);
-  hub.handler?.(produce(jobStream("k1"), 1, "job-1 line"), p.conn);
+  hub.handler?.(produce(composeStreamId("worker-A", "k1"), 1, "job-1 line"), p.conn);
 
   await service.reconcileEngineCorrelations();
   assertEquals(correlation.jobKeysFor("worker-A"), ["k1"], "a transient engine failure leaves the job linked");
@@ -774,7 +775,7 @@ test("#661 defensive reconcile: a no-op when no engine resolver is wired", async
   const byConnection = new Map([["prod", "worker-A"]]);
   const { service, hub } = mkCorrelatedService(registry, memoryDb(), correlation, byConnection);
   const p = connect("prod", registry);
-  hub.handler?.(produce(jobStream("k1"), 1, "job-1 line"), p.conn);
+  hub.handler?.(produce(composeStreamId("worker-A", "k1"), 1, "job-1 line"), p.conn);
 
   // With no element-instance resolver (engine-less host), the safety net cannot query the engine —
   // it must be an inert no-op, leaving the correlation exactly as the primary path manages it.
@@ -914,12 +915,12 @@ test("H6 correlation write-side: a throwing correlation.link() never escapes the
   // The first `produce` links — but the injected correlation throws. It must be swallowed (advisory),
   // so the frame handler does not throw and the stream is left UNLINKED so a later produce retries.
   failLink(true);
-  hub.handler?.(produce(jobStream("kL"), 1, "x"), p.conn);
+  hub.handler?.(produce(composeStreamId("worker-L", "kL"), 1, "x"), p.conn);
   assertEquals(inner.count(), 0, "a throwing link is swallowed and records no correlation");
 
   // A later produce (link now succeeds) retries the link — proving the stream was left unlinked.
   failLink(false);
-  hub.handler?.(produce(jobStream("kL"), 1, "y"), p.conn);
+  hub.handler?.(produce(composeStreamId("worker-L", "kL"), 1, "y"), p.conn);
   assertEquals(inner.jobKeysFor("worker-L"), ["kL"], "the link retries and succeeds on a later frame");
   assertEquals(inner.count(), 1);
   service.teardown();
@@ -940,7 +941,7 @@ test("H6 correlation write-side: a throwing correlation.releaseJob() never escap
     instanceForConnection: (id) => byConnection.get(id),
   });
   const p = connect("prod", registry);
-  hub.handler?.(produce(jobStream("kX"), 1, "x"), p.conn);
+  hub.handler?.(produce(composeStreamId("worker-X", "kX"), 1, "x"), p.conn);
   assertEquals(inner.jobKeysFor("worker-X"), ["kX"]);
 
   // A producer disconnect drives #reconcile → #unlink, but releaseJob throws. The advisory contract
@@ -953,7 +954,7 @@ test("H6 correlation write-side: a throwing correlation.releaseJob() never escap
 
   // The stream still finalizes (terminal) so #reconcile does not thrash it every frame, and a later
   // frame's reconcile is a clean no-op rather than a repeated crash.
-  hub.handler?.(produce(jobStream("kX"), 2, "late"), p.conn);
+  hub.handler?.(produce(composeStreamId("worker-X", "kX"), 2, "late"), p.conn);
   assertEquals(
     inner.jobKeysFor("worker-X"),
     ["kX"],
@@ -969,7 +970,7 @@ test("H6 correlation write-side: a producer disconnect releases its job correlat
   // No DataLayer → the relay runs unpersisted; correlation release must still fire (store-independent).
   const { service, hub } = mkCorrelatedService(registry, undefined, correlation, byConnection);
   const p = connect("prod", registry);
-  hub.handler?.(produce(jobStream("k2"), 1, "x"), p.conn);
+  hub.handler?.(produce(composeStreamId("worker-B", "k2"), 1, "x"), p.conn);
   assertEquals(correlation.jobKeysFor("worker-B"), ["k2"]);
 
   // Producer drops; a subsequent frame from any live connection reconciles the dead producer.
@@ -1000,7 +1001,7 @@ test("#689 mid-job reconnect: a stale producer whose instance is still live keep
     isInstanceLive,
   });
   const p = connect("conn-old", registry);
-  hub.handler?.(produce(jobStream("5749"), 1, "booting agent"), p.conn);
+  hub.handler?.(produce(composeStreamId("worker-L", "5749"), 1, "booting agent"), p.conn);
   assertEquals(correlation.jobKeysFor("worker-L"), ["5749"], "the job is linked on first produce");
 
   // The producer's WS connection blips (client reconnects). Model the reconnect faithfully: the new
@@ -1014,20 +1015,20 @@ test("#689 mid-job reconnect: a stale producer whose instance is still live keep
   const other = connect("cons", registry);
   hub.handler?.(grant(0), other.conn);
   assertEquals(correlation.jobKeysFor("worker-L"), ["5749"], "a mid-job reconnect keeps the correlation");
-  assertEquals(service.transcriptOf(jobStream("5749")), undefined, "the still-active stream is NOT archived");
+  assertEquals(service.transcriptOf(composeStreamId("worker-L", "5749")), undefined, "the still-active stream is NOT archived");
 
   // The worker resumes producing on the SAME job over its already-open NEW connection → re-attributed,
   // still one job, transcript still live (not terminal).
-  hub.handler?.(produce(jobStream("5749"), 1, "resumed output"), p2.conn);
+  hub.handler?.(produce(composeStreamId("worker-L", "5749"), 1, "resumed output"), p2.conn);
   assertEquals(correlation.jobKeysFor("worker-L"), ["5749"], "the resumed producer stays linked to the same job");
-  assertEquals(service.liveFallback(jobStream("5749"))?.ring !== undefined, true, "the transcript is still live, not completed");
+  assertEquals(service.liveFallback(composeStreamId("worker-L", "5749"))?.ring !== undefined, true, "the transcript is still live, not completed");
 
   // Only once the worker truly EXITS (all its connections gone → isInstanceLive false) does a later
   // reconcile complete the stream and release the correlation.
   registry.remove("conn-new");
   hub.handler?.(grant(0), other.conn);
   assertEquals(correlation.jobKeysFor("worker-L"), [], "a true worker-exit completes + releases the job");
-  assertEquals(service.transcriptOf(jobStream("5749"))?.status, "completed", "the exited worker's stream is archived");
+  assertEquals(service.transcriptOf(composeStreamId("worker-L", "5749"))?.status, "completed", "the exited worker's stream is archived");
   service.teardown();
 });
 
@@ -1039,14 +1040,14 @@ test("#689 mid-job reconnect: with no isInstanceLive wired, a producer disconnec
   // preserving the prior always-complete-on-disconnect behaviour for callers that don't wire presence.
   const { service, hub } = mkCorrelatedService(registry, memoryDb(), correlation, byConnection);
   const p = connect("prod", registry);
-  hub.handler?.(produce(jobStream("kN"), 1, "x"), p.conn);
+  hub.handler?.(produce(composeStreamId("worker-N", "kN"), 1, "x"), p.conn);
   assertEquals(correlation.jobKeysFor("worker-N"), ["kN"]);
 
   registry.remove("prod");
   const other = connect("cons", registry);
   hub.handler?.(grant(0), other.conn);
   assertEquals(correlation.jobKeysFor("worker-N"), [], "disconnect completes + releases when liveness is unknown");
-  assertEquals(service.transcriptOf(jobStream("kN"))?.status, "completed");
+  assertEquals(service.transcriptOf(composeStreamId("worker-N", "kN"))?.status, "completed");
   service.teardown();
 });
 
@@ -1065,7 +1066,7 @@ test("#691 engine-owned disconnect: a mid-job reconnect whose engine job is stil
     resolveElementInstance,
   });
   const p = connect("conn-old", registry);
-  hub.handler?.(produce(jobStream("9001"), 1, "booting agent"), p.conn);
+  hub.handler?.(produce(composeStreamId("worker-E", "9001"), 1, "booting agent"), p.conn);
   assertEquals(correlation.jobKeysFor("worker-E"), ["9001"], "the job links on first produce");
 
   // The producer WS blips: the old connection drops (no new one yet — presence would report the
@@ -1075,20 +1076,20 @@ test("#691 engine-owned disconnect: a mid-job reconnect whose engine job is stil
   hub.handler?.(grant(0), other.conn);
   await tick(); // let the fire-and-forget engine reconcile settle
   assertEquals(correlation.jobKeysFor("worker-E"), ["9001"], "a still-parked job survives the disconnect");
-  assertEquals(service.transcriptOf(jobStream("9001")), undefined, "the still-active stream is NOT archived");
-  assertEquals(service.liveFallback(jobStream("9001"))?.ring !== undefined, true, "the transcript is still live");
+  assertEquals(service.transcriptOf(composeStreamId("worker-E", "9001")), undefined, "the still-active stream is NOT archived");
+  assertEquals(service.liveFallback(composeStreamId("worker-E", "9001"))?.ring !== undefined, true, "the transcript is still live");
 
   // The worker resumes producing on a NEW connection over the same job → re-attributed, still one job.
   byConnection.set("conn-new", "worker-E");
   const p2 = connect("conn-new", registry);
-  hub.handler?.(produce(jobStream("9001"), 1, "resumed output"), p2.conn);
+  hub.handler?.(produce(composeStreamId("worker-E", "9001"), 1, "resumed output"), p2.conn);
   assertEquals(correlation.jobKeysFor("worker-E"), ["9001"], "the resumed producer stays linked to the same job");
 
   // The job genuinely ends: the engine park vanishes. The periodic backstop pass completes + archives it.
   parked = false;
   await service.reconcileEngineCorrelations();
   assertEquals(correlation.jobKeysFor("worker-E"), [], "the ended job is released");
-  assertEquals(service.transcriptOf(jobStream("9001"))?.status, "completed", "and its transcript is archived");
+  assertEquals(service.transcriptOf(composeStreamId("worker-E", "9001"))?.status, "completed", "and its transcript is archived");
   service.teardown();
 });
 
@@ -1103,7 +1104,7 @@ test("#691 engine-owned disconnect: a true exit whose engine job is gone complet
     resolveElementInstance,
   });
   const p = connect("prod", registry);
-  hub.handler?.(produce(jobStream("kX"), 1, "x"), p.conn);
+  hub.handler?.(produce(composeStreamId("worker-X", "kX"), 1, "x"), p.conn);
   assertEquals(correlation.jobKeysFor("worker-X"), ["kX"]);
 
   registry.remove("prod");
@@ -1111,7 +1112,7 @@ test("#691 engine-owned disconnect: a true exit whose engine job is gone complet
   hub.handler?.(grant(0), other.conn);
   await tick(); // the fire-and-forget engine reconcile resolves "gone" → completes
   assertEquals(correlation.jobKeysFor("worker-X"), [], "a truly-ended job is released on disconnect");
-  assertEquals(service.transcriptOf(jobStream("kX"))?.status, "completed", "and its transcript is archived");
+  assertEquals(service.transcriptOf(composeStreamId("worker-X", "kX"))?.status, "completed", "and its transcript is archived");
   service.teardown();
 });
 
@@ -1132,7 +1133,7 @@ test("#691 engine-owned disconnect: an UNLINKED job stream (register/produce rac
     resolveElementInstance,
   });
   const p = connect("conn-old", registry);
-  hub.handler?.(produce(jobStream("7742"), 1, "booting agent"), p.conn);
+  hub.handler?.(produce(composeStreamId("worker-R", "7742"), 1, "booting agent"), p.conn);
   assertEquals(correlation.count(), 0, "the stream did NOT link — the instance was not resolvable at produce time");
 
   // The old producer connection blips before a later produce could retry the link. A frame drives
@@ -1142,23 +1143,23 @@ test("#691 engine-owned disconnect: an UNLINKED job stream (register/produce rac
   hub.handler?.(grant(0), other.conn);
   await tick(); // let the fire-and-forget engine reconcile settle
   assertEquals(
-    service.transcriptOf(jobStream("7742")),
+    service.transcriptOf(composeStreamId("worker-R", "7742")),
     undefined,
     "an unlinked-but-still-parked job is NOT archived on disconnect",
   );
-  assertEquals(service.liveFallback(jobStream("7742"))?.ring !== undefined, true, "its transcript is still live");
+  assertEquals(service.liveFallback(composeStreamId("worker-R", "7742"))?.ring !== undefined, true, "its transcript is still live");
 
   // The worker resumes on a NEW connection; the instance now resolves → the late link finally lands.
   byConnection.set("conn-new", "worker-R");
   const p2 = connect("conn-new", registry);
-  hub.handler?.(produce(jobStream("7742"), 1, "resumed output"), p2.conn);
+  hub.handler?.(produce(composeStreamId("worker-R", "7742"), 1, "resumed output"), p2.conn);
   assertEquals(correlation.jobKeysFor("worker-R"), ["7742"], "the late link succeeds on reconnect once the instance resolves");
 
   // The job genuinely ends: the engine park vanishes → the backstop pass completes + archives it.
   parked = false;
   await service.reconcileEngineCorrelations();
   assertEquals(correlation.jobKeysFor("worker-R"), [], "the ended job is released");
-  assertEquals(service.transcriptOf(jobStream("7742"))?.status, "completed", "and its transcript is archived");
+  assertEquals(service.transcriptOf(composeStreamId("worker-R", "7742"))?.status, "completed", "and its transcript is archived");
   service.teardown();
 });
 
@@ -1180,7 +1181,7 @@ test("#708 periodic backstop covers an UNLINKED job stream: an unlinked-but-park
     resolveElementInstance,
   });
   const p = connect("conn-old", registry);
-  hub.handler?.(produce(jobStream("7708"), 1, "booting agent"), p.conn);
+  hub.handler?.(produce(composeStreamId("wk", "7708"), 1, "booting agent"), p.conn);
   assertEquals(correlation.count(), 0, "the stream did NOT link — the instance was not resolvable at produce time");
 
   // Producer blips; the disconnect engine-reconcile keeps the still-parked stream live and clears
@@ -1190,7 +1191,7 @@ test("#708 periodic backstop covers an UNLINKED job stream: an unlinked-but-park
   hub.handler?.(grant(0), other.conn);
   await tick();
   assertEquals(
-    service.transcriptOf(jobStream("7708")),
+    service.transcriptOf(composeStreamId("wk", "7708")),
     undefined,
     "an unlinked-but-still-parked job is NOT archived on disconnect",
   );
@@ -1200,11 +1201,11 @@ test("#708 periodic backstop covers an UNLINKED job stream: an unlinked-but-park
   parked = false;
   await service.reconcileEngineCorrelations();
   assertEquals(
-    service.transcriptOf(jobStream("7708"))?.status,
+    service.transcriptOf(composeStreamId("wk", "7708"))?.status,
     "completed",
     "the periodic backstop completes an unlinked job stream once the engine park disappears",
   );
-  assertEquals(service.liveFallback(jobStream("7708")), undefined, "and its live ring is retired");
+  assertEquals(service.liveFallback(composeStreamId("wk", "7708")), undefined, "and its live ring is retired");
   service.teardown();
 });
 
@@ -1224,21 +1225,21 @@ test("#691 engine-owned disconnect: a transient engine read at disconnect never 
     resolveElementInstance,
   });
   const p = connect("prod", registry);
-  hub.handler?.(produce(jobStream("kT"), 1, "x"), p.conn);
+  hub.handler?.(produce(composeStreamId("worker-T", "kT"), 1, "x"), p.conn);
 
   registry.remove("prod");
   const other = connect("cons", registry);
   hub.handler?.(grant(0), other.conn);
   await tick(); // the engine read rejects → the stream must stay linked, not complete
   assertEquals(correlation.jobKeysFor("worker-T"), ["kT"], "a transient engine failure leaves the job linked");
-  assertEquals(service.transcriptOf(jobStream("kT")), undefined, "and its transcript is NOT archived");
+  assertEquals(service.transcriptOf(composeStreamId("worker-T", "kT")), undefined, "and its transcript is NOT archived");
 
   // The engine recovers and now reports the job gone: the periodic backstop pass completes it.
   failing = false;
   gone = true;
   await service.reconcileEngineCorrelations();
   assertEquals(correlation.jobKeysFor("worker-T"), [], "the backstop pass releases the ended job");
-  assertEquals(service.transcriptOf(jobStream("kT"))?.status, "completed", "and archives its transcript");
+  assertEquals(service.transcriptOf(composeStreamId("worker-T", "kT"))?.status, "completed", "and archives its transcript");
   service.teardown();
 });
 
@@ -1255,10 +1256,10 @@ test("H6 correlation write-side: non-job streams are never linked; a link retrie
 
   // A job stream whose producer's presence instance is not yet known does not link — but a later
   // frame (after the register lands) retries and links, closing the register/produce race.
-  hub.handler?.(produce(jobStream("k3"), 1, "a"), p.conn);
+  hub.handler?.(produce(composeStreamId("worker-C", "k3"), 1, "a"), p.conn);
   assertEquals(correlation.count(), 0, "no presence instance yet → not linked");
   byConnection.set("prod", "worker-C");
-  hub.handler?.(produce(jobStream("k3"), 1, "b"), p.conn);
+  hub.handler?.(produce(composeStreamId("worker-C", "k3"), 1, "b"), p.conn);
   assertEquals(correlation.jobKeysFor("worker-C"), ["k3"], "retried link succeeds once the instance resolves");
   service.teardown();
 });

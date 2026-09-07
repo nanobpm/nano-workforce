@@ -9,14 +9,17 @@
 // Correlation is BEST-EFFORT and advisory: the correlation registry is in-memory and only holds
 // currently-linked jobs, so a completed session's process-instance / plan context is present only
 // while the job is still live. The jobKey itself is always recoverable — it is encoded in the stream
-// id (`job:<jobKey>`), so a past session is never anonymous even once its correlation has been released.
+// id (`composeStreamId(instance, jobKey)`, decoded with `parseStreamId`), so a past session is never
+// anonymous even once its correlation has been released.
 //
 // Pure and side-effect-free apart from reading the store: no I/O beyond the injected store, so it is
 // unit-testable on the injected env (Node, no browser), and never touches the engine or a BPMN flow.
 
+import { parseStreamId } from "@nanobpm/agentic/emit";
 import type { TranscriptChunk, TranscriptRing, TranscriptStore, TranscriptStream } from "@nanobpm/agentic/transcript";
 import type { AgenticTranscript, AgenticTranscriptData, ErrorBody } from "../../nano-generated/api-io.d.ts";
-import { type CorrelationRegistry, jobKeyOfStream } from "./correlation.ts";
+import type { CorrelationRegistry } from "./correlation.ts";
+import { jobKeyOfJobStream } from "./correlation.ts";
 import type { AgenticCorrelationStore } from "./correlation-store.ts";
 import type { RelayTranscriptService } from "./families/relay.family.ts";
 import { utf8ByteLength } from "./transcript-events.ts";
@@ -46,8 +49,10 @@ interface CorrelationFields {
 }
 
 /**
- * Resolve a stream id to its correlation fields. The jobKey is always decoded from a `job:<jobKey>`
- * stream id. Engine context (process instance / plan) + worker attribution (instance / identity /
+ * Resolve a stream id to its correlation fields. The jobKey is decoded from the instance-scoped
+ * stream id (`composeStreamId(instance, jobKey)`) via {@link parseStreamId}, falling back to the bare
+ * `job:<jobKey>` Stage-0 alias ({@link jobKeyOfJobStream}) so a session addressed by either scheme stays
+ * attributable. Engine context (process instance / plan) + worker attribution (instance / identity /
  * host) come from the LIVE registry while the job is still linked, and fall back to the DURABLE store
  * (`AgenticCorrelationStore`) once the job has completed and its live correlation was released — so a
  * PAST session stays attributable to its worker after the worker exits or the process restarts.
@@ -58,7 +63,7 @@ export function correlationFieldsFor(
   correlation: CorrelationRegistry | undefined,
   durable?: AgenticCorrelationStore | undefined,
 ): CorrelationFields {
-  const jobKey = jobKeyOfStream(stream);
+  const jobKey = parseStreamId(stream)?.stream ?? jobKeyOfJobStream(stream);
   if (jobKey === undefined) return {};
   const fields: CorrelationFields = { jobKey };
   const context = correlation?.resolve(jobKey);
@@ -252,6 +257,30 @@ export type SingleTranscriptResult =
   | { status: 404; body: ErrorBody };
 
 /**
+ * Resolve a requested stream id to the instance-scoped id the transcript is actually STORED under.
+ *
+ * The data plane keys every job transcript by `composeStreamId(instance, jobKey)` (issue #738), but the
+ * Explorer Stage-0 `transcriptUrl` (`app/agentic/transcript-url.ts`, #543) still addresses a job by the
+ * bare `job:<jobKey>` alias — the completing worker cannot know its own instance at output-mapping time.
+ * So a Stage-0 read arrives keyed by `job:<jobKey>` and would MISS the store (and 404) unless it is first
+ * mapped back to the instance-scoped id. The jobKey → instance-scoped stream is recovered from the LIVE
+ * correlation registry while the job is still linked, else from the DURABLE store (which persists the
+ * instance-scoped `stream` keyed by jobKey at completion). An already-instance-scoped id, a non-job
+ * stream, or an unknown jobKey is returned unchanged (the caller then reads it as-is, 404-ing if absent).
+ */
+export function canonicalStreamFor(
+  stream: string,
+  correlation: CorrelationRegistry | undefined,
+  durable: AgenticCorrelationStore | undefined,
+): string {
+  // Already instance-scoped (or a non-alias id) — nothing to resolve.
+  if (parseStreamId(stream) !== undefined) return stream;
+  const jobKey = jobKeyOfJobStream(stream);
+  if (jobKey === undefined) return stream;
+  return correlation?.resolve(jobKey)?.stream ?? durable?.get(jobKey)?.stream ?? stream;
+}
+
+/**
  * The ONE canonical single-stream transcript read, shared by BOTH routes that serve it (#744):
  * `GET /agentic/transcripts?stream=<id>&from=<n>` (the proxy-safe QUERY form the cockpit clients
  * build — a gateway that peels one percent-encoding layer before routing splits an encoded slash
@@ -259,6 +288,10 @@ export type SingleTranscriptResult =
  * `GET /agentic/transcripts/{stream}` (the legacy path form the worker-emitted `transcriptUrl`
  * resolves — safe there because `job:<jobKey>` ids structurally never contain a slash). One
  * implementation so the two addressings can never answer differently for the same stream/from.
+ *
+ * A Stage-0 `job:<jobKey>` alias is first resolved to the instance-scoped id the bytes are stored under
+ * ({@link canonicalStreamFor}), so both the durable store read AND the live-ring fallback address the
+ * stream the producer actually wrote (issue #738) rather than 404-ing the alias.
  */
 export function readSingleTranscript(
   stream: string,
@@ -274,13 +307,14 @@ export function readSingleTranscript(
     // No relay/transcript service mounted at all - nothing to replay.
     return { status: 404, body: { error: "no transcript for stream" } };
   }
+  const readStream = canonicalStreamFor(stream, correlation, service.correlationStore);
   const data = readTranscriptFrom(
-    stream,
+    readStream,
     offset,
     service.store,
     correlation,
     service.correlationStore,
-    service.liveFallback(stream),
+    service.liveFallback(readStream),
   );
   if (data === undefined) {
     return { status: 404, body: { error: "no transcript for stream" } };

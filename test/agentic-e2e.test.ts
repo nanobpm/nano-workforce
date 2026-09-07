@@ -27,6 +27,7 @@ import type { SqliteDb } from "@nanobpm/agentic/presence";
 import { decodeFrame, encodeFrame, type Frame } from "@nanobpm/agentic/protocol";
 import type { AppApi, DataLayer } from "@nanobpm/urban";
 import { assert, assertEquals } from "#test-assert";
+import { composeStreamId } from "@nanobpm/agentic/emit";
 import { currentCorrelation } from "../app/agentic/correlation.ts";
 import { loadAgenticFamilies } from "../app/agentic/loader.ts";
 import { type AgenticContext, AgenticFamilyRegistry } from "../app/agentic/registry.ts";
@@ -146,7 +147,9 @@ function supplyInput() {
 test("E2E: the whole visibility plane wires up — presence, correlation, supply report, relay drill, and resume across a hub restart", async () => {
   const db = memSqlite();
   const JOB = "6494";
-  const STREAM = `job:${JOB}`;
+  // The producer writes a job's terminal on the instance-scoped stream (issue #738); the drill stream
+  // the supply advertises MUST be this exact id, or the cockpit reads a stream that never existed.
+  const STREAM = composeStreamId("wk-a", JOB);
 
   // Sanity: the fleet the seam discovers really includes presence, relay, and correlation.
   const fleet = await mountFleet(db);

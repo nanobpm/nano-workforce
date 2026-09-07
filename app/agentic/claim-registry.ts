@@ -25,7 +25,7 @@
 // type on the job protocol; ADVISORY — the registry is a read-only visibility source and NEVER
 // hard-locks or gates a BPMN sequence flow.
 
-import { jobStream } from "./correlation.ts";
+import { composeStreamId } from "@nanobpm/agentic/emit";
 
 /** One ownership record: a worker instance's claim over a job. */
 export interface Claim {
@@ -138,14 +138,16 @@ export class ClaimRegistry {
 
   /**
    * The jobKey-scoped relay stream a worker's terminal should drill into: its lowest-sorted current
-   * claim's stream (`job:<jobKey>`). A worker runs one job at a time in this fleet, but sorting keeps
-   * it stable if it ever holds several. Undefined when the worker holds no claim — the caller then
-   * falls back to the instance-keyed stream. This is the "relay demoted to drill-in, keyed by the
-   * CLAIM (not by `instanceForConnection`)" seam.
+   * claim's stream (`composeStreamId(instance, jobKey)`). A worker runs one job at a time in this
+   * fleet, but sorting keeps it stable if it ever holds several. Undefined when the worker holds no
+   * claim — the caller then falls back to the instance-keyed stream. This is the "relay demoted to
+   * drill-in, keyed by the CLAIM (not by `instanceForConnection`)" seam. The instance-scoped stream id
+   * is the one canonical `@nanobpm/agentic/emit` codec the producer writes under (issue #738), so the
+   * cockpit drills the SAME stream the transcript bytes actually land on.
    */
   primaryStreamFor(instance: string): string | undefined {
     const [first] = this.jobKeysFor(instance);
-    return first === undefined ? undefined : jobStream(first);
+    return first === undefined ? undefined : composeStreamId(instance, first);
   }
 
   /** Whether any instance currently owns `jobKey`. */

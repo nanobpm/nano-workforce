@@ -6,8 +6,9 @@
 // H6/#713 closes the loop with an EXPLICIT claim registry (`app/agentic/claim-registry.ts`): it is the
 // AUTHORITATIVE source the presence snapshot's `jobKeysFor` seam resolves against, so each worker's
 // current jobKeys light up from `claim` frames — not inferred from the relay terminal — and appear even
-// with ZERO transcript. Each worker's drill `stream` is repointed at its claimed jobKey-scoped relay
-// stream (`job:<jobKey>`), keyed by the CLAIM (explicit instance+jobKey), not by a connection. The
+// with ZERO transcript. Each worker's drill `stream` is repointed at its claimed instance-scoped relay
+// stream (`composeStreamId(instance, jobKey)`, issue #738), keyed by the CLAIM (explicit
+// instance+jobKey), not by a connection. The
 // relay correlation registry is DEMOTED to drill-in context only: it still supplies the `correlations`
 // — the process-instance / plan context for a job's terminal — so the cockpit lines a worker's terminal
 // up with "that process instance / this plan", but it is no longer the visibility source.
@@ -31,9 +32,10 @@ import { defineOperation } from "../nano-generated/operations.ts";
 const SECRET = envVar("NANO_PR_WEBHOOK_SECRET") ?? "";
 
 // Project a presence-registry row to the wire worker. The drill `stream` defaults to the worker
-// instance (H5) but is repointed at the worker's claimed jobKey-scoped relay stream (`job:<jobKey>`)
-// when the claim registry knows a current claim for it (#713) — keyed by the CLAIM, not by the
-// connection — so drilling in opens the LIVE job's terminal even before any transcript lands.
+// instance (H5) but is repointed at the worker's claimed instance-scoped relay stream
+// (`composeStreamId(instance, jobKey)`, issue #738) when the claim registry knows a current claim for
+// it (#713) — keyed by the CLAIM, not by the connection — so drilling in opens the LIVE job's terminal
+// (the exact stream the producer writes) even before any transcript lands.
 function toWorker(w: SupplyWorker, claims: ClaimRegistry | undefined): AgenticSupplyWorker {
   const out: AgenticSupplyWorker = {
     instance: w.instance,

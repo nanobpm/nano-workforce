@@ -9,6 +9,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
+import { composeStreamId } from "@nanobpm/agentic/emit";
 import {
   ClaimRegistry,
   currentClaimRegistry,
@@ -22,7 +23,7 @@ test("claim records both projections; jobKeysFor and primaryStreamFor resolve ag
   assert.deepEqual(reg.jobKeysFor("wk-a"), ["8420"]);
   assert.equal(reg.ownerOf("8420"), "wk-a");
   assert.equal(reg.isClaimed("8420"), true);
-  assert.equal(reg.primaryStreamFor("wk-a"), "job:8420");
+  assert.equal(reg.primaryStreamFor("wk-a"), composeStreamId("wk-a", "8420"));
   assert.equal(reg.count(), 1);
 });
 
@@ -62,7 +63,7 @@ test("a worker can hold several claims; jobKeysFor is sorted and primaryStreamFo
   reg.claim("wk-a", "8419");
   reg.claim("wk-a", "8421");
   assert.deepEqual(reg.jobKeysFor("wk-a"), ["8419", "8420", "8421"]);
-  assert.equal(reg.primaryStreamFor("wk-a"), "job:8419");
+  assert.equal(reg.primaryStreamFor("wk-a"), composeStreamId("wk-a", "8419"));
 });
 
 test("release clears one claim; a late / duplicate release is a no-op", () => {

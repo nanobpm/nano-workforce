@@ -12,9 +12,10 @@
 //     asks for, so a worker's current jobKeys light up in the supply feed / cockpit.
 //   - `resolve(jobKey)` gives the cockpit the process-instance / plan a terminal belongs to, so the
 //     drilled bytes line up with "that process instance / this plan".
-//   - the relay terminal for a job is the jobKey-scoped stream {@link jobStream} — a stable naming
-//     convention (`job:<jobKey>`) so the report can repoint a worker's drill stream at its live job
-//     without a second lookup table.
+//   - the relay terminal for a job is the instance-scoped stream `composeStreamId(instance, jobKey)`
+//     from `@nanobpm/agentic/emit` (issue #738) — the ONE codec the producer also writes with, so the
+//     report can repoint a worker's drill stream at the exact live stream the producer emits without a
+//     second, divergent naming scheme.
 //
 // Who populates it: the orchestrator that dispatches an agentic job to a worker (it holds the whole
 // job payload — jobKey, processInstanceKey, bpmnProcessId, and the plan/epic it belongs to) calls
@@ -26,20 +27,32 @@
 // is untouched — correlation is an app-side observation, not a new wire type; ADVISORY — it is a
 // read-only join for visibility and NEVER hard-locks or gates a BPMN sequence flow.
 
-/** The relay-stream prefix for a jobKey-scoped terminal stream. */
+import { composeStreamId } from "@nanobpm/agentic/emit";
+
+/**
+ * The relay-stream prefix for a jobKey-scoped terminal stream. Retained ONLY for the two surfaces
+ * that still address a job by a bare, slash-free stream id — the Explorer Stage-0 transcript URL
+ * (`app/agentic/transcript-url.ts`, #543) and the permission control-lane resolution default
+ * (`app/agentic/permission-bridge.ts`). The cockpit transcript DATA plane no longer uses it: a job
+ * transcript stream is the instance-scoped `composeStreamId(instance, jobKey)` (issue #738), so that
+ * producer and consumer share ONE codec (`@nanobpm/agentic/emit`) and never diverge again.
+ */
 export const JOB_STREAM_PREFIX = "job:";
 
-/** The stable relay stream id a worker relays a job's terminal on: `job:<jobKey>`. */
+/** The bare, slash-free jobKey-scoped stream id `job:<jobKey>` — see {@link JOB_STREAM_PREFIX}. */
 export function jobStream(jobKey: string): string {
   return `${JOB_STREAM_PREFIX}${jobKey}`;
 }
 
 /**
- * The jobKey encoded in a jobKey-scoped relay stream id, or undefined for any other stream.
- * A bare `job:` prefix with no suffix carries no jobKey, so it maps to undefined too — keeping
- * the "empty jobKey is invalid" invariant (`link()` ignores empty jobKeys) consistent for callers.
+ * The jobKey encoded in a bare `job:<jobKey>` alias — the Stage-0 transcript URL / permission-lane
+ * scheme retained by {@link JOB_STREAM_PREFIX}. Returns undefined for ANY other stream, including an
+ * instance-scoped `composeStreamId(instance, jobKey)` data-plane id (decode THAT with `parseStreamId`)
+ * and a bare `job:` with no jobKey — keeping the "empty jobKey is invalid" invariant (`link()` ignores
+ * empty jobKeys) consistent for callers. This is the READ-path alias decoder ONLY: the write/relay side
+ * addresses jobs solely by the instance-scoped id, so it must never route through this.
  */
-export function jobKeyOfStream(stream: string): string | undefined {
+export function jobKeyOfJobStream(stream: string): string | undefined {
   if (!stream.startsWith(JOB_STREAM_PREFIX)) return undefined;
   const jobKey = stream.slice(JOB_STREAM_PREFIX.length);
   return jobKey === "" ? undefined : jobKey;
@@ -64,7 +77,7 @@ export interface JobCorrelation {
   readonly elementInstanceKey?: string;
   /** The plan / epic key this job is part of (e.g. `owner/repo#142`), if known. */
   readonly planKey?: string;
-  /** The relay stream id the job's terminal is relayed on (`job:<jobKey>`). */
+  /** The relay stream id the job's terminal is relayed on (`composeStreamId(instance, jobKey)`). */
   readonly stream: string;
 }
 
@@ -120,7 +133,7 @@ export class CorrelationRegistry {
     this.#context.set(jobKey, {
       ...existing,
       jobKey,
-      stream: jobStream(jobKey),
+      stream: composeStreamId(instance, jobKey),
       ...stripUndefined(context),
     });
   }
@@ -183,7 +196,7 @@ export class CorrelationRegistry {
    */
   primaryStreamFor(instance: string): string | undefined {
     const [first] = this.jobKeysFor(instance);
-    return first === undefined ? undefined : jobStream(first);
+    return first === undefined ? undefined : composeStreamId(instance, first);
   }
 
   /** The number of currently-linked jobs. */

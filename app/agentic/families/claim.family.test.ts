@@ -12,6 +12,7 @@ import { AgenticHub } from "@nanobpm/agentic/channel";
 import type { Authenticator, ChannelConnection, ChannelTransport } from "@nanobpm/agentic/channel";
 import { encodeFrame, type Frame } from "@nanobpm/agentic/protocol";
 import { assert, assertEquals } from "#test-assert";
+import { composeStreamId } from "@nanobpm/agentic/emit";
 import { noopLog } from "../../../test/log.ts";
 import { currentClaimRegistry } from "../claim-registry.ts";
 import type { AgenticContext } from "../registry.ts";
@@ -91,7 +92,7 @@ test("a claim populates the worker's jobKeys with ZERO transcript (visibility no
     const reg = currentClaimRegistry();
     assert(reg, "registry mounted");
     assertEquals(reg.jobKeysFor("wk-a"), ["8420"]);
-    assertEquals(reg.primaryStreamFor("wk-a"), "job:8420", "the drill stream repoints at the claimed job");
+    assertEquals(reg.primaryStreamFor("wk-a"), composeStreamId("wk-a", "8420"), "the drill stream repoints at the claimed job");
   } finally {
     family.teardown?.();
   }

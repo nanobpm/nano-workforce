@@ -19,8 +19,9 @@
 // `element_instance_key`). A drift-guard test (`correlation-store.test.ts`) applies those migrations to
 // one DB and the canonical DDL to another and asserts the two schemas are identical, so they can never
 // diverge (the migrations, once merged, are immutable — the canonical DDL is what evolves).
+
+import { parseStreamId } from "@nanobpm/agentic/emit";
 import type { SqliteDb } from "@nanobpm/agentic/transcript";
-import { jobKeyOfStream } from "./correlation.ts";
 
 /**
  * The canonical DDL for the durable correlation table. The `078_*` + `086_*` migrations reproduce this
@@ -183,9 +184,9 @@ export class AgenticCorrelationStore {
     return rows.length > 0 ? fromRow(rows[0]) : undefined;
   }
 
-  /** The durable attribution for a `job:<jobKey>` stream id, or undefined for a non-job stream. */
+  /** The durable attribution for an instance-scoped job stream id, or undefined for a non-job stream. */
   byStream(stream: string): DurableCorrelation | undefined {
-    const jobKey = jobKeyOfStream(stream);
+    const jobKey = parseStreamId(stream)?.stream;
     return jobKey === undefined ? undefined : this.get(jobKey);
   }
 
