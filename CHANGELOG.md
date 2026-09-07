@@ -1,3 +1,9 @@
+## [0.183.1](https://github.com/nanobpm/nano-workforce/compare/v0.183.0...v0.183.1) (2026-09-07)
+
+### Bug Fixes
+
+* **reconcile:** cross-check engine truth before orphaning a vanished instance ([#753](https://github.com/nanobpm/nano-workforce/issues/753)) ([a363fdb](https://github.com/nanobpm/nano-workforce/commit/a363fdbec1fd14641f2c4a2ef2718034a11a1e92)), closes [#630](https://github.com/nanobpm/nano-workforce/issues/630) [#736](https://github.com/nanobpm/nano-workforce/issues/736) [#736](https://github.com/nanobpm/nano-workforce/issues/736) [#736](https://github.com/nanobpm/nano-workforce/issues/736)
+
 ## [0.183.0](https://github.com/nanobpm/nano-workforce/compare/v0.182.3...v0.183.0) (2026-09-07)
 
 ### Features
