@@ -397,10 +397,11 @@ same `prKey`, sharing the datasource and poller. It merges the PR, honouring
 merge-queue branches and cross-PR dependencies, and reuses the review stage's
 escalation machinery for anything it can't resolve autonomously.
 
-A per-submit `convergeOnly: true` on the `start/convergence-loop` request pins that PR
-to review-only regardless of the global default: `pr.finalize` reads the flag off the
-instance and rests the PR at `converged` without starting `merge-loop`. The flag only
-ever narrows (it never forces the merge stage on when `NANO_PR_AUTO_MERGE` is off).
+A per-submit `autoMerge` setting on the `start/convergence-loop` request is the preferred
+positive control: `true` drives the merge-loop after convergence and `false` pins that PR
+to review-only, regardless of the global default. The legacy negative `convergeOnly: true`
+alias remains accepted for callers that omit `autoMerge`; when both are present, `autoMerge`
+wins. Neither setting forces the merge stage on when `NANO_PR_AUTO_MERGE` is off.
 
 Flow:
 

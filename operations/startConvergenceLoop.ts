@@ -3,13 +3,15 @@
 // external webhook relay, a CI job, and Swagger all POST here. Parse the PR reference and
 // register/refresh the PR aggregate (idempotent on prKey) before starting the loop.
 //
-// The request body is FLAT (`{ pr | url, dependsOn?, maxRounds?, convergeOnly? }`), not wrapped in a
-// `variables` envelope: this is a purpose-built operation, not a generic engine "start process" call,
-// so it does not leak the engine's variable-map concept to callers. The body is a `oneOf` — EXACTLY
-// ONE of `pr` or `url` — so the runtime rejects an empty or ambiguous target at the edge (a 400 that
-// names the allowed shapes); this delegate no longer coalesces `pr ?? url`, it just narrows the
-// validated variant. It keeps the PR-parse guard because the reference FORMAT (owner/repo#123 or a
-// URL) is app logic the JSON schema can't express — an unparseable reference is a 400.
+// The request body is FLAT (`{ pr | url, dependsOn?, maxRounds?, autoMerge?, convergeOnly? }`), not
+// wrapped in a `variables` envelope: this is a purpose-built operation, not a generic engine "start
+// process" call, so it does not leak the engine's variable-map concept to callers. `autoMerge` is
+// the positive, preferred form for UI/API callers; `convergeOnly` remains a legacy negative alias.
+// When both are present, `autoMerge` wins. The body is a `oneOf` — EXACTLY ONE of `pr` or `url` — so
+// the runtime rejects an empty or ambiguous target at the edge (a 400 that names the allowed
+// shapes); this delegate no longer coalesces `pr ?? url`, it just narrows the validated variant. It
+// keeps the PR-parse guard because the reference FORMAT (owner/repo#123 or a URL) is app logic the
+// JSON schema can't express — an unparseable reference is a 400.
 
 import { clampRounds, MAX_ROUNDS, parsePr, submitPr } from "../app/service.ts";
 import { defineOperation } from "../nano-generated/operations.ts";
@@ -29,9 +31,10 @@ export default defineOperation("startConvergenceLoop", async ({ body }, app) => 
   }
   const dependsOn = body.dependsOn ?? [];
   const maxRounds = clampRounds(body.maxRounds, MAX_ROUNDS);
-  // Per-request review-only override: when true the PR stops at `converged` and is never
-  // handed to the merge-loop, regardless of the global NANO_PR_AUTO_MERGE default.
-  const convergeOnly = body.convergeOnly === true;
+  // Prefer the positive autoMerge form so an unchecked UI box is explicitly review-only. Legacy
+  // callers that omit autoMerge retain the existing convergeOnly/global-default behavior.
+  const hasAutoMerge = "autoMerge" in body;
+  const convergeOnly = hasAutoMerge ? body.autoMerge !== true : body.convergeOnly === true;
   const result = await submitPr(app.data, app.engine, parsed, dependsOn, maxRounds, convergeOnly);
   app.log.info("convergence loop started", {
     prKey: parsed.prKey,

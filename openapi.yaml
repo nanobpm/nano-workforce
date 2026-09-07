@@ -1513,11 +1513,12 @@ components:
           type: integer
           minimum: 1
           description: Values above 100 are accepted and clamped to 100 by the delegate.
+        autoMerge:
+          type: boolean
+          description: When true, drive the merge-loop after convergence. When false, stop at `converged` (review-only). This is the preferred positive per-request setting. When omitted, `convergeOnly` or the global `NANO_PR_AUTO_MERGE` default applies.
         convergeOnly:
           type: boolean
-          description: When true, run convergence only and stop at `converged` — the PR is never
-            handed to the merge-loop even if auto-merge is on globally (`NANO_PR_AUTO_MERGE`). A
-            per-request review-only override; defaults to false (the global auto-merge default applies).
+          description: Legacy negative alias. When true, run convergence only and stop at `converged` — the PR is never handed to the merge-loop even if auto-merge is on globally (`NANO_PR_AUTO_MERGE`). Ignored when `autoMerge` is present.
     ConvergenceStartByUrl:
       type: object
       additionalProperties: false
@@ -1535,11 +1536,12 @@ components:
           type: integer
           minimum: 1
           description: Values above 100 are accepted and clamped to 100 by the delegate.
+        autoMerge:
+          type: boolean
+          description: When true, drive the merge-loop after convergence. When false, stop at `converged` (review-only). This is the preferred positive per-request setting. When omitted, `convergeOnly` or the global `NANO_PR_AUTO_MERGE` default applies.
         convergeOnly:
           type: boolean
-          description: When true, run convergence only and stop at `converged` — the PR is never
-            handed to the merge-loop even if auto-merge is on globally (`NANO_PR_AUTO_MERGE`). A
-            per-request review-only override; defaults to false (the global auto-merge default applies).
+          description: Legacy negative alias. When true, run convergence only and stop at `converged` — the PR is never handed to the merge-loop even if auto-merge is on globally (`NANO_PR_AUTO_MERGE`). Ignored when `autoMerge` is present.
     PlanStart:
       description: The start-plan-fanout request body. Names the target issue by EXACTLY ONE of
         `issue` (an `owner/repo#123` reference) or `url` (a bare issue URL), plus a REQUIRED
@@ -4142,9 +4144,12 @@ paths:
                       type: integer
                       minimum: 1
                       description: Values above 100 are accepted and clamped to 100 by the delegate.
+                    autoMerge:
+                      type: boolean
+                      description: When true, drive the merge-loop after convergence. When false, stop at `converged` (review-only). This is the preferred positive per-request setting. When omitted, `convergeOnly` or the global `NANO_PR_AUTO_MERGE` default applies.
                     convergeOnly:
                       type: boolean
-                      description: When true, run convergence only and stop at `converged` — the PR is never handed to the merge-loop even if auto-merge is on globally (`NANO_PR_AUTO_MERGE`). A per-request review-only override; defaults to false (the global auto-merge default applies).
+                      description: Legacy negative alias. When true, run convergence only and stop at `converged` — the PR is never handed to the merge-loop even if auto-merge is on globally (`NANO_PR_AUTO_MERGE`). Ignored when `autoMerge` is present.
                 - type: object
                   additionalProperties: false
                   required:
@@ -4161,9 +4166,12 @@ paths:
                       type: integer
                       minimum: 1
                       description: Values above 100 are accepted and clamped to 100 by the delegate.
+                    autoMerge:
+                      type: boolean
+                      description: When true, drive the merge-loop after convergence. When false, stop at `converged` (review-only). This is the preferred positive per-request setting. When omitted, `convergeOnly` or the global `NANO_PR_AUTO_MERGE` default applies.
                     convergeOnly:
                       type: boolean
-                      description: When true, run convergence only and stop at `converged` — the PR is never handed to the merge-loop even if auto-merge is on globally (`NANO_PR_AUTO_MERGE`). A per-request review-only override; defaults to false (the global auto-merge default applies).
+                      description: Legacy negative alias. When true, run convergence only and stop at `converged` — the PR is never handed to the merge-loop even if auto-merge is on globally (`NANO_PR_AUTO_MERGE`). Ignored when `autoMerge` is present.
               type: object
               # END generated:mcp-body
       responses:

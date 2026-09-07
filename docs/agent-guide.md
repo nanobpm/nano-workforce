@@ -73,7 +73,8 @@ The body is flat. Fields:
 | field | type | meaning |
 |---|---|---|
 | `pr` (or `url`) | string | the PR — `owner/repo#123` or a full PR URL. Required. |
-| `convergeOnly` | boolean | **`true` = review only.** The PR stops at `converged` and is **never** handed to the merge loop, even when `NANO_PR_AUTO_MERGE` is on. Omit / `false` = converge **then merge**. |
+| `autoMerge` | boolean | **Preferred positive setting.** `true` = converge **then merge**; `false` = review only, stopping at `converged`. |
+| `convergeOnly` | boolean | **Legacy negative alias.** `true` = review only. Ignored when `autoMerge` is present; when both are omitted, the global `NANO_PR_AUTO_MERGE` default applies. |
 | `maxRounds` | integer | per-submit cap before escalating (clamped 1–100; default from `NANO_PR_MAX_ROUNDS`, 20). |
 | `dependsOn` | string[] | other `prKey`s that must land before this one merges (merge-loop barrier). |
 
@@ -84,12 +85,12 @@ The body is flat. Fields:
 # or is only after a review pass):
 curl -sS -X POST __BASE__/actions/start/convergence-loop \
   -H 'content-type: application/json' \
-  -d '{ "pr": "owner/repo#123", "convergeOnly": true }'
+  -d '{ "pr": "owner/repo#123", "autoMerge": false }'
 
 # Converge then merge, with a dependency barrier and a tighter round cap:
 curl -sS -X POST __BASE__/actions/start/convergence-loop \
   -H 'content-type: application/json' \
-  -d '{ "pr": "owner/repo#42", "maxRounds": 8, "dependsOn": ["owner/repo#40"] }'
+  -d '{ "pr": "owner/repo#42", "autoMerge": true, "maxRounds": 8, "dependsOn": ["owner/repo#40"] }'
 ```
 
 Submitting is **idempotent on the PR key** — re-POSTing the same PR refreshes the
