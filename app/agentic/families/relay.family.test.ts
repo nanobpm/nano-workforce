@@ -350,11 +350,11 @@ test("H6 correlation write-side: a produce on job:<k> links instance→[k]; stre
   const { service, hub } = mkCorrelatedService(registry, memoryDb(), correlation, byConnection);
   const p = connect("prod", registry);
 
-  // The first `produce` for a job-scoped stream links the producing worker instance → jobKey, from
+  // The first `produce` for an instance-scoped stream links the producing worker instance → jobKey, from
   // data already crossing the wire (jobKey decoded from the stream id; instance from the connection).
   hub.handler?.(produce(composeStreamId("worker-A", "k1"), 1, "chunk"), p.conn);
   assertEquals(correlation.jobKeysFor("worker-A"), ["k1"], "instance → [jobKey] is now linked");
-  assertEquals(correlation.resolve("k1")?.stream, composeStreamId("worker-A", "k1"), "context carries the job-scoped stream");
+  assertEquals(correlation.resolve("k1")?.stream, composeStreamId("worker-A", "k1"), "context carries the instance-scoped stream");
   assertEquals(correlation.count(), 1);
 
   // Job end (stream completion) releases the correlation, so the worker's supply row clears it.
