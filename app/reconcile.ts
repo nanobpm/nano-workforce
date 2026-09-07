@@ -38,8 +38,13 @@
 // `reconcileVanishedInstances` drives every such row — active, dispatched, its key absent from
 // `_urban_instance_state`, and PAST A GRACE WINDOW (so a still-starting run not yet projected is
 // spared) — to the same `orphaned` terminal, with a DISTINCT provenance reason so an operator can
-// tell a vanished-instance orphan apart from an epoch-regression one. `runEngineReconcile` runs BOTH
-// passes, so startup and the operator command converge both failure modes in one call.
+// tell a vanished-instance orphan apart from an epoch-regression one. Because `_urban_instance_state`
+// is an app-side projection that can lag / be pruned / be rebuilt while the instance is still ACTIVE
+// on the engine, "no projection row" is NOT proof the instance vanished — so before folding, the pass
+// CROSS-CHECKS ENGINE TRUTH (`/v2/process-instances/search`, issue #736): an instance the engine still
+// reports ACTIVE (or whose truth cannot be established) is SPARED, closing the false-orphan class on
+// deployments whose engine omits the incarnation epoch. `runEngineReconcile` runs BOTH passes, so
+// startup and the operator command converge both failure modes in one call.
 //
 // The provenance is app-owned (not urban's `_urban_write_provenance`, which is a domain-free
 // insert-join sidecar written only inside a job): reconcile runs at boot / over HTTP, outside any
@@ -152,6 +157,15 @@ export interface VanishedReconcileOptions extends ReconcileOptions {
    *  still-starting run (not yet projected into `_urban_instance_state`) is not orphaned prematurely.
    *  Defaults to {@link DEFAULT_VANISHED_GRACE_MS}. */
   graceMs?: number;
+  /** Cross-check against ENGINE TRUTH before orphaning a candidate row (issue #736). Given the row's
+   *  `keyField` (process instance key), it reports whether the engine still considers the instance
+   *  ACTIVE. An ACTIVE instance is NEVER orphaned — the app-side `_urban_instance_state` projection is
+   *  merely lagging — and an instance whose truth could not be established (`null`) is spared too (we
+   *  never orphan what we could not confirm dead). Only a row the engine positively confirms is gone
+   *  (`false`) is folded. When omitted the pass falls back to projection-only behaviour (no live
+   *  cross-check); production always wires one via {@link runEngineReconcile}. See
+   *  {@link makeEngineActiveProbe}. */
+  engineActive?: EngineActiveProbe;
 }
 
 /** Read the incarnation epoch out of a `/v2/topology` body — `nano.incarnation` (or its `epoch`
@@ -187,6 +201,80 @@ export async function probeEngineEpoch(
   } catch {
     return { reachable: false, epoch: null };
   }
+}
+
+/** A cross-check against ENGINE TRUTH for one process instance key, used to spare a live instance from
+ *  the vanished-instance pass. Returns:
+ *   • `true`  — the engine reports the instance ACTIVE. It is live; the app-side `_urban_instance_state`
+ *               projection is merely lagging/pruned/rebuilding, so the row MUST NOT be orphaned.
+ *   • `false` — the engine answered and the instance is NOT active: absent from the read model, or in a
+ *               known terminal state ({@link ENGINE_TERMINAL_STATES}). It is genuinely gone in engine
+ *               truth → orphan-eligible.
+ *   • `null`  — engine truth could NOT be established (unreachable, non-2xx, malformed — including an
+ *               item whose `state` is missing or outside {@link ENGINE_TERMINAL_STATES}). We never
+ *               orphan a row we could not confirm dead, so the caller spares it (a transient outage
+ *               must never fold live work). */
+export type EngineActiveProbe = (processKey: string) => Promise<boolean | null>;
+
+/** One item of a `/v2/process-instances/search` result, narrowed to what the engine-truth cross-check
+ *  reads: the instance key (to match the row we probed for) and its lifecycle `state`. Keys are
+ *  stringified defensively (the wire may send a JSON number or string); `state` is the engine's
+ *  lifecycle enum (`ACTIVE`/`COMPLETED`/`CANCELED`/…). */
+interface InstanceSearchStateItem {
+  processInstanceKey?: string | number;
+  state?: string;
+}
+
+/** The lifecycle states that POSITIVELY mean "this instance is no longer running" — urban's
+ *  `ProcessInstanceState` terminals (`COMPLETED`/`TERMINATED`) plus the Camunda-8-parity v2 REST
+ *  terminals (`CANCELED`/`FAILED`), since the probe reads that raw surface rather than the typed
+ *  client. ONLY these may answer `false` (orphan-eligible): a `state` that is missing, empty, or
+ *  outside this set is a partial/malformed read this app cannot interpret, so it degrades to `null`
+ *  ("unknown" → the caller spares the row). Classifying an unrecognized state as "gone" would fold
+ *  live work off a wire shape we misread — the exact failure mode the #736 cross-check exists to stop. */
+const ENGINE_TERMINAL_STATES: ReadonlySet<string> = new Set(["COMPLETED", "TERMINATED", "CANCELED", "FAILED"]);
+
+/** Build an {@link EngineActiveProbe} that queries the engine's own `/v2/process-instances/search` for
+ *  a single process instance key and reports whether the engine still considers it ACTIVE. This is the
+ *  authoritative engine-truth check the vanished-instance pass consults before orphaning: an ACTIVE
+ *  engine instance must NEVER be orphaned regardless of the app-side projection (issue #736), so a
+ *  merlin-style deployment whose `_urban_instance_state` lags no longer false-orphans live work.
+ *  Never throws — every transport/parse failure, and every `state` this app cannot interpret (missing,
+ *  or outside {@link ENGINE_TERMINAL_STATES}), degrades to `null` ("unknown"), which the caller treats
+ *  as "spare" (we never orphan what we could not confirm dead). */
+export function makeEngineActiveProbe(
+  engineRest: { restAddress: string; token?: string },
+  opts: { fetchImpl?: typeof fetch; timeoutMs?: number } = {},
+): EngineActiveProbe {
+  const fetchImpl = opts.fetchImpl ?? fetch;
+  const base = engineRest.restAddress.replace(/\/+$/, "");
+  const headers: Record<string, string> = { accept: "application/json", "content-type": "application/json" };
+  if (engineRest.token) headers.authorization = `Bearer ${engineRest.token}`;
+  return async (processKey: string): Promise<boolean | null> => {
+    try {
+      const res = await fetchImpl(`${base}/process-instances/search`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ filter: { processInstanceKey: processKey }, page: { from: 0, limit: 10 } }),
+        signal: AbortSignal.timeout(opts.timeoutMs ?? 3000),
+      });
+      if (!res.ok) return null;
+      // biome-ignore lint/plugin: runtime/framework contract boundary for external data shape
+      const body = (await res.json()) as { items?: InstanceSearchStateItem[] };
+      const items = body.items ?? [];
+      const match = items.find((it) => it.processInstanceKey != null && String(it.processInstanceKey) === processKey);
+      // Engine answered but the instance is absent from the read model → genuinely gone (not active).
+      if (!match) return false;
+      const state = String(match.state ?? "").trim().toUpperCase();
+      if (state === "ACTIVE") return true;
+      // A KNOWN terminal state is a positive "gone". Anything else — a missing/empty `state`, or one
+      // outside the enum this app can interpret — is a partial or malformed answer, NOT a confirmed
+      // death, so it degrades to `null` and the caller spares the row.
+      return ENGINE_TERMINAL_STATES.has(state) ? false : null;
+    } catch {
+      return null;
+    }
+  };
 }
 
 /** Double-quote a SQL identifier (table/column) so a manifest-declared name is safe to interpolate. */
@@ -334,19 +422,24 @@ function withinGrace(updated: unknown, nowMs: number, graceMs: number): boolean 
   return nowMs - t < graceMs;
 }
 
-/** Orphan every NON-terminal, engine-backed row whose `keyField` (process instance key) has NO
- *  `_urban_instance_state` row — the instance is absent/unknown in engine truth (vanished, issue
- *  #630) — and whose last transition is older than the grace window. Records one
- *  `reconcile_provenance` row per transition (reason {@link RECONCILE_VANISHED_REASON}). Runs inside
- *  the caller's transaction. */
-async function orphanVanishedRows(
+/** A vanished-instance candidate: the row selected for possible orphaning plus the binding shape that
+ *  resolves its physical schema. Selected OUTSIDE any transaction, because the engine-truth
+ *  cross-check that narrows these is network I/O (see {@link confirmVanishedGone}). */
+interface VanishedCandidate {
+  shape: BindingShape;
+  row: OrphanCandidate;
+}
+
+/** SELECT every NON-terminal, engine-backed row whose `keyField` (process instance key) has NO
+ *  `_urban_instance_state` row — the instance is absent/unknown in the app-side read model (vanished,
+ *  issue #630) — and whose last transition is older than the grace window. READ-ONLY and network-free,
+ *  so it is safe to run outside the orphaning transaction. */
+async function selectVanishedCandidates(
   src: DataSource,
-  runId: string,
-  at: string,
   nowMs: number,
   graceMs: number,
-): Promise<OrphanedRow[]> {
-  const orphaned: OrphanedRow[] = [];
+): Promise<VanishedCandidate[]> {
+  const candidates: VanishedCandidate[] = [];
   for (const binding of engineBackedBindings()) {
     const shape = await resolveShape(src, binding);
     if (!shape) continue;
@@ -360,16 +453,78 @@ async function orphanVanishedRows(
         `AND NOT EXISTS (SELECT 1 FROM ${q(INSTANCE_STATE_TABLE)} s WHERE s.process_instance_key = b.${q(shape.keyField)})`,
       [...shape.active],
     );
-    // Re-assert "still no instance-state row" in the guarded UPDATE too, so an instance that reappears
-    // (the poller records it) between the SELECT above and the UPDATE wins the race.
+    for (const row of rows) {
+      if (shape.hasUpdatedAt && withinGrace(row.__updated, nowMs, graceMs)) continue;
+      candidates.push({ shape, row });
+    }
+  }
+  return candidates;
+}
+
+/** Narrow candidates to the ones ENGINE TRUTH positively confirms are gone (issue #736): the
+ *  `_urban_instance_state` projection is an app-side read model that can lag / be pruned / be rebuilt
+ *  while the instance is still ACTIVE on the engine, so "no projection row" is NOT "instance vanished".
+ *  An ACTIVE instance (`true`) is spared, and one whose truth could not be established (`null` — engine
+ *  unreachable, malformed answer, or a probe that THREW) is spared too: we never orphan a row we could
+ *  not positively confirm is gone, and an injected probe's failure must never abort the pass. Only a
+ *  `false` (engine confirms absent/terminated) survives. Runs OUTSIDE the DB transaction — this is
+ *  network I/O, and awaiting it under an open write transaction would hold the SQLite lock for up to
+ *  the probe's timeout PER ROW, stalling every other writer (including boot). Without a probe (omitted)
+ *  the pass falls back to projection-only behaviour, so every candidate survives. */
+async function confirmVanishedGone(
+  candidates: VanishedCandidate[],
+  engineActive?: EngineActiveProbe,
+): Promise<VanishedCandidate[]> {
+  if (!engineActive) return candidates;
+  // Engine truth is PER INSTANCE, not per row, and one instance can back several tracked rows: the
+  // `delivery_units` aggregate is a DB-trigger mirror of its legacy base row (db/migrations/089) and
+  // carries the same `process_key`, so both are candidates for one vanished instance. Probe each
+  // DISTINCT key once and apply that verdict to every row carrying it — the same answer, without
+  // doubling engine calls that can each block for the probe's full timeout.
+  const verdicts = new Map<string, boolean | null>();
+  const gone: VanishedCandidate[] = [];
+  for (const candidate of candidates) {
+    const key = candidate.row.__key == null ? null : String(candidate.row.__key);
+    // Defensive: the SELECT requires a populated key, so with no key there is nothing to cross-check
+    // and the projection-only verdict stands.
+    if (key == null) {
+      gone.push(candidate);
+      continue;
+    }
+    let verdict = verdicts.get(key);
+    if (verdict === undefined) {
+      try {
+        verdict = await engineActive(key);
+      } catch {
+        // A probe that throws established nothing — treat it exactly like an unreachable engine.
+        verdict = null;
+      }
+      verdicts.set(key, verdict);
+    }
+    if (verdict === false) gone.push(candidate);
+  }
+  return gone;
+}
+
+/** Fold each confirmed-gone candidate to the `orphaned` terminal, recording one
+ *  `reconcile_provenance` row per transition (reason {@link RECONCILE_VANISHED_REASON}). WRITE-ONLY and
+ *  network-free, so the caller's transaction stays short. Runs inside the caller's transaction. */
+async function orphanVanishedCandidates(
+  t: DataSource,
+  candidates: VanishedCandidate[],
+  runId: string,
+  at: string,
+): Promise<OrphanedRow[]> {
+  const orphaned: OrphanedRow[] = [];
+  for (const { shape, row } of candidates) {
+    // Re-assert "still no instance-state row" in the guarded UPDATE (which also re-asserts the exact
+    // status read), so a row that went terminal — or an instance that reappeared, the poller recording
+    // it — between the out-of-transaction SELECT/probe and this UPDATE wins the race.
     const stillVanishedGuard =
       ` AND NOT EXISTS (SELECT 1 FROM ${q(INSTANCE_STATE_TABLE)} s ` +
       `WHERE s.process_instance_key = ${q(shape.table)}.${q(shape.keyField)})`;
-    for (const row of rows) {
-      if (shape.hasUpdatedAt && withinGrace(row.__updated, nowMs, graceMs)) continue;
-      const o = await orphanRow(src, shape, row, RECONCILE_VANISHED_REASON, null, runId, at, stillVanishedGuard);
-      if (o) orphaned.push(o);
-    }
+    const o = await orphanRow(t, shape, row, RECONCILE_VANISHED_REASON, null, runId, at, stillVanishedGuard);
+    if (o) orphaned.push(o);
   }
   return orphaned;
 }
@@ -475,9 +630,20 @@ export async function reconcileEngineBackedWork(
  *     it), every dispatched row would look vanished, so the pass is a hard no-op.
  *   • GUARDED — the same status-re-assert as the epoch pass, plus a still-vanished re-check, so a
  *     concurrent terminal write or a reappearing instance wins the race.
- *   • This pass reads the app's OWN last-known projection, not a live probe, so it acts correctly on a
- *     genuinely-vanished instance regardless of transient engine reachability (a live instance keeps
- *     its persisted ACTIVE row across a restart, so it is never mistaken for vanished).
+ *   • ENGINE-TRUTH CROSS-CHECK (issue #736) — the `_urban_instance_state` projection is an app-side
+ *     read model that can lag / be pruned / be rebuilt for an instance that is still ACTIVE on the
+ *     engine, so "no projection row" is NOT "instance vanished". Before folding, the pass consults
+ *     `opts.engineActive` (production wires one from the live engine via {@link makeEngineActiveProbe};
+ *     {@link runEngineReconcile}): an instance the engine reports ACTIVE — or whose truth could not be
+ *     established (engine unreachable, malformed answer, a probe that threw) — is SPARED. Only an
+ *     instance the engine positively confirms is gone is orphaned. Without a cross-check (omitted) the
+ *     pass falls back to projection-only.
+ *   • SHORT TRANSACTION — the cross-check is network I/O, so the candidate SELECT and every probe run
+ *     OUTSIDE `src.tx(...)`; the transaction covers only the guarded UPDATE + provenance writes. A
+ *     slow or unreachable engine therefore cannot hold the SQLite write lock open (for up to the
+ *     probe's timeout per candidate row), stalling other writers or boot. The guards make the split
+ *     safe: a row that went terminal, or an instance that reappeared in the projection, between the
+ *     out-of-transaction read and the in-transaction UPDATE wins the race and is not folded.
  */
 export async function reconcileVanishedInstances(
   data: DataLayer,
@@ -498,8 +664,13 @@ export async function reconcileVanishedInstances(
     return { runId, reason: "no-op", observedEpoch: null, recordedEpoch: null, orphanedCount: 0, orphaned: [] };
   }
 
+  // READ + PROBE first, transaction second: the engine-truth cross-check is network I/O and must never
+  // be awaited under an open write transaction (see SHORT TRANSACTION above).
+  const candidates = await selectVanishedCandidates(src, nowMs, graceMs);
+  const confirmedGone = await confirmVanishedGone(candidates, opts.engineActive);
+
   const orphaned = await src.tx(async (t) => {
-    const rows = await orphanVanishedRows(t, runId, at, nowMs, graceMs);
+    const rows = await orphanVanishedCandidates(t, confirmedGone, runId, at);
     const reason: ReconcileReason = rows.length > 0 ? "instance-vanished" : "no-op";
     await recordRun(t, { runId, at, observedEpoch: null, recordedEpoch: null, reason, orphanedCount: rows.length });
     return rows;
@@ -561,6 +732,12 @@ export async function runEngineReconcile(
   const vanished = await reconcileVanishedInstances(data, {
     ...opts,
     runId: `${epoch.runId}-vanished`,
+    // Cross-check ENGINE TRUTH before orphaning any vanished-instance candidate (issue #736): an
+    // instance the engine still reports ACTIVE is spared even when its `_urban_instance_state`
+    // projection is absent (the merlin false-orphan: the projection lags, the instance is live). A
+    // caller-supplied `engineActive` wins (tests inject a deterministic one); otherwise build one from
+    // the same engine address/token the epoch probe used.
+    engineActive: opts.engineActive ?? makeEngineActiveProbe(engineRest, { fetchImpl: opts.fetchImpl }),
   });
 
   const orphaned = [...epoch.orphaned, ...vanished.orphaned];

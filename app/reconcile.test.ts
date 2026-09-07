@@ -10,10 +10,12 @@
 // `makeGateway`), so the tables/columns/indexes reconcile reads and writes are the shipping schema.
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
-import { assertEquals } from "#test-assert";
+import type { DataLayer, GatewayDataSource as DataSource } from "@nanobpm/urban";
+import { assertEquals, assertNotEquals } from "#test-assert";
 import { freshData } from "../test/reconcileDb.ts";
 import {
   DEFAULT_VANISHED_GRACE_MS,
+  makeEngineActiveProbe,
   ORPHANED_STATUS,
   parseEngineEpoch,
   RECONCILE_ORPHAN_REASON,
@@ -393,28 +395,115 @@ test("idempotent: a second vanished pass is a no-op (the orphaned row left activ
   assertEquals((raw.prepare("SELECT COUNT(*) c FROM reconcile_provenance").get() as { c: number }).c, 1);
 });
 
+// --- Engine-truth cross-check before orphaning a "vanished" row (issue #736) -------------------
+// The `_urban_instance_state` projection is an app-side read model that can lag / be pruned / be
+// rebuilt while the instance is still ACTIVE on the engine. "No projection row" is therefore NOT
+// "instance vanished": on merlin (whose engine exposes no incarnation epoch, so the robust epoch
+// detector is disabled) this false-orphaned 3 concurrently-LIVE instances in one pass. The vanished
+// pass now cross-checks ENGINE TRUTH via `engineActive` before folding — an ACTIVE instance is spared.
+
+test("RED→GREEN #736: an engine-ACTIVE instance with no _urban_instance_state row (past grace) is NOT orphaned", async () => {
+  const { data, raw } = freshData();
+  ensureInstanceState(raw);
+  // The merlin repro: an inflight run past grace whose projection row is absent (lagging/pruned) but
+  // whose instance the engine still reports ACTIVE. RED (pre-fix): folded to `orphaned`. GREEN: spared.
+  seedFeatureRun(raw, "nanobpm/nano-workforce#336", "running", "11625");
+  // Engine truth says ACTIVE for this key.
+  const engineActive = async (key: string) => (key === "11625" ? true : false);
+
+  const res = await reconcileVanishedInstances(data, { now: AT, runId: "van-1", engineActive });
+
+  assertEquals(res.reason, "no-op");
+  assertEquals(res.orphanedCount, 0);
+  const row = raw.prepare("SELECT status FROM feature_runs WHERE feature_key='nanobpm/nano-workforce#336'").get() as {
+    status: string;
+  };
+  assertEquals(row.status, "running");
+  assertEquals((raw.prepare("SELECT COUNT(*) c FROM reconcile_provenance").get() as { c: number }).c, 0);
+});
+
+test("#736: an engine-CONFIRMED-gone instance (engineActive=false) IS still orphaned", async () => {
+  const { data, raw } = freshData();
+  ensureInstanceState(raw);
+  seedFeatureRun(raw, "Magikcraft/nano-bpm#1051", "escalated", "71506");
+  // Engine answered and the instance is absent/terminated — genuinely gone in engine truth.
+  const engineActive = async () => false;
+
+  const res = await reconcileVanishedInstances(data, { now: AT, runId: "van-1", engineActive });
+
+  assertEquals(res.reason, "instance-vanished");
+  assertEquals(res.orphanedCount, 1);
+  const row = raw.prepare("SELECT status FROM feature_runs WHERE feature_key='Magikcraft/nano-bpm#1051'").get() as {
+    status: string;
+  };
+  assertEquals(row.status, ORPHANED_STATUS);
+});
+
+test("#736: an instance whose engine truth is UNKNOWN (engineActive=null) is spared — never orphan unconfirmed", async () => {
+  const { data, raw } = freshData();
+  ensureInstanceState(raw);
+  seedFeatureRun(raw, "o/r#unknown", "escalated", "71506");
+  // The engine truth could not be established (unreachable / non-2xx / malformed) — we must NOT orphan.
+  const engineActive = async () => null;
+
+  const res = await reconcileVanishedInstances(data, { now: AT, runId: "van-1", engineActive });
+
+  assertEquals(res.reason, "no-op");
+  assertEquals(res.orphanedCount, 0);
+  const row = raw.prepare("SELECT status FROM feature_runs WHERE feature_key='o/r#unknown'").get() as {
+    status: string;
+  };
+  assertEquals(row.status, "escalated");
+});
+
 // --- Merged seam: runEngineReconcile (both passes, one result) --------------------------------
 // The operator/startup seam merges the epoch-regression and vanished-instance passes into ONE
 // result. This guards the merged behavior the two per-pass suites above don't reach: run-id
-// correlation (the vanished pass's provenance must be locatable from the returned `runId`) and
-// `reason` selection when the epoch pass is `engine-unreachable` yet vanished instances are orphaned.
+// correlation (the vanished pass's provenance must be locatable from the returned `runId`), the
+// engine-truth cross-check the seam wires from the live engine (#736), and `reason` selection.
 
-test("runEngineReconcile: engine-unreachable epoch pass still folds vanished instances, with a correlatable run id", async () => {
+/** A `/v2` fetch stub: `/topology` answers `topologyBody` (200), and `/process-instances/search`
+ *  answers with `searchItems` (200) — the engine-truth cross-check the vanished pass runs (#736). */
+function engineFetch(
+  topologyBody: unknown,
+  searchItems: { processInstanceKey?: string | number; state?: string }[],
+): typeof fetch {
+  return (async (url: string, init?: { method?: string }) => {
+    const u = String(url);
+    if (u.endsWith("/topology")) return new Response(JSON.stringify(topologyBody), { status: 200 });
+    if (u.endsWith("/process-instances/search") && init?.method === "POST") {
+      return new Response(JSON.stringify({ items: searchItems }), { status: 200 });
+    }
+    return new Response("not found", { status: 404 });
+  }) as unknown as typeof fetch;
+}
+
+test("runEngineReconcile #736: a reachable engine reporting the instance ACTIVE spares it (no false-orphan)", async () => {
   const { data, raw } = freshData();
   ensureInstanceState(raw);
-  // A vanished orphan (escalated, past grace, instance absent from the read model).
+  // No projection row, past grace — but the engine (reachable, no epoch, like merlin) reports ACTIVE.
+  seedFeatureRun(raw, "nanobpm/nano-workforce#731", "escalated", "11644");
+  const fetchImpl = engineFetch({ nano: { engine: "merlin" } }, [{ processInstanceKey: "11644", state: "ACTIVE" }]);
+
+  const res = await runEngineReconcile(data, { restAddress: "http://engine.local/v2" }, { now: AT, fetchImpl });
+
+  assertEquals(res.orphanedCount, 0);
+  const row = raw.prepare("SELECT status FROM feature_runs WHERE feature_key='nanobpm/nano-workforce#731'").get() as {
+    status: string;
+  };
+  assertEquals(row.status, "escalated");
+  assertEquals((raw.prepare("SELECT COUNT(*) c FROM reconcile_provenance").get() as { c: number }).c, 0);
+});
+
+test("runEngineReconcile #736: a reachable engine that no longer knows the instance folds it, with a correlatable run id", async () => {
+  const { data, raw } = freshData();
+  ensureInstanceState(raw);
+  // A genuinely-vanished orphan (escalated, past grace); the engine answers but the instance is absent.
   seedFeatureRun(raw, "Magikcraft/nano-bpm#1051", "escalated", "71506");
+  const fetchImpl = engineFetch({ nano: { engine: "merlin" } }, []);
 
-  // The engine is unreachable — the epoch probe fails, so the epoch pass reports `engine-unreachable`
-  // and orphans nothing; the vanished pass must still act.
-  const fetchImpl = (() => Promise.reject(new Error("ECONNREFUSED"))) as unknown as typeof fetch;
-  const res = await runEngineReconcile(
-    data,
-    { restAddress: "http://engine.invalid" },
-    { now: AT, fetchImpl },
-  );
+  const res = await runEngineReconcile(data, { restAddress: "http://engine.local/v2" }, { now: AT, fetchImpl });
 
-  // The vanished pass acted even though the epoch pass could not reach the engine.
   assertEquals(res.reason, "instance-vanished");
   assertEquals(res.orphanedCount, 1);
   const orphan = raw
@@ -429,14 +518,189 @@ test("runEngineReconcile: engine-unreachable epoch pass still folds vanished ins
     .get() as { run_id: string };
   assertEquals(prov.run_id, `${res.runId}-vanished`);
 
-  // Both passes recorded their own reconcile_runs row under correlatable ids.
-  const epochRun = raw.prepare("SELECT reason FROM reconcile_runs WHERE run_id=?").get(res.runId) as
-    | { reason: string }
-    | undefined;
-  assertEquals(epochRun?.reason, "engine-unreachable");
   const vanishedRun = raw
     .prepare("SELECT reason, orphaned_count FROM reconcile_runs WHERE run_id=?")
     .get(`${res.runId}-vanished`) as { reason: string; orphaned_count: number } | undefined;
   assertEquals(vanishedRun?.reason, "instance-vanished");
   assertEquals(vanishedRun?.orphaned_count, 1);
+});
+
+test("runEngineReconcile #736: an UNREACHABLE engine spares vanished candidates (truth unconfirmed → never orphan)", async () => {
+  const { data, raw } = freshData();
+  ensureInstanceState(raw);
+  // A candidate that looks vanished (escalated, past grace, no projection row) — but with the engine
+  // unreachable we cannot confirm it is gone, so it MUST be spared (issue #736): the old projection-only
+  // behavior would have orphaned it, potentially false-orphaning a live instance mid-outage.
+  seedFeatureRun(raw, "Magikcraft/nano-bpm#1051", "escalated", "71506");
+
+  const fetchImpl = (() => Promise.reject(new Error("ECONNREFUSED"))) as unknown as typeof fetch;
+  const res = await runEngineReconcile(data, { restAddress: "http://engine.invalid" }, { now: AT, fetchImpl });
+
+  // The epoch pass could not reach the engine, and the vanished pass could not confirm death → no-op.
+  assertEquals(res.reason, "engine-unreachable");
+  assertEquals(res.orphanedCount, 0);
+  const row = raw.prepare("SELECT status FROM feature_runs WHERE feature_key='Magikcraft/nano-bpm#1051'").get() as {
+    status: string;
+  };
+  assertEquals(row.status, "escalated");
+  assertEquals((raw.prepare("SELECT COUNT(*) c FROM reconcile_provenance").get() as { c: number }).c, 0);
+});
+
+// --- Hardening the cross-check itself (#736 review) ---------------------------------------------
+// Two defects of the SAME class the first cut still carried — "never orphan a row we could not
+// positively confirm is gone" — plus the lock-hold the cross-check introduced:
+//   1. a MATCHING search item whose `state` was missing or outside the engine's lifecycle enum read as
+//      `false` ("gone"), so a malformed/partial engine answer folded live work;
+//   2. the probe (network I/O) was awaited INSIDE `src.tx(...)`, so a slow or unreachable engine held
+//      the SQLite write transaction open for the probe's full timeout PER CANDIDATE ROW — stalling
+//      every other writer, including boot — and an injected probe that threw aborted the whole pass.
+
+/** Answer `/v2/process-instances/search` with exactly `items` (200), so a probe's classification can
+ *  be read off one wire shape varying only in the item's `state`. */
+function searchItemsFetch(items: { processInstanceKey?: string | number; state?: string }[]): typeof fetch {
+  return (async () => new Response(JSON.stringify({ items }), { status: 200 })) as unknown as typeof fetch;
+}
+
+/** Probe the key `11644` against a stubbed engine search answer of `items`. */
+function probeAgainst(items: { processInstanceKey?: string | number; state?: string }[]): Promise<boolean | null> {
+  const probe = makeEngineActiveProbe({ restAddress: "http://engine.local/v2" }, { fetchImpl: searchItemsFetch(items) });
+  return probe("11644");
+}
+
+test("#736: the probe answers `true` for ACTIVE and `false` ONLY for a known-terminal engine state", async () => {
+  assertEquals(await probeAgainst([{ processInstanceKey: "11644", state: "ACTIVE" }]), true);
+  // The wire may carry the key as a JSON number and the state in any casing.
+  assertEquals(await probeAgainst([{ processInstanceKey: 11644, state: "active" }]), true);
+  for (const state of ["COMPLETED", "TERMINATED", "CANCELED", "FAILED"]) {
+    assertEquals(await probeAgainst([{ processInstanceKey: "11644", state }]), false, `${state} is a positive "gone"`);
+  }
+  // Absent from the read model is STILL a positive "gone": the engine answered and does not know it.
+  assertEquals(await probeAgainst([]), false);
+});
+
+test("RED→GREEN #736: a MISSING or UNRECOGNIZED engine state is UNKNOWN truth (`null` → spare), never `false`", async () => {
+  // RED (pre-fix): the probe answered `String(match.state ?? "").toUpperCase() === "ACTIVE"`, so a
+  // partial item (no `state`) or a state outside the enum this app knows read as "gone" and folded the
+  // row — contradicting the probe's own contract that malformed engine truth degrades to `null`.
+  assertEquals(await probeAgainst([{ processInstanceKey: "11644" }]), null, "a missing state is not a confirmed death");
+  assertEquals(await probeAgainst([{ processInstanceKey: "11644", state: "" }]), null);
+  assertEquals(await probeAgainst([{ processInstanceKey: "11644", state: "SUSPENDED" }]), null);
+  // An item for a DIFFERENT key is no match for this one, so that stays "absent" (gone), not unknown.
+  assertEquals(await probeAgainst([{ processInstanceKey: "99999" }]), false);
+});
+
+test("RED→GREEN #736: a malformed search item (no `state`) spares the candidate end-to-end", async () => {
+  const { data, raw } = freshData();
+  ensureInstanceState(raw);
+  // Past grace, no projection row, and the engine ANSWERS — but its item carries no lifecycle state, so
+  // engine truth is unestablished and the row must survive (RED pre-fix: folded to `orphaned`).
+  seedFeatureRun(raw, "nanobpm/nano-workforce#731", "escalated", "11644");
+  const fetchImpl = engineFetch({ nano: { engine: "merlin" } }, [{ processInstanceKey: "11644" }]);
+
+  const res = await runEngineReconcile(data, { restAddress: "http://engine.local/v2" }, { now: AT, fetchImpl });
+
+  assertEquals(res.orphanedCount, 0);
+  const row = raw.prepare("SELECT status FROM feature_runs WHERE feature_key='nanobpm/nano-workforce#731'").get() as {
+    status: string;
+  };
+  assertEquals(row.status, "escalated");
+  assertEquals((raw.prepare("SELECT COUNT(*) c FROM reconcile_provenance").get() as { c: number }).c, 0);
+});
+
+test("RED→GREEN #736: a probe that THROWS is unknown truth — it spares the row instead of aborting the pass", async () => {
+  const { data, raw } = freshData();
+  ensureInstanceState(raw);
+  seedFeatureRun(raw, "o/r#boom", "escalated", "71506");
+  // `engineActive` is injectable: an implementation that rejects means truth could NOT be established
+  // (spare), and must not bubble out of the pass.
+  const engineActive = async (): Promise<boolean | null> => {
+    throw new Error("engine exploded");
+  };
+
+  const res = await reconcileVanishedInstances(data, { now: AT, runId: "van-1", engineActive });
+
+  assertEquals(res.reason, "no-op");
+  assertEquals(res.orphanedCount, 0);
+  const row = raw.prepare("SELECT status FROM feature_runs WHERE feature_key='o/r#boom'").get() as { status: string };
+  assertEquals(row.status, "escalated");
+  // The pass COMPLETED and recorded its run — pre-fix the throw escaped the transaction and rejected the
+  // whole reconcile, so no `reconcile_runs` row was written at all.
+  const run = raw.prepare("SELECT reason, orphaned_count FROM reconcile_runs WHERE run_id='van-1'").get() as
+    | { reason: string; orphaned_count: number }
+    | undefined;
+  assertEquals(run?.reason, "no-op");
+  assertEquals(run?.orphaned_count, 0);
+});
+
+test("RED→GREEN #736: the probe (network I/O) is never awaited INSIDE the write transaction", async () => {
+  const { data, raw } = freshData();
+  ensureInstanceState(raw);
+  seedFeatureRun(raw, "o/r#tx", "escalated", "71506");
+
+  // Wrap the gateway so the probe can report how deep in `src.tx(...)` it was awaited. RED (pre-fix):
+  // depth 1 — every candidate row held the SQLite write transaction open across a network round trip
+  // (up to the probe's full timeout on a slow/unreachable engine), delaying every other writer and
+  // slowing/locking boot. GREEN: depth 0 — the probes finish first, and only the guarded UPDATE +
+  // provenance writes run in a short transaction.
+  let depth = 0;
+  const observed: number[] = [];
+  const inner = data.open();
+  const tracked = {
+    open: () => ({
+      query: (sql: string, params?: unknown[]) => inner.query(sql, params),
+      exec: (sql: string, params?: unknown[]) => inner.exec(sql, params),
+      schema: () => inner.schema(),
+      table: (name: string, pk?: string) => inner.table(name, pk),
+      tx: async <T>(fn: (t: DataSource) => Promise<T>): Promise<T> => {
+        depth += 1;
+        try {
+          return await inner.tx(fn);
+        } finally {
+          depth -= 1;
+        }
+      },
+    }),
+  } as unknown as DataLayer;
+
+  const engineActive = async (): Promise<boolean | null> => {
+    observed.push(depth);
+    return false;
+  };
+
+  const res = await reconcileVanishedInstances(tracked, { now: AT, runId: "van-tx", engineActive });
+
+  // Exactly one entry: the seeded row also mirrors into `delivery_units` (same `process_key`), and one
+  // instance is probed once (see the next test) — at depth 0, outside any open write transaction.
+  assertEquals(observed, [0], "the engine-truth probe must be awaited outside any open write transaction");
+  // Hoisting the probe out of the transaction must not weaken the pass: a confirmed-gone row still folds.
+  assertEquals(res.orphanedCount, 1);
+  const row = raw.prepare("SELECT status FROM feature_runs WHERE feature_key='o/r#tx'").get() as { status: string };
+  assertEquals(row.status, ORPHANED_STATUS);
+});
+
+test("#736: one instance backing several tracked rows is probed ONCE (engine truth is per instance)", async () => {
+  const { data, raw } = freshData();
+  ensureInstanceState(raw);
+  // A `feature_runs` row is ALSO mirrored into the `delivery_units` aggregate by DB trigger
+  // (db/migrations/089), carrying the same `process_key` — so one vanished instance yields TWO
+  // candidates. Engine truth is per instance, so it must be asked once, not once per row (each probe
+  // can block for its full timeout on a slow engine).
+  seedFeatureRun(raw, "o/r#mirror", "escalated", "71506");
+  const probed: string[] = [];
+  const engineActive = async (key: string): Promise<boolean | null> => {
+    probed.push(key);
+    return false;
+  };
+
+  const res = await reconcileVanishedInstances(data, { now: AT, runId: "van-mirror", engineActive });
+
+  assertEquals(probed, ["71506"], "one probe per distinct instance key");
+  // Folding the base row re-projects its mirror (the sync trigger clears `dispatch_status`), so the
+  // mirror is not folded a second time for the same instance — no duplicate provenance.
+  assertEquals(res.orphaned.map((o) => o.table), ["feature_runs"]);
+  assertEquals(res.orphanedCount, 1);
+  const mirror = raw.prepare("SELECT dispatch_status FROM delivery_units WHERE legacy_key='o/r#mirror'").get() as {
+    dispatch_status: string | null;
+  };
+  assertNotEquals(mirror.dispatch_status, "dispatched");
 });
