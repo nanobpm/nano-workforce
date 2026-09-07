@@ -44,6 +44,20 @@ export function jobStream(jobKey: string): string {
   return `${JOB_STREAM_PREFIX}${jobKey}`;
 }
 
+/**
+ * The jobKey encoded in a bare `job:<jobKey>` alias — the Stage-0 transcript URL / permission-lane
+ * scheme retained by {@link JOB_STREAM_PREFIX}. Returns undefined for ANY other stream, including an
+ * instance-scoped `composeStreamId(instance, jobKey)` data-plane id (decode THAT with `parseStreamId`)
+ * and a bare `job:` with no jobKey — keeping the "empty jobKey is invalid" invariant (`link()` ignores
+ * empty jobKeys) consistent for callers. This is the READ-path alias decoder ONLY: the write/relay side
+ * addresses jobs solely by the instance-scoped id, so it must never route through this.
+ */
+export function jobKeyOfJobStream(stream: string): string | undefined {
+  if (!stream.startsWith(JOB_STREAM_PREFIX)) return undefined;
+  const jobKey = stream.slice(JOB_STREAM_PREFIX.length);
+  return jobKey === "" ? undefined : jobKey;
+}
+
 /** One job's engine context — the correlation a terminal is lined up against. */
 export interface JobCorrelation {
   /** The Camunda-8 job key (the C8 job the worker activated). */

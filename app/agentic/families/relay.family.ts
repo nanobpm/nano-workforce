@@ -195,7 +195,7 @@ interface StreamState {
   /** Set once an ephemeral stream has been flushed & completed (so it is not re-completed). */
   completed: boolean;
   /**
-   * Set once a `job:<jobKey>` stream has been linked into the correlation registry (H6, #149), so
+   * Set once an instance-scoped job stream has been linked into the correlation registry (H6, #149), so
    * the link is attempted at most once per stream. It stays `false` while the producer's presence
    * instance is not yet resolvable (a register/produce race), so a later `produce` frame retries.
    */
@@ -209,14 +209,14 @@ interface StreamState {
    */
   createdAt: string;
   /**
-   * The worker instance a `job:<jobKey>` stream was linked under (H6). Recorded so a stream's release
+   * The worker instance an instance-scoped job stream was linked under (H6). Recorded so a stream's release
    * (completion / disconnect) can tidy the {@link RelayTranscriptService.#jobStreamByInstance}
    * supersede index, and so the "one job at a time per worker" supersede rule can identify the
    * instance's prior job stream.
    */
   instance?: string;
   /**
-   * The engine element-instance key this `job:<jobKey>` stream's job occupies (#544), once the
+   * The engine element-instance key this instance-scoped job stream's job occupies (#544), once the
    * asynchronous link-time resolution ({@link RelayTranscriptService.#resolveElementInstance}) lands.
    * Stashed on the stream so job completion can persist it even if the live correlation was already
    * enriched-and-released, and so a resolution that returns after completion can still be recognised.
@@ -276,7 +276,7 @@ export interface RelayTranscriptServiceOptions {
   readonly ensureSchema?: boolean;
   /**
    * The correlation write-side seam (H6, #149). When present, a first `produce` frame for a
-   * `job:<jobKey>` stream links the producing worker instance → jobKey here, and the stream's
+   * instance-scoped job stream links the producing worker instance → jobKey here, and the stream's
    * completion / producer disconnect releases it. Defaults to the process-wide correlation registry
    * ({@link currentCorrelation}); absent (`() => undefined`) → no linking (advisory, never an error).
    */
@@ -318,7 +318,7 @@ export interface RelayTranscriptServiceOptions {
    */
   readonly correlationStore?: AgenticCorrelationStore;
   /**
-   * Resolve the engine element-instance key a `job:<jobKey>` stream's job occupies (#544). Called
+   * Resolve the engine element-instance key an instance-scoped job stream's job occupies (#544). Called
    * fire-and-forget on the first `produce` (while the job's JOB park is still live), and its result
    * enriches the live correlation context / durable attribution so a captured session is keyed on the
    * element INSTANCE (unambiguous across a looping / retried job), not just the static element id.
@@ -358,7 +358,7 @@ export class RelayTranscriptService {
   readonly #log: Logger;
   readonly #streams = new Map<string, StreamState>();
   /**
-   * The `job:<jobKey>` relay stream each worker instance is CURRENTLY relaying (H6, #149). A worker
+   * The instance-scoped job relay stream each worker instance is CURRENTLY relaying (H6, #149). A worker
    * relays every job it runs over one long-lived channel connection, one job at a time
    * (`../correlation.ts`), so that connection never disconnects between jobs — the disconnect-driven
    * `#reconcile` release never fires. This index lets a NEW job's first `produce` supersede the
@@ -699,7 +699,8 @@ export class RelayTranscriptService {
       });
   }
 
-  /** H6 write-side (#149): release a `job:<jobKey>` stream's correlation on completion / disconnect. */
+  /** H6 write-side (#149): release an instance-scoped job stream's (`composeStreamId(instance, jobKey)`)
+   *  correlation on completion / disconnect. */
   #unlink(stream: string, state: StreamState): void {
     if (!state.linked) return;
     const jobKey = parseStreamId(stream)?.stream;
@@ -873,7 +874,7 @@ export class RelayTranscriptService {
   }
 
   /**
-   * Reconcile ONE `job:<jobKey>` stream against the engine's view of its job (the poller-owned
+   * Reconcile ONE instance-scoped job stream against the engine's view of its job (the poller-owned
    * completion authority, #691). Asks the engine read model (the {@link ElementInstanceResolver} the
    * #544 link path uses) whether the job is still parked: still parked → genuinely active, kept live;
    * gone → ended (a clean completion whose terminal lifecycle event was missed, or an unclean exit) →
