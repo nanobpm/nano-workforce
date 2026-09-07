@@ -1,3 +1,9 @@
+## [0.183.0](https://github.com/nanobpm/nano-workforce/compare/v0.182.3...v0.183.0) (2026-09-07)
+
+### Features
+
+* **agent:** mark senior:* tasks as engine-native external AgentTasks ([#748](https://github.com/nanobpm/nano-workforce/issues/748)) ([806eea5](https://github.com/nanobpm/nano-workforce/commit/806eea522490a999747ad4814fc92847dab3a6e4)), closes [#464](https://github.com/nanobpm/nano-workforce/issues/464) [#745](https://github.com/nanobpm/nano-workforce/issues/745) [#746](https://github.com/nanobpm/nano-workforce/issues/746) [#747](https://github.com/nanobpm/nano-workforce/issues/747) [Magikcraft/nano-bpm#1137](https://github.com/Magikcraft/nano-bpm/issues/1137)
+
 ## [0.182.3](https://github.com/nanobpm/nano-workforce/compare/v0.182.2...v0.182.3) (2026-09-06)
 
 ### Bug Fixes
