@@ -9,10 +9,9 @@
 // the structurally-derivable goldens at full whole-model parity, park the rest
 // pending an upstream construct, and do NOT relax to node-surface parity):
 //
-//   • `retro` is a GREEN whole-model parity port (see below). The remaining seven
-//     goldens are `blockedReason`-parked, in TWO distinct classes, each awaiting
-//     an upstream `@nanobpm/workflow` (nano-ide) construct + re-release — never a
-//     golden edit and never relaxed acceptance:
+//   • EVERY golden is currently `blockedReason`-parked, in THREE distinct
+//     classes, each awaiting an upstream `@nanobpm/workflow` (nano-ide) construct
+//     + re-release — never a golden edit and never relaxed acceptance:
 //
 //     (1) MULTI top-level start/end (spine-demo, readiness-gate, feature,
 //         merge-loop, plan-fanout, delivery-human). `@nanobpm/workflow` derives EXACTLY
@@ -34,6 +33,19 @@
 //         split. Single start/end is necessary but NOT sufficient. Needs an
 //         arbitrary-graph / explicit-join (named-target) builder — a SUPERSET of
 //         the class-(1) gap.
+//
+//     (3) ENGINE-NATIVE AGENT-TASK MARKER (retro). `retro` clears BOTH classes
+//         above and WAS a green whole-model parity port: its single start/end,
+//         linear pipeline, `deviations?` branch, userTask, data envelopes, prompt
+//         bindings and general `io` mappings all derive faithfully — the complete
+//         port is still authored below, and `derivation-parity.test.ts` proves it
+//         differs from its golden by NOTHING but the marker. Issue #745 then added
+//         `<zeebe:agentDefinition agentType="external" />` to every prompt-bearing
+//         `senior:*` task (a marker `app/agentic/vocab/agent-marker.test.ts`
+//         requires, so the golden cannot drop it), and the published compiler
+//         cannot emit it: `task()` accepts only `{ jobType, prompt, io }`, and no
+//         `agentDefinition`/`agentType` appears anywhere in
+//         `@nanobpm/workflow@0.14.0`. Needs an agent-marker option on `task()`.
 //
 // A resumed run flips any parked model to a real `flow` once the corresponding
 // upstream construct lands and `@nanobpm/workflow` is bumped to carry it.
@@ -60,7 +72,7 @@ export type PortEntry =
       readonly blockedReason: string;
     };
 
-// ── retro (GREEN — whole-model parity) ───────────────────────────────────────
+// ── retro (PARKED — class 3: agent-task marker; the port is otherwise COMPLETE) ─
 // retro is a single-start/single-end model: a linear gather → conformance →
 // record-conformance agent pipeline, a `deviations?` exclusive gateway guarding a
 // conformance-escalation subgraph (nano-workforce #355/#356), then a shared
@@ -72,6 +84,15 @@ export type PortEntry =
 // (nano-ide#405) — `w.task`+`io` for `record-conformance-ack`'s general
 // <zeebe:ioMapping> (inputs `=planKey`→planKey and
 // `=if (is defined(note)) then note else null`→note).
+//
+// The port below is therefore kept WHOLE and exported, not deleted: it is a
+// faithful whole-model derivation whose ONLY divergence from the golden is the
+// `<zeebe:agentDefinition agentType="external" />` marker issue #745 added to the
+// two `senior:*` tasks (class 3 above). `derivation-parity.test.ts` asserts that
+// divergence is exactly the marker, so the moment upstream `task()` grows an
+// agent-marker option this diagnostic fires and the model is un-parked by
+// threading `retroFlow` back into its PORTS entry — a one-line change, with the
+// port already proven correct rather than re-authored from scratch.
 
 /** The typed data envelopes retro's non-agent service tasks lift into the model
  *  (`nano:shape` + `io.nanobpm.dataEnvelope.in`), matching the golden's shapes. */
@@ -96,8 +117,10 @@ const ConformanceRecordIn = envelope("ConformanceRecordIn", {
   summary: { type: "string", optional: true },
 });
 
-/** The code-first port of `resources/processes/retro.bpmn`. */
-const retroFlow: DeclarativeFlow = defineFlow(
+/** The code-first port of `resources/processes/retro.bpmn` — complete but for the
+ *  class-3 agent-task marker, so it is exported for the parity diagnostic that
+ *  pins the divergence to exactly that marker (and parked in PORTS below). */
+export const retroFlow: DeclarativeFlow = defineFlow(
   "retro",
   {
     gather: { in: RetroGatherIn },
@@ -146,9 +169,26 @@ const MULTI_START_END_BLOCK =
   "cannot reproduce. Awaits an upstream terminal/explicit-end (+ multi-start) " +
   "construct in @nanobpm/workflow (nano-ide).";
 
+/** The engine-native AgentTask marker limitation (issue #745), the `blockedReason`
+ *  for a golden whose ONLY underivable feature is `<zeebe:agentDefinition
+ *  agentType="external" />` on its agent service tasks. */
+const AGENT_MARKER_BLOCK =
+  "blocked (agent-task marker): single top-level start/end and a fully " +
+  "structured topology, so this golden derives EXCEPT for the " +
+  "<zeebe:agentDefinition agentType=\"external\" /> marker issue #745 added to " +
+  "its prompt-bearing senior:* tasks — a marker the published compiler cannot " +
+  "emit (task() accepts only { jobType, prompt, io }, and no agentDefinition " +
+  "appears anywhere in @nanobpm/workflow@0.14.0). The golden cannot drop the " +
+  "marker: app/agentic/vocab/agent-marker.test.ts is a defect-class guard " +
+  "requiring it on every deployed prompt-bearing agent task. Proven in the test " +
+  "suite — the complete port (retroFlow, still authored here) differs from the " +
+  "golden by nothing else. Awaits an agent-marker option on task() upstream in " +
+  "@nanobpm/workflow (nano-ide); flip this entry back to `flow: retroFlow` when " +
+  "it lands.";
+
 /** All ports, keyed by model, in the epic's stated authoring order. */
 export const PORTS: readonly PortEntry[] = [
-  { model: "retro", flow: retroFlow },
+  { model: "retro", blockedReason: AGENT_MARKER_BLOCK },
   {
     model: "spine-demo",
     blockedReason: `${MULTI_START_END_BLOCK} (spine-demo: 1 start, 2 ends)`,
