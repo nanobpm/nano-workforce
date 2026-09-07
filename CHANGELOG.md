@@ -1,3 +1,9 @@
+## [0.183.2](https://github.com/nanobpm/nano-workforce/compare/v0.183.1...v0.183.2) (2026-09-07)
+
+### Bug Fixes
+
+* **cockpit:** read transcripts on instance-scoped composeStreamId stream, not job:<jobKey> ([#754](https://github.com/nanobpm/nano-workforce/issues/754)) ([03fabb5](https://github.com/nanobpm/nano-workforce/commit/03fabb57c79c25ac0334bc0bd4a672348e5e507c)), closes [c8ctl-plugin-nano#186](https://github.com/nanobpm/c8ctl-plugin-nano/issues/186) [nano-ide#557](https://github.com/nanobpm/nano-ide/issues/557) [#543](https://github.com/nanobpm/nano-workforce/issues/543) [#738](https://github.com/nanobpm/nano-workforce/issues/738) [#738](https://github.com/nanobpm/nano-workforce/issues/738) [#738](https://github.com/nanobpm/nano-workforce/issues/738) [#543](https://github.com/nanobpm/nano-workforce/issues/543)
+
 ## [0.183.1](https://github.com/nanobpm/nano-workforce/compare/v0.183.0...v0.183.1) (2026-09-07)
 
 ### Bug Fixes
