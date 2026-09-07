@@ -28,6 +28,13 @@ import {
   TerminalSession,
   type TerminalSink,
 } from "@nanobpm/agentic/cockpit";
+import { renderAgentHistory, renderAgentSessions } from "./agent-history-render.ts";
+import {
+  type AgentHistoryReport,
+  type AgentInstanceListReport,
+  agentHistoryView,
+  agentSessionsView,
+} from "./agent-history-view.ts";
 import type { CockpitRoute } from "./cockpit-route.ts";
 import { renderSupply } from "./supply-render.ts";
 import type { SupplyReport, SupplyView } from "./supply-view.ts";
@@ -69,6 +76,23 @@ export interface SupplyCockpitEnv {
    * Required for the "past sessions" replay to work; must be provided together with {@link fetchTranscripts}.
    */
   readonly fetchTranscript?: (stream: string, from?: number) => Promise<TranscriptDataReport>;
+  /**
+   * Fetches the engine-native AgentInstance list (`GET /agentic/agent-instances`, served from
+   * `@nanobpm/urban`'s EngineClient `searchAgentInstances`) for the SETTLED "agent history" panel
+   * (issue #745/#747). Optional: when omitted the agent-history panel is not rendered. Must be
+   * provided together with {@link fetchAgentHistory}. This is the CONSUMER read path — settled history
+   * derives from engine truth keyed by agent-instance / process keys, NOT the slash-bearing relay
+   * stream id (so the #744 gateway-proxy bug class is moot); the relay past-sessions panel above stays
+   * the LIVE overlay only.
+   */
+  readonly fetchAgentInstances?: (processInstanceKey?: string) => Promise<AgentInstanceListReport>;
+  /**
+   * Fetches one AgentInstance's durable conversation history (turns + per-turn metrics) from engine
+   * `searchAgentInstanceHistory` (`GET /agentic/agent-instances/{agentInstanceKey}/history`), for the
+   * historical transcript view. Required for the agent-history panel's drill-in to work; must be
+   * provided together with {@link fetchAgentInstances}.
+   */
+  readonly fetchAgentHistory?: (agentInstanceKey: string) => Promise<AgentHistoryReport>;
   /** Opens a socket to the app relay channel (one per drill-in connection). */
   readonly connectRelay: SocketFactory;
   /** Mounts the terminal widget (xterm.js in the browser) and returns its write sink. */
@@ -117,6 +141,8 @@ export interface SupplyCockpitHandle {
   drill(stream: string): void;
   /** Replay a captured past session's stored transcript statically into the terminal (no live worker). */
   replay(stream: string): Promise<void>;
+  /** View one engine-native agent instance's settled conversation history in the agent-history panel. */
+  viewAgentHistory(agentInstanceKey: string): Promise<void>;
   /** Open a worker's dedicated detail page. */
   openWorker(instance: string): void;
   /** Return to the main worker list. */
@@ -125,6 +151,8 @@ export interface SupplyCockpitHandle {
   readonly currentRoute: CockpitRoute;
   /** The stream currently drilled into or replayed, if any. */
   readonly currentStream: string | undefined;
+  /** The agent instance whose settled history is currently shown in the agent-history panel, if any. */
+  readonly currentAgentInstanceKey: string | undefined;
   /** Whether the terminal is showing a LIVE stream or a REPLAYED transcript (undefined when idle). */
   readonly currentMode: TerminalMode | undefined;
   /** Stop everything and release the terminal connection. */
@@ -147,6 +175,11 @@ class SupplyCockpit implements SupplyCockpitHandle {
   readonly #env: SupplyCockpitEnv;
   readonly #listRegion: ElementLike;
   readonly #pastRegion: ElementLike | undefined;
+  // The engine-native SETTLED agent-history panel (issue #745): a list region (the AgentInstance runs)
+  // and a detail region (a selected instance's ordered conversation turns + metrics). Present only when
+  // the engine agent-history read endpoints are wired. Distinct from #pastRegion (the relay live overlay).
+  readonly #agentRegion: ElementLike | undefined;
+  readonly #agentDetailRegion: ElementLike | undefined;
   // A dedicated volatile region the STRUCTURED derived view (messages, rich tool/diff cards, permission
   // prompts) is mounted into on a replay — beside, and additive to, the byte-level terminal replay
   // (which is left untouched). Present only when the transcript read endpoints are wired.
@@ -182,6 +215,12 @@ class SupplyCockpit implements SupplyCockpitHandle {
   // hung transcripts endpoint can't accumulate pending calls.
   #pastRefreshing = false;
   #pastRefreshPending = false;
+  // Single-flight latch for the agent-history list refresh (mirrors #pastRefreshing), so the poll can
+  // never stack engine agent-instance fetches against a slow/unresponsive read endpoint.
+  #agentRefreshing = false;
+  #agentRefreshPending = false;
+  // The agent instance whose settled history is currently rendered in the detail region, if any.
+  #shownAgentInstanceKey: string | undefined;
   #route: CockpitRoute = { kind: "main" };
   #view: SupplyView | undefined;
   // Bumped by every start()/stop() so an in-flight #tick() from a previous start cycle can't
@@ -216,6 +255,12 @@ class SupplyCockpit implements SupplyCockpitHandle {
     // is an unreachable capability. Require both together (or neither) so a half-wired env fails loudly.
     if ((env.fetchTranscripts === undefined) !== (env.fetchTranscript === undefined)) {
       throw new Error("SupplyCockpitEnv.fetchTranscripts and fetchTranscript must be provided together (or neither)");
+    }
+    // The engine agent-history LIST source and the per-instance HISTORY source are likewise a matched
+    // pair: the panel renders whenever the list source is present, but its rows route through
+    // viewAgentHistory(), which no-ops without the history source. Require both together (or neither).
+    if ((env.fetchAgentInstances === undefined) !== (env.fetchAgentHistory === undefined)) {
+      throw new Error("SupplyCockpitEnv.fetchAgentInstances and fetchAgentHistory must be provided together (or neither)");
     }
     this.#setTimer =
       env.setTimer ??
@@ -255,6 +300,14 @@ class SupplyCockpit implements SupplyCockpitHandle {
       this.#pastRegion = env.doc.createElement("div");
       this.#pastRegion.className = "cockpit-past-region";
     }
+    // The engine-native agent-history panel: a list region + a detail region, present only when the
+    // engine agent-history read endpoints are wired.
+    if (env.fetchAgentInstances !== undefined) {
+      this.#agentRegion = env.doc.createElement("div");
+      this.#agentRegion.className = "cockpit-agent-region";
+      this.#agentDetailRegion = env.doc.createElement("div");
+      this.#agentDetailRegion.className = "cockpit-agent-detail-region";
+    }
     this.#terminalPanel = env.doc.createElement("section");
     this.#terminalPanel.className = "cockpit-terminal";
     this.#terminalPanel.setAttribute("data-terminal-mode", "idle");
@@ -284,12 +337,18 @@ class SupplyCockpit implements SupplyCockpitHandle {
     this.#terminalPanel.appendChild(this.#terminalNote);
     shell.appendChild(this.#listRegion);
     if (this.#pastRegion !== undefined) shell.appendChild(this.#pastRegion);
+    if (this.#agentRegion !== undefined) shell.appendChild(this.#agentRegion);
+    if (this.#agentDetailRegion !== undefined) shell.appendChild(this.#agentDetailRegion);
     shell.appendChild(this.#terminalPanel);
     env.host.appendChild(shell);
   }
 
   get currentStream(): string | undefined {
     return this.#shownStream;
+  }
+
+  get currentAgentInstanceKey(): string | undefined {
+    return this.#shownAgentInstanceKey;
   }
 
   get currentMode(): TerminalMode | undefined {
@@ -350,6 +409,9 @@ class SupplyCockpit implements SupplyCockpitHandle {
     // transcripts endpoint that hangs (not just rejects) would otherwise stall #refresh() forever and
     // wedge the live worker list. #refreshPast is single-flight, so a slow fetch can't pile up either.
     void this.#refreshPast(this.#route.kind === "worker" ? this.#route.instance : undefined);
+    // Same fire-and-forget discipline for the engine agent-history list: a slow/hung read endpoint must
+    // never gate the supply poll's next tick. #refreshAgentHistory is single-flight + bounded.
+    void this.#refreshAgentHistory(this.#route.kind === "worker" ? this.#route.instance : undefined);
   }
 
   #renderRoute(): void {
@@ -410,6 +472,73 @@ class SupplyCockpit implements SupplyCockpitHandle {
         this.#pastRefreshPending = false;
         void this.#refreshPast(this.#route.kind === "worker" ? this.#route.instance : undefined);
       }
+    }
+  }
+
+  /** Fetch + render the engine-native SETTLED agent-history list, when the read endpoints are wired.
+   * Single-flight + bounded (mirrors {@link #refreshPast}): an engine read fault/hang never blocks the
+   * live worker list. The list is engine-global (settled AgentInstances), so it is not route-filtered. */
+  async #refreshAgentHistory(_instance?: string): Promise<void> {
+    const fetchAgentInstances = this.#env.fetchAgentInstances;
+    if (fetchAgentInstances === undefined || this.#agentRegion === undefined) return;
+    if (this.#agentRefreshing) {
+      this.#agentRefreshPending = true;
+      return;
+    }
+    this.#agentRefreshing = true;
+    try {
+      let report: AgentInstanceListReport;
+      try {
+        report = await this.#bounded(() => fetchAgentInstances(), "agent-instances");
+      } catch (err) {
+        if (this.#disposed) return;
+        this.#env.onError?.(err);
+        return;
+      }
+      if (this.#disposed || this.#agentRegion === undefined) return;
+      try {
+        renderAgentSessions(this.#agentRegion, this.#env.doc, agentSessionsView(report), {
+          onSelect: (agentInstanceKey) => void this.viewAgentHistory(agentInstanceKey),
+          ...(this.#shownAgentInstanceKey !== undefined ? { activeInstanceKey: this.#shownAgentInstanceKey } : {}),
+        });
+      } catch (err) {
+        this.#env.onError?.(err);
+      }
+    } finally {
+      this.#agentRefreshing = false;
+      if (this.#agentRefreshPending && !this.#disposed) {
+        this.#agentRefreshPending = false;
+        void this.#refreshAgentHistory();
+      }
+    }
+  }
+
+  /**
+   * Fetch + render one engine-native agent instance's SETTLED conversation history (turns + per-turn /
+   * instance metrics) into the detail region, keyed by `agentInstanceKey` — the CONSUMER read path
+   * (issue #745/#747). Bounded so a hung engine read can't wedge the panel. Read-as-absence: an unknown
+   * key renders an explicit empty history, never an error.
+   */
+  async viewAgentHistory(agentInstanceKey: string): Promise<void> {
+    if (this.#disposed) return;
+    const fetchAgentHistory = this.#env.fetchAgentHistory;
+    if (fetchAgentHistory === undefined || this.#agentDetailRegion === undefined) return;
+    let report: AgentHistoryReport;
+    try {
+      report = await this.#bounded(() => fetchAgentHistory(agentInstanceKey), "agent-history");
+    } catch (err) {
+      if (this.#disposed) return;
+      this.#env.onError?.(err);
+      return;
+    }
+    if (this.#disposed || this.#agentDetailRegion === undefined) return;
+    try {
+      this.#shownAgentInstanceKey = agentInstanceKey;
+      renderAgentHistory(this.#agentDetailRegion, this.#env.doc, agentHistoryView(report));
+      // Re-render the list so the just-selected run shows as active (best-effort).
+      void this.#refreshAgentHistory();
+    } catch (err) {
+      this.#env.onError?.(err);
     }
   }
 

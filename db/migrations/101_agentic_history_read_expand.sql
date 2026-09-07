@@ -1,0 +1,34 @@
+-- Engine-native AgentInstance/AgentHistory read path — EXPAND phase (issue #745/#747, umbrella #746).
+--
+-- The CONSUMER half of the durable-agent-transcript work. The Cockpit HISTORICAL transcript + per-turn
+-- and instance metrics are now sourced from the engine read model (`searchAgentInstances` /
+-- `searchAgentInstanceHistory` / `getAgentInstance` on `@nanobpm/urban`'s EngineClient — urban 0.93 /
+-- nanobpm/nano-ide#563), served by `GET /agentic/agent-instances` and
+-- `GET /agentic/agent-instances/{agentInstanceKey}/history` (app/agentic/agent-history.ts). Settled
+-- history now derives from engine truth, keyed by agent-instance / process-instance / element-instance
+-- keys — never the slash-bearing `job:<jobKey>` relay stream id.
+--
+-- EXPAND / CONTRACT DISCIPLINE (AGENTS.md — forward-only, additive expand; destructive contract later):
+--
+--   • EXPAND (this phase, no schema change): begin sourcing HISTORICAL reads from engine AgentHistory.
+--     The engine read path holds no app-side table (it reads the engine read model over the SDK/broker),
+--     so there is NO new DDL and NOTHING is dropped here. This migration records the transition in the
+--     schema history so the expand phase is an explicit, ordered ledger entry, mirroring the DDL-less
+--     documented-meaning precedent in 013_merge_train_waiting_lane.sql.
+--
+--   • RETAIN (unchanged): the relay transcript tables `agentic_transcript_stream` /
+--     `agentic_transcript_chunk` (024_agentic_transcript.sql) and the `transcript.readUrl` scheme STAY.
+--     They remain the LIVE OVERLAY — the token-granular tail of a still-running agent — which the engine
+--     settled-history read deliberately does NOT replace. Do not drop them here.
+--
+--   • CONTRACT (a LATER, separate phase — tracked, NOT executed here): once nothing reads the relay
+--     tables / the transcript-URL scheme for SETTLED history (i.e. the live overlay is the only remaining
+--     consumer, or it too has moved), a future forward-only migration DROPs `agentic_transcript_*` and
+--     retires the URL scheme. That destructive drop is intentionally deferred behind a release that has
+--     stopped reading the old shape (expand-and-contract), and is tracked as its own issue so the
+--     remainder is a filed, claimable work item rather than invisible prose.
+--     Deferred-to: nanobpm/nano-workforce#755
+--
+-- Additive and idempotent: no column/table is created, altered, or dropped, so it is safe to apply
+-- forward over any earlier schema and re-runs are no-ops.
+SELECT 1;

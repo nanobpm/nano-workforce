@@ -43,6 +43,8 @@
 
 .cockpit-supply-region,
 .cockpit-past-region,
+.cockpit-agent-region,
+.cockpit-agent-detail-region,
 .cockpit-terminal {
   background: var(--cockpit-panel);
   border: 1px solid var(--cockpit-edge);
@@ -241,6 +243,108 @@
 .cockpit-past-empty {
   color: var(--cockpit-muted);
   padding: 8px 0;
+}
+
+/* ── Agent history (engine-native settled AgentInstance/AgentHistory, #745/#747). ─────────────── */
+
+.cockpit-agent-header,
+.cockpit-agent-transcript-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.cockpit-agent-title,
+.cockpit-agent-transcript-title {
+  font-size: 13px;
+  margin: 0;
+  color: var(--cockpit-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.cockpit-agent-summary,
+.cockpit-agent-transcript-metrics {
+  color: var(--cockpit-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.cockpit-agent-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+}
+
+.cockpit-agent-select {
+  background: none;
+  border: none;
+  color: var(--cockpit-text);
+  cursor: pointer;
+  font: inherit;
+  padding: 0;
+  text-align: left;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.cockpit-agent-select:hover { color: #58a6ff; }
+
+.cockpit-agent-session[data-active="true"] {
+  background: rgba(88, 166, 255, 0.12);
+}
+
+.cockpit-agent-status { color: var(--cockpit-muted); }
+.cockpit-agent-metrics { color: var(--cockpit-muted); font-size: 12px; }
+.cockpit-agent-captured { color: var(--cockpit-muted); font-size: 12px; }
+
+.cockpit-agent-empty,
+.cockpit-agent-transcript-empty {
+  color: var(--cockpit-muted);
+  padding: 8px 0;
+}
+
+.cockpit-agent-turn {
+  border-top: 1px solid var(--cockpit-edge);
+  padding: 8px 0;
+}
+
+.cockpit-agent-turn-meta {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  margin-bottom: 4px;
+}
+
+.cockpit-agent-turn-role {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #58a6ff;
+}
+
+.cockpit-agent-turn-iter,
+.cockpit-agent-turn-metrics {
+  font-size: 11px;
+  color: var(--cockpit-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.cockpit-agent-turn-text {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font: inherit;
+}
+
+.cockpit-agent-turn-tools {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  color: var(--cockpit-muted);
+  font-size: 12px;
 }
 
 /* ── Worker detail route (#/cockpit/worker/<instance>): header + current job + filtered history. ── */

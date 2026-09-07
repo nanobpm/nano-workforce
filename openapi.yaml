@@ -1002,6 +1002,250 @@ components:
           description: The retained chunks with `offset >= from`, in offset order.
           items:
             $ref: "#/components/schemas/AgenticTranscriptChunk"
+    AgentInstanceMetrics:
+      type: object
+      description: >-
+        Aggregated metrics the engine rolls up on an AgentInstance across all of its model
+        calls (issue #745/#747 — the CONSUMER half). Total tokens consumed, and the count of model /
+        tool calls made. Distinct from the per-turn metrics carried on an AgentHistoryRecord.
+      required:
+        - inputTokens
+        - outputTokens
+        - modelCalls
+        - toolCalls
+      properties:
+        inputTokens:
+          type: integer
+          description: Total input (prompt) tokens consumed across the instance's model calls.
+        outputTokens:
+          type: integer
+          description: Total output (completion) tokens produced across the instance's model calls.
+        modelCalls:
+          type: integer
+          description: The number of LLM model calls the agent made.
+        toolCalls:
+          type: integer
+          description: The number of tool calls the agent dispatched.
+    AgentInstance:
+      type: object
+      description: >-
+        One engine-native AgentInstance as `searchAgentInstances` / `getAgentInstance` report
+        it (issue #745/#747, umbrella #746 — Camunda 8.10 parity). The durable projection of an agent
+        task's run, minted by the worker harness against the `<zeebe:agentDefinition agentType="external"/>`
+        marker (#748). Keyed by `agentInstanceKey` (passed to the history read) and correlated by
+        process / element-instance keys — NEVER the slash-bearing `job:<jobKey>` relay stream id.
+      required:
+        - agentInstanceKey
+        - status
+        - processInstanceKey
+      properties:
+        agentInstanceKey:
+          type: string
+          description: The engine-unique agent-instance key — the identity a caller passes to the history read.
+        status:
+          type: string
+          description: The lifecycle status (the engine's broad `AgentInstanceStatusEnum` — e.g.
+            INITIALIZING / THINKING / TOOL_CALLING / IDLE / COMPLETED), a bare string.
+        processInstanceKey:
+          type: string
+          description: The owning process-instance key.
+        elementId:
+          type: string
+          description: The BPMN element id (the AI-agent task) that owns the instance, when reported.
+        elementInstanceKeys:
+          type: array
+          description: The engine element-instance keys the instance's token(s) occupied (#544) — per-occupancy
+            handles, unambiguous across a looping / retried activity. Omitted when the engine reports none.
+          items:
+            type: string
+        rootProcessInstanceKey:
+          type: string
+          description: The root process-instance key of the owning hierarchy, when reported.
+        processDefinitionKey:
+          type: string
+          description: The owning process-definition key, when reported.
+        processDefinitionId:
+          type: string
+          description: The owning process-definition id, when reported.
+        metrics:
+          $ref: "#/components/schemas/AgentInstanceMetrics"
+        creationDate:
+          type: string
+          description: When the instance was created, ISO-8601, when reported.
+        lastUpdatedDate:
+          type: string
+          description: When the instance was last updated, ISO-8601, when reported.
+        completionDate:
+          type: string
+          description: When the instance completed, ISO-8601 (absent while still running).
+    AgentInstanceList:
+      type: object
+      description: >-
+        The list of engine-native agent instances (issue #745/#747), newest-created first —
+        the cockpit "historical sessions" feed sourced from engine history (not the relay store).
+      required:
+        - count
+        - instances
+      properties:
+        count:
+          type: integer
+          description: The number of instances returned (after any filters).
+        generatedAt:
+          type: string
+          description: When this snapshot was taken, ISO-8601.
+        instances:
+          type: array
+          items:
+            $ref: "#/components/schemas/AgentInstance"
+    AgentHistoryContentBlock:
+      type: object
+      description: One typed content block in a turn's message (Camunda `AgentHistoryMessageContentValue`
+        parity). Exactly one payload is populated per `contentType`.
+      required:
+        - contentType
+      properties:
+        contentType:
+          type: string
+          enum: [TEXT, DOCUMENT, OBJECT, UNSPECIFIED]
+          description: The content type; selects which payload field is populated.
+        text:
+          type: string
+          description: Text payload; populated when `contentType` is TEXT.
+        documentReference:
+          type: string
+          description: Document reference; populated when `contentType` is DOCUMENT.
+        object:
+          description: JSON value payload (any JSON type); populated when `contentType` is OBJECT.
+    AgentHistoryToolCall:
+      type: object
+      description: A tool call embedded in a turn (Camunda `AgentHistoryEmbeddedToolCallValue` parity).
+      required:
+        - toolCallId
+        - toolName
+        - arguments
+      properties:
+        toolCallId:
+          type: string
+          description: The stable tool-call id (pairs a call to its result).
+        toolName:
+          type: string
+          description: The tool that was called.
+        elementId:
+          type: string
+          description: The tool task's BPMN element id, when reported.
+        arguments:
+          type: object
+          description: The arguments passed to the tool (an arbitrary JSON object).
+          additionalProperties: true
+    AgentHistoryTurnMetrics:
+      type: object
+      description: Per-turn metrics (Camunda `AgentHistoryMetricsValue` parity) — the token counts a
+        single turn's LLM call consumed/produced and its wall-clock duration. Distinct from the
+        instance-level `AgentInstanceMetrics`.
+      required:
+        - inputTokens
+        - outputTokens
+        - reasoningTokenCount
+        - cacheCreationTokenCount
+        - cacheReadTokenCount
+        - durationMs
+      properties:
+        inputTokens:
+          type: integer
+        outputTokens:
+          type: integer
+        reasoningTokenCount:
+          type: integer
+        cacheCreationTokenCount:
+          type: integer
+        cacheReadTokenCount:
+          type: integer
+        durationMs:
+          type: integer
+    AgentHistoryRecord:
+      type: object
+      description: >-
+        One agent-instance history item (a turn) as `searchAgentInstanceHistory` reports it
+        (issue #745/#747) — the projection of the engine's `AgentInstanceHistoryItemResult`, i.e. one
+        Camunda `AgentHistoryRecordValue`. Its conversation grammar reuses the transcript parity types,
+        so the engine-read seam and the relay transcript store project the SAME shape (No Drift Surfaces).
+      required:
+        - historyItemKey
+        - agentInstanceKey
+        - loopIteration
+        - role
+        - content
+        - toolCalls
+        - commitStatus
+      properties:
+        historyItemKey:
+          type: string
+          description: The stable, creation-ordered identity of the history item.
+        agentInstanceKey:
+          type: string
+          description: The owning agent-instance key.
+        loopIteration:
+          type: integer
+          description: The agent-loop counter (one LLM call + its tool dispatches + results share an iteration).
+        role:
+          type: string
+          enum: [USER, ASSISTANT, TOOL_RESULT, CONFIGURATION, UNSPECIFIED]
+          description: The conversation role of the turn.
+        content:
+          type: array
+          description: The turn's typed content blocks.
+          items:
+            $ref: "#/components/schemas/AgentHistoryContentBlock"
+        toolCalls:
+          type: array
+          description: The tool calls embedded in the turn.
+          items:
+            $ref: "#/components/schemas/AgentHistoryToolCall"
+        metrics:
+          $ref: "#/components/schemas/AgentHistoryTurnMetrics"
+        commitStatus:
+          type: string
+          description: The engine's COMMITTED / PENDING / DISCARDED commit flag (a bare string).
+        elementInstanceKey:
+          type: string
+          description: The element instance the item was produced under, when reported (best-effort).
+        jobKey:
+          type: string
+          description: The job key the item was produced under, when reported (best-effort).
+        producedAt:
+          type: string
+          description: When the item was produced, ISO-8601, when reported (best-effort).
+    AgentHistory:
+      type: object
+      description: >-
+        One agent instance's durable conversation history (turns + per-turn metrics) sourced
+        from engine `searchAgentInstanceHistory` (issue #745/#747), in conversational order. The cockpit
+        renders the HISTORICAL transcript + metrics from this; the token-granular relay stays the LIVE
+        overlay only. Keyed by `agentInstanceKey` — never the slash-bearing relay stream id (#744 moot).
+      required:
+        - agentInstanceKey
+        - count
+        - records
+      properties:
+        agentInstanceKey:
+          type: string
+          description: The agent-instance key this history belongs to.
+        count:
+          type: integer
+          description: The number of history records (turns) returned.
+        generatedAt:
+          type: string
+          description: When this snapshot was taken, ISO-8601.
+        instance:
+          allOf:
+            - $ref: "#/components/schemas/AgentInstance"
+          description: The owning instance summary (rolled-up metrics + lifecycle), when the engine still
+            reports it. Absent when the instance is unknown/aged out.
+        records:
+          type: array
+          description: The history records (turns), ordered by loopIteration then creation-ordered key.
+          items:
+            $ref: "#/components/schemas/AgentHistoryRecord"
     VersionInfo:
       type: object
       description: The running app's identity (which code is actually live).
@@ -3941,6 +4185,122 @@ paths:
                 $ref: "#/components/schemas/ErrorBody"
         "404":
           description: No transcript exists for the given stream.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+  /agentic/agent-instances:
+    get:
+      operationId: listAgentInstances
+      summary: >-
+        List engine-native AgentInstances (issue #745/#747, umbrella #746) — the durable agent-task
+        runs the worker harness minted against the `<zeebe:agentDefinition agentType="external"/>` marker,
+        read back from the engine read model (`searchAgentInstances`), newest-created first. Keyed/filtered
+        by process / element / status — NOT the slash-bearing relay stream id. Advisory read-only; never
+        gates control flow. Feeds the cockpit "historical sessions" view (settled history = engine; live
+        tail = relay overlay). Read-as-absence — an engine with no AgentInstance channel returns an empty list.
+      security:
+        - hookSecret: []
+        - {}
+      parameters:
+        - name: processInstanceKey
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Return only agent instances owned by this process instance.
+        - name: rootProcessInstanceKey
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Return only agent instances in this root process-instance hierarchy.
+        - name: elementId
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Return only agent instances owned by this BPMN element (the AI-agent task).
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Return only agent instances in this lifecycle status (the engine's `AgentInstanceStatusEnum`).
+      responses:
+        "200":
+          description: The engine-native agent instances matching the filters.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentInstanceList"
+        "401":
+          description: Missing/invalid shared secret (only when NANO_PR_WEBHOOK_SECRET is set).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+        "503":
+          description: No engine read path available (no engine client configured).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+  /agentic/agent-instances/{agentInstanceKey}/history:
+    get:
+      operationId: getAgentInstanceHistory
+      summary: >-
+        Fetch one AgentInstance's durable conversation history (turns + per-turn metrics) from
+        engine `searchAgentInstanceHistory` (issue #745/#747), in conversational order, with the owning
+        instance's rolled-up metrics when still reported. The cockpit renders the HISTORICAL transcript +
+        metrics from this — keyed by `agentInstanceKey`, never the slash-bearing relay stream id (#744
+        moot). Advisory read-only; never gates control flow. Read-as-absence — an unknown key / an engine
+        with no AgentHistory channel returns an empty history.
+      security:
+        - hookSecret: []
+        - {}
+      parameters:
+        - name: agentInstanceKey
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The engine agent-instance key whose history to read (from `listAgentInstances`).
+        - name: role
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [USER, ASSISTANT, TOOL_RESULT, CONFIGURATION, UNSPECIFIED]
+          description: Only turns with this conversation role (only the engine-side subset
+            USER / ASSISTANT / TOOL_RESULT is forwarded as a filter).
+        - name: loopIteration
+          in: query
+          required: false
+          schema:
+            type: integer
+          description: Only turns produced in this agent-loop iteration.
+        - name: elementInstanceKey
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Only turns produced under this element instance.
+      responses:
+        "200":
+          description: The agent instance's history (turns + metrics), possibly empty.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentHistory"
+        "401":
+          description: Missing/invalid shared secret (only when NANO_PR_WEBHOOK_SECRET is set).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+        "503":
+          description: No engine read path available (no engine client configured).
           content:
             application/json:
               schema:
