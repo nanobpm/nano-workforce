@@ -1,32 +1,36 @@
 // Unit tests for the jobKey ⇄ process/plan correlation registry (ADR 0056, H6 / #149).
 //
 // The registry is the single canonical join the cockpit uses to line a worker's terminal up with the
-// process instance / plan it belongs to. These tests pin: the `job:<jobKey>` stream convention; the
-// two derived-from-one-write projections (instance→jobKeys and jobKey→context) staying consistent
-// across link / re-link (move) / releaseJob / releaseInstance; the presence `jobKeysFor` seam; the
-// drill `primaryStreamFor`; and the sorted snapshot.
+// process instance / plan it belongs to. These tests pin: the instance-scoped `composeStreamId`
+// transcript-stream convention (issue #738); the two derived-from-one-write projections
+// (instance→jobKeys and jobKey→context) staying consistent across link / re-link (move) / releaseJob /
+// releaseInstance; the presence `jobKeysFor` seam; the drill `primaryStreamFor`; and the sorted snapshot.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
+import { composeStreamId, parseStreamId } from "@nanobpm/agentic/emit";
 import {
   CorrelationRegistry,
   currentCorrelation,
   JOB_STREAM_PREFIX,
-  jobKeyOfStream,
   jobStream,
   setCurrentCorrelation,
 } from "./correlation.ts";
 
-test("jobStream / jobKeyOfStream are inverse over the job: convention", () => {
+test("jobStream builds the bare, slash-free job: id retained for the aux (Explorer/permission) surfaces", () => {
   assert.equal(jobStream("6494"), `${JOB_STREAM_PREFIX}6494`);
-  assert.equal(jobKeyOfStream(jobStream("6494")), "6494");
-  assert.equal(jobKeyOfStream("wk-a"), undefined);
-  // A bare `job:` prefix carries no jobKey, so it maps to undefined (not "") — an empty jobKey is
-  // invalid (link() ignores it), so callers never mistake it for a valid key.
-  assert.equal(jobKeyOfStream("job:"), undefined);
+  assert.equal(JOB_STREAM_PREFIX, "job:");
 });
 
-test("link records context and both projections; resolve carries the job: stream", () => {
+test("the transcript stream is the instance-scoped composeStreamId id, round-tripped by parseStreamId (#738)", () => {
+  const stream = composeStreamId("wk-a", "6494");
+  const ref = parseStreamId(stream);
+  assert.ok(ref);
+  assert.equal(ref.instance, "wk-a");
+  assert.equal(ref.stream, "6494");
+});
+
+test("link records context and both projections; resolve carries the instance-scoped stream", () => {
   const reg = new CorrelationRegistry();
   reg.link("wk-a", "6494", { processInstanceKey: "4612", bpmnProcessId: "plan-fanout", elementId: "implement-task", planKey: "o/r#142" });
 
@@ -34,7 +38,7 @@ test("link records context and both projections; resolve carries the job: stream
   const c = reg.resolve("6494");
   assert.ok(c);
   assert.equal(c.jobKey, "6494");
-  assert.equal(c.stream, "job:6494");
+  assert.equal(c.stream, composeStreamId("wk-a", "6494"));
   assert.equal(c.processInstanceKey, "4612");
   assert.equal(c.bpmnProcessId, "plan-fanout");
   assert.equal(c.elementId, "implement-task");
@@ -54,7 +58,7 @@ test("attachElementInstance enriches a linked job's context, preserving every ot
   assert.equal(c.elementId, "agent");
   assert.equal(c.planKey, "o/r#142");
   assert.equal(c.jobKey, "6494");
-  assert.equal(c.stream, "job:6494");
+  assert.equal(c.stream, composeStreamId("wk-a", "6494"));
 });
 
 test("attachElementInstance is a no-op for a released (or never-linked) job or an empty key (#544)", () => {
@@ -145,7 +149,7 @@ test("primaryStreamFor picks the lowest-sorted job's stream; undefined when none
   assert.equal(reg.primaryStreamFor("wk-a"), undefined);
   reg.link("wk-a", "50");
   reg.link("wk-a", "10");
-  assert.equal(reg.primaryStreamFor("wk-a"), "job:10");
+  assert.equal(reg.primaryStreamFor("wk-a"), composeStreamId("wk-a", "10"));
 });
 
 test("snapshot returns every job sorted by jobKey", () => {
@@ -156,7 +160,11 @@ test("snapshot returns every job sorted by jobKey", () => {
   const snap = reg.snapshot();
   assert.equal(snap.count, 3);
   assert.deepEqual(snap.correlations.map((c) => c.jobKey), ["10", "20", "30"]);
-  assert.deepEqual(snap.correlations.map((c) => c.stream), ["job:10", "job:20", "job:30"]);
+  assert.deepEqual(snap.correlations.map((c) => c.stream), [
+    composeStreamId("wk-b", "10"),
+    composeStreamId("wk-c", "20"),
+    composeStreamId("wk-a", "30"),
+  ]);
 });
 
 test("link with no context leaves optional fields unset (no undefined holes)", () => {

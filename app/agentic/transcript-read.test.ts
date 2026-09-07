@@ -8,9 +8,15 @@ import { test } from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import type { SqliteDb, TranscriptRing, TranscriptStore, TranscriptStream } from "@nanobpm/agentic/transcript";
 import { assert, assertEquals } from "#test-assert";
+import { composeStreamId } from "@nanobpm/agentic/emit";
 import { AgenticCorrelationStore } from "./correlation-store.ts";
 import { CorrelationRegistry } from "./correlation.ts";
 import { correlationFieldsFor, listTranscripts, readTranscriptFrom } from "./transcript-read.ts";
+
+/** The instance-scoped transcript stream id a job's terminal is stored under (issue #738); the jobKey
+ *  is the stream part `parseStreamId` recovers. The worker instance is fixed here where it is immaterial
+ *  to the assertion (the durable filters key off the recorded row's instance, not the stream's). */
+const s = (jobKey: string): string => composeStreamId("w", jobKey);
 
 /** A read-only TranscriptStore double: list() returns the seeded metas; read() has no retained chunks. */
 function fakeStore(metas: TranscriptStream[]): TranscriptStore {
@@ -90,7 +96,7 @@ test("durable fallback: a released (past) job is attributed from the durable sto
   const durable = new AgenticCorrelationStore(memoryStore());
   durable.record({
     jobKey: "k1",
-    stream: "job:k1",
+    stream: s("k1"),
     instance: "worker-A",
     identity: "gpu-box-7",
     host: "us-east-1a",
@@ -99,7 +105,7 @@ test("durable fallback: a released (past) job is attributed from the durable sto
     completedAt: mid,
   });
 
-  const fields = correlationFieldsFor("job:k1", undefined, durable);
+  const fields = correlationFieldsFor(s("k1"), undefined, durable);
   assertEquals(fields.jobKey, "k1");
   assertEquals(fields.instance, "worker-A");
   assertEquals(fields.identity, "gpu-box-7");
@@ -111,16 +117,16 @@ test("durable fallback: a released (past) job is attributed from the durable sto
 test("#544: the durable element-instance key surfaces on the read projection and its filter", () => {
   const durable = new AgenticCorrelationStore(memoryStore());
   // Two iterations of the SAME static element (`agent`) — distinct element instances, distinct jobKeys.
-  durable.record({ jobKey: "k1", stream: "job:k1", instance: "worker-A", elementId: "agent", elementInstanceKey: "ei-1", completedAt: early });
-  durable.record({ jobKey: "k2", stream: "job:k2", instance: "worker-A", elementId: "agent", elementInstanceKey: "ei-2", completedAt: late });
+  durable.record({ jobKey: "k1", stream: s("k1"), instance: "worker-A", elementId: "agent", elementInstanceKey: "ei-1", completedAt: early });
+  durable.record({ jobKey: "k2", stream: s("k2"), instance: "worker-A", elementId: "agent", elementInstanceKey: "ei-2", completedAt: late });
 
   // The key surfaces on the correlation fields (durable fallback, live registry empty).
-  assertEquals(correlationFieldsFor("job:k1", undefined, durable).elementInstanceKey, "ei-1");
+  assertEquals(correlationFieldsFor(s("k1"), undefined, durable).elementInstanceKey, "ei-1");
 
-  const store = fakeStore([meta("job:k1", early), meta("job:k2", late)]);
+  const store = fakeStore([meta(s("k1"), early), meta(s("k2"), late)]);
   // The elementInstanceKey filter resolves a session to ONE occupancy, where the elementId cannot.
   const out = listTranscripts(store, undefined, { elementInstanceKey: "ei-2" }, durable);
-  assertEquals(out.map((t) => t.stream), ["job:k2"], "only the ei-2 occupancy matches");
+  assertEquals(out.map((t) => t.stream), [s("k2")], "only the ei-2 occupancy matches");
   assertEquals(out[0].elementInstanceKey, "ei-2", "the projection carries the element-instance key");
 });
 
@@ -129,22 +135,22 @@ test("#544: the live correlation's element-instance key takes precedence over th
   registry.link("worker-A", "k1", { elementId: "agent" });
   registry.attachElementInstance("k1", "ei-live");
   const durable = new AgenticCorrelationStore(memoryStore());
-  durable.record({ jobKey: "k1", stream: "job:k1", instance: "worker-A", elementInstanceKey: "ei-old", completedAt: mid });
+  durable.record({ jobKey: "k1", stream: s("k1"), instance: "worker-A", elementInstanceKey: "ei-old", completedAt: mid });
 
-  assertEquals(correlationFieldsFor("job:k1", registry, durable).elementInstanceKey, "ei-live");
+  assertEquals(correlationFieldsFor(s("k1"), registry, durable).elementInstanceKey, "ei-live");
 });
 
 test("listTranscripts: the instance filter returns only sessions the durable store attributes to that worker", () => {
-  const store = fakeStore([meta("job:k1", early), meta("job:k2", mid), meta("job:k3", late)]);
+  const store = fakeStore([meta(s("k1"), early), meta(s("k2"), mid), meta(s("k3"), late)]);
   const durable = new AgenticCorrelationStore(memoryStore());
-  durable.record({ jobKey: "k1", stream: "job:k1", instance: "worker-A", completedAt: early });
-  durable.record({ jobKey: "k2", stream: "job:k2", instance: "worker-B", completedAt: mid });
-  durable.record({ jobKey: "k3", stream: "job:k3", instance: "worker-A", completedAt: late });
+  durable.record({ jobKey: "k1", stream: s("k1"), instance: "worker-A", completedAt: early });
+  durable.record({ jobKey: "k2", stream: s("k2"), instance: "worker-B", completedAt: mid });
+  durable.record({ jobKey: "k3", stream: s("k3"), instance: "worker-A", completedAt: late });
 
   const out = listTranscripts(store, undefined, { instance: "worker-A" }, durable);
   assertEquals(
     out.map((t) => t.stream),
-    ["job:k3", "job:k1"],
+    [s("k3"), s("k1")],
     "only worker-A's sessions, newest-first",
   );
   assert(out.every((t) => t.instance === "worker-A"), "each row is attributed to worker-A");
@@ -183,7 +189,7 @@ test("readTranscriptFrom: falls back to the live ring when the durable store has
     { offset: 0, chunk: "hello " },
     { offset: 1, chunk: "world" },
   ]);
-  const out = readTranscriptFrom("job:live1", 0, getStore(undefined), undefined, undefined, {
+  const out = readTranscriptFrom(s("live1"), 0, getStore(undefined), undefined, undefined, {
     ring,
     createdAt: mid,
   });

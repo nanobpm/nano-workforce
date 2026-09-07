@@ -21,6 +21,7 @@
 // is untouched — the agentic channel is the only new conversation; advisory semantics preserved (the
 // relay/transcript never hard-lock or gate a BPMN sequence flow).
 import type { ConnectionRegistry } from "@nanobpm/agentic/channel";
+import { parseStreamId } from "@nanobpm/agentic/emit";
 import type { Frame } from "@nanobpm/agentic/protocol";
 import { RELAY_FAMILY, RelayHub, type RelayHubOptions } from "@nanobpm/agentic/relay";
 import {
@@ -37,7 +38,7 @@ import {
   type TranscriptVocab,
 } from "@nanobpm/agentic/transcript";
 import type { Logger } from "@nanobpm/urban";
-import { currentCorrelation, type JobContext, type JobCorrelation, jobKeyOfStream } from "../correlation.ts";
+import { currentCorrelation, type JobContext, type JobCorrelation } from "../correlation.ts";
 import { AgenticCorrelationStore } from "../correlation-store.ts";
 import type { ElementInstanceResolver } from "../element-instance.ts";
 import type { AgenticContext, AgenticFamily } from "../registry.ts";
@@ -609,17 +610,18 @@ export class RelayTranscriptService {
   }
 
   /**
-   * H6 write-side (#149): on the first `produce` for a `job:<jobKey>` stream, link the producing
-   * worker instance → jobKey in the correlation registry, from data already crossing the wire (the
-   * jobKey is decoded from the stream id; the instance is resolved from the producing connection).
-   * That lights up the worker's `jobKeys` in the supply feed and repoints its drill stream at the
-   * jobKey-scoped relay stream. Idempotent per stream; retries on a later frame while the producer's
-   * presence instance is not yet resolvable (a register/produce race). Advisory — never throws into
-   * the frame handler.
+   * H6 write-side (#149): on the first `produce` for an instance-scoped job stream
+   * (`composeStreamId(instance, jobKey)`), link the producing worker instance → jobKey in the
+   * correlation registry, from data already crossing the wire (the jobKey is decoded from the stream
+   * id via `parseStreamId`; the instance is resolved from the producing connection). That lights up
+   * the worker's `jobKeys` in the supply feed and repoints its drill stream at the instance-scoped
+   * relay stream the producer actually writes under (issue #738). Idempotent per stream; retries on a
+   * later frame while the producer's presence instance is not yet resolvable (a register/produce
+   * race). Advisory — never throws into the frame handler.
    */
   #link(stream: string, connectionId: string, state: StreamState): void {
     if (state.linked) return;
-    const jobKey = jobKeyOfStream(stream);
+    const jobKey = parseStreamId(stream)?.stream;
     if (jobKey === undefined) return;
     const instance = this.#instanceForConnection(connectionId);
     if (instance === undefined || instance === "") return;
@@ -700,7 +702,7 @@ export class RelayTranscriptService {
   /** H6 write-side (#149): release a `job:<jobKey>` stream's correlation on completion / disconnect. */
   #unlink(stream: string, state: StreamState): void {
     if (!state.linked) return;
-    const jobKey = jobKeyOfStream(stream);
+    const jobKey = parseStreamId(stream)?.stream;
     if (jobKey === undefined) return;
     try {
       // Persist the completed job's durable worker attribution + (best-effort) engine context BEFORE
@@ -791,7 +793,7 @@ export class RelayTranscriptService {
         // relay-connection layer (the old presence heuristic, #690) conflates two independent liveness
         // signals (engine lease vs. WS connection); the authoritative one is the engine job-state the
         // poller already reconciles (#691).
-        if (this.#resolveElementInstance !== undefined && jobKeyOfStream(stream) !== undefined) {
+        if (this.#resolveElementInstance !== undefined && parseStreamId(stream)?.stream !== undefined) {
           // Engine/poller-owned completion (#691): drop the dead producer so `#reconcile` does not
           // re-trigger on every subsequent frame, then reconcile THIS stream against the engine's view
           // of its job (fire-and-forget — the sync frame handler must not await an engine read). A
@@ -858,7 +860,7 @@ export class RelayTranscriptService {
     const streams: string[] = [];
     for (const [stream, state] of this.#streams) {
       if (state.completed) continue;
-      if (jobKeyOfStream(stream) === undefined) continue;
+      if (parseStreamId(stream)?.stream === undefined) continue;
       // Include UNLINKED job streams too (#708). The disconnect path (#691) routes an unlinked
       // job stream through the engine reconcile and clears `state.producer`, so if the engine
       // reports "still parked" at disconnect (or the read faults transiently) and the worker never
@@ -895,7 +897,7 @@ export class RelayTranscriptService {
     if (resolve === undefined) return;
     const before = this.#streams.get(stream);
     if (before === undefined || before.completed) return;
-    const jobKey = jobKeyOfStream(stream);
+    const jobKey = parseStreamId(stream)?.stream;
     if (jobKey === undefined) return;
     const processInstanceKey = this.#correlation()?.resolve?.(jobKey)?.processInstanceKey;
     let activeKey: string | undefined;

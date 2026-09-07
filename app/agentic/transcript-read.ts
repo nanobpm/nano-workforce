@@ -9,14 +9,16 @@
 // Correlation is BEST-EFFORT and advisory: the correlation registry is in-memory and only holds
 // currently-linked jobs, so a completed session's process-instance / plan context is present only
 // while the job is still live. The jobKey itself is always recoverable — it is encoded in the stream
-// id (`job:<jobKey>`), so a past session is never anonymous even once its correlation has been released.
+// id (`composeStreamId(instance, jobKey)`, decoded with `parseStreamId`), so a past session is never
+// anonymous even once its correlation has been released.
 //
 // Pure and side-effect-free apart from reading the store: no I/O beyond the injected store, so it is
 // unit-testable on the injected env (Node, no browser), and never touches the engine or a BPMN flow.
 
+import { parseStreamId } from "@nanobpm/agentic/emit";
 import type { TranscriptChunk, TranscriptRing, TranscriptStore, TranscriptStream } from "@nanobpm/agentic/transcript";
 import type { AgenticTranscript, AgenticTranscriptData, ErrorBody } from "../../nano-generated/api-io.d.ts";
-import { type CorrelationRegistry, jobKeyOfStream } from "./correlation.ts";
+import type { CorrelationRegistry } from "./correlation.ts";
 import type { AgenticCorrelationStore } from "./correlation-store.ts";
 import type { RelayTranscriptService } from "./families/relay.family.ts";
 import { utf8ByteLength } from "./transcript-events.ts";
@@ -46,8 +48,8 @@ interface CorrelationFields {
 }
 
 /**
- * Resolve a stream id to its correlation fields. The jobKey is always decoded from a `job:<jobKey>`
- * stream id. Engine context (process instance / plan) + worker attribution (instance / identity /
+ * Resolve a stream id to its correlation fields. The jobKey is always decoded from the instance-scoped
+ * stream id (`composeStreamId(instance, jobKey)`) via {@link parseStreamId}. Engine context (process instance / plan) + worker attribution (instance / identity /
  * host) come from the LIVE registry while the job is still linked, and fall back to the DURABLE store
  * (`AgenticCorrelationStore`) once the job has completed and its live correlation was released — so a
  * PAST session stays attributable to its worker after the worker exits or the process restarts.
@@ -58,7 +60,7 @@ export function correlationFieldsFor(
   correlation: CorrelationRegistry | undefined,
   durable?: AgenticCorrelationStore | undefined,
 ): CorrelationFields {
-  const jobKey = jobKeyOfStream(stream);
+  const jobKey = parseStreamId(stream)?.stream;
   if (jobKey === undefined) return {};
   const fields: CorrelationFields = { jobKey };
   const context = correlation?.resolve(jobKey);

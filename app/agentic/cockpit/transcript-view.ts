@@ -41,7 +41,7 @@ export interface TranscriptListReport {
 
 /** One past-session row in the renderable history view. */
 export interface TranscriptView {
-  /** The relay stream id to replay (`job:<jobKey>` for a job stream). */
+  /** The relay stream id to replay (`composeStreamId(instance, jobKey)` for a job stream, issue #738). */
   readonly stream: string;
   /** A single stable human label for the session's process instance / plan (falls back to the stream). */
   readonly label: string;

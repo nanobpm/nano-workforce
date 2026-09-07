@@ -12,6 +12,7 @@ import { encodeFrame, type Frame } from "@nanobpm/agentic/protocol";
 import type { SqliteDb } from "@nanobpm/agentic/presence";
 import type { AppApi, DataLayer } from "@nanobpm/urban";
 import { assert, assertEquals } from "#test-assert";
+import { composeStreamId, parseStreamId } from "@nanobpm/agentic/emit";
 import { currentClaimRegistry } from "../app/agentic/claim-registry.ts";
 import { currentCorrelation } from "../app/agentic/correlation.ts";
 import { family as claimFamily } from "../app/agentic/families/claim.family.ts";
@@ -172,7 +173,7 @@ test("#713: a claim populates jobKeys and repoints the drill stream with ZERO tr
     assertEquals(res.status, 200);
     const w = res.body.workers[0];
     assertEquals(w.jobKeys, ["8420"], "the claim registry feeds the jobKeys seam");
-    assertEquals(w.stream, "job:8420", "the drill stream repoints at the claimed job, keyed by the claim");
+    assertEquals(w.stream, composeStreamId("wk-a", "8420"), "the drill stream repoints at the claimed job, keyed by the claim");
     assertEquals(res.body.correlations.length, 0, "no correlation context until a terminal lands (drill-in only)");
   } finally {
     claimFamily.teardown?.();
@@ -210,12 +211,50 @@ test("#713: the correlation registry is demoted to drill-in context — a link a
     assertEquals(res.body.correlations.length, 1);
     const c = res.body.correlations[0];
     assertEquals(c.jobKey, "6494");
-    assertEquals(c.stream, "job:6494");
+    assertEquals(c.stream, composeStreamId("wk-a", "6494"));
     assertEquals(c.processInstanceKey, "4612");
     assertEquals(c.bpmnProcessId, "plan-fanout");
     assertEquals(c.planKey, "o/r#142");
   } finally {
     correlationFamily.teardown?.();
+    family.teardown?.();
+    await hub.close();
+  }
+});
+
+test("#738 drift: the supply advertises the producer's instance-scoped stream id, round-tripping the shared @nanobpm/agentic codec (not the retired job:<jobKey>)", async () => {
+  // The data-plane naming contract this bug (#738) restores: the producer (c8ctl-plugin-nano) writes a
+  // job's transcript under `composeStreamId(instance, jobKey)`, so the cockpit MUST advertise that exact
+  // id — both the worker drill stream (claim-keyed) and the correlation drill stream — or every
+  // transcript renders empty. This pins the consumer to the ONE shared codec: a regression back to
+  // `job:<jobKey>` (a slash-free id that never round-trips through parseStreamId) fails here.
+  const hub = await mountPresence(memSqlite());
+  const ctx: AgenticContext = { hub, registry: hub.registry, transport: undefined as never, data: undefined, log: noopLog() };
+  claimFamily.mount(ctx);
+  correlationFamily.mount(ctx);
+  const claims = currentClaimRegistry();
+  const correlation = currentCorrelation();
+  assert(claims !== undefined && correlation !== undefined, "both singletons install");
+  claims.claim("wk-a", "12559");
+  correlation.link("wk-a", "12559", { processInstanceKey: "4612", planKey: "o/r#142" });
+  try {
+    const res = (await handler(input(), app)) as {
+      status: number;
+      body: { workers: Array<Record<string, unknown>>; correlations: Array<Record<string, unknown>> };
+    };
+    assertEquals(res.status, 200);
+    const producerStream = composeStreamId("wk-a", "12559");
+    const w = res.body.workers[0];
+    assertEquals(w.stream, producerStream, "the cockpit drills the exact stream the producer writes");
+    const c = res.body.correlations[0];
+    assertEquals(c.stream, producerStream, "the correlation drill stream matches the producer stream");
+    // The shared codec round-trips the advertised id back to its {instance, stream} parts.
+    assertEquals(parseStreamId(producerStream), { instance: "wk-a", stream: "12559" });
+    // And it is emphatically NOT the retired job:<jobKey> scheme that left transcripts empty (#738).
+    assert(typeof w.stream === "string" && !w.stream.startsWith("job:"), "the retired job:<jobKey> data-plane scheme is gone");
+  } finally {
+    correlationFamily.teardown?.();
+    claimFamily.teardown?.();
     family.teardown?.();
     await hub.close();
   }

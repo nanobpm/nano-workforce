@@ -11,6 +11,7 @@ import type { Frame } from "@nanobpm/agentic/protocol";
 import type { SqliteDb } from "@nanobpm/agentic/transcript";
 import type { AppApi, DataLayer } from "@nanobpm/urban";
 import { assert, assertEquals } from "#test-assert";
+import { composeStreamId } from "@nanobpm/agentic/emit";
 import { currentCorrelation } from "../app/agentic/correlation.ts";
 import { family as correlationFamily } from "../app/agentic/families/correlation.family.ts";
 import { createRelayFamily, currentRelayTranscriptService } from "../app/agentic/families/relay.family.ts";
@@ -78,8 +79,8 @@ test("projects the TranscriptStore rows into the list (byteLength, chunkCount, l
   relayFamily.mount(mountCtx(memSqlite()));
   const store = currentRelayTranscriptService()?.store;
   assert(store !== undefined, "the relay family installs a persisted store");
-  // Seed one completed ephemeral session on a jobKey-scoped stream.
-  store.flush("job:6494", { since: () => ({ entries: [{ offset: 0, chunk: "hello " }, { offset: 1, chunk: "world" }] }), nextOffset: 2 }, "ephemeral");
+  // Seed one completed ephemeral session on an instance-scoped stream (issue #738).
+  store.flush(composeStreamId("wk", "6494"), { since: () => ({ entries: [{ offset: 0, chunk: "hello " }, { offset: 1, chunk: "world" }] }), nextOffset: 2 }, "ephemeral");
   try {
     const res = (await handler(input(), app)) as {
       status: number;
@@ -89,8 +90,8 @@ test("projects the TranscriptStore rows into the list (byteLength, chunkCount, l
     assertEquals(res.body.count, 1);
     assert(typeof res.body.retentionMs === "number", "the list surfaces the retention window");
     const t = res.body.transcripts[0];
-    assertEquals(t.stream, "job:6494");
-    assertEquals(t.jobKey, "6494", "the jobKey is decoded from the job: stream id");
+    assertEquals(t.stream, composeStreamId("wk", "6494"));
+    assertEquals(t.jobKey, "6494", "the jobKey is decoded from the instance-scoped stream id");
     assertEquals(t.lifecycle, "ephemeral");
     assertEquals(t.status, "completed");
     assertEquals(t.chunkCount, 2);
@@ -105,7 +106,7 @@ test("enriches with the H6 correlation (process instance / plan) when it is stil
   relayFamily.mount(mountCtx(memSqlite()));
   const store = currentRelayTranscriptService()?.store;
   assert(store !== undefined);
-  store.flush("job:6494", { since: () => ({ entries: [{ offset: 0, chunk: "x" }] }), nextOffset: 1 }, "ephemeral");
+  store.flush(composeStreamId("wk-a", "6494"), { since: () => ({ entries: [{ offset: 0, chunk: "x" }] }), nextOffset: 1 }, "ephemeral");
   correlationFamily.mount({ hub: undefined as never, registry: undefined as never, transport: undefined as never, data: undefined, log: noopLog() });
   currentCorrelation()?.link("wk-a", "6494", { processInstanceKey: "4612", bpmnProcessId: "plan-fanout", planKey: "o/r#142" });
   try {
@@ -124,18 +125,18 @@ test("filters by jobKey and plan", async () => {
   relayFamily.mount(mountCtx(memSqlite()));
   const store = currentRelayTranscriptService()?.store;
   assert(store !== undefined);
-  store.flush("job:1", { since: () => ({ entries: [{ offset: 0, chunk: "a" }] }), nextOffset: 1 }, "ephemeral");
-  store.flush("job:2", { since: () => ({ entries: [{ offset: 0, chunk: "b" }] }), nextOffset: 1 }, "ephemeral");
+  store.flush(composeStreamId("wk", "1"), { since: () => ({ entries: [{ offset: 0, chunk: "a" }] }), nextOffset: 1 }, "ephemeral");
+  store.flush(composeStreamId("wk", "2"), { since: () => ({ entries: [{ offset: 0, chunk: "b" }] }), nextOffset: 1 }, "ephemeral");
   correlationFamily.mount({ hub: undefined as never, registry: undefined as never, transport: undefined as never, data: undefined, log: noopLog() });
   currentCorrelation()?.link("wk", "2", { planKey: "o/r#9" });
   try {
     const byJob = (await handler(input({ jobKey: "1" }), app)) as { body: { count: number; transcripts: Array<Record<string, unknown>> } };
     assertEquals(byJob.body.count, 1);
-    assertEquals(byJob.body.transcripts[0]?.stream, "job:1");
+    assertEquals(byJob.body.transcripts[0]?.stream, composeStreamId("wk", "1"));
 
     const byPlan = (await handler(input({ planKey: "o/r#9" }), app)) as { body: { count: number; transcripts: Array<Record<string, unknown>> } };
     assertEquals(byPlan.body.count, 1);
-    assertEquals(byPlan.body.transcripts[0]?.stream, "job:2");
+    assertEquals(byPlan.body.transcripts[0]?.stream, composeStreamId("wk", "2"));
   } finally {
     correlationFamily.teardown?.();
     relayFamily.teardown?.();
