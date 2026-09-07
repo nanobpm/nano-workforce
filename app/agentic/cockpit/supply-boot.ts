@@ -413,8 +413,9 @@ class SupplyCockpit implements SupplyCockpitHandle {
     // wedge the live worker list. #refreshPast is single-flight, so a slow fetch can't pile up either.
     void this.#refreshPast(this.#route.kind === "worker" ? this.#route.instance : undefined);
     // Same fire-and-forget discipline for the engine agent-history list: a slow/hung read endpoint must
-    // never gate the supply poll's next tick. #refreshAgentHistory is single-flight + bounded.
-    void this.#refreshAgentHistory(this.#route.kind === "worker" ? this.#route.instance : undefined);
+    // never gate the supply poll's next tick. #refreshAgentHistory is single-flight + bounded. The list
+    // is engine-global (not route-filtered), so it takes no route instance — call it with no argument.
+    void this.#refreshAgentHistory();
   }
 
   #renderRoute(): void {
@@ -481,7 +482,7 @@ class SupplyCockpit implements SupplyCockpitHandle {
   /** Fetch + render the engine-native SETTLED agent-history list, when the read endpoints are wired.
    * Single-flight + bounded (mirrors {@link #refreshPast}): an engine read fault/hang never blocks the
    * live worker list. The list is engine-global (settled AgentInstances), so it is not route-filtered. */
-  async #refreshAgentHistory(_instance?: string): Promise<void> {
+  async #refreshAgentHistory(): Promise<void> {
     const fetchAgentInstances = this.#env.fetchAgentInstances;
     if (fetchAgentInstances === undefined || this.#agentRegion === undefined) return;
     if (this.#agentRefreshing) {

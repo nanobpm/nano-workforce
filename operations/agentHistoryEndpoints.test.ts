@@ -11,8 +11,11 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
+import type { AppApi } from "@nanobpm/urban";
 import { assertEquals } from "#test-assert";
 import { bootTestApp, type TestApp } from "@nanobpm/urban-testkit";
+import type { AgentHistoryReader } from "../app/agentic/agent-history.ts";
+import { noopLog } from "../test/log.ts";
 import type { AgentHistory, AgentInstanceList } from "../nano-generated/api-io.d.ts";
 
 const APP_ROOT = resolve(import.meta.dirname, "..");
@@ -47,4 +50,57 @@ test("getAgentInstanceHistory: an unknown key → 200 with an empty history (rea
     assertEquals(res.body.count, 0);
     assertEquals(res.body.records.length, 0);
   });
+});
+
+// Shared-secret guard regression coverage. Both endpoints implement the same optional guard the other
+// agentic reads pin (x-hook-secret when NANO_PR_WEBHOOK_SECRET is set; unset -> open). `SECRET` is
+// captured at module load, so set the env and re-import with a cache-buster to re-capture it, exactly
+// as the sibling operation guard tests do. A lightweight stub engine (read-as-absence) is enough for
+// the authorised path — the point is to pin 401-without-header / non-401-with-header, so a future
+// refactor can't silently invert the condition or rename the header.
+const stubEngine: AgentHistoryReader = {
+  searchAgentInstances: async () => [],
+  searchAgentInstanceHistory: async () => [],
+  getAgentInstance: async () => null,
+};
+const guardApp = { log: noopLog(), engine: stubEngine } as unknown as AppApi;
+
+function guardInput(headers: Record<string, string>, params: Record<string, string> = {}) {
+  return {
+    req: { method: "GET", headers: new Headers(headers), text: async () => "" } as never,
+    params,
+    query: {},
+    body: undefined,
+  };
+}
+
+test("listAgentInstances: shared-secret guard rejects a missing/invalid secret, admits the correct one", async () => {
+  const prev = process.env["NANO_PR_WEBHOOK_SECRET"];
+  process.env["NANO_PR_WEBHOOK_SECRET"] = "s3cr3t";
+  try {
+    const mod = await import(`./listAgentInstances.ts?guard=${Date.now()}`);
+    const handler = mod.default as (i: ReturnType<typeof guardInput>, app: AppApi) => Promise<{ status: number }>;
+    assertEquals((await handler(guardInput({}), guardApp)).status, 401);
+    assertEquals((await handler(guardInput({ "x-hook-secret": "wrong" }), guardApp)).status, 401);
+    assertEquals((await handler(guardInput({ "x-hook-secret": "s3cr3t" }), guardApp)).status, 200);
+  } finally {
+    if (prev === undefined) delete process.env["NANO_PR_WEBHOOK_SECRET"];
+    else process.env["NANO_PR_WEBHOOK_SECRET"] = prev;
+  }
+});
+
+test("getAgentInstanceHistory: shared-secret guard rejects a missing/invalid secret, admits the correct one", async () => {
+  const prev = process.env["NANO_PR_WEBHOOK_SECRET"];
+  process.env["NANO_PR_WEBHOOK_SECRET"] = "s3cr3t";
+  try {
+    const mod = await import(`./getAgentInstanceHistory.ts?guard=${Date.now()}`);
+    const handler = mod.default as (i: ReturnType<typeof guardInput>, app: AppApi) => Promise<{ status: number }>;
+    const params = { agentInstanceKey: "ai-1" };
+    assertEquals((await handler(guardInput({}, params), guardApp)).status, 401);
+    assertEquals((await handler(guardInput({ "x-hook-secret": "wrong" }, params), guardApp)).status, 401);
+    assertEquals((await handler(guardInput({ "x-hook-secret": "s3cr3t" }, params), guardApp)).status, 200);
+  } finally {
+    if (prev === undefined) delete process.env["NANO_PR_WEBHOOK_SECRET"];
+    else process.env["NANO_PR_WEBHOOK_SECRET"] = prev;
+  }
 });
