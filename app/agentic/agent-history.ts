@@ -1,7 +1,7 @@
 // nano-workforce — the engine-native AgentInstance/AgentHistory READ path (issue #745 / #747,
 // umbrella #746). The CONSUMER half of the durable-agent-transcript work.
 //
-// The write path is engine-native: the worker harness (jwulf/c8ctl-plugin-nano#195) mints
+// The write path is engine-native: the worker harness (jwulf/c8ctl-plugin-nano#194) mints
 // Create/Update/Complete AgentInstance/AgentHistory records against the engine for every element that
 // carries the `<zeebe:agentDefinition agentType="external"/>` marker (the PRODUCER half, landed in
 // #748). This module is the READ counterpart: it projects the engine's durable AgentInstance +

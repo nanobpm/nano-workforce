@@ -649,8 +649,9 @@ function relaySocketFactory(url) {
  * @param {number} [opts.refreshMs] — poll interval (default 2000).
  * @param {number} [opts.staleAfterMs] — a worker is rendered "stale" once its last heartbeat is at
  *   least this many ms old (default 15000).
- * @param {number} [opts.pastFetchTimeoutMs] — upper bound (ms) on a single past-sessions transcripts
- *   fetch; the fetch is aborted past this so a hung endpoint can't wedge the past panel (default 15000).
+ * @param {number} [opts.pastFetchTimeoutMs] — upper bound (ms) on a single bounded engine JSON fetch:
+ *   both a past-sessions transcripts fetch AND (via `boundedJson`) an engine agent-history fetch are
+ *   aborted past this so a hung endpoint can't wedge the past or agent-history panel (default 15000).
  * @param {string} [opts.transcriptsUrl] — the captured-session list endpoint backing the always-on
  *   "past sessions" history + replay (default
  *   `new URL("../app/api/agentic/transcripts", import.meta.url).href`, module-anchored so it
@@ -1068,6 +1069,9 @@ export function mountCockpit(host, opts = {}) {
     return base.href;
   }
 
+  // Shared bounded-fetch helper for the engine JSON read endpoints (agent-instances list +
+  // per-instance agent-history). Reuses `pastFetchTimeoutMs` as the abort bound — the same discipline
+  // as the past-sessions fetches — so a hung engine read endpoint can't wedge the agent-history panel.
   async function boundedJson(url) {
     const controller = new AbortController();
     const abortTimer = setTimeout(() => controller.abort(), pastFetchTimeoutMs);
