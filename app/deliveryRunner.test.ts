@@ -207,6 +207,39 @@ test("agent node producer completion contract (#760): every agent prompt carries
 });
 
 
+test("producer contract required-emit subset (#761): a routing-only emit is NOT listed as a required field, but the classifier-emit contract still names it", async () => {
+  // #761: `renderProducerContract` was passed a node's FULL declared `emits`, so it told the agent to
+  // populate EVERY declared emit non-null — even a routing-only fact (named only in an edge `when`
+  // guard) that the #731 gate deliberately leaves optional. That contradicted the classifier-emit
+  // contract's "OMIT an undecidable routing fact (default branch)" guidance and pushed agents to guess.
+  // The producer contract must list ONLY the required-data-dependency subset (`from: "<node>.<fact>"`),
+  // while the emit contract still lists every declared fact.
+  const graph: DeliveryGraph = {
+    name: "routing-only producer",
+    nodes: [
+      { id: "classify", kind: "agent", agent: { jobType: "senior:feature", prompt: "classify it" }, emits: [{ name: "decision", type: "string" }] },
+      { id: "migrate", kind: "connector", connector: { target: "npm:install", dedupeKey: "m-1" } },
+      { id: "release", kind: "connector", connector: { target: "npm:publish", dedupeKey: "r-1" } },
+    ],
+    edges: [
+      { from: "classify", to: "migrate", when: "classify.decision", equals: "breaking" },
+      { from: "classify", to: "release", default: true },
+    ],
+  };
+  const p = await prepareOk(graph);
+  const classify = Object.values(p.nodeInputs).find((v) => "jobType" in v && String((v as Record<string, unknown>).appendPrompt).includes("classify it")) as Record<string, unknown> | undefined;
+  assert(classify, "the classify agent node is seeded");
+  const prompt = String(classify!.appendPrompt);
+  // The producer contract still gates on status but names NO required emit (routing-only ⇒ optional).
+  assert(prompt.includes("Producer completion contract"), "the producer contract is present");
+  assert(prompt.includes(renderProducerContract([])), "the producer contract lists no required emit for a purely routing-only producer");
+  assert(!prompt.includes("populate each of these top-level fields"), "no required-emit sentence is rendered when every emit is routing-only");
+  // The classifier-emit contract STILL tells the agent to return the routing fact (and omit if undecidable).
+  assert(prompt.includes("Classifier emit contract"), "the classifier-emit contract is present");
+  assert(prompt.includes("`decision`"), "the routing fact is still named by the classifier-emit contract");
+});
+
+
 test("agent node idempotency preflight (#551): every agent prompt leads with adopt-and-report guidance; non-agent nodes are untouched", async () => {
   // #551: a delivery agent node dispatches a raw retry-carrying `senior:feature` job with no
   // PR-existence guard, so a re-dispatch opened a DUPLICATE PR (instance 43077 n0 → #979/#980). The
