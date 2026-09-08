@@ -3128,8 +3128,8 @@ components:
         autoMerge:
           type: boolean
           description: >-
-            When true (and `converge` is true), drive the merge-loop after convergence — mirrors
-            the global auto-merge setting. When false the run stops at `converged`.
+            When true (and `converge` is true), drive the merge-loop after convergence only when
+            `NANO_PR_AUTO_MERGE` is enabled. When false the run stops at `converged`.
             Moot when `converge` is false.
         confirmDefaultBase:
           type: boolean
@@ -5749,7 +5749,7 @@ paths:
                       description: When true, hand the opened PR to the convergence loop (review rounds) as a follow-on step. When false (default) the run ends at "PR raised, not reviewed".
                     autoMerge:
                       type: boolean
-                      description: When true (and `converge` is true), drive the merge-loop after convergence — mirrors the global auto-merge setting. When false the run stops at `converged`. Moot when `converge` is false.
+                      description: When true (and `converge` is true), drive the merge-loop after convergence only when `NANO_PR_AUTO_MERGE` is enabled. When false the run stops at `converged`. Moot when `converge` is false.
                     confirmDefaultBase:
                       type: boolean
                       description: Acknowledge that `baseBranch` is the repository default branch (the PR would target it directly). See `PlanStartByIssue.confirmDefaultBase`.
