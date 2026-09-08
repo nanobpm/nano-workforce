@@ -76,13 +76,14 @@ export function safeStringify(value: unknown): string {
   }
 }
 
-/** Parse + validate the converge connector's payload (`{ pr, convergeOnly?, dependsOn? }`) for a
+/** Parse + validate the converge connector's payload (`{ pr, autoMerge?, dependsOn? }`) for a
  * `converge` / `converge-merge` / `merge-main` target. `pr` is REQUIRED and must parse to a canonical `owner/repo#N`
  * (fail CLOSED — a converge connector with no target PR is meaningless and could never enroll).
- * `convergeOnly` DEFAULTS from the target (`converge` → review-only `true`; `converge-merge`/`merge-main` → drive
- * the merge loop `false`) and may be overridden per-dispatch by an explicit boolean. `dependsOn` is an
- * optional list of PR refs unioned into the enrolled PR's merge-stage dependency set (only non-string
- * entries are dropped; `submitPr` itself ignores unparseable refs). Exported for unit coverage.
+ * `autoMerge` DEFAULTS from the target (`converge` → `false`; `converge-merge`/`merge-main` → `true`) and
+ * may be overridden per-dispatch by an explicit boolean. The deprecated `convergeOnly` alias is still
+ * accepted for compatibility. `dependsOn` is an optional list of PR refs unioned into the enrolled PR's
+ * merge-stage dependency set (only non-string entries are dropped; `submitPr` itself ignores unparseable
+ * refs). Exported for unit coverage.
  *
  * `pr` may be sourced three ways (issue #548), resolved by {@link resolveConvergePr} against the
  * threaded `boundFacts` BEFORE parsing: a LITERAL `owner/repo#N`, an explicit fact REFERENCE
@@ -104,7 +105,13 @@ export function readConvergeInput(
         `bound from an upstream \`agent\` node (got ${safeStringify(prValue ?? null)})`,
     );
   }
-  const convergeOnly = typeof p.convergeOnly === "boolean" ? p.convergeOnly : convergeOnlyForTarget(target);
+  const autoMerge =
+    typeof p.autoMerge === "boolean"
+      ? p.autoMerge
+      : typeof p.convergeOnly === "boolean"
+        ? !p.convergeOnly
+        : !convergeOnlyForTarget(target);
+  const convergeOnly = !autoMerge;
   const dependsOn = Array.isArray(p.dependsOn) ? p.dependsOn.filter((d): d is string => typeof d === "string") : [];
   return { parsed, convergeOnly, dependsOn };
 }

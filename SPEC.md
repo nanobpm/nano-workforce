@@ -397,10 +397,10 @@ same `prKey`, sharing the datasource and poller. It merges the PR, honouring
 merge-queue branches and cross-PR dependencies, and reuses the review stage's
 escalation machinery for anything it can't resolve autonomously.
 
-A per-submit `convergeOnly: true` on the `start/convergence-loop` request pins that PR
-to review-only regardless of the global default: `pr.finalize` reads the flag off the
-instance and rests the PR at `converged` without starting `merge-loop`. The flag only
-ever narrows (it never forces the merge stage on when `NANO_PR_AUTO_MERGE` is off).
+A per-submit `autoMerge` setting on the `start/convergence-loop` request is the preferred
+positive control: `false` pins that PR to review-only regardless of the global default, while
+`true` enables the merge-loop after convergence only when `NANO_PR_AUTO_MERGE` is on. No per-submit
+setting forces the merge stage on when the global toggle is off.
 
 Flow:
 
@@ -495,7 +495,7 @@ queries skip (`merging`), so a slow pass can't double-signal.
 | `NANO_PR_POLL_MS` | 60000 | poll interval |
 | `NANO_PR_MAX_ROUNDS` | 20 | default round cap (per-submit `maxRounds` override, clamped 1–100) |
 | `NANO_PR_WEBHOOK_SECRET` | — | optional shared secret (`x-hook-secret`) for guarded operations (e.g. `/app/api/agent`, `/app/api/version`, `/app/api/status`) |
-| `NANO_PR_AUTO_MERGE` | 1 | run the merge stage after convergence (`0` = review-only; per-submit `convergeOnly: true` override) |
+| `NANO_PR_AUTO_MERGE` | 1 | run the merge stage after convergence (`0` = review-only; per-submit `autoMerge: false` override) |
 | `NANO_PR_MERGE_METHOD` | squash | `squash` \| `merge` \| `rebase` |
 | `NANO_PR_MERGE_ADMIN` | 0 | pass `--admin` on merge |
 | `NANO_PR_REVIEW_WAIT_TIMEOUT` | PT20M | ISO-8601 wait before a stalled review escalates (timer arm of the `wait-review` event-based gateway); malformed → default |

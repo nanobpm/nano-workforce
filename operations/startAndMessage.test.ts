@@ -143,15 +143,57 @@ test("startConvergenceLoop forwards convergeOnly:true to the loop", async () => 
   });
 });
 
+test("startConvergenceLoop maps autoMerge:true to merge-enabled convergence", async () => {
+  await withGithubOff(async () => {
+    const { app: capApp, get } = captureApp();
+    const res = await startConvergenceLoop(input({ pr: "owner/repo#9", autoMerge: true }), capApp);
+    assertEquals((res as any).status, 202);
+    assertEquals(get(), false);
+  });
+});
+
+test("startConvergenceLoop maps autoMerge:false to review-only convergence", async () => {
+  await withGithubOff(async () => {
+    const { app: capApp, get } = captureApp();
+    const res = await startConvergenceLoop(input({ pr: "owner/repo#10", autoMerge: false }), capApp);
+    assertEquals((res as any).status, 202);
+    assertEquals(get(), true);
+  });
+});
+
+test("startConvergenceLoop lets autoMerge override the legacy convergeOnly alias", async () => {
+  await withGithubOff(async () => {
+    const merge = captureApp();
+    const mergeRes = await startConvergenceLoop(
+      input({ pr: "owner/repo#13", autoMerge: true, convergeOnly: true }),
+      merge.app,
+    );
+    assertEquals((mergeRes as any).status, 202);
+    assertEquals(merge.get(), false);
+
+    const review = captureApp();
+    const reviewRes = await startConvergenceLoop(
+      input({ pr: "owner/repo#14", autoMerge: false, convergeOnly: false }),
+      review.app,
+    );
+    assertEquals((reviewRes as any).status, 202);
+    assertEquals(review.get(), true);
+  });
+});
+
 test("startConvergenceLoop defaults convergeOnly to false and does not truthy-coerce a non-boolean", async () => {
   await withGithubOff(async () => {
     const omitted = captureApp();
-    await startConvergenceLoop(input({ pr: "owner/repo#9" }), omitted.app);
+    await startConvergenceLoop(input({ pr: "owner/repo#11" }), omitted.app);
     assertEquals(omitted.get(), false);
 
     const stringy = captureApp();
-    await startConvergenceLoop(input({ pr: "owner/repo#10", convergeOnly: "true" }), stringy.app);
+    await startConvergenceLoop(input({ pr: "owner/repo#12", convergeOnly: "true" }), stringy.app);
     assertEquals(stringy.get(), false);
+
+    const stringyAutoMerge = captureApp();
+    await startConvergenceLoop(input({ pr: "owner/repo#15", autoMerge: "true" }), stringyAutoMerge.app);
+    assertEquals(stringyAutoMerge.get(), false);
   });
 });
 
