@@ -209,7 +209,11 @@ describe("delivery-graph runner — engine-native execution (S4)", () => {
           processInstanceKey: job.processInstanceKey ?? null,
           elementId: job.elementId ?? null,
         });
-        return await dispatchConnector(app.db, { dedupeKey: dedupeKey ?? "x", target, payload, boundFacts }, new Date().toISOString());
+        // Mirror the real worker's fail-closed contract: an un-dedupable dispatch (no author key AND
+        // no engine identity) throws rather than papering over it with a hardcoded fallback that would
+        // mask a regression where the connector node stops seeding `dedupeKey`.
+        if (!dedupeKey) throw new Error("connector stub: no dedupe key (author-supplied or graph-derived) available");
+        return await dispatchConnector(app.db, { dedupeKey, target, payload, boundFacts }, new Date().toISOString());
       },
       { fetchVariables: ["boundFacts", "target", "dedupeKey", "payload"] },
     );
@@ -272,7 +276,11 @@ describe("delivery-graph runner — engine-native execution (S4)", () => {
           processInstanceKey: job.processInstanceKey ?? null,
           elementId: job.elementId ?? null,
         });
-        return await dispatchConnector(app.db, { dedupeKey: dedupeKey ?? "x", target, payload, boundFacts }, new Date().toISOString());
+        // Mirror the real worker's fail-closed contract: an un-dedupable dispatch (no author key AND
+        // no engine identity) throws rather than papering over it with a hardcoded fallback that would
+        // mask a regression where the connector node stops seeding `dedupeKey`.
+        if (!dedupeKey) throw new Error("connector stub: no dedupe key (author-supplied or graph-derived) available");
+        return await dispatchConnector(app.db, { dedupeKey, target, payload, boundFacts }, new Date().toISOString());
       },
       { fetchVariables: ["boundFacts", "target", "dedupeKey", "payload"] },
     );

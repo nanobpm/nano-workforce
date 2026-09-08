@@ -625,8 +625,9 @@ node that declares no `emits` gets no contract text and behaves exactly as befor
 *also* has a **producer completion contract** appended to its prompt at dispatch, alongside the
 idempotency preflight and the emit contract. It hands the agent the terminal-status vocabulary
 the `#731` producer gate enforces — a completion routes onward only when its self-reported
-`status` is one of `AGENT_TERMINAL_SUCCESS_STATUSES` (`done` / `opened` / `skipped`) **and**
-every required emit is non-null; any other status parks the run on a human `__contract`
+`status` is **absent/null (legacy workers / stubs that report no status) or** one of
+`AGENT_TERMINAL_SUCCESS_STATUSES` (`done` / `opened` / `skipped`) **and** every required emit
+is non-null; any *explicitly non-terminal* status parks the run on a human `__contract`
 escalation (fail-closed). The wording is **derived from that single allowlist** (changing the
 list changes the prompt — no second copy), so **authors must not hand-encode status vocabulary
 in a node's prompt.** Unlike the emit contract, a no-emit node still receives the status block
