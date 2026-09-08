@@ -311,7 +311,7 @@ the answer becomes the agent's next-round context.
 ```
  submit ──► convergence-loop
    round (senior:pr-review) ──► addressed ──► wait review-ready ─┐
-                             ├─ converged  ──► finalize ──► merge-loop (when autoMerge is enabled)
+                             ├─ converged  ──► finalize ──► merge-loop (when autoMerge and NANO_PR_AUTO_MERGE are enabled)
                              └─ needs_input/blocked ──► escalate ──► wait-answer userTask (task inbox)
  merge-loop: wait deps ─► arm merge ─► (queue-aware) merge / land
              blocked (CI red) ─► senior:fix-ci ─► retry     conflict ─► senior:rebase ─► retry

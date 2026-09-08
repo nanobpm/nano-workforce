@@ -1519,7 +1519,7 @@ components:
         convergeOnly:
           type: boolean
           deprecated: true
-          description: "Deprecated compatibility alias for `autoMerge: false`. Prefer `autoMerge`."
+          description: "Deprecated negative alias. If `autoMerge` is omitted, `true` means `autoMerge: false`; `false` means `autoMerge: true` (still gated by `NANO_PR_AUTO_MERGE`). Prefer `autoMerge`."
     ConvergenceStartByUrl:
       type: object
       additionalProperties: false
@@ -1543,7 +1543,7 @@ components:
         convergeOnly:
           type: boolean
           deprecated: true
-          description: "Deprecated compatibility alias for `autoMerge: false`. Prefer `autoMerge`."
+          description: "Deprecated negative alias. If `autoMerge` is omitted, `true` means `autoMerge: false`; `false` means `autoMerge: true` (still gated by `NANO_PR_AUTO_MERGE`). Prefer `autoMerge`."
     PlanStart:
       description: The start-plan-fanout request body. Names the target issue by EXACTLY ONE of
         `issue` (an `owner/repo#123` reference) or `url` (a bare issue URL), plus a REQUIRED
@@ -4152,7 +4152,7 @@ paths:
                     convergeOnly:
                       type: boolean
                       deprecated: true
-                      description: 'Deprecated compatibility alias for `autoMerge: false`. Prefer `autoMerge`.'
+                      description: 'Deprecated negative alias. If `autoMerge` is omitted, `true` means `autoMerge: false`; `false` means `autoMerge: true` (still gated by `NANO_PR_AUTO_MERGE`). Prefer `autoMerge`.'
                 - type: object
                   additionalProperties: false
                   required:
@@ -4175,7 +4175,7 @@ paths:
                     convergeOnly:
                       type: boolean
                       deprecated: true
-                      description: 'Deprecated compatibility alias for `autoMerge: false`. Prefer `autoMerge`.'
+                      description: 'Deprecated negative alias. If `autoMerge` is omitted, `true` means `autoMerge: false`; `false` means `autoMerge: true` (still gated by `NANO_PR_AUTO_MERGE`). Prefer `autoMerge`.'
               type: object
               # END generated:mcp-body
       responses:
