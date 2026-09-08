@@ -1,3 +1,9 @@
+## [0.186.0](https://github.com/nanobpm/nano-workforce/compare/v0.185.1...v0.186.0) (2026-09-08)
+
+### Features
+
+* **cockpit:** render coherent streaming message blocks in order ([#766](https://github.com/nanobpm/nano-workforce/issues/766)) ([b977927](https://github.com/nanobpm/nano-workforce/commit/b977927df9b3c264d2a34fe450180e168bcbd4b0)), closes [#566](https://github.com/nanobpm/nano-workforce/issues/566) [#757](https://github.com/nanobpm/nano-workforce/issues/757)
+
 ## [0.185.1](https://github.com/nanobpm/nano-workforce/compare/v0.185.0...v0.185.1) (2026-09-08)
 
 ### Bug Fixes
