@@ -220,6 +220,27 @@ test("#758: node-provisioned graph confirms through the real mount with digest o
   }
 });
 
+test("dispatch normalizes the attribute-sourced digest before POSTing (untrusted DOM value)", async () => {
+  // The confirm digest is read back from a DOM attribute (untrusted) at confirm time; like doDismiss/
+  // doSaveToLibrary/doPreviewDi, dispatch must trim it so accidental whitespace never reaches the door.
+  const h = harness();
+  try {
+    await h.flush();
+    h.click(h.host.querySelector("[data-dispatch]"));
+    const confirmBtn = h.host.querySelector("[data-dispatch-confirm]");
+    assert(confirmBtn, "the in-DOM Confirm dispatch affordance must appear");
+    // Simulate an untrusted DOM value: pad the attribute the confirm handler reads the digest from.
+    confirmBtn.setAttribute("data-dispatch-confirm", `  ${PROPOSAL.digest}  `);
+    h.click(confirmBtn);
+    await h.flush();
+    const dispatched = posts(h.calls, DISPATCH_URL);
+    assertEquals(dispatched.length, 1, "the confirmed dispatch must POST despite the padded attribute");
+    assertEquals(JSON.parse(dispatched[0].body), { digest: PROPOSAL.digest }, "the digest is trimmed before dispatch");
+  } finally {
+    h.teardown();
+  }
+});
+
 test("#758: node mode displays the server's missing-node provisioning error without inferring checkout-less", async () => {
   const error = "1 agent node(s) resolve to no repository (implement-api): each must declare its own `repository`, or the dispatch must supply a run-level `repository` + `baseBranch` fallback";
   const h = harness(error);

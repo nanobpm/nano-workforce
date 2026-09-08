@@ -537,7 +537,8 @@ export function mountStagedProposals(host, config = {}) {
     const dispatchConfirmBtn = closest("[data-dispatch-confirm]");
     if (dispatchConfirmBtn) {
       ev.preventDefault();
-      const digest = dispatchConfirmBtn.getAttribute("data-dispatch-confirm");
+      const rawDigest = dispatchConfirmBtn.getAttribute("data-dispatch-confirm");
+      const digest = typeof rawDigest === "string" ? rawDigest.trim() : "";
       const isThisPending = pending != null && pending.kind === "dispatch" && pending.digest === digest;
       if (!isThisPending) return;
       const mode = pending.mode;
