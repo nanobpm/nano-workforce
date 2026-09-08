@@ -1515,7 +1515,7 @@ components:
           description: Values above 100 are accepted and clamped to 100 by the delegate.
         autoMerge:
           type: boolean
-          description: When true, drive the merge-loop after convergence. When false, stop at `converged` (review-only). This is the preferred positive per-request setting. When omitted, `convergeOnly` or the global `NANO_PR_AUTO_MERGE` default applies.
+          description: Preferred per-request setting. When false, stop at `converged`; when true, run the merge-loop after convergence only if `NANO_PR_AUTO_MERGE` is enabled. Omit to use `convergeOnly` or the global default.
         convergeOnly:
           type: boolean
           description: Legacy negative alias. When true, run convergence only and stop at `converged` — the PR is never handed to the merge-loop even if auto-merge is on globally (`NANO_PR_AUTO_MERGE`). Ignored when `autoMerge` is present.
@@ -1538,7 +1538,7 @@ components:
           description: Values above 100 are accepted and clamped to 100 by the delegate.
         autoMerge:
           type: boolean
-          description: When true, drive the merge-loop after convergence. When false, stop at `converged` (review-only). This is the preferred positive per-request setting. When omitted, `convergeOnly` or the global `NANO_PR_AUTO_MERGE` default applies.
+          description: Preferred per-request setting. When false, stop at `converged`; when true, run the merge-loop after convergence only if `NANO_PR_AUTO_MERGE` is enabled. Omit to use `convergeOnly` or the global default.
         convergeOnly:
           type: boolean
           description: Legacy negative alias. When true, run convergence only and stop at `converged` — the PR is never handed to the merge-loop even if auto-merge is on globally (`NANO_PR_AUTO_MERGE`). Ignored when `autoMerge` is present.
@@ -4146,7 +4146,7 @@ paths:
                       description: Values above 100 are accepted and clamped to 100 by the delegate.
                     autoMerge:
                       type: boolean
-                      description: When true, drive the merge-loop after convergence. When false, stop at `converged` (review-only). This is the preferred positive per-request setting. When omitted, `convergeOnly` or the global `NANO_PR_AUTO_MERGE` default applies.
+                      description: Preferred per-request setting. When false, stop at `converged`; when true, run the merge-loop after convergence only if `NANO_PR_AUTO_MERGE` is enabled. Omit to use `convergeOnly` or the global default.
                     convergeOnly:
                       type: boolean
                       description: Legacy negative alias. When true, run convergence only and stop at `converged` — the PR is never handed to the merge-loop even if auto-merge is on globally (`NANO_PR_AUTO_MERGE`). Ignored when `autoMerge` is present.
@@ -4168,7 +4168,7 @@ paths:
                       description: Values above 100 are accepted and clamped to 100 by the delegate.
                     autoMerge:
                       type: boolean
-                      description: When true, drive the merge-loop after convergence. When false, stop at `converged` (review-only). This is the preferred positive per-request setting. When omitted, `convergeOnly` or the global `NANO_PR_AUTO_MERGE` default applies.
+                      description: Preferred per-request setting. When false, stop at `converged`; when true, run the merge-loop after convergence only if `NANO_PR_AUTO_MERGE` is enabled. Omit to use `convergeOnly` or the global default.
                     convergeOnly:
                       type: boolean
                       description: Legacy negative alias. When true, run convergence only and stop at `converged` — the PR is never handed to the merge-loop even if auto-merge is on globally (`NANO_PR_AUTO_MERGE`). Ignored when `autoMerge` is present.

@@ -286,10 +286,11 @@ exhausted budget, or an agent that can't fix the build escalate to a human; answ
 the UI and the process re-arms and retries.
 
 A single submission can choose its merge behavior explicitly with the positive
-`autoMerge` field on the `start/convergence-loop` request: `true` drives the
-merge-loop after convergence and `false` stops at `converged`, regardless of the
-global default. The legacy `convergeOnly: true` alias remains accepted when
-`autoMerge` is omitted, and is ignored when `autoMerge` is present.
+`autoMerge` field on the `start/convergence-loop` request: `false` stops at
+`converged` regardless of the global default, while `true` enables the merge-loop
+after convergence only when `NANO_PR_AUTO_MERGE` is enabled. The legacy
+`convergeOnly: true` alias remains accepted when `autoMerge` is omitted, and is
+ignored when `autoMerge` is present.
 
 ### Fleet mode: hand it an issue (plan → implement → converge)
 

@@ -398,10 +398,11 @@ merge-queue branches and cross-PR dependencies, and reuses the review stage's
 escalation machinery for anything it can't resolve autonomously.
 
 A per-submit `autoMerge` setting on the `start/convergence-loop` request is the preferred
-positive control: `true` drives the merge-loop after convergence and `false` pins that PR
-to review-only, regardless of the global default. The legacy negative `convergeOnly: true`
-alias remains accepted for callers that omit `autoMerge`; when both are present, `autoMerge`
-wins. Neither setting forces the merge stage on when `NANO_PR_AUTO_MERGE` is off.
+positive control: `false` pins that PR to review-only regardless of the global default, while
+`true` enables the merge-loop after convergence only when `NANO_PR_AUTO_MERGE` is on. The legacy
+negative `convergeOnly: true` alias remains accepted for callers that omit `autoMerge`; when both
+are present, `autoMerge` wins. No per-submit setting forces the merge stage on when the global
+toggle is off.
 
 Flow:
 

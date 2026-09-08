@@ -73,7 +73,7 @@ The body is flat. Fields:
 | field | type | meaning |
 |---|---|---|
 | `pr` (or `url`) | string | the PR — `owner/repo#123` or a full PR URL. Required. |
-| `autoMerge` | boolean | **Preferred positive setting.** `true` = converge **then merge**; `false` = review only, stopping at `converged`. |
+| `autoMerge` | boolean | **Preferred positive setting.** `false` = review only, stopping at `converged`, regardless of the global default; `true` = converge **then merge** when `NANO_PR_AUTO_MERGE` is enabled. |
 | `convergeOnly` | boolean | **Legacy negative alias.** `true` = review only. Ignored when `autoMerge` is present; when both are omitted, the global `NANO_PR_AUTO_MERGE` default applies. |
 | `maxRounds` | integer | per-submit cap before escalating (clamped 1–100; default from `NANO_PR_MAX_ROUNDS`, 20). |
 | `dependsOn` | string[] | other `prKey`s that must land before this one merges (merge-loop barrier). |

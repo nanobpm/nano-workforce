@@ -161,6 +161,26 @@ test("startConvergenceLoop maps autoMerge:false to review-only convergence", asy
   });
 });
 
+test("startConvergenceLoop lets autoMerge override the legacy convergeOnly alias", async () => {
+  await withGithubOff(async () => {
+    const merge = captureApp();
+    const mergeRes = await startConvergenceLoop(
+      input({ pr: "owner/repo#13", autoMerge: true, convergeOnly: true }),
+      merge.app,
+    );
+    assertEquals((mergeRes as any).status, 202);
+    assertEquals(merge.get(), false);
+
+    const review = captureApp();
+    const reviewRes = await startConvergenceLoop(
+      input({ pr: "owner/repo#14", autoMerge: false, convergeOnly: false }),
+      review.app,
+    );
+    assertEquals((reviewRes as any).status, 202);
+    assertEquals(review.get(), true);
+  });
+});
+
 test("startConvergenceLoop defaults convergeOnly to false and does not truthy-coerce a non-boolean", async () => {
   await withGithubOff(async () => {
     const omitted = captureApp();
