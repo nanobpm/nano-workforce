@@ -527,14 +527,52 @@ function bodyReferences(body: string, num: string): boolean {
   return new RegExp(`#${num}(?!\\d)`).test(body);
 }
 
-/** The `<version>` of a release tagged exactly `<package>@<version>` (numeric-dotted), or undefined
- * when the tag belongs to another package or is not a version tag. Per-package scoping is enforced
- * here: a sibling package's provenance can never leak into this package's resolution. */
-function versionForPackage(tag: string, pkg: string): string | undefined {
+/** A numeric-dotted SemVer-ish core, e.g. `1.58.0`. */
+const VERSION_CORE = /^\d+(\.\d+)*$/;
+
+/** Is `tag` a **package-scoped** version tag — `<anything>@<version>` (numeric-dotted), the monorepo
+ * convention (e.g. `@nanobpm/urban@0.54.0`, `c8ctl-plugin-nano@1.58.0`)? Used to decide whether a
+ * repo follows the single-package (`v1.58.0` / bare) convention: a repo is "single-package" only when
+ * it emits NO package-scoped tags at all. Anchored on the LAST `@` so scoped npm names (`@org/name@1.0.0`)
+ * are recognised. */
+function isPackageScopedVersionTag(tag: string): boolean {
+  const at = tag.lastIndexOf("@");
+  if (at <= 0) return false; // no `@`, or a leading `@` (scoped-name start) with nothing before it
+  return VERSION_CORE.test(tag.slice(at + 1).trim());
+}
+
+/** True when the repo's observed release set contains NO `<anything>@<version>`-prefixed package-scoped
+ * tags at all — i.e. it follows the single-package `v<version>` / bare `<version>` convention
+ * (semantic-release default), so a bare `v1.58.0` tag may be attributed to the sole package (#764).
+ * A repo using package-scoped tags is a monorepo: bare `v` tags are ignored there, keeping
+ * per-package provenance scoping airtight (a sibling package's provenance can never leak). */
+function repoIsSinglePackage(releases: readonly GithubRelease[]): boolean {
+  for (const rel of releases) {
+    if (rel && typeof rel.tag === "string" && isPackageScopedVersionTag(rel.tag)) return false;
+  }
+  return true;
+}
+
+/** The `<version>` a release tag carries for `pkg`, or undefined when it belongs to another package /
+ * is not a version tag. A tag is a candidate for `pkg` when **either**:
+ *
+ * 1. it is `<pkg>@<version>` (numeric-dotted) — the monorepo convention, per-package scoped so a
+ *    sibling package's provenance can never leak; **or**
+ * 2. `singlePackage` is true (the repo emits no package-scoped tags — see {@link repoIsSinglePackage})
+ *    AND the tag is `v<version>` or a bare `<version>` — the single-package / semantic-release-default
+ *    convention (#764). In a monorepo (`singlePackage` false) bare `v` tags are ignored, so scoping
+ *    stays airtight. */
+function versionForPackage(tag: string, pkg: string, singlePackage: boolean): string | undefined {
   const prefix = `${pkg}@`;
-  if (!tag.startsWith(prefix)) return undefined;
-  const v = tag.slice(prefix.length).trim();
-  return /^\d+(\.\d+)*$/.test(v) ? v : undefined;
+  if (tag.startsWith(prefix)) {
+    const v = tag.slice(prefix.length).trim();
+    return VERSION_CORE.test(v) ? v : undefined;
+  }
+  if (singlePackage) {
+    const v = (tag.startsWith("v") ? tag.slice(1) : tag).trim();
+    if (VERSION_CORE.test(v)) return v;
+  }
+  return undefined;
 }
 
 /** A compact, deterministic, BOUNDED summary of the capability candidate releases a probe observed
@@ -553,10 +591,11 @@ export function summariseCapabilityCandidates(
   const ref = match?.capabilityRef;
   if (!pkg) return "capability: no package configured";
   const num = ref ? capabilityNumber(ref) : undefined;
+  const singlePackage = repoIsSinglePackage(releases);
   const candidates: { version: string; refs: boolean }[] = [];
   for (const rel of releases) {
     if (!rel || typeof rel.tag !== "string" || typeof rel.body !== "string") continue;
-    const version = versionForPackage(rel.tag, pkg);
+    const version = versionForPackage(rel.tag, pkg, singlePackage);
     if (!version) continue;
     candidates.push({ version, refs: num !== undefined && bodyReferences(rel.body, num) });
   }
@@ -597,9 +636,10 @@ export function matchCapability(match: ProbeMatch | undefined, releases: readonl
   if (!num) return { ready: false, detail: "capability: unparseable capabilityRef (no #NNN)", observed };
 
   let firstVersion: string | undefined;
+  const singlePackage = repoIsSinglePackage(releases);
   for (const rel of releases) {
     if (!rel || typeof rel.tag !== "string" || typeof rel.body !== "string") continue;
-    const version = versionForPackage(rel.tag, pkg);
+    const version = versionForPackage(rel.tag, pkg, singlePackage);
     if (!version) continue;
     if (!bodyReferences(rel.body, num)) continue;
     if (firstVersion === undefined || cmpVersion(version, firstVersion) < 0) firstVersion = version;
@@ -615,9 +655,10 @@ export function matchCapability(match: ProbeMatch | undefined, releases: readonl
 export function newestPublishedVersion(pkg: string | undefined, releases: readonly GithubRelease[]): string | undefined {
   if (!pkg) return undefined;
   let newest: string | undefined;
+  const singlePackage = repoIsSinglePackage(releases);
   for (const rel of releases) {
     if (!rel || typeof rel.tag !== "string") continue;
-    const version = versionForPackage(rel.tag, pkg);
+    const version = versionForPackage(rel.tag, pkg, singlePackage);
     if (!version) continue;
     if (newest === undefined || cmpVersion(version, newest) > 0) newest = version;
   }

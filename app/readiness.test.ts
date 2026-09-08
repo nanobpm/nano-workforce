@@ -220,6 +220,57 @@ test("matchCapability: the bare '#274' ref form resolves identically to 'nano-id
   assertEquals(res.bind?.resolvedArtifact, "@nanobpm/urban@1.2.3");
 });
 
+// ── #764: single-package repos tag releases `v<version>` / bare `<version>` (semantic-release default) ──
+
+const c8Match = { capabilityRef: "c8ctl-plugin-nano#206", package: "c8ctl-plugin-nano" };
+
+test("#764 matchCapability: a `v<version>` release (body refs the cap) resolves in a single-package repo", () => {
+  // Red before the fix: `v1.58.0` never matched versionForPackage(tag, 'c8ctl-plugin-nano'),
+  // so the gate reported 'not published yet' though the npm package WAS published.
+  const res = matchCapability(c8Match, [rel("v1.58.0", [206])]);
+  assert(res.ready);
+  assertEquals(res.bind?.resolvedArtifact, "c8ctl-plugin-nano@1.58.0");
+});
+
+test("#764 matchCapability: a bare `<version>` release resolves the same way in a single-package repo", () => {
+  const res = matchCapability(c8Match, [rel("1.58.0", [206])]);
+  assert(res.ready);
+  assertEquals(res.bind?.resolvedArtifact, "c8ctl-plugin-nano@1.58.0");
+});
+
+test("#764 monorepo guard: a stray `v2.0.0` alongside package-scoped tags is NOT attributed to another package", () => {
+  // The repo emits package-scoped tags → it is a monorepo → bare `v` tags are ignored, so the stray
+  // v2.0.0 can never leak into @nanobpm/other's resolution.
+  const releases = [rel("@nanobpm/other@1.0.0", [200]), rel("v2.0.0", [274])];
+  const res = matchCapability({ capabilityRef: "nano-ide#274", package: "@nanobpm/other" }, releases);
+  assert(!res.ready, "the stray v2.0.0 must not resolve #274 for @nanobpm/other");
+});
+
+test("#764 summariseCapabilityCandidates: shows the extended `v`-tag candidate in a single-package repo", () => {
+  const summary = summariseCapabilityCandidates(c8Match, [rel("v1.58.0", [206]), rel("v1.57.0", [200])]);
+  assertStringIncludes(summary, "2 c8ctl-plugin-nano release(s) observed");
+  assertStringIncludes(summary, "c8ctl-plugin-nano@1.58.0 refs #206");
+  assertStringIncludes(summary, "c8ctl-plugin-nano@1.57.0 no #206");
+});
+
+test("#764 summariseCapabilityCandidates: in a monorepo a stray `v` tag is not summarised as another package's candidate", () => {
+  const summary = summariseCapabilityCandidates({ capabilityRef: "nano-ide#274", package: "@nanobpm/other" }, [
+    rel("@nanobpm/other@1.0.0", [200]),
+    rel("v2.0.0", [274]),
+  ]);
+  assertStringIncludes(summary, "1 @nanobpm/other release(s) observed");
+  assert(!summary.includes("2.0.0"), "the stray monorepo v2.0.0 is not a candidate for @nanobpm/other");
+});
+
+test("#764 newestPublishedVersion: resolves from `v`-tags under the single-package condition", () => {
+  assertEquals(newestPublishedVersion("c8ctl-plugin-nano", [rel("v1.57.0", []), rel("v1.58.0", [])]), "1.58.0");
+});
+
+test("#764 newestPublishedVersion: a stray `v` tag in a monorepo is ignored for a scoped package", () => {
+  const releases = [rel("@nanobpm/urban@0.9.0", []), rel("v9.9.9", [])];
+  assertEquals(newestPublishedVersion("@nanobpm/urban", releases), "0.9.0");
+});
+
 // ── #514 Defect A: the capability gate is self-diagnosing on escalation ──────────────────────────
 
 test("#514 Defect A summariseCapabilityCandidates: lists candidate releases (newest first) and whether each references the ref", () => {
