@@ -75,6 +75,12 @@ function num(body, key) {
     const v = body[key];
     return typeof v === "number" && Number.isFinite(v) ? v : undefined;
 }
+/** Read a strictly-boolean field, or `undefined` when absent. A present-but-non-boolean value returns
+ *  `undefined` too, so the caller can reject a malformed envelope rather than silently coercing it. */
+function bool(body, key) {
+    const v = body[key];
+    return typeof v === "boolean" ? v : undefined;
+}
 const ROLES = ["assistant", "user", "system", "tool"];
 /** Narrow an arbitrary string to a known {@link TranscriptRole}, defaulting to `assistant`. */
 function toRole(value) {
@@ -123,7 +129,35 @@ export const CORE_TRANSCRIPT_VOCAB = Object.freeze(Object.assign(Object.create(n
         if (text === undefined)
             return undefined;
         const roleRaw = str(body, "role");
-        return { kind: "message", offset, role: toRole(roleRaw), text };
+        // The additive display metadata (all optional). Mirror the permission decoder's discipline: a
+        // present-but-malformed optional field REJECTS the whole envelope (→ raw stream-chunk) rather than
+        // being silently dropped, so a decoded event never diverges from the on-wire JSON.
+        const messageId = str(body, "messageId");
+        if (body.messageId !== undefined && messageId === undefined)
+            return undefined;
+        let mode;
+        if (body.mode !== undefined) {
+            const modeRaw = str(body, "mode");
+            if (modeRaw !== "delta" && modeRaw !== "snapshot")
+                return undefined;
+            mode = modeRaw;
+        }
+        const start = bool(body, "start");
+        if (body.start !== undefined && start === undefined)
+            return undefined;
+        const final = bool(body, "final");
+        if (body.final !== undefined && final === undefined)
+            return undefined;
+        return {
+            kind: "message",
+            offset,
+            role: toRole(roleRaw),
+            text,
+            ...(messageId !== undefined ? { messageId } : {}),
+            ...(mode !== undefined ? { mode } : {}),
+            ...(start !== undefined ? { start } : {}),
+            ...(final !== undefined ? { final } : {}),
+        };
     },
     "tool-call": (body, offset) => {
         const name = str(body, "name");

@@ -77,14 +77,23 @@ test("regression: a nwfTranscriptEvent chunk is rendered as derived cards, NEVER
   assert(!host.text().includes(TRANSCRIPT_EVENT_MARKER), "rendered transcript must not contain the raw nwfTranscriptEvent marker");
 });
 
-test("feature: messages coalesce into one turn, tool/diff card renders, permission prompt renders", () => {
+test("feature: split-fragment messages coalesce into one block, chronological tool/diff + permission order (#757)", () => {
   const host = new FakeElement("div");
   renderDerivedTranscript(host as never, doc, report() as never);
 
-  // Message coalescing: both the user and assistant messages fold under a SINGLE derived turn section.
-  const turns = host.byClass("cockpit-transcript-turn");
-  assertEquals(turns.length, 1);
-  const roles = turns[0]?.byClass("cockpit-transcript-message").map((n) => n.getAttribute("data-role")) ?? [];
+  // NO per-delta cards and NO turn-section wrapper: the ordered display renders one growing text block
+  // per logical message, interleaved in chronological (offset) order — the #757 fix.
+  assertEquals(host.byClass("cockpit-transcript-turn").length, 0);
+  const blocksHost = host.byClass("cockpit-transcript-blocks")[0];
+  assert(blocksHost !== undefined, "the ordered blocks container is rendered");
+  const order = blocksHost.children.map((n) => n.className);
+  assertEquals(order, [
+    "cockpit-transcript-message", // user: "please build it"
+    "cockpit-transcript-tool", // the edit tool/diff card issued mid-conversation
+    "cockpit-transcript-message", // assistant: "built it"
+    "cockpit-transcript-permission", // the escalate prompt
+  ]);
+  const roles = host.byClass("cockpit-transcript-message").map((n) => n.getAttribute("data-role"));
   assertEquals(roles, ["user", "assistant"]);
 
   // Tool card with a synthesized diff (structured edit args → add/del lines).
