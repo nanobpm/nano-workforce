@@ -25,7 +25,7 @@
 // (`app/agentic/cockpit/transcript-derive.ts` + `app/agentic/transcript-events.ts`) that a drift-guard
 // test keeps byte-identical to its source.
 import { RelayChannelClient, TerminalSession } from "@nanobpm/agentic/cockpit";
-import { renderDerivedTranscript } from "./generated/transcript-derive.js";
+import { createIncrementalTranscript } from "./generated/transcript-derive.js";
 
 const DEFAULT_REFRESH_MS = 2000;
 const DEFAULT_STALE_AFTER_MS = 15_000;
@@ -390,42 +390,96 @@ function renderTranscripts(host, doc, view, onReplay, activeStream, title = "Pas
   host.appendChild(root);
 }
 
-// ── transcript rendering (#660) ────────────────────────────────────────────────────────────────
+// ── transcript rendering (#660, #757) ───────────────────────────────────────────────────────────
 //
-// A rendered-transcript sink over `host`: it accumulates the relay stream's `{offset, chunk}` entries
-// and (re-)draws them through the shared `renderDerivedTranscript` — the SAME parse→derive→render path
-// the typed core uses — so the operator sees readable message turns + tool/diff/permission cards, never
-// the raw `nwfTranscriptEvent` envelopes. Chunks are keyed by offset, so a resume-from-offset reconnect
-// that re-delivers a chunk coalesces instead of doubling it (mirrors TerminalSession's own dedup). The
-// derive/render logic is NOT re-copied here — that hand-copy was the #660 drift; this only collects
-// offsets and hands the whole page to the imported renderer, which parses + folds it exactly once.
+// An INCREMENTAL rendered-transcript sink over `host`: it feeds each relay `{offset, chunk}` into the
+// shared {@link createIncrementalTranscript} projection — the SAME ordered-display fold the typed core
+// uses (#757) — so the operator sees ONE growing text block per logical message with tool/diff/permission
+// activity interleaved in chronological order, never one bordered card per streamed delta and never the
+// raw `nwfTranscriptEvent` envelopes. The renderer patches only the ONE touched block's DOM node per
+// chunk (append a new block, or grow/settle an existing one) instead of rebuilding the whole tree, so the
+// operator's text selection and expansion survive live streaming.
+//
+// Redraws are BATCHED to an animation frame when the host provides one (bounded scheduling: many deltas
+// arriving in one frame apply together, once), falling back to a synchronous flush where no rAF exists
+// (Node/tests). Scroll is AUTO-FOLLOWED only when the operator is already at the tail — captured before
+// each flush mutates the DOM — so reading back through history is not yanked to the bottom by new output.
+// The derive/render logic is NOT re-copied here (that hand-copy was the #660 drift); this only schedules
+// and collects chunks and hands them to the imported projection.
 function transcriptSink(host, stream, opts = {}) {
-  const byOffset = new Map();
-  let gap = false;
-  let nextOffset = 0;
-  const draw = () => {
-    const entries = [...byOffset.entries()].sort((a, b) => a[0] - b[0]).map(([offset, chunk]) => ({ offset, chunk }));
-    renderDerivedTranscript(host, host.ownerDocument, { stream, from: 0, gap, nextOffset, entries }, opts);
-  };
+  const doc = host.ownerDocument;
+  const win = doc?.defaultView ?? (typeof window !== "undefined" ? window : undefined);
+  const raf = win && typeof win.requestAnimationFrame === "function" ? win.requestAnimationFrame.bind(win) : undefined;
+  const caf = win && typeof win.cancelAnimationFrame === "function" ? win.cancelAnimationFrame.bind(win) : undefined;
+
+  let renderer = createIncrementalTranscript(host, doc, stream, opts);
+  const pending = []; // buffered {offset, chunk} awaiting the next flush
+  let gapPending = false; // a retention gap to open before the next flush's chunks
+  let frame = 0; // scheduled animation-frame handle (0 = none)
+  let disposed = false;
+
+  // Is the operator following the tail (so new output should auto-scroll)? Only meaningful with real
+  // layout; a host without numeric scroll metrics (the Node fake DOM) is treated as following.
+  function atTail() {
+    const sh = host.scrollHeight;
+    const st = host.scrollTop;
+    const ch = host.clientHeight;
+    if (typeof sh !== "number" || typeof st !== "number" || typeof ch !== "number") return true;
+    return st + ch >= sh - 4;
+  }
+  function followTail() {
+    if (typeof host.scrollHeight === "number") host.scrollTop = host.scrollHeight;
+  }
+
+  function flush() {
+    frame = 0;
+    if (disposed) return;
+    // Capture follow-state BEFORE mutating so only an operator already at the tail is auto-scrolled.
+    const follow = atTail();
+    if (gapPending) {
+      renderer.noteGap();
+      gapPending = false;
+    }
+    const batch = pending.splice(0, pending.length).sort((a, b) => a.offset - b.offset);
+    for (const entry of batch) renderer.applyChunk(entry);
+    if (follow) followTail();
+  }
+
+  function schedule() {
+    if (disposed || frame !== 0) return;
+    if (raf) frame = raf(flush);
+    else flush(); // no animation-frame scheduler (Node/tests) — flush synchronously so the DOM is current
+  }
+
   return {
-    /** Fold in the resume ack (offset/gap metadata) and redraw. */
+    /** Fold in the resume ack: a gap flag opens a visible retention break before the following chunks. */
     ack: (message) => {
-      if (typeof message?.nextOffset === "number") nextOffset = message.nextOffset;
-      if (typeof message?.gap === "boolean") gap = message.gap;
-      draw();
+      if (message != null && message.gap === true) gapPending = true;
+      schedule();
     },
-    /** Fold in one relay data chunk (deduped by offset) and redraw. */
+    /** Buffer one relay data chunk (deduped by offset inside the idempotent projection) and schedule a flush. */
     add: (offset, chunk) => {
-      byOffset.set(offset, chunk);
-      draw();
+      pending.push({ offset, chunk });
+      schedule();
     },
-    /** Render a whole fetched transcript page in one pass (static replay). */
+    /** Render a whole fetched transcript page in one pass (static replay) — rebuild from a fresh projection. */
     replace: (data) => {
-      byOffset.clear();
-      gap = Boolean(data.gap);
-      nextOffset = data.nextOffset ?? 0;
-      for (const entry of data.entries ?? []) byOffset.set(entry.offset, entry.chunk);
-      draw();
+      if (frame !== 0 && caf) caf(frame);
+      frame = 0;
+      pending.length = 0;
+      gapPending = false;
+      renderer = createIncrementalTranscript(host, doc, data.stream ?? stream, opts);
+      if (data.gap) renderer.noteGap();
+      const entries = [...(data.entries ?? [])].sort((a, b) => a.offset - b.offset);
+      for (const entry of entries) renderer.applyChunk(entry);
+      followTail();
+    },
+    /** Tear down the scheduler when the terminal region is claimed by another session (or disposed). */
+    dispose: () => {
+      disposed = true;
+      if (frame !== 0 && caf) caf(frame);
+      frame = 0;
+      pending.length = 0;
     },
   };
 }

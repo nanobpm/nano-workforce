@@ -40,12 +40,22 @@ interface BundleModule {
 // self-contained ESM (`dist/transcript/events.js` has no runtime imports), the SAME source of truth the
 // Node core re-exports via the `transcript-events.ts` barrel. This keeps "one grammar, no drift surface"
 // true across BOTH hosts: the cockpit renders from agentic's grammar, never a hand-rolled second copy.
+// The ordered DISPLAY projection (agentic #566) is a THIRD browser-safe agentic module
+// (`dist/transcript/display.js`, self-contained — its only import is `import type` from events.ts,
+// erased on transpile). The cockpit's derive+render now folds through it (one growing block per message,
+// chronological interleave), so it joins the bundle beside the events grammar. `transcript-derive.ts`
+// imports the display fold from the `../transcript-display.ts` barrel, rewritten here to the generated
+// display sibling — the SAME source of truth the Node core re-exports.
 const MODULES: readonly BundleModule[] = [
   { src: "node_modules/@nanobpm/agentic/dist/transcript/events.js", out: "pages/cockpit/generated/transcript-events.js" },
+  { src: "node_modules/@nanobpm/agentic/dist/transcript/display.js", out: "pages/cockpit/generated/transcript-display.js" },
   {
     src: "app/agentic/cockpit/transcript-derive.ts",
     out: "pages/cockpit/generated/transcript-derive.js",
-    rewrites: [["../transcript-events.ts", "./transcript-events.js"]],
+    rewrites: [
+      ["../transcript-events.ts", "./transcript-events.js"],
+      ["../transcript-display.ts", "./transcript-display.js"],
+    ],
   },
 ];
 
