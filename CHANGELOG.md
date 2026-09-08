@@ -1,3 +1,9 @@
+## [0.185.1](https://github.com/nanobpm/nano-workforce/compare/v0.185.0...v0.185.1) (2026-09-08)
+
+### Bug Fixes
+
+* **agentic:** capability probe recognises single-package v-prefixed release tags ([#765](https://github.com/nanobpm/nano-workforce/issues/765)) ([79faa67](https://github.com/nanobpm/nano-workforce/commit/79faa676f46882d4e10f3ce0bb70080f40e3e757)), closes [#764](https://github.com/nanobpm/nano-workforce/issues/764)
+
 ## [0.185.0](https://github.com/nanobpm/nano-workforce/compare/v0.184.1...v0.185.0) (2026-09-08)
 
 ### Features
