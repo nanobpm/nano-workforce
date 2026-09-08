@@ -190,6 +190,10 @@ test("startConvergenceLoop defaults convergeOnly to false and does not truthy-co
     const stringy = captureApp();
     await startConvergenceLoop(input({ pr: "owner/repo#12", convergeOnly: "true" }), stringy.app);
     assertEquals(stringy.get(), false);
+
+    const stringyAutoMerge = captureApp();
+    await startConvergenceLoop(input({ pr: "owner/repo#15", autoMerge: "true" }), stringyAutoMerge.app);
+    assertEquals(stringyAutoMerge.get(), false);
   });
 });
 

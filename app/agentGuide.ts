@@ -31,7 +31,7 @@ const RAW_GUIDE: string = (() => {
       "Key endpoints (under the app control-API base `__BASE__`):",
       "- `GET /status` — every PR in flight, with its engine `processKey` and any open escalation.",
       "- `GET /version` — which code is live.",
-      "- `POST /actions/start/convergence-loop` — submit a PR (`{ pr, autoMerge?, convergeOnly?, maxRounds?, dependsOn? }`; prefer positive `autoMerge`, with legacy `convergeOnly` accepted).",
+      "- `POST /actions/start/convergence-loop` — submit a PR (`{ pr, autoMerge?, maxRounds?, dependsOn? }`; `autoMerge` is the positive per-request merge control).",
       "- `POST /actions/start/plan-fanout` — submit an epic (`{ issue, baseBranch }` or `{ url, baseBranch }`; base is required — a missing `epic/*` base is auto-created, and `confirmDefaultBase`/`allowSharedBase` gate the default-branch and shared-base cases — see ADR 0003).",
       "- `POST /actions/complete-user-task` — answer an escalation (`{ userTaskKey, variables }`); the parked user task's key comes from `GET /status`/the Tasks inbox, and the typed variables match its `.form` (e.g. a PR escalation's `{ answer }`).",
       "- `POST /actions/message` — publish a BPMN message (optionally correlated) into the engine.",

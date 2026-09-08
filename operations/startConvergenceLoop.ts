@@ -33,7 +33,7 @@ export default defineOperation("startConvergenceLoop", async ({ body }, app) => 
   const maxRounds = clampRounds(body.maxRounds, MAX_ROUNDS);
   // Prefer the positive autoMerge form so an unchecked UI box is explicitly review-only. Legacy
   // callers that omit autoMerge retain the existing convergeOnly/global-default behavior.
-  const hasAutoMerge = "autoMerge" in body;
+  const hasAutoMerge = typeof body.autoMerge === "boolean";
   const convergeOnly = hasAutoMerge ? body.autoMerge !== true : body.convergeOnly === true;
   const result = await submitPr(app.data, app.engine, parsed, dependsOn, maxRounds, convergeOnly);
   app.log.info("convergence loop started", {

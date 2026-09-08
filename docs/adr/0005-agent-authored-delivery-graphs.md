@@ -113,7 +113,7 @@ The closed set (extensible only by a deliberate ADR/PR, never by graph authors):
 > PR back to `converging`. `submitPr`'s own `prKey` idempotency additionally makes a resumed re-perform
 > double-safe on a still-live row. This retires the manual `land-*` human gate whose only job was "go run convergence
 > yourself" — the canonical shape is now `agent (opens PR) → connector[converge-merge] →
-> wait[pr, merged]` with no human node. The payload is `{ pr, convergeOnly?, dependsOn? }`; the `pr`
+> wait[pr, merged]` with no human node. The payload is `{ pr, autoMerge?, dependsOn? }`; the `pr`
 > may be a literal `owner/repo#N`, a `<node>.pr` fact reference late-bound from an upstream `agent`
 > node's emitted `pr` fact, or omitted to auto-bind the single incoming `pr` fact (issue #548 —
 > shipped: the connector resolves it via `resolveConvergePr`, and the `wait[pr]` target is late-bound

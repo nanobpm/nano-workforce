@@ -149,6 +149,14 @@ test("readConvergeInput: an explicit payload.convergeOnly overrides the target d
   assertEquals(r.dependsOn, ["owner/repo#5"], "non-string dependsOn entries are dropped");
 });
 
+test("readConvergeInput: autoMerge is the positive per-dispatch control", () => {
+  const merge = readConvergeInput("converge", { pr: "owner/repo#7", autoMerge: true }, null);
+  assertEquals(merge.convergeOnly, false);
+
+  const review = readConvergeInput("converge-merge", { pr: "owner/repo#7", autoMerge: false }, null);
+  assertEquals(review.convergeOnly, true);
+});
+
 test("readConvergeInput: a missing / unparseable pr fails CLOSED (a converge connector with no target PR is meaningless)", () => {
   assertThrows(() => readConvergeInput("converge-merge", null, null), Error, "payload.pr");
   assertThrows(() => readConvergeInput("converge-merge", {}, null), Error, "payload.pr");

@@ -1515,10 +1515,11 @@ components:
           description: Values above 100 are accepted and clamped to 100 by the delegate.
         autoMerge:
           type: boolean
-          description: Preferred per-request setting. When false, stop at `converged`; when true, run the merge-loop after convergence only if `NANO_PR_AUTO_MERGE` is enabled. Omit to use `convergeOnly` or the global default.
+          description: Preferred per-request setting. When false, stop at `converged`; when true, run the merge-loop after convergence only if `NANO_PR_AUTO_MERGE` is enabled. When omitted, the global default applies.
         convergeOnly:
           type: boolean
-          description: Legacy negative alias. When true, run convergence only and stop at `converged` — the PR is never handed to the merge-loop even if auto-merge is on globally (`NANO_PR_AUTO_MERGE`). Ignored when `autoMerge` is present.
+          deprecated: true
+          description: "Deprecated compatibility alias for `autoMerge: false`. Prefer `autoMerge`."
     ConvergenceStartByUrl:
       type: object
       additionalProperties: false
@@ -1538,10 +1539,11 @@ components:
           description: Values above 100 are accepted and clamped to 100 by the delegate.
         autoMerge:
           type: boolean
-          description: Preferred per-request setting. When false, stop at `converged`; when true, run the merge-loop after convergence only if `NANO_PR_AUTO_MERGE` is enabled. Omit to use `convergeOnly` or the global default.
+          description: Preferred per-request setting. When false, stop at `converged`; when true, run the merge-loop after convergence only if `NANO_PR_AUTO_MERGE` is enabled. When omitted, the global default applies.
         convergeOnly:
           type: boolean
-          description: Legacy negative alias. When true, run convergence only and stop at `converged` — the PR is never handed to the merge-loop even if auto-merge is on globally (`NANO_PR_AUTO_MERGE`). Ignored when `autoMerge` is present.
+          deprecated: true
+          description: "Deprecated compatibility alias for `autoMerge: false`. Prefer `autoMerge`."
     PlanStart:
       description: The start-plan-fanout request body. Names the target issue by EXACTLY ONE of
         `issue` (an `owner/repo#123` reference) or `url` (a bare issue URL), plus a REQUIRED
@@ -3127,7 +3129,7 @@ components:
           type: boolean
           description: >-
             When true (and `converge` is true), drive the merge-loop after convergence — mirrors
-            `convergeOnly`/`NANO_PR_AUTO_MERGE` inverted. When false the run stops at `converged`.
+            the global auto-merge setting. When false the run stops at `converged`.
             Moot when `converge` is false.
         confirmDefaultBase:
           type: boolean
@@ -4146,10 +4148,11 @@ paths:
                       description: Values above 100 are accepted and clamped to 100 by the delegate.
                     autoMerge:
                       type: boolean
-                      description: Preferred per-request setting. When false, stop at `converged`; when true, run the merge-loop after convergence only if `NANO_PR_AUTO_MERGE` is enabled. Omit to use `convergeOnly` or the global default.
+                      description: Preferred per-request setting. When false, stop at `converged`; when true, run the merge-loop after convergence only if `NANO_PR_AUTO_MERGE` is enabled. When omitted, the global default applies.
                     convergeOnly:
                       type: boolean
-                      description: Legacy negative alias. When true, run convergence only and stop at `converged` — the PR is never handed to the merge-loop even if auto-merge is on globally (`NANO_PR_AUTO_MERGE`). Ignored when `autoMerge` is present.
+                      deprecated: true
+                      description: 'Deprecated compatibility alias for `autoMerge: false`. Prefer `autoMerge`.'
                 - type: object
                   additionalProperties: false
                   required:
@@ -4168,10 +4171,11 @@ paths:
                       description: Values above 100 are accepted and clamped to 100 by the delegate.
                     autoMerge:
                       type: boolean
-                      description: Preferred per-request setting. When false, stop at `converged`; when true, run the merge-loop after convergence only if `NANO_PR_AUTO_MERGE` is enabled. Omit to use `convergeOnly` or the global default.
+                      description: Preferred per-request setting. When false, stop at `converged`; when true, run the merge-loop after convergence only if `NANO_PR_AUTO_MERGE` is enabled. When omitted, the global default applies.
                     convergeOnly:
                       type: boolean
-                      description: Legacy negative alias. When true, run convergence only and stop at `converged` — the PR is never handed to the merge-loop even if auto-merge is on globally (`NANO_PR_AUTO_MERGE`). Ignored when `autoMerge` is present.
+                      deprecated: true
+                      description: 'Deprecated compatibility alias for `autoMerge: false`. Prefer `autoMerge`.'
               type: object
               # END generated:mcp-body
       responses:
@@ -5386,9 +5390,9 @@ paths:
                           type: string
                           enum: [real, forward-declared]
                           description: real ⇒ dispatches a real side effect; forward-declared ⇒ a no-op stub.
-                        convergeOnlyDefault:
+                        autoMergeDefault:
                           type: boolean
-                          description: The default `convergeOnly` for a real converge target.
+                          description: The default `autoMerge` for a real converge target.
                         summary:
                           type: string
                           description: What the target does.
@@ -5449,7 +5453,7 @@ paths:
                       optionalFields: [dedupeKey, payload]
                       sideEffecting: true
                       mayEmit: true
-                      summary: "An automated outbound action; payload for a converge target is { pr, convergeOnly?, dependsOn? }."
+                      summary: "An automated outbound action; payload for a converge target is { pr, autoMerge?, dependsOn? }."
                   factTypes: [string, number, boolean, artifact, version, url, pr]
                   guardScalarTypes: [string, number, boolean]
                   waitProbeKinds:
@@ -5470,15 +5474,15 @@ paths:
                   connectorTargets:
                     - target: converge
                       status: real
-                      convergeOnlyDefault: true
+                      autoMergeDefault: false
                       summary: "Converge-only: drive review convergence and stop at converged."
                     - target: converge-merge
                       status: real
-                      convergeOnlyDefault: false
+                      autoMergeDefault: true
                       summary: "Unit-level land: converge AND merge onto the PR's own base branch."
                     - target: merge-main
                       status: real
-                      convergeOnlyDefault: false
+                      autoMergeDefault: true
                       summary: "Graph-level top-level land onto main (two-level merge)."
                     - target: "<any other target>"
                       status: forward-declared
@@ -5745,7 +5749,7 @@ paths:
                       description: When true, hand the opened PR to the convergence loop (review rounds) as a follow-on step. When false (default) the run ends at "PR raised, not reviewed".
                     autoMerge:
                       type: boolean
-                      description: When true (and `converge` is true), drive the merge-loop after convergence — mirrors `convergeOnly`/`NANO_PR_AUTO_MERGE` inverted. When false the run stops at `converged`. Moot when `converge` is false.
+                      description: When true (and `converge` is true), drive the merge-loop after convergence — mirrors the global auto-merge setting. When false the run stops at `converged`. Moot when `converge` is false.
                     confirmDefaultBase:
                       type: boolean
                       description: Acknowledge that `baseBranch` is the repository default branch (the PR would target it directly). See `PlanStartByIssue.confirmDefaultBase`.
