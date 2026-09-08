@@ -436,9 +436,10 @@ export function renderEmitContract(emits: readonly DeliveryFact[]): string {
 
 /** Per-status semantics for the producer-completion contract (#760). Keyed by the SAME status strings
  * as {@link AGENT_TERMINAL_SUCCESS_STATUSES} so the rendered bullets are DERIVED from the single source
- * of truth: {@link renderProducerContract} iterates the allowlist and only emits a bullet for a status
- * it can explain, so removing a status from the allowlist drops its bullet and adding one changes the
- * surfaced list — no second copy of the vocabulary. */
+ * of truth: {@link renderProducerContract} iterates the allowlist and emits a bullet for EVERY status,
+ * failing fast if any allowlisted status has no entry here. Removing a status from the allowlist drops
+ * its bullet; adding one WITHOUT documenting its semantics here is a build/boot-time error (not a
+ * silently under-explained prompt) — so the surfaced list and the allowlist can never drift. */
 const PRODUCER_STATUS_SEMANTICS: Readonly<Record<string, string>> = {
   opened: "you opened OR adopted a PR (also return it in the declared `pr` emit)",
   done: "the work completed with no PR to open",
@@ -468,9 +469,16 @@ const PRODUCER_STATUS_SEMANTICS: Readonly<Record<string, string>> = {
  * optional (#761). */
 export function renderProducerContract(requiredEmits: readonly DeliveryFact[]): string {
   const list = AGENT_TERMINAL_SUCCESS_STATUSES.map((s) => `\`${s}\``).join(", ");
-  const semantics = AGENT_TERMINAL_SUCCESS_STATUSES.filter((s) => s in PRODUCER_STATUS_SEMANTICS).map(
-    (s) => `- \`${s}\` — ${PRODUCER_STATUS_SEMANTICS[s]}.`,
-  );
+  const semantics = AGENT_TERMINAL_SUCCESS_STATUSES.map((s) => {
+    const doc = PRODUCER_STATUS_SEMANTICS[s];
+    if (doc === undefined) {
+      throw new Error(
+        `renderProducerContract: allowlisted status "${s}" has no PRODUCER_STATUS_SEMANTICS entry — ` +
+          "document its semantics so the producer-contract prompt and AGENT_TERMINAL_SUCCESS_STATUSES cannot drift.",
+      );
+    }
+    return `- \`${s}\` — ${doc}.`;
+  });
   const lines = [
     "",
     "",

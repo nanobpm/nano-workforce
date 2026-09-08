@@ -293,9 +293,9 @@ describe("delivery-graph runner — engine-native execution (S4)", () => {
     // The producer satisfied its contract (allowlisted status + non-null required emit): NO __contract
     // escalation was raised, the downstream connector fired once, and the graph reached End.
     assert.equal(agentFired, 1, "the agent node's job fired and completed");
-    const open = await app.engine.searchUserTasks({ state: "CREATED" });
-    const contract = open.find((t) => t.elementId?.startsWith("delivery-human-task__") && t.elementId?.endsWith("__contract"));
-    assert.ok(!contract, `an allowlisted status + required emit must NOT escalate, got ${JSON.stringify(open.map((t) => t.elementId))}`);
+    const createdTasks = await app.engine.searchUserTasks({ state: "CREATED" });
+    const contract = createdTasks.find((t) => t.elementId?.startsWith("delivery-human-task__") && t.elementId?.endsWith("__contract"));
+    assert.ok(!contract, `an allowlisted status + required emit must NOT escalate, got ${JSON.stringify(createdTasks.map((t) => t.elementId))}`);
     assert.equal(connectorFired, 1, "the satisfied producer threads its result to the downstream connector");
     assert.ok(takenFlows(app).some((f) => f.endsWith("->End")), "the satisfied producer's result reaches End");
   });

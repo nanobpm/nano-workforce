@@ -240,6 +240,24 @@ test("producer contract required-emit subset (#761): a routing-only emit is NOT 
 });
 
 
+test("producer contract semantics coverage (#761 follow-up): renderProducerContract emits a documented bullet for EVERY allowlisted status and fails fast on an undocumented one", () => {
+  // Copilot review follow-up: `renderProducerContract` previously FILTERED the allowlist against
+  // PRODUCER_STATUS_SEMANTICS, so adding a status to AGENT_TERMINAL_SUCCESS_STATUSES without documenting
+  // its semantics would silently render a prompt that LISTS the status in the vocabulary line yet gives
+  // no explanatory bullet — a quiet drift between the allowlist and the surfaced contract. It now emits
+  // a bullet for every allowlisted status and throws if any lacks semantics. Pin: every currently
+  // allowlisted status carries a documented `- \`<status>\` — …` bullet (so the throw path is
+  // unreachable for the shipped allowlist, and any future undocumented addition breaks the build).
+  const rendered = renderProducerContract([]);
+  for (const status of AGENT_TERMINAL_SUCCESS_STATUSES) {
+    assert(
+      rendered.includes(`- \`${status}\` — `),
+      `every allowlisted status carries a documented semantics bullet, missing: ${status}, got: ${rendered}`,
+    );
+  }
+});
+
+
 test("agent node idempotency preflight (#551): every agent prompt leads with adopt-and-report guidance; non-agent nodes are untouched", async () => {
   // #551: a delivery agent node dispatches a raw retry-carrying `senior:feature` job with no
   // PR-existence guard, so a re-dispatch opened a DUPLICATE PR (instance 43077 n0 → #979/#980). The
