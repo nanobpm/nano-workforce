@@ -623,7 +623,8 @@ node that declares no `emits` gets no contract text and behaves exactly as befor
 
 **Producer completion contract (auto-injected — do NOT hand-encode it).** Every `agent` node
 *also* has a **producer completion contract** appended to its prompt at dispatch, alongside the
-idempotency preflight and the emit contract. It hands the agent the terminal-status vocabulary
+idempotency preflight and — only for a node that declares `emits` — the classifier emit contract.
+It hands the agent the terminal-status vocabulary
 the `#731` producer gate enforces — a completion routes onward only when its self-reported
 `status` is **absent/null (legacy workers / stubs that report no status) or** one of
 `AGENT_TERMINAL_SUCCESS_STATUSES` (`done` / `opened` / `skipped`) **and** every required emit
