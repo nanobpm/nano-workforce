@@ -441,7 +441,7 @@ export function renderEmitContract(emits: readonly DeliveryFact[]): string {
  * its bullet; adding one WITHOUT documenting its semantics here is a build/boot-time error (not a
  * silently under-explained prompt) — so the surfaced list and the allowlist can never drift. */
 const PRODUCER_STATUS_SEMANTICS: Readonly<Record<string, string>> = {
-  opened: "you opened OR adopted a PR (also return it in the declared `pr` emit)",
+  opened: "you opened OR adopted a PR (return it in your `pr` emit if this node declares one)",
   done: "the work completed with no PR to open",
   skipped: "there was genuinely nothing to do",
 };
