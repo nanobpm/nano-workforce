@@ -1,3 +1,9 @@
+## [0.184.1](https://github.com/nanobpm/nano-workforce/compare/v0.184.0...v0.184.1) (2026-09-08)
+
+### Bug Fixes
+
+* **delivery:** allow node repositories in staged dispatch form ([#759](https://github.com/nanobpm/nano-workforce/issues/759)) ([a9fb9f6](https://github.com/nanobpm/nano-workforce/commit/a9fb9f672a2b3cd365c191755847a303b906a343)), closes [#758](https://github.com/nanobpm/nano-workforce/issues/758)
+
 ## [0.184.0](https://github.com/nanobpm/nano-workforce/compare/v0.183.2...v0.184.0) (2026-09-07)
 
 ### Features
