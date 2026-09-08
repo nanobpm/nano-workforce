@@ -18,7 +18,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { EngineClient } from "@nanobpm/urban";
 import type { DeliveryFact, DeliveryGraph, DeliveryNode } from "../nano-generated/api-io.d.ts";
 import { TRANSCRIPT_URL_BASE_VAR, transcriptUrlBaseFor } from "./agentic/transcript-url.ts";
-import { AGENT_REPO_SPEC_HEADER, assertNever, compileDeliveryGraph, DELIVERY_GRAPH_PROCESS_ID } from "./deliveryGraphCompiler.ts";
+import { AGENT_REPO_SPEC_HEADER, AGENT_TERMINAL_SUCCESS_STATUSES, assertNever, compileDeliveryGraph, DELIVERY_GRAPH_PROCESS_ID } from "./deliveryGraphCompiler.ts";
 import { DEFAULT_EVERY_MS, msToIsoDuration, parseProbe, readinessPollEvery, readinessTimeout } from "./readiness.ts";
 import { agentNodeRepoEnvelope, flattenAgentTaskEnvelope, isResolvableRepo, RepoEnvelopeConflictError, RepoEnvelopeUnresolvedError } from "./repoEnvelope.ts";
 import { isoDuration } from "./reviewWait.ts";
@@ -419,6 +419,64 @@ export function renderEmitContract(emits: readonly DeliveryFact[]): string {
 }
 
 
+/** Per-status semantics for the producer-completion contract (#760). Keyed by the SAME status strings
+ * as {@link AGENT_TERMINAL_SUCCESS_STATUSES} so the rendered bullets are DERIVED from the single source
+ * of truth: {@link renderProducerContract} iterates the allowlist and only emits a bullet for a status
+ * it can explain, so removing a status from the allowlist drops its bullet and adding one changes the
+ * surfaced list — no second copy of the vocabulary. */
+const PRODUCER_STATUS_SEMANTICS: Readonly<Record<string, string>> = {
+  opened: "you opened OR adopted a PR (also return it in the declared `pr` emit)",
+  done: "the work completed with no PR to open",
+  skipped: "there was genuinely nothing to do",
+};
+
+/** Render the producer-completion contract auto-injected into EVERY `agent` node's `appendPrompt`
+ * (issue #760) — the missing THIRD contract block alongside {@link renderIdempotencyPreamble} (#551)
+ * and {@link renderEmitContract} (#506). The #731 producer gate (`app/deliveryGraphCompiler.ts`) only
+ * routes a completion onward when its self-reported `status` is one of `AGENT_TERMINAL_SUCCESS_STATUSES`
+ * AND every required emit is non-null; before this block that vocabulary lived ONLY in the gate, so a
+ * correctly-finished agent that self-reported an out-of-vocabulary `status` (e.g. `"success"`) was
+ * parked on a `__contract` escalation despite good work (instance 15697). This block hands the agent the
+ * same vocabulary through its sole steering channel, DERIVED from `AGENT_TERMINAL_SUCCESS_STATUSES` (and
+ * the node's declared `emits`) so the gate and the prompt cannot drift — changing the allowlist changes
+ * this block. Deterministic: fixed wording, statuses + emit names in declared order, so identical graphs
+ * still compile+seed byte-identically. Unconditional — a no-emit node still gets the status block (the
+ * gate applies to it too); only the required-emit sentence is elided when there are none. */
+export function renderProducerContract(emits: readonly DeliveryFact[]): string {
+  const list = AGENT_TERMINAL_SUCCESS_STATUSES.map((s) => `\`${s}\``).join(", ");
+  const semantics = AGENT_TERMINAL_SUCCESS_STATUSES.filter((s) => s in PRODUCER_STATUS_SEMANTICS).map(
+    (s) => `- \`${s}\` — ${PRODUCER_STATUS_SEMANTICS[s]}.`,
+  );
+  const lines = [
+    "",
+    "",
+    "---",
+    "",
+    "## Producer completion contract (delivery graph)",
+    "",
+    "This node is a PRODUCER in a delivery graph: a completion barrier gates your result before it can",
+    "route to a downstream consumer. The structured result you write to `AGENT_RESULT_FILE` MUST end",
+    `with a \`status\` field that is one of the terminal-success values ${list}:`,
+    "",
+    ...semantics,
+    "",
+    `Any \`status\` OUTSIDE ${list} — including a free-form \`success\`/\`in_progress\`/\`failed\` — parks the`,
+    "run on a human escalation (the gate is fail-closed), EVEN when your underlying work was correct. So",
+    "do not invent a status: report exactly one of the allowlisted values above.",
+  ];
+  if (emits.length > 0) {
+    lines.push(
+      "",
+      "AND every emit a downstream node requires must be populated non-null before your result routes",
+      "onward — populate each of these top-level fields:",
+      "",
+      ...emits.map((f) => `- \`${f.name}\``),
+    );
+  }
+  return lines.join("\n");
+}
+
+
 /** Build the `nodeInputs.<element>` seed for one node, per its kind — the exact fields the compiled
  * subProcess ioMapping pulls. Total over the closed kind set. */
 function buildNodeInput(
@@ -439,7 +497,7 @@ function buildNodeInput(
       // truth. A no-emit node appends nothing, so a plain implementation node is unchanged.
       const basePrompt = node.agent.prompt ?? "";
       const emits = Array.isArray(node.emits) ? node.emits.map((f) => ({ ...f })) : [];
-      return { jobType: node.agent.jobType, appendPrompt: renderIdempotencyPreamble() + basePrompt + renderEmitContract(emits), timeout: isoDuration(node.agent.timeout, ctx.nodeTimeout) };
+      return { jobType: node.agent.jobType, appendPrompt: renderIdempotencyPreamble() + basePrompt + renderEmitContract(emits) + renderProducerContract(emits), timeout: isoDuration(node.agent.timeout, ctx.nodeTimeout) };
     }
     case "wait": {
       const probe = parseProbe(node.wait, { allowLateBoundTarget: true });

@@ -11,7 +11,8 @@
 // proven end-to-end in `e2e/delivery-graph.e2e.ts`.
 import { test } from "node:test";
 import { assert, assertEquals, assertRejects } from "#test-assert";
-import { prepareDeliveryGraph, renderIdempotencyPreamble, runDeliveryGraph } from "./deliveryRunner.ts";
+import { AGENT_TERMINAL_SUCCESS_STATUSES } from "./deliveryGraphCompiler.ts";
+import { prepareDeliveryGraph, renderEmitContract, renderIdempotencyPreamble, renderProducerContract, runDeliveryGraph } from "./deliveryRunner.ts";
 import { RepoEnvelopeConflictError, RepoEnvelopeUnresolvedError } from "./repoEnvelope.ts";
 import type { DeliveryGraph } from "../nano-generated/api-io.d.ts";
 
@@ -76,8 +77,9 @@ test("nodeInputs seeds the exact per-kind fields each node's subProcess ioMappin
 
   const agent = byField((v) => v.jobType === "senior:feature");
   // Every agent node's appendPrompt is prefixed with the idempotency preflight (#551), then the
-  // authored prompt (this node declares no emits, so the emit contract adds nothing).
-  assertEquals(agent, { jobType: "senior:feature", appendPrompt: renderIdempotencyPreamble() + "un-draft + merge #B", timeout: "PT10M" });
+  // authored prompt, then the (emit-less) producer completion contract (#760) — this node declares no
+  // emits, so the emit contract adds nothing but the status block still applies.
+  assertEquals(agent, { jobType: "senior:feature", appendPrompt: renderIdempotencyPreamble() + "un-draft + merge #B" + renderEmitContract([]) + renderProducerContract([]), timeout: "PT10M" });
 
   const wait = byField((v) => "gateKey" in v);
   assertEquals(wait?.gateKey, "run-7:n3");
@@ -156,9 +158,52 @@ test("agent node classifier-emit contract (#506): a declared `emits` threads the
   assert(adoptPrompt.includes("breaking | compatible"), "the fact's optional description rides the contract");
   assert(adoptPrompt.includes("AGENT_RESULT_FILE"), "the contract names the completion channel the fact rides");
 
-  // A node that declares NO facts still carries the preflight, then exactly the authored prompt — the
-  // emit contract contributes nothing.
-  assertEquals(plain?.appendPrompt, renderIdempotencyPreamble() + "just implement it");
+  // A node that declares NO facts still carries the preflight and the (emit-less) producer contract,
+  // then exactly the authored prompt — the emit contract contributes nothing.
+  assertEquals(plain?.appendPrompt, renderIdempotencyPreamble() + "just implement it" + renderEmitContract([]) + renderProducerContract([]));
+});
+
+test("agent node producer completion contract (#760): every agent prompt carries the terminal-status vocabulary derived from AGENT_TERMINAL_SUCCESS_STATUSES + required-emit names; a non-agent node never does", async () => {
+  // #760: the #731 producer gate's terminal-status vocabulary (AGENT_TERMINAL_SUCCESS_STATUSES) lived
+  // ONLY in the compiler's gate — nothing told the agent which statuses count as success, so a
+  // correctly-done agent that self-reported `status: "success"` was parked on a __contract escalation
+  // (instance 15697). Auto-inject the vocabulary into every agent node's appendPrompt, derived from the
+  // single source of truth so the list and the prompt can never drift.
+  const graph: DeliveryGraph = {
+    name: "producer contract",
+    nodes: [
+      { id: "emit", kind: "agent", agent: { jobType: "senior:feature", prompt: "do the thing" }, emits: [{ name: "pr", type: "pr" }] },
+      { id: "plain", kind: "agent", agent: { jobType: "senior:feature", prompt: "no emits here" } },
+      { id: "gate", kind: "wait", wait: { kind: "pr", target: "owner/repo#1", match: { prState: "merged" } } },
+    ],
+    edges: [{ from: "emit.pr", to: "plain" }, { from: "plain", to: "gate" }],
+  };
+  const p = await prepareOk(graph);
+  const agents = Object.values(p.nodeInputs).filter((v) => "jobType" in v) as Array<Record<string, unknown>>;
+  assertEquals(agents.length, 2, "both agent nodes are seeded");
+
+  // Every agent node — emit-declaring OR not — carries the producer contract heading and the EXACT
+  // allowlist strings, derived from the single source of truth.
+  for (const a of agents) {
+    const prompt = String(a.appendPrompt);
+    assert(prompt.includes("Producer completion contract"), `every agent prompt carries the producer contract, got: ${prompt}`);
+    for (const status of AGENT_TERMINAL_SUCCESS_STATUSES) {
+      assert(prompt.includes(`\`${status}\``), `the allowlist status ${status} is surfaced verbatim, got: ${prompt}`);
+    }
+    assert(prompt.includes("escalation"), "it warns an out-of-vocabulary status parks a human escalation");
+  }
+
+  // The emit-declaring node names its required emit in the producer contract; the no-emit node carries
+  // the status block unchanged in every other respect (per #760 acceptance) but names no emit.
+  const emit = agents.find((v) => String(v.appendPrompt).includes("do the thing"));
+  const plain = agents.find((v) => String(v.appendPrompt).includes("no emits here"));
+  assert(String(emit?.appendPrompt).includes(renderProducerContract([{ name: "pr", type: "pr" }])), "the emit-declaring node's producer contract names its required emit");
+  assert(String(plain?.appendPrompt).includes(renderProducerContract([])), "the no-emit node still carries the status block");
+
+  // The vocabulary is AGENT-ONLY — a wait node's seed carries no prompt at all.
+  const wait = Object.values(p.nodeInputs).find((v) => "gateKey" in v) as Record<string, unknown> | undefined;
+  assert(wait, "the wait node is seeded");
+  assert(!("appendPrompt" in wait!), "a non-agent node never carries the producer completion contract");
 });
 
 

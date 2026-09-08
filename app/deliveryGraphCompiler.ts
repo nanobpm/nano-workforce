@@ -119,8 +119,11 @@ function contractEscalationTaskElement(element: string): string {
  * and escalates AT the node instead of threading an incomplete result into a downstream consumer. An
  * ABSENT/null status passes the gate (a status-less completion — an older fleet worker or a bare test
  * stub — is not itself the failure mode; the required-emit gate still catches a missing data fact).
- * Sorted for the compiler's byte-identical-output determinism. */
-const AGENT_TERMINAL_SUCCESS_STATUSES: readonly string[] = ["done", "opened", "skipped"];
+ * Sorted for the compiler's byte-identical-output determinism. Exported as the SINGLE SOURCE OF TRUTH:
+ * the compiler's contract gate reads it here, and the runner's `renderProducerContract` (#760) derives
+ * the agent-facing status vocabulary from the SAME list — changing it changes both the gate and the
+ * prompt at once, so the two representations of the producer contract can never drift. */
+export const AGENT_TERMINAL_SUCCESS_STATUSES: readonly string[] = ["done", "opened", "skipped"];
 
 /** A never-reached exhaustiveness guard: `compileNode`'s `switch` covers every allowlisted kind, so
  * the closed union narrows to `never` here. If a future kind is added to the vocabulary without a
