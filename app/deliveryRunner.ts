@@ -18,7 +18,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { EngineClient } from "@nanobpm/urban";
 import type { DeliveryFact, DeliveryGraph, DeliveryNode } from "../nano-generated/api-io.d.ts";
 import { TRANSCRIPT_URL_BASE_VAR, transcriptUrlBaseFor } from "./agentic/transcript-url.ts";
-import { AGENT_REPO_SPEC_HEADER, assertNever, compileDeliveryGraph, DELIVERY_GRAPH_PROCESS_ID } from "./deliveryGraphCompiler.ts";
+import { AGENT_REPO_SPEC_HEADER, AGENT_TERMINAL_SUCCESS_STATUSES, assertNever, compileDeliveryGraph, DELIVERY_GRAPH_PROCESS_ID } from "./deliveryGraphCompiler.ts";
 import { DEFAULT_EVERY_MS, msToIsoDuration, parseProbe, readinessPollEvery, readinessTimeout } from "./readiness.ts";
 import { agentNodeRepoEnvelope, flattenAgentTaskEnvelope, isResolvableRepo, RepoEnvelopeConflictError, RepoEnvelopeUnresolvedError } from "./repoEnvelope.ts";
 import { isoDuration } from "./reviewWait.ts";
@@ -100,6 +100,10 @@ const DEFAULTS: Required<Omit<DeliveryRunTimeouts, "escalationAssignee">> = {
   escalationSlaTimeout: "P1D",
 };
 
+/** Shared empty required-emit set for a node whose declared emits are all routing-only (or which
+ * declares none) — avoids allocating a throwaway `Set` per such node while seeding. */
+const EMPTY_REQUIRED_EMITS: ReadonlySet<string> = new Set<string>();
+
 /** The per-node config the compiled subProcess ioMappings read from `nodeInputs.<element>`. A closed
  * union mirrored by the compiler's `ioMappingLines` — the two must agree on field names (a drift here
  * silently seeds `null` into a node body), so both derive from the same node kinds. */
@@ -170,11 +174,22 @@ export async function prepareDeliveryGraph(
     escalationAssignee: options.escalationAssignee ?? null,
   };
   const elementByNodeId = new Map(compiled.resolved.nodes.map((n) => [n.id, n.element]));
+  // Required-emit subset per node (#761), derived from the SAME canonical `resolved.edges` the compiler's
+  // `requiredEmitsByElement` gate uses: a fact is a required data dependency exactly when some edge
+  // threads it as a fact-qualified `from: "<node>.<fact>"` (`fromFact` set). A routing-only fact (named
+  // only in a `when` guard) is deliberately absent, so the producer contract leaves it optional.
+  const requiredEmitsByNodeId = new Map<string, Set<string>>();
+  for (const edge of compiled.resolved.edges) {
+    if (edge.fromFact === undefined) continue;
+    const set = requiredEmitsByNodeId.get(edge.fromNode) ?? new Set<string>();
+    set.add(edge.fromFact);
+    requiredEmitsByNodeId.set(edge.fromNode, set);
+  }
   const nodeInputs: Record<string, NodeInput> = {};
   for (const node of graph.nodes) {
     const element = elementByNodeId.get(node.id);
     if (element === undefined) continue; // unreachable — resolved covers every node — but keep total.
-    nodeInputs[element] = buildNodeInput(node, { runKey, element, ...timeouts });
+    nodeInputs[element] = buildNodeInput(node, { runKey, element, ...timeouts, requiredEmits: requiredEmitsByNodeId.get(node.id) ?? EMPTY_REQUIRED_EMITS });
   }
   return { ok: true, prepared: { processDefinitionId, bpmn, nodeInputs } };
 }
@@ -419,11 +434,86 @@ export function renderEmitContract(emits: readonly DeliveryFact[]): string {
 }
 
 
+/** Per-status semantics for the producer-completion contract (#760). Keyed by the SAME status strings
+ * as {@link AGENT_TERMINAL_SUCCESS_STATUSES} so the rendered bullets are DERIVED from the single source
+ * of truth: {@link renderProducerContract} iterates the allowlist and emits a bullet for EVERY status,
+ * failing fast if any allowlisted status has no entry here. Removing a status from the allowlist drops
+ * its bullet; adding one WITHOUT documenting its semantics here is a build/boot-time error (not a
+ * silently under-explained prompt) — so the surfaced list and the allowlist can never drift. */
+const PRODUCER_STATUS_SEMANTICS: Readonly<Record<string, string>> = {
+  opened: "you opened OR adopted a PR (return it in your `pr` emit if this node declares one)",
+  done: "the work completed with no PR to open",
+  skipped: "there was genuinely nothing to do",
+};
+
+/** Render the producer-completion contract auto-injected into EVERY `agent` node's `appendPrompt`
+ * (issue #760) — the missing THIRD contract block alongside {@link renderIdempotencyPreamble} (#551)
+ * and {@link renderEmitContract} (#506). The #731 producer gate (`app/deliveryGraphCompiler.ts`) only
+ * routes a completion onward when its self-reported `status` is one of `AGENT_TERMINAL_SUCCESS_STATUSES`
+ * AND every required emit is non-null; before this block that vocabulary lived ONLY in the gate, so a
+ * correctly-finished agent that self-reported an out-of-vocabulary `status` (e.g. `"success"`) was
+ * parked on a `__contract` escalation despite good work (instance 15697). This block hands the agent the
+ * same vocabulary through its sole steering channel, DERIVED from `AGENT_TERMINAL_SUCCESS_STATUSES` (and
+ * the node's REQUIRED emits) so the gate and the prompt cannot drift — changing the allowlist changes
+ * this block. Deterministic: fixed wording, statuses + emit names in declared order, so identical graphs
+ * still compile+seed byte-identically. Unconditional — a no-emit node still gets the status block (the
+ * gate applies to it too); only the required-emit sentence is elided when there are none.
+ *
+ * `requiredEmits` is the subset of the node's declared `emits` the #731 gate actually gates on — those
+ * consumed downstream as a REQUIRED DATA DEPENDENCY (threaded on a fact-qualified `from: "<node>.<fact>"`
+ * edge), derived from the SAME `requiredEmitsByElement` source the compiler's proceed-condition uses
+ * (see `prepareDeliveryGraph`). It deliberately EXCLUDES a routing-only fact (named only in an edge
+ * `when` guard) — the gate leaves those optional (omit ⇒ default branch), and the classifier-emit
+ * contract already tells the agent to omit an undecidable routing fact. Listing every DECLARED emit
+ * here instead would contradict that guidance and push agents to guess values that should stay
+ * optional (#761). */
+export function renderProducerContract(requiredEmits: readonly DeliveryFact[]): string {
+  const list = AGENT_TERMINAL_SUCCESS_STATUSES.map((s) => `\`${s}\``).join(", ");
+  const semantics = AGENT_TERMINAL_SUCCESS_STATUSES.map((s) => {
+    const doc = PRODUCER_STATUS_SEMANTICS[s];
+    if (doc === undefined) {
+      throw new Error(
+        `renderProducerContract: allowlisted status "${s}" has no PRODUCER_STATUS_SEMANTICS entry — ` +
+          "document its semantics so the producer-contract prompt and AGENT_TERMINAL_SUCCESS_STATUSES cannot drift.",
+      );
+    }
+    return `- \`${s}\` — ${doc}.`;
+  });
+  const lines = [
+    "",
+    "",
+    "---",
+    "",
+    "## Producer completion contract (delivery graph)",
+    "",
+    "This node is a PRODUCER in a delivery graph: a completion barrier gates your result before it can",
+    "route to a downstream consumer. The structured result you write to `AGENT_RESULT_FILE` MUST end",
+    `with a \`status\` field that is one of the terminal-success values ${list}:`,
+    "",
+    ...semantics,
+    "",
+    `Any \`status\` OUTSIDE ${list} — including a free-form \`success\`/\`in_progress\`/\`failed\` — parks the`,
+    "run on a human escalation (the gate is fail-closed), EVEN when your underlying work was correct. So",
+    "do not invent a status: report exactly one of the allowlisted values above.",
+  ];
+  if (requiredEmits.length > 0) {
+    lines.push(
+      "",
+      "AND every emit a downstream node requires must be populated non-null before your result routes",
+      "onward — populate each of these top-level fields:",
+      "",
+      ...requiredEmits.map((f) => `- \`${f.name}\``),
+    );
+  }
+  return lines.join("\n");
+}
+
+
 /** Build the `nodeInputs.<element>` seed for one node, per its kind — the exact fields the compiled
  * subProcess ioMapping pulls. Total over the closed kind set. */
 function buildNodeInput(
   node: DeliveryNode,
-  ctx: { runKey: string; element: string; nodeTimeout: string; probeTimeout: string; probePollEvery: string; escalationSlaTimeout: string; escalationAssignee: string | null },
+  ctx: { runKey: string; element: string; nodeTimeout: string; probeTimeout: string; probePollEvery: string; escalationSlaTimeout: string; escalationAssignee: string | null; requiredEmits: ReadonlySet<string> },
 ): NodeInput {
   switch (node.kind) {
     case "agent": {
@@ -439,7 +529,13 @@ function buildNodeInput(
       // truth. A no-emit node appends nothing, so a plain implementation node is unchanged.
       const basePrompt = node.agent.prompt ?? "";
       const emits = Array.isArray(node.emits) ? node.emits.map((f) => ({ ...f })) : [];
-      return { jobType: node.agent.jobType, appendPrompt: renderIdempotencyPreamble() + basePrompt + renderEmitContract(emits), timeout: isoDuration(node.agent.timeout, ctx.nodeTimeout) };
+      // The classifier-emit contract lists ALL declared emits (the agent returns each fact it can, and
+      // OMITS an undecidable routing fact). The producer contract's required-emit sentence instead lists
+      // only the subset the #731 gate fails closed on — the facts consumed downstream as a required data
+      // dependency (`ctx.requiredEmits`) — so it never contradicts the emit contract by demanding a
+      // routing-only fact be non-null (#761).
+      const requiredEmits = emits.filter((f) => ctx.requiredEmits.has(f.name));
+      return { jobType: node.agent.jobType, appendPrompt: renderIdempotencyPreamble() + basePrompt + renderEmitContract(emits) + renderProducerContract(requiredEmits), timeout: isoDuration(node.agent.timeout, ctx.nodeTimeout) };
     }
     case "wait": {
       const probe = parseProbe(node.wait, { allowLateBoundTarget: true });

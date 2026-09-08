@@ -621,6 +621,22 @@ agent node and guard the downstream edge on `<node>.<name>`; a contract-followin
 **omits** it, and the split takes its `default` (else) branch — the deadlock-safe fallback. A
 node that declares no `emits` gets no contract text and behaves exactly as before.
 
+**Producer completion contract (auto-injected — do NOT hand-encode it).** Every `agent` node
+*also* has a **producer completion contract** appended to its prompt at dispatch, alongside the
+idempotency preflight and — only for a node that declares `emits` — the classifier emit contract.
+It hands the agent the terminal-status vocabulary
+the `#731` producer gate enforces: the injected text tells the agent it MUST end its result with
+one of `AGENT_TERMINAL_SUCCESS_STATUSES` (`done` / `opened` / `skipped`) — never omit `status` or
+invent one. The gate routes a completion onward only when its self-reported `status` is one of that
+allowlist **and** every required emit is non-null; any *explicitly non-terminal* status parks the
+run on a human `__contract` escalation (fail-closed). (As a backward-compat concession the gate
+*also* routes onward an **absent/null** status — for legacy workers / stubs that report none — but
+the injected contract never invites a real agent to lean on that: always return an allowlisted
+status.) The wording is **derived from that single allowlist** (changing the
+list changes the prompt — no second copy), so **authors must not hand-encode status vocabulary
+in a node's prompt.** Unlike the emit contract, a no-emit node still receives the status block
+(the gate applies to it too).
+
 ### 9.2 The agent loop: draft → compile → stage → ask an operator to dispatch
 
 ```

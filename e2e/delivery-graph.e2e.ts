@@ -209,7 +209,11 @@ describe("delivery-graph runner — engine-native execution (S4)", () => {
           processInstanceKey: job.processInstanceKey ?? null,
           elementId: job.elementId ?? null,
         });
-        return await dispatchConnector(app.db, { dedupeKey: dedupeKey ?? "x", target, payload, boundFacts }, new Date().toISOString());
+        // Mirror the real worker's fail-closed contract: an un-dedupable dispatch (no author key AND
+        // no engine identity) throws rather than papering over it with a hardcoded fallback that would
+        // mask a regression where the connector node stops seeding `dedupeKey`.
+        if (!dedupeKey) throw new Error("connector stub: no dedupe key (author-supplied or graph-derived) available");
+        return await dispatchConnector(app.db, { dedupeKey, target, payload, boundFacts }, new Date().toISOString());
       },
       { fetchVariables: ["boundFacts", "target", "dedupeKey", "payload"] },
     );
@@ -244,6 +248,64 @@ describe("delivery-graph runner — engine-native execution (S4)", () => {
     const rows = await deliveryConnectorDispatches(app.db).find({ dedupe_key: "land-731" });
     assert.equal(rows.length, 1, "the connector fired exactly once after resume");
     assert.ok(takenFlows(app).some((f) => f.endsWith("->End")), "the resumed producer's result reaches End");
+  });
+
+  test("#760 producer contract satisfied: an agent completing with an allowlisted status + its required emit passes the gate with NO __contract escalation and threads onward", async () => {
+    const app = track(await boot(freshDir()));
+
+    // The instance-15697 failure mode: the agent DID the work correctly and returned its required emit,
+    // but self-reported an out-of-vocabulary `status` (e.g. "success") and so was wrongly parked on a
+    // __contract escalation — because the terminal-status vocabulary lived ONLY in the gate. With #760
+    // the vocabulary is auto-injected into the agent's appendPrompt (proven in the runner unit tests);
+    // here we prove the gate's happy path: a status FROM `AGENT_TERMINAL_SUCCESS_STATUSES` ("opened")
+    // WITH the required emit sails through — no escalation, the downstream connector fires.
+    let agentFired = 0;
+    await app.engine.registerWorker("senior:demo", async () => {
+      agentFired++;
+      return { status: "opened", pr: "owner/repo#99", summary: "PR opened and green." };
+    });
+    let connectorFired = 0;
+    await app.engine.registerWorker(
+      "pr.delivery-connector",
+      async (job) => {
+        connectorFired++;
+        const vars = job.variables as Record<string, unknown>;
+        const { target, payload, boundFacts } = readConnectorInput(vars as Parameters<typeof readConnectorInput>[0]);
+        const dedupeKey = connectorDedupeKey({
+          dedupeKey: (vars.dedupeKey as string | null | undefined) ?? null,
+          processInstanceKey: job.processInstanceKey ?? null,
+          elementId: job.elementId ?? null,
+        });
+        // Mirror the real worker's fail-closed contract: an un-dedupable dispatch (no author key AND
+        // no engine identity) throws rather than papering over it with a hardcoded fallback that would
+        // mask a regression where the connector node stops seeding `dedupeKey`.
+        if (!dedupeKey) throw new Error("connector stub: no dedupe key (author-supplied or graph-derived) available");
+        return await dispatchConnector(app.db, { dedupeKey, target, payload, boundFacts }, new Date().toISOString());
+      },
+      { fetchVariables: ["boundFacts", "target", "dedupeKey", "payload"] },
+    );
+
+    const graph: DeliveryGraph = {
+      name: "e2e producer gate satisfied",
+      nodes: [
+        { id: "open", kind: "agent", agent: { jobType: "senior:demo" }, emits: [{ name: "pr", type: "pr" }] },
+        { id: "land", kind: "connector", connector: { target: "slack", payload: { pr: "open.pr" }, dedupeKey: "land-760" } },
+      ],
+      edges: [{ from: "open.pr", to: "land" }],
+    };
+
+    const run = await runDeliveryGraph(app.engine, graph, { escalationSlaTimeout: "PT1H", repoless: true });
+    assert.ok(run.ok, `graph should deploy + run, got ${JSON.stringify(run)}`);
+    await app.settle();
+
+    // The producer satisfied its contract (allowlisted status + non-null required emit): NO __contract
+    // escalation was raised, the downstream connector fired once, and the graph reached End.
+    assert.equal(agentFired, 1, "the agent node's job fired and completed");
+    const createdTasks = await app.engine.searchUserTasks({ state: "CREATED" });
+    const contract = createdTasks.find((t) => t.elementId?.startsWith("delivery-human-task__") && t.elementId?.endsWith("__contract"));
+    assert.ok(!contract, `an allowlisted status + required emit must NOT escalate, got ${JSON.stringify(createdTasks.map((t) => t.elementId))}`);
+    assert.equal(connectorFired, 1, "the satisfied producer threads its result to the downstream connector");
+    assert.ok(takenFlows(app).some((f) => f.endsWith("->End")), "the satisfied producer's result reaches End");
   });
 
   test("resume never double-fires: an at-least-once redelivery of the connector dedupes", async () => {
