@@ -37,7 +37,7 @@ interface FetchCall {
 
 /** Boot the real mount over a linkedom DOM whose `window` mimics a sandboxed App-View iframe (native
  *  confirm/prompt SUPPRESSED → false/null), with a recording fetch double. */
-function harness() {
+function harness(dispatchError?: string) {
   const { window: domWindow, document } = parseHTML(
     "<!doctype html><html><body><div id='host'></div></body></html>",
   );
@@ -54,7 +54,11 @@ function harness() {
     if (method === "GET" && url === STAGED_URL) {
       return new Response(JSON.stringify({ proposals: [PROPOSAL] }), { status: 200 });
     }
-    if (url === DISPATCH_URL) return new Response(JSON.stringify({ ok: true }), { status: 202 });
+    if (url === DISPATCH_URL) {
+      return dispatchError
+        ? new Response(JSON.stringify({ ok: false, error: dispatchError }), { status: 400 })
+        : new Response(JSON.stringify({ ok: true }), { status: 202 });
+    }
     if (url === DISMISS_URL) return new Response(JSON.stringify({ ok: true }), { status: 200 });
     if (url === SAVE_URL) return new Response(JSON.stringify({ ok: true }), { status: 200 });
     return new Response(JSON.stringify({}), { status: 404 });
@@ -93,8 +97,14 @@ function harness() {
     el.dispatchEvent(new domWindow.Event("click", { bubbles: true, cancelable: true }));
   const fire = (el: { dispatchEvent: (ev: unknown) => boolean }, type: string) =>
     el.dispatchEvent(new domWindow.Event(type, { bubbles: true, cancelable: true }));
+  const mode = (value: string) => {
+    const input = host.querySelector(`[data-dispatch-mode][value="${value}"]`);
+    assert(input, `the mounted confirmation must offer ${value} mode`);
+    input.checked = true;
+    fire(input, "change");
+  };
 
-  return { host, calls, teardown, flush, click, fire };
+  return { host, calls, teardown, flush, click, fire, mode };
 }
 
 const posts = (calls: FetchCall[], url: string) => calls.filter((c) => c.method === "POST" && c.url === url);
@@ -112,12 +122,12 @@ test("#569/#729: Dispatch dispatches via the in-DOM confirmation with the repo e
     h.click(dispatchBtn);
     await h.flush();
     assertEquals(posts(h.calls, DISPATCH_URL).length, 0, "Dispatch must not POST before the operator confirms in-DOM");
+    h.mode("fallback");
     const confirmBtn = h.host.querySelector("[data-dispatch-confirm]");
     assert(confirmBtn, "clicking Dispatch must reveal an in-DOM Confirm-dispatch control (#569), not call window.confirm");
     assert(!h.host.querySelector("[data-dispatch]"), "the plain Dispatch button is replaced by the inline confirmation while it is open");
 
-    // The operator supplies the repository-isolation envelope the door now requires (#729): a staged
-    // proposal carries no repo metadata, so the cockpit collects it here.
+    // In fallback mode the operator explicitly supplies the run-level repository-isolation envelope.
     const repoInput = h.host.querySelector("[data-dispatch-repository]");
     const baseInput = h.host.querySelector("[data-dispatch-base]");
     assert(repoInput && baseInput, "the Dispatch confirmation must expose repository + base-branch fields (#729)");
@@ -165,22 +175,133 @@ test("#729: Dispatch checkout-less posts `repoless: true` (no repo envelope) ins
   }
 });
 
-test("#729: confirming a dispatch with neither the repo envelope nor checkout-less does NOT POST (keeps the confirmation open)", async () => {
+test("#729/#758: fallback mode requires both repository and base branch and keeps incomplete confirmation open", async () => {
   const h = harness();
   try {
     await h.flush();
     h.click(h.host.querySelector("[data-dispatch]"));
     await h.flush();
-    // Confirm with blank repository/baseBranch and checkout-less unticked — the door would 400, so the
-    // mount guards client-side: no POST, and the confirmation stays open so the operator can fix it.
+    h.mode("fallback");
+    // An explicitly selected fallback needs both fields; keep it editable rather than silently
+    // changing to node repositories or checkout-less when the fields are blank.
     h.click(h.host.querySelector("[data-dispatch-confirm]"));
     await h.flush();
     assertEquals(posts(h.calls, DISPATCH_URL).length, 0, "an incomplete envelope must not POST to the dispatch door (#729)");
     assert(h.host.querySelector("[data-dispatch-confirm]"), "the confirmation stays open so the operator can supply the envelope");
+    const repoInput = h.host.querySelector("[data-dispatch-repository]");
+    const baseInput = h.host.querySelector("[data-dispatch-base]");
+    for (const [repository, baseBranch] of [["acme/widgets", " "], [" ", "main"]]) {
+      repoInput.value = repository;
+      baseInput.value = baseBranch;
+      h.click(h.host.querySelector("[data-dispatch-confirm]"));
+      await h.flush();
+      assertEquals(posts(h.calls, DISPATCH_URL).length, 0, "each fallback field is required");
+      assert(h.host.querySelector("[data-dispatch-confirm]"), "invalid fallback remains editable");
+    }
   } finally {
     h.teardown();
   }
 });
+
+test("#758: node-provisioned graph confirms through the real mount with digest only", async () => {
+  const h = harness();
+  try {
+    await h.flush();
+    h.click(h.host.querySelector("[data-dispatch]"));
+    assertEquals(posts(h.calls, DISPATCH_URL).length, 0, "opening confirmation must not dispatch");
+    h.click(h.host.querySelector("[data-dispatch-confirm]"));
+    await h.flush();
+    const dispatched = posts(h.calls, DISPATCH_URL);
+    assertEquals(dispatched.length, 1, "node repositories must reach the authoritative dispatch door");
+    assertEquals(JSON.parse(dispatched[0].body), { digest: PROPOSAL.digest });
+    assert(h.host.querySelector("#dg-staged-status").textContent.includes("Dispatched"));
+  } finally {
+    h.teardown();
+  }
+});
+
+test("dispatch normalizes the attribute-sourced digest before POSTing (untrusted DOM value)", async () => {
+  // The confirm digest is read back from a DOM attribute (untrusted) at confirm time; like doDismiss/
+  // doSaveToLibrary/doPreviewDi, dispatch must trim it so accidental whitespace never reaches the door.
+  const h = harness();
+  try {
+    await h.flush();
+    h.click(h.host.querySelector("[data-dispatch]"));
+    const confirmBtn = h.host.querySelector("[data-dispatch-confirm]");
+    assert(confirmBtn, "the in-DOM Confirm dispatch affordance must appear");
+    // Simulate an untrusted DOM value: pad the attribute the confirm handler reads the digest from.
+    confirmBtn.setAttribute("data-dispatch-confirm", `  ${PROPOSAL.digest}  `);
+    h.click(confirmBtn);
+    await h.flush();
+    const dispatched = posts(h.calls, DISPATCH_URL);
+    assertEquals(dispatched.length, 1, "the confirmed dispatch must POST despite the padded attribute");
+    assertEquals(JSON.parse(dispatched[0].body), { digest: PROPOSAL.digest }, "the digest is trimmed before dispatch");
+  } finally {
+    h.teardown();
+  }
+});
+
+test("#758: node mode displays the server's missing-node provisioning error without inferring checkout-less", async () => {
+  const error = "1 agent node(s) resolve to no repository (implement-api): each must declare its own `repository`, or the dispatch must supply a run-level `repository` + `baseBranch` fallback";
+  const h = harness(error);
+  try {
+    await h.flush();
+    h.click(h.host.querySelector("[data-dispatch]"));
+    h.click(h.host.querySelector("[data-dispatch-confirm]"));
+    await h.flush();
+    assertEquals(h.host.querySelector("#dg-staged-status").textContent, error);
+    assertEquals(posts(h.calls, DISPATCH_URL).map((call) => JSON.parse(call.body)), [{ digest: PROPOSAL.digest }]);
+    assert(h.host.querySelector("[data-dispatch]"), "the rejected proposal remains available");
+  } finally {
+    h.teardown();
+  }
+});
+
+test("#758: repository choices explain server validation and run-level fallback semantics", async () => {
+  const h = harness();
+  try {
+    await h.flush();
+    h.click(h.host.querySelector("[data-dispatch]"));
+    const nodes = h.host.querySelector('[data-dispatch-mode][value="nodes"]');
+    assert(nodes?.hasAttribute("checked"), "node repositories is the explicit default, not checkout-less");
+    assert(h.host.querySelector("[data-dispatch-repository]").disabled);
+    assert(h.host.querySelector("[data-dispatch-base]").disabled);
+    const text = h.host.textContent;
+    assert(text.includes("Use node repositories"));
+    assert(text.includes("fallback for nodes without their own repository"));
+    assert(text.includes("server validates"));
+  } finally {
+    h.teardown();
+  }
+});
+
+for (const target of ["nodes", "repoless", "fallback"]) {
+  test(`#758: switching modes to ${target} submits only the selected provisioning choice`, async () => {
+    const h = harness();
+    try {
+      await h.flush();
+      h.click(h.host.querySelector("[data-dispatch]"));
+      h.mode("fallback");
+      h.host.querySelector("[data-dispatch-repository]").value = " acme/widgets ";
+      h.host.querySelector("[data-dispatch-base]").value = " main ";
+      h.mode("repoless");
+      assert(h.host.querySelector("[data-dispatch-repository]").disabled);
+      assert(h.host.querySelector("[data-dispatch-base]").disabled);
+      h.mode("nodes");
+      h.mode(target);
+      h.click(h.host.querySelector("[data-dispatch-confirm]"));
+      await h.flush();
+      const expected = target === "fallback"
+        ? { digest: PROPOSAL.digest, repository: "acme/widgets", baseBranch: "main" }
+        : target === "repoless"
+          ? { digest: PROPOSAL.digest, repoless: true }
+          : { digest: PROPOSAL.digest };
+      assertEquals(posts(h.calls, DISPATCH_URL).map((call) => JSON.parse(call.body)), [expected]);
+    } finally {
+      h.teardown();
+    }
+  });
+}
 
 test("#569: Cancel on the in-DOM Dispatch confirmation aborts without POSTing", async () => {
   const h = harness();
