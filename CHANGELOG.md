@@ -1,3 +1,9 @@
+## [0.185.0](https://github.com/nanobpm/nano-workforce/compare/v0.184.1...v0.185.0) (2026-09-08)
+
+### Features
+
+* **delivery:** auto-inject the producer-completion contract into every agent node's prompt ([#761](https://github.com/nanobpm/nano-workforce/issues/761)) ([3eb90a3](https://github.com/nanobpm/nano-workforce/commit/3eb90a3ed3bca8a5fc8cb542716f9d19fa82a541)), closes [#731](https://github.com/nanobpm/nano-workforce/issues/731) [#551](https://github.com/nanobpm/nano-workforce/issues/551) [#506](https://github.com/nanobpm/nano-workforce/issues/506) [#731](https://github.com/nanobpm/nano-workforce/issues/731) [#760](https://github.com/nanobpm/nano-workforce/issues/760) [#731](https://github.com/nanobpm/nano-workforce/issues/731) [#731](https://github.com/nanobpm/nano-workforce/issues/731)
+
 ## [0.184.1](https://github.com/nanobpm/nano-workforce/compare/v0.184.0...v0.184.1) (2026-09-08)
 
 ### Bug Fixes
