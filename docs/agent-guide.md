@@ -625,11 +625,14 @@ node that declares no `emits` gets no contract text and behaves exactly as befor
 *also* has a **producer completion contract** appended to its prompt at dispatch, alongside the
 idempotency preflight and — only for a node that declares `emits` — the classifier emit contract.
 It hands the agent the terminal-status vocabulary
-the `#731` producer gate enforces — a completion routes onward only when its self-reported
-`status` is **absent/null (legacy workers / stubs that report no status) or** one of
-`AGENT_TERMINAL_SUCCESS_STATUSES` (`done` / `opened` / `skipped`) **and** every required emit
-is non-null; any *explicitly non-terminal* status parks the run on a human `__contract`
-escalation (fail-closed). The wording is **derived from that single allowlist** (changing the
+the `#731` producer gate enforces: the injected text tells the agent it MUST end its result with
+one of `AGENT_TERMINAL_SUCCESS_STATUSES` (`done` / `opened` / `skipped`) — never omit `status` or
+invent one. The gate routes a completion onward only when its self-reported `status` is one of that
+allowlist **and** every required emit is non-null; any *explicitly non-terminal* status parks the
+run on a human `__contract` escalation (fail-closed). (As a backward-compat concession the gate
+*also* routes onward an **absent/null** status — for legacy workers / stubs that report none — but
+the injected contract never invites a real agent to lean on that: always return an allowlisted
+status.) The wording is **derived from that single allowlist** (changing the
 list changes the prompt — no second copy), so **authors must not hand-encode status vocabulary
 in a node's prompt.** Unlike the emit contract, a no-emit node still receives the status block
 (the gate applies to it too).
