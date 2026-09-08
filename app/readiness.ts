@@ -576,7 +576,9 @@ function versionForPackage(tag: string, pkg: string, singlePackage: boolean): st
 }
 
 /** A compact, deterministic, BOUNDED summary of the capability candidate releases a probe observed
- * (issue #514 Defect A). Lists the releases tagged `<match.package>@<version>` (newest first) and,
+ * (issue #514 Defect A). Lists the releases carrying a resolvable `<match.package>` version — tagged
+ * `<match.package>@<version>`, or (for a single-package repo) a `v<version>`/bare `<version>` tag —
+ * newest first, and,
  * for each, whether its body referenced `match.capabilityRef` — so an escalated capability gate can
  * show a human/agent EXACTLY what the probe saw (a genuine "not published yet" vs. a transient
  * false-negative where a matching release was live but its provenance body was momentarily empty).
@@ -586,12 +588,12 @@ function versionForPackage(tag: string, pkg: string, singlePackage: boolean): st
 export function summariseCapabilityCandidates(
   match: ProbeMatch | undefined,
   releases: readonly GithubRelease[],
+  singlePackage: boolean = repoIsSinglePackage(releases),
 ): string {
   const pkg = match?.package;
   const ref = match?.capabilityRef;
   if (!pkg) return "capability: no package configured";
   const num = ref ? capabilityNumber(ref) : undefined;
-  const singlePackage = repoIsSinglePackage(releases);
   const candidates: { version: string; refs: boolean }[] = [];
   for (const rel of releases) {
     if (!rel || typeof rel.tag !== "string" || typeof rel.body !== "string") continue;
@@ -630,13 +632,13 @@ const CAPABILITY_SUMMARY_LIMIT = 8;
 export function matchCapability(match: ProbeMatch | undefined, releases: readonly GithubRelease[]): ProbeResult {
   const pkg = match?.package;
   const ref = match?.capabilityRef;
-  const observed = summariseCapabilityCandidates(match, releases);
+  const singlePackage = repoIsSinglePackage(releases);
+  const observed = summariseCapabilityCandidates(match, releases, singlePackage);
   if (!pkg || !ref) return { ready: false, detail: "capability: missing package/capabilityRef", observed };
   const num = capabilityNumber(ref);
   if (!num) return { ready: false, detail: "capability: unparseable capabilityRef (no #NNN)", observed };
 
   let firstVersion: string | undefined;
-  const singlePackage = repoIsSinglePackage(releases);
   for (const rel of releases) {
     if (!rel || typeof rel.tag !== "string" || typeof rel.body !== "string") continue;
     const version = versionForPackage(rel.tag, pkg, singlePackage);
