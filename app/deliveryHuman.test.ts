@@ -373,6 +373,17 @@ test("deliveryHumanContextQuestion: a human node whose id itself ends in __esc r
 
 const genericForm = readFileSync("resources/forms/delivery-human-generic.form", "utf8");
 
+test("form-structure guard: delivery-human-generic.form uses node-neutral wording", () => {
+  // This shared form is also attached to the `__esc`/`__contract` escalation tasks that bounded
+  // agent/wait/connector nodes create (`app/deliveryGraphCompiler.ts`), not only scheduled `human`
+  // nodes. Copy that calls the task a "scheduled human step" is inaccurate for the escalation family
+  // and can obscure that the task is an escalation, so the static text must stay node-neutral.
+  assert(
+    !/scheduled human step/i.test(genericForm),
+    "the shared generic form must use node-neutral wording (it also serves escalation tasks)",
+  );
+});
+
 test("form-structure guard: delivery-human-generic.form carries no {{…}} tokens", () => {
   // The Tasks surface (`engineForm`) seeds NO form variables, so any `{{token}}` renders literally and
   // any data-dependent `conditional` mis-fires. Deploy-time `{{token}}` templating is removed too, so

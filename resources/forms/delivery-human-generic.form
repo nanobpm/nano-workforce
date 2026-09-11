@@ -6,7 +6,7 @@
     {
       "type": "text",
       "label": "Now do this",
-      "text": "This scheduled human step's instruction is shown in the Decision context above."
+      "text": "This task's instruction is shown in the Decision context above."
     },
     {
       "type": "textfield",
