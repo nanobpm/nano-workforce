@@ -7,7 +7,7 @@
       "type": "textarea",
       "key": "prompt",
       "label": "Now do this",
-      "description": "The scheduled human step this delivery graph is waiting on. Its full instruction is shown in the Decision context above.",
+      "description": "The scheduled human step this delivery graph is waiting on. A summary of its instruction is shown in the Decision context above.",
       "readonly": true
     },
     {
