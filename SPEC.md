@@ -466,10 +466,13 @@ start ─► wait: deps merged ─► arm merge ─► wait: mergeable ─┬─
   time** by a `fix-ci`/`rebase` agent (`status: "waiting-on-pr"`, above). `merge-loop`
   parks at *wait: deps merged*; the poller checks each dependency (own tracked row
   first, else GitHub `merged` state) and publishes `deps-cleared` once all have landed.
-- **Mergeability** — the poller classifies GitHub's `mergeStateStatus`:
+- **Mergeability** — the poller classifies GitHub's `mergeStateStatus`, but a
+  first-class `isDraft` guard runs *first* (`classifyMergeability`, `app/github.ts`):
+  a draft PR is `draft` regardless of `mergeStateStatus`. Otherwise, by status:
   `CLEAN`/`HAS_HOOKS`/`UNSTABLE`/`BEHIND` → `ready`; `DIRTY` → `conflict`;
   `BLOCKED` → `blocked` if a required check is failing, else keep waiting;
-  `DRAFT` → `draft`; `UNKNOWN`/empty → keep polling (GitHub still computing). It
+  `UNKNOWN`/empty (and any other status, including `DRAFT`) → keep polling (GitHub
+  still computing). It
   publishes `merge-ready {mergeState}` for the settled verdicts. When the live
   poller is dead the `wait-mergeable-timeout` backstop's stall-probe re-derives
   mergeability; a still-unsettled `UNKNOWN`/`waiting` verdict then routes to a
