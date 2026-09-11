@@ -166,6 +166,13 @@ export const ENV_CONTRACTS = {
     semantics:
       "How long the merge loop waits for the poller's `merge-ready` before the stall-probe timer arm fires (dead-poller backstop, #636; FEEL/ISO-8601 duration).",
   },
+  NANO_PR_MERGEABLE_REPOLL_INTERVAL: {
+    category: "env",
+    name: "NANO_PR_MERGEABLE_REPOLL_INTERVAL",
+    owner: "app/service.ts",
+    semantics:
+      "How long the merge loop waits before re-deriving mergeability when `gw-mergeable` sees an async-`UNKNOWN` `\"waiting\"` verdict, instead of escalating to a human (#774; bounded by `NANO_PR_MAX_MERGE_STALL_ROUNDS`; FEEL/ISO-8601 duration).",
+  },
   NANO_PR_AUTO_MERGE: {
     category: "env",
     name: "NANO_PR_AUTO_MERGE",

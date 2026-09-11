@@ -6,7 +6,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { DEFAULT_MERGEABLE_WAIT_TIMEOUT, mergeableWaitTimeout } from "./mergeableWait.ts";
+import { DEFAULT_MERGEABLE_REPOLL_INTERVAL, DEFAULT_MERGEABLE_WAIT_TIMEOUT, mergeableRepollInterval, mergeableWaitTimeout } from "./mergeableWait.ts";
 
 test("mergeableWaitTimeout: blank / absent / malformed → default", () => {
   assert.equal(mergeableWaitTimeout(undefined), DEFAULT_MERGEABLE_WAIT_TIMEOUT);
@@ -36,4 +36,38 @@ test("the default is itself a well-formed ISO-8601 duration (never an uninterpre
   const sentinel = "PT1S";
   assert.notEqual(DEFAULT_MERGEABLE_WAIT_TIMEOUT, sentinel);
   assert.equal(mergeableWaitTimeout(DEFAULT_MERGEABLE_WAIT_TIMEOUT, sentinel), DEFAULT_MERGEABLE_WAIT_TIMEOUT);
+});
+
+// --- Mergeability re-poll interval (issue #774) -----------------------------------------------
+// Baked into every merge-loop instance's `mergeableRepollInterval` process variable and evaluated by
+// the `wait-mergeable-repoll` timer catch, which bounds the `"waiting"` (async UNKNOWN) verdict's
+// re-poll before it re-derives mergeability from ground truth — so a malformed operator env must
+// never deploy an uninterpretable `<bpmn:timeDuration>`.
+
+test("mergeableRepollInterval: blank / absent / malformed → default", () => {
+  assert.equal(mergeableRepollInterval(undefined), DEFAULT_MERGEABLE_REPOLL_INTERVAL);
+  assert.equal(mergeableRepollInterval(""), DEFAULT_MERGEABLE_REPOLL_INTERVAL);
+  assert.equal(mergeableRepollInterval("   "), DEFAULT_MERGEABLE_REPOLL_INTERVAL);
+  assert.equal(mergeableRepollInterval("2m"), DEFAULT_MERGEABLE_REPOLL_INTERVAL); // missing leading P/T
+  assert.equal(mergeableRepollInterval("garbage"), DEFAULT_MERGEABLE_REPOLL_INTERVAL);
+});
+
+test("mergeableRepollInterval: a valid ISO-8601 duration is honoured and upper-cased", () => {
+  assert.equal(mergeableRepollInterval("PT2M"), "PT2M");
+  assert.equal(mergeableRepollInterval("pt90s"), "PT90S");
+  assert.equal(mergeableRepollInterval("  pt5m  "), "PT5M");
+});
+
+test("mergeableRepollInterval: the re-poll interval is shorter than the poller-death backstop", () => {
+  // The re-poll (GitHub settling UNKNOWN, ~seconds) must fire far sooner than the 30-minute
+  // dead-poller backstop, so a transient UNKNOWN self-heals briskly rather than parking for tens of
+  // minutes per round.
+  assert.equal(DEFAULT_MERGEABLE_REPOLL_INTERVAL, "PT2M");
+  assert.notEqual(DEFAULT_MERGEABLE_REPOLL_INTERVAL, DEFAULT_MERGEABLE_WAIT_TIMEOUT);
+});
+
+test("mergeableRepollInterval: the default is itself a well-formed ISO-8601 duration", () => {
+  const sentinel = "PT1S";
+  assert.notEqual(DEFAULT_MERGEABLE_REPOLL_INTERVAL, sentinel);
+  assert.equal(mergeableRepollInterval(DEFAULT_MERGEABLE_REPOLL_INTERVAL, sentinel), DEFAULT_MERGEABLE_REPOLL_INTERVAL);
 });
