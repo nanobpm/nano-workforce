@@ -10,6 +10,7 @@ import type { DeliveryFact } from "../nano-generated/api-io.d.ts";
 import {
   bindHumanEmits,
   DELIVERY_HUMAN_ELEMENT,
+  deliveryHumanContextQuestion,
   deriveHumanCategory,
   GENERIC_HUMAN_FORM,
   HUMAN_ACK_FORM,
@@ -303,4 +304,59 @@ test("drift guard: the human element is completer-answerable and surfaces on the
     typeof USER_TASK_KIND_LABELS[DELIVERY_HUMAN_ELEMENT] === "string",
     "USER_TASK_KIND_LABELS must label the delivery human node",
   );
+});
+
+// ── issue #772: Tasks-inbox "Decision context" for a parked delivery-graph human node ─────────────
+
+test("deliveryHumanContextQuestion: derives the node instruction from human_labels (base + __esc twin)", () => {
+  const labels = { "delivery-human-task__n7": "Run the manual OTP publish for @nanobpm/urban" };
+  // The parked base task looks up its own id.
+  assertEquals(
+    deliveryHumanContextQuestion(labels, "delivery-human-task__n7"),
+    "Run the manual OTP publish for @nanobpm/urban",
+  );
+  // The bounded-timeout escalation twin parks on `…__esc`; strip it to find the same stamped label.
+  assertEquals(
+    deliveryHumanContextQuestion(labels, "delivery-human-task__n7__esc"),
+    "Run the manual OTP publish for @nanobpm/urban",
+  );
+});
+
+test("deliveryHumanContextQuestion: falls back to a static message when no label is stored", () => {
+  // A parked human step must never render a blank Decision context — an untracked/absent label still
+  // yields actionable guidance rather than null (which would leave the panel empty, issue #772).
+  assertEquals(
+    deliveryHumanContextQuestion({}, "delivery-human-task__n1"),
+    "A scheduled delivery-graph human step is waiting to be completed.",
+  );
+  assertEquals(
+    deliveryHumanContextQuestion(undefined, "delivery-human-task__n1"),
+    "A scheduled delivery-graph human step is waiting to be completed.",
+  );
+});
+
+// ── issue #772: the generic form must be static / input-only on the Tasks surface ─────────────────
+
+const genericForm = readFileSync("resources/forms/delivery-human-generic.form", "utf8");
+
+test("form-structure guard: delivery-human-generic.form carries no {{…}} tokens", () => {
+  // The Tasks surface (`engineForm`) seeds NO form variables, so any `{{token}}` renders literally and
+  // any data-dependent `conditional` mis-fires. Deploy-time `{{token}}` templating is removed too, so
+  // such a token could never resolve. Assert the surface stays context-free-safe (issue #772).
+  assert(!genericForm.includes("{{"), "the generic delivery-human form must not carry {{…}} tokens");
+});
+
+test("form-structure guard: delivery-human-generic.form has no data-dependent conditional and an OPTIONAL value", () => {
+  const parsed = JSON.parse(genericForm) as {
+    components: { key?: string; conditional?: unknown; validate?: { required?: boolean } }[];
+  };
+  // No component may gate on form data — those blurbs render contradictorily against empty data.
+  for (const c of parsed.components) {
+    assert(c.conditional === undefined, "no component may carry a data-dependent conditional");
+  }
+  // `value` must be OPTIONAL — a no-emit ("click done") node completes without entering a value; an
+  // emit node's value is validated SERVER-side in bindHumanEmits, not by a client-required field.
+  const value = parsed.components.find((c) => c.key === "value");
+  assert(value, "the generic form must keep a single `value` field");
+  assert(value!.validate?.required !== true, "`value` must be optional on this surface");
 });

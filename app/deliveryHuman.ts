@@ -54,6 +54,24 @@ export function isDeliveryHumanElement(elementId: string): boolean {
   return elementId === DELIVERY_HUMAN_ELEMENT || elementId.startsWith(`${DELIVERY_HUMAN_ELEMENT}__`);
 }
 
+/** The read-model "Decision context" for a parked delivery-graph `human` node (issue #772). The Tasks
+ *  surface renders the deployed `.form` against EMPTY data (it seeds no task-local variables), so the
+ *  node's instruction cannot reach the operator through the form's readonly `prompt` field — it must
+ *  arrive through the read-model `question` column, exactly like every other escalation kind. The run
+ *  row already stamps each human node's instruction label in `human_labels` (`buildHumanLabels`), keyed
+ *  by the node's base user-task element id (`delivery-human-task__<node>`); the bounded-timeout
+ *  escalation twin parks on the `…__esc` variant, so strip that suffix before the lookup. Returns a
+ *  static fallback when no label is stored so a parked human step is never left with a blank panel. */
+export function deliveryHumanContextQuestion(
+  humanLabels: Record<string, string> | undefined,
+  elementId: string,
+): string {
+  const labels = humanLabels ?? {};
+  const base = elementId.replace(/__esc$/, "");
+  const label = (labels[base] ?? labels[elementId] ?? "").trim();
+  return label || "A scheduled delivery-graph human step is waiting to be completed.";
+}
+
 /** The GENERIC fallback form (Decision 4, step 3): captures ONE typed value into the node's single
  *  declared emitted fact, so a human node with no explicit/category form can STILL emit downstream. */
 export const GENERIC_HUMAN_FORM = "delivery-human-generic";

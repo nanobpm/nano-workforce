@@ -30,7 +30,7 @@ import { isUniqueConstraintFence } from "./dbFence.ts";
 import { deriveDelivery, EPIC_LIVE_STATUSES, TERMINAL_STATUSES } from "./delivery.ts";
 import { sweepExpiredProposals } from "./deliveryGraphProposals.ts";
 import { deliveryGraphRuns, deriveDeliveryPhase, parseHumanLabels } from "./deliveryGraphRun.ts";
-import { isDeliveryHumanElement } from "./deliveryHuman.ts";
+import { deliveryHumanContextQuestion, isDeliveryHumanElement } from "./deliveryHuman.ts";
 import { fleetSupportsDurableResume } from "./durableResume.ts";
 import { deriveEpicPhaseLive, deriveTerminalEpicPhase } from "./epicPhase.ts";
 import { deriveFeatureDelivery, FEATURE_BLOCKED_ELEMENT, FEATURE_ESCALATION_ELEMENT, FEATURE_RUN_STATUSES, type FeatureRunStatus, featureEscalations, featureRuns } from "./feature.ts";
@@ -2613,6 +2613,10 @@ export async function pollUserTasks(
     url?: string | null;
     deliveryLabel?: string | null;
     conformanceSummary?: string | null;
+    /** The parked human-node instruction labels for a delivery run, keyed by user-task element id
+     *  (`delivery-human-task__<node>`) — the run row's stamped `human_labels`, denormalised so the
+     *  Tasks-inbox "Decision context" can explain a parked delivery-graph `human` node (issue #772). */
+    humanLabels?: Record<string, string>;
     /** The subject's at-a-glance "waiting on <capability> · …" rollup, denormalised for the readiness
      *  escalation question (issue #674): the wait-gate projection on `plans.wait_gate_label`, or the
      *  feature run's `delivery_label` for the inline preflight. */
@@ -2640,7 +2644,7 @@ export async function pollUserTasks(
   // feature/plan/pr enrichment. The row's inlined `delivery-human-task__<node>` id is recognised by
   // the shared `userTaskKindLabel` predicate, and buckets as `delivery` (below).
   for (const run of await deliveryGraphRuns(data).all()) {
-    if (run.process_key) subjectByInstance.set(run.process_key, { type: "delivery", key: run.run_key, title: run.title, url: null });
+    if (run.process_key) subjectByInstance.set(run.process_key, { type: "delivery", key: run.run_key, title: run.title, url: null, humanLabels: parseHumanLabels(run.human_labels) });
   }
 
   // Per-element subject type for an ORPHANED task (no subject row) — the kind implies its aggregate even
@@ -2718,6 +2722,13 @@ export async function pollUserTasks(
         // feature preflight's `delivery_label`), with a static readiness-stalled fallback (#674).
         question = readinessEscalationQuestion(subj?.waitGateLabel ?? null);
         break;
+    }
+    // A delivery-graph `human` node's user-task id is inlined per node (`delivery-human-task__<node>`
+    // and its `…__esc` twin), so it can't be a static `case` above (issue #772). Fill its "Decision
+    // context" from the run's stamped `human_labels` — otherwise the panel is blank and, because this
+    // surface seeds no form variables, the operator has no idea what the run is waiting on.
+    if (question === null && isDeliveryHumanElement(elementId)) {
+      question = deliveryHumanContextQuestion(subj?.humanLabels, elementId);
     }
     return { userTaskKey, elementId, subjectType, subjectKey, subjectTitle: subj?.title ?? null, subjectUrl: subj?.url ?? null, question, processKey: processInstanceKey, formKey: resolvedFormKey };
   };
