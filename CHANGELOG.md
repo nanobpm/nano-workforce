@@ -1,3 +1,9 @@
+## [0.186.2](https://github.com/nanobpm/nano-workforce/compare/v0.186.1...v0.186.2) (2026-09-11)
+
+### Bug Fixes
+
+* **merge-loop:** re-poll a 'waiting' mergeability verdict instead of escalating ([#775](https://github.com/nanobpm/nano-workforce/issues/775)) ([4812fe9](https://github.com/nanobpm/nano-workforce/commit/4812fe9689088f21e41ef50ba8f1dbec2093fb23)), closes [#774](https://github.com/nanobpm/nano-workforce/issues/774) [#774](https://github.com/nanobpm/nano-workforce/issues/774) [#774](https://github.com/nanobpm/nano-workforce/issues/774)
+
 ## [0.186.1](https://github.com/nanobpm/nano-workforce/compare/v0.186.0...v0.186.1) (2026-09-11)
 
 ### Bug Fixes
