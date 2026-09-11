@@ -53,7 +53,7 @@ import {
 } from "./github.ts";
 import { activeStatusesFor, derivedTrackingTable } from "./instanceTracking.ts";
 import { pollLineage } from "./lineage.ts";
-import { mergeableWaitTimeout } from "./mergeableWait.ts";
+import { mergeableRepollInterval, mergeableWaitTimeout } from "./mergeableWait.ts";
 import { mergeLanes, readExclusions } from "./mergeExclusion.ts";
 import { mergeLandedWaitTimeout } from "./mergeLandedWait.ts";
 import {
@@ -204,6 +204,19 @@ export const MERGE_LANDED_WAIT_TIMEOUT = mergeLandedWaitTimeout(
  * deployed. */
 export const MERGEABLE_WAIT_TIMEOUT = mergeableWaitTimeout(
   process.env.NANO_PR_MERGEABLE_WAIT_TIMEOUT,
+);
+
+/** How long the merge loop waits before re-deriving mergeability from ground truth when
+ * `gw-mergeable` sees an async-`UNKNOWN` `"waiting"` verdict (issue #774). Seeded as the
+ * `mergeableRepollInterval` process variable at merge start and evaluated by the merge-loop's
+ * `wait-mergeable-repoll` timer catch. A `"waiting"` verdict means GitHub is still computing
+ * mergeability in the background — so route it to a *bounded re-poll* (this timer → `merge-stall-probe`
+ * → the existing `gw-mergeable` arms), not to a human. The re-poll shares the `mergeStallMax` budget
+ * (`NANO_PR_MAX_MERGE_STALL_ROUNDS`) with the dead-poller stall backstop; once exhausted,
+ * `gw-merge-stall` escalates. ISO-8601 duration; a malformed `NANO_PR_MERGEABLE_REPOLL_INTERVAL`
+ * falls back to the default so an uninterpretable timer is never deployed. */
+export const MERGEABLE_REPOLL_INTERVAL = mergeableRepollInterval(
+  process.env.NANO_PR_MERGEABLE_REPOLL_INTERVAL,
 );
 
 /** Cooldown (ms) between the poller's automatic Copilot re-request nudges for a single waiting PR.
@@ -678,6 +691,7 @@ export async function startMerge(
       agentSlaTimeout: AGENT_SLA_TIMEOUT,
       landedWaitTimeout: MERGE_LANDED_WAIT_TIMEOUT,
       mergeableWaitTimeout: MERGEABLE_WAIT_TIMEOUT,
+      mergeableRepollInterval: MERGEABLE_REPOLL_INTERVAL,
       mergeStallRounds: 0,
       mergeStallMax: MAX_MERGE_STALL_ROUNDS,
       // Lineage (issue #245): thread the origin identity onto the merge instance (see startMerge).

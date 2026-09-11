@@ -43,6 +43,7 @@ const MODEL = readFileSync("resources/processes/merge-loop.bpmn", "utf8");
 const AGENT_SLA_MS = 30 * 60 * 1000; // matches the PT30M we start instances with
 const LANDED_WAIT_MS = 30 * 60 * 1000; // matches the PT30M landedWaitTimeout we start instances with
 const MERGEABLE_WAIT_MS = 30 * 60 * 1000; // matches the PT30M mergeableWaitTimeout we start instances with
+const MERGEABLE_REPOLL_MS = 2 * 60 * 1000; // matches the PT2M mergeableRepollInterval we start instances with
 
 type Output = Record<string, unknown>;
 type Responder = Output | Output[] | ((job: { variables: Record<string, unknown> }) => Output);
@@ -85,6 +86,7 @@ const DEFAULT_VARS: Record<string, unknown> = {
   agentSlaTimeout: "PT30M",
   landedWaitTimeout: "PT30M",
   mergeableWaitTimeout: "PT30M",
+  mergeableRepollInterval: "PT2M",
   mergeStallRounds: 0,
   mergeStallMax: 3,
   abandonBrief: null,
@@ -347,6 +349,94 @@ test("the stall-round cap escalates to a human instead of looping forever (#636)
   await assertThatUserTask(engine, { instance: byProcessId("merge-loop"), elementId: "wait-merge-answer" }).isCreated();
   assertThatInstance(engine, byProcessId("merge-loop")).hasCompletedElements("merge-stall-probe", "merge-esc-conflict");
   assert(!completedElementIds(engine).has("mark-merged"), "an exhausted stall must not mark-merged");
+});
+
+// ---------------------------------------------------------------------------
+// Async-UNKNOWN "waiting" verdict → bounded re-poll, NOT a human (issue #774)
+// ---------------------------------------------------------------------------
+// GitHub returns `mergeable=UNKNOWN` transiently while it computes mergeability in the background,
+// which `classifyMergeability` maps to `"waiting"`. Before the fix, a `"waiting"` verdict at
+// `gw-mergeable` hit the DEFAULT arm and escalated straight to the `wait-merge-answer` human task —
+// so a PR whose real state was still settling (e.g. to `"conflict"`, which would auto-fire
+// `senior:rebase`) paged a human instead of self-healing. The fix routes `"waiting"` to a bounded
+// re-poll (`wait-mergeable-repoll` timer → `merge-stall-probe` → the existing `gw-mergeable` arms),
+// bounded by the shared `mergeStallMax` budget, and routes the true DEFAULT to auto-rebase.
+
+test("a 'waiting' (async UNKNOWN) verdict re-polls instead of escalating to a human (#774)", async () => {
+  // RED (before the fix): `waiting` → DEFAULT → `merge-esc-conflict` → `wait-merge-answer`. GREEN:
+  // `waiting` parks on the re-poll timer; when it fires, `merge-stall-probe` re-derives `ready` and
+  // the PR merges — no human ever touched.
+  const engine = await boot({
+    responses: {
+      "pr.merge-stall-probe": { mergeState: "ready", failingChecks: 0, failingChecksList: "" },
+      "pr.merge": { mergeStatus: "merged" },
+    },
+  });
+  await engine.publishMessage({ name: "deps-cleared", correlationKey: "pr-1" });
+  await engine.publishMessage({ name: "merge-ready", correlationKey: "pr-1", variables: { mergeState: "waiting" } });
+  // Parks on the bounded re-poll timer — NOT on a human task, NOT escalated.
+  assertThatInstance(engine, byProcessId("merge-loop")).isActive().hasActiveElement("wait-mergeable-repoll");
+  assert(!completedElementIds(engine).has("merge-esc-conflict"), "a waiting verdict must NOT escalate to a human");
+  const openTasks = await engine.searchUserTasks({});
+  assert(!openTasks.some((t) => t.elementId === "wait-merge-answer"), "a waiting verdict must not park a user task");
+  // The timer fires → the probe re-derives ground truth (`ready`) → the PR merges.
+  await engine.advanceTime(MERGEABLE_REPOLL_MS + 1);
+  assertThatInstance(engine, byProcessId("merge-loop"))
+    .hasCompleted()
+    .hasNoIncident()
+    .hasCompletedElements("wait-mergeable-repoll", "merge-stall-probe", "attempt-merge", "mark-merged");
+});
+
+test("a 'waiting' verdict that settles to conflict on re-poll reaches the rebase arm (#774)", async () => {
+  // The incident (Magikcraft/nano-bpm#1166): the PR was really CONFLICTING, but GitHub reported
+  // UNKNOWN transiently. The re-poll must let it settle to `conflict` → `senior:rebase`, the arm that
+  // would have fixed it, rather than paging a human on the transient UNKNOWN.
+  const engine = await boot({
+    responses: {
+      "pr.merge-stall-probe": { mergeState: "conflict", failingChecks: 0, failingChecksList: "" },
+      "senior:rebase": { status: "rebased" },
+    },
+  });
+  await engine.publishMessage({ name: "deps-cleared", correlationKey: "pr-1" });
+  await engine.publishMessage({ name: "merge-ready", correlationKey: "pr-1", variables: { mergeState: "waiting" } });
+  await engine.advanceTime(MERGEABLE_REPOLL_MS + 1);
+  assertThatInstance(engine, byProcessId("merge-loop"))
+    .isActive()
+    .hasCompletedElements("wait-mergeable-repoll", "merge-stall-probe", "rebase")
+    .hasVariable("rebaseRound", 1);
+  assert(!completedElementIds(engine).has("merge-esc-conflict"), "settling to conflict must rebase, not escalate");
+});
+
+test("the 'waiting' re-poll is bounded — exhausting mergeStallMax escalates to a human (#774)", async () => {
+  // A permanently-UNKNOWN PR cannot re-poll forever: the re-poll shares the `mergeStallMax` budget.
+  // `mergeStallMax: 0` — escalate on the first re-poll. The probe runs once, `gw-merge-stall` finds
+  // the budget exhausted, and routes to the human `wait-merge-answer` (last resort, not first).
+  const engine = await boot({
+    vars: { mergeStallMax: 0 },
+    responses: {
+      "pr.merge-stall-probe": { mergeState: "waiting", failingChecks: 0, failingChecksList: "" },
+    },
+  });
+  await engine.publishMessage({ name: "deps-cleared", correlationKey: "pr-1" });
+  await engine.publishMessage({ name: "merge-ready", correlationKey: "pr-1", variables: { mergeState: "waiting" } });
+  assert(!completedElementIds(engine).has("merge-esc-conflict"), "must re-poll before ever escalating");
+  await engine.advanceTime(MERGEABLE_REPOLL_MS + 1);
+  await assertThatUserTask(engine, { instance: byProcessId("merge-loop"), elementId: "wait-merge-answer" }).isCreated();
+  assertThatInstance(engine, byProcessId("merge-loop")).hasCompletedElements("wait-mergeable-repoll", "merge-stall-probe", "merge-esc-conflict");
+});
+
+test("an unclassified verdict routes to auto-rebase (DEFAULT), not to a human (#774)", async () => {
+  // The DEFAULT arm is a last-resort self-heal, not a page: an unexpected/garbage `mergeState` routes
+  // to the bounded rebase agent (which reconciles from ground truth), never straight to a human.
+  const engine = await boot({ responses: { "senior:rebase": { status: "rebased" } } });
+  await engine.publishMessage({ name: "deps-cleared", correlationKey: "pr-1" });
+  await engine.publishMessage({ name: "merge-ready", correlationKey: "pr-1", variables: { mergeState: "bogus" } });
+  assertThatInstance(engine, byProcessId("merge-loop"))
+    .isActive()
+    .hasCompletedElements("rebase")
+    .hasVariable("rebaseRound", 1);
+  const openTasks = await engine.searchUserTasks({});
+  assert(!openTasks.some((t) => t.elementId === "wait-merge-answer"), "the default arm must not page a human");
 });
 
 test("an evicted queued merge re-arms the poller rather than completing", async () => {

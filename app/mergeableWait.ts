@@ -36,3 +36,26 @@ export function mergeableWaitTimeout(
 ): string {
   return isoDuration(raw, def);
 }
+
+/** Default mergeability re-poll interval (ISO-8601 duration): how long the merge loop waits before
+ * re-deriving mergeability from ground truth when `gw-mergeable` sees an async-`UNKNOWN` `"waiting"`
+ * verdict (issue #774). GitHub returns `mergeable=UNKNOWN` transiently while it computes mergeability
+ * in the background; a `"waiting"` verdict must therefore route to a *bounded re-poll* — not straight
+ * to a human — so the loop self-heals once GitHub settles (to `"conflict"` → `senior:rebase`, etc.).
+ * Deliberately SHORT (unlike the 30-minute {@link DEFAULT_MERGEABLE_WAIT_TIMEOUT} poller-death
+ * backstop): GitHub usually settles UNKNOWN within seconds, so re-poll briskly rather than parking
+ * the PR for tens of minutes per round. The re-poll is bounded by the shared `mergeStallMax` budget
+ * (`NANO_PR_MAX_MERGE_STALL_ROUNDS`): once exhausted, `gw-merge-stall` escalates to a human. */
+export const DEFAULT_MERGEABLE_REPOLL_INTERVAL = "PT2M";
+
+/** Validate the operator-supplied mergeability re-poll interval (env
+ * `NANO_PR_MERGEABLE_REPOLL_INTERVAL`, ISO-8601 duration), falling back to
+ * {@link DEFAULT_MERGEABLE_REPOLL_INTERVAL} when absent, blank, or malformed — a bad env value must
+ * never deploy an uninterpretable timer expression. Derives its validation from the single canonical
+ * {@link isoDuration}. */
+export function mergeableRepollInterval(
+  raw: string | undefined,
+  def: string = DEFAULT_MERGEABLE_REPOLL_INTERVAL,
+): string {
+  return isoDuration(raw, def);
+}

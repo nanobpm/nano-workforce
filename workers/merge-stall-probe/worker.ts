@@ -8,7 +8,10 @@
 //   • ready    → attempt-merge
 //   • conflict → rebase arm
 //   • blocked  → CI-fix arm
-//   • draft / waiting (still computing) → not-landable escalation (gw-mergeable default)
+//   • waiting (GitHub still computing) → bounded re-poll (`wait-mergeable-repoll`), NOT a terminal
+//     escalation (#774); it only escalates once the shared `mergeStallMax` budget is exhausted
+//   • draft → not-landable escalation
+//   • unclassified/default → auto-rebase (`gw-rebase`, the `gw-mergeable` default arm)
 // The timer only guarantees the remediation machinery is ENTERED when the poller is dead; every
 // downstream arm is the same one the live poller feeds. A bounded `mergeStallRounds` counter
 // (incremented by this task's output mapping, capped by `mergeStallMax`) stops the probe from
@@ -23,9 +26,10 @@ type In = WorkerInputs["pr.merge-stall-probe"];
 
 interface Out extends Record<string, unknown> {
   // Mirrors the poller's `merge-ready {mergeState}` payload so the existing `gw-mergeable` FEEL
-  // routes it. `waiting` (GitHub still computing / no verdict) is surfaced verbatim; gw-mergeable
-  // has no `waiting` arm, so it falls to the not-landable default and escalates — the correct
-  // backstop when the poller is dead and 30 minutes on GitHub still cannot settle the PR.
+  // routes it. `waiting` (GitHub still computing / no verdict) is surfaced verbatim; `gw-mergeable`
+  // routes it to a bounded re-poll (`wait-mergeable-repoll`, #774) — re-probing until the verdict
+  // settles or the shared `mergeStallMax` budget is exhausted, at which point it escalates to a
+  // human. This backstops a dead poller without wedging a PR GitHub is merely slow to settle.
   mergeState: string;
   failingChecks: number;
   failingChecksList: string;
@@ -39,8 +43,8 @@ const handler: AppJobHandler<In, Out> = async (job, app) => {
   // protocol so the protocol-aware backstop (#392) gates a red DECLARED-required check even when
   // GitHub reports UNSTABLE. Any transport hiccup is treated as "still waiting" — never a spurious
   // ready/conflict verdict — so a bad read is surfaced as `waiting`, which `gw-mergeable` routes to
-  // its not-landable default (human escalation), erring toward a human rather than misrouting the
-  // token to a wrong remediation arm.
+  // a bounded re-poll (#774) rather than misrouting the token to a wrong remediation arm; a
+  // genuinely stuck verdict still escalates once the `mergeStallMax` budget is exhausted.
   const st = await fetchPrState(repo, prNumber, token).catch(() => null);
   if (st === null) {
     return { mergeState: "waiting", failingChecks: 0, failingChecksList: "" };

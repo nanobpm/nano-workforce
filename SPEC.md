@@ -216,7 +216,7 @@ Consequences the prompt (`resources/prompts/review-round.md`) encodes:
 | `pr-submitted` | — (start) | submit route/webhook | `{repo, prNumber, prUrl, prKey}` |
 | `readiness-ready` | `prKey` | **poller** | `{ready, detail?}` (ADR 0001 §2 wait-gate; the review-ready wait, re-expressed on the ReadinessProbe gate — #259) |
 | `deps-cleared` | `prKey` | **poller** (merge) | — (all `Depends-on` PRs merged) |
-| `merge-ready` | `prKey` | **poller** (merge) | `{mergeState}` (`ready` \| `conflict` \| `blocked`); when `blocked`, also `{failingChecks, failingChecksList}` for the `senior:fix-ci` branch |
+| `merge-ready` | `prKey` | **poller** (merge) | `{mergeState}` (`ready` \| `conflict` \| `blocked` \| `draft`); when `blocked`, also `{failingChecks, failingChecksList}` for the `senior:fix-ci` branch. A transient `UNKNOWN`/`waiting` verdict is NOT published — the poller keeps polling (fast self-heal); the merge loop's `gw-mergeable` sees `waiting` only via the dead-poller stall-probe re-derivation, where it re-polls (bounded, #774) instead of escalating |
 | `merge-landed` | `prKey` | **poller** (merge) | — (queued PR merged, or merged out-of-band) |
 
 The `escalation-answered` message was retired (#256): the merge-loop escalation is
@@ -466,10 +466,21 @@ start ─► wait: deps merged ─► arm merge ─► wait: mergeable ─┬─
   time** by a `fix-ci`/`rebase` agent (`status: "waiting-on-pr"`, above). `merge-loop`
   parks at *wait: deps merged*; the poller checks each dependency (own tracked row
   first, else GitHub `merged` state) and publishes `deps-cleared` once all have landed.
-- **Mergeability** — the poller classifies GitHub's `mergeStateStatus`:
+- **Mergeability** — the poller classifies GitHub's `mergeStateStatus`, but a
+  first-class `isDraft` guard runs *first* (`classifyMergeability`, `app/github.ts`):
+  a draft PR is `draft` regardless of `mergeStateStatus`. Otherwise, by status:
   `CLEAN`/`HAS_HOOKS`/`UNSTABLE`/`BEHIND` → `ready`; `DIRTY` → `conflict`;
   `BLOCKED` → `blocked` if a required check is failing, else keep waiting;
-  `DRAFT`/`UNKNOWN`/empty → keep waiting. It publishes `merge-ready {mergeState}`.
+  `UNKNOWN`/empty (and any other status, including `DRAFT`) → keep polling (GitHub
+  still computing). It
+  publishes `merge-ready {mergeState}` for the settled verdicts. When the live
+  poller is dead the `wait-mergeable-timeout` backstop's stall-probe re-derives
+  mergeability; a still-unsettled `UNKNOWN`/`waiting` verdict then routes to a
+  **bounded re-poll** (`wait-mergeable-repoll`, `NANO_PR_MERGEABLE_REPOLL_INTERVAL`)
+  rather than escalating (bounded by `NANO_PR_MAX_MERGE_STALL_ROUNDS`), and an
+  unclassified/default verdict routes to auto-rebase (`gw-rebase`, bounded by its
+  own `NANO_PR_MAX_REBASE_ROUNDS` budget); once either budget is exhausted the loop
+  escalates to a human (#774).
 - **Merge** — `pr.merge` attempts the merge (`NANO_PR_MERGE_METHOD`, default
   `squash`). GitHub auto-enqueues on merge-queue-required branches → the process
   waits for `merge-landed` (poller detects the landed PR). Every attempt is
