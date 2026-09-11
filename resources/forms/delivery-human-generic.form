@@ -14,7 +14,7 @@
       "type": "textfield",
       "key": "value",
       "label": "Emitted value (only if this step emits a fact)",
-      "description": "The typed value this step hands forward to its downstream dependents. Leave blank for a click-done step that emits nothing — an emit node's value is validated server-side against its declared fact."
+      "description": "The typed value this step hands forward to its downstream dependents. Leave blank for a click-done step that emits nothing."
     },
     {
       "type": "textarea",

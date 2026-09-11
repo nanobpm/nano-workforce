@@ -61,7 +61,14 @@ export function isDeliveryHumanElement(elementId: string): boolean {
  *  row already stamps each human node's instruction label in `human_labels` (`buildHumanLabels`), keyed
  *  by the node's base user-task element id (`delivery-human-task__<node>`); the bounded-timeout
  *  escalation twin parks on the `…__esc` variant, so strip that suffix before the lookup. Returns a
- *  static fallback when no label is stored so a parked human step is never left with a blank panel. */
+ *  static fallback when no label is stored so a parked step is never left with a blank panel.
+ *
+ *  The fallback is deliberately node-NEUTRAL ("…delivery-graph step…", not "…human step…"): only
+ *  real `human` nodes are stamped into `human_labels`, but `isDeliveryHumanElement` (and hence this
+ *  helper's caller) also matches the `__esc`/`__contract` escalation twins that BOUNDED `agent`/`wait`/
+ *  `connector` nodes schedule — those carry no stored label and would otherwise be mislabeled as a
+ *  "human step". A found label is always a real human node's instruction; the fallback must read true
+ *  for both an untracked human run AND a non-human escalation twin. */
 export function deliveryHumanContextQuestion(
   humanLabels: Record<string, string> | undefined,
   elementId: string,
@@ -69,7 +76,7 @@ export function deliveryHumanContextQuestion(
   const labels = humanLabels ?? {};
   const base = elementId.replace(/__esc$/, "");
   const label = (labels[base] ?? labels[elementId] ?? "").trim();
-  return label || "A scheduled delivery-graph human step is waiting to be completed.";
+  return label || "A scheduled delivery-graph step is waiting to be completed.";
 }
 
 /** The GENERIC fallback form (Decision 4, step 3): captures ONE typed value into the node's single

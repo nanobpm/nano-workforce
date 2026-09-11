@@ -696,11 +696,15 @@ test("pollUserTasks: a parked delivery-human node carries its instruction as `qu
 });
 
 test("pollUserTasks: a delivery-human node with no stored label still gets a non-blank Decision context (issue #772)", async () => {
-  // An untracked run (or a run whose label wasn't stamped) must not leave the panel blank — a static
-  // fallback still tells the operator a human step is waiting.
+  // An untracked run (or a run whose label wasn't stamped) must not leave the panel blank — a static,
+  // node-NEUTRAL fallback still tells the operator a delivery-graph step is waiting. It must read true
+  // for a non-human escalation twin too, so it must not claim "human step".
   const { data, stores } = memData({});
   const restore = stubUserTaskSearch([
     { userTaskKey: "20411", elementId: "delivery-human-task__n1", processInstanceKey: "dg-9", state: "CREATED" },
+    // a bounded `agent`/`wait`/`connector` node's escalation twin: `isDeliveryHumanElement` matches it,
+    // but it carries no stored human label, so it gets the neutral fallback, not a "human step" claim.
+    { userTaskKey: "20499", elementId: "delivery-human-task__agent5__esc", processInstanceKey: "dg-9", state: "CREATED" },
   ]);
   try {
     await pollUserTasks(data, fakeEngine({}), REST);
@@ -709,7 +713,8 @@ test("pollUserTasks: a delivery-human node with no stored label still gets a non
   }
 
   const byKey = Object.fromEntries((stores.user_tasks ?? []).map((r) => [r.user_task_key, r]));
-  assertEquals(byKey["20411"].question, "A scheduled delivery-graph human step is waiting to be completed.");
+  assertEquals(byKey["20411"].question, "A scheduled delivery-graph step is waiting to be completed.");
+  assertEquals(byKey["20499"].question, "A scheduled delivery-graph step is waiting to be completed.");
 });
 
 test("pollUserTasks (engine-first): a delivery-human task on an UNTRACKED run still surfaces (bucketed `delivery`, instance fallback) (issue #442)", async () => {

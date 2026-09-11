@@ -327,11 +327,31 @@ test("deliveryHumanContextQuestion: falls back to a static message when no label
   // yields actionable guidance rather than null (which would leave the panel empty, issue #772).
   assertEquals(
     deliveryHumanContextQuestion({}, "delivery-human-task__n1"),
-    "A scheduled delivery-graph human step is waiting to be completed.",
+    "A scheduled delivery-graph step is waiting to be completed.",
   );
   assertEquals(
     deliveryHumanContextQuestion(undefined, "delivery-human-task__n1"),
-    "A scheduled delivery-graph human step is waiting to be completed.",
+    "A scheduled delivery-graph step is waiting to be completed.",
+  );
+});
+
+test("deliveryHumanContextQuestion: a non-human node's escalation twin (no stored label) gets the node-NEUTRAL fallback, not a 'human step' claim", () => {
+  // `isDeliveryHumanElement` also matches the `__esc`/`__contract` escalation twins that bounded
+  // `agent`/`wait`/`connector` nodes schedule; those carry NO stored human label. The fallback must
+  // not mislabel them as a "human step" (issue #772 review, comment on service.ts contextFor arm).
+  const humanLabels = { "delivery-human-task__n7": "Run the manual OTP publish" };
+  assertEquals(
+    deliveryHumanContextQuestion(humanLabels, "delivery-human-task__agent5__esc"),
+    "A scheduled delivery-graph step is waiting to be completed.",
+  );
+  assertEquals(
+    deliveryHumanContextQuestion(humanLabels, "delivery-human-task__agent5__contract"),
+    "A scheduled delivery-graph step is waiting to be completed.",
+  );
+  // A real human node's own `__esc` timeout twin still resolves the base label.
+  assertEquals(
+    deliveryHumanContextQuestion(humanLabels, "delivery-human-task__n7__esc"),
+    "Run the manual OTP publish",
   );
 });
 
@@ -354,8 +374,10 @@ test("form-structure guard: delivery-human-generic.form has no data-dependent co
   for (const c of parsed.components) {
     assert(c.conditional === undefined, "no component may carry a data-dependent conditional");
   }
-  // `value` must be OPTIONAL — a no-emit ("click done") node completes without entering a value; an
-  // emit node's value is validated SERVER-side in bindHumanEmits, not by a client-required field.
+  // `value` must be OPTIONAL — a no-emit ("click done") node completes without entering a value. This
+  // S3 generic surface deploys a single static default form and cannot know per-node whether a fact is
+  // required, so it must not client-require `value`; per-node typed-emit binding is the S4 form-
+  // selection path's job (`bindHumanEmits`), not a client-required field on this generic surface.
   const value = parsed.components.find((c) => c.key === "value");
   assert(value, "the generic form must keep a single `value` field");
   assert(value!.validate?.required !== true, "`value` must be optional on this surface");
