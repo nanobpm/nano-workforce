@@ -137,7 +137,7 @@ export const ENV_CONTRACTS = {
     name: "NANO_PR_MAX_MERGE_STALL_ROUNDS",
     owner: "app/service.ts",
     semantics:
-      "Maximum mergeable-wait-timeout stall-probe re-derivations (dead-poller backstop, #636) before escalating; 0 escalates on the first stall.",
+      "Maximum mergeable-wait-timeout stall-probe re-derivations (dead-poller backstop, #636) AND `waiting`-verdict re-poll probes (#774) before escalating; 0 escalates on the first stall.",
     default: "3",
   },
   NANO_PR_REVIEW_WAIT_TIMEOUT: {

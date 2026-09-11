@@ -7,6 +7,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { DEFAULT_MERGEABLE_REPOLL_INTERVAL, DEFAULT_MERGEABLE_WAIT_TIMEOUT, mergeableRepollInterval, mergeableWaitTimeout } from "./mergeableWait.ts";
+import { isoDurationToMs } from "./reviewWait.ts";
 
 test("mergeableWaitTimeout: blank / absent / malformed → default", () => {
   assert.equal(mergeableWaitTimeout(undefined), DEFAULT_MERGEABLE_WAIT_TIMEOUT);
@@ -63,7 +64,13 @@ test("mergeableRepollInterval: the re-poll interval is shorter than the poller-d
   // dead-poller backstop, so a transient UNKNOWN self-heals briskly rather than parking for tens of
   // minutes per round.
   assert.equal(DEFAULT_MERGEABLE_REPOLL_INTERVAL, "PT2M");
-  assert.notEqual(DEFAULT_MERGEABLE_REPOLL_INTERVAL, DEFAULT_MERGEABLE_WAIT_TIMEOUT);
+  // `notEqual` only proves the values differ — a future `PT1H` would pass despite being LONGER than
+  // the backstop. Assert the actual ordering invariant on parsed durations via the canonical helper.
+  assert.ok(
+    isoDurationToMs(DEFAULT_MERGEABLE_REPOLL_INTERVAL, "PT0S") <
+      isoDurationToMs(DEFAULT_MERGEABLE_WAIT_TIMEOUT, "PT0S"),
+    "the re-poll interval must be strictly shorter than the poller-death backstop",
+  );
 });
 
 test("mergeableRepollInterval: the default is itself a well-formed ISO-8601 duration", () => {
