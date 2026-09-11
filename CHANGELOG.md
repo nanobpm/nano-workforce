@@ -1,3 +1,9 @@
+## [0.186.1](https://github.com/nanobpm/nano-workforce/compare/v0.186.0...v0.186.1) (2026-09-11)
+
+### Bug Fixes
+
+* delivery-graph human-node Tasks form renders context-free ([#773](https://github.com/nanobpm/nano-workforce/issues/773)) ([91a8065](https://github.com/nanobpm/nano-workforce/commit/91a806566e157257cc264310e18d7df0bba3e350)), closes [#772](https://github.com/nanobpm/nano-workforce/issues/772) [#772](https://github.com/nanobpm/nano-workforce/issues/772)
+
 ## [0.186.0](https://github.com/nanobpm/nano-workforce/compare/v0.185.1...v0.186.0) (2026-09-08)
 
 ### Features
