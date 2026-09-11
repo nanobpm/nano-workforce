@@ -60,8 +60,12 @@ export function isDeliveryHumanElement(elementId: string): boolean {
  *  arrive through the read-model `question` column, exactly like every other escalation kind. The run
  *  row already stamps each human node's instruction label in `human_labels` (`buildHumanLabels`), keyed
  *  by the node's base user-task element id (`delivery-human-task__<node>`); the bounded-timeout
- *  escalation twin parks on the `…__esc` variant, so strip that suffix before the lookup. Returns a
- *  static fallback when no label is stored so a parked step is never left with a blank panel.
+ *  escalation twin parks on the `…__esc` variant. A node id may itself legitimately END in `__esc`
+ *  (`deliveryGraph.ts` NODE_ID_PATTERN allows it), so the twin-suffix strip is a FALLBACK, not the
+ *  first probe: look up the EXACT reported element id first (a real `…__esc` human node stores its
+ *  label under that exact key), and only then the `__esc`-stripped base (the bounded-timeout twin,
+ *  whose exact id is never stamped, resolves to its real node's label). Returns a static fallback when
+ *  no label is stored so a parked step is never left with a blank panel.
  *
  *  The fallback is deliberately node-NEUTRAL ("…delivery-graph step…", not "…human step…"): only
  *  real `human` nodes are stamped into `human_labels`, but `isDeliveryHumanElement` (and hence this
@@ -75,7 +79,7 @@ export function deliveryHumanContextQuestion(
 ): string {
   const labels = humanLabels ?? {};
   const base = elementId.replace(/__esc$/, "");
-  const label = (labels[base] ?? labels[elementId] ?? "").trim();
+  const label = (labels[elementId] ?? labels[base] ?? "").trim();
   return label || "A scheduled delivery-graph step is waiting to be completed.";
 }
 

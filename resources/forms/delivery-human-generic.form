@@ -4,11 +4,9 @@
   "type": "default",
   "components": [
     {
-      "type": "textarea",
-      "key": "prompt",
+      "type": "text",
       "label": "Now do this",
-      "description": "The scheduled human step this delivery graph is waiting on. A summary of its instruction is shown in the Decision context above.",
-      "readonly": true
+      "text": "This scheduled human step's instruction is shown in the Decision context above."
     },
     {
       "type": "textfield",

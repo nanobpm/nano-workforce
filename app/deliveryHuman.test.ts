@@ -355,6 +355,20 @@ test("deliveryHumanContextQuestion: a non-human node's escalation twin (no store
   );
 });
 
+test("deliveryHumanContextQuestion: a human node whose id itself ends in __esc resolves its EXACT label, not a sibling's", () => {
+  // Node ids may legitimately end in `__esc` (`deliveryGraph.ts` NODE_ID_PATTERN), so such a node is
+  // stamped under the exact key `delivery-human-task__<id>` (…__esc). The exact lookup must win over
+  // the `__esc`-stripped base, otherwise a sibling `n7` node's label would shadow real node `n7__esc`.
+  const labels = {
+    "delivery-human-task__n7": "Sibling n7 label",
+    "delivery-human-task__n7__esc": "The real n7__esc node label",
+  };
+  assertEquals(
+    deliveryHumanContextQuestion(labels, "delivery-human-task__n7__esc"),
+    "The real n7__esc node label",
+  );
+});
+
 // ── issue #772: the generic form must be static / input-only on the Tasks surface ─────────────────
 
 const genericForm = readFileSync("resources/forms/delivery-human-generic.form", "utf8");
@@ -381,4 +395,24 @@ test("form-structure guard: delivery-human-generic.form has no data-dependent co
   const value = parsed.components.find((c) => c.key === "value");
   assert(value, "the generic form must keep a single `value` field");
   assert(value!.validate?.required !== true, "`value` must be optional on this surface");
+});
+
+test("form-structure guard: delivery-human-generic.form has no task-variable-dependent readonly input", () => {
+  // The Tasks surface (`engineForm`) seeds NO task-local variables, so a readonly INPUT component
+  // (e.g. the old `prompt` textarea) renders permanently blank — a confusing empty "Now do this".
+  // The instruction reaches the operator through the read-model Decision context column instead, so
+  // the surface must carry no keyed readonly control; a static keyless `text` block may point to it.
+  const parsed = JSON.parse(genericForm) as {
+    components: { type?: string; key?: string; readonly?: boolean }[];
+  };
+  for (const c of parsed.components) {
+    assert(
+      !(c.readonly === true && typeof c.key === "string"),
+      `keyed readonly input '${c.key}' renders blank on the variable-free Tasks surface`,
+    );
+  }
+  assert(
+    !parsed.components.some((c) => c.key === "prompt"),
+    "the never-seeded readonly `prompt` control must not reappear on the Tasks surface",
+  );
 });
