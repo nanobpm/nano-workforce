@@ -661,6 +661,62 @@ test("pollUserTasks (engine-first): surfaces an inlined delivery-graph human tas
   assertEquals(byKey["35002"].subject_title, "release runbook");
 });
 
+test("pollUserTasks: a parked delivery-human node carries its instruction as `question` (Decision context, issue #772)", async () => {
+  // The Tasks surface seeds no form variables, so a delivery-graph `human` node's instruction can only
+  // reach the operator through the read-model `question` (rendered as "Decision context"). Source it
+  // from the run's stamped `human_labels`, keyed by the parked user-task element id — else the panel is
+  // blank and the human has no idea what the run is waiting on.
+  const { data, stores } = memData({
+    delivery_graph_runs: [
+      {
+        run_key: "delivery-graph-403eb22e",
+        process_key: "dg-1",
+        status: "running",
+        title: "release runbook",
+        human_labels: JSON.stringify({
+          "delivery-human-task__n7": "Run the manual OTP publish for @nanobpm/urban",
+        }),
+      },
+    ],
+  });
+  const restore = stubUserTaskSearch([
+    { userTaskKey: "20411", elementId: "delivery-human-task__n7", processInstanceKey: "dg-1", state: "CREATED" },
+    // the bounded-timeout escalation twin parks on the `…__esc` id but resolves the same base label
+    { userTaskKey: "20412", elementId: "delivery-human-task__n7__esc", processInstanceKey: "dg-1", state: "CREATED" },
+  ]);
+  try {
+    await pollUserTasks(data, fakeEngine({}), REST);
+  } finally {
+    restore();
+  }
+
+  const byKey = Object.fromEntries((stores.user_tasks ?? []).map((r) => [r.user_task_key, r]));
+  assertEquals(byKey["20411"].question, "Run the manual OTP publish for @nanobpm/urban");
+  assertEquals(byKey["20412"].question, "Run the manual OTP publish for @nanobpm/urban");
+});
+
+test("pollUserTasks: a delivery-human node with no stored label still gets a non-blank Decision context (issue #772)", async () => {
+  // An untracked run (or a run whose label wasn't stamped) must not leave the panel blank — a static,
+  // node-NEUTRAL fallback still tells the operator a delivery-graph step is waiting. It must read true
+  // for a non-human escalation twin too, so it must not claim "human step".
+  const { data, stores } = memData({});
+  const restore = stubUserTaskSearch([
+    { userTaskKey: "20411", elementId: "delivery-human-task__n1", processInstanceKey: "dg-9", state: "CREATED" },
+    // a bounded `agent`/`wait`/`connector` node's escalation twin: `isDeliveryHumanElement` matches it,
+    // but it carries no stored human label, so it gets the neutral fallback, not a "human step" claim.
+    { userTaskKey: "20499", elementId: "delivery-human-task__agent5__esc", processInstanceKey: "dg-9", state: "CREATED" },
+  ]);
+  try {
+    await pollUserTasks(data, fakeEngine({}), REST);
+  } finally {
+    restore();
+  }
+
+  const byKey = Object.fromEntries((stores.user_tasks ?? []).map((r) => [r.user_task_key, r]));
+  assertEquals(byKey["20411"].question, "A scheduled delivery-graph step is waiting to be completed.");
+  assertEquals(byKey["20499"].question, "A scheduled delivery-graph step is waiting to be completed.");
+});
+
 test("pollUserTasks (engine-first): a delivery-human task on an UNTRACKED run still surfaces (bucketed `delivery`, instance fallback) (issue #442)", async () => {
   // Even with no `delivery_graph_runs` row referencing the instance, the kind implies its aggregate, so
   // the row renders and stays answerable — mirroring the orphaned-escalation guarantee (#358).

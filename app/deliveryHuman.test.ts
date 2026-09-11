@@ -10,6 +10,7 @@ import type { DeliveryFact } from "../nano-generated/api-io.d.ts";
 import {
   bindHumanEmits,
   DELIVERY_HUMAN_ELEMENT,
+  deliveryHumanContextQuestion,
   deriveHumanCategory,
   GENERIC_HUMAN_FORM,
   HUMAN_ACK_FORM,
@@ -302,5 +303,127 @@ test("drift guard: the human element is completer-answerable and surfaces on the
   assert(
     typeof USER_TASK_KIND_LABELS[DELIVERY_HUMAN_ELEMENT] === "string",
     "USER_TASK_KIND_LABELS must label the delivery human node",
+  );
+});
+
+// ── issue #772: Tasks-inbox "Decision context" for a parked delivery-graph human node ─────────────
+
+test("deliveryHumanContextQuestion: derives the node instruction from human_labels (base + __esc twin)", () => {
+  const labels = { "delivery-human-task__n7": "Run the manual OTP publish for @nanobpm/urban" };
+  // The parked base task looks up its own id.
+  assertEquals(
+    deliveryHumanContextQuestion(labels, "delivery-human-task__n7"),
+    "Run the manual OTP publish for @nanobpm/urban",
+  );
+  // The bounded-timeout escalation twin parks on `…__esc`; strip it to find the same stamped label.
+  assertEquals(
+    deliveryHumanContextQuestion(labels, "delivery-human-task__n7__esc"),
+    "Run the manual OTP publish for @nanobpm/urban",
+  );
+});
+
+test("deliveryHumanContextQuestion: falls back to a static message when no label is stored", () => {
+  // A parked human step must never render a blank Decision context — an untracked/absent label still
+  // yields actionable guidance rather than null (which would leave the panel empty, issue #772).
+  assertEquals(
+    deliveryHumanContextQuestion({}, "delivery-human-task__n1"),
+    "A scheduled delivery-graph step is waiting to be completed.",
+  );
+  assertEquals(
+    deliveryHumanContextQuestion(undefined, "delivery-human-task__n1"),
+    "A scheduled delivery-graph step is waiting to be completed.",
+  );
+});
+
+test("deliveryHumanContextQuestion: a non-human node's escalation twin (no stored label) gets the node-NEUTRAL fallback, not a 'human step' claim", () => {
+  // `isDeliveryHumanElement` also matches the `__esc`/`__contract` escalation twins that bounded
+  // `agent`/`wait`/`connector` nodes schedule; those carry NO stored human label. The fallback must
+  // not mislabel them as a "human step" (issue #772 review, comment on service.ts contextFor arm).
+  const humanLabels = { "delivery-human-task__n7": "Run the manual OTP publish" };
+  assertEquals(
+    deliveryHumanContextQuestion(humanLabels, "delivery-human-task__agent5__esc"),
+    "A scheduled delivery-graph step is waiting to be completed.",
+  );
+  assertEquals(
+    deliveryHumanContextQuestion(humanLabels, "delivery-human-task__agent5__contract"),
+    "A scheduled delivery-graph step is waiting to be completed.",
+  );
+  // A real human node's own `__esc` timeout twin still resolves the base label.
+  assertEquals(
+    deliveryHumanContextQuestion(humanLabels, "delivery-human-task__n7__esc"),
+    "Run the manual OTP publish",
+  );
+});
+
+test("deliveryHumanContextQuestion: a human node whose id itself ends in __esc resolves its EXACT label, not a sibling's", () => {
+  // Node ids may legitimately end in `__esc` (`deliveryGraph.ts` NODE_ID_PATTERN), so such a node is
+  // stamped under the exact key `delivery-human-task__<id>` (…__esc). The exact lookup must win over
+  // the `__esc`-stripped base, otherwise a sibling `n7` node's label would shadow real node `n7__esc`.
+  const labels = {
+    "delivery-human-task__n7": "Sibling n7 label",
+    "delivery-human-task__n7__esc": "The real n7__esc node label",
+  };
+  assertEquals(
+    deliveryHumanContextQuestion(labels, "delivery-human-task__n7__esc"),
+    "The real n7__esc node label",
+  );
+});
+
+// ── issue #772: the generic form must be static / input-only on the Tasks surface ─────────────────
+
+const genericForm = readFileSync("resources/forms/delivery-human-generic.form", "utf8");
+
+test("form-structure guard: delivery-human-generic.form uses node-neutral wording", () => {
+  // This shared form is also attached to the `__esc`/`__contract` escalation tasks that bounded
+  // agent/wait/connector nodes create (`app/deliveryGraphCompiler.ts`), not only scheduled `human`
+  // nodes. Copy that calls the task a "scheduled human step" is inaccurate for the escalation family
+  // and can obscure that the task is an escalation, so the static text must stay node-neutral.
+  assert(
+    !/scheduled human step/i.test(genericForm),
+    "the shared generic form must use node-neutral wording (it also serves escalation tasks)",
+  );
+});
+
+test("form-structure guard: delivery-human-generic.form carries no {{…}} tokens", () => {
+  // The Tasks surface (`engineForm`) seeds NO form variables, so any `{{token}}` renders literally and
+  // any data-dependent `conditional` mis-fires. Deploy-time `{{token}}` templating is removed too, so
+  // such a token could never resolve. Assert the surface stays context-free-safe (issue #772).
+  assert(!genericForm.includes("{{"), "the generic delivery-human form must not carry {{…}} tokens");
+});
+
+test("form-structure guard: delivery-human-generic.form has no data-dependent conditional and an OPTIONAL value", () => {
+  const parsed = JSON.parse(genericForm) as {
+    components: { key?: string; conditional?: unknown; validate?: { required?: boolean } }[];
+  };
+  // No component may gate on form data — those blurbs render contradictorily against empty data.
+  for (const c of parsed.components) {
+    assert(c.conditional === undefined, "no component may carry a data-dependent conditional");
+  }
+  // `value` must be OPTIONAL — a no-emit ("click done") node completes without entering a value. This
+  // S3 generic surface deploys a single static default form and cannot know per-node whether a fact is
+  // required, so it must not client-require `value`; per-node typed-emit binding is the S4 form-
+  // selection path's job (`bindHumanEmits`), not a client-required field on this generic surface.
+  const value = parsed.components.find((c) => c.key === "value");
+  assert(value, "the generic form must keep a single `value` field");
+  assert(value!.validate?.required !== true, "`value` must be optional on this surface");
+});
+
+test("form-structure guard: delivery-human-generic.form has no task-variable-dependent readonly input", () => {
+  // The Tasks surface (`engineForm`) seeds NO task-local variables, so a readonly INPUT component
+  // (e.g. the old `prompt` textarea) renders permanently blank — a confusing empty "Now do this".
+  // The instruction reaches the operator through the read-model Decision context column instead, so
+  // the surface must carry no keyed readonly control; a static keyless `text` block may point to it.
+  const parsed = JSON.parse(genericForm) as {
+    components: { type?: string; key?: string; readonly?: boolean }[];
+  };
+  for (const c of parsed.components) {
+    assert(
+      !(c.readonly === true && typeof c.key === "string"),
+      `keyed readonly input '${c.key}' renders blank on the variable-free Tasks surface`,
+    );
+  }
+  assert(
+    !parsed.components.some((c) => c.key === "prompt"),
+    "the never-seeded readonly `prompt` control must not reappear on the Tasks surface",
   );
 });

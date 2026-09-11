@@ -54,6 +54,35 @@ export function isDeliveryHumanElement(elementId: string): boolean {
   return elementId === DELIVERY_HUMAN_ELEMENT || elementId.startsWith(`${DELIVERY_HUMAN_ELEMENT}__`);
 }
 
+/** The read-model "Decision context" for a parked delivery-graph `human` node (issue #772). The Tasks
+ *  surface renders the deployed `.form` against EMPTY data (it seeds no task-local variables), so the
+ *  node's instruction cannot reach the operator through the form's readonly `prompt` field — it must
+ *  arrive through the read-model `question` column, exactly like every other escalation kind. The run
+ *  row already stamps each human node's instruction label in `human_labels` (`buildHumanLabels`), keyed
+ *  by the node's base user-task element id (`delivery-human-task__<node>`); the bounded-timeout
+ *  escalation twin parks on the `…__esc` variant. A node id may itself legitimately END in `__esc`
+ *  (`deliveryGraph.ts` NODE_ID_PATTERN allows it), so the twin-suffix strip is a FALLBACK, not the
+ *  first probe: look up the EXACT reported element id first (a real `…__esc` human node stores its
+ *  label under that exact key), and only then the `__esc`-stripped base (the bounded-timeout twin,
+ *  whose exact id is never stamped, resolves to its real node's label). Returns a static fallback when
+ *  no label is stored so a parked step is never left with a blank panel.
+ *
+ *  The fallback is deliberately node-NEUTRAL ("…delivery-graph step…", not "…human step…"): only
+ *  real `human` nodes are stamped into `human_labels`, but `isDeliveryHumanElement` (and hence this
+ *  helper's caller) also matches the `__esc`/`__contract` escalation twins that BOUNDED `agent`/`wait`/
+ *  `connector` nodes schedule — those carry no stored label and would otherwise be mislabeled as a
+ *  "human step". A found label is always a real human node's instruction; the fallback must read true
+ *  for both an untracked human run AND a non-human escalation twin. */
+export function deliveryHumanContextQuestion(
+  humanLabels: Record<string, string> | undefined,
+  elementId: string,
+): string {
+  const labels = humanLabels ?? {};
+  const base = elementId.replace(/__esc$/, "");
+  const label = (labels[elementId] ?? labels[base] ?? "").trim();
+  return label || "A scheduled delivery-graph step is waiting to be completed.";
+}
+
 /** The GENERIC fallback form (Decision 4, step 3): captures ONE typed value into the node's single
  *  declared emitted fact, so a human node with no explicit/category form can STILL emit downstream. */
 export const GENERIC_HUMAN_FORM = "delivery-human-generic";
