@@ -477,9 +477,10 @@ start ─► wait: deps merged ─► arm merge ─► wait: mergeable ─┬─
   poller is dead the `wait-mergeable-timeout` backstop's stall-probe re-derives
   mergeability; a still-unsettled `UNKNOWN`/`waiting` verdict then routes to a
   **bounded re-poll** (`wait-mergeable-repoll`, `NANO_PR_MERGEABLE_REPOLL_INTERVAL`)
-  rather than escalating, and an unclassified/default verdict routes to auto-rebase
-  — both bounded by `NANO_PR_MAX_MERGE_STALL_ROUNDS`, after which the loop escalates
-  to a human (#774).
+  rather than escalating (bounded by `NANO_PR_MAX_MERGE_STALL_ROUNDS`), and an
+  unclassified/default verdict routes to auto-rebase (`gw-rebase`, bounded by its
+  own `NANO_PR_MAX_REBASE_ROUNDS` budget); once either budget is exhausted the loop
+  escalates to a human (#774).
 - **Merge** — `pr.merge` attempts the merge (`NANO_PR_MERGE_METHOD`, default
   `squash`). GitHub auto-enqueues on merge-queue-required branches → the process
   waits for `merge-landed` (poller detects the landed PR). Every attempt is
