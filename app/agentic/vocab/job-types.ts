@@ -127,14 +127,18 @@ export function agentTaskTypesMissingExternalMarker(xml: string): string[] {
  * opted-out task is served ONLY by a worker that explicitly subscribes (`--job-type <type>` / a
  * profile capability), never by `--auto` auto-discovery (which keys on the
  * `<zeebe:agentDefinition agentType="external" />` marker). The property is inert to the engine;
- * only the exact `value="false"` opts out (any other value auto-subscribes, fail-safe). Returns the
+ * only the exact `value="false"` opts out (any other value auto-subscribes, fail-safe). The opt-out
+ * scan is scoped to the block's `<bpmn:extensionElements>` (the engine-honoured PLACEMENT scope, via
+ * `extensionElementsOf`) — a property sitting directly under `<bpmn:serviceTask>` is ignored by the
+ * engine, so it must not be reported as an active opt-out here (this keeps the reader consistent with
+ * the placement-scoped drift guard `agentTaskTypesOptedOutMissingExternalMarker`). Returns the
  * distinct opted-out task types in first-occurrence order (empty when no task opts out).
  */
 export function agentTaskTypesOptedOutOfAuto(xml: string): string[] {
   const seen = new Set<string>();
   const optedOut: string[] = [];
   for (const [block] of xml.matchAll(SERVICE_TASK)) {
-    if (!AUTO_SUBSCRIBE_OPTOUT.test(block)) continue;
+    if (!AUTO_SUBSCRIBE_OPTOUT.test(extensionElementsOf(block))) continue;
     const type = block.match(TASK_DEFINITION_TYPE)?.[1];
     if (type === undefined || type.length === 0 || seen.has(type)) continue;
     seen.add(type);
@@ -157,8 +161,10 @@ export function agentTaskTypesOptedOutOfAuto(xml: string): string[] {
  * lists (the latter only reports PROMPT-BEARING tasks, so a non-prompt host task's opt-out is
  * invisible to it), the drift cannot hide. An opt-out on a block with a missing/empty
  * `<zeebe:taskDefinition>` type (which likewise cannot be a real agent task) is surfaced under a
- * descriptive sentinel rather than skipped. Returns the offending task types in first-occurrence
- * order (empty when every opted-out task is externally marked).
+ * descriptive sentinel BEFORE the external-marker short-circuit — so even a typeless block that
+ * carries the external marker is still flagged as malformed drift. Returns the offending task types
+ * in first-occurrence order (empty when every opted-out task is a properly-typed, externally-marked
+ * agent task).
  */
 export function agentTaskTypesOptedOutMissingExternalMarker(xml: string): string[] {
   const seen = new Set<string>();
@@ -166,14 +172,22 @@ export function agentTaskTypesOptedOutMissingExternalMarker(xml: string): string
   for (const [block] of xml.matchAll(SERVICE_TASK)) {
     const ext = extensionElementsOf(block);
     if (!AUTO_SUBSCRIBE_OPTOUT.test(ext)) continue;
-    if (EXTERNAL_AGENT_MARKER.test(ext)) continue;
     const type = block.match(TASK_DEFINITION_TYPE)?.[1];
-    // A missing/empty type cannot be a real agent task, so an opt-out here is still drift — surface it
-    // under a sentinel instead of letting the dedupe `continue` swallow it silently.
-    const label = type === undefined || type.length === 0 ? MALFORMED_OPTOUT_LABEL : type;
-    if (seen.has(label)) continue;
-    seen.add(label);
-    offending.push(label);
+    // A missing/empty type cannot be a real agent task, so an opt-out here is malformed drift
+    // REGARDLESS of any external marker — surface it under the sentinel BEFORE the marker
+    // short-circuit, so a marked-yet-typeless opt-out is caught rather than passed by the marker.
+    if (type === undefined || type.length === 0) {
+      if (seen.has(MALFORMED_OPTOUT_LABEL)) continue;
+      seen.add(MALFORMED_OPTOUT_LABEL);
+      offending.push(MALFORMED_OPTOUT_LABEL);
+      continue;
+    }
+    // A properly-typed opt-out is fine only when the SAME block is externally marked inside its
+    // extensionElements (the engine-honoured placement scope).
+    if (EXTERNAL_AGENT_MARKER.test(ext)) continue;
+    if (seen.has(type)) continue;
+    seen.add(type);
+    offending.push(type);
   }
   return offending;
 }

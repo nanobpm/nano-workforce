@@ -177,15 +177,32 @@ test("agentTaskTypesOptedOutMissingExternalMarker surfaces an opt-out on a block
   assertEquals(agentTaskTypesOptedOutMissingExternalMarker(xml), [MALFORMED_OPTOUT_LABEL]);
 });
 
+test("agentTaskTypesOptedOutMissingExternalMarker surfaces a MARKED opt-out block with a missing/empty taskDefinition type", () => {
+  // The block carries BOTH the external marker AND the opt-out, but its <zeebe:taskDefinition> type
+  // is empty — so it still cannot be a real agent task. The malformed check must run BEFORE the
+  // external-marker short-circuit, or the marker would wrongly let this typeless opt-out pass.
+  const xml = `
+    <bpmn:serviceTask id="markedTypeless">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="" />
+        <zeebe:agentDefinition agentType="external" />
+        <zeebe:properties>
+          <zeebe:property name="io.nanobpm.agentTask.autoSubscribe" value="false" />
+        </zeebe:properties>
+      </bpmn:extensionElements>
+    </bpmn:serviceTask>`;
+  assertEquals(agentTaskTypesOptedOutMissingExternalMarker(xml), [MALFORMED_OPTOUT_LABEL]);
+});
+
 test("GUARD: every deployed opted-out task is itself an externally-marked agent task", () => {
   for (const file of bpmnFiles()) {
     const xml = readFileSync(join(PROCESSES_DIR, file), "utf8");
-    const optedOut = agentTaskTypesOptedOutOfAuto(xml);
-    if (optedOut.length === 0) continue;
-    // An opt-out only makes sense on a real agent task (one that WOULD otherwise be auto-discovered
-    // via its external marker). Check the external marker on the SAME service-task block as the
-    // opt-out — a deduplicated comparison against `agentTaskTypesMissingExternalMarker` (which only
-    // reports PROMPT-BEARING tasks) would miss an opt-out that drifted onto a non-prompt host task.
+    // Drive the guard DIRECTLY from the block-level, placement-scoped helper rather than gating on
+    // `agentTaskTypesOptedOutOfAuto` (which skips missing/empty task-definition types, so a typeless
+    // opt-out would never reach the check). The helper scans every service task itself, surfaces a
+    // malformed typeless opt-out under the sentinel, and checks the external marker on the SAME
+    // block's extensionElements — so a typeless opt-out, an out-of-place property, or a marker that
+    // drifted onto a non-agent element all fail CI here.
     const drifted = agentTaskTypesOptedOutMissingExternalMarker(xml);
     assertEquals(
       drifted,
