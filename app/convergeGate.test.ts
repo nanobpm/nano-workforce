@@ -198,6 +198,21 @@ test("advisoryStableKey: word boundaries and Unicode are preserved (distinct pro
   assertEquals(advisoryStableKey(p, "Foo bar, baz."), advisoryStableKey(p, "foo  bar   baz"));
 });
 
+// A collision in the advisory fingerprint would let a NEWER, unacknowledged advisory on the same
+// path pass the gate on a resolved ack for a DIFFERENT advisory — a false-OPEN. The former 32-bit
+// FNV-1a digest was cheaply collidable; the key now carries a 128-bit (32-hex) SHA-256 slice.
+test("advisoryStableKey: digest is a collision-resistant 128-bit (32-hex) SHA-256 slice", () => {
+  const p = "app/x.ts";
+  const hash = advisoryStableKey(p, "Some advisory prose.").split("#")[1];
+  assertEquals(hash.length, 32, "digest is 32 hex chars (128 bits)");
+  assert(/^[0-9a-f]{32}$/.test(hash), "digest is lowercase hex");
+  // Distinct prose on the same path yields distinct keys (no cheap collision surface).
+  assertNotEquals(
+    advisoryStableKey(p, "Narrow this return type."),
+    advisoryStableKey(p, "Guard against a null argument here."),
+  );
+});
+
 // ── Issue #787: a DECLINED advisory must not livelock the gate when its line drifts ──────────
 //
 // A declined advisory is re-emitted by Copilot every round; any unrelated edit shifts its line, so

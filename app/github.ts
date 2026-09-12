@@ -11,6 +11,8 @@
 // The poller is app-side host glue (main.ts), so host-specific subprocess I/O is allowed here.
 // Cross-runtime: runs under Node (`node:child_process`).
 
+import { createHash } from "node:crypto";
+
 // Type-only import (erased at runtime, so no runtime cycle with mergeProtocol.ts, which imports
 // `fetchRepoFile` from here): `classifyMergeability` reads a repo's declared required checks to gate
 // a merge independently of GitHub branch protection.
@@ -156,14 +158,19 @@ function normalizeAdvisoryText(text: string): string {
     .trim();
 }
 
-/** FNV-1a 32-bit fingerprint of a string → 8-hex-char digest. Deterministic, dependency-free. */
+/** COLLISION-RESISTANT fingerprint of a string → 32-hex-char (128-bit) digest, the leading half of
+ * a SHA-256 hash. Deterministic and dependency-free (Node's built-in `node:crypto`, no npm dep).
+ *
+ * The gate treats an advisory whose key `<path>#<fingerprint>` matches a resolved ack as addressed,
+ * so a *collision* would let a NEWER, unacknowledged advisory on the same path pass without its own
+ * ack — a false-OPEN that violates the gate's no-false-open guarantee. The former 32-bit FNV-1a
+ * digest was cheap to collide (birthday bound ~2^16); a 128-bit SHA-256 slice makes an accidental
+ * collision (~2^-64 for realistic advisory counts) infeasible. The digest is INTERNAL to the key —
+ * it never appears in a human-authored `nano-ack:` marker (those carry the verbatim prose, which is
+ * re-fingerprinted at read time), so widening it neither lengthens any marker nor breaks a
+ * previously-issued one: both the advisory side and the ack side recompute with this same function. */
 function fingerprint(s: string): string {
-  let h = 0x811c9dc5;
-  for (let i = 0; i < s.length; i++) {
-    h ^= s.charCodeAt(i);
-    h = Math.imul(h, 0x01000193);
-  }
-  return (h >>> 0).toString(16).padStart(8, "0");
+  return createHash("sha256").update(s, "utf8").digest("hex").slice(0, 32);
 }
 
 /** The line-stable acknowledgement key for an advisory: `<path>#<fingerprint(normalized prose)>`.
