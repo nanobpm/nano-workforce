@@ -87,9 +87,10 @@ export function makeHandler(deps: {
         return { convergeBlocked: true, convergeBlockReason: BLOCK_UNVERIFIABLE };
       }
       const unresolvedThreadCount = threads.filter((t) => !t.isResolved).length;
+      const advisories = parseSuppressedAdvisories(reviewBody);
       result = evaluateConvergeGate({
         unresolvedThreadCount,
-        suppressedKeys: parseSuppressedAdvisories(reviewBody),
+        suppressedAdvisories: advisories.map((a) => ({ key: a.key, legacyKey: a.legacyKey, label: a.label })),
         acknowledgedKeys: parseAckedAdvisories(threads),
       });
     } catch {

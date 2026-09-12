@@ -119,19 +119,28 @@ Because several agents may run on the same host at once:
    carries a **resolved** acknowledgement, so a decision you only wrote into your
    `summary` is invisible to the gate. For each suppressed advisory you applied or
    declined (step 2), post a **new review comment thread** whose body contains the
-   verbatim marker **`nano-ack: <path>:<line>`** — copied exactly from Copilot's
-   bold `**<path>:<line>**` header for that advisory — then **resolve** that thread.
-   The gate matches on the marker **text**, so the thread may sit on any valid diff
-   line; only the exact `path:line` string must match. Example:
+   verbatim marker **`nano-ack: <path> :: <advisory text>`** — the `<path>` from
+   Copilot's bold `**<path>:<line>**` header and `<advisory text>` copied
+   **verbatim** from the first line of that advisory's prose — then **resolve** that
+   thread. The gate keys the acknowledgement on the advisory **text** (a
+   line-independent fingerprint of `<path> + <advisory text>`), *not* on the line
+   number: this is deliberate. A **declined** advisory is re-emitted every round,
+   and any unrelated edit you make shifts its line, so Copilot re-anchors it to a
+   new line — a line-based ack would go stale and the gate would escalate to a human
+   every round (issue #787). Because the ack is keyed on the prose, a decline you
+   made in an earlier round stays acknowledged across the drift and you need **not**
+   re-ack it. The ack thread may sit on any valid diff line. Example:
 
    ```sh
    # Post the ack thread (pick any changed line in the diff for path/line). Use the PR's real HEAD
    # SHA as commit_id — `git rev-parse HEAD` can drift from the PR head; ask GitHub:
    CID=$(gh api repos/OWNER/REPO/pulls/PR --jq .head.sha)
    gh api repos/OWNER/REPO/pulls/PR/comments -f commit_id="$CID" -f path=PATH -F line=LINE -f side=RIGHT \
-     -f body='Applied. nano-ack: <path>:<line>'   # or: 'Declined, false positive — <reason>. nano-ack: <path>:<line>'
+     -f body='Applied. nano-ack: <path> :: <verbatim advisory text>'   # or: 'Declined, false positive — <reason>. nano-ack: <path> :: <verbatim advisory text>'
    # Then resolve it exactly like any other thread (map its databaseId -> thread node id -> resolveReviewThread).
    ```
+   The legacy `nano-ack: <path>:<line>` marker is still honoured for back-compat,
+   but it does **not** survive a line drift — prefer the `<path> :: <text>` form.
 6. **Do NOT request, re-request, or remove the reviewer yourself.** Keeping
    Copilot attached is the **process's** job: a deterministic poller ensures a
    Copilot review is requested (idempotently) whenever this PR is waiting, and it

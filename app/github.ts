@@ -90,9 +90,20 @@ export async function fetchPrReviews(
 //   • SUPPRESSED / low-confidence advisories — Copilot folds these into the review BODY under a
 //     "Suppressed comments (N)" block; they are NOT threads, cannot be resolved, and are re-listed
 //     every round. To make "acknowledged" trackable, the review-round agent must post a RESOLVED
-//     review thread carrying a `nano-ack: <path>:<line>` marker (the exact key from Copilot's
-//     `**path:line**` header) for each advisory it applies or declines. The gate then treats an
-//     advisory as addressed iff a resolved thread carries its ack marker.
+//     review thread carrying a `nano-ack:` marker for each advisory it applies or declines. The gate
+//     then treats an advisory as addressed iff a resolved thread carries a matching ack marker.
+//
+// The ack key must be LINE-STABLE. Keying it on `path:line` (issue #787) livelocks a DECLINED
+// advisory: Copilot re-emits a declined advisory every round, but any unrelated edit in the PR
+// shifts its line, so Copilot re-anchors it to a new line. A prior-round `nano-ack: path:OLD` no
+// longer matches the re-emitted `path:NEW`, the gate sees a freshly "unacknowledged" advisory, and
+// escalates to a human every round. The fix keys acknowledgement on a line-independent identity —
+// `<path>#<fingerprint>` of the advisory's PROSE — so a drifted line still matches. The resolved
+// ack thread is itself the durable store: its marker text survives across rounds regardless of the
+// line, so a decline stays acknowledged without the agent re-acking each round. The new marker is
+// `nano-ack: <path> :: <verbatim advisory text>`; the legacy `nano-ack: <path>:<line>` form is still
+// honoured for back-compat (matched against the current round's line, so it converges within a round
+// even though it cannot survive a line drift).
 
 /** One PR review thread, narrowed to what the convergence gate needs. */
 export interface ReviewThread {
@@ -101,30 +112,96 @@ export interface ReviewThread {
   bodies: string[];
 }
 
-/** The `nano-ack:` acknowledgement marker the review-round agent stamps into the resolved thread
- * it opens per suppressed advisory. The captured group is the advisory key (`path:line`). */
-const ACK_MARKER = /nano-ack:\s*([^\s)>*]+:\d+)/gi;
+/** A suppressed / low-confidence Copilot advisory parsed out of a review body. Carries both a
+ * line-stable `key` (the primary identity, survives a line drift) and a `legacyKey` (`path:line`,
+ * honoured only for pre-#787 acks). `label` is the human-facing `path:line` shown in block reasons. */
+export interface SuppressedAdvisory {
+  path: string;
+  line: number;
+  /** The advisory prose (first non-empty line after the header), used for the stable fingerprint. */
+  text: string;
+  /** Line-stable identity: `<path>#<fingerprint>` of the normalized prose. Survives line drift. */
+  key: string;
+  /** Legacy `<path>:<line>` identity, honoured for back-compat with pre-#787 acks (drifts). */
+  legacyKey: string;
+  /** Human-facing `path:line` label for block-reason messages. */
+  label: string;
+}
 
-/** Parse the `path:line` keys of Copilot's suppressed / low-confidence advisories out of a review
- * body. Copilot renders them under a `<summary>Suppressed comments (N)</summary>` block, each as a
- * bold `**path:line**` header. Returns the de-duplicated keys (empty when there is no such block). */
-export function parseSuppressedAdvisories(reviewBody: string | null | undefined): string[] {
+/** Any `nano-ack:` marker — captures the rest of the marker's line (path + optional `:: text`). */
+const ACK_MARKER = /nano-ack:\s*([^\n\r]+)/gi;
+/** New line-stable form: `<path> :: <advisory text>`. */
+const NEW_ACK = /^(\S+?)\s*::\s*(.+)$/s;
+/** Legacy form: leading `<path>:<line>`. */
+const LEGACY_ACK = /^([^\s)>*]+:\d+)/;
+
+/** Normalize advisory prose to a line-/format-independent form before fingerprinting: lowercase,
+ * keep only alphanumerics. Tolerant to whitespace, markdown bullets, and punctuation differences
+ * between Copilot's header text and the agent's copied ack text. */
+function normalizeAdvisoryText(text: string): string {
+  return text.toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+/** FNV-1a 32-bit fingerprint of a string → 8-hex-char digest. Deterministic, dependency-free. */
+function fingerprint(s: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(16).padStart(8, "0");
+}
+
+/** The line-stable acknowledgement key for an advisory: `<path>#<fingerprint(normalized prose)>`.
+ * Exported so the review-round agent's contract and tests share one canonical implementation. */
+export function advisoryStableKey(path: string, text: string): string {
+  return `${path.trim()}#${fingerprint(normalizeAdvisoryText(text))}`;
+}
+
+/** Parse Copilot's suppressed / low-confidence advisories out of a review body. Copilot renders them
+ * under a `<summary>Suppressed comments (N)</summary>` block, each as a bold `**path:line**` header
+ * followed by the advisory prose. Returns de-duplicated advisories (empty when there is no block). */
+export function parseSuppressedAdvisories(reviewBody: string | null | undefined): SuppressedAdvisory[] {
   const body = reviewBody ?? "";
   const idx = body.search(/Suppressed comments\s*\(/i);
   if (idx < 0) return [];
   // Scan only from the "Suppressed comments" marker onward so a `**path:line**` elsewhere in the
   // overview prose can never be mistaken for an advisory.
   const region = body.slice(idx);
-  const keys = new Set<string>();
-  const re = /\*\*([^*]+?:\d+)\*\*/g;
-  let m: RegExpExecArray | null;
-  // biome-ignore lint/suspicious/noAssignInExpressions: canonical regex-exec accumulation loop
-  while ((m = re.exec(region)) !== null) keys.add(m[1].trim());
-  return [...keys];
+  const lines = region.split(/\r?\n/);
+  const headerRe = /\*\*([^*]+?):(\d+)\*\*/;
+  const out: SuppressedAdvisory[] = [];
+  const seen = new Set<string>();
+  for (let i = 0; i < lines.length; i++) {
+    const h = headerRe.exec(lines[i]);
+    if (!h) continue;
+    const path = h[1].trim();
+    const line = Number(h[2]);
+    const label = `${path}:${line}`;
+    // The advisory prose is the first non-empty line after the header (up to the next header). A
+    // single bullet is the common shape; strip a leading markdown bullet marker before fingerprinting.
+    let text = "";
+    for (let j = i + 1; j < lines.length; j++) {
+      if (headerRe.test(lines[j])) break;
+      const t = lines[j].replace(/^\s*[-*]\s*/, "").trim();
+      if (t) {
+        text = t;
+        break;
+      }
+    }
+    const key = advisoryStableKey(path, text);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ path, line, text, key, legacyKey: label, label });
+  }
+  return out;
 }
 
 /** Extract the acknowledged advisory keys from a set of review threads (only RESOLVED threads
- * count — an open ack thread is not yet an acknowledgement). */
+ * count — an open ack thread is not yet an acknowledgement). Returns a mix of line-stable keys
+ * (`<path>#<fp>`, from the new `nano-ack: <path> :: <text>` form) and legacy `path:line` keys (from
+ * the pre-#787 `nano-ack: <path>:<line>` form); the gate treats an advisory as acked if EITHER its
+ * stable key or its legacy key appears here. */
 export function parseAckedAdvisories(threads: ReviewThread[]): string[] {
   const acked = new Set<string>();
   for (const t of threads) {
@@ -133,7 +210,16 @@ export function parseAckedAdvisories(threads: ReviewThread[]): string[] {
       ACK_MARKER.lastIndex = 0;
       let m: RegExpExecArray | null;
       // biome-ignore lint/suspicious/noAssignInExpressions: canonical regex-exec accumulation loop
-      while ((m = ACK_MARKER.exec(body)) !== null) acked.add(m[1].trim());
+      while ((m = ACK_MARKER.exec(body)) !== null) {
+        const raw = m[1].trim();
+        const nw = NEW_ACK.exec(raw);
+        if (nw) {
+          acked.add(advisoryStableKey(nw[1], nw[2]));
+          continue;
+        }
+        const lg = LEGACY_ACK.exec(raw);
+        if (lg) acked.add(lg[1].trim());
+      }
     }
   }
   return [...acked];

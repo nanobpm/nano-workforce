@@ -14,6 +14,7 @@ import { test } from "node:test";
 import { assert, assertEquals, assertStringIncludes } from "#test-assert";
 import { evaluateConvergeGate } from "./convergeGate.ts";
 import {
+  advisoryStableKey,
   parseAckedAdvisories,
   parseReviewThreadsPage,
   parseSuppressedAdvisories,
@@ -24,13 +25,13 @@ import {
 // ── The canonical router ────────────────────────────────────────────────────
 
 test("evaluateConvergeGate: a clean PR (no unresolved threads, no advisories) converges", () => {
-  const r = evaluateConvergeGate({ unresolvedThreadCount: 0, suppressedKeys: [], acknowledgedKeys: [] });
+  const r = evaluateConvergeGate({ unresolvedThreadCount: 0, suppressedAdvisories: [], acknowledgedKeys: [] });
   assertEquals(r.convergeBlocked, false);
   assertEquals(r.convergeBlockReason, "");
 });
 
 test("evaluateConvergeGate: an unresolved review thread blocks convergence", () => {
-  const r = evaluateConvergeGate({ unresolvedThreadCount: 2, suppressedKeys: [], acknowledgedKeys: [] });
+  const r = evaluateConvergeGate({ unresolvedThreadCount: 2, suppressedAdvisories: [], acknowledgedKeys: [] });
   assertEquals(r.convergeBlocked, true);
   assertStringIncludes(r.convergeBlockReason, "2 unresolved review threads");
 });
@@ -38,7 +39,7 @@ test("evaluateConvergeGate: an unresolved review thread blocks convergence", () 
 test("evaluateConvergeGate: an unacknowledged suppressed advisory blocks convergence", () => {
   const r = evaluateConvergeGate({
     unresolvedThreadCount: 0,
-    suppressedKeys: ["spec/a.json:613"],
+    suppressedAdvisories: [{ key: "spec/a.json#deadbeef", legacyKey: "spec/a.json:613", label: "spec/a.json:613" }],
     acknowledgedKeys: [],
   });
   assertEquals(r.convergeBlocked, true);
@@ -50,7 +51,16 @@ test("evaluateConvergeGate: an unacknowledged suppressed advisory blocks converg
 test("evaluateConvergeGate: an ACKNOWLEDGED suppressed advisory no longer blocks convergence", () => {
   const r = evaluateConvergeGate({
     unresolvedThreadCount: 0,
-    suppressedKeys: ["spec/a.json:613"],
+    suppressedAdvisories: [{ key: "spec/a.json#deadbeef", legacyKey: "spec/a.json:613", label: "spec/a.json:613" }],
+    acknowledgedKeys: ["spec/a.json#deadbeef"],
+  });
+  assertEquals(r.convergeBlocked, false);
+});
+
+test("evaluateConvergeGate: a LEGACY path:line ack still acknowledges its advisory (back-compat)", () => {
+  const r = evaluateConvergeGate({
+    unresolvedThreadCount: 0,
+    suppressedAdvisories: [{ key: "spec/a.json#deadbeef", legacyKey: "spec/a.json:613", label: "spec/a.json:613" }],
     acknowledgedKeys: ["spec/a.json:613"],
   });
   assertEquals(r.convergeBlocked, false);
@@ -59,7 +69,10 @@ test("evaluateConvergeGate: an ACKNOWLEDGED suppressed advisory no longer blocks
 test("evaluateConvergeGate: multiple unacknowledged advisories use the plural noun", () => {
   const r = evaluateConvergeGate({
     unresolvedThreadCount: 0,
-    suppressedKeys: ["x.ts:10", "y.ts:20"],
+    suppressedAdvisories: [
+      { key: "x.ts#a", legacyKey: "x.ts:10", label: "x.ts:10" },
+      { key: "y.ts#b", legacyKey: "y.ts:20", label: "y.ts:20" },
+    ],
     acknowledgedKeys: [],
   });
   assertEquals(r.convergeBlocked, true);
@@ -69,8 +82,11 @@ test("evaluateConvergeGate: multiple unacknowledged advisories use the plural no
 test("evaluateConvergeGate: reports both a thread and an advisory when both are outstanding", () => {
   const r = evaluateConvergeGate({
     unresolvedThreadCount: 1,
-    suppressedKeys: ["x.ts:10", "y.ts:20"],
-    acknowledgedKeys: ["x.ts:10"],
+    suppressedAdvisories: [
+      { key: "x.ts#a", legacyKey: "x.ts:10", label: "x.ts:10" },
+      { key: "y.ts#b", legacyKey: "y.ts:20", label: "y.ts:20" },
+    ],
+    acknowledgedKeys: ["x.ts#a"],
   });
   assertEquals(r.convergeBlocked, true);
   assertStringIncludes(r.convergeBlockReason, "1 unresolved review thread");
@@ -95,9 +111,19 @@ const SAMPLE_REVIEW_BODY = [
   "</details>",
 ].join("\n");
 
-test("parseSuppressedAdvisories: extracts only the keys inside the Suppressed comments block", () => {
-  const keys = parseSuppressedAdvisories(SAMPLE_REVIEW_BODY);
-  assertEquals(keys, ["spec-app/nano-app.schema.json:613", "server/src/main.rs:42"]);
+test("parseSuppressedAdvisories: extracts advisories inside the Suppressed comments block", () => {
+  const advisories = parseSuppressedAdvisories(SAMPLE_REVIEW_BODY);
+  assertEquals(
+    advisories.map((a) => a.label),
+    ["spec-app/nano-app.schema.json:613", "server/src/main.rs:42"],
+  );
+  // The line-stable key is `<path>#<fingerprint>` of the prose, distinct from the legacy path:line.
+  assertEquals(advisories[0].legacyKey, "spec-app/nano-app.schema.json:613");
+  assertEquals(
+    advisories[0].key,
+    advisoryStableKey("spec-app/nano-app.schema.json", "The description could be clearer about the loopback default."),
+  );
+  assert(advisories[0].key.startsWith("spec-app/nano-app.schema.json#"), "stable key is path#fingerprint");
 });
 
 test("parseSuppressedAdvisories: returns [] when there is no suppressed block", () => {
@@ -114,6 +140,80 @@ test("parseAckedAdvisories: only RESOLVED threads carrying a nano-ack marker cou
   ];
   const acked = parseAckedAdvisories(threads);
   assertEquals(acked, ["spec-app/nano-app.schema.json:613"]);
+});
+
+test("parseAckedAdvisories: the new `<path> :: <text>` form yields the line-stable key", () => {
+  const threads: ReviewThread[] = [
+    { isResolved: true, path: "a.ts", bodies: ["Declined. nano-ack: server/src/main.rs :: Consider narrowing this type."] },
+  ];
+  const acked = parseAckedAdvisories(threads);
+  assertEquals(acked, [advisoryStableKey("server/src/main.rs", "Consider narrowing this type.")]);
+});
+
+// ── Issue #787: a DECLINED advisory must not livelock the gate when its line drifts ──────────
+//
+// A declined advisory is re-emitted by Copilot every round; any unrelated edit shifts its line, so
+// Copilot re-anchors it to a new line. Keying the ack on the line-stable prose fingerprint (not
+// path:line) keeps a prior-round ack matching the re-emitted advisory across the drift.
+test("converge gate #787: a stable-key ack survives a line drift and keeps the advisory acknowledged", () => {
+  const proseText = "Consider narrowing this type.";
+  // Round 1: Copilot suppressed the advisory at line 360; the agent acked it with the new form.
+  const round1Body = [
+    "<details>",
+    "<summary>Suppressed comments (1)</summary>",
+    "",
+    "**app/deliveryRunner.ts:360**",
+    `- ${proseText}`,
+    "</details>",
+  ].join("\n");
+  // Round 2: an unrelated edit shifted the SAME advisory to line 369; Copilot re-emitted it there.
+  const round2Body = round1Body.replace("app/deliveryRunner.ts:360", "app/deliveryRunner.ts:369");
+  // The resolved ack thread from round 1 persists (its marker text is line-independent).
+  const ackThreads: ReviewThread[] = [
+    { isResolved: true, path: "app/deliveryRunner.ts", bodies: [`Declined, false positive. nano-ack: app/deliveryRunner.ts :: ${proseText}`] },
+  ];
+  const acknowledgedKeys = parseAckedAdvisories(ackThreads);
+
+  const round1 = evaluateConvergeGate({
+    unresolvedThreadCount: 0,
+    suppressedAdvisories: parseSuppressedAdvisories(round1Body),
+    acknowledgedKeys,
+  });
+  assertEquals(round1.convergeBlocked, false);
+
+  // The drift MUST NOT re-block: the round-1 ack still acknowledges the round-2 re-emission.
+  const round2 = evaluateConvergeGate({
+    unresolvedThreadCount: 0,
+    suppressedAdvisories: parseSuppressedAdvisories(round2Body),
+    acknowledgedKeys,
+  });
+  assertEquals(round2.convergeBlocked, false);
+});
+
+test("converge gate #787: a genuinely new, never-acked advisory still blocks (no false-open)", () => {
+  const body = [
+    "<details>",
+    "<summary>Suppressed comments (2)</summary>",
+    "",
+    "**app/x.ts:10**",
+    "- The declined advisory that was acknowledged.",
+    "",
+    "**app/x.ts:20**", // SAME path, DIFFERENT advisory — never acknowledged.
+    "- A brand-new concern that was never triaged.",
+    "</details>",
+  ].join("\n");
+  const ackThreads: ReviewThread[] = [
+    { isResolved: true, path: "app/x.ts", bodies: ["Declined. nano-ack: app/x.ts :: The declined advisory that was acknowledged."] },
+  ];
+  const r = evaluateConvergeGate({
+    unresolvedThreadCount: 0,
+    suppressedAdvisories: parseSuppressedAdvisories(body),
+    acknowledgedKeys: parseAckedAdvisories(ackThreads),
+  });
+  assertEquals(r.convergeBlocked, true);
+  // Only the un-acked advisory on the same path is reported; the acked one is not.
+  assertStringIncludes(r.convergeBlockReason, "app/x.ts:20");
+  assert(!r.convergeBlockReason.includes("app/x.ts:10"), "the acknowledged advisory must not be listed");
 });
 
 test("parseReviewThreadsPage: maps nodes and reports a complete (final) page", () => {
