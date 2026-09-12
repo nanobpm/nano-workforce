@@ -211,13 +211,26 @@ export function repoEnvelopeVars(
  * `ref`): a cross-repo graph node carries only its `owner/repo` (an issue ref names no branch), so when
  * neither the node nor the run declares a base the cell must still provision an isolated clone — of the
  * repository's DEFAULT branch. The harness `provisionRepo` omits `--branch` when `ref` is blank, so a
- * `ref`-less envelope clones the default branch (each agent then cuts its own `feat/<node.id>` branch
- * inside the isolated clone, unchanged). Returns `{}` for a `repo` that is not a plain `owner/repo` (an
- * unresolved cell — the runner's invariant rejects the run before this degrades to a launch-dir share).
- * Blobless single-branch shaping + `cloneTimeoutMs` (issues #287/#694) are emitted on every cell. */
-export function agentNodeRepoEnvelope(repo: string, base: string | null): Record<string, unknown> {
+ * `ref`-less envelope clones the default branch. Returns `{}` for a `repo` that is not a plain
+ * `owner/repo` (an unresolved cell — the runner's invariant rejects the run before this degrades to a
+ * launch-dir share). Blobless single-branch shaping + `cloneTimeoutMs` (issues #287/#694) are emitted on
+ * every cell.
+ *
+ * Deterministic isolation branch (issue #776): `branchCreate` (the per-node `feat/<node.id>`) is emitted
+ * as `branch.create` so the harness cuts the isolation branch ITSELF — mirroring the single-feature path
+ * (`repoEnvelopeVars`/`feature.ts`) — instead of delegating branch-cutting to agent prompt discipline. A
+ * forgetful agent that never branched used to commit on the checked-out BASE branch; its `git push
+ * origin <base>` was then rejected non-fast-forward and the whole run's work was stranded (merlin job
+ * 20974; harness counterpart jwulf/c8ctl-plugin-nano#231). Emitting `branch.create` makes it impossible
+ * for a cell to leave its agent committing on the base. Emitted independently of `ref`: when the base is
+ * unknown the harness cuts the branch off the cloned default tip; when known, off `ref`. Omitted for a
+ * blank `branchCreate` (falls back to the pre-#776 agent-cuts-its-own-branch behaviour). Delivery-graph
+ * agent cells are single-instance, so a static per-node `feat/<node.id>` never collides across siblings
+ * (the MI-child collision the issue flags does not arise in the current single-instance cells). */
+export function agentNodeRepoEnvelope(repo: string, base: string | null, branchCreate: string | null = null): Record<string, unknown> {
   if (!isPlainOwnerRepo(repo)) return {};
   const ref = typeof base === "string" && base.trim() !== "" ? base.trim() : null;
+  const create = typeof branchCreate === "string" && branchCreate.trim() !== "" ? branchCreate.trim() : null;
   return {
     [AGENT_TASK_NS]: {
       repository: {
@@ -226,9 +239,12 @@ export function agentNodeRepoEnvelope(repo: string, base: string | null): Record
         singleBranch: true,
         filter: "blob:none",
         cloneTimeoutMs: cloneTimeoutMs(),
-        // A per-node base (declared, or defaulted from the run level) — the branch the agent cuts its
+        // A per-node base (declared, or defaulted from the run level) — the branch the harness cuts its
         // `feat/<node.id>` off. Omitted when unknown so the harness clones the repo's default branch.
         ...(ref ? { ref, baseRef: ref } : {}),
+        // The deterministic isolation branch the harness cuts (issue #776), so the agent can never be
+        // left committing on the checked-out base branch. Off `ref` when known, else off the default tip.
+        ...(create ? { branch: { create } } : {}),
       },
       // Repo-provisioning auth gate (issue #770): as in `repoEnvelopeVars`, a repo-backed cell must
       // opt the harness into git-credential resolution (`task.allowPr`) or the clone fails with

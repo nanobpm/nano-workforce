@@ -1057,15 +1057,19 @@ function innerBodyLines(w: NodeWiring, requiredEmits: ReadonlySet<string>): stri
 
 /** Render the DECLARED per-node repository-spec marker task header (#739) for an `agent` node — a single
  * `<zeebe:taskHeaders>` block carrying {@link AGENT_REPO_SPEC_HEADER} with a compact JSON of the node's
- * DECLARED `{ repository, baseBranch }` (each `null` when absent). It is emitted on EVERY agent service
- * task (even one with no declared repo → `{"repository":null,"baseBranch":null}`) so the runner has a
- * single, uniform anchor to replace with the effective envelope on every cell. Digest-stable and
- * env-free — only the declared values (pure graph content) appear here; the run-level fallback and the
- * env-dependent `cloneTimeoutMs` are injected by the runner POST-digest. Declared values pass the
- * `owner/repo` + branch-name allowlists (validator/OpenAPI), so the JSON carries no XML-hostile chars. */
+ * `id` and its DECLARED `{ repository, baseBranch }` (each `null` when absent). It is emitted on EVERY
+ * agent service task (even one with no declared repo → `{"repository":null,"baseBranch":null}`) so the
+ * runner has a single, uniform anchor to replace with the effective envelope on every cell. The node
+ * `id` is carried here (issue #776) so the runner can emit the deterministic per-node `feat/<node.id>`
+ * `branch.create` on the injected envelope — the identity is not otherwise recoverable from the isolated
+ * `<zeebe:taskHeaders>` block the runner rewrites. Digest-stable and env-free — only the node id and
+ * declared values (pure graph content) appear here; the run-level fallback and the env-dependent
+ * `cloneTimeoutMs` are injected by the runner POST-digest. The id + declared values pass the
+ * `owner/repo` + node-id/branch-name allowlists (validator/OpenAPI), so the JSON carries no XML-hostile
+ * chars. */
 function agentRepoSpecHeaderLines(node: Extract<DeliveryNode, { kind: "agent" }>): string[] {
   const trimOrNull = (v: unknown): string | null => (typeof v === "string" && v.trim() !== "" ? v.trim() : null);
-  const spec = JSON.stringify({ repository: trimOrNull(node.agent.repository), baseBranch: trimOrNull(node.agent.baseBranch) });
+  const spec = JSON.stringify({ nodeId: node.id, repository: trimOrNull(node.agent.repository), baseBranch: trimOrNull(node.agent.baseBranch) });
   return [
     "          <zeebe:taskHeaders>",
     `            <zeebe:header key="${AGENT_REPO_SPEC_HEADER}" ${attr("value", spec)} />`,

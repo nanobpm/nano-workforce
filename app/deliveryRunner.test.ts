@@ -13,7 +13,7 @@ import { test } from "node:test";
 import { assert, assertEquals, assertRejects } from "#test-assert";
 import { AGENT_TERMINAL_SUCCESS_STATUSES } from "./deliveryGraphCompiler.ts";
 import { prepareDeliveryGraph, renderEmitContract, renderIdempotencyPreamble, renderProducerContract, runDeliveryGraph } from "./deliveryRunner.ts";
-import { RepoEnvelopeConflictError, RepoEnvelopeUnresolvedError } from "./repoEnvelope.ts";
+import { RepoEnvelopeConflictError, RepoEnvelopeUnresolvedError, agentNodeRepoEnvelope } from "./repoEnvelope.ts";
 import type { DeliveryGraph } from "../nano-generated/api-io.d.ts";
 
 const GRAPH: DeliveryGraph = {
@@ -488,6 +488,9 @@ test("prepareDeliveryGraph injects the repository envelope PER agent cell from t
   // Repo-provisioning auth gate (issue #770): the per-cell envelope carries `task.allowPr:true` so the
   // c8ctl harness resolves the git credential for the clone instead of failing on password prompt.
   assert(headers.some((h) => h.includes('task.allowPr" value="true"')), `expected a task.allowPr header, got ${JSON.stringify(headers)}`);
+  // The deterministic per-node isolation branch (issue #776): the harness cuts `feat/<node.id>` itself,
+  // so the agent can never be left committing on the base branch (a non-ff push that strands the run).
+  assert(headers.some((h) => h.includes('repository.branch.create" value="feat/open-b"')), `expected a per-node branch.create header, got ${JSON.stringify(headers)}`);
   // No `__repoSpec` marker survives injection — it is the compiler's digest-stable anchor only.
   assert(!p.bpmn.includes("__repoSpec"), "the __repoSpec marker is fully replaced");
   // No run-root `io.nanobpm.agentTask` variable — the envelope rides headers now, not a run variable.
@@ -542,6 +545,68 @@ test("a declared repository WITHOUT a base branch omits ref/baseRef — the harn
   assert(headers.some((h) => h.includes('repository.url" value="https://github.com/acme/one.git"')), "url present");
   assert(!headers.some((h) => h.includes("repository.ref")), "no ref → clone the repo default branch");
   assert(!headers.some((h) => h.includes("repository.baseRef")), "no baseRef either");
+  // Even without a known base, the deterministic isolation branch is still emitted (issue #776): the
+  // harness cuts `feat/<node.id>` off the cloned default tip, so the agent never commits on the default.
+  assert(headers.some((h) => h.includes('repository.branch.create" value="feat/a"')), `expected branch.create even without a base, got ${JSON.stringify(headers)}`);
+});
+
+test("each agent cell gets its OWN deterministic feat/<node.id> branch.create — never a shared branch (#776)", async () => {
+  const graph: DeliveryGraph = {
+    name: "deterministic isolation branches",
+    nodes: [
+      { id: "impl-a", kind: "agent", agent: { jobType: "senior:feature", prompt: "a", repository: "acme/one" } },
+      { id: "impl-b", kind: "agent", agent: { jobType: "senior:feature", prompt: "b", repository: "acme/two" } },
+    ],
+    edges: [{ from: "impl-a", to: "impl-b" }],
+  };
+  const p = await prepareOk(graph, {});
+  const branches = agentHeaders(p.bpmn).filter((h) => h.includes("repository.branch.create"));
+  // Two distinct cells → two distinct per-node branches, so no two agents can collide on one branch.
+  assert(branches.some((h) => h.includes('value="feat/impl-a"')), `expected feat/impl-a, got ${JSON.stringify(branches)}`);
+  assert(branches.some((h) => h.includes('value="feat/impl-b"')), `expected feat/impl-b, got ${JSON.stringify(branches)}`);
+  assertEquals(branches.length, 2, "exactly one branch.create per agent cell");
+});
+
+test("an explicit repoless run emits NO branch.create — no envelope at all (#776/#729)", async () => {
+  const p = await prepareOk(GRAPH, { repoless: true });
+  assert(!p.bpmn.includes("repository.branch.create"), "a repoless run carries no isolation branch either");
+});
+
+test("a node id that derives an invalid git ref degrades to NO branch.create — never emits an unusable feat/... (#776)", async () => {
+  // Node ids are only constrained by `^[A-Za-z_][A-Za-z0-9_.-]*$`, laxer than git's ref rules: `a..b` and
+  // `a.lock` pass id validation but produce ill-formed `feat/...` refs the harness cannot create. The
+  // runner must degrade to the pre-#776 agent-cuts-its-own-branch behaviour (no branch.create) for those,
+  // not emit a branch the harness will choke on — while a sibling with a valid id still gets its branch.
+  const graph: DeliveryGraph = {
+    name: "invalid-ref node ids degrade",
+    nodes: [
+      { id: "a..b", kind: "agent", agent: { jobType: "senior:feature", prompt: "a", repository: "acme/one" } },
+      { id: "a.lock", kind: "agent", agent: { jobType: "senior:feature", prompt: "b", repository: "acme/two" } },
+      { id: "ok", kind: "agent", agent: { jobType: "senior:feature", prompt: "c", repository: "acme/three" } },
+    ],
+    edges: [{ from: "a..b", to: "a.lock" }, { from: "a.lock", to: "ok" }],
+  };
+  const p = await prepareOk(graph, {});
+  const branches = agentHeaders(p.bpmn).filter((h) => h.includes("repository.branch.create"));
+  // Only the valid-id cell keeps a branch.create; the two invalid-ref ids emit none (their agents still
+  // provision an isolated clone, they just cut their own branch inside it — the pre-#776 fallback).
+  assertEquals(branches.length, 1, `only the valid id keeps a branch.create, got ${JSON.stringify(branches)}`);
+  assert(branches[0].includes('value="feat/ok"'), `expected feat/ok, got ${JSON.stringify(branches)}`);
+});
+
+test("agentNodeRepoEnvelope emits branch.create off the base when known, off the default when not, and omits it when blank (#776)", () => {
+  const withBase = (agentNodeRepoEnvelope("acme/one", "main", "feat/n1") as any)["io.nanobpm.agentTask"].repository;
+  assertEquals(withBase.ref, "main", "known base → checked-out ref");
+  assertEquals(withBase.branch.create, "feat/n1", "the harness cuts feat/<node.id> off the base");
+  const noBase = (agentNodeRepoEnvelope("acme/one", null, "feat/n2") as any)["io.nanobpm.agentTask"].repository;
+  assertEquals("ref" in noBase, false, "no base → clone the default branch");
+  assertEquals(noBase.branch.create, "feat/n2", "branch.create is still emitted off the default tip");
+  // A whitespace-tainted branch is trimmed; a blank/absent one omits the `branch` key (pre-#776 behaviour).
+  assertEquals((agentNodeRepoEnvelope("acme/one", "main", "  feat/n3  ") as any)["io.nanobpm.agentTask"].repository.branch.create, "feat/n3");
+  for (const blank of [null, undefined, "", "   "]) {
+    const r = (agentNodeRepoEnvelope("acme/one", "main", blank as any) as any)["io.nanobpm.agentTask"].repository;
+    assertEquals("branch" in r, false, `expected no branch key for ${JSON.stringify(blank)}`);
+  }
 });
 
 test("prepareDeliveryGraph seeds NO envelope ONLY on an EXPLICIT repoless run — the conscious opt-out (#729)", async () => {
