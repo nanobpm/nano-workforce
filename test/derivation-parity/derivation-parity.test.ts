@@ -139,7 +139,7 @@ test("convergence-loop golden has arbitrary-graph features the structured builde
 // (a): a `loop()` whose body starts with a task derives an exclusive-gateway
 // loop head that absorbs the back-edge (in>=2), leaving the task itself at
 // in=1. The golden instead merges its back-edges directly into `review-round`
-// (in=3) with no loop-head gateway — a shape the builder cannot express.
+// (in=4) with no loop-head gateway — a shape the builder cannot express.
 test("loop() inserts a gateway head, so back-edges cannot merge into a task", () => {
   const probe = defineFlow("loop-head-probe", (w) => {
     w.loop((b) => {

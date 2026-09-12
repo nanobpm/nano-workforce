@@ -31,7 +31,9 @@ type Out = WorkerOutputs["pr.progress-check"];
 // `null` so the guard fails OPEN. It reads the BRANCH ref (`git/ref/heads/<branch>`) — updated
 // atomically with the push — in preference to the PR object's asynchronously-denormalized
 // `head.sha`, so a lagging PR projection can never fabricate a stale-but-valid no-advance
-// escalation (#786). Falls back to the PR head only when the branch ref is unreadable.
+// escalation (#786). Once a head ref is known this trusts ONLY its atomic ref: a failed/absent
+// ref read fails OPEN (`null`), never falling back to `head.sha`. The PR head is used only when
+// the PR carries NO head ref at all.
 export type HeadReader = (repo: string, prNumber: number) => Promise<string | null>;
 
 // Corroborates whether a no-advance `addressed` round produced DURABLE agent work: `true` when a
