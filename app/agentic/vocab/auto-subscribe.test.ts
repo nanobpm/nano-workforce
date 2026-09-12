@@ -91,6 +91,38 @@ test("agentTaskTypesOptedOutOfAuto ignores an unrelated property named the same-
   assertEquals(agentTaskTypesOptedOutOfAuto(xml), []);
 });
 
+test("agentTaskTypesOptedOutOfAuto ignores a bare opt-out property OUTSIDE the <zeebe:properties> wrapper (placement contract)", () => {
+  // The property carries the exact name/value, but it sits directly under <bpmn:extensionElements>
+  // rather than inside the <zeebe:properties> wrapper the engine honours — so the engine ignores it
+  // and it is NOT an active opt-out. Both the reader and the drift guard must treat it as absent.
+  const xml = `
+    <bpmn:serviceTask id="bare">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="senior:special" />
+        <zeebe:agentDefinition agentType="external" />
+        <zeebe:property name="io.nanobpm.agentTask.autoSubscribe" value="false" />
+      </bpmn:extensionElements>
+    </bpmn:serviceTask>`;
+  assertEquals(agentTaskTypesOptedOutOfAuto(xml), []);
+  assertEquals(agentTaskTypesOptedOutMissingExternalMarker(xml), []);
+});
+
+test("agentTaskTypesMissingExternalMarker flags a prompt-bearing task whose external marker sits OUTSIDE extensionElements (placement contract)", () => {
+  // The task is a real prompt-bearing agent task, but its <zeebe:agentDefinition> marker is a sibling
+  // of <serviceTask> rather than inside extensionElements, so the engine/harness ignores it — the
+  // task is effectively unmarked. A whole-block scan would see the marker "somewhere" and wrongly
+  // pass; the placement-scoped scan flags the drift.
+  const xml = `
+    <bpmn:serviceTask id="misplaced">
+      <zeebe:agentDefinition agentType="external" />
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="senior:special" />
+        <zeebe:linkedResource resourceId="prompts/x.md" linkName="prompt" />
+      </bpmn:extensionElements>
+    </bpmn:serviceTask>`;
+  assertEquals(agentTaskTypesMissingExternalMarker(xml), ["senior:special"]);
+});
+
 test("agentTaskTypesOptedOutMissingExternalMarker flags an opt-out on a block lacking the external marker", () => {
   // A host task (no external marker, no prompt link) that carries the opt-out is authoring drift:
   // the block-level check catches it even though `agentTaskTypesMissingExternalMarker` (prompt-only)

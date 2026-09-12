@@ -49,6 +49,12 @@ export function jobTypeToRoutingToken(jobType: string): string | undefined {
 const SERVICE_TASK = /<(?:\w+:)?serviceTask\b[\s\S]*?<\/(?:\w+:)?serviceTask>/g;
 const TASK_DEFINITION_TYPE = /<(?:\w+:)?taskDefinition\b[^>]*\btype="([^"]*)"/;
 const EXTENSION_ELEMENTS = /<(?:\w+:)?extensionElements\b[\s\S]*?<\/(?:\w+:)?extensionElements>/;
+// The engine only honours a `<zeebe:property>` nested inside a `<zeebe:properties>` wrapper (itself
+// inside `<bpmn:extensionElements>`). A bare `<zeebe:property>` placed directly under
+// `extensionElements` (or `serviceTask`) is ignored, so property-contract scans (the `--auto`
+// opt-out) run against THIS wrapper — a misplaced bare property is treated as absent, exactly as the
+// engine treats it.
+const ZEEBE_PROPERTIES = /<(?:\w+:)?properties\b[\s\S]*?<\/(?:\w+:)?properties>/;
 const PROMPT_LINK = /<(?:\w+:)?linkedResource\b[^>]*\blinkName="prompt"/;
 // The engine-native AgentTask marker (issue #745): a `<zeebe:agentDefinition agentType="external" />`
 // sibling of the `<zeebe:taskDefinition>` inside a `senior:*` agent task's extensionElements. It is
@@ -80,6 +86,17 @@ function extensionElementsOf(block: string): string {
 }
 
 /**
+ * The `<zeebe:properties>…</zeebe:properties>` content nested inside a block's `extensionElements`,
+ * or the empty string when absent. The engine only honours `<zeebe:property>` entries INSIDE this
+ * wrapper, so the `--auto` opt-out property scan runs against THIS scope — a bare `<zeebe:property>`
+ * sitting directly under `extensionElements` (or `serviceTask`) is treated as absent, exactly as the
+ * engine treats it, matching the registered/documented shape (`<zeebe:properties>`-nested).
+ */
+function optOutPropertiesOf(block: string): string {
+  return extensionElementsOf(block).match(ZEEBE_PROPERTIES)?.[0] ?? "";
+}
+
+/**
  * Scan one BPMN document for the job types of its PROMPT-BEARING service tasks — the deployed fleet
  * AGENT tasks. A task is prompt-bearing iff it carries a `<zeebe:linkedResource … linkName="prompt">`
  * (the base-prompt resource the engine delivers to the agent). Ordinary host jobs (no prompt link)
@@ -103,15 +120,18 @@ export function promptBearingTaskTypes(xml: string): string[] {
  * engine-native AgentTask marker `<zeebe:agentDefinition agentType="external" />` (issue #745). Every
  * deployed `senior:*` agent task must carry the marker so the worker harness mints an AgentInstance
  * for it; a newly-added agent task that forgets it is a silent drift surface (its run never persists
- * durable AgentHistory), so the regression guard fails CI. Returns the offending task types in
- * first-occurrence order (empty when every agent task is marked).
+ * durable AgentHistory), so the regression guard fails CI. The marker check is scoped to the block's
+ * `<bpmn:extensionElements>` (the engine-honoured PLACEMENT scope, via `extensionElementsOf`) — a
+ * marker sitting outside `extensionElements` is ignored by the engine, so it must not "cover" a task
+ * here either. Returns the offending task types in first-occurrence order (empty when every agent
+ * task is marked).
  */
 export function agentTaskTypesMissingExternalMarker(xml: string): string[] {
   const seen = new Set<string>();
   const missing: string[] = [];
   for (const [block] of xml.matchAll(SERVICE_TASK)) {
     if (!PROMPT_LINK.test(block)) continue;
-    if (EXTERNAL_AGENT_MARKER.test(block)) continue;
+    if (EXTERNAL_AGENT_MARKER.test(extensionElementsOf(block))) continue;
     const type = block.match(TASK_DEFINITION_TYPE)?.[1];
     if (type === undefined || type.length === 0 || seen.has(type)) continue;
     seen.add(type);
@@ -128,17 +148,18 @@ export function agentTaskTypesMissingExternalMarker(xml: string): string[] {
  * profile capability), never by `--auto` auto-discovery (which keys on the
  * `<zeebe:agentDefinition agentType="external" />` marker). The property is inert to the engine;
  * only the exact `value="false"` opts out (any other value auto-subscribes, fail-safe). The opt-out
- * scan is scoped to the block's `<bpmn:extensionElements>` (the engine-honoured PLACEMENT scope, via
- * `extensionElementsOf`) — a property sitting directly under `<bpmn:serviceTask>` is ignored by the
- * engine, so it must not be reported as an active opt-out here (this keeps the reader consistent with
- * the placement-scoped drift guard `agentTaskTypesOptedOutMissingExternalMarker`). Returns the
+ * scan is scoped to the block's `<zeebe:properties>` wrapper inside `<bpmn:extensionElements>` (the
+ * engine-honoured PLACEMENT scope, via `optOutPropertiesOf`) — a bare `<zeebe:property>` sitting
+ * directly under `<bpmn:extensionElements>` or `<bpmn:serviceTask>` is ignored by the engine, so it
+ * must not be reported as an active opt-out here (this keeps the reader consistent with the
+ * placement-scoped drift guard `agentTaskTypesOptedOutMissingExternalMarker`). Returns the
  * distinct opted-out task types in first-occurrence order (empty when no task opts out).
  */
 export function agentTaskTypesOptedOutOfAuto(xml: string): string[] {
   const seen = new Set<string>();
   const optedOut: string[] = [];
   for (const [block] of xml.matchAll(SERVICE_TASK)) {
-    if (!AUTO_SUBSCRIBE_OPTOUT.test(extensionElementsOf(block))) continue;
+    if (!AUTO_SUBSCRIBE_OPTOUT.test(optOutPropertiesOf(block))) continue;
     const type = block.match(TASK_DEFINITION_TYPE)?.[1];
     if (type === undefined || type.length === 0 || seen.has(type)) continue;
     seen.add(type);
@@ -154,7 +175,9 @@ export function agentTaskTypesOptedOutOfAuto(xml: string): string[] {
  * agent task (one that WOULD otherwise be auto-discovered via its external marker); a marker that has
  * drifted onto a host task (e.g. `pr.finalize`, which carries no external marker) or onto one task
  * that merely shares a `taskDefinition` type with a properly-marked sibling is authoring drift. This
- * checks both markers on the SAME service-task block — and only inside that block's
+ * checks both markers on the SAME service-task block — the opt-out property inside the block's
+ * `<zeebe:properties>` wrapper (via `optOutPropertiesOf`, so a bare misplaced `<zeebe:property>` is
+ * ignored just as the engine ignores it) and the external marker inside that block's
  * `<bpmn:extensionElements>` (the engine-honoured PLACEMENT scope), so an out-of-place external
  * marker sitting outside `extensionElements` cannot spuriously "cover" the opt-out — so, unlike
  * comparing the deduplicated `agentTaskTypesOptedOutOfAuto` / `agentTaskTypesMissingExternalMarker`
@@ -171,7 +194,7 @@ export function agentTaskTypesOptedOutMissingExternalMarker(xml: string): string
   const offending: string[] = [];
   for (const [block] of xml.matchAll(SERVICE_TASK)) {
     const ext = extensionElementsOf(block);
-    if (!AUTO_SUBSCRIBE_OPTOUT.test(ext)) continue;
+    if (!AUTO_SUBSCRIBE_OPTOUT.test(optOutPropertiesOf(block))) continue;
     const type = block.match(TASK_DEFINITION_TYPE)?.[1];
     // A missing/empty type cannot be a real agent task, so an opt-out here is malformed drift
     // REGARDLESS of any external marker — surface it under the sentinel BEFORE the marker
