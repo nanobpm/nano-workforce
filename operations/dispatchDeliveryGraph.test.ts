@@ -43,10 +43,23 @@ test("stableProposalRunKey: canonical — key-order / whitespace invariant, but 
   // A different credential value → a different key (no collision onto the first run).
   const other = { name: "g", nodes: [{ id: "n", kind: "human", human: { prompt: "y" } }], edges: [] };
   assert.notEqual(stableProposalRunKey(a), stableProposalRunKey(other));
-  // Array ORDER is significant (node order matters) — a reordered node list is a distinct key.
+  // Top-level node ORDER is NOT significant: the compiler sorts nodes by id before deriving the
+  // redacted `semanticBpmn` the digest addresses, so a reordered re-stage shares that digest (and
+  // overwrites `proposal.graph`) — the run key must match too, else it double-launches (issue #778 review).
   const twoNodes = { name: "g", nodes: [{ id: "n1", kind: "human" }, { id: "n2", kind: "human" }], edges: [] };
   const swapped = { name: "g", nodes: [{ id: "n2", kind: "human" }, { id: "n1", kind: "human" }], edges: [] };
-  assert.notEqual(stableProposalRunKey(twoNodes), stableProposalRunKey(swapped));
+  assert.equal(stableProposalRunKey(twoNodes), stableProposalRunKey(swapped));
+  // Top-level edge ORDER is likewise not significant (the compiler sorts edges deterministically).
+  const twoEdges = {
+    name: "g",
+    nodes: [{ id: "n1", kind: "human" }, { id: "n2", kind: "human" }, { id: "n3", kind: "human" }],
+    edges: [{ from: "n1", to: "n2" }, { from: "n2", to: "n3" }],
+  };
+  const edgesSwapped = { ...twoEdges, edges: [{ from: "n2", to: "n3" }, { from: "n1", to: "n2" }] };
+  assert.equal(stableProposalRunKey(twoEdges), stableProposalRunKey(edgesSwapped));
+  // But a genuinely DIFFERENT edge set still diverges (order-invariance is not blindness to value).
+  const differentEdges = { ...twoEdges, edges: [{ from: "n1", to: "n3" }, { from: "n2", to: "n3" }] };
+  assert.notEqual(stableProposalRunKey(twoEdges), stableProposalRunKey(differentEdges));
   assert.ok(stableProposalRunKey(a).startsWith("staged-"), "the key is self-describing");
 });
 

@@ -1415,3 +1415,20 @@ test("#778 graphCarriesRedactedSecrets: true when payload.pr carries a redacted-
   const plainPr = { name: "n", nodes: [{ id: "c", kind: "connector", connector: { target: "slack:#r", payload: { pr: "o/r#1" } } }], edges: [] };
   assertEquals(graphCarriesRedactedSecrets(plainPr), false);
 });
+
+test("#778 graphCarriesRedactedSecrets: lossy for a present-but-unsurfaced payload — empty object, null/empty pr — without throwing on a non-plain payload", () => {
+  // A present-empty payload `{}` renders NO `PR:` line yet the raw `{}` reaches the connector worker —
+  // the digest cannot see it, so it must be lossy (else a `{}`-payload graph shares a run identity with
+  // a no-payload one) (issue #778 review).
+  const emptyPayload = { name: "n", nodes: [{ id: "c", kind: "connector", connector: { target: "slack:#r", payload: {} } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(emptyPayload), true);
+  // `{ pr: null }` and `{ pr: "" }` likewise surface no `PR:` line but reach the connector raw.
+  const nullPr = { name: "n", nodes: [{ id: "c", kind: "connector", connector: { target: "slack:#r", payload: { pr: null } } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(nullPr), true);
+  const emptyStrPr = { name: "n", nodes: [{ id: "c", kind: "connector", connector: { target: "slack:#r", payload: { pr: "" } } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(emptyStrPr), true);
+  // A non-plain-object payload (a bare primitive) must be treated as lossy WITHOUT throwing — `"pr" in 42`
+  // would otherwise crash the predicate and 500 the dispatch (issue #778 review).
+  const primitivePayload = { name: "n", nodes: [{ id: "c", kind: "connector", connector: { target: "slack:#r", payload: 42 } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(primitivePayload), true);
+});

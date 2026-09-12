@@ -766,7 +766,15 @@ function buildHumanNodes(nodes: readonly DeliveryNode[]): DeliveryHumanStop[] {
   for (const node of nodes) {
     if (node.kind !== "human") continue;
     const stop: DeliveryHumanStop = { nodeId: node.id, emits: normaliseEmits(node) };
-    const withPrompt = node.human?.prompt !== undefined ? { ...stop, prompt: node.human.prompt } : stop;
+    // Redact the operator-facing preview `prompt` at its SOURCE with the SAME display-safe helper
+    // `nodeDisplay` renders with: this projection is persisted into the staged proposal `preview` and
+    // rendered verbatim on the Delivery Graphs page (and denormalised into the run's parked-node
+    // labels), so a URL credential in a human prompt (`//user:pass@…`) must be stripped here too — else
+    // it leaks unredacted through the preview even though the BPMN display path redacts it. The RAW
+    // prompt still reaches the runtime user task via the compiled BPMN `nodeInputs`, unmodified (issue
+    // #778 review). `redactFreeText` is a no-op for a credential-free prompt.
+    const withPrompt =
+      node.human?.prompt !== undefined ? { ...stop, prompt: redactFreeText(node.human.prompt) } : stop;
     stops.push(node.human?.formKey !== undefined ? { ...withPrompt, formKey: node.human.formKey } : withPrompt);
   }
   return stops;
@@ -785,13 +793,21 @@ function buildSideEffects(nodes: readonly DeliveryNode[]): DeliverySideEffect[] 
         description: `runs agent job \`${node.agent.jobType}\``,
       });
     } else if (node.kind === "connector") {
+      // Redact the operator-facing `target`/`dedupeKey` at their SOURCE with the SAME display-safe
+      // helper `nodeDisplay` renders with: this projection is persisted into the staged proposal
+      // `preview` and rendered on the Delivery Graphs page, so a URL credential in a connector target
+      // or dedupe key (`//user:pass@…`) must be stripped here too — else it leaks unredacted through
+      // the preview even though the BPMN display path redacts it. The RAW values still reach the
+      // runtime connector via the compiled BPMN `nodeInputs`, unmodified (issue #778 review).
       const effect: DeliverySideEffect = {
         nodeId: node.id,
         kind: "connector",
-        description: `invokes connector target \`${node.connector.target}\``,
+        description: `invokes connector target \`${redactConnectorValue(node.connector.target)}\``,
       };
       effects.push(
-        node.connector.dedupeKey !== undefined ? { ...effect, dedupeKey: node.connector.dedupeKey } : effect,
+        node.connector.dedupeKey !== undefined
+          ? { ...effect, dedupeKey: redactConnectorValue(node.connector.dedupeKey) }
+          : effect,
       );
     }
   }
@@ -954,6 +970,15 @@ function firstLine(value: string | undefined | null, cap = 72): string {
 /** Trim an optional value to a non-blank string, or `""` when absent/blank. */
 function trimmedOrEmpty(value: unknown): string {
   return typeof value === "string" && value.trim() !== "" ? value.trim() : "";
+}
+
+/** A runtime plain-object narrowing used where a statically-typed field may LIE at runtime because no
+ * validator constrained its shape — notably a connector `payload`, whose schema is a forward-declared
+ * `additionalProperties:true` stub the semantic validator does NOT shape-check (issue #778 review). A
+ * bare primitive (`42`) or an array is NOT a record, so callers must gate on this before an `in`/`Object.keys`
+ * probe that would otherwise THROW on a primitive. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /** URL-only credential redaction for a free-form connector value (`target`, `dedupeKey`, a bound
@@ -1159,20 +1184,19 @@ export function graphCarriesRedactedSecrets(graph: DeliveryGraph): boolean {
         // untrimmed value reaches the runtime — lossy on redaction OR on trimmed whitespace.
         if (lossy(c.dedupeKey, redactConnectorValue(trimmedOrEmpty(c.dedupeKey)))) return true;
         // The free-form connector `payload` survives raw into runtime `nodeInputs`, but `nodeDisplay`
-        // surfaces ONLY a STRING `payload.pr` (redacted). So the identity is lossy when: (a) any key
-        // other than `pr` is present (never surfaced), (b) a string `pr`'s redaction drops content, or
-        // (c) `pr` is present but NOT a string (never rendered, yet the raw payload still reaches the
-        // connector).
-        if (c.payload) {
-          if (Object.keys(c.payload).some((k) => k !== "pr")) return true;
-          if ("pr" in c.payload) {
-            const pr = c.payload.pr;
-            if (typeof pr === "string") {
-              if (pr !== redactConnectorValue(pr)) return true;
-            } else if (pr !== undefined && pr !== null) {
-              return true;
-            }
-          }
+        // surfaces at most a single NON-EMPTY string `payload.pr` (redacted). So the display FAITHFULLY
+        // represents the payload ONLY when it is exactly `{ pr: <non-empty string> }` whose redaction is
+        // a no-op; EVERY other shape leaves content in the runtime payload the digest cannot see and is
+        // therefore lossy: (a) a non-plain-object payload (a bare `42`/array — on which `"pr" in payload`
+        // would even THROW, so it MUST be gated before that probe), (b) a present-but-empty object or any
+        // extra key beyond `pr` (never surfaced), (c) an omitted / non-string / empty `pr` (never
+        // rendered), or (d) a string `pr` whose redaction drops content.
+        if (c.payload !== undefined && c.payload !== null) {
+          if (!isRecord(c.payload)) return true;
+          const keys = Object.keys(c.payload);
+          if (keys.length !== 1 || keys[0] !== "pr") return true;
+          const pr = c.payload.pr;
+          if (typeof pr !== "string" || pr === "" || pr !== redactConnectorValue(pr)) return true;
         }
         break;
       }
