@@ -101,11 +101,17 @@ known at submit time, carried as a process variable and stored on the DB row.
 │    <gateway: status>
 │      ├── converged  → [Mark converged] → (end: converged)
 │      │
-│      ├── addressed  → [Record round] → <event-based gateway: review ready or timeout?>
-│      │                     ├── readiness-ready (msg catch, key = prKey) → round++ ─┐
-│      │                     └── =reviewWaitTimeout (timer catch)                     │
-│      │                          → [Escalate: review stalled] (blocked)              │
-│      │                          → [Wait: wait-answer userTask] ─────────────────────┤
+│      ├── addressed  → <guard: round ≥ maxRounds → escalate "not converged">
+│      │                   → [Record round] → [Check progress] (did the PR head advance?)
+│      │                       ├── progressed → <event-based gateway: review ready or timeout?>
+│      │                       │      ├── readiness-ready (msg catch, key = prKey) → round++ ─┐
+│      │                       │      └── =reviewWaitTimeout (timer catch)                    │
+│      │                       │           → [Escalate: review stalled] (blocked)             │
+│      │                       │           → [Wait: wait-answer userTask] ────────────────────┤
+│      │                       └── no progress → <husk? no commit AND no terminal instance>   │
+│      │                              ├── husk & retries < MAX → re-enter [Review round]       │
+│      │                              └── no-advance / husk cap → [Escalate: no progress]      │
+│      │                                     → [Wait: wait-answer userTask] ───────────────────┤
 │      │                                                                             │
 │      └── needs_input     [Record escalation]                       │               │
 │          or blocked  →   (kind = question | blocker)               │               │
@@ -149,6 +155,22 @@ Notes:
   backstop when even repeated nudges fail.
 - On `needs_input`, the same `round` is retried after the answer (the answer is
   added to the agent's context; the round number does not advance).
+- **No-progress guard + husk classification (issue #786).** Before the review
+  wait, an `addressed` round passes through `pr.progress-check`
+  (`workers/progress-check/worker.ts`, mirrored by `app/roundProgress.ts`): it
+  reads the PR's current head SHA (the branch ref, atomic with the push) and
+  compares it to the head recorded at the previous round. A round whose head DID
+  advance is real progress and continues to the review-wait gateway. A round whose
+  head did NOT advance pushed no commit, so re-requesting a review would loop on
+  byte-identical code; `gw-progress` routes it to `gw-husk`, which SPLITS it:
+    - a **husk** — no commit AND no terminal `review-round` agent-instance for the
+      round (the producer harness died mid-run) — is auto-re-run onto a healthy
+      worker up to `MAX_HUSK_RETRIES` (2) before escalating; and
+    - a **no-advance** — a terminal instance exists but nothing was pushed — (and a
+      husk that exhausts its retries) escalates to the human `wait-answer` task.
+  A head that cannot be read fails OPEN (continue), so a transient GitHub hiccup
+  never fabricates a no-progress escalation. The round cap and the review-wait
+  timeout remain the outer safety nets.
 
 
 ## 5. Agent job contract (`senior:pr-review`)

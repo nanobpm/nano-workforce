@@ -10,7 +10,7 @@
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { assert, assertEquals, assertStringIncludes } from "#test-assert";
-import { routeProgress } from "./roundProgress.ts";
+import { decideProgress, MAX_HUSK_RETRIES, noProgressQuestion, routeProgress } from "./roundProgress.ts";
 
 // ── The canonical router ────────────────────────────────────────────────────
 
@@ -68,6 +68,91 @@ test("routeProgress: fails OPEN when either head is unknown (no baseline / unrea
   }
 });
 
+// ── Husk classification & bounded self-heal (issue #786) ─────────────────────
+
+test("decideProgress: a progressing round continues and RESETS the husk counter", () => {
+  // head advanced -> progressed, huskRetries reset to 0 regardless of the carried count.
+  const d = decideProgress("addressed", "sha-1", "sha-2", 3, null, 2);
+  assertEquals(d.progressed, true);
+  assertEquals(d.huskRetries, 0);
+  assertEquals(d.huskRetry, undefined);
+  assertEquals(d.reason, undefined);
+});
+
+test("decideProgress: a husk (successful empty agent-work read) under the cap auto-retries the same round", () => {
+  // no head advance + a SUCCESSFUL empty agent-instance read (false) => husk. Under the cap it
+  // re-runs the same round on a healthy worker and bumps the counter.
+  const d = decideProgress("addressed", "sha-1", "sha-1", 5, false, 0);
+  assertEquals(d.progressed, false);
+  assertEquals(d.huskRetry, true, "a corroborated-empty husk must auto-retry");
+  assertEquals(d.huskRetries, 1, "the husk bumps the counter");
+  assertEquals(d.reason, "husk");
+  assertEquals(d.question, undefined, "an auto-retry opens no escalation question");
+});
+
+test("decideProgress: an UNKNOWN agent-work read (null/undefined) escalates as no-advance — never auto-retries", () => {
+  // An engine read that was unavailable/threw (null) — or was never attempted (undefined) — is NOT a
+  // corroborated husk. Auto-retrying it could duplicate agent work that actually ran, so it fails
+  // safe to an immediate no-advance escalation, exactly as the pre-#786 loop did.
+  for (const observed of [null, undefined] as const) {
+    const d = decideProgress("addressed", "sha-1", "sha-1", 5, observed, 0);
+    assertEquals(d.progressed, false, `observed=${observed}`);
+    assertEquals(d.huskRetry, false, `observed=${observed} must NOT auto-retry an unknown read`);
+    assertEquals(d.huskRetries, 0, `observed=${observed} does not bump the husk counter`);
+    assertEquals(d.reason, "no-advance");
+    assert(d.question, `observed=${observed} escalates with a question`);
+    assertStringIncludes(d.question ?? "", "PR head did not advance");
+  }
+});
+
+test("decideProgress: a husk at the retry cap escalates with a husk-specific question and resets", () => {
+  const d = decideProgress("addressed", "sha-1", "sha-1", 5, false, MAX_HUSK_RETRIES);
+  assertEquals(d.progressed, false);
+  assertEquals(d.huskRetry, false, "the cap is reached — no more auto-retries");
+  assertEquals(d.huskRetries, 0, "the counter resets so a human-answered resume gets fresh retries");
+  assertEquals(d.reason, "husk");
+  assert(d.question, "an escalating husk carries a question");
+  assertStringIncludes(d.question ?? "", "no durable work");
+  assertStringIncludes(d.question ?? "", "did not help");
+});
+
+test("decideProgress: a no-advance round (agent DID run) escalates immediately — never auto-retries", () => {
+  // A terminal agent-instance exists (agentWorkObserved=true): the agent ran but pushed nothing.
+  // Re-running would loop on identical reasoning, so escalate straight away even with 0 retries used.
+  const d = decideProgress("addressed", "sha-1", "sha-1", 4, true, 0);
+  assertEquals(d.progressed, false);
+  assertEquals(d.huskRetry, false, "a no-advance round is never auto-retried");
+  assertEquals(d.reason, "no-advance");
+  assert(d.question, "a no-advance round carries a question");
+  assertStringIncludes(d.question ?? "", "PR head did not advance");
+});
+
+test("decideProgress: a legitimately non-addressed / unreadable-head round continues without a husk verdict", () => {
+  for (const args of [
+    ["waiting", "sha-1", "sha-1", 1, null, 0],
+    ["addressed", null, "sha-1", 1, null, 0],
+    ["addressed", "sha-1", null, 1, null, 0],
+  ] as const) {
+    const d = decideProgress(...args);
+    assertEquals(d.progressed, true, `${JSON.stringify(args)} must continue`);
+    assertEquals(d.reason, undefined);
+    assertEquals(d.huskRetries, 0);
+  }
+});
+
+test("decideProgress: a garbage carried husk-retry counter is coerced to 0", () => {
+  for (const bad of [Number.NaN, -3, undefined, null] as const) {
+    const d = decideProgress("addressed", "sha-1", "sha-1", 5, false, bad);
+    assertEquals(d.huskRetry, true, `counter ${String(bad)} coerces to 0 -> under the cap`);
+    assertEquals(d.huskRetries, 1);
+  }
+});
+
+test("noProgressQuestion: husk vs no-advance render distinct, human-actionable reasons", () => {
+  assertStringIncludes(noProgressQuestion(5, "husk", false), "no durable work");
+  assertStringIncludes(noProgressQuestion(5, "no-advance", false), "PR head did not advance");
+});
+
 // ── The worker (with an injected head reader — never touches git/network) ────
 
 function fakeApp(row?: { last_round_head: string | null }) {
@@ -75,6 +160,10 @@ function fakeApp(row?: { last_round_head: string | null }) {
   const store = new Map<string, unknown>();
   if (row) store.set("o/r#1", { pr_key: "o/r#1", ...row });
   const app = {
+    // The default agent-work reader consults app.engine.searchAgentInstances; the fake returns an
+    // empty list (read-as-absence) so a no-progress round classifies as a husk unless a test injects
+    // its own readAgentWork.
+    engine: { async searchAgentInstances() { return []; } },
     data: {
       table(_name: string, _key: string) {
         return {
@@ -91,9 +180,12 @@ function fakeApp(row?: { last_round_head: string | null }) {
   return { app, updates };
 }
 
-async function makeUnderTest(readHead: (repo: string, n: number) => Promise<string | null>) {
+async function makeUnderTest(
+  readHead: (repo: string, n: number) => Promise<string | null>,
+  readAgentWork?: (pik: string | null | undefined, round: number) => Promise<boolean | null>,
+) {
   const { makeHandler } = await import("../workers/progress-check/worker.ts");
-  return makeHandler({ readHead });
+  return makeHandler(readAgentWork ? { readHead, readAgentWork } : { readHead });
 }
 
 test("progress-check: skips the head read entirely for a non-addressed round", async () => {
@@ -104,7 +196,7 @@ test("progress-check: skips the head read entirely for a non-addressed round", a
   });
   const { app, updates } = fakeApp({ last_round_head: "sha-1" });
   const out = await handler({ variables: { prKey: "o/r#1", status: "waiting", repo: "o/r", prNumber: 1 } } as any, app as any);
-  assertEquals(out, { progressed: true });
+  assertEquals(out, { progressed: true, huskRetries: 0 });
   assertEquals(called, false, "a waiting round never reads the head");
   assertEquals(updates.length, 0, "and never rewrites the baseline");
 });
@@ -116,23 +208,52 @@ test("progress-check: a blank/unknown status is treated as addressed — reads t
     return "sha-1";
   });
   const { app } = fakeApp({ last_round_head: "sha-1" });
-  const out = await handler({ variables: { prKey: "o/r#1", status: "", repo: "o/r", prNumber: 1 } } as any, app as any);
-  assertEquals(out, { progressed: false }, "a blank-status no-progress round is caught, not waved through");
+  const out = await handler({ variables: { prKey: "o/r#1", status: "", repo: "o/r", prNumber: 1, round: 5, huskRetries: MAX_HUSK_RETRIES } } as any, app as any);
+  assertEquals(out.progressed, false, "a blank-status no-progress round is caught, not waved through");
   assertEquals(called, true, "a blank status (the safe-default addressed trap) still reads the head");
 });
 
-test("progress-check: an addressed round whose head is unchanged reports progressed:false", async () => {
-  const handler = await makeUnderTest(async () => "sha-1");
+test("progress-check: an addressed round whose head is unchanged with no agent work AUTO-RETRIES (husk) under the cap", async () => {
+  // No terminal review-round agent-instance (injected false) => husk. Under the cap the worker
+  // re-runs the same round instead of parking a human.
+  const handler = await makeUnderTest(async () => "sha-1", async () => false);
   const { app } = fakeApp({ last_round_head: "sha-1" });
-  const out = await handler({ variables: { prKey: "o/r#1", status: "addressed", repo: "o/r", prNumber: 1 } } as any, app as any);
-  assertEquals(out, { progressed: false });
+  const out = await handler({ variables: { prKey: "o/r#1", status: "addressed", repo: "o/r", prNumber: 1, round: 5, huskRetries: 0 } } as any, app as any);
+  assertEquals(out.progressed, false);
+  assertEquals(out.huskRetry, true, "the husk is auto-retried");
+  assertEquals(out.huskRetries, 1);
+  assertEquals(out.noProgressReason, "husk");
+});
+
+test("progress-check: an unchanged head with an UNKNOWN agent-work read (null) escalates as no-advance, never auto-retries", async () => {
+  // A transient/unavailable AgentInstance read (injected null) must not be treated as a husk — it
+  // fails safe to an immediate no-advance escalation so a read outage can never auto-retry (and
+  // possibly duplicate) genuinely-completed agent work.
+  const handler = await makeUnderTest(async () => "sha-1", async () => null);
+  const { app } = fakeApp({ last_round_head: "sha-1" });
+  const out = await handler({ variables: { prKey: "o/r#1", status: "addressed", repo: "o/r", prNumber: 1, round: 5, huskRetries: 0 } } as any, app as any);
+  assertEquals(out.progressed, false);
+  assertEquals(out.huskRetry, false, "an unknown read is never auto-retried");
+  assertEquals(out.noProgressReason, "no-advance");
+  assertStringIncludes(String(out.noProgressQuestion), "PR head did not advance");
+});
+
+test("progress-check: an unchanged head with a terminal agent-instance escalates as no-advance (never auto-retry)", async () => {
+  const handler = await makeUnderTest(async () => "sha-1", async () => true);
+  const { app } = fakeApp({ last_round_head: "sha-1" });
+  const out = await handler({ variables: { prKey: "o/r#1", status: "addressed", repo: "o/r", prNumber: 1, round: 3, huskRetries: 0 } } as any, app as any);
+  assertEquals(out.progressed, false);
+  assertEquals(out.huskRetry, false, "a corroborated no-advance round is never auto-retried");
+  assertEquals(out.noProgressReason, "no-advance");
+  assertStringIncludes(String(out.noProgressQuestion), "PR head did not advance");
 });
 
 test("progress-check: an addressed round whose head advanced reports progressed:true and rebaselines", async () => {
   const handler = await makeUnderTest(async () => "sha-2");
   const { app, updates } = fakeApp({ last_round_head: "sha-1" });
-  const out = await handler({ variables: { prKey: "o/r#1", status: "addressed", repo: "o/r", prNumber: 1 } } as any, app as any);
-  assertEquals(out, { progressed: true });
+  const out = await handler({ variables: { prKey: "o/r#1", status: "addressed", repo: "o/r", prNumber: 1, round: 2 } } as any, app as any);
+  assertEquals(out.progressed, true);
+  assertEquals(out.huskRetries, 0, "a progressing round resets the husk counter");
   assertEquals(updates.length, 1, "the observed head is recorded as the new baseline");
   assertEquals(updates[0]!.patch.last_round_head, "sha-2");
 });
@@ -140,16 +261,16 @@ test("progress-check: an addressed round whose head advanced reports progressed:
 test("progress-check: the first observed round (no baseline) continues and records the baseline", async () => {
   const handler = await makeUnderTest(async () => "sha-1");
   const { app, updates } = fakeApp(); // no row yet -> previousHead null
-  const out = await handler({ variables: { prKey: "o/r#1", status: "addressed", repo: "o/r", prNumber: 1 } } as any, app as any);
-  assertEquals(out, { progressed: true }, "no baseline yet fails open");
+  const out = await handler({ variables: { prKey: "o/r#1", status: "addressed", repo: "o/r", prNumber: 1, round: 1 } } as any, app as any);
+  assertEquals(out.progressed, true, "no baseline yet fails open");
   assertEquals(updates[0]!.patch.last_round_head, "sha-1");
 });
 
 test("progress-check: an unreadable head fails open and does not clobber the baseline", async () => {
   const handler = await makeUnderTest(async () => null);
   const { app, updates } = fakeApp({ last_round_head: "sha-1" });
-  const out = await handler({ variables: { prKey: "o/r#1", status: "addressed", repo: "o/r", prNumber: 1 } } as any, app as any);
-  assertEquals(out, { progressed: true }, "a null head fails open");
+  const out = await handler({ variables: { prKey: "o/r#1", status: "addressed", repo: "o/r", prNumber: 1, round: 2 } } as any, app as any);
+  assertEquals(out.progressed, true, "a null head fails open");
   assertEquals(updates.length, 0, "a null head never overwrites the good baseline");
 });
 
@@ -160,8 +281,19 @@ test("progress-check: resolves repo/prNumber from the prKey when the vars are ab
     return "sha-2";
   });
   const { app } = fakeApp({ last_round_head: "sha-1" });
-  await handler({ variables: { prKey: "o/r#1", status: "addressed" } } as any, app as any);
+  await handler({ variables: { prKey: "o/r#1", status: "addressed", round: 2 } } as any, app as any);
   assertEquals(seen, ["o/r", 1], "falls back to parsing owner/repo#N from the prKey");
+});
+
+test("progress-check: only reads agent-instances on the no-advance path, not on a progressing round", async () => {
+  let agentReads = 0;
+  const handler = await makeUnderTest(async () => "sha-2", async () => {
+    agentReads++;
+    return true;
+  });
+  const { app } = fakeApp({ last_round_head: "sha-1" });
+  await handler({ variables: { prKey: "o/r#1", status: "addressed", repo: "o/r", prNumber: 1, round: 2 } } as any, app as any);
+  assertEquals(agentReads, 0, "an advancing head never wastes an engine read");
 });
 
 // ── Structural guard over the committed BPMN (no engine) ─────────────────────
@@ -193,11 +325,36 @@ test("check-progress feeds the gw-progress gateway", () => {
   assertStringIncludes(flat, 'type="pr.progress-check"');
 });
 
-test("gw-progress escalates a no-progress round on an explicit progressed = false condition", () => {
+test("gw-progress routes a no-progress round into the husk gate on an explicit progressed = false condition", () => {
   const f = flowElement("f_noProgress");
   assert(f, "f_noProgress flow missing");
-  assertStringIncludes(f, 'targetRef="persist-escalation-noprogress"');
+  assertStringIncludes(f, 'targetRef="gw-husk"');
   assertStringIncludes(f, "progressed = false");
+});
+
+test("gw-husk auto-retries a husk back into review-round, and defaults to the human escalation", () => {
+  // #786: a husked round (no commit AND no terminal review-round agent-instance) is re-run onto a
+  // healthy worker — bounded by the worker's huskRetries cap — before parking a human. The bound
+  // lives in the pr.progress-check worker (app/roundProgress.ts decideProgress), so the gateway only
+  // routes on the worker's `huskRetry` output.
+  const gw = flat.match(/<bpmn:exclusiveGateway\b[^>]*\bid="gw-husk"[^>]*>/);
+  assert(gw, "gw-husk gateway missing");
+  assertStringIncludes(gw[0], 'default="f_huskEscalate"');
+  const retry = flowElement("f_huskRetry");
+  assert(retry, "f_huskRetry flow missing");
+  assertStringIncludes(retry, 'sourceRef="gw-husk"');
+  assertStringIncludes(retry, 'targetRef="review-round"');
+  assertStringIncludes(retry, "huskRetry = true");
+  const esc = flowElement("f_huskEscalate");
+  assert(esc, "f_huskEscalate flow missing");
+  assertStringIncludes(esc, 'sourceRef="gw-husk"');
+  assertStringIncludes(esc, 'targetRef="persist-escalation-noprogress"');
+  assert(!/conditionExpression/.test(esc), "the escalate arm is the unconditioned default");
+  // The husk-retry re-enters review-round WITHOUT going through the round-incrementing review wait,
+  // so it re-runs the SAME round rather than advancing the counter.
+  const reviewRound = flat.match(/<bpmn:serviceTask\b[^>]*\bid="review-round"[^>]*>.*?<\/bpmn:serviceTask>/);
+  assert(reviewRound, "review-round task missing");
+  assertStringIncludes(reviewRound[0], "<bpmn:incoming>f_huskRetry</bpmn:incoming>");
 });
 
 test("gw-progress default arm re-enters the review wait with no condition", () => {

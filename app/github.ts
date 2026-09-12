@@ -959,6 +959,21 @@ export async function fetchPrHead(
   return { headRef: j.head?.ref ?? null, headSha: j.head?.sha ?? null, baseRef: j.base?.ref ?? null };
 }
 
+/** The head commit SHA of `branch` on `repo`, read from the git-ref endpoint
+ * (`git/ref/heads/<branch>`) — the ref that GitHub updates ATOMICALLY with the push, unlike a PR
+ * object's `head.sha`, which is an asynchronously-denormalized projection that can briefly report a
+ * stale-but-valid SHA after a push. The no-progress guard (#786) reads this in preference to the PR
+ * head so a lagging PR denormalization can never fabricate a no-advance escalation. `null` when the
+ * branch does not exist (a 404) or no transport is usable; throws only on a genuine transport
+ * failure. */
+export async function fetchBranchHead(
+  repo: string,
+  branch: string,
+  token: string,
+): Promise<string | null> {
+  return branchHeadSha(repo, branch, token);
+}
+
 /** The PR's current base branch ref — the branch this PR would land *into*. `null` when no
  * transport is usable (idle). Used by the dead-end-base guard (#60) so we never land a PR into a
  * base that has itself already merged to the default branch. */

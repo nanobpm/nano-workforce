@@ -3,7 +3,7 @@
 // the merge-exclusion graph. Force the token transport and stub `globalThis.fetch`.
 import { test } from "node:test";
 import { assertEquals, assertRejects } from "#test-assert";
-import { BaseBranchMustExistError, checkConclusions, classifyMergeability, classifyPrLiveness, coalesceTitle, createPullRequest, ensureBaseBranch, ensurePromotionPr, fetchIssueTitle, fetchPrFiles, isNotAPullRequestError, listPrsForHead, type Mergeability, type PrState } from "./github.ts";
+import { BaseBranchMustExistError, checkConclusions, classifyMergeability, classifyPrLiveness, coalesceTitle, createPullRequest, ensureBaseBranch, ensurePromotionPr, fetchBranchHead, fetchIssueTitle, fetchPrFiles, isNotAPullRequestError, listPrsForHead, type Mergeability, type PrState } from "./github.ts";
 import { DEFAULT_MERGE_PROTOCOL, type MergeProtocol, type RequiredCheck } from "./mergeProtocol.ts";
 
 // A fake `fetch` that serves `pages` of file batches; each page N (1-based) returns `pages[N-1]`
@@ -722,4 +722,50 @@ test("checkConclusions: in-flight runs map to '' for both CheckRun and StatusCon
     "legacy-expected": "",
     "legacy-error": "ERROR",
   });
+});
+
+// ── fetchBranchHead — the atomic branch-ref reader (issue #786) ──────────────
+//
+// The no-progress guard reads the branch ref (git/ref/heads/<branch>), updated ATOMICALLY with the
+// push, rather than the PR object's asynchronously-denormalized head.sha, so a lagging PR projection
+// can never fabricate a stale-but-valid no-advance escalation. Force the token transport and stub
+// `globalThis.fetch` to serve the git-ref endpoint.
+async function withRefFetch<T>(
+  serve: (path: string) => { status: number; body: unknown },
+  fn: () => Promise<T>,
+): Promise<T> {
+  const prevMode = process.env["NANO_PR_GITHUB_TRANSPORT"];
+  const prevFetch = globalThis.fetch;
+  process.env["NANO_PR_GITHUB_TRANSPORT"] = "token";
+  globalThis.fetch = ((url: string | URL | Request): Promise<Response> => {
+    const path = new URL(String(url)).pathname.replace(/^\/repos\//, "");
+    const { status, body } = serve(path);
+    return Promise.resolve(new Response(JSON.stringify(body), { status }));
+  }) as typeof fetch;
+  try {
+    return await fn();
+  } finally {
+    globalThis.fetch = prevFetch;
+    if (prevMode === undefined) delete process.env["NANO_PR_GITHUB_TRANSPORT"];
+    else process.env["NANO_PR_GITHUB_TRANSPORT"] = prevMode;
+  }
+}
+
+test("fetchBranchHead: returns the branch ref's atomic head SHA", async () => {
+  const sha = await withRefFetch(
+    (path) => {
+      assertEquals(path, "o/r/git/ref/heads/feat/x");
+      return { status: 200, body: { object: { sha: "deadbeef" } } };
+    },
+    () => fetchBranchHead("o/r", "feat/x", "tok"),
+  );
+  assertEquals(sha, "deadbeef");
+});
+
+test("fetchBranchHead: a 404 (branch absent) resolves to null, never throws", async () => {
+  const sha = await withRefFetch(
+    () => ({ status: 404, body: { message: "Not Found" } }),
+    () => fetchBranchHead("o/r", "feat/missing", "tok"),
+  );
+  assertEquals(sha, null);
 });
