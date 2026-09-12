@@ -149,15 +149,25 @@ export function assertNever(value: never, context: string): never {
   throw new Error(`${context}: unreachable — non-allowlisted delivery node kind ${JSON.stringify(value)}`);
 }
 
-/** XML 1.0 forbids the C0 control characters (except tab `#x9`, LF `#xA`, CR `#xD`) anywhere in a
- * document — no entity can represent them, so a raw `\x01` in an element `name`/`documentation` makes
+/** XML 1.0's `Char` production forbids, anywhere in a document: the C0 control characters (except tab
+ * `#x9`, LF `#xA`, CR `#xD`), the noncharacters U+FFFE/U+FFFF, and unpaired UTF-16 surrogates — none can
+ * be represented by an entity, so any of them in an element `name`/`documentation` makes
  * `layoutBpmn`/deployment reject the whole semantic BPMN. User-authored display strings (a node's
  * free-form `prompt`, a probe `target`, an emit name) only impose length limits at the OpenAPI edge, so
- * such a character can reach the renderer. Strip the forbidden controls before emitting any XML text /
- * attribute content — dropping an unrepresentable control is the only well-formed rendering. */
+ * such a character can reach the renderer — and a code-unit truncation elsewhere can even manufacture a
+ * lone surrogate from a valid astral character. Strip all of these before emitting any XML text /
+ * attribute content (VALID astral pairs are preserved) — dropping an unrepresentable character is the
+ * only well-formed rendering. */
 function stripXmlInvalidChars(value: string): string {
-  // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional — this IS the XML-1.0 control filter.
-  return value.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, "");
+  return (
+    value
+      // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional — this IS the XML-1.0 control filter.
+      .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, "")
+      // Unpaired surrogates (a high not followed by a low, or a low not preceded by a high); valid pairs stay.
+      .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "")
+      // XML-1.0 noncharacters just past the BMP `Char` range end (#xFFFD).
+      .replace(/[\uFFFE\uFFFF]/g, "")
+  );
 }
 
 /** Escape a string for use as XML text / attribute content, first stripping XML-1.0-forbidden control
@@ -968,7 +978,7 @@ function describeProbeMatch(match: Extract<DeliveryNode, { kind: "wait" }>["wait
   if (match === undefined || match === null) return "";
   return Object.entries(match)
     .filter(([, v]) => v !== undefined && v !== null)
-    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .sort(([a], [b]) => byCodeUnit(a, b))
     .map(([k, v]) => `${k}=${REDACTED_MATCH_FIELDS.has(k) ? "<redacted>" : String(v)}`)
     .join(", ");
 }

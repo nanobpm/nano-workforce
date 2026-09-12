@@ -1137,3 +1137,15 @@ test("#778 the mermaid diagram strips XML-1.0-forbidden control characters from 
   // biome-ignore lint/suspicious/noControlCharactersInRegex: asserting the mermaid sanitiser removed them.
   assert(!/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/.test(r.diagram), "no forbidden control char survives into the mermaid diagram");
 });
+
+test("#778 stripXmlInvalidChars-guarded output drops U+FFFE/U+FFFF noncharacters and directly-injected unpaired surrogates while keeping valid astral pairs", async () => {
+  // A prompt carrying a noncharacter, a lone high surrogate, a lone low surrogate, AND a valid emoji
+  // pair: the renderer must drop the first three (XML-1.0 `Char` forbids them) but keep the pair.
+  const prompt = "keep\uFFFE me\uFFFF here \uD83D lone-high \uDE00 lone-low but this pair 😀 stays";
+  const graph = { name: "noncharacters", nodes: [{ id: "n", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+  const r = await compileOk(graph);
+  assert(!/[\uFFFE\uFFFF]/.test(r.bpmn), "no U+FFFE/U+FFFF noncharacter survives into the compiled BPMN");
+  const loneSurrogate = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+  assert(!loneSurrogate.test(r.bpmn), "no unpaired surrogate survives into the compiled BPMN");
+  assert(r.bpmn.includes("😀"), "a valid astral pair is preserved");
+});
