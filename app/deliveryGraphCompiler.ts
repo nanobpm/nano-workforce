@@ -149,9 +149,21 @@ export function assertNever(value: never, context: string): never {
   throw new Error(`${context}: unreachable — non-allowlisted delivery node kind ${JSON.stringify(value)}`);
 }
 
-/** Escape a string for use as XML text / attribute content. Deterministic and total. */
+/** XML 1.0 forbids the C0 control characters (except tab `#x9`, LF `#xA`, CR `#xD`) anywhere in a
+ * document — no entity can represent them, so a raw `\x01` in an element `name`/`documentation` makes
+ * `layoutBpmn`/deployment reject the whole semantic BPMN. User-authored display strings (a node's
+ * free-form `prompt`, a probe `target`, an emit name) only impose length limits at the OpenAPI edge, so
+ * such a character can reach the renderer. Strip the forbidden controls before emitting any XML text /
+ * attribute content — dropping an unrepresentable control is the only well-formed rendering. */
+function stripXmlInvalidChars(value: string): string {
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional — this IS the XML-1.0 control filter.
+  return value.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, "");
+}
+
+/** Escape a string for use as XML text / attribute content, first stripping XML-1.0-forbidden control
+ * characters (see {@link stripXmlInvalidChars}). Deterministic and total. */
 function escapeXml(value: string): string {
-  return value
+  return stripXmlInvalidChars(value)
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
@@ -165,7 +177,7 @@ function escapeXml(value: string): string {
  * literal survives to the engine. Safe because the compiler grafts DI onto its own semantic XML without
  * re-serializing it, so these text nodes are never round-tripped/normalized. Deterministic and total. */
 function escapeXmlText(value: string): string {
-  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return stripXmlInvalidChars(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
 /** Render a `name=value` XML attribute, choosing the delimiter so FEEL string literals survive the
@@ -176,7 +188,7 @@ function escapeXmlText(value: string): string {
  * escaping) is used. Deterministic. */
 function attr(name: string, value: string): string {
   if (value.includes('"')) {
-    const inner = value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/'/g, "&apos;");
+    const inner = stripXmlInvalidChars(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/'/g, "&apos;");
     return `${name}='${inner}'`;
   }
   return `${name}="${escapeXml(value)}"`;
@@ -933,12 +945,16 @@ function humanizeConnectorTarget(target: string): string {
   }
 }
 
-/** Render a probe's `match` predicate as a compact `k=v, k=v` description (declared fields only). */
+/** Render a probe's `match` predicate as a compact `k=v, k=v` description (declared fields only).
+ * `verifyCommand` is an arbitrary shell command the capability probe runs at the gate boundary — it can
+ * embed a secret exactly like a `command` target — so it is never surfaced in the user-visible
+ * name/documentation; only a fixed `<redacted>` placeholder appears, while the raw value survives in the
+ * runtime probe config. (Issue #778 review.) */
 function describeProbeMatch(match: Extract<DeliveryNode, { kind: "wait" }>["wait"]["match"]): string {
   if (match === undefined || match === null) return "";
   return Object.entries(match)
     .filter(([, v]) => v !== undefined && v !== null)
-    .map(([k, v]) => `${k}=${String(v)}`)
+    .map(([k, v]) => `${k}=${k === "verifyCommand" ? "<redacted>" : String(v)}`)
     .join(", ");
 }
 
@@ -1283,6 +1299,7 @@ function serviceBodyLines(
       "nodeTimeout",
       "; in-flight work may already exist — check for a draft PR or partial state before retrying or reassigning.",
     ),
+    { displayName: taskName },
   );
   const head = [
     `      <bpmn:startEvent id="${el}_start"><bpmn:outgoing>${el}_i0</bpmn:outgoing></bpmn:startEvent>`,
@@ -1322,7 +1339,7 @@ function serviceBodyLines(
     // Resumable when the producer owes a required emit: a human/agent supplies the missing fact, which
     // the subProcess output ioMapping then publishes as `<el>_<fact>` (agent emit source = fact name),
     // so the downstream consumer late-binds a real value instead of the null that poisoned it (#731).
-    emits.length > 0 ? { resume: { kind: "agent" as const, emits } } : undefined,
+    { ...(emits.length > 0 ? { resume: { kind: "agent" as const, emits } } : {}), displayName: taskName },
   );
   return [
     ...head,
@@ -1442,7 +1459,7 @@ function waitBodyLines(el: string, node: Extract<DeliveryNode, { kind: "wait" }>
           [`${el}_i4`],
           `${el}_i5`,
           waitEscalationContextFeel(nodeId),
-          { resume: { kind: node.kind, emits }, diagnosticInputs },
+          { resume: { kind: node.kind, emits }, diagnosticInputs, displayName },
         )),
     // On `continue`, the not-ready-at-boundary branch (`_i4`) proceeds straight to the node end (no
     // human stop, no `_i5` escalation-return flow); on `escalate` it parks on the escalation task,
@@ -1524,6 +1541,7 @@ function escalationTaskLines(
   opts?: {
     resume?: { kind: DeliveryNode["kind"]; emits: readonly DeliveryFact[] };
     diagnosticInputs?: readonly { source: string; target: string }[];
+    displayName?: string;
   },
 ): string[] {
   const emits = opts?.resume?.emits ?? [];
@@ -1559,8 +1577,12 @@ function escalationTaskLines(
       );
     }
   }
+  // The escalation user task shows the node's DESCRIPTIVE display name (issue #778 review) so a
+  // timed-out / contract-broken node is legible in the explorer/inbox instead of an opaque bare id;
+  // `nodeId` is still threaded as the `nodeId` input above for runtime correlation.
+  const escLabel = trimmedOrEmpty(opts?.displayName) || nodeId;
   return [
-    `      <bpmn:userTask id="${esc}" name="Escalate: ${escapeXml(nodeId)}">`,
+    `      <bpmn:userTask id="${esc}" name="Escalate: ${escapeXml(escLabel)}">`,
     "        <bpmn:extensionElements>",
     `          <zeebe:formDefinition formId="${GENERIC_HUMAN_FORM}" />`,
     "          <zeebe:userTask />",
@@ -1607,9 +1629,10 @@ function flow(id: string, source: string, target: string): string {
   return `      <bpmn:sequenceFlow id="${id}" sourceRef="${source}" targetRef="${target}" />`;
 }
 
-/** Render a human-readable mermaid `flowchart` of the resolved graph — one node per box labelled
- * `<kind>: <id>`, one arrow per edge (labelled with the referenced fact when qualified). Deterministic
- * (nodes/edges already sorted). */
+/** Render a human-readable mermaid `flowchart` of the resolved graph — one box per node labelled with
+ * the SAME descriptive {@link nodeDisplay} name the compiled BPMN uses (issue #778: one display source,
+ * no `kind: id` drift between the diagram and the deployed model), one arrow per edge (labelled with the
+ * referenced fact when qualified). Deterministic (nodes/edges already sorted). */
 function renderMermaid(
   graph: DeliveryGraph,
   wirings: readonly NodeWiring[],
@@ -1619,7 +1642,7 @@ function renderMermaid(
   const lines: string[] = ["flowchart TD"];
   if (graph.name !== undefined) lines.push(`  %% ${escapeMermaid(graph.name)}`);
   for (const w of wirings) {
-    lines.push(`  ${w.element}["${escapeMermaid(`${w.node.kind}: ${w.node.id}`)}"]`);
+    lines.push(`  ${w.element}["${escapeMermaid(nodeDisplay(w.node).name)}"]`);
   }
   for (const edge of edges) {
     const from = mustGet(elementById, edge.fromNode);

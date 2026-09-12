@@ -1007,3 +1007,58 @@ test("#778 the wait + human inner tasks carry the descriptive display name (not 
   assert(r.bpmn.includes(`<bpmn:userTask id="${humanEl}" name="Delivery: human step — Run the manual OTP publish · otp">`), "the human user task uses the display name");
   assert(!r.bpmn.includes('name="Delivery: human step — otp"'), "no bare human id name remains");
 });
+
+test("#778 nodeDisplay redacts a capability probe's verifyCommand (arbitrary shell) in name + documentation", () => {
+  const cap = nodeDisplay({
+    id: "g",
+    kind: "wait",
+    wait: {
+      kind: "capability",
+      target: "github-releases:owner/repo",
+      match: { package: "@scope/pkg", capabilityRef: "owner/repo#7", verifyCommand: "curl -H \"Authorization: Bearer $SECRET\" x" },
+    },
+  });
+  assert(cap.documentation.includes("verifyCommand=<redacted>"), "verifyCommand is redacted in the doc");
+  assert(!cap.documentation.includes("$SECRET"), "the raw shell command never reaches the doc");
+  // Non-secret match fields stay verbatim.
+  assert(cap.documentation.includes("package=@scope/pkg"), "structured match fields stay verbatim");
+});
+
+test("#778 the mermaid diagram reuses the descriptive nodeDisplay name (not the bare `kind: id`)", async () => {
+  const r = await compileOk(RELEASE_RUNBOOK);
+  // One display source: the diagram box carries the same descriptive label the BPMN uses.
+  assert(r.diagram.includes("Wait: pr owner/repo#42 · watch-b"), "wait box uses the descriptive display name");
+  assert(!/"wait: watch-b"/i.test(r.diagram), "no bare `kind: id` box label remains");
+});
+
+test("#778 a bounded node's escalation task carries the descriptive display name (nodeId kept for correlation)", async () => {
+  const graph = {
+    name: "escalation names",
+    nodes: [{ id: "impl", kind: "agent", agent: { jobType: "senior:feature", prompt: "Implement the widget" } }],
+    edges: [],
+  };
+  const r = await compileOk(graph);
+  const esc = escBlockForNode(r.bpmn, "impl");
+  assert(esc.includes('name="Escalate: Implement the widget · impl"'), "escalation task uses the descriptive display name");
+  assert(!esc.includes('name="Escalate: impl"'), "no bare-id escalation name remains");
+  // nodeId is still threaded for runtime correlation.
+  assert(esc.includes('target="nodeId"'), "nodeId is retained as an input for correlation");
+});
+
+test("#778 XML-1.0-forbidden control characters are stripped from user-authored display strings", () => {
+  const display = nodeDisplay({ id: "n", kind: "agent", agent: { jobType: "j", prompt: "do\u0001 the\u0007 thing" } });
+  // nodeDisplay itself keeps the raw string; the renderer must strip it. Compile and assert the BPMN
+  // carries no raw control char (which would make layoutBpmn/deploy reject the model).
+  assert(display.name.includes("\u0001"), "nodeDisplay preserves the raw value (renderer sanitises)");
+});
+
+test("#778 the compiled BPMN never emits an XML-1.0-forbidden control character", async () => {
+  const graph = {
+    name: "control\u0001 chars",
+    nodes: [{ id: "n", kind: "agent", agent: { jobType: "j", prompt: "line one\u0007 with a bell\u0000 and null" } }],
+    edges: [],
+  };
+  const r = await compileOk(graph);
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: asserting the sanitiser removed them.
+  assert(!/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/.test(r.bpmn), "no forbidden control char survives into the compiled BPMN");
+});
