@@ -1378,6 +1378,16 @@ export function digestInvisibleRawValues(graph: DeliveryGraph): string[] {
       case "wait": {
         const p = node.wait;
         push(id, "wait.target", p.target, redactProbeTargetForDisplay(p));
+        // `credentialEnv` names a DECLARED env-contract key, shown in the doc as `trimmedOrEmpty(...)` then
+        // XML-sanitised at serialisation, while the runtime `parseProbe` reads it as `.trim()`. A value
+        // carrying an XML-invalid char (`"GITHUB_TOKEN\x01"`) sanitises to the SAME display as valid
+        // `"GITHUB_TOKEN"`, so without a fingerprint the malformed graph shares the valid graph's digest and
+        // `graphCarriesRedactedSecrets` stays false — letting keyless dispatch short-circuit the malformed
+        // proposal onto the valid running instance (and mark it dispatched) even though `parseProbe` would
+        // reject the raw value. Fingerprint the trimmed raw against its XML-sanitised form so a whitespace-
+        // only variant collapses (runtime trims) while an invalid-char one stays disambiguated (issue #778
+        // review — thread :1355).
+        push(id, "wait.credentialEnv", trimmedOrEmpty(p.credentialEnv), stripXmlInvalidChars(trimmedOrEmpty(p.credentialEnv)));
         if (p.match) {
           for (const [k, v] of Object.entries(p.match)) {
             if (v === undefined || v === null) continue;
@@ -1385,7 +1395,14 @@ export function digestInvisibleRawValues(graph: DeliveryGraph): string[] {
             // match value is shown as `String(v)`, which XML-1.0 sanitisation (`escapeXml`) later STRIPS
             // invalid characters from — so `"1\x01"` and `"1"` share a digest while the raw probe configs
             // differ. Both cases are digest-invisible; the raw value is the disambiguator.
-            if (REDACTED_MATCH_FIELDS.has(k) || hasXmlInvalidChars(String(v))) {
+            if (REDACTED_MATCH_FIELDS.has(k)) {
+              // A redacted field is ALWAYS invisible (display is `<redacted>`). `parseMatch` TRIMS these
+              // free-form strings before the worker uses them, so fingerprint the TRIMMED value — a
+              // whitespace-only variant collapses to the same runtime match (an internal invalid char
+              // still distinguishes) instead of forking the server-derived run key (issue #778 review —
+              // thread :1363).
+              out.push(`${id}\u0000wait.match.${k}\u0000${canonicalJson(typeof v === "string" ? v.trim() : v)}`);
+            } else if (hasXmlInvalidChars(String(v))) {
               out.push(`${id}\u0000wait.match.${k}\u0000${canonicalJson(v)}`);
             }
           }

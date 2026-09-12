@@ -1401,6 +1401,37 @@ test("#778 nodeDisplay + digestInvisibleRawValues redact a credential-bearing ag
   assert(!digestInvisibleRawValues(ordinary).some((e) => e.includes("agent.jobType")), "a normal jobType is not spuriously fingerprinted");
 });
 
+test("#778 digestInvisibleRawValues fingerprints an XML-invalid `wait.credentialEnv` so a malformed env key does not collide with a valid one (suppressed advisory :1355)", () => {
+  const clean = { name: "g", nodes: [{ id: "w", kind: "wait", wait: { kind: "http", target: "https://x", credentialEnv: "GITHUB_TOKEN" } }], edges: [] };
+  const dirty = { name: "g", nodes: [{ id: "w", kind: "wait", wait: { kind: "http", target: "https://x", credentialEnv: "GITHUB_TOKEN\x01" } }], edges: [] };
+  assert(!digestInvisibleRawValues(clean).some((e) => e.includes("wait.credentialEnv")), "a clean credentialEnv is not fingerprinted");
+  assert(digestInvisibleRawValues(dirty).some((e) => e.includes("wait.credentialEnv")), "an XML-invalid credentialEnv is fingerprinted digest-invisible");
+  // The two graphs (identical display/digest) therefore produce DIFFERENT invisible-value sets.
+  assert(
+    JSON.stringify(digestInvisibleRawValues(clean)) !== JSON.stringify(digestInvisibleRawValues(dirty)),
+    "the malformed credentialEnv graph is disambiguated from the valid one",
+  );
+});
+
+test("#778 digestInvisibleRawValues collapses a whitespace-only redacted-match variant (`verifyCommand`) — parseMatch trims it (suppressed advisory :1363)", () => {
+  const canon = { name: "g", nodes: [{ id: "w", kind: "wait", wait: { kind: "capability", target: "github-releases:o/r", match: { verifyCommand: "curl x" } } }], edges: [] };
+  const trailingWs = { name: "g", nodes: [{ id: "w", kind: "wait", wait: { kind: "capability", target: "github-releases:o/r", match: { verifyCommand: "curl x " } } }], edges: [] };
+  // The redacted field is ALWAYS fingerprinted (display is `<redacted>`), but the trimmed value is used,
+  // so a trailing-whitespace variant produces the IDENTICAL fingerprint set (no spurious run-key fork).
+  assert(digestInvisibleRawValues(canon).some((e) => e.includes("wait.match.verifyCommand")), "a redacted match field is fingerprinted");
+  assertEquals(
+    JSON.stringify(digestInvisibleRawValues(canon)),
+    JSON.stringify(digestInvisibleRawValues(trailingWs)),
+    "a whitespace-only difference in a trimmed redacted match field does not fork the fingerprint",
+  );
+  // An internal invalid char still distinguishes (runtime carries it).
+  const invalid = { name: "g", nodes: [{ id: "w", kind: "wait", wait: { kind: "capability", target: "github-releases:o/r", match: { verifyCommand: "curl\x01x" } } }], edges: [] };
+  assert(
+    JSON.stringify(digestInvisibleRawValues(invalid)) !== JSON.stringify(digestInvisibleRawValues(canon)),
+    "an internal invalid char in a redacted match field is still disambiguated",
+  );
+});
+
 test("#778 describeProbeMatch renders match fields in a stable order regardless of JSON insertion order (byte-determinism)", () => {
   const a = nodeDisplay({ id: "g", kind: "wait", wait: { kind: "http", target: "https://x", match: { status: 200, version: "1.2.3" } } });
   const b = nodeDisplay({ id: "g", kind: "wait", wait: { kind: "http", target: "https://x", match: { version: "1.2.3", status: 200 } } });
