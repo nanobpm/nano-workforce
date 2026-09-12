@@ -1,3 +1,9 @@
+## [0.186.4](https://github.com/nanobpm/nano-workforce/compare/v0.186.3...v0.186.4) (2026-09-12)
+
+### Bug Fixes
+
+* **agentic:** allow c8ctl GitHub auth for repository provisioning ([#784](https://github.com/nanobpm/nano-workforce/issues/784)) ([323bb05](https://github.com/nanobpm/nano-workforce/commit/323bb05060e63ca57082d42e3bf9c91f63abaa0a)), closes [#770](https://github.com/nanobpm/nano-workforce/issues/770) [#770](https://github.com/nanobpm/nano-workforce/issues/770) [#770](https://github.com/nanobpm/nano-workforce/issues/770)
+
 ## [0.186.3](https://github.com/nanobpm/nano-workforce/compare/v0.186.2...v0.186.3) (2026-09-12)
 
 ### Bug Fixes
