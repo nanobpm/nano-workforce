@@ -1062,3 +1062,78 @@ test("#778 the compiled BPMN never emits an XML-1.0-forbidden control character"
   // biome-ignore lint/suspicious/noControlCharactersInRegex: asserting the sanitiser removed them.
   assert(!/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/.test(r.bpmn), "no forbidden control char survives into the compiled BPMN");
 });
+
+test("#778 nodeDisplay redacts free-form probe match fields (bodyIncludes/stdoutIncludes) that can carry response tokens", () => {
+  const http = nodeDisplay({
+    id: "g",
+    kind: "wait",
+    wait: { kind: "http", target: "https://api.example.com/health", match: { status: 200, bodyIncludes: "session=SUPER_SECRET_TOKEN" } },
+  });
+  assert(http.documentation.includes("bodyIncludes=<redacted>"), "bodyIncludes is redacted");
+  assert(!http.documentation.includes("SUPER_SECRET_TOKEN"), "the raw body substring never reaches the doc");
+  assert(http.documentation.includes("status=200"), "structured match fields stay verbatim");
+
+  const cmd = nodeDisplay({
+    id: "c",
+    kind: "wait",
+    wait: { kind: "command", target: "check.sh", match: { exitCode: 0, stdoutIncludes: "apikey=SUPER_SECRET_STDOUT" } },
+  });
+  assert(cmd.documentation.includes("stdoutIncludes=<redacted>"), "stdoutIncludes is redacted");
+  assert(!cmd.documentation.includes("SUPER_SECRET_STDOUT"), "the raw stdout substring never reaches the doc");
+  assert(cmd.documentation.includes("exitCode=0"), "structured match fields stay verbatim");
+});
+
+test("#778 describeProbeMatch renders match fields in a stable order regardless of JSON insertion order (byte-determinism)", () => {
+  const a = nodeDisplay({ id: "g", kind: "wait", wait: { kind: "http", target: "https://x", match: { status: 200, version: "1.2.3" } } });
+  const b = nodeDisplay({ id: "g", kind: "wait", wait: { kind: "http", target: "https://x", match: { version: "1.2.3", status: 200 } } });
+  assertEquals(a.documentation, b.documentation);
+  // The stable order is code-unit ascending on the key ("status" < "version").
+  const match = a.documentation.split("\n").find((l) => l.startsWith("Match: "));
+  assertEquals(match, "Match: status=200, version=1.2.3");
+});
+
+test("#778 nodeDisplay redacts a credential-bearing connector target + dedupeKey (forward-declared / free-form values)", () => {
+  const c = nodeDisplay({
+    id: "call",
+    kind: "connector",
+    connector: { target: "https://user:p4ss@hooks.example.com/deploy?token=abc123", dedupeKey: "https://k:s3cr3t@idem.example.com/key?sig=zzz" },
+  });
+  assert(!c.name.includes("p4ss") && !c.name.includes("abc123"), "connector name drops userinfo + query secret");
+  assert(!c.documentation.includes("p4ss") && !c.documentation.includes("abc123"), "connector doc target drops userinfo + query secret");
+  assert(!c.documentation.includes("s3cr3t") && !c.documentation.includes("zzz"), "connector doc dedupeKey drops userinfo + query secret");
+  assert(c.documentation.includes("Connector target: https://***@hooks.example.com/deploy?***"), "connector target rendered redacted");
+  assert(c.documentation.includes("Dedupe key: https://***@idem.example.com/key?***"), "connector dedupeKey rendered redacted");
+});
+
+test("#778 the compiled connector inner task carries the descriptive display name (distinct connector arg path)", async () => {
+  const graph = {
+    name: "connector inner name",
+    nodes: [{ id: "land", kind: "connector", connector: { target: "converge-merge", payload: { pr: "o/r#42" }, dedupeKey: "land-1" } }],
+    edges: [],
+  };
+  const r = await compileOk(graph);
+  const el = elementForNode(r.bpmn, "land");
+  assert(r.bpmn.includes(`<bpmn:serviceTask id="${el}_task" name="Converge &amp; merge PR · land">`), "the connector inner task shares the descriptive display name");
+  assert(!r.bpmn.includes('name="connector: land"'), "no bare kind:id connector task name remains");
+});
+
+test("#778 firstLine truncates by code point so an astral character never leaves an unpaired surrogate in the BPMN", async () => {
+  // 70 ASCII + an emoji straddling the cap-1 (71) boundary + trailing text: a code-unit slice(0,71)
+  // would cut the surrogate pair, leaving a lone high surrogate that stripXmlInvalidChars does NOT remove.
+  const prompt = `${"a".repeat(70)}😀 trailing detail that pushes past the seventy-two character cap`;
+  const graph = { name: "surrogate", nodes: [{ id: "n", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+  const r = await compileOk(graph);
+  const loneSurrogate = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+  assert(!loneSurrogate.test(r.bpmn), "no unpaired surrogate survives into the compiled BPMN");
+});
+
+test("#778 the mermaid diagram strips XML-1.0-forbidden control characters from node labels", async () => {
+  const graph = {
+    name: "mermaid\u0001 controls",
+    nodes: [{ id: "n", kind: "agent", agent: { jobType: "j", prompt: "preview\u0001 label\u0007 with controls" } }],
+    edges: [],
+  };
+  const r = await compileOk(graph);
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: asserting the mermaid sanitiser removed them.
+  assert(!/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/.test(r.diagram), "no forbidden control char survives into the mermaid diagram");
+});

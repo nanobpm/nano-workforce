@@ -194,10 +194,13 @@ function attr(name: string, value: string): string {
   return `${name}="${escapeXml(value)}"`;
 }
 
-/** Escape a string for use inside a mermaid quoted label. Mermaid uses `#` HTML-entity escapes; a
- * double quote inside a `"…"` label must become `#quot;` so the label stays well-formed. */
+/** Escape a string for use inside a mermaid quoted label. First strips XML-1.0-forbidden control
+ * characters (see {@link stripXmlInvalidChars}) — the same free-form node labels feed the Mermaid path,
+ * so a stray control char (e.g. `\x01` in a prompt) would otherwise make the preview unparsable. Mermaid
+ * then uses `#` HTML-entity escapes; a double quote inside a `"…"` label must become `#quot;` so the
+ * label stays well-formed. */
 function escapeMermaid(value: string): string {
-  return value.replace(/"/g, "#quot;").replace(/\n/g, " ");
+  return stripXmlInvalidChars(value).replace(/"/g, "#quot;").replace(/\n/g, " ");
 }
 
 /** A node's typed emits, normalised to a stable array (absent → `[]`). */
@@ -917,11 +920,15 @@ function renderBpmn(
 
 /** The first non-empty line of a (possibly multi-line) string, trimmed and length-capped for use as a
  * concise element label. Returns `""` for a blank/undefined input; a line longer than `cap` is
- * truncated with an ellipsis. Deterministic. */
+ * truncated with an ellipsis. Truncation is by Unicode CODE POINT (`Array.from`), not UTF-16 code unit,
+ * so slicing never splits an astral character (emoji etc.) into an unpaired surrogate — an unpaired
+ * surrogate survives {@link stripXmlInvalidChars} and would make the emitted BPMN not well-formed.
+ * Deterministic. */
 function firstLine(value: string | undefined | null, cap = 72): string {
   if (typeof value !== "string") return "";
   const line = value.split(/\r?\n/).map((l) => l.trim()).find((l) => l.length > 0) ?? "";
-  return line.length > cap ? `${line.slice(0, cap - 1).trimEnd()}…` : line;
+  const points = Array.from(line);
+  return points.length > cap ? `${Array.from(points.slice(0, cap - 1)).join("").trimEnd()}…` : line;
 }
 
 /** Trim an optional value to a non-blank string, or `""` when absent/blank. */
@@ -931,7 +938,9 @@ function trimmedOrEmpty(value: unknown): string {
 
 /** A human-readable label for a connector node's `target`. The converge-enrollment vocabulary
  * (`convergeTargets.ts`) maps to intent-revealing phrases; any other (forward-declared) target is shown
- * verbatim so nothing is lost. Deterministic. */
+ * through {@link redactString} — a bare identifier survives unchanged, but a credential-bearing URL
+ * (`//user:pass@…`, `?token=…`) has its secret components stripped so it is never persisted into
+ * user-visible BPMN documentation/modeler. Deterministic. */
 function humanizeConnectorTarget(target: string): string {
   switch (target) {
     case CONVERGE_TARGET:
@@ -941,20 +950,26 @@ function humanizeConnectorTarget(target: string): string {
     case MERGE_MAIN_TARGET:
       return "Merge to main";
     default:
-      return `Connector: ${target}`;
+      return `Connector: ${redactString(target)}`;
   }
 }
 
 /** Render a probe's `match` predicate as a compact `k=v, k=v` description (declared fields only).
- * `verifyCommand` is an arbitrary shell command the capability probe runs at the gate boundary — it can
- * embed a secret exactly like a `command` target — so it is never surfaced in the user-visible
- * name/documentation; only a fixed `<redacted>` placeholder appears, while the raw value survives in the
- * runtime probe config. (Issue #778 review.) */
+ * Three fields are FREE-FORM, user-supplied secret-bearing values — `verifyCommand` (an arbitrary shell
+ * command the capability probe runs at the gate boundary) and `bodyIncludes`/`stdoutIncludes` (arbitrary
+ * response-body / stdout substrings that can carry response tokens) — so they are never surfaced in the
+ * user-visible name/documentation; only a fixed `<redacted>` placeholder appears while the raw value
+ * survives in the runtime probe config. Every other field is a structured/enumerable predicate and is
+ * shown verbatim. Fields are emitted in a STABLE code-unit key order (not the caller's JSON insertion
+ * order) so two semantically identical graphs render byte-identically — preserving the compiler's
+ * determinism/digest guarantee. (Issue #778 review.) */
+const REDACTED_MATCH_FIELDS: ReadonlySet<string> = new Set(["verifyCommand", "bodyIncludes", "stdoutIncludes"]);
 function describeProbeMatch(match: Extract<DeliveryNode, { kind: "wait" }>["wait"]["match"]): string {
   if (match === undefined || match === null) return "";
   return Object.entries(match)
     .filter(([, v]) => v !== undefined && v !== null)
-    .map(([k, v]) => `${k}=${k === "verifyCommand" ? "<redacted>" : String(v)}`)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([k, v]) => `${k}=${REDACTED_MATCH_FIELDS.has(k) ? "<redacted>" : String(v)}`)
     .join(", ");
 }
 
@@ -989,8 +1004,8 @@ export function nodeDisplay(node: DeliveryNode): { name: string; documentation: 
     }
     case "connector": {
       const c = node.connector;
-      const doc: string[] = [`Connector target: ${c.target}`];
-      if (trimmedOrEmpty(c.dedupeKey)) doc.push(`Dedupe key: ${trimmedOrEmpty(c.dedupeKey)}`);
+      const doc: string[] = [`Connector target: ${redactString(c.target)}`];
+      if (trimmedOrEmpty(c.dedupeKey)) doc.push(`Dedupe key: ${redactString(trimmedOrEmpty(c.dedupeKey))}`);
       const boundPr = c.payload && typeof c.payload.pr === "string" ? c.payload.pr : "";
       if (boundPr) doc.push(`PR: ${boundPr}`);
       if (emitsLabel) doc.push(`Emits: ${emitsLabel}`);
