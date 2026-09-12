@@ -1,3 +1,9 @@
+## [0.187.0](https://github.com/nanobpm/nano-workforce/compare/v0.186.4...v0.187.0) (2026-09-12)
+
+### Features
+
+* **agentic:** autoSubscribe opt-out marker + single agentDefinition-external convention ([#782](https://github.com/nanobpm/nano-workforce/issues/782)) ([6a0c616](https://github.com/nanobpm/nano-workforce/commit/6a0c616158db7e83ab2479d66677dd652c12f886)), closes [jwulf/c8ctl-plugin-nano#235](https://github.com/jwulf/c8ctl-plugin-nano/issues/235) [#779](https://github.com/nanobpm/nano-workforce/issues/779) [#745](https://github.com/nanobpm/nano-workforce/issues/745)
+
 ## [0.186.4](https://github.com/nanobpm/nano-workforce/compare/v0.186.3...v0.186.4) (2026-09-12)
 
 ### Bug Fixes
