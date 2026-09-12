@@ -33,34 +33,33 @@ const SIDE_EFFECTING = {
   edges: [{ from: "open-b", to: "publish" }],
 };
 
-test("stableProposalRunKey: canonical — key-order / whitespace invariant, but value-sensitive (issue #778 review)", () => {
-  // The stable key content-addresses the PARSED graph in canonical form, so a re-stage of the SAME
-  // graph with reordered object keys or reflowed whitespace yields the SAME key and short-circuits
-  // instead of double-launching — while any genuine value difference (e.g. a credential) diverges.
-  const a = { name: "g", nodes: [{ id: "n", kind: "human", human: { prompt: "x" } }], edges: [] };
-  const reordered = { edges: [], nodes: [{ human: { prompt: "x" }, kind: "human", id: "n" }], name: "g" };
-  assert.equal(stableProposalRunKey(a), stableProposalRunKey(reordered));
-  // A different credential value → a different key (no collision onto the first run).
-  const other = { name: "g", nodes: [{ id: "n", kind: "human", human: { prompt: "y" } }], edges: [] };
-  assert.notEqual(stableProposalRunKey(a), stableProposalRunKey(other));
-  // Top-level node ORDER is NOT significant: the compiler sorts nodes by id before deriving the
-  // redacted `semanticBpmn` the digest addresses, so a reordered re-stage shares that digest (and
-  // overwrites `proposal.graph`) — the run key must match too, else it double-launches (issue #778 review).
-  const twoNodes = { name: "g", nodes: [{ id: "n1", kind: "human" }, { id: "n2", kind: "human" }], edges: [] };
-  const swapped = { name: "g", nodes: [{ id: "n2", kind: "human" }, { id: "n1", kind: "human" }], edges: [] };
-  assert.equal(stableProposalRunKey(twoNodes), stableProposalRunKey(swapped));
-  // Top-level edge ORDER is likewise not significant (the compiler sorts edges deterministically).
-  const twoEdges = {
+test("stableProposalRunKey: digest identity + secret disambiguation (issue #778 review)", () => {
+  // The run key is derived from the proposal's semantic `digest` (which the compiler already normalises
+  // — collapsing omitted-vs-default fields and top-level node/edge REORDER) PLUS a fingerprint of the
+  // digest-invisible raw values. So a re-stage of the SAME logical graph in ANY encoding sharing the
+  // digest short-circuits, while a credential-differing graph (same digest, different secret) diverges.
+  const D1 = "sha-aaa";
+  const D2 = "sha-bbb";
+  const credA = {
     name: "g",
-    nodes: [{ id: "n1", kind: "human" }, { id: "n2", kind: "human" }, { id: "n3", kind: "human" }],
-    edges: [{ from: "n1", to: "n2" }, { from: "n2", to: "n3" }],
+    nodes: [{ id: "n", kind: "connector", connector: { target: "//user:pass@host" } }],
+    edges: [],
   };
-  const edgesSwapped = { ...twoEdges, edges: [{ from: "n2", to: "n3" }, { from: "n1", to: "n2" }] };
-  assert.equal(stableProposalRunKey(twoEdges), stableProposalRunKey(edgesSwapped));
-  // But a genuinely DIFFERENT edge set still diverges (order-invariance is not blindness to value).
-  const differentEdges = { ...twoEdges, edges: [{ from: "n1", to: "n3" }, { from: "n2", to: "n3" }] };
-  assert.notEqual(stableProposalRunKey(twoEdges), stableProposalRunKey(differentEdges));
-  assert.ok(stableProposalRunKey(a).startsWith("staged-"), "the key is self-describing");
+  // Same digest + identical graph → same key (a double-click / re-dispatch short-circuits).
+  assert.equal(stableProposalRunKey(D1, credA), stableProposalRunKey(D1, credA));
+  // Same digest but a DIFFERENT redacted-away credential — both redact to the same `//***@host` display
+  // so they SHARE the digest — must yield a DIFFERENT key, else the second dispatch collapses onto the
+  // first's still-running instance.
+  const credB = { name: "g", nodes: [{ id: "n", kind: "connector", connector: { target: "//other:secret@host" } }], edges: [] };
+  assert.notEqual(stableProposalRunKey(D1, credA), stableProposalRunKey(D1, credB));
+  // A genuinely different semantic graph carries a DIFFERENT digest → a different key even with no secrets.
+  const plain = { name: "g", nodes: [{ id: "n", kind: "human", human: { prompt: "x" } }], edges: [] };
+  assert.notEqual(stableProposalRunKey(D1, plain), stableProposalRunKey(D2, plain));
+  // A graph with NO digest-invisible content has an EMPTY fingerprint, so its key is a pure function of
+  // the digest: a re-stage in a DIFFERENT object-key encoding (same digest) short-circuits.
+  const plainReordered = { edges: [], name: "g", nodes: [{ human: { prompt: "x" }, kind: "human", id: "n" }] };
+  assert.equal(stableProposalRunKey(D1, plain), stableProposalRunKey(D1, plainReordered));
+  assert.ok(stableProposalRunKey(D1, credA).startsWith("staged-"), "the key is self-describing");
 });
 
 describe("dispatchDeliveryGraph — operator dispatch by staged-proposal digest", () => {

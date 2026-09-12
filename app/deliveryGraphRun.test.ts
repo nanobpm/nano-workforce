@@ -222,6 +222,10 @@ test("parseHumanLabels: round-trips a stored map and tolerates null/blank/corrup
   assertEquals(parseHumanLabels(""), {});
   assertEquals(parseHumanLabels("  "), {});
   assertEquals(parseHumanLabels("{not json"), {});
+  assertEquals(parseHumanLabels(JSON.stringify({ n1: "manual OTP publish", n2: "confirm deploy" })), {
+    n1: "manual OTP publish",
+    n2: "confirm deploy",
+  }); // round-trips a valid string→string map
   assertEquals(parseHumanLabels(JSON.stringify(["a"])), {}); // non-object
   assertEquals(parseHumanLabels(JSON.stringify({ a: 1, b: "y" })), { b: "y" }); // drops non-string values
 });

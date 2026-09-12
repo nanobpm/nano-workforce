@@ -13,7 +13,7 @@
 //   • humanNodes[] and sideEffects[] extraction.
 import { test } from "node:test";
 import { assert, assertEquals } from "#test-assert";
-import { compileDeliveryGraph, graphCarriesRedactedSecrets, nodeDisplay } from "./deliveryGraphCompiler.ts";
+import { compileDeliveryGraph, digestInvisibleRawValues, graphCarriesRedactedSecrets, nodeDisplay, redactFreeText } from "./deliveryGraphCompiler.ts";
 
 /** Compile and assert success, returning the narrowed ok-result. */
 async function compileOk(graph: unknown) {
@@ -1431,4 +1431,53 @@ test("#778 graphCarriesRedactedSecrets: lossy for a present-but-unsurfaced paylo
   // would otherwise crash the predicate and 500 the dispatch (issue #778 review).
   const primitivePayload = { name: "n", nodes: [{ id: "c", kind: "connector", connector: { target: "slack:#r", payload: 42 } }], edges: [] };
   assertEquals(graphCarriesRedactedSecrets(primitivePayload), true);
+});
+
+test("#778 nodeDisplay: emit `description` is embedded (redacted) in the label so a description-differing graph is not collapsed", () => {
+  // `renderEmitContract` embeds each fact's `description` in the runtime `appendPrompt`, so two graphs
+  // differing ONLY in an emit description dispatch DIFFERENT instructions — the display must carry a
+  // (redacted) representation or the digest collapses them and keyless dispatch reuses the wrong prompt.
+  const withDesc = nodeDisplay({ id: "a", kind: "agent", agent: { jobType: "j", prompt: "do it" }, emits: [{ name: "pr", type: "pr", description: "the merged PR ref" }] });
+  assert(withDesc.documentation.includes("Emits: pr (pr) — the merged PR ref"), "emit description appears in the label");
+  const other = nodeDisplay({ id: "a", kind: "agent", agent: { jobType: "j", prompt: "do it" }, emits: [{ name: "pr", type: "pr", description: "a DIFFERENT description" }] });
+  assert(withDesc.documentation !== other.documentation, "a different emit description yields a different label");
+  // A credential in the description is redacted in the display AND flagged digest-invisible.
+  const credDesc = { name: "n", nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt: "do it" }, emits: [{ name: "pr", type: "pr", description: "post to //user:pass@host/x?token=abc" }] }], edges: [] };
+  const disp = nodeDisplay(credDesc.nodes[0]);
+  assert(!disp.documentation.includes("user:pass") && !disp.documentation.includes("token=abc"), "credential is stripped from the emit-description label");
+  assertEquals(graphCarriesRedactedSecrets(credDesc), true);
+});
+
+test("#778 nodeDisplay: a credential-bearing human `formKey` is redacted in the label and flagged digest-invisible", () => {
+  const credForm = { name: "n", nodes: [{ id: "h", kind: "human", human: { prompt: "approve", formKey: "//user:pass@forms.example.com/approve?token=abc" } }], edges: [] };
+  const disp = nodeDisplay(credForm.nodes[0]);
+  assert(!disp.documentation.includes("user:pass") && !disp.documentation.includes("token=abc"), "credential stripped from the formKey label");
+  assertEquals(graphCarriesRedactedSecrets(credForm), true);
+  // An ordinary opaque form id is shown verbatim and is fully digest-represented.
+  const plainForm = { name: "n", nodes: [{ id: "h", kind: "human", human: { prompt: "approve", formKey: "deploy-approval" } }], edges: [] };
+  assert(nodeDisplay(plainForm.nodes[0]).documentation.includes("Form: deploy-approval"), "opaque form id shown verbatim");
+  assertEquals(graphCarriesRedactedSecrets(plainForm), false);
+});
+
+test("#778 graphCarriesRedactedSecrets: true when a non-redacted match value loses characters to XML sanitization", () => {
+  // A non-secret match value is shown as `String(v)`, which XML-1.0 sanitization strips invalid chars
+  // from at serialization — so `"1\u0001"` and `"1"` would share a digest while the raw probe configs
+  // differ. That sanitization loss must be flagged digest-invisible (issue #778 review).
+  const sanitized = { name: "n", nodes: [{ id: "w", kind: "wait", wait: { kind: "http", target: "https://h/x", match: { version: "1\u0001" } } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(sanitized), true);
+  // The clean twin (no invalid chars) is faithfully represented → not lossy.
+  const clean = { name: "n", nodes: [{ id: "w", kind: "wait", wait: { kind: "http", target: "https://h/x", match: { version: "1" } } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(clean), false);
+  // The two differ in their digest-invisible values, so their dispatch fingerprints diverge.
+  assert(JSON.stringify(digestInvisibleRawValues(sanitized)) !== JSON.stringify(digestInvisibleRawValues(clean)), "sanitization-lossy value contributes a distinct fingerprint");
+});
+
+test("#778 redactFreeText: redacts a URL query/fragment orphaned across a smuggled newline", () => {
+  // The whitespace-delimited URL token stops at the CR/LF, so the `?token=…` tail on the far side must
+  // still be stripped by the newline-spanning belt-and-braces (issue #778 review).
+  const out = redactFreeText("see //user:pa\nss@host/path?token=secret for details");
+  assert(!out.includes("user:pa") && !out.includes("token=secret"), `credential must not survive: ${out}`);
+  // Ordinary prose after a real whitespace break is not over-redacted.
+  const prose = redactFreeText("visit //example.com then\nis this ok? yes");
+  assert(prose.includes("is this ok? yes"), `prose after a whitespace break is intact: ${prose}`);
 });

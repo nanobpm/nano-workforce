@@ -40,8 +40,10 @@ import { CONVERGE_MERGE_TARGET, CONVERGE_TARGET, MERGE_MAIN_TARGET } from "./con
 import { DELIVERY_CONNECTOR_TASK_TYPE } from "./deliveryConnector.ts";
 import {
   analyzeExclusiveTopology,
+  canonicalJson,
   type DeliveryGraphError,
   deliveryNodeFacts,
+  hasXmlInvalidChars,
   resolveDeliveryFrom,
   stripXmlInvalidChars,
   validateDeliveryGraph,
@@ -1021,13 +1023,15 @@ export function redactFreeText(value: string): string {
   return (
     stripXmlInvalidChars(value)
       .replace(/(?:[a-z][a-z0-9+.-]*:)?\/\/[^\s]+/gi, (m) => redactString(m))
-      // Belt-and-braces for a `//user:pass@host` whose userinfo embeds a raw CR/LF: the whitespace-
+      // Belt-and-braces for a URL whose userinfo OR query/fragment embeds a raw CR/LF: the whitespace-
       // delimited `//[^\s]+` token above STOPS at the line break, so `redactString` never sees the
-      // `…@host` tail and the credential survives into `<bpmn:documentation>` (XML preserves line
-      // breaks). Re-scan the whole string for a `//…@` userinfo that may span newlines. Space/tab still
-      // bound it, so an ordinary prose `email admin@corp` sitting after an unrelated `//` is NOT
-      // over-redacted (issue #778 review — same class as the readiness `redactString` userinfo fix).
-      .replace(/\/\/[^/@ \t]*@/g, "//***@")
+      // `…@host` userinfo or the `?token=…`/`#frag` tail on the far side of the newline and the
+      // credential survives into `<bpmn:documentation>` (XML preserves line breaks). Re-scan each `//…`
+      // authority up to the next SPACE/TAB (newlines included) and run the SAME `redactString` over it,
+      // so BOTH a newline-spanning userinfo AND a newline-orphaned query/fragment are stripped. Space/tab
+      // still bounds the token, so ordinary prose after a real whitespace break is not over-redacted
+      // (issue #778 review — extends the userinfo-only fix to the query/fragment tail).
+      .replace(/\/\/[^ \t]*/g, (m) => redactString(m))
   );
 }
 
@@ -1077,7 +1081,16 @@ function describeProbeMatch(match: Extract<DeliveryNode, { kind: "wait" }>["wait
 export function nodeDisplay(node: DeliveryNode): { name: string; documentation: string } {
   const id = node.id;
   const emitsLabel = normaliseEmits(node)
-    .map((e) => `${e.name} (${e.type})`)
+    // Include a display-safe (URL-credential-redacted) `description`: the runtime `appendPrompt`
+    // (`renderEmitContract`) embeds each fact's `description`, so two graphs differing ONLY in an emit
+    // description dispatch DIFFERENT instructions — omitting it here would collapse them to one
+    // `semanticBpmn`/digest and let keyless dispatch reuse the wrong prompt. A credential-bearing
+    // description is redacted (and additionally flagged lossy by {@link graphCarriesRedactedSecrets})
+    // (issue #778 review). */
+    .map((e) => {
+      const desc = redactFreeText(trimmedOrEmpty(e.description));
+      return `${e.name} (${e.type})${desc ? ` — ${desc}` : ""}`;
+    })
     .join(", ");
   const withId = (label: string): string => `${label} · ${id}`;
   switch (node.kind) {
@@ -1137,7 +1150,7 @@ export function nodeDisplay(node: DeliveryNode): { name: string; documentation: 
       const doc: string[] = [];
       const prompt = trimmedOrEmpty(h?.prompt);
       doc.push(prompt ? `Prompt: ${redactFreeText(prompt)}` : "Human decision step");
-      if (trimmedOrEmpty(h?.formKey)) doc.push(`Form: ${trimmedOrEmpty(h?.formKey)}`);
+      if (trimmedOrEmpty(h?.formKey)) doc.push(`Form: ${redactConnectorValue(trimmedOrEmpty(h?.formKey))}`);
       if (emitsLabel) doc.push(`Emits: ${emitsLabel}`);
       return { name: withId(base), documentation: doc.join("\n") };
     }
@@ -1146,73 +1159,108 @@ export function nodeDisplay(node: DeliveryNode): { name: string; documentation: 
   }
 }
 
-/** Whether a graph's raw content carries values that redaction DROPS from `semanticBpmn` (issue #778
- * review — Option C). A delivery graph's identity is content-addressed over the redacted `semanticBpmn`
- * (issue #716), yet credential-bearing raw values survive UNREDACTED into the runtime `nodeInputs`:
- * `user:pass@`/`?query`/`#fragment` URLs (redacted by {@link redactString} in a `target`/`prompt`/
- * `dedupeKey`), a `command`-probe `target` (shown only as a fixed `<redacted>` placeholder), the
- * free-form `verifyCommand`/`bodyIncludes`/`stdoutIncludes` match secrets (also `<redacted>`), and the
- * free-form connector `payload` (only its `pr` key is ever surfaced). Two graphs differing ONLY in such
- * a redacted-away value compile to IDENTICAL `semanticBpmn` → identical digest, so the digest is NOT a
- * faithful fingerprint for them. This predicate flags that lossy case so a dispatch can REQUIRE an
- * explicit `idempotencyKey` to disambiguate credential-differing graphs (the decided Option C), instead
- * of silently collapsing the second onto the first's still-running instance. A graph whose display
- * fields are all fully represented in `semanticBpmn` (redaction is a no-op everywhere) returns `false` —
- * its digest is a complete identity and no key is required. Deterministic; reuses the SAME redaction
- * helpers `nodeDisplay` renders with, so the "carries a secret" set can never drift from what is
- * actually stripped. */
-export function graphCarriesRedactedSecrets(graph: DeliveryGraph): boolean {
-  // `raw` is lossy when it is a present string that does NOT match the EXACT `display` form
-  // `nodeDisplay` embeds in `semanticBpmn` — so the comparison must apply the SAME normalisation
-  // (`trimmedOrEmpty`/redaction) the display does, or a difference the display collapses (redaction OR
-  // trimmed whitespace) escapes the check while still reaching the runtime raw.
-  const lossy = (raw: string | undefined | null, display: string): boolean => typeof raw === "string" && raw !== display;
+/** The raw field values a graph carries that the redacted `semanticBpmn` DROPS or COLLAPSES — i.e. the
+ * content that reaches the runtime `nodeInputs` but is NOT faithfully represented in the digest, so two
+ * graphs differing ONLY here compile to IDENTICAL `semanticBpmn` → identical digest (issue #778 review,
+ * issue #716 content-address). Each entry is namespaced `nodeId\0field\0rawValue` so it also captures
+ * WHICH node/field differs. This ONE traversal is the single source of truth for BOTH:
+ *   • {@link graphCarriesRedactedSecrets} — non-empty ⇒ the digest is not a faithful identity, so a
+ *     keyless dispatch must be disambiguated (Option C), and
+ *   • the dispatch run-key ({@link stableProposalRunKey}) — which fingerprints this list ALONGSIDE the
+ *     semantic digest, so credential-differing graphs get distinct run-keys while the digest collapses
+ *     every compiler-normalised default/reorder (no per-field enumeration to drift).
+ * Digest-invisible content is: `user:pass@`/`?query`/`#fragment` URL credentials redacted from a
+ * `target`/`prompt`/`dedupeKey`/`formKey`/emit-`description`; a `command`-probe `target`, the free-form
+ * `verifyCommand`/`bodyIncludes`/`stdoutIncludes` match secrets (all shown only as `<redacted>`); a
+ * non-redacted `match` value whose raw form loses characters to XML-1.0 sanitisation
+ * ({@link hasXmlInvalidChars}) at serialisation; and the free-form connector `payload` (only a safe
+ * `pr` string is surfaced). Deterministic; reuses the SAME redaction helpers `nodeDisplay` renders
+ * with, so the set can never drift from what is actually stripped. */
+export function digestInvisibleRawValues(graph: DeliveryGraph): string[] {
+  const out: string[] = [];
+  // `raw` is digest-invisible when a present string does NOT match the EXACT `display` form `nodeDisplay`
+  // embeds in `semanticBpmn` — apply the SAME normalisation (`trimmedOrEmpty`/redaction) the display does,
+  // or a difference the display collapses (redaction OR trimmed whitespace) escapes while still reaching
+  // the runtime raw.
+  const push = (nodeId: string, field: string, raw: string | undefined | null, display: string): void => {
+    if (typeof raw === "string" && raw !== display) out.push(`${nodeId}\u0000${field}\u0000${raw}`);
+  };
   for (const node of graph.nodes) {
+    const id = node.id;
+    // Emit `description` is embedded in `emitsLabel` as `redactFreeText(trimmedOrEmpty(description))`
+    // (see `nodeDisplay`) AND in the runtime `appendPrompt` (`renderEmitContract`) raw, so a
+    // credential-bearing description whose redaction drops content is digest-invisible.
+    for (const fact of normaliseEmits(node)) {
+      push(id, `emit.${fact.name}.description`, fact.description, redactFreeText(trimmedOrEmpty(fact.description)));
+    }
     switch (node.kind) {
       case "agent":
         // Display embeds `redactFreeText(trimmedOrEmpty(prompt))`; the RAW, untrimmed prompt reaches the
-        // runtime (`buildNodeInput`), so a leading/trailing-whitespace-only difference is lossy too.
-        if (lossy(node.agent.prompt, redactFreeText(trimmedOrEmpty(node.agent.prompt)))) return true;
+        // runtime (`buildNodeInput`), so a leading/trailing-whitespace-only difference is invisible too.
+        push(id, "agent.prompt", node.agent.prompt, redactFreeText(trimmedOrEmpty(node.agent.prompt)));
         break;
       case "human":
-        if (lossy(node.human?.prompt, redactFreeText(trimmedOrEmpty(node.human?.prompt)))) return true;
+        push(id, "human.prompt", node.human?.prompt, redactFreeText(trimmedOrEmpty(node.human?.prompt)));
+        push(id, "human.formKey", node.human?.formKey, redactConnectorValue(trimmedOrEmpty(node.human?.formKey)));
         break;
       case "connector": {
         const c = node.connector;
-        if (lossy(c.target, redactConnectorValue(c.target))) return true;
-        // `dedupeKey` is displayed as `redactConnectorValue(trimmedOrEmpty(dedupeKey))` while the raw,
-        // untrimmed value reaches the runtime — lossy on redaction OR on trimmed whitespace.
-        if (lossy(c.dedupeKey, redactConnectorValue(trimmedOrEmpty(c.dedupeKey)))) return true;
+        push(id, "connector.target", c.target, redactConnectorValue(c.target));
+        // `dedupeKey` displays as `redactConnectorValue(trimmedOrEmpty(dedupeKey))` while the raw,
+        // untrimmed value reaches the runtime — invisible on redaction OR on trimmed whitespace.
+        push(id, "connector.dedupeKey", c.dedupeKey, redactConnectorValue(trimmedOrEmpty(c.dedupeKey)));
         // The free-form connector `payload` survives raw into runtime `nodeInputs`, but `nodeDisplay`
         // surfaces at most a single NON-EMPTY string `payload.pr` (redacted). So the display FAITHFULLY
         // represents the payload ONLY when it is exactly `{ pr: <non-empty string> }` whose redaction is
-        // a no-op; EVERY other shape leaves content in the runtime payload the digest cannot see and is
-        // therefore lossy: (a) a non-plain-object payload (a bare `42`/array — on which `"pr" in payload`
-        // would even THROW, so it MUST be gated before that probe), (b) a present-but-empty object or any
-        // extra key beyond `pr` (never surfaced), (c) an omitted / non-string / empty `pr` (never
-        // rendered), or (d) a string `pr` whose redaction drops content.
+        // a no-op; EVERY other shape leaves content the digest cannot see and is therefore invisible:
+        // (a) a non-plain-object payload (a bare `42`/array — on which `"pr" in payload` would THROW, so
+        // it MUST be gated before that probe), (b) a present-but-empty object or any extra key beyond
+        // `pr`, (c) an omitted / non-string / empty `pr`, or (d) a string `pr` whose redaction drops
+        // content. The whole raw payload (canonicalised so key order is not spuriously distinguishing)
+        // is the disambiguator.
         if (c.payload !== undefined && c.payload !== null) {
-          if (!isRecord(c.payload)) return true;
-          const keys = Object.keys(c.payload);
-          if (keys.length !== 1 || keys[0] !== "pr") return true;
-          const pr = c.payload.pr;
-          if (typeof pr !== "string" || pr === "" || pr !== redactConnectorValue(pr)) return true;
+          let invisible = true;
+          if (isRecord(c.payload)) {
+            const keys = Object.keys(c.payload);
+            const pr = c.payload.pr;
+            invisible = keys.length !== 1 || keys[0] !== "pr" || typeof pr !== "string" || pr === "" || pr !== redactConnectorValue(pr);
+          }
+          if (invisible) out.push(`${id}\u0000connector.payload\u0000${canonicalJson(c.payload)}`);
         }
         break;
       }
       case "wait": {
         const p = node.wait;
-        if (lossy(p.target, redactProbeTargetForDisplay(p))) return true;
-        // `verifyCommand`/`bodyIncludes`/`stdoutIncludes` are shown only as `<redacted>` but survive raw
-        // into the runtime probe config, so their presence is likewise lossy for the digest.
-        if (p.match && Object.entries(p.match).some(([k, v]) => REDACTED_MATCH_FIELDS.has(k) && v !== undefined && v !== null)) return true;
+        push(id, "wait.target", p.target, redactProbeTargetForDisplay(p));
+        if (p.match) {
+          for (const [k, v] of Object.entries(p.match)) {
+            if (v === undefined || v === null) continue;
+            // `verifyCommand`/`bodyIncludes`/`stdoutIncludes` are shown only as `<redacted>`; every other
+            // match value is shown as `String(v)`, which XML-1.0 sanitisation (`escapeXml`) later STRIPS
+            // invalid characters from — so `"1\x01"` and `"1"` share a digest while the raw probe configs
+            // differ. Both cases are digest-invisible; the raw value is the disambiguator.
+            if (REDACTED_MATCH_FIELDS.has(k) || hasXmlInvalidChars(String(v))) {
+              out.push(`${id}\u0000wait.match.${k}\u0000${canonicalJson(v)}`);
+            }
+          }
+        }
         break;
       }
       default:
-        return assertNever(node, "graphCarriesRedactedSecrets");
+        return assertNever(node, "digestInvisibleRawValues");
     }
   }
-  return false;
+  return out;
+}
+
+/** Whether a graph's raw content carries values that redaction/normalisation DROPS from `semanticBpmn`
+ * (issue #778 review — Option C): non-empty {@link digestInvisibleRawValues}. Two graphs differing ONLY
+ * in such a value compile to IDENTICAL `semanticBpmn` → identical digest, so the digest is NOT a faithful
+ * fingerprint for them; a dispatch must then REQUIRE an explicit `idempotencyKey` (or the stable
+ * server-side run-key) to disambiguate, instead of silently collapsing the second onto the first's
+ * still-running instance. `false` ⇒ the digest is a complete identity and no key is required. */
+export function graphCarriesRedactedSecrets(graph: DeliveryGraph): boolean {
+  return digestInvisibleRawValues(graph).length > 0;
 }
 
 /** Render one node as an EMBEDDED `bpmn:subProcess` — the engine-native delegation unit (Decision 2).

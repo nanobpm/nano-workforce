@@ -12,8 +12,8 @@
 
 import { createHash } from "node:crypto";
 import { isPlausibleBranchName } from "../app/baseBranch.ts";
-import { validateDeliveryGraph } from "../app/deliveryGraph.ts";
-import { graphCarriesRedactedSecrets } from "../app/deliveryGraphCompiler.ts";
+import { canonicalJson, validateDeliveryGraph } from "../app/deliveryGraph.ts";
+import { digestInvisibleRawValues, graphCarriesRedactedSecrets } from "../app/deliveryGraphCompiler.ts";
 import { dispatchDeliveryGraphRun } from "../app/deliveryGraphDispatch.ts";
 import { getStagedProposal, markProposalDispatched, markProposalExpired } from "../app/deliveryGraphProposals.ts";
 import { unresolvedAgentRepoNodes } from "../app/deliveryRunner.ts";
@@ -30,89 +30,26 @@ function truncateForEcho(value: string): string {
   return value.length > MAX_ECHO_LEN ? `${value.slice(0, MAX_ECHO_LEN)}… (${value.length} chars)` : value;
 }
 
-/** A DETERMINISTIC canonical JSON serialization: object keys sorted recursively while ARRAY order is
- * preserved (object key order and insignificant whitespace are not semantic). Top-level node/edge
- * order — which the compiler DOES normalise away — is handled separately by {@link orderGraphArraysForKey}
- * before this runs; every other array (a node's `emits`, a `payload` list) keeps its authored order.
- * Used to content-address the identity of a parsed graph so two byte-different-but-equivalent encodings
- * (reordered keys, reflowed whitespace) hash the same, while any genuine value difference (e.g. a
- * credential) still diverges. */
-function canonicalJson(value: unknown): string {
-  if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "null";
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
-  return `{${Object.entries(value)
-    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-    .map(([k, v]) => `${JSON.stringify(k)}:${canonicalJson(v)}`)
-    .join(",")}}`;
-}
-
-/** Read a string property off an unknown value without a type assertion (biome bans `as`), returning
- * `""` when the value is not a record or the property is absent/non-string. */
-function stringProp(value: unknown, key: string): string {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) return "";
-  const v = Reflect.get(value, key);
-  return typeof v === "string" ? v : "";
-}
-
-/** A deterministic, INPUT-ORDER-INVARIANT sort key for one raw graph edge — its `(to, from, when,
- * equals, default)` tuple joined on a NUL that cannot appear in an id. Mirrors the invariance
- * `compileDeliveryGraphSemantic` gives resolved edges (it sorts by to, fromNode, fromFact, when,
- * equals), so two edge lists differing ONLY in order collapse to the same key. */
-function edgeSortKey(edge: unknown): string {
-  const equals = edge !== null && typeof edge === "object" ? JSON.stringify(Reflect.get(edge, "equals")) ?? "null" : "null";
-  const def = edge !== null && typeof edge === "object" && Reflect.get(edge, "default") === true ? "1" : "0";
-  return [stringProp(edge, "to"), stringProp(edge, "from"), stringProp(edge, "when"), equals, def].join("\u0000");
-}
-
-/** Reorder ONLY the top-level `nodes` (by `id`) and `edges` (by {@link edgeSortKey}) arrays the SAME
- * way {@link compileDeliveryGraphSemantic} does before it derives the redacted `semanticBpmn` the
- * content-address digest is taken over. A re-stage that merely reorders nodes/edges shares that
- * semantic digest and OVERWRITES `proposal.graph`, so the dispatch run key must be invariant to that
- * reorder too — else the reordered re-stage mints a NEW `staged-*` key and launches a duplicate run
- * instead of short-circuiting as `alreadyRunning` (issue #778 review). Every OTHER array (e.g. a
- * node's `emits`, or a `payload` list) keeps its authored order, which `canonicalJson` preserves — the
- * compiler reorders only these two top-level lists. A non-object graph, or one with absent/non-array
- * `nodes`/`edges`, passes through untouched. */
-function orderGraphArraysForKey(graph: unknown): unknown {
-  if (graph === null || typeof graph !== "object" || Array.isArray(graph)) return graph;
-  const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(graph)) {
-    if (k === "nodes" && Array.isArray(v)) {
-      out[k] = [...v].sort((a, b) => {
-        const ai = stringProp(a, "id");
-        const bi = stringProp(b, "id");
-        return ai < bi ? -1 : ai > bi ? 1 : 0;
-      });
-    } else if (k === "edges" && Array.isArray(v)) {
-      out[k] = [...v].sort((a, b) => {
-        const ak = edgeSortKey(a);
-        const bk = edgeSortKey(b);
-        return ak < bk ? -1 : ak > bk ? 1 : 0;
-      });
-    } else {
-      out[k] = v;
-    }
-  }
-  return out;
-}
-
 /** A STABLE, server-side dispatch run key for a secret-bearing staged proposal (issue #778, Option C).
  * The graph's identity is content-addressed over the REDACTED `semanticBpmn` digest, so two graphs
- * differing ONLY in a redacted-away credential share one digest — a keyless dispatch would collapse the
- * second onto the first's still-running instance. The dispatch core therefore REQUIRES an explicit key
- * for such a graph, but the cockpit's staged-proposals UI posts no idempotency-key field. The operator
- * clicking Dispatch on THIS specific stored proposal is unambiguous, so we content-address the
- * proposal's PARSED graph via {@link canonicalJson}: deterministic per proposal (a double-click /
- * re-dispatch still short-circuits as `alreadyRunning`), yet DISTINCT for a credential-differing
- * proposal — exactly the disambiguation Option C wants, without a UI change. Hashing the CANONICAL form
- * (not the raw stored bytes) means a re-stage of the SAME graph with reordered object keys or reflowed
- * whitespace — which shares the semantic digest and overwrites `proposal.graph` — still yields the SAME
- * key, so it short-circuits instead of launching a duplicate. A re-stage that reorders the top-level
- * `nodes`/`edges` likewise shares the semantic digest (the compiler sorts them), so those two arrays are
- * order-normalised via {@link orderGraphArraysForKey} first — else a reordered re-stage would mint a new
- * key and double-launch (issue #778 review). Prefixed so it is self-describing in run listings. */
-export function stableProposalRunKey(graph: unknown): string {
-  return `staged-${createHash("sha256").update(canonicalJson(orderGraphArraysForKey(graph))).digest("hex").slice(0, 16)}`;
+ * differing ONLY in a redacted-away credential (or other {@link digestInvisibleRawValues} content) share
+ * one digest — a keyless dispatch would collapse the second onto the first's still-running instance. The
+ * dispatch core therefore REQUIRES an explicit key for such a graph, but the cockpit's staged-proposals
+ * UI posts no idempotency-key field. The operator clicking Dispatch on THIS specific stored proposal is
+ * unambiguous, so we derive a key from TWO parts:
+ *   • the proposal's semantic `digest` — which the compiler already normalises: it collapses every
+ *     omitted-vs-default field (`edges`/`emits` → `[]`, a `false` boolean vs an absent one, …) and any
+ *     top-level node/edge REORDER, so a re-stage of the same logical graph in a different encoding — which
+ *     shares the digest and OVERWRITES `proposal.graph` — yields the SAME key and short-circuits as
+ *     `alreadyRunning` instead of double-launching (issue #778 review, thread on omitted-vs-empty), and
+ *   • a fingerprint of {@link digestInvisibleRawValues} — the exact raw content the digest CANNOT see —
+ *     so a credential-differing proposal (identical digest) gets a DISTINCT key.
+ * Deriving both parts from the digest + the shared invisible-values traversal means the key needs NO
+ * per-field enumeration of the compiler's defaults (which would drift), while still disambiguating on
+ * every secret the digest drops. Prefixed so it is self-describing in run listings. */
+export function stableProposalRunKey(digest: string, graph: DeliveryGraph): string {
+  const fingerprint = canonicalJson(digestInvisibleRawValues(graph));
+  return `staged-${createHash("sha256").update(`${digest}\u0000${fingerprint}`).digest("hex").slice(0, 16)}`;
 }
 
 /** Door-level cap on a duration override, mirroring the `maxLength: 64` on these fields in `openapi.yaml`.
@@ -296,7 +233,7 @@ export default defineOperation("dispatchDeliveryGraph", async ({ body }, app) =>
     if (graphErrors.length === 0) {
       // biome-ignore lint/plugin: validated staged graph narrowed to its contract after validateDeliveryGraph
       const typedGraph = graph as DeliveryGraph;
-      if (graphCarriesRedactedSecrets(typedGraph)) dispatchRunKey = stableProposalRunKey(typedGraph);
+      if (graphCarriesRedactedSecrets(typedGraph)) dispatchRunKey = stableProposalRunKey(digest, typedGraph);
     }
   }
 

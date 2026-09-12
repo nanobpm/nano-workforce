@@ -1301,3 +1301,18 @@ export function resolveDeliveryFrom(
   const { nodeId, fact } = resolveFrom(from, nodeFacts);
   return fact !== undefined ? { nodeId, fact } : { nodeId };
 }
+
+/** A DETERMINISTIC canonical JSON serialization: object keys sorted recursively while ARRAY order is
+ * preserved (object key order and insignificant whitespace are not semantic). Two byte-different-but-
+ * equivalent encodings (reordered keys, reflowed whitespace) serialize identically, while any genuine
+ * value difference still diverges. Shared single source of truth (issue #778 review): the dispatch
+ * run-key hashes it and the compiler's `payload` disambiguator canonicalises with it, so neither can
+ * drift from the other. */
+export function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "null";
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  return `{${Object.entries(value)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([k, v]) => `${JSON.stringify(k)}:${canonicalJson(v)}`)
+    .join(",")}}`;
+}
