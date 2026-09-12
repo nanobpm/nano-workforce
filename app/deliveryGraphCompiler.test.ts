@@ -13,7 +13,7 @@
 //   • humanNodes[] and sideEffects[] extraction.
 import { test } from "node:test";
 import { assert, assertEquals } from "#test-assert";
-import { compileDeliveryGraph } from "./deliveryGraphCompiler.ts";
+import { compileDeliveryGraph, nodeDisplay } from "./deliveryGraphCompiler.ts";
 
 /** Compile and assert success, returning the narrowed ok-result. */
 async function compileOk(graph: unknown) {
@@ -279,9 +279,10 @@ const CAP_GATE = {
 };
 
 /** The subProcess element id the compiler assigned to a node (elements are positional `n<k>`, not the
- * node id). Located via the subProcess `name="<kind>: <nodeId>"`. */
+ * node id). Located via the subProcess `name="… · <nodeId>"` — the node id is retained as a stable
+ * ` · ` suffix on the descriptive label (issue #778). */
 function elementForNode(bpmn: string, nodeId: string): string {
-  const m = bpmn.match(new RegExp(`<bpmn:subProcess id="([^"]+)" name="[^"]*: ${nodeId}"`));
+  const m = bpmn.match(new RegExp(`<bpmn:subProcess id="([^"]+)" name="[^"]* · ${nodeId}"`));
   assert(m, `a subProcess for node ${nodeId} exists`);
   return m![1];
 }
@@ -873,4 +874,88 @@ test("#731 routing-only emits stay optional: a fact referenced ONLY by an edge `
   assert(esc.includes('="none"') && esc.includes('target="emitMode"'), "a status-only contract escalation keeps its emit field hidden");
   // The guarded split that routes `result` downstream is untouched (default branch preserved).
   assert(r.bpmn.includes('=classify_result = "breaking"') || r.bpmn.includes(`${el}_result = "breaking"`), "the routing guard on the emitted fact is preserved");
+});
+
+// ---------------------------------------------------------------------------------------------------
+// Issue #778: descriptive compiled node names + `<bpmn:documentation>`. Every compiled node renders a
+// human-readable name derived from its typed config (not the bare id/kind), with the node id retained
+// as a ` · <id>` suffix, and carries a `<bpmn:documentation>` describing what it does. ONE `nodeDisplay`
+// helper is the single source for both the label and the documentation (derivation over duplication).
+
+test("#778 nodeDisplay derives a descriptive label + documentation per kind, with the node id as a suffix", () => {
+  const agent = nodeDisplay({
+    id: "impl",
+    kind: "agent",
+    agent: { jobType: "senior:feature", prompt: "Implement the change and open a PR.", converge: true, merge: true, repository: "o/r", baseBranch: "main" },
+    emits: [{ name: "pr", type: "pr" }],
+  });
+  assertEquals(agent.name, "Implement the change and open a PR. & converge+merge · impl");
+  assert(agent.documentation.includes("Agent job: senior:feature"), "agent doc names the job type");
+  assert(agent.documentation.includes("Target: o/r@main"), "agent doc names the repo@branch");
+  assert(agent.documentation.includes("Policy: converge+merge"), "agent doc names the land policy");
+  assert(agent.documentation.includes("Emits: pr (pr)"), "agent doc lists emits");
+
+  const connector = nodeDisplay({
+    id: "land",
+    kind: "connector",
+    connector: { target: "converge-merge", dedupeKey: "land-1", payload: { pr: "o/r#42" } },
+  });
+  assertEquals(connector.name, "Converge & merge PR · land");
+  assert(connector.documentation.includes("Connector target: converge-merge"), "connector doc names the raw target");
+  assert(connector.documentation.includes("Dedupe key: land-1"), "connector doc names the dedupe key");
+  assert(connector.documentation.includes("PR: o/r#42"), "connector doc names the bound PR");
+
+  const wait = nodeDisplay({
+    id: "gate",
+    kind: "wait",
+    wait: { kind: "github-check", target: "o/r@main", match: { conclusion: "success" }, poll: { everyMs: 60000, timeoutMs: 3600000 } },
+  });
+  assertEquals(wait.name, "Wait: github-check o/r@main · gate");
+  assert(wait.documentation.includes("Readiness probe: github-check"), "wait doc names the probe kind");
+  assert(wait.documentation.includes("Match: conclusion=success"), "wait doc names the match criteria");
+  assert(wait.documentation.includes("Poll: every 60000ms, timeout 3600000ms"), "wait doc names the poll budget");
+
+  const human = nodeDisplay({ id: "otp", kind: "human", human: { prompt: "Run the manual OTP publish", formKey: "publish-form" } });
+  assertEquals(human.name, "Run the manual OTP publish · otp");
+  assert(human.documentation.includes("Form: publish-form"), "human doc names the attached form");
+
+  // Degenerate fallbacks: an agent with no prompt falls back to the job type; a bare human to a default.
+  assertEquals(nodeDisplay({ id: "a", kind: "agent", agent: { jobType: "j" } }).name, "j · a");
+  assertEquals(nodeDisplay({ id: "h", kind: "human" }).name, "Human decision · h");
+});
+
+test("#778 the compiled subProcess carries the descriptive name + a `<bpmn:documentation>` first child", async () => {
+  const graph = {
+    name: "descriptive",
+    nodes: [
+      { id: "impl", kind: "agent", agent: { jobType: "senior:feature", prompt: "Implement #567 and open a PR.", converge: true, merge: true }, emits: [{ name: "pr", type: "pr" }] },
+      { id: "land", kind: "connector", connector: { target: "converge-merge", dedupeKey: "land-1", payload: { pr: "impl.pr" } } },
+      { id: "gate", kind: "wait", wait: { kind: "pr", target: "impl.pr", match: { prState: "merged" } } },
+    ],
+    edges: [
+      { from: "impl.pr", to: "land" },
+      { from: "land", to: "gate" },
+      { from: "impl.pr", to: "gate" },
+    ],
+  };
+  const r = await compileOk(graph);
+  const el = elementForNode(r.bpmn, "impl");
+  // The subProcess wrapper is named from the typed config (not `agent: impl`) and the id is a suffix.
+  assert(
+    r.bpmn.includes(`<bpmn:subProcess id="${el}" name="Implement #567 and open a PR. &amp; converge+merge · impl">`),
+    "the agent subProcess wrapper carries the descriptive name",
+  );
+  // The bare `agent: impl` / `wait: gate` naming is gone.
+  assert(!r.bpmn.includes('name="agent: impl"'), "no bare kind:id subProcess name remains");
+  // `<bpmn:documentation>` is the FIRST child of the subProcess (before `<bpmn:incoming>`), and describes it.
+  const wrapperOpen = r.bpmn.indexOf(`<bpmn:subProcess id="${el}" `);
+  const beforeFlowRefs = r.bpmn.slice(wrapperOpen, r.bpmn.indexOf("<bpmn:incoming>", wrapperOpen));
+  assert(beforeFlowRefs.includes("<bpmn:documentation>"), "the documentation precedes the flow refs (first child)");
+  assert(!beforeFlowRefs.includes("<bpmn:extensionElements>"), "the documentation precedes extensionElements");
+  assert(r.bpmn.includes("<bpmn:documentation>Agent job: senior:feature"), "the documentation describes the node");
+  // The inner service task is named from the SAME nodeDisplay source (not the bare node id).
+  assert(r.bpmn.includes(`<bpmn:serviceTask id="${el}_task" name="Implement #567 and open a PR. &amp; converge+merge · impl">`), "the inner task shares the descriptive name");
+  // Every node kind carries a documentation child.
+  const waitEl = elementForNode(r.bpmn, "gate");
+  assert(r.bpmn.includes(`<bpmn:subProcess id="${waitEl}" name="Wait: pr impl.pr · gate">`), "the wait wrapper carries the descriptive name");
 });

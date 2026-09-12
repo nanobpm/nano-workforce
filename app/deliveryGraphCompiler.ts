@@ -36,6 +36,7 @@ import type {
   ResolvedDeliveryNode,
 } from "../nano-generated/api-io.d.ts";
 import { TRANSCRIPT_URL_BASE_VAR, TRANSCRIPT_URL_VAR } from "./agentic/transcript-url.ts";
+import { CONVERGE_MERGE_TARGET, CONVERGE_TARGET, MERGE_MAIN_TARGET } from "./convergeTargets.ts";
 import { DELIVERY_CONNECTOR_TASK_TYPE } from "./deliveryConnector.ts";
 import {
   analyzeExclusiveTopology,
@@ -886,6 +887,115 @@ function renderBpmn(
   return `${lines.filter((l) => l.length > 0).join("\n")}\n`;
 }
 
+/** The first non-empty line of a (possibly multi-line) string, trimmed and length-capped for use as a
+ * concise element label. Returns `""` for a blank/undefined input; a line longer than `cap` is
+ * truncated with an ellipsis. Deterministic. */
+function firstLine(value: string | undefined | null, cap = 72): string {
+  if (typeof value !== "string") return "";
+  const line = value.split(/\r?\n/).map((l) => l.trim()).find((l) => l.length > 0) ?? "";
+  return line.length > cap ? `${line.slice(0, cap - 1).trimEnd()}…` : line;
+}
+
+/** Trim an optional value to a non-blank string, or `""` when absent/blank. */
+function trimmedOrEmpty(value: unknown): string {
+  return typeof value === "string" && value.trim() !== "" ? value.trim() : "";
+}
+
+/** A human-readable label for a connector node's `target`. The converge-enrollment vocabulary
+ * (`convergeTargets.ts`) maps to intent-revealing phrases; any other (forward-declared) target is shown
+ * verbatim so nothing is lost. Deterministic. */
+function humanizeConnectorTarget(target: string): string {
+  switch (target) {
+    case CONVERGE_TARGET:
+      return "Converge PR (review only)";
+    case CONVERGE_MERGE_TARGET:
+      return "Converge & merge PR";
+    case MERGE_MAIN_TARGET:
+      return "Merge to main";
+    default:
+      return `Connector: ${target}`;
+  }
+}
+
+/** Render a probe's `match` predicate as a compact `k=v, k=v` description (declared fields only). */
+function describeProbeMatch(match: Extract<DeliveryNode, { kind: "wait" }>["wait"]["match"]): string {
+  if (match === undefined || match === null) return "";
+  return Object.entries(match)
+    .filter(([, v]) => v !== undefined && v !== null)
+    .map(([k, v]) => `${k}=${String(v)}`)
+    .join(", ");
+}
+
+/** The SINGLE source of a compiled node's human-readable display (issue #778): a concise `name` label
+ * derived from the node's typed config — with the node `id` retained as a stable ` · <id>` suffix for
+ * correlation (edges/logs/DI reference ids) — plus a longer `documentation` string rendered as the
+ * flow element's `<bpmn:documentation>` child. BOTH the subProcess wrapper and its inner task read
+ * their name from here (they must NOT compute names independently — derivation over duplication).
+ * Deterministic and total over the closed kind union. */
+export function nodeDisplay(node: DeliveryNode): { name: string; documentation: string } {
+  const id = node.id;
+  const emitsLabel = normaliseEmits(node)
+    .map((e) => `${e.name} (${e.type})`)
+    .join(", ");
+  const withId = (label: string): string => `${label} · ${id}`;
+  switch (node.kind) {
+    case "agent": {
+      const a = node.agent;
+      const policy = a.merge ? "converge+merge" : a.converge ? "converge" : "";
+      const base = firstLine(a.prompt) || a.jobType;
+      const label = policy ? `${base} & ${policy}` : base;
+      const doc: string[] = [`Agent job: ${a.jobType}`];
+      const repo = trimmedOrEmpty(a.repository);
+      const branch = trimmedOrEmpty(a.baseBranch);
+      if (repo || branch) doc.push(`Target: ${repo || "(run repo)"}${branch ? `@${branch}` : ""}`);
+      if (policy) doc.push(`Policy: ${policy}`);
+      if (emitsLabel) doc.push(`Emits: ${emitsLabel}`);
+      if (trimmedOrEmpty(a.timeout)) doc.push(`Timeout: ${trimmedOrEmpty(a.timeout)}`);
+      const prompt = trimmedOrEmpty(a.prompt);
+      if (prompt) doc.push(`Prompt: ${prompt}`);
+      return { name: withId(label), documentation: doc.join("\n") };
+    }
+    case "connector": {
+      const c = node.connector;
+      const doc: string[] = [`Connector target: ${c.target}`];
+      if (trimmedOrEmpty(c.dedupeKey)) doc.push(`Dedupe key: ${trimmedOrEmpty(c.dedupeKey)}`);
+      const boundPr = c.payload && typeof c.payload.pr === "string" ? c.payload.pr : "";
+      if (boundPr) doc.push(`PR: ${boundPr}`);
+      if (emitsLabel) doc.push(`Emits: ${emitsLabel}`);
+      if (trimmedOrEmpty(c.timeout)) doc.push(`Timeout: ${trimmedOrEmpty(c.timeout)}`);
+      return { name: withId(humanizeConnectorTarget(c.target)), documentation: doc.join("\n") };
+    }
+    case "wait": {
+      const p = node.wait;
+      const doc: string[] = [`Readiness probe: ${p.kind}`, `Target: ${p.target}`];
+      const match = describeProbeMatch(p.match);
+      if (match) doc.push(`Match: ${match}`);
+      if (trimmedOrEmpty(p.onTimeout)) doc.push(`On timeout: ${trimmedOrEmpty(p.onTimeout)}`);
+      if (p.poll) {
+        const budget: string[] = [];
+        if (typeof p.poll.everyMs === "number") budget.push(`every ${p.poll.everyMs}ms`);
+        if (typeof p.poll.timeoutMs === "number") budget.push(`timeout ${p.poll.timeoutMs}ms`);
+        if (trimmedOrEmpty(p.poll.backoff)) budget.push(`${trimmedOrEmpty(p.poll.backoff)} backoff`);
+        if (budget.length > 0) doc.push(`Poll: ${budget.join(", ")}`);
+      }
+      if (emitsLabel) doc.push(`Emits: ${emitsLabel}`);
+      return { name: withId(`Wait: ${p.kind} ${p.target}`), documentation: doc.join("\n") };
+    }
+    case "human": {
+      const h = node.human;
+      const base = firstLine(h?.prompt) || "Human decision";
+      const doc: string[] = [];
+      const prompt = trimmedOrEmpty(h?.prompt);
+      doc.push(prompt ? `Prompt: ${prompt}` : "Human decision step");
+      if (trimmedOrEmpty(h?.formKey)) doc.push(`Form: ${trimmedOrEmpty(h?.formKey)}`);
+      if (emitsLabel) doc.push(`Emits: ${emitsLabel}`);
+      return { name: withId(base), documentation: doc.join("\n") };
+    }
+    default:
+      return assertNever(node, "nodeDisplay");
+  }
+}
+
 /** Render one node as an EMBEDDED `bpmn:subProcess` — the engine-native delegation unit (Decision 2).
  * Call activities are a no-op on the pinned WASM engine (the child is never instantiated), so — like
  * `plan-fanout`'s `readiness-preflight` — every node inlines a subProcess that shares the parent
@@ -904,15 +1014,25 @@ function renderNodeElement(
   requiredEmits: ReadonlySet<string>,
 ): string {
   const el = w.element;
-  const name = escapeXml(`${w.node.kind}: ${w.node.id}`);
+  const display = nodeDisplay(w.node);
+  const name = escapeXml(display.name);
   const flowRefs = [
     ...incoming.map((id) => `      <bpmn:incoming>${id}</bpmn:incoming>`),
     ...outgoing.map((id) => `      <bpmn:outgoing>${id}</bpmn:outgoing>`),
   ];
   const io = ioMappingLines(w, boundInputs);
-  const inner = innerBodyLines(w, requiredEmits);
+  const inner = innerBodyLines(w, requiredEmits, display.name);
+  // `<bpmn:documentation>` is the BPMN-native per-node description (a tooltip/details panel in the
+  // explorer/modeler). It is a SEMANTIC child, so it survives the `layoutBpmn` DI graft untouched
+  // (unlike a hand-edited DI block). Schema-wise it must be the flow element's FIRST child (before
+  // `<extensionElements>`/`<incoming>`), so it slots ahead of the flow refs and io. Omitted when empty.
+  const documentation =
+    display.documentation.trim() !== ""
+      ? [`      <bpmn:documentation>${escapeXml(display.documentation)}</bpmn:documentation>`]
+      : [];
   const lines = [
     `    <bpmn:subProcess id="${el}" name="${name}">`,
+    ...documentation,
     ...flowRefs,
     "      <bpmn:extensionElements>",
     ...io,
@@ -1032,7 +1152,7 @@ function ioMappingLines(w: NodeWiring, boundInputs: readonly BoundInput[]): stri
  * the S3 scheduled user-task + generic form + SLA. Each is a single-entry / single-exit subgraph with
  * a bounded timeout that escalates onto a human-completable user task (or, for `human`, records an
  * escalated outcome). */
-function innerBodyLines(w: NodeWiring, requiredEmits: ReadonlySet<string>): string[] {
+function innerBodyLines(w: NodeWiring, requiredEmits: ReadonlySet<string>, displayName: string): string[] {
   const el = w.element;
   const node = w.node;
   switch (node.kind) {
@@ -1042,10 +1162,10 @@ function innerBodyLines(w: NodeWiring, requiredEmits: ReadonlySet<string>): stri
       // as a required data dependency. A broken producer (returns `in_progress`, or omits a required
       // emit) escalates AT this node instead of threading an incomplete result onward.
       const contractGate = { requiredEmits: normaliseEmits(node).filter((f) => requiredEmits.has(f.name)) };
-      return serviceBodyLines(el, node.id, attr("type", node.agent.jobType), [], node.agent.jobType, contractGate, agentRepoSpecHeaderLines(node));
+      return serviceBodyLines(el, node.id, attr("type", node.agent.jobType), [], node.agent.jobType, contractGate, agentRepoSpecHeaderLines(node), displayName);
     }
     case "connector":
-      return serviceBodyLines(el, node.id, `type="${DELEGATE_TASK_TYPE.connector}"`, [], `connector → ${node.connector.target}`);
+      return serviceBodyLines(el, node.id, `type="${DELEGATE_TASK_TYPE.connector}"`, [], `connector → ${node.connector.target}`, undefined, [], displayName);
     case "wait":
       return waitBodyLines(el, node);
     case "human":
@@ -1125,6 +1245,7 @@ function serviceBodyLines(
   descriptor: string,
   contractGate?: { requiredEmits: readonly DeliveryFact[] },
   taskHeaders: readonly string[] = [],
+  taskName: string = nodeId,
 ): string[] {
   const esc = escalationTaskElement(el);
   const taskExt = [
@@ -1148,7 +1269,7 @@ function serviceBodyLines(
   );
   const head = [
     `      <bpmn:startEvent id="${el}_start"><bpmn:outgoing>${el}_i0</bpmn:outgoing></bpmn:startEvent>`,
-    `      <bpmn:serviceTask id="${el}_task" name="${escapeXml(nodeId)}">`,
+    `      <bpmn:serviceTask id="${el}_task" name="${escapeXml(taskName)}">`,
     ...taskExt,
     `        <bpmn:incoming>${el}_i0</bpmn:incoming>`,
     `        <bpmn:outgoing>${el}_i1</bpmn:outgoing>`,
