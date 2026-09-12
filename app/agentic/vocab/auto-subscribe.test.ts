@@ -10,7 +10,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { test } from "node:test";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
-import { assertEquals } from "#test-assert";
+import { assert, assertEquals } from "#test-assert";
 import {
   agentTaskTypesMissingExternalMarker,
   agentTaskTypesOptedOutMissingExternalMarker,
@@ -18,18 +18,20 @@ import {
   MALFORMED_OPTOUT_LABEL,
 } from "./job-types.ts";
 
-const PROCESSES_DIR = join(dirname(fileURLToPath(import.meta.url)), "../../../resources/processes");
+const RESOURCES_DIR = join(dirname(fileURLToPath(import.meta.url)), "../../../resources");
 
-// urban deploys `resources/` recursively (every file at any depth), so an opted-out task added under
-// a subdirectory would still deploy — walk recursively here too, or the guard would miss it.
+// urban deploys `resources/` recursively (every file at ANY depth), so an opted-out task in a `.bpmn`
+// added under any resources subdirectory — not just `resources/processes` — would still deploy. Root
+// the walk at the `resources/` convention root (mirroring the deploy contract) so a deployed BPMN
+// placed elsewhere under `resources/` cannot bypass this guard.
 function bpmnFiles(): string[] {
   const walk = (dir: string): string[] =>
     readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
       const full = join(dir, entry.name);
       if (entry.isDirectory()) return walk(full);
-      return entry.name.endsWith(".bpmn") ? [relative(PROCESSES_DIR, full)] : [];
+      return entry.name.endsWith(".bpmn") ? [relative(RESOURCES_DIR, full)] : [];
     });
-  return walk(PROCESSES_DIR).sort();
+  return walk(RESOURCES_DIR).sort();
 }
 
 test("agentTaskTypesOptedOutOfAuto flags a task carrying the value=\"false\" opt-out property", () => {
@@ -226,9 +228,23 @@ test("agentTaskTypesOptedOutMissingExternalMarker surfaces a MARKED opt-out bloc
   assertEquals(agentTaskTypesOptedOutMissingExternalMarker(xml), [MALFORMED_OPTOUT_LABEL]);
 });
 
+test("GUARD: the deploy-scan walks from the resources/ convention root (not just resources/processes)", () => {
+  // Regression for the deploy-by-convention coverage gap: urban deploys `resources/` recursively, so
+  // the guard must root its BPMN walk at `resources/` — a `.bpmn` added under any other resources
+  // subdirectory must still be scanned. Assert the walk actually reaches the process models AND that
+  // every returned path is relative to the resources root (carries its subdirectory segment), so a
+  // future refactor that narrows the root back to `resources/processes` is caught here.
+  const files = bpmnFiles();
+  assert(files.length > 0, "expected the resources/ walk to discover deployed BPMN models");
+  assert(
+    files.some((f) => f.startsWith("processes/")),
+    `expected resources-root-relative paths (e.g. "processes/…"); got ${JSON.stringify(files.slice(0, 3))}`,
+  );
+});
+
 test("GUARD: every deployed opted-out task is itself an externally-marked agent task", () => {
   for (const file of bpmnFiles()) {
-    const xml = readFileSync(join(PROCESSES_DIR, file), "utf8");
+    const xml = readFileSync(join(RESOURCES_DIR, file), "utf8");
     // Drive the guard DIRECTLY from the block-level, placement-scoped helper rather than gating on
     // `agentTaskTypesOptedOutOfAuto` (which skips missing/empty task-definition types, so a typeless
     // opt-out would never reach the check). The helper scans every service task itself, surfaces a

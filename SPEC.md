@@ -358,14 +358,20 @@ the app, which deploys on boot), and the next agent job of that type picks it up
 > baked `io.nanobpm.agentTask.task.prompt` header.
 
 > **`<zeebe:agentDefinition agentType="external" />` is the ONE agentic-task signal.**
-> Every `senior:*` agent service task carries this engine-native AgentTask marker
+> Every hand-authored `senior:*` agent service task in `resources/processes` carries this
+> engine-native AgentTask marker
 > (issue #745) alongside its `<zeebe:taskDefinition>`, and it is the **single
 > convention** the worker harness `--auto` reconciliation scans to discover agentic
 > tasks — replacing the legacy `linkName="prompt"` / header dual signal so the app and
 > harness converge on one signal (issue #779, harness jwulf/c8ctl-plugin-nano#235). The
-> marker is CI-enforced (`agentTaskTypesMissingExternalMarker`,
-> `agent-marker.test.ts`), so no deployed agent task relies on prompt-link-only
-> discovery. To **exclude** a task from `--auto` — one that must be served only by a
+> marker is CI-enforced over the deployed `resources/` process models
+> (`agentTaskTypesMissingExternalMarker`,
+> `agent-marker.test.ts`), so no prompt-bearing agent task in those models relies on
+> prompt-link-only discovery. (The delivery-graph compiler's GENERATED agent BPMN —
+> deployed at run time by `runDeliveryGraph`, not authored under `resources/` — is a
+> separate deployed path NOT covered by this static guard; whether its generated cells
+> should also carry the marker/opt-out convention is tracked separately under issue #745,
+> not #779.) To **exclude** a task from `--auto` — one that must be served only by a
 > worker that explicitly subscribes (`--job-type <type>` / a profile capability) — add
 > the inert opt-out property inside its `extensionElements`, nested in the
 > `<zeebe:properties>` wrapper the models and engine expect (as
