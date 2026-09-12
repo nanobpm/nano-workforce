@@ -946,11 +946,22 @@ function trimmedOrEmpty(value: unknown): string {
   return typeof value === "string" && value.trim() !== "" ? value.trim() : "";
 }
 
+/** URL-only credential redaction for a free-form connector value (`target`, `dedupeKey`, a bound
+ * `payload.pr`). Such a value is frequently an OPAQUE identifier — `slack:#releases`, `owner/repo#42`,
+ * a `<node>.pr` ref, `pkg@version` — in which `#`/`?`/`@` are MEANINGFUL, so blind {@link redactString}
+ * would mangle it (e.g. `slack:#releases` → `slack:#***`, `owner/repo#42` → `owner/repo#***`). Only a
+ * value that is actually a `scheme://authority` URL — where a credential can hide in userinfo/query/
+ * fragment — is redacted; every other value is shown VERBATIM. Mirrors {@link redactProbeTargetForDisplay}'s
+ * http-only rule (issue #778 review). Deterministic and total. */
+function redactConnectorValue(value: string): string {
+  return /^[a-z][a-z0-9+.-]*:\/\//i.test(value) ? redactString(value) : value;
+}
+
 /** A human-readable label for a connector node's `target`. The converge-enrollment vocabulary
  * (`convergeTargets.ts`) maps to intent-revealing phrases; any other (forward-declared) target is shown
- * through {@link redactString} — a bare identifier survives unchanged, but a credential-bearing URL
- * (`//user:pass@…`, `?token=…`) has its secret components stripped so it is never persisted into
- * user-visible BPMN documentation/modeler. Deterministic. */
+ * through {@link redactConnectorValue} — an opaque identifier (`slack:#releases`) survives unchanged, but
+ * a credential-bearing URL (`//user:pass@…`, `?token=…`) has its secret components stripped so it is
+ * never persisted into user-visible BPMN documentation/modeler. Deterministic. */
 function humanizeConnectorTarget(target: string): string {
   switch (target) {
     case CONVERGE_TARGET:
@@ -960,7 +971,7 @@ function humanizeConnectorTarget(target: string): string {
     case MERGE_MAIN_TARGET:
       return "Merge to main";
     default:
-      return `Connector: ${redactString(target)}`;
+      return `Connector: ${redactConnectorValue(target)}`;
   }
 }
 
@@ -1014,10 +1025,10 @@ export function nodeDisplay(node: DeliveryNode): { name: string; documentation: 
     }
     case "connector": {
       const c = node.connector;
-      const doc: string[] = [`Connector target: ${redactString(c.target)}`];
-      if (trimmedOrEmpty(c.dedupeKey)) doc.push(`Dedupe key: ${redactString(trimmedOrEmpty(c.dedupeKey))}`);
+      const doc: string[] = [`Connector target: ${redactConnectorValue(c.target)}`];
+      if (trimmedOrEmpty(c.dedupeKey)) doc.push(`Dedupe key: ${redactConnectorValue(trimmedOrEmpty(c.dedupeKey))}`);
       const boundPr = c.payload && typeof c.payload.pr === "string" ? c.payload.pr : "";
-      if (boundPr) doc.push(`PR: ${boundPr}`);
+      if (boundPr) doc.push(`PR: ${redactConnectorValue(boundPr)}`);
       if (emitsLabel) doc.push(`Emits: ${emitsLabel}`);
       if (trimmedOrEmpty(c.timeout)) doc.push(`Timeout: ${trimmedOrEmpty(c.timeout)}`);
       return { name: withId(humanizeConnectorTarget(c.target)), documentation: doc.join("\n") };

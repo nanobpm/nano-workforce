@@ -282,7 +282,8 @@ const CAP_GATE = {
  * node id). Located via the subProcess `name="… · <nodeId>"` — the node id is retained as a stable
  * ` · ` suffix on the descriptive label (issue #778). */
 function elementForNode(bpmn: string, nodeId: string): string {
-  const m = bpmn.match(new RegExp(`<bpmn:subProcess id="([^"]+)" name="[^"]* · ${nodeId}"`));
+  const escaped = nodeId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const m = bpmn.match(new RegExp(`<bpmn:subProcess id="([^"]+)" name="[^"]* · ${escaped}"`));
   assert(m, `a subProcess for node ${nodeId} exists`);
   return m![1];
 }
@@ -1103,6 +1104,37 @@ test("#778 nodeDisplay redacts a credential-bearing connector target + dedupeKey
   assert(!c.documentation.includes("s3cr3t") && !c.documentation.includes("zzz"), "connector doc dedupeKey drops userinfo + query secret");
   assert(c.documentation.includes("Connector target: https://***@hooks.example.com/deploy?***"), "connector target rendered redacted");
   assert(c.documentation.includes("Dedupe key: https://***@idem.example.com/key?***"), "connector dedupeKey rendered redacted");
+});
+
+test("#778 nodeDisplay preserves an OPAQUE (non-URL) connector target/dedupeKey/payload.pr verbatim — `#`/`?` are not URL redaction points", () => {
+  // A forward-declared connector identifier such as `slack:#releases` is NOT a `scheme://authority`
+  // URL, so blind redactString would mangle its meaningful `#`/`?` (e.g. `slack:#releases` →
+  // `slack:#***`). Only real URLs are redacted; opaque identifiers and `owner/repo#42`/`<node>.pr`
+  // PR references survive verbatim.
+  const c = nodeDisplay({
+    id: "call",
+    kind: "connector",
+    connector: { target: "slack:#releases?thread=42", dedupeKey: "idem#deploy?v=1", payload: { pr: "owner/repo#42" } },
+  });
+  assert(c.name.includes("Connector: slack:#releases?thread=42"), "opaque target name is verbatim (not mangled)");
+  assert(c.documentation.includes("Connector target: slack:#releases?thread=42"), "opaque target doc is verbatim");
+  assert(c.documentation.includes("Dedupe key: idem#deploy?v=1"), "opaque dedupeKey is verbatim");
+  assert(c.documentation.includes("PR: owner/repo#42"), "an `owner/repo#42` PR reference is preserved verbatim");
+});
+
+test("#778 nodeDisplay redacts a credential-bearing connector payload.pr (canonical URL) but preserves a clean PR URL/`<node>.pr` ref", () => {
+  const cred = nodeDisplay({
+    id: "land",
+    kind: "connector",
+    connector: { target: "converge-merge", payload: { pr: "https://user:tok3n@github.com/o/r/pull/42?access=sekret" } },
+  });
+  assert(!cred.documentation.includes("tok3n") && !cred.documentation.includes("sekret"), "credential-bearing PR URL has userinfo + query stripped");
+  const ref = nodeDisplay({
+    id: "land2",
+    kind: "connector",
+    connector: { target: "converge-merge", payload: { pr: "impl.pr" } },
+  });
+  assert(ref.documentation.includes("PR: impl.pr"), "a `<node>.pr` fact reference is preserved verbatim");
 });
 
 test("#778 the compiled connector inner task carries the descriptive display name (distinct connector arg path)", async () => {
