@@ -54,15 +54,18 @@ import { AGENT_TASK_NS } from "./repoEnvelope.ts";
  * (issue #778 review): a `command` target is an arbitrary shell snippet that can embed a secret, so it
  * is never surfaced — only a fixed placeholder; an `http` target can carry a credential in its
  * `user:pass@` userinfo or `?query`/`#fragment`, so it goes through the same {@link redactString} log
- * redaction. Every OTHER kind's target is a structured, non-credential identifier (`owner/repo#42`,
- * `pkg@version`, `owner/repo@ref`, a `<node>.<fact>` ref) that must be shown VERBATIM — running the
- * URL redaction over it would mangle a legitimate `#`/`@` (e.g. a `pr` target's `#42`). The RAW target
- * is retained only in runtime variables (the probe config + the escalation diagnostics), never in the
- * deployed documentation the explorer/modeler shows. */
+ * redaction. A structured, non-credential identifier (`owner/repo#42`, `pkg@version`, `owner/repo@ref`,
+ * a `<node>.<fact>` ref) is shown VERBATIM — but because the graph validator only requires a non-empty
+ * target (and `parsePrTarget` accepts any prefix before `#<digits>`), a URL-SHAPED value smuggled into
+ * one of those kinds is still routed through the same URL-only {@link redactConnectorValue}, so a
+ * `//user:pass@host/repo#42` has its credential stripped while a legitimate `#`/`@` in a structured ref
+ * (which is not URL-shaped) is left untouched. The RAW target is retained only in runtime variables (the
+ * probe config + the escalation diagnostics), never in the deployed documentation the explorer/modeler
+ * shows. */
 function redactProbeTargetForDisplay(probe: Extract<DeliveryNode, { kind: "wait" }>["wait"]): string {
   if (probe.kind === "command") return "<redacted>";
   if (probe.kind === "http") return redactString(probe.target);
-  return probe.target;
+  return redactConnectorValue(probe.target);
 }
 
 /** The task-header key that carries an `agent` node's DECLARED per-node repository spec (#739) into the
@@ -944,10 +947,27 @@ function trimmedOrEmpty(value: unknown): string {
  * would mangle it (e.g. `slack:#releases` → `slack:#***`, `owner/repo#42` → `owner/repo#***`). Only a
  * value that is actually a URL — a `scheme://authority` OR a scheme-relative `//authority` form, either
  * of which can hide a credential in userinfo/query/fragment (`redactString` redacts both) — is redacted;
- * every other value is shown VERBATIM. Mirrors {@link redactProbeTargetForDisplay}'s
+ * every other value is shown VERBATIM. The URL classification is done on `value.trim()` so leading
+ * whitespace (` //user:pass@host` — the OpenAPI edge caps length but does not trim) cannot bypass the
+ * anchored URL check; the ORIGINAL `value` is what `redactString` operates on so no surrounding
+ * character survives unredacted. Mirrors {@link redactProbeTargetForDisplay}'s
  * http-only rule (issue #778 review). Deterministic and total. */
 function redactConnectorValue(value: string): string {
-  return /^([a-z][a-z0-9+.-]*:)?\/\//i.test(value) ? redactString(value) : value;
+  return /^([a-z][a-z0-9+.-]*:)?\/\//i.test(value.trim()) ? redactString(value) : value;
+}
+
+/** Redact credential-bearing pieces of any URL embedded in FREE-FORM prose (a node's authored
+ * `prompt`), IN PLACE. Unlike {@link redactString} — tuned for a single opaque target string, where it
+ * truncates from the first `?`/`#` to end-of-string — this finds each URL-shaped token *within*
+ * surrounding prose (`scheme://…` or a scheme-relative `//…`) and strips only that token's
+ * `user:pass@` userinfo and `?query`/`#fragment` via `redactString`, leaving the prose (and ordinary
+ * punctuation such as a `?` ending a sentence) intact. Applied to the DISPLAY name/documentation only —
+ * a prompt is up to 20 000 chars of arbitrary text that can embed a bearer token or private URL, and
+ * the deployed `<bpmn:documentation>`/name is visible to modeler/explorer readers; the RAW prompt still
+ * reaches the runtime job input (`appendPrompt`/`prompt`) unmodified (issue #778 review). Deterministic
+ * and total. */
+function redactFreeText(value: string): string {
+  return value.replace(/(?:[a-z][a-z0-9+.-]*:)?\/\/[^\s]+/gi, (m) => redactString(m));
 }
 
 /** A human-readable label for a connector node's `target`. The converge-enrollment vocabulary
@@ -1003,7 +1023,7 @@ export function nodeDisplay(node: DeliveryNode): { name: string; documentation: 
     case "agent": {
       const a = node.agent;
       const policy = a.merge ? "converge+merge" : a.converge ? "converge" : "";
-      const base = firstLine(a.prompt) || a.jobType;
+      const base = firstLine(typeof a.prompt === "string" ? redactFreeText(a.prompt) : a.prompt) || a.jobType;
       const label = policy ? `${base} & ${policy}` : base;
       const doc: string[] = [`Agent job: ${a.jobType}`];
       const repo = trimmedOrEmpty(a.repository);
@@ -1013,7 +1033,7 @@ export function nodeDisplay(node: DeliveryNode): { name: string; documentation: 
       if (emitsLabel) doc.push(`Emits: ${emitsLabel}`);
       if (trimmedOrEmpty(a.timeout)) doc.push(`Timeout: ${trimmedOrEmpty(a.timeout)}`);
       const prompt = trimmedOrEmpty(a.prompt);
-      if (prompt) doc.push(`Prompt: ${prompt}`);
+      if (prompt) doc.push(`Prompt: ${redactFreeText(prompt)}`);
       return { name: withId(label), documentation: doc.join("\n") };
     }
     case "connector": {
@@ -1045,10 +1065,10 @@ export function nodeDisplay(node: DeliveryNode): { name: string; documentation: 
     }
     case "human": {
       const h = node.human;
-      const base = firstLine(h?.prompt) || "Human decision";
+      const base = firstLine(typeof h?.prompt === "string" ? redactFreeText(h.prompt) : h?.prompt) || "Human decision";
       const doc: string[] = [];
       const prompt = trimmedOrEmpty(h?.prompt);
-      doc.push(prompt ? `Prompt: ${prompt}` : "Human decision step");
+      doc.push(prompt ? `Prompt: ${redactFreeText(prompt)}` : "Human decision step");
       if (trimmedOrEmpty(h?.formKey)) doc.push(`Form: ${trimmedOrEmpty(h?.formKey)}`);
       if (emitsLabel) doc.push(`Emits: ${emitsLabel}`);
       return { name: withId(base), documentation: doc.join("\n") };

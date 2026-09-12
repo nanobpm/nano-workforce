@@ -683,8 +683,30 @@ test("S7 guard-invalid-equals: a clean string `equals` (no XML-invalid character
   );
 });
 
-test("S7 guard-default-conflict: an edge with both `default` and `when` is rejected", () => {
+test("invalid-jobType: an `agent.jobType` carrying an XML-1.0-invalid character is rejected, not silently rewritten into a different executable worker type (#778 review)", () => {
+  // `agent.jobType` is emitted VERBATIM as the executable `<zeebe:taskDefinition type=…>` (and mirrored
+  // into `resolved.calledElement`). An XML-1.0-forbidden character (here a C0 control) cannot be
+  // entity-escaped, so the compiler's attribute sanitiser would STRIP it — deploying `senior:feature`
+  // for an authored `senior:\u0001feature` and routing the cell to the WRONG worker. It must be
+  // rejected at validation rather than silently mutated.
   const errors = validateDeliveryGraph({
+    nodes: [{ id: "impl", kind: "agent", agent: { jobType: "senior:\u0001feature" } }],
+    edges: [],
+  });
+  hasCode(errors, "invalid-jobType");
+});
+
+test("invalid-jobType: a clean `agent.jobType` (no XML-invalid characters) passes validation", () => {
+  assertEquals(
+    validateDeliveryGraph({
+      nodes: [{ id: "impl", kind: "agent", agent: { jobType: "senior:feature" } }],
+      edges: [],
+    }).filter((e) => e.code === "invalid-jobType"),
+    [],
+  );
+});
+
+test("S7 guard-default-conflict: an edge with both `default` and `when` is rejected", () => {  const errors = validateDeliveryGraph({
     nodes: [
       { id: "bump", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "result", type: "string" }] },
       { id: "a", kind: "agent", agent: { jobType: "j" } },

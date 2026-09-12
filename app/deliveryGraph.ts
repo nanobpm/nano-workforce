@@ -99,6 +99,7 @@ export type DeliveryGraphErrorCode =
   | "converge-merge-type"
   | "invalid-node-repository"
   | "invalid-node-base-branch"
+  | "invalid-jobType"
   | "unbound-pr";
 
 /** A single semantic validation failure. `path` is a JSON-path-qualified pointer at the offending
@@ -430,6 +431,23 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
               "are first-class cell policy (set `agent.converge`/`agent.merge`), not a raw agent node " +
               "(ADR 0006 §3 / S5)",
             code: "raw-converge-node",
+          });
+        }
+        // `agent.jobType` is baked VERBATIM into the executable `<zeebe:taskDefinition type=…>` attribute
+        // (and mirrored into `resolved.calledElement`), so — unlike a display string — the compiler must
+        // NOT let its attribute sanitiser silently strip an XML-1.0-invalid character out of it: that would
+        // deploy a worker type differing from the authored job type (e.g. `senior:\u0001feature` →
+        // `senior:feature`), silently routing the cell to the wrong worker. Reject it here rather than
+        // rewrite an executable value (issue #778 review — same rationale as `guard-invalid-equals`).
+        if (kind === "agent" && typeof config.jobType === "string" && hasXmlInvalidChars(config.jobType)) {
+          errors.push({
+            path: `${path}.${configKey}.jobType`,
+            message:
+              `\`agent.jobType\` "${config.jobType}" contains XML-1.0-invalid characters (control ` +
+              "characters, U+FFFE/U+FFFF, or an unpaired surrogate) — the job type is emitted verbatim as " +
+              "the executable `<zeebe:taskDefinition type=…>`, so it must be rejected rather than silently " +
+              "rewritten into a different (wrong) worker type",
+            code: "invalid-jobType",
           });
         }
         // S5 trust boundary: `validateDeliveryGraph` is the gate before `dispatchDeliveryGraphRun`

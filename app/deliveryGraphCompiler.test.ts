@@ -986,6 +986,54 @@ test("#778 nodeDisplay redacts a wait probe's credential-bearing target in the n
   assert(http.documentation.includes("Target: https://***@example.com/health?***"), "http target rendered redacted");
 });
 
+test("#778 nodeDisplay redacts a URL-SHAPED non-http probe target (smuggled credential) while leaving a legitimate structured ref verbatim", () => {
+  // The graph validator only requires a non-empty `target`, and `parsePrTarget` accepts any prefix
+  // before `#<digits>` — so a URL-shaped value can reach a `pr`/`capability` target. It must still be
+  // URL-redacted in the display path, while an ordinary `owner/repo#42` (whose `#`/`@` are meaningful,
+  // not a URL) stays verbatim.
+  const smuggled = nodeDisplay({
+    id: "g",
+    kind: "wait",
+    wait: { kind: "pr", target: "//user:pass@example.com/repo#42", match: { prState: "merged" } },
+  });
+  assert(!smuggled.name.includes("user:pass") && !smuggled.documentation.includes("user:pass"), "smuggled userinfo is redacted");
+  assert(smuggled.documentation.includes("Target: //***@example.com/repo#***"), "URL-shaped pr target rendered redacted");
+
+  const clean = nodeDisplay({
+    id: "g2",
+    kind: "wait",
+    wait: { kind: "pr", target: "owner/repo#42", match: { prState: "merged" } },
+  });
+  assertEquals(clean.name, "Wait: pr owner/repo#42 · g2");
+  assert(clean.documentation.includes("Target: owner/repo#42"), "legitimate structured pr ref is verbatim");
+});
+
+test("#778 nodeDisplay redacts a connector value even when a leading space would bypass the anchored URL check (trim classification)", () => {
+  const c = nodeDisplay({
+    id: "n",
+    kind: "connector",
+    connector: { target: " //user:pass@hooks.example.com?token=abc123" },
+  });
+  assert(!c.documentation.includes("user:pass") && !c.documentation.includes("abc123"), "leading-space URL still has its credential stripped");
+  assert(c.documentation.includes("***@hooks.example.com?***"), "whitespace-prefixed connector target rendered redacted");
+});
+
+test("#778 nodeDisplay redacts a credential-bearing URL embedded in an agent/human prompt (in place, prose intact) — the raw prompt only reaches the runtime job input", () => {
+  const agent = nodeDisplay({
+    id: "impl",
+    kind: "agent",
+    agent: { jobType: "senior:feature", prompt: "Fetch https://user:pass@api.example.com/data?token=abc123 then open a PR. Ready?" },
+  });
+  assert(!agent.name.includes("user:pass") && !agent.name.includes("abc123"), "agent name drops the embedded URL credential");
+  assert(!agent.documentation.includes("user:pass") && !agent.documentation.includes("abc123"), "agent doc drops the embedded URL credential");
+  // The prose around the URL — including a legitimate trailing `?` — survives (redaction is in place,
+  // NOT a truncation from the first `?` to end-of-string).
+  assert(agent.documentation.includes("then open a PR. Ready?"), "prose after the URL (and a sentence `?`) is preserved");
+
+  const human = nodeDisplay({ id: "otp", kind: "human", human: { prompt: "Publish using //deploy:s3cr3t@registry.example.com" } });
+  assert(!human.name.includes("s3cr3t") && !human.documentation.includes("s3cr3t"), "human prompt drops the embedded credential");
+});
+
 test("#778 the wait + human inner tasks carry the descriptive display name (not the bare id)", async () => {
   const graph = {
     name: "inner names",
