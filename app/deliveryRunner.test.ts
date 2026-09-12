@@ -485,6 +485,9 @@ test("prepareDeliveryGraph injects the repository envelope PER agent cell from t
   assert(headers.some((h) => h.includes('repository.provider" value="github"')), "provider header");
   assert(headers.some((h) => h.includes('repository.singleBranch" value="true"')), "branch-scoped blobless clone (#287)");
   assert(headers.some((h) => h.includes('repository.filter" value="blob:none"')), "blobless filter");
+  // Repo-provisioning auth gate (issue #770): the per-cell envelope carries `task.allowPr:true` so the
+  // c8ctl harness resolves the git credential for the clone instead of failing on password prompt.
+  assert(headers.some((h) => h.includes('task.allowPr" value="true"')), `expected a task.allowPr header, got ${JSON.stringify(headers)}`);
   // No `__repoSpec` marker survives injection — it is the compiler's digest-stable anchor only.
   assert(!p.bpmn.includes("__repoSpec"), "the __repoSpec marker is fully replaced");
   // No run-root `io.nanobpm.agentTask` variable — the envelope rides headers now, not a run variable.
