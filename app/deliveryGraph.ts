@@ -462,7 +462,7 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
           errors.push({
             path: `${path}.${configKey}.jobType`,
             message:
-              `\`agent.jobType\` "${config.jobType}" contains a character that would be silently ` +
+              `\`agent.jobType\` ${JSON.stringify(config.jobType)} contains a character that would be silently ` +
               "rewritten when emitted as the executable `<zeebe:taskDefinition type=…>` attribute — an " +
               "XML-1.0-invalid character (control characters, U+FFFE/U+FFFF, or an unpaired surrogate) that " +
               "the sanitiser strips, or attribute whitespace (tab, LF, CR) that XML attribute-value " +

@@ -1046,21 +1046,43 @@ export function redactFreeText(value: string): string {
   // the `//[^\s]+` token match, escapes redaction, then reconstructs the credential once `escapeXml`/
   // `stripXmlInvalidChars` drops the control at render time (issue #778 review — same class as the
   // connector/probe strip-before-classify fix).
-  return (
-    stripXmlInvalidChars(value)
-      .replace(/(?:[a-z][a-z0-9+.-]*:)?\/\/[^\s]+/gi, (m) => redactString(m))
-      // Belt-and-braces for a URL whose userinfo embeds a raw CR/LF or TAB: the whitespace-delimited
-      // `//[^\s]+` token above STOPS at the line break (or tab), so `redactString` never sees the `…@host`
-      // userinfo on the far side of the break and the credential survives into `<bpmn:documentation>` (XML
-      // preserves line breaks and TABs). Re-scan only a CREDENTIAL-SHAPED span — a `//…:…@` userinfo
-      // (a `user:pass@` shape, the exact class `redactString` collapses) bounded by literal SPACEs so it
-      // may cross a CR/LF/TAB inside the userinfo — and run the SAME `redactString` (which also strips any
-      // `?query`/`#fragment` tail on the matched span). Requiring the `:`…`@` userinfo shape (not every
-      // `//` run) means ordinary prose — a `//comment` reference, a `//host` then a new-line email
-      // `owner@example.com`, or a sentence-ending `?`/`#` — is NOT over-redacted (issue #778 review —
-      // supersedes the earlier space-bounded `//[^ ]*` scan that mangled non-URL `//` prose).
-      .replace(/\/\/[^ @]*:[^ @]*@[^ ]*/g, (m) => redactString(m))
-  );
+  const primary = stripXmlInvalidChars(value).replace(/(?:[a-z][a-z0-9+.-]*:)?\/\/[^\s]+/gi, (m) => redactString(m));
+  // Belt-and-braces linear pass for a URL whose credential (`//…:…@` userinfo) or `?query`/`#fragment`
+  // is split from it by a raw CR/LF/TAB: the whitespace-delimited `//[^\s]+` primary token STOPS at the
+  // break, so `redactString` never sees the `…@host` userinfo (or a `?…=secret` query) on the far side
+  // and it survives into `<bpmn:documentation>` (XML preserves line breaks and TABs). See
+  // {@link redactCredentialSpans}.
+  return redactCredentialSpans(primary);
+}
+
+/** Linear (backtracking-free) belt companion to {@link redactFreeText}'s primary whitespace-bounded
+ * pass. Each `//`-run is bounded by a literal SPACE (0x20) — so a single span may cross a CR/LF/TAB
+ * *inside* the URL that the primary `//[^\s]+` token stopped at — and is redacted via {@link redactString}
+ * ONLY when it is credential-shaped (a `:` before an `@`, the `user:pass@` userinfo class `redactString`
+ * collapses) OR it carries a `?query`/`#fragment` (where a token often rides). Requiring that shape means
+ * ordinary prose — a `//comment` reference, a break-spanning email `owner@example.com`, a sentence-ending
+ * `?`/`#` inside a bounded token — is NOT over-redacted. The scan is a single left-to-right walk using
+ * `indexOf` over spans bounded by the next SPACE, with no regex backtracking, so a 20 000-char adversarial
+ * prompt cannot trigger catastrophic backtracking (issue #778 review — supersedes the credential-shaped
+ * belt regex, which was quadratic on a long userinfo-shaped run with no `@` AND blind to a `?query` split
+ * from its URL by a line break, leaking the far side). Deterministic and total. */
+function redactCredentialSpans(text: string): string {
+  let out = "";
+  let i = 0;
+  for (;;) {
+    const start = text.indexOf("//", i);
+    if (start < 0) return out + text.slice(i);
+    out += text.slice(i, start);
+    let end = start;
+    while (end < text.length && text.charCodeAt(end) !== 0x20 /* SPACE */) end++;
+    const span = text.slice(start, end);
+    const at = span.indexOf("@");
+    const colon = span.indexOf(":");
+    const credentialShaped = colon >= 0 && at >= 0 && colon < at;
+    const hasQueryOrFragment = span.indexOf("?") >= 0 || span.indexOf("#") >= 0;
+    out += credentialShaped || hasQueryOrFragment ? redactString(span) : span;
+    i = end;
+  }
 }
 
 /** A human-readable label for a connector node's `target`. The converge-enrollment vocabulary

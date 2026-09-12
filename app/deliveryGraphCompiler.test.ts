@@ -1149,6 +1149,41 @@ test("#778 redactFreeText: a non-credential `//` run spanning a break is NOT ove
   assert(!cred.includes("token=abc") && !cred.includes("user:pass"), `a real split credential must be redacted: ${cred}`);
 });
 
+test("#778 redactFreeText consumes a `?query` split from its URL by a line break (query-across-break)", () => {
+  // The whitespace-delimited `//[^\s]+` primary token STOPS at the break, so a `//host/?` followed by a
+  // new-line `TOKEN=secret` left the secret visible in the XML-preserved display doc even though it is the
+  // URL's query. The linear belt (space-bounded, so it crosses the break) redacts the whole `?…` tail
+  // (issue #778 review — the credential-shaped-`@`-only belt regex was blind to a query with no userinfo).
+  const out = redactFreeText("see //host/?\nTOKEN=secret now");
+  assert(!out.includes("TOKEN=secret"), `a break-spanning query token must be redacted: ${out}`);
+  assert(out.includes("?***"), `the query collapses to the redaction marker: ${out}`);
+  // A bare `#fragment` split the same way is likewise redacted.
+  const frag = redactFreeText("open //host/#\nsig=zzz please");
+  assert(!frag.includes("sig=zzz"), `a break-spanning fragment must be redacted: ${frag}`);
+});
+
+test("#778 redactFreeText is linear on an adversarial `//…:…` prompt (no catastrophic backtracking)", () => {
+  // The old `/\/\/[^ @]*:[^ @]*@[^ ]*/g` belt regex backtracked quadratically on a long run of `//…:…`
+  // segments that never reach an `@`. The linear span scanner walks each `//`-run once, so a 20 000-char
+  // adversarial prompt completes near-instantly. Guard the class with a generous wall-clock bound.
+  const adversarial = `deploy ${"//a:".repeat(5000)} then done`;
+  const t0 = Date.now();
+  const out = redactFreeText(adversarial);
+  assert(Date.now() - t0 < 1000, "redactFreeText must not exhibit catastrophic backtracking");
+  // A run with no `@`, no `?`, no `#` is not credential-shaped, so it is left intact (not over-redacted).
+  assert(out.includes("//a:"), "a non-credential `//…:` run is not redacted");
+});
+
+test("#778 agent.jobType validation error quotes the offending value with JSON.stringify (control-char-safe)", async () => {
+  // A jobType carrying a raw control char (here a TAB) was interpolated between literal double quotes in
+  // the error message, so the control survived verbatim into the rendered error. `JSON.stringify` escapes
+  // it (and matches every other jobType/emit error in the validator) (issue #778 review).
+  const errors = await compileFail({ nodes: [{ id: "n", kind: "agent", agent: { jobType: "bad\ttype" } }], edges: [] });
+  const msg = errors.map((e) => e.message).join("\n");
+  assert(msg.includes('"bad\\ttype"'), `the error quotes the value via JSON.stringify: ${msg}`);
+  assert(!msg.includes("bad\ttype"), "the raw TAB does not survive into the error message");
+});
+
 test("#778 nodeDisplay surfaces a wait probe's credentialEnv key NAME so a credential-differing graph gets a DISTINCT digest (not a collision)", () => {
   // `credentialEnv` names a validated env-contract KEY (never a secret) but selects which credential a
   // probe uses at runtime; omitting it from the display let two otherwise-identical graphs collapse to
