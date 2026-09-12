@@ -13,7 +13,7 @@
 //   • humanNodes[] and sideEffects[] extraction.
 import { test } from "node:test";
 import { assert, assertEquals } from "#test-assert";
-import { compileDeliveryGraph } from "./deliveryGraphCompiler.ts";
+import { compileDeliveryGraph, digestInvisibleRawValues, graphCarriesRedactedSecrets, nodeDisplay, redactFreeText } from "./deliveryGraphCompiler.ts";
 
 /** Compile and assert success, returning the narrowed ok-result. */
 async function compileOk(graph: unknown) {
@@ -279,9 +279,11 @@ const CAP_GATE = {
 };
 
 /** The subProcess element id the compiler assigned to a node (elements are positional `n<k>`, not the
- * node id). Located via the subProcess `name="<kind>: <nodeId>"`. */
+ * node id). Located via the subProcess `name="… · <nodeId>"` — the node id is retained as a stable
+ * ` · ` suffix on the descriptive label (issue #778). */
 function elementForNode(bpmn: string, nodeId: string): string {
-  const m = bpmn.match(new RegExp(`<bpmn:subProcess id="([^"]+)" name="[^"]*: ${nodeId}"`));
+  const escaped = nodeId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const m = bpmn.match(new RegExp(`<bpmn:subProcess id="([^"]+)" name="[^"]* · ${escaped}"`));
   assert(m, `a subProcess for node ${nodeId} exists`);
   return m![1];
 }
@@ -446,6 +448,48 @@ test("humanNodes: extracts prompt/formKey/emits; a click-done node emits nothing
   const ack = r.humanNodes.find((h) => h.nodeId === "ack");
   assertEquals(ack?.emits.length, 0);
   assertEquals(ack?.prompt, undefined);
+});
+
+test("#778 humanNodes: a credential-bearing formKey is redacted in the preview projection (raw only reaches runtime form resolution)", async () => {
+  // `humanNodes[]` is persisted into the staged proposal `preview` and rendered verbatim on the Delivery
+  // Graphs page, so a credential in a human `formKey` (`//user:pass@…`) must be stripped here with the
+  // SAME helper the BPMN `Form:` doc uses — else it leaks unredacted through the preview. The RAW formKey
+  // still drives runtime form resolution (`deliveryHuman` reads `node.human.formKey` directly).
+  const r = await compileOk({
+    nodes: [{ id: "h", kind: "human", human: { prompt: "approve", formKey: "//user:pass@forms.example.com/approve?token=abc" } }],
+    edges: [],
+  });
+  const h = r.humanNodes.find((n) => n.nodeId === "h");
+  assert(h?.formKey !== undefined && !h.formKey.includes("user:pass") && !h.formKey.includes("token=abc"), `credential stripped from preview formKey: ${h?.formKey}`);
+  // An ordinary opaque form id is preserved verbatim.
+  const plain = await compileOk({ nodes: [{ id: "h", kind: "human", human: { prompt: "approve", formKey: "deploy-approval" } }], edges: [] });
+  assertEquals(plain.humanNodes.find((n) => n.nodeId === "h")?.formKey, "deploy-approval");
+});
+
+test("#778 humanNodes: a credential-bearing emit `description` is redacted in the preview projection (raw only reaches runtime)", async () => {
+  // `humanNodes[].emits` is persisted into the staged proposal `preview` and rendered on the Delivery
+  // Graphs page, so a `//user:pass@…` URL in a free-form fact `description` must be stripped here with the
+  // SAME `redactFreeText` the BPMN emit label uses — else it leaks unredacted through the preview even
+  // though the label path redacts it. The RAW description still reaches the runtime `appendPrompt` (#778).
+  const r = await compileOk({
+    nodes: [
+      {
+        id: "h",
+        kind: "human",
+        human: { prompt: "approve" },
+        emits: [{ name: "pr", type: "pr", description: "post to //user:pass@host/x?token=abc when done" }],
+      },
+    ],
+    edges: [],
+  });
+  const desc = r.humanNodes.find((n) => n.nodeId === "h")?.emits.find((e) => e.name === "pr")?.description;
+  assert(desc !== undefined && !desc.includes("user:pass") && !desc.includes("token=abc"), `credential stripped from preview emit description: ${desc}`);
+  // An ordinary (credential-free) description is preserved verbatim.
+  const plain = await compileOk({
+    nodes: [{ id: "h", kind: "human", human: { prompt: "approve" }, emits: [{ name: "pr", type: "pr", description: "the merged PR ref" }] }],
+    edges: [],
+  });
+  assertEquals(plain.humanNodes.find((n) => n.nodeId === "h")?.emits.find((e) => e.name === "pr")?.description, "the merged PR ref");
 });
 
 test("sideEffects: agent + connector only; connector carries its dedupeKey", async () => {
@@ -873,4 +917,819 @@ test("#731 routing-only emits stay optional: a fact referenced ONLY by an edge `
   assert(esc.includes('="none"') && esc.includes('target="emitMode"'), "a status-only contract escalation keeps its emit field hidden");
   // The guarded split that routes `result` downstream is untouched (default branch preserved).
   assert(r.bpmn.includes('=classify_result = "breaking"') || r.bpmn.includes(`${el}_result = "breaking"`), "the routing guard on the emitted fact is preserved");
+});
+
+// ---------------------------------------------------------------------------------------------------
+// Issue #778: descriptive compiled node names + `<bpmn:documentation>`. Every compiled node renders a
+// human-readable name derived from its typed config (not the bare id/kind), with the node id retained
+// as a ` · <id>` suffix, and carries a `<bpmn:documentation>` describing what it does. ONE `nodeDisplay`
+// helper is the single source for both the label and the documentation (derivation over duplication).
+
+test("#778 nodeDisplay derives a descriptive label + documentation per kind, with the node id as a suffix", () => {
+  const agent = nodeDisplay({
+    id: "impl",
+    kind: "agent",
+    agent: { jobType: "senior:feature", prompt: "Implement the change and open a PR.", converge: true, merge: true, repository: "o/r", baseBranch: "main" },
+    emits: [{ name: "pr", type: "pr" }],
+  });
+  assertEquals(agent.name, "Implement the change and open a PR. & converge+merge · impl");
+  assert(agent.documentation.includes("Agent job: senior:feature"), "agent doc names the job type");
+  assert(agent.documentation.includes("Target: o/r@main"), "agent doc names the repo@branch");
+  assert(agent.documentation.includes("Policy: converge+merge"), "agent doc names the land policy");
+  assert(agent.documentation.includes("Emits: pr (pr)"), "agent doc lists emits");
+
+  const connector = nodeDisplay({
+    id: "land",
+    kind: "connector",
+    connector: { target: "converge-merge", dedupeKey: "land-1", payload: { pr: "o/r#42" } },
+  });
+  assertEquals(connector.name, "Converge & merge PR · land");
+  assert(connector.documentation.includes("Connector target: converge-merge"), "connector doc names the raw target");
+  assert(connector.documentation.includes("Dedupe key: land-1"), "connector doc names the dedupe key");
+  assert(connector.documentation.includes("PR: o/r#42"), "connector doc names the bound PR");
+
+  const wait = nodeDisplay({
+    id: "gate",
+    kind: "wait",
+    wait: { kind: "github-check", target: "o/r@main", match: { conclusion: "success" }, poll: { everyMs: 60000, timeoutMs: 3600000 } },
+  });
+  assertEquals(wait.name, "Wait: github-check o/r@main · gate");
+  assert(wait.documentation.includes("Readiness probe: github-check"), "wait doc names the probe kind");
+  assert(wait.documentation.includes("Match: conclusion=success"), "wait doc names the match criteria");
+  assert(wait.documentation.includes("Poll: every 60000ms, timeout 3600000ms"), "wait doc names the poll budget");
+
+  const human = nodeDisplay({ id: "otp", kind: "human", human: { prompt: "Run the manual OTP publish", formKey: "publish-form" } });
+  assertEquals(human.name, "Run the manual OTP publish · otp");
+  assert(human.documentation.includes("Form: publish-form"), "human doc names the attached form");
+
+  // Degenerate fallbacks: an agent with no prompt falls back to the job type; a bare human to a default.
+  assertEquals(nodeDisplay({ id: "a", kind: "agent", agent: { jobType: "j" } }).name, "j · a");
+  assertEquals(nodeDisplay({ id: "h", kind: "human" }).name, "Human decision · h");
+});
+
+test("#778 the compiled subProcess carries the descriptive name + a `<bpmn:documentation>` first child", async () => {
+  const graph = {
+    name: "descriptive",
+    nodes: [
+      { id: "impl", kind: "agent", agent: { jobType: "senior:feature", prompt: "Implement #567 and open a PR.", converge: true, merge: true }, emits: [{ name: "pr", type: "pr" }] },
+      { id: "land", kind: "connector", connector: { target: "converge-merge", dedupeKey: "land-1", payload: { pr: "impl.pr" } } },
+      { id: "gate", kind: "wait", wait: { kind: "pr", target: "impl.pr", match: { prState: "merged" } } },
+    ],
+    edges: [
+      { from: "impl.pr", to: "land" },
+      { from: "land", to: "gate" },
+      { from: "impl.pr", to: "gate" },
+    ],
+  };
+  const r = await compileOk(graph);
+  const el = elementForNode(r.bpmn, "impl");
+  // The subProcess wrapper is named from the typed config (not `agent: impl`) and the id is a suffix.
+  assert(
+    r.bpmn.includes(`<bpmn:subProcess id="${el}" name="Implement #567 and open a PR. &amp; converge+merge · impl">`),
+    "the agent subProcess wrapper carries the descriptive name",
+  );
+  // The bare `agent: impl` / `wait: gate` naming is gone.
+  assert(!r.bpmn.includes('name="agent: impl"'), "no bare kind:id subProcess name remains");
+  // `<bpmn:documentation>` is the FIRST child of the subProcess (before `<bpmn:incoming>`), and describes it.
+  const wrapperOpen = r.bpmn.indexOf(`<bpmn:subProcess id="${el}" `);
+  const beforeFlowRefs = r.bpmn.slice(wrapperOpen, r.bpmn.indexOf("<bpmn:incoming>", wrapperOpen));
+  assert(beforeFlowRefs.includes("<bpmn:documentation>"), "the documentation precedes the flow refs (first child)");
+  assert(!beforeFlowRefs.includes("<bpmn:extensionElements>"), "the documentation precedes extensionElements");
+  assert(r.bpmn.includes("<bpmn:documentation>Agent job: senior:feature"), "the documentation describes the node");
+  // The inner service task is named from the SAME nodeDisplay source (not the bare node id).
+  assert(r.bpmn.includes(`<bpmn:serviceTask id="${el}_task" name="Implement #567 and open a PR. &amp; converge+merge · impl">`), "the inner task shares the descriptive name");
+  // Every node kind carries a documentation child.
+  const waitEl = elementForNode(r.bpmn, "gate");
+  assert(r.bpmn.includes(`<bpmn:subProcess id="${waitEl}" name="Wait: pr impl.pr · gate">`), "the wait wrapper carries the descriptive name");
+});
+
+test("#778 nodeDisplay redacts a wait probe's credential-bearing target in the name + documentation", () => {
+  // A `command` target is an arbitrary shell snippet that can embed a secret — it is never surfaced.
+  const cmd = nodeDisplay({
+    id: "g",
+    kind: "wait",
+    wait: { kind: "command", target: "curl -H 'Authorization: Bearer SUPER_SECRET' https://api.example.com" },
+  });
+  assertEquals(cmd.name, "Wait: command <redacted> · g");
+  assert(cmd.documentation.includes("Target: <redacted>"), "command target is redacted in the doc");
+  assert(!cmd.name.includes("SUPER_SECRET") && !cmd.documentation.includes("SUPER_SECRET"), "no secret leaks");
+
+  // An HTTP target's `user:pass@` userinfo and `?query` (where a token often rides) are stripped.
+  const http = nodeDisplay({
+    id: "h",
+    kind: "wait",
+    wait: { kind: "http", target: "https://user:s3cr3t@example.com/health?token=abc123" },
+  });
+  assert(!http.name.includes("s3cr3t") && !http.name.includes("abc123"), "http name drops userinfo + query secret");
+  assert(
+    !http.documentation.includes("s3cr3t") && !http.documentation.includes("abc123"),
+    "http doc drops userinfo + query secret",
+  );
+  assert(http.documentation.includes("Target: https://***@example.com/health?***"), "http target rendered redacted");
+});
+
+test("#778 nodeDisplay redacts a URL-SHAPED non-http probe target (smuggled credential) while leaving a legitimate structured ref verbatim", () => {
+  // The graph validator only requires a non-empty `target`, and `parsePrTarget` accepts any prefix
+  // before `#<digits>` — so a URL-shaped value can reach a `pr`/`capability` target. It must still be
+  // URL-redacted in the display path, while an ordinary `owner/repo#42` (whose `#`/`@` are meaningful,
+  // not a URL) stays verbatim.
+  const smuggled = nodeDisplay({
+    id: "g",
+    kind: "wait",
+    wait: { kind: "pr", target: "//user:pass@example.com/repo#42", match: { prState: "merged" } },
+  });
+  assert(!smuggled.name.includes("user:pass") && !smuggled.documentation.includes("user:pass"), "smuggled userinfo is redacted");
+  assert(smuggled.documentation.includes("Target: //***@example.com/repo#***"), "URL-shaped pr target rendered redacted");
+
+  const clean = nodeDisplay({
+    id: "g2",
+    kind: "wait",
+    wait: { kind: "pr", target: "owner/repo#42", match: { prState: "merged" } },
+  });
+  assertEquals(clean.name, "Wait: pr owner/repo#42 · g2");
+  assert(clean.documentation.includes("Target: owner/repo#42"), "legitimate structured pr ref is verbatim");
+});
+
+test("#778 nodeDisplay redacts a connector value even when a leading space would bypass the anchored URL check (trim classification)", () => {
+  const c = nodeDisplay({
+    id: "n",
+    kind: "connector",
+    connector: { target: " //user:pass@hooks.example.com?token=abc123" },
+  });
+  assert(!c.documentation.includes("user:pass") && !c.documentation.includes("abc123"), "leading-space URL still has its credential stripped");
+  assert(c.documentation.includes("***@hooks.example.com?***"), "whitespace-prefixed connector target rendered redacted");
+});
+
+test("#778 nodeDisplay redacts a connector value whose URL is prefixed by an XML-invalid control char (strip-before-classify)", () => {
+  // A control char (U+0001) that XML 1.0 forbids gets stripped by `escapeXml`/`stripXmlInvalidChars` at
+  // render time. If classification/redaction ran on the RAW value, the anchored `^(scheme:)?//` check
+  // would miss the URL (it starts with the control char), leaving the credential to surface once the
+  // prefix is dropped. Stripping before classifying closes that bypass.
+  const c = nodeDisplay({
+    id: "n",
+    kind: "connector",
+    connector: { target: "\u0001//user:pass@hooks.example.com?token=abc123" },
+  });
+  assert(!c.documentation.includes("user:pass") && !c.documentation.includes("abc123"), "control-char-prefixed URL still has its credential stripped");
+  assert(c.documentation.includes("***@hooks.example.com?***"), "control-char-prefixed connector target rendered redacted");
+});
+
+test("#778 nodeDisplay redacts a credential-bearing URL embedded in an agent/human prompt (in place, prose intact) — the raw prompt only reaches the runtime job input", () => {
+  const agent = nodeDisplay({
+    id: "impl",
+    kind: "agent",
+    agent: { jobType: "senior:feature", prompt: "Fetch https://user:pass@api.example.com/data?token=abc123 then open a PR. Ready?" },
+  });
+  assert(!agent.name.includes("user:pass") && !agent.name.includes("abc123"), "agent name drops the embedded URL credential");
+  assert(!agent.documentation.includes("user:pass") && !agent.documentation.includes("abc123"), "agent doc drops the embedded URL credential");
+  // The prose around the URL — including a legitimate trailing `?` — survives (redaction is in place,
+  // NOT a truncation from the first `?` to end-of-string).
+  assert(agent.documentation.includes("then open a PR. Ready?"), "prose after the URL (and a sentence `?`) is preserved");
+
+  const human = nodeDisplay({ id: "otp", kind: "human", human: { prompt: "Publish using //deploy:s3cr3t@registry.example.com" } });
+  assert(!human.name.includes("s3cr3t") && !human.documentation.includes("s3cr3t"), "human prompt drops the embedded credential");
+});
+
+test("#778 an XML-forbidden control INSIDE a credential-bearing URL cannot survive redaction in any display path (strip-before-redact)", async () => {
+  // The control (`\x0B`, XML-1.0-forbidden) splits `redactString`'s `//user:pass@` / `//[^\s]+` match, so
+  // redacting the RAW value would miss the userinfo; the renderer then strips the control, re-joining a
+  // live credential. Every display path must sanitise BEFORE redacting. Cover the three that redact URLs.
+  // (a) http wait probe → `redactString(stripXmlInvalidChars(target))`.
+  const wait = nodeDisplay({ id: "w", kind: "wait", wait: { kind: "http", target: "//us\u000Ber:p4ss@api.example.com/health?token=abc123", match: { status: 200 } } });
+  assert(!wait.documentation.includes("p4ss") && !wait.documentation.includes("abc123"), "http probe target drops the split credential");
+  assert(!/[\u000B]/.test(wait.documentation), "no raw control char remains in the probe display");
+  // (b) free-form agent prompt → `redactFreeText` (strip-before-tokenize).
+  const agent = nodeDisplay({ id: "a", kind: "agent", agent: { jobType: "j", prompt: "curl //us\u000Ber:p4ss@api.example.com/d?token=abc123 then report" } });
+  assert(!agent.documentation.includes("p4ss") && !agent.documentation.includes("abc123"), "agent prompt drops the split credential");
+  // (c) end-to-end: the compiled BPMN never carries the reconstructed secret.
+  const r = await compileOk({ name: "split-cred", nodes: [{ id: "w", kind: "wait", wait: { kind: "http", target: "//us\u000Ber:p4ss@api.example.com/health?token=abc123", match: { status: 200 } } }], edges: [] });
+  assert(!r.bpmn.includes("p4ss") && !r.bpmn.includes("abc123"), "no split credential is reconstructed into the compiled BPMN");
+});
+
+test("#778 redactString consumes the query/fragment across an embedded line break (newline-safe)", () => {
+  // `[?#].*$` cannot cross a `\n`, so a target whose query is followed by another line kept the token.
+  const wait = nodeDisplay({ id: "w", kind: "wait", wait: { kind: "http", target: "https://host/api?token=s3cr3t\nX-Extra: leak", match: { status: 200 } } });
+  assert(!wait.documentation.includes("s3cr3t"), "the token before the line break is redacted");
+  assert(wait.documentation.includes("?***"), "the query is redacted through the line break");
+});
+
+test("#778 redactFreeText consumes a `//user:pass@` userinfo that embeds a raw line break (newline-safe)", () => {
+  // A CR/LF smuggled INSIDE the userinfo stops the whitespace-delimited `//[^\s]+` token, so a plain
+  // scan left `ss@host` visible in the display doc (XML preserves the break). The whole-string userinfo
+  // re-scan must strip it while a space/tab still bounds ordinary prose.
+  const agent = nodeDisplay({ id: "a", kind: "agent", agent: { jobType: "j", prompt: "deploy via //user:pa\nss@registry.example.com now" } });
+  assert(!agent.documentation.includes("ss@registry") && !agent.documentation.includes("user:pa"), "the newline-split userinfo is redacted");
+  assert(agent.documentation.includes("//***@"), "the userinfo collapses to the redaction marker");
+  // Ordinary prose with an unrelated `//` before an email is NOT over-redacted (space bounds the match).
+  const prose = nodeDisplay({ id: "b", kind: "agent", agent: { jobType: "j", prompt: "compare a//b then email admin@corp.example" } });
+  assert(prose.documentation.includes("admin@corp.example"), "an ordinary email after a bounded `//` survives");
+});
+
+test("#778 redactFreeText consumes a `//user:pass@` userinfo that embeds a raw TAB (tab-safe)", () => {
+  // A TAB is a VALID XML character `stripXmlInvalidChars` does not remove, so the whitespace-delimited
+  // `//[^\s]+` token splits `//user:pa\tss@host` before the `@`, leaking `ss@host` into the display doc
+  // (XML preserves the TAB). The credential-shaped belt scan (`//…:…@`, space-bounded so it may cross the
+  // tab inside the userinfo) strips the tab-split userinfo — and its `?token=…` tail (issue #778).
+  const agent = nodeDisplay({ id: "a", kind: "agent", agent: { jobType: "j", prompt: "deploy via //user:pa\tss@registry.example.com/p?token=s3cr3t now" } });
+  assert(!agent.documentation.includes("ss@registry") && !agent.documentation.includes("user:pa"), "the tab-split userinfo is redacted");
+  assert(!agent.documentation.includes("s3cr3t"), "the query token is redacted");
+  assert(agent.documentation.includes("//***@"), "the userinfo collapses to the redaction marker");
+});
+
+test("#778 redactFreeText: prose AFTER a `?query`/`#fragment` split across a line break is CONSERVATIVELY redacted, not preserved (thread :1115 supersedes :1083)", () => {
+  // A `?token=VALUE` whose VALUE rides across a newline (`?token=\nsecret`) is a SPLIT credential: the
+  // far side of the break is the secret's continuation, indistinguishable from ordinary prose resuming
+  // after the URL. Round-18 preserved that tail (suppressed advisory :1083); the higher-confidence
+  // inline finding :1115 showed preservation leaks the split value, so the belt now redacts the whole
+  // `?query`/`#fragment` tail through the span's space boundary — trailing continuation included. The RAW
+  // prompt still reaches the runtime job input intact; only the operator-visible display doc loses the
+  // ambiguous tail (issue #778 review).
+  const out = redactFreeText("fetch //host/api?token=s3cr3t\nthen review the results please");
+  assert(!out.includes("s3cr3t"), `the query token is redacted: ${out}`);
+  assert(out.includes("?***"), `the query collapses to the marker: ${out}`);
+  assert(!out.includes("then"), `the same-span continuation after the break is redacted away, not kept: ${out}`);
+  // Prose beyond the span's SPACE boundary (a genuinely separate word) is untouched.
+  assert(out.includes("review the results please"), `prose past the span boundary survives: ${out}`);
+  // A `#fragment` split the same way is likewise redacted through the span.
+  const frag = redactFreeText("open //host/p#sig=zzz\nand confirm the deploy");
+  assert(!frag.includes("sig=zzz") && !frag.includes("and"), `fragment + in-span continuation redacted: ${frag}`);
+  assert(frag.includes("confirm the deploy"), `prose past the span boundary survives: ${frag}`);
+});
+
+test("#778 redactFreeText: a non-credential `//` run spanning a break is NOT over-redacted (credential-shaped belt only)", () => {
+  // The belt scan re-redacts only a `//…:…@` userinfo span, not every `//` run. A `//comment` reference
+  // followed by a new-line email `owner@example.com` has no `user:pass@` shape, so the prose survives
+  // intact instead of collapsing to `//***@example.com` (issue #778 review — the earlier `//[^ ]*` scan
+  // mangled it).
+  const out = redactFreeText("Use //comment\nowner@example.com for context");
+  assert(out.includes("owner@example.com") && out.includes("//comment"), `non-credential prose must survive: ${out}`);
+  assert(!out.includes("//***@"), "a break-spanning email is not mistaken for a credential");
+  // A genuine `user:pass@` userinfo split across the same newline IS still redacted.
+  const cred = redactFreeText("Use //user:pass\nx@host/x?token=abc for context");
+  assert(!cred.includes("token=abc") && !cred.includes("user:pass"), `a real split credential must be redacted: ${cred}`);
+});
+
+test("#778 redactFreeText consumes a `?query` split from its URL by a line break (query-across-break)", () => {
+  // The whitespace-delimited `//[^\s]+` primary token STOPS at the break, so a `//host/?` followed by a
+  // new-line `TOKEN=secret` left the secret visible in the XML-preserved display doc even though it is the
+  // URL's query. The linear belt (space-bounded, so it crosses the break) redacts the whole `?…` tail
+  // (issue #778 review — the credential-shaped-`@`-only belt regex was blind to a query with no userinfo).
+  const out = redactFreeText("see //host/?\nTOKEN=secret now");
+  assert(!out.includes("TOKEN=secret"), `a break-spanning query token must be redacted: ${out}`);
+  assert(out.includes("?***"), `the query collapses to the redaction marker: ${out}`);
+  // A bare `#fragment` split the same way is likewise redacted.
+  const frag = redactFreeText("open //host/#\nsig=zzz please");
+  assert(!frag.includes("sig=zzz"), `a break-spanning fragment must be redacted: ${frag}`);
+});
+
+test("#778 redactFreeText is linear on an adversarial `//…:…` prompt (no catastrophic backtracking)", () => {
+  // The old `/\/\/[^ @]*:[^ @]*@[^ ]*/g` belt regex backtracked quadratically on a long run of `//…:…`
+  // segments that never reach an `@`. The linear span scanner walks each `//`-run once, so a 20 000-char
+  // adversarial prompt completes near-instantly. Guard the class with a generous wall-clock bound.
+  const adversarial = `deploy ${"//a:".repeat(5000)} then done`;
+  const t0 = Date.now();
+  const out = redactFreeText(adversarial);
+  assert(Date.now() - t0 < 1000, "redactFreeText must not exhibit catastrophic backtracking");
+  // A run with no `@`, no `?`, no `#` is not credential-shaped, so it is left intact (not over-redacted).
+  assert(out.includes("//a:"), "a non-credential `//…:` run is not redacted");
+});
+
+test("#778 agent.jobType validation error quotes the offending value with JSON.stringify (control-char-safe)", async () => {
+  // A jobType carrying a raw control char (here a TAB) was interpolated between literal double quotes in
+  // the error message, so the control survived verbatim into the rendered error. `JSON.stringify` escapes
+  // it (and matches every other jobType/emit error in the validator) (issue #778 review).
+  const errors = await compileFail({ nodes: [{ id: "n", kind: "agent", agent: { jobType: "bad\ttype" } }], edges: [] });
+  const msg = errors.map((e) => e.message).join("\n");
+  assert(msg.includes('"bad\\ttype"'), `the error quotes the value via JSON.stringify: ${msg}`);
+  assert(!msg.includes("bad\ttype"), "the raw TAB does not survive into the error message");
+});
+
+test("#778 nodeDisplay surfaces a wait probe's credentialEnv key NAME so a credential-differing graph gets a DISTINCT digest (not a collision)", () => {
+  // `credentialEnv` names a validated env-contract KEY (never a secret) but selects which credential a
+  // probe uses at runtime; omitting it from the display let two otherwise-identical graphs collapse to
+  // one content-address. Surfacing the key name makes the digest faithful.
+  const withCred = nodeDisplay({ id: "w", kind: "wait", wait: { kind: "http", target: "https://api.example.com/health", credentialEnv: "PROD_API_TOKEN", match: { status: 200 } } });
+  const otherCred = nodeDisplay({ id: "w", kind: "wait", wait: { kind: "http", target: "https://api.example.com/health", credentialEnv: "STAGING_API_TOKEN", match: { status: 200 } } });
+  const noCred = nodeDisplay({ id: "w", kind: "wait", wait: { kind: "http", target: "https://api.example.com/health", match: { status: 200 } } });
+  assert(withCred.documentation.includes("Credential env: PROD_API_TOKEN"), "the env-key name is surfaced in the display doc");
+  assert(withCred.documentation !== otherCred.documentation, "two graphs differing only in credentialEnv render distinctly (distinct digest)");
+  assert(withCred.documentation !== noCred.documentation, "presence of credentialEnv changes the display (distinct digest)");
+});
+
+
+test("#778 firstLine falls back to the job type / decision label when a prompt is only XML-forbidden control chars", () => {
+  // A prompt of only `\x01` would otherwise be selected and render as a blank ` · <id>` label. firstLine
+  // now skips a line whose SANITISED content is empty, so the fallback (`jobType` / `Human decision`) wins.
+  const agent = nodeDisplay({ id: "n", kind: "agent", agent: { jobType: "senior:build", prompt: "\u0001\u0007" } });
+  assert(agent.name.startsWith("senior:build · "), "an all-control-char prompt falls back to the job type label");
+  const human = nodeDisplay({ id: "h", kind: "human", human: { prompt: "\u0001" } });
+  assert(human.name.startsWith("Human decision · "), "an all-control-char human prompt falls back to `Human decision`");
+});
+
+test("#778 the wait + human inner tasks carry the descriptive display name (not the bare id)", async () => {
+  const graph = {
+    name: "inner names",
+    nodes: [
+      { id: "gate", kind: "wait", wait: { kind: "pr", target: "owner/repo#42", match: { prState: "merged" } } },
+      { id: "otp", kind: "human", human: { prompt: "Run the manual OTP publish", formKey: "publish-form" } },
+    ],
+    edges: [{ from: "gate", to: "otp" }],
+  };
+  const r = await compileOk(graph);
+  const waitEl = elementForNode(r.bpmn, "gate");
+  // All three wait inner elements (loop, probe, boundary retry) now use the descriptive display name.
+  assert(r.bpmn.includes(`<bpmn:subProcess id="${waitEl}_probeLoop" name="Probe readiness loop: Wait: pr owner/repo#42 · gate">`), "probe loop uses the display name");
+  assert(r.bpmn.includes(`<bpmn:serviceTask id="${waitEl}_task" name="Probe readiness: Wait: pr owner/repo#42 · gate">`), "probe task uses the display name");
+  assert(r.bpmn.includes(`<bpmn:serviceTask id="${waitEl}_lastAttempt" name="Probe readiness at boundary: Wait: pr owner/repo#42 · gate">`), "boundary probe uses the display name");
+  // The old bare `...: <id>` inner names are gone.
+  assert(!r.bpmn.includes('name="Probe readiness: gate"'), "no bare probe id name remains");
+  // The human user task uses the descriptive display name too.
+  const humanEl = `delivery-human-task__${humanTaskSubEl(r.bpmn)}`;
+  assert(r.bpmn.includes(`<bpmn:userTask id="${humanEl}" name="Delivery: human step — Run the manual OTP publish · otp">`), "the human user task uses the display name");
+  assert(!r.bpmn.includes('name="Delivery: human step — otp"'), "no bare human id name remains");
+});
+
+test("#778 nodeDisplay redacts a capability probe's verifyCommand (arbitrary shell) in name + documentation", () => {
+  const cap = nodeDisplay({
+    id: "g",
+    kind: "wait",
+    wait: {
+      kind: "capability",
+      target: "github-releases:owner/repo",
+      match: { package: "@scope/pkg", capabilityRef: "owner/repo#7", verifyCommand: "curl -H \"Authorization: Bearer $SECRET\" x" },
+    },
+  });
+  assert(cap.documentation.includes("verifyCommand=<redacted>"), "verifyCommand is redacted in the doc");
+  assert(!cap.documentation.includes("$SECRET"), "the raw shell command never reaches the doc");
+  // Non-secret match fields stay verbatim.
+  assert(cap.documentation.includes("package=@scope/pkg"), "structured match fields stay verbatim");
+});
+
+test("#778 the mermaid diagram reuses the descriptive nodeDisplay name (not the bare `kind: id`)", async () => {
+  const r = await compileOk(RELEASE_RUNBOOK);
+  // One display source: the diagram box carries the same descriptive label the BPMN uses.
+  assert(r.diagram.includes("Wait: pr owner/repo#42 · watch-b"), "wait box uses the descriptive display name");
+  assert(!/"wait: watch-b"/i.test(r.diagram), "no bare `kind: id` box label remains");
+});
+
+test("#778 a bounded node's escalation task carries the descriptive display name (nodeId kept for correlation)", async () => {
+  const graph = {
+    name: "escalation names",
+    nodes: [{ id: "impl", kind: "agent", agent: { jobType: "senior:feature", prompt: "Implement the widget" } }],
+    edges: [],
+  };
+  const r = await compileOk(graph);
+  const esc = escBlockForNode(r.bpmn, "impl");
+  assert(esc.includes('name="Escalate: Implement the widget · impl"'), "escalation task uses the descriptive display name");
+  assert(!esc.includes('name="Escalate: impl"'), "no bare-id escalation name remains");
+  // nodeId is still threaded for runtime correlation.
+  assert(esc.includes('target="nodeId"'), "nodeId is retained as an input for correlation");
+});
+
+test("#778 XML-1.0-forbidden control characters are stripped from user-authored display strings", () => {
+  const display = nodeDisplay({ id: "n", kind: "agent", agent: { jobType: "j", prompt: "do\u0001 the\u0007 thing" } });
+  // `redactFreeText` (the display path for agent/human prompts) strips XML-1.0-forbidden control chars
+  // BEFORE tokenizing, so the name carries the SANITISED text — never a raw control char (which would
+  // make layoutBpmn/deploy reject the model, and could otherwise reconstruct a split-redaction secret).
+  assert(!/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/.test(display.name), "nodeDisplay emits no raw control char");
+  assert(display.name.includes("do the thing"), "the sanitised prompt text is preserved as the label");
+});
+
+test("#778 the compiled BPMN never emits an XML-1.0-forbidden control character", async () => {
+  const graph = {
+    name: "control\u0001 chars",
+    nodes: [{ id: "n", kind: "agent", agent: { jobType: "j", prompt: "line one\u0007 with a bell\u0000 and null" } }],
+    edges: [],
+  };
+  const r = await compileOk(graph);
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: asserting the sanitiser removed them.
+  assert(!/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/.test(r.bpmn), "no forbidden control char survives into the compiled BPMN");
+});
+
+test("#778 nodeDisplay redacts free-form probe match fields (bodyIncludes/stdoutIncludes) that can carry response tokens", () => {
+  const http = nodeDisplay({
+    id: "g",
+    kind: "wait",
+    wait: { kind: "http", target: "https://api.example.com/health", match: { status: 200, bodyIncludes: "session=SUPER_SECRET_TOKEN" } },
+  });
+  assert(http.documentation.includes("bodyIncludes=<redacted>"), "bodyIncludes is redacted");
+  assert(!http.documentation.includes("SUPER_SECRET_TOKEN"), "the raw body substring never reaches the doc");
+  assert(http.documentation.includes("status=200"), "structured match fields stay verbatim");
+
+  const cmd = nodeDisplay({
+    id: "c",
+    kind: "wait",
+    wait: { kind: "command", target: "check.sh", match: { exitCode: 0, stdoutIncludes: "apikey=SUPER_SECRET_STDOUT" } },
+  });
+  assert(cmd.documentation.includes("stdoutIncludes=<redacted>"), "stdoutIncludes is redacted");
+  assert(!cmd.documentation.includes("SUPER_SECRET_STDOUT"), "the raw stdout substring never reaches the doc");
+  assert(cmd.documentation.includes("exitCode=0"), "structured match fields stay verbatim");
+});
+
+test("#778 describeProbeMatch DROPS an undeclared `wait.match` key so a text-ingress graph cannot leak a secret through an attacker-named field (thread :1121)", async () => {
+  // `validateDeliveryGraph` does NOT reject an unknown extra `wait.match` key, so a graph submitted as
+  // text can smuggle an attacker-named field whose value the display would otherwise render VERBATIM
+  // (an unknown key bypasses `REDACTED_MATCH_FIELDS`). Only the declared `ProbeMatch` fields are shown.
+  const graph = {
+    name: "g",
+    nodes: [
+      {
+        id: "w",
+        kind: "wait",
+        wait: { kind: "command", target: "check.sh", match: { exitCode: 0, "x-smuggled": "LEAK_SECRET_VALUE" } },
+      },
+    ],
+    edges: [],
+  };
+  const r = await compileOk(graph);
+  assert(!r.bpmn.includes("LEAK_SECRET_VALUE"), "an undeclared match key's value never reaches the compiled documentation");
+  assert(!r.bpmn.includes("x-smuggled"), "the undeclared match key itself is dropped from the display");
+  assert(r.bpmn.includes("exitCode=0"), "a declared match field still renders verbatim");
+});
+
+test("#778 digestInvisibleRawValues fingerprints an XML-invalid `agent`/`connector` timeout so two runtime-different graphs do not collide (thread :1251)", () => {
+  // The node `timeout` is displayed as `trimmedOrEmpty(timeout)` then XML-sanitised at serialisation, but
+  // the RAW value drives the runtime SLA — so `PT1H` and `PT1H\x01` share a digest while the runtime SLA
+  // differs (an invalid duration silently falls back to the run default). The raw must be fingerprinted.
+  const clean = { name: "g", nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt: "p", timeout: "PT1H" } }], edges: [] };
+  const dirty = { name: "g", nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt: "p", timeout: "PT1H\x01" } }], edges: [] };
+  const invisible = digestInvisibleRawValues(dirty);
+  assert(invisible.some((e) => e.includes("agent.timeout")), "an XML-invalid agent timeout is flagged digest-invisible");
+  // The clean timeout is fully digest-visible → not flagged.
+  assert(!digestInvisibleRawValues(clean).some((e) => e.includes("agent.timeout")), "a clean timeout is not spuriously flagged");
+  // Same for a connector timeout.
+  const dirtyConn = { name: "g", nodes: [{ id: "c", kind: "connector", connector: { target: "converge-merge", timeout: "PT2H\x01" } }], edges: [] };
+  assert(digestInvisibleRawValues(dirtyConn).some((e) => e.includes("connector.timeout")), "an XML-invalid connector timeout is flagged digest-invisible");
+});
+
+test("#778 digestInvisibleRawValues collapses a whitespace-only timeout variant (`PT1H` vs `PT1H `) so it does not spuriously fork the run-key (thread :1307)", () => {
+  // `isoDuration` TRIMS the timeout before it becomes the runtime `nodeTimeout`, and the display doc shows
+  // `trimmedOrEmpty(timeout)` — so `PT1H` and `PT1H ` have the SAME semantic BPMN/digest AND the same SLA.
+  // Fingerprinting the RAW string forked them (one pushed `"PT1H "`, the other nothing), so a
+  // whitespace-only re-stage got a different run key and launched a second run. Fingerprinting the
+  // NORMALISED value collapses them (issue #778 review).
+  const canon = { name: "g", nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", timeout: "PT1H" } }], edges: [] };
+  const trailingWs = { name: "g", nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", timeout: "PT1H " } }], edges: [] };
+  assertEquals(
+    JSON.stringify(digestInvisibleRawValues(canon)),
+    JSON.stringify(digestInvisibleRawValues(trailingWs)),
+    "a trailing-whitespace timeout produces the identical fingerprint set (no spurious fork)",
+  );
+  assert(!digestInvisibleRawValues(canon).some((e) => e.includes("agent.timeout")), "a valid canonical timeout is not fingerprinted at all");
+  // A genuinely-invalid duration DOES still fork from a valid one — it falls back to a different SLA.
+  const invalid = { name: "g", nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", timeout: "PT1H\x01" } }], edges: [] };
+  assert(
+    JSON.stringify(digestInvisibleRawValues(invalid)) !== JSON.stringify(digestInvisibleRawValues(canon)),
+    "an invalid timeout (distinct runtime SLA) is still disambiguated from a valid one",
+  );
+});
+
+test("#778 nodeDisplay + digestInvisibleRawValues redact a credential-bearing agent `jobType` (thread :1202)", () => {
+  // `jobType` is emitted verbatim into the agent node's display label and (as of #778) the compiled BPMN,
+  // so a URL-shaped jobType carrying a credential must be redacted the SAME way a connector target is —
+  // and the redacted-away raw fingerprinted so a secret-differing jobType is not digest-collapsed.
+  const secret = "//user:s3cr3t@host/?token=abc";
+  const d = nodeDisplay({ id: "a", kind: "agent", agent: { jobType: secret } });
+  const rendered = `${d.name}\n${d.documentation}`;
+  assert(!rendered.includes("s3cr3t") && !rendered.includes("token=abc"), `the credential is redacted from the display: ${rendered}`);
+  assert(rendered.includes("***"), `the display carries the redaction marker: ${rendered}`);
+  const graph = { name: "g", nodes: [{ id: "a", kind: "agent", agent: { jobType: secret } }], edges: [] };
+  assert(digestInvisibleRawValues(graph).some((e) => e.includes("agent.jobType")), "the redacted-away jobType is fingerprinted digest-invisible");
+  // An ordinary `senior:feature` jobType (not URL-shaped) is untouched and not fingerprinted.
+  const ordinary = { name: "g", nodes: [{ id: "a", kind: "agent", agent: { jobType: "senior:feature" } }], edges: [] };
+  assert(nodeDisplay({ id: "a", kind: "agent", agent: { jobType: "senior:feature" } }).documentation.includes("senior:feature"), "a normal jobType renders verbatim");
+  assert(!digestInvisibleRawValues(ordinary).some((e) => e.includes("agent.jobType")), "a normal jobType is not spuriously fingerprinted");
+});
+
+test("#778 digestInvisibleRawValues fingerprints an XML-invalid `wait.credentialEnv` so a malformed env key does not collide with a valid one (suppressed advisory :1355)", () => {
+  const clean = { name: "g", nodes: [{ id: "w", kind: "wait", wait: { kind: "http", target: "https://x", credentialEnv: "GITHUB_TOKEN" } }], edges: [] };
+  const dirty = { name: "g", nodes: [{ id: "w", kind: "wait", wait: { kind: "http", target: "https://x", credentialEnv: "GITHUB_TOKEN\x01" } }], edges: [] };
+  assert(!digestInvisibleRawValues(clean).some((e) => e.includes("wait.credentialEnv")), "a clean credentialEnv is not fingerprinted");
+  assert(digestInvisibleRawValues(dirty).some((e) => e.includes("wait.credentialEnv")), "an XML-invalid credentialEnv is fingerprinted digest-invisible");
+  // The two graphs (identical display/digest) therefore produce DIFFERENT invisible-value sets.
+  assert(
+    JSON.stringify(digestInvisibleRawValues(clean)) !== JSON.stringify(digestInvisibleRawValues(dirty)),
+    "the malformed credentialEnv graph is disambiguated from the valid one",
+  );
+});
+
+test("#778 digestInvisibleRawValues collapses a whitespace-only redacted-match variant (`verifyCommand`) — parseMatch trims it (suppressed advisory :1363)", () => {
+  const canon = { name: "g", nodes: [{ id: "w", kind: "wait", wait: { kind: "capability", target: "github-releases:o/r", match: { verifyCommand: "curl x" } } }], edges: [] };
+  const trailingWs = { name: "g", nodes: [{ id: "w", kind: "wait", wait: { kind: "capability", target: "github-releases:o/r", match: { verifyCommand: "curl x " } } }], edges: [] };
+  // The redacted field is ALWAYS fingerprinted (display is `<redacted>`), but the trimmed value is used,
+  // so a trailing-whitespace variant produces the IDENTICAL fingerprint set (no spurious run-key fork).
+  assert(digestInvisibleRawValues(canon).some((e) => e.includes("wait.match.verifyCommand")), "a redacted match field is fingerprinted");
+  assertEquals(
+    JSON.stringify(digestInvisibleRawValues(canon)),
+    JSON.stringify(digestInvisibleRawValues(trailingWs)),
+    "a whitespace-only difference in a trimmed redacted match field does not fork the fingerprint",
+  );
+  // An internal invalid char still distinguishes (runtime carries it).
+  const invalid = { name: "g", nodes: [{ id: "w", kind: "wait", wait: { kind: "capability", target: "github-releases:o/r", match: { verifyCommand: "curl\x01x" } } }], edges: [] };
+  assert(
+    JSON.stringify(digestInvisibleRawValues(invalid)) !== JSON.stringify(digestInvisibleRawValues(canon)),
+    "an internal invalid char in a redacted match field is still disambiguated",
+  );
+});
+
+test("#778 describeProbeMatch renders match fields in a stable order regardless of JSON insertion order (byte-determinism)", () => {
+  const a = nodeDisplay({ id: "g", kind: "wait", wait: { kind: "http", target: "https://x", match: { status: 200, version: "1.2.3" } } });
+  const b = nodeDisplay({ id: "g", kind: "wait", wait: { kind: "http", target: "https://x", match: { version: "1.2.3", status: 200 } } });
+  assertEquals(a.documentation, b.documentation);
+  // The stable order is code-unit ascending on the key ("status" < "version").
+  const match = a.documentation.split("\n").find((l) => l.startsWith("Match: "));
+  assertEquals(match, "Match: status=200, version=1.2.3");
+});
+
+test("#778 nodeDisplay redacts a credential-bearing connector target + dedupeKey (forward-declared / free-form values)", () => {
+  const c = nodeDisplay({
+    id: "call",
+    kind: "connector",
+    connector: { target: "https://user:p4ss@hooks.example.com/deploy?token=abc123", dedupeKey: "https://k:s3cr3t@idem.example.com/key?sig=zzz" },
+  });
+  assert(!c.name.includes("p4ss") && !c.name.includes("abc123"), "connector name drops userinfo + query secret");
+  assert(!c.documentation.includes("p4ss") && !c.documentation.includes("abc123"), "connector doc target drops userinfo + query secret");
+  assert(!c.documentation.includes("s3cr3t") && !c.documentation.includes("zzz"), "connector doc dedupeKey drops userinfo + query secret");
+  assert(c.documentation.includes("Connector target: https://***@hooks.example.com/deploy?***"), "connector target rendered redacted");
+  assert(c.documentation.includes("Dedupe key: https://***@idem.example.com/key?***"), "connector dedupeKey rendered redacted");
+});
+
+test("#778 nodeDisplay preserves an OPAQUE (non-URL) connector target/dedupeKey/payload.pr verbatim — `#`/`?` are not URL redaction points", () => {
+  // A forward-declared connector identifier such as `slack:#releases` is NOT a `scheme://authority`
+  // URL, so blind redactString would mangle its meaningful `#`/`?` (e.g. `slack:#releases` →
+  // `slack:#***`). Only real URLs are redacted; opaque identifiers and `owner/repo#42`/`<node>.pr`
+  // PR references survive verbatim.
+  const c = nodeDisplay({
+    id: "call",
+    kind: "connector",
+    connector: { target: "slack:#releases?thread=42", dedupeKey: "idem#deploy?v=1", payload: { pr: "owner/repo#42" } },
+  });
+  assert(c.name.includes("Connector: slack:#releases?thread=42"), "opaque target name is verbatim (not mangled)");
+  assert(c.documentation.includes("Connector target: slack:#releases?thread=42"), "opaque target doc is verbatim");
+  assert(c.documentation.includes("Dedupe key: idem#deploy?v=1"), "opaque dedupeKey is verbatim");
+  assert(c.documentation.includes("PR: owner/repo#42"), "an `owner/repo#42` PR reference is preserved verbatim");
+});
+
+test("#778 nodeDisplay redacts a credential-bearing connector payload.pr (canonical URL) but preserves a clean PR URL/`<node>.pr` ref", () => {
+  const cred = nodeDisplay({
+    id: "land",
+    kind: "connector",
+    connector: { target: "converge-merge", payload: { pr: "https://user:tok3n@github.com/o/r/pull/42?access=sekret" } },
+  });
+  assert(!cred.documentation.includes("tok3n") && !cred.documentation.includes("sekret"), "credential-bearing PR URL has userinfo + query stripped");
+  const ref = nodeDisplay({
+    id: "land2",
+    kind: "connector",
+    connector: { target: "converge-merge", payload: { pr: "impl.pr" } },
+  });
+  assert(ref.documentation.includes("PR: impl.pr"), "a `<node>.pr` fact reference is preserved verbatim");
+});
+
+test("#778 nodeDisplay redacts a PROTOCOL-RELATIVE (`//user:pass@…`) connector target/dedupeKey — a scheme is optional (#778 review)", () => {
+  // `redactString` redacts a scheme-relative `//user:pass@host?token=…` form, but the URL detector
+  // that gates it once required a `scheme://` prefix, so a protocol-relative target slipped through
+  // VERBATIM into the compiled name/documentation, leaking its credential. The detector now accepts an
+  // OPTIONAL scheme before the `//authority`.
+  const c = nodeDisplay({
+    id: "call",
+    kind: "connector",
+    connector: { target: "//user:p4ss@hooks.example.com/deploy?token=abc123", dedupeKey: "//s3cr3t@idem.example.com/key?sig=zzz" },
+  });
+  assert(!c.name.includes("p4ss") && !c.name.includes("abc123"), "protocol-relative connector name drops userinfo + query secret");
+  assert(!c.documentation.includes("p4ss") && !c.documentation.includes("abc123"), "protocol-relative connector doc target drops secret");
+  assert(!c.documentation.includes("s3cr3t") && !c.documentation.includes("zzz"), "protocol-relative dedupeKey drops secret");
+  assert(c.documentation.includes("Connector target: //***@hooks.example.com/deploy?***"), "protocol-relative target rendered redacted");
+  assert(c.documentation.includes("Dedupe key: //***@idem.example.com/key?***"), "protocol-relative dedupeKey rendered redacted");
+});
+
+test("#778 the connector timeout-escalation FEEL descriptor redacts a credential-bearing target (#778 review)", async () => {
+  // The connector node's escalation-context descriptor (`connector → <target>`) is baked as a
+  // compile-time FEEL string literal into the timeout escalation task. A raw credential-bearing target
+  // there would persist the secret in the generated BPMN even though nodeDisplay redacts it — the
+  // descriptor must use the same URL-only redaction.
+  const graph = {
+    name: "connector escalation redaction",
+    nodes: [{ id: "call", kind: "connector", connector: { target: "https://user:p4ss@hooks.example.com/deploy?token=abc123" } }],
+    edges: [],
+  };
+  const r = await compileOk(graph);
+  assert(!r.bpmn.includes("p4ss") && !r.bpmn.includes("abc123"), "no connector credential leaks into the compiled BPMN escalation context");
+  assert(r.bpmn.includes("connector → https://***@hooks.example.com/deploy?***"), "the escalation descriptor renders the redacted target");
+});
+
+test("#778 the compiled connector inner task carries the descriptive display name (distinct connector arg path)", async () => {
+  const graph = {
+    name: "connector inner name",
+    nodes: [{ id: "land", kind: "connector", connector: { target: "converge-merge", payload: { pr: "o/r#42" }, dedupeKey: "land-1" } }],
+    edges: [],
+  };
+  const r = await compileOk(graph);
+  const el = elementForNode(r.bpmn, "land");
+  assert(r.bpmn.includes(`<bpmn:serviceTask id="${el}_task" name="Converge &amp; merge PR · land">`), "the connector inner task shares the descriptive display name");
+  assert(!r.bpmn.includes('name="connector: land"'), "no bare kind:id connector task name remains");
+});
+
+test("#778 firstLine truncates by code point so an astral character never leaves an unpaired surrogate in the BPMN", async () => {
+  // 70 ASCII + an emoji straddling the cap-1 (71) boundary + trailing text: a code-unit slice(0,71)
+  // would cut the surrogate pair, leaving a lone high surrogate that stripXmlInvalidChars does NOT remove.
+  const prompt = `${"a".repeat(70)}😀 trailing detail that pushes past the seventy-two character cap`;
+  const graph = { name: "surrogate", nodes: [{ id: "n", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+  const r = await compileOk(graph);
+  const loneSurrogate = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+  assert(!loneSurrogate.test(r.bpmn), "no unpaired surrogate survives into the compiled BPMN");
+  // Positive check: `stripXmlInvalidChars` would silently drop a lone surrogate left by a buggy UTF-16
+  // `slice`, so the no-lone-surrogate assertion alone can't catch a code-UNIT truncation. Assert the
+  // label truncated by CODE POINT — the 70 ASCII run, the intact emoji pair, then the ellipsis.
+  assert(r.bpmn.includes(`${"a".repeat(70)}😀…`), "truncation keeps whole code points: 70 ASCII + the intact emoji + ellipsis");
+});
+
+test("#778 the mermaid diagram strips XML-1.0-forbidden control characters from node labels", async () => {
+  const graph = {
+    name: "mermaid\u0001 controls",
+    nodes: [{ id: "n", kind: "agent", agent: { jobType: "j", prompt: "preview\u0001 label\u0007 with controls" } }],
+    edges: [],
+  };
+  const r = await compileOk(graph);
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: asserting the mermaid sanitiser removed them.
+  assert(!/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/.test(r.diagram), "no forbidden control char survives into the mermaid diagram");
+});
+
+test("#778 the mermaid diagram encodes markup chars and folds bare CR line breaks in free-form labels", async () => {
+  const graph = {
+    name: "mermaid markup",
+    // `<`/`>`/`&` would render as markup (label vanishes/mangles); a bare `\r` (valid, so kept by
+    // stripXmlInvalidChars) injects a raw break into the line-oriented Mermaid source.
+    nodes: [{ id: "n", kind: "agent", agent: { jobType: "j", prompt: "a<b> & first\rsecond" } }],
+    edges: [],
+  };
+  const r = await compileOk(graph);
+  const label = r.diagram.split("\n").find((l) => /^\s+\S+\["/.test(l) && l.includes("first"));
+  assert(label !== undefined, "the node label line is present");
+  assert(!/[<>]/.test(label ?? ""), "no raw < or > survives into the mermaid label");
+  assert((label ?? "").includes("#lt;b#gt;") && (label ?? "").includes("#amp;"), "markup chars are Mermaid-entity encoded");
+  assert(!/\r/.test(label ?? ""), "the bare CR is folded to a space, not a raw break");
+  assert((label ?? "").includes("first second"), "the CR-separated words are joined by a space");
+});
+
+test("#778 stripXmlInvalidChars-guarded output drops U+FFFE/U+FFFF noncharacters and directly-injected unpaired surrogates while keeping valid astral pairs", async () => {
+  // A prompt carrying a noncharacter, a lone high surrogate, a lone low surrogate, AND a valid emoji
+  // pair: the renderer must drop the first three (XML-1.0 `Char` forbids them) but keep the pair.
+  const prompt = "keep\uFFFE me\uFFFF here \uD83D lone-high \uDE00 lone-low but this pair 😀 stays";
+  const graph = { name: "noncharacters", nodes: [{ id: "n", kind: "agent", agent: { jobType: "j", prompt } }], edges: [] };
+  const r = await compileOk(graph);
+  assert(!/[\uFFFE\uFFFF]/.test(r.bpmn), "no U+FFFE/U+FFFF noncharacter survives into the compiled BPMN");
+  const loneSurrogate = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+  assert(!loneSurrogate.test(r.bpmn), "no unpaired surrogate survives into the compiled BPMN");
+  assert(r.bpmn.includes("😀"), "a valid astral pair is preserved");
+});
+
+test("#778 graphCarriesRedactedSecrets: false for a graph whose display fields are fully digest-represented", () => {
+  const plain = {
+    name: "plain",
+    nodes: [
+      { id: "a", kind: "agent", agent: { jobType: "senior:feature", prompt: "implement nanobpm/nano-ide#42" } },
+      { id: "h", kind: "human", human: { prompt: "click done" } },
+      { id: "w", kind: "wait", wait: { kind: "epic", target: "nanobpm/nano-ide#488" } },
+      { id: "c", kind: "connector", connector: { target: "slack:#releases", payload: { pr: "o/r#1" } } },
+    ],
+    edges: [],
+  };
+  assertEquals(graphCarriesRedactedSecrets(plain), false);
+});
+
+test("#778 graphCarriesRedactedSecrets: true when a node carries redacted-away secret material", () => {
+  const urlInPrompt = { name: "n", nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt: "push to https://u:p@host/x" } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(urlInPrompt), true);
+
+  const commandWait = { name: "n", nodes: [{ id: "w", kind: "wait", wait: { kind: "command", target: "run-the-secret.sh" } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(commandWait), true);
+
+  const matchSecret = { name: "n", nodes: [{ id: "w", kind: "wait", wait: { kind: "command", target: "x", match: { stdoutIncludes: "TOKEN=abc" } } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(matchSecret), true);
+
+  const payloadKey = { name: "n", nodes: [{ id: "c", kind: "connector", connector: { target: "slack:#r", payload: { pr: "o/r#1", secretHeader: "Bearer z" } } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(payloadKey), true);
+});
+
+test("#778 graphCarriesRedactedSecrets: true when a prompt differs from its display form only by trimmed whitespace", () => {
+  // The display embeds `redactFreeText(trimmedOrEmpty(prompt))`, but the RAW untrimmed prompt reaches
+  // the runtime — so `"  run this"` and `"run this"` share one digest yet dispatch different prompts.
+  const leadingWs = { name: "n", nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt: "   run this" } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(leadingWs), true);
+  const humanWs = { name: "n", nodes: [{ id: "h", kind: "human", human: { prompt: "click done  " } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(humanWs), true);
+  // The trimmed twin is faithfully represented → not lossy.
+  const trimmed = { name: "n", nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt: "run this" } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(trimmed), false);
+});
+
+test("#778 graphCarriesRedactedSecrets: whitespace-only dedupeKey/formKey difference is NOT lossy (runtime trims both)", () => {
+  // The connector worker (`connectorDedupeKey`) and human form resolution (`resolveHumanForm`) BOTH trim
+  // these keys, so a leading/trailing-whitespace-only variant has identical runtime identity/behaviour —
+  // the fingerprint keys on the NORMALISED value, so it must NOT be flagged digest-invisible (else a
+  // whitespace twin needlessly requires an idempotencyKey and double-launches an identical graph) (#778).
+  const wsKey = { name: "n", nodes: [{ id: "c", kind: "connector", connector: { target: "slack:#r", dedupeKey: "  key  " } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(wsKey), false);
+  const cleanKey = { name: "n", nodes: [{ id: "c", kind: "connector", connector: { target: "slack:#r", dedupeKey: "key" } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(cleanKey), false);
+  // The whitespace twin fingerprints IDENTICALLY to its trimmed form — same run-key, so a re-dispatch
+  // short-circuits as `alreadyRunning` instead of relaunching.
+  assertEquals(JSON.stringify(digestInvisibleRawValues(wsKey)), JSON.stringify(digestInvisibleRawValues(cleanKey)));
+  const wsForm = { name: "n", nodes: [{ id: "h", kind: "human", human: { prompt: "approve", formKey: "  deploy-approval  " } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(wsForm), false);
+  const cleanForm = { name: "n", nodes: [{ id: "h", kind: "human", human: { prompt: "approve", formKey: "deploy-approval" } }], edges: [] };
+  assertEquals(JSON.stringify(digestInvisibleRawValues(wsForm)), JSON.stringify(digestInvisibleRawValues(cleanForm)));
+  // A genuine credential in either key is still redacted-away → lossy (whitespace normalisation does not
+  // hide a real secret).
+  const credKey = { name: "n", nodes: [{ id: "c", kind: "connector", connector: { target: "slack:#r", dedupeKey: "//user:pass@host/x?token=abc" } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(credKey), true);
+});
+
+test("#778 graphCarriesRedactedSecrets: true when payload.pr carries a redacted-away credential, or is a non-string value", () => {
+  // `nodeDisplay` surfaces `payload.pr` redacted; a credential in the raw pr URL is dropped from the
+  // digest but reaches the connector → lossy.
+  const credPr = { name: "n", nodes: [{ id: "c", kind: "connector", connector: { target: "slack:#r", payload: { pr: "https://u:p@host/x?token=abc" } } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(credPr), true);
+  // A non-string pr is never rendered as a string, yet the raw payload still reaches the connector.
+  const nonStringPr = { name: "n", nodes: [{ id: "c", kind: "connector", connector: { target: "slack:#r", payload: { pr: 42 } } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(nonStringPr), true);
+  // A faithful string pr (no credential) is fully digest-represented → not lossy.
+  const plainPr = { name: "n", nodes: [{ id: "c", kind: "connector", connector: { target: "slack:#r", payload: { pr: "o/r#1" } } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(plainPr), false);
+});
+
+test("#778 graphCarriesRedactedSecrets: lossy for a present-but-unsurfaced payload — empty object, null/empty pr — without throwing on a non-plain payload", () => {
+  // A present-empty payload `{}` renders NO `PR:` line yet the raw `{}` reaches the connector worker —
+  // the digest cannot see it, so it must be lossy (else a `{}`-payload graph shares a run identity with
+  // a no-payload one) (issue #778 review).
+  const emptyPayload = { name: "n", nodes: [{ id: "c", kind: "connector", connector: { target: "slack:#r", payload: {} } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(emptyPayload), true);
+  // `{ pr: null }` and `{ pr: "" }` likewise surface no `PR:` line but reach the connector raw.
+  const nullPr = { name: "n", nodes: [{ id: "c", kind: "connector", connector: { target: "slack:#r", payload: { pr: null } } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(nullPr), true);
+  const emptyStrPr = { name: "n", nodes: [{ id: "c", kind: "connector", connector: { target: "slack:#r", payload: { pr: "" } } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(emptyStrPr), true);
+  // A non-plain-object payload (a bare primitive) must be treated as lossy WITHOUT throwing — `"pr" in 42`
+  // would otherwise crash the predicate and 500 the dispatch (issue #778 review).
+  const primitivePayload = { name: "n", nodes: [{ id: "c", kind: "connector", connector: { target: "slack:#r", payload: 42 } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(primitivePayload), true);
+});
+
+test("#778 nodeDisplay: emit `description` is embedded (redacted) in the label so a description-differing graph is not collapsed", () => {
+  // `renderEmitContract` embeds each fact's `description` in the runtime `appendPrompt`, so two graphs
+  // differing ONLY in an emit description dispatch DIFFERENT instructions — the display must carry a
+  // (redacted) representation or the digest collapses them and keyless dispatch reuses the wrong prompt.
+  const withDesc = nodeDisplay({ id: "a", kind: "agent", agent: { jobType: "j", prompt: "do it" }, emits: [{ name: "pr", type: "pr", description: "the merged PR ref" }] });
+  assert(withDesc.documentation.includes("Emits: pr (pr) — the merged PR ref"), "emit description appears in the label");
+  const other = nodeDisplay({ id: "a", kind: "agent", agent: { jobType: "j", prompt: "do it" }, emits: [{ name: "pr", type: "pr", description: "a DIFFERENT description" }] });
+  assert(withDesc.documentation !== other.documentation, "a different emit description yields a different label");
+  // A credential in the description is redacted in the display AND flagged digest-invisible.
+  const credDesc = { name: "n", nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt: "do it" }, emits: [{ name: "pr", type: "pr", description: "post to //user:pass@host/x?token=abc" }] }], edges: [] };
+  const disp = nodeDisplay(credDesc.nodes[0]);
+  assert(!disp.documentation.includes("user:pass") && !disp.documentation.includes("token=abc"), "credential is stripped from the emit-description label");
+  assertEquals(graphCarriesRedactedSecrets(credDesc), true);
+});
+
+test("#778 nodeDisplay: a credential-bearing human `formKey` is redacted in the label and flagged digest-invisible", () => {
+  const credForm = { name: "n", nodes: [{ id: "h", kind: "human", human: { prompt: "approve", formKey: "//user:pass@forms.example.com/approve?token=abc" } }], edges: [] };
+  const disp = nodeDisplay(credForm.nodes[0]);
+  assert(!disp.documentation.includes("user:pass") && !disp.documentation.includes("token=abc"), "credential stripped from the formKey label");
+  assertEquals(graphCarriesRedactedSecrets(credForm), true);
+  // An ordinary opaque form id is shown verbatim and is fully digest-represented.
+  const plainForm = { name: "n", nodes: [{ id: "h", kind: "human", human: { prompt: "approve", formKey: "deploy-approval" } }], edges: [] };
+  assert(nodeDisplay(plainForm.nodes[0]).documentation.includes("Form: deploy-approval"), "opaque form id shown verbatim");
+  assertEquals(graphCarriesRedactedSecrets(plainForm), false);
+});
+
+test("#778 graphCarriesRedactedSecrets: true when a non-redacted match value loses characters to XML sanitization", () => {
+  // A non-secret match value is shown as `String(v)`, which XML-1.0 sanitization strips invalid chars
+  // from at serialization — so `"1\u0001"` and `"1"` would share a digest while the raw probe configs
+  // differ. That sanitization loss must be flagged digest-invisible (issue #778 review).
+  const sanitized = { name: "n", nodes: [{ id: "w", kind: "wait", wait: { kind: "http", target: "https://h/x", match: { version: "1\u0001" } } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(sanitized), true);
+  // The clean twin (no invalid chars) is faithfully represented → not lossy.
+  const clean = { name: "n", nodes: [{ id: "w", kind: "wait", wait: { kind: "http", target: "https://h/x", match: { version: "1" } } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(clean), false);
+  // The two differ in their digest-invisible values, so their dispatch fingerprints diverge.
+  assert(JSON.stringify(digestInvisibleRawValues(sanitized)) !== JSON.stringify(digestInvisibleRawValues(clean)), "sanitization-lossy value contributes a distinct fingerprint");
+});
+
+test("#778 digestInvisibleRawValues: emits a canonical (node-order-independent) list so the run-key fingerprint is reorder-invariant", () => {
+  // The compiler sorts nodes before `semanticBpmn`, so a top-level node reorder shares one digest. This
+  // list — which the run-key fingerprints — must therefore be reorder-invariant too, else a re-stage in a
+  // different node encoding forks the run-key and double-launches (issue #778 review). Entries are
+  // code-unit sorted at the source, so two node orderings yield an IDENTICAL list.
+  const ab = { name: "n", nodes: [{ id: "a", kind: "connector", connector: { target: "//user:pass@host" } }, { id: "b", kind: "connector", connector: { target: "//other:secret@host" } }], edges: [] };
+  const ba = { name: "n", nodes: [{ id: "b", kind: "connector", connector: { target: "//other:secret@host" } }, { id: "a", kind: "connector", connector: { target: "//user:pass@host" } }], edges: [] };
+  assertEquals(JSON.stringify(digestInvisibleRawValues(ab)), JSON.stringify(digestInvisibleRawValues(ba)));
+});
+
+test("#778 redactFreeText: redacts a URL query/fragment orphaned across a smuggled newline", () => {
+  // The whitespace-delimited URL token stops at the CR/LF, so the `?token=…` tail on the far side must
+  // still be stripped by the newline-spanning belt-and-braces (issue #778 review).
+  const out = redactFreeText("see //user:pa\nss@host/path?token=secret for details");
+  assert(!out.includes("user:pa") && !out.includes("token=secret"), `credential must not survive: ${out}`);
+  // Ordinary prose after a real whitespace break is not over-redacted.
+  const prose = redactFreeText("visit //example.com then\nis this ok? yes");
+  assert(prose.includes("is this ok? yes"), `prose after a whitespace break is intact: ${prose}`);
 });

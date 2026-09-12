@@ -217,28 +217,54 @@ export async function stageProposal(data: DataLayer, row: DeliveryGraphProposal)
         createdAt: isProposalExpired(existing.expires_at) ? undefined : existing.created_at,
       })
     : row;
-  if (existing) {
-    const { digest, ...patch } = toWrite;
-    await table.update(row.digest, patch);
-  } else {
-    await table.insert(toWrite);
-  }
-  // Reconcile to EXACTLY ONE live proposal per logical graph: supersede every `staged` row for this
-  // `logical_key` that has a strictly-NEWER staged sibling (by `updated_at`, with a deterministic
-  // `digest` tie-breaker), leaving only the globally-newest live. This is ORDER-INDEPENDENT — it never
-  // references the just-written digest, so it converges to a single live row regardless of the
-  // interleaving of concurrent stages. A supersede pass keyed to "only flip rows older than the one *I*
-  // just wrote" leaves TWO live proposals when an OLDER stage's pass runs AFTER a newer stage already
-  // committed (the older pass won't flip the newer row, and the newer pass ran before the older row
-  // existed) — and an unordered supersede-all leaves ZERO. Anchoring on the newest staged sibling avoids
-  // both: the newest row is never superseded (no newer sibling), so it stays staged throughout the
-  // statement and every older row's `EXISTS` is satisfied by it. Idempotent: a no-op once one row remains.
-  await data
-    .open()
-    .exec(
-      `UPDATE "delivery_graph_proposals" SET "status" = 'superseded', "updated_at" = ? WHERE "logical_key" = ? AND "status" = 'staged' AND EXISTS (SELECT 1 FROM "delivery_graph_proposals" AS "newer" WHERE "newer"."logical_key" = "delivery_graph_proposals"."logical_key" AND "newer"."status" = 'staged' AND ("newer"."updated_at" > "delivery_graph_proposals"."updated_at" OR ("newer"."updated_at" = "delivery_graph_proposals"."updated_at" AND "newer"."digest" > "delivery_graph_proposals"."digest")))`,
+  // Persist the write, its strictly-monotonic stage sequence, AND the supersede reconcile as ONE
+  // transaction (issue #778 review — threads deliveryGraphProposals.ts:237/:239). Two properties matter:
+  //   • `stage_seq` is assigned ATOMICALLY inside the write itself — `MAX(stage_seq)+1` in the
+  //     INSERT/UPDATE, NOT a separate stamp statement — so there is never a "written but unstamped
+  //     (seq 0)" window in which a rival same-millisecond stage's reconcile could read the half-written
+  //     sibling at its DEFAULT 0 and supersede it out of order (the inversion the old two-statement
+  //     stamp+reconcile allowed). Assigning inside the serialized transaction keeps `MAX(...)` atomic, so
+  //     `+1` is strictly greater than every committed seq and reflects true write order.
+  //   • wrapping the reconcile in the SAME transaction means no concurrent stage observes an intermediate
+  //     state between the write and the reconcile.
+  // `MAX(stage_seq)` reads the pre-write table via the `stage_seq` index (migration 102), an O(1)
+  // reverse-index seek rather than the full-history scan a bare aggregate over the retained terminal rows
+  // would cost.
+  const w = toWrite;
+  const nextSeq = `(SELECT COALESCE(MAX("stage_seq"), 0) + 1 FROM "delivery_graph_proposals")`;
+  await data.open().tx(async (t) => {
+    if (existing) {
+      await t.exec(
+        `UPDATE "delivery_graph_proposals" SET "logical_key" = ?, "title" = ?, "graph" = ?, "preview" = ?, "node_count" = ?, "human_node_count" = ?, "side_effect_count" = ?, "side_effecting" = ?, "status" = ?, "created_at" = ?, "updated_at" = ?, "expires_at" = ?, "stage_seq" = ${nextSeq} WHERE "digest" = ?`,
+        [w.logical_key, w.title, w.graph, w.preview, w.node_count, w.human_node_count, w.side_effect_count, w.side_effecting, w.status, w.created_at, w.updated_at, w.expires_at, w.digest],
+      );
+    } else {
+      await t.exec(
+        `INSERT INTO "delivery_graph_proposals" ("digest", "logical_key", "title", "graph", "preview", "node_count", "human_node_count", "side_effect_count", "side_effecting", "status", "created_at", "updated_at", "expires_at", "stage_seq") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${nextSeq})`,
+        [w.digest, w.logical_key, w.title, w.graph, w.preview, w.node_count, w.human_node_count, w.side_effect_count, w.side_effecting, w.status, w.created_at, w.updated_at, w.expires_at],
+      );
+    }
+    // Reconcile to EXACTLY ONE live proposal per logical graph: supersede every `staged` row for this
+    // `logical_key` that has a strictly-NEWER staged sibling (by `updated_at`, with a deterministic
+    // `stage_seq` tie-breaker), leaving only the globally-newest live. This is ORDER-INDEPENDENT
+    // — it never references the just-written digest, so it converges to a single live row regardless of the
+    // interleaving of concurrent stages. A supersede pass keyed to "only flip rows older than the one *I*
+    // just wrote" leaves TWO live proposals when an OLDER stage's pass runs AFTER a newer stage already
+    // committed (the older pass won't flip the newer row, and the newer pass ran before the older row
+    // existed) — and an unordered supersede-all leaves ZERO. Anchoring on the newest staged sibling avoids
+    // both: the newest row is never superseded (no newer sibling), so it stays staged throughout the
+    // statement and every older row's `EXISTS` is satisfied by it. Idempotent: a no-op once one row remains.
+    // The tie-break is the monotonic `stage_seq` (atomically assigned in the write above), NOT the content
+    // `digest` NOR the frozen `rowid`: two stages landing in the SAME millisecond tie on `updated_at`, and a
+    // `digest`-string tie-break is arbitrary w.r.t. submission order while `rowid` does not advance on a
+    // re-stage UPDATE — so either could pick the LATER-submitted graph as the one superseded, inverting
+    // "the latest stage wins". `stage_seq` advances on every stage (insert AND re-stage alike), so the
+    // most-recently-written row deterministically wins the tie.
+    await t.exec(
+      `UPDATE "delivery_graph_proposals" SET "status" = 'superseded', "updated_at" = ? WHERE "logical_key" = ? AND "status" = 'staged' AND EXISTS (SELECT 1 FROM "delivery_graph_proposals" AS "newer" WHERE "newer"."logical_key" = "delivery_graph_proposals"."logical_key" AND "newer"."status" = 'staged' AND ("newer"."updated_at" > "delivery_graph_proposals"."updated_at" OR ("newer"."updated_at" = "delivery_graph_proposals"."updated_at" AND "newer"."stage_seq" > "delivery_graph_proposals"."stage_seq")))`,
       [now(), row.logical_key],
     );
+  });
 
   // Report what the stage did to siblings (issue #740). `superseded` = the same-logical-key proposals
   // this stage retired (re-read post-reconcile so a concurrent newer stage that kept ITS row live —

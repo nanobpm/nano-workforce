@@ -15,6 +15,7 @@ import assert from "node:assert/strict";
 import { bootTestApp, type TestApp } from "@nanobpm/urban-testkit";
 import { deliveryGraphProposals } from "../app/deliveryGraphProposals.ts";
 import { deliveryGraphRuns } from "../app/deliveryGraphRun.ts";
+import { stableProposalRunKey } from "./dispatchDeliveryGraph.ts";
 
 const APP_ROOT = resolve(import.meta.dirname, "..");
 const GITHUB_ENV: Record<string, string> = { NANO_PR_GITHUB_TRANSPORT: "token", GITHUB_TOKEN: "" };
@@ -31,6 +32,61 @@ const SIDE_EFFECTING = {
   ],
   edges: [{ from: "open-b", to: "publish" }],
 };
+
+test("stableProposalRunKey: digest identity + secret disambiguation (issue #778 review)", () => {
+  // The run key is derived from the proposal's semantic `digest` (which the compiler already normalises
+  // — collapsing omitted-vs-default fields and top-level node/edge REORDER) PLUS a fingerprint of the
+  // digest-invisible raw values. So a re-stage of the SAME logical graph in ANY encoding sharing the
+  // digest short-circuits, while a credential-differing graph (same digest, different secret) diverges.
+  const D1 = "sha-aaa";
+  const D2 = "sha-bbb";
+  const credA = {
+    name: "g",
+    nodes: [{ id: "n", kind: "connector", connector: { target: "//user:pass@host" } }],
+    edges: [],
+  };
+  // Same digest + identical graph → same key (a double-click / re-dispatch short-circuits).
+  assert.equal(stableProposalRunKey(D1, credA), stableProposalRunKey(D1, credA));
+  // Same digest but a DIFFERENT redacted-away credential — both redact to the same `//***@host` display
+  // so they SHARE the digest — must yield a DIFFERENT key, else the second dispatch collapses onto the
+  // first's still-running instance.
+  const credB = { name: "g", nodes: [{ id: "n", kind: "connector", connector: { target: "//other:secret@host" } }], edges: [] };
+  assert.notEqual(stableProposalRunKey(D1, credA), stableProposalRunKey(D1, credB));
+  // A genuinely different semantic graph carries a DIFFERENT digest → a different key even with no secrets.
+  const plain = { name: "g", nodes: [{ id: "n", kind: "human", human: { prompt: "x" } }], edges: [] };
+  assert.notEqual(stableProposalRunKey(D1, plain), stableProposalRunKey(D2, plain));
+  // A graph with NO digest-invisible content has an EMPTY fingerprint, so its key is a pure function of
+  // the digest: a re-stage in a DIFFERENT object-key encoding (same digest) short-circuits.
+  const plainReordered = { edges: [], name: "g", nodes: [{ human: { prompt: "x" }, kind: "human", id: "n" }] };
+  assert.equal(stableProposalRunKey(D1, plain), stableProposalRunKey(D1, plainReordered));
+  assert.ok(stableProposalRunKey(D1, credA).startsWith("staged-"), "the key is self-describing");
+});
+
+test("stableProposalRunKey: node-ORDER of digest-invisible content does not fork the key (issue #778 review)", () => {
+  // The compiler SORTS nodes before emitting `semanticBpmn`, so two graphs differing ONLY in top-level
+  // node order share one digest. Their digest-invisible raw values (`digestInvisibleRawValues`) must
+  // therefore fingerprint identically too — else a re-stage of the same logical graph in a different
+  // node encoding forks a DISTINCT run-key and double-launches instead of short-circuiting. The
+  // fingerprint is code-unit sorted at its source, making it reorder-invariant like the digest.
+  const D = "sha-order";
+  const ab = {
+    name: "g",
+    nodes: [
+      { id: "a", kind: "connector", connector: { target: "//user:pass@host" } },
+      { id: "b", kind: "connector", connector: { target: "//other:secret@host" } },
+    ],
+    edges: [],
+  };
+  const ba = {
+    name: "g",
+    nodes: [
+      { id: "b", kind: "connector", connector: { target: "//other:secret@host" } },
+      { id: "a", kind: "connector", connector: { target: "//user:pass@host" } },
+    ],
+    edges: [],
+  };
+  assert.equal(stableProposalRunKey(D, ab), stableProposalRunKey(D, ba), "a top-level node reorder must not fork the run-key");
+});
 
 describe("dispatchDeliveryGraph — operator dispatch by staged-proposal digest", () => {
   const dirs: string[] = [];
@@ -246,6 +302,28 @@ describe("dispatchDeliveryGraph — operator dispatch by staged-proposal digest"
     assert.equal(res.status, 202);
     assert.equal(res.body.ok, true);
     assert.equal(res.body.status, "running");
+    await app.settle();
+    assert.equal((await deliveryGraphRuns(app.db).all()).length, 1);
+    assert.equal((await deliveryGraphProposals(app.db).get(staged.body.digest))?.status, "dispatched");
+  });
+
+  test("a SECRET-BEARING staged graph dispatches through the cockpit UI WITHOUT an idempotencyKey — the door supplies a stable server-side key (#778)", async () => {
+    // Regression: Option C's dispatch gate refuses a keyless dispatch of a graph whose digest is lossy,
+    // but the cockpit staged-proposals UI posts no idempotency-key field. The door must therefore derive
+    // a stable server-side key from the stored proposal so these proposals remain launchable.
+    const app = await boot();
+    assert.ok(app.api);
+    const api = app.api;
+    const SECRET = { name: "deploy", nodes: [{ id: "d", kind: "agent", agent: { jobType: "senior:demo", prompt: "push to https://user:pass@host.example/repo" } }] };
+    const staged = await api.call<{ digest: string }>("compileDeliveryGraph", { body: SECRET });
+    // No idempotencyKey in the body — exactly what the staged UI posts.
+    const res = await api.call<{ ok: boolean; status: string; runKey: string }>("dispatchDeliveryGraph", {
+      body: { digest: staged.body.digest, repoless: true },
+    });
+    assert.equal(res.status, 202);
+    assert.equal(res.body.ok, true);
+    assert.equal(res.body.status, "running");
+    assert.ok(res.body.runKey.startsWith("staged-"), `expected a server-side staged- key, got ${res.body.runKey}`);
     await app.settle();
     assert.equal((await deliveryGraphRuns(app.db).all()).length, 1);
     assert.equal((await deliveryGraphProposals(app.db).get(staged.body.digest))?.status, "dispatched");

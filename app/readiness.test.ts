@@ -874,6 +874,25 @@ test("redactString/redactTarget: strip userinfo and query (a token often rides e
   assert(!t.includes("s3cr3t"), "the secret must not survive redaction");
 });
 
+test("redactString: a `//user:pass@` userinfo that embeds a raw line break is still stripped (newline-safe)", () => {
+  // The userinfo class is `[^/@ ]` (NOT `[^/@\s]`): a CR/LF smuggled inside the userinfo must not
+  // break the `//…@` match and leave the credential tail visible. Newlines are consumed while a
+  // space still bounds the match, so ordinary text is not over-matched.
+  const r = redactString("https://user:pa\nss@host/path");
+  assert(!r.includes("ss@host") && !r.includes("user:pa"), "the newline-split userinfo is redacted");
+  assertStringIncludes(r, "//***@");
+});
+
+test("redactString: a `//user:pass@` userinfo that embeds a raw TAB is still stripped (tab-safe)", () => {
+  // A TAB is a VALID XML character `stripXmlInvalidChars` does not remove, so an earlier `[^/@ \t]`
+  // userinfo class (excluding TAB) let `https://user:pa\tss@host` split before the `@` — leaving
+  // `ss@host` visible in the display artifact. Only a literal SPACE bounds the userinfo now (issue #778).
+  const r = redactString("https://user:pa\tss@host/path?token=s3cr3t");
+  assert(!r.includes("ss@host") && !r.includes("user:pa"), "the tab-split userinfo is redacted");
+  assert(!r.includes("s3cr3t"), "the query token is redacted");
+  assertStringIncludes(r, "//***@");
+});
+
 test("redactTarget: a command target is never logged — only the kind + a fixed placeholder", () => {
   const ct = redactTarget(parseProbe({ kind: "command", target: "curl -H 'Authorization: Bearer s3cr3t' https://h/p" }));
   assertEquals(ct, "command:<redacted>");
