@@ -21,6 +21,7 @@ import { Server } from "node:http";
 import { createNanoSdkEngineClient, runFromEnv, selectHost } from "@nanobpm/urban";
 import { type AgenticChannelHandle, mountAgenticChannel } from "./app/agentic/channel.ts";
 import { makeElementInstanceResolver } from "./app/agentic/element-instance.ts";
+import { mountConsoleRedirect, resolveConsoleOrigin } from "./app/consoleRedirect.ts";
 import { announceEngine, resolveEngineAddress } from "./app/enginePreflight.ts";
 import { runEngineReconcile } from "./app/reconcile.ts";
 import { MAX_ROUNDS, pollOnce } from "./app/service.ts";
@@ -103,6 +104,19 @@ if (httpServer instanceof Server) {
   app.log.warn("agentic channel not mounted: app.httpServer is not a node:http Server on this host");
 }
 
+// Standalone `/console` redirect (issue #771). Running behind the nano console, the console origin
+// serves `/console/*` and the reverse proxy strips its app-view prefix before the app ever sees a
+// request — but STANDALONE, the UI's `/console` links land on this app's own port, where nothing
+// serves them, so the runtime answers a bare 503. Mount a narrow request redirect that rewrites
+// `/console/*` to the engine console origin (derived from `NANOBPMN_BASE_URL`), preserving path +
+// query, and leaves `/app/*`, `/agentic`, and the Workforce page routes untouched. Mounted last so
+// it captures every request listener the runtime + agentic channel attached, and delegates each
+// non-console request to them unchanged.
+let consoleRedirectTeardown: (() => void) | undefined;
+if (httpServer instanceof Server) {
+  consoleRedirectTeardown = mountConsoleRedirect(httpServer, resolveConsoleOrigin(), app.log);
+}
+
 // Engine-reset reconciliation (issues #622, #630). On boot, compare the engine's incarnation epoch
 // against the last-seen value; on a REGRESSION (the engine was reset/restored/rewound and re-minted
 // its keys, Magikcraft/nano-bpm#1065) drive every dangling engine-backed inflight row to the defined
@@ -153,6 +167,12 @@ async function drainAndExit(): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
   if (pollTimer) clearTimeout(pollTimer);
+  // Restore the original request listener set (drops the /console redirect wrapper).
+  if (consoleRedirectTeardown) {
+    try {
+      consoleRedirectTeardown();
+    } catch { /* best-effort redirect teardown */ }
+  }
   // Tear the agentic families + hub down (releases the WS clients) before the app stops its HTTP
   // server, which the channel shares.
   if (agentic) {
