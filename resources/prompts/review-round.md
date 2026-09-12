@@ -148,7 +148,7 @@ Because several agents may run on the same host at once:
        #   Declined, false positive — <reason>. nano-ack: <path> :: <verbatim advisory text>
        #   EOF
        #   )
-   gh api repos/OWNER/REPO/pulls/PR/comments -f commit_id="$CID" -f path=PATH -F line=LINE -f side=RIGHT -f body="$BODY"
+   gh api repos/OWNER/REPO/pulls/PR/comments -f commit_id="$CID" -f path="PATH" -F line=LINE -f side=RIGHT -f body="$BODY"
    # Then resolve it exactly like any other thread (map its databaseId -> thread node id -> resolveReviewThread).
    ```
    Only the `nano-ack: <path> :: <text>` (prose-keyed) form is honoured. A bare

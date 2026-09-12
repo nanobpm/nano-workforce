@@ -209,6 +209,43 @@ test("advisoryStableKey: word boundaries, punctuation and Unicode are preserved 
   assertNotEquals(advisoryStableKey(p, "foo/bar"), advisoryStableKey(p, "foo bar"));
   // Only case and whitespace runs are normalized (verbatim copy modulo reflow -> same key).
   assertEquals(advisoryStableKey(p, "Foo  bar,   baz."), advisoryStableKey(p, "foo bar, baz."));
+  // NFC (not NFKC): compatibility variants must stay DISTINCT, or acking one false-OPENs the other.
+  // Full-width `！` vs ASCII `!` (NFKC would fold them together); ligature `ﬁ` vs `fi`.
+  assertNotEquals(advisoryStableKey(p, "Use foo\uFF01"), advisoryStableKey(p, "Use foo!"));
+  assertNotEquals(advisoryStableKey(p, "The \uFB01le"), advisoryStableKey(p, "The file"));
+  // A precomposed vs decomposed accent IS canonically equivalent (NFC unifies) -> same key.
+  assertEquals(advisoryStableKey(p, "caf\u00E9"), advisoryStableKey(p, "cafe\u0301"));
+});
+
+// The advisory side strips a leading markdown bullet (Copilot renders suppressed prose as `* …`),
+// and the prompt tells the agent to copy that first line VERBATIM — so an ack marker legitimately
+// carries the `* ` bullet. Keying must therefore be bullet-insensitive on BOTH sides, else the ack
+// key never matches the advisory key and the gate livelocks (fail-CLOSED). Regression for the
+// suppressed finding that `parseSuppressedAdvisories` stripped the bullet but the ack path did not.
+test("advisoryStableKey: a leading markdown bullet is stripped so bulleted ack text matches", () => {
+  const p = "app/x.ts";
+  assertEquals(advisoryStableKey(p, "* Consider narrowing this type."), advisoryStableKey(p, "Consider narrowing this type."));
+  assertEquals(advisoryStableKey(p, "- Consider narrowing this type."), advisoryStableKey(p, "Consider narrowing this type."));
+});
+
+// End-to-end: an ack whose marker copies Copilot's bulleted first line verbatim acknowledges the
+// advisory parsed from that same rendered bullet (the ack key == the parsed advisory key).
+test("parseAckedAdvisories: an ack copying the rendered `* ` bullet verbatim matches the advisory key", () => {
+  const advisories = parseSuppressedAdvisories(SAMPLE_REVIEW_BODY);
+  const bulleted = advisories.map((a) => a.label); // ["…schema.json:613", "…main.rs:42"]
+  assert(bulleted.length === 2);
+  const threads: ReviewThread[] = [
+    {
+      isResolved: true,
+      path: "a.ts",
+      // Verbatim copy of Copilot's rendered first line, bullet included.
+      bodies: ["Declined. nano-ack: server/src/main.rs :: - Consider narrowing this type."],
+    },
+  ];
+  const acked = parseAckedAdvisories(threads);
+  const mainRs = advisories.find((a) => a.path === "server/src/main.rs");
+  assert(mainRs !== undefined);
+  assert(acked.includes(mainRs.key), "bulleted verbatim ack resolves to the advisory's stable key");
 });
 
 // A collision in the advisory fingerprint would let a NEWER, unacknowledged advisory on the same

@@ -142,21 +142,37 @@ const ACK_MARKER = /nano-ack:\s*([^\n\r]+)/gi;
  * advisory re-emitted at a previously-acked line. */
 const NEW_ACK = /^(.+?)\s+::\s+(.+)$/s;
 
-/** Normalize advisory prose to a line-/format-independent form before fingerprinting: NFKC-fold,
- * lowercase, and collapse runs of WHITESPACE to a single space. Punctuation is PRESERVED, NOT
- * collapsed: the prompt requires the agent to copy the advisory's first line VERBATIM, so
- * whitespace/case tolerance is all that is needed to absorb trivial markdown/whitespace reflow.
- * Collapsing every non-word run into a space (as an earlier revision did) instead ALIASES
- * genuinely-distinct advisories whose prose differs only by punctuation-vs-space — e.g.
- * `Use foo() here` vs `Use foo here`, or `foo/bar` vs `foo bar` — so a resolved ack for advisory A
- * would silently acknowledge a DIFFERENT advisory B that normalizes to the same key: a false-OPEN
- * this gate exists to prevent. Preserving punctuation errs toward a stricter match, which is
- * fail-CLOSED: a benign punctuation mismatch merely re-escalates to a human, and never converges an
- * unacknowledged advisory. Unicode letters/digits are preserved by NFKC-folding rather than stripped,
- * so non-ASCII-only prose still yields a non-empty, distinct key. */
+/** Normalize advisory prose to a line-/format-independent form before fingerprinting: strip a
+ * leading markdown bullet, NFC-normalize, lowercase, and collapse runs of WHITESPACE to a single
+ * space. Punctuation is PRESERVED, NOT collapsed: the prompt requires the agent to copy the
+ * advisory's first line VERBATIM, so whitespace/case tolerance is all that is needed to absorb
+ * trivial markdown/whitespace reflow. Collapsing every non-word run into a space (as an earlier
+ * revision did) instead ALIASES genuinely-distinct advisories whose prose differs only by
+ * punctuation-vs-space — e.g. `Use foo() here` vs `Use foo here`, or `foo/bar` vs `foo bar` — so a
+ * resolved ack for advisory A would silently acknowledge a DIFFERENT advisory B that normalizes to
+ * the same key: a false-OPEN this gate exists to prevent. Preserving punctuation errs toward a
+ * stricter match, which is fail-CLOSED: a benign punctuation mismatch merely re-escalates to a
+ * human, and never converges an unacknowledged advisory.
+ *
+ * NFC — canonical composition — is used deliberately in preference to NFKC. NFKC additionally folds
+ * COMPATIBILITY variants (full-width `！` → ASCII `!`, ligatures, super/subscripts, …), which would
+ * ALIAS genuinely-distinct advisories such as `Use foo！` and `Use foo!` to one key — the very
+ * false-OPEN this fingerprint exists to prevent, and a contradiction with "punctuation is
+ * preserved". NFC only unifies sequences that are canonically equivalent (visually and semantically
+ * identical, e.g. a precomposed `é` vs `e`+combining-acute), so verbatim copies still match while
+ * distinct compatibility forms stay distinct (fail-CLOSED). Unicode letters/digits are preserved
+ * rather than stripped, so non-ASCII-only prose still yields a non-empty, distinct key.
+ *
+ * The leading-bullet strip keeps the ADVISORY side (Copilot renders suppressed prose as `* …`, which
+ * `parseSuppressedAdvisories` also strips for display) and the ACK side SYMMETRIC: the prompt tells
+ * the agent to copy the advisory's first line verbatim, so an ack marker legitimately carries the
+ * `* ` bullet — without stripping it here the ack key would differ from the advisory key and the
+ * gate would never converge (fail-CLOSED livelock). Applying it in this shared canonicaliser is the
+ * SINGLE source of truth for both sides. */
 function normalizeAdvisoryText(text: string): string {
   return text
-    .normalize("NFKC")
+    .normalize("NFC")
+    .replace(/^\s*[-*]\s*/u, "")
     .toLowerCase()
     .replace(/\s+/gu, " ")
     .trim();
@@ -204,7 +220,9 @@ export function parseSuppressedAdvisories(reviewBody: string | null | undefined)
     const line = Number(h[2]);
     const label = `${path}:${line}`;
     // The advisory prose is the first non-empty line after the header (up to the next header). A
-    // single bullet is the common shape; strip a leading markdown bullet marker before fingerprinting.
+    // single bullet is the common shape; strip a leading markdown bullet marker for the display
+    // `text`. (Keying is bullet-insensitive regardless: `normalizeAdvisoryText` strips a leading
+    // bullet too, so the ack side — which copies the bulleted first line verbatim — keys the same.)
     let text = "";
     for (let j = i + 1; j < lines.length; j++) {
       if (headerRe.test(lines[j])) break;
