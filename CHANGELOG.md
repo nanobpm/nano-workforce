@@ -1,3 +1,9 @@
+## [0.186.3](https://github.com/nanobpm/nano-workforce/compare/v0.186.2...v0.186.3) (2026-09-12)
+
+### Bug Fixes
+
+* **app:** redirect standalone /console routes to the engine console ([#780](https://github.com/nanobpm/nano-workforce/issues/780)) ([103e967](https://github.com/nanobpm/nano-workforce/commit/103e967b95191bb04239b5c6a2195913e50b8b9b)), closes [#771](https://github.com/nanobpm/nano-workforce/issues/771)
+
 ## [0.186.2](https://github.com/nanobpm/nano-workforce/compare/v0.186.1...v0.186.2) (2026-09-11)
 
 ### Bug Fixes
