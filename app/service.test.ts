@@ -487,6 +487,24 @@ test("repoEnvelopeVars emits the repository envelope keyed on the PR head branch
   assertEquals(env.repository.cloneTimeoutMs, 600000);
 });
 
+// Repo-provisioning auth gate (issue #770): c8ctl-plugin-nano (≥1.60.2) only resolves the git
+// credential (GITHUB_TOKEN, or the `gh` default when it's absent) for repository provisioning when
+// `task.allowPr` is truthy. Without it a repo-backed clone dies with `unable to get password from
+// user` before the agent starts. Every repo-backed envelope must therefore carry `task.allowPr:
+// true`; the repoless (unresolved) path emits nothing, so it carries no `task` and is unchanged.
+test("repoEnvelopeVars emits task.allowPr:true on every repo-backed envelope (#770)", () => {
+  // PR-based path (review-round / fix-ci / rebase).
+  const pr = (repoEnvelopeVars("owner/repo", "feat/issue-12", "main") as any)["io.nanobpm.agentTask"];
+  assertEquals(pr.task.allowPr, true, "the PR-based envelope opts the harness into auth-resolved provisioning");
+  // Pre-PR implementation path (feature.bpmn / plan-fanout's implement-cell, #684).
+  const prePr = (repoEnvelopeVars("owner/repo", "main", null, null, "feat/issue-7") as any)["io.nanobpm.agentTask"];
+  assertEquals(prePr.task.allowPr, true, "the pre-PR envelope opts in too");
+  // A repoless / unresolved input emits NOTHING — no envelope, and so no `task` (auth posture
+  // unchanged: the launch-dir fallback needs no repo credential).
+  assertEquals(Object.keys(repoEnvelopeVars("owner/repo", null)).length, 0, "unresolved head → no envelope, no task");
+  assertEquals(Object.keys(repoEnvelopeVars("not-owner-repo", "feat/x")).length, 0, "malformed repo → no envelope, no task");
+});
+
 test("repoEnvelopeVars emits cloneTimeoutMs from NANO_PR_CLONE_TIMEOUT_MS, default 600000 (#694)", () => {
   // Default (knob unset): 600000ms = 10 min, raising the harness's 120000ms default so a
   // branch-scoped blobless clone of a large monorepo provisions instead of dying at 120s.

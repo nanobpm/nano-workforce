@@ -191,6 +191,14 @@ export function repoEnvelopeVars(
           ? { branch: { create: branchCreate.trim() } }
           : {}),
       },
+      // Repo-provisioning auth gate (issue #770): c8ctl-plugin-nano (≥1.60.2) only resolves the
+      // git credential (GITHUB_TOKEN, or the `gh` default when it's absent) for repository
+      // provisioning when `task.allowPr` is truthy — `resolveJobSecrets` pulls the token behind that
+      // flag. Without it, a repo-backed clone dies with `unable to get password from user` before the
+      // agent even starts. So EVERY repo-backed envelope (this builder only runs past the `owner/repo`
+      // guard above) opts the harness into auth-resolved provisioning. The repoless path emits `{}`
+      // (no envelope, no `task`), so its behaviour — and its auth posture — is unchanged.
+      task: { allowPr: true },
     },
   };
 }
@@ -222,6 +230,11 @@ export function agentNodeRepoEnvelope(repo: string, base: string | null): Record
         // `feat/<node.id>` off. Omitted when unknown so the harness clones the repo's default branch.
         ...(ref ? { ref, baseRef: ref } : {}),
       },
+      // Repo-provisioning auth gate (issue #770): as in `repoEnvelopeVars`, a repo-backed cell must
+      // opt the harness into git-credential resolution (`task.allowPr`) or the clone fails with
+      // `unable to get password from user`. Emitted on every resolved cell (past the `owner/repo`
+      // guard above); an unresolved/`repoless` cell returns `{}` and carries no `task`.
+      task: { allowPr: true },
     },
   };
 }
