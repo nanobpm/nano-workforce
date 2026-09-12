@@ -48,6 +48,7 @@ export function jobTypeToRoutingToken(jobType: string): string | undefined {
 
 const SERVICE_TASK = /<(?:\w+:)?serviceTask\b[\s\S]*?<\/(?:\w+:)?serviceTask>/g;
 const TASK_DEFINITION_TYPE = /<(?:\w+:)?taskDefinition\b[^>]*\btype="([^"]*)"/;
+const EXTENSION_ELEMENTS = /<(?:\w+:)?extensionElements\b[\s\S]*?<\/(?:\w+:)?extensionElements>/;
 const PROMPT_LINK = /<(?:\w+:)?linkedResource\b[^>]*\blinkName="prompt"/;
 // The engine-native AgentTask marker (issue #745): a `<zeebe:agentDefinition agentType="external" />`
 // sibling of the `<zeebe:taskDefinition>` inside a `senior:*` agent task's extensionElements. It is
@@ -60,6 +61,23 @@ const EXTERNAL_AGENT_MARKER = /<(?:\w+:)?agentDefinition\b[^>]*\bagentType="exte
 // the exact `value="false"` opts out — any other value auto-subscribes as normal (fail-safe).
 const AUTO_SUBSCRIBE_OPTOUT =
   /<(?:\w+:)?property\b[^>]*\bname="io\.nanobpm\.agentTask\.autoSubscribe"[^>]*\bvalue="false"|<(?:\w+:)?property\b[^>]*\bvalue="false"[^>]*\bname="io\.nanobpm\.agentTask\.autoSubscribe"/;
+
+// The label surfaced for an opted-out, unmarked service task whose `<zeebe:taskDefinition>` is
+// missing or has an empty `type` (issue #779 drift guard). Such a block cannot be a real
+// externally-marked agent task, so the opt-out is drift regardless of the absent type — we surface it
+// under a descriptive sentinel rather than letting the dedupe skip swallow it.
+export const MALFORMED_OPTOUT_LABEL = "(opted-out task with missing/empty taskDefinition type)";
+
+/**
+ * The `<bpmn:extensionElements>…</bpmn:extensionElements>` content of a service-task block, or the
+ * empty string when the block has none. Placement-contract scans (issue #745/#779: a marker is only
+ * honoured by the engine INSIDE `extensionElements`) run against THIS scope, so a property/marker
+ * sitting outside `extensionElements` is treated as absent — the engine ignores it, and so must the
+ * guard (an out-of-place external marker cannot "cover" an opt-out).
+ */
+function extensionElementsOf(block: string): string {
+  return block.match(EXTENSION_ELEMENTS)?.[0] ?? "";
+}
 
 /**
  * Scan one BPMN document for the job types of its PROMPT-BEARING service tasks — the deployed fleet
@@ -132,22 +150,30 @@ export function agentTaskTypesOptedOutOfAuto(xml: string): string[] {
  * agent task (one that WOULD otherwise be auto-discovered via its external marker); a marker that has
  * drifted onto a host task (e.g. `pr.finalize`, which carries no external marker) or onto one task
  * that merely shares a `taskDefinition` type with a properly-marked sibling is authoring drift. This
- * checks both markers on the SAME service-task block, so — unlike comparing the deduplicated
- * `agentTaskTypesOptedOutOfAuto` / `agentTaskTypesMissingExternalMarker` lists (the latter only
- * reports PROMPT-BEARING tasks, so a non-prompt host task's opt-out is invisible to it) — the drift
- * cannot hide. Returns the offending task types in first-occurrence order (empty when every opted-out
- * task is externally marked).
+ * checks both markers on the SAME service-task block — and only inside that block's
+ * `<bpmn:extensionElements>` (the engine-honoured PLACEMENT scope), so an out-of-place external
+ * marker sitting outside `extensionElements` cannot spuriously "cover" the opt-out — so, unlike
+ * comparing the deduplicated `agentTaskTypesOptedOutOfAuto` / `agentTaskTypesMissingExternalMarker`
+ * lists (the latter only reports PROMPT-BEARING tasks, so a non-prompt host task's opt-out is
+ * invisible to it), the drift cannot hide. An opt-out on a block with a missing/empty
+ * `<zeebe:taskDefinition>` type (which likewise cannot be a real agent task) is surfaced under a
+ * descriptive sentinel rather than skipped. Returns the offending task types in first-occurrence
+ * order (empty when every opted-out task is externally marked).
  */
 export function agentTaskTypesOptedOutMissingExternalMarker(xml: string): string[] {
   const seen = new Set<string>();
   const offending: string[] = [];
   for (const [block] of xml.matchAll(SERVICE_TASK)) {
-    if (!AUTO_SUBSCRIBE_OPTOUT.test(block)) continue;
-    if (EXTERNAL_AGENT_MARKER.test(block)) continue;
+    const ext = extensionElementsOf(block);
+    if (!AUTO_SUBSCRIBE_OPTOUT.test(ext)) continue;
+    if (EXTERNAL_AGENT_MARKER.test(ext)) continue;
     const type = block.match(TASK_DEFINITION_TYPE)?.[1];
-    if (type === undefined || type.length === 0 || seen.has(type)) continue;
-    seen.add(type);
-    offending.push(type);
+    // A missing/empty type cannot be a real agent task, so an opt-out here is still drift — surface it
+    // under a sentinel instead of letting the dedupe `continue` swallow it silently.
+    const label = type === undefined || type.length === 0 ? MALFORMED_OPTOUT_LABEL : type;
+    if (seen.has(label)) continue;
+    seen.add(label);
+    offending.push(label);
   }
   return offending;
 }

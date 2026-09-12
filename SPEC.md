@@ -367,10 +367,17 @@ the app, which deploys on boot), and the next agent job of that type picks it up
 > `agent-marker.test.ts`), so no deployed agent task relies on prompt-link-only
 > discovery. To **exclude** a task from `--auto` — one that must be served only by a
 > worker that explicitly subscribes (`--job-type <type>` / a profile capability) — add
-> the inert opt-out property inside its `extensionElements`:
+> the inert opt-out property inside its `extensionElements`, nested in the
+> `<zeebe:properties>` wrapper the models and engine expect (as
+> `resources/processes/feature.bpmn:57-63` does — a bare `<zeebe:property>` placed
+> directly under `<bpmn:extensionElements>` is NOT the accepted shape):
 >
 > ```xml
-> <zeebe:property name="io.nanobpm.agentTask.autoSubscribe" value="false" />
+> <bpmn:extensionElements>
+>   <zeebe:properties>
+>     <zeebe:property name="io.nanobpm.agentTask.autoSubscribe" value="false" />
+>   </zeebe:properties>
+> </bpmn:extensionElements>
 > ```
 >
 > Absence (or any value other than `"false"`) auto-subscribes as normal — opt-out is

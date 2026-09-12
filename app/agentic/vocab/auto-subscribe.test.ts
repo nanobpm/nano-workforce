@@ -15,6 +15,7 @@ import {
   agentTaskTypesMissingExternalMarker,
   agentTaskTypesOptedOutMissingExternalMarker,
   agentTaskTypesOptedOutOfAuto,
+  MALFORMED_OPTOUT_LABEL,
 } from "./job-types.ts";
 
 const PROCESSES_DIR = join(dirname(fileURLToPath(import.meta.url)), "../../../resources/processes");
@@ -141,6 +142,39 @@ test("agentTaskTypesOptedOutMissingExternalMarker checks each block independentl
       </bpmn:extensionElements>
     </bpmn:serviceTask>`;
   assertEquals(agentTaskTypesOptedOutMissingExternalMarker(xml), ["senior:special"]);
+});
+
+test("agentTaskTypesOptedOutMissingExternalMarker flags an opt-out whose external marker sits OUTSIDE extensionElements (placement contract)", () => {
+  // The opt-out is correctly placed inside extensionElements, but the external marker is out of place
+  // (a sibling of <serviceTask>, not inside extensionElements) so the engine ignores it — the block
+  // is therefore NOT a real marked agent task. A whole-block scan would see the marker "somewhere" and
+  // wrongly pass; the placement-scoped scan flags the drift.
+  const xml = `
+    <bpmn:serviceTask id="misplaced">
+      <zeebe:agentDefinition agentType="external" />
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="senior:special" />
+        <zeebe:properties>
+          <zeebe:property name="io.nanobpm.agentTask.autoSubscribe" value="false" />
+        </zeebe:properties>
+      </bpmn:extensionElements>
+    </bpmn:serviceTask>`;
+  assertEquals(agentTaskTypesOptedOutMissingExternalMarker(xml), ["senior:special"]);
+});
+
+test("agentTaskTypesOptedOutMissingExternalMarker surfaces an opt-out on a block with a missing/empty taskDefinition type", () => {
+  // An opt-out on an unmarked block whose <zeebe:taskDefinition> type is empty cannot be a real agent
+  // task, so it is still drift — surfaced under the sentinel rather than silently skipped.
+  const xml = `
+    <bpmn:serviceTask id="typeless">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="" />
+        <zeebe:properties>
+          <zeebe:property name="io.nanobpm.agentTask.autoSubscribe" value="false" />
+        </zeebe:properties>
+      </bpmn:extensionElements>
+    </bpmn:serviceTask>`;
+  assertEquals(agentTaskTypesOptedOutMissingExternalMarker(xml), [MALFORMED_OPTOUT_LABEL]);
 });
 
 test("GUARD: every deployed opted-out task is itself an externally-marked agent task", () => {
