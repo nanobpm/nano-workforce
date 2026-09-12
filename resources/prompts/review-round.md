@@ -142,7 +142,12 @@ Because several agents may run on the same host at once:
    BODY=$(cat <<'EOF'
    Applied. nano-ack: <path> :: <verbatim advisory text>
    EOF
-   )   # or: 'Declined, false positive — <reason>. nano-ack: <path> :: <verbatim advisory text>'
+   )   # to DECLINE instead, build the body the same quoted-heredoc way (never a single-quoted
+       # `-f body='...'`, which breaks the moment the reason or advisory prose contains a `'`):
+       #   BODY=$(cat <<'EOF'
+       #   Declined, false positive — <reason>. nano-ack: <path> :: <verbatim advisory text>
+       #   EOF
+       #   )
    gh api repos/OWNER/REPO/pulls/PR/comments -f commit_id="$CID" -f path=PATH -F line=LINE -f side=RIGHT -f body="$BODY"
    # Then resolve it exactly like any other thread (map its databaseId -> thread node id -> resolveReviewThread).
    ```

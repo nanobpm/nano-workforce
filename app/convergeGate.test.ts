@@ -194,16 +194,21 @@ test("parseAckedAdvisories: a path containing `::` is not split at the interior 
   assertEquals(parseAckedAdvisories(threads), [advisoryStableKey("src/a::b.ts", "Narrow the return type here.")]);
 });
 
-// Normalization must preserve word boundaries and Unicode so distinct advisories on one path do not
-// alias to the same key (regression for the suppressed finding: deleting every separator made
-// `foo-bar`/`foobar` collide, and non-ASCII-only prose normalized to an empty, colliding string).
-test("advisoryStableKey: word boundaries and Unicode are preserved (distinct prose -> distinct keys)", () => {
+// Normalization must preserve word boundaries, punctuation, and Unicode so distinct advisories on
+// one path do not alias to the same key (regression for the suppressed findings: deleting every
+// separator made `foo-bar`/`foobar` collide and non-ASCII-only prose normalized to an empty key;
+// collapsing punctuation-into-space aliased `Use foo() here` with `Use foo here` — a false-OPEN).
+test("advisoryStableKey: word boundaries, punctuation and Unicode are preserved (distinct prose -> distinct keys)", () => {
   const p = "app/x.ts";
   assertNotEquals(advisoryStableKey(p, "foo-bar"), advisoryStableKey(p, "foobar"));
   // Two different non-ASCII-only advisories must not both collapse to the empty-string key.
   assertNotEquals(advisoryStableKey(p, "café"), advisoryStableKey(p, "naïve"));
-  // Punctuation/whitespace/markdown-bullet noise is still tolerated (same words -> same key).
-  assertEquals(advisoryStableKey(p, "Foo bar, baz."), advisoryStableKey(p, "foo  bar   baz"));
+  // Punctuation must NOT collapse into whitespace: prose differing only by punctuation-vs-space
+  // stays distinct, so a resolved ack for one cannot silently acknowledge the other (false-OPEN).
+  assertNotEquals(advisoryStableKey(p, "Use foo() here"), advisoryStableKey(p, "Use foo here"));
+  assertNotEquals(advisoryStableKey(p, "foo/bar"), advisoryStableKey(p, "foo bar"));
+  // Only case and whitespace runs are normalized (verbatim copy modulo reflow -> same key).
+  assertEquals(advisoryStableKey(p, "Foo  bar,   baz."), advisoryStableKey(p, "foo bar, baz."));
 });
 
 // A collision in the advisory fingerprint would let a NEWER, unacknowledged advisory on the same

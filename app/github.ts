@@ -143,16 +143,22 @@ const ACK_MARKER = /nano-ack:\s*([^\n\r]+)/gi;
 const NEW_ACK = /^(.+?)\s+::\s+(.+)$/s;
 
 /** Normalize advisory prose to a line-/format-independent form before fingerprinting: NFKC-fold,
- * lowercase, and collapse every run of non-word characters to a single space (word boundaries are
- * PRESERVED, not deleted, so `foo-bar` and `foobar` stay distinct), keeping Unicode letters/digits
- * (so non-ASCII-only prose does not normalize to an empty, colliding key). Tolerant to whitespace,
- * markdown bullets, and punctuation differences between Copilot's header text and the agent's
- * copied ack text. */
+ * lowercase, and collapse runs of WHITESPACE to a single space. Punctuation is PRESERVED, NOT
+ * collapsed: the prompt requires the agent to copy the advisory's first line VERBATIM, so
+ * whitespace/case tolerance is all that is needed to absorb trivial markdown/whitespace reflow.
+ * Collapsing every non-word run into a space (as an earlier revision did) instead ALIASES
+ * genuinely-distinct advisories whose prose differs only by punctuation-vs-space — e.g.
+ * `Use foo() here` vs `Use foo here`, or `foo/bar` vs `foo bar` — so a resolved ack for advisory A
+ * would silently acknowledge a DIFFERENT advisory B that normalizes to the same key: a false-OPEN
+ * this gate exists to prevent. Preserving punctuation errs toward a stricter match, which is
+ * fail-CLOSED: a benign punctuation mismatch merely re-escalates to a human, and never converges an
+ * unacknowledged advisory. Unicode letters/digits are preserved by NFKC-folding rather than stripped,
+ * so non-ASCII-only prose still yields a non-empty, distinct key. */
 function normalizeAdvisoryText(text: string): string {
   return text
     .normalize("NFKC")
     .toLowerCase()
-    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .replace(/\s+/gu, " ")
     .trim();
 }
 
