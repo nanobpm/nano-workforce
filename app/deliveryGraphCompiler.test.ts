@@ -959,3 +959,51 @@ test("#778 the compiled subProcess carries the descriptive name + a `<bpmn:docum
   const waitEl = elementForNode(r.bpmn, "gate");
   assert(r.bpmn.includes(`<bpmn:subProcess id="${waitEl}" name="Wait: pr impl.pr · gate">`), "the wait wrapper carries the descriptive name");
 });
+
+test("#778 nodeDisplay redacts a wait probe's credential-bearing target in the name + documentation", () => {
+  // A `command` target is an arbitrary shell snippet that can embed a secret — it is never surfaced.
+  const cmd = nodeDisplay({
+    id: "g",
+    kind: "wait",
+    wait: { kind: "command", target: "curl -H 'Authorization: Bearer SUPER_SECRET' https://api.example.com" },
+  });
+  assertEquals(cmd.name, "Wait: command <redacted> · g");
+  assert(cmd.documentation.includes("Target: <redacted>"), "command target is redacted in the doc");
+  assert(!cmd.name.includes("SUPER_SECRET") && !cmd.documentation.includes("SUPER_SECRET"), "no secret leaks");
+
+  // An HTTP target's `user:pass@` userinfo and `?query` (where a token often rides) are stripped.
+  const http = nodeDisplay({
+    id: "h",
+    kind: "wait",
+    wait: { kind: "http", target: "https://user:s3cr3t@example.com/health?token=abc123" },
+  });
+  assert(!http.name.includes("s3cr3t") && !http.name.includes("abc123"), "http name drops userinfo + query secret");
+  assert(
+    !http.documentation.includes("s3cr3t") && !http.documentation.includes("abc123"),
+    "http doc drops userinfo + query secret",
+  );
+  assert(http.documentation.includes("Target: https://***@example.com/health?***"), "http target rendered redacted");
+});
+
+test("#778 the wait + human inner tasks carry the descriptive display name (not the bare id)", async () => {
+  const graph = {
+    name: "inner names",
+    nodes: [
+      { id: "gate", kind: "wait", wait: { kind: "pr", target: "owner/repo#42", match: { prState: "merged" } } },
+      { id: "otp", kind: "human", human: { prompt: "Run the manual OTP publish", formKey: "publish-form" } },
+    ],
+    edges: [{ from: "gate", to: "otp" }],
+  };
+  const r = await compileOk(graph);
+  const waitEl = elementForNode(r.bpmn, "gate");
+  // All three wait inner elements (loop, probe, boundary retry) now use the descriptive display name.
+  assert(r.bpmn.includes(`<bpmn:subProcess id="${waitEl}_probeLoop" name="Probe readiness loop: Wait: pr owner/repo#42 · gate">`), "probe loop uses the display name");
+  assert(r.bpmn.includes(`<bpmn:serviceTask id="${waitEl}_task" name="Probe readiness: Wait: pr owner/repo#42 · gate">`), "probe task uses the display name");
+  assert(r.bpmn.includes(`<bpmn:serviceTask id="${waitEl}_lastAttempt" name="Probe readiness at boundary: Wait: pr owner/repo#42 · gate">`), "boundary probe uses the display name");
+  // The old bare `...: <id>` inner names are gone.
+  assert(!r.bpmn.includes('name="Probe readiness: gate"'), "no bare probe id name remains");
+  // The human user task uses the descriptive display name too.
+  const humanEl = `delivery-human-task__${humanTaskSubEl(r.bpmn)}`;
+  assert(r.bpmn.includes(`<bpmn:userTask id="${humanEl}" name="Delivery: human step — Run the manual OTP publish · otp">`), "the human user task uses the display name");
+  assert(!r.bpmn.includes('name="Delivery: human step — otp"'), "no bare human id name remains");
+});

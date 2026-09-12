@@ -46,7 +46,23 @@ import {
   validateDeliveryGraph,
 } from "./deliveryGraph.ts";
 import { DELIVERY_HUMAN_ELEMENT, GENERIC_HUMAN_FORM } from "./deliveryHuman.ts";
+import { redactString } from "./readiness.ts";
 import { AGENT_TASK_NS } from "./repoEnvelope.ts";
+
+/** A display-safe rendering of a `wait` probe's target for user-visible BPMN name/documentation
+ * (issue #778 review): a `command` target is an arbitrary shell snippet that can embed a secret, so it
+ * is never surfaced — only a fixed placeholder; an `http` target can carry a credential in its
+ * `user:pass@` userinfo or `?query`/`#fragment`, so it goes through the same {@link redactString} log
+ * redaction. Every OTHER kind's target is a structured, non-credential identifier (`owner/repo#42`,
+ * `pkg@version`, `owner/repo@ref`, a `<node>.<fact>` ref) that must be shown VERBATIM — running the
+ * URL redaction over it would mangle a legitimate `#`/`@` (e.g. a `pr` target's `#42`). The RAW target
+ * is retained only in runtime variables (the probe config + the escalation diagnostics), never in the
+ * deployed documentation the explorer/modeler shows. */
+function redactProbeTargetForDisplay(probe: Extract<DeliveryNode, { kind: "wait" }>["wait"]): string {
+  if (probe.kind === "command") return "<redacted>";
+  if (probe.kind === "http") return redactString(probe.target);
+  return probe.target;
+}
 
 /** The task-header key that carries an `agent` node's DECLARED per-node repository spec (#739) into the
  * compiled BPMN. It is a DIGEST-STABLE, env-free marker — pure graph content — so two graphs differing
@@ -967,7 +983,8 @@ export function nodeDisplay(node: DeliveryNode): { name: string; documentation: 
     }
     case "wait": {
       const p = node.wait;
-      const doc: string[] = [`Readiness probe: ${p.kind}`, `Target: ${p.target}`];
+      const safeTarget = redactProbeTargetForDisplay(p);
+      const doc: string[] = [`Readiness probe: ${p.kind}`, `Target: ${safeTarget}`];
       const match = describeProbeMatch(p.match);
       if (match) doc.push(`Match: ${match}`);
       if (trimmedOrEmpty(p.onTimeout)) doc.push(`On timeout: ${trimmedOrEmpty(p.onTimeout)}`);
@@ -979,7 +996,7 @@ export function nodeDisplay(node: DeliveryNode): { name: string; documentation: 
         if (budget.length > 0) doc.push(`Poll: ${budget.join(", ")}`);
       }
       if (emitsLabel) doc.push(`Emits: ${emitsLabel}`);
-      return { name: withId(`Wait: ${p.kind} ${p.target}`), documentation: doc.join("\n") };
+      return { name: withId(`Wait: ${p.kind} ${safeTarget}`), documentation: doc.join("\n") };
     }
     case "human": {
       const h = node.human;
@@ -1167,9 +1184,9 @@ function innerBodyLines(w: NodeWiring, requiredEmits: ReadonlySet<string>, displ
     case "connector":
       return serviceBodyLines(el, node.id, `type="${DELEGATE_TASK_TYPE.connector}"`, [], `connector → ${node.connector.target}`, undefined, [], displayName);
     case "wait":
-      return waitBodyLines(el, node);
+      return waitBodyLines(el, node, displayName);
     case "human":
-      return humanBodyLines(el, node.id);
+      return humanBodyLines(el, displayName);
     default:
       return assertNever(node, "innerBodyLines");
   }
@@ -1329,8 +1346,9 @@ function serviceBodyLines(
 /** `wait` body: `start → pr.readiness-probe (poll) → ready? → end`, escalating on not-ready or on the
  * `=probeTimeout` engine bound. The probe polls its OWN target, so an unrelated upstream event can
  * never flip it to ready (#274/S2 concurrency-correctness); the `pr` kind (S2) binds `mergedSha`. */
-function waitBodyLines(el: string, node: Extract<DeliveryNode, { kind: "wait" }>): string[] {
+function waitBodyLines(el: string, node: Extract<DeliveryNode, { kind: "wait" }>, displayName: string): string[] {
   const nodeId = node.id;
+  const name = escapeXml(displayName);
   const esc = escalationTaskElement(el);
   const emits = normaliseEmits(node);
   // `onTimeout` routing (#462): `escalate` (default) parks the not-ready-at-boundary token on a
@@ -1350,7 +1368,7 @@ function waitBodyLines(el: string, node: Extract<DeliveryNode, { kind: "wait" }>
   ];
   return [
     `      <bpmn:startEvent id="${el}_start"><bpmn:outgoing>${el}_i0</bpmn:outgoing></bpmn:startEvent>`,
-    `      <bpmn:subProcess id="${el}_probeLoop" name="Probe readiness loop: ${escapeXml(nodeId)}">`,
+    `      <bpmn:subProcess id="${el}_probeLoop" name="Probe readiness loop: ${name}">`,
     "        <bpmn:extensionElements>",
     "          <zeebe:ioMapping>",
     '            <zeebe:output source="=ready" target="ready" />',
@@ -1364,7 +1382,7 @@ function waitBodyLines(el: string, node: Extract<DeliveryNode, { kind: "wait" }>
     `        <bpmn:incoming>${el}_i0</bpmn:incoming>`,
     `        <bpmn:outgoing>${el}_i1</bpmn:outgoing>`,
     `        <bpmn:startEvent id="${el}_loopStart"><bpmn:outgoing>${el}_li0</bpmn:outgoing></bpmn:startEvent>`,
-    `        <bpmn:serviceTask id="${el}_task" name="Probe readiness: ${escapeXml(nodeId)}">`,
+    `        <bpmn:serviceTask id="${el}_task" name="Probe readiness: ${name}">`,
     "          <bpmn:extensionElements>",
     `            <zeebe:taskDefinition type="${DELEGATE_TASK_TYPE.wait}" />`,
     "            <zeebe:properties>",
@@ -1397,7 +1415,7 @@ function waitBodyLines(el: string, node: Extract<DeliveryNode, { kind: "wait" }>
     `        <bpmn:outgoing>${el}_i2</bpmn:outgoing>`,
     `        <bpmn:timerEventDefinition id="${el}_ted"><bpmn:timeDuration xsi:type="bpmn:tFormalExpression">=probeTimeout</bpmn:timeDuration></bpmn:timerEventDefinition>`,
     "      </bpmn:boundaryEvent>",
-    `      <bpmn:serviceTask id="${el}_lastAttempt" name="Probe readiness at boundary: ${escapeXml(nodeId)}">`,
+    `      <bpmn:serviceTask id="${el}_lastAttempt" name="Probe readiness at boundary: ${name}">`,
     "        <bpmn:extensionElements>",
     `          <zeebe:taskDefinition type="${DELEGATE_TASK_TYPE.wait}" />`,
     "          <zeebe:properties>",
@@ -1445,13 +1463,13 @@ function waitBodyLines(el: string, node: Extract<DeliveryNode, { kind: "wait" }>
  * — the subProcess ioMapping then publishes it as the node's fact); on SLA expiry the node records an
  * `escalated` outcome and settles (bounded — the graph cannot silently wedge). Mirrors the standalone
  * `delivery-human.bpmn` shape, reusing the S3 form + emit-var contract (`deliveryHuman.ts`). */
-function humanBodyLines(el: string, nodeId: string): string[] {
+function humanBodyLines(el: string, displayName: string): string[] {
   const task = humanTaskElement(el);
   const assignee =
     '=if (is defined(escalationAssignee) and escalationAssignee != null and trim(string(escalationAssignee)) != "") then escalationAssignee else null';
   return [
     `      <bpmn:startEvent id="${el}_start"><bpmn:outgoing>${el}_i0</bpmn:outgoing></bpmn:startEvent>`,
-    `      <bpmn:userTask id="${task}" name="Delivery: human step — ${escapeXml(nodeId)}">`,
+    `      <bpmn:userTask id="${task}" name="Delivery: human step — ${escapeXml(displayName)}">`,
     "        <bpmn:extensionElements>",
     `          <zeebe:formDefinition formId="${GENERIC_HUMAN_FORM}" />`,
     "          <zeebe:userTask />",
