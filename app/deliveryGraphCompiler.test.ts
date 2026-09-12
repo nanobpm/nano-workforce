@@ -13,7 +13,7 @@
 //   • humanNodes[] and sideEffects[] extraction.
 import { test } from "node:test";
 import { assert, assertEquals } from "#test-assert";
-import { compileDeliveryGraph, nodeDisplay } from "./deliveryGraphCompiler.ts";
+import { compileDeliveryGraph, graphCarriesRedactedSecrets, nodeDisplay } from "./deliveryGraphCompiler.ts";
 
 /** Compile and assert success, returning the narrowed ok-result. */
 async function compileOk(graph: unknown) {
@@ -1329,4 +1329,32 @@ test("#778 stripXmlInvalidChars-guarded output drops U+FFFE/U+FFFF noncharacters
   const loneSurrogate = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
   assert(!loneSurrogate.test(r.bpmn), "no unpaired surrogate survives into the compiled BPMN");
   assert(r.bpmn.includes("😀"), "a valid astral pair is preserved");
+});
+
+test("#778 graphCarriesRedactedSecrets: false for a graph whose display fields are fully digest-represented", () => {
+  const plain = {
+    name: "plain",
+    nodes: [
+      { id: "a", kind: "agent", agent: { jobType: "senior:feature", prompt: "implement nanobpm/nano-ide#42" } },
+      { id: "h", kind: "human", human: { prompt: "click done" } },
+      { id: "w", kind: "wait", wait: { kind: "epic", target: "nanobpm/nano-ide#488" } },
+      { id: "c", kind: "connector", connector: { target: "slack:#releases", payload: { pr: "o/r#1" } } },
+    ],
+    edges: [],
+  };
+  assertEquals(graphCarriesRedactedSecrets(plain), false);
+});
+
+test("#778 graphCarriesRedactedSecrets: true when a node carries redacted-away secret material", () => {
+  const urlInPrompt = { name: "n", nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt: "push to https://u:p@host/x" } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(urlInPrompt), true);
+
+  const commandWait = { name: "n", nodes: [{ id: "w", kind: "wait", wait: { kind: "command", target: "run-the-secret.sh" } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(commandWait), true);
+
+  const matchSecret = { name: "n", nodes: [{ id: "w", kind: "wait", wait: { kind: "command", target: "x", match: { stdoutIncludes: "TOKEN=abc" } } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(matchSecret), true);
+
+  const payloadKey = { name: "n", nodes: [{ id: "c", kind: "connector", connector: { target: "slack:#r", payload: { pr: "o/r#1", secretHeader: "Bearer z" } } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(payloadKey), true);
 });

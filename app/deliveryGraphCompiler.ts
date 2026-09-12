@@ -1104,6 +1104,56 @@ export function nodeDisplay(node: DeliveryNode): { name: string; documentation: 
   }
 }
 
+/** Whether a graph's raw content carries values that redaction DROPS from `semanticBpmn` (issue #778
+ * review — Option C). A delivery graph's identity is content-addressed over the redacted `semanticBpmn`
+ * (issue #716), yet credential-bearing raw values survive UNREDACTED into the runtime `nodeInputs`:
+ * `user:pass@`/`?query`/`#fragment` URLs (redacted by {@link redactString} in a `target`/`prompt`/
+ * `dedupeKey`), a `command`-probe `target` (shown only as a fixed `<redacted>` placeholder), the
+ * free-form `verifyCommand`/`bodyIncludes`/`stdoutIncludes` match secrets (also `<redacted>`), and the
+ * free-form connector `payload` (only its `pr` key is ever surfaced). Two graphs differing ONLY in such
+ * a redacted-away value compile to IDENTICAL `semanticBpmn` → identical digest, so the digest is NOT a
+ * faithful fingerprint for them. This predicate flags that lossy case so a dispatch can REQUIRE an
+ * explicit `idempotencyKey` to disambiguate credential-differing graphs (the decided Option C), instead
+ * of silently collapsing the second onto the first's still-running instance. A graph whose display
+ * fields are all fully represented in `semanticBpmn` (redaction is a no-op everywhere) returns `false` —
+ * its digest is a complete identity and no key is required. Deterministic; reuses the SAME redaction
+ * helpers `nodeDisplay` renders with, so the "carries a secret" set can never drift from what is
+ * actually stripped. */
+export function graphCarriesRedactedSecrets(graph: DeliveryGraph): boolean {
+  const lossy = (raw: string | undefined | null, redacted: string): boolean => typeof raw === "string" && raw !== redacted;
+  for (const node of graph.nodes) {
+    switch (node.kind) {
+      case "agent":
+        if (lossy(node.agent.prompt, redactFreeText(node.agent.prompt ?? ""))) return true;
+        break;
+      case "human":
+        if (lossy(node.human?.prompt, redactFreeText(node.human?.prompt ?? ""))) return true;
+        break;
+      case "connector": {
+        const c = node.connector;
+        if (lossy(c.target, redactConnectorValue(c.target))) return true;
+        if (typeof c.dedupeKey === "string" && lossy(c.dedupeKey, redactConnectorValue(c.dedupeKey))) return true;
+        // The free-form connector `payload` survives raw into runtime `nodeInputs`, but only its `pr`
+        // key is ever surfaced (redacted) in `semanticBpmn` — any OTHER payload key is invisible to the
+        // digest, so its presence makes the graph's identity lossy.
+        if (c.payload && Object.keys(c.payload).some((k) => k !== "pr")) return true;
+        break;
+      }
+      case "wait": {
+        const p = node.wait;
+        if (lossy(p.target, redactProbeTargetForDisplay(p))) return true;
+        // `verifyCommand`/`bodyIncludes`/`stdoutIncludes` are shown only as `<redacted>` but survive raw
+        // into the runtime probe config, so their presence is likewise lossy for the digest.
+        if (p.match && Object.entries(p.match).some(([k, v]) => REDACTED_MATCH_FIELDS.has(k) && v !== undefined && v !== null)) return true;
+        break;
+      }
+      default:
+        return assertNever(node, "graphCarriesRedactedSecrets");
+    }
+  }
+  return false;
+}
+
 /** Render one node as an EMBEDDED `bpmn:subProcess` — the engine-native delegation unit (Decision 2).
  * Call activities are a no-op on the pinned WASM engine (the child is never instantiated), so — like
  * `plan-fanout`'s `readiness-preflight` — every node inlines a subProcess that shares the parent

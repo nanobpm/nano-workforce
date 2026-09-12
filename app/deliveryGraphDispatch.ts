@@ -14,7 +14,7 @@
 import type { AppApi } from "@nanobpm/urban";
 import type { DeliveryGraph } from "../nano-generated/api-io.d.ts";
 import { validateDeliveryGraph } from "./deliveryGraph.ts";
-import { compileDeliveryGraph } from "./deliveryGraphCompiler.ts";
+import { compileDeliveryGraph, graphCarriesRedactedSecrets } from "./deliveryGraphCompiler.ts";
 import {
   buildDeliveryGraphRunRow,
   buildHumanLabels,
@@ -64,6 +64,30 @@ export async function dispatchDeliveryGraphRun(
   }
 
   const digest = deliveryGraphDigest(compiled.semanticBpmn);
+  const explicitKey = typeof options.runKey === "string" && options.runKey.trim() !== "";
+  // Option C (issue #778): the graph's identity is content-addressed over the REDACTED `semanticBpmn`
+  // (issue #716), so two graphs differing ONLY in a redacted-away credential (a URL secret/`?query`/
+  // `#fragment`, a `command` target, a `verifyCommand`/`bodyIncludes`/`stdoutIncludes` match secret, or
+  // a free-form connector `payload`) share one digest — and a KEYLESS dispatch defaults `runKey` to that
+  // digest, silently collapsing the second onto the first's still-running instance and reusing its
+  // config. We accept the collision as by-design but REQUIRE an explicit `idempotencyKey` to
+  // disambiguate such a secret-bearing graph, rather than launch it under an ambiguous identity.
+  if (!explicitKey && graphCarriesRedactedSecrets(typedGraph)) {
+    app.log.warn("dispatch-delivery-graph refused: secret-bearing graph needs an explicit idempotencyKey", { digest });
+    return {
+      ok: false,
+      errors: [
+        {
+          path: "idempotencyKey",
+          message:
+            "this graph carries credential-bearing values (a URL credential/`?query`/`#fragment`, a `command` target, a " +
+            "`verifyCommand`/`bodyIncludes`/`stdoutIncludes` match secret, or a free-form connector `payload`) that redaction " +
+            "strips from the content-addressed graph, so its digest cannot distinguish it from another graph differing only in " +
+            "those secrets — supply an explicit `idempotencyKey` to dispatch it (issue #778)",
+        },
+      ],
+    };
+  }
   const runKey = computeRunKey(options.runKey, digest);
   const sideEffecting = compiled.sideEffects.length > 0;
   const explicitTitle = typeof options.title === "string" && options.title.trim() !== "" ? options.title.trim() : "";
