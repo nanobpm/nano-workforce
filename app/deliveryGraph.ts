@@ -99,7 +99,7 @@ export type DeliveryGraphErrorCode =
   | "converge-merge-type"
   | "invalid-node-repository"
   | "invalid-node-base-branch"
-  | "invalid-jobType"
+  | "invalid-job-type"
   | "unbound-pr";
 
 /** A single semantic validation failure. `path` is a JSON-path-qualified pointer at the offending
@@ -145,6 +145,19 @@ export function stripXmlInvalidChars(value: string): string {
  * guard and route the process down the wrong edge). Deterministic and total. */
 export function hasXmlInvalidChars(value: string): boolean {
   return stripXmlInvalidChars(value) !== value;
+}
+
+/** True when `value` contains a whitespace character that XML **attribute-value normalization**
+ * rewrites to a space (literal TAB `#x9`, LF `#xA`, or CR `#xD`). Such characters are perfectly
+ * valid XML `Char`s — so {@link hasXmlInvalidChars} does NOT flag them — yet when a value is emitted
+ * verbatim into a raw XML attribute (`<zeebe:taskDefinition type="…">`), a conforming parser folds
+ * each of them to a single space at deploy time. An executable value carrying one (e.g.
+ * `senior:\nfeature`) is therefore silently deployed as a DIFFERENT worker type (`senior: feature`),
+ * routing the cell to the wrong worker. Rejected — not normalized — for the same reason as
+ * {@link hasXmlInvalidChars}: an executable value must never be silently mutated. Deterministic and
+ * total. */
+export function hasAttrNormalizedWhitespace(value: string): boolean {
+  return /[\t\n\r]/.test(value);
 }
 
 /** True when `kind` is a member of the closed allowlist. */
@@ -435,19 +448,27 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
         }
         // `agent.jobType` is baked VERBATIM into the executable `<zeebe:taskDefinition type=…>` attribute
         // (and mirrored into `resolved.calledElement`), so — unlike a display string — the compiler must
-        // NOT let its attribute sanitiser silently strip an XML-1.0-invalid character out of it: that would
-        // deploy a worker type differing from the authored job type (e.g. `senior:\u0001feature` →
-        // `senior:feature`), silently routing the cell to the wrong worker. Reject it here rather than
-        // rewrite an executable value (issue #778 review — same rationale as `guard-invalid-equals`).
-        if (kind === "agent" && typeof config.jobType === "string" && hasXmlInvalidChars(config.jobType)) {
+        // NOT let its attribute sanitiser silently strip an XML-1.0-invalid character out of it, NOR may
+        // it carry a whitespace character that XML attribute-value normalization folds to a space at
+        // deploy time: either would deploy a worker type differing from the authored job type (e.g.
+        // `senior:\u0001feature` → `senior:feature`, or `senior:\nfeature` → `senior: feature`), silently
+        // routing the cell to the wrong worker. Reject it here rather than rewrite/normalize an executable
+        // value (issue #778 review — same rationale as `guard-invalid-equals`).
+        if (
+          kind === "agent" &&
+          typeof config.jobType === "string" &&
+          (hasXmlInvalidChars(config.jobType) || hasAttrNormalizedWhitespace(config.jobType))
+        ) {
           errors.push({
             path: `${path}.${configKey}.jobType`,
             message:
-              `\`agent.jobType\` "${config.jobType}" contains XML-1.0-invalid characters (control ` +
-              "characters, U+FFFE/U+FFFF, or an unpaired surrogate) — the job type is emitted verbatim as " +
-              "the executable `<zeebe:taskDefinition type=…>`, so it must be rejected rather than silently " +
-              "rewritten into a different (wrong) worker type",
-            code: "invalid-jobType",
+              `\`agent.jobType\` "${config.jobType}" contains a character that would be silently ` +
+              "rewritten when emitted as the executable `<zeebe:taskDefinition type=…>` attribute — an " +
+              "XML-1.0-invalid character (control characters, U+FFFE/U+FFFF, or an unpaired surrogate) that " +
+              "the sanitiser strips, or attribute whitespace (tab, LF, CR) that XML attribute-value " +
+              "normalization folds to a space — so it must be rejected rather than silently rewritten into " +
+              "a different (wrong) worker type",
+            code: "invalid-job-type",
           });
         }
         // S5 trust boundary: `validateDeliveryGraph` is the gate before `dispatchDeliveryGraphRun`

@@ -683,7 +683,7 @@ test("S7 guard-invalid-equals: a clean string `equals` (no XML-invalid character
   );
 });
 
-test("invalid-jobType: an `agent.jobType` carrying an XML-1.0-invalid character is rejected, not silently rewritten into a different executable worker type (#778 review)", () => {
+test("invalid-job-type: an `agent.jobType` carrying an XML-1.0-invalid character is rejected, not silently rewritten into a different executable worker type (#778 review)", () => {
   // `agent.jobType` is emitted VERBATIM as the executable `<zeebe:taskDefinition type=…>` (and mirrored
   // into `resolved.calledElement`). An XML-1.0-forbidden character (here a C0 control) cannot be
   // entity-escaped, so the compiler's attribute sanitiser would STRIP it — deploying `senior:feature`
@@ -693,20 +693,33 @@ test("invalid-jobType: an `agent.jobType` carrying an XML-1.0-invalid character 
     nodes: [{ id: "impl", kind: "agent", agent: { jobType: "senior:\u0001feature" } }],
     edges: [],
   });
-  hasCode(errors, "invalid-jobType");
+  hasCode(errors, "invalid-job-type");
 });
 
-test("invalid-jobType: a clean `agent.jobType` (no XML-invalid characters) passes validation", () => {
+test("invalid-job-type: an `agent.jobType` carrying attribute whitespace (LF) is rejected — XML attribute-value normalization would fold it to a space, deploying a different worker type (#778 review)", () => {
+  // A literal TAB/LF/CR is a valid XML `Char` (so the invalid-char strip does NOT catch it), but XML
+  // attribute-value normalization rewrites it to a single space when emitted as `type="…"`. An authored
+  // `senior:\nfeature` would deploy as `senior: feature` — a DIFFERENT worker type — so it must be
+  // rejected at validation, not silently normalized.
+  const errors = validateDeliveryGraph({
+    nodes: [{ id: "impl", kind: "agent", agent: { jobType: "senior:\nfeature" } }],
+    edges: [],
+  });
+  hasCode(errors, "invalid-job-type");
+});
+
+test("invalid-job-type: a clean `agent.jobType` (no XML-invalid characters, no attribute whitespace) passes validation", () => {
   assertEquals(
     validateDeliveryGraph({
       nodes: [{ id: "impl", kind: "agent", agent: { jobType: "senior:feature" } }],
       edges: [],
-    }).filter((e) => e.code === "invalid-jobType"),
+    }).filter((e) => e.code === "invalid-job-type"),
     [],
   );
 });
 
-test("S7 guard-default-conflict: an edge with both `default` and `when` is rejected", () => {  const errors = validateDeliveryGraph({
+test("S7 guard-default-conflict: an edge with both `default` and `when` is rejected", () => {
+  const errors = validateDeliveryGraph({
     nodes: [
       { id: "bump", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "result", type: "string" }] },
       { id: "a", kind: "agent", agent: { jobType: "j" } },
