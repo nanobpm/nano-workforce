@@ -130,16 +130,27 @@ export interface SuppressedAdvisory {
 
 /** Any `nano-ack:` marker — captures the rest of the marker's line (path + optional `:: text`). */
 const ACK_MARKER = /nano-ack:\s*([^\n\r]+)/gi;
-/** New line-stable form: `<path> :: <advisory text>`. */
-const NEW_ACK = /^(\S+?)\s*::\s*(.+)$/s;
-/** Legacy form: leading `<path>:<line>`. */
-const LEGACY_ACK = /^([^\s)>*]+:\d+)/;
+/** New line-stable form: `<path> :: <advisory text>`. The path group parses up to the ` :: `
+ * delimiter (non-greedily) rather than forbidding whitespace, so a valid GitHub path containing
+ * spaces (e.g. `docs/my file.md`) is honoured. */
+const NEW_ACK = /^(.+?)\s*::\s*(.+)$/s;
+/** Legacy form: leading `<path>:<line>`. The path may contain spaces; capture up to the final
+ * `:<line>` (non-greedy, terminated by a non-digit or end-of-string) rather than forbidding
+ * whitespace, so a spaced path is honoured here too. */
+const LEGACY_ACK = /^(.+?:\d+)(?:\D|$)/;
 
-/** Normalize advisory prose to a line-/format-independent form before fingerprinting: lowercase,
- * keep only alphanumerics. Tolerant to whitespace, markdown bullets, and punctuation differences
- * between Copilot's header text and the agent's copied ack text. */
+/** Normalize advisory prose to a line-/format-independent form before fingerprinting: NFKC-fold,
+ * lowercase, and collapse every run of non-word characters to a single space (word boundaries are
+ * PRESERVED, not deleted, so `foo-bar` and `foobar` stay distinct), keeping Unicode letters/digits
+ * (so non-ASCII-only prose does not normalize to an empty, colliding key). Tolerant to whitespace,
+ * markdown bullets, and punctuation differences between Copilot's header text and the agent's
+ * copied ack text. */
 function normalizeAdvisoryText(text: string): string {
-  return text.toLowerCase().replace(/[^a-z0-9]+/g, "");
+  return text
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim();
 }
 
 /** FNV-1a 32-bit fingerprint of a string → 8-hex-char digest. Deterministic, dependency-free. */

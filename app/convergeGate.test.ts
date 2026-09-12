@@ -11,7 +11,7 @@
 // thread, escalating to the human `wait-answer` task instead of finalizing.
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { assert, assertEquals, assertStringIncludes } from "#test-assert";
+import { assert, assertEquals, assertNotEquals, assertStringIncludes } from "#test-assert";
 import { evaluateConvergeGate } from "./convergeGate.ts";
 import {
   advisoryStableKey,
@@ -148,6 +148,33 @@ test("parseAckedAdvisories: the new `<path> :: <text>` form yields the line-stab
   ];
   const acked = parseAckedAdvisories(threads);
   assertEquals(acked, [advisoryStableKey("server/src/main.rs", "Consider narrowing this type.")]);
+});
+
+// A valid GitHub path can contain spaces; neither ack form may reject it (regression for the
+// critical review finding — `\S+`/`[^\s]` path groups silently dropped a spaced-path ack, so the
+// gate could never observe the acknowledgement and escalated forever).
+test("parseAckedAdvisories: a path containing spaces is honoured in BOTH the new and legacy forms", () => {
+  const newForm: ReviewThread[] = [
+    { isResolved: true, path: "d.md", bodies: ["Applied. nano-ack: docs/my file.md :: Clarify the loopback default."] },
+  ];
+  assertEquals(parseAckedAdvisories(newForm), [advisoryStableKey("docs/my file.md", "Clarify the loopback default.")]);
+
+  const legacyForm: ReviewThread[] = [
+    { isResolved: true, path: "d.md", bodies: ["Applied. nano-ack: docs/my file.md:42"] },
+  ];
+  assertEquals(parseAckedAdvisories(legacyForm), ["docs/my file.md:42"]);
+});
+
+// Normalization must preserve word boundaries and Unicode so distinct advisories on one path do not
+// alias to the same key (regression for the suppressed finding: deleting every separator made
+// `foo-bar`/`foobar` collide, and non-ASCII-only prose normalized to an empty, colliding string).
+test("advisoryStableKey: word boundaries and Unicode are preserved (distinct prose -> distinct keys)", () => {
+  const p = "app/x.ts";
+  assertNotEquals(advisoryStableKey(p, "foo-bar"), advisoryStableKey(p, "foobar"));
+  // Two different non-ASCII-only advisories must not both collapse to the empty-string key.
+  assertNotEquals(advisoryStableKey(p, "café"), advisoryStableKey(p, "naïve"));
+  // Punctuation/whitespace/markdown-bullet noise is still tolerated (same words -> same key).
+  assertEquals(advisoryStableKey(p, "Foo bar, baz."), advisoryStableKey(p, "foo  bar   baz"));
 });
 
 // ── Issue #787: a DECLINED advisory must not livelock the gate when its line drifts ──────────

@@ -135,8 +135,15 @@ Because several agents may run on the same host at once:
    # Post the ack thread (pick any changed line in the diff for path/line). Use the PR's real HEAD
    # SHA as commit_id — `git rev-parse HEAD` can drift from the PR head; ask GitHub:
    CID=$(gh api repos/OWNER/REPO/pulls/PR --jq .head.sha)
-   gh api repos/OWNER/REPO/pulls/PR/comments -f commit_id="$CID" -f path=PATH -F line=LINE -f side=RIGHT \
-     -f body='Applied. nano-ack: <path> :: <verbatim advisory text>'   # or: 'Declined, false positive — <reason>. nano-ack: <path> :: <verbatim advisory text>'
+   # Build the body via a QUOTED heredoc so the verbatim advisory prose is never re-interpreted by
+   # the shell — a single-quoted `-f body='...'` breaks the moment the prose contains a `'` (e.g.
+   # "doesn't handle ..."), and a double-quoted one breaks on `$`/backticks. `<<'EOF'` (quoted
+   # delimiter) disables ALL expansion, so any advisory text is safe:
+   BODY=$(cat <<'EOF'
+   Applied. nano-ack: <path> :: <verbatim advisory text>
+   EOF
+   )   # or: 'Declined, false positive — <reason>. nano-ack: <path> :: <verbatim advisory text>'
+   gh api repos/OWNER/REPO/pulls/PR/comments -f commit_id="$CID" -f path=PATH -F line=LINE -f side=RIGHT -f body="$BODY"
    # Then resolve it exactly like any other thread (map its databaseId -> thread node id -> resolveReviewThread).
    ```
    The legacy `nano-ack: <path>:<line>` marker is still honoured for back-compat,

@@ -8,7 +8,9 @@
 // comments:
 //   • any review THREAD is still unresolved (GraphQL `isResolved = false`), or
 //   • any SUPPRESSED advisory in the latest Copilot review body lacks a matching RESOLVED ack
-//     thread (a `nano-ack: <path>:<line>` marker copied from Copilot's `**path:line**` header).
+//     thread (a `nano-ack: <path> :: <verbatim advisory text>` marker whose line-stable prose
+//     fingerprint matches Copilot's advisory; the legacy `nano-ack: <path>:<line>` form is still
+//     honoured for back-compat but drifts with the line, so the `<path> :: <text>` form is preferred).
 // A blocked gate returns `convergeBlocked = true`; the model's `gw-converge-gate` gateway routes to
 // the human `wait-answer` escalation (recoverable), never a hard wedge.
 //
