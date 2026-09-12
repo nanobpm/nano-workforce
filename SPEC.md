@@ -357,6 +357,41 @@ the app, which deploys on boot), and the next agent job of that type picks it up
 > (`$AGENT_RESULT_FILE` / `::nano:result::`), and no task may still carry the retired
 > baked `io.nanobpm.agentTask.task.prompt` header.
 
+> **`<zeebe:agentDefinition agentType="external" />` is the ONE agentic-task signal.**
+> Every hand-authored `senior:*` agent service task in `resources/processes` carries this
+> engine-native AgentTask marker
+> (issue #745) alongside its `<zeebe:taskDefinition>`, and it is the **single
+> convention** the worker harness `--auto` reconciliation scans to discover agentic
+> tasks — replacing the legacy `linkName="prompt"` / header dual signal so the app and
+> harness converge on one signal (issue #779, harness jwulf/c8ctl-plugin-nano#235). The
+> marker is CI-enforced over the deployed `resources/` process models
+> (`agentTaskTypesMissingExternalMarker`,
+> `agent-marker.test.ts`), so no prompt-bearing agent task in those models relies on
+> prompt-link-only discovery. (The delivery-graph compiler's GENERATED agent BPMN —
+> deployed at run time by `runDeliveryGraph`, not authored under `resources/` — is a
+> separate deployed path NOT covered by this static guard; whether its generated cells
+> should also carry the marker/opt-out convention is tracked separately under issue #745,
+> not #779.) To **exclude** a task from `--auto` — one that must be served only by a
+> worker that explicitly subscribes (`--job-type <type>` / a profile capability) — add
+> the inert opt-out property inside its `extensionElements`, nested in the
+> `<zeebe:properties>` wrapper the models and engine expect (as
+> `resources/processes/feature.bpmn:57-63` does — a bare `<zeebe:property>` placed
+> directly under `<bpmn:extensionElements>` is NOT the accepted shape):
+>
+> ```xml
+> <bpmn:extensionElements>
+>   <zeebe:properties>
+>     <zeebe:property name="io.nanobpm.agentTask.autoSubscribe" value="false" />
+>   </zeebe:properties>
+> </bpmn:extensionElements>
+> ```
+>
+> Absence (or any value other than `"false"`) auto-subscribes as normal — opt-out is
+> explicit and fail-safe. The property is inert to the engine (no migration, no
+> behaviour change). It is a registered contract (`agentTask.autoSubscribe` in
+> `app/contracts.ts`), read by the ONE helper `agentTaskTypesOptedOutOfAuto`
+> (`app/agentic/vocab/job-types.ts`) and guarded by `auto-subscribe.test.ts`.
+
 Per-instance dynamic context still rides **`appendPrompt`** (unchanged): an ioMapping
 sets a job-local `appendPrompt` string (a plan's rejection findings, a feature task's
 brief, the failing-check list) which the agent harness concatenates **verbatim** onto
