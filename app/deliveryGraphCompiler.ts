@@ -953,7 +953,13 @@ function trimmedOrEmpty(value: unknown): string {
  * character survives unredacted. Mirrors {@link redactProbeTargetForDisplay}'s
  * http-only rule (issue #778 review). Deterministic and total. */
 function redactConnectorValue(value: string): string {
-  return /^([a-z][a-z0-9+.-]*:)?\/\//i.test(value.trim()) ? redactString(value) : value;
+  // Strip XML-invalid display characters BEFORE classifying/redacting: the anchored `^(scheme:)?//`
+  // check and the redaction both run on the exact string the renderer will emit. Otherwise a target
+  // prefixed by an unrepresentable control char (e.g. `\x01//user:pass@host/?token=…`) fails the
+  // anchored check, escapes redaction, then loses that prefix during `escapeXml`/`stripXmlInvalidChars`
+  // — surfacing the credential verbatim in the BPMN name/documentation and connector escalation FEEL.
+  const cleaned = stripXmlInvalidChars(value);
+  return /^([a-z][a-z0-9+.-]*:)?\/\//i.test(cleaned.trim()) ? redactString(cleaned) : cleaned;
 }
 
 /** Redact credential-bearing pieces of any URL embedded in FREE-FORM prose (a node's authored

@@ -1018,6 +1018,20 @@ test("#778 nodeDisplay redacts a connector value even when a leading space would
   assert(c.documentation.includes("***@hooks.example.com?***"), "whitespace-prefixed connector target rendered redacted");
 });
 
+test("#778 nodeDisplay redacts a connector value whose URL is prefixed by an XML-invalid control char (strip-before-classify)", () => {
+  // A control char (U+0001) that XML 1.0 forbids gets stripped by `escapeXml`/`stripXmlInvalidChars` at
+  // render time. If classification/redaction ran on the RAW value, the anchored `^(scheme:)?//` check
+  // would miss the URL (it starts with the control char), leaving the credential to surface once the
+  // prefix is dropped. Stripping before classifying closes that bypass.
+  const c = nodeDisplay({
+    id: "n",
+    kind: "connector",
+    connector: { target: "\u0001//user:pass@hooks.example.com?token=abc123" },
+  });
+  assert(!c.documentation.includes("user:pass") && !c.documentation.includes("abc123"), "control-char-prefixed URL still has its credential stripped");
+  assert(c.documentation.includes("***@hooks.example.com?***"), "control-char-prefixed connector target rendered redacted");
+});
+
 test("#778 nodeDisplay redacts a credential-bearing URL embedded in an agent/human prompt (in place, prose intact) — the raw prompt only reaches the runtime job input", () => {
   const agent = nodeDisplay({
     id: "impl",
