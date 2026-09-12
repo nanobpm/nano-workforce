@@ -4,17 +4,15 @@
   "type": "default",
   "components": [
     {
-      "type": "textarea",
-      "key": "question",
-      "label": "Escalation question",
-      "description": "A human decision is needed to resume the PR review-convergence loop.",
-      "readonly": true
+      "type": "text",
+      "label": "Respond to this escalation",
+      "text": "A human decision is needed to resume the PR review-convergence loop. The requested decision is shown as **Decision context** above. Read it, then enter your reply below."
     },
     {
       "type": "textarea",
       "key": "answer",
       "label": "Your answer",
-      "description": "Your reply resumes the review loop and is handed to the next review round.",
+      "description": "Your reply resumes the review loop and is handed to the next review round. Answer the request shown in Decision context above.",
       "validate": {
         "required": true
       }
