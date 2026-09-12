@@ -8,7 +8,11 @@
 // comments:
 //   • any review THREAD is still unresolved (GraphQL `isResolved = false`), or
 //   • any SUPPRESSED advisory in the latest Copilot review body lacks a matching RESOLVED ack
-//     thread (a `nano-ack: <path>:<line>` marker copied from Copilot's `**path:line**` header).
+//     thread (a `nano-ack: <path> :: <verbatim advisory text>` marker whose line-stable prose
+//     fingerprint matches Copilot's advisory). The bare legacy `nano-ack: <path>:<line>` form is
+//     NOT honoured: keyed only on `path:line`, it is blind to the advisory prose and would let a
+//     resolved ack for one advisory silently acknowledge a genuinely new advisory re-emitted at
+//     that same line (a false-OPEN). Only the prose-keyed `<path> :: <text>` form acknowledges.
 // A blocked gate returns `convergeBlocked = true`; the model's `gw-converge-gate` gateway routes to
 // the human `wait-answer` escalation (recoverable), never a hard wedge.
 //
@@ -87,9 +91,10 @@ export function makeHandler(deps: {
         return { convergeBlocked: true, convergeBlockReason: BLOCK_UNVERIFIABLE };
       }
       const unresolvedThreadCount = threads.filter((t) => !t.isResolved).length;
+      const advisories = parseSuppressedAdvisories(reviewBody);
       result = evaluateConvergeGate({
         unresolvedThreadCount,
-        suppressedKeys: parseSuppressedAdvisories(reviewBody),
+        suppressedAdvisories: advisories.map((a) => ({ key: a.key, label: a.label })),
         acknowledgedKeys: parseAckedAdvisories(threads),
       });
     } catch {

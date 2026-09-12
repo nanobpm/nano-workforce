@@ -11,6 +11,8 @@
 // The poller is app-side host glue (main.ts), so host-specific subprocess I/O is allowed here.
 // Cross-runtime: runs under Node (`node:child_process`).
 
+import { createHash } from "node:crypto";
+
 // Type-only import (erased at runtime, so no runtime cycle with mergeProtocol.ts, which imports
 // `fetchRepoFile` from here): `classifyMergeability` reads a repo's declared required checks to gate
 // a merge independently of GitHub branch protection.
@@ -90,9 +92,23 @@ export async function fetchPrReviews(
 //   • SUPPRESSED / low-confidence advisories — Copilot folds these into the review BODY under a
 //     "Suppressed comments (N)" block; they are NOT threads, cannot be resolved, and are re-listed
 //     every round. To make "acknowledged" trackable, the review-round agent must post a RESOLVED
-//     review thread carrying a `nano-ack: <path>:<line>` marker (the exact key from Copilot's
-//     `**path:line**` header) for each advisory it applies or declines. The gate then treats an
-//     advisory as addressed iff a resolved thread carries its ack marker.
+//     review thread carrying a `nano-ack:` marker for each advisory it applies or declines. The gate
+//     then treats an advisory as addressed iff a resolved thread carries a matching ack marker.
+//
+// The ack key must be LINE-STABLE. Keying it on `path:line` (issue #787) livelocks a DECLINED
+// advisory: Copilot re-emits a declined advisory every round, but any unrelated edit in the PR
+// shifts its line, so Copilot re-anchors it to a new line. A prior-round `nano-ack: path:OLD` no
+// longer matches the re-emitted `path:NEW`, the gate sees a freshly "unacknowledged" advisory, and
+// escalates to a human every round. The fix keys acknowledgement on a line-independent identity —
+// `<path>#<fingerprint>` of the advisory's PROSE — so a drifted line still matches. The resolved
+// ack thread is itself the durable store: its marker text survives across rounds regardless of the
+// line, so a decline stays acknowledged without the agent re-acking each round. The new marker is
+// `nano-ack: <path> :: <verbatim advisory text>`. This line-stable prose key is the SOLE ack
+// identity. A bare `nano-ack: <path>:<line>` form is NOT honoured: keyed only on `path:line`, it is
+// blind to the advisory's prose, so a resolved legacy ack for advisory A at a line would silently
+// acknowledge a genuinely NEW advisory B re-emitted at that same line — a false-OPEN this gate exists
+// to prevent. (Issue #787 introduces the ack mechanism itself in this change, so there is no pre-#787
+// legacy-ack corpus to protect by honouring the prose-blind form.)
 
 /** One PR review thread, narrowed to what the convergence gate needs. */
 export interface ReviewThread {
@@ -101,30 +117,141 @@ export interface ReviewThread {
   bodies: string[];
 }
 
-/** The `nano-ack:` acknowledgement marker the review-round agent stamps into the resolved thread
- * it opens per suppressed advisory. The captured group is the advisory key (`path:line`). */
-const ACK_MARKER = /nano-ack:\s*([^\s)>*]+:\d+)/gi;
+/** A suppressed / low-confidence Copilot advisory parsed out of a review body. Its `key` is the
+ * line-stable identity (survives a line drift); `label` is the human-facing `path:line` shown in
+ * block reasons. */
+export interface SuppressedAdvisory {
+  path: string;
+  line: number;
+  /** The advisory prose (first non-empty line after the header), used for the stable fingerprint. */
+  text: string;
+  /** Line-stable identity: `<path>#<fingerprint>` of the normalized prose. Survives line drift. */
+  key: string;
+  /** Human-facing `path:line` label for block-reason messages. */
+  label: string;
+}
 
-/** Parse the `path:line` keys of Copilot's suppressed / low-confidence advisories out of a review
- * body. Copilot renders them under a `<summary>Suppressed comments (N)</summary>` block, each as a
- * bold `**path:line**` header. Returns the de-duplicated keys (empty when there is no such block). */
-export function parseSuppressedAdvisories(reviewBody: string | null | undefined): string[] {
+/** Any `nano-ack:` marker — captures the rest of the marker's line (path + optional `:: text`). */
+const ACK_MARKER = /nano-ack:\s*([^\n\r]+)/gi;
+/** The ONLY honoured ack form: line-stable `<path> :: <advisory text>`. The delimiter is ` :: ` with
+ * REQUIRED surrounding whitespace (matching the canonical marker the agent authors), so a bare `::`
+ * inside a valid GitHub path (e.g. `src/a::b.ts`) is NOT mistaken for the separator — the path group
+ * parses non-greedily up to the first *whitespace-delimited* ` :: `, so a path containing spaces
+ * (e.g. `docs/my file.md`) is still honoured. A bare `<path>:<line>` marker is intentionally not
+ * parsed: keyed only on `path:line`, it is blind to the advisory prose and would false-OPEN a new
+ * advisory re-emitted at a previously-acked line. */
+const NEW_ACK = /^(.+?)\s+::\s+(.+)$/s;
+
+/** Normalize advisory prose to a line-/format-independent form before fingerprinting: strip a
+ * leading markdown bullet, NFC-normalize, lowercase, and collapse runs of WHITESPACE to a single
+ * space. Punctuation is PRESERVED, NOT collapsed: the prompt requires the agent to copy the
+ * advisory's first line VERBATIM, so whitespace/case tolerance is all that is needed to absorb
+ * trivial markdown/whitespace reflow. Collapsing every non-word run into a space (as an earlier
+ * revision did) instead ALIASES genuinely-distinct advisories whose prose differs only by
+ * punctuation-vs-space — e.g. `Use foo() here` vs `Use foo here`, or `foo/bar` vs `foo bar` — so a
+ * resolved ack for advisory A would silently acknowledge a DIFFERENT advisory B that normalizes to
+ * the same key: a false-OPEN this gate exists to prevent. Preserving punctuation errs toward a
+ * stricter match, which is fail-CLOSED: a benign punctuation mismatch merely re-escalates to a
+ * human, and never converges an unacknowledged advisory.
+ *
+ * NFC — canonical composition — is used deliberately in preference to NFKC. NFKC additionally folds
+ * COMPATIBILITY variants (full-width `！` → ASCII `!`, ligatures, super/subscripts, …), which would
+ * ALIAS genuinely-distinct advisories such as `Use foo！` and `Use foo!` to one key — the very
+ * false-OPEN this fingerprint exists to prevent, and a contradiction with "punctuation is
+ * preserved". NFC only unifies sequences that are canonically equivalent (visually and semantically
+ * identical, e.g. a precomposed `é` vs `e`+combining-acute), so verbatim copies still match while
+ * distinct compatibility forms stay distinct (fail-CLOSED). Unicode letters/digits are preserved
+ * rather than stripped, so non-ASCII-only prose still yields a non-empty, distinct key.
+ *
+ * The leading-bullet strip keeps the ADVISORY side (Copilot renders suppressed prose as `* …`, which
+ * `parseSuppressedAdvisories` also strips for display) and the ACK side SYMMETRIC: the prompt tells
+ * the agent to copy the advisory's first line verbatim, so an ack marker legitimately carries the
+ * `* ` bullet — without stripping it here the ack key would differ from the advisory key and the
+ * gate would never converge (fail-CLOSED livelock). Applying it in this shared canonicaliser is the
+ * SINGLE source of truth for both sides.
+ *
+ * The bullet marker REQUIRES trailing whitespace (`[-*]\s+`): a genuine markdown bullet is always
+ * `- ` / `* ` followed by a space, so `-foo` / `*foo` (leading punctuation, no separator) is NOT a
+ * bullet and its leading char is PRESERVED. A greedy `\s*` there would strip the `-`/`*` off such
+ * prose too, collapsing distinct first lines like `-foo` and `foo` to one key — a false-ACK
+ * (false-OPEN) where acking one silently satisfies the other. */
+function normalizeAdvisoryText(text: string): string {
+  return text
+    .normalize("NFC")
+    .replace(/^\s*[-*]\s+/u, "")
+    .toLowerCase()
+    .replace(/\s+/gu, " ")
+    .trim();
+}
+
+/** COLLISION-RESISTANT fingerprint of a string → 32-hex-char (128-bit) digest, the leading half of
+ * a SHA-256 hash. Deterministic and dependency-free (Node's built-in `node:crypto`, no npm dep).
+ *
+ * The gate treats an advisory whose key `<path>#<fingerprint>` matches a resolved ack as addressed,
+ * so a *collision* would let a NEWER, unacknowledged advisory on the same path pass without its own
+ * ack — a false-OPEN that violates the gate's no-false-open guarantee. The former 32-bit FNV-1a
+ * digest was cheap to collide (birthday bound ~2^16); a 128-bit SHA-256 slice makes an accidental
+ * collision (~2^-64 for realistic advisory counts) infeasible. The digest is INTERNAL to the key —
+ * it never appears in a human-authored `nano-ack:` marker (those carry the verbatim prose, which is
+ * re-fingerprinted at read time), so widening it neither lengthens any marker nor breaks a
+ * previously-issued one: both the advisory side and the ack side recompute with this same function. */
+function fingerprint(s: string): string {
+  return createHash("sha256").update(s, "utf8").digest("hex").slice(0, 32);
+}
+
+/** The line-stable acknowledgement key for an advisory: `<path>#<fingerprint(normalized prose)>`.
+ * Exported so the review-round agent's contract and tests share one canonical implementation. */
+export function advisoryStableKey(path: string, text: string): string {
+  return `${path.trim()}#${fingerprint(normalizeAdvisoryText(text))}`;
+}
+
+/** Parse Copilot's suppressed / low-confidence advisories out of a review body. Copilot renders them
+ * under a `<summary>Suppressed comments (N)</summary>` block, each as a bold `**path:line**` header
+ * followed by the advisory prose. Returns de-duplicated advisories (empty when there is no block). */
+export function parseSuppressedAdvisories(reviewBody: string | null | undefined): SuppressedAdvisory[] {
   const body = reviewBody ?? "";
   const idx = body.search(/Suppressed comments\s*\(/i);
   if (idx < 0) return [];
   // Scan only from the "Suppressed comments" marker onward so a `**path:line**` elsewhere in the
   // overview prose can never be mistaken for an advisory.
   const region = body.slice(idx);
-  const keys = new Set<string>();
-  const re = /\*\*([^*]+?:\d+)\*\*/g;
-  let m: RegExpExecArray | null;
-  // biome-ignore lint/suspicious/noAssignInExpressions: canonical regex-exec accumulation loop
-  while ((m = re.exec(region)) !== null) keys.add(m[1].trim());
-  return [...keys];
+  const lines = region.split(/\r?\n/);
+  const headerRe = /\*\*([^*]+?):(\d+)\*\*/;
+  const out: SuppressedAdvisory[] = [];
+  const seen = new Set<string>();
+  for (let i = 0; i < lines.length; i++) {
+    const h = headerRe.exec(lines[i]);
+    if (!h) continue;
+    const path = h[1].trim();
+    const line = Number(h[2]);
+    const label = `${path}:${line}`;
+    // The advisory prose is the first non-empty line after the header (up to the next header). A
+    // single bullet is the common shape; strip a leading markdown bullet marker for the display
+    // `text`. (Keying is bullet-insensitive regardless: `normalizeAdvisoryText` strips a leading
+    // bullet too, so the ack side — which copies the bulleted first line verbatim — keys the same.)
+    let text = "";
+    for (let j = i + 1; j < lines.length; j++) {
+      if (headerRe.test(lines[j])) break;
+      const t = lines[j].replace(/^\s*[-*]\s+/, "").trim();
+      if (t) {
+        text = t;
+        break;
+      }
+    }
+    const key = advisoryStableKey(path, text);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ path, line, text, key, label });
+  }
+  return out;
 }
 
 /** Extract the acknowledged advisory keys from a set of review threads (only RESOLVED threads
- * count — an open ack thread is not yet an acknowledgement). */
+ * count — an open ack thread is not yet an acknowledgement). Returns line-stable keys (`<path>#<fp>`)
+ * parsed from the `nano-ack: <path> :: <text>` form ONLY. A bare `nano-ack: <path>:<line>` marker is
+ * intentionally NOT honoured: its `path:line` key is blind to the advisory prose and would false-OPEN
+ * a genuinely new advisory re-emitted at a previously-acked line. The gate treats an advisory as
+ * acked iff its stable key appears here. */
 export function parseAckedAdvisories(threads: ReviewThread[]): string[] {
   const acked = new Set<string>();
   for (const t of threads) {
@@ -133,7 +260,10 @@ export function parseAckedAdvisories(threads: ReviewThread[]): string[] {
       ACK_MARKER.lastIndex = 0;
       let m: RegExpExecArray | null;
       // biome-ignore lint/suspicious/noAssignInExpressions: canonical regex-exec accumulation loop
-      while ((m = ACK_MARKER.exec(body)) !== null) acked.add(m[1].trim());
+      while ((m = ACK_MARKER.exec(body)) !== null) {
+        const nw = NEW_ACK.exec(m[1].trim());
+        if (nw) acked.add(advisoryStableKey(nw[1], nw[2]));
+      }
     }
   }
   return [...acked];

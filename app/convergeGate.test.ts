@@ -11,9 +11,10 @@
 // thread, escalating to the human `wait-answer` task instead of finalizing.
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { assert, assertEquals, assertStringIncludes } from "#test-assert";
+import { assert, assertEquals, assertNotEquals, assertStringIncludes } from "#test-assert";
 import { evaluateConvergeGate } from "./convergeGate.ts";
 import {
+  advisoryStableKey,
   parseAckedAdvisories,
   parseReviewThreadsPage,
   parseSuppressedAdvisories,
@@ -24,13 +25,13 @@ import {
 // ── The canonical router ────────────────────────────────────────────────────
 
 test("evaluateConvergeGate: a clean PR (no unresolved threads, no advisories) converges", () => {
-  const r = evaluateConvergeGate({ unresolvedThreadCount: 0, suppressedKeys: [], acknowledgedKeys: [] });
+  const r = evaluateConvergeGate({ unresolvedThreadCount: 0, suppressedAdvisories: [], acknowledgedKeys: [] });
   assertEquals(r.convergeBlocked, false);
   assertEquals(r.convergeBlockReason, "");
 });
 
 test("evaluateConvergeGate: an unresolved review thread blocks convergence", () => {
-  const r = evaluateConvergeGate({ unresolvedThreadCount: 2, suppressedKeys: [], acknowledgedKeys: [] });
+  const r = evaluateConvergeGate({ unresolvedThreadCount: 2, suppressedAdvisories: [], acknowledgedKeys: [] });
   assertEquals(r.convergeBlocked, true);
   assertStringIncludes(r.convergeBlockReason, "2 unresolved review threads");
 });
@@ -38,7 +39,7 @@ test("evaluateConvergeGate: an unresolved review thread blocks convergence", () 
 test("evaluateConvergeGate: an unacknowledged suppressed advisory blocks convergence", () => {
   const r = evaluateConvergeGate({
     unresolvedThreadCount: 0,
-    suppressedKeys: ["spec/a.json:613"],
+    suppressedAdvisories: [{ key: "spec/a.json#deadbeef", label: "spec/a.json:613" }],
     acknowledgedKeys: [],
   });
   assertEquals(r.convergeBlocked, true);
@@ -50,16 +51,34 @@ test("evaluateConvergeGate: an unacknowledged suppressed advisory blocks converg
 test("evaluateConvergeGate: an ACKNOWLEDGED suppressed advisory no longer blocks convergence", () => {
   const r = evaluateConvergeGate({
     unresolvedThreadCount: 0,
-    suppressedKeys: ["spec/a.json:613"],
-    acknowledgedKeys: ["spec/a.json:613"],
+    suppressedAdvisories: [{ key: "spec/a.json#deadbeef", label: "spec/a.json:613" }],
+    acknowledgedKeys: ["spec/a.json#deadbeef"],
   });
   assertEquals(r.convergeBlocked, false);
+});
+
+test("evaluateConvergeGate: a prose-blind legacy `path:line` ack does NOT acknowledge an advisory (no false-OPEN)", () => {
+  // A resolved `nano-ack: spec/a.json:613` for a PRIOR advisory would yield only the `path:line`
+  // string — never a stable `<path>#<fp>` key. A genuinely new advisory at that same line carries a
+  // different stable key, so a bare-line ack can never satisfy it: the gate stays blocked. This is
+  // the guard for issue #787's re-review finding — honouring `path:line` let a resolved ack for
+  // advisory A silently converge a NEW advisory B re-emitted at the same line.
+  const r = evaluateConvergeGate({
+    unresolvedThreadCount: 0,
+    suppressedAdvisories: [{ key: "spec/a.json#deadbeef", label: "spec/a.json:613" }],
+    acknowledgedKeys: ["spec/a.json:613"],
+  });
+  assertEquals(r.convergeBlocked, true);
+  assertStringIncludes(r.convergeBlockReason, "spec/a.json:613");
 });
 
 test("evaluateConvergeGate: multiple unacknowledged advisories use the plural noun", () => {
   const r = evaluateConvergeGate({
     unresolvedThreadCount: 0,
-    suppressedKeys: ["x.ts:10", "y.ts:20"],
+    suppressedAdvisories: [
+      { key: "x.ts#a", label: "x.ts:10" },
+      { key: "y.ts#b", label: "y.ts:20" },
+    ],
     acknowledgedKeys: [],
   });
   assertEquals(r.convergeBlocked, true);
@@ -69,8 +88,11 @@ test("evaluateConvergeGate: multiple unacknowledged advisories use the plural no
 test("evaluateConvergeGate: reports both a thread and an advisory when both are outstanding", () => {
   const r = evaluateConvergeGate({
     unresolvedThreadCount: 1,
-    suppressedKeys: ["x.ts:10", "y.ts:20"],
-    acknowledgedKeys: ["x.ts:10"],
+    suppressedAdvisories: [
+      { key: "x.ts#a", label: "x.ts:10" },
+      { key: "y.ts#b", label: "y.ts:20" },
+    ],
+    acknowledgedKeys: ["x.ts#a"],
   });
   assertEquals(r.convergeBlocked, true);
   assertStringIncludes(r.convergeBlockReason, "1 unresolved review thread");
@@ -95,9 +117,19 @@ const SAMPLE_REVIEW_BODY = [
   "</details>",
 ].join("\n");
 
-test("parseSuppressedAdvisories: extracts only the keys inside the Suppressed comments block", () => {
-  const keys = parseSuppressedAdvisories(SAMPLE_REVIEW_BODY);
-  assertEquals(keys, ["spec-app/nano-app.schema.json:613", "server/src/main.rs:42"]);
+test("parseSuppressedAdvisories: extracts advisories inside the Suppressed comments block", () => {
+  const advisories = parseSuppressedAdvisories(SAMPLE_REVIEW_BODY);
+  assertEquals(
+    advisories.map((a) => a.label),
+    ["spec-app/nano-app.schema.json:613", "server/src/main.rs:42"],
+  );
+  // The line-stable key is `<path>#<fingerprint>` of the prose; `label` remains the human `path:line`.
+  assertEquals(advisories[0].label, "spec-app/nano-app.schema.json:613");
+  assertEquals(
+    advisories[0].key,
+    advisoryStableKey("spec-app/nano-app.schema.json", "The description could be clearer about the loopback default."),
+  );
+  assert(advisories[0].key.startsWith("spec-app/nano-app.schema.json#"), "stable key is path#fingerprint");
 });
 
 test("parseSuppressedAdvisories: returns [] when there is no suppressed block", () => {
@@ -108,12 +140,198 @@ test("parseSuppressedAdvisories: returns [] when there is no suppressed block", 
 
 test("parseAckedAdvisories: only RESOLVED threads carrying a nano-ack marker count", () => {
   const threads: ReviewThread[] = [
-    { isResolved: true, path: "a.ts", bodies: ["Fixed. nano-ack: spec-app/nano-app.schema.json:613"] },
-    { isResolved: false, path: "b.ts", bodies: ["nano-ack: server/src/main.rs:42"] }, // open -> ignored
+    {
+      isResolved: true,
+      path: "a.ts",
+      bodies: ["Fixed. nano-ack: spec-app/nano-app.schema.json :: Clarify the loopback default."],
+    },
+    { isResolved: false, path: "b.ts", bodies: ["nano-ack: server/src/main.rs :: Narrow this type."] }, // open -> ignored
     { isResolved: true, path: "c.ts", bodies: ["unrelated resolved comment"] },
   ];
   const acked = parseAckedAdvisories(threads);
-  assertEquals(acked, ["spec-app/nano-app.schema.json:613"]);
+  assertEquals(acked, [advisoryStableKey("spec-app/nano-app.schema.json", "Clarify the loopback default.")]);
+});
+
+// A resolved bare `<path>:<line>` ack (the retired legacy form) must NOT count: it carries no
+// advisory prose, so it cannot identify WHICH advisory it acknowledged. Honouring it would false-OPEN
+// a genuinely new advisory re-emitted at that same line (issue #787's re-review finding).
+test("parseAckedAdvisories: a bare legacy `<path>:<line>` marker is NOT honoured (no prose-blind ack)", () => {
+  const threads: ReviewThread[] = [
+    { isResolved: true, path: "a.ts", bodies: ["Fixed. nano-ack: spec-app/nano-app.schema.json:613"] },
+  ];
+  assertEquals(parseAckedAdvisories(threads), []);
+});
+
+test("parseAckedAdvisories: the new `<path> :: <text>` form yields the line-stable key", () => {
+  const threads: ReviewThread[] = [
+    { isResolved: true, path: "a.ts", bodies: ["Declined. nano-ack: server/src/main.rs :: Consider narrowing this type."] },
+  ];
+  const acked = parseAckedAdvisories(threads);
+  assertEquals(acked, [advisoryStableKey("server/src/main.rs", "Consider narrowing this type.")]);
+});
+
+// A valid GitHub path can contain spaces; the ack form must not reject it (regression for the
+// critical review finding — `\S+`/`[^\s]` path groups silently dropped a spaced-path ack, so the
+// gate could never observe the acknowledgement and escalated forever).
+test("parseAckedAdvisories: a path containing spaces is honoured in the new `<path> :: <text>` form", () => {
+  const newForm: ReviewThread[] = [
+    { isResolved: true, path: "d.md", bodies: ["Applied. nano-ack: docs/my file.md :: Clarify the loopback default."] },
+  ];
+  assertEquals(parseAckedAdvisories(newForm), [advisoryStableKey("docs/my file.md", "Clarify the loopback default.")]);
+});
+
+// A valid GitHub path can itself contain `::` (e.g. `src/a::b.ts`); the ` :: ` separator must be
+// whitespace-delimited so a bare `::` inside the path is not mistaken for the delimiter (regression
+// for the suppressed finding: `\s*::\s*` split `src/a::b.ts :: text` at the wrong `::`, mangling the
+// path and producing a key that could never match the advisory).
+// The `<path> :: <text>` separator is whitespace-delimited, so a path containing a bare `::` is not
+// split at the interior `::` (a legacy `<path>:<line>` interior-colon test was retired with the
+// prose-blind legacy form).
+test("parseAckedAdvisories: a path containing `::` is not split at the interior `::`", () => {
+  const threads: ReviewThread[] = [
+    { isResolved: true, path: "a.ts", bodies: ["Applied. nano-ack: src/a::b.ts :: Narrow the return type here."] },
+  ];
+  assertEquals(parseAckedAdvisories(threads), [advisoryStableKey("src/a::b.ts", "Narrow the return type here.")]);
+});
+
+// Normalization must preserve word boundaries, punctuation, and Unicode so distinct advisories on
+// one path do not alias to the same key (regression for the suppressed findings: deleting every
+// separator made `foo-bar`/`foobar` collide and non-ASCII-only prose normalized to an empty key;
+// collapsing punctuation-into-space aliased `Use foo() here` with `Use foo here` — a false-OPEN).
+test("advisoryStableKey: word boundaries, punctuation and Unicode are preserved (distinct prose -> distinct keys)", () => {
+  const p = "app/x.ts";
+  assertNotEquals(advisoryStableKey(p, "foo-bar"), advisoryStableKey(p, "foobar"));
+  // Two different non-ASCII-only advisories must not both collapse to the empty-string key.
+  assertNotEquals(advisoryStableKey(p, "café"), advisoryStableKey(p, "naïve"));
+  // Punctuation must NOT collapse into whitespace: prose differing only by punctuation-vs-space
+  // stays distinct, so a resolved ack for one cannot silently acknowledge the other (false-OPEN).
+  assertNotEquals(advisoryStableKey(p, "Use foo() here"), advisoryStableKey(p, "Use foo here"));
+  assertNotEquals(advisoryStableKey(p, "foo/bar"), advisoryStableKey(p, "foo bar"));
+  // Only case and whitespace runs are normalized (verbatim copy modulo reflow -> same key).
+  assertEquals(advisoryStableKey(p, "Foo  bar,   baz."), advisoryStableKey(p, "foo bar, baz."));
+  // NFC (not NFKC): compatibility variants must stay DISTINCT, or acking one false-OPENs the other.
+  // Full-width `！` vs ASCII `!` (NFKC would fold them together); ligature `ﬁ` vs `fi`.
+  assertNotEquals(advisoryStableKey(p, "Use foo\uFF01"), advisoryStableKey(p, "Use foo!"));
+  assertNotEquals(advisoryStableKey(p, "The \uFB01le"), advisoryStableKey(p, "The file"));
+  // A precomposed vs decomposed accent IS canonically equivalent (NFC unifies) -> same key.
+  assertEquals(advisoryStableKey(p, "caf\u00E9"), advisoryStableKey(p, "cafe\u0301"));
+});
+
+// The advisory side strips a leading markdown bullet (Copilot renders suppressed prose as `* …`),
+// and the prompt tells the agent to copy that first line VERBATIM — so an ack marker legitimately
+// carries the `* ` bullet. Keying must therefore be bullet-insensitive on BOTH sides, else the ack
+// key never matches the advisory key and the gate livelocks (fail-CLOSED). Regression for the
+// suppressed finding that `parseSuppressedAdvisories` stripped the bullet but the ack path did not.
+test("advisoryStableKey: a leading markdown bullet is stripped so bulleted ack text matches", () => {
+  const p = "app/x.ts";
+  assertEquals(advisoryStableKey(p, "* Consider narrowing this type."), advisoryStableKey(p, "Consider narrowing this type."));
+  assertEquals(advisoryStableKey(p, "- Consider narrowing this type."), advisoryStableKey(p, "Consider narrowing this type."));
+  // But a leading `-`/`*` with NO trailing whitespace is NOT a bullet: it is preserved, so distinct
+  // first-line prose keeps a distinct key (else `-foo` false-acks `foo`). Regression for the finding
+  // that the greedy `[-*]\s*` stripped a non-bullet leading punctuation char.
+  assertNotEquals(advisoryStableKey(p, "-foo"), advisoryStableKey(p, "foo"));
+  assertNotEquals(advisoryStableKey(p, "*foo"), advisoryStableKey(p, "foo"));
+});
+
+// End-to-end: an ack whose marker copies Copilot's bulleted first line verbatim acknowledges the
+// advisory parsed from that same rendered bullet (the ack key == the parsed advisory key).
+test("parseAckedAdvisories: an ack copying the rendered `* ` bullet verbatim matches the advisory key", () => {
+  const advisories = parseSuppressedAdvisories(SAMPLE_REVIEW_BODY);
+  const bulleted = advisories.map((a) => a.label); // ["…schema.json:613", "…main.rs:42"]
+  assert(bulleted.length === 2);
+  const threads: ReviewThread[] = [
+    {
+      isResolved: true,
+      path: "a.ts",
+      // Verbatim copy of Copilot's rendered first line, bullet included.
+      bodies: ["Declined. nano-ack: server/src/main.rs :: - Consider narrowing this type."],
+    },
+  ];
+  const acked = parseAckedAdvisories(threads);
+  const mainRs = advisories.find((a) => a.path === "server/src/main.rs");
+  assert(mainRs !== undefined);
+  assert(acked.includes(mainRs.key), "bulleted verbatim ack resolves to the advisory's stable key");
+});
+
+// A collision in the advisory fingerprint would let a NEWER, unacknowledged advisory on the same
+// path pass the gate on a resolved ack for a DIFFERENT advisory — a false-OPEN. The former 32-bit
+// FNV-1a digest was cheaply collidable; the key now carries a 128-bit (32-hex) SHA-256 slice.
+test("advisoryStableKey: digest is a collision-resistant 128-bit (32-hex) SHA-256 slice", () => {
+  const p = "app/x.ts";
+  const hash = advisoryStableKey(p, "Some advisory prose.").split("#")[1];
+  assertEquals(hash.length, 32, "digest is 32 hex chars (128 bits)");
+  assert(/^[0-9a-f]{32}$/.test(hash), "digest is lowercase hex");
+  // Distinct prose on the same path yields distinct keys (no cheap collision surface).
+  assertNotEquals(
+    advisoryStableKey(p, "Narrow this return type."),
+    advisoryStableKey(p, "Guard against a null argument here."),
+  );
+});
+
+// ── Issue #787: a DECLINED advisory must not livelock the gate when its line drifts ──────────
+//
+// A declined advisory is re-emitted by Copilot every round; any unrelated edit shifts its line, so
+// Copilot re-anchors it to a new line. Keying the ack on the line-stable prose fingerprint (not
+// path:line) keeps a prior-round ack matching the re-emitted advisory across the drift.
+test("converge gate #787: a stable-key ack survives a line drift and keeps the advisory acknowledged", () => {
+  const proseText = "Consider narrowing this type.";
+  // Round 1: Copilot suppressed the advisory at line 360; the agent acked it with the new form.
+  const round1Body = [
+    "<details>",
+    "<summary>Suppressed comments (1)</summary>",
+    "",
+    "**app/deliveryRunner.ts:360**",
+    `- ${proseText}`,
+    "</details>",
+  ].join("\n");
+  // Round 2: an unrelated edit shifted the SAME advisory to line 369; Copilot re-emitted it there.
+  const round2Body = round1Body.replace("app/deliveryRunner.ts:360", "app/deliveryRunner.ts:369");
+  // The resolved ack thread from round 1 persists (its marker text is line-independent).
+  const ackThreads: ReviewThread[] = [
+    { isResolved: true, path: "app/deliveryRunner.ts", bodies: [`Declined, false positive. nano-ack: app/deliveryRunner.ts :: ${proseText}`] },
+  ];
+  const acknowledgedKeys = parseAckedAdvisories(ackThreads);
+
+  const round1 = evaluateConvergeGate({
+    unresolvedThreadCount: 0,
+    suppressedAdvisories: parseSuppressedAdvisories(round1Body),
+    acknowledgedKeys,
+  });
+  assertEquals(round1.convergeBlocked, false);
+
+  // The drift MUST NOT re-block: the round-1 ack still acknowledges the round-2 re-emission.
+  const round2 = evaluateConvergeGate({
+    unresolvedThreadCount: 0,
+    suppressedAdvisories: parseSuppressedAdvisories(round2Body),
+    acknowledgedKeys,
+  });
+  assertEquals(round2.convergeBlocked, false);
+});
+
+test("converge gate #787: a genuinely new, never-acked advisory still blocks (no false-open)", () => {
+  const body = [
+    "<details>",
+    "<summary>Suppressed comments (2)</summary>",
+    "",
+    "**app/x.ts:10**",
+    "- The declined advisory that was acknowledged.",
+    "",
+    "**app/x.ts:20**", // SAME path, DIFFERENT advisory — never acknowledged.
+    "- A brand-new concern that was never triaged.",
+    "</details>",
+  ].join("\n");
+  const ackThreads: ReviewThread[] = [
+    { isResolved: true, path: "app/x.ts", bodies: ["Declined. nano-ack: app/x.ts :: The declined advisory that was acknowledged."] },
+  ];
+  const r = evaluateConvergeGate({
+    unresolvedThreadCount: 0,
+    suppressedAdvisories: parseSuppressedAdvisories(body),
+    acknowledgedKeys: parseAckedAdvisories(ackThreads),
+  });
+  assertEquals(r.convergeBlocked, true);
+  // Only the un-acked advisory on the same path is reported; the acked one is not.
+  assertStringIncludes(r.convergeBlockReason, "app/x.ts:20");
+  assert(!r.convergeBlockReason.includes("app/x.ts:10"), "the acknowledged advisory must not be listed");
 });
 
 test("parseReviewThreadsPage: maps nodes and reports a complete (final) page", () => {
@@ -254,8 +472,18 @@ test("converge-gate: an unacknowledged suppressed advisory blocks convergence", 
 test("converge-gate: an acknowledged advisory (resolved ack thread) is allowed", async () => {
   const handler = await makeUnderTest({
     readThreads: async () => [
-      { isResolved: true, path: "spec-app/nano-app.schema.json", bodies: ["Applied. nano-ack: spec-app/nano-app.schema.json:613"] },
-      { isResolved: true, path: "server/src/main.rs", bodies: ["Declined, false positive. nano-ack: server/src/main.rs:42"] },
+      {
+        isResolved: true,
+        path: "spec-app/nano-app.schema.json",
+        bodies: [
+          "Applied. nano-ack: spec-app/nano-app.schema.json :: The description could be clearer about the loopback default.",
+        ],
+      },
+      {
+        isResolved: true,
+        path: "server/src/main.rs",
+        bodies: ["Declined, false positive. nano-ack: server/src/main.rs :: Consider narrowing this type."],
+      },
     ],
     readReviewBody: async () => SAMPLE_REVIEW_BODY,
   });
