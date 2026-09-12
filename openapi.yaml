@@ -2112,8 +2112,9 @@ components:
                   pattern: '^(?![/.-])(?!.*[/.]$)(?!.*\.\.)(?!.*//)(?!.*/\.)(?!.*\.lock(?:/|$))[A-Za-z0-9._/-]+$'
                   description: >-
                     OPTIONAL per-node base branch this agent node branches off (#739) — the `ref` the
-                    harness checks out in the isolated clone (the pre-PR shape: the agent cuts its own
-                    `feat/<node.id>` branch off this base). Absent → the run-level dispatch `baseBranch`
+                    harness checks out in the isolated clone (the pre-PR shape: the harness cuts the
+                    deterministic `feat/<node.id>` branch off this base itself, per #776, so a forgetful
+                    agent can never be left committing on the base branch). Absent → the run-level dispatch `baseBranch`
                     (else the node's repository default branch). A value that is not a plausible git
                     branch name is rejected at submit; the pattern mirrors the authoritative server-side
                     gate (`isPlausibleBranchName`, app/baseBranch.ts).
@@ -5005,7 +5006,7 @@ paths:
                                 type: string
                                 maxLength: 255
                                 pattern: ^(?![/.-])(?!.*[/.]$)(?!.*\.\.)(?!.*//)(?!.*/\.)(?!.*\.lock(?:/|$))[A-Za-z0-9._/-]+$
-                                description: "OPTIONAL per-node base branch this agent node branches off (#739) — the `ref` the harness checks out in the isolated clone (the pre-PR shape: the agent cuts its own `feat/<node.id>` branch off this base). Absent → the run-level dispatch `baseBranch` (else the node's repository default branch). A value that is not a plausible git branch name is rejected at submit; the pattern mirrors the authoritative server-side gate (`isPlausibleBranchName`, app/baseBranch.ts)."
+                                description: "OPTIONAL per-node base branch this agent node branches off (#739) — the `ref` the harness checks out in the isolated clone (the pre-PR shape: the harness cuts the deterministic `feat/<node.id>` branch off this base itself, per #776, so a forgetful agent can never be left committing on the base branch). Absent → the run-level dispatch `baseBranch` (else the node's repository default branch). A value that is not a plausible git branch name is rejected at submit; the pattern mirrors the authoritative server-side gate (`isPlausibleBranchName`, app/baseBranch.ts)."
                               converge:
                                 type: boolean
                                 description: 'OPTIONAL first-class CONVERGE policy (ADR 0006 §3 / S5) — a DECLARED, compiler- validated completion-policy flag on this cell node. It declares that the node''s opened PR is to be driven through the review-convergence loop to green as an edge-gated completion policy; this slice adds and validates the flag, with the delivery-graph execution wiring that consumes it landing in a follow-up slice. It supersedes (in intent) the emergent `feature.bpmn` `gw-converge` gateway and the "un-draft + merge #B" prompt prose a delivery-graph `agent` node used to smuggle. Converge and merge are SEPARABLE phases; a node may converge without merging (stop at green and gate the landing behind a downstream node).'

@@ -572,6 +572,28 @@ test("an explicit repoless run emits NO branch.create — no envelope at all (#7
   assert(!p.bpmn.includes("repository.branch.create"), "a repoless run carries no isolation branch either");
 });
 
+test("a node id that derives an invalid git ref degrades to NO branch.create — never emits an unusable feat/... (#776)", async () => {
+  // Node ids are only constrained by `^[A-Za-z_][A-Za-z0-9_.-]*$`, laxer than git's ref rules: `a..b` and
+  // `a.lock` pass id validation but produce ill-formed `feat/...` refs the harness cannot create. The
+  // runner must degrade to the pre-#776 agent-cuts-its-own-branch behaviour (no branch.create) for those,
+  // not emit a branch the harness will choke on — while a sibling with a valid id still gets its branch.
+  const graph: DeliveryGraph = {
+    name: "invalid-ref node ids degrade",
+    nodes: [
+      { id: "a..b", kind: "agent", agent: { jobType: "senior:feature", prompt: "a", repository: "acme/one" } },
+      { id: "a.lock", kind: "agent", agent: { jobType: "senior:feature", prompt: "b", repository: "acme/two" } },
+      { id: "ok", kind: "agent", agent: { jobType: "senior:feature", prompt: "c", repository: "acme/three" } },
+    ],
+    edges: [{ from: "a..b", to: "a.lock" }, { from: "a.lock", to: "ok" }],
+  };
+  const p = await prepareOk(graph, {});
+  const branches = agentHeaders(p.bpmn).filter((h) => h.includes("repository.branch.create"));
+  // Only the valid-id cell keeps a branch.create; the two invalid-ref ids emit none (their agents still
+  // provision an isolated clone, they just cut their own branch inside it — the pre-#776 fallback).
+  assertEquals(branches.length, 1, `only the valid id keeps a branch.create, got ${JSON.stringify(branches)}`);
+  assert(branches[0].includes('value="feat/ok"'), `expected feat/ok, got ${JSON.stringify(branches)}`);
+});
+
 test("agentNodeRepoEnvelope emits branch.create off the base when known, off the default when not, and omits it when blank (#776)", () => {
   const withBase = (agentNodeRepoEnvelope("acme/one", "main", "feat/n1") as any)["io.nanobpm.agentTask"].repository;
   assertEquals(withBase.ref, "main", "known base → checked-out ref");

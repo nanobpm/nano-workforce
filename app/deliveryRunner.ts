@@ -18,6 +18,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { EngineClient } from "@nanobpm/urban";
 import type { DeliveryFact, DeliveryGraph, DeliveryNode } from "../nano-generated/api-io.d.ts";
 import { TRANSCRIPT_URL_BASE_VAR, transcriptUrlBaseFor } from "./agentic/transcript-url.ts";
+import { isPlausibleBranchName } from "./baseBranch.ts";
 import { AGENT_REPO_SPEC_HEADER, AGENT_TERMINAL_SUCCESS_STATUSES, assertNever, compileDeliveryGraph, DELIVERY_GRAPH_PROCESS_ID } from "./deliveryGraphCompiler.ts";
 import { DEFAULT_EVERY_MS, msToIsoDuration, parseProbe, readinessPollEvery, readinessTimeout } from "./readiness.ts";
 import { agentNodeRepoEnvelope, flattenAgentTaskEnvelope, isResolvableRepo, RepoEnvelopeConflictError, RepoEnvelopeUnresolvedError } from "./repoEnvelope.ts";
@@ -80,9 +81,10 @@ export interface DeliveryRunOptions extends DeliveryRunTimeouts {
   repository?: string | null;
   /** OPTIONAL run-level base-branch DEFAULT for `agent` nodes that declare a `repository` but no
    * `baseBranch` — the `ref` the harness checks out in the isolated clone (the PRE-PR shape: no PR head
-   * exists yet, so the agent cuts its own `feat/<node.id>` branch off this base inside the clone). A
-   * node with a resolvable repository but no base clones the repo's default branch, so this is a
-   * convenience default, not a hard requirement. */
+   * exists yet). Per issue #776 the harness itself cuts the deterministic `feat/<node.id>` branch off
+   * this base (emitted as `branch.create`) so a forgetful agent can never be left committing on the base
+   * branch; a node with a resolvable repository but no base clones the repo's default branch, so this is
+   * a convenience default, not a hard requirement. */
   baseBranch?: string | null;
   /** EXPLICIT opt-out of repository provisioning (issue #729). `true` → the run is dispatched with NO
    * isolation envelope on ANY node (the per-node headers are stripped, the legacy launch-dir behaviour),
@@ -356,8 +358,15 @@ function injectAgentRepoEnvelopes(bpmn: string, graph: DeliveryGraph, options: D
     // per-block rewrite; delivery-graph agent cells are single-instance, so the static per-node branch
     // never collides across siblings. Omitted when the marker predates the id (a blank id degrades to the
     // pre-#776 agent-cuts-its-own-branch behaviour rather than an ill-formed `feat/`).
+    // A graph node id is only constrained by `^[A-Za-z_][A-Za-z0-9_.-]*$` (deliveryGraph.ts), which is
+    // laxer than git's ref rules: ids like `a..b`, `a.`, or `a.lock` pass id validation yet produce an
+    // ill-formed `feat/...` ref the harness cannot create — turning the isolation guarantee into a
+    // launch/checkout failure. Validate the DERIVED branch with the same `isPlausibleBranchName` gate the
+    // dispatch doors use and degrade to null (the pre-#776 agent-cuts-its-own-branch behaviour) rather
+    // than emit an unusable branch.create.
     const nodeId = trimOrNull(declared.nodeId);
-    const branchCreate = nodeId ? `feat/${nodeId}` : null;
+    const derivedBranch = nodeId ? `feat/${nodeId}` : null;
+    const branchCreate = derivedBranch !== null && isPlausibleBranchName(derivedBranch) ? derivedBranch : null;
     // The unresolved invariant above guarantees a resolvable repo here on a non-repoless run.
     const envelope = agentNodeRepoEnvelope(effRepo ?? "", effBase, branchCreate);
     const flat = flattenAgentTaskEnvelope(envelope);
