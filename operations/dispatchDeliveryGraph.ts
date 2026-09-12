@@ -43,7 +43,10 @@ function truncateForEcho(value: string): string {
  *     shares the digest and OVERWRITES `proposal.graph` — yields the SAME key and short-circuits as
  *     `alreadyRunning` instead of double-launching (issue #778 review, thread on omitted-vs-empty), and
  *   • a fingerprint of {@link digestInvisibleRawValues} — the exact raw content the digest CANNOT see —
- *     so a credential-differing proposal (identical digest) gets a DISTINCT key.
+ *     so a credential-differing proposal (identical digest) gets a DISTINCT key. That traversal now emits
+ *     its entries in a canonical (code-unit sorted) order, so it too collapses a top-level node reorder:
+ *     the fingerprint is reorder-invariant, matching the digest, so the whole key short-circuits a
+ *     re-stage of the same logical graph regardless of node encoding order (issue #778 review).
  * Deriving both parts from the digest + the shared invisible-values traversal means the key needs NO
  * per-field enumeration of the compiler's defaults (which would drift), while still disambiguating on
  * every secret the digest drops. Prefixed so it is self-describing in run listings. */

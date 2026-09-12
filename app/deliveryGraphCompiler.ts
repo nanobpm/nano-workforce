@@ -777,7 +777,17 @@ function buildHumanNodes(nodes: readonly DeliveryNode[]): DeliveryHumanStop[] {
     // #778 review). `redactFreeText` is a no-op for a credential-free prompt.
     const withPrompt =
       node.human?.prompt !== undefined ? { ...stop, prompt: redactFreeText(node.human.prompt) } : stop;
-    stops.push(node.human?.formKey !== undefined ? { ...withPrompt, formKey: node.human.formKey } : withPrompt);
+    // The `formKey` is an opaque identifier a modeler/explorer reads verbatim off the staged proposal
+    // preview + Delivery Graphs page (and denormalised into parked-node labels), so a credential-bearing
+    // formKey (`//user:pass@…`) must be stripped here with the SAME `redactConnectorValue` the BPMN
+    // `Form:` documentation (nodeDisplay) and the digest-invisible traversal use — else it leaks
+    // unredacted through the preview. The RAW formKey still drives runtime form resolution
+    // (`deliveryHuman.ts` reads `node.human.formKey` directly), unmodified (issue #778 review).
+    stops.push(
+      node.human?.formKey !== undefined
+        ? { ...withPrompt, formKey: redactConnectorValue(node.human.formKey) }
+        : withPrompt,
+    );
   }
   return stops;
 }
@@ -1023,15 +1033,17 @@ export function redactFreeText(value: string): string {
   return (
     stripXmlInvalidChars(value)
       .replace(/(?:[a-z][a-z0-9+.-]*:)?\/\/[^\s]+/gi, (m) => redactString(m))
-      // Belt-and-braces for a URL whose userinfo OR query/fragment embeds a raw CR/LF: the whitespace-
-      // delimited `//[^\s]+` token above STOPS at the line break, so `redactString` never sees the
-      // `…@host` userinfo or the `?token=…`/`#frag` tail on the far side of the newline and the
-      // credential survives into `<bpmn:documentation>` (XML preserves line breaks). Re-scan each `//…`
-      // authority up to the next SPACE/TAB (newlines included) and run the SAME `redactString` over it,
-      // so BOTH a newline-spanning userinfo AND a newline-orphaned query/fragment are stripped. Space/tab
-      // still bounds the token, so ordinary prose after a real whitespace break is not over-redacted
-      // (issue #778 review — extends the userinfo-only fix to the query/fragment tail).
-      .replace(/\/\/[^ \t]*/g, (m) => redactString(m))
+      // Belt-and-braces for a URL whose userinfo OR query/fragment embeds a raw CR/LF or TAB: the
+      // whitespace-delimited `//[^\s]+` token above STOPS at the line break (or tab), so `redactString`
+      // never sees the `…@host` userinfo or the `?token=…`/`#frag` tail on the far side of the break and
+      // the credential survives into `<bpmn:documentation>` (XML preserves line breaks and TABs). Re-scan
+      // each `//…` authority up to the next SPACE (newlines AND tabs included) and run the SAME
+      // `redactString` over it, so a newline- OR tab-spanning userinfo AND a break-orphaned query/fragment
+      // are stripped. Only a literal SPACE bounds the token — a TAB is a valid XML character that
+      // `stripXmlInvalidChars` cannot drop, so bounding at TAB (as `[^ \t]` did) let a tab-split credential
+      // escape; a space still bounds so ordinary prose after a real space break is not over-redacted
+      // (issue #778 review — extends the CR/LF fix to embedded TABs, matching `redactString`'s userinfo class).
+      .replace(/\/\/[^ ]*/g, (m) => redactString(m))
   );
 }
 
@@ -1250,6 +1262,17 @@ export function digestInvisibleRawValues(graph: DeliveryGraph): string[] {
         return assertNever(node, "digestInvisibleRawValues");
     }
   }
+  // Canonicalise the order so this list is a content IDENTITY, not an ENCODING one. Each entry is fully
+  // self-identifying (`nodeId\0field\0raw`), so its position in `graph.nodes` iteration order carries no
+  // information — but the run-key fingerprint (`stableProposalRunKey`) canonicalises this array with
+  // `canonicalJson`, which PRESERVES array order. The compiler SORTS nodes before emitting `semanticBpmn`,
+  // so two graphs differing ONLY in top-level node order share one digest; without this sort their
+  // invisible-value lists would differ in order alone, yielding DISTINCT run-keys that double-launch the
+  // same logical graph instead of short-circuiting as `alreadyRunning`. Sort by code unit (locale-
+  // independent) so the fingerprint is reorder-invariant, matching the digest's node-reorder collapse
+  // (issue #778 review). Sorting cannot drop or merge entries, so the emptiness check
+  // (`graphCarriesRedactedSecrets`) and the credential-disambiguation are unaffected.
+  out.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
   return out;
 }
 

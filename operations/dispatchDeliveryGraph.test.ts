@@ -62,6 +62,32 @@ test("stableProposalRunKey: digest identity + secret disambiguation (issue #778 
   assert.ok(stableProposalRunKey(D1, credA).startsWith("staged-"), "the key is self-describing");
 });
 
+test("stableProposalRunKey: node-ORDER of digest-invisible content does not fork the key (issue #778 review)", () => {
+  // The compiler SORTS nodes before emitting `semanticBpmn`, so two graphs differing ONLY in top-level
+  // node order share one digest. Their digest-invisible raw values (`digestInvisibleRawValues`) must
+  // therefore fingerprint identically too — else a re-stage of the same logical graph in a different
+  // node encoding forks a DISTINCT run-key and double-launches instead of short-circuiting. The
+  // fingerprint is code-unit sorted at its source, making it reorder-invariant like the digest.
+  const D = "sha-order";
+  const ab = {
+    name: "g",
+    nodes: [
+      { id: "a", kind: "connector", connector: { target: "//user:pass@host" } },
+      { id: "b", kind: "connector", connector: { target: "//other:secret@host" } },
+    ],
+    edges: [],
+  };
+  const ba = {
+    name: "g",
+    nodes: [
+      { id: "b", kind: "connector", connector: { target: "//other:secret@host" } },
+      { id: "a", kind: "connector", connector: { target: "//user:pass@host" } },
+    ],
+    edges: [],
+  };
+  assert.equal(stableProposalRunKey(D, ab), stableProposalRunKey(D, ba), "a top-level node reorder must not fork the run-key");
+});
+
 describe("dispatchDeliveryGraph — operator dispatch by staged-proposal digest", () => {
   const dirs: string[] = [];
   const apps: TestApp[] = [];

@@ -450,6 +450,22 @@ test("humanNodes: extracts prompt/formKey/emits; a click-done node emits nothing
   assertEquals(ack?.prompt, undefined);
 });
 
+test("#778 humanNodes: a credential-bearing formKey is redacted in the preview projection (raw only reaches runtime form resolution)", async () => {
+  // `humanNodes[]` is persisted into the staged proposal `preview` and rendered verbatim on the Delivery
+  // Graphs page, so a credential in a human `formKey` (`//user:pass@…`) must be stripped here with the
+  // SAME helper the BPMN `Form:` doc uses — else it leaks unredacted through the preview. The RAW formKey
+  // still drives runtime form resolution (`deliveryHuman` reads `node.human.formKey` directly).
+  const r = await compileOk({
+    nodes: [{ id: "h", kind: "human", human: { prompt: "approve", formKey: "//user:pass@forms.example.com/approve?token=abc" } }],
+    edges: [],
+  });
+  const h = r.humanNodes.find((n) => n.nodeId === "h");
+  assert(h?.formKey !== undefined && !h.formKey.includes("user:pass") && !h.formKey.includes("token=abc"), `credential stripped from preview formKey: ${h?.formKey}`);
+  // An ordinary opaque form id is preserved verbatim.
+  const plain = await compileOk({ nodes: [{ id: "h", kind: "human", human: { prompt: "approve", formKey: "deploy-approval" } }], edges: [] });
+  assertEquals(plain.humanNodes.find((n) => n.nodeId === "h")?.formKey, "deploy-approval");
+});
+
 test("sideEffects: agent + connector only; connector carries its dedupeKey", async () => {
   const r = await compileOk(RELEASE_RUNBOOK);
   const agent = r.sideEffects.find((s) => s.nodeId === "open-b");
@@ -1083,6 +1099,17 @@ test("#778 redactFreeText consumes a `//user:pass@` userinfo that embeds a raw l
   assert(prose.documentation.includes("admin@corp.example"), "an ordinary email after a bounded `//` survives");
 });
 
+test("#778 redactFreeText consumes a `//user:pass@` userinfo that embeds a raw TAB (tab-safe)", () => {
+  // A TAB is a VALID XML character `stripXmlInvalidChars` does not remove, so the whitespace-delimited
+  // `//[^\s]+` token AND an earlier `//[^ \t]*` belt scan both split `//user:pa\tss@host` before the
+  // `@`, leaking `ss@host` into the display doc (XML preserves the TAB). Only a literal SPACE bounds the
+  // belt scan now, so the tab-split userinfo — and its `?token=…` tail — are stripped (issue #778).
+  const agent = nodeDisplay({ id: "a", kind: "agent", agent: { jobType: "j", prompt: "deploy via //user:pa\tss@registry.example.com/p?token=s3cr3t now" } });
+  assert(!agent.documentation.includes("ss@registry") && !agent.documentation.includes("user:pa"), "the tab-split userinfo is redacted");
+  assert(!agent.documentation.includes("s3cr3t"), "the query token is redacted");
+  assert(agent.documentation.includes("//***@"), "the userinfo collapses to the redaction marker");
+});
+
 test("#778 nodeDisplay surfaces a wait probe's credentialEnv key NAME so a credential-differing graph gets a DISTINCT digest (not a collision)", () => {
   // `credentialEnv` names a validated env-contract KEY (never a secret) but selects which credential a
   // probe uses at runtime; omitting it from the display let two otherwise-identical graphs collapse to
@@ -1470,6 +1497,16 @@ test("#778 graphCarriesRedactedSecrets: true when a non-redacted match value los
   assertEquals(graphCarriesRedactedSecrets(clean), false);
   // The two differ in their digest-invisible values, so their dispatch fingerprints diverge.
   assert(JSON.stringify(digestInvisibleRawValues(sanitized)) !== JSON.stringify(digestInvisibleRawValues(clean)), "sanitization-lossy value contributes a distinct fingerprint");
+});
+
+test("#778 digestInvisibleRawValues: emits a canonical (node-order-independent) list so the run-key fingerprint is reorder-invariant", () => {
+  // The compiler sorts nodes before `semanticBpmn`, so a top-level node reorder shares one digest. This
+  // list — which the run-key fingerprints — must therefore be reorder-invariant too, else a re-stage in a
+  // different node encoding forks the run-key and double-launches (issue #778 review). Entries are
+  // code-unit sorted at the source, so two node orderings yield an IDENTICAL list.
+  const ab = { name: "n", nodes: [{ id: "a", kind: "connector", connector: { target: "//user:pass@host" } }, { id: "b", kind: "connector", connector: { target: "//other:secret@host" } }], edges: [] };
+  const ba = { name: "n", nodes: [{ id: "b", kind: "connector", connector: { target: "//other:secret@host" } }, { id: "a", kind: "connector", connector: { target: "//user:pass@host" } }], edges: [] };
+  assertEquals(JSON.stringify(digestInvisibleRawValues(ab)), JSON.stringify(digestInvisibleRawValues(ba)));
 });
 
 test("#778 redactFreeText: redacts a URL query/fragment orphaned across a smuggled newline", () => {

@@ -1162,14 +1162,18 @@ export function redactTarget(probe: ReadinessProbe): string {
  * `[\s\S]*` (NOT `.*$`, which cannot cross a line break) so an embedded CR/LF after the `?`/`#` — e.g.
  * `https://host/?token=secret\nnext` — cannot leave the token un-redacted; everything from the first
  * `?`/`#` to end-of-string is consumed regardless of intervening newlines. The userinfo class is
- * `[^/@ \t]` (NOT `[^/@\s]`) for the SAME reason on the other side of the `@`: a raw CR/LF smuggled
- * INSIDE the userinfo — e.g. `https://user:pa\nss@host` — must not break the `//…@` match and leave
- * `ss@host` visible; newlines are consumed while a space/tab still bounds the match so ordinary text is
- * not over-matched. Callers that surface the result in a display artifact must first pass it through
+ * `[^/@ ]` (NOT `[^/@\s]`, and NOT the earlier `[^/@ \t]`) for the SAME reason on the other side of the
+ * `@`: ANY whitespace smuggled INSIDE the userinfo — a raw CR/LF (`https://user:pa\nss@host`) OR an
+ * embedded TAB (`https://user:pa\tss@host`) — must not break the `//…@` match and leave `ss@host`
+ * visible. A TAB is a VALID XML character, so `stripXmlInvalidChars` does not remove it; excluding only
+ * TAB (as `[^/@ \t]` did) let a tab-split credential escape into a display artifact (issue #778 review).
+ * All whitespace except a literal SPACE is therefore consumed within the userinfo, while a space still
+ * bounds the match so ordinary prose is not over-matched (a real URL never carries an unencoded space in
+ * its userinfo). Callers that surface the result in a display artifact must first pass it through
  * `stripXmlInvalidChars` so an XML-forbidden control (e.g. U+000B) inside the userinfo cannot split the
  * `//…@` match and be re-joined at render. */
 export function redactString(s: string): string {
   return s
-    .replace(/\/\/[^/@ \t]*@/g, "//***@")
+    .replace(/\/\/[^/@ ]*@/g, "//***@")
     .replace(/[?#][\s\S]*$/, (m) => `${m[0]}***`);
 }
