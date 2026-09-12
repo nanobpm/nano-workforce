@@ -355,7 +355,7 @@ the app, which deploys on boot), and the next agent job of that type picks it up
 > a manifest `models` override glob), each linked
 > prompt must be non-blank and teach the agent to emit a machine-readable result
 > (`$AGENT_RESULT_FILE` / `::nano:result::`), and no task may still carry the retired
->> baked `io.nanobpm.agentTask.task.prompt` header.
+> baked `io.nanobpm.agentTask.task.prompt` header.
 
 > **`<zeebe:agentDefinition agentType="external" />` is the ONE agentic-task signal.**
 > Every `senior:*` agent service task carries this engine-native AgentTask marker

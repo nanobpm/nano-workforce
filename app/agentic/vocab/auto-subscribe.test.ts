@@ -10,9 +10,10 @@ import { readFileSync, readdirSync } from "node:fs";
 import { test } from "node:test";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
-import { assert, assertEquals } from "#test-assert";
+import { assertEquals } from "#test-assert";
 import {
   agentTaskTypesMissingExternalMarker,
+  agentTaskTypesOptedOutMissingExternalMarker,
   agentTaskTypesOptedOutOfAuto,
 } from "./job-types.ts";
 
@@ -49,7 +50,9 @@ test("agentTaskTypesOptedOutOfAuto tolerates reversed attribute order (name/valu
     <bpmn:serviceTask id="agent">
       <bpmn:extensionElements>
         <zeebe:taskDefinition type="senior:special" />
-        <zeebe:property value="false" name="io.nanobpm.agentTask.autoSubscribe" />
+        <zeebe:properties>
+          <zeebe:property value="false" name="io.nanobpm.agentTask.autoSubscribe" />
+        </zeebe:properties>
       </bpmn:extensionElements>
     </bpmn:serviceTask>`;
   assertEquals(agentTaskTypesOptedOutOfAuto(xml), ["senior:special"]);
@@ -66,7 +69,9 @@ test("agentTaskTypesOptedOutOfAuto ignores a task without the marker and one wit
     <bpmn:serviceTask id="explicitTrue">
       <bpmn:extensionElements>
         <zeebe:taskDefinition type="senior:retro" />
-        <zeebe:property name="io.nanobpm.agentTask.autoSubscribe" value="true" />
+        <zeebe:properties>
+          <zeebe:property name="io.nanobpm.agentTask.autoSubscribe" value="true" />
+        </zeebe:properties>
       </bpmn:extensionElements>
     </bpmn:serviceTask>`;
   assertEquals(agentTaskTypesOptedOutOfAuto(xml), []);
@@ -77,10 +82,65 @@ test("agentTaskTypesOptedOutOfAuto ignores an unrelated property named the same-
     <bpmn:serviceTask id="agent">
       <bpmn:extensionElements>
         <zeebe:taskDefinition type="senior:feature" />
-        <zeebe:property name="io.nanobpm.agentTask.autoSubscribeMode" value="false" />
+        <zeebe:properties>
+          <zeebe:property name="io.nanobpm.agentTask.autoSubscribeMode" value="false" />
+        </zeebe:properties>
       </bpmn:extensionElements>
     </bpmn:serviceTask>`;
   assertEquals(agentTaskTypesOptedOutOfAuto(xml), []);
+});
+
+test("agentTaskTypesOptedOutMissingExternalMarker flags an opt-out on a block lacking the external marker", () => {
+  // A host task (no external marker, no prompt link) that carries the opt-out is authoring drift:
+  // the block-level check catches it even though `agentTaskTypesMissingExternalMarker` (prompt-only)
+  // never reports it.
+  const xml = `
+    <bpmn:serviceTask id="host">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="pr.finalize" />
+        <zeebe:properties>
+          <zeebe:property name="io.nanobpm.agentTask.autoSubscribe" value="false" />
+        </zeebe:properties>
+      </bpmn:extensionElements>
+    </bpmn:serviceTask>`;
+  assertEquals(agentTaskTypesMissingExternalMarker(xml), []);
+  assertEquals(agentTaskTypesOptedOutMissingExternalMarker(xml), ["pr.finalize"]);
+});
+
+test("agentTaskTypesOptedOutMissingExternalMarker passes an opt-out on an externally-marked agent task", () => {
+  const xml = `
+    <bpmn:serviceTask id="agent">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="senior:special" />
+        <zeebe:agentDefinition agentType="external" />
+        <zeebe:properties>
+          <zeebe:property name="io.nanobpm.agentTask.autoSubscribe" value="false" />
+        </zeebe:properties>
+      </bpmn:extensionElements>
+    </bpmn:serviceTask>`;
+  assertEquals(agentTaskTypesOptedOutMissingExternalMarker(xml), []);
+});
+
+test("agentTaskTypesOptedOutMissingExternalMarker checks each block independently (a marked sibling does not cover a drifted opt-out)", () => {
+  // Two tasks share the `senior:special` type: one is a proper externally-marked agent task, the
+  // other opts out but lacks the marker. A deduplicated cross-task comparison would miss this; the
+  // per-block check flags the unmarked one.
+  const xml = `
+    <bpmn:serviceTask id="marked">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="senior:special" />
+        <zeebe:agentDefinition agentType="external" />
+      </bpmn:extensionElements>
+    </bpmn:serviceTask>
+    <bpmn:serviceTask id="drifted">
+      <bpmn:extensionElements>
+        <zeebe:taskDefinition type="senior:special" />
+        <zeebe:properties>
+          <zeebe:property name="io.nanobpm.agentTask.autoSubscribe" value="false" />
+        </zeebe:properties>
+      </bpmn:extensionElements>
+    </bpmn:serviceTask>`;
+  assertEquals(agentTaskTypesOptedOutMissingExternalMarker(xml), ["senior:special"]);
 });
 
 test("GUARD: every deployed opted-out task is itself an externally-marked agent task", () => {
@@ -89,14 +149,14 @@ test("GUARD: every deployed opted-out task is itself an externally-marked agent 
     const optedOut = agentTaskTypesOptedOutOfAuto(xml);
     if (optedOut.length === 0) continue;
     // An opt-out only makes sense on a real agent task (one that WOULD otherwise be auto-discovered
-    // via its external marker). If a type is opted out yet still appears as missing the external
-    // marker, the opt-out has drifted onto a non-agent/incorrectly-authored element.
-    const missing = agentTaskTypesMissingExternalMarker(xml);
-    for (const type of optedOut) {
-      assert(
-        !missing.includes(type),
-        `${file}: task "${type}" opts out of --auto but lacks <zeebe:agentDefinition agentType="external" /> — an opt-out belongs only on a real agent task`,
-      );
-    }
+    // via its external marker). Check the external marker on the SAME service-task block as the
+    // opt-out — a deduplicated comparison against `agentTaskTypesMissingExternalMarker` (which only
+    // reports PROMPT-BEARING tasks) would miss an opt-out that drifted onto a non-prompt host task.
+    const drifted = agentTaskTypesOptedOutMissingExternalMarker(xml);
+    assertEquals(
+      drifted,
+      [],
+      `${file}: task(s) ${JSON.stringify(drifted)} opt out of --auto but lack <zeebe:agentDefinition agentType="external" /> on the same block — an opt-out belongs only on a real agent task`,
+    );
   }
 });

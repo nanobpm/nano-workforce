@@ -124,3 +124,30 @@ export function agentTaskTypesOptedOutOfAuto(xml: string): string[] {
   }
   return optedOut;
 }
+
+/**
+ * Scan one BPMN document for the job types of service tasks that OPT OUT of `--auto` (issue #779) yet
+ * are NOT themselves externally-marked agent tasks — i.e. an opt-out property on a block WITHOUT a
+ * sibling `<zeebe:agentDefinition agentType="external" />`. An opt-out only makes sense on a real
+ * agent task (one that WOULD otherwise be auto-discovered via its external marker); a marker that has
+ * drifted onto a host task (e.g. `pr.finalize`, which carries no external marker) or onto one task
+ * that merely shares a `taskDefinition` type with a properly-marked sibling is authoring drift. This
+ * checks both markers on the SAME service-task block, so — unlike comparing the deduplicated
+ * `agentTaskTypesOptedOutOfAuto` / `agentTaskTypesMissingExternalMarker` lists (the latter only
+ * reports PROMPT-BEARING tasks, so a non-prompt host task's opt-out is invisible to it) — the drift
+ * cannot hide. Returns the offending task types in first-occurrence order (empty when every opted-out
+ * task is externally marked).
+ */
+export function agentTaskTypesOptedOutMissingExternalMarker(xml: string): string[] {
+  const seen = new Set<string>();
+  const offending: string[] = [];
+  for (const [block] of xml.matchAll(SERVICE_TASK)) {
+    if (!AUTO_SUBSCRIBE_OPTOUT.test(block)) continue;
+    if (EXTERNAL_AGENT_MARKER.test(block)) continue;
+    const type = block.match(TASK_DEFINITION_TYPE)?.[1];
+    if (type === undefined || type.length === 0 || seen.has(type)) continue;
+    seen.add(type);
+    offending.push(type);
+  }
+  return offending;
+}
