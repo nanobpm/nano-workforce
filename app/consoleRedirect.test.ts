@@ -46,6 +46,22 @@ test("handles an absent url", () => {
   assertEquals(consoleRedirectLocation(undefined, "http://localhost:8080"), null);
 });
 
+test("resolveConsoleOrigin gives CAMUNDA_REST_ADDRESS precedence over NANOBPMN_BASE_URL", () => {
+  const read = (name: string): string | null =>
+    name === "CAMUNDA_REST_ADDRESS"
+      ? "http://engine.example:8080/v2"
+      : name === "NANOBPMN_BASE_URL"
+        ? "http://localhost:9999"
+        : null;
+  assertEquals(resolveConsoleOrigin(read), "http://engine.example:8080");
+});
+
+test("resolveConsoleOrigin uses NANOBPMN_BASE_URL when CAMUNDA_REST_ADDRESS is unset", () => {
+  const read = (name: string): string | null =>
+    name === "NANOBPMN_BASE_URL" ? "https://engine.example.com:9000" : null;
+  assertEquals(resolveConsoleOrigin(read), "https://engine.example.com:9000");
+});
+
 test("resolveConsoleOrigin derives the origin from NANOBPMN_BASE_URL", () => {
   assertEquals(resolveConsoleOrigin(() => "https://engine.example.com:9000"), "https://engine.example.com:9000");
 });

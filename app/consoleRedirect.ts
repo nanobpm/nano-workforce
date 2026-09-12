@@ -14,12 +14,15 @@
 // path that is exactly `/console` or under `/console/`.
 //
 // The redirect is derived, not configured twice: the engine console shares the engine's origin, so
-// the target origin is `NANOBPMN_BASE_URL`'s origin (default `http://localhost:8080`) — the same
-// single source of truth the engine address resolves from (see `app/enginePreflight.ts`). Mounting
-// it when embedded is harmless: the proxy owns `/console` there, so the app's server never sees such
-// a path.
+// the target origin comes from the CANONICAL engine-address resolution (`resolveEngineAddress`,
+// `app/enginePreflight.ts`) — an explicit `CAMUNDA_REST_ADDRESS` wins over `NANOBPMN_BASE_URL`
+// (default `http://localhost:8080`), the same precedence and single source of truth the engine
+// client uses, so the redirect target can never drift from the engine the app actually talks to.
+// Mounting it when embedded is harmless: the proxy owns `/console` there, so the app's server never
+// sees such a path.
 
 import type { IncomingMessage, RequestListener, Server, ServerResponse } from "node:http";
+import { resolveEngineAddress } from "./enginePreflight.ts";
 import { envVar } from "./version.ts";
 
 /** A minimal logging surface (structurally a subset of `Logger`) the mount uses at boot. */
@@ -55,19 +58,22 @@ export function consoleRedirectLocation(
 }
 
 /**
- * Resolve the engine console origin (scheme + authority) from `NANOBPMN_BASE_URL` — the engine
- * console is served on the engine's own origin, so this reuses the single engine-base source of
- * truth rather than introducing a second knob. Any path/query on the base is discarded (only the
- * origin is meaningful for the redirect target). Falls back to the localhost default when unset or
+ * Resolve the engine console origin (scheme + authority) from the CANONICAL engine-address
+ * resolution (`resolveEngineAddress`, `app/enginePreflight.ts`). The engine console is served on the
+ * engine's own origin, so this reuses the single engine-base source of truth — including its
+ * precedence — rather than reading one input directly. That means an explicit `CAMUNDA_REST_ADDRESS`
+ * (already the `/v2` REST address) wins over `NANOBPMN_BASE_URL`, exactly as the engine client
+ * resolves it; the redirect target can never drift from the engine the app actually talks to. Only
+ * the origin is meaningful for the redirect, so any path/query on the resolved address (e.g. the
+ * `/v2` suffix) is discarded. Falls back to the localhost default when the resolved value is
  * unparseable.
  *
  * `read` is injectable so resolution is testable without mutating `process.env`.
  */
 export function resolveConsoleOrigin(read: (name: string) => string | null = envVar): string {
-  const raw = read("NANOBPMN_BASE_URL")?.trim();
-  const candidate = raw && raw.length > 0 ? raw : "http://localhost:8080";
+  const { restAddress } = resolveEngineAddress(read);
   try {
-    return new URL(candidate).origin;
+    return new URL(restAddress).origin;
   } catch {
     return "http://localhost:8080";
   }
