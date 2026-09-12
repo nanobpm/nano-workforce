@@ -108,10 +108,11 @@ if (httpServer instanceof Server) {
 // serves `/console/*` and the reverse proxy strips its app-view prefix before the app ever sees a
 // request — but STANDALONE, the UI's `/console` links land on this app's own port, where nothing
 // serves them, so the runtime answers a bare 503. Mount a narrow request redirect that rewrites
-// `/console/*` to the engine console origin (derived from `NANOBPMN_BASE_URL`), preserving path +
-// query, and leaves `/app/*`, `/agentic`, and the Workforce page routes untouched. Mounted last so
-// it captures every request listener the runtime + agentic channel attached, and delegates each
-// non-console request to them unchanged.
+// `/console/*` to the engine console origin (derived from the CANONICAL engine-address resolution,
+// `resolveEngineAddress`, so an explicit `CAMUNDA_REST_ADDRESS` wins over `NANOBPMN_BASE_URL`),
+// preserving path + query, and leaves `/app/*`, `/agentic`, and the Workforce page routes untouched.
+// Mounted last so it captures every request listener the runtime + agentic channel attached, and
+// delegates each non-console request to them unchanged.
 let consoleRedirectTeardown: (() => void) | undefined;
 if (httpServer instanceof Server) {
   consoleRedirectTeardown = mountConsoleRedirect(httpServer, resolveConsoleOrigin(), app.log);

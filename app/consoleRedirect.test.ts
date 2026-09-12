@@ -63,7 +63,9 @@ test("resolveConsoleOrigin uses NANOBPMN_BASE_URL when CAMUNDA_REST_ADDRESS is u
 });
 
 test("resolveConsoleOrigin derives the origin from NANOBPMN_BASE_URL", () => {
-  assertEquals(resolveConsoleOrigin(() => "https://engine.example.com:9000"), "https://engine.example.com:9000");
+  const read = (name: string): string | null =>
+    name === "NANOBPMN_BASE_URL" ? "https://engine.example.com:9000" : null;
+  assertEquals(resolveConsoleOrigin(read), "https://engine.example.com:9000");
 });
 
 test("resolveConsoleOrigin strips any path from the base", () => {
