@@ -202,10 +202,18 @@ function attr(name: string, value: string): string {
 /** Escape a string for use inside a mermaid quoted label. First strips XML-1.0-forbidden control
  * characters (see {@link stripXmlInvalidChars}) — the same free-form node labels feed the Mermaid path,
  * so a stray control char (e.g. `\x01` in a prompt) would otherwise make the preview unparsable. Mermaid
- * then uses `#` HTML-entity escapes; a double quote inside a `"…"` label must become `#quot;` so the
- * label stays well-formed. */
+ * then uses `#` HTML-entity escapes: `&`, `<`, `>` and `"` are encoded (`#amp;`/`#lt;`/`#gt;`/`#quot;`)
+ * so free-form prompt/target text can't be interpreted as markup and make a label render wrong or vanish
+ * (`&` is encoded FIRST so its `#amp;` isn't re-encoded). Any line break — LF **or** a bare/`\r\n` CR
+ * (a valid char `stripXmlInvalidChars` preserves) — is folded to a space, since a raw break inside the
+ * line-oriented Mermaid source would make the preview unparsable. */
 function escapeMermaid(value: string): string {
-  return stripXmlInvalidChars(value).replace(/"/g, "#quot;").replace(/\n/g, " ");
+  return stripXmlInvalidChars(value)
+    .replace(/&/g, "#amp;")
+    .replace(/</g, "#lt;")
+    .replace(/>/g, "#gt;")
+    .replace(/"/g, "#quot;")
+    .replace(/\r\n?|\n/g, " ");
 }
 
 /** A node's typed emits, normalised to a stable array (absent → `[]`). */

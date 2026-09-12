@@ -1264,6 +1264,23 @@ test("#778 the mermaid diagram strips XML-1.0-forbidden control characters from 
   assert(!/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/.test(r.diagram), "no forbidden control char survives into the mermaid diagram");
 });
 
+test("#778 the mermaid diagram encodes markup chars and folds bare CR line breaks in free-form labels", async () => {
+  const graph = {
+    name: "mermaid markup",
+    // `<`/`>`/`&` would render as markup (label vanishes/mangles); a bare `\r` (valid, so kept by
+    // stripXmlInvalidChars) injects a raw break into the line-oriented Mermaid source.
+    nodes: [{ id: "n", kind: "agent", agent: { jobType: "j", prompt: "a<b> & first\rsecond" } }],
+    edges: [],
+  };
+  const r = await compileOk(graph);
+  const label = r.diagram.split("\n").find((l) => /^\s+\S+\["/.test(l) && l.includes("first"));
+  assert(label !== undefined, "the node label line is present");
+  assert(!/[<>]/.test(label ?? ""), "no raw < or > survives into the mermaid label");
+  assert((label ?? "").includes("#lt;b#gt;") && (label ?? "").includes("#amp;"), "markup chars are Mermaid-entity encoded");
+  assert(!/\r/.test(label ?? ""), "the bare CR is folded to a space, not a raw break");
+  assert((label ?? "").includes("first second"), "the CR-separated words are joined by a space");
+});
+
 test("#778 stripXmlInvalidChars-guarded output drops U+FFFE/U+FFFF noncharacters and directly-injected unpaired surrogates while keeping valid astral pairs", async () => {
   // A prompt carrying a noncharacter, a lone high surrogate, a lone low surrogate, AND a valid emoji
   // pair: the renderer must drop the first three (XML-1.0 `Char` forbids them) but keep the pair.
