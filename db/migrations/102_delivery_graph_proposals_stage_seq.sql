@@ -1,0 +1,14 @@
+-- A MONOTONIC per-write stage revision for delivery-graph proposals (issue #778 review, thread
+-- app/deliveryGraphProposals.ts:245). The supersede reconcile ("exactly one live proposal per logical
+-- graph, the LATEST stage wins") breaks a same-millisecond `updated_at` tie between two staged siblings
+-- with a deterministic secondary key. That key used to be SQLite's `rowid` (insertion order) — but a
+-- RE-STAGE of an existing digest is an `UPDATE` that bumps `updated_at` while LEAVING the `rowid`
+-- unchanged, so a re-stage that lands in the same millisecond as a different digest's fresh stage could
+-- be selected as the OLDER row (its stale, lower rowid) and be immediately superseded, inverting the
+-- "latest stage wins" invariant this tie-break exists to uphold.
+--
+-- `stage_seq` fixes that: it is reassigned to `MAX(stage_seq)+1` on EVERY stage write — a fresh insert
+-- AND a re-stage update alike — so the most-recently-written row always holds the strictly-highest value
+-- regardless of its rowid or a coincident `updated_at`. Additive/expand (nullable-equivalent `DEFAULT 0`,
+-- no data rewrite): existing rows read as `0` and are re-sequenced the next time they are staged.
+ALTER TABLE delivery_graph_proposals ADD COLUMN stage_seq INTEGER NOT NULL DEFAULT 0;

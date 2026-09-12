@@ -792,7 +792,7 @@ function buildHumanNodes(nodes: readonly DeliveryNode[]): DeliveryHumanStop[] {
     // prompt still reaches the runtime user task via the compiled BPMN `nodeInputs`, unmodified (issue
     // #778 review). `redactFreeText` is a no-op for a credential-free prompt.
     const withPrompt =
-      node.human?.prompt !== undefined ? { ...stop, prompt: redactFreeText(node.human.prompt) } : stop;
+      typeof node.human?.prompt === "string" ? { ...stop, prompt: redactFreeText(node.human.prompt) } : stop;
     // The `formKey` is an opaque identifier a modeler/explorer reads verbatim off the staged proposal
     // preview + Delivery Graphs page (and denormalised into parked-node labels), so a credential-bearing
     // formKey (`//user:pass@…`) must be stripped here with the SAME `redactConnectorValue` the BPMN
@@ -800,7 +800,7 @@ function buildHumanNodes(nodes: readonly DeliveryNode[]): DeliveryHumanStop[] {
     // unredacted through the preview. The RAW formKey still drives runtime form resolution
     // (`deliveryHuman.ts` reads `node.human.formKey` directly), unmodified (issue #778 review).
     stops.push(
-      node.human?.formKey !== undefined
+      typeof node.human?.formKey === "string"
         ? { ...withPrompt, formKey: redactConnectorValue(node.human.formKey) }
         : withPrompt,
     );
@@ -833,7 +833,7 @@ function buildSideEffects(nodes: readonly DeliveryNode[]): DeliverySideEffect[] 
         description: `invokes connector target \`${redactConnectorValue(node.connector.target)}\``,
       };
       effects.push(
-        node.connector.dedupeKey !== undefined
+        typeof node.connector.dedupeKey === "string"
           ? { ...effect, dedupeKey: redactConnectorValue(node.connector.dedupeKey) }
           : effect,
       );
@@ -1041,31 +1041,32 @@ function redactConnectorValue(value: string): string {
  * reaches the runtime job input (`appendPrompt`/`prompt`) unmodified (issue #778 review). Deterministic
  * and total. */
 export function redactFreeText(value: string): string {
-  // Strip XML-invalid display characters BEFORE tokenizing/redacting so the URL scan runs on the exact
+  // Strip XML-invalid display characters BEFORE tokenizing/redacting so every scan runs on the exact
   // string the renderer emits. Otherwise a control char embedded in a URL (`//us\x0Ber:pass@…`) breaks
   // the `//[^\s]+` token match, escapes redaction, then reconstructs the credential once `escapeXml`/
   // `stripXmlInvalidChars` drops the control at render time (issue #778 review — same class as the
   // connector/probe strip-before-classify fix).
-  const primary = stripXmlInvalidChars(value).replace(/(?:[a-z][a-z0-9+.-]*:)?\/\/[^\s]+/gi, (m) => redactString(m));
-  // Belt-and-braces linear pass for a URL whose credential (`//…:…@` userinfo) or `?query`/`#fragment`
-  // is split from it by a raw CR/LF/TAB: the whitespace-delimited `//[^\s]+` primary token STOPS at the
-  // break, so `redactString` never sees the `…@host` userinfo (or a `?…=secret` query) on the far side
-  // and it survives into `<bpmn:documentation>` (XML preserves line breaks and TABs). See
-  // {@link redactCredentialSpans}.
-  return redactCredentialSpans(primary);
+  const cleaned = stripXmlInvalidChars(value);
+  // Run the newline-aware BELT pass on the ORIGINAL cleaned text FIRST, then the primary
+  // whitespace-bounded pass. The belt must see the raw text: its dangling-`?query` detection (a `?`/`#`
+  // sitting immediately before a break, whose value rode onto the next line) is defeated if the primary
+  // pass has already rewritten the on-line `?token` tail to `?***`, erasing the signal (issue #778 review
+  // — thread deliveryGraphCompiler.ts:1083). The belt only touches credential-shaped or query/fragment
+  // spans and PRESERVES ordinary prose that follows a redacted query across a line break; the primary
+  // pass then redacts the same-line `scheme://…`/`//…` userinfo+query tokens `redactString` handles.
+  const belted = redactCredentialSpans(cleaned);
+  return belted.replace(/(?:[a-z][a-z0-9+.-]*:)?\/\/[^\s]+/gi, (m) => redactString(m));
 }
 
-/** Linear (backtracking-free) belt companion to {@link redactFreeText}'s primary whitespace-bounded
- * pass. Each `//`-run is bounded by a literal SPACE (0x20) — so a single span may cross a CR/LF/TAB
- * *inside* the URL that the primary `//[^\s]+` token stopped at — and is redacted via {@link redactString}
- * ONLY when it is credential-shaped (a `:` before an `@`, the `user:pass@` userinfo class `redactString`
- * collapses) OR it carries a `?query`/`#fragment` (where a token often rides). Requiring that shape means
- * ordinary prose — a `//comment` reference, a break-spanning email `owner@example.com`, a sentence-ending
- * `?`/`#` inside a bounded token — is NOT over-redacted. The scan is a single left-to-right walk using
- * `indexOf` over spans bounded by the next SPACE, with no regex backtracking, so a 20 000-char adversarial
- * prompt cannot trigger catastrophic backtracking (issue #778 review — supersedes the credential-shaped
- * belt regex, which was quadratic on a long userinfo-shaped run with no `@` AND blind to a `?query` split
- * from its URL by a line break, leaking the far side). Deterministic and total. */
+/** Linear (backtracking-free) newline-aware belt companion to {@link redactFreeText}'s primary
+ * whitespace-bounded pass. Each `//`-run is bounded by a literal SPACE (0x20) — so a single span may
+ * cross a CR/LF/TAB *inside* the URL that the primary `//[^\s]+` token stopped at. A span is redacted
+ * ONLY when it is credential-shaped (a `:` before an `@`, the `user:pass@` userinfo class) OR it carries
+ * a `?query`/`#fragment`; ordinary prose — a `//comment` reference, a break-spanning email
+ * `owner@example.com`, a bounded token with no secret — is returned untouched. The scan is a single
+ * left-to-right walk using `indexOf` over spans bounded by the next SPACE, with no regex backtracking, so
+ * a 20 000-char adversarial prompt cannot trigger catastrophic backtracking (issue #778 review).
+ * Deterministic and total. */
 function redactCredentialSpans(text: string): string {
   let out = "";
   let i = 0;
@@ -1075,14 +1076,43 @@ function redactCredentialSpans(text: string): string {
     out += text.slice(i, start);
     let end = start;
     while (end < text.length && text.charCodeAt(end) !== 0x20 /* SPACE */) end++;
-    const span = text.slice(start, end);
-    const at = span.indexOf("@");
-    const colon = span.indexOf(":");
-    const credentialShaped = colon >= 0 && at >= 0 && colon < at;
-    const hasQueryOrFragment = span.indexOf("?") >= 0 || span.indexOf("#") >= 0;
-    out += credentialShaped || hasQueryOrFragment ? redactString(span) : span;
+    out += redactCredentialSpan(text.slice(start, end));
     i = end;
   }
+}
+
+/** Redact ONE space-bounded `//`-span (which may embed a raw CR/LF/TAB the primary whitespace-bounded
+ * token stopped at). Returns the span unchanged unless it is credential-shaped or carries a query/
+ * fragment. A `user:pass@` userinfo — even one split across a break inside it — collapses to `//***@`; a
+ * `?query`/`#fragment` is handled break-AWARE so prose that follows the query across a line break is
+ * PRESERVED (issue #778 review — thread deliveryGraphCompiler.ts:1083): only the on-line query VALUE is
+ * replaced, not everything to end-of-span. A `?`/`#` sitting immediately before a break (or at span end)
+ * is a "dangling" marker whose value rode onto the next line, so it (and the far side up to the span's
+ * space boundary) is redacted to end-of-span. Linear — `indexOf`/`charCodeAt` only, no backtracking. */
+function redactCredentialSpan(span: string): string {
+  const at = span.indexOf("@");
+  const colon = span.indexOf(":");
+  const credentialShaped = colon >= 0 && at >= 0 && colon < at;
+  const hasQueryOrFragment = span.indexOf("?") >= 0 || span.indexOf("#") >= 0;
+  if (!credentialShaped && !hasQueryOrFragment) return span;
+  // Collapse a `user:pass@` userinfo (the `//…:…@` class, which may cross a break inside it) to `//***@`.
+  const s = credentialShaped ? span.replace(/\/\/[^/@ ]*@/g, "//***@") : span;
+  const qMark = s.indexOf("?");
+  const hMark = s.indexOf("#");
+  const qi = qMark < 0 ? hMark : hMark < 0 ? qMark : Math.min(qMark, hMark);
+  if (qi < 0) return s;
+  const marker = s[qi];
+  // Walk from the marker to the next raw line break (CR/LF/TAB) — where the primary token stopped.
+  let lineEnd = qi;
+  while (lineEnd < s.length) {
+    const code = s.charCodeAt(lineEnd);
+    if (code === 13 /* CR */ || code === 10 /* LF */ || code === 9 /* TAB */) break;
+    lineEnd++;
+  }
+  // A query VALUE is present on the marker's own line (`lineEnd > qi + 1`): redact just that value and
+  // PRESERVE everything from the break onward (the prose the earlier belt wrongly deleted). Otherwise the
+  // marker is dangling (its value rode across the break, or it sits at span end): redact to end-of-span.
+  return lineEnd > qi + 1 ? `${s.slice(0, qi)}${marker}***${s.slice(lineEnd)}` : `${s.slice(0, qi)}${marker}***`;
 }
 
 /** A human-readable label for a connector node's `target`. The converge-enrollment vocabulary
@@ -1113,10 +1143,30 @@ function humanizeConnectorTarget(target: string): string {
  * order) so two semantically identical graphs render byte-identically — preserving the compiler's
  * determinism/digest guarantee. (Issue #778 review.) */
 const REDACTED_MATCH_FIELDS: ReadonlySet<string> = new Set(["verifyCommand", "bodyIncludes", "stdoutIncludes"]);
+/** The DECLARED `ProbeMatch` fields (app/readiness.ts). `validateDeliveryGraph` does NOT reject an
+ * unknown extra `wait.match` key, so a text-ingress graph can smuggle an arbitrary attacker-named key
+ * whose value would otherwise be rendered VERBATIM into the user-visible preview/documentation here (a
+ * credential-leak channel — an unknown key bypasses the `REDACTED_MATCH_FIELDS` set entirely). Only these
+ * declared, enumerable predicate fields are rendered; any other key is dropped from the display (the raw
+ * value still survives untouched in the runtime probe config). Keep in sync with `ProbeMatch`. */
+const DECLARED_MATCH_FIELDS: ReadonlySet<string> = new Set([
+  "status",
+  "bodyIncludes",
+  "exitCode",
+  "stdoutIncludes",
+  "version",
+  "conclusion",
+  "checkName",
+  "capabilityRef",
+  "package",
+  "verifyCommand",
+  "prState",
+  "epicState",
+]);
 function describeProbeMatch(match: Extract<DeliveryNode, { kind: "wait" }>["wait"]["match"]): string {
   if (match === undefined || match === null) return "";
   return Object.entries(match)
-    .filter(([, v]) => v !== undefined && v !== null)
+    .filter(([k, v]) => v !== undefined && v !== null && DECLARED_MATCH_FIELDS.has(k))
     .sort(([a], [b]) => byCodeUnit(a, b))
     .map(([k, v]) => `${k}=${REDACTED_MATCH_FIELDS.has(k) ? "<redacted>" : String(v)}`)
     .join(", ");
@@ -1248,6 +1298,13 @@ export function digestInvisibleRawValues(graph: DeliveryGraph): string[] {
         // Display embeds `redactFreeText(trimmedOrEmpty(prompt))`; the RAW, untrimmed prompt reaches the
         // runtime (`buildNodeInput`), so a leading/trailing-whitespace-only difference is invisible too.
         push(id, "agent.prompt", node.agent.prompt, redactFreeText(trimmedOrEmpty(node.agent.prompt)));
+        // The node `timeout` is embedded in the display doc as `trimmedOrEmpty(timeout)` and then
+        // XML-serialised — where `escapeXml` STRIPS XML-1.0-invalid chars — yet the RAW value drives the
+        // runtime `nodeTimeout` SLA (`cfg("timeout")`). So `"PT1H"`, `"PT1H "`, and `"PT1H\x01"` all
+        // collapse to the same digest-visible `PT1H` while the runtime SLA differs (an invalid duration
+        // silently falls back to the run-level default). Fingerprint the raw whenever it differs from the
+        // digest-visible (trimmed + XML-sanitised) form (issue #778 review — thread :1251).
+        push(id, "agent.timeout", node.agent.timeout, stripXmlInvalidChars(trimmedOrEmpty(node.agent.timeout)));
         break;
       case "human":
         push(id, "human.prompt", node.human?.prompt, redactFreeText(trimmedOrEmpty(node.human?.prompt)));
@@ -1268,6 +1325,10 @@ export function digestInvisibleRawValues(graph: DeliveryGraph): string[] {
         // idempotencyKey and double-launch a graph the runtime treats identically); only a genuine redaction
         // difference (a real credential) survives (issue #778 review).
         push(id, "connector.dedupeKey", trimmedOrEmpty(c.dedupeKey), redactConnectorValue(trimmedOrEmpty(c.dedupeKey)));
+        // The connector `timeout` is digest-invisible the same way an agent's is: displayed as
+        // `trimmedOrEmpty(timeout)` then XML-sanitised, but read RAW into the runtime `nodeTimeout` SLA.
+        // Fingerprint the raw whenever it differs from the trimmed + XML-sanitised form (issue #778 review).
+        push(id, "connector.timeout", c.timeout, stripXmlInvalidChars(trimmedOrEmpty(c.timeout)));
         // The free-form connector `payload` survives raw into runtime `nodeInputs`, but `nodeDisplay`
         // surfaces at most a single NON-EMPTY string `payload.pr` (redacted). So the display FAITHFULLY
         // represents the payload ONLY when it is exactly `{ pr: <non-empty string> }` whose redaction is

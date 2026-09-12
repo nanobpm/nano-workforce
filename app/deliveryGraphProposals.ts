@@ -223,9 +223,23 @@ export async function stageProposal(data: DataLayer, row: DeliveryGraphProposal)
   } else {
     await table.insert(toWrite);
   }
+  // Stamp this write with a strictly-monotonic stage revision — `MAX(stage_seq)+1` over the whole table,
+  // reassigned on EVERY stage (a fresh insert AND a re-stage update alike) — so the just-written row
+  // always holds the globally-highest `stage_seq`. This is the deterministic secondary ordering the
+  // supersede tie-break below keys on; unlike SQLite's `rowid` (frozen at first insertion), it advances
+  // on a re-stage `UPDATE`, so a re-staged digest cannot be mistaken for the older row in a same-`updated_at`
+  // race (issue #778 review — thread deliveryGraphProposals.ts:245). The `MAX(...)` subquery reads the
+  // pre-write table state (including this row's prior value), so `+1` is strictly greater than every
+  // existing seq. Run BEFORE the reconcile so the newest row already outranks its siblings.
+  await data
+    .open()
+    .exec(
+      `UPDATE "delivery_graph_proposals" SET "stage_seq" = (SELECT COALESCE(MAX("stage_seq"), 0) + 1 FROM "delivery_graph_proposals") WHERE "digest" = ?`,
+      [row.digest],
+    );
   // Reconcile to EXACTLY ONE live proposal per logical graph: supersede every `staged` row for this
   // `logical_key` that has a strictly-NEWER staged sibling (by `updated_at`, with a deterministic
-  // insertion-order `rowid` tie-breaker), leaving only the globally-newest live. This is ORDER-INDEPENDENT
+  // `stage_seq` tie-breaker), leaving only the globally-newest live. This is ORDER-INDEPENDENT
   // — it never references the just-written digest, so it converges to a single live row regardless of the
   // interleaving of concurrent stages. A supersede pass keyed to "only flip rows older than the one *I*
   // just wrote" leaves TWO live proposals when an OLDER stage's pass runs AFTER a newer stage already
@@ -233,16 +247,17 @@ export async function stageProposal(data: DataLayer, row: DeliveryGraphProposal)
   // existed) — and an unordered supersede-all leaves ZERO. Anchoring on the newest staged sibling avoids
   // both: the newest row is never superseded (no newer sibling), so it stays staged throughout the
   // statement and every older row's `EXISTS` is satisfied by it. Idempotent: a no-op once one row remains.
-  // The tie-break is the autoincrement `rowid` (SQLite insertion order), NOT the content `digest`: two
-  // stages landing in the SAME millisecond tie on `updated_at`, and a `digest`-string tie-break is
-  // arbitrary w.r.t. submission order — so the LATER-submitted changed graph could be the one superseded,
-  // inverting "a changed graph supersedes the prior" (a latent race that failed ~1-in-3 same-ms stages).
-  // `rowid` orders by actual insertion, so the most-recently-inserted row deterministically wins the tie
-  // (issue #778 review — replaces the non-deterministic `digest` tie-break).
+  // The tie-break is the monotonic `stage_seq` (reassigned MAX+1 on every write above), NOT the content
+  // `digest` NOR the frozen `rowid`: two stages landing in the SAME millisecond tie on `updated_at`, and a
+  // `digest`-string tie-break is arbitrary w.r.t. submission order while `rowid` does not advance on a
+  // re-stage UPDATE — so either could pick the LATER-submitted graph as the one superseded, inverting
+  // "the latest stage wins". `stage_seq` advances on every stage (insert AND re-stage alike), so the
+  // most-recently-written row deterministically wins the tie (issue #778 review — supersedes the
+  // rowid tie-break, which did not reflect a re-stage).
   await data
     .open()
     .exec(
-      `UPDATE "delivery_graph_proposals" SET "status" = 'superseded', "updated_at" = ? WHERE "logical_key" = ? AND "status" = 'staged' AND EXISTS (SELECT 1 FROM "delivery_graph_proposals" AS "newer" WHERE "newer"."logical_key" = "delivery_graph_proposals"."logical_key" AND "newer"."status" = 'staged' AND ("newer"."updated_at" > "delivery_graph_proposals"."updated_at" OR ("newer"."updated_at" = "delivery_graph_proposals"."updated_at" AND "newer"."rowid" > "delivery_graph_proposals"."rowid")))`,
+      `UPDATE "delivery_graph_proposals" SET "status" = 'superseded', "updated_at" = ? WHERE "logical_key" = ? AND "status" = 'staged' AND EXISTS (SELECT 1 FROM "delivery_graph_proposals" AS "newer" WHERE "newer"."logical_key" = "delivery_graph_proposals"."logical_key" AND "newer"."status" = 'staged' AND ("newer"."updated_at" > "delivery_graph_proposals"."updated_at" OR ("newer"."updated_at" = "delivery_graph_proposals"."updated_at" AND "newer"."stage_seq" > "delivery_graph_proposals"."stage_seq")))`,
       [now(), row.logical_key],
     );
 

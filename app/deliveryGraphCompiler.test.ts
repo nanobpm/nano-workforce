@@ -1136,6 +1136,19 @@ test("#778 redactFreeText consumes a `//user:pass@` userinfo that embeds a raw T
   assert(agent.documentation.includes("//***@"), "the userinfo collapses to the redaction marker");
 });
 
+test("#778 redactFreeText: prose AFTER a redacted `?query` across a line break is PRESERVED, not deleted (thread :1083)", () => {
+  // The belt must redact only the on-line query VALUE and keep everything from the break onward. The
+  // earlier belt ran `redactString` over the whole space-bounded span, whose `[?#][\s\S]*$` deleted the
+  // prose that followed the query across the newline (issue #778 review).
+  const out = redactFreeText("fetch //host/api?token=s3cr3t\nthen review the results please");
+  assert(!out.includes("s3cr3t"), `the query token is redacted: ${out}`);
+  assert(out.includes("?***"), `the query collapses to the marker: ${out}`);
+  assert(out.includes("then review the results please"), `prose after the break survives: ${out}`);
+  // A `#fragment` split the same way likewise keeps the trailing prose.
+  const frag = redactFreeText("open //host/p#sig=zzz\nand confirm the deploy");
+  assert(!frag.includes("sig=zzz") && frag.includes("and confirm the deploy"), `fragment redacted, prose kept: ${frag}`);
+});
+
 test("#778 redactFreeText: a non-credential `//` run spanning a break is NOT over-redacted (credential-shaped belt only)", () => {
   // The belt scan re-redacts only a `//…:…@` userinfo span, not every `//` run. A `//comment` reference
   // followed by a new-line email `owner@example.com` has no `user:pass@` shape, so the prose survives
@@ -1304,6 +1317,42 @@ test("#778 nodeDisplay redacts free-form probe match fields (bodyIncludes/stdout
   assert(cmd.documentation.includes("stdoutIncludes=<redacted>"), "stdoutIncludes is redacted");
   assert(!cmd.documentation.includes("SUPER_SECRET_STDOUT"), "the raw stdout substring never reaches the doc");
   assert(cmd.documentation.includes("exitCode=0"), "structured match fields stay verbatim");
+});
+
+test("#778 describeProbeMatch DROPS an undeclared `wait.match` key so a text-ingress graph cannot leak a secret through an attacker-named field (thread :1121)", async () => {
+  // `validateDeliveryGraph` does NOT reject an unknown extra `wait.match` key, so a graph submitted as
+  // text can smuggle an attacker-named field whose value the display would otherwise render VERBATIM
+  // (an unknown key bypasses `REDACTED_MATCH_FIELDS`). Only the declared `ProbeMatch` fields are shown.
+  const graph = {
+    name: "g",
+    nodes: [
+      {
+        id: "w",
+        kind: "wait",
+        wait: { kind: "command", target: "check.sh", match: { exitCode: 0, "x-smuggled": "LEAK_SECRET_VALUE" } },
+      },
+    ],
+    edges: [],
+  };
+  const r = await compileOk(graph);
+  assert(!r.bpmn.includes("LEAK_SECRET_VALUE"), "an undeclared match key's value never reaches the compiled documentation");
+  assert(!r.bpmn.includes("x-smuggled"), "the undeclared match key itself is dropped from the display");
+  assert(r.bpmn.includes("exitCode=0"), "a declared match field still renders verbatim");
+});
+
+test("#778 digestInvisibleRawValues fingerprints an XML-invalid `agent`/`connector` timeout so two runtime-different graphs do not collide (thread :1251)", () => {
+  // The node `timeout` is displayed as `trimmedOrEmpty(timeout)` then XML-sanitised at serialisation, but
+  // the RAW value drives the runtime SLA — so `PT1H` and `PT1H\x01` share a digest while the runtime SLA
+  // differs (an invalid duration silently falls back to the run default). The raw must be fingerprinted.
+  const clean = { name: "g", nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt: "p", timeout: "PT1H" } }], edges: [] };
+  const dirty = { name: "g", nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt: "p", timeout: "PT1H\x01" } }], edges: [] };
+  const invisible = digestInvisibleRawValues(dirty);
+  assert(invisible.some((e) => e.includes("agent.timeout")), "an XML-invalid agent timeout is flagged digest-invisible");
+  // The clean timeout is fully digest-visible → not flagged.
+  assert(!digestInvisibleRawValues(clean).some((e) => e.includes("agent.timeout")), "a clean timeout is not spuriously flagged");
+  // Same for a connector timeout.
+  const dirtyConn = { name: "g", nodes: [{ id: "c", kind: "connector", connector: { target: "converge-merge", timeout: "PT2H\x01" } }], edges: [] };
+  assert(digestInvisibleRawValues(dirtyConn).some((e) => e.includes("connector.timeout")), "an XML-invalid connector timeout is flagged digest-invisible");
 });
 
 test("#778 describeProbeMatch renders match fields in a stable order regardless of JSON insertion order (byte-determinism)", () => {

@@ -241,6 +241,38 @@ test("stageProposal: reconciles to EXACTLY ONE live proposal — an older stage 
   });
 });
 
+test("stageProposal: a RE-STAGE wins a same-millisecond `updated_at` tie over an untouched sibling — the monotonic `stage_seq` reflects the re-stage that a frozen `rowid` does not (issue #778 review — thread :245)", async (t) => {
+  await withData(async (data) => {
+    const table = deliveryGraphProposals(data);
+    // Freeze wall-clock time so every `now()` inside `stageProposal` stamps the SAME `updated_at`,
+    // reproducing the same-millisecond concurrent-stage race deterministically (only the `Date` API is
+    // mocked, so async DB I/O on real timers is unaffected).
+    t.mock.timers.enable({ apis: ["Date"], now: Date.parse("2025-06-01T00:00:00.000Z") });
+    // Two staged siblings under logical_key "runbook", both stamped the frozen instant. d2 is staged
+    // AFTER d1, so it is (correctly) the live winner and d1 is superseded — `rowid` and `stage_seq` agree
+    // so far (insertion order == stage order).
+    await stageProposal(data, row({ digest: "d1" }));
+    await stageProposal(data, row({ digest: "d2" }));
+    assertEquals((await table.get("d1"))?.status, "superseded");
+    assertEquals((await table.get("d2"))?.status, "staged");
+    // Now RE-STAGE d1 (an UPDATE) at the SAME frozen instant. This is the newest write, so it MUST become
+    // the sole live proposal. But a re-stage is an `UPDATE`: d1's `rowid` stays frozen BELOW d2's, so the
+    // old `rowid` tie-break wrongly keeps d2 live and leaves the just-re-staged d1 superseded. The
+    // monotonic `stage_seq` (reassigned MAX+1 on every write, including this re-stage) advances past d2,
+    // so the reconcile correctly makes d1 live and supersedes d2.
+    await stageProposal(data, row({ digest: "d1" }));
+    assertEquals(
+      (await table.get("d1"))?.status,
+      "staged",
+      "the just-re-staged digest must be the live proposal, even against an untouched higher-rowid sibling",
+    );
+    assertEquals((await table.get("d2"))?.status, "superseded", "the untouched older sibling is superseded by the re-stage");
+    const live = (await table.all()).filter((r) => r.status === "staged" && r.logical_key === "runbook");
+    assertEquals(live.length, 1, "exactly one live proposal per logical graph after the re-stage");
+    assertEquals(live[0]?.digest, "d1", "the re-staged digest wins the same-`updated_at` tie");
+  });
+});
+
 test("stageProposal outcome: `row` reflects the POST-reconcile status — a stage immediately superseded by a newer sibling reports its own row as `superseded`, not the pre-reconcile `staged`", async () => {
   await withData(async (data) => {
     const table = deliveryGraphProposals(data);
