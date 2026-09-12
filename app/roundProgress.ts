@@ -156,8 +156,11 @@ export function noProgressQuestion(
  *    counter resets so a human-answered resume gets fresh retries.
  *
  * `agentWorkObserved` is the agent-instance corroboration: `true` when a terminal `review-round`
- * agent-instance exists for the round (→ `no-advance`), `false`/`null` (no terminal instance, incl.
- * the read-as-absence testkit) → `husk`. */
+ * agent-instance exists for the round (→ `no-advance`); `false` — a SUCCESSFUL read that found no
+ * terminal instance (incl. the read-as-absence testkit, whose empty list is `false`) → `husk`; and
+ * `null`/`undefined` — an UNKNOWN read (the engine channel was unavailable or threw) → `no-advance`,
+ * never an auto-retry, so a transient AgentInstance read outage can never duplicate genuinely-
+ * completed agent work. Only a positively-corroborated empty read is a husk. */
 export function decideProgress(
   status: string | null | undefined,
   previousHead: string | null | undefined,
@@ -170,7 +173,13 @@ export function decideProgress(
   if (routeProgress(status, previousHead, currentHead) === "continue") {
     return { progressed: true, huskRetries: 0 };
   }
-  const reason: NoProgressReason = agentWorkObserved === true ? "no-advance" : "husk";
+  // Only a POSITIVELY-corroborated empty read (`false` — a successful AgentInstance search that
+  // found no terminal `review-round` instance) is a husk we may auto-retry. `true` (a terminal
+  // instance exists) is a real no-advance; and an UNKNOWN read (`null`/`undefined` — the engine
+  // channel was unavailable or threw) must NOT auto-retry, since re-running could duplicate agent
+  // work that actually did run. So an unknown read fails safe to `no-advance` (escalate to a human),
+  // exactly as the pre-#786 loop did — only a successful empty read means husk.
+  const reason: NoProgressReason = agentWorkObserved === false ? "husk" : "no-advance";
   const retries = normalizeRetries(currentHuskRetries);
   if (reason === "husk" && retries < maxHuskRetries) {
     return { progressed: false, huskRetry: true, huskRetries: retries + 1, reason };

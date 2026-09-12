@@ -79,16 +79,29 @@ test("decideProgress: a progressing round continues and RESETS the husk counter"
   assertEquals(d.reason, undefined);
 });
 
-test("decideProgress: a husk (no agent work) under the cap auto-retries the same round", () => {
-  // no head advance + no terminal agent-instance corroboration (false/null) => husk. Under the cap
-  // it re-runs the same round on a healthy worker and bumps the counter.
-  for (const observed of [false, null, undefined] as const) {
+test("decideProgress: a husk (successful empty agent-work read) under the cap auto-retries the same round", () => {
+  // no head advance + a SUCCESSFUL empty agent-instance read (false) => husk. Under the cap it
+  // re-runs the same round on a healthy worker and bumps the counter.
+  const d = decideProgress("addressed", "sha-1", "sha-1", 5, false, 0);
+  assertEquals(d.progressed, false);
+  assertEquals(d.huskRetry, true, "a corroborated-empty husk must auto-retry");
+  assertEquals(d.huskRetries, 1, "the husk bumps the counter");
+  assertEquals(d.reason, "husk");
+  assertEquals(d.question, undefined, "an auto-retry opens no escalation question");
+});
+
+test("decideProgress: an UNKNOWN agent-work read (null/undefined) escalates as no-advance — never auto-retries", () => {
+  // An engine read that was unavailable/threw (null) — or was never attempted (undefined) — is NOT a
+  // corroborated husk. Auto-retrying it could duplicate agent work that actually ran, so it fails
+  // safe to an immediate no-advance escalation, exactly as the pre-#786 loop did.
+  for (const observed of [null, undefined] as const) {
     const d = decideProgress("addressed", "sha-1", "sha-1", 5, observed, 0);
     assertEquals(d.progressed, false, `observed=${observed}`);
-    assertEquals(d.huskRetry, true, `observed=${observed} must auto-retry`);
-    assertEquals(d.huskRetries, 1, `observed=${observed} bumps the counter`);
-    assertEquals(d.reason, "husk");
-    assertEquals(d.question, undefined, "an auto-retry opens no escalation question");
+    assertEquals(d.huskRetry, false, `observed=${observed} must NOT auto-retry an unknown read`);
+    assertEquals(d.huskRetries, 0, `observed=${observed} does not bump the husk counter`);
+    assertEquals(d.reason, "no-advance");
+    assert(d.question, `observed=${observed} escalates with a question`);
+    assertStringIncludes(d.question ?? "", "PR head did not advance");
   }
 });
 
@@ -210,6 +223,19 @@ test("progress-check: an addressed round whose head is unchanged with no agent w
   assertEquals(out.huskRetry, true, "the husk is auto-retried");
   assertEquals(out.huskRetries, 1);
   assertEquals(out.noProgressReason, "husk");
+});
+
+test("progress-check: an unchanged head with an UNKNOWN agent-work read (null) escalates as no-advance, never auto-retries", async () => {
+  // A transient/unavailable AgentInstance read (injected null) must not be treated as a husk — it
+  // fails safe to an immediate no-advance escalation so a read outage can never auto-retry (and
+  // possibly duplicate) genuinely-completed agent work.
+  const handler = await makeUnderTest(async () => "sha-1", async () => null);
+  const { app } = fakeApp({ last_round_head: "sha-1" });
+  const out = await handler({ variables: { prKey: "o/r#1", status: "addressed", repo: "o/r", prNumber: 1, round: 5, huskRetries: 0 } } as any, app as any);
+  assertEquals(out.progressed, false);
+  assertEquals(out.huskRetry, false, "an unknown read is never auto-retried");
+  assertEquals(out.noProgressReason, "no-advance");
+  assertStringIncludes(String(out.noProgressQuestion), "PR head did not advance");
 });
 
 test("progress-check: an unchanged head with a terminal agent-instance escalates as no-advance (never auto-retry)", async () => {

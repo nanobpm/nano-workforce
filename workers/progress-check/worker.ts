@@ -48,9 +48,14 @@ const defaultReadHead: HeadReader = async (repo, prNumber) => {
   const pr = await fetchPrHead(repo, prNumber, token).catch(() => null);
   if (!pr) return null;
   // Prefer the branch ref (atomic with the push) over the PR object's denormalized head.sha (#786).
+  // Once the head branch is known, trust ONLY its atomic ref: a failed/absent ref read fails OPEN
+  // (`null`) rather than falling back to the PR object's asynchronously-denormalized head.sha, which
+  // can still report a stale-but-valid SHA after a push and fabricate a no-advance escalation — the
+  // very projection this branch-ref read exists to avoid. This also makes a fork PR (whose head ref
+  // lives in another repo, so this base-repo lookup 404s) fail open to the safe continue path rather
+  // than compare a lagging denormalized SHA. Fall back to the PR head only when there is NO head ref.
   if (pr.headRef) {
-    const branchSha = await fetchBranchHead(repo, pr.headRef, token).catch(() => null);
-    if (branchSha) return branchSha;
+    return await fetchBranchHead(repo, pr.headRef, token).catch(() => null);
   }
   return pr.headSha ?? null;
 };
@@ -67,8 +72,9 @@ function isTerminalInstance(s: AgentInstanceSummary): boolean {
  * instance that reached a terminal state and compare to the round number. Every progressing round
  * before this one minted a terminal instance, so `terminal >= round` means the completing round DID
  * produce a durable instance (→ `no-advance`); fewer means it husked. Read-as-absence (an engine
- * with no AgentInstance channel, or none matching) yields an empty list → `husk`. Any read failure
- * degrades to `null` (unknown → treated as `husk` downstream), never an incident. */
+ * with no AgentInstance channel, or none matching) yields an empty list → `false` → `husk`. Any read
+ * FAILURE degrades to `null` (unknown → treated as a conservative `no-advance` downstream, never an
+ * auto-retry), so a transient read outage can never duplicate genuinely-completed agent work. */
 function agentWorkFromEngine(engine: AppApi["engine"]): AgentWorkReader {
   return async (processInstanceKey, round) => {
     if (!processInstanceKey) return null;
@@ -123,7 +129,10 @@ export function makeHandler(deps: {
       await prs.update(prKey, { last_round_head: currentHead });
     }
 
-    const roundNo = typeof round === "number" ? round : 0;
+    // Round numbers are 1-based; coerce a missing/invalid `round` to a positive 1 (never 0, which
+    // would make the `terminalCount >= 0` corroboration trivially true and force every such round to
+    // `no-advance` regardless of the real agent-instance state).
+    const roundNo = typeof round === "number" && round > 0 ? Math.floor(round) : 1;
     // Corroborate durable agent work only when we are actually on the no-progress path (an
     // addressed round whose head did not advance) — otherwise the engine read is wasted.
     const readAgentWork = deps.readAgentWork ?? agentWorkFromEngine(app.engine);
