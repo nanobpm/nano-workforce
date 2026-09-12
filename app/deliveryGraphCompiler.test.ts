@@ -1137,6 +1137,38 @@ test("#778 nodeDisplay redacts a credential-bearing connector payload.pr (canoni
   assert(ref.documentation.includes("PR: impl.pr"), "a `<node>.pr` fact reference is preserved verbatim");
 });
 
+test("#778 nodeDisplay redacts a PROTOCOL-RELATIVE (`//user:pass@…`) connector target/dedupeKey — a scheme is optional (#778 review)", () => {
+  // `redactString` redacts a scheme-relative `//user:pass@host?token=…` form, but the URL detector
+  // that gates it once required a `scheme://` prefix, so a protocol-relative target slipped through
+  // VERBATIM into the compiled name/documentation, leaking its credential. The detector now accepts an
+  // OPTIONAL scheme before the `//authority`.
+  const c = nodeDisplay({
+    id: "call",
+    kind: "connector",
+    connector: { target: "//user:p4ss@hooks.example.com/deploy?token=abc123", dedupeKey: "//s3cr3t@idem.example.com/key?sig=zzz" },
+  });
+  assert(!c.name.includes("p4ss") && !c.name.includes("abc123"), "protocol-relative connector name drops userinfo + query secret");
+  assert(!c.documentation.includes("p4ss") && !c.documentation.includes("abc123"), "protocol-relative connector doc target drops secret");
+  assert(!c.documentation.includes("s3cr3t") && !c.documentation.includes("zzz"), "protocol-relative dedupeKey drops secret");
+  assert(c.documentation.includes("Connector target: //***@hooks.example.com/deploy?***"), "protocol-relative target rendered redacted");
+  assert(c.documentation.includes("Dedupe key: //***@idem.example.com/key?***"), "protocol-relative dedupeKey rendered redacted");
+});
+
+test("#778 the connector timeout-escalation FEEL descriptor redacts a credential-bearing target (#778 review)", async () => {
+  // The connector node's escalation-context descriptor (`connector → <target>`) is baked as a
+  // compile-time FEEL string literal into the timeout escalation task. A raw credential-bearing target
+  // there would persist the secret in the generated BPMN even though nodeDisplay redacts it — the
+  // descriptor must use the same URL-only redaction.
+  const graph = {
+    name: "connector escalation redaction",
+    nodes: [{ id: "call", kind: "connector", connector: { target: "https://user:p4ss@hooks.example.com/deploy?token=abc123" } }],
+    edges: [],
+  };
+  const r = await compileOk(graph);
+  assert(!r.bpmn.includes("p4ss") && !r.bpmn.includes("abc123"), "no connector credential leaks into the compiled BPMN escalation context");
+  assert(r.bpmn.includes("connector → https://***@hooks.example.com/deploy?***"), "the escalation descriptor renders the redacted target");
+});
+
 test("#778 the compiled connector inner task carries the descriptive display name (distinct connector arg path)", async () => {
   const graph = {
     name: "connector inner name",

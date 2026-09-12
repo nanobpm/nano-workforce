@@ -43,6 +43,7 @@ import {
   type DeliveryGraphError,
   deliveryNodeFacts,
   resolveDeliveryFrom,
+  stripXmlInvalidChars,
   validateDeliveryGraph,
 } from "./deliveryGraph.ts";
 import { DELIVERY_HUMAN_ELEMENT, GENERIC_HUMAN_FORM } from "./deliveryHuman.ts";
@@ -152,23 +153,14 @@ export function assertNever(value: never, context: string): never {
 /** XML 1.0's `Char` production forbids, anywhere in a document: the C0 control characters (except tab
  * `#x9`, LF `#xA`, CR `#xD`), the noncharacters U+FFFE/U+FFFF, and unpaired UTF-16 surrogates — none can
  * be represented by an entity, so any of them in an element `name`/`documentation` makes
- * `layoutBpmn`/deployment reject the whole semantic BPMN. User-authored display strings (a node's
- * free-form `prompt`, a probe `target`, an emit name) only impose length limits at the OpenAPI edge, so
- * such a character can reach the renderer — and a code-unit truncation elsewhere can even manufacture a
- * lone surrogate from a valid astral character. Strip all of these before emitting any XML text /
- * attribute content (VALID astral pairs are preserved) — dropping an unrepresentable character is the
- * only well-formed rendering. */
-function stripXmlInvalidChars(value: string): string {
-  return (
-    value
-      // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional — this IS the XML-1.0 control filter.
-      .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, "")
-      // Unpaired surrogates (a high not followed by a low, or a low not preceded by a high); valid pairs stay.
-      .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "")
-      // XML-1.0 noncharacters just past the BMP `Char` range end (#xFFFD).
-      .replace(/[\uFFFE\uFFFF]/g, "")
-  );
-}
+ * `layoutBpmn`/deployment reject the whole semantic BPMN. The character-class filter is
+ * {@link stripXmlInvalidChars}, canonical in `./deliveryGraph.ts` so the validator (which REJECTS such a
+ * character in executable FEEL) and this compiler (which strips it from DISPLAY text) share one
+ * definition. User-authored display strings (a node's free-form `prompt`, a probe `target`, an emit
+ * name) only impose length limits at the OpenAPI edge, so such a character can reach the renderer — and
+ * a code-unit truncation elsewhere can even manufacture a lone surrogate from a valid astral character.
+ * Strip all of these before emitting any XML text / attribute content (VALID astral pairs are
+ * preserved) — dropping an unrepresentable character is the only well-formed rendering. */
 
 /** Escape a string for use as XML text / attribute content, first stripping XML-1.0-forbidden control
  * characters (see {@link stripXmlInvalidChars}). Deterministic and total. */
@@ -950,11 +942,12 @@ function trimmedOrEmpty(value: unknown): string {
  * `payload.pr`). Such a value is frequently an OPAQUE identifier — `slack:#releases`, `owner/repo#42`,
  * a `<node>.pr` ref, `pkg@version` — in which `#`/`?`/`@` are MEANINGFUL, so blind {@link redactString}
  * would mangle it (e.g. `slack:#releases` → `slack:#***`, `owner/repo#42` → `owner/repo#***`). Only a
- * value that is actually a `scheme://authority` URL — where a credential can hide in userinfo/query/
- * fragment — is redacted; every other value is shown VERBATIM. Mirrors {@link redactProbeTargetForDisplay}'s
+ * value that is actually a URL — a `scheme://authority` OR a scheme-relative `//authority` form, either
+ * of which can hide a credential in userinfo/query/fragment (`redactString` redacts both) — is redacted;
+ * every other value is shown VERBATIM. Mirrors {@link redactProbeTargetForDisplay}'s
  * http-only rule (issue #778 review). Deterministic and total. */
 function redactConnectorValue(value: string): string {
-  return /^[a-z][a-z0-9+.-]*:\/\//i.test(value) ? redactString(value) : value;
+  return /^([a-z][a-z0-9+.-]*:)?\/\//i.test(value) ? redactString(value) : value;
 }
 
 /** A human-readable label for a connector node's `target`. The converge-enrollment vocabulary
@@ -1234,7 +1227,7 @@ function innerBodyLines(w: NodeWiring, requiredEmits: ReadonlySet<string>, displ
       return serviceBodyLines(el, node.id, attr("type", node.agent.jobType), [], node.agent.jobType, contractGate, agentRepoSpecHeaderLines(node), displayName);
     }
     case "connector":
-      return serviceBodyLines(el, node.id, `type="${DELEGATE_TASK_TYPE.connector}"`, [], `connector → ${node.connector.target}`, undefined, [], displayName);
+      return serviceBodyLines(el, node.id, `type="${DELEGATE_TASK_TYPE.connector}"`, [], `connector → ${redactConnectorValue(node.connector.target)}`, undefined, [], displayName);
     case "wait":
       return waitBodyLines(el, node, displayName);
     case "human":

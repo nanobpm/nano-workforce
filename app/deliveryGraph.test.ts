@@ -646,6 +646,43 @@ test("S7 guard-type-mismatch: an `equals` whose type differs from the fact's dec
   hasCode(errors, "guard-type-mismatch");
 });
 
+test("S7 guard-invalid-equals: a string `equals` carrying an XML-1.0-invalid character is rejected, not silently rewritten into a different FEEL guard (#778 review)", () => {
+  // A string `equals` is baked VERBATIM into the compiled `<bpmn:conditionExpression>` FEEL literal.
+  // An XML-1.0-forbidden character (here U+FFFE) cannot be entity-escaped, so the compiler's
+  // display-text sanitiser would STRIP it — turning the guard `bump_result = "a\uFFFEb"` into
+  // `bump_result = "ab"` and routing the split down the wrong edge. It must be rejected at validation
+  // instead of silently mutating executable FEEL.
+  const errors = validateDeliveryGraph({
+    nodes: [
+      { id: "bump", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "result", type: "string" }] },
+      { id: "a", kind: "agent", agent: { jobType: "j" } },
+      { id: "b", kind: "agent", agent: { jobType: "j" } },
+    ],
+    edges: [
+      { from: "bump", to: "a", when: "bump.result", equals: "a\uFFFEb" },
+      { from: "bump", to: "b", default: true },
+    ],
+  });
+  hasCode(errors, "guard-invalid-equals");
+});
+
+test("S7 guard-invalid-equals: a clean string `equals` (no XML-invalid characters) passes validation", () => {
+  assertEquals(
+    validateDeliveryGraph({
+      nodes: [
+        { id: "bump", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "result", type: "string" }] },
+        { id: "a", kind: "agent", agent: { jobType: "j" } },
+        { id: "b", kind: "agent", agent: { jobType: "j" } },
+      ],
+      edges: [
+        { from: "bump", to: "a", when: "bump.result", equals: "breaking" },
+        { from: "bump", to: "b", default: true },
+      ],
+    }).filter((e) => e.code === "guard-invalid-equals"),
+    [],
+  );
+});
+
 test("S7 guard-default-conflict: an edge with both `default` and `when` is rejected", () => {
   const errors = validateDeliveryGraph({
     nodes: [

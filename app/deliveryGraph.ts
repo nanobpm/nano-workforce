@@ -88,6 +88,7 @@ export type DeliveryGraphErrorCode =
   | "guard-default-conflict"
   | "bad-when"
   | "guard-type-mismatch"
+  | "guard-invalid-equals"
   | "mixed-fan-out"
   | "multiple-defaults"
   | "non-exhaustive-split"
@@ -113,6 +114,36 @@ export interface DeliveryGraphError {
 /** Narrow an untyped value to a plain object so its fields can be read as `unknown`. */
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Strip the characters XML 1.0's `Char` production forbids anywhere in a document: the C0 control
+ * characters (except tab `#x9`, LF `#xA`, CR `#xD`), the noncharacters U+FFFE/U+FFFF, and unpaired
+ * UTF-16 surrogates — none can be represented by an entity, so any of them in an element
+ * `name`/`documentation` makes `layoutBpmn`/deployment reject the whole semantic BPMN. VALID astral
+ * pairs are preserved; dropping an unrepresentable character is the only well-formed rendering.
+ * Canonical here (the low-level graph module) so both the validator (which must REJECT such a
+ * character in executable FEEL — see {@link hasXmlInvalidChars}) and the compiler (which strips it
+ * from DISPLAY text) share ONE character-class definition — no drift surface. Deterministic and
+ * total. */
+export function stripXmlInvalidChars(value: string): string {
+  return (
+    value
+      // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional — this IS the XML-1.0 control filter.
+      .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, "")
+      // Unpaired surrogates (a high not followed by a low, or a low not preceded by a high); valid pairs stay.
+      .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "")
+      // XML-1.0 noncharacters just past the BMP `Char` range end (#xFFFD).
+      .replace(/[\uFFFE\uFFFF]/g, "")
+  );
+}
+
+/** True when `value` contains any XML-1.0-forbidden character (see {@link stripXmlInvalidChars}).
+ * Defined in terms of the strip so detection and stripping can never disagree — a single source of
+ * truth for the character class. Used to REJECT such a character in an executable FEEL guard literal
+ * at validation time (rather than let the compiler's display-text sanitiser silently rewrite the
+ * guard and route the process down the wrong edge). Deterministic and total. */
+export function hasXmlInvalidChars(value: string): boolean {
+  return stripXmlInvalidChars(value) !== value;
 }
 
 /** True when `kind` is a member of the closed allowlist. */
@@ -922,6 +953,22 @@ function validateGuardedEdges(
         message:
           `guard \`equals\` for "${whenStr}" must be a ${factType} to match the fact's declared type`,
         code: "guard-type-mismatch",
+      });
+      continue;
+    }
+    // A string `equals` is baked VERBATIM into the compiled `<bpmn:conditionExpression>` FEEL literal,
+    // so an XML-1.0-invalid character in it (a C0 control, U+FFFE/U+FFFF, a lone surrogate) cannot be
+    // entity-escaped and the compiler's display-text sanitiser would silently STRIP it — mutating
+    // executable FEEL (e.g. `"a\uFFFEb"` → `"ab"`) and potentially routing the split down the wrong
+    // edge. Reject it here rather than silently rewrite the guard (issue #778 review).
+    if (typeof e.equals === "string" && hasXmlInvalidChars(e.equals)) {
+      errors.push({
+        path: `${path}.equals`,
+        message:
+          `guard \`equals\` for "${whenStr}" contains XML-1.0-invalid characters (control characters, ` +
+          "U+FFFE/U+FFFF, or an unpaired surrogate) that cannot be represented in the compiled FEEL " +
+          "condition — remove them rather than let the guard be silently rewritten",
+        code: "guard-invalid-equals",
       });
       continue;
     }
