@@ -53,6 +53,13 @@ const PROMPT_LINK = /<(?:\w+:)?linkedResource\b[^>]*\blinkName="prompt"/;
 // sibling of the `<zeebe:taskDefinition>` inside a `senior:*` agent task's extensionElements. It is
 // what makes the element eligible for engine-native AgentInstance minting by the worker harness.
 const EXTERNAL_AGENT_MARKER = /<(?:\w+:)?agentDefinition\b[^>]*\bagentType="external"/;
+// The `--auto` opt-OUT marker (issue #779): a `<zeebe:property name="io.nanobpm.agentTask.
+// autoSubscribe" value="false" />` sibling inside an agent task's extensionElements. It declares the
+// task is EXCLUDED from the harness `--auto` reconciliation (which keys on EXTERNAL_AGENT_MARKER) and
+// is served only by a worker that explicitly subscribes. The property is inert to the engine. Only
+// the exact `value="false"` opts out — any other value auto-subscribes as normal (fail-safe).
+const AUTO_SUBSCRIBE_OPTOUT =
+  /<(?:\w+:)?property\b[^>]*\bname="io\.nanobpm\.agentTask\.autoSubscribe"[^>]*\bvalue="false"|<(?:\w+:)?property\b[^>]*\bvalue="false"[^>]*\bname="io\.nanobpm\.agentTask\.autoSubscribe"/;
 
 /**
  * Scan one BPMN document for the job types of its PROMPT-BEARING service tasks — the deployed fleet
@@ -93,4 +100,27 @@ export function agentTaskTypesMissingExternalMarker(xml: string): string[] {
     missing.push(type);
   }
   return missing;
+}
+
+/**
+ * Scan one BPMN document for the job types of agent service tasks that OPT OUT of the harness
+ * `--auto` reconciliation (issue #779) — those carrying `<zeebe:property
+ * name="io.nanobpm.agentTask.autoSubscribe" value="false" />` inside their extensionElements. An
+ * opted-out task is served ONLY by a worker that explicitly subscribes (`--job-type <type>` / a
+ * profile capability), never by `--auto` auto-discovery (which keys on the
+ * `<zeebe:agentDefinition agentType="external" />` marker). The property is inert to the engine;
+ * only the exact `value="false"` opts out (any other value auto-subscribes, fail-safe). Returns the
+ * distinct opted-out task types in first-occurrence order (empty when no task opts out).
+ */
+export function agentTaskTypesOptedOutOfAuto(xml: string): string[] {
+  const seen = new Set<string>();
+  const optedOut: string[] = [];
+  for (const [block] of xml.matchAll(SERVICE_TASK)) {
+    if (!AUTO_SUBSCRIBE_OPTOUT.test(block)) continue;
+    const type = block.match(TASK_DEFINITION_TYPE)?.[1];
+    if (type === undefined || type.length === 0 || seen.has(type)) continue;
+    seen.add(type);
+    optedOut.push(type);
+  }
+  return optedOut;
 }
