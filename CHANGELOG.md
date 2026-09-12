@@ -1,3 +1,9 @@
+## [0.187.1](https://github.com/nanobpm/nano-workforce/compare/v0.187.0...v0.187.1) (2026-09-12)
+
+### Bug Fixes
+
+* **delivery-graph:** emit a deterministic branch.create so agent cells never commit on the base branch ([#781](https://github.com/nanobpm/nano-workforce/issues/781)) ([56f6488](https://github.com/nanobpm/nano-workforce/commit/56f6488344b439a5ac12f5069567facd9519bf66)), closes [#776](https://github.com/nanobpm/nano-workforce/issues/776) [pre-#776](https://github.com/nanobpm/pre-/issues/776) [#776](https://github.com/nanobpm/nano-workforce/issues/776)
+
 ## [0.187.0](https://github.com/nanobpm/nano-workforce/compare/v0.186.4...v0.187.0) (2026-09-12)
 
 ### Features
