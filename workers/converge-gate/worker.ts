@@ -92,7 +92,7 @@ export function makeHandler(deps: {
       const advisories = parseSuppressedAdvisories(reviewBody);
       result = evaluateConvergeGate({
         unresolvedThreadCount,
-        suppressedAdvisories: advisories.map((a) => ({ key: a.key, legacyKey: a.legacyKey, label: a.label })),
+        suppressedAdvisories: advisories.map((a) => ({ key: a.key, label: a.label })),
         acknowledgedKeys: parseAckedAdvisories(threads),
       });
     } catch {

@@ -103,9 +103,12 @@ export async function fetchPrReviews(
 // `<path>#<fingerprint>` of the advisory's PROSE — so a drifted line still matches. The resolved
 // ack thread is itself the durable store: its marker text survives across rounds regardless of the
 // line, so a decline stays acknowledged without the agent re-acking each round. The new marker is
-// `nano-ack: <path> :: <verbatim advisory text>`; the legacy `nano-ack: <path>:<line>` form is still
-// honoured for back-compat (matched against the current round's line, so it converges within a round
-// even though it cannot survive a line drift).
+// `nano-ack: <path> :: <verbatim advisory text>`. This line-stable prose key is the SOLE ack
+// identity. A bare `nano-ack: <path>:<line>` form is NOT honoured: keyed only on `path:line`, it is
+// blind to the advisory's prose, so a resolved legacy ack for advisory A at a line would silently
+// acknowledge a genuinely NEW advisory B re-emitted at that same line — a false-OPEN this gate exists
+// to prevent. (Issue #787 introduces the ack mechanism itself in this change, so there is no pre-#787
+// legacy-ack corpus to protect by honouring the prose-blind form.)
 
 /** One PR review thread, narrowed to what the convergence gate needs. */
 export interface ReviewThread {
@@ -114,9 +117,9 @@ export interface ReviewThread {
   bodies: string[];
 }
 
-/** A suppressed / low-confidence Copilot advisory parsed out of a review body. Carries both a
- * line-stable `key` (the primary identity, survives a line drift) and a `legacyKey` (`path:line`,
- * honoured only for pre-#787 acks). `label` is the human-facing `path:line` shown in block reasons. */
+/** A suppressed / low-confidence Copilot advisory parsed out of a review body. Its `key` is the
+ * line-stable identity (survives a line drift); `label` is the human-facing `path:line` shown in
+ * block reasons. */
 export interface SuppressedAdvisory {
   path: string;
   line: number;
@@ -124,25 +127,20 @@ export interface SuppressedAdvisory {
   text: string;
   /** Line-stable identity: `<path>#<fingerprint>` of the normalized prose. Survives line drift. */
   key: string;
-  /** Legacy `<path>:<line>` identity, honoured for back-compat with pre-#787 acks (drifts). */
-  legacyKey: string;
   /** Human-facing `path:line` label for block-reason messages. */
   label: string;
 }
 
 /** Any `nano-ack:` marker — captures the rest of the marker's line (path + optional `:: text`). */
 const ACK_MARKER = /nano-ack:\s*([^\n\r]+)/gi;
-/** New line-stable form: `<path> :: <advisory text>`. The delimiter is ` :: ` with REQUIRED
- * surrounding whitespace (matching the canonical marker the agent authors), so a bare `::` inside a
- * valid GitHub path (e.g. `src/a::b.ts`) is NOT mistaken for the separator — the path group parses
- * non-greedily up to the first *whitespace-delimited* ` :: `, so a path containing spaces (e.g.
- * `docs/my file.md`) is still honoured. */
+/** The ONLY honoured ack form: line-stable `<path> :: <advisory text>`. The delimiter is ` :: ` with
+ * REQUIRED surrounding whitespace (matching the canonical marker the agent authors), so a bare `::`
+ * inside a valid GitHub path (e.g. `src/a::b.ts`) is NOT mistaken for the separator — the path group
+ * parses non-greedily up to the first *whitespace-delimited* ` :: `, so a path containing spaces
+ * (e.g. `docs/my file.md`) is still honoured. A bare `<path>:<line>` marker is intentionally not
+ * parsed: keyed only on `path:line`, it is blind to the advisory prose and would false-OPEN a new
+ * advisory re-emitted at a previously-acked line. */
 const NEW_ACK = /^(.+?)\s+::\s+(.+)$/s;
-/** Legacy form: leading `<path>:<line>`. The path may contain spaces AND embedded `:<digits>`
- * segments (e.g. `docs/v1:2/file.ts:42`); capture GREEDILY up to the FINAL `:<line>` (terminated by
- * a non-digit or end-of-string) rather than stopping at the first `:<digits>`, so an interior colon
- * segment does not truncate the path. */
-const LEGACY_ACK = /^(.+:\d+)(?:\D|$)/;
 
 /** Normalize advisory prose to a line-/format-independent form before fingerprinting: NFKC-fold,
  * lowercase, and collapse every run of non-word characters to a single space (word boundaries are
@@ -213,16 +211,17 @@ export function parseSuppressedAdvisories(reviewBody: string | null | undefined)
     const key = advisoryStableKey(path, text);
     if (seen.has(key)) continue;
     seen.add(key);
-    out.push({ path, line, text, key, legacyKey: label, label });
+    out.push({ path, line, text, key, label });
   }
   return out;
 }
 
 /** Extract the acknowledged advisory keys from a set of review threads (only RESOLVED threads
- * count — an open ack thread is not yet an acknowledgement). Returns a mix of line-stable keys
- * (`<path>#<fp>`, from the new `nano-ack: <path> :: <text>` form) and legacy `path:line` keys (from
- * the pre-#787 `nano-ack: <path>:<line>` form); the gate treats an advisory as acked if EITHER its
- * stable key or its legacy key appears here. */
+ * count — an open ack thread is not yet an acknowledgement). Returns line-stable keys (`<path>#<fp>`)
+ * parsed from the `nano-ack: <path> :: <text>` form ONLY. A bare `nano-ack: <path>:<line>` marker is
+ * intentionally NOT honoured: its `path:line` key is blind to the advisory prose and would false-OPEN
+ * a genuinely new advisory re-emitted at a previously-acked line. The gate treats an advisory as
+ * acked iff its stable key appears here. */
 export function parseAckedAdvisories(threads: ReviewThread[]): string[] {
   const acked = new Set<string>();
   for (const t of threads) {
@@ -232,14 +231,8 @@ export function parseAckedAdvisories(threads: ReviewThread[]): string[] {
       let m: RegExpExecArray | null;
       // biome-ignore lint/suspicious/noAssignInExpressions: canonical regex-exec accumulation loop
       while ((m = ACK_MARKER.exec(body)) !== null) {
-        const raw = m[1].trim();
-        const nw = NEW_ACK.exec(raw);
-        if (nw) {
-          acked.add(advisoryStableKey(nw[1], nw[2]));
-          continue;
-        }
-        const lg = LEGACY_ACK.exec(raw);
-        if (lg) acked.add(lg[1].trim());
+        const nw = NEW_ACK.exec(m[1].trim());
+        if (nw) acked.add(advisoryStableKey(nw[1], nw[2]));
       }
     }
   }

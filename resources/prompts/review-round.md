@@ -146,8 +146,11 @@ Because several agents may run on the same host at once:
    gh api repos/OWNER/REPO/pulls/PR/comments -f commit_id="$CID" -f path=PATH -F line=LINE -f side=RIGHT -f body="$BODY"
    # Then resolve it exactly like any other thread (map its databaseId -> thread node id -> resolveReviewThread).
    ```
-   The legacy `nano-ack: <path>:<line>` marker is still honoured for back-compat,
-   but it does **not** survive a line drift — prefer the `<path> :: <text>` form.
+   Only the `nano-ack: <path> :: <text>` (prose-keyed) form is honoured. A bare
+   `nano-ack: <path>:<line>` marker is **not** an acknowledgement: keyed only on
+   `path:line`, it is blind to the advisory's prose, so it would let a resolved ack
+   for one advisory silently acknowledge a genuinely new advisory re-emitted at that
+   same line. Always use the `<path> :: <text>` form.
 6. **Do NOT request, re-request, or remove the reviewer yourself.** Keeping
    Copilot attached is the **process's** job: a deterministic poller ensures a
    Copilot review is requested (idempotently) whenever this PR is waiting, and it
