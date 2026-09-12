@@ -1161,11 +1161,15 @@ export function redactTarget(probe: ReadinessProbe): string {
  * userinfo and any `?query`/`#fragment` (a token often rides the query). The query/fragment strip uses
  * `[\s\S]*` (NOT `.*$`, which cannot cross a line break) so an embedded CR/LF after the `?`/`#` — e.g.
  * `https://host/?token=secret\nnext` — cannot leave the token un-redacted; everything from the first
- * `?`/`#` to end-of-string is consumed regardless of intervening newlines. Callers that surface the
- * result in a display artifact must first pass it through `stripXmlInvalidChars` so an XML-forbidden
- * control (e.g. U+000B) inside the userinfo cannot split the `//…@` match and be re-joined at render. */
+ * `?`/`#` to end-of-string is consumed regardless of intervening newlines. The userinfo class is
+ * `[^/@ \t]` (NOT `[^/@\s]`) for the SAME reason on the other side of the `@`: a raw CR/LF smuggled
+ * INSIDE the userinfo — e.g. `https://user:pa\nss@host` — must not break the `//…@` match and leave
+ * `ss@host` visible; newlines are consumed while a space/tab still bounds the match so ordinary text is
+ * not over-matched. Callers that surface the result in a display artifact must first pass it through
+ * `stripXmlInvalidChars` so an XML-forbidden control (e.g. U+000B) inside the userinfo cannot split the
+ * `//…@` match and be re-joined at render. */
 export function redactString(s: string): string {
   return s
-    .replace(/\/\/[^/@\s]*@/g, "//***@")
+    .replace(/\/\/[^/@ \t]*@/g, "//***@")
     .replace(/[?#][\s\S]*$/, (m) => `${m[0]}***`);
 }

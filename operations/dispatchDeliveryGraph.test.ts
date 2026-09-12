@@ -15,6 +15,7 @@ import assert from "node:assert/strict";
 import { bootTestApp, type TestApp } from "@nanobpm/urban-testkit";
 import { deliveryGraphProposals } from "../app/deliveryGraphProposals.ts";
 import { deliveryGraphRuns } from "../app/deliveryGraphRun.ts";
+import { stableProposalRunKey } from "./dispatchDeliveryGraph.ts";
 
 const APP_ROOT = resolve(import.meta.dirname, "..");
 const GITHUB_ENV: Record<string, string> = { NANO_PR_GITHUB_TRANSPORT: "token", GITHUB_TOKEN: "" };
@@ -31,6 +32,23 @@ const SIDE_EFFECTING = {
   ],
   edges: [{ from: "open-b", to: "publish" }],
 };
+
+test("stableProposalRunKey: canonical — key-order / whitespace invariant, but value-sensitive (issue #778 review)", () => {
+  // The stable key content-addresses the PARSED graph in canonical form, so a re-stage of the SAME
+  // graph with reordered object keys or reflowed whitespace yields the SAME key and short-circuits
+  // instead of double-launching — while any genuine value difference (e.g. a credential) diverges.
+  const a = { name: "g", nodes: [{ id: "n", kind: "human", human: { prompt: "x" } }], edges: [] };
+  const reordered = { edges: [], nodes: [{ human: { prompt: "x" }, kind: "human", id: "n" }], name: "g" };
+  assert.equal(stableProposalRunKey(a), stableProposalRunKey(reordered));
+  // A different credential value → a different key (no collision onto the first run).
+  const other = { name: "g", nodes: [{ id: "n", kind: "human", human: { prompt: "y" } }], edges: [] };
+  assert.notEqual(stableProposalRunKey(a), stableProposalRunKey(other));
+  // Array ORDER is significant (node order matters) — a reordered node list is a distinct key.
+  const twoNodes = { name: "g", nodes: [{ id: "n1", kind: "human" }, { id: "n2", kind: "human" }], edges: [] };
+  const swapped = { name: "g", nodes: [{ id: "n2", kind: "human" }, { id: "n1", kind: "human" }], edges: [] };
+  assert.notEqual(stableProposalRunKey(twoNodes), stableProposalRunKey(swapped));
+  assert.ok(stableProposalRunKey(a).startsWith("staged-"), "the key is self-describing");
+});
 
 describe("dispatchDeliveryGraph — operator dispatch by staged-proposal digest", () => {
   const dirs: string[] = [];

@@ -1071,6 +1071,31 @@ test("#778 redactString consumes the query/fragment across an embedded line brea
   assert(wait.documentation.includes("?***"), "the query is redacted through the line break");
 });
 
+test("#778 redactFreeText consumes a `//user:pass@` userinfo that embeds a raw line break (newline-safe)", () => {
+  // A CR/LF smuggled INSIDE the userinfo stops the whitespace-delimited `//[^\s]+` token, so a plain
+  // scan left `ss@host` visible in the display doc (XML preserves the break). The whole-string userinfo
+  // re-scan must strip it while a space/tab still bounds ordinary prose.
+  const agent = nodeDisplay({ id: "a", kind: "agent", agent: { jobType: "j", prompt: "deploy via //user:pa\nss@registry.example.com now" } });
+  assert(!agent.documentation.includes("ss@registry") && !agent.documentation.includes("user:pa"), "the newline-split userinfo is redacted");
+  assert(agent.documentation.includes("//***@"), "the userinfo collapses to the redaction marker");
+  // Ordinary prose with an unrelated `//` before an email is NOT over-redacted (space bounds the match).
+  const prose = nodeDisplay({ id: "b", kind: "agent", agent: { jobType: "j", prompt: "compare a//b then email admin@corp.example" } });
+  assert(prose.documentation.includes("admin@corp.example"), "an ordinary email after a bounded `//` survives");
+});
+
+test("#778 nodeDisplay surfaces a wait probe's credentialEnv key NAME so a credential-differing graph gets a DISTINCT digest (not a collision)", () => {
+  // `credentialEnv` names a validated env-contract KEY (never a secret) but selects which credential a
+  // probe uses at runtime; omitting it from the display let two otherwise-identical graphs collapse to
+  // one content-address. Surfacing the key name makes the digest faithful.
+  const withCred = nodeDisplay({ id: "w", kind: "wait", wait: { kind: "http", target: "https://api.example.com/health", credentialEnv: "PROD_API_TOKEN", match: { status: 200 } } });
+  const otherCred = nodeDisplay({ id: "w", kind: "wait", wait: { kind: "http", target: "https://api.example.com/health", credentialEnv: "STAGING_API_TOKEN", match: { status: 200 } } });
+  const noCred = nodeDisplay({ id: "w", kind: "wait", wait: { kind: "http", target: "https://api.example.com/health", match: { status: 200 } } });
+  assert(withCred.documentation.includes("Credential env: PROD_API_TOKEN"), "the env-key name is surfaced in the display doc");
+  assert(withCred.documentation !== otherCred.documentation, "two graphs differing only in credentialEnv render distinctly (distinct digest)");
+  assert(withCred.documentation !== noCred.documentation, "presence of credentialEnv changes the display (distinct digest)");
+});
+
+
 test("#778 firstLine falls back to the job type / decision label when a prompt is only XML-forbidden control chars", () => {
   // A prompt of only `\x01` would otherwise be selected and render as a blank ` · <id>` label. firstLine
   // now skips a line whose SANITISED content is empty, so the fallback (`jobType` / `Human decision`) wins.

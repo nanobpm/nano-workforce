@@ -987,13 +987,23 @@ function redactConnectorValue(value: string): string {
  * the deployed `<bpmn:documentation>`/name is visible to modeler/explorer readers; the RAW prompt still
  * reaches the runtime job input (`appendPrompt`/`prompt`) unmodified (issue #778 review). Deterministic
  * and total. */
-function redactFreeText(value: string): string {
+export function redactFreeText(value: string): string {
   // Strip XML-invalid display characters BEFORE tokenizing/redacting so the URL scan runs on the exact
   // string the renderer emits. Otherwise a control char embedded in a URL (`//us\x0Ber:pass@…`) breaks
   // the `//[^\s]+` token match, escapes redaction, then reconstructs the credential once `escapeXml`/
   // `stripXmlInvalidChars` drops the control at render time (issue #778 review — same class as the
   // connector/probe strip-before-classify fix).
-  return stripXmlInvalidChars(value).replace(/(?:[a-z][a-z0-9+.-]*:)?\/\/[^\s]+/gi, (m) => redactString(m));
+  return (
+    stripXmlInvalidChars(value)
+      .replace(/(?:[a-z][a-z0-9+.-]*:)?\/\/[^\s]+/gi, (m) => redactString(m))
+      // Belt-and-braces for a `//user:pass@host` whose userinfo embeds a raw CR/LF: the whitespace-
+      // delimited `//[^\s]+` token above STOPS at the line break, so `redactString` never sees the
+      // `…@host` tail and the credential survives into `<bpmn:documentation>` (XML preserves line
+      // breaks). Re-scan the whole string for a `//…@` userinfo that may span newlines. Space/tab still
+      // bound it, so an ordinary prose `email admin@corp` sitting after an unrelated `//` is NOT
+      // over-redacted (issue #778 review — same class as the readiness `redactString` userinfo fix).
+      .replace(/\/\/[^/@ \t]*@/g, "//***@")
+  );
 }
 
 /** A human-readable label for a connector node's `target`. The converge-enrollment vocabulary
@@ -1078,6 +1088,13 @@ export function nodeDisplay(node: DeliveryNode): { name: string; documentation: 
       const doc: string[] = [`Readiness probe: ${p.kind}`, `Target: ${safeTarget}`];
       const match = describeProbeMatch(p.match);
       if (match) doc.push(`Match: ${match}`);
+      // `credentialEnv` names a DECLARED env-contract key (validated `isEnvKey`, never a secret value —
+      // the secret is read from the ambient env at execution time), yet it is carried raw into the
+      // runtime probe config where it selects the HTTP Authorization credential. Surfacing its safe
+      // env-key NAME here makes it part of `semanticBpmn`, so two graphs differing only in `credentialEnv`
+      // get DISTINCT digests instead of colliding — the content-address stays a faithful identity and
+      // keyless dispatch cannot reuse the wrong credential's running instance (issue #778 review).
+      if (trimmedOrEmpty(p.credentialEnv)) doc.push(`Credential env: ${trimmedOrEmpty(p.credentialEnv)}`);
       if (trimmedOrEmpty(p.onTimeout)) doc.push(`On timeout: ${trimmedOrEmpty(p.onTimeout)}`);
       if (p.poll) {
         const budget: string[] = [];

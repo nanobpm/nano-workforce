@@ -26,6 +26,7 @@
 import type { DataLayer, ProcessInstanceState } from "@nanobpm/urban";
 import type { CompileDeliveryGraphResult } from "../nano-generated/api-io.d.ts";
 import { isUniqueConstraintFence } from "./dbFence.ts";
+import { redactFreeText } from "./deliveryGraphCompiler.ts";
 import { DELIVERY_HUMAN_ELEMENT, isDeliveryHumanElement } from "./deliveryHuman.ts";
 
 const now = () => new Date().toISOString();
@@ -181,7 +182,13 @@ export function buildHumanLabels(compiled: CompileDeliveryGraphResult): Record<s
   for (const stop of compiled.humanNodes) {
     const element = elementByNodeId.get(stop.nodeId);
     if (element === undefined) continue;
-    labels[humanTaskElementId(element)] = firstLine(stop.prompt) || stop.nodeId;
+    // Redact the prompt with the SAME display-safe helper `nodeDisplay` uses BEFORE stamping it: this
+    // label is denormalised into the run row's `human_labels` and surfaced to the operator as the parked
+    // task's Decision context in the Tasks inbox, so a URL credential in a human prompt (`//user:pass@…`)
+    // must be stripped here too — else it is persisted and shown unredacted even though the BPMN display
+    // path redacts it. The RAW prompt still reaches the runtime user task unmodified (issue #778 review).
+    const safePrompt = typeof stop.prompt === "string" ? redactFreeText(stop.prompt) : "";
+    labels[humanTaskElementId(element)] = firstLine(safePrompt) || stop.nodeId;
   }
   return labels;
 }
