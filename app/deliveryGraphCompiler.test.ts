@@ -1358,3 +1358,35 @@ test("#778 graphCarriesRedactedSecrets: true when a node carries redacted-away s
   const payloadKey = { name: "n", nodes: [{ id: "c", kind: "connector", connector: { target: "slack:#r", payload: { pr: "o/r#1", secretHeader: "Bearer z" } } }], edges: [] };
   assertEquals(graphCarriesRedactedSecrets(payloadKey), true);
 });
+
+test("#778 graphCarriesRedactedSecrets: true when a prompt differs from its display form only by trimmed whitespace", () => {
+  // The display embeds `redactFreeText(trimmedOrEmpty(prompt))`, but the RAW untrimmed prompt reaches
+  // the runtime — so `"  run this"` and `"run this"` share one digest yet dispatch different prompts.
+  const leadingWs = { name: "n", nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt: "   run this" } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(leadingWs), true);
+  const humanWs = { name: "n", nodes: [{ id: "h", kind: "human", human: { prompt: "click done  " } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(humanWs), true);
+  // The trimmed twin is faithfully represented → not lossy.
+  const trimmed = { name: "n", nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", prompt: "run this" } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(trimmed), false);
+});
+
+test("#778 graphCarriesRedactedSecrets: true when a connector dedupeKey differs from its display form only by trimmed whitespace", () => {
+  const wsKey = { name: "n", nodes: [{ id: "c", kind: "connector", connector: { target: "slack:#r", dedupeKey: "  key  " } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(wsKey), true);
+  const cleanKey = { name: "n", nodes: [{ id: "c", kind: "connector", connector: { target: "slack:#r", dedupeKey: "key" } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(cleanKey), false);
+});
+
+test("#778 graphCarriesRedactedSecrets: true when payload.pr carries a redacted-away credential, or is a non-string value", () => {
+  // `nodeDisplay` surfaces `payload.pr` redacted; a credential in the raw pr URL is dropped from the
+  // digest but reaches the connector → lossy.
+  const credPr = { name: "n", nodes: [{ id: "c", kind: "connector", connector: { target: "slack:#r", payload: { pr: "https://u:p@host/x?token=abc" } } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(credPr), true);
+  // A non-string pr is never rendered as a string, yet the raw payload still reaches the connector.
+  const nonStringPr = { name: "n", nodes: [{ id: "c", kind: "connector", connector: { target: "slack:#r", payload: { pr: 42 } } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(nonStringPr), true);
+  // A faithful string pr (no credential) is fully digest-represented → not lossy.
+  const plainPr = { name: "n", nodes: [{ id: "c", kind: "connector", connector: { target: "slack:#r", payload: { pr: "o/r#1" } } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(plainPr), false);
+});

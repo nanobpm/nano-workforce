@@ -1120,23 +1120,43 @@ export function nodeDisplay(node: DeliveryNode): { name: string; documentation: 
  * helpers `nodeDisplay` renders with, so the "carries a secret" set can never drift from what is
  * actually stripped. */
 export function graphCarriesRedactedSecrets(graph: DeliveryGraph): boolean {
-  const lossy = (raw: string | undefined | null, redacted: string): boolean => typeof raw === "string" && raw !== redacted;
+  // `raw` is lossy when it is a present string that does NOT match the EXACT `display` form
+  // `nodeDisplay` embeds in `semanticBpmn` — so the comparison must apply the SAME normalisation
+  // (`trimmedOrEmpty`/redaction) the display does, or a difference the display collapses (redaction OR
+  // trimmed whitespace) escapes the check while still reaching the runtime raw.
+  const lossy = (raw: string | undefined | null, display: string): boolean => typeof raw === "string" && raw !== display;
   for (const node of graph.nodes) {
     switch (node.kind) {
       case "agent":
-        if (lossy(node.agent.prompt, redactFreeText(node.agent.prompt ?? ""))) return true;
+        // Display embeds `redactFreeText(trimmedOrEmpty(prompt))`; the RAW, untrimmed prompt reaches the
+        // runtime (`buildNodeInput`), so a leading/trailing-whitespace-only difference is lossy too.
+        if (lossy(node.agent.prompt, redactFreeText(trimmedOrEmpty(node.agent.prompt)))) return true;
         break;
       case "human":
-        if (lossy(node.human?.prompt, redactFreeText(node.human?.prompt ?? ""))) return true;
+        if (lossy(node.human?.prompt, redactFreeText(trimmedOrEmpty(node.human?.prompt)))) return true;
         break;
       case "connector": {
         const c = node.connector;
         if (lossy(c.target, redactConnectorValue(c.target))) return true;
-        if (typeof c.dedupeKey === "string" && lossy(c.dedupeKey, redactConnectorValue(c.dedupeKey))) return true;
-        // The free-form connector `payload` survives raw into runtime `nodeInputs`, but only its `pr`
-        // key is ever surfaced (redacted) in `semanticBpmn` — any OTHER payload key is invisible to the
-        // digest, so its presence makes the graph's identity lossy.
-        if (c.payload && Object.keys(c.payload).some((k) => k !== "pr")) return true;
+        // `dedupeKey` is displayed as `redactConnectorValue(trimmedOrEmpty(dedupeKey))` while the raw,
+        // untrimmed value reaches the runtime — lossy on redaction OR on trimmed whitespace.
+        if (lossy(c.dedupeKey, redactConnectorValue(trimmedOrEmpty(c.dedupeKey)))) return true;
+        // The free-form connector `payload` survives raw into runtime `nodeInputs`, but `nodeDisplay`
+        // surfaces ONLY a STRING `payload.pr` (redacted). So the identity is lossy when: (a) any key
+        // other than `pr` is present (never surfaced), (b) a string `pr`'s redaction drops content, or
+        // (c) `pr` is present but NOT a string (never rendered, yet the raw payload still reaches the
+        // connector).
+        if (c.payload) {
+          if (Object.keys(c.payload).some((k) => k !== "pr")) return true;
+          if ("pr" in c.payload) {
+            const pr = c.payload.pr;
+            if (typeof pr === "string") {
+              if (pr !== redactConnectorValue(pr)) return true;
+            } else if (pr !== undefined && pr !== null) {
+              return true;
+            }
+          }
+        }
         break;
       }
       case "wait": {

@@ -10,8 +10,10 @@
 // re-dispatch of an already-running run short-circuits with `alreadyRunning`. An unknown / expired /
 // superseded / already-dispatched digest is a clean 400.
 
+import { createHash } from "node:crypto";
 import { isPlausibleBranchName } from "../app/baseBranch.ts";
 import { validateDeliveryGraph } from "../app/deliveryGraph.ts";
+import { graphCarriesRedactedSecrets } from "../app/deliveryGraphCompiler.ts";
 import { dispatchDeliveryGraphRun } from "../app/deliveryGraphDispatch.ts";
 import { getStagedProposal, markProposalDispatched, markProposalExpired } from "../app/deliveryGraphProposals.ts";
 import { unresolvedAgentRepoNodes } from "../app/deliveryRunner.ts";
@@ -26,6 +28,20 @@ import { defineOperation } from "../nano-generated/operations.ts";
 const MAX_ECHO_LEN = 80;
 function truncateForEcho(value: string): string {
   return value.length > MAX_ECHO_LEN ? `${value.slice(0, MAX_ECHO_LEN)}… (${value.length} chars)` : value;
+}
+
+/** A STABLE, server-side dispatch run key for a secret-bearing staged proposal (issue #778, Option C).
+ * The graph's identity is content-addressed over the REDACTED `semanticBpmn` digest, so two graphs
+ * differing ONLY in a redacted-away credential share one digest — a keyless dispatch would collapse the
+ * second onto the first's still-running instance. The dispatch core therefore REQUIRES an explicit key
+ * for such a graph, but the cockpit's staged-proposals UI posts no idempotency-key field. The operator
+ * clicking Dispatch on THIS specific stored proposal is unambiguous, so we content-address the
+ * proposal's RAW stored graph (the pre-redaction bytes): deterministic per proposal (a double-click /
+ * re-dispatch still short-circuits as `alreadyRunning`), yet DISTINCT for a credential-differing
+ * proposal — exactly the disambiguation Option C wants, without a UI change. Prefixed so it is
+ * self-describing in run listings. */
+function stableProposalRunKey(rawGraphJson: string): string {
+  return `staged-${createHash("sha256").update(rawGraphJson).digest("hex").slice(0, 16)}`;
 }
 
 /** Door-level cap on a duration override, mirroring the `maxLength: 64` on these fields in `openapi.yaml`.
@@ -196,7 +212,24 @@ export default defineOperation("dispatchDeliveryGraph", async ({ body }, app) =>
     }
   }
 
-  const dispatched = await dispatchDeliveryGraphRun(app, graph, { runKey: idempotencyKey, title: proposal.title, repository, baseBranch, repoless, ...timeouts });
+  // Derive the dispatch run key (issue #778, Option C). Honour an explicit operator-supplied
+  // `idempotencyKey` verbatim. Otherwise, when the staged graph carries credential-bearing values that
+  // redaction strips from the content-addressed digest, that digest is NOT a faithful identity — two
+  // credential-differing graphs share it — so a keyless dispatch is refused by the dispatch core. The
+  // cockpit UI posts no idempotency-key field, so supply a STABLE server-side key derived from THIS
+  // proposal's raw stored graph (`stableProposalRunKey`); a faithful-digest graph keeps its digest
+  // identity (key left undefined). A malformed graph falls through to the core's own validation.
+  let dispatchRunKey: string | undefined = idempotencyKey;
+  if (dispatchRunKey === undefined) {
+    const graphErrors = validateDeliveryGraph(graph);
+    if (graphErrors.length === 0) {
+      // biome-ignore lint/plugin: validated staged graph narrowed to its contract after validateDeliveryGraph
+      const typedGraph = graph as DeliveryGraph;
+      if (graphCarriesRedactedSecrets(typedGraph)) dispatchRunKey = stableProposalRunKey(proposal.graph);
+    }
+  }
+
+  const dispatched = await dispatchDeliveryGraphRun(app, graph, { runKey: dispatchRunKey, title: proposal.title, repository, baseBranch, repoless, ...timeouts });
   if (!dispatched.ok) {
     app.log.warn("dispatch-delivery-graph refused: compile", { digest, errors: dispatched.errors.length });
     const outBody: DeliveryGraphTextResult = {

@@ -251,6 +251,28 @@ describe("dispatchDeliveryGraph — operator dispatch by staged-proposal digest"
     assert.equal((await deliveryGraphProposals(app.db).get(staged.body.digest))?.status, "dispatched");
   });
 
+  test("a SECRET-BEARING staged graph dispatches through the cockpit UI WITHOUT an idempotencyKey — the door supplies a stable server-side key (#778)", async () => {
+    // Regression: Option C's dispatch gate refuses a keyless dispatch of a graph whose digest is lossy,
+    // but the cockpit staged-proposals UI posts no idempotency-key field. The door must therefore derive
+    // a stable server-side key from the stored proposal so these proposals remain launchable.
+    const app = await boot();
+    assert.ok(app.api);
+    const api = app.api;
+    const SECRET = { name: "deploy", nodes: [{ id: "d", kind: "agent", agent: { jobType: "senior:demo", prompt: "push to https://user:pass@host.example/repo" } }] };
+    const staged = await api.call<{ digest: string }>("compileDeliveryGraph", { body: SECRET });
+    // No idempotencyKey in the body — exactly what the staged UI posts.
+    const res = await api.call<{ ok: boolean; status: string; runKey: string }>("dispatchDeliveryGraph", {
+      body: { digest: staged.body.digest, repoless: true },
+    });
+    assert.equal(res.status, 202);
+    assert.equal(res.body.ok, true);
+    assert.equal(res.body.status, "running");
+    assert.ok(res.body.runKey.startsWith("staged-"), `expected a server-side staged- key, got ${res.body.runKey}`);
+    await app.settle();
+    assert.equal((await deliveryGraphRuns(app.db).all()).length, 1);
+    assert.equal((await deliveryGraphProposals(app.db).get(staged.body.digest))?.status, "dispatched");
+  });
+
   test("a malformed `repository` is rejected at submit → 400, nothing launched (#684/#686)", async () => {
     const app = await boot();
     assert.ok(app.api);
