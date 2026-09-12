@@ -64,7 +64,10 @@ import { AGENT_TASK_NS } from "./repoEnvelope.ts";
  * shows. */
 function redactProbeTargetForDisplay(probe: Extract<DeliveryNode, { kind: "wait" }>["wait"]): string {
   if (probe.kind === "command") return "<redacted>";
-  if (probe.kind === "http") return redactString(probe.target);
+  // `stripXmlInvalidChars` BEFORE `redactString`: an XML-forbidden control (e.g. `\x0B`) hidden inside
+  // the `user:pass@` userinfo would otherwise split `redactString`'s `//…@` match, escape redaction, and
+  // be re-joined into a live credential once the renderer strips that control (issue #778 review).
+  if (probe.kind === "http") return redactString(stripXmlInvalidChars(probe.target));
   return redactConnectorValue(probe.target);
 }
 
@@ -936,10 +939,14 @@ function renderBpmn(
  * truncated with an ellipsis. Truncation is by Unicode CODE POINT (`Array.from`), not UTF-16 code unit,
  * so slicing never splits an astral character (emoji etc.) into an unpaired surrogate — an unpaired
  * surrogate survives {@link stripXmlInvalidChars} and would make the emitted BPMN not well-formed.
- * Deterministic. */
+ * The first-non-empty test is on each line's SANITIZED content ({@link stripXmlInvalidChars}), so a line
+ * that is ONLY XML-forbidden control characters (which the renderer strips to nothing) is skipped rather
+ * than selected — otherwise a prompt of only `\x01` would be chosen and render as a blank ` · <id>`
+ * label instead of falling back to the job type / `Human decision`. The RAW (unsanitised) line is
+ * returned for mixed text — the renderer sanitises it (issue #778 review). Deterministic. */
 function firstLine(value: string | undefined | null, cap = 72): string {
   if (typeof value !== "string") return "";
-  const line = value.split(/\r?\n/).map((l) => l.trim()).find((l) => l.length > 0) ?? "";
+  const line = value.split(/\r?\n/).map((l) => l.trim()).find((l) => stripXmlInvalidChars(l).trim().length > 0) ?? "";
   const points = Array.from(line);
   return points.length > cap ? `${Array.from(points.slice(0, cap - 1)).join("").trimEnd()}…` : line;
 }
@@ -981,7 +988,12 @@ function redactConnectorValue(value: string): string {
  * reaches the runtime job input (`appendPrompt`/`prompt`) unmodified (issue #778 review). Deterministic
  * and total. */
 function redactFreeText(value: string): string {
-  return value.replace(/(?:[a-z][a-z0-9+.-]*:)?\/\/[^\s]+/gi, (m) => redactString(m));
+  // Strip XML-invalid display characters BEFORE tokenizing/redacting so the URL scan runs on the exact
+  // string the renderer emits. Otherwise a control char embedded in a URL (`//us\x0Ber:pass@…`) breaks
+  // the `//[^\s]+` token match, escapes redaction, then reconstructs the credential once `escapeXml`/
+  // `stripXmlInvalidChars` drops the control at render time (issue #778 review — same class as the
+  // connector/probe strip-before-classify fix).
+  return stripXmlInvalidChars(value).replace(/(?:[a-z][a-z0-9+.-]*:)?\/\/[^\s]+/gi, (m) => redactString(m));
 }
 
 /** A human-readable label for a connector node's `target`. The converge-enrollment vocabulary

@@ -1048,6 +1048,38 @@ test("#778 nodeDisplay redacts a credential-bearing URL embedded in an agent/hum
   assert(!human.name.includes("s3cr3t") && !human.documentation.includes("s3cr3t"), "human prompt drops the embedded credential");
 });
 
+test("#778 an XML-forbidden control INSIDE a credential-bearing URL cannot survive redaction in any display path (strip-before-redact)", async () => {
+  // The control (`\x0B`, XML-1.0-forbidden) splits `redactString`'s `//user:pass@` / `//[^\s]+` match, so
+  // redacting the RAW value would miss the userinfo; the renderer then strips the control, re-joining a
+  // live credential. Every display path must sanitise BEFORE redacting. Cover the three that redact URLs.
+  // (a) http wait probe → `redactString(stripXmlInvalidChars(target))`.
+  const wait = nodeDisplay({ id: "w", kind: "wait", wait: { kind: "http", target: "//us\u000Ber:p4ss@api.example.com/health?token=abc123", match: { status: 200 } } });
+  assert(!wait.documentation.includes("p4ss") && !wait.documentation.includes("abc123"), "http probe target drops the split credential");
+  assert(!/[\u000B]/.test(wait.documentation), "no raw control char remains in the probe display");
+  // (b) free-form agent prompt → `redactFreeText` (strip-before-tokenize).
+  const agent = nodeDisplay({ id: "a", kind: "agent", agent: { jobType: "j", prompt: "curl //us\u000Ber:p4ss@api.example.com/d?token=abc123 then report" } });
+  assert(!agent.documentation.includes("p4ss") && !agent.documentation.includes("abc123"), "agent prompt drops the split credential");
+  // (c) end-to-end: the compiled BPMN never carries the reconstructed secret.
+  const r = await compileOk({ name: "split-cred", nodes: [{ id: "w", kind: "wait", wait: { kind: "http", target: "//us\u000Ber:p4ss@api.example.com/health?token=abc123", match: { status: 200 } } }], edges: [] });
+  assert(!r.bpmn.includes("p4ss") && !r.bpmn.includes("abc123"), "no split credential is reconstructed into the compiled BPMN");
+});
+
+test("#778 redactString consumes the query/fragment across an embedded line break (newline-safe)", () => {
+  // `[?#].*$` cannot cross a `\n`, so a target whose query is followed by another line kept the token.
+  const wait = nodeDisplay({ id: "w", kind: "wait", wait: { kind: "http", target: "https://host/api?token=s3cr3t\nX-Extra: leak", match: { status: 200 } } });
+  assert(!wait.documentation.includes("s3cr3t"), "the token before the line break is redacted");
+  assert(wait.documentation.includes("?***"), "the query is redacted through the line break");
+});
+
+test("#778 firstLine falls back to the job type / decision label when a prompt is only XML-forbidden control chars", () => {
+  // A prompt of only `\x01` would otherwise be selected and render as a blank ` · <id>` label. firstLine
+  // now skips a line whose SANITISED content is empty, so the fallback (`jobType` / `Human decision`) wins.
+  const agent = nodeDisplay({ id: "n", kind: "agent", agent: { jobType: "senior:build", prompt: "\u0001\u0007" } });
+  assert(agent.name.startsWith("senior:build · "), "an all-control-char prompt falls back to the job type label");
+  const human = nodeDisplay({ id: "h", kind: "human", human: { prompt: "\u0001" } });
+  assert(human.name.startsWith("Human decision · "), "an all-control-char human prompt falls back to `Human decision`");
+});
+
 test("#778 the wait + human inner tasks carry the descriptive display name (not the bare id)", async () => {
   const graph = {
     name: "inner names",
@@ -1110,9 +1142,11 @@ test("#778 a bounded node's escalation task carries the descriptive display name
 
 test("#778 XML-1.0-forbidden control characters are stripped from user-authored display strings", () => {
   const display = nodeDisplay({ id: "n", kind: "agent", agent: { jobType: "j", prompt: "do\u0001 the\u0007 thing" } });
-  // nodeDisplay itself keeps the raw string; the renderer must strip it. Compile and assert the BPMN
-  // carries no raw control char (which would make layoutBpmn/deploy reject the model).
-  assert(display.name.includes("\u0001"), "nodeDisplay preserves the raw value (renderer sanitises)");
+  // `redactFreeText` (the display path for agent/human prompts) strips XML-1.0-forbidden control chars
+  // BEFORE tokenizing, so the name carries the SANITISED text — never a raw control char (which would
+  // make layoutBpmn/deploy reject the model, and could otherwise reconstruct a split-redaction secret).
+  assert(!/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/.test(display.name), "nodeDisplay emits no raw control char");
+  assert(display.name.includes("do the thing"), "the sanitised prompt text is preserved as the label");
 });
 
 test("#778 the compiled BPMN never emits an XML-1.0-forbidden control character", async () => {
@@ -1251,6 +1285,10 @@ test("#778 firstLine truncates by code point so an astral character never leaves
   const r = await compileOk(graph);
   const loneSurrogate = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
   assert(!loneSurrogate.test(r.bpmn), "no unpaired surrogate survives into the compiled BPMN");
+  // Positive check: `stripXmlInvalidChars` would silently drop a lone surrogate left by a buggy UTF-16
+  // `slice`, so the no-lone-surrogate assertion alone can't catch a code-UNIT truncation. Assert the
+  // label truncated by CODE POINT — the 70 ASCII run, the intact emoji pair, then the ellipsis.
+  assert(r.bpmn.includes(`${"a".repeat(70)}😀…`), "truncation keeps whole code points: 70 ASCII + the intact emoji + ellipsis");
 });
 
 test("#778 the mermaid diagram strips XML-1.0-forbidden control characters from node labels", async () => {

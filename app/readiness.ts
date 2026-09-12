@@ -1158,9 +1158,14 @@ export function redactTarget(probe: ReadinessProbe): string {
 }
 
 /** Strip credential-bearing pieces from a free-form target string for logging: any `user:pass@`
- * userinfo and any `?query`/`#fragment` (a token often rides the query). */
+ * userinfo and any `?query`/`#fragment` (a token often rides the query). The query/fragment strip uses
+ * `[\s\S]*` (NOT `.*$`, which cannot cross a line break) so an embedded CR/LF after the `?`/`#` — e.g.
+ * `https://host/?token=secret\nnext` — cannot leave the token un-redacted; everything from the first
+ * `?`/`#` to end-of-string is consumed regardless of intervening newlines. Callers that surface the
+ * result in a display artifact must first pass it through `stripXmlInvalidChars` so an XML-forbidden
+ * control (e.g. U+000B) inside the userinfo cannot split the `//…@` match and be re-joined at render. */
 export function redactString(s: string): string {
   return s
     .replace(/\/\/[^/@\s]*@/g, "//***@")
-    .replace(/[?#].*$/, (m) => `${m[0]}***`);
+    .replace(/[?#][\s\S]*$/, (m) => `${m[0]}***`);
 }
