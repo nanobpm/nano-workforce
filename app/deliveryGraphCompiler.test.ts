@@ -1136,17 +1136,24 @@ test("#778 redactFreeText consumes a `//user:pass@` userinfo that embeds a raw T
   assert(agent.documentation.includes("//***@"), "the userinfo collapses to the redaction marker");
 });
 
-test("#778 redactFreeText: prose AFTER a redacted `?query` across a line break is PRESERVED, not deleted (thread :1083)", () => {
-  // The belt must redact only the on-line query VALUE and keep everything from the break onward. The
-  // earlier belt ran `redactString` over the whole space-bounded span, whose `[?#][\s\S]*$` deleted the
-  // prose that followed the query across the newline (issue #778 review).
+test("#778 redactFreeText: prose AFTER a `?query`/`#fragment` split across a line break is CONSERVATIVELY redacted, not preserved (thread :1115 supersedes :1083)", () => {
+  // A `?token=VALUE` whose VALUE rides across a newline (`?token=\nsecret`) is a SPLIT credential: the
+  // far side of the break is the secret's continuation, indistinguishable from ordinary prose resuming
+  // after the URL. Round-18 preserved that tail (suppressed advisory :1083); the higher-confidence
+  // inline finding :1115 showed preservation leaks the split value, so the belt now redacts the whole
+  // `?query`/`#fragment` tail through the span's space boundary — trailing continuation included. The RAW
+  // prompt still reaches the runtime job input intact; only the operator-visible display doc loses the
+  // ambiguous tail (issue #778 review).
   const out = redactFreeText("fetch //host/api?token=s3cr3t\nthen review the results please");
   assert(!out.includes("s3cr3t"), `the query token is redacted: ${out}`);
   assert(out.includes("?***"), `the query collapses to the marker: ${out}`);
-  assert(out.includes("then review the results please"), `prose after the break survives: ${out}`);
-  // A `#fragment` split the same way likewise keeps the trailing prose.
+  assert(!out.includes("then"), `the same-span continuation after the break is redacted away, not kept: ${out}`);
+  // Prose beyond the span's SPACE boundary (a genuinely separate word) is untouched.
+  assert(out.includes("review the results please"), `prose past the span boundary survives: ${out}`);
+  // A `#fragment` split the same way is likewise redacted through the span.
   const frag = redactFreeText("open //host/p#sig=zzz\nand confirm the deploy");
-  assert(!frag.includes("sig=zzz") && frag.includes("and confirm the deploy"), `fragment redacted, prose kept: ${frag}`);
+  assert(!frag.includes("sig=zzz") && !frag.includes("and"), `fragment + in-span continuation redacted: ${frag}`);
+  assert(frag.includes("confirm the deploy"), `prose past the span boundary survives: ${frag}`);
 });
 
 test("#778 redactFreeText: a non-credential `//` run spanning a break is NOT over-redacted (credential-shaped belt only)", () => {
@@ -1353,6 +1360,45 @@ test("#778 digestInvisibleRawValues fingerprints an XML-invalid `agent`/`connect
   // Same for a connector timeout.
   const dirtyConn = { name: "g", nodes: [{ id: "c", kind: "connector", connector: { target: "converge-merge", timeout: "PT2H\x01" } }], edges: [] };
   assert(digestInvisibleRawValues(dirtyConn).some((e) => e.includes("connector.timeout")), "an XML-invalid connector timeout is flagged digest-invisible");
+});
+
+test("#778 digestInvisibleRawValues collapses a whitespace-only timeout variant (`PT1H` vs `PT1H `) so it does not spuriously fork the run-key (thread :1307)", () => {
+  // `isoDuration` TRIMS the timeout before it becomes the runtime `nodeTimeout`, and the display doc shows
+  // `trimmedOrEmpty(timeout)` — so `PT1H` and `PT1H ` have the SAME semantic BPMN/digest AND the same SLA.
+  // Fingerprinting the RAW string forked them (one pushed `"PT1H "`, the other nothing), so a
+  // whitespace-only re-stage got a different run key and launched a second run. Fingerprinting the
+  // NORMALISED value collapses them (issue #778 review).
+  const canon = { name: "g", nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", timeout: "PT1H" } }], edges: [] };
+  const trailingWs = { name: "g", nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", timeout: "PT1H " } }], edges: [] };
+  assertEquals(
+    JSON.stringify(digestInvisibleRawValues(canon)),
+    JSON.stringify(digestInvisibleRawValues(trailingWs)),
+    "a trailing-whitespace timeout produces the identical fingerprint set (no spurious fork)",
+  );
+  assert(!digestInvisibleRawValues(canon).some((e) => e.includes("agent.timeout")), "a valid canonical timeout is not fingerprinted at all");
+  // A genuinely-invalid duration DOES still fork from a valid one — it falls back to a different SLA.
+  const invalid = { name: "g", nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", timeout: "PT1H\x01" } }], edges: [] };
+  assert(
+    JSON.stringify(digestInvisibleRawValues(invalid)) !== JSON.stringify(digestInvisibleRawValues(canon)),
+    "an invalid timeout (distinct runtime SLA) is still disambiguated from a valid one",
+  );
+});
+
+test("#778 nodeDisplay + digestInvisibleRawValues redact a credential-bearing agent `jobType` (thread :1202)", () => {
+  // `jobType` is emitted verbatim into the agent node's display label and (as of #778) the compiled BPMN,
+  // so a URL-shaped jobType carrying a credential must be redacted the SAME way a connector target is —
+  // and the redacted-away raw fingerprinted so a secret-differing jobType is not digest-collapsed.
+  const secret = "//user:s3cr3t@host/?token=abc";
+  const d = nodeDisplay({ id: "a", kind: "agent", agent: { jobType: secret } });
+  const rendered = `${d.name}\n${d.documentation}`;
+  assert(!rendered.includes("s3cr3t") && !rendered.includes("token=abc"), `the credential is redacted from the display: ${rendered}`);
+  assert(rendered.includes("***"), `the display carries the redaction marker: ${rendered}`);
+  const graph = { name: "g", nodes: [{ id: "a", kind: "agent", agent: { jobType: secret } }], edges: [] };
+  assert(digestInvisibleRawValues(graph).some((e) => e.includes("agent.jobType")), "the redacted-away jobType is fingerprinted digest-invisible");
+  // An ordinary `senior:feature` jobType (not URL-shaped) is untouched and not fingerprinted.
+  const ordinary = { name: "g", nodes: [{ id: "a", kind: "agent", agent: { jobType: "senior:feature" } }], edges: [] };
+  assert(nodeDisplay({ id: "a", kind: "agent", agent: { jobType: "senior:feature" } }).documentation.includes("senior:feature"), "a normal jobType renders verbatim");
+  assert(!digestInvisibleRawValues(ordinary).some((e) => e.includes("agent.jobType")), "a normal jobType is not spuriously fingerprinted");
 });
 
 test("#778 describeProbeMatch renders match fields in a stable order regardless of JSON insertion order (byte-determinism)", () => {

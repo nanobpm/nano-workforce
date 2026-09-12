@@ -12,3 +12,10 @@
 -- regardless of its rowid or a coincident `updated_at`. Additive/expand (nullable-equivalent `DEFAULT 0`,
 -- no data rewrite): existing rows read as `0` and are re-sequenced the next time they are staged.
 ALTER TABLE delivery_graph_proposals ADD COLUMN stage_seq INTEGER NOT NULL DEFAULT 0;
+
+-- Index `stage_seq` so the atomic `MAX(stage_seq)+1` allocation in `stageProposal` (issue #778 review,
+-- thread app/deliveryGraphProposals.ts:237) is an O(1) reverse-index seek of the single highest value
+-- rather than a full scan of the retained proposal history (staged + terminal rows accumulate; a bare
+-- aggregate would grow linearly with them).
+CREATE INDEX IF NOT EXISTS idx_delivery_graph_proposals_stage_seq
+  ON delivery_graph_proposals (stage_seq);

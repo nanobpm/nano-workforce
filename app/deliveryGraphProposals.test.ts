@@ -273,6 +273,28 @@ test("stageProposal: a RE-STAGE wins a same-millisecond `updated_at` tie over an
   });
 });
 
+test("stageProposal: assigns `stage_seq` ATOMICALLY in the write — a fresh stage is strictly > 0 and monotonic, so there is never a DEFAULT-0 window a concurrent reconcile could mis-order (issue #778 review — thread :237/:239)", async () => {
+  await withData(async (data) => {
+    const seqOf = async (digest: string): Promise<number> => {
+      const rows = await data.open().query<{ stage_seq: number }>(
+        `SELECT "stage_seq" FROM "delivery_graph_proposals" WHERE "digest" = ?`,
+        [digest],
+      );
+      return rows.length ? Number(rows[0].stage_seq) : -1;
+    };
+    // A first stage: the seq is assigned in the INSERT itself (MAX+1), never left at the column DEFAULT 0.
+    await stageProposal(data, row({ digest: "d1", logicalKey: "k-a" }));
+    const s1 = await seqOf("d1");
+    assert(s1 > 0, `a fresh stage carries a strictly-positive stage_seq (atomic, no 0 window): ${s1}`);
+    // A second, independent stage is strictly greater — the monotonic secondary ordering.
+    await stageProposal(data, row({ digest: "d2", logicalKey: "k-b" }));
+    assert((await seqOf("d2")) > s1, "a later stage's seq is strictly greater");
+    // A RE-STAGE (UPDATE) also advances the seq — it is reassigned on every write, not frozen like rowid.
+    await stageProposal(data, row({ digest: "d1", logicalKey: "k-a" }));
+    assert((await seqOf("d1")) > (await seqOf("d2")), "a re-stage advances stage_seq past every prior write");
+  });
+});
+
 test("stageProposal outcome: `row` reflects the POST-reconcile status — a stage immediately superseded by a newer sibling reports its own row as `superseded`, not the pre-reconcile `staged`", async () => {
   await withData(async (data) => {
     const table = deliveryGraphProposals(data);

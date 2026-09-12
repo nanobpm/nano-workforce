@@ -51,6 +51,7 @@ import {
 import { DELIVERY_HUMAN_ELEMENT, GENERIC_HUMAN_FORM } from "./deliveryHuman.ts";
 import { redactString } from "./readiness.ts";
 import { AGENT_TASK_NS } from "./repoEnvelope.ts";
+import { isoDuration } from "./reviewWait.ts";
 
 /** A display-safe rendering of a `wait` probe's target for user-visible BPMN name/documentation
  * (issue #778 review): a `command` target is an arbitrary shell snippet that can embed a secret, so it
@@ -818,7 +819,11 @@ function buildSideEffects(nodes: readonly DeliveryNode[]): DeliverySideEffect[] 
       effects.push({
         nodeId: node.id,
         kind: "agent",
-        description: `runs agent job \`${node.agent.jobType}\``,
+        // Redact a credential-bearing `jobType` at its SOURCE with the display-safe helper `nodeDisplay`
+        // uses — this side-effect projection is persisted into the staged proposal preview, an
+        // operator-visible surface, so a URL-shaped jobType carrying a secret must not echo verbatim here
+        // any more than in the node label/documentation (issue #778 review — thread :1202).
+        description: `runs agent job \`${redactConnectorValue(node.agent.jobType)}\``,
       });
     } else if (node.kind === "connector") {
       // Redact the operator-facing `target`/`dedupeKey` at their SOURCE with the SAME display-safe
@@ -1000,6 +1005,17 @@ function trimmedOrEmpty(value: unknown): string {
   return typeof value === "string" && value.trim() !== "" ? value.trim() : "";
 }
 
+/** The runtime-effective node `timeout` fingerprint: the SAME normalisation the runtime applies
+ * (`isoDuration` in `deliveryRunner` — trim + upper-case a valid ISO-8601 duration, else fall back to
+ * the run-level default). A valid duration collapses whitespace/case variants that drive the identical
+ * SLA (`"PT1H"`/`"PT1H "`/`"pt1h"` → `"PT1H"`); a malformed one (including an XML-invalid-char variant
+ * like `"PT1H\x01"`) collapses to the `""` fallback sentinel — genuinely different from a valid value.
+ * A non-string stays as-is so the caller's `typeof raw === "string"` guard skips an absent timeout
+ * (issue #778 review — thread :1307). */
+function normaliseNodeTimeout(value: string | undefined | null): string | undefined | null {
+  return typeof value === "string" ? isoDuration(value, "") : value;
+}
+
 /** A runtime plain-object narrowing used where a statically-typed field may LIE at runtime because no
  * validator constrained its shape — notably a connector `payload`, whose schema is a forward-declared
  * `additionalProperties:true` stub the semantic validator does NOT shape-check (issue #778 review). A
@@ -1048,12 +1064,13 @@ export function redactFreeText(value: string): string {
   // connector/probe strip-before-classify fix).
   const cleaned = stripXmlInvalidChars(value);
   // Run the newline-aware BELT pass on the ORIGINAL cleaned text FIRST, then the primary
-  // whitespace-bounded pass. The belt must see the raw text: its dangling-`?query` detection (a `?`/`#`
-  // sitting immediately before a break, whose value rode onto the next line) is defeated if the primary
-  // pass has already rewritten the on-line `?token` tail to `?***`, erasing the signal (issue #778 review
-  // — thread deliveryGraphCompiler.ts:1083). The belt only touches credential-shaped or query/fragment
-  // spans and PRESERVES ordinary prose that follows a redacted query across a line break; the primary
-  // pass then redacts the same-line `scheme://…`/`//…` userinfo+query tokens `redactString` handles.
+  // whitespace-bounded pass. The belt must see the raw text: a `?query`/`#fragment` whose value rode
+  // across a break is defeated if the primary pass has already rewritten the on-line `?token` tail to
+  // `?***`, erasing the marker (issue #778 review — thread deliveryGraphCompiler.ts:1083/:1115). The belt
+  // only touches credential-shaped or query/fragment spans and CONSERVATIVELY redacts a break-spanning
+  // `?query`/`#fragment` through the span (a continuation past the break is indistinguishable from a split
+  // credential); the primary pass then redacts the same-line `scheme://…`/`//…` userinfo+query tokens
+  // `redactString` handles.
   const belted = redactCredentialSpans(cleaned);
   return belted.replace(/(?:[a-z][a-z0-9+.-]*:)?\/\/[^\s]+/gi, (m) => redactString(m));
 }
@@ -1084,11 +1101,10 @@ function redactCredentialSpans(text: string): string {
 /** Redact ONE space-bounded `//`-span (which may embed a raw CR/LF/TAB the primary whitespace-bounded
  * token stopped at). Returns the span unchanged unless it is credential-shaped or carries a query/
  * fragment. A `user:pass@` userinfo — even one split across a break inside it — collapses to `//***@`; a
- * `?query`/`#fragment` is handled break-AWARE so prose that follows the query across a line break is
- * PRESERVED (issue #778 review — thread deliveryGraphCompiler.ts:1083): only the on-line query VALUE is
- * replaced, not everything to end-of-span. A `?`/`#` sitting immediately before a break (or at span end)
- * is a "dangling" marker whose value rode onto the next line, so it (and the far side up to the span's
- * space boundary) is redacted to end-of-span. Linear — `indexOf`/`charCodeAt` only, no backtracking. */
+ * `?query`/`#fragment` is redacted CONSERVATIVELY from the marker to the span's space boundary (the whole
+ * tail, including any continuation past an embedded break), because a value/prose resuming after the break
+ * is indistinguishable from a split-credential continuation (issue #778 review — thread
+ * deliveryGraphCompiler.ts:1115). Linear — `indexOf`/`charCodeAt` only, no backtracking. */
 function redactCredentialSpan(span: string): string {
   const at = span.indexOf("@");
   const colon = span.indexOf(":");
@@ -1101,18 +1117,16 @@ function redactCredentialSpan(span: string): string {
   const hMark = s.indexOf("#");
   const qi = qMark < 0 ? hMark : hMark < 0 ? qMark : Math.min(qMark, hMark);
   if (qi < 0) return s;
-  const marker = s[qi];
-  // Walk from the marker to the next raw line break (CR/LF/TAB) — where the primary token stopped.
-  let lineEnd = qi;
-  while (lineEnd < s.length) {
-    const code = s.charCodeAt(lineEnd);
-    if (code === 13 /* CR */ || code === 10 /* LF */ || code === 9 /* TAB */) break;
-    lineEnd++;
-  }
-  // A query VALUE is present on the marker's own line (`lineEnd > qi + 1`): redact just that value and
-  // PRESERVE everything from the break onward (the prose the earlier belt wrongly deleted). Otherwise the
-  // marker is dangling (its value rode across the break, or it sits at span end): redact to end-of-span.
-  return lineEnd > qi + 1 ? `${s.slice(0, qi)}${marker}***${s.slice(lineEnd)}` : `${s.slice(0, qi)}${marker}***`;
+  // CONSERVATIVE: redact the `?`/`#` marker and EVERYTHING to the span's space boundary — the whole
+  // `?query`/`#fragment` tail, including any continuation past an embedded CR/LF/TAB. A value or prose
+  // that resumes after the break is INDISTINGUISHABLE from a split-credential continuation (`?token=\n
+  // secret` splits the VALUE across the break, so preserving the far side leaks it), so we never keep the
+  // post-break side. This supersedes the earlier break-AWARE branch that preserved trailing prose across a
+  // line break (issue #778 review — thread deliveryGraphCompiler.ts:1115 over the suppressed :1083): the
+  // RAW prompt still reaches the runtime job input unmodified; only the operator-visible display doc loses
+  // the ambiguous tail. Same behaviour {@link redactString} applies to a single-line target. Linear —
+  // `indexOf` only, no backtracking.
+  return `${s.slice(0, qi)}${s[qi]}***`;
 }
 
 /** A human-readable label for a connector node's `target`. The converge-enrollment vocabulary
@@ -1197,9 +1211,9 @@ export function nodeDisplay(node: DeliveryNode): { name: string; documentation: 
     case "agent": {
       const a = node.agent;
       const policy = a.merge ? "converge+merge" : a.converge ? "converge" : "";
-      const base = firstLine(typeof a.prompt === "string" ? redactFreeText(a.prompt) : a.prompt) || a.jobType;
+      const base = firstLine(typeof a.prompt === "string" ? redactFreeText(a.prompt) : a.prompt) || redactConnectorValue(a.jobType);
       const label = policy ? `${base} & ${policy}` : base;
-      const doc: string[] = [`Agent job: ${a.jobType}`];
+      const doc: string[] = [`Agent job: ${redactConnectorValue(a.jobType)}`];
       const repo = trimmedOrEmpty(a.repository);
       const branch = trimmedOrEmpty(a.baseBranch);
       if (repo || branch) doc.push(`Target: ${repo || "(run repo)"}${branch ? `@${branch}` : ""}`);
@@ -1298,13 +1312,23 @@ export function digestInvisibleRawValues(graph: DeliveryGraph): string[] {
         // Display embeds `redactFreeText(trimmedOrEmpty(prompt))`; the RAW, untrimmed prompt reaches the
         // runtime (`buildNodeInput`), so a leading/trailing-whitespace-only difference is invisible too.
         push(id, "agent.prompt", node.agent.prompt, redactFreeText(trimmedOrEmpty(node.agent.prompt)));
-        // The node `timeout` is embedded in the display doc as `trimmedOrEmpty(timeout)` and then
-        // XML-serialised — where `escapeXml` STRIPS XML-1.0-invalid chars — yet the RAW value drives the
-        // runtime `nodeTimeout` SLA (`cfg("timeout")`). So `"PT1H"`, `"PT1H "`, and `"PT1H\x01"` all
-        // collapse to the same digest-visible `PT1H` while the runtime SLA differs (an invalid duration
-        // silently falls back to the run-level default). Fingerprint the raw whenever it differs from the
-        // digest-visible (trimmed + XML-sanitised) form (issue #778 review — thread :1251).
-        push(id, "agent.timeout", node.agent.timeout, stripXmlInvalidChars(trimmedOrEmpty(node.agent.timeout)));
+        // `jobType` is a required non-empty string but only shape-validated, so it can smuggle a
+        // credential-bearing URL (`//user:pass@host`). The display now redacts it through the SAME
+        // `redactConnectorValue` (URL-only) rule, so a redacted jobType whose raw form the digest cannot
+        // see reaches the worker verbatim (`cfg("jobType")`) — fingerprint the raw whenever it differs
+        // from the redacted display (issue #778 review — thread :1202). An ordinary `senior:feature`
+        // is not URL-shaped, so display == raw and nothing is pushed.
+        push(id, "agent.jobType", node.agent.jobType, redactConnectorValue(node.agent.jobType));
+        // The node `timeout` is embedded in the display doc as `trimmedOrEmpty(timeout)` then XML-
+        // serialised (`escapeXml` STRIPS XML-1.0-invalid chars), yet the runtime reads it through
+        // `isoDuration(timeout, nodeTimeout)` (deliveryRunner) — which TRIMS + upper-cases a valid value
+        // and falls back to the run default on a malformed one. So `"PT1H"`, `"PT1H "`, and `"pt1h"` all
+        // drive the SAME runtime SLA and must NOT be distinguished (else a whitespace-only re-stage
+        // launches a second run), while `"PT1H\x01"` (invalid ⇒ falls back) genuinely differs. Fingerprint
+        // the ISO-normalised timeout (`""` sentinel when it falls back) and compare it with the XML-
+        // sanitised display form so invalid characters remain disambiguated (issue #778 review — thread
+        // :1307, over :1251).
+        push(id, "agent.timeout", normaliseNodeTimeout(node.agent.timeout), stripXmlInvalidChars(trimmedOrEmpty(node.agent.timeout)));
         break;
       case "human":
         push(id, "human.prompt", node.human?.prompt, redactFreeText(trimmedOrEmpty(node.human?.prompt)));
@@ -1326,9 +1350,11 @@ export function digestInvisibleRawValues(graph: DeliveryGraph): string[] {
         // difference (a real credential) survives (issue #778 review).
         push(id, "connector.dedupeKey", trimmedOrEmpty(c.dedupeKey), redactConnectorValue(trimmedOrEmpty(c.dedupeKey)));
         // The connector `timeout` is digest-invisible the same way an agent's is: displayed as
-        // `trimmedOrEmpty(timeout)` then XML-sanitised, but read RAW into the runtime `nodeTimeout` SLA.
-        // Fingerprint the raw whenever it differs from the trimmed + XML-sanitised form (issue #778 review).
-        push(id, "connector.timeout", c.timeout, stripXmlInvalidChars(trimmedOrEmpty(c.timeout)));
+        // `trimmedOrEmpty(timeout)` then XML-sanitised, but read through `isoDuration(timeout, nodeTimeout)`
+        // into the runtime SLA. Fingerprint the ISO-normalised value, compared with the XML-sanitised
+        // display form so a whitespace-only variant collapses while an invalid one stays disambiguated
+        // (issue #778 review — thread :1307).
+        push(id, "connector.timeout", normaliseNodeTimeout(c.timeout), stripXmlInvalidChars(trimmedOrEmpty(c.timeout)));
         // The free-form connector `payload` survives raw into runtime `nodeInputs`, but `nodeDisplay`
         // surfaces at most a single NON-EMPTY string `payload.pr` (redacted). So the display FAITHFULLY
         // represents the payload ONLY when it is exactly `{ pr: <non-empty string> }` whose redaction is
