@@ -466,6 +466,32 @@ test("#778 humanNodes: a credential-bearing formKey is redacted in the preview p
   assertEquals(plain.humanNodes.find((n) => n.nodeId === "h")?.formKey, "deploy-approval");
 });
 
+test("#778 humanNodes: a credential-bearing emit `description` is redacted in the preview projection (raw only reaches runtime)", async () => {
+  // `humanNodes[].emits` is persisted into the staged proposal `preview` and rendered on the Delivery
+  // Graphs page, so a `//user:pass@…` URL in a free-form fact `description` must be stripped here with the
+  // SAME `redactFreeText` the BPMN emit label uses — else it leaks unredacted through the preview even
+  // though the label path redacts it. The RAW description still reaches the runtime `appendPrompt` (#778).
+  const r = await compileOk({
+    nodes: [
+      {
+        id: "h",
+        kind: "human",
+        human: { prompt: "approve" },
+        emits: [{ name: "pr", type: "pr", description: "post to //user:pass@host/x?token=abc when done" }],
+      },
+    ],
+    edges: [],
+  });
+  const desc = r.humanNodes.find((n) => n.nodeId === "h")?.emits.find((e) => e.name === "pr")?.description;
+  assert(desc !== undefined && !desc.includes("user:pass") && !desc.includes("token=abc"), `credential stripped from preview emit description: ${desc}`);
+  // An ordinary (credential-free) description is preserved verbatim.
+  const plain = await compileOk({
+    nodes: [{ id: "h", kind: "human", human: { prompt: "approve" }, emits: [{ name: "pr", type: "pr", description: "the merged PR ref" }] }],
+    edges: [],
+  });
+  assertEquals(plain.humanNodes.find((n) => n.nodeId === "h")?.emits.find((e) => e.name === "pr")?.description, "the merged PR ref");
+});
+
 test("sideEffects: agent + connector only; connector carries its dedupeKey", async () => {
   const r = await compileOk(RELEASE_RUNBOOK);
   const agent = r.sideEffects.find((s) => s.nodeId === "open-b");
@@ -1101,13 +1127,26 @@ test("#778 redactFreeText consumes a `//user:pass@` userinfo that embeds a raw l
 
 test("#778 redactFreeText consumes a `//user:pass@` userinfo that embeds a raw TAB (tab-safe)", () => {
   // A TAB is a VALID XML character `stripXmlInvalidChars` does not remove, so the whitespace-delimited
-  // `//[^\s]+` token AND an earlier `//[^ \t]*` belt scan both split `//user:pa\tss@host` before the
-  // `@`, leaking `ss@host` into the display doc (XML preserves the TAB). Only a literal SPACE bounds the
-  // belt scan now, so the tab-split userinfo — and its `?token=…` tail — are stripped (issue #778).
+  // `//[^\s]+` token splits `//user:pa\tss@host` before the `@`, leaking `ss@host` into the display doc
+  // (XML preserves the TAB). The credential-shaped belt scan (`//…:…@`, space-bounded so it may cross the
+  // tab inside the userinfo) strips the tab-split userinfo — and its `?token=…` tail (issue #778).
   const agent = nodeDisplay({ id: "a", kind: "agent", agent: { jobType: "j", prompt: "deploy via //user:pa\tss@registry.example.com/p?token=s3cr3t now" } });
   assert(!agent.documentation.includes("ss@registry") && !agent.documentation.includes("user:pa"), "the tab-split userinfo is redacted");
   assert(!agent.documentation.includes("s3cr3t"), "the query token is redacted");
   assert(agent.documentation.includes("//***@"), "the userinfo collapses to the redaction marker");
+});
+
+test("#778 redactFreeText: a non-credential `//` run spanning a break is NOT over-redacted (credential-shaped belt only)", () => {
+  // The belt scan re-redacts only a `//…:…@` userinfo span, not every `//` run. A `//comment` reference
+  // followed by a new-line email `owner@example.com` has no `user:pass@` shape, so the prose survives
+  // intact instead of collapsing to `//***@example.com` (issue #778 review — the earlier `//[^ ]*` scan
+  // mangled it).
+  const out = redactFreeText("Use //comment\nowner@example.com for context");
+  assert(out.includes("owner@example.com") && out.includes("//comment"), `non-credential prose must survive: ${out}`);
+  assert(!out.includes("//***@"), "a break-spanning email is not mistaken for a credential");
+  // A genuine `user:pass@` userinfo split across the same newline IS still redacted.
+  const cred = redactFreeText("Use //user:pass\nx@host/x?token=abc for context");
+  assert(!cred.includes("token=abc") && !cred.includes("user:pass"), `a real split credential must be redacted: ${cred}`);
 });
 
 test("#778 nodeDisplay surfaces a wait probe's credentialEnv key NAME so a credential-differing graph gets a DISTINCT digest (not a collision)", () => {
@@ -1423,11 +1462,26 @@ test("#778 graphCarriesRedactedSecrets: true when a prompt differs from its disp
   assertEquals(graphCarriesRedactedSecrets(trimmed), false);
 });
 
-test("#778 graphCarriesRedactedSecrets: true when a connector dedupeKey differs from its display form only by trimmed whitespace", () => {
+test("#778 graphCarriesRedactedSecrets: whitespace-only dedupeKey/formKey difference is NOT lossy (runtime trims both)", () => {
+  // The connector worker (`connectorDedupeKey`) and human form resolution (`resolveHumanForm`) BOTH trim
+  // these keys, so a leading/trailing-whitespace-only variant has identical runtime identity/behaviour —
+  // the fingerprint keys on the NORMALISED value, so it must NOT be flagged digest-invisible (else a
+  // whitespace twin needlessly requires an idempotencyKey and double-launches an identical graph) (#778).
   const wsKey = { name: "n", nodes: [{ id: "c", kind: "connector", connector: { target: "slack:#r", dedupeKey: "  key  " } }], edges: [] };
-  assertEquals(graphCarriesRedactedSecrets(wsKey), true);
+  assertEquals(graphCarriesRedactedSecrets(wsKey), false);
   const cleanKey = { name: "n", nodes: [{ id: "c", kind: "connector", connector: { target: "slack:#r", dedupeKey: "key" } }], edges: [] };
   assertEquals(graphCarriesRedactedSecrets(cleanKey), false);
+  // The whitespace twin fingerprints IDENTICALLY to its trimmed form — same run-key, so a re-dispatch
+  // short-circuits as `alreadyRunning` instead of relaunching.
+  assertEquals(JSON.stringify(digestInvisibleRawValues(wsKey)), JSON.stringify(digestInvisibleRawValues(cleanKey)));
+  const wsForm = { name: "n", nodes: [{ id: "h", kind: "human", human: { prompt: "approve", formKey: "  deploy-approval  " } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(wsForm), false);
+  const cleanForm = { name: "n", nodes: [{ id: "h", kind: "human", human: { prompt: "approve", formKey: "deploy-approval" } }], edges: [] };
+  assertEquals(JSON.stringify(digestInvisibleRawValues(wsForm)), JSON.stringify(digestInvisibleRawValues(cleanForm)));
+  // A genuine credential in either key is still redacted-away → lossy (whitespace normalisation does not
+  // hide a real secret).
+  const credKey = { name: "n", nodes: [{ id: "c", kind: "connector", connector: { target: "slack:#r", dedupeKey: "//user:pass@host/x?token=abc" } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(credKey), true);
 });
 
 test("#778 graphCarriesRedactedSecrets: true when payload.pr carries a redacted-away credential, or is a non-string value", () => {

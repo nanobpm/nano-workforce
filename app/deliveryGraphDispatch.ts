@@ -80,10 +80,12 @@ export async function dispatchDeliveryGraphRun(
         {
           path: "idempotencyKey",
           message:
-            "this graph carries credential-bearing values (a URL credential/`?query`/`#fragment`, a `command` target, a " +
-            "`verifyCommand`/`bodyIncludes`/`stdoutIncludes` match secret, or a free-form connector `payload`) that redaction " +
-            "strips from the content-addressed graph, so its digest cannot distinguish it from another graph differing only in " +
-            "those secrets — supply an explicit `idempotencyKey` to dispatch it (issue #778)",
+            "this graph carries runtime values that redaction/normalisation strips from its content-addressed " +
+            "digest — a URL credential/`?query`/`#fragment`, a `command` target, a `verifyCommand`/`bodyIncludes`/" +
+            "`stdoutIncludes` match secret, a free-form connector `payload`, an untrimmed-whitespace difference in " +
+            "an agent/human `prompt`, or a value that loses characters to XML sanitisation — so its digest cannot " +
+            "distinguish it from another graph differing only in those values; supply an explicit `idempotencyKey` " +
+            "to dispatch it (issue #778)",
         },
       ],
     };

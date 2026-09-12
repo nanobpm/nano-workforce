@@ -761,13 +761,29 @@ function delegateTarget(node: DeliveryNode, element: string): string {
   }
 }
 
+/** Redact any credential-bearing URL inside each emit's free-form `description` for the operator-facing
+ * preview projection, mirroring the `redactFreeText(trimmedOrEmpty(description))` the BPMN label embeds
+ * (`nodeDisplay`). Returns fresh `DeliveryFact` copies (never mutates the source), so the RAW descriptions
+ * on the runtime path are untouched (issue #778 review). */
+function redactEmitsForPreview(facts: readonly DeliveryFact[]): DeliveryFact[] {
+  return facts.map((f) =>
+    typeof f.description === "string" ? { ...f, description: redactFreeText(f.description) } : { ...f },
+  );
+}
+
 /** Extract the human STOP-points (sorted by id) — where the graph pauses for a person/agent, with the
  * instruction, optional attached form, and the typed facts the node will emit. */
 function buildHumanNodes(nodes: readonly DeliveryNode[]): DeliveryHumanStop[] {
   const stops: DeliveryHumanStop[] = [];
   for (const node of nodes) {
     if (node.kind !== "human") continue;
-    const stop: DeliveryHumanStop = { nodeId: node.id, emits: normaliseEmits(node) };
+    // Redact a credential-bearing URL inside each emit's free-form `description` at its SOURCE, the SAME
+    // way `nodeDisplay` embeds it (`redactFreeText(trimmedOrEmpty(description))`): `humanNodes[]` — emits
+    // included — is persisted into the staged proposal `preview` and rendered on the Delivery Graphs page
+    // (and denormalised into parked-node labels), so a `//user:pass@…` in a fact description would leak
+    // unredacted through this operator-facing projection even though the BPMN label path redacts it. The
+    // RAW descriptions still reach the runtime `appendPrompt` (`renderEmitContract`) unmodified (#778).
+    const stop: DeliveryHumanStop = { nodeId: node.id, emits: redactEmitsForPreview(normaliseEmits(node)) };
     // Redact the operator-facing preview `prompt` at its SOURCE with the SAME display-safe helper
     // `nodeDisplay` renders with: this projection is persisted into the staged proposal `preview` and
     // rendered verbatim on the Delivery Graphs page (and denormalised into the run's parked-node
@@ -1033,17 +1049,17 @@ export function redactFreeText(value: string): string {
   return (
     stripXmlInvalidChars(value)
       .replace(/(?:[a-z][a-z0-9+.-]*:)?\/\/[^\s]+/gi, (m) => redactString(m))
-      // Belt-and-braces for a URL whose userinfo OR query/fragment embeds a raw CR/LF or TAB: the
-      // whitespace-delimited `//[^\s]+` token above STOPS at the line break (or tab), so `redactString`
-      // never sees the `…@host` userinfo or the `?token=…`/`#frag` tail on the far side of the break and
-      // the credential survives into `<bpmn:documentation>` (XML preserves line breaks and TABs). Re-scan
-      // each `//…` authority up to the next SPACE (newlines AND tabs included) and run the SAME
-      // `redactString` over it, so a newline- OR tab-spanning userinfo AND a break-orphaned query/fragment
-      // are stripped. Only a literal SPACE bounds the token — a TAB is a valid XML character that
-      // `stripXmlInvalidChars` cannot drop, so bounding at TAB (as `[^ \t]` did) let a tab-split credential
-      // escape; a space still bounds so ordinary prose after a real space break is not over-redacted
-      // (issue #778 review — extends the CR/LF fix to embedded TABs, matching `redactString`'s userinfo class).
-      .replace(/\/\/[^ ]*/g, (m) => redactString(m))
+      // Belt-and-braces for a URL whose userinfo embeds a raw CR/LF or TAB: the whitespace-delimited
+      // `//[^\s]+` token above STOPS at the line break (or tab), so `redactString` never sees the `…@host`
+      // userinfo on the far side of the break and the credential survives into `<bpmn:documentation>` (XML
+      // preserves line breaks and TABs). Re-scan only a CREDENTIAL-SHAPED span — a `//…:…@` userinfo
+      // (a `user:pass@` shape, the exact class `redactString` collapses) bounded by literal SPACEs so it
+      // may cross a CR/LF/TAB inside the userinfo — and run the SAME `redactString` (which also strips any
+      // `?query`/`#fragment` tail on the matched span). Requiring the `:`…`@` userinfo shape (not every
+      // `//` run) means ordinary prose — a `//comment` reference, a `//host` then a new-line email
+      // `owner@example.com`, or a sentence-ending `?`/`#` — is NOT over-redacted (issue #778 review —
+      // supersedes the earlier space-bounded `//[^ ]*` scan that mangled non-URL `//` prose).
+      .replace(/\/\/[^ @]*:[^ @]*@[^ ]*/g, (m) => redactString(m))
   );
 }
 
@@ -1213,14 +1229,23 @@ export function digestInvisibleRawValues(graph: DeliveryGraph): string[] {
         break;
       case "human":
         push(id, "human.prompt", node.human?.prompt, redactFreeText(trimmedOrEmpty(node.human?.prompt)));
-        push(id, "human.formKey", node.human?.formKey, redactConnectorValue(trimmedOrEmpty(node.human?.formKey)));
+        // Runtime form resolution TRIMS an explicit formKey (`resolveHumanForm` in `deliveryHuman.ts`),
+        // so a whitespace-only formKey variant has identical compiled form + runtime behaviour. Fingerprint
+        // the NORMALISED (trimmed) value — the same value form resolution keys on — so a leading/trailing-
+        // whitespace difference does NOT falsely mark the node digest-invisible and re-launch the whole
+        // graph; only a genuine redaction difference (a real credential) survives (issue #778 review).
+        push(id, "human.formKey", trimmedOrEmpty(node.human?.formKey), redactConnectorValue(trimmedOrEmpty(node.human?.formKey)));
         break;
       case "connector": {
         const c = node.connector;
         push(id, "connector.target", c.target, redactConnectorValue(c.target));
-        // `dedupeKey` displays as `redactConnectorValue(trimmedOrEmpty(dedupeKey))` while the raw,
-        // untrimmed value reaches the runtime — invisible on redaction OR on trimmed whitespace.
-        push(id, "connector.dedupeKey", c.dedupeKey, redactConnectorValue(trimmedOrEmpty(c.dedupeKey)));
+        // The connector worker TRIMS the authored dedupeKey (`connectorDedupeKey` in `deliveryConnector.ts`,
+        // the SINGLE dedupe-key derivation site), so a whitespace-only variant has identical dedupe identity
+        // + runtime behaviour. Fingerprint the NORMALISED (trimmed) value the worker keys on, so a trimmed-
+        // whitespace difference does NOT falsely mark the node digest-invisible (which would force an
+        // idempotencyKey and double-launch a graph the runtime treats identically); only a genuine redaction
+        // difference (a real credential) survives (issue #778 review).
+        push(id, "connector.dedupeKey", trimmedOrEmpty(c.dedupeKey), redactConnectorValue(trimmedOrEmpty(c.dedupeKey)));
         // The free-form connector `payload` survives raw into runtime `nodeInputs`, but `nodeDisplay`
         // surfaces at most a single NON-EMPTY string `payload.pr` (redacted). So the display FAITHFULLY
         // represents the payload ONLY when it is exactly `{ pr: <non-empty string> }` whose redaction is
