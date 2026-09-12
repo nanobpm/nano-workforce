@@ -168,11 +168,17 @@ const NEW_ACK = /^(.+?)\s+::\s+(.+)$/s;
  * the agent to copy the advisory's first line verbatim, so an ack marker legitimately carries the
  * `* ` bullet — without stripping it here the ack key would differ from the advisory key and the
  * gate would never converge (fail-CLOSED livelock). Applying it in this shared canonicaliser is the
- * SINGLE source of truth for both sides. */
+ * SINGLE source of truth for both sides.
+ *
+ * The bullet marker REQUIRES trailing whitespace (`[-*]\s+`): a genuine markdown bullet is always
+ * `- ` / `* ` followed by a space, so `-foo` / `*foo` (leading punctuation, no separator) is NOT a
+ * bullet and its leading char is PRESERVED. A greedy `\s*` there would strip the `-`/`*` off such
+ * prose too, collapsing distinct first lines like `-foo` and `foo` to one key — a false-ACK
+ * (false-OPEN) where acking one silently satisfies the other. */
 function normalizeAdvisoryText(text: string): string {
   return text
     .normalize("NFC")
-    .replace(/^\s*[-*]\s*/u, "")
+    .replace(/^\s*[-*]\s+/u, "")
     .toLowerCase()
     .replace(/\s+/gu, " ")
     .trim();
@@ -226,7 +232,7 @@ export function parseSuppressedAdvisories(reviewBody: string | null | undefined)
     let text = "";
     for (let j = i + 1; j < lines.length; j++) {
       if (headerRe.test(lines[j])) break;
-      const t = lines[j].replace(/^\s*[-*]\s*/, "").trim();
+      const t = lines[j].replace(/^\s*[-*]\s+/, "").trim();
       if (t) {
         text = t;
         break;

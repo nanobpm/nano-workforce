@@ -226,6 +226,11 @@ test("advisoryStableKey: a leading markdown bullet is stripped so bulleted ack t
   const p = "app/x.ts";
   assertEquals(advisoryStableKey(p, "* Consider narrowing this type."), advisoryStableKey(p, "Consider narrowing this type."));
   assertEquals(advisoryStableKey(p, "- Consider narrowing this type."), advisoryStableKey(p, "Consider narrowing this type."));
+  // But a leading `-`/`*` with NO trailing whitespace is NOT a bullet: it is preserved, so distinct
+  // first-line prose keeps a distinct key (else `-foo` false-acks `foo`). Regression for the finding
+  // that the greedy `[-*]\s*` stripped a non-bullet leading punctuation char.
+  assertNotEquals(advisoryStableKey(p, "-foo"), advisoryStableKey(p, "foo"));
+  assertNotEquals(advisoryStableKey(p, "*foo"), advisoryStableKey(p, "foo"));
 });
 
 // End-to-end: an ack whose marker copies Copilot's bulleted first line verbatim acknowledges the
