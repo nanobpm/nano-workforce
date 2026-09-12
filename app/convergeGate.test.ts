@@ -165,6 +165,27 @@ test("parseAckedAdvisories: a path containing spaces is honoured in BOTH the new
   assertEquals(parseAckedAdvisories(legacyForm), ["docs/my file.md:42"]);
 });
 
+// A valid GitHub path can itself contain `::` (e.g. `src/a::b.ts`); the ` :: ` separator must be
+// whitespace-delimited so a bare `::` inside the path is not mistaken for the delimiter (regression
+// for the suppressed finding: `\s*::\s*` split `src/a::b.ts :: text` at the wrong `::`, mangling the
+// path and producing a key that could never match the advisory).
+test("parseAckedAdvisories: a path containing `::` is not split at the interior `::`", () => {
+  const threads: ReviewThread[] = [
+    { isResolved: true, path: "a.ts", bodies: ["Applied. nano-ack: src/a::b.ts :: Narrow the return type here."] },
+  ];
+  assertEquals(parseAckedAdvisories(threads), [advisoryStableKey("src/a::b.ts", "Narrow the return type here.")]);
+});
+
+// The legacy `<path>:<line>` capture must anchor on the FINAL `:<line>`, not the first `:<digits>`,
+// so a path with an interior colon segment (e.g. `docs/v1:2/file.ts:42`) is not truncated (regression
+// for the suppressed finding: the non-greedy `.+?:\d+` stopped at `docs/v1:2`, dropping the ack).
+test("parseAckedAdvisories: the legacy form anchors on the final `:<line>` past interior colons", () => {
+  const threads: ReviewThread[] = [
+    { isResolved: true, path: "d.ts", bodies: ["Applied. nano-ack: docs/v1:2/file.ts:42"] },
+  ];
+  assertEquals(parseAckedAdvisories(threads), ["docs/v1:2/file.ts:42"]);
+});
+
 // Normalization must preserve word boundaries and Unicode so distinct advisories on one path do not
 // alias to the same key (regression for the suppressed finding: deleting every separator made
 // `foo-bar`/`foobar` collide, and non-ASCII-only prose normalized to an empty, colliding string).

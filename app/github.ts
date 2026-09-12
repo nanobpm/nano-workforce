@@ -130,14 +130,17 @@ export interface SuppressedAdvisory {
 
 /** Any `nano-ack:` marker — captures the rest of the marker's line (path + optional `:: text`). */
 const ACK_MARKER = /nano-ack:\s*([^\n\r]+)/gi;
-/** New line-stable form: `<path> :: <advisory text>`. The path group parses up to the ` :: `
- * delimiter (non-greedily) rather than forbidding whitespace, so a valid GitHub path containing
- * spaces (e.g. `docs/my file.md`) is honoured. */
-const NEW_ACK = /^(.+?)\s*::\s*(.+)$/s;
-/** Legacy form: leading `<path>:<line>`. The path may contain spaces; capture up to the final
- * `:<line>` (non-greedy, terminated by a non-digit or end-of-string) rather than forbidding
- * whitespace, so a spaced path is honoured here too. */
-const LEGACY_ACK = /^(.+?:\d+)(?:\D|$)/;
+/** New line-stable form: `<path> :: <advisory text>`. The delimiter is ` :: ` with REQUIRED
+ * surrounding whitespace (matching the canonical marker the agent authors), so a bare `::` inside a
+ * valid GitHub path (e.g. `src/a::b.ts`) is NOT mistaken for the separator — the path group parses
+ * non-greedily up to the first *whitespace-delimited* ` :: `, so a path containing spaces (e.g.
+ * `docs/my file.md`) is still honoured. */
+const NEW_ACK = /^(.+?)\s+::\s+(.+)$/s;
+/** Legacy form: leading `<path>:<line>`. The path may contain spaces AND embedded `:<digits>`
+ * segments (e.g. `docs/v1:2/file.ts:42`); capture GREEDILY up to the FINAL `:<line>` (terminated by
+ * a non-digit or end-of-string) rather than stopping at the first `:<digits>`, so an interior colon
+ * segment does not truncate the path. */
+const LEGACY_ACK = /^(.+:\d+)(?:\D|$)/;
 
 /** Normalize advisory prose to a line-/format-independent form before fingerprinting: NFKC-fold,
  * lowercase, and collapse every run of non-word characters to a single space (word boundaries are
