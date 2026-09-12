@@ -345,13 +345,21 @@ function injectAgentRepoEnvelopes(bpmn: string, graph: DeliveryGraph, options: D
   );
   return bpmn.replace(blockRe, (_full, indent: string, sq: string | undefined, dq: string | undefined, tail: string) => {
     const raw = sq ?? (dq ?? "").replace(/&apos;/g, "'").replace(/&quot;/g, '"').replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
-    const declared: { repository: string | null; baseBranch: string | null } = JSON.parse(raw);
+    const declared: { nodeId?: string; repository: string | null; baseBranch: string | null } = JSON.parse(raw);
     // `repoless` → strip the block entirely (no isolation envelope, the launch-dir fallback).
     if (repoless) return "";
     const effRepo = trimOrNull(declared.repository) ?? runRepo;
     const effBase = trimOrNull(declared.baseBranch) ?? runBase;
+    // The deterministic per-node isolation branch (issue #776): the harness cuts `feat/<node.id>` itself
+    // so a cell can never leave its agent committing on the checked-out base branch (a non-ff push that
+    // strands the run — merlin job 20974). The node id rides the marker so it survives into this
+    // per-block rewrite; delivery-graph agent cells are single-instance, so the static per-node branch
+    // never collides across siblings. Omitted when the marker predates the id (a blank id degrades to the
+    // pre-#776 agent-cuts-its-own-branch behaviour rather than an ill-formed `feat/`).
+    const nodeId = trimOrNull(declared.nodeId);
+    const branchCreate = nodeId ? `feat/${nodeId}` : null;
     // The unresolved invariant above guarantees a resolvable repo here on a non-repoless run.
-    const envelope = agentNodeRepoEnvelope(effRepo ?? "", effBase);
+    const envelope = agentNodeRepoEnvelope(effRepo ?? "", effBase, branchCreate);
     const flat = flattenAgentTaskEnvelope(envelope);
     const headerLines = Object.entries(flat).map(([k, v]) => `${indent}  <zeebe:header key="${xmlAttr(k)}" value="${xmlAttr(v)}" />`);
     if (headerLines.length === 0) return "";
