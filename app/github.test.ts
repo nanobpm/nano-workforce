@@ -832,3 +832,18 @@ test("fetchPrHead: no usable transport (token mode, empty token) resolves to nul
     else process.env["NANO_PR_GITHUB_TRANSPORT"] = prevMode;
   }
 });
+
+// A branch name may legally contain `#`, `?`, or spaces. The reader must percent-encode each ref
+// SEGMENT (preserving `/`) before building the API path/URL — otherwise a `#` starts a URL fragment,
+// the path is truncated to the wrong ref, and the no-progress guard fails open (issue #786).
+test("fetchBranchHead: percent-encodes a special-character branch ref (preserving '/')", async () => {
+  const sha = await withRefFetch(
+    (path) => {
+      // The `#` must survive as %23 inside the path, not truncate it into a URL fragment.
+      assertEquals(path, "o/r/git/ref/heads/feat/x%23123");
+      return { status: 200, body: { object: { sha: "cafef00d" } } };
+    },
+    () => fetchBranchHead("o/r", "feat/x#123", "tok"),
+  );
+  assertEquals(sha, "cafef00d");
+});

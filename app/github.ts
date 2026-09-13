@@ -1382,7 +1382,13 @@ function isEpicBranch(branch: string): boolean {
 /** Resolve the head commit SHA of `branch` on `repo`, or `null` when the branch does not exist
  * (a 404 from the git-ref endpoint). Throws only on a genuine transport failure. */
 async function branchHeadSha(repo: string, branch: string, token: string): Promise<string | null> {
-  const apiPath = `repos/${repo}/git/ref/heads/${branch}`;
+  // Percent-encode each ref SEGMENT (git permits `#`, `?`, spaces, etc. in a branch name) while
+  // preserving the `/` separators that git uses for hierarchical refs (`feat/x`). Interpolating the
+  // raw name would, in the direct `fetch` URL, let a `#` start a fragment (and `?` a query) — the
+  // path is truncated, the wrong ref (or a 404) is read, and the no-progress guard fails open. gh
+  // api receives the same already-encoded path.
+  const encodedBranch = branch.split("/").map(encodeURIComponent).join("/");
+  const apiPath = `repos/${repo}/git/ref/heads/${encodedBranch}`;
   if (await useGh()) {
     try {
       const out = await runGh(["api", apiPath]);
