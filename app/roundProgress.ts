@@ -193,6 +193,6 @@ export function decideProgress(
     huskRetry: false,
     huskRetries: 0,
     reason,
-    question: noProgressQuestion(round, reason, retries >= maxHuskRetries),
+    question: noProgressQuestion(round, reason, reason === "husk" && retries >= maxHuskRetries),
   };
 }

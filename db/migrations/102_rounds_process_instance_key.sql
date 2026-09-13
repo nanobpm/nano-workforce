@@ -13,7 +13,16 @@
 -- Persist the writing process instance's key so the upsert can reuse ONLY a row THIS run wrote: a
 -- husk retry (same `process_instance_key`) updates in place; a resubmission (a different key) inserts
 -- a fresh row, leaving every prior run's history intact. Additive and nullable — pre-#786 rows and
--- rows written by an engine that does not surface the key read back NULL and simply never match a
--- concrete current key (they fall through to the status-only heuristic), so it is safe to apply
--- forward over any earlier schema and re-runs are no-ops.
+-- rows written by an engine that does not surface the key read back NULL for this column.
+--
+-- Upgrade behaviour of those NULL rows (persist-round's reuse predicate):
+--   * A KEYED engine job (the normal production case) reuses a row ONLY when its key equals the
+--     current `process_instance_key`, so a NULL-key row NEVER matches and is never reused. The
+--     status-only heuristic applies ONLY to a KEYLESS job (testkit/synthetic, no process key).
+--   * Consequently a husk auto-retry that straddles this deploy — its first attempt wrote a NULL-key
+--     row before the migration, its retry runs after with a concrete key — will not reuse that
+--     earlier row and instead inserts a fresh round-record row. That lost idempotency is INTENTIONAL
+--     and self-healing: it touches only a run whose husk-retry brackets the deploy, costs at worst
+--     one duplicate history row for that single round, and never corrupts data or history.
+-- Additive and nullable, so it is safe to apply forward over any earlier schema and re-runs are no-ops.
 ALTER TABLE rounds ADD COLUMN process_instance_key TEXT;

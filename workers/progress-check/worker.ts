@@ -49,22 +49,33 @@ export type AgentWorkReader = (
   round: number,
 ) => Promise<boolean | null>;
 
-const defaultReadHead: HeadReader = async (repo, prNumber) => {
-  const token = process.env.GITHUB_TOKEN ?? "";
-  const pr = await fetchPrHead(repo, prNumber, token).catch(() => null);
-  if (!pr) return null;
-  // Prefer the branch ref (atomic with the push) over the PR object's denormalized head.sha (#786).
-  // Once the head branch is known, trust ONLY its atomic ref: a failed/absent ref read fails OPEN
-  // (`null`) rather than falling back to the PR object's asynchronously-denormalized head.sha, which
-  // can still report a stale-but-valid SHA after a push and fabricate a no-advance escalation — the
-  // very projection this branch-ref read exists to avoid. This also makes a fork PR (whose head ref
-  // lives in another repo, so this base-repo lookup 404s) fail open to the safe continue path rather
-  // than compare a lagging denormalized SHA. Fall back to the PR head only when there is NO head ref.
-  if (pr.headRef) {
-    return await fetchBranchHead(repo, pr.headRef, token).catch(() => null);
-  }
-  return pr.headSha ?? null;
-};
+/** Build the default head reader over injected GitHub fetchers. Exported (with injectable fetchers)
+ * so the branch-ref-over-stale-`head.sha` preference — the whole point of {@link fetchBranchHead}
+ * here (#786) — is covered by a handler-level regression test, not only inside the private binding:
+ * a change that stopped reading the branch ref, or fell back to `head.sha`, must turn a test red. */
+export function makeDefaultReadHead(deps: {
+  fetchPrHead: typeof fetchPrHead;
+  fetchBranchHead: typeof fetchBranchHead;
+}): HeadReader {
+  return async (repo, prNumber) => {
+    const token = process.env.GITHUB_TOKEN ?? "";
+    const pr = await deps.fetchPrHead(repo, prNumber, token).catch(() => null);
+    if (!pr) return null;
+    // Prefer the branch ref (atomic with the push) over the PR object's denormalized head.sha (#786).
+    // Once the head branch is known, trust ONLY its atomic ref: a failed/absent ref read fails OPEN
+    // (`null`) rather than falling back to the PR object's asynchronously-denormalized head.sha, which
+    // can still report a stale-but-valid SHA after a push and fabricate a no-advance escalation — the
+    // very projection this branch-ref read exists to avoid. This also makes a fork PR (whose head ref
+    // lives in another repo, so this base-repo lookup 404s) fail open to the safe continue path rather
+    // than compare a lagging denormalized SHA. Fall back to the PR head only when there is NO head ref.
+    if (pr.headRef) {
+      return await deps.fetchBranchHead(repo, pr.headRef, token).catch(() => null);
+    }
+    return pr.headSha ?? null;
+  };
+}
+
+const defaultReadHead: HeadReader = makeDefaultReadHead({ fetchPrHead, fetchBranchHead });
 
 /** An agent-instance is "durable work" for husk purposes once it has reached a terminal state — it
  * carries a `completionDate`, or a terminal lifecycle status. A husked instance never closes (it is

@@ -495,3 +495,61 @@ test("the no-progress escalation routes through gw-escalated toward the human wa
   // It must NOT double-record the round persist-round already recorded.
   assertStringIncludes(task[0], 'target="recordRound"');
 });
+
+// ── makeDefaultReadHead: the real head reader's branch-ref-over-stale-head.sha preference ─────────
+// #786 regression guard: the handler tests inject `readHead`, and app/github.test.ts exercises
+// fetchBranchHead in isolation, so nothing pinned the DEFAULT reader's wiring — a change that stopped
+// reading the branch ref, or fell back to the PR object's denormalized head.sha, would leave the
+// suite green. These drive makeDefaultReadHead with injected fetchers to lock that contract.
+async function makeReader(deps: {
+  fetchPrHead: (repo: string, n: number | string, token: string) => Promise<{ headRef: string | null; headSha: string | null; baseRef: string | null } | null>;
+  fetchBranchHead: (repo: string, branch: string, token: string) => Promise<string | null>;
+}) {
+  const { makeDefaultReadHead } = await import("../workers/progress-check/worker.ts");
+  return makeDefaultReadHead(deps as any);
+}
+
+test("makeDefaultReadHead: prefers the atomic branch ref over a stale PR head.sha", async () => {
+  let branchReads = 0;
+  const read = await makeReader({
+    fetchPrHead: async () => ({ headRef: "feat/x", headSha: "stale-denormalized-sha", baseRef: "main" }),
+    fetchBranchHead: async (_r, branch) => {
+      branchReads++;
+      assertEquals(branch, "feat/x", "the branch ref read targets the PR's head ref");
+      return "fresh-atomic-sha";
+    },
+  });
+  assertEquals(await read("o/r", 1), "fresh-atomic-sha", "the branch ref SHA wins over the stale head.sha");
+  assertEquals(branchReads, 1, "the branch ref was actually consulted");
+});
+
+test("makeDefaultReadHead: a failed branch-ref read fails OPEN to null, never falling back to head.sha", async () => {
+  const read = await makeReader({
+    fetchPrHead: async () => ({ headRef: "feat/x", headSha: "stale-sha", baseRef: "main" }),
+    fetchBranchHead: async () => {
+      throw new Error("ref 404 / transport hiccup");
+    },
+  });
+  assertEquals(await read("o/r", 1), null, "a ref-read failure must not fall back to the denormalized head.sha");
+});
+
+test("makeDefaultReadHead: with NO head ref (e.g. detached) falls back to the PR head.sha", async () => {
+  let branchReads = 0;
+  const read = await makeReader({
+    fetchPrHead: async () => ({ headRef: null, headSha: "only-head-sha", baseRef: "main" }),
+    fetchBranchHead: async () => {
+      branchReads++;
+      return "unused";
+    },
+  });
+  assertEquals(await read("o/r", 1), "only-head-sha", "with no head ref the PR head.sha is the only signal");
+  assertEquals(branchReads, 0, "the branch ref is not read when there is no head ref");
+});
+
+test("makeDefaultReadHead: an unreadable PR (null) fails OPEN to null", async () => {
+  const read = await makeReader({
+    fetchPrHead: async () => null,
+    fetchBranchHead: async () => "never",
+  });
+  assertEquals(await read("o/r", 1), null, "a null PR read fails open (the guard treats null as continue)");
+});
