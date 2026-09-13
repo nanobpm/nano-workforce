@@ -3,7 +3,7 @@
 // the merge-exclusion graph. Force the token transport and stub `globalThis.fetch`.
 import { test } from "node:test";
 import { assertEquals, assertRejects } from "#test-assert";
-import { BaseBranchMustExistError, checkConclusions, classifyMergeability, classifyPrLiveness, coalesceTitle, createPullRequest, ensureBaseBranch, ensurePromotionPr, fetchBranchHead, fetchIssueTitle, fetchPrFiles, isNotAPullRequestError, listPrsForHead, type Mergeability, type PrState } from "./github.ts";
+import { BaseBranchMustExistError, checkConclusions, classifyMergeability, classifyPrLiveness, coalesceTitle, createPullRequest, ensureBaseBranch, ensurePromotionPr, fetchBranchHead, fetchIssueTitle, fetchPrFiles, fetchPrHead, isNotAPullRequestError, listPrsForHead, type Mergeability, type PrState } from "./github.ts";
 import { DEFAULT_MERGE_PROTOCOL, type MergeProtocol, type RequiredCheck } from "./mergeProtocol.ts";
 
 // A fake `fetch` that serves `pages` of file batches; each page N (1-based) returns `pages[N-1]`
@@ -779,6 +779,54 @@ test("fetchBranchHead: no usable transport (token mode, empty token) resolves to
   try {
     const sha = await fetchBranchHead("o/r", "feat/x", "");
     assertEquals(sha, null);
+  } finally {
+    if (prevMode === undefined) delete process.env["NANO_PR_GITHUB_TRANSPORT"];
+    else process.env["NANO_PR_GITHUB_TRANSPORT"] = prevMode;
+  }
+});
+
+// ── fetchPrHead — the PR head reader surfaces the head branch's OWNING repo (issue #786) ─────
+//
+// The no-progress head reader resolves the head ref in `headRepo`, so a cross-repo (fork) PR reads
+// the fork's ref, not a same-named branch in the base repo (which would resolve to an unrelated
+// SHA). These assert the transport-level mapping of the source repository through `fetchPrHead`'s
+// REST branch (forced via the token transport), which the handler-level tests — injecting an
+// already-parsed `{ headRepo }` — do not exercise.
+test("fetchPrHead: REST maps head.repo.full_name to the fork's source repository", async () => {
+  const head = await withRefFetch(
+    (path) => {
+      assertEquals(path, "base/repo/pulls/789");
+      return {
+        status: 200,
+        body: {
+          head: { ref: "feat/x", sha: "cafef00d", repo: { full_name: "fork-owner/repo" } },
+          base: { ref: "main" },
+        },
+      };
+    },
+    () => fetchPrHead("base/repo", 789, "tok"),
+  );
+  assertEquals(head, { headRef: "feat/x", headSha: "cafef00d", baseRef: "main", headRepo: "fork-owner/repo" });
+});
+
+test("fetchPrHead: REST fails open to headRepo=null when the head repo is absent (deleted fork)", async () => {
+  const head = await withRefFetch(
+    () => ({
+      status: 200,
+      body: { head: { ref: "feat/x", sha: "cafef00d", repo: null }, base: { ref: "main" } },
+    }),
+    () => fetchPrHead("base/repo", 789, "tok"),
+  );
+  // A null head repo must surface as headRepo=null (the reader then fails open), never the base repo.
+  assertEquals(head?.headRepo, null);
+});
+
+test("fetchPrHead: no usable transport (token mode, empty token) resolves to null, never throws", async () => {
+  const prevMode = process.env["NANO_PR_GITHUB_TRANSPORT"];
+  process.env["NANO_PR_GITHUB_TRANSPORT"] = "token";
+  try {
+    const head = await fetchPrHead("o/r", 1, "");
+    assertEquals(head, null);
   } finally {
     if (prevMode === undefined) delete process.env["NANO_PR_GITHUB_TRANSPORT"];
     else process.env["NANO_PR_GITHUB_TRANSPORT"] = prevMode;
