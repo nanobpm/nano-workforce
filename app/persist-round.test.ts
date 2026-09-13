@@ -168,3 +168,56 @@ test("persist-round is idempotent on (pr_key, round_no) — a retry updates, nev
   assertEquals(roundUpdate?.patch.summary, "retry attempt", "the retry updates the existing round in place");
   assertEquals((inserts.rounds[0] as any).round_no, 4);
 });
+
+// Regression (issue #786): the idempotent upsert must reuse only a row THIS worker wrote — never an
+// escalation row. On a needs_input/blocked escalation, pr.persist-escalation records a `rounds` row
+// (status needs_input/blocked) for the SAME (pr_key, round_no); the human-answered resume re-enters
+// that same numeric round and lands here. Blindly updating the newest matching row would overwrite
+// the escalation row to `addressed`, ERASING the escalation attempt from the durable history. The
+// resume must INSERT a fresh row so both the escalation and its resolution survive.
+test("persist-round does NOT overwrite a same-round escalation row — it inserts the resumed attempt", async () => {
+  const { app, inserts, updates, rows } = fakeApp();
+  // Simulate pr.persist-escalation having recorded a needs_input round row for round 5.
+  const roundsStore = (rows.rounds ??= new Map());
+  roundsStore.set(101, {
+    id: 101,
+    pr_key: "o/r#1",
+    round_no: 5,
+    status: "needs_input",
+    summary: "escalated: which API shape?",
+    transcript: "escalation transcript",
+    started_at: "t0",
+    ended_at: "t0",
+  });
+
+  // The human answers; the same numeric round resumes and reaches persist-round as `addressed`.
+  const resume = { variables: { prKey: "o/r#1", round: 5, status: "addressed", summary: "resumed and pushed" } };
+  await handler(resume as any, app as any);
+
+  assertEquals(inserts.rounds.length, 1, "the resumed attempt inserts a NEW round row");
+  assertEquals((inserts.rounds[0] as any).status, "addressed", "the new row is the addressed resume");
+  // The escalation row is untouched — never updated to `addressed`.
+  const escalationTouched = (updates.rounds ?? []).some((u: any) => u.key === 101);
+  assertEquals(escalationTouched, false, "the needs_input escalation row is preserved, not overwritten");
+  assertEquals((roundsStore.get(101) as any).status, "needs_input", "the escalation row keeps its status");
+});
+
+// But a genuine husk retry (a prior pr.persist-round row, status addressed/waiting) is still reused
+// in place — only escalation rows are excluded, so idempotency for the retry path is preserved even
+// when an escalation row for the same round also exists.
+test("persist-round reuses a prior addressed round-record row while skipping an escalation row", async () => {
+  const { app, inserts, updates, rows } = fakeApp();
+  const roundsStore = (rows.rounds ??= new Map());
+  // An escalation row AND a prior persist-round row for the same round.
+  roundsStore.set(200, { id: 200, pr_key: "o/r#1", round_no: 6, status: "blocked", summary: "blocked earlier" });
+  roundsStore.set(201, { id: 201, pr_key: "o/r#1", round_no: 6, status: "addressed", summary: "first addressed" });
+
+  const retry = { variables: { prKey: "o/r#1", round: 6, status: "addressed", summary: "husk retry" } };
+  await handler(retry as any, app as any);
+
+  assertEquals(inserts.rounds.length, 0, "no new row — the prior addressed row is reused");
+  const roundUpdate = (updates.rounds ?? []).at(-1) as any;
+  assertEquals(roundUpdate?.key, 201, "the addressed round-record row is updated, not the blocked escalation row");
+  assertEquals(roundUpdate?.patch.summary, "husk retry");
+  assertEquals((roundsStore.get(200) as any).status, "blocked", "the escalation row is left intact");
+});

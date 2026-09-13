@@ -155,12 +155,15 @@ export function noProgressQuestion(
  *    huskRetry: false, huskRetries: 0, question }` — `gw-husk` routes to the human escalation. The
  *    counter resets so a human-answered resume gets fresh retries.
  *
- * `agentWorkObserved` is the agent-instance corroboration: `true` when a terminal `review-round`
- * agent-instance exists for the round (→ `no-advance`); `false` — a SUCCESSFUL read that found no
- * terminal instance (incl. the read-as-absence testkit, whose empty list is `false`) → `husk`; and
- * `null`/`undefined` — an UNKNOWN read (the engine channel was unavailable or threw) → `no-advance`,
- * never an auto-retry, so a transient AgentInstance read outage can never duplicate genuinely-
- * completed agent work. Only a positively-corroborated empty read is a husk. */
+ * `agentWorkObserved` is the agent-instance corroboration for the COMPLETING `review-round`
+ * element-instance (see {@link decideProgress}'s reader in workers/progress-check): `true` when the
+ * newest correlated `review-round` instance is TERMINAL (→ `no-advance`); `false` — a SUCCESSFUL,
+ * positively-corroborated read whose newest correlated instance is NON-terminal (the completing
+ * attempt husked) → `husk`; and `null`/`undefined` — an UNKNOWN read (the engine channel was
+ * unavailable/absent — e.g. an empty instance list on the read-as-absence testkit — or the read
+ * threw) → `no-advance`, never an auto-retry, so a transient or absent AgentInstance read can never
+ * duplicate genuinely-completed agent work. Only a positively-corroborated non-terminal completing
+ * instance is a husk; an absent/empty read is UNKNOWN, not a husk. */
 export function decideProgress(
   status: string | null | undefined,
   previousHead: string | null | undefined,

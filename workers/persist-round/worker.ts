@@ -112,8 +112,18 @@ const handler: AppJobHandler<In> = async (job, app) => {
   // The `rounds` table has no UNIQUE(pr_key, round_no), so an unconditional insert would manufacture
   // a DUPLICATE history row per retry — the durable round history is the SoT the cockpit and the
   // no-progress guard read, so a duplicate row corrupts both. Upsert on `(pr_key, round_no)`:
-  // update the existing row in place, else insert. Application-level (no migration/UNIQUE) so it
-  // heals installs that already carry pre-#786 duplicates rather than crashing on a new constraint.
+  // update the existing round-record row in place, else insert. Application-level (no
+  // migration/UNIQUE) so it heals installs that already carry pre-#786 duplicates rather than
+  // crashing on a new constraint.
+  //
+  // But the upsert MUST reuse only a row THIS worker wrote — never an escalation row. On a
+  // `needs_input`/`blocked` escalation, `pr.persist-escalation` inserts a `rounds` row (status
+  // `needs_input`/`blocked`) for the SAME `(pr_key, round_no)`, and the human-answered resume
+  // re-enters that same numeric round → back here. Blindly updating the newest matching row would
+  // overwrite that escalation row to `addressed`, ERASING the escalation attempt from the durable
+  // history. So reuse only a prior `pr.persist-round` row — one whose status is NOT a human-hold
+  // status (`needs_input`/`blocked`); if the only match is an escalation row, insert a fresh row for
+  // the resumed attempt so both the escalation and its resolution survive in the history.
   const roundsTbl = app.data.table<{
     id: number;
     pr_key: string;
@@ -125,7 +135,12 @@ const handler: AppJobHandler<In> = async (job, app) => {
     started_at: string;
     ended_at: string;
   }>("rounds", "id");
-  const existing = await roundsTbl.find({ pr_key: prKey, round_no: round });
+  const HUMAN_HOLD_STATUSES = new Set(["needs_input", "blocked"]);
+  const matching = await roundsTbl.find({ pr_key: prKey, round_no: round });
+  // Reuse only a round-record row (not an escalation row); of those, the newest (greatest id).
+  const reusable = matching
+    .filter((r) => !HUMAN_HOLD_STATUSES.has(r.status))
+    .reduce<{ id: number } | null>((newest, r) => (newest && newest.id >= r.id ? newest : r), null);
   const roundRow = {
     status,
     summary,
@@ -133,8 +148,8 @@ const handler: AppJobHandler<In> = async (job, app) => {
     worker: workerOf(job.variables),
     ended_at: now,
   };
-  if (existing.length > 0) {
-    await roundsTbl.update(existing[0].id, roundRow);
+  if (reusable) {
+    await roundsTbl.update(reusable.id, roundRow);
   } else {
     await roundsTbl.insert({
       pr_key: prKey,
