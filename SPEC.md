@@ -162,15 +162,29 @@ Notes:
   compares it to the head recorded at the previous round. A round whose head DID
   advance is real progress and continues to the review-wait gateway. A round whose
   head did NOT advance pushed no commit, so re-requesting a review would loop on
-  byte-identical code; `gw-progress` routes it to `gw-husk`, which SPLITS it:
-    - a **husk** — no commit AND no terminal `review-round` agent-instance for the
-      round (the producer harness died mid-run) — is auto-re-run onto a healthy
-      worker up to `MAX_HUSK_RETRIES` (2) before escalating; and
-    - a **no-advance** — a terminal instance exists but nothing was pushed — (and a
-      husk that exhausts its retries) escalates to the human `wait-answer` task.
-  A head that cannot be read fails OPEN (continue), so a transient GitHub hiccup
-  never fabricates a no-progress escalation. The round cap and the review-wait
-  timeout remain the outer safety nets.
+  byte-identical code; `gw-progress` routes it to `gw-husk`, which SPLITS it on a
+  corroboration correlated to the COMPLETING `review-round` element-instance (NOT
+  an aggregate terminal count — a same-round human-answered resume is classified on
+  its own fresh attempt):
+    - a **husk** — no commit AND the completing `review-round` attempt is
+      NON-TERMINAL (the producer harness died mid-run, leaving a stuck instance) —
+      is auto-re-run onto a healthy worker up to `MAX_HUSK_RETRIES` (2) before
+      escalating; and
+    - a **no-advance** — the completing attempt ran to a terminal instance but
+      nothing was pushed — (and a husk that exhausts its retries) escalates to the
+      human `wait-answer` task.
+  The agent-instance read is AVAILABILITY-AWARE and fails SAFE (ADR 0056): an
+  absent channel (an engine with no AgentInstance projection yields an empty list)
+  or a read error is UNKNOWN, treated as no-advance — never an auto-retry that
+  could duplicate genuinely-completed work — because the just-completed round would
+  have minted an instance had the channel existed. A head that cannot be read fails
+  OPEN (continue), so a transient GitHub hiccup never fabricates a no-progress
+  escalation. Two supporting invariants keep an auto-retry clean: `pr.persist-round`
+  records a round IDEMPOTENTLY on `(pr_key, round_no)` (a retry updates in place, it
+  never duplicates the durable round history), and the guard flips the PR back to
+  the running `converging` status before a retry re-enters `review-round` so the
+  poller does not solicit a spurious review against the still-running round. The
+  round cap and the review-wait timeout remain the outer safety nets.
 
 
 ## 5. Agent job contract (`senior:pr-review`)

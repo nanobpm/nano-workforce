@@ -14,6 +14,7 @@ function fakeApp() {
   const inserts: Record<string, unknown[]> = { rounds: [] };
   const updates: Record<string, unknown[]> = { pull_requests: [] };
   const rows: Record<string, Map<string, unknown>> = {};
+  let roundsId = 0;
   const app = {
     data: {
       table(name: string, _key: string) {
@@ -22,14 +23,25 @@ function fakeApp() {
           async get(key: string) {
             return store.get(key);
           },
+          async find(criteria: Record<string, unknown>) {
+            return [...store.values()].filter((r) =>
+              Object.entries(criteria).every(([k, v]) => (r as any)[k] === v),
+            );
+          },
           async insert(row: unknown) {
-            (inserts[name] ??= []).push(row);
             const pk = name === "rounds" ? "id" : "pr_key";
+            // The rounds table has an AUTOINCREMENT id; mint one so find/update can key on it.
+            if (name === "rounds" && (row as any).id === undefined) {
+              (row as any).id = ++roundsId;
+            }
+            (inserts[name] ??= []).push(row);
             store.set((row as any)[pk], row);
             return 1;
           },
-          async update(key: string, patch: unknown) {
+          async update(key: string, patch: Record<string, unknown>) {
             (updates[name] ??= []).push({ key, patch });
+            const existing = store.get(key);
+            if (existing) store.set(key, { ...(existing as object), ...patch });
           },
         };
       },
@@ -134,4 +146,25 @@ test("persist-round heals from the prKey when repo/prNumber are absent", async (
     "TOK-en_123",
     "the running agent's abandon token is preserved from abandonUrl, not re-minted",
   );
+});
+
+// Idempotent round recording (issue #786): a husk auto-retry re-enters `review-round` WITHOUT
+// advancing the round counter, so pr.persist-round is reached again for the SAME (pr_key, round_no).
+// The `rounds` table has no UNIQUE(pr_key, round_no), so the worker must UPSERT — update the existing
+// row in place, never manufacture a duplicate history row that would corrupt the durable round
+// history the cockpit and the no-progress guard both read.
+test("persist-round is idempotent on (pr_key, round_no) — a retry updates, never duplicates", async () => {
+  const { app, inserts, updates } = fakeApp();
+  const first = { variables: { prKey: "o/r#1", round: 4, status: "addressed", summary: "first attempt" } };
+  await handler(first as any, app as any);
+  assertEquals(inserts.rounds.length, 1, "the first attempt inserts a round row");
+
+  // A husk retry: same round_no, a fresh summary/transcript.
+  const retry = { variables: { prKey: "o/r#1", round: 4, status: "addressed", summary: "retry attempt" } };
+  await handler(retry as any, app as any);
+  assertEquals(inserts.rounds.length, 1, "the retry does NOT insert a second round row");
+
+  const roundUpdate = (updates.rounds ?? []).at(-1) as any;
+  assertEquals(roundUpdate?.patch.summary, "retry attempt", "the retry updates the existing round in place");
+  assertEquals((inserts.rounds[0] as any).round_no, 4);
 });

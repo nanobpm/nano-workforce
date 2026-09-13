@@ -36,10 +36,14 @@ type Out = WorkerOutputs["pr.progress-check"];
 // the PR carries NO head ref at all.
 export type HeadReader = (repo: string, prNumber: number) => Promise<string | null>;
 
-// Corroborates whether a no-advance `addressed` round produced DURABLE agent work: `true` when a
-// terminal `review-round` agent-instance exists for the round (→ `no-advance`), `false` when none do
-// (→ `husk`), `null` when the engine read is unavailable. Injectable for tests; the default reads
-// the engine's AgentInstance channel (read-as-absence yields an empty list → `husk`).
+// Corroborates whether a no-advance `addressed` round produced DURABLE agent work: `true` when the
+// completing `review-round` element-instance ran to a terminal agent-instance (→ `no-advance`),
+// `false` when the completing attempt husked — a non-terminal `review-round` instance is present
+// (→ `husk`), `null` when the read is UNAVAILABLE (the engine has no AgentInstance channel, or the
+// read threw → `no-advance`, never an auto-retry). Injectable for tests; the default is
+// availability-aware over the engine's AgentInstance channel (see {@link agentWorkFromEngine}). The
+// `round` argument is retained for the reader contract but no longer participates in the decision —
+// correlation is by the COMPLETING element-instance, not an aggregate round count (#786).
 export type AgentWorkReader = (
   processInstanceKey: string | null | undefined,
   round: number,
@@ -70,22 +74,40 @@ function isTerminalInstance(s: AgentInstanceSummary): boolean {
   return /^(completed|complete|done|finished|failed|terminated)$/i.test(s.status ?? "");
 }
 
-/** Default agent-work corroboration: count the `review-round` agent-instances in this process
- * instance that reached a terminal state and compare to the round number. Every progressing round
- * before this one minted a terminal instance, so `terminal >= round` means the completing round DID
- * produce a durable instance (→ `no-advance`); fewer means it husked. Read-as-absence (an engine
- * with no AgentInstance channel, or none matching) yields an empty list → `false` → `husk`. Any read
- * FAILURE degrades to `null` (unknown → treated as a conservative `no-advance` downstream, never an
- * auto-retry), so a transient read outage can never duplicate genuinely-completed agent work. */
+/** Default agent-work corroboration — AVAILABILITY-AWARE and correlated to the COMPLETING
+ * `review-round` element-instance (issue #786, Option 1):
+ *
+ *  • AVAILABILITY PROBE (ADR 0056 fail-safe): search the process instance's `review-round`
+ *    agent-instances. An EMPTY list means the AgentInstance channel is ABSENT for this deployment
+ *    (the testkit WASM double, or a live engine without it) — because the just-completed
+ *    `review-round` element MUST have minted a Create record on a channel-present engine, so an
+ *    empty list can only mean "no channel", never "this round husked". An absent channel is UNKNOWN
+ *    (`null`) → `no-advance` downstream, never an auto-retry. This is what makes an advisory,
+ *    read-only channel safe to consult on the husk path: on absence it forces nothing.
+ *
+ *  • CORRELATION (no key threading): once the channel is known present, only the CURRENT
+ *    (single-threaded) `review-round` attempt can be non-terminal — every prior round already ran to
+ *    a terminal instance — so a non-terminal instance present ⇔ the completing attempt husked, and
+ *    all-terminal ⇔ the completing attempt is terminal (→ `no-advance`). This is round-INDEPENDENT,
+ *    so a same-round human-answered resume (which mints a fresh element-instance) is classified on
+ *    its OWN attempt rather than an aggregate `terminal >= round` count a prior round already
+ *    satisfied (the worker.ts:75 misclassification #786 flagged).
+ *
+ * Any read FAILURE degrades to `null` (unknown → `no-advance`, never an auto-retry), so a transient
+ * read outage can never duplicate genuinely-completed agent work. */
 function agentWorkFromEngine(engine: AppApi["engine"]): AgentWorkReader {
-  return async (processInstanceKey, round) => {
+  return async (processInstanceKey, _round) => {
     if (!processInstanceKey) return null;
     try {
       const instances = await engine.searchAgentInstances({
         processInstanceKey: String(processInstanceKey),
         elementId: "review-round",
       });
-      return instances.filter(isTerminalInstance).length >= round;
+      // Availability probe: an empty list ⇒ no channel ⇒ unknown ⇒ no-advance (never husk-retry).
+      if (instances.length === 0) return null;
+      // Correlate to the completing attempt: all-terminal ⇒ no-advance (`true`); any non-terminal ⇒
+      // the current attempt husked (`false`).
+      return instances.every(isTerminalInstance);
     } catch {
       return null;
     }
@@ -102,13 +124,6 @@ export function makeHandler(deps: {
   return async (job, app) => {
     const { prKey, status, repo, prNumber, round, huskRetries } = job.variables;
 
-    // Only an `addressed` round claims a push, so only it can be a no-progress round — and a
-    // blank/unknown status counts as `addressed` here (gw-status defaults it down the addressed
-    // arm and pr.persist-round records a missing status as `addressed`), so it is the safe-default
-    // trap this guard exists for. Skip the GitHub read entirely only for an explicitly recognized
-    // non-addressed status — a `waiting` round costs nothing and continues.
-    if (!isAddressedStatus(status)) return { progressed: true, huskRetries: 0 };
-
     // Prefer the carried repo/prNumber; fall back to parsing the canonical `owner/repo#N` prKey so
     // an older in-flight instance (or a process-variable regression) still resolves a target. If
     // neither yields one, fail open rather than guess.
@@ -117,23 +132,35 @@ export function makeHandler(deps: {
     const ghNumber = typeof prNumber === "number" ? prNumber : parsed?.number;
     if (!ghRepo || typeof ghNumber !== "number") return { progressed: true, huskRetries: 0 };
 
+    // Read the head and record the baseline on EVERY round — including a non-addressed `waiting`
+    // round — BEFORE the addressed-only escalation logic. A `waiting` round pushes nothing, but
+    // recording its head establishes the baseline the FIRST `addressed` round compares against, so a
+    // first-addressed-round husk is classifiable instead of silently failing open for want of a
+    // baseline (the worker.ts:142 gap #786 flagged). The baseline is only overwritten when we
+    // actually read a head, so a null (unreadable) head never clobbers a good baseline.
     const currentHead = await deps.readHead(ghRepo, ghNumber).catch(() => null);
-    const prs = app.data.table<{ pr_key: string; last_round_head: string | null }>(
-      "pull_requests",
-      "pr_key",
-    );
+    const prs = app.data.table<{
+      pr_key: string;
+      last_round_head: string | null;
+      status: string | null;
+      updated_at: string | null;
+    }>("pull_requests", "pr_key");
     const row = await prs.get(prKey);
     const previousHead = row?.last_round_head ?? null;
-
-    // Record the observed head as the baseline for the next round's comparison — but only when we
-    // actually read one, so a null (unreadable) head never clobbers a good baseline.
     if (currentHead) {
       await prs.update(prKey, { last_round_head: currentHead });
     }
 
-    // Round numbers are 1-based; coerce a missing/invalid `round` to a positive 1 (never 0, which
-    // would make the `terminalCount >= 0` corroboration trivially true and force every such round to
-    // `no-advance` regardless of the real agent-instance state).
+    // Only an `addressed` round claims a push, so only it can be a no-progress round — and a
+    // blank/unknown status counts as `addressed` here (gw-status defaults it down the addressed arm
+    // and pr.persist-round records a missing status as `addressed`), so it is the safe-default trap
+    // this guard exists for. An explicitly recognized non-addressed status (`waiting`, etc.)
+    // legitimately has no push and always continues — after the baseline write above.
+    if (!isAddressedStatus(status)) return { progressed: true, huskRetries: 0 };
+
+    // Round numbers are 1-based; coerce a missing/invalid `round` to a positive 1. The round no
+    // longer gates the agent-work corroboration (correlation is by the completing element-instance,
+    // not an aggregate round count — #786); it only tunes the human-facing escalation question.
     const roundNo = typeof round === "number" && round > 0 ? Math.floor(round) : 1;
     // Corroborate durable agent work only when we are actually on the no-progress path (an
     // addressed round whose head did not advance) — otherwise the engine read is wasted.
@@ -151,6 +178,16 @@ export function makeHandler(deps: {
       agentWorkObserved,
       typeof huskRetries === "number" ? huskRetries : null,
     );
+
+    // Poller non-interference during a husk auto-retry (#786): pr.persist-round parked the PR in
+    // `waiting_review`, but a husk retry re-enters `review-round` immediately (it does NOT wait for a
+    // new review), so leaving the PR `waiting_review` would let pollReviews solicit a spurious
+    // Copilot review and make pollJobActivation (which treats only `converging` as live) hide the
+    // re-running job. Flip the status back to the running `converging` aggregate BEFORE the retry
+    // re-enters review-round so the poller correctly sees an in-flight round, not a stalled wait.
+    if (decision.huskRetry === true) {
+      await prs.update(prKey, { status: "converging", updated_at: new Date().toISOString() });
+    }
 
     return {
       progressed: decision.progressed,

@@ -107,16 +107,42 @@ const handler: AppJobHandler<In> = async (job, app) => {
     });
   }
 
-  await app.data.table("rounds", "id").insert({
-    pr_key: prKey,
-    round_no: round,
+  // Idempotent round record (issue #786): a husk auto-retry re-enters `review-round` WITHOUT
+  // advancing the round counter, so the SAME `(pr_key, round_no)` reaches this worker more than once.
+  // The `rounds` table has no UNIQUE(pr_key, round_no), so an unconditional insert would manufacture
+  // a DUPLICATE history row per retry — the durable round history is the SoT the cockpit and the
+  // no-progress guard read, so a duplicate row corrupts both. Upsert on `(pr_key, round_no)`:
+  // update the existing row in place, else insert. Application-level (no migration/UNIQUE) so it
+  // heals installs that already carry pre-#786 duplicates rather than crashing on a new constraint.
+  const roundsTbl = app.data.table<{
+    id: number;
+    pr_key: string;
+    round_no: number;
+    status: string;
+    summary?: string;
+    transcript: string | null;
+    worker?: string;
+    started_at: string;
+    ended_at: string;
+  }>("rounds", "id");
+  const existing = await roundsTbl.find({ pr_key: prKey, round_no: round });
+  const roundRow = {
     status,
     summary,
     transcript: transcriptOf(job.variables),
     worker: workerOf(job.variables),
-    started_at: now,
     ended_at: now,
-  });
+  };
+  if (existing.length > 0) {
+    await roundsTbl.update(existing[0].id, roundRow);
+  } else {
+    await roundsTbl.insert({
+      pr_key: prKey,
+      round_no: round,
+      started_at: now,
+      ...roundRow,
+    });
+  }
   await app.data.table("pull_requests", "pr_key").update(prKey, {
     status: "waiting_review",
     current_round: round,
