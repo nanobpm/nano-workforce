@@ -502,7 +502,7 @@ test("the no-progress escalation routes through gw-escalated toward the human wa
 // reading the branch ref, or fell back to the PR object's denormalized head.sha, would leave the
 // suite green. These drive makeDefaultReadHead with injected fetchers to lock that contract.
 async function makeReader(deps: {
-  fetchPrHead: (repo: string, n: number | string, token: string) => Promise<{ headRef: string | null; headSha: string | null; baseRef: string | null } | null>;
+  fetchPrHead: (repo: string, n: number | string, token: string) => Promise<{ headRef: string | null; headSha: string | null; baseRef: string | null; headRepo: string | null } | null>;
   fetchBranchHead: (repo: string, branch: string, token: string) => Promise<string | null>;
 }) {
   const { makeDefaultReadHead } = await import("../workers/progress-check/worker.ts");
@@ -512,7 +512,7 @@ async function makeReader(deps: {
 test("makeDefaultReadHead: prefers the atomic branch ref over a stale PR head.sha", async () => {
   let branchReads = 0;
   const read = await makeReader({
-    fetchPrHead: async () => ({ headRef: "feat/x", headSha: "stale-denormalized-sha", baseRef: "main" }),
+    fetchPrHead: async () => ({ headRef: "feat/x", headSha: "stale-denormalized-sha", baseRef: "main", headRepo: "o/r" }),
     fetchBranchHead: async (_r, branch) => {
       branchReads++;
       assertEquals(branch, "feat/x", "the branch ref read targets the PR's head ref");
@@ -525,7 +525,7 @@ test("makeDefaultReadHead: prefers the atomic branch ref over a stale PR head.sh
 
 test("makeDefaultReadHead: a failed branch-ref read fails OPEN to null, never falling back to head.sha", async () => {
   const read = await makeReader({
-    fetchPrHead: async () => ({ headRef: "feat/x", headSha: "stale-sha", baseRef: "main" }),
+    fetchPrHead: async () => ({ headRef: "feat/x", headSha: "stale-sha", baseRef: "main", headRepo: "o/r" }),
     fetchBranchHead: async () => {
       throw new Error("ref 404 / transport hiccup");
     },
@@ -536,7 +536,7 @@ test("makeDefaultReadHead: a failed branch-ref read fails OPEN to null, never fa
 test("makeDefaultReadHead: with NO head ref (e.g. detached) falls back to the PR head.sha", async () => {
   let branchReads = 0;
   const read = await makeReader({
-    fetchPrHead: async () => ({ headRef: null, headSha: "only-head-sha", baseRef: "main" }),
+    fetchPrHead: async () => ({ headRef: null, headSha: "only-head-sha", baseRef: "main", headRepo: "o/r" }),
     fetchBranchHead: async () => {
       branchReads++;
       return "unused";
@@ -552,4 +552,32 @@ test("makeDefaultReadHead: an unreadable PR (null) fails OPEN to null", async ()
     fetchBranchHead: async () => "never",
   });
   assertEquals(await read("o/r", 1), null, "a null PR read fails open (the guard treats null as continue)");
+});
+
+test("makeDefaultReadHead: a fork PR reads the FORK repo's ref, not the (colliding) base-repo ref (#786)", async () => {
+  // A cross-repo PR whose head branch shares a name with a base-repo branch: querying the base repo
+  // would read the unrelated base-branch SHA. The reader must target the head branch's OWNING repo.
+  const queried: Array<{ repo: string; branch: string }> = [];
+  const read = await makeReader({
+    fetchPrHead: async () => ({ headRef: "feat/x", headSha: "sha", baseRef: "main", headRepo: "fork-owner/r" }),
+    fetchBranchHead: async (repo, branch) => {
+      queried.push({ repo, branch });
+      return repo === "fork-owner/r" ? "fork-head-sha" : "unrelated-base-sha";
+    },
+  });
+  assertEquals(await read("base-owner/r", 1), "fork-head-sha", "the head ref is resolved in the fork, not the base repo");
+  assertEquals(queried, [{ repo: "fork-owner/r", branch: "feat/x" }], "the branch ref read targets the fork repository");
+});
+
+test("makeDefaultReadHead: an unresolvable head repository (deleted fork) fails OPEN to null (#786)", async () => {
+  let branchReads = 0;
+  const read = await makeReader({
+    fetchPrHead: async () => ({ headRef: "feat/x", headSha: "sha", baseRef: "main", headRepo: null }),
+    fetchBranchHead: async () => {
+      branchReads++;
+      return "never";
+    },
+  });
+  assertEquals(await read("o/r", 1), null, "a null head repo fails open rather than falling back to the base repo");
+  assertEquals(branchReads, 0, "no base-repo branch read is attempted when the head repo is unresolvable");
 });

@@ -65,11 +65,20 @@ export function makeDefaultReadHead(deps: {
     // Once the head branch is known, trust ONLY its atomic ref: a failed/absent ref read fails OPEN
     // (`null`) rather than falling back to the PR object's asynchronously-denormalized head.sha, which
     // can still report a stale-but-valid SHA after a push and fabricate a no-advance escalation — the
-    // very projection this branch-ref read exists to avoid. This also makes a fork PR (whose head ref
-    // lives in another repo, so this base-repo lookup 404s) fail open to the safe continue path rather
-    // than compare a lagging denormalized SHA. Fall back to the PR head only when there is NO head ref.
+    // very projection this branch-ref read exists to avoid. The ref is read in the repository the
+    // head branch actually lives in (the fork for a cross-repo PR — see below), so a fork PR fails
+    // open safely instead of comparing an unrelated base-repo SHA. Fall back to the PR head only when
+    // there is NO head ref.
     if (pr.headRef) {
-      return await deps.fetchBranchHead(repo, pr.headRef, token).catch(() => null);
+      // Resolve the head ref in the repository the head branch actually lives in — the FORK for a
+      // cross-repo PR (`pr.headRepo`), else the base `repo`. Querying the base repo unconditionally
+      // would, for a fork PR whose head branch shares a name with a base-repo branch, read the
+      // unrelated base-branch SHA and fabricate progress/no-progress (#786). When the head repo
+      // cannot be resolved (a deleted fork ⇒ `headRepo:null`) fail OPEN to `null` rather than fall
+      // back to the base repo and risk that collision.
+      const headRepo = pr.headRepo;
+      if (!headRepo) return null;
+      return await deps.fetchBranchHead(headRepo, pr.headRef, token).catch(() => null);
     }
     return pr.headSha ?? null;
   };
