@@ -1448,6 +1448,38 @@ test("#778 digestInvisibleRawValues fingerprints an XML-invalid `wait.credential
   );
 });
 
+test("#778 digestInvisibleRawValues fingerprints an XML-invalid `wait.kind`/`onTimeout`/`poll.backoff` so a malformed probe does not collide with a valid one (thread :1366)", () => {
+  const clean = { name: "g", nodes: [{ id: "w", kind: "wait", wait: { kind: "http", target: "https://x", onTimeout: "escalate", poll: { backoff: "linear" } } }], edges: [] };
+  for (const [field, dirtyWait] of [
+    ["wait.kind", { kind: "http\x01", target: "https://x" }],
+    ["wait.onTimeout", { kind: "http", target: "https://x", onTimeout: "escalate\x01" }],
+    ["wait.poll.backoff", { kind: "http", target: "https://x", poll: { backoff: "linear\x01" } }],
+  ] as const) {
+    const dirty = { name: "g", nodes: [{ id: "w", kind: "wait", wait: dirtyWait }], edges: [] };
+    assert(digestInvisibleRawValues(dirty).some((e) => e.includes(field)), `an XML-invalid ${field} is fingerprinted digest-invisible`);
+  }
+  // A clean probe's enum fields are never fingerprinted (display == raw), so a valid graph is not forked.
+  assert(!digestInvisibleRawValues(clean).some((e) => e.includes("wait.kind") || e.includes("wait.onTimeout") || e.includes("wait.poll.backoff")), "clean probe enum fields are not spuriously fingerprinted");
+});
+
+test("#778 describeProbeMatch + digestInvisibleRawValues redact a credential-bearing `capabilityRef` match field (thread :1169)", () => {
+  // `capabilityRef` (and `package`/`checkName`) are free-form string predicates `parseProbe` accepts for a
+  // trailing id, so a URL-shaped value can smuggle a credential into the operator-visible display. It must
+  // be redacted the SAME URL-only way a connector target is, and the redacted-away raw fingerprinted so a
+  // secret-differing probe is not digest-collapsed.
+  const secret = "//user:s3cr3t@host#274";
+  const d = nodeDisplay({ id: "w", kind: "wait", wait: { kind: "capability", target: "github-releases:o/r", match: { capabilityRef: secret } } });
+  const rendered = `${d.name}\n${d.documentation}`;
+  assert(!rendered.includes("s3cr3t"), `the credential is redacted from the match display: ${rendered}`);
+  assert(rendered.includes("***"), `the display carries the redaction marker: ${rendered}`);
+  const graph = { name: "g", nodes: [{ id: "w", kind: "wait", wait: { kind: "capability", target: "github-releases:o/r", match: { capabilityRef: secret } } }], edges: [] };
+  assert(digestInvisibleRawValues(graph).some((e) => e.includes("wait.match.capabilityRef")), "the redacted-away capabilityRef is fingerprinted digest-invisible");
+  // An ordinary (non-URL) capabilityRef is untouched and not fingerprinted.
+  const ordinary = { name: "g", nodes: [{ id: "w", kind: "wait", wait: { kind: "capability", target: "github-releases:o/r", match: { capabilityRef: "owner/repo#7" } } }], edges: [] };
+  assert(nodeDisplay({ id: "w", kind: "wait", wait: { kind: "capability", target: "github-releases:o/r", match: { capabilityRef: "owner/repo#7" } } }).documentation.includes("owner/repo#7"), "an ordinary capabilityRef renders verbatim");
+  assert(!digestInvisibleRawValues(ordinary).some((e) => e.includes("wait.match.capabilityRef")), "an ordinary capabilityRef is not spuriously fingerprinted");
+});
+
 test("#778 digestInvisibleRawValues collapses a whitespace-only redacted-match variant (`verifyCommand`) — parseMatch trims it (suppressed advisory :1363)", () => {
   const canon = { name: "g", nodes: [{ id: "w", kind: "wait", wait: { kind: "capability", target: "github-releases:o/r", match: { verifyCommand: "curl x" } } }], edges: [] };
   const trailingWs = { name: "g", nodes: [{ id: "w", kind: "wait", wait: { kind: "capability", target: "github-releases:o/r", match: { verifyCommand: "curl x " } } }], edges: [] };

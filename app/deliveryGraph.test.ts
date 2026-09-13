@@ -768,16 +768,51 @@ test("invalid-credential-env: a `wait.credentialEnv` that is not a DECLARED env-
   hasCode(errors, "invalid-credential-env");
 });
 
-test("invalid-credential-env: a DECLARED env-contract key passes (the secret is read from the ambient env at execution time, never carried here)", () => {
+test("invalid-credential-env: a DECLARED env-contract key on an `http` probe passes (the secret is read from the ambient env at execution time, never carried here)", () => {
   assertEquals(
     validateDeliveryGraph({
       nodes: [
         {
           id: "g",
           kind: "wait",
-          wait: { kind: "pr", target: "acme/repo#1", match: { prState: "merged" }, credentialEnv: "GITHUB_TOKEN" },
+          wait: { kind: "http", target: "https://acme.example/health", credentialEnv: "GITHUB_TOKEN" },
         },
       ],
+      edges: [],
+    }).filter((e) => e.code === "invalid-credential-env"),
+    [],
+  );
+});
+
+test("invalid-credential-env: a well-formed `credentialEnv` key on a NON-`http` probe kind is rejected at the semantic boundary — `parseProbe` supports it only for `http`, so reject here rather than stage-then-throw at dispatch (#778 review, thread deliveryGraph.ts:474)", () => {
+  for (const kind of ["pr", "command", "npm", "github-check", "capability", "epic"] as const) {
+    const errors = validateDeliveryGraph({
+      nodes: [
+        {
+          id: "g",
+          kind: "wait",
+          wait: { kind, target: "acme/repo#1", credentialEnv: "GITHUB_TOKEN" },
+        },
+      ],
+      edges: [],
+    });
+    hasCode(errors, "invalid-credential-env");
+  }
+});
+
+test("invalid-credential-env: a padded-but-valid `credentialEnv` on `http` passes — validation trims like `parseProbe` does, so it agrees with execution (#778 review, suppressed advisory deliveryGraph.ts:466)", () => {
+  assertEquals(
+    validateDeliveryGraph({
+      nodes: [{ id: "g", kind: "wait", wait: { kind: "http", target: "https://x/health", credentialEnv: "  GITHUB_TOKEN  " } }],
+      edges: [],
+    }).filter((e) => e.code === "invalid-credential-env"),
+    [],
+  );
+  // A whitespace-only credentialEnv is treated as ABSENT (parseProbe reads `.trim() || undefined`), so it
+  // is neither rejected nor carried — no error.
+  assertEquals(
+    validateDeliveryGraph({
+      nodes: [{ id: "g", kind: "wait", wait: { kind: "http", target: "https://x/health", credentialEnv: "   " } }],
       edges: [],
     }).filter((e) => e.code === "invalid-credential-env"),
     [],

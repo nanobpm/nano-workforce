@@ -462,16 +462,39 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
         // `credentialEnv: "an-actual-secret"` and expose it in the compiled BPMN the preview door returns
         // BEFORE dispatch rejects it. Enforce the SAME `isEnvKey` contract here at the semantic boundary so
         // a non-key value can never reach the compiler (issue #778 review — thread
-        // deliveryGraphCompiler.ts:1249). A `credentialEnv` on a non-`http` kind is left to `parseProbe`.
-        if (kind === "wait" && typeof config.credentialEnv === "string" && config.credentialEnv.length > 0 && !isEnvKey(config.credentialEnv)) {
-          errors.push({
-            path: `${path}.${configKey}.credentialEnv`,
-            message:
-              "`wait.credentialEnv` must name a DECLARED env-contract key (never a secret value — the " +
-              "credential is read from the ambient env at execution time); an undeclared key is rejected " +
-              "so a secret can never be smuggled into the compiled BPMN the preview door returns",
-            code: "invalid-credential-env",
-          });
+        // deliveryGraphCompiler.ts:1249). `parseProbe` ALSO rejects a `credentialEnv` on any non-`http`
+        // probe kind (the credential selects an HTTP Authorization header — no other kind reads it), but
+        // only LATER, at dispatch: a shape-valid `command`/`npm`/`github-check`/`capability` graph
+        // carrying a well-formed `credentialEnv` key stages successfully and then THROWS during dispatch
+        // instead of returning a compile-time validation error. Enforce the SAME `http`-only contract here
+        // at the semantic boundary so the mismatch surfaces as a 400 from the preview/stage door rather
+        // than a dispatch-time incident (issue #778 review — thread deliveryGraph.ts:474).
+        if (kind === "wait" && typeof config.credentialEnv === "string" && config.credentialEnv.trim().length > 0) {
+          // Compare the TRIMMED value: `parseProbe` normalises `credentialEnv` with `.trim()` before its
+          // own `isEnvKey`/kind checks (readiness.ts:287), so validating the raw value here would
+          // false-reject a padded-but-valid `" GITHUB_TOKEN "` the runtime accepts — keep validation and
+          // execution in agreement (issue #778 review — suppressed advisory deliveryGraph.ts:466).
+          const credentialEnv = config.credentialEnv.trim();
+          if (!isEnvKey(credentialEnv)) {
+            errors.push({
+              path: `${path}.${configKey}.credentialEnv`,
+              message:
+                "`wait.credentialEnv` must name a DECLARED env-contract key (never a secret value — the " +
+                "credential is read from the ambient env at execution time); an undeclared key is rejected " +
+                "so a secret can never be smuggled into the compiled BPMN the preview door returns",
+              code: "invalid-credential-env",
+            });
+          } else if (typeof config.kind === "string" && config.kind !== "http") {
+            errors.push({
+              path: `${path}.${configKey}.credentialEnv`,
+              message:
+                `\`credentialEnv\` is only supported for the \`http\` wait kind (probe kind is ` +
+                `${JSON.stringify(config.kind)}); \`parseProbe\` rejects this combination at dispatch, so ` +
+                "reject it here at the semantic boundary rather than letting a shape-valid graph stage and " +
+                "then throw during dispatch",
+              code: "invalid-credential-env",
+            });
+          }
         }
         // S5 (ADR 0006 §3): converge/merge are first-class, edge-gated CELL POLICY, not raw nodes.
         // A raw converge/merge agent job (`senior:converge`, `senior:merge`, or a bare `converge`/

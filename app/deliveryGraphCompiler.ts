@@ -1136,10 +1136,16 @@ function humanizeConnectorTarget(target: string): string {
  * command the capability probe runs at the gate boundary) and `bodyIncludes`/`stdoutIncludes` (arbitrary
  * response-body / stdout substrings that can carry response tokens) — so they are never surfaced in the
  * user-visible name/documentation; only a fixed `<redacted>` placeholder appears while the raw value
- * survives in the runtime probe config. Every other field is a structured/enumerable predicate and is
- * shown verbatim. Fields are emitted in a STABLE code-unit key order (not the caller's JSON insertion
- * order) so two semantically identical graphs render byte-identically — preserving the compiler's
- * determinism/digest guarantee. (Issue #778 review.) */
+ * survives in the runtime probe config. Every other declared field is a structured/enumerable predicate,
+ * but not all are safe to interpolate verbatim — a free-form string predicate (`capabilityRef`,
+ * `package`, `checkName`, …) can carry a credential-bearing URL (`//user:pass@host#274`, which
+ * `parseProbe` accepts for its trailing id), so each is run through {@link redactConnectorValue} (a
+ * URL-only redactor: an ordinary `status=200`/`checkName=build` passes through untouched, a URL has its
+ * credential stripped). The raw value still survives in the runtime probe config; any value the display
+ * redacts is fingerprinted by `digestInvisibleRawValues` so the digest/run-key stays faithful. Fields are
+ * emitted in a STABLE code-unit key order (not the caller's JSON insertion order) so two semantically
+ * identical graphs render byte-identically — preserving the compiler's determinism/digest guarantee.
+ * (Issue #778 review.) */
 const REDACTED_MATCH_FIELDS: ReadonlySet<string> = new Set(["verifyCommand", "bodyIncludes", "stdoutIncludes"]);
 /** The DECLARED `ProbeMatch` fields (app/readiness.ts). `validateDeliveryGraph` does NOT reject an
  * unknown extra `wait.match` key, so a text-ingress graph can smuggle an arbitrary attacker-named key
@@ -1166,7 +1172,7 @@ function describeProbeMatch(match: Extract<DeliveryNode, { kind: "wait" }>["wait
   return Object.entries(match)
     .filter(([k, v]) => v !== undefined && v !== null && DECLARED_MATCH_FIELDS.has(k))
     .sort(([a], [b]) => byCodeUnit(a, b))
-    .map(([k, v]) => `${k}=${REDACTED_MATCH_FIELDS.has(k) ? "<redacted>" : String(v)}`)
+    .map(([k, v]) => `${k}=${REDACTED_MATCH_FIELDS.has(k) ? "<redacted>" : redactConnectorValue(String(v))}`)
     .join(", ");
 }
 
@@ -1374,13 +1380,29 @@ export function digestInvisibleRawValues(graph: DeliveryGraph): string[] {
         // only variant collapses (runtime trims) while an invalid-char one stays disambiguated (issue #778
         // review — thread :1355).
         push(id, "wait.credentialEnv", trimmedOrEmpty(p.credentialEnv), stripXmlInvalidChars(trimmedOrEmpty(p.credentialEnv)));
+        // `kind`/`onTimeout`/`poll.backoff` are shown verbatim in the doc (`Readiness probe: <kind>`,
+        // `On timeout: <onTimeout>`, `<backoff> backoff`) then XML-sanitised at serialisation, while the
+        // runtime `parseProbe` reads their RAW values. Exactly like `credentialEnv` above, a value carrying
+        // an XML-invalid char (`"http\x01"`) sanitises to the SAME display as the valid form, so without a
+        // fingerprint the malformed probe shares a valid graph's digest and `graphCarriesRedactedSecrets`
+        // stays false — letting keyless dispatch short-circuit the malformed proposal onto the valid
+        // running instance (and mark it dispatched) even though `parseProbe` would reject the raw value.
+        // Fingerprint each trimmed raw against its XML-sanitised form so a whitespace-only variant collapses
+        // (runtime trims) while an invalid-char one stays disambiguated (issue #778 review — thread :1366,
+        // same class as the credentialEnv :1355 fingerprint above).
+        push(id, "wait.kind", trimmedOrEmpty(p.kind), stripXmlInvalidChars(trimmedOrEmpty(p.kind)));
+        push(id, "wait.onTimeout", trimmedOrEmpty(p.onTimeout), stripXmlInvalidChars(trimmedOrEmpty(p.onTimeout)));
+        push(id, "wait.poll.backoff", trimmedOrEmpty(p.poll?.backoff), stripXmlInvalidChars(trimmedOrEmpty(p.poll?.backoff)));
         if (p.match) {
           for (const [k, v] of Object.entries(p.match)) {
             if (v === undefined || v === null) continue;
             // `verifyCommand`/`bodyIncludes`/`stdoutIncludes` are shown only as `<redacted>`; every other
-            // match value is shown as `String(v)`, which XML-1.0 sanitisation (`escapeXml`) later STRIPS
-            // invalid characters from — so `"1\x01"` and `"1"` share a digest while the raw probe configs
-            // differ. Both cases are digest-invisible; the raw value is the disambiguator.
+            // match value is shown as `redactConnectorValue(String(v))`, which (a) XML-1.0 sanitisation
+            // (`escapeXml`) later STRIPS invalid characters from — so `"1\x01"` and `"1"` share a digest —
+            // AND (b) URL-redacts a credential-bearing free-form predicate (`capabilityRef`/`package`/
+            // `checkName`) so `//user:pass@host#274` no longer surfaces the secret in the display. Either
+            // transform leaves content the digest cannot see while the raw probe config differs; both cases
+            // are digest-invisible and the raw value is the disambiguator (issue #778 review — thread :1169).
             if (REDACTED_MATCH_FIELDS.has(k)) {
               // A redacted field is ALWAYS invisible (display is `<redacted>`). `parseMatch` TRIMS these
               // free-form strings before the worker uses them, so fingerprint the TRIMMED value — a
@@ -1388,7 +1410,7 @@ export function digestInvisibleRawValues(graph: DeliveryGraph): string[] {
               // still distinguishes) instead of forking the server-derived run key (issue #778 review —
               // thread :1363).
               out.push(`${id}\u0000wait.match.${k}\u0000${canonicalJson(typeof v === "string" ? v.trim() : v)}`);
-            } else if (hasXmlInvalidChars(String(v))) {
+            } else if (hasXmlInvalidChars(String(v)) || redactConnectorValue(String(v)) !== String(v)) {
               out.push(`${id}\u0000wait.match.${k}\u0000${canonicalJson(v)}`);
             }
           }
