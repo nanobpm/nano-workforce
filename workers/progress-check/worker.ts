@@ -74,6 +74,32 @@ function isTerminalInstance(s: AgentInstanceSummary): boolean {
   return /^(completed|complete|done|finished|failed|terminated)$/i.test(s.status ?? "");
 }
 
+/** Parse a 64-bit engine key string to a `BigInt` for monotonic ordering; an absent/blank/malformed
+ * key sorts oldest (`0n`). Engine keys are 64-bit, so a numeric `parseInt`/`Number` compare would
+ * lose precision — `BigInt` compares them exactly. */
+function engineKey(s: string | undefined | null): bigint {
+  if (typeof s !== "string" || s.trim() === "") return 0n;
+  try {
+    return BigInt(s.trim());
+  } catch {
+    return 0n;
+  }
+}
+
+/** The monotonic recency key that orders an AgentInstance by creation: the GREATEST of its occupancy
+ * `elementInstanceKeys` (the `review-round` element-instance keys the engine mints per attempt),
+ * falling back to its `agentInstanceKey`. Engine keys increase with creation, so the instance with
+ * the greatest recency key is the most-recently-created — the COMPLETING attempt in the
+ * single-threaded review-round loop. */
+function recencyKey(s: AgentInstanceSummary): bigint {
+  let max = engineKey(s.agentInstanceKey);
+  for (const k of s.elementInstanceKeys ?? []) {
+    const v = engineKey(k);
+    if (v > max) max = v;
+  }
+  return max;
+}
+
 /** Default agent-work corroboration — AVAILABILITY-AWARE and correlated to the COMPLETING
  * `review-round` element-instance (issue #786, Option 1):
  *
@@ -85,13 +111,18 @@ function isTerminalInstance(s: AgentInstanceSummary): boolean {
  *    (`null`) → `no-advance` downstream, never an auto-retry. This is what makes an advisory,
  *    read-only channel safe to consult on the husk path: on absence it forces nothing.
  *
- *  • CORRELATION (no key threading): once the channel is known present, only the CURRENT
- *    (single-threaded) `review-round` attempt can be non-terminal — every prior round already ran to
- *    a terminal instance — so a non-terminal instance present ⇔ the completing attempt husked, and
- *    all-terminal ⇔ the completing attempt is terminal (→ `no-advance`). This is round-INDEPENDENT,
- *    so a same-round human-answered resume (which mints a fresh element-instance) is classified on
- *    its OWN attempt rather than an aggregate `terminal >= round` count a prior round already
- *    satisfied (the worker.ts:75 misclassification #786 flagged).
+ *  • CORRELATION to the COMPLETING element-instance: once the channel is known present, classify
+ *    ONLY the most-recently-created `review-round` instance — the one with the greatest monotonic
+ *    engine key (its `elementInstanceKeys`, else its `agentInstanceKey`; see {@link recencyKey}).
+ *    Each attempt (initial, review-loop, answer-loop resume, husk retry) re-enters `review-round` as
+ *    a FRESH element-instance, so the newest instance IS the completing attempt. Classifying only it
+ *    — rather than aggregating `.every(isTerminalInstance)` over ALL historical instances — is what
+ *    correlates the verdict to the completing invocation: a stale non-terminal instance left by an
+ *    EARLIER husked attempt can no longer drag an otherwise-terminal current attempt into a false
+ *    husk, and a terminal earlier attempt in the same round can no longer mask a current husk. The
+ *    newest terminal ⇒ `no-advance` (`true`); the newest non-terminal ⇒ the completing attempt
+ *    husked (`false`). Round-INDEPENDENT, so a same-round human-answered resume is classified on its
+ *    OWN fresh attempt (the worker.ts:105 correlation defect #786 flagged).
  *
  * Any read FAILURE degrades to `null` (unknown → `no-advance`, never an auto-retry), so a transient
  * read outage can never duplicate genuinely-completed agent work. */
@@ -105,9 +136,20 @@ function agentWorkFromEngine(engine: AppApi["engine"]): AgentWorkReader {
       });
       // Availability probe: an empty list ⇒ no channel ⇒ unknown ⇒ no-advance (never husk-retry).
       if (instances.length === 0) return null;
-      // Correlate to the completing attempt: all-terminal ⇒ no-advance (`true`); any non-terminal ⇒
-      // the current attempt husked (`false`).
-      return instances.every(isTerminalInstance);
+      // Correlate to the COMPLETING attempt: the most-recently-created instance (greatest monotonic
+      // engine key). Its terminality is the verdict — newest terminal ⇒ no-advance (`true`); newest
+      // non-terminal ⇒ the completing attempt husked (`false`). Older instances are ignored so a
+      // stale prior attempt can neither fabricate nor mask a husk.
+      let newest = instances[0];
+      let newestKey = recencyKey(newest);
+      for (const inst of instances) {
+        const k = recencyKey(inst);
+        if (k > newestKey) {
+          newest = inst;
+          newestKey = k;
+        }
+      }
+      return isTerminalInstance(newest);
     } catch {
       return null;
     }

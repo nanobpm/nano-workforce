@@ -335,11 +335,12 @@ test("progress-check default reader: an EMPTY instance list (absent channel) fai
 });
 
 test("progress-check default reader: a non-terminal review-round instance ⇒ husk (auto-retry under cap)", async () => {
-  // Channel present, the completing attempt is stuck non-terminal (husked) => false => husk.
+  // Channel present, the completing attempt (newest element-instance) is stuck non-terminal
+  // (husked) => false => husk. The stale terminal instance is an EARLIER attempt (lower key).
   const handler = await makeUnderTest(async () => "sha-1");
   const { app } = fakeApp({ last_round_head: "sha-1" }, async () => [
-    { status: "completed", completionDate: "2024-01-01T00:00:00Z" },
-    { status: "THINKING", completionDate: null },
+    { status: "completed", completionDate: "2024-01-01T00:00:00Z", elementInstanceKeys: ["100"] },
+    { status: "THINKING", completionDate: null, elementInstanceKeys: ["200"] },
   ]);
   const out = await handler({ processInstanceKey: "pik", variables: { prKey: "o/r#1", status: "addressed", repo: "o/r", prNumber: 1, round: 5, huskRetries: 0 } } as any, app as any);
   assertEquals(out.progressed, false);
@@ -352,13 +353,44 @@ test("progress-check default reader: ALL-terminal review-round instances ⇒ no-
   // genuine no-advance — the agent ran to completion but produced no head change, a human question.
   const handler = await makeUnderTest(async () => "sha-1");
   const { app } = fakeApp({ last_round_head: "sha-1" }, async () => [
-    { status: "completed", completionDate: "2024-01-01T00:00:00Z" },
-    { status: "failed", completionDate: "2024-01-02T00:00:00Z" },
+    { status: "completed", completionDate: "2024-01-01T00:00:00Z", elementInstanceKeys: ["100"] },
+    { status: "failed", completionDate: "2024-01-02T00:00:00Z", elementInstanceKeys: ["200"] },
   ]);
   const out = await handler({ processInstanceKey: "pik", variables: { prKey: "o/r#1", status: "addressed", repo: "o/r", prNumber: 1, round: 5, huskRetries: 0 } } as any, app as any);
   assertEquals(out.progressed, false);
   assertEquals(out.huskRetry, false, "an all-terminal round is a genuine no-advance, not a husk");
   assertEquals(out.noProgressReason, "no-advance");
+});
+
+test("progress-check default reader: a STALE non-terminal prior attempt does NOT mask a terminal completing attempt (no false husk)", async () => {
+  // #786 correlation defect: `.every(isTerminalInstance)` over ALL historical instances mis-flags a
+  // genuine no-advance as a husk whenever an EARLIER attempt is still stuck non-terminal. The newest
+  // element-instance (greatest engine key) is the COMPLETING attempt and it is terminal => no-advance,
+  // regardless of the stale husked prior instance.
+  const handler = await makeUnderTest(async () => "sha-1");
+  const { app } = fakeApp({ last_round_head: "sha-1" }, async () => [
+    { status: "THINKING", completionDate: null, elementInstanceKeys: ["100"] }, // stale prior husk
+    { status: "completed", completionDate: "2024-01-02T00:00:00Z", elementInstanceKeys: ["200"] }, // newest, terminal
+  ]);
+  const out = await handler({ processInstanceKey: "pik", variables: { prKey: "o/r#1", status: "addressed", repo: "o/r", prNumber: 1, round: 5, huskRetries: 0 } } as any, app as any);
+  assertEquals(out.progressed, false);
+  assertEquals(out.huskRetry, false, "a stale non-terminal prior attempt must not fabricate a husk");
+  assertEquals(out.noProgressReason, "no-advance");
+});
+
+test("progress-check default reader: a same-round husk AFTER an earlier terminal attempt is a husk (newest instance wins)", async () => {
+  // The mirror case: an earlier attempt in this round ran to a terminal instance, then a resume
+  // husked. The newest element-instance (greatest engine key) is the non-terminal resume => husk,
+  // not masked by the earlier terminal instance.
+  const handler = await makeUnderTest(async () => "sha-1");
+  const { app } = fakeApp({ last_round_head: "sha-1" }, async () => [
+    { status: "completed", completionDate: "2024-01-01T00:00:00Z", elementInstanceKeys: ["300"] }, // earlier terminal
+    { status: "THINKING", completionDate: null, elementInstanceKeys: ["400"] }, // newest, husked
+  ]);
+  const out = await handler({ processInstanceKey: "pik", variables: { prKey: "o/r#1", status: "addressed", repo: "o/r", prNumber: 1, round: 5, huskRetries: 0 } } as any, app as any);
+  assertEquals(out.progressed, false);
+  assertEquals(out.huskRetry, true, "the newest attempt husked, so the round is a husk");
+  assertEquals(out.noProgressReason, "husk");
 });
 
 test("progress-check default reader: an engine read that THROWS degrades to no-advance (unknown), never a husk", async () => {
