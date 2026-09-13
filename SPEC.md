@@ -133,7 +133,7 @@ Notes:
   canonical `readiness-ready` wait-gate message (ADR 0001 §2; correlated by the
   poller when a fresh review lands)
   against a `=reviewWaitTimeout` timer (seeded at submit from
-  `NANO_PR_REVIEW_WAIT_TIMEOUT`, default `PT20M`). Whichever fires first
+  `NANO_PR_REVIEW_WAIT_TIMEOUT`, default `PT30M`). Whichever fires first
   withdraws the other — the message arm advances `round`, the timer arm escalates
   a **stalled review** (`blocked`) so a human decides rather than the instance
   hanging forever. Because `persist-round` already recorded this `round` as
@@ -544,7 +544,7 @@ queries skip (`merging`), so a slow pass can't double-signal.
 | `NANO_PR_AUTO_MERGE` | 1 | run the merge stage after convergence (`0` = review-only; per-submit `convergeOnly: true` override) |
 | `NANO_PR_MERGE_METHOD` | squash | `squash` \| `merge` \| `rebase` |
 | `NANO_PR_MERGE_ADMIN` | 0 | pass `--admin` on merge |
-| `NANO_PR_REVIEW_WAIT_TIMEOUT` | PT20M | ISO-8601 wait before a stalled review escalates (timer arm of the `wait-review` event-based gateway); malformed → default |
+| `NANO_PR_REVIEW_WAIT_TIMEOUT` | PT30M | ISO-8601 wait before a stalled review escalates (timer arm of the `wait-review` event-based gateway); malformed → default |
 | `NANO_PR_REVIEW_NUDGE_MINUTES` | 5 | cooldown between poller Copilot re-request nudges per PR (clamped 1–1440) |
 
 ## 13. Planning fan-out (`plan-fanout.bpmn`) — issue #14

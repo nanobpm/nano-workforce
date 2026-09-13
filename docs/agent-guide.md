@@ -470,7 +470,7 @@ Work through this order:
 3. **Check for an open escalation** (§3) — the process may simply be waiting for a
    human answer. Answer it.
 4. **A review that never arrives** escalates on its own after
-   `NANO_PR_REVIEW_WAIT_TIMEOUT` (default `PT20M`); the poller also re-nudges the
+   `NANO_PR_REVIEW_WAIT_TIMEOUT` (default `PT30M`); the poller also re-nudges the
    reviewer periodically. If the reviewer bot is not provisioned on the repo, no
    review will ever land — that is a repo-config problem, not an app bug.
 5. **Cancel + resubmit** as a last resort. Cancel through the **app-owned** door —

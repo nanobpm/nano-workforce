@@ -190,7 +190,7 @@ test("persist-escalation heals from the prKey when repo/prNumber are absent", as
 // never a dead wait with a null question (the #333 defect).
 test("a control-flow arm with a concrete question opens an escalation gw-escalated can park", async () => {
   const { app, inserts } = fakeApp();
-  const question = "No review arrived within the review-wait timeout (PT20M). A human must decide how to proceed.";
+  const question = "No review arrived within the review-wait timeout (PT30M). A human must decide how to proceed.";
   const job = { variables: { prKey: "o/r#5", round: 2, status: "blocked", question, recordRound: false } };
   const out = await handler(job as any, app as any);
   assertEquals((out as any).escalated, true, "a real control-flow escalation reports escalated:true");

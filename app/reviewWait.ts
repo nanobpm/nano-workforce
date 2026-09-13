@@ -12,7 +12,7 @@
 
 /** Default review-wait timeout (ISO-8601 duration): how long the loop waits for a fresh review
  * before the timer arm of the event-based gateway fires and it escalates to a human. */
-export const DEFAULT_REVIEW_WAIT_TIMEOUT = "PT20M";
+export const DEFAULT_REVIEW_WAIT_TIMEOUT = "PT30M";
 
 // A pragmatic ISO-8601 duration matcher: requires a leading `P`, at least one component, and a
 // `T` before any time components (with at least one time component after it). Good enough to

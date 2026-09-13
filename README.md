@@ -360,7 +360,7 @@ agent at that URL to author, compile, and submit a graph unaided. See
 | `NANO_PR_MERGE_METHOD` | `squash` | merge method: `squash`, `merge`, or `rebase` |
 | `NANO_PR_MERGE_ADMIN` | `0` | pass `--admin` to override failing non-required checks (use with care) |
 | `NANO_PR_MAX_CI_FIX_ROUNDS` | `3` | max `senior:fix-ci` attempts to green a `blocked` PR before escalating; `0` disables (escalate immediately), clamped 0–20 |
-| `NANO_PR_REVIEW_WAIT_TIMEOUT` | `PT20M` | ISO-8601 duration the loop waits for a fresh review before escalating a stalled review (timer arm of the `wait-review` gateway) |
+| `NANO_PR_REVIEW_WAIT_TIMEOUT` | `PT30M` | ISO-8601 duration the loop waits for a fresh review before escalating a stalled review (timer arm of the `wait-review` gateway) |
 | `NANO_PR_REVIEW_NUDGE_MINUTES` | `5` | cooldown between the poller's automatic reviewer re-request nudges for one waiting PR (clamped 1–1440) |
 | `NANO_WORKFORCE_BASE_URL` | `http://localhost:3000` | externally-reachable base URL for the capability hooks (`/app/api/hooks/*`). Must resolve from **wherever the agent runs** — set it to the app's LAN address (or console-proxy URL) for a remote fleet. See [Fleet networking](#fleet-networking-remote-workers) |
 | `NANO_AGENTIC_SECRET` | — | enables **secure mode** for the agentic visibility channel (`/agentic`): every peer must present the **same** `NANO_AGENTIC_SECRET` value (set the identical env var on the server and every worker box — Tab A → Slot A). Unset = on-by-default **LOCAL mode** — the well-known token is honoured from **any origin** (open on the trusted LAN, matching the engine's posture); exposure is governed by the server bind address, not a shared secret. Also accepts `NANO_PR_WEBHOOK_SECRET` |
