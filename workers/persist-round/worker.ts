@@ -116,14 +116,25 @@ const handler: AppJobHandler<In> = async (job, app) => {
   // migration/UNIQUE) so it heals installs that already carry pre-#786 duplicates rather than
   // crashing on a new constraint.
   //
-  // But the upsert MUST reuse only a row THIS worker wrote — never an escalation row. On a
-  // `needs_input`/`blocked` escalation, `pr.persist-escalation` inserts a `rounds` row (status
-  // `needs_input`/`blocked`) for the SAME `(pr_key, round_no)`, and the human-answered resume
-  // re-enters that same numeric round → back here. Blindly updating the newest matching row would
-  // overwrite that escalation row to `addressed`, ERASING the escalation attempt from the durable
-  // history. So reuse only a prior `pr.persist-round` row — one whose status is NOT a human-hold
-  // status (`needs_input`/`blocked`); if the only match is an escalation row, insert a fresh row for
-  // the resumed attempt so both the escalation and its resolution survive in the history.
+  // But the upsert MUST reuse only a row THIS run's `pr.persist-round` wrote — identity, not a
+  // status heuristic. Two ways a stale-but-status-eligible row can share `(pr_key, round_no)`:
+  //   • An escalation row: on a `needs_input`/`blocked` escalation, `pr.persist-escalation` inserts
+  //     a `rounds` row (status `needs_input`/`blocked`) for the SAME `(pr_key, round_no)`, and the
+  //     human-answered resume re-enters that numeric round → back here. Reusing it would overwrite
+  //     the escalation to `addressed`, ERASING the escalation attempt from the durable history.
+  //   • A prior RUN's row: `submitPr` re-opens a previously converged/abandoned/merged PR at
+  //     `current_round = 1` WITHOUT deleting `rounds` history, so a fresh convergence run (a NEW
+  //     process instance) at round 1 finds the prior run's `addressed`/`waiting`/`converged` round-1
+  //     row. Reusing it (its status is not a human-hold) would clobber another run's canonical
+  //     history — the resubmission drift the reviewer flagged.
+  // The idempotency target is precisely "the row a husk auto-retry of THIS process instance wrote",
+  // and a husk retry re-enters `review-round` in the SAME process instance while a resubmission is a
+  // NEW one. So scope reuse by the writing `process_instance_key` (persisted below) AND exclude
+  // human-hold rows: reuse a row only when it carries the current instance's key and a non-hold
+  // status; otherwise insert a fresh row so every prior run's history — and every escalation — is
+  // preserved. `job.processInstanceKey` is always present for an engine job; when it is absent (a
+  // testkit/synthetic job) we fall back to the status-only heuristic so idempotency still holds
+  // within that single run.
   const roundsTbl = app.data.table<{
     id: number;
     pr_key: string;
@@ -134,12 +145,16 @@ const handler: AppJobHandler<In> = async (job, app) => {
     worker?: string;
     started_at: string;
     ended_at: string;
+    process_instance_key?: string | null;
   }>("rounds", "id");
   const HUMAN_HOLD_STATUSES = new Set(["needs_input", "blocked"]);
+  const processInstanceKey = job.processInstanceKey != null ? String(job.processInstanceKey) : null;
   const matching = await roundsTbl.find({ pr_key: prKey, round_no: round });
-  // Reuse only a round-record row (not an escalation row); of those, the newest (greatest id).
+  // Reuse only a round-record row written by THIS run (matching process instance, when known) and
+  // never an escalation (human-hold) row; of those, the newest (greatest id).
   const reusable = matching
     .filter((r) => !HUMAN_HOLD_STATUSES.has(r.status))
+    .filter((r) => processInstanceKey === null || r.process_instance_key === processInstanceKey)
     .reduce<{ id: number } | null>((newest, r) => (newest && newest.id >= r.id ? newest : r), null);
   const roundRow = {
     status,
@@ -155,6 +170,7 @@ const handler: AppJobHandler<In> = async (job, app) => {
       pr_key: prKey,
       round_no: round,
       started_at: now,
+      process_instance_key: processInstanceKey,
       ...roundRow,
     });
   }

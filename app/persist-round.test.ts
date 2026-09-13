@@ -221,3 +221,77 @@ test("persist-round reuses a prior addressed round-record row while skipping an 
   assertEquals(roundUpdate?.patch.summary, "husk retry");
   assertEquals((roundsStore.get(200) as any).status, "blocked", "the escalation row is left intact");
 });
+
+// Regression (issue #786): the idempotent upsert must be scoped to the writing RUN, not inferred
+// from status. `submitPr` re-opens a previously converged/abandoned PR at round 1 WITHOUT deleting
+// `rounds` history, so a fresh convergence run (a NEW process instance) at round 1 finds the prior
+// run's `addressed`/`waiting`/`converged` round-1 row. Reusing it (its status is not human-hold)
+// would clobber another run's canonical summary/transcript/worker/timestamps. Scoping reuse by the
+// writing `process_instance_key` means the new run INSERTS a fresh row and the prior run's history
+// survives verbatim.
+test("persist-round scopes idempotency to the process instance — a resubmission inserts a fresh row", async () => {
+  const { app, inserts, updates, rows } = fakeApp();
+  const roundsStore = (rows.rounds ??= new Map());
+  // A prior run's round-1 row (its own process instance) with real history.
+  roundsStore.set(300, {
+    id: 300,
+    pr_key: "o/r#1",
+    round_no: 1,
+    status: "converged",
+    summary: "prior run summary",
+    transcript: "prior run transcript",
+    worker: "senior",
+    process_instance_key: "proc-OLD",
+    started_at: "t0",
+    ended_at: "t0",
+  });
+
+  // A resubmission: submitPr restarts convergence at round 1 in a NEW process instance.
+  const resubmit = {
+    processInstanceKey: "proc-NEW",
+    variables: { prKey: "o/r#1", round: 1, status: "addressed", summary: "fresh run" },
+  };
+  await handler(resubmit as any, app as any);
+
+  assertEquals(inserts.rounds.length, 1, "the resubmission inserts its OWN round row");
+  assertEquals((inserts.rounds[0] as any).process_instance_key, "proc-NEW", "the new row carries the new run's key");
+  const priorTouched = (updates.rounds ?? []).some((u: any) => u.key === 300);
+  assertEquals(priorTouched, false, "the prior run's round-1 row is never updated");
+  assertEquals((roundsStore.get(300) as any).summary, "prior run summary", "the prior run's history is intact");
+});
+
+// But a husk retry WITHIN the same run (same process instance key, same round_no) is still reused in
+// place — process-instance scoping preserves husk-retry idempotency, it does not disable it.
+test("persist-round reuses the same-process-instance row on a husk retry", async () => {
+  const { app, inserts, updates, rows } = fakeApp();
+  const roundsStore = (rows.rounds ??= new Map());
+  // This run's own round-4 row, plus an UNRELATED prior run's round-4 row.
+  roundsStore.set(400, {
+    id: 400,
+    pr_key: "o/r#1",
+    round_no: 4,
+    status: "addressed",
+    summary: "other run",
+    process_instance_key: "proc-OTHER",
+  });
+  roundsStore.set(401, {
+    id: 401,
+    pr_key: "o/r#1",
+    round_no: 4,
+    status: "addressed",
+    summary: "this run first attempt",
+    process_instance_key: "proc-THIS",
+  });
+
+  const retry = {
+    processInstanceKey: "proc-THIS",
+    variables: { prKey: "o/r#1", round: 4, status: "addressed", summary: "this run husk retry" },
+  };
+  await handler(retry as any, app as any);
+
+  assertEquals(inserts.rounds.length, 0, "no new row — this run's own row is reused");
+  const roundUpdate = (updates.rounds ?? []).at(-1) as any;
+  assertEquals(roundUpdate?.key, 401, "the reused row is THIS run's row, not the other run's");
+  assertEquals(roundUpdate?.patch.summary, "this run husk retry");
+  assertEquals((roundsStore.get(400) as any).summary, "other run", "the unrelated run's row is untouched");
+});

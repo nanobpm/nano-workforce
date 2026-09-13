@@ -1,0 +1,19 @@
+-- Scope pr.persist-round's idempotent upsert to the process instance that wrote the row (issue #786).
+--
+-- The idempotent `(pr_key, round_no)` upsert in pr.persist-round exists so a husk auto-retry — which
+-- re-enters `review-round` WITHOUT advancing the round counter, in the SAME convergence process
+-- instance — updates its round-record row in place instead of manufacturing a duplicate history row.
+-- Round ownership was previously INFERRED from `status` (reuse any non-`needs_input`/`blocked` row),
+-- but status is not identity: `submitPr` re-opens a previously converged/abandoned/merged PR at
+-- `current_round = 1` WITHOUT deleting `rounds` history, so a fresh convergence run (a NEW process
+-- instance) at round 1 would find the prior run's `addressed`/`waiting`/`converged` round-1 row and
+-- overwrite its summary/transcript/worker/timestamps — destroying the canonical history across
+-- resubmissions.
+--
+-- Persist the writing process instance's key so the upsert can reuse ONLY a row THIS run wrote: a
+-- husk retry (same `process_instance_key`) updates in place; a resubmission (a different key) inserts
+-- a fresh row, leaving every prior run's history intact. Additive and nullable — pre-#786 rows and
+-- rows written by an engine that does not surface the key read back NULL and simply never match a
+-- concrete current key (they fall through to the status-only heuristic), so it is safe to apply
+-- forward over any earlier schema and re-runs are no-ops.
+ALTER TABLE rounds ADD COLUMN process_instance_key TEXT;

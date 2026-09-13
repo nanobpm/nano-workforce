@@ -130,9 +130,9 @@ export function noProgressQuestion(
       : "";
     return (
       `Round ${round} reported the review comments were addressed, but the agent produced no ` +
-      `durable work — no commit was pushed and no completed review agent-instance was recorded for ` +
-      `the round (a husked round; the worker likely died mid-run)${tail}. A human must decide how to ` +
-      `proceed (reply to resume the loop).`
+      `durable work — no commit was pushed and the COMPLETING review attempt recorded no terminal ` +
+      `agent-instance (a husked round; the worker likely died mid-run)${tail}. A human must decide ` +
+      `how to proceed (reply to resume the loop).`
     );
   }
   return (
@@ -176,12 +176,13 @@ export function decideProgress(
   if (routeProgress(status, previousHead, currentHead) === "continue") {
     return { progressed: true, huskRetries: 0 };
   }
-  // Only a POSITIVELY-corroborated empty read (`false` — a successful AgentInstance search that
-  // found no terminal `review-round` instance) is a husk we may auto-retry. `true` (a terminal
-  // instance exists) is a real no-advance; and an UNKNOWN read (`null`/`undefined` — the engine
-  // channel was unavailable or threw) must NOT auto-retry, since re-running could duplicate agent
+  // Only a POSITIVELY-corroborated husk (`false` — a successful AgentInstance search whose NEWEST
+  // correlated `review-round` instance is NON-terminal, i.e. the completing attempt died mid-run) is
+  // one we may auto-retry. `true` (that newest correlated instance is TERMINAL) is a real no-advance;
+  // and an UNKNOWN read (`null`/`undefined` — an empty/absent instance list or a thrown read, i.e.
+  // the engine channel was unavailable) must NOT auto-retry, since re-running could duplicate agent
   // work that actually did run. So an unknown read fails safe to `no-advance` (escalate to a human),
-  // exactly as the pre-#786 loop did — only a successful empty read means husk.
+  // exactly as the pre-#786 loop did — only a corroborated non-terminal completing instance is husk.
   const reason: NoProgressReason = agentWorkObserved === false ? "husk" : "no-advance";
   const retries = normalizeRetries(currentHuskRetries);
   if (reason === "husk" && retries < maxHuskRetries) {
