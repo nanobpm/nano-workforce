@@ -971,6 +971,12 @@ export async function fetchBranchHead(
   branch: string,
   token: string,
 ): Promise<string | null> {
+  // Honor the documented no-transport contract at this public boundary, exactly like the sibling
+  // readers `fetchPrHead`/`fetchPrBase`: with no `gh` CLI and no token there is no usable transport,
+  // which is the idle "unknown" case → `null`, NOT an exception. The internal `branchHeadSha` still
+  // throws in that case for `ensureBaseBranch`'s callers, which treat a missing transport as a hard
+  // failure; this wrapper's `Promise<string | null>` contract promises `null` instead.
+  if (!(await useGh()) && !token) return null;
   return branchHeadSha(repo, branch, token);
 }
 

@@ -769,3 +769,18 @@ test("fetchBranchHead: a 404 (branch absent) resolves to null, never throws", as
   );
   assertEquals(sha, null);
 });
+
+test("fetchBranchHead: no usable transport (token mode, empty token) resolves to null, never throws", async () => {
+  // The documented contract promises `null` when no transport is usable, matching fetchPrHead /
+  // fetchPrBase — a missing token under the token transport must not surface an exception to callers
+  // relying on the Promise<string | null> shape.
+  const prevMode = process.env["NANO_PR_GITHUB_TRANSPORT"];
+  process.env["NANO_PR_GITHUB_TRANSPORT"] = "token";
+  try {
+    const sha = await fetchBranchHead("o/r", "feat/x", "");
+    assertEquals(sha, null);
+  } finally {
+    if (prevMode === undefined) delete process.env["NANO_PR_GITHUB_TRANSPORT"];
+    else process.env["NANO_PR_GITHUB_TRANSPORT"] = prevMode;
+  }
+});
