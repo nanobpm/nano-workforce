@@ -1177,3 +1177,15 @@ export function redactString(s: string): string {
     .replace(/\/\/[^/@ ]*@/g, "//***@")
     .replace(/[?#][\s\S]*$/, (m) => `${m[0]}***`);
 }
+
+/** The ONE canonical "is this value a URL?" classifier — a `scheme://authority` OR scheme-relative
+ * `//authority` form, either of which can hide a credential in userinfo/query/fragment. It is the single
+ * source of truth for URL-shape detection shared by the connector/jobType display redactor
+ * ({@link redactString} callers in the compiler) AND the semantic validation boundary
+ * (`validateDeliveryGraph`), so the "what counts as credential-bearing/URL-shaped" rule can never drift
+ * between the redact path and the reject path (issue #778 review — thread deliveryGraphCompiler.ts:1606).
+ * Classify on the TRIMMED value so leading whitespace (` //user:pass@host` — the OpenAPI edge caps
+ * length but does not trim) cannot bypass the anchored check. Deterministic and total. */
+export function isUrlShaped(value: string): boolean {
+  return /^([a-z][a-z0-9+.-]*:)?\/\//i.test(value.trim());
+}

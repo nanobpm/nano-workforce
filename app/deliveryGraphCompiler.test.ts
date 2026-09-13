@@ -1384,6 +1384,41 @@ test("#778 digestInvisibleRawValues collapses a whitespace-only timeout variant 
   );
 });
 
+test("#778 digestInvisibleRawValues collapses a CASE-only timeout variant (`pt1h` vs `PT1H`) — the runtime ISO-normalises BOTH, so it must not spuriously fork the run-key (thread :1331)", () => {
+  // `isoDuration` upper-cases a valid timeout before it becomes the runtime `nodeTimeout`, so `pt1h` and
+  // `PT1H` drive the IDENTICAL runtime SLA and identical semantic BPMN. The fix normalises BOTH the raw
+  // fingerprint AND the digest-visible display value; without normalising the display side, `pt1h` (digest
+  // sees `pt1h`, runtime canonicalises to `PT1H`) was falsely flagged digest-invisible, forcing an
+  // idempotency key and double-launching a graph the runtime treats identically.
+  const lower = { name: "g", nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", timeout: "pt1h" } }], edges: [] };
+  const upper = { name: "g", nodes: [{ id: "a", kind: "agent", agent: { jobType: "j", timeout: "PT1H" } }], edges: [] };
+  assert(!digestInvisibleRawValues(lower).some((e) => e.includes("agent.timeout")), "a case-only timeout variant is not falsely flagged digest-invisible");
+  assertEquals(
+    JSON.stringify(digestInvisibleRawValues(lower)),
+    JSON.stringify(digestInvisibleRawValues(upper)),
+    "a case-only timeout produces the identical fingerprint set (no spurious fork)",
+  );
+  // The same for a connector timeout.
+  const lowerConn = { name: "g", nodes: [{ id: "c", kind: "connector", connector: { target: "converge-merge", timeout: "pt2h" } }], edges: [] };
+  const upperConn = { name: "g", nodes: [{ id: "c", kind: "connector", connector: { target: "converge-merge", timeout: "PT2H" } }], edges: [] };
+  assertEquals(
+    JSON.stringify(digestInvisibleRawValues(lowerConn)),
+    JSON.stringify(digestInvisibleRawValues(upperConn)),
+    "a case-only connector timeout collapses too",
+  );
+});
+
+test("#778 compileDeliveryGraph REJECTS a URL-shaped agent `jobType` at the validation boundary — a credential embedded in the executable job type never reaches the compiled BPMN, and the compile error is redacted (#778 review)", async () => {
+  const errors = await compileFail({
+    name: "g",
+    nodes: [{ id: "a", kind: "agent", agent: { jobType: "//user:pass@evil.example/route", prompt: "p" } }],
+    edges: [],
+  });
+  const joined = JSON.stringify(errors);
+  assert(joined.includes("URL-shaped"), `rejected as URL-shaped: ${joined}`);
+  assert(!joined.includes("user:pass"), `no compile error echoes the embedded credential: ${joined}`);
+});
+
 test("#778 nodeDisplay + digestInvisibleRawValues redact a credential-bearing agent `jobType` (thread :1202)", () => {
   // `jobType` is emitted verbatim into the agent node's display label and (as of #778) the compiled BPMN,
   // so a URL-shaped jobType carrying a credential must be redacted the SAME way a connector target is —

@@ -44,6 +44,7 @@ import {
   type DeliveryGraphError,
   deliveryNodeFacts,
   hasXmlInvalidChars,
+  redactConnectorValue,
   resolveDeliveryFrom,
   stripXmlInvalidChars,
   validateDeliveryGraph,
@@ -1025,26 +1026,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/** URL-only credential redaction for a free-form connector value (`target`, `dedupeKey`, a bound
- * `payload.pr`). Such a value is frequently an OPAQUE identifier — `slack:#releases`, `owner/repo#42`,
- * a `<node>.pr` ref, `pkg@version` — in which `#`/`?`/`@` are MEANINGFUL, so blind {@link redactString}
- * would mangle it (e.g. `slack:#releases` → `slack:#***`, `owner/repo#42` → `owner/repo#***`). Only a
- * value that is actually a URL — a `scheme://authority` OR a scheme-relative `//authority` form, either
- * of which can hide a credential in userinfo/query/fragment (`redactString` redacts both) — is redacted;
- * every other value is shown VERBATIM. The URL classification is done on `value.trim()` so leading
- * whitespace (` //user:pass@host` — the OpenAPI edge caps length but does not trim) cannot bypass the
- * anchored URL check; the ORIGINAL `value` is what `redactString` operates on so no surrounding
- * character survives unredacted. Mirrors {@link redactProbeTargetForDisplay}'s
- * http-only rule (issue #778 review). Deterministic and total. */
-function redactConnectorValue(value: string): string {
-  // Strip XML-invalid display characters BEFORE classifying/redacting: the anchored `^(scheme:)?//`
-  // check and the redaction both run on the exact string the renderer will emit. Otherwise a target
-  // prefixed by an unrepresentable control char (e.g. `\x01//user:pass@host/?token=…`) fails the
-  // anchored check, escapes redaction, then loses that prefix during `escapeXml`/`stripXmlInvalidChars`
-  // — surfacing the credential verbatim in the BPMN name/documentation and connector escalation FEEL.
-  const cleaned = stripXmlInvalidChars(value);
-  return /^([a-z][a-z0-9+.-]*:)?\/\//i.test(cleaned.trim()) ? redactString(cleaned) : cleaned;
-}
+/** URL-only credential redaction relocated to the low-level graph module ({@link redactConnectorValue}
+ * in `deliveryGraph.ts`) so the DISPLAY path here and `validateDeliveryGraph`'s reject/error path share
+ * ONE redactor — no drift surface (issue #778 review). */
 
 /** Redact credential-bearing pieces of any URL embedded in FREE-FORM prose (a node's authored
  * `prompt`), IN PLACE. Unlike {@link redactString} — tuned for a single opaque target string, where it
@@ -1296,7 +1280,7 @@ export function digestInvisibleRawValues(graph: DeliveryGraph): string[] {
   // embeds in `semanticBpmn` — apply the SAME normalisation (`trimmedOrEmpty`/redaction) the display does,
   // or a difference the display collapses (redaction OR trimmed whitespace) escapes while still reaching
   // the runtime raw.
-  const push = (nodeId: string, field: string, raw: string | undefined | null, display: string): void => {
+  const push = (nodeId: string, field: string, raw: string | undefined | null, display: string | undefined | null): void => {
     if (typeof raw === "string" && raw !== display) out.push(`${nodeId}\u0000${field}\u0000${raw}`);
   };
   for (const node of graph.nodes) {
@@ -1323,12 +1307,14 @@ export function digestInvisibleRawValues(graph: DeliveryGraph): string[] {
         // serialised (`escapeXml` STRIPS XML-1.0-invalid chars), yet the runtime reads it through
         // `isoDuration(timeout, nodeTimeout)` (deliveryRunner) — which TRIMS + upper-cases a valid value
         // and falls back to the run default on a malformed one. So `"PT1H"`, `"PT1H "`, and `"pt1h"` all
-        // drive the SAME runtime SLA and must NOT be distinguished (else a whitespace-only re-stage
-        // launches a second run), while `"PT1H\x01"` (invalid ⇒ falls back) genuinely differs. Fingerprint
-        // the ISO-normalised timeout (`""` sentinel when it falls back) and compare it with the XML-
-        // sanitised display form so invalid characters remain disambiguated (issue #778 review — thread
-        // :1307, over :1251).
-        push(id, "agent.timeout", normaliseNodeTimeout(node.agent.timeout), stripXmlInvalidChars(trimmedOrEmpty(node.agent.timeout)));
+        // drive the SAME runtime SLA and must NOT be distinguished (else a whitespace-only OR case-only
+        // re-stage launches a second run), while `"PT1H\x01"` (invalid ⇒ falls back) genuinely differs.
+        // Fingerprint the ISO-normalised raw timeout AND compare it against the ISO-normalised form of what
+        // the digest actually sees (the XML-sanitised trimmed display value) — normalising BOTH sides, so a
+        // lowercase `"pt1h"` (digest sees `"pt1h"`, runtime canonicalises to `"PT1H"`) is NOT falsely marked
+        // digest-invisible, while an XML-invalid variant (digest sees `"PT1H"` after the strip but the raw
+        // falls back to the default) still is (issue #778 review — thread :1331, over :1307/:1251).
+        push(id, "agent.timeout", normaliseNodeTimeout(node.agent.timeout), normaliseNodeTimeout(stripXmlInvalidChars(trimmedOrEmpty(node.agent.timeout))));
         break;
       case "human":
         push(id, "human.prompt", node.human?.prompt, redactFreeText(trimmedOrEmpty(node.human?.prompt)));
@@ -1351,10 +1337,10 @@ export function digestInvisibleRawValues(graph: DeliveryGraph): string[] {
         push(id, "connector.dedupeKey", trimmedOrEmpty(c.dedupeKey), redactConnectorValue(trimmedOrEmpty(c.dedupeKey)));
         // The connector `timeout` is digest-invisible the same way an agent's is: displayed as
         // `trimmedOrEmpty(timeout)` then XML-sanitised, but read through `isoDuration(timeout, nodeTimeout)`
-        // into the runtime SLA. Fingerprint the ISO-normalised value, compared with the XML-sanitised
-        // display form so a whitespace-only variant collapses while an invalid one stays disambiguated
-        // (issue #778 review — thread :1307).
-        push(id, "connector.timeout", normaliseNodeTimeout(c.timeout), stripXmlInvalidChars(trimmedOrEmpty(c.timeout)));
+        // into the runtime SLA. Fingerprint the ISO-normalised value, compared with the ISO-normalised form
+        // of the XML-sanitised display value (normalise BOTH sides) so a whitespace- OR case-only variant
+        // collapses while an invalid one stays disambiguated (issue #778 review — thread :1331, over :1307).
+        push(id, "connector.timeout", normaliseNodeTimeout(c.timeout), normaliseNodeTimeout(stripXmlInvalidChars(trimmedOrEmpty(c.timeout))));
         // The free-form connector `payload` survives raw into runtime `nodeInputs`, but `nodeDisplay`
         // surfaces at most a single NON-EMPTY string `payload.pr` (redacted). So the display FAITHFULLY
         // represents the payload ONLY when it is exactly `{ pr: <non-empty string> }` whose redaction is
@@ -1603,7 +1589,12 @@ function innerBodyLines(w: NodeWiring, requiredEmits: ReadonlySet<string>, displ
       // as a required data dependency. A broken producer (returns `in_progress`, or omits a required
       // emit) escalates AT this node instead of threading an incomplete result onward.
       const contractGate = { requiredEmits: normaliseEmits(node).filter((f) => requiredEmits.has(f.name)) };
-      return serviceBodyLines(el, node.id, attr("type", node.agent.jobType), [], node.agent.jobType, contractGate, agentRepoSpecHeaderLines(node), displayName);
+      // The executable `<zeebe:taskDefinition type=…>` MUST carry the raw `jobType` verbatim for worker
+      // routing (validateDeliveryGraph rejects a URL-shaped/credential-bearing jobType, so it can never
+      // be a leak here), but the `descriptor` is embedded by `serviceBodyLines` into the operator-visible
+      // timeout / producer-contract escalation FEEL `prompt` — so it takes the SAME display redaction
+      // `nodeDisplay` applies, never the raw value (issue #778 review — thread deliveryGraphCompiler.ts:1606).
+      return serviceBodyLines(el, node.id, attr("type", node.agent.jobType), [], redactConnectorValue(node.agent.jobType), contractGate, agentRepoSpecHeaderLines(node), displayName);
     }
     case "connector":
       return serviceBodyLines(el, node.id, `type="${DELEGATE_TASK_TYPE.connector}"`, [], `connector → ${redactConnectorValue(node.connector.target)}`, undefined, [], displayName);

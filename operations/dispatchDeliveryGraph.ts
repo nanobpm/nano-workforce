@@ -182,6 +182,10 @@ export default defineOperation("dispatchDeliveryGraph", async ({ body }, app) =>
   }
 
   // The stored graph was validated at stage time; dispatch re-compiles it to derive the run-row shape.
+  // Snapshot the proposal's stage revision NOW so the terminal `markProposalDispatched` can guard its
+  // flip against a concurrent re-stage that overwrites this same-digest row with a newer graph after we
+  // read it (issue #778 review — thread dispatchDeliveryGraph.ts:243).
+  const stageSeq = proposal.stage_seq;
   let graph: unknown;
   try {
     graph = JSON.parse(proposal.graph);
@@ -270,7 +274,14 @@ export default defineOperation("dispatchDeliveryGraph", async ({ body }, app) =>
       },
     };
   }
-  await markProposalDispatched(app.data, digest);
+  const marked = await markProposalDispatched(app.data, digest, stageSeq);
+  if (!marked) {
+    // The row left the `staged` revision we snapshotted between our load and this flip — a concurrent
+    // dispatch consumed it, or a re-stage overwrote it with a newer graph (bumping stage_seq), or a
+    // dismiss/supersede/expiry retired it. The run we launched still stands; we intentionally skip the
+    // mark so a newer, never-launched revision is not clobbered to `dispatched` (issue #778 review).
+    app.log.warn("dispatch-delivery-graph: staged revision changed before consume; mark skipped", { digest, stageSeq });
+  }
 
   const outBody: DeliveryGraphTextResult = {
     ok: true,

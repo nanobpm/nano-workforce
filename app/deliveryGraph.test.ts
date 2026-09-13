@@ -718,6 +718,72 @@ test("invalid-job-type: a clean `agent.jobType` (no XML-invalid characters, no a
   );
 });
 
+test("invalid-job-type: the rejection message REDACTS a credential embedded in the (URL-shaped, XML-invalid) job type — a 400 never echoes a secret (#778 review)", () => {
+  // A job type that is BOTH URL-shaped (userinfo credential) AND carries an XML-1.0-invalid control char
+  // trips `invalid-job-type`. The message interpolates the value through `redactConnectorValue`, so the
+  // embedded `user:pass` must NOT survive into the error a text-ingress caller sees.
+  const errors = validateDeliveryGraph({
+    nodes: [{ id: "impl", kind: "agent", agent: { jobType: "//user:pass@host\u0001/route" } }],
+    edges: [],
+  });
+  const err = hasCode(errors, "invalid-job-type");
+  assert(!err.message.includes("user:pass"), `the invalid-job-type message must redact the credential, got: ${err.message}`);
+});
+
+test("url-shaped-job-type: a URL-shaped `agent.jobType` is REJECTED at the semantic boundary — it is baked verbatim into the executable `<zeebe:taskDefinition type=…>`, so an embedded credential would leak into the compiled BPMN the preview door returns (#778 review)", () => {
+  const errors = validateDeliveryGraph({
+    nodes: [{ id: "impl", kind: "agent", agent: { jobType: "https://user:pass@evil.example/route" } }],
+    edges: [],
+  });
+  const err = hasCode(errors, "url-shaped-job-type");
+  assert(!err.message.includes("user:pass"), `the url-shaped-job-type message must redact the credential, got: ${err.message}`);
+});
+
+test("url-shaped-job-type: a scheme-relative `//host` job type is rejected too; a plain routing token passes", () => {
+  assert(
+    hasCode(
+      validateDeliveryGraph({ nodes: [{ id: "a", kind: "agent", agent: { jobType: "//user:pass@host/x" } }], edges: [] }),
+      "url-shaped-job-type",
+    ) !== undefined,
+  );
+  assertEquals(
+    validateDeliveryGraph({ nodes: [{ id: "a", kind: "agent", agent: { jobType: "senior:feature" } }], edges: [] }).filter(
+      (e) => e.code === "url-shaped-job-type",
+    ),
+    [],
+  );
+});
+
+test("invalid-credential-env: a `wait.credentialEnv` that is not a DECLARED env-contract key is rejected at the semantic boundary — a raw secret can never reach the compiled BPMN the preview door returns (#778 review)", () => {
+  const errors = validateDeliveryGraph({
+    nodes: [
+      {
+        id: "g",
+        kind: "wait",
+        wait: { kind: "pr", target: "acme/repo#1", match: { prState: "merged" }, credentialEnv: "sk-an-actual-secret-value" },
+      },
+    ],
+    edges: [],
+  });
+  hasCode(errors, "invalid-credential-env");
+});
+
+test("invalid-credential-env: a DECLARED env-contract key passes (the secret is read from the ambient env at execution time, never carried here)", () => {
+  assertEquals(
+    validateDeliveryGraph({
+      nodes: [
+        {
+          id: "g",
+          kind: "wait",
+          wait: { kind: "pr", target: "acme/repo#1", match: { prState: "merged" }, credentialEnv: "GITHUB_TOKEN" },
+        },
+      ],
+      edges: [],
+    }).filter((e) => e.code === "invalid-credential-env"),
+    [],
+  );
+});
+
 test("S7 guard-default-conflict: an edge with both `default` and `when` is rejected", () => {
   const errors = validateDeliveryGraph({
     nodes: [

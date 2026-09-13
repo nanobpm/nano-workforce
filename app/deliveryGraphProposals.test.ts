@@ -17,6 +17,7 @@ import {
   getStagedProposal,
   isLiveStaged,
   isProposalExpired,
+  listStagedProposals,
   markProposalDismissed,
   markProposalDispatched,
   markProposalExpired,
@@ -331,6 +332,88 @@ test("markProposalDispatched: a dispatched proposal is no longer live", async ()
     await markProposalDispatched(data, "d1");
     assertEquals((await deliveryGraphProposals(data).get("d1"))?.status, "dispatched");
     assertEquals(await getStagedProposal(data, "d1"), null);
+  });
+});
+
+test("markProposalDispatched: flipping a live `staged` row returns true; an already-terminal (dispatched) row returns false (guarded, mirrors markProposalDismissed/Expired)", async () => {
+  await withData(async (data) => {
+    await stageProposal(data, row());
+    assertEquals(await markProposalDispatched(data, "d1"), true);
+    assertEquals((await deliveryGraphProposals(data).get("d1"))?.status, "dispatched");
+    // A second consume of the same digest (already dispatched) must no-op and report the lost race.
+    assertEquals(await markProposalDispatched(data, "d1"), false);
+    assertEquals((await deliveryGraphProposals(data).get("d1"))?.status, "dispatched");
+  });
+});
+
+test("markProposalDispatched: a concurrent RE-STAGE (bumping stage_seq) after the dispatch snapshot makes the seq-guarded mark a no-op — the newer, never-launched graph stays `staged` (#778 review)", async () => {
+  await withData(async (data) => {
+    // Dispatch snapshots the proposal's stage_seq when it loads the row.
+    await stageProposal(data, row());
+    const snapshot = await getStagedProposal(data, "d1");
+    assert(snapshot, "the freshly staged proposal is live");
+    const snapSeq = snapshot.stage_seq;
+    // A concurrent re-stage overwrites the SAME digest in place with a newer graph (two credential-
+    // differing graphs share a semantic digest), bumping stage_seq past the dispatch's snapshot.
+    await stageProposal(data, row());
+    const reStaged = await deliveryGraphProposals(data).get("d1");
+    assert(reStaged && reStaged.stage_seq > snapSeq, "the re-stage bumped stage_seq past the snapshot");
+    // The dispatch marks with the STALE snapshot seq → the `stage_seq` guard fails → no row flips, so the
+    // newer graph is NOT retired to `dispatched`; it stays `staged` for its own dispatch.
+    assertEquals(await markProposalDispatched(data, "d1", snapSeq), false);
+    assertEquals((await deliveryGraphProposals(data).get("d1"))?.status, "staged");
+    // Marking with the CURRENT seq consumes it as normal.
+    assertEquals(await markProposalDispatched(data, "d1", reStaged.stage_seq), true);
+    assertEquals((await deliveryGraphProposals(data).get("d1"))?.status, "dispatched");
+  });
+});
+
+test("stageProposal: two concurrent FIRST stages of the SAME digest do NOT primary-key-conflict — the raced insert collapses into an idempotent UPSERT (#778 review — thread :245)", async () => {
+  await withData(async (data) => {
+    // Reproduce the race deterministically: our stage reads `existing = null` (no row yet), then — in the
+    // window BEFORE our transaction commits — a COMPETING first-stage of the same digest lands its row.
+    // The old read-then-branch INSERT would make our write hit a UNIQUE(digest) conflict and THROW,
+    // dropping our reconcile; the `ON CONFLICT("digest") DO UPDATE` upsert must instead collapse it.
+    let injected = false;
+    const racyData = new Proxy(data, {
+      get(target, prop) {
+        if (prop === "open") {
+          return () => {
+            const src = target.open();
+            return new Proxy(src, {
+              get(s, p) {
+                if (p === "tx") {
+                  return async (fn: (t: unknown) => Promise<void>) => {
+                    if (!injected) {
+                      injected = true;
+                      // A competing first-stage commits its row before ours does (real data layer).
+                      await stageProposal(data, row());
+                    }
+                    // @ts-expect-error the wrapped tx forwards the original callback unchanged
+                    return s.tx(fn);
+                  };
+                }
+                const v = Reflect.get(s, p, s);
+                return typeof v === "function" ? v.bind(s) : v;
+              },
+            });
+          };
+        }
+        const v = Reflect.get(target, prop, target);
+        return typeof v === "function" ? v.bind(target) : v;
+      },
+    });
+
+    // Must NOT throw despite our `existing = null` read racing the competitor's committed insert.
+    await stageProposal(racyData as DataLayer, row());
+    assert(injected, "the competing first-stage should have fired");
+    const finalRow = await deliveryGraphProposals(data).get("d1");
+    assert(finalRow, "exactly one row exists for the digest");
+    assertEquals(finalRow.status, "staged");
+    // The upsert collapsed onto the competitor's row (an UPDATE, not a second INSERT), so stage_seq
+    // advanced past the competitor's — proving no PK conflict and a single reconciled row.
+    assert(finalRow.stage_seq >= 2, `the raced insert collapsed into an upsert (stage_seq advanced): ${finalRow.stage_seq}`);
+    assertEquals((await listStagedProposals(data)).length, 1);
   });
 });
 
