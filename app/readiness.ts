@@ -1157,7 +1157,7 @@ export function redactTarget(probe: ReadinessProbe): string {
   return `${probe.kind}:${redactString(probe.target)}`;
 }
 
-/** The ONE canonical embedded-`//<user>:<secret>@` credential-userinfo span, shared by the redactor
+/** The ONE canonical embedded-`//<userinfo>@` credential-userinfo span, shared by the redactor
  * ({@link redactString}, which REWRITES the span to `//***@`) and the semantic reject path
  * ({@link hasEmbeddedCredential}, used by `validateDeliveryGraph` to REJECT a credential-bearing
  * `agent.jobType`). Keeping ONE source string means the "what counts as an embedded credential" rule
@@ -1166,7 +1166,12 @@ export function redactTarget(probe: ReadinessProbe): string {
  * `[^/@\s]`): it deliberately spans WHITESPACE up to the `@`, so a malformed-but-operator-authored
  * `//user:secret pass@host` (a literal space in the userinfo) is caught, not left to leak verbatim
  * into the executable `<zeebe:taskDefinition type=…>` / compiled BPMN (issue #778 review — thread
- * deliveryGraph.ts:570). `[^/@]*@` is a single-quantifier match — linear, no catastrophic backtracking. */
+ * deliveryGraph.ts:570). The userinfo colon is DELIBERATELY OPTIONAL (`[^/@]*@`, not `[^/@]*:[^/@]*@`):
+ * a passwordless, username-only `//token@host` is a bearer/OAuth token riding the userinfo and MUST be
+ * caught too — a plain worker-routing job type never contains a `//…@` span at all (with or without a
+ * colon), so requiring a colon would only re-open a real leak for no legitimate gain (issue #778 review
+ * — thread readiness.ts:1170). `[^/@]*@` is a single-quantifier match — linear, no catastrophic
+ * backtracking. */
 const EMBEDDED_CREDENTIAL_SRC = "\\/\\/[^/@]*@";
 
 /** Strip credential-bearing pieces from a free-form target string for logging: any `user:pass@`
@@ -1191,7 +1196,8 @@ export function redactString(s: string): string {
     .replace(/[?#][\s\S]*$/, (m) => `${m[0]}***`);
 }
 
-/** True when `value` embeds a `//<user>:<secret>@host` credential token (see {@link EMBEDDED_CREDENTIAL_SRC}).
+/** True when `value` embeds a `//<userinfo>@host` credential token (see {@link EMBEDDED_CREDENTIAL_SRC};
+ * the userinfo colon is optional, so a passwordless `//token@host` bearer token also matches).
  * A plain worker-routing job type / opaque id never contains one, so a match is a credential leak to reject. */
 export function hasEmbeddedCredential(value: string): boolean {
   return new RegExp(EMBEDDED_CREDENTIAL_SRC).test(value);

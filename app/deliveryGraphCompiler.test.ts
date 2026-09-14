@@ -1775,6 +1775,42 @@ test("#778 graphCarriesRedactedSecrets: true when a prompt differs from its disp
   assertEquals(graphCarriesRedactedSecrets(trimmed), false);
 });
 
+test("#778 graphCarriesRedactedSecrets: a wait.match value of the WRONG type forks the digest — numeric status:200 vs string status:\"200\" render identically yet parse differently (#778 review — thread :1495)", () => {
+  // `parseMatch` reads `status` via `num()`, so a string "200" coerces to undefined (any-2xx) while the
+  // number 200 means exactly-200 — same `status=200` display, different runtime. The string variant is a
+  // digest-invisible fork and must be fingerprinted; the correctly-typed numeric form is a faithful
+  // identity and must NOT be (keyless dispatch of a normal graph stays unaffected).
+  const numeric = { name: "n", nodes: [{ id: "w", kind: "wait", wait: { kind: "http", target: "https://h/health", match: { status: 200 } } }], edges: [] };
+  const stringy = { name: "n", nodes: [{ id: "w", kind: "wait", wait: { kind: "http", target: "https://h/health", match: { status: "200" } } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(numeric), false);
+  assertEquals(graphCarriesRedactedSecrets(stringy), true);
+  // The raw type is the disambiguator, so the two never share a stable run-key fingerprint.
+  assertEquals(digestInvisibleRawValues(numeric).length, 0);
+  assertEquals(digestInvisibleRawValues(stringy).length, 1);
+  // Same class for a numeric-typed string on `exitCode` (also `num()`-read).
+  const exitStr = { name: "n", nodes: [{ id: "w", kind: "wait", wait: { kind: "command", target: "x", match: { exitCode: "0" } } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(exitStr), true);
+  // ...and a NON-string on a string-typed field (`conclusion`) likewise forks.
+  const concNum = { name: "n", nodes: [{ id: "w", kind: "wait", wait: { kind: "github-check", target: "acme/repo#1", match: { conclusion: 1 } } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(concNum), true);
+});
+
+test("#778 graphCarriesRedactedSecrets: an UNKNOWN wait.match key is runtime-inert (parseMatch ignores it) so it is NOT a digest fork — push-back on fingerprinting it (#778 review — thread :1495)", () => {
+  // `parseMatch` reads only the DECLARED predicate fields; an unknown key never reaches the worker's
+  // predicate, so two graphs differing only by it run identically and correctly share one digest.
+  // Fingerprinting it would wrongly force an idempotencyKey onto a behaviourally-identical graph.
+  const withUnknown = { name: "n", nodes: [{ id: "w", kind: "wait", wait: { kind: "http", target: "https://h/health", match: { status: 200, bogus: "whatever" } } }], edges: [] };
+  assertEquals(graphCarriesRedactedSecrets(withUnknown), false);
+});
+
+test("#778 wait display: a padded probe `kind` (\" http \") renders trimmed in name+doc, so it shares the trimmed twin's digest and is NOT digest-invisible (runtime `parseProbe` trims) (#778 review — thread :1495/:1296)", async () => {
+  const mk = (k: string) => ({ name: "n", nodes: [{ id: "w", kind: "wait", wait: { kind: k, target: "https://h/health" } }], edges: [] });
+  const padded = await compileOk(mk(" http "));
+  const plain = await compileOk(mk("http"));
+  assertEquals(padded.digest, plain.digest);
+  assertEquals(graphCarriesRedactedSecrets(mk(" http ")), false);
+});
+
 test("#778 graphCarriesRedactedSecrets: whitespace-only dedupeKey/formKey difference is NOT lossy (runtime trims both)", () => {
   // The connector worker (`connectorDedupeKey`) and human form resolution (`resolveHumanForm`) BOTH trim
   // these keys, so a leading/trailing-whitespace-only variant has identical runtime identity/behaviour —

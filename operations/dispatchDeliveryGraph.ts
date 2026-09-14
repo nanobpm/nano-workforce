@@ -233,12 +233,15 @@ export default defineOperation("dispatchDeliveryGraph", async ({ body }, app) =>
   }
 
   // Derive the dispatch run key (issue #778, Option C). Honour an explicit operator-supplied
-  // `idempotencyKey` verbatim. Otherwise, when the staged graph carries credential-bearing values that
-  // redaction strips from the content-addressed digest, that digest is NOT a faithful identity — two
-  // credential-differing graphs share it — so a keyless dispatch is refused by the dispatch core. The
-  // cockpit UI posts no idempotency-key field, so supply a STABLE server-side key derived from THIS
-  // proposal's parsed graph in canonical form (`stableProposalRunKey`); a faithful-digest graph keeps
-  // its digest identity (key left undefined). A malformed graph falls through to the core's own validation.
+  // `idempotencyKey` verbatim — a BLANK/whitespace-only key is already normalised to `undefined` at the
+  // request edge (`idemRaw`/`idempotencyKey` above), so `=== undefined` here covers both "omitted" and
+  // "blank" (issue #778 review — thread dispatchDeliveryGraph.ts:243, already handled upstream). When the
+  // staged graph carries credential-bearing values that redaction strips from the content-addressed
+  // digest, that digest is NOT a faithful identity — two credential-differing graphs share it — so a
+  // keyless dispatch is refused by the dispatch core. The cockpit UI posts no idempotency-key field, so
+  // supply a STABLE server-side key derived from THIS proposal's parsed graph in canonical form
+  // (`stableProposalRunKey`); a faithful-digest graph keeps its digest identity (key left undefined). A
+  // malformed graph falls through to the core's own validation.
   let dispatchRunKey: string | undefined = idempotencyKey;
   if (dispatchRunKey === undefined) {
     const graphErrors = validateDeliveryGraph(graph);

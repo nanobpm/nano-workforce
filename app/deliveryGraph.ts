@@ -470,6 +470,21 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
         // instead of returning a compile-time validation error. Enforce the SAME `http`-only contract here
         // at the semantic boundary so the mismatch surfaces as a 400 from the preview/stage door rather
         // than a dispatch-time incident (issue #778 review — thread deliveryGraph.ts:474).
+        // A PRESENT `credentialEnv` that is neither null/undefined nor a string can never name an
+        // env-contract key: `parseProbe` coerces + rejects it at DISPATCH, so a shape-valid graph carrying
+        // e.g. `credentialEnv: 123` stages successfully and only fails later with an unlaunchable proposal.
+        // Reject a non-string here at the semantic boundary so the mismatch surfaces as a 400 from the
+        // preview/stage door (issue #778 review — suppressed advisory deliveryGraph.ts:473).
+        if (kind === "wait" && config.credentialEnv !== undefined && config.credentialEnv !== null && typeof config.credentialEnv !== "string") {
+          errors.push({
+            path: `${path}.${configKey}.credentialEnv`,
+            message:
+              "`wait.credentialEnv` must be a STRING naming a declared env-contract key; a non-string value " +
+              "can never resolve to a key and `parseProbe` rejects it at dispatch, so reject it here rather " +
+              "than let a shape-invalid graph stage and then throw during dispatch",
+            code: "invalid-credential-env",
+          });
+        }
         if (kind === "wait" && typeof config.credentialEnv === "string" && config.credentialEnv.trim().length > 0) {
           // Compare the TRIMMED value: `parseProbe` normalises `credentialEnv` with `.trim()` before its
           // own `isEnvKey`/kind checks (readiness.ts:287), so validating the raw value here would
@@ -485,7 +500,7 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
                 "so a secret can never be smuggled into the compiled BPMN the preview door returns",
               code: "invalid-credential-env",
             });
-          } else if (typeof config.kind === "string" && config.kind !== "http") {
+          } else if (typeof config.kind === "string" && config.kind.trim() !== "http") {
             errors.push({
               path: `${path}.${configKey}.credentialEnv`,
               message:
@@ -574,7 +589,8 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
             path: `${path}.${configKey}.jobType`,
             message:
               `\`agent.jobType\` ${JSON.stringify(redactString(stripXmlInvalidChars(config.jobType)))} embeds a ` +
-              "credential-bearing URL token (`//<user>:<secret>@host`) that a plain worker-routing job type " +
+              "credential-bearing URL userinfo token (`//<userinfo>@host` — the userinfo need not contain a " +
+              "colon; a passwordless `//token@host` bearer token counts) that a plain worker-routing job type " +
               "never contains and that would land verbatim in the executable `<zeebe:taskDefinition type=…>`, " +
               "leaking the credential into the compiled BPMN. Use a plain job-type token and carry any " +
               "endpoint/credential as a runtime job variable instead",

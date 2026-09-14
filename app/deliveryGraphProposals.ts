@@ -477,9 +477,15 @@ export async function sweepExpiredProposals(data: DataLayer, at: Date = new Date
   let swept = 0;
   for (const row of staged) {
     if (isProposalExpired(row.expires_at, at)) {
+      // Pin `stage_seq` (like `markProposalDispatched`/`markProposalExpired`): the `find` liveness read and
+      // this flip are separate statements, so a concurrent RE-STAGE can overwrite the row in place with a
+      // newer graph — bumping `stage_seq` and REFRESHING `expires_at` — in the window between them. A blind
+      // `digest + status='staged'` update would then expire that fresh, un-expired revision. Guarding on the
+      // `stage_seq` we inspected makes the flip a no-op in that race, leaving the re-staged graph `staged`
+      // (issue #778 review — thread deliveryGraphProposals.ts:417).
       const res = await db.exec(
-        `UPDATE "delivery_graph_proposals" SET "status" = 'expired', "updated_at" = ? WHERE "digest" = ? AND "status" = 'staged'`,
-        [ts, row.digest],
+        `UPDATE "delivery_graph_proposals" SET "status" = 'expired', "updated_at" = ? WHERE "digest" = ? AND "status" = 'staged' AND "stage_seq" = ?`,
+        [ts, row.digest, row.stage_seq],
       );
       swept += res.changed;
     }

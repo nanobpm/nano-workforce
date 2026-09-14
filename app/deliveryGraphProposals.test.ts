@@ -488,6 +488,59 @@ test("sweepExpiredProposals: a dispatch racing between the read and the write is
   });
 });
 
+test("sweepExpiredProposals: a re-stage racing between the read and the write is NOT expired — the `stage_seq` guard no-ops the stale flip so the fresh revision survives (#778 review — thread deliveryGraphProposals.ts:417)", async () => {
+  await withData(async (data) => {
+    const seqOf = async (digest: string): Promise<number> => {
+      const rows = await data.open().query<{ stage_seq: number }>(`SELECT "stage_seq" FROM "delivery_graph_proposals" WHERE "digest" = ?`, [digest]);
+      return rows.length ? Number(rows[0].stage_seq) : -1;
+    };
+    // One aged-out staged proposal — the sweep's `find()` will see it as `staged` at revision seq0.
+    await stageProposal(data, row({ digest: "d1", createdAt: "2024-01-01T00:00:00.000Z" }));
+    const seq0 = await seqOf("d1");
+    const at = new Date(Date.parse("2024-01-01T00:00:00.000Z") + DELIVERY_PROPOSAL_TTL_MS + 1000);
+
+    // Wrap the data layer so that, in the window between the sweep's `find()` and its per-row guarded
+    // `exec`, a concurrent RE-STAGE overwrites d1 in place with a fresh, future-TTL revision (bumping
+    // stage_seq past seq0). A blind `WHERE digest=? AND status='staged'` flip would expire that never-swept
+    // fresh revision; the `stage_seq`-guarded UPDATE must instead no-op and leave the row live `staged`.
+    let raced = false;
+    const racyData = new Proxy(data, {
+      get(target, prop, receiver) {
+        if (prop === "open") {
+          return () => {
+            const src = target.open();
+            return new Proxy(src, {
+              get(s, p) {
+                if (p === "exec") {
+                  return async (sql: string, params?: unknown[]) => {
+                    if (!raced) {
+                      raced = true;
+                      await stageProposal(data, row({ digest: "d1", createdAt: "2030-01-01T00:00:00.000Z" }));
+                    }
+                    return s.exec(sql, params);
+                  };
+                }
+                const v = Reflect.get(s, p, s);
+                return typeof v === "function" ? v.bind(s) : v;
+              },
+            });
+          };
+        }
+        const v = Reflect.get(target, prop, target);
+        return typeof v === "function" ? v.bind(target) : v;
+      },
+    });
+
+    const swept = await sweepExpiredProposals(racyData as DataLayer, at);
+    assert(raced, "the racing re-stage should have fired");
+    assertEquals(swept, 0);
+    assert((await seqOf("d1")) > seq0, "the injected re-stage bumped stage_seq past the sweep's snapshot");
+    const d1 = await deliveryGraphProposals(data).get("d1");
+    assertEquals(d1?.status, "staged");
+    assert(!isProposalExpired(d1?.expires_at ?? ""), "the fresh revision retains its future TTL — it was not expired by the stale sweep");
+  });
+});
+
 test("markProposalDismissed: flipping a live `staged` row returns true and lands it `dismissed`", async () => {
   await withData(async (data) => {
     await stageProposal(data, row());

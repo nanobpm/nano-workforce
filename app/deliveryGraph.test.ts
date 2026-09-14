@@ -853,6 +853,35 @@ test("invalid-credential-env: a padded-but-valid `credentialEnv` on `http` passe
   );
 });
 
+test("invalid-credential-env: a non-string `credentialEnv` (e.g. 123) is rejected at the semantic boundary — it can never name an env key and `parseProbe` throws at dispatch, so reject rather than stage-then-throw (#778 review, suppressed advisory deliveryGraph.ts:473)", () => {
+  for (const bad of [123, true, { k: "v" }, ["GITHUB_TOKEN"]]) {
+    const errors = validateDeliveryGraph({
+      nodes: [{ id: "g", kind: "wait", wait: { kind: "http", target: "https://x/health", credentialEnv: bad } }],
+      edges: [],
+    });
+    hasCode(errors, "invalid-credential-env");
+  }
+});
+
+test("invalid-credential-env: a padded probe `kind` (\" http \") still accepts a `credentialEnv` — the http-only check trims `kind` like `parseProbe` does, so a valid padded-kind http probe is not false-rejected (#778 review — thread deliveryGraph.ts:488)", () => {
+  assertEquals(
+    validateDeliveryGraph({
+      nodes: [{ id: "g", kind: "wait", wait: { kind: " http ", target: "https://x/health", credentialEnv: "GITHUB_TOKEN" } }],
+      edges: [],
+    }).filter((e) => e.code === "invalid-credential-env"),
+    [],
+  );
+});
+
+test("credential-in-job-type: a PASSWORDLESS userinfo token (`senior:feature //token@host`, no colon) is REJECTED — a bearer/OAuth token riding the userinfo is a credential too, and a routing key never contains `//…@` at all (#778 review push-back — thread readiness.ts:1170)", () => {
+  const errors = validateDeliveryGraph({
+    nodes: [{ id: "a", kind: "agent", agent: { jobType: "senior:feature //tok3n@host" } }],
+    edges: [],
+  });
+  const err = hasCode(errors, "credential-in-job-type");
+  assert(!err.message.includes("tok3n"), `the credential-in-job-type message must redact the passwordless token, got: ${err.message}`);
+});
+
 test("S7 guard-default-conflict: an edge with both `default` and `when` is rejected", () => {
   const errors = validateDeliveryGraph({
     nodes: [

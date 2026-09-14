@@ -1213,6 +1213,23 @@ const DECLARED_MATCH_FIELDS: ReadonlySet<string> = new Set([
   "prState",
   "epicState",
 ]);
+
+/** The declared `wait.match` fields `parseMatch` (`app/readiness.ts`) reads through `num()` — a value of
+ * any OTHER type coerces to `undefined` (the predicate is treated as UNSET). Every other declared field is
+ * read through `str()`, i.e. string-typed. `describeProbeMatch` renders `String(v)`, so a numeric
+ * `status:200` and a string `status:"200"` render IDENTICALLY (`status=200`) yet parse DIFFERENTLY (`200`
+ * vs. unset/any-2xx) — a digest-invisible fork. `matchValueTypeMismatch` flags exactly that cross-type
+ * case so it is fingerprinted; a correctly-typed value is NOT flagged, so a normal graph's digest stays a
+ * faithful identity and keyless dispatch is unaffected (issue #778 review — thread :1495). */
+const NUMERIC_MATCH_FIELDS: ReadonlySet<string> = new Set(["status", "exitCode"]);
+
+function matchValueTypeMismatch(key: string, value: unknown): boolean {
+  if (NUMERIC_MATCH_FIELDS.has(key)) return typeof value !== "number";
+  // Remaining declared fields are string-typed (`str().trim()`); an unknown key is IGNORED by `parseMatch`
+  // (runtime-inert), so it is never a digest-invisible fork and must NOT be fingerprinted.
+  if (DECLARED_MATCH_FIELDS.has(key)) return typeof value !== "string";
+  return false;
+}
 function describeProbeMatch(match: Extract<DeliveryNode, { kind: "wait" }>["wait"]["match"]): string {
   if (match === undefined || match === null) return "";
   // Render the NORMALISED (trimmed) string value — `parseMatch` (`readiness.ts`) trims each string
@@ -1294,8 +1311,15 @@ export function nodeDisplay(node: DeliveryNode): { name: string; documentation: 
     }
     case "wait": {
       const p = node.wait;
+      // NORMALISE the kind — `parseProbe` trims `wait.kind` before the worker runs the probe, and
+      // `digestInvisibleRawValues` fingerprints the trimmed kind, but the label/documentation must trim it
+      // too: a padded `" http "` runs the SAME probe as `"http"`, so rendering the raw kind would fork the
+      // `semanticBpmn`/digest+name and let a re-stage bypass the idempotency fence and duplicate the run
+      // (issue #778 review — thread deliveryGraphCompiler.ts:1296). `redactProbeTargetForDisplay` already
+      // trims the kind internally for its command/http branch decision.
+      const kind = p.kind.trim();
       const safeTarget = redactProbeTargetForDisplay(p);
-      const doc: string[] = [`Readiness probe: ${p.kind}`, `Target: ${safeTarget}`];
+      const doc: string[] = [`Readiness probe: ${kind}`, `Target: ${safeTarget}`];
       const match = describeProbeMatch(p.match);
       if (match) doc.push(`Match: ${match}`);
       // `credentialEnv` names a DECLARED env-contract key (validated `isEnvKey`, never a secret value —
@@ -1314,7 +1338,7 @@ export function nodeDisplay(node: DeliveryNode): { name: string; documentation: 
         if (budget.length > 0) doc.push(`Poll: ${budget.join(", ")}`);
       }
       if (emitsLabel) doc.push(`Emits: ${emitsLabel}`);
-      return { name: withId(`Wait: ${p.kind} ${safeTarget}`), documentation: doc.join("\n") };
+      return { name: withId(`Wait: ${kind} ${safeTarget}`), documentation: doc.join("\n") };
     }
     case "human": {
       const h = node.human;
@@ -1490,7 +1514,7 @@ export function digestInvisibleRawValues(graph: DeliveryGraph): string[] {
               // still distinguishes) instead of forking the server-derived run key (issue #778 review —
               // thread :1363).
               out.push(`${id}\u0000wait.match.${k}\u0000${canonicalJson(typeof v === "string" ? v.trim() : v)}`);
-            } else if (hasXmlInvalidChars(String(v)) || redactConnectorValue(String(v)) !== String(v)) {
+            } else if (hasXmlInvalidChars(String(v)) || redactConnectorValue(String(v)) !== String(v) || matchValueTypeMismatch(k, v)) {
               out.push(`${id}\u0000wait.match.${k}\u0000${canonicalJson(v)}`);
             }
           }
