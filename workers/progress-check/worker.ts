@@ -185,21 +185,54 @@ export function makeHandler(deps: {
 }): AppJobHandler<In, Out> {
   return async (job, app) => {
     const { prKey, status, repo, prNumber, round, huskRetries } = job.variables;
+    const jobKey = job.jobKey;
 
-    // The single writer of the review-wait park (#786): persist-round no longer sets
-    // `waiting_review` — it runs before the husk decision — so progress-check records the park ONLY
-    // on a path that genuinely waits for a review, once a husk auto-retry has been ruled out. This
-    // is what closes the persist-round→progress-check race: the row stays on its running
-    // `converging` status until exactly one terminal write here resolves it to `waiting_review`
-    // (park) or leaves it `converging` (husk retry / escalation), so the poller never sees a
-    // transient `waiting_review` for a round that is really re-entering review-round.
-    const parkForReview = async () => {
+    const prs = app.data.table<{
+      pr_key: string;
+      last_round_head: string | null;
+      status: string | null;
+      updated_at: string | null;
+      last_progress_job_key: string | null;
+      last_progress_result: string | null;
+    }>("pull_requests", "pr_key");
+    const row = await prs.get(prKey);
+
+    // REDELIVERY REPLAY GUARD (Copilot #789 / engine at-least-once delivery). A job whose
+    // side-effects landed but whose completion-ack was lost is redelivered with the SAME job key.
+    // Replaying the recorded outcome — instead of re-deriving against the now-advanced
+    // `last_round_head` baseline — stops a redelivered PROGRESSED round from reading its own
+    // just-written head as "no advance" and mis-escalating an already-progressed round. A husk
+    // auto-retry re-enters `review-round` as a NEW job key, so it is never mistaken for a redelivery.
+    // The stamp and the baseline advance are written in ONE atomic row update (see `commit` below),
+    // so this guard can never disagree with the baseline it replays against.
+    if (jobKey && row?.last_progress_job_key === jobKey && typeof row.last_progress_result === "string") {
+      // biome-ignore lint/plugin: replay a worker outcome persisted as JSON in the idempotency stamp.
+      return JSON.parse(row.last_progress_result) as Out;
+    }
+
+    // The SINGLE atomic terminal write for this delivery. It advances the head baseline (when a head
+    // was read), applies the resting status effect, and stamps the idempotency key + serialized
+    // outcome. Folding all three into one row update is what makes the observation and the decision
+    // atomic (Copilot #789): a redelivery either sees the whole record (→ replay above) or none of
+    // it (→ recompute from the un-advanced baseline → same decision), never a half-state. It is also
+    // the single writer of the review-wait park (#786) — persist-round no longer sets
+    // `waiting_review`, so the row rests on its running `converging` status until exactly one write
+    // here resolves it, and the poller never sees a transient `waiting_review` for a husk-retry round.
+    const commit = async (
+      out: Out,
+      opts: { head?: string | null; status?: "waiting_review" | "converging" },
+    ): Promise<Out> => {
       const ts = new Date().toISOString();
-      await app.data.table("pull_requests", "pr_key").update(prKey, {
-        status: "waiting_review",
-        waiting_since: ts,
+      await prs.update(prKey, {
+        // Only overwrite the baseline when we actually read a head, so a null (unreadable) head
+        // never clobbers a good `last_round_head`.
+        ...(opts.head ? { last_round_head: opts.head } : {}),
+        ...(opts.status === "waiting_review" ? { status: "waiting_review", waiting_since: ts } : {}),
+        ...(opts.status === "converging" ? { status: "converging" } : {}),
+        ...(jobKey ? { last_progress_job_key: jobKey, last_progress_result: JSON.stringify(out) } : {}),
         updated_at: ts,
       });
+      return out;
     };
 
     // Prefer the carried repo/prNumber; fall back to parsing the canonical `owner/repo#N` prKey so
@@ -210,38 +243,25 @@ export function makeHandler(deps: {
     const ghRepo = repo ?? parsed?.repo;
     const ghNumber = typeof prNumber === "number" ? prNumber : parsed?.number;
     if (!ghRepo || typeof ghNumber !== "number") {
-      await parkForReview();
-      return { progressed: true, huskRetries: 0 };
+      return commit({ progressed: true, huskRetries: 0 }, { status: "waiting_review" });
     }
 
     // Read the head and record the baseline on EVERY round — including a non-addressed `waiting`
     // round — BEFORE the addressed-only escalation logic. A `waiting` round pushes nothing, but
     // recording its head establishes the baseline the FIRST `addressed` round compares against, so a
     // first-addressed-round husk is classifiable instead of silently failing open for want of a
-    // baseline (the worker.ts:142 gap #786 flagged). The baseline is only overwritten when we
-    // actually read a head, so a null (unreadable) head never clobbers a good baseline.
+    // baseline (the worker.ts:142 gap #786 flagged).
     const currentHead = await deps.readHead(ghRepo, ghNumber).catch(() => null);
-    const prs = app.data.table<{
-      pr_key: string;
-      last_round_head: string | null;
-      status: string | null;
-      updated_at: string | null;
-    }>("pull_requests", "pr_key");
-    const row = await prs.get(prKey);
     const previousHead = row?.last_round_head ?? null;
-    if (currentHead) {
-      await prs.update(prKey, { last_round_head: currentHead });
-    }
 
     // Only an `addressed` round claims a push, so only it can be a no-progress round — and a
     // blank/unknown status counts as `addressed` here (gw-status defaults it down the addressed arm
     // and pr.persist-round records a missing status as `addressed`), so it is the safe-default trap
     // this guard exists for. An explicitly recognized non-addressed status (`waiting`, etc.)
-    // legitimately has no push and always continues to the review wait — after the baseline write
-    // above. Park it for review (persist-round no longer does).
+    // legitimately has no push and always continues to the review wait — after the baseline write.
+    // Park it for review (persist-round no longer does).
     if (!isAddressedStatus(status)) {
-      await parkForReview();
-      return { progressed: true, huskRetries: 0 };
+      return commit({ progressed: true, huskRetries: 0 }, { head: currentHead, status: "waiting_review" });
     }
 
     // Round numbers are 1-based; coerce a missing/invalid `round` to a positive 1. The round no
@@ -265,31 +285,33 @@ export function makeHandler(deps: {
       typeof huskRetries === "number" ? huskRetries : null,
     );
 
-    // Resolve the row's resting status with exactly ONE terminal write, now that the husk decision
-    // is known — closing the persist-round→progress-check race (#786): persist-round left the PR on
-    // its running `converging` status, and this is the first and only place a post-round wait status
-    // is written.
-    if (decision.huskRetry === true) {
-      // Husk auto-retry re-enters `review-round` immediately (it does NOT wait for a new review), so
-      // keep the PR on the running `converging` aggregate: the poller must see an in-flight round,
-      // not a `waiting_review` it would solicit a spurious Copilot review for (and pollJobActivation
-      // treats only `converging` as live). persist-round already left it `converging`; assert it.
-      await prs.update(prKey, { status: "converging", updated_at: new Date().toISOString() });
-    } else if (decision.progressed) {
-      // Genuine progress → the loop parks at wait-review. THIS is the review-wait park, written only
-      // once the husk retry has been ruled out, so a husk-retry round never transits `waiting_review`.
-      await parkForReview();
-    }
-    // The remaining outcome (progressed:false, huskRetry:false) escalates to a human; the
-    // persist-escalation-noprogress worker owns that status, so progress-check leaves the row as-is.
-
-    return {
+    const out: Out = {
       progressed: decision.progressed,
       huskRetries: decision.huskRetries,
       ...(decision.huskRetry !== undefined ? { huskRetry: decision.huskRetry } : {}),
       ...(decision.reason !== undefined ? { noProgressReason: decision.reason } : {}),
       ...(decision.question !== undefined ? { noProgressQuestion: decision.question } : {}),
     };
+
+    // Resolve the row's resting status with the single atomic `commit`, now that the husk decision
+    // is known — closing the persist-round→progress-check race (#786).
+    if (decision.huskRetry === true) {
+      // Husk auto-retry re-enters `review-round` immediately (it does NOT wait for a new review), so
+      // keep the PR on the running `converging` aggregate: the poller must see an in-flight round,
+      // not a `waiting_review` it would solicit a spurious Copilot review for (and pollJobActivation
+      // treats only `converging` as live).
+      return commit(out, { head: currentHead, status: "converging" });
+    }
+    if (decision.progressed) {
+      // Genuine progress → the loop parks at wait-review. THIS is the review-wait park, written only
+      // once the husk retry has been ruled out, so a husk-retry round never transits `waiting_review`.
+      return commit(out, { head: currentHead, status: "waiting_review" });
+    }
+    // The remaining outcome (progressed:false, huskRetry:false) escalates to a human; the
+    // persist-escalation-noprogress worker owns the status, so leave it unset — but still advance the
+    // baseline and stamp the idempotency record so a redelivered escalation replays instead of
+    // recomputing.
+    return commit(out, { head: currentHead });
   };
 }
 

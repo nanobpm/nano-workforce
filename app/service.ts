@@ -289,6 +289,12 @@ export interface PullRequest {
   // commit. Scoped to the current convergence run — cleared on re-open so a resubmission starts from
   // a clean slate. NULL before the first round is recorded.
   last_round_head: string | null;
+  // At-least-once idempotency for pr.progress-check (103_pr_progress_idempotency.sql): the engine
+  // job key that produced the last committed progress decision, and that decision's serialized
+  // `PrProgressCheckOut`. On a lost-ack redelivery the guard recognizes its own job key and replays
+  // the recorded outcome instead of recomputing against the already-advanced `last_round_head`.
+  last_progress_job_key: string | null;
+  last_progress_result: string | null;
   // Merge-protocol liveness (012_merge_protocol_attempt.sql): head commit last nudged by the
   // frugal-CI fresh-head-run remedy. A rebase changes the head and therefore permits a new nudge.
   fresh_head_run_head: string | null;

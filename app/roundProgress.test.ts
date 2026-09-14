@@ -156,11 +156,11 @@ test("noProgressQuestion: husk vs no-advance render distinct, human-actionable r
 // ── The worker (with an injected head reader — never touches git/network) ────
 
 function fakeApp(
-  row?: { last_round_head: string | null },
+  row?: ({ last_round_head: string | null } & Record<string, unknown>) | undefined,
   searchAgentInstances: (arg: unknown) => Promise<unknown[]> = async () => [],
 ) {
   const updates: { key: string; patch: Record<string, unknown> }[] = [];
-  const store = new Map<string, unknown>();
+  const store = new Map<string, Record<string, unknown>>();
   if (row) store.set("o/r#1", { pr_key: "o/r#1", ...row });
   const app = {
     // The default agent-work reader consults app.engine.searchAgentInstances; the fake returns an
@@ -176,6 +176,9 @@ function fakeApp(
           },
           async update(key: string, patch: Record<string, unknown>) {
             updates.push({ key, patch });
+            // Apply the patch so a redelivery in the SAME test observes the committed baseline +
+            // idempotency stamp — the faithful double for the at-least-once replay guard (#789).
+            store.set(key, { ...(store.get(key) ?? { pr_key: key }), ...patch });
           },
         };
       },
@@ -213,12 +216,13 @@ test("progress-check: a non-addressed round records the baseline but never escal
   assertEquals(out, { progressed: true, huskRetries: 0 });
   assertEquals(called, true, "a waiting round reads the head to seed the baseline");
   assertEquals(agentReads, 0, "but never consults the agent-work channel");
-  // Two writes now: the baseline head, then the review-wait PARK. persist-round no longer parks —
-  // pr.progress-check is the single writer of `waiting_review` (#786), so a `waiting` round parks here.
-  assertEquals(updates.length, 2, "records the baseline and then parks for review");
+  // ONE atomic write now (Copilot #789): the baseline head advance and the review-wait PARK are
+  // folded into a single row update so a redelivery can't observe a half-state. persist-round no
+  // longer parks — pr.progress-check is the single writer of `waiting_review` (#786).
+  assertEquals(updates.length, 1, "records the baseline and parks for review in one atomic write");
   assertEquals(updates[0]!.patch.last_round_head, "sha-2", "the observed head is the new baseline");
-  assertEquals(updates[1]!.patch.status, "waiting_review", "the round parks for review");
-  assertEquals(typeof updates[1]!.patch.waiting_since, "string", "and stamps the review-wait start");
+  assertEquals(updates[0]!.patch.status, "waiting_review", "the round parks for review");
+  assertEquals(typeof updates[0]!.patch.waiting_since, "string", "and stamps the review-wait start");
 });
 
 test("progress-check: a blank/unknown status is treated as addressed — reads the head and can report no progress", async () => {
@@ -282,11 +286,52 @@ test("progress-check: an addressed round whose head advanced reports progressed:
   const out = await handler({ processInstanceKey: "pik", variables: { prKey: "o/r#1", status: "addressed", repo: "o/r", prNumber: 1, round: 2 } } as any, app as any);
   assertEquals(out.progressed, true);
   assertEquals(out.huskRetries, 0, "a progressing round resets the husk counter");
-  // The baseline rebaseline, then the review-wait PARK (progress-check owns `waiting_review` now, #786).
-  assertEquals(updates.length, 2, "the observed head is rebaselined, then the PR parks for review");
+  // ONE atomic write (Copilot #789): the rebaseline and the review-wait PARK are a single row
+  // update so a redelivery can't see the advanced baseline without the park. progress-check owns
+  // `waiting_review` now (#786).
+  assertEquals(updates.length, 1, "the observed head is rebaselined and parked in one atomic write");
   assertEquals(updates[0]!.patch.last_round_head, "sha-2");
-  assertEquals(updates[1]!.patch.status, "waiting_review", "a progressed round parks for review");
-  assertEquals(typeof updates[1]!.patch.waiting_since, "string", "and stamps the review-wait start");
+  assertEquals(updates[0]!.patch.status, "waiting_review", "a progressed round parks for review");
+  assertEquals(typeof updates[0]!.patch.waiting_since, "string", "and stamps the review-wait start");
+});
+
+test("progress-check: a lost completion-ack REDELIVERS the same job — the recorded outcome is replayed, not recomputed against the advanced baseline (idempotent)", async () => {
+  // Copilot #789 (engine at-least-once delivery): a progressed round advances `last_round_head` to
+  // the new head. If its completion-ack is LOST the engine redelivers the SAME job key. Without the
+  // idempotency guard the redelivery reads the just-advanced baseline as `previousHead`, sees the
+  // (still-unchanged) head as "no advance", and mis-ESCALATES an already-progressed round. The guard
+  // must recognize its own job key and REPLAY the recorded progressed outcome, making no new write
+  // and never consulting the agent-work channel.
+  let agentReads = 0;
+  const readAgentWork = async () => {
+    agentReads++;
+    return null; // would drive a no-advance ESCALATION if the guard let it recompute
+  };
+  // Head reader returns the SAME advanced head on both deliveries (no new push between them).
+  const handler = await makeUnderTest(async () => "sha-2", readAgentWork);
+  const { app, updates } = fakeApp({ last_round_head: "sha-1" });
+
+  // First delivery: an addressed round whose head advanced → progressed:true, stamps the baseline +
+  // idempotency record atomically.
+  const first = await handler(
+    { jobKey: "job-1", processInstanceKey: "pik", variables: { prKey: "o/r#1", status: "addressed", repo: "o/r", prNumber: 1, round: 2, huskRetries: 0 } } as any,
+    app as any,
+  );
+  assertEquals(first.progressed, true, "the first delivery sees the advance and progresses");
+  const writesAfterFirst = updates.length;
+  assertEquals(agentReads, 0, "a progressing round never reads agent-work");
+
+  // Second delivery: the SAME job key redelivered after a lost ack. The baseline is now "sha-2" and
+  // the head is unchanged, so a RECOMPUTE would read "no advance" and escalate. The guard must
+  // replay the recorded progressed outcome instead.
+  const replay = await handler(
+    { jobKey: "job-1", processInstanceKey: "pik", variables: { prKey: "o/r#1", status: "addressed", repo: "o/r", prNumber: 1, round: 2, huskRetries: 0 } } as any,
+    app as any,
+  );
+  assertEquals(replay.progressed, true, "the redelivery REPLAYS progressed:true, never mis-escalates");
+  assertEquals(replay.huskRetry, undefined, "the replay is not a no-advance/husk escalation");
+  assertEquals(agentReads, 0, "the replay never recomputes, so it never reads agent-work");
+  assertEquals(updates.length, writesAfterFirst, "the replay makes no new write (pure replay)");
 });
 
 test("progress-check: the first observed round (no baseline) continues and records the baseline", async () => {
