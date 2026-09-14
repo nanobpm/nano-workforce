@@ -797,14 +797,53 @@ test("record-answer resets huskRetries on every human resume (Copilot #789)", ()
   assertStringIncludes(loop, 'targetRef="capture-head"');
 });
 
-test("gw-progress default arm re-enters the review wait with no condition", () => {
+test("gw-progress default (progress) arm routes to the round-cap guard, then the review wait", () => {
+  // After #786/#789 the round-cap guard (gw-guard) moved DOWNSTREAM of progress classification: a
+  // progressing round routes gw-progress → gw-guard → (round<max) gw-review-wait, so the round cap
+  // gates the NEXT review round only. A husk auto-retry (gw-husk → capture-head) therefore bypasses
+  // the cap entirely — a dead-worker husk is re-tried onto a healthy worker even on the final round.
   const gw = flat.match(/<bpmn:exclusiveGateway\b[^>]*\bid="gw-progress"[^>]*>/);
   assert(gw, "gw-progress gateway missing");
   assertStringIncludes(gw[0], 'default="f_progressOk"');
   const ok = flowElement("f_progressOk");
   assert(ok, "f_progressOk flow missing");
-  assertStringIncludes(ok, 'targetRef="gw-review-wait"');
+  assertStringIncludes(ok, 'targetRef="gw-guard"');
   assert(!/conditionExpression/.test(ok), "the default arm must carry no conditionExpression");
+  // The guard's continue arm (not the max-rounds arm) is what re-enters the review wait.
+  const guardOk = flowElement("f_guardOk");
+  assert(guardOk, "f_guardOk flow missing");
+  assertStringIncludes(guardOk, 'sourceRef="gw-guard"');
+  assertStringIncludes(guardOk, 'targetRef="gw-review-wait"');
+  assert(!/conditionExpression/.test(guardOk), "the guard continue arm is the default (no condition)");
+});
+
+test("the round-cap guard is downstream of progress classification, so a husk auto-retry bypasses it (#786/#789)", () => {
+  // gw-guard is fed ONLY by the progress arm (f_progressOk), NOT by the addressed/waiting status
+  // arms — those now go straight to persist-round. This is the structural guarantee that a husk on
+  // the final configured round still reaches gw-husk and gets its bounded retries, instead of being
+  // escalated as "max rounds" before it is ever classified.
+  const guard = flat.match(/<bpmn:exclusiveGateway\b[^>]*\bid="gw-guard"[^>]*>[\s\S]*?<\/bpmn:exclusiveGateway>/);
+  assert(guard, "gw-guard gateway missing");
+  assertStringIncludes(guard[0], "<bpmn:incoming>f_progressOk</bpmn:incoming>");
+  for (const id of ["f_addressed", "f_waiting", "f_escReenter"]) {
+    assert(!guard[0].includes(`<bpmn:incoming>${id}</bpmn:incoming>`), `gw-guard must not sit before progress classification (still takes ${id})`);
+  }
+  // The max-rounds arm still fires on the round cap, but only AFTER a progressing round.
+  const max = flowElement("f_guardMax");
+  assert(max, "f_guardMax flow missing");
+  assertStringIncludes(max, 'sourceRef="gw-guard"');
+  assertStringIncludes(max, 'targetRef="persist-escalation-maxrounds"');
+  assertStringIncludes(max, "round &gt;= maxRounds");
+  // The husk retry re-enters via capture-head, never touching gw-guard.
+  const retry = flowElement("f_huskRetry");
+  assert(retry, "f_huskRetry flow missing");
+  assertStringIncludes(retry, 'targetRef="capture-head"');
+  // The addressed/waiting status arms feed persist-round directly (not the guard).
+  for (const id of ["f_addressed", "f_waiting"]) {
+    const f = flowElement(id);
+    assert(f, `${id} flow missing`);
+    assertStringIncludes(f, 'targetRef="persist-round"');
+  }
 });
 
 test("the no-progress escalation routes through gw-escalated toward the human wait-answer task", () => {

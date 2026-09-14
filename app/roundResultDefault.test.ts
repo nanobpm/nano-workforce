@@ -74,10 +74,10 @@ test("escalation is an explicit needs_input/blocked arm gated on a non-blank que
   assertStringIncludes(esc, 'trim(question) != ""');
 });
 
-test("the default (addressed) arm carries no condition and re-enters the guard", () => {
+test("the default (addressed) arm carries no condition and re-enters round processing", () => {
   const addressed = flowElement("f_addressed");
   assert(addressed, "f_addressed flow missing");
-  assertStringIncludes(addressed, 'targetRef="gw-guard"');
+  assertStringIncludes(addressed, 'targetRef="persist-round"');
   // A default flow must have NO conditionExpression.
   assert(
     !/conditionExpression/.test(addressed),
@@ -95,9 +95,10 @@ test("regression: an empty/unknown status no longer routes to persist-escalation
   for (const f of intoEscalation) {
     assertStringIncludes(f, "conditionExpression");
   }
-  // The addressed default must land on the guard (which re-solicits the review), not escalation.
+  // The addressed default must land on round processing (persist-round → check-progress, which
+  // re-solicits the review after the round-cap gate downstream), not escalation.
   const addressed = flowElement("f_addressed");
-  assert(addressed && /targetRef="gw-guard"/.test(addressed), "default arm must re-enter gw-guard");
+  assert(addressed && /targetRef="persist-round"/.test(addressed), "default arm must re-enter round processing");
 });
 
 // The canonical router (app/roundResultDefault.ts) mirrors the gw-status routing above, with the
@@ -161,7 +162,7 @@ test("persist-escalation routes through the gw-escalated liveness gateway, not s
   );
 });
 
-test("gw-escalated waits only when an escalation was opened, else re-enters the guard", () => {
+test("gw-escalated waits only when an escalation was opened, else re-enters round processing", () => {
   const gw = flat.match(/<bpmn:exclusiveGateway\b[^>]*\bid="gw-escalated"[^>]*>/);
   assert(gw, "gw-escalated gateway missing");
   // Its default arm must be the re-enter (no-escalation) arm, never the answer-wait.
@@ -175,12 +176,13 @@ test("gw-escalated waits only when an escalation was opened, else re-enters the 
   assertStringIncludes(wait, 'targetRef="wait-answer"');
   assertStringIncludes(wait, "escalated = true");
 
-  // The default (no-escalation) arm carries no condition and re-enters gw-guard (forward
-  // progress), so a non-escalation early return can never wedge on wait-answer.
+  // The default (no-escalation) arm carries no condition and re-enters round processing
+  // (persist-round → check-progress → the round-cap gate), so a non-escalation early return can
+  // never wedge on wait-answer.
   const reenter = flowElement("f_escReenter");
   assert(reenter, "f_escReenter flow missing");
   assertStringIncludes(reenter, 'sourceRef="gw-escalated"');
-  assertStringIncludes(reenter, 'targetRef="gw-guard"');
+  assertStringIncludes(reenter, 'targetRef="persist-round"');
   assert(
     !/conditionExpression/.test(reenter),
     "f_escReenter is the default arm and must not carry a conditionExpression",
