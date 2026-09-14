@@ -13,6 +13,13 @@ import {
   reviewWaitTimeout,
 } from "./reviewWait.ts";
 
+test("DEFAULT_REVIEW_WAIT_TIMEOUT: pins the user-visible default to PT30M", () => {
+  // A direct regression guard on the literal default — the fallback-based assertions below compare
+  // against DEFAULT_REVIEW_WAIT_TIMEOUT itself, so they would still pass if it were accidentally
+  // reverted to PT20M. This anchors the intended value so that change is caught.
+  assertEquals(DEFAULT_REVIEW_WAIT_TIMEOUT, "PT30M");
+});
+
 test("reviewWaitTimeout: blank / absent / malformed → default", () => {
   assertEquals(reviewWaitTimeout(undefined), DEFAULT_REVIEW_WAIT_TIMEOUT);
   assertEquals(reviewWaitTimeout(""), DEFAULT_REVIEW_WAIT_TIMEOUT);
