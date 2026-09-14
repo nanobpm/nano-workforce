@@ -180,8 +180,10 @@ Notes:
   have minted an instance had the channel existed. A head that cannot be read fails
   OPEN (continue), so a transient GitHub hiccup never fabricates a no-progress
   escalation. Two supporting invariants keep an auto-retry clean: `pr.persist-round`
-  records a round IDEMPOTENTLY on `(pr_key, round_no)` (a retry updates in place, it
-  never duplicates the durable round history), and the guard flips the PR back to
+  records a round IDEMPOTENTLY on `(pr_key, round_no, process_instance_key)` — a husk
+  retry (same process instance) updates its row in place, while a resubmission that
+  re-opens the PR at round 1 in a NEW process instance inserts a fresh row and so
+  never clobbers a prior run's durable round history (migration 102) — and the guard flips the PR back to
   the running `converging` status before a retry re-enters `review-round` so the
   poller does not solicit a spurious review against the still-running round. The
   round cap and the review-wait timeout remain the outer safety nets.
