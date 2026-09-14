@@ -23,7 +23,7 @@ import { isPlausibleBranchName } from "./baseBranch.ts";
 import { isEnvKey } from "./contracts.ts";
 import { isConvergeTarget } from "./convergeTargets.ts";
 import { isRawConvergeMergeJobType, NODE_COMPLETION_POLICIES } from "./nodePolicy.ts";
-import { isUrlShaped, redactString } from "./readiness.ts";
+import { hasEmbeddedCredential, isUrlShaped, redactString } from "./readiness.ts";
 import { isResolvableRepo } from "./repoEnvelope.ts";
 
 /** The CLOSED node-kind allowlist (ADR 0005 Decision 2) — the trust boundary. Extensible only by a
@@ -529,7 +529,7 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
           errors.push({
             path: `${path}.${configKey}.jobType`,
             message:
-              `\`agent.jobType\` ${JSON.stringify(redactConnectorValue(config.jobType))} contains a character that would be silently ` +
+              `\`agent.jobType\` ${JSON.stringify(redactString(stripXmlInvalidChars(config.jobType)))} contains a character that would be silently ` +
               "rewritten when emitted as the executable `<zeebe:taskDefinition type=…>` attribute — an " +
               "XML-1.0-invalid character (control characters, U+FFFE/U+FFFF, or an unpaired surrogate) that " +
               "the sanitiser strips, or attribute whitespace (tab, LF, CR) that XML attribute-value " +
@@ -565,9 +565,11 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
         // separated by a plain space — which `hasAttrNormalizedWhitespace` (TAB/LF/CR only) and the anchored
         // `isUrlShaped` both miss — so the `//user:pass@host` substring still lands verbatim in the
         // executable `<zeebe:taskDefinition type=…>`. Reject ANY embedded `//…@` credential token (a
-        // routing key never contains one) at the same trust boundary, message redacted (issue #778 review —
-        // thread deliveryGraph.ts:550). */
-        if (kind === "agent" && typeof config.jobType === "string" && /\/\/[^/\s]*@/.test(config.jobType)) {
+        // routing key never contains one) at the same trust boundary via {@link hasEmbeddedCredential} — the
+        // SAME whitespace-tolerant `//…@` span the display redactor strips, so a userinfo carrying a literal
+        // space (`//user:secret pass@host`) can neither slip past this reject nor escape the display redact
+        // (issue #778 review — thread deliveryGraph.ts:550/570). Message redacted.
+        if (kind === "agent" && typeof config.jobType === "string" && hasEmbeddedCredential(config.jobType)) {
           errors.push({
             path: `${path}.${configKey}.jobType`,
             message:

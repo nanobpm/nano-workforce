@@ -1004,6 +1004,20 @@ test("#778 the compiled subProcess carries the descriptive name + a `<bpmn:docum
   assert(r.bpmn.includes(`<bpmn:subProcess id="${waitEl}" name="Wait: pr impl.pr · gate">`), "the wait wrapper carries the descriptive name");
 });
 
+test("#778 nodeDisplay redacts a wait probe whose `kind` is PADDED (` command `) — the runtime trims the kind so it runs as a command probe; the display must trim too and route its arbitrary shell target to <redacted>, not leak it (thread deliveryGraphCompiler.ts:70)", async () => {
+  // `kind: " command "` passes the validator (non-empty string) and the worker trims it to `command`, so
+  // it runs as a COMMAND probe. A raw-kind compare here would miss that and send the shell snippet through
+  // the URL-only redactor, leaking it into the compiled BPMN documentation. Compile through the real path
+  // (unknown-typed input, so no cast is needed for the padded kind) and assert the secret never surfaces.
+  const r = await compileOk({
+    name: "padded-kind",
+    nodes: [{ id: "g", kind: "wait", wait: { kind: " command ", target: "curl -H 'Authorization: SUPER_SECRET' https://api.example.com" } }],
+    edges: [],
+  });
+  assert(!r.semanticBpmn.includes("SUPER_SECRET"), "a padded-kind command probe's shell target must not leak into the compiled BPMN");
+  assert(r.semanticBpmn.includes("&lt;redacted&gt;"), "a padded-kind command probe's target must render as <redacted>");
+});
+
 test("#778 nodeDisplay redacts a wait probe's credential-bearing target in the name + documentation", () => {
   // A `command` target is an arbitrary shell snippet that can embed a secret — it is never surfaced.
   const cmd = nodeDisplay({

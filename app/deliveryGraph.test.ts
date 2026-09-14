@@ -770,6 +770,24 @@ test("credential-in-job-type: a plausible token with an EMBEDDED credential-bear
   );
 });
 
+test("invalid-job-type: a NON-url-shaped token that both embeds a credential AND carries an XML-invalid char (`senior:feature //user:pass@host\\x01`) redacts the credential in the message — `redactConnectorValue` would have echoed it verbatim (#778 review — thread deliveryGraph.ts:532)", () => {
+  const errors = validateDeliveryGraph({
+    nodes: [{ id: "impl", kind: "agent", agent: { jobType: "senior:feature //user:pass@evil.example\u0001/route" } }],
+    edges: [],
+  });
+  const err = hasCode(errors, "invalid-job-type");
+  assert(!err.message.includes("user:pass"), `the invalid-job-type message must redact the EMBEDDED credential, got: ${err.message}`);
+});
+
+test("credential-in-job-type: a literal SPACE inside the userinfo (`senior:feature //user:secret pass@host`) is caught — the whitespace-tolerant `//…@` span matches the display redactor, message redacted (#778 review — thread deliveryGraph.ts:570)", () => {
+  const errors = validateDeliveryGraph({
+    nodes: [{ id: "a", kind: "agent", agent: { jobType: "senior:feature //user:secret pass@evil.example/route" } }],
+    edges: [],
+  });
+  const err = hasCode(errors, "credential-in-job-type");
+  assert(!err.message.includes("secret pass"), `the credential-in-job-type message must redact the space-bearing credential, got: ${err.message}`);
+});
+
 test("invalid-credential-env: a `wait.credentialEnv` that is not a DECLARED env-contract key is rejected at the semantic boundary — a raw secret can never reach the compiled BPMN the preview door returns (#778 review)", () => {
   const errors = validateDeliveryGraph({
     nodes: [

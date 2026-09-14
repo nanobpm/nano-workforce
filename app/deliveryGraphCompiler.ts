@@ -67,7 +67,14 @@ import { isoDuration } from "./reviewWait.ts";
  * probe config + the escalation diagnostics), never in the deployed documentation the explorer/modeler
  * shows. */
 function redactProbeTargetForDisplay(probe: Extract<DeliveryNode, { kind: "wait" }>["wait"]): string {
-  if (probe.kind === "command") return "<redacted>";
+  // NORMALIZE the kind first — `parseProbe` (`readiness.ts`) trims `wait.kind` before the worker keys
+  // on it, and the semantic validator only requires a non-empty string, so an internal/direct graph
+  // with `kind: " command "` runs as a COMMAND probe at runtime. Comparing the RAW (padded) kind here
+  // would miss that, route its arbitrary shell target through the URL-only `redactConnectorValue`, and
+  // leak it into the deployed BPMN documentation instead of `<redacted>` (issue #778 review — thread
+  // deliveryGraphCompiler.ts:70). Trim to match the runtime kind.
+  const kind = probe.kind.trim();
+  if (kind === "command") return "<redacted>";
   // TRIM the target first — `parseProbe` (`readiness.ts`) trims `target` for EVERY kind before the worker
   // keys on it, so a padded ` owner/repo#1 ` and `owner/repo#1` are the SAME runtime probe. Rendering the
   // raw (padded) value would leave the whitespace in `nodeDisplay`/`semanticBpmn`, forking the graph digest
@@ -77,7 +84,7 @@ function redactProbeTargetForDisplay(probe: Extract<DeliveryNode, { kind: "wait"
   // `stripXmlInvalidChars` BEFORE `redactString`: an XML-forbidden control (e.g. `\x0B`) hidden inside
   // the `user:pass@` userinfo would otherwise split `redactString`'s `//…@` match, escape redaction, and
   // be re-joined into a live credential once the renderer strips that control (issue #778 review).
-  if (probe.kind === "http") return redactString(stripXmlInvalidChars(target));
+  if (kind === "http") return redactString(stripXmlInvalidChars(target));
   return redactConnectorValue(target);
 }
 
