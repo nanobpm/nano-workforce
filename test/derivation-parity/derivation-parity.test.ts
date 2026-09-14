@@ -125,9 +125,14 @@ test("convergence-loop golden has arbitrary-graph features the structured builde
     const body = rest.slice(0, close);
     return (body.match(new RegExp(`<bpmn:${tag}\\b`, "g")) ?? []).length;
   };
-  // (a) the loop head is a serviceTask that MERGES four back-edges directly (the review loop, the
-  // answer resume, the escalation re-enter, and the #786 husk auto-retry).
-  assertEquals(between("review-round", "serviceTask", "incoming"), 4, "review-round should merge 4 flows on the task itself");
+  // (a) the loop head is a serviceTask that MERGES four back-edges directly — after #786/#789 the
+  // round-entry head capture (`capture-head`) is the loop head sitting BEFORE `review-round`, so it
+  // is `capture-head` that absorbs the four back-edges (the review loop, the answer resume, the
+  // escalation re-enter, and the #786 husk auto-retry); `review-round` then takes its single
+  // `f_capture` in-edge. A serviceTask merging four back-edges directly is the arbitrary-graph shape
+  // the structured builder cannot emit — the feature this asserts, now on `capture-head`.
+  assertEquals(between("capture-head", "serviceTask", "incoming"), 4, "capture-head should merge 4 flows on the task itself");
+  assertEquals(between("review-round", "serviceTask", "incoming"), 1, "review-round now takes the single f_capture in-edge");
   // (b) a single exclusive gateway forks FOUR heterogeneous-condition out-edges.
   assertEquals(between("gw-status", "exclusiveGateway", "outgoing"), 4, "gw-status should be a 4-way exclusive gateway");
   // (c) a single exclusive gateway is at once a 6-way merge and a 2-way split.

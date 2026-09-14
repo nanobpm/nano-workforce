@@ -243,7 +243,7 @@ export function makeHandler(deps: {
   readAgentWork?: AgentWorkReader;
 }): AppJobHandler<In, Out> {
   return async (job, app) => {
-    const { prKey, status, repo, prNumber, round, huskRetries } = job.variables;
+    const { prKey, status, repo, prNumber, round, huskRetries, roundEntryHead } = job.variables;
     const jobKey = job.jobKey;
 
     const prs = app.data.table<{
@@ -329,12 +329,24 @@ export function makeHandler(deps: {
     }
 
     // Read the head and record the baseline on EVERY round — including a non-addressed `waiting`
-    // round — BEFORE the addressed-only escalation logic. A `waiting` round pushes nothing, but
-    // recording its head establishes the baseline the FIRST `addressed` round compares against, so a
-    // first-addressed-round husk is classifiable instead of silently failing open for want of a
-    // baseline (the worker.ts:142 gap #786 flagged).
+    // round — BEFORE the addressed-only escalation logic. The within-round baseline is now
+    // `roundEntryHead` (captured by `pr.capture-head` before `review-round`); persisting each round's
+    // exit head into `last_round_head` still matters as the FALLBACK baseline for an older in-flight
+    // instance whose fixed flow predates capture-head, or when a capture read failed open to null.
     const currentHead = await deps.readHead(ghRepo, ghNumber).catch(() => null);
-    const previousHead = row?.last_round_head ?? null;
+    // Baseline = the head captured by `pr.capture-head` at THIS round's entry, BEFORE `review-round`
+    // ran (the `roundEntryHead` process variable). It is a within-round baseline, so it structurally
+    // closes the no-baseline gap: a real push advances `currentHead` past it (→ progress, never a
+    // false husk), and a husk that pushed nothing leaves `currentHead === roundEntryHead` (→ a
+    // genuine no-advance, split into husk vs. no-advance by the agent-instance corroboration).
+    // capture-head publishes the EMPTY string when it could not read the entry head (its "unknown"
+    // sentinel) — treat that as no round-entry baseline and fall back to the persisted prior-round
+    // head (an OLDER in-flight instance whose fixed flow lacks capture-head resolves the var to
+    // undefined and lands here too). Absent both, the no-advance path fails open (see decideProgress).
+    const previousHead =
+      typeof roundEntryHead === "string" && roundEntryHead !== ""
+        ? roundEntryHead
+        : (row?.last_round_head ?? null);
 
     // Round numbers are 1-based; coerce a missing/invalid `round` to a positive 1. The round no
     // longer gates the agent-work corroboration (correlation is by the completing element-instance,
@@ -342,8 +354,8 @@ export function makeHandler(deps: {
     const roundNo = typeof round === "number" && round > 0 ? Math.floor(round) : 1;
     // Corroborate durable agent work on EVERY round with a READABLE head — the addressed rounds AND
     // the non-addressed `waiting` round — not only the no-advance path. The husk verdict itself is
-    // only consulted when the head did not advance (or on a no-baseline round — the #786
-    // first-round-husk gap), but the read must ALSO run to MAINTAIN THE ATTEMPT WATERMARK (Copilot
+    // only consulted when the head did not advance past the round-entry baseline, but the read must
+    // ALSO run to MAINTAIN THE ATTEMPT WATERMARK (Copilot
     // #789): every round runs `review-round` BEFORE this progress-check
     // (`…→review-round→gw-status→…→check-progress`), registering a fresh `review-round` instance that
     // must be CONSUMED into the watermark, else the NEXT round's pre-registration husk would see that

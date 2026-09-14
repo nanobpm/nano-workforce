@@ -140,27 +140,21 @@ test("decideProgress: a legitimately non-addressed / unreadable-head round conti
   }
 });
 
-test("decideProgress: a NO-BASELINE addressed round is a husk ONLY when the completing instance is corroborated non-terminal (agentWork=false); a terminal/unknown read still fails open", () => {
-  // #786 first-round-husk gap: with no baseline (previousHead null) the head-diff can't see a
-  // no-advance, but a husked completing attempt (agentWork === false) is head-independent, so it must
-  // still be classified as a husk and retried — NOT waved through as progress. A terminal (true) or
-  // unknown (null/undefined) read must stay fail-open, because without a baseline a terminal
-  // completing attempt could equally have pushed a commit (real progress).
-  const husk = decideProgress("addressed", null, "sha-1", 1, false, 0);
-  assertEquals(husk.progressed, false, "a corroborated no-baseline husk is not progress");
-  assertEquals(husk.huskRetry, true, "it auto-retries the same round under the cap");
-  assertEquals(husk.reason, "husk");
-  for (const agentWork of [true, null, undefined] as const) {
+test("decideProgress: a NO-BASELINE addressed round ALWAYS fails open — the no-baseline husk special-case is gone (closed structurally by pr.capture-head)", () => {
+  // The no-baseline case is now handled UPSTREAM: `pr.capture-head` records the round's entry head
+  // into `roundEntryHead` before `review-round` runs, so within a round there is always a baseline
+  // and a first-addressed-round husk leaves `currentHead === roundEntryHead` (→ the escalate/husk
+  // split). Consequently `decideProgress` itself no longer special-cases a null baseline: with no
+  // baseline the head-diff cannot see a no-advance, so it fails OPEN for EVERY agent-work verdict —
+  // including a corroborated non-terminal read that the old code retried. This removes the opposing
+  // risk of mis-escalating a straggler push the old special-case carried.
+  for (const agentWork of [true, false, null, undefined] as const) {
     const d = decideProgress("addressed", null, "sha-1", 1, agentWork, 0);
     assertEquals(d.progressed, true, `no baseline + agentWork=${String(agentWork)} fails open`);
-    assertEquals(d.reason, undefined, "a non-corroborated no-baseline round carries no husk verdict");
+    assertEquals(d.huskRetry, undefined, "no baseline never auto-retries");
+    assertEquals(d.reason, undefined, "a no-baseline round carries no husk verdict");
+    assertEquals(d.huskRetries, 0, "the husk counter resets on a fail-open round");
   }
-  // At the husk cap a no-baseline husk escalates (never loops forever), with the husk-specific question.
-  const capped = decideProgress("addressed", null, "sha-1", 4, false, MAX_HUSK_RETRIES);
-  assertEquals(capped.progressed, false);
-  assertEquals(capped.huskRetry, false, "at the cap it escalates to a human");
-  assertEquals(capped.reason, "husk");
-  assertStringIncludes(String(capped.question), "no durable work");
 });
 
 test("decideProgress: a garbage carried husk-retry counter is coerced to 0", () => {
@@ -380,29 +374,57 @@ test("progress-check: the first observed round (no baseline) continues and recor
   assertEquals(updates[0]!.patch.last_round_head, "sha-1");
 });
 
-test("progress-check: a FIRST addressed round with NO baseline whose completing instance husked (non-terminal) is retried, not waved through as progress (#786 first-round-husk gap)", async () => {
-  // Copilot #789: with `last_round_head` null (a fresh submission, or after a transient waiting-round
-  // baseline-read failure) the head-diff can't see a no-advance, so the worker previously failed open
-  // and treated a first-addressed-round husk as PROGRESS — bypassing gw-husk. The completing
-  // review-round instance husking (agentWork=false) is head-independent, so it must be corroborated
-  // even with no baseline and auto-retried.
+test("progress-check: capture-head's roundEntryHead is the within-round baseline — a first-round husk that pushed nothing (head == roundEntryHead, non-terminal instance) is now CAUGHT and retried (#786/#789 categorical fix)", async () => {
+  // Copilot #789 "close both sides": `pr.capture-head` records the round-entry head into
+  // `roundEntryHead` BEFORE `review-round` runs, so even the FIRST addressed round has a baseline. A
+  // husk that pushed nothing leaves `currentHead === roundEntryHead`, so the head-diff now sees a
+  // no-advance, and the non-terminal completing instance (agentWork=false) splits it into a husk that
+  // auto-retries — no longer waved through as progress for want of a baseline.
   const handler = await makeUnderTest(async () => "sha-1", async () => false);
-  const { app } = fakeApp(); // no row yet -> previousHead null
-  const out = await handler({ processInstanceKey: "pik", variables: { prKey: "o/r#1", status: "addressed", repo: "o/r", prNumber: 1, round: 1, huskRetries: 0 } } as any, app as any);
+  const { app } = fakeApp(); // no persisted last_round_head — the baseline comes from roundEntryHead
+  const out = await handler({ processInstanceKey: "pik", variables: { prKey: "o/r#1", status: "addressed", repo: "o/r", prNumber: 1, round: 1, huskRetries: 0, roundEntryHead: "sha-1" } } as any, app as any);
   assertEquals(out.progressed, false, "a first-round husk is NOT waved through as progress");
   assertEquals(out.huskRetry, true, "the first-round husk auto-retries the same round");
   assertEquals(out.noProgressReason, "husk");
 });
 
-test("progress-check: a FIRST addressed round with NO baseline whose completing instance is terminal fails open (a terminal attempt may have pushed — no false no-advance)", async () => {
-  // The mirror safety case: without a baseline a TERMINAL completing attempt could equally have
-  // pushed a commit, so it must NOT be escalated as a no-advance — only a corroborated husk acts.
+test("progress-check: with a roundEntryHead baseline, a first-round terminal no-advance (head == roundEntryHead, terminal instance) now escalates as no-advance — the other side closed", async () => {
+  // The mirror of the categorical fix: a real terminal attempt that pushed nothing on the FIRST round
+  // is a genuine no-advance and now escalates immediately — previously it failed open for want of a
+  // baseline. The within-round baseline makes both husk and no-advance classifiable from round one.
   const handler = await makeUnderTest(async () => "sha-1", async () => true);
-  const { app } = fakeApp(); // no baseline
-  const out = await handler({ processInstanceKey: "pik", variables: { prKey: "o/r#1", status: "addressed", repo: "o/r", prNumber: 1, round: 1, huskRetries: 0 } } as any, app as any);
-  assertEquals(out.progressed, true, "a no-baseline terminal attempt fails open (may have pushed)");
+  const { app } = fakeApp();
+  const out = await handler({ processInstanceKey: "pik", variables: { prKey: "o/r#1", status: "addressed", repo: "o/r", prNumber: 1, round: 1, huskRetries: 0, roundEntryHead: "sha-1" } } as any, app as any);
+  assertEquals(out.progressed, false, "a first-round terminal no-advance escalates");
+  assertEquals(out.huskRetry, false, "a no-advance never auto-retries");
+  assertEquals(out.noProgressReason, "no-advance");
+});
+
+test("progress-check: a real push within the round (currentHead != roundEntryHead) is progress, never a false husk", async () => {
+  // The complement: capture-head recorded the entry head, the agent pushed a commit, so currentHead
+  // advances past roundEntryHead → progress, regardless of the (non-terminal) instance state. This is
+  // the false-husk direction the within-round baseline closes.
+  const handler = await makeUnderTest(async () => "sha-2", async () => false);
+  const { app } = fakeApp();
+  const out = await handler({ processInstanceKey: "pik", variables: { prKey: "o/r#1", status: "addressed", repo: "o/r", prNumber: 1, round: 1, huskRetries: 0, roundEntryHead: "sha-1" } } as any, app as any);
+  assertEquals(out.progressed, true, "a head advance within the round is progress");
   assertEquals(out.huskRetry, undefined);
-  assertEquals(out.noProgressReason, undefined);
+});
+
+test("progress-check: roundEntryHead takes PRECEDENCE over the persisted last_round_head; an empty-string roundEntryHead (capture read failed) falls back to last_round_head", async () => {
+  // Precedence: capture-head's within-round entry head is the primary baseline.
+  const h1 = await makeUnderTest(async () => "sha-9", async () => false);
+  const a1 = fakeApp({ last_round_head: "stale-old" });
+  const o1 = await h1({ processInstanceKey: "pik", variables: { prKey: "o/r#1", status: "addressed", repo: "o/r", prNumber: 1, round: 3, huskRetries: 0, roundEntryHead: "sha-9" } } as any, a1.app as any);
+  assertEquals(o1.progressed, false, "head==roundEntryHead is a no-advance even though it != last_round_head");
+  assertEquals(o1.noProgressReason, "husk");
+  // Fallback: an empty-string roundEntryHead (capture-head could not read the entry head) is treated
+  // as no round-entry baseline, so the persisted last_round_head is used instead.
+  const h2 = await makeUnderTest(async () => "sha-1", async () => false);
+  const a2 = fakeApp({ last_round_head: "sha-1" });
+  const o2 = await h2({ processInstanceKey: "pik", variables: { prKey: "o/r#1", status: "addressed", repo: "o/r", prNumber: 1, round: 3, huskRetries: 0, roundEntryHead: "" } } as any, a2.app as any);
+  assertEquals(o2.progressed, false, "empty roundEntryHead falls back to last_round_head baseline");
+  assertEquals(o2.noProgressReason, "husk");
 });
 
 test("progress-check: an unreadable head fails open and does not clobber the baseline", async () => {
@@ -690,18 +712,59 @@ test("gw-husk auto-retries a husk back into review-round, and defaults to the hu
   const retry = flowElement("f_huskRetry");
   assert(retry, "f_huskRetry flow missing");
   assertStringIncludes(retry, 'sourceRef="gw-husk"');
-  assertStringIncludes(retry, 'targetRef="review-round"');
+  assertStringIncludes(retry, 'targetRef="capture-head"');
   assertStringIncludes(retry, "huskRetry = true");
   const esc = flowElement("f_huskEscalate");
   assert(esc, "f_huskEscalate flow missing");
   assertStringIncludes(esc, 'sourceRef="gw-husk"');
   assertStringIncludes(esc, 'targetRef="persist-escalation-noprogress"');
   assert(!/conditionExpression/.test(esc), "the escalate arm is the unconditioned default");
-  // The husk-retry re-enters review-round WITHOUT going through the round-incrementing review wait,
-  // so it re-runs the SAME round rather than advancing the counter.
+  // The husk-retry re-enters review-round (via capture-head, which re-captures the round-entry head)
+  // WITHOUT going through the round-incrementing review wait, so it re-runs the SAME round rather than
+  // advancing the counter. capture-head owns f_huskRetry; review-round is entered from f_capture.
+  const captureHead = flat.match(/<bpmn:serviceTask\b[^>]*\bid="capture-head"[^>]*>.*?<\/bpmn:serviceTask>/);
+  assert(captureHead, "capture-head task missing");
+  assertStringIncludes(captureHead[0], "<bpmn:incoming>f_huskRetry</bpmn:incoming>");
   const reviewRound = flat.match(/<bpmn:serviceTask\b[^>]*\bid="review-round"[^>]*>.*?<\/bpmn:serviceTask>/);
   assert(reviewRound, "review-round task missing");
-  assertStringIncludes(reviewRound[0], "<bpmn:incoming>f_huskRetry</bpmn:incoming>");
+  assertStringIncludes(reviewRound[0], "<bpmn:incoming>f_capture</bpmn:incoming>");
+});
+
+test("capture-head runs BEFORE review-round on EVERY round entry (round-entry head baseline, #786/#789)", () => {
+  // The categorical fix for the no-baseline husk: `pr.capture-head` records the head into
+  // `roundEntryHead` immediately before `review-round` on ALL four entry paths (Start, review-loop
+  // re-enter, human-answer resume, husk auto-retry), so progress-check always has a within-round
+  // baseline. This guards the structural invariant that no path reaches review-round without first
+  // passing through capture-head.
+  const capture = flat.match(/<bpmn:serviceTask\b[^>]*\bid="capture-head"[^>]*>.*?<\/bpmn:serviceTask>/);
+  assert(capture, "capture-head task missing");
+  assertStringIncludes(capture[0], 'type="pr.capture-head"');
+  // All four round-entry flows target capture-head, not review-round.
+  for (const [id, src] of [
+    ["f_start", "Start"],
+    ["f_reviewLoop", "wait-review"],
+    ["f_answerLoop", "record-answer"],
+    ["f_huskRetry", "gw-husk"],
+  ] as const) {
+    const f = flowElement(id);
+    assert(f, `${id} flow missing`);
+    assertStringIncludes(f, `sourceRef="${src}"`);
+    assertStringIncludes(f, 'targetRef="capture-head"');
+    assertStringIncludes(capture[0], `<bpmn:incoming>${id}</bpmn:incoming>`);
+  }
+  // capture-head's single outgoing is the ONLY way into review-round.
+  const cap = flowElement("f_capture");
+  assert(cap, "f_capture flow missing");
+  assertStringIncludes(cap, 'sourceRef="capture-head"');
+  assertStringIncludes(cap, 'targetRef="review-round"');
+  assertStringIncludes(capture[0], "<bpmn:outgoing>f_capture</bpmn:outgoing>");
+  const reviewRound = flat.match(/<bpmn:serviceTask\b[^>]*\bid="review-round"[^>]*>.*?<\/bpmn:serviceTask>/);
+  assert(reviewRound, "review-round task missing");
+  assertStringIncludes(reviewRound[0], "<bpmn:incoming>f_capture</bpmn:incoming>");
+  // review-round is entered ONLY via f_capture — no direct round-entry flow survives.
+  for (const id of ["f_start", "f_reviewLoop", "f_answerLoop", "f_huskRetry"]) {
+    assert(!reviewRound[0].includes(`<bpmn:incoming>${id}</bpmn:incoming>`), `review-round must not still take ${id} directly`);
+  }
 });
 
 test("record-answer resets huskRetries on every human resume (Copilot #789)", () => {
@@ -715,12 +778,13 @@ test("record-answer resets huskRetries on every human resume (Copilot #789)", ()
   assert(task, "record-answer task missing");
   assertStringIncludes(task[0], 'source="=0"');
   assertStringIncludes(task[0], 'target="huskRetries"');
-  // record-answer is the loop-back into review-round (the human-resume chokepoint the reset guards).
+  // record-answer is the loop-back into review-round via capture-head (the human-resume chokepoint
+  // the reset guards); capture-head re-captures the round-entry head before the re-run.
   assertStringIncludes(task[0], "<bpmn:outgoing>f_answerLoop</bpmn:outgoing>");
   const loop = flowElement("f_answerLoop");
   assert(loop, "f_answerLoop flow missing");
   assertStringIncludes(loop, 'sourceRef="record-answer"');
-  assertStringIncludes(loop, 'targetRef="review-round"');
+  assertStringIncludes(loop, 'targetRef="capture-head"');
 });
 
 test("gw-progress default arm re-enters the review wait with no condition", () => {

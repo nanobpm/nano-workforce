@@ -150,12 +150,11 @@ export function noProgressQuestion(
  * then splitting a no-advance round into a bounded husk auto-retry vs. an immediate escalation.
  *
  *  • A round that progressed (head advanced, or a legitimately non-addressed status, or an
- *    unreadable head that fails OPEN) returns `{ progressed: true, huskRetries: 0 }` — real progress
- *    RESETS the husk counter so a later, unrelated husk starts fresh. The ONE fail-open exception is
- *    a no-baseline addressed round (`previousHead` null) whose completing instance is a corroborated
- *    husk (`agentWorkObserved === false`): with no baseline the head-diff cannot see a no-advance,
- *    but a husked completing attempt is head-independent, so a FIRST-addressed-round husk is still
- *    classified and retried/escalated instead of waved through (#786 first-round-husk gap).
+ *    unreadable head that fails OPEN, or a no-baseline addressed round) returns `{ progressed: true,
+ *    huskRetries: 0 }` — real progress RESETS the husk counter so a later, unrelated husk starts
+ *    fresh. A first-addressed-round husk is no longer a special case here: `pr.capture-head` records
+ *    the round's entry head into `roundEntryHead` BEFORE `review-round` runs, so within-round there
+ *    is always a baseline and a husk that pushed nothing takes the no-advance/husk split below.
  *  • A husked round under the retry cap returns `{ progressed: false, huskRetry: true,
  *    huskRetries: n+1 }` — `gw-husk` re-enters `review-round` (the SAME round) to try a healthy
  *    worker.
@@ -182,22 +181,16 @@ export function decideProgress(
   maxHuskRetries: number = MAX_HUSK_RETRIES,
 ): ProgressDecision {
   if (routeProgress(status, previousHead, currentHead) === "continue") {
-    // Fail-open cases (head advanced, non-addressed status, or an unreadable head) — EXCEPT a
-    // no-baseline addressed round whose completing `review-round` instance is a CORROBORATED husk.
-    // Without a baseline `routeProgress` cannot see a no-ADVANCE (it does not know the entry head),
-    // so it continues; but a husked completing attempt (`agentWorkObserved === false`) is a
-    // HEAD-INDEPENDENT fact — the harness died mid-run, so no commit could have landed. Classify it
-    // as a husk so a FIRST-addressed-round husk (the baseline is null on a fresh submission, or after
-    // a transient waiting-round baseline-read failure) is retried/escalated instead of being waved
-    // through as progress (#786 first-round-husk gap). A TERMINAL (`true`) or UNKNOWN (`null`) read
-    // stays fail-open: without a baseline a terminal completing attempt could equally have PUSHED a
-    // commit, so escalating it would fabricate a false no-advance. Only the positively-corroborated
-    // non-terminal completing instance — a genuine husk — is acted on with no baseline.
-    const noBaselineHusk =
-      isAddressedStatus(status) && !previousHead && !!currentHead && agentWorkObserved === false;
-    if (!noBaselineHusk) {
-      return { progressed: true, huskRetries: 0 };
-    }
+    // Fail-open: the head advanced (real progress → RESET the husk counter), a legitimately
+    // non-addressed status, an unreadable current head, OR a no-baseline addressed round. The
+    // no-baseline case is now handled structurally UPSTREAM: `pr.capture-head` records the round's
+    // entry head into `roundEntryHead` BEFORE `review-round` runs, so the baseline is always present
+    // within the round — a first-addressed-round husk leaves `currentHead === roundEntryHead` and
+    // takes the `escalate` path below (split into husk vs. no-advance), while a real push advances
+    // the head and legitimately continues. The old no-baseline husk special-case (which had to guess
+    // from `agentWorkObserved` alone, with the opposing risk of mis-escalating a straggler push) is
+    // therefore gone: with a within-round baseline there is no no-baseline case left to special-case.
+    return { progressed: true, huskRetries: 0 };
   }
   // Only a POSITIVELY-corroborated husk (`false` — a successful AgentInstance search whose NEWEST
   // correlated `review-round` instance is NON-terminal, i.e. the completing attempt died mid-run) is

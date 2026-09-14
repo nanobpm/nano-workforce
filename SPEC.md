@@ -159,9 +159,21 @@ Notes:
   wait, an `addressed` round passes through `pr.progress-check`
   (`workers/progress-check/worker.ts`, mirrored by `app/roundProgress.ts`): it
   reads the PR's current head SHA (the branch ref, atomic with the push) and
-  compares it to the head recorded at the previous round. A round whose head DID
-  advance is real progress and continues to the review-wait gateway. A round whose
-  head did NOT advance pushed no commit, so re-requesting a review would loop on
+  compares it to the **round-entry head** — the head captured by `pr.capture-head`
+  immediately BEFORE `review-round` ran this round, published as the
+  `roundEntryHead` process variable. `pr.capture-head` sits on EVERY entry into
+  `review-round` (the first round from `Start`, a review-loop re-enter, a
+  human-answer resume, and a husk auto-retry), so within any round there is always
+  a baseline captured against the agent's own starting point — closing the
+  no-baseline gap where a FIRST addressed round had no prior-round head to compare
+  against (and either waved a first-round husk through as progress, or risked
+  mis-escalating a straggler push). If `roundEntryHead` is absent — an older
+  in-flight instance whose flow predates `capture-head`, or a capture read that
+  failed open (it publishes the empty string as its "unknown" sentinel) —
+  progress-check falls back to the head persisted from the previous round
+  (`last_round_head`). A round whose head DID advance past the round-entry baseline
+  is real progress and continues to the review-wait gateway. A round whose head did
+  NOT advance pushed no commit, so re-requesting a review would loop on
   byte-identical code; `gw-progress` routes it to `gw-husk`, which SPLITS it on a
   corroboration correlated to the COMPLETING `review-round` element-instance (NOT
   an aggregate terminal count — a same-round human-answered resume is classified on
@@ -173,13 +185,22 @@ Notes:
     - a **no-advance** — the completing attempt ran to a terminal instance but
       nothing was pushed — (and a husk that exhausts its retries) escalates to the
       human `wait-answer` task.
-  The agent-instance read is AVAILABILITY-AWARE and fails SAFE (ADR 0056): an
-  absent channel (an engine with no AgentInstance projection yields an empty list)
-  or a read error is UNKNOWN, treated as no-advance — never an auto-retry that
-  could duplicate genuinely-completed work — because the just-completed round would
-  have minted an instance had the channel existed. A head that cannot be read fails
-  OPEN (continue), so a transient GitHub hiccup never fabricates a no-progress
-  escalation. Two supporting invariants keep an auto-retry clean: `pr.persist-round`
+  The agent-instance read is AVAILABILITY-AWARE via a **two-tier probe** and fails
+  SAFE (ADR 0056). `review-round` is an external-agent service task, so a job that
+  husks BEFORE it ever registers an AgentInstance leaves the scoped `review-round`
+  search EMPTY — indistinguishable, on that query alone, from an engine that has no
+  AgentInstance projection at all. The probe therefore resolves an empty
+  `review-round` search against a SECOND, process-wide read:
+    - if the process-wide read also finds NO instance, the **channel is absent**
+      (an engine with no AgentInstance projection) — UNKNOWN, treated as no-advance,
+      never an auto-retry that could duplicate genuinely-completed work;
+    - if the process-wide read finds ANOTHER instance (from `classify-scope`, an
+      earlier round, etc.), the **channel is PRESENT** but this round registered
+      nothing — a genuine **pre-registration husk**, so it is classified as a husk
+      and auto-retried.
+  A head that cannot be read fails OPEN (continue), so a transient GitHub hiccup
+  never fabricates a no-progress escalation. Two supporting invariants keep an
+  auto-retry clean: `pr.persist-round`
   records a round IDEMPOTENTLY on `(pr_key, round_no, process_instance_key)` — a husk
   retry (same process instance) updates its row in place, while a resubmission that
   re-opens the PR at round 1 in a NEW process instance inserts a fresh row and so
