@@ -1061,6 +1061,30 @@ test("#778 nodeDisplay redacts a connector value even when a leading space would
   assert(c.documentation.includes("***@hooks.example.com?***"), "whitespace-prefixed connector target rendered redacted");
 });
 
+test("#778 a connector `timeout` differing ONLY in case/whitespace compiles to byte-identical BPMN and the SAME invisible-value set — the run-key digest collapses instead of forking on authored casing (Fix D, thread deliveryGraphCompiler.ts:1243)", async () => {
+  const mk = (timeout: string): DeliveryGraph => ({
+    name: "g",
+    nodes: [{ id: "c", kind: "connector", connector: { target: "slack:#releases", timeout } }],
+    edges: [],
+  });
+  const canonical = await compileOk(mk("PT1H"));
+  const variant = await compileOk(mk("pt1h "));
+  assertEquals(variant.bpmn, canonical.bpmn, "case/whitespace-only timeout variants compile to identical BPMN (display renders the isoDuration-normalised value)");
+  assertEquals(digestInvisibleRawValues(mk("pt1h ")), digestInvisibleRawValues(mk("PT1H")), "no invisible token forks the two timeout variants");
+});
+
+test("#778 a connector bound-`pr` payload differing ONLY in surrounding whitespace compiles to byte-identical BPMN and the SAME invisible-value set — the run-key digest collapses (Fix E, thread deliveryGraphCompiler.ts:1253)", async () => {
+  const mk = (pr: string): DeliveryGraph => ({
+    name: "g",
+    nodes: [{ id: "c", kind: "connector", connector: { target: "slack:#releases", payload: { pr } } }],
+    edges: [],
+  });
+  const canonical = await compileOk(mk("owner/repo#1"));
+  const variant = await compileOk(mk("  owner/repo#1  "));
+  assertEquals(variant.bpmn, canonical.bpmn, "whitespace-only pr variants compile to identical BPMN (display trims the bound pr, matching the runtime parse)");
+  assertEquals(digestInvisibleRawValues(mk("  owner/repo#1  ")), digestInvisibleRawValues(mk("owner/repo#1")), "no invisible token forks the two pr variants");
+});
+
 test("#778 nodeDisplay redacts a connector value whose URL is prefixed by an XML-invalid control char (strip-before-classify)", () => {
   // A control char (U+0001) that XML 1.0 forbids gets stripped by `escapeXml`/`stripXmlInvalidChars` at
   // render time. If classification/redaction ran on the RAW value, the anchored `^(scheme:)?//` check

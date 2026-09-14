@@ -103,6 +103,7 @@ export type DeliveryGraphErrorCode =
   | "invalid-node-base-branch"
   | "invalid-job-type"
   | "url-shaped-job-type"
+  | "credential-in-job-type"
   | "invalid-credential-env"
   | "unbound-pr";
 
@@ -557,6 +558,25 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
               "plain job-type token (e.g. `senior:feature`) and carry any endpoint/credential as a runtime " +
               "job variable instead",
             code: "url-shaped-job-type",
+          });
+        }
+        // The url-shaped check above is ANCHORED (a job type that STARTS with a URL). A credential-bearing
+        // URL can also be EMBEDDED after an otherwise plausible token (`senior:feature //user:pass@host`),
+        // separated by a plain space — which `hasAttrNormalizedWhitespace` (TAB/LF/CR only) and the anchored
+        // `isUrlShaped` both miss — so the `//user:pass@host` substring still lands verbatim in the
+        // executable `<zeebe:taskDefinition type=…>`. Reject ANY embedded `//…@` credential token (a
+        // routing key never contains one) at the same trust boundary, message redacted (issue #778 review —
+        // thread deliveryGraph.ts:550). */
+        if (kind === "agent" && typeof config.jobType === "string" && /\/\/[^/\s]*@/.test(config.jobType)) {
+          errors.push({
+            path: `${path}.${configKey}.jobType`,
+            message:
+              `\`agent.jobType\` ${JSON.stringify(redactString(stripXmlInvalidChars(config.jobType)))} embeds a ` +
+              "credential-bearing URL token (`//<user>:<secret>@host`) that a plain worker-routing job type " +
+              "never contains and that would land verbatim in the executable `<zeebe:taskDefinition type=…>`, " +
+              "leaking the credential into the compiled BPMN. Use a plain job-type token and carry any " +
+              "endpoint/credential as a runtime job variable instead",
+            code: "credential-in-job-type",
           });
         }
         // S5 trust boundary: `validateDeliveryGraph` is the gate before `dispatchDeliveryGraphRun`

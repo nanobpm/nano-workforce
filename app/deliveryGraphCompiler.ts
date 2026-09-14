@@ -68,11 +68,17 @@ import { isoDuration } from "./reviewWait.ts";
  * shows. */
 function redactProbeTargetForDisplay(probe: Extract<DeliveryNode, { kind: "wait" }>["wait"]): string {
   if (probe.kind === "command") return "<redacted>";
+  // TRIM the target first — `parseProbe` (`readiness.ts`) trims `target` for EVERY kind before the worker
+  // keys on it, so a padded ` owner/repo#1 ` and `owner/repo#1` are the SAME runtime probe. Rendering the
+  // raw (padded) value would leave the whitespace in `nodeDisplay`/`semanticBpmn`, forking the graph digest
+  // (and run key) from the trimmed-equivalent graph even though both probe the same value (issue #778
+  // review — thread deliveryGraphCompiler.ts:75).
+  const target = probe.target.trim();
   // `stripXmlInvalidChars` BEFORE `redactString`: an XML-forbidden control (e.g. `\x0B`) hidden inside
   // the `user:pass@` userinfo would otherwise split `redactString`'s `//…@` match, escape redaction, and
   // be re-joined into a live credential once the renderer strips that control (issue #778 review).
-  if (probe.kind === "http") return redactString(stripXmlInvalidChars(probe.target));
-  return redactConnectorValue(probe.target);
+  if (probe.kind === "http") return redactString(stripXmlInvalidChars(target));
+  return redactConnectorValue(target);
 }
 
 /** The task-header key that carries an `agent` node's DECLARED per-node repository spec (#739) into the
@@ -1200,10 +1206,15 @@ const DECLARED_MATCH_FIELDS: ReadonlySet<string> = new Set([
 ]);
 function describeProbeMatch(match: Extract<DeliveryNode, { kind: "wait" }>["wait"]["match"]): string {
   if (match === undefined || match === null) return "";
+  // Render the NORMALISED (trimmed) string value — `parseMatch` (`readiness.ts`) trims each string
+  // predicate before the worker uses it, so a padded `version:" 1.2.3 "` and `"1.2.3"` probe the same
+  // value. Rendering the raw value would leave the whitespace in `semanticBpmn`, forking the digest/run
+  // key from the trimmed-equivalent graph while both run the identical match (issue #778 review — thread
+  // deliveryGraphCompiler.ts:1206). Non-string values (numbers/booleans) are shown as-is.
   return Object.entries(match)
     .filter(([k, v]) => v !== undefined && v !== null && DECLARED_MATCH_FIELDS.has(k))
     .sort(([a], [b]) => byCodeUnit(a, b))
-    .map(([k, v]) => `${k}=${REDACTED_MATCH_FIELDS.has(k) ? "<redacted>" : redactConnectorValue(String(v))}`)
+    .map(([k, v]) => `${k}=${REDACTED_MATCH_FIELDS.has(k) ? "<redacted>" : redactConnectorValue(typeof v === "string" ? v.trim() : String(v))}`)
     .join(", ");
 }
 
@@ -1240,7 +1251,8 @@ export function nodeDisplay(node: DeliveryNode): { name: string; documentation: 
       if (repo || branch) doc.push(`Target: ${repo || "(run repo)"}${branch ? `@${branch}` : ""}`);
       if (policy) doc.push(`Policy: ${policy}`);
       if (emitsLabel) doc.push(`Emits: ${emitsLabel}`);
-      if (trimmedOrEmpty(a.timeout)) doc.push(`Timeout: ${trimmedOrEmpty(a.timeout)}`);
+      const agentTimeout = normaliseNodeTimeout(a.timeout);
+      if (agentTimeout) doc.push(`Timeout: ${agentTimeout}`);
       const prompt = trimmedOrEmpty(a.prompt);
       if (prompt) doc.push(`Prompt: ${redactFreeText(prompt)}`);
       return { name: withId(label), documentation: doc.join("\n") };
@@ -1249,10 +1261,19 @@ export function nodeDisplay(node: DeliveryNode): { name: string; documentation: 
       const c = node.connector;
       const doc: string[] = [`Connector target: ${redactConnectorValue(c.target)}`];
       if (trimmedOrEmpty(c.dedupeKey)) doc.push(`Dedupe key: ${redactConnectorValue(trimmedOrEmpty(c.dedupeKey))}`);
-      const boundPr = c.payload && typeof c.payload.pr === "string" ? c.payload.pr : "";
+      // TRIM the bound `payload.pr` — `resolveConvergePr`/`parsePr` (`deliveryConnector`/`readiness`) trim
+      // it before matching, so a padded `" impl.pr "` and `"impl.pr"` drive the SAME connector. Rendering
+      // the raw value would fork the `semanticBpmn`/digest from the trimmed-equivalent graph while both
+      // dispatch the identical connector (issue #778 review — thread deliveryGraphCompiler.ts:1253).
+      const boundPr = c.payload && typeof c.payload.pr === "string" ? c.payload.pr.trim() : "";
       if (boundPr) doc.push(`PR: ${redactConnectorValue(boundPr)}`);
       if (emitsLabel) doc.push(`Emits: ${emitsLabel}`);
-      if (trimmedOrEmpty(c.timeout)) doc.push(`Timeout: ${trimmedOrEmpty(c.timeout)}`);
+      // Render the CANONICAL timeout (`isoDuration` — trim + upper-case, else the run default), the SAME
+      // normalisation the runtime applies, so `pt1h`/`PT1H`/`PT1H ` collapse to one `semanticBpmn`/digest
+      // instead of forking the run key on authored casing/whitespace (issue #778 review — thread
+      // deliveryGraphCompiler.ts:1243).
+      const connectorTimeout = normaliseNodeTimeout(c.timeout);
+      if (connectorTimeout) doc.push(`Timeout: ${connectorTimeout}`);
       return { name: withId(humanizeConnectorTarget(c.target)), documentation: doc.join("\n") };
     }
     case "wait": {

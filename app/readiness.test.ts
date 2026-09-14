@@ -48,6 +48,7 @@ import {
   readinessTimeoutMs,
   redactString,
   redactTarget,
+  isUrlShaped,
 } from "./readiness.ts";
 
 // A ProbeExec stub: canned http/command responses, capturing the last command it was asked to run.
@@ -862,6 +863,20 @@ test("probeBudgetMs: prefers the seeded probeTimeout (the gate timer's bound), f
 });
 
 // ── repo/ref parse + redaction ──────────────────────────────────────────────────────────────
+test("isUrlShaped: tolerates XML-attribute whitespace (TAB/LF/CR/space) between the scheme and `//` — `https:\\t//host` still classifies as a URL so its credential is redacted, not passed through as a non-URL (#778 review — thread readiness.ts:1191)", () => {
+  assert(isUrlShaped("https://host"), "a plain URL");
+  assert(isUrlShaped("//host"), "scheme-relative");
+  assert(isUrlShaped("  https://host"), "leading whitespace (trimmed first)");
+  // The XML-valid whitespace `stripXmlInvalidChars` keeps must not break the scheme→authority match:
+  assert(isUrlShaped("https:\t//user:pass@host"), "TAB between scheme and //");
+  assert(isUrlShaped("https:\n//host"), "LF between scheme and //");
+  assert(isUrlShaped("https:\r//host"), "CR between scheme and //");
+  assert(isUrlShaped("https:  //host"), "spaces between scheme and //");
+  // A plain routing token / non-URL is still NOT url-shaped.
+  assert(!isUrlShaped("senior:feature"), "a plain job-type token is not url-shaped");
+  assert(!isUrlShaped("owner/repo#1"), "a PR ref is not url-shaped");
+});
+
 test("parseRepoRef: splits owner/repo@ref and defaults the ref to HEAD", () => {
   assertEquals(parseRepoRef("o/r@abc123"), { repo: "o/r", ref: "abc123" });
   assertEquals(parseRepoRef("o/r"), { repo: "o/r", ref: "HEAD" });

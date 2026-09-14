@@ -1186,7 +1186,11 @@ export function redactString(s: string): string {
  * (`validateDeliveryGraph`), so the "what counts as credential-bearing/URL-shaped" rule can never drift
  * between the redact path and the reject path (issue #778 review — thread deliveryGraphCompiler.ts:1606).
  * Classify on the TRIMMED value so leading whitespace (` //user:pass@host` — the OpenAPI edge caps
- * length but does not trim) cannot bypass the anchored check. Deterministic and total. */
+ * length but does not trim) cannot bypass the anchored check. The scheme may be followed by
+ * XML-attribute whitespace (TAB/LF/CR/space) before the `//` authority: those characters are valid XML
+ * `Char`s that `stripXmlInvalidChars` does NOT remove, so `https:\t//user:pass@host` must still classify
+ * as URL-shaped or its credential escapes redaction as "not a URL" (issue #778 review — thread
+ * readiness.ts:1191). Deterministic and total. */
 export function isUrlShaped(value: string): boolean {
-  return /^([a-z][a-z0-9+.-]*:)?\/\//i.test(value.trim());
+  return /^([a-z][a-z0-9+.-]*:\s*)?\/\//i.test(value.trim());
 }

@@ -754,6 +754,22 @@ test("url-shaped-job-type: a scheme-relative `//host` job type is rejected too; 
   );
 });
 
+test("credential-in-job-type: a plausible token with an EMBEDDED credential-bearing URL (`senior:feature //user:pass@host`, past the anchored url-shape and TAB/LF/CR checks) is REJECTED, message redacted (#778 review — thread deliveryGraph.ts:550)", () => {
+  const errors = validateDeliveryGraph({
+    nodes: [{ id: "a", kind: "agent", agent: { jobType: "senior:feature //user:pass@evil.example/route" } }],
+    edges: [],
+  });
+  const err = hasCode(errors, "credential-in-job-type");
+  assert(!err.message.includes("user:pass"), `the credential-in-job-type message must redact the credential, got: ${err.message}`);
+  // A plain routing token with no embedded credential is untouched.
+  assertEquals(
+    validateDeliveryGraph({ nodes: [{ id: "a", kind: "agent", agent: { jobType: "senior:feature" } }], edges: [] }).filter(
+      (e) => e.code === "credential-in-job-type",
+    ),
+    [],
+  );
+});
+
 test("invalid-credential-env: a `wait.credentialEnv` that is not a DECLARED env-contract key is rejected at the semantic boundary — a raw secret can never reach the compiled BPMN the preview door returns (#778 review)", () => {
   const errors = validateDeliveryGraph({
     nodes: [
