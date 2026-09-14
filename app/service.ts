@@ -592,6 +592,14 @@ export async function submitPr(
       // watermark would still be below them, but clearing keeps the per-run husk-correlation state
       // unambiguous and self-contained.
       last_progress_agent_watermark: null,
+      // Clear the at-least-once REPLAY stamp too (Copilot PR #789). The idempotency guard replays a
+      // recorded outcome whenever a redelivered job key matches this row; if the stamp survived a
+      // re-open, an OLD `pr.progress-check` delivery redelivered after the NEW convergence instance
+      // starts would still match its job key here and replay a stale escalation/progress effect into
+      // the fresh run. Clearing it makes the new run treat any such straggler as an unknown key (a
+      // normal, freshly-computed decision) rather than replaying the prior run's outcome.
+      last_progress_job_key: null,
+      last_progress_result: null,
       outcome: null,
       converged_at: null,
       merged_at: null,
