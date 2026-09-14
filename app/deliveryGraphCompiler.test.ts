@@ -968,6 +968,17 @@ test("#778 nodeDisplay derives a descriptive label + documentation per kind, wit
   assertEquals(nodeDisplay({ id: "h", kind: "human" }).name, "Human decision · h");
 });
 
+test("#778 nodeDisplay TRIMS a padded reserved connector target — the worker trims before reserved-vocab matching, so `\" converge-merge \"` must render the descriptive label + collapse to the trimmed digest, not the generic `Connector:` fallback (thread deliveryGraphCompiler.ts:1277)", () => {
+  const padded = nodeDisplay({
+    id: "land",
+    kind: "connector",
+    connector: { target: " converge-merge ", dedupeKey: "land-1", payload: { pr: "o/r#42" } },
+  });
+  assertEquals(padded.name, "Converge & merge PR · land");
+  assert(padded.documentation.includes("Connector target: converge-merge"), "the padded reserved target is trimmed in the doc");
+  assert(!padded.documentation.includes(" converge-merge "), "no padded target survives into the doc");
+});
+
 test("#778 the compiled subProcess carries the descriptive name + a `<bpmn:documentation>` first child", async () => {
   const graph = {
     name: "descriptive",
@@ -1863,6 +1874,14 @@ test("#778 digestInvisibleRawValues: emits a canonical (node-order-independent) 
   const ab = { name: "n", nodes: [{ id: "a", kind: "connector", connector: { target: "//user:pass@host" } }, { id: "b", kind: "connector", connector: { target: "//other:secret@host" } }], edges: [] };
   const ba = { name: "n", nodes: [{ id: "b", kind: "connector", connector: { target: "//other:secret@host" } }, { id: "a", kind: "connector", connector: { target: "//user:pass@host" } }], edges: [] };
   assertEquals(JSON.stringify(digestInvisibleRawValues(ab)), JSON.stringify(digestInvisibleRawValues(ba)));
+});
+
+test("#778 redactFreeText: a userinfo with a literal SPACE then a NEWLINE before the `@` is still redacted (thread deliveryGraphCompiler.ts:1102)", () => {
+  // The SPACE cuts the primary span at `//user:secret`, and the malformed-userinfo fallback must NOT
+  // stop at the following CR/LF — it has to reach the `@` so the credential + `?token` tail collapse.
+  const out = redactFreeText("push to //user:secret pass\n@host/repo?token=s3cr3t now");
+  assert(!out.includes("token=s3cr3t"), `the query token must not survive: ${out}`);
+  assert(!out.includes("secret pass"), `the space+newline userinfo must not survive: ${out}`);
 });
 
 test("#778 redactFreeText: redacts a URL query/fragment orphaned across a smuggled newline", () => {

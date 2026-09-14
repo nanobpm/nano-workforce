@@ -1090,22 +1090,24 @@ function redactCredentialSpans(text: string): string {
     out += text.slice(i, start);
     let end = start;
     while (end < text.length && text.charCodeAt(end) !== 0x20 /* SPACE */) end++;
-    // Malformed-userinfo fallback (issue #778 review — deliveryGraphCompiler.ts:1080): the SPACE that
+    // Malformed-userinfo fallback (issue #778 review — deliveryGraphCompiler.ts:1080/1102): the SPACE that
     // bounds the span above also cuts a `user:secret pass@host` userinfo that carries a literal space
     // BEFORE its `@`, so the span (`//user:secret`) has a `:` but no `@` and neither branch of
     // `redactCredentialSpan` fires — the credential tail escapes into the display doc. When a span is
-    // credential-PREFIX-shaped (a `:` and no `@`), look PAST the space(s) for the userinfo's `@` before
-    // any URL/line boundary (`/ ? # CR LF`); if found, extend the span through the `@`'s host so the
-    // space-tolerant collapse below redacts it. The forward scan is bounded by the next such boundary,
-    // so a colon-run with no reachable `@` (the adversarial `//a://a:…` prompt, or ordinary `//foo:bar`
-    // prose) stops immediately and the walk stays linear.
+    // credential-PREFIX-shaped (a `:` and no `@`), look PAST the space(s) for the userinfo's `@` before a
+    // URL boundary (`/ ? #`). A raw CR/LF/TAB embedded in the userinfo does NOT stop the scan — a
+    // `//user:secret pass\n@host?token=x` (space THEN newline before the `@`) would otherwise leave the
+    // credential+token un-redacted — so only `/ ? #` bound it; the redactor's `[^/@]*@` class then spans
+    // whatever whitespace/break the extension pulled in. The forward scan is still bounded (it stops at the
+    // first `/ ? # @` or end-of-text), so a colon-run with no reachable `@` (the adversarial `//a://a:…`
+    // prompt, or ordinary `//foo:bar` prose) stops immediately and the walk stays linear.
     const span = text.slice(start, end);
     if (span.indexOf(":") >= 0 && span.indexOf("@") < 0) {
       let j = end;
       let foundAt = -1;
       while (j < text.length) {
         const c = text.charCodeAt(j);
-        if (c === 0x2f /* / */ || c === 0x3f /* ? */ || c === 0x23 /* # */ || c === 0x0a /* LF */ || c === 0x0d /* CR */) break;
+        if (c === 0x2f /* / */ || c === 0x3f /* ? */ || c === 0x23 /* # */) break;
         if (c === 0x40 /* @ */) {
           foundAt = j;
           break;
@@ -1266,7 +1268,14 @@ export function nodeDisplay(node: DeliveryNode): { name: string; documentation: 
     }
     case "connector": {
       const c = node.connector;
-      const doc: string[] = [`Connector target: ${redactConnectorValue(c.target)}`];
+      // TRIM the target — the connector worker (`workers/delivery-connector/worker.ts`) trims `vars.target`
+      // before matching the reserved converge/merge vocabulary AND before dispatch, so a padded
+      // `" converge-merge "` executes as `converge-merge`. Humanising/redacting the RAW value would miss
+      // the reserved-target switch (rendering the generic `Connector: converge-merge` instead of the
+      // descriptive `Converge & merge PR`) and fork the `semanticBpmn`/digest from the trimmed-equivalent
+      // graph that dispatches identically (issue #778 review — thread deliveryGraphCompiler.ts:1277).
+      const target = c.target.trim();
+      const doc: string[] = [`Connector target: ${redactConnectorValue(target)}`];
       if (trimmedOrEmpty(c.dedupeKey)) doc.push(`Dedupe key: ${redactConnectorValue(trimmedOrEmpty(c.dedupeKey))}`);
       // TRIM the bound `payload.pr` — `resolveConvergePr`/`parsePr` (`deliveryConnector`/`readiness`) trim
       // it before matching, so a padded `" impl.pr "` and `"impl.pr"` drive the SAME connector. Rendering
@@ -1281,7 +1290,7 @@ export function nodeDisplay(node: DeliveryNode): { name: string; documentation: 
       // deliveryGraphCompiler.ts:1243).
       const connectorTimeout = normaliseNodeTimeout(c.timeout);
       if (connectorTimeout) doc.push(`Timeout: ${connectorTimeout}`);
-      return { name: withId(humanizeConnectorTarget(c.target)), documentation: doc.join("\n") };
+      return { name: withId(humanizeConnectorTarget(target)), documentation: doc.join("\n") };
     }
     case "wait": {
       const p = node.wait;
@@ -1392,7 +1401,13 @@ export function digestInvisibleRawValues(graph: DeliveryGraph): string[] {
         break;
       case "connector": {
         const c = node.connector;
-        push(id, "connector.target", c.target, redactConnectorValue(c.target));
+        // The connector worker TRIMS `vars.target` before reserved-vocab matching AND dispatch, so a
+        // whitespace-padded target has identical routing + runtime behaviour. Fingerprint the NORMALISED
+        // (trimmed) value the worker keys on — matching the trimmed display — so a padding-only difference
+        // does not fork the digest-invisible fingerprint (which would force an idempotencyKey and
+        // double-launch a graph the runtime treats identically), while a real credential difference in the
+        // trimmed value still survives (issue #778 review — thread deliveryGraphCompiler.ts:1277).
+        push(id, "connector.target", trimmedOrEmpty(c.target), redactConnectorValue(trimmedOrEmpty(c.target)));
         // The connector worker TRIMS the authored dedupeKey (`connectorDedupeKey` in `deliveryConnector.ts`,
         // the SINGLE dedupe-key derivation site), so a whitespace-only variant has identical dedupe identity
         // + runtime behaviour. Fingerprint the NORMALISED (trimmed) value the worker keys on, so a trimmed-
