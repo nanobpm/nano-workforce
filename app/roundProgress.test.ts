@@ -140,6 +140,29 @@ test("decideProgress: a legitimately non-addressed / unreadable-head round conti
   }
 });
 
+test("decideProgress: a NO-BASELINE addressed round is a husk ONLY when the completing instance is corroborated non-terminal (agentWork=false); a terminal/unknown read still fails open", () => {
+  // #786 first-round-husk gap: with no baseline (previousHead null) the head-diff can't see a
+  // no-advance, but a husked completing attempt (agentWork === false) is head-independent, so it must
+  // still be classified as a husk and retried — NOT waved through as progress. A terminal (true) or
+  // unknown (null/undefined) read must stay fail-open, because without a baseline a terminal
+  // completing attempt could equally have pushed a commit (real progress).
+  const husk = decideProgress("addressed", null, "sha-1", 1, false, 0);
+  assertEquals(husk.progressed, false, "a corroborated no-baseline husk is not progress");
+  assertEquals(husk.huskRetry, true, "it auto-retries the same round under the cap");
+  assertEquals(husk.reason, "husk");
+  for (const agentWork of [true, null, undefined] as const) {
+    const d = decideProgress("addressed", null, "sha-1", 1, agentWork, 0);
+    assertEquals(d.progressed, true, `no baseline + agentWork=${String(agentWork)} fails open`);
+    assertEquals(d.reason, undefined, "a non-corroborated no-baseline round carries no husk verdict");
+  }
+  // At the husk cap a no-baseline husk escalates (never loops forever), with the husk-specific question.
+  const capped = decideProgress("addressed", null, "sha-1", 4, false, MAX_HUSK_RETRIES);
+  assertEquals(capped.progressed, false);
+  assertEquals(capped.huskRetry, false, "at the cap it escalates to a human");
+  assertEquals(capped.reason, "husk");
+  assertStringIncludes(String(capped.question), "no durable work");
+});
+
 test("decideProgress: a garbage carried husk-retry counter is coerced to 0", () => {
   for (const bad of [Number.NaN, -3, undefined, null] as const) {
     const d = decideProgress("addressed", "sha-1", "sha-1", 5, false, bad);
@@ -340,6 +363,31 @@ test("progress-check: the first observed round (no baseline) continues and recor
   const out = await handler({ processInstanceKey: "pik", variables: { prKey: "o/r#1", status: "addressed", repo: "o/r", prNumber: 1, round: 1 } } as any, app as any);
   assertEquals(out.progressed, true, "no baseline yet fails open");
   assertEquals(updates[0]!.patch.last_round_head, "sha-1");
+});
+
+test("progress-check: a FIRST addressed round with NO baseline whose completing instance husked (non-terminal) is retried, not waved through as progress (#786 first-round-husk gap)", async () => {
+  // Copilot #789: with `last_round_head` null (a fresh submission, or after a transient waiting-round
+  // baseline-read failure) the head-diff can't see a no-advance, so the worker previously failed open
+  // and treated a first-addressed-round husk as PROGRESS — bypassing gw-husk. The completing
+  // review-round instance husking (agentWork=false) is head-independent, so it must be corroborated
+  // even with no baseline and auto-retried.
+  const handler = await makeUnderTest(async () => "sha-1", async () => false);
+  const { app } = fakeApp(); // no row yet -> previousHead null
+  const out = await handler({ processInstanceKey: "pik", variables: { prKey: "o/r#1", status: "addressed", repo: "o/r", prNumber: 1, round: 1, huskRetries: 0 } } as any, app as any);
+  assertEquals(out.progressed, false, "a first-round husk is NOT waved through as progress");
+  assertEquals(out.huskRetry, true, "the first-round husk auto-retries the same round");
+  assertEquals(out.noProgressReason, "husk");
+});
+
+test("progress-check: a FIRST addressed round with NO baseline whose completing instance is terminal fails open (a terminal attempt may have pushed — no false no-advance)", async () => {
+  // The mirror safety case: without a baseline a TERMINAL completing attempt could equally have
+  // pushed a commit, so it must NOT be escalated as a no-advance — only a corroborated husk acts.
+  const handler = await makeUnderTest(async () => "sha-1", async () => true);
+  const { app } = fakeApp(); // no baseline
+  const out = await handler({ processInstanceKey: "pik", variables: { prKey: "o/r#1", status: "addressed", repo: "o/r", prNumber: 1, round: 1, huskRetries: 0 } } as any, app as any);
+  assertEquals(out.progressed, true, "a no-baseline terminal attempt fails open (may have pushed)");
+  assertEquals(out.huskRetry, undefined);
+  assertEquals(out.noProgressReason, undefined);
 });
 
 test("progress-check: an unreadable head fails open and does not clobber the baseline", async () => {

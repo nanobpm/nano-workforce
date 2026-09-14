@@ -268,11 +268,14 @@ export function makeHandler(deps: {
     // longer gates the agent-work corroboration (correlation is by the completing element-instance,
     // not an aggregate round count — #786); it only tunes the human-facing escalation question.
     const roundNo = typeof round === "number" && round > 0 ? Math.floor(round) : 1;
-    // Corroborate durable agent work only when we are actually on the no-progress path (an
-    // addressed round whose head did not advance) — otherwise the engine read is wasted.
+    // Corroborate durable agent work whenever we are on a potential no-progress path: an addressed
+    // round whose head did NOT advance, OR a no-BASELINE addressed round (previousHead null) whose
+    // head is readable — the latter so a first-addressed-round husk can be corroborated head-
+    // independently (#786 first-round-husk gap). An advanced head, or an unreadable current head,
+    // needs no read (the decision fails open regardless), so the engine read is not wasted there.
     const readAgentWork = deps.readAgentWork ?? agentWorkFromEngine(app.engine);
     const agentWorkObserved =
-      previousHead && currentHead && currentHead === previousHead
+      currentHead && (!previousHead || currentHead === previousHead)
         ? await readAgentWork(job.processInstanceKey, roundNo).catch(() => null)
         : null;
 

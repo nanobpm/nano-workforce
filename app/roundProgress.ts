@@ -147,7 +147,11 @@ export function noProgressQuestion(
  *
  *  • A round that progressed (head advanced, or a legitimately non-addressed status, or an
  *    unreadable head that fails OPEN) returns `{ progressed: true, huskRetries: 0 }` — real progress
- *    RESETS the husk counter so a later, unrelated husk starts fresh.
+ *    RESETS the husk counter so a later, unrelated husk starts fresh. The ONE fail-open exception is
+ *    a no-baseline addressed round (`previousHead` null) whose completing instance is a corroborated
+ *    husk (`agentWorkObserved === false`): with no baseline the head-diff cannot see a no-advance,
+ *    but a husked completing attempt is head-independent, so a FIRST-addressed-round husk is still
+ *    classified and retried/escalated instead of waved through (#786 first-round-husk gap).
  *  • A husked round under the retry cap returns `{ progressed: false, huskRetry: true,
  *    huskRetries: n+1 }` — `gw-husk` re-enters `review-round` (the SAME round) to try a healthy
  *    worker.
@@ -174,7 +178,22 @@ export function decideProgress(
   maxHuskRetries: number = MAX_HUSK_RETRIES,
 ): ProgressDecision {
   if (routeProgress(status, previousHead, currentHead) === "continue") {
-    return { progressed: true, huskRetries: 0 };
+    // Fail-open cases (head advanced, non-addressed status, or an unreadable head) — EXCEPT a
+    // no-baseline addressed round whose completing `review-round` instance is a CORROBORATED husk.
+    // Without a baseline `routeProgress` cannot see a no-ADVANCE (it does not know the entry head),
+    // so it continues; but a husked completing attempt (`agentWorkObserved === false`) is a
+    // HEAD-INDEPENDENT fact — the harness died mid-run, so no commit could have landed. Classify it
+    // as a husk so a FIRST-addressed-round husk (the baseline is null on a fresh submission, or after
+    // a transient waiting-round baseline-read failure) is retried/escalated instead of being waved
+    // through as progress (#786 first-round-husk gap). A TERMINAL (`true`) or UNKNOWN (`null`) read
+    // stays fail-open: without a baseline a terminal completing attempt could equally have PUSHED a
+    // commit, so escalating it would fabricate a false no-advance. Only the positively-corroborated
+    // non-terminal completing instance — a genuine husk — is acted on with no baseline.
+    const noBaselineHusk =
+      isAddressedStatus(status) && !previousHead && !!currentHead && agentWorkObserved === false;
+    if (!noBaselineHusk) {
+      return { progressed: true, huskRetries: 0 };
+    }
   }
   // Only a POSITIVELY-corroborated husk (`false` — a successful AgentInstance search whose NEWEST
   // correlated `review-round` instance is NON-terminal, i.e. the completing attempt died mid-run) is
