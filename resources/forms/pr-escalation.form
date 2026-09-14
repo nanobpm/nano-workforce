@@ -6,13 +6,13 @@
     {
       "type": "text",
       "label": "Respond to this escalation",
-      "text": "A human decision is needed to resume the PR review-convergence loop. The requested decision is shown as **Decision context** above. Read it, then enter your reply below."
+      "text": "A human decision is needed to resume the PR process. The requested decision is shown as **Decision context** above. Read it, then enter your reply below."
     },
     {
       "type": "textarea",
       "key": "answer",
       "label": "Your answer",
-      "description": "Your reply resumes the review loop and is handed to the next review round. Answer the request shown in Decision context above.",
+      "description": "Your reply resumes the PR process and is handed to its next step. Answer the request shown in Decision context above.",
       "validate": {
         "required": true
       }
