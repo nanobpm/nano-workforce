@@ -1157,10 +1157,64 @@ export function redactTarget(probe: ReadinessProbe): string {
   return `${probe.kind}:${redactString(probe.target)}`;
 }
 
+/** The ONE canonical embedded-`//<userinfo>@` credential-userinfo span, shared by the redactor
+ * ({@link redactString}, which REWRITES the span to `//***@`) and the semantic reject path
+ * ({@link hasEmbeddedCredential}, used by `validateDeliveryGraph` to REJECT a credential-bearing
+ * `agent.jobType`). Keeping ONE source string means the "what counts as an embedded credential" rule
+ * can never drift between the two — the redactor must strip exactly what the validator rejects, or a
+ * credential the validator misses would be echoed un-redacted. The userinfo class is `[^/@]` (NOT
+ * `[^/@\s]`): it deliberately spans WHITESPACE up to the `@`, so a malformed-but-operator-authored
+ * `//user:secret pass@host` (a literal space in the userinfo) is caught, not left to leak verbatim
+ * into the executable `<zeebe:taskDefinition type=…>` / compiled BPMN (issue #778 review — thread
+ * deliveryGraph.ts:570). The userinfo colon is DELIBERATELY OPTIONAL (`[^/@]*@`, not `[^/@]*:[^/@]*@`):
+ * a passwordless, username-only `//token@host` is a bearer/OAuth token riding the userinfo and MUST be
+ * caught too — a plain worker-routing job type never contains a `//…@` span at all (with or without a
+ * colon), so requiring a colon would only re-open a real leak for no legitimate gain (issue #778 review
+ * — thread readiness.ts:1170). `[^/@]*@` is a single-quantifier match — linear, no catastrophic
+ * backtracking. */
+const EMBEDDED_CREDENTIAL_SRC = "\\/\\/[^/@]*@";
+
 /** Strip credential-bearing pieces from a free-form target string for logging: any `user:pass@`
- * userinfo and any `?query`/`#fragment` (a token often rides the query). */
+ * userinfo and any `?query`/`#fragment` (a token often rides the query). The query/fragment strip uses
+ * `[\s\S]*` (NOT `.*$`, which cannot cross a line break) so an embedded CR/LF after the `?`/`#` — e.g.
+ * `https://host/?token=secret\nnext` — cannot leave the token un-redacted; everything from the first
+ * `?`/`#` to end-of-string is consumed regardless of intervening newlines. The userinfo class is
+ * `[^/@]` (NOT `[^/@\s]`, and NOT the earlier `[^/@ ]`/`[^/@ \t]`): ANY character smuggled INSIDE the
+ * userinfo up to the `@` — a raw CR/LF (`https://user:pa\nss@host`), an embedded TAB
+ * (`https://user:pa\tss@host`), OR a literal SPACE (`https://user:secret pass@host`, a malformed but
+ * operator-authored value) — must not break the `//…@` match and leave the credential tail visible.
+ * An earlier `[^/@ ]` bounded the userinfo at a SPACE to avoid over-matching prose, but that let a
+ * space-in-userinfo credential escape into an operator-visible display artifact; since the RAW value
+ * still reaches runtime unmodified and only the DISPLAY doc is affected, redacting more (through the
+ * `@`) is the safe direction (issue #778 review). `[^/@]*@` remains a single-quantifier match, so it is
+ * linear with no catastrophic backtracking. Callers that surface the result in a display artifact must
+ * first pass it through `stripXmlInvalidChars` so an XML-forbidden control (e.g. U+000B) inside the
+ * userinfo cannot split the `//…@` match and be re-joined at render. */
 export function redactString(s: string): string {
   return s
-    .replace(/\/\/[^/@\s]*@/g, "//***@")
-    .replace(/[?#].*$/, (m) => `${m[0]}***`);
+    .replace(new RegExp(EMBEDDED_CREDENTIAL_SRC, "g"), "//***@")
+    .replace(/[?#][\s\S]*$/, (m) => `${m[0]}***`);
+}
+
+/** True when `value` embeds a `//<userinfo>@host` credential token (see {@link EMBEDDED_CREDENTIAL_SRC};
+ * the userinfo colon is optional, so a passwordless `//token@host` bearer token also matches).
+ * A plain worker-routing job type / opaque id never contains one, so a match is a credential leak to reject. */
+export function hasEmbeddedCredential(value: string): boolean {
+  return new RegExp(EMBEDDED_CREDENTIAL_SRC).test(value);
+}
+
+/** The ONE canonical "is this value a URL?" classifier — a `scheme://authority` OR scheme-relative
+ * `//authority` form, either of which can hide a credential in userinfo/query/fragment. It is the single
+ * source of truth for URL-shape detection shared by the connector/jobType display redactor
+ * ({@link redactString} callers in the compiler) AND the semantic validation boundary
+ * (`validateDeliveryGraph`), so the "what counts as credential-bearing/URL-shaped" rule can never drift
+ * between the redact path and the reject path (issue #778 review — thread deliveryGraphCompiler.ts:1606).
+ * Classify on the TRIMMED value so leading whitespace (` //user:pass@host` — the OpenAPI edge caps
+ * length but does not trim) cannot bypass the anchored check. The scheme may be followed by
+ * XML-attribute whitespace (TAB/LF/CR/space) before the `//` authority: those characters are valid XML
+ * `Char`s that `stripXmlInvalidChars` does NOT remove, so `https:\t//user:pass@host` must still classify
+ * as URL-shaped or its credential escapes redaction as "not a URL" (issue #778 review — thread
+ * readiness.ts:1191). Deterministic and total. */
+export function isUrlShaped(value: string): boolean {
+  return /^([a-z][a-z0-9+.-]*:\s*)?\/\//i.test(value.trim());
 }

@@ -646,6 +646,242 @@ test("S7 guard-type-mismatch: an `equals` whose type differs from the fact's dec
   hasCode(errors, "guard-type-mismatch");
 });
 
+test("S7 guard-invalid-equals: a string `equals` carrying an XML-1.0-invalid character is rejected, not silently rewritten into a different FEEL guard (#778 review)", () => {
+  // A string `equals` is baked VERBATIM into the compiled `<bpmn:conditionExpression>` FEEL literal.
+  // An XML-1.0-forbidden character (here U+FFFE) cannot be entity-escaped, so the compiler's
+  // display-text sanitiser would STRIP it — turning the guard `bump_result = "a\uFFFEb"` into
+  // `bump_result = "ab"` and routing the split down the wrong edge. It must be rejected at validation
+  // instead of silently mutating executable FEEL.
+  const errors = validateDeliveryGraph({
+    nodes: [
+      { id: "bump", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "result", type: "string" }] },
+      { id: "a", kind: "agent", agent: { jobType: "j" } },
+      { id: "b", kind: "agent", agent: { jobType: "j" } },
+    ],
+    edges: [
+      { from: "bump", to: "a", when: "bump.result", equals: "a\uFFFEb" },
+      { from: "bump", to: "b", default: true },
+    ],
+  });
+  hasCode(errors, "guard-invalid-equals");
+});
+
+test("S7 guard-invalid-equals: a clean string `equals` (no XML-invalid characters) passes validation", () => {
+  assertEquals(
+    validateDeliveryGraph({
+      nodes: [
+        { id: "bump", kind: "agent", agent: { jobType: "j" }, emits: [{ name: "result", type: "string" }] },
+        { id: "a", kind: "agent", agent: { jobType: "j" } },
+        { id: "b", kind: "agent", agent: { jobType: "j" } },
+      ],
+      edges: [
+        { from: "bump", to: "a", when: "bump.result", equals: "breaking" },
+        { from: "bump", to: "b", default: true },
+      ],
+    }).filter((e) => e.code === "guard-invalid-equals"),
+    [],
+  );
+});
+
+test("invalid-job-type: an `agent.jobType` carrying an XML-1.0-invalid character is rejected, not silently rewritten into a different executable worker type (#778 review)", () => {
+  // `agent.jobType` is emitted VERBATIM as the executable `<zeebe:taskDefinition type=…>` (and mirrored
+  // into `resolved.calledElement`). An XML-1.0-forbidden character (here a C0 control) cannot be
+  // entity-escaped, so the compiler's attribute sanitiser would STRIP it — deploying `senior:feature`
+  // for an authored `senior:\u0001feature` and routing the cell to the WRONG worker. It must be
+  // rejected at validation rather than silently mutated.
+  const errors = validateDeliveryGraph({
+    nodes: [{ id: "impl", kind: "agent", agent: { jobType: "senior:\u0001feature" } }],
+    edges: [],
+  });
+  hasCode(errors, "invalid-job-type");
+});
+
+test("invalid-job-type: an `agent.jobType` carrying attribute whitespace (LF) is rejected — XML attribute-value normalization would fold it to a space, deploying a different worker type (#778 review)", () => {
+  // A literal TAB/LF/CR is a valid XML `Char` (so the invalid-char strip does NOT catch it), but XML
+  // attribute-value normalization rewrites it to a single space when emitted as `type="…"`. An authored
+  // `senior:\nfeature` would deploy as `senior: feature` — a DIFFERENT worker type — so it must be
+  // rejected at validation, not silently normalized.
+  const errors = validateDeliveryGraph({
+    nodes: [{ id: "impl", kind: "agent", agent: { jobType: "senior:\nfeature" } }],
+    edges: [],
+  });
+  hasCode(errors, "invalid-job-type");
+});
+
+test("invalid-job-type: a clean `agent.jobType` (no XML-invalid characters, no attribute whitespace) passes validation", () => {
+  assertEquals(
+    validateDeliveryGraph({
+      nodes: [{ id: "impl", kind: "agent", agent: { jobType: "senior:feature" } }],
+      edges: [],
+    }).filter((e) => e.code === "invalid-job-type"),
+    [],
+  );
+});
+
+test("invalid-job-type: the rejection message REDACTS a credential embedded in the (URL-shaped, XML-invalid) job type — a 400 never echoes a secret (#778 review)", () => {
+  // A job type that is BOTH URL-shaped (userinfo credential) AND carries an XML-1.0-invalid control char
+  // trips `invalid-job-type`. The message interpolates the value through `redactConnectorValue`, so the
+  // embedded `user:pass` must NOT survive into the error a text-ingress caller sees.
+  const errors = validateDeliveryGraph({
+    nodes: [{ id: "impl", kind: "agent", agent: { jobType: "//user:pass@host\u0001/route" } }],
+    edges: [],
+  });
+  const err = hasCode(errors, "invalid-job-type");
+  assert(!err.message.includes("user:pass"), `the invalid-job-type message must redact the credential, got: ${err.message}`);
+});
+
+test("url-shaped-job-type: a URL-shaped `agent.jobType` is REJECTED at the semantic boundary — it is baked verbatim into the executable `<zeebe:taskDefinition type=…>`, so an embedded credential would leak into the compiled BPMN the preview door returns (#778 review)", () => {
+  const errors = validateDeliveryGraph({
+    nodes: [{ id: "impl", kind: "agent", agent: { jobType: "https://user:pass@evil.example/route" } }],
+    edges: [],
+  });
+  const err = hasCode(errors, "url-shaped-job-type");
+  assert(!err.message.includes("user:pass"), `the url-shaped-job-type message must redact the credential, got: ${err.message}`);
+});
+
+test("url-shaped-job-type: a scheme-relative `//host` job type is rejected too; a plain routing token passes", () => {
+  assert(
+    hasCode(
+      validateDeliveryGraph({ nodes: [{ id: "a", kind: "agent", agent: { jobType: "//user:pass@host/x" } }], edges: [] }),
+      "url-shaped-job-type",
+    ) !== undefined,
+  );
+  assertEquals(
+    validateDeliveryGraph({ nodes: [{ id: "a", kind: "agent", agent: { jobType: "senior:feature" } }], edges: [] }).filter(
+      (e) => e.code === "url-shaped-job-type",
+    ),
+    [],
+  );
+});
+
+test("credential-in-job-type: a plausible token with an EMBEDDED credential-bearing URL (`senior:feature //user:pass@host`, past the anchored url-shape and TAB/LF/CR checks) is REJECTED, message redacted (#778 review — thread deliveryGraph.ts:550)", () => {
+  const errors = validateDeliveryGraph({
+    nodes: [{ id: "a", kind: "agent", agent: { jobType: "senior:feature //user:pass@evil.example/route" } }],
+    edges: [],
+  });
+  const err = hasCode(errors, "credential-in-job-type");
+  assert(!err.message.includes("user:pass"), `the credential-in-job-type message must redact the credential, got: ${err.message}`);
+  // A plain routing token with no embedded credential is untouched.
+  assertEquals(
+    validateDeliveryGraph({ nodes: [{ id: "a", kind: "agent", agent: { jobType: "senior:feature" } }], edges: [] }).filter(
+      (e) => e.code === "credential-in-job-type",
+    ),
+    [],
+  );
+});
+
+test("invalid-job-type: a NON-url-shaped token that both embeds a credential AND carries an XML-invalid char (`senior:feature //user:pass@host\\x01`) redacts the credential in the message — `redactConnectorValue` would have echoed it verbatim (#778 review — thread deliveryGraph.ts:532)", () => {
+  const errors = validateDeliveryGraph({
+    nodes: [{ id: "impl", kind: "agent", agent: { jobType: "senior:feature //user:pass@evil.example\u0001/route" } }],
+    edges: [],
+  });
+  const err = hasCode(errors, "invalid-job-type");
+  assert(!err.message.includes("user:pass"), `the invalid-job-type message must redact the EMBEDDED credential, got: ${err.message}`);
+});
+
+test("credential-in-job-type: a literal SPACE inside the userinfo (`senior:feature //user:secret pass@host`) is caught — the whitespace-tolerant `//…@` span matches the display redactor, message redacted (#778 review — thread deliveryGraph.ts:570)", () => {
+  const errors = validateDeliveryGraph({
+    nodes: [{ id: "a", kind: "agent", agent: { jobType: "senior:feature //user:secret pass@evil.example/route" } }],
+    edges: [],
+  });
+  const err = hasCode(errors, "credential-in-job-type");
+  assert(!err.message.includes("secret pass"), `the credential-in-job-type message must redact the space-bearing credential, got: ${err.message}`);
+});
+
+test("invalid-credential-env: a `wait.credentialEnv` that is not a DECLARED env-contract key is rejected at the semantic boundary — a raw secret can never reach the compiled BPMN the preview door returns (#778 review)", () => {
+  const errors = validateDeliveryGraph({
+    nodes: [
+      {
+        id: "g",
+        kind: "wait",
+        wait: { kind: "pr", target: "acme/repo#1", match: { prState: "merged" }, credentialEnv: "sk-an-actual-secret-value" },
+      },
+    ],
+    edges: [],
+  });
+  hasCode(errors, "invalid-credential-env");
+});
+
+test("invalid-credential-env: a DECLARED env-contract key on an `http` probe passes (the secret is read from the ambient env at execution time, never carried here)", () => {
+  assertEquals(
+    validateDeliveryGraph({
+      nodes: [
+        {
+          id: "g",
+          kind: "wait",
+          wait: { kind: "http", target: "https://acme.example/health", credentialEnv: "GITHUB_TOKEN" },
+        },
+      ],
+      edges: [],
+    }).filter((e) => e.code === "invalid-credential-env"),
+    [],
+  );
+});
+
+test("invalid-credential-env: a well-formed `credentialEnv` key on a NON-`http` probe kind is rejected at the semantic boundary — `parseProbe` supports it only for `http`, so reject here rather than stage-then-throw at dispatch (#778 review, thread deliveryGraph.ts:474)", () => {
+  for (const kind of ["pr", "command", "npm", "github-check", "capability", "epic"] as const) {
+    const errors = validateDeliveryGraph({
+      nodes: [
+        {
+          id: "g",
+          kind: "wait",
+          wait: { kind, target: "acme/repo#1", credentialEnv: "GITHUB_TOKEN" },
+        },
+      ],
+      edges: [],
+    });
+    hasCode(errors, "invalid-credential-env");
+  }
+});
+
+test("invalid-credential-env: a padded-but-valid `credentialEnv` on `http` passes — validation trims like `parseProbe` does, so it agrees with execution (#778 review, suppressed advisory deliveryGraph.ts:466)", () => {
+  assertEquals(
+    validateDeliveryGraph({
+      nodes: [{ id: "g", kind: "wait", wait: { kind: "http", target: "https://x/health", credentialEnv: "  GITHUB_TOKEN  " } }],
+      edges: [],
+    }).filter((e) => e.code === "invalid-credential-env"),
+    [],
+  );
+  // A whitespace-only credentialEnv is treated as ABSENT (parseProbe reads `.trim() || undefined`), so it
+  // is neither rejected nor carried — no error.
+  assertEquals(
+    validateDeliveryGraph({
+      nodes: [{ id: "g", kind: "wait", wait: { kind: "http", target: "https://x/health", credentialEnv: "   " } }],
+      edges: [],
+    }).filter((e) => e.code === "invalid-credential-env"),
+    [],
+  );
+});
+
+test("invalid-credential-env: a non-string `credentialEnv` (e.g. 123) is rejected at the semantic boundary — it can never name an env key and `parseProbe` throws at dispatch, so reject rather than stage-then-throw (#778 review, suppressed advisory deliveryGraph.ts:473)", () => {
+  for (const bad of [123, true, { k: "v" }, ["GITHUB_TOKEN"]]) {
+    const errors = validateDeliveryGraph({
+      nodes: [{ id: "g", kind: "wait", wait: { kind: "http", target: "https://x/health", credentialEnv: bad } }],
+      edges: [],
+    });
+    hasCode(errors, "invalid-credential-env");
+  }
+});
+
+test("invalid-credential-env: a padded probe `kind` (\" http \") still accepts a `credentialEnv` — the http-only check trims `kind` like `parseProbe` does, so a valid padded-kind http probe is not false-rejected (#778 review — thread deliveryGraph.ts:488)", () => {
+  assertEquals(
+    validateDeliveryGraph({
+      nodes: [{ id: "g", kind: "wait", wait: { kind: " http ", target: "https://x/health", credentialEnv: "GITHUB_TOKEN" } }],
+      edges: [],
+    }).filter((e) => e.code === "invalid-credential-env"),
+    [],
+  );
+});
+
+test("credential-in-job-type: a PASSWORDLESS userinfo token (`senior:feature //token@host`, no colon) is REJECTED — a bearer/OAuth token riding the userinfo is a credential too, and a routing key never contains `//…@` at all (#778 review push-back — thread readiness.ts:1170)", () => {
+  const errors = validateDeliveryGraph({
+    nodes: [{ id: "a", kind: "agent", agent: { jobType: "senior:feature //tok3n@host" } }],
+    edges: [],
+  });
+  const err = hasCode(errors, "credential-in-job-type");
+  assert(!err.message.includes("tok3n"), `the credential-in-job-type message must redact the passwordless token, got: ${err.message}`);
+});
+
 test("S7 guard-default-conflict: an edge with both `default` and `when` is rejected", () => {
   const errors = validateDeliveryGraph({
     nodes: [

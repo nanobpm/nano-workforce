@@ -48,6 +48,7 @@ import {
   readinessTimeoutMs,
   redactString,
   redactTarget,
+  isUrlShaped,
 } from "./readiness.ts";
 
 // A ProbeExec stub: canned http/command responses, capturing the last command it was asked to run.
@@ -862,6 +863,20 @@ test("probeBudgetMs: prefers the seeded probeTimeout (the gate timer's bound), f
 });
 
 // ── repo/ref parse + redaction ──────────────────────────────────────────────────────────────
+test("isUrlShaped: tolerates XML-attribute whitespace (TAB/LF/CR/space) between the scheme and `//` — `https:\\t//host` still classifies as a URL so its credential is redacted, not passed through as a non-URL (#778 review — thread readiness.ts:1191)", () => {
+  assert(isUrlShaped("https://host"), "a plain URL");
+  assert(isUrlShaped("//host"), "scheme-relative");
+  assert(isUrlShaped("  https://host"), "leading whitespace (trimmed first)");
+  // The XML-valid whitespace `stripXmlInvalidChars` keeps must not break the scheme→authority match:
+  assert(isUrlShaped("https:\t//user:pass@host"), "TAB between scheme and //");
+  assert(isUrlShaped("https:\n//host"), "LF between scheme and //");
+  assert(isUrlShaped("https:\r//host"), "CR between scheme and //");
+  assert(isUrlShaped("https:  //host"), "spaces between scheme and //");
+  // A plain routing token / non-URL is still NOT url-shaped.
+  assert(!isUrlShaped("senior:feature"), "a plain job-type token is not url-shaped");
+  assert(!isUrlShaped("owner/repo#1"), "a PR ref is not url-shaped");
+});
+
 test("parseRepoRef: splits owner/repo@ref and defaults the ref to HEAD", () => {
   assertEquals(parseRepoRef("o/r@abc123"), { repo: "o/r", ref: "abc123" });
   assertEquals(parseRepoRef("o/r"), { repo: "o/r", ref: "HEAD" });
@@ -872,6 +887,35 @@ test("redactString/redactTarget: strip userinfo and query (a token often rides e
   assertStringIncludes(redactTarget(parseProbe({ kind: "http", target: "https://h/p?tok=s3cr3t" })), "?***");
   const t = redactTarget(parseProbe({ kind: "http", target: "https://h/p?tok=s3cr3t" }));
   assert(!t.includes("s3cr3t"), "the secret must not survive redaction");
+});
+
+test("redactString: a `//user:pass@` userinfo that embeds a raw line break is still stripped (newline-safe)", () => {
+  // The userinfo class is `[^/@]` (NOT `[^/@\s]`): a CR/LF smuggled inside the userinfo must not
+  // break the `//…@` match and leave the credential tail visible.
+  const r = redactString("https://user:pa\nss@host/path");
+  assert(!r.includes("ss@host") && !r.includes("user:pa"), "the newline-split userinfo is redacted");
+  assertStringIncludes(r, "//***@");
+});
+
+test("redactString: a `//user:pass@` userinfo that embeds a raw TAB is still stripped (tab-safe)", () => {
+  // A TAB is a VALID XML character `stripXmlInvalidChars` does not remove, so an earlier `[^/@ \t]`
+  // userinfo class (excluding TAB) let `https://user:pa\tss@host` split before the `@` — leaving
+  // `ss@host` visible in the display artifact. The class is now `[^/@]` (issue #778 review).
+  const r = redactString("https://user:pa\tss@host/path?token=s3cr3t");
+  assert(!r.includes("ss@host") && !r.includes("user:pa"), "the tab-split userinfo is redacted");
+  assert(!r.includes("s3cr3t"), "the query token is redacted");
+  assertStringIncludes(r, "//***@");
+});
+
+test("redactString: a `//user:secret pass@` userinfo that embeds a literal SPACE is still stripped (space-safe)", () => {
+  // An earlier `[^/@ ]` class bounded the userinfo at a SPACE to avoid over-matching prose, but that let
+  // a malformed but operator-authored `https://user:secret pass@host` leave `user:secret` visible in the
+  // display artifact. The class is now `[^/@]` (space-tolerant), so the whole userinfo through the `@`
+  // collapses; the RAW value still reaches runtime unmodified (issue #778 review — thread readiness.ts:1177).
+  const r = redactString("https://user:secret pass@host/path?token=s3cr3t");
+  assert(!r.includes("secret") && !r.includes("user:"), `the space-split userinfo is redacted: ${r}`);
+  assert(!r.includes("s3cr3t"), "the query token is redacted");
+  assertStringIncludes(r, "//***@");
 });
 
 test("redactTarget: a command target is never logged — only the kind + a fixed placeholder", () => {

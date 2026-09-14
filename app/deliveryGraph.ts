@@ -20,8 +20,10 @@
 // caller can point the author straight at the offending input.
 
 import { isPlausibleBranchName } from "./baseBranch.ts";
+import { isEnvKey } from "./contracts.ts";
 import { isConvergeTarget } from "./convergeTargets.ts";
 import { isRawConvergeMergeJobType, NODE_COMPLETION_POLICIES } from "./nodePolicy.ts";
+import { hasEmbeddedCredential, isUrlShaped, redactString } from "./readiness.ts";
 import { isResolvableRepo } from "./repoEnvelope.ts";
 
 /** The CLOSED node-kind allowlist (ADR 0005 Decision 2) — the trust boundary. Extensible only by a
@@ -88,6 +90,7 @@ export type DeliveryGraphErrorCode =
   | "guard-default-conflict"
   | "bad-when"
   | "guard-type-mismatch"
+  | "guard-invalid-equals"
   | "mixed-fan-out"
   | "multiple-defaults"
   | "non-exhaustive-split"
@@ -98,6 +101,10 @@ export type DeliveryGraphErrorCode =
   | "converge-merge-type"
   | "invalid-node-repository"
   | "invalid-node-base-branch"
+  | "invalid-job-type"
+  | "url-shaped-job-type"
+  | "credential-in-job-type"
+  | "invalid-credential-env"
   | "unbound-pr";
 
 /** A single semantic validation failure. `path` is a JSON-path-qualified pointer at the offending
@@ -113,6 +120,70 @@ export interface DeliveryGraphError {
 /** Narrow an untyped value to a plain object so its fields can be read as `unknown`. */
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Strip the characters XML 1.0's `Char` production forbids anywhere in a document: the C0 control
+ * characters (except tab `#x9`, LF `#xA`, CR `#xD`), the noncharacters U+FFFE/U+FFFF, and unpaired
+ * UTF-16 surrogates — none can be represented by an entity, so any of them in an element
+ * `name`/`documentation` makes `layoutBpmn`/deployment reject the whole semantic BPMN. VALID astral
+ * pairs are preserved; dropping an unrepresentable character is the only well-formed rendering.
+ * Canonical here (the low-level graph module) so both the validator (which must REJECT such a
+ * character in executable FEEL — see {@link hasXmlInvalidChars}) and the compiler (which strips it
+ * from DISPLAY text) share ONE character-class definition — no drift surface. Deterministic and
+ * total. */
+export function stripXmlInvalidChars(value: string): string {
+  return (
+    value
+      // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional — this IS the XML-1.0 control filter.
+      .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, "")
+      // Unpaired surrogates (a high not followed by a low, or a low not preceded by a high); valid pairs stay.
+      .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "")
+      // XML-1.0 noncharacters just past the BMP `Char` range end (#xFFFD).
+      .replace(/[\uFFFE\uFFFF]/g, "")
+  );
+}
+
+/** True when `value` contains any XML-1.0-forbidden character (see {@link stripXmlInvalidChars}).
+ * Defined in terms of the strip so detection and stripping can never disagree — a single source of
+ * truth for the character class. Used to REJECT such a character in an executable FEEL guard literal
+ * at validation time (rather than let the compiler's display-text sanitiser silently rewrite the
+ * guard and route the process down the wrong edge). Deterministic and total. */
+export function hasXmlInvalidChars(value: string): boolean {
+  return stripXmlInvalidChars(value) !== value;
+}
+
+/** URL-only credential redaction for a free-form connector value (`target`, `dedupeKey`, a bound
+ * `payload.pr`) or an `agent.jobType` descriptor. Such a value is frequently an OPAQUE identifier —
+ * `slack:#releases`, `owner/repo#42`, a `<node>.pr` ref, `pkg@version` — in which `#`/`?`/`@` are
+ * MEANINGFUL, so blind {@link redactString} would mangle it (e.g. `slack:#releases` → `slack:#***`,
+ * `owner/repo#42` → `owner/repo#***`). Only a value that is actually a URL — a `scheme://authority` OR a
+ * scheme-relative `//authority` form ({@link isUrlShaped}), either of which can hide a credential in
+ * userinfo/query/fragment (`redactString` redacts both) — is redacted; every other value is shown
+ * VERBATIM. Canonical HERE (the low-level graph module, alongside {@link stripXmlInvalidChars} and the
+ * URL classifier it shares) so the compiler's DISPLAY path AND `validateDeliveryGraph`'s reject/error
+ * path use ONE redactor — no drift surface (issue #778 review — thread deliveryGraphCompiler.ts:1606).
+ * Deterministic and total. */
+export function redactConnectorValue(value: string): string {
+  // Strip XML-invalid display characters BEFORE classifying/redacting: the anchored `^(scheme:)?//`
+  // check and the redaction both run on the exact string the renderer will emit. Otherwise a target
+  // prefixed by an unrepresentable control char (e.g. `\x01//user:pass@host/?token=…`) fails the
+  // anchored check, escapes redaction, then loses that prefix during `escapeXml`/`stripXmlInvalidChars`
+  // — surfacing the credential verbatim in the BPMN name/documentation and connector escalation FEEL.
+  const cleaned = stripXmlInvalidChars(value);
+  return isUrlShaped(cleaned) ? redactString(cleaned) : cleaned;
+}
+
+/** True when `value` contains a whitespace character that XML **attribute-value normalization**
+ * rewrites to a space (literal TAB `#x9`, LF `#xA`, or CR `#xD`). Such characters are perfectly
+ * valid XML `Char`s — so {@link hasXmlInvalidChars} does NOT flag them — yet when a value is emitted
+ * verbatim into a raw XML attribute (`<zeebe:taskDefinition type="…">`), a conforming parser folds
+ * each of them to a single space at deploy time. An executable value carrying one (e.g.
+ * `senior:\nfeature`) is therefore silently deployed as a DIFFERENT worker type (`senior: feature`),
+ * routing the cell to the wrong worker. Rejected — not normalized — for the same reason as
+ * {@link hasXmlInvalidChars}: an executable value must never be silently mutated. Deterministic and
+ * total. */
+export function hasAttrNormalizedWhitespace(value: string): boolean {
+  return /[\t\n\r]/.test(value);
 }
 
 /** True when `kind` is a member of the closed allowlist. */
@@ -385,6 +456,62 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
             code: "unsupported-on-timeout",
           });
         }
+        // A wait probe's `credentialEnv` names a DECLARED env-contract KEY (the secret is read from the
+        // ambient env at execution time, never carried here) — but `parseProbe` only enforces that
+        // `isEnvKey` contract LATER, at dispatch. The compiler surfaces the `credentialEnv` value verbatim
+        // into the probe's `<bpmn:documentation>`, so a text-ingress graph could stage
+        // `credentialEnv: "an-actual-secret"` and expose it in the compiled BPMN the preview door returns
+        // BEFORE dispatch rejects it. Enforce the SAME `isEnvKey` contract here at the semantic boundary so
+        // a non-key value can never reach the compiler (issue #778 review — thread
+        // deliveryGraphCompiler.ts:1249). `parseProbe` ALSO rejects a `credentialEnv` on any non-`http`
+        // probe kind (the credential selects an HTTP Authorization header — no other kind reads it), but
+        // only LATER, at dispatch: a shape-valid `command`/`npm`/`github-check`/`capability` graph
+        // carrying a well-formed `credentialEnv` key stages successfully and then THROWS during dispatch
+        // instead of returning a compile-time validation error. Enforce the SAME `http`-only contract here
+        // at the semantic boundary so the mismatch surfaces as a 400 from the preview/stage door rather
+        // than a dispatch-time incident (issue #778 review — thread deliveryGraph.ts:474).
+        // A PRESENT `credentialEnv` that is neither null/undefined nor a string can never name an
+        // env-contract key: `parseProbe` coerces + rejects it at DISPATCH, so a shape-valid graph carrying
+        // e.g. `credentialEnv: 123` stages successfully and only fails later with an unlaunchable proposal.
+        // Reject a non-string here at the semantic boundary so the mismatch surfaces as a 400 from the
+        // preview/stage door (issue #778 review — suppressed advisory deliveryGraph.ts:473).
+        if (kind === "wait" && config.credentialEnv !== undefined && config.credentialEnv !== null && typeof config.credentialEnv !== "string") {
+          errors.push({
+            path: `${path}.${configKey}.credentialEnv`,
+            message:
+              "`wait.credentialEnv` must be a STRING naming a declared env-contract key; a non-string value " +
+              "can never resolve to a key and `parseProbe` rejects it at dispatch, so reject it here rather " +
+              "than let a shape-invalid graph stage and then throw during dispatch",
+            code: "invalid-credential-env",
+          });
+        }
+        if (kind === "wait" && typeof config.credentialEnv === "string" && config.credentialEnv.trim().length > 0) {
+          // Compare the TRIMMED value: `parseProbe` normalises `credentialEnv` with `.trim()` before its
+          // own `isEnvKey`/kind checks (readiness.ts:287), so validating the raw value here would
+          // false-reject a padded-but-valid `" GITHUB_TOKEN "` the runtime accepts — keep validation and
+          // execution in agreement (issue #778 review — suppressed advisory deliveryGraph.ts:466).
+          const credentialEnv = config.credentialEnv.trim();
+          if (!isEnvKey(credentialEnv)) {
+            errors.push({
+              path: `${path}.${configKey}.credentialEnv`,
+              message:
+                "`wait.credentialEnv` must name a DECLARED env-contract key (never a secret value — the " +
+                "credential is read from the ambient env at execution time); an undeclared key is rejected " +
+                "so a secret can never be smuggled into the compiled BPMN the preview door returns",
+              code: "invalid-credential-env",
+            });
+          } else if (typeof config.kind === "string" && config.kind.trim() !== "http") {
+            errors.push({
+              path: `${path}.${configKey}.credentialEnv`,
+              message:
+                `\`credentialEnv\` is only supported for the \`http\` wait kind (probe kind is ` +
+                `${JSON.stringify(config.kind)}); \`parseProbe\` rejects this combination at dispatch, so ` +
+                "reject it here at the semantic boundary rather than letting a shape-valid graph stage and " +
+                "then throw during dispatch",
+              code: "invalid-credential-env",
+            });
+          }
+        }
         // S5 (ADR 0006 §3): converge/merge are first-class, edge-gated CELL POLICY, not raw nodes.
         // A raw converge/merge agent job (`senior:converge`, `senior:merge`, or a bare `converge`/
         // `merge` verb) is retired as user-facing vocabulary — reject it at compile so "a raw converge
@@ -399,6 +526,75 @@ export function validateDeliveryGraph(graph: unknown): DeliveryGraphError[] {
               "are first-class cell policy (set `agent.converge`/`agent.merge`), not a raw agent node " +
               "(ADR 0006 §3 / S5)",
             code: "raw-converge-node",
+          });
+        }
+        // `agent.jobType` is baked VERBATIM into the executable `<zeebe:taskDefinition type=…>` attribute
+        // (and mirrored into `resolved.calledElement`), so — unlike a display string — the compiler must
+        // NOT let its attribute sanitiser silently strip an XML-1.0-invalid character out of it, NOR may
+        // it carry a whitespace character that XML attribute-value normalization folds to a space at
+        // deploy time: either would deploy a worker type differing from the authored job type (e.g.
+        // `senior:\u0001feature` → `senior:feature`, or `senior:\nfeature` → `senior: feature`), silently
+        // routing the cell to the wrong worker. Reject it here rather than rewrite/normalize an executable
+        // value (issue #778 review — same rationale as `guard-invalid-equals`).
+        if (
+          kind === "agent" &&
+          typeof config.jobType === "string" &&
+          (hasXmlInvalidChars(config.jobType) || hasAttrNormalizedWhitespace(config.jobType))
+        ) {
+          errors.push({
+            path: `${path}.${configKey}.jobType`,
+            message:
+              `\`agent.jobType\` ${JSON.stringify(redactString(stripXmlInvalidChars(config.jobType)))} contains a character that would be silently ` +
+              "rewritten when emitted as the executable `<zeebe:taskDefinition type=…>` attribute — an " +
+              "XML-1.0-invalid character (control characters, U+FFFE/U+FFFF, or an unpaired surrogate) that " +
+              "the sanitiser strips, or attribute whitespace (tab, LF, CR) that XML attribute-value " +
+              "normalization folds to a space — so it must be rejected rather than silently rewritten into " +
+              "a different (wrong) worker type",
+            code: "invalid-job-type",
+          });
+        }
+        // A URL-shaped `agent.jobType` (`//user:pass@host`, `https://…`) is baked VERBATIM into the
+        // executable `<zeebe:taskDefinition type=…>` for worker routing, so — unlike a display string — it
+        // CANNOT be redacted in place (that would change the routing target). The compiler's display path
+        // redacts a URL-shaped jobType wherever it surfaces to an operator, but the raw executable value
+        // still lands in the compiled BPMN returned by the preview door, defeating that guarantee, and a
+        // URL is never a legitimate Zeebe routing key anyway. Reject it at the semantic boundary (the same
+        // "reject rather than rewrite an executable value" rule as `invalid-job-type` above) so a
+        // credential-bearing job type can never reach the compiler (issue #778 review — thread
+        // deliveryGraphCompiler.ts:1606). The message shows the REDACTED form so the 400 never echoes a
+        // credential.
+        if (kind === "agent" && typeof config.jobType === "string" && isUrlShaped(config.jobType)) {
+          errors.push({
+            path: `${path}.${configKey}.jobType`,
+            message:
+              `\`agent.jobType\` ${JSON.stringify(redactConnectorValue(config.jobType))} is URL-shaped — a URL is ` +
+              "never a valid worker-routing job type and, since the executable `<zeebe:taskDefinition type=…>` " +
+              "must carry it verbatim, a credential embedded in it would leak into the compiled BPMN. Use a " +
+              "plain job-type token (e.g. `senior:feature`) and carry any endpoint/credential as a runtime " +
+              "job variable instead",
+            code: "url-shaped-job-type",
+          });
+        }
+        // The url-shaped check above is ANCHORED (a job type that STARTS with a URL). A credential-bearing
+        // URL can also be EMBEDDED after an otherwise plausible token (`senior:feature //user:pass@host`),
+        // separated by a plain space — which `hasAttrNormalizedWhitespace` (TAB/LF/CR only) and the anchored
+        // `isUrlShaped` both miss — so the `//user:pass@host` substring still lands verbatim in the
+        // executable `<zeebe:taskDefinition type=…>`. Reject ANY embedded `//…@` credential token (a
+        // routing key never contains one) at the same trust boundary via {@link hasEmbeddedCredential} — the
+        // SAME whitespace-tolerant `//…@` span the display redactor strips, so a userinfo carrying a literal
+        // space (`//user:secret pass@host`) can neither slip past this reject nor escape the display redact
+        // (issue #778 review — thread deliveryGraph.ts:550/570). Message redacted.
+        if (kind === "agent" && typeof config.jobType === "string" && hasEmbeddedCredential(config.jobType)) {
+          errors.push({
+            path: `${path}.${configKey}.jobType`,
+            message:
+              `\`agent.jobType\` ${JSON.stringify(redactString(stripXmlInvalidChars(config.jobType)))} embeds a ` +
+              "credential-bearing URL userinfo token (`//<userinfo>@host` — the userinfo need not contain a " +
+              "colon; a passwordless `//token@host` bearer token counts) that a plain worker-routing job type " +
+              "never contains and that would land verbatim in the executable `<zeebe:taskDefinition type=…>`, " +
+              "leaking the credential into the compiled BPMN. Use a plain job-type token and carry any " +
+              "endpoint/credential as a runtime job variable instead",
+            code: "credential-in-job-type",
           });
         }
         // S5 trust boundary: `validateDeliveryGraph` is the gate before `dispatchDeliveryGraphRun`
@@ -925,6 +1121,22 @@ function validateGuardedEdges(
       });
       continue;
     }
+    // A string `equals` is baked VERBATIM into the compiled `<bpmn:conditionExpression>` FEEL literal,
+    // so an XML-1.0-invalid character in it (a C0 control, U+FFFE/U+FFFF, a lone surrogate) cannot be
+    // entity-escaped and the compiler's display-text sanitiser would silently STRIP it — mutating
+    // executable FEEL (e.g. `"a\uFFFEb"` → `"ab"`) and potentially routing the split down the wrong
+    // edge. Reject it here rather than silently rewrite the guard (issue #778 review).
+    if (typeof e.equals === "string" && hasXmlInvalidChars(e.equals)) {
+      errors.push({
+        path: `${path}.equals`,
+        message:
+          `guard \`equals\` for "${whenStr}" contains XML-1.0-invalid characters (control characters, ` +
+          "U+FFFE/U+FFFF, or an unpaired surrogate) that cannot be represented in the compiled FEEL " +
+          "condition — remove them rather than let the guard be silently rewritten",
+        code: "guard-invalid-equals",
+      });
+      continue;
+    }
     guardFactTypeByIndex.set(e.index, factType);
   }
 
@@ -1214,4 +1426,19 @@ export function resolveDeliveryFrom(
 ): { nodeId: string; fact?: string } {
   const { nodeId, fact } = resolveFrom(from, nodeFacts);
   return fact !== undefined ? { nodeId, fact } : { nodeId };
+}
+
+/** A DETERMINISTIC canonical JSON serialization: object keys sorted recursively while ARRAY order is
+ * preserved (object key order and insignificant whitespace are not semantic). Two byte-different-but-
+ * equivalent encodings (reordered keys, reflowed whitespace) serialize identically, while any genuine
+ * value difference still diverges. Shared single source of truth (issue #778 review): the dispatch
+ * run-key hashes it and the compiler's `payload` disambiguator canonicalises with it, so neither can
+ * drift from the other. */
+export function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "null";
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  return `{${Object.entries(value)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([k, v]) => `${JSON.stringify(k)}:${canonicalJson(v)}`)
+    .join(",")}}`;
 }

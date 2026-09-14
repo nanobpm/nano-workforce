@@ -8,7 +8,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
-import { assertEquals } from "#test-assert";
+import { assert, assertEquals, assertStringIncludes } from "#test-assert";
 import type { DataLayer } from "@nanobpm/urban";
 import { bootTestApp } from "@nanobpm/urban-testkit";
 import { compileDeliveryGraph } from "./deliveryGraphCompiler.ts";
@@ -200,12 +200,32 @@ test("buildHumanLabels: maps each human node's compiled user-task element id →
   assertEquals(labels[humanTaskElementId(ackEl)], "ack"); // fallback to node id
 });
 
+test("buildHumanLabels: redacts a credential-bearing human prompt before it lands in human_labels (issue #778 review)", async () => {
+  const graph = {
+    nodes: [
+      { id: "publish", kind: "human", human: { prompt: "deploy via https://user:s3cr3t@registry.example.com then confirm" } },
+    ],
+    edges: [],
+  };
+  const compiled = await compileDeliveryGraph(graph);
+  assertEquals(compiled.ok, true);
+  if (!compiled.ok) return;
+  const labels = buildHumanLabels(compiled);
+  const publishEl = compiled.resolved.nodes.find((n) => n.id === "publish")?.element ?? "";
+  const label = labels[humanTaskElementId(publishEl)];
+  assert(!label.includes("s3cr3t") && !label.includes("user:s3cr3t"), "the credential must not survive into the denormalised inbox label");
+  assertStringIncludes(label, "//***@");
+});
+
 test("parseHumanLabels: round-trips a stored map and tolerates null/blank/corrupt", () => {
-  assertEquals(parseHumanLabels(JSON.stringify({ a: "x" })), { a: "x" });
   assertEquals(parseHumanLabels(null), {});
   assertEquals(parseHumanLabels(""), {});
   assertEquals(parseHumanLabels("  "), {});
   assertEquals(parseHumanLabels("{not json"), {});
+  assertEquals(parseHumanLabels(JSON.stringify({ n1: "manual OTP publish", n2: "confirm deploy" })), {
+    n1: "manual OTP publish",
+    n2: "confirm deploy",
+  }); // round-trips a valid string→string map
   assertEquals(parseHumanLabels(JSON.stringify(["a"])), {}); // non-object
   assertEquals(parseHumanLabels(JSON.stringify({ a: 1, b: "y" })), { b: "y" }); // drops non-string values
 });
