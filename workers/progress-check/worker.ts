@@ -352,10 +352,10 @@ export function makeHandler(deps: {
     // longer gates the agent-work corroboration (correlation is by the completing element-instance,
     // not an aggregate round count — #786); it only tunes the human-facing escalation question.
     const roundNo = typeof round === "number" && round > 0 ? Math.floor(round) : 1;
-    // Corroborate durable agent work on EVERY round with a READABLE head — the addressed rounds AND
-    // the non-addressed `waiting` round — not only the no-advance path. The husk verdict itself is
-    // only consulted when the head did not advance past the round-entry baseline, but the read must
-    // ALSO run to MAINTAIN THE ATTEMPT WATERMARK (Copilot
+    // Corroborate durable agent work on EVERY round — the addressed rounds AND the non-addressed
+    // `waiting` round, AND even a round whose head could not be read. The husk verdict itself is only
+    // consulted when the head did not advance past the round-entry baseline, but the read must ALSO
+    // run to MAINTAIN THE ATTEMPT WATERMARK (Copilot
     // #789): every round runs `review-round` BEFORE this progress-check
     // (`…→review-round→gw-status→…→check-progress`), registering a fresh `review-round` instance that
     // must be CONSUMED into the watermark, else the NEXT round's pre-registration husk would see that
@@ -363,13 +363,17 @@ export function makeHandler(deps: {
     // includes the `waiting` round (Copilot #789 worker.ts:329): a `waiting` round's own review runs
     // and can leave a terminal instance, so if its progress-check returned early WITHOUT consuming it,
     // the first addressed round's pre-registration husk would inherit that unconsumed terminal
-    // instance and bypass the bounded husk retry. An unreadable current head skips the read (the
-    // decision fails open regardless and there is nothing to correlate).
+    // instance and bypass the bounded husk retry. It ALSO includes a round whose CURRENT HEAD could
+    // not be read (Copilot #789): the head-diff fails open regardless, but if that GitHub outage
+    // coincided with a round whose review DID register a terminal instance, skipping the agent read
+    // would leave that instance UNCONSUMED — a later pre-registration husk would then see it as newer
+    // than the stale watermark and mis-classify itself as no-advance. So read the channel here too and
+    // let a successful read advance the watermark even when the head is unreadable.
     const readAgentWork = deps.readAgentWork ?? agentWorkFromEngine(app.engine);
     const priorWatermark = row?.last_progress_agent_watermark ?? null;
-    const observation = currentHead
-      ? normalizeAgentWork(await readAgentWork(job.processInstanceKey, roundNo, priorWatermark).catch(() => null))
-      : normalizeAgentWork(null);
+    const observation = normalizeAgentWork(
+      await readAgentWork(job.processInstanceKey, roundNo, priorWatermark).catch(() => null),
+    );
     const agentWorkObserved = observation.work;
     // The watermark to persist: the key this read consumed (a fresh attempt), else undefined so the
     // stored one is left untouched (an unreadable head or an injected bare-verdict reader).

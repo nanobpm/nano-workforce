@@ -467,16 +467,26 @@ test("progress-check: reads agent-instances on EVERY addressed round (incl. a pr
   assertEquals(out.progressed, true, "an advancing head is still progress regardless of the read");
 });
 
-test("progress-check: an unreadable head skips the agent-work read (nothing to correlate)", async () => {
+test("progress-check: an unreadable head STILL reads the agent channel to advance the watermark (Copilot #789 worker.ts:372)", async () => {
+  // A GitHub outage that blanks the current head must not also skip consuming this round's own
+  // `review-round` instance into the attempt watermark: if it did, a later pre-registration husk
+  // would see that unconsumed terminal instance as newer than the stale watermark and mis-classify
+  // itself as no-advance. So the agent read runs even with a null head; the head-diff still fails
+  // open to progress, but the watermark advances.
   let agentReads = 0;
   const handler = await makeUnderTest(async () => null, async () => {
     agentReads++;
-    return true;
+    return { work: true, consumedKey: "77" };
   });
-  const { app } = fakeApp({ last_round_head: "sha-1" });
+  const { app, updates } = fakeApp({ last_round_head: "sha-1" });
   const out = await handler({ processInstanceKey: "pik", variables: { prKey: "o/r#1", status: "addressed", repo: "o/r", prNumber: 1, round: 2 } } as any, app as any);
-  assertEquals(agentReads, 0, "an unreadable head has nothing to correlate, so no read");
+  assertEquals(agentReads, 1, "an unreadable head still reads the channel to advance the watermark");
   assertEquals(out.progressed, true, "an unreadable head fails open to progress");
+  assertEquals(
+    updates[0]!.patch.last_progress_agent_watermark,
+    "77",
+    "the round consumes its review instance into the watermark despite the head-read outage",
+  );
 });
 
 // ── The DEFAULT (availability-aware) agent-work reader over app.engine.searchAgentInstances ──────
