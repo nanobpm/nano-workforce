@@ -427,19 +427,40 @@ test("progress-check: only reads agent-instances on the no-advance path, not on 
 
 // ── The DEFAULT (availability-aware) agent-work reader over app.engine.searchAgentInstances ──────
 // These exercise agentWorkFromEngine directly (no injected readAgentWork), via fakeApp's injectable
-// engine, to lock the Option 1 (#786) semantics: empty→unknown→no-advance; non-terminal→husk;
-// all-terminal→no-advance; correlation is by the COMPLETING element-instance, not a round count.
+// engine, to lock the Option 1 (#786) semantics: BOTH-empty→unknown→no-advance; scoped-empty-but-
+// channel-present→husk; non-terminal→husk; all-terminal→no-advance; correlation is by the COMPLETING
+// element-instance, not a round count.
 
-test("progress-check default reader: an EMPTY instance list (absent channel) fails safe to no-advance, never a husk", async () => {
-  // The availability probe: on a channel-absent engine (the testkit double returns []) the just-
-  // completed review-round would still have minted a Create record if the channel existed, so empty
-  // ⇒ unknown ⇒ no-advance — NOT a husk auto-retry that could duplicate real agent work.
+test("progress-check default reader: a WHOLLY-empty process instance (absent channel) fails safe to no-advance, never a husk", async () => {
+  // Two-tier availability probe: on a channel-absent engine (the testkit double returns [] for EVERY
+  // search — both the scoped review-round query AND the process-wide probe) the channel is UNKNOWN,
+  // so empty ⇒ no-advance — NOT a husk auto-retry that could loop forever on a non-agentic engine.
   const handler = await makeUnderTest(async () => "sha-1"); // no injected readAgentWork -> default
   const { app } = fakeApp({ last_round_head: "sha-1" }, async () => []);
   const out = await handler({ processInstanceKey: "pik", variables: { prKey: "o/r#1", status: "addressed", repo: "o/r", prNumber: 1, round: 5, huskRetries: 0 } } as any, app as any);
   assertEquals(out.progressed, false);
   assertEquals(out.huskRetry, false, "an absent channel must never auto-retry");
   assertEquals(out.noProgressReason, "no-advance");
+});
+
+test("progress-check default reader: an empty review-round search but a CHANNEL-PRESENT process (another agent instance exists) ⇒ husk — the round husked before registering (#789)", async () => {
+  // Copilot #789: review-round is an external-agent serviceTask, so a job that husks BEFORE the
+  // worker registers its AgentInstance mints NOTHING — the scoped search is empty even on a
+  // channel-present engine. The process-wide probe disambiguates: another agent instance (e.g.
+  // classify-scope, or an earlier round) proves the channel is PRESENT, so the empty review-round is
+  // a genuine husk (auto-retry), not an absent channel.
+  const handler = await makeUnderTest(async () => "sha-1");
+  const { app } = fakeApp({ last_round_head: "sha-1" }, async (arg) => {
+    // Filter-aware double: the scoped review-round query is EMPTY (the round husked pre-registration),
+    // but the process-wide probe returns a classify-scope instance (channel present).
+    const f = (arg ?? {}) as { elementId?: string };
+    if (f.elementId === "review-round") return [];
+    return [{ status: "completed", completionDate: "2024-01-01T00:00:00Z", elementInstanceKeys: ["50"] }];
+  });
+  const out = await handler({ processInstanceKey: "pik", variables: { prKey: "o/r#1", status: "addressed", repo: "o/r", prNumber: 1, round: 5, huskRetries: 0 } } as any, app as any);
+  assertEquals(out.progressed, false);
+  assertEquals(out.huskRetry, true, "a channel-present empty review-round is a husk, so it auto-retries");
+  assertEquals(out.noProgressReason, "husk");
 });
 
 test("progress-check default reader: a non-terminal review-round instance ⇒ husk (auto-retry under cap)", async () => {

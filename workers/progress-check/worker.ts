@@ -123,13 +123,21 @@ function recencyKey(s: AgentInstanceSummary): bigint {
 /** Default agent-work corroboration — AVAILABILITY-AWARE and correlated to the COMPLETING
  * `review-round` element-instance (issue #786, Option 1):
  *
- *  • AVAILABILITY PROBE (ADR 0056 fail-safe): search the process instance's `review-round`
- *    agent-instances. An EMPTY list means the AgentInstance channel is ABSENT for this deployment
- *    (the testkit WASM double, or a live engine without it) — because the just-completed
- *    `review-round` element MUST have minted a Create record on a channel-present engine, so an
- *    empty list can only mean "no channel", never "this round husked". An absent channel is UNKNOWN
- *    (`null`) → `no-advance` downstream, never an auto-retry. This is what makes an advisory,
- *    read-only channel safe to consult on the husk path: on absence it forces nothing.
+ *  • AVAILABILITY PROBE (ADR 0056 fail-safe) — TWO-TIER, because an empty `review-round` search is
+ *    AMBIGUOUS. `review-round` is an external-agent `serviceTask`: the engine creates an ORDINARY
+ *    job and the WORKER registers its AgentInstance via `CreateAgentInstance` (nanobpmn engine-core
+ *    `bpmn.rs`; a husked round is "a COMPLETED job that minted no AgentInstance", `event.rs`). So a
+ *    completing review-round job that HUSKED *before the worker registered* mints NO instance — an
+ *    empty scoped search is then a genuine husk, NOT proof of an absent channel. Distinguish the two
+ *    with a process-instance-WIDE probe: (a) scoped `review-round` search non-empty → classify it
+ *    (below); (b) scoped empty BUT the process instance has ANY agent instance at all (e.g.
+ *    `classify-scope`, or an earlier round) → the channel is provably PRESENT, so a review-round
+ *    that minted nothing is a genuine HUSK (`false`, auto-retry under the cap); (c) scoped empty AND
+ *    the whole process instance has NO agent instance → the channel is UNKNOWN/ABSENT (the testkit
+ *    WASM double, or a non-agentic engine) → `null` → `no-advance`, never an auto-retry, so a
+ *    channel-absent engine can't loop. (The irreducible residual: the VERY FIRST agent task in a
+ *    process husking before registering, with zero prior instances anywhere, is indistinguishable
+ *    from an absent channel and fails safe to `no-advance` — a human resume, not a wedge.)
  *
  *  • CORRELATION to the COMPLETING element-instance: once the channel is known present, classify
  *    ONLY the most-recently-created `review-round` instance — the one with the greatest monotonic
@@ -154,8 +162,17 @@ function agentWorkFromEngine(engine: AppApi["engine"]): AgentWorkReader {
         processInstanceKey: String(processInstanceKey),
         elementId: "review-round",
       });
-      // Availability probe: an empty list ⇒ no channel ⇒ unknown ⇒ no-advance (never husk-retry).
-      if (instances.length === 0) return null;
+      if (instances.length === 0) {
+        // Two-tier availability probe (Copilot #789): the scoped search is empty, which is
+        // AMBIGUOUS for an external-agent task (a pre-registration husk mints no instance). Probe
+        // the process instance WIDE: if it holds ANY agent instance the channel is provably PRESENT,
+        // so a review-round that minted nothing genuinely HUSKED (`false`); if it holds NONE the
+        // channel is UNKNOWN/ABSENT → `null` (no-advance, never an auto-retry).
+        const anyInProcess = await engine.searchAgentInstances({
+          processInstanceKey: String(processInstanceKey),
+        });
+        return anyInProcess.length === 0 ? null : false;
+      }
       // Correlate to the COMPLETING attempt: the most-recently-created instance (greatest monotonic
       // engine key). Its terminality is the verdict — newest terminal ⇒ no-advance (`true`); newest
       // non-terminal ⇒ the completing attempt husked (`false`). Older instances are ignored so a
