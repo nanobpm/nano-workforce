@@ -145,6 +145,7 @@ export const ENV_CONTRACTS = {
     name: "NANO_PR_REVIEW_WAIT_TIMEOUT",
     owner: "app/service.ts",
     semantics: "How long to wait for a review before nudging/escalating (FEEL/ISO-8601 duration).",
+    default: "PT30M",
   },
   NANO_PR_REVIEW_NUDGE_MINUTES: {
     category: "env",
