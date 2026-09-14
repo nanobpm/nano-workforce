@@ -329,6 +329,37 @@ describe("dispatchDeliveryGraph — operator dispatch by staged-proposal digest"
     assert.equal((await deliveryGraphProposals(app.db).get(staged.body.digest))?.status, "dispatched");
   });
 
+  test("an explicit idempotencyKey re-used across two SECRET-differing graphs that SHARE a digest is refused at short-circuit → 409; the re-staged proposal is NOT consumed and nothing new launches (#778 review — thread dispatchDeliveryGraph.ts:282)", async () => {
+    const app = await boot();
+    assert.ok(app.api);
+    const api = app.api;
+    // Two graphs differing ONLY in a redacted-away credential redact to the SAME `semanticBpmn`, so they
+    // share ONE content digest and therefore ONE digest-keyed proposal row.
+    const SECRET_A = { name: "deploy", nodes: [{ id: "d", kind: "agent", agent: { jobType: "senior:demo", prompt: "push to https://user:AAAsecret@host.example/repo" } }] };
+    const SECRET_B = { name: "deploy", nodes: [{ id: "d", kind: "agent", agent: { jobType: "senior:demo", prompt: "push to https://user:BBBsecret@host.example/repo" } }] };
+    const a = await api.call<{ digest: string }>("compileDeliveryGraph", { body: SECRET_A });
+    // Dispatch A under an explicit shared key — it launches and parks (running).
+    const first = await api.call<{ ok: boolean; status: string }>("dispatchDeliveryGraph", {
+      body: { digest: a.body.digest, idempotencyKey: "shared-key", repoless: true },
+    });
+    assert.equal(first.status, 202);
+    await app.settle();
+    // B re-stages the SAME digest-keyed proposal row (its credential differs, but the digest is identical).
+    const b = await api.call<{ digest: string }>("compileDeliveryGraph", { body: SECRET_B });
+    assert.equal(b.body.digest, a.body.digest, "the two secret-differing graphs must share one redacted digest");
+    // Dispatch B under the SAME shared key — it short-circuits onto A's still-running run. Because the
+    // digest cannot prove the running run is THIS (secret-bearing) graph, B must NOT be consumed: 409.
+    const second = await api.call<{ ok: boolean; error?: string }>("dispatchDeliveryGraph", {
+      body: { digest: b.body.digest, idempotencyKey: "shared-key", repoless: true },
+    });
+    assert.equal(second.status, 409);
+    assert.equal(second.body.ok, false);
+    await app.settle();
+    // The proposal is still staged (never falsely consumed) and only A's single run exists.
+    assert.equal((await deliveryGraphProposals(app.db).get(b.body.digest))?.status, "staged");
+    assert.equal((await deliveryGraphRuns(app.db).all()).length, 1);
+  });
+
   test("a malformed `repository` is rejected at submit → 400, nothing launched (#684/#686)", async () => {
     const app = await boot();
     assert.ok(app.api);

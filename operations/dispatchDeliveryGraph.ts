@@ -279,6 +279,41 @@ export default defineOperation("dispatchDeliveryGraph", async ({ body }, app) =>
       },
     };
   }
+
+  // Even when `dispatched.digest === digest`, that equality does NOT prove the short-circuited run is
+  // THIS graph when the graph carries redacted-away secrets: the digest is content-addressed over the
+  // REDACTED `semanticBpmn`, so two credential-differing graphs share it (the very reason a keyless
+  // secret-bearing dispatch is refused upstream). An EXPLICIT `idempotencyKey` bypasses the lossless
+  // server-side `stableProposalRunKey`, so a caller who re-uses one key across two secret-differing
+  // graphs (which occupy the SAME digest-keyed proposal row, one re-staged over the other) would
+  // short-circuit onto the FIRST graph's still-running run — `dispatched.alreadyRunning` — while the
+  // re-staged graph never launched. Consuming the proposal then marks a graph `dispatched` that never
+  // ran. Since we deliberately do NOT persist a second lossless fingerprint (the digest is the one
+  // content identity; issue #778 review — thread dispatchDeliveryGraph.ts:282), we cannot PROVE the
+  // running run is this exact secret-bearing graph, so refuse the ambiguous short-circuit (409) and
+  // leave the proposal staged rather than falsely consume it. A distinct key per graph (or the keyless
+  // stable-key path) dispatches it unambiguously.
+  const explicitIdempotencyKey = typeof idempotencyKey === "string" && idempotencyKey.trim() !== "";
+  if (dispatched.alreadyRunning && explicitIdempotencyKey && validateDeliveryGraph(graph).length === 0) {
+    // biome-ignore lint/plugin: validated staged graph narrowed to its contract after validateDeliveryGraph
+    const typedGraph = graph as DeliveryGraph;
+    if (graphCarriesRedactedSecrets(typedGraph)) {
+      app.log.warn("dispatch-delivery-graph refused: explicit idempotencyKey short-circuit cannot prove identity of a secret-bearing graph", {
+        digest,
+        runKey: dispatched.runKey,
+      });
+      return {
+        status: 409,
+        body: {
+          ok: false,
+          error:
+            `idempotencyKey is already bound to a running delivery graph and this graph carries redacted-away secret material, ` +
+            `so its content-addressed digest (${digest}) cannot prove the running run is this exact graph; the staged proposal was NOT ` +
+            "dispatched — re-dispatch with a distinct idempotencyKey per graph (or none, to use the lossless server-side key)",
+        },
+      };
+    }
+  }
   const marked = await markProposalDispatched(app.data, digest, stageSeq);
   if (!marked) {
     // The row left the `staged` revision we snapshotted between our load and this flip — a concurrent
