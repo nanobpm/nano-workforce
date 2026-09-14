@@ -192,8 +192,13 @@ export default defineOperation("dispatchDeliveryGraph", async ({ body }, app) =>
   } catch (err) {
     app.log.error("dispatch-delivery-graph: stored graph is corrupt", { digest });
     // Fail closed: a corrupt graph can never launch, so retire the proposal (→ `expired`) instead of
-    // leaving an undismissable `staged` row that fails every dispatch attempt the same way.
-    await markProposalExpired(app.data, digest);
+    // leaving an undismissable `staged` row that fails every dispatch attempt the same way. Guard the
+    // expiry on the SAME `stage_seq` we read the corrupt graph at — a concurrent re-stage that overwrites
+    // this same-digest row with a fresh (valid) graph in the window between `getStagedProposal` and this
+    // update bumps `stage_seq`, so the guard makes the expiry a no-op rather than retiring a revision we
+    // never inspected (issue #778 review — thread dispatchDeliveryGraph.ts:188, same revision guard as the
+    // terminal `markProposalDispatched` below).
+    await markProposalExpired(app.data, digest, stageSeq);
     return { status: 400, body: { ok: false, error: `staged proposal ${digest} is corrupt: ${err instanceof Error ? err.message : String(err)}` } };
   }
 

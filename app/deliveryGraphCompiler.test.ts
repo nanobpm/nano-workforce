@@ -13,6 +13,7 @@
 //   • humanNodes[] and sideEffects[] extraction.
 import { test } from "node:test";
 import { assert, assertEquals } from "#test-assert";
+import type { DeliveryGraph } from "../nano-generated/api-io.d.ts";
 import { compileDeliveryGraph, digestInvisibleRawValues, graphCarriesRedactedSecrets, nodeDisplay, redactFreeText } from "./deliveryGraphCompiler.ts";
 
 /** Compile and assert success, returning the narrowed ok-result. */
@@ -1192,6 +1193,41 @@ test("#778 redactFreeText is linear on an adversarial `//…:…` prompt (no cat
   assert(Date.now() - t0 < 1000, "redactFreeText must not exhibit catastrophic backtracking");
   // A run with no `@`, no `?`, no `#` is not credential-shaped, so it is left intact (not over-redacted).
   assert(out.includes("//a:"), "a non-credential `//…:` run is not redacted");
+});
+
+test("#778 redactFreeText consumes a `//user:secret pass@host` userinfo split by a literal SPACE (space-safe belt)", () => {
+  // The SPACE that bounds a belt span also cuts a `user:secret pass@host` userinfo carrying a literal
+  // space BEFORE its `@`, so the span (`//user:secret`) has a `:` but no `@` and escaped redaction —
+  // leaking `user:secret` into the display doc. The belt now looks PAST the space for the userinfo `@`
+  // before any URL/line boundary and extends the span through it (issue #778 review — thread
+  // deliveryGraphCompiler.ts:1080).
+  const agent = nodeDisplay({ id: "a", kind: "agent", agent: { jobType: "j", prompt: "deploy via //user:secret pass@registry.example.com/p?token=s3cr3t now" } });
+  assert(!agent.documentation.includes("user:secret") && !agent.documentation.includes("secret pass"), `the space-split userinfo is redacted: ${agent.documentation}`);
+  assert(!agent.documentation.includes("s3cr3t"), "the query token is redacted");
+  assert(agent.documentation.includes("//***@"), "the userinfo collapses to the redaction marker");
+  // A `//foo:bar` prose run with NO reachable `@` (the space-bounded lookahead hits end-of-prose, not an
+  // `@`) is NOT over-redacted.
+  const prose = nodeDisplay({ id: "b", kind: "agent", agent: { jobType: "j", prompt: "ratio //foo:bar then continue" } });
+  assert(prose.documentation.includes("//foo:bar"), `a colon run with no reachable @ survives: ${prose.documentation}`);
+  assert(!prose.documentation.includes("//***@"), `no credential is fabricated from a bare colon run: ${prose.documentation}`);
+  // A `//user:pass` prefix whose lookahead hits a `/` boundary (a new path segment) before any `@` is not
+  // extended — the colon run is left intact rather than collapsed to a phantom `//***@`.
+  const bounded = nodeDisplay({ id: "c", kind: "agent", agent: { jobType: "j", prompt: "cmp //user:pass /next then done" } });
+  assert(bounded.documentation.includes("//user:pass"), `a '/'-bounded lookahead leaves the colon run intact: ${bounded.documentation}`);
+  assert(!bounded.documentation.includes("//***@"), `a '/'-bounded lookahead does not fabricate a credential: ${bounded.documentation}`);
+});
+
+test("#778 wait.target digest fingerprint is TRIMMED so a whitespace-only variant shares one staged run key (all kinds)", () => {
+  // `parseProbe` trims `target` for every kind before the worker keys on it, so ` run-task ` and
+  // `run-task` are the SAME runtime probe. A `command` probe's display is a constant `<redacted>`, so
+  // the untrimmed raw was the sole digest disambiguator — forking the staged run key on pure whitespace
+  // and bypassing the idempotency fence. The fingerprint is now `target.trim()` (issue #778 review —
+  // thread deliveryGraphCompiler.ts:1372).
+  const mk = (target: string): DeliveryGraph => ({ nodes: [{ id: "w", kind: "wait", wait: { kind: "command", target } }], edges: [] });
+  const padded = digestInvisibleRawValues(mk("  run-task  ")).filter((t) => t.includes("wait.target"));
+  const tight = digestInvisibleRawValues(mk("run-task")).filter((t) => t.includes("wait.target"));
+  assertEquals(padded, tight);
+  assert(tight.length === 1 && tight[0].endsWith("run-task"), `the fingerprint is the trimmed target: ${tight[0]}`);
 });
 
 test("#778 agent.jobType validation error quotes the offending value with JSON.stringify (control-char-safe)", async () => {

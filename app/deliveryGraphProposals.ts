@@ -409,12 +409,18 @@ export async function markProposalDispatched(data: DataLayer, digest: string, ex
  * Returns whether the guarded UPDATE actually flipped a row (`res.changed > 0`), mirroring
  * `markProposalDismissed`/`sweepExpiredProposals`. A `false` return means the row was no longer `staged`
  * at write time (a dismiss/supersede/dispatch race won), so the caller must not treat the retirement as
- * having happened. */
-export async function markProposalExpired(data: DataLayer, digest: string): Promise<boolean> {
+ * having happened.
+ *
+ * When an `expectedStageSeq` is supplied (the dispatch door's corrupt-graph retirement), the flip is
+ * ADDITIONALLY guarded on `stage_seq = ?`, exactly like `markProposalDispatched`: a concurrent re-stage
+ * of the same digest bumps `stage_seq`, so guarding on the revision we inspected keeps the expiry from
+ * retiring a newer graph that landed in the read→write window (issue #778 review). */
+export async function markProposalExpired(data: DataLayer, digest: string, expectedStageSeq?: number): Promise<boolean> {
   const db = data.open();
+  const guardSeq = typeof expectedStageSeq === "number";
   const res = await db.exec(
-    `UPDATE "delivery_graph_proposals" SET "status" = 'expired', "updated_at" = ? WHERE "digest" = ? AND "status" = 'staged'`,
-    [now(), digest],
+    `UPDATE "delivery_graph_proposals" SET "status" = 'expired', "updated_at" = ? WHERE "digest" = ? AND "status" = 'staged'${guardSeq ? ` AND "stage_seq" = ?` : ""}`,
+    guardSeq ? [now(), digest, expectedStageSeq] : [now(), digest],
   );
   return res.changed > 0;
 }

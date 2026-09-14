@@ -1077,6 +1077,34 @@ function redactCredentialSpans(text: string): string {
     out += text.slice(i, start);
     let end = start;
     while (end < text.length && text.charCodeAt(end) !== 0x20 /* SPACE */) end++;
+    // Malformed-userinfo fallback (issue #778 review — deliveryGraphCompiler.ts:1080): the SPACE that
+    // bounds the span above also cuts a `user:secret pass@host` userinfo that carries a literal space
+    // BEFORE its `@`, so the span (`//user:secret`) has a `:` but no `@` and neither branch of
+    // `redactCredentialSpan` fires — the credential tail escapes into the display doc. When a span is
+    // credential-PREFIX-shaped (a `:` and no `@`), look PAST the space(s) for the userinfo's `@` before
+    // any URL/line boundary (`/ ? # CR LF`); if found, extend the span through the `@`'s host so the
+    // space-tolerant collapse below redacts it. The forward scan is bounded by the next such boundary,
+    // so a colon-run with no reachable `@` (the adversarial `//a://a:…` prompt, or ordinary `//foo:bar`
+    // prose) stops immediately and the walk stays linear.
+    const span = text.slice(start, end);
+    if (span.indexOf(":") >= 0 && span.indexOf("@") < 0) {
+      let j = end;
+      let foundAt = -1;
+      while (j < text.length) {
+        const c = text.charCodeAt(j);
+        if (c === 0x2f /* / */ || c === 0x3f /* ? */ || c === 0x23 /* # */ || c === 0x0a /* LF */ || c === 0x0d /* CR */) break;
+        if (c === 0x40 /* @ */) {
+          foundAt = j;
+          break;
+        }
+        j++;
+      }
+      if (foundAt >= 0) {
+        let k = foundAt + 1;
+        while (k < text.length && text.charCodeAt(k) !== 0x20 /* SPACE */) k++;
+        end = k;
+      }
+    }
     out += redactCredentialSpan(text.slice(start, end));
     i = end;
   }
@@ -1095,8 +1123,11 @@ function redactCredentialSpan(span: string): string {
   const credentialShaped = colon >= 0 && at >= 0 && colon < at;
   const hasQueryOrFragment = span.indexOf("?") >= 0 || span.indexOf("#") >= 0;
   if (!credentialShaped && !hasQueryOrFragment) return span;
-  // Collapse a `user:pass@` userinfo (the `//…:…@` class, which may cross a break inside it) to `//***@`.
-  const s = credentialShaped ? span.replace(/\/\/[^/@ ]*@/g, "//***@") : span;
+  // Collapse a `user:pass@` userinfo (the `//…:…@` class, which may cross a break OR a literal SPACE
+  // inside it after the malformed-userinfo span extension in `redactCredentialSpans`) to `//***@`. The
+  // class is `[^/@]` (not `[^/@ ]`) so a space the extended span pulled in (`//user:secret pass@host`) is
+  // consumed up to the `@`; single-quantifier, so still linear (issue #778 review).
+  const s = credentialShaped ? span.replace(/\/\/[^/@]*@/g, "//***@") : span;
   const qMark = s.indexOf("?");
   const hMark = s.indexOf("#");
   const qi = qMark < 0 ? hMark : hMark < 0 ? qMark : Math.min(qMark, hMark);
@@ -1369,7 +1400,13 @@ export function digestInvisibleRawValues(graph: DeliveryGraph): string[] {
       }
       case "wait": {
         const p = node.wait;
-        push(id, "wait.target", p.target, redactProbeTargetForDisplay(p));
+        // `parseProbe` (`readiness.ts`) TRIMS `target` for EVERY kind before the worker keys on it, so a
+        // leading/trailing-whitespace-only variant (` run-task ` vs `run-task`) is the SAME runtime probe.
+        // For a `command` probe the display is a constant `<redacted>`, so without trimming the fingerprint
+        // the digest would fork on that whitespace — a distinct staged run key for an identical runtime
+        // probe, bypassing the idempotency fence. Fingerprint the TRIMMED target (all kinds) so it matches
+        // the runtime-normalised value (issue #778 review — thread :1372).
+        push(id, "wait.target", p.target.trim(), redactProbeTargetForDisplay(p));
         // `credentialEnv` names a DECLARED env-contract key, shown in the doc as `trimmedOrEmpty(...)` then
         // XML-sanitised at serialisation, while the runtime `parseProbe` reads it as `.trim()`. A value
         // carrying an XML-invalid char (`"GITHUB_TOKEN\x01"`) sanitises to the SAME display as valid

@@ -621,3 +621,27 @@ test("markProposalExpired: a dismiss racing between the dispatch door's liveness
     assertEquals((await deliveryGraphProposals(data).get("d1"))?.status, "dismissed");
   });
 });
+
+test("markProposalExpired: an `expectedStageSeq` guard NO-OPs when a concurrent re-stage bumped the revision (corrupt-graph retirement does not retire a newer graph)", async () => {
+  await withData(async (data) => {
+    const seqOf = async (digest: string): Promise<number> => {
+      const rows = await data.open().query<{ stage_seq: number }>(`SELECT "stage_seq" FROM "delivery_graph_proposals" WHERE "digest" = ?`, [digest]);
+      return rows.length ? Number(rows[0].stage_seq) : -1;
+    };
+    // The dispatch door reads a `staged` proposal at revision `seq0` (its graph is corrupt).
+    await stageProposal(data, row());
+    const seq0 = await seqOf("d1");
+    // Before the corrupt-graph retirement fires, a concurrent re-stage overwrites the SAME digest with a
+    // fresh (valid) graph, bumping `stage_seq`.
+    await stageProposal(data, row());
+    const seq1 = await seqOf("d1");
+    assert(seq1 > seq0, "the re-stage bumped stage_seq");
+    // The retirement guarded on the STALE revision must no-op (return false) and leave the newer graph staged.
+    const flipped = await markProposalExpired(data, "d1", seq0);
+    assertEquals(flipped, false);
+    assertEquals((await deliveryGraphProposals(data).get("d1"))?.status, "staged");
+    // Guarded on the CURRENT revision, it retires as usual.
+    assertEquals(await markProposalExpired(data, "d1", seq1), true);
+    assertEquals((await deliveryGraphProposals(data).get("d1"))?.status, "expired");
+  });
+});
