@@ -1,6 +1,10 @@
 // pr.persist-round — records a completed round (an `addressed` round where the agent pushed
-// changes, or a `waiting` round where there was nothing to triage yet) and parks the PR in
-// `waiting_review` so the poller starts watching for / soliciting the next review.
+// changes, or a `waiting` round where there was nothing to triage yet) and advances the PR's
+// `current_round`. It does NOT park the PR in `waiting_review`: that transition is owned by the
+// downstream pr.progress-check step, the single writer of the post-round wait status. persist-round
+// runs BEFORE the husk decision, so parking here would momentarily expose a husk-retry round (which
+// re-enters review-round WITHOUT waiting for a review) to the poller's `waiting_review` scan and let
+// it solicit a spurious Copilot review before progress-check flips the row back (#786).
 //
 // Data access goes through the injected app datasource gateway (`app.data.table<T>`), the RAD
 // `Table<T>` surface — `rounds.insert(...)` / `pull_requests.update(...)`, not hand-written SQL.
@@ -174,10 +178,15 @@ const handler: AppJobHandler<In> = async (job, app) => {
       ...roundRow,
     });
   }
+  // Advance the round pointer only; the PARK into `waiting_review` is owned by pr.progress-check,
+  // the single writer of the post-round wait status. persist-round must NOT park here — it runs
+  // BEFORE the husk decision, so writing `waiting_review` now would expose a husk-retry round (which
+  // re-enters review-round WITHOUT waiting for a review) to the poller's `waiting_review` scan for
+  // the window until progress-check resolves the outcome, letting the poller fire a spurious Copilot
+  // re-request (#786). Leaving the row on its running `converging` status until progress-check
+  // decides closes that window; only the genuine review-wait park sets `waiting_review`.
   await app.data.table("pull_requests", "pr_key").update(prKey, {
-    status: "waiting_review",
     current_round: round,
-    waiting_since: now,
     updated_at: now,
   });
 

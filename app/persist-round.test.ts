@@ -1,11 +1,12 @@
-// Red/green regression for pr.persist-round's round recording + parking behaviour.
+// Red/green regression for pr.persist-round's round recording behaviour.
 //
 // The convergence loop routes both `addressed` (the agent pushed changes) and the new `waiting`
 // (nothing to triage yet — round 1, awaiting the first review) statuses through gw-guard into
-// persist-round. Both must be recorded in `rounds` under their own status and both must park the
-// PR in `waiting_review` so the deterministic poller (app/service.ts) starts soliciting a review.
-// A `waiting` round is what replaced the old failure mode where an agent with nothing to do
-// re-requested the review destructively and escalated `blocked`.
+// persist-round. Both must be recorded in `rounds` under their own status and both must advance the
+// PR's `current_round`. The PARK into `waiting_review` is owned by the downstream pr.progress-check
+// step (the single writer of the post-round wait status), NOT persist-round — persist-round runs
+// before the husk decision, so parking here would let the poller fire a spurious review re-request
+// against a husk-retry round before progress-check resolves it (#786).
 import { test } from "node:test";
 import { assertEquals } from "#test-assert";
 import handler from "../workers/persist-round/worker.ts";
@@ -51,7 +52,7 @@ function fakeApp() {
 }
 
 for (const status of ["addressed", "waiting"]) {
-  test(`persist-round records a '${status}' round and parks the PR in waiting_review`, async () => {
+  test(`persist-round records a '${status}' round and advances current_round without parking`, async () => {
     const { app, inserts, updates } = fakeApp();
     const job = { variables: { prKey: "o/r#1", round: 1, status, summary: `round was ${status}` } };
     await handler(job as any, app as any);
@@ -63,7 +64,11 @@ for (const status of ["addressed", "waiting"]) {
 
     assertEquals(updates.pull_requests!.length, 1, "the PR is updated once");
     const patch = (updates.pull_requests![0] as any).patch;
-    assertEquals(patch.status, "waiting_review", "the PR parks in waiting_review for the poller");
+    // The park into `waiting_review` is owned by pr.progress-check (the single writer of the
+    // post-round wait status), NOT persist-round — persist-round runs before the husk decision, so
+    // parking here would race the poller against a husk retry (#786). It only advances the round.
+    assertEquals(patch.status, undefined, "persist-round does NOT park the PR in waiting_review");
+    assertEquals(patch.waiting_since, undefined, "persist-round does NOT stamp the review-wait start");
     assertEquals(patch.current_round, 1);
   });
 }
@@ -109,9 +114,11 @@ test("persist-round heals a missing pull_requests parent before recording the ro
   assertEquals(healed.status, "converging", "the healed parent starts in the converging aggregate");
   assertEquals(healed.url, "https://github.com/o/r/pull/7", "URL is derived canonically");
   assertEquals(inserts.rounds.length, 1, "the round is still recorded after the heal");
-  // And the worker still parks the (now-present) PR in waiting_review as its final state.
+  // And the worker advances current_round on the (now-present) PR — but does NOT park it in
+  // waiting_review (that is pr.progress-check's job now, #786).
   assertEquals(updates.pull_requests!.length, 1, "the PR is updated once after the heal");
-  assertEquals((updates.pull_requests![0] as any).patch.status, "waiting_review");
+  assertEquals((updates.pull_requests![0] as any).patch.status, undefined, "no park in persist-round");
+  assertEquals((updates.pull_requests![0] as any).patch.current_round, 3);
 });
 
 // rather than writing a NULL status — the round history stays readable.

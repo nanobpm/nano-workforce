@@ -213,8 +213,12 @@ test("progress-check: a non-addressed round records the baseline but never escal
   assertEquals(out, { progressed: true, huskRetries: 0 });
   assertEquals(called, true, "a waiting round reads the head to seed the baseline");
   assertEquals(agentReads, 0, "but never consults the agent-work channel");
-  assertEquals(updates.length, 1, "and records the observed head as the baseline");
-  assertEquals(updates[0]!.patch.last_round_head, "sha-2");
+  // Two writes now: the baseline head, then the review-wait PARK. persist-round no longer parks —
+  // pr.progress-check is the single writer of `waiting_review` (#786), so a `waiting` round parks here.
+  assertEquals(updates.length, 2, "records the baseline and then parks for review");
+  assertEquals(updates[0]!.patch.last_round_head, "sha-2", "the observed head is the new baseline");
+  assertEquals(updates[1]!.patch.status, "waiting_review", "the round parks for review");
+  assertEquals(typeof updates[1]!.patch.waiting_since, "string", "and stamps the review-wait start");
 });
 
 test("progress-check: a blank/unknown status is treated as addressed — reads the head and can report no progress", async () => {
@@ -239,8 +243,11 @@ test("progress-check: an addressed round whose head is unchanged with no agent w
   assertEquals(out.huskRetry, true, "the husk is auto-retried");
   assertEquals(out.huskRetries, 1);
   assertEquals(out.noProgressReason, "husk");
-  // Poller non-interference (#786): the retry flips the PR back to a running `converging` status so
-  // pollReviews won't solicit a spurious review while the retried round re-enters review-round.
+  // Poller non-interference (#786): the retry keeps the PR on a running `converging` status (never a
+  // transient `waiting_review`) so pollReviews can't solicit a spurious review while the retried
+  // round re-enters review-round. persist-round no longer parks, so this is the ONLY status write.
+  const parked = updates.find((u) => u.patch.status === "waiting_review");
+  assertEquals(parked, undefined, "a husk-retry round NEVER transits waiting_review");
   const statusUpdate = updates.find((u) => u.patch.status !== undefined);
   assert(statusUpdate, "a husk retry must update the PR status");
   assertEquals(statusUpdate!.patch.status, "converging", "the retry flips the PR to a running status");
@@ -275,8 +282,11 @@ test("progress-check: an addressed round whose head advanced reports progressed:
   const out = await handler({ processInstanceKey: "pik", variables: { prKey: "o/r#1", status: "addressed", repo: "o/r", prNumber: 1, round: 2 } } as any, app as any);
   assertEquals(out.progressed, true);
   assertEquals(out.huskRetries, 0, "a progressing round resets the husk counter");
-  assertEquals(updates.length, 1, "the observed head is recorded as the new baseline");
+  // The baseline rebaseline, then the review-wait PARK (progress-check owns `waiting_review` now, #786).
+  assertEquals(updates.length, 2, "the observed head is rebaselined, then the PR parks for review");
   assertEquals(updates[0]!.patch.last_round_head, "sha-2");
+  assertEquals(updates[1]!.patch.status, "waiting_review", "a progressed round parks for review");
+  assertEquals(typeof updates[1]!.patch.waiting_since, "string", "and stamps the review-wait start");
 });
 
 test("progress-check: the first observed round (no baseline) continues and records the baseline", async () => {
@@ -292,7 +302,12 @@ test("progress-check: an unreadable head fails open and does not clobber the bas
   const { app, updates } = fakeApp({ last_round_head: "sha-1" });
   const out = await handler({ processInstanceKey: "pik", variables: { prKey: "o/r#1", status: "addressed", repo: "o/r", prNumber: 1, round: 2 } } as any, app as any);
   assertEquals(out.progressed, true, "a null head fails open");
-  assertEquals(updates.length, 0, "a null head never overwrites the good baseline");
+  // A null head is never written as a baseline (it must not clobber the good `last_round_head`), but
+  // the round still fails OPEN to the review wait, so progress-check parks it (persist-round no
+  // longer does). The single write is therefore the PARK, carrying no `last_round_head`.
+  assertEquals(updates.length, 1, "only the review-wait park is written");
+  assertEquals(updates[0]!.patch.last_round_head, undefined, "a null head never overwrites the baseline");
+  assertEquals(updates[0]!.patch.status, "waiting_review", "a fail-open round still parks for review");
 });
 
 test("progress-check: resolves repo/prNumber from the prKey when the vars are absent", async () => {
